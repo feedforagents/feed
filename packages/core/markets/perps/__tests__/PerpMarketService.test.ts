@@ -450,6 +450,80 @@ describe('PerpMarketService', () => {
     );
   });
 
+  it('liquidation pays out accrued funding receivable instead of dropping it', async () => {
+    // Short 1000 notional at 10x: prepaid margin = 100.
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 1000,
+      leverage: 10,
+    });
+
+    // The short accrued 30 of funding income over its life (fundingPaid = -30).
+    await db.updateOpenPosition(open.positionId, { fundingPaid: -30 });
+
+    const entry = open.entryPrice;
+    const balanceBefore = (await wallet.getBalance('u1')).balance;
+
+    // Push price 11% against the short: trade PnL = -110, past the
+    // liquidation price (entry * 1.1) but with 19 of equity left once
+    // funding income is settled (100 - 110 + 30 - 1 fee = 19).
+    await service.applyPriceUpdates({ 'org-abc': entry * 1.11 });
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeDefined();
+
+    // Realized PnL must include the accrued funding receivable.
+    expect(pos?.realizedPnL).toBeCloseTo(-110 - -30, 4);
+
+    const pnls = wallet.getPnLs('u1');
+    // Wealth change = net settlement (19) - prepaid margin (100).
+    expect(pnls.find((p) => p.reason === 'perp_liquidation')?.pnl).toBeCloseTo(
+      -81,
+      4
+    );
+
+    // The leftover equity (funded margin) must be credited back.
+    const balanceAfter = (await wallet.getBalance('u1')).balance;
+    expect(balanceAfter - balanceBefore).toBeCloseTo(19, 4);
+  });
+
+  it('liquidation keeps accrued funding debt in realized PnL instead of forgiving it', async () => {
+    // Long 1000 notional at 10x: prepaid margin = 100.
+    const open = await service.openPosition({
+      userId: 'u2',
+      ticker: 'ABC',
+      side: 'long',
+      size: 1000,
+      leverage: 10,
+    });
+
+    // The long owes 30 of accrued funding (fundingPaid = +30).
+    await db.updateOpenPosition(open.positionId, { fundingPaid: 30 });
+
+    const entry = open.entryPrice;
+
+    // Push price 11% against the long: trade PnL = -110, past the
+    // liquidation price (entry * 0.9). Equity including funding debt:
+    // 100 - 110 - 30 - 1 fee = -41 → clamped to 0 settlement.
+    await service.applyPriceUpdates({ 'org-abc': entry * 0.89 });
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeDefined();
+
+    // The stored realized PnL must carry the full -140 loss (trade + funding),
+    // not just the margin-sized -100.
+    expect(pos?.realizedPnL).toBeCloseTo(-110 - 30, 4);
+
+    const pnls = wallet.getPnLs('u2');
+    // No leftover equity; the user loses exactly the prepaid margin.
+    expect(pnls.find((p) => p.reason === 'perp_liquidation')?.pnl).toBeCloseTo(
+      -100,
+      4
+    );
+  });
+
   it('updates unrealized PnL on price move without liquidation', async () => {
     const open = await service.openPosition({
       userId: 'u1',
