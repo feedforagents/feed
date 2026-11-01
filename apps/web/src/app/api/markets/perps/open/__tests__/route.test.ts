@@ -68,7 +68,7 @@ describe('POST /api/markets/perps/open', () => {
     });
   });
 
-  it('opens a market order with no slippage bound when none is given', async () => {
+  it('opens a market order with the 1% default slippage bound when none is given', async () => {
     const response = (await POST(openRequest(marketOrder))) as Response;
 
     expect(response.status).toBe(201);
@@ -78,8 +78,16 @@ describe('POST /api/markets/perps/open', () => {
       side: 'long',
       size: 100,
       leverage: 5,
-      maxSlippage: undefined,
+      maxSlippage: 0.01,
     });
+  });
+
+  it('lets a caller disable the slippage bound with 0', async () => {
+    await POST(openRequest({ ...marketOrder, maxSlippage: 0 }));
+
+    expect(mockOpenPosition).toHaveBeenCalledWith(
+      expect.objectContaining({ maxSlippage: 0 })
+    );
   });
 
   it('passes the requested maxSlippage through to the service', async () => {
