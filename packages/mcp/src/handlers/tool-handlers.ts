@@ -805,11 +805,16 @@ export async function executeGetPositions(
   agent: AuthenticatedAgent,
   args: GetPositionsArgs
 ): Promise<GetPositionsResult> {
+  // The tool is advertised as returning open positions. A full sell leaves the
+  // row behind with status 'closed' and resolution marks it 'resolved', so only
+  // 'active' rows are open (the same filter the in-process agents use).
   const where: {
     userId: { equals: string };
+    status: { equals: string };
     marketId?: { equals: string };
   } = {
     userId: { equals: agent.userId },
+    status: { equals: 'active' },
   };
 
   if (args.marketId) {
