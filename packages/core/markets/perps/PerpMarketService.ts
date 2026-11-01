@@ -1045,8 +1045,17 @@ export class PerpMarketService {
 
       const now = this.deps.clock?.now() ?? new Date();
 
-      // Liquidation check
-      if (shouldLiquidate(newPrice, position.liquidationPrice, position.side)) {
+      // Liquidation check — PRD §9.3: liquidation is on the mark price
+      // (index × (1 + bounded funding premium)), not the raw feed price,
+      // so a raw-price wick through the liquidation price does not
+      // force-close a position the mark never confirmed. This is the same
+      // mark the market-stats update below computes and stores.
+      const markPrice = market
+        ? this.calculateMarkPrice(newPrice, market.fundingRate.rate)
+        : newPrice;
+      if (
+        shouldLiquidate(markPrice, position.liquidationPrice, position.side)
+      ) {
         const marginLoss = position.size / position.leverage;
 
         try {
