@@ -1625,6 +1625,25 @@ export class PerpMarketService {
       };
     } else {
       // FLIP: Close existing and open inverse position
+      // Exposure limit: the flip closes `existing` and opens the inverse leg,
+      // so the resulting exposure is every other open position plus that
+      // leg. Check it before any funds move, as a fresh open does.
+      const inverseNotional =
+        (tradeSize - existing.size) *
+        Math.min(leverage, market.maxLeverage ?? DEFAULT_MAX_LEVERAGE);
+      const userPositions = await this.db.getOpenPositionsByUser(input.userId);
+      for (const position of userPositions) {
+        this.assertOpenPositionIntegrity(position);
+      }
+      const otherExposure = userPositions
+        .filter((position) => position.id !== existing.id)
+        .reduce((sum, position) => sum + position.size * position.leverage, 0);
+      if (otherExposure + inverseNotional > MAX_PERP_USER_EXPOSURE) {
+        throw new Error(
+          `Total exposure would exceed limit: current ${otherExposure.toLocaleString()}, ` +
+            `new ${inverseNotional.toLocaleString()}, max ${MAX_PERP_USER_EXPOSURE.toLocaleString()}`
+        );
+      }
       // Use transaction for atomicity - all DB operations use tx
       const flipResult =
         await this.db.transaction<FlipPositionTransactionResult>(async (tx) => {
