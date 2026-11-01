@@ -310,6 +310,55 @@ export class PredictionDbAdapter implements PredictionDbPort {
     return p ? mapPosition(p) : null;
   }
 
+  async claimPositionShares(
+    positionId: string,
+    shares: number
+  ): Promise<PredictionPositionRecord | null> {
+    const [updated] = await this.client
+      .update(positions)
+      .set({
+        shares: sql`${positions.shares} - ${String(shares)}::numeric`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(positions.id, positionId),
+          eq(positions.status, 'active'),
+          sql`${positions.shares} >= ${String(shares)}::numeric`
+        )
+      )
+      .returning();
+    return updated ? mapPosition(updated) : null;
+  }
+
+  async claimResolution(
+    marketId: string,
+    updates: Partial<
+      Pick<
+        PredictionMarketRecord,
+        | 'resolution'
+        | 'liquidity'
+        | 'resolutionProofUrl'
+        | 'resolutionDescription'
+      >
+    >
+  ): Promise<PredictionMarketRecord | null> {
+    const [updated] = await this.client
+      .update(markets)
+      .set({
+        resolved: true,
+        resolution: updates.resolution,
+        liquidity:
+          updates.liquidity != null ? String(updates.liquidity) : undefined,
+        resolutionProofUrl: updates.resolutionProofUrl,
+        resolutionDescription: updates.resolutionDescription,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(markets.id, marketId), eq(markets.resolved, false)))
+      .returning();
+    return updated ? mapMarket(updated) : null;
+  }
+
   async upsertPosition(
     position: Omit<PredictionPositionRecord, 'id'> & { id?: string }
   ): Promise<PredictionPositionRecord> {

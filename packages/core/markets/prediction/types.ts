@@ -108,6 +108,39 @@ export interface PredictionDbPort {
     marketId: string,
     side: PredictionSide
   ): Promise<PredictionPositionRecord | null>;
+  /**
+   * Atomically subtract `shares` from an active position (conditional
+   * UPDATE ... WHERE status = 'active' AND shares >= requested RETURNING).
+   * Returns the updated row, or null when the position does not exist, is
+   * not active, or holds fewer shares than requested. Sell() claims the
+   * shares it sells through this primitive so two concurrent sells of the
+   * same position cannot both read the same balance and credit proceeds
+   * twice (mirrors the perps port's lockOpenPositionById).
+   */
+  claimPositionShares(
+    positionId: string,
+    shares: number
+  ): Promise<PredictionPositionRecord | null>;
+  /**
+   * Atomically transition an unresolved market to resolved (conditional
+   * UPDATE ... WHERE resolved = false RETURNING), applying `updates` alongside
+   * resolved = true in the same statement. Returns the updated market row, or
+   * null when another writer already resolved the market. Resolve() claims the
+   * resolution through this primitive so concurrent resolvers (game cron and
+   * admin tool) cannot credit winners twice.
+   */
+  claimResolution(
+    marketId: string,
+    updates: Partial<
+      Pick<
+        PredictionMarketRecord,
+        | 'resolution'
+        | 'liquidity'
+        | 'resolutionProofUrl'
+        | 'resolutionDescription'
+      >
+    >
+  ): Promise<PredictionMarketRecord | null>;
   upsertPosition(
     position: Omit<PredictionPositionRecord, 'id'> & { id?: string }
   ): Promise<PredictionPositionRecord>;

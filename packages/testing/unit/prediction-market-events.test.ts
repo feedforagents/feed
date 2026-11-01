@@ -62,7 +62,17 @@ describe('PredictionMarketService broadcast events', () => {
         ...createMockMarket({ id }),
         ...updates,
       })),
+      claimResolution: mock(async (id, updates) => ({
+        ...createMockMarket({ id, resolved: true }),
+        ...updates,
+      })),
       getPosition: mock(async () => null),
+      claimPositionShares: mock(async (positionId: string, shares: number) => {
+        const pos = createMockPosition({ id: positionId });
+        return pos.shares >= shares
+          ? { ...pos, shares: pos.shares - shares }
+          : null;
+      }),
       upsertPosition: mock(async (pos) => ({
         ...pos,
         id: pos.id ?? 'new-pos-id',

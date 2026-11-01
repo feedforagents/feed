@@ -340,24 +340,33 @@ export class PredictionMarketService {
     if (newLiquidity < 0) {
       throw new BadRequestError('Sale would exceed available liquidity');
     }
+
+    // Arbitrate concurrent sells atomically: claim the shares being sold via
+    // a conditional decrement so two simultaneous sells of the same position
+    // cannot both read the same balance and credit proceeds twice.
+    const claimed = await this.db.claimPositionShares(pos.id, shares);
+    if (!claimed) {
+      throw new BadRequestError('Insufficient shares');
+    }
+
     await this.db.updateMarketState(marketId, {
       yesShares: calc.newYesShares,
       noShares: calc.newNoShares,
       liquidity: newLiquidity,
     });
 
-    const remaining = pos.shares - shares;
+    const remaining = claimed.shares;
     const positionClosed = remaining <= MIN_SHARES;
     if (positionClosed) {
       await this.db.upsertPosition({
-        ...pos,
+        ...claimed,
         shares: 0,
         status: 'closed',
         updatedAt: this.now(),
       });
     } else {
       await this.db.upsertPosition({
-        ...pos,
+        ...claimed,
         shares: remaining,
         updatedAt: this.now(),
       });
@@ -493,13 +502,15 @@ export class PredictionMarketService {
     const liquidityReduction = Math.min(totalPayout, market.liquidity);
     const newLiquidity = market.liquidity - liquidityReduction;
 
-    await this.db.updateMarketState(marketId, {
-      resolved: true,
+    // Arbitrate concurrent resolutions (game cron + admin tool) atomically:
+    // only the writer that flips resolved=false → true pays the winners.
+    const claimed = await this.db.claimResolution(marketId, {
       resolution: winningSide === 'yes',
       liquidity: newLiquidity,
       resolutionProofUrl: resolutionProofUrl ?? undefined,
       resolutionDescription: resolutionDescription ?? undefined,
     });
+    if (!claimed) return;
 
     for (const pos of positions) {
       const isWinner = isWinnerSide(pos);
