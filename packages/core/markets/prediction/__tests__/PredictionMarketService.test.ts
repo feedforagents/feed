@@ -13,6 +13,7 @@ import type {
   PredictionPositionRecord,
   PredictionPriceSnapshotRecord,
   PredictionSide,
+  PredictionTradeResult,
 } from '../types';
 
 const feeConfig = {
@@ -147,6 +148,17 @@ class InMemoryDb implements PredictionDbPort {
       (p) => p.userId === userId && p.marketId === marketId && p.side === side
     );
     return pos ? { ...pos } : null;
+  }
+
+  async claimPositionShares(
+    positionId: string,
+    shares: number
+  ): Promise<PredictionPositionRecord | null> {
+    const pos = this.positions.get(positionId);
+    if (!pos || pos.status !== 'active' || pos.shares < shares) return null;
+    const updated = { ...pos, shares: pos.shares - shares };
+    this.positions.set(positionId, updated);
+    return { ...updated };
   }
 
   async upsertPosition(
@@ -684,6 +696,132 @@ describe('PredictionMarketService input boundaries (D17)', () => {
     await expect(
       expired.buy({ userId: 'u1', marketId: 'mb', side: 'yes', amount: 10 })
     ).rejects.toThrow('Market expired');
+  });
+});
+
+describe('PredictionMarketService concurrency', () => {
+  const baseMarket: PredictionMarketRecord = {
+    id: 'mc',
+    question: 'Concurrent?',
+    yesShares: 5000,
+    noShares: 5000,
+    liquidity: 10_000,
+    endDate: new Date('2030-01-01T00:00:00.000Z'),
+    resolved: false,
+  };
+
+  function makeConcurrencyService(db: InMemoryDb) {
+    const wallet = new InMemoryWallet();
+    const service = new PredictionMarketService({
+      db,
+      wallet,
+      broadcast: new InMemoryBroadcast(),
+      cache: new InMemoryCache(),
+      clock: { now: () => new Date('2029-01-01T00:00:00.000Z') },
+      fees: feeConfig,
+      feeProcessor: {
+        processTradingFee: async () => ({ feeCharged: 0, referrerPaid: 0 }),
+      },
+    });
+    return { service, wallet };
+  }
+
+  /**
+   * Deterministic two-party barrier: the first `wait()` blocks until a second
+   * caller also waits. Used to hold both racers' reads until both have
+   * observed the same pre-write state, opening the TOCTOU window reliably.
+   */
+  function pairGate() {
+    let arrived = 0;
+    let releaseAll: (() => void) | undefined;
+    const allArrived = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+    return {
+      wait(): Promise<void> {
+        arrived += 1;
+        if (arrived === 2) releaseAll?.();
+        return allArrived;
+      },
+    };
+  }
+
+  it('sell: two concurrent sells of the same position are credited exactly once', async () => {
+    const db = new InMemoryDb(baseMarket);
+    const { service, wallet } = makeConcurrencyService(db);
+    await service.buy({
+      userId: 'u1',
+      marketId: 'mc',
+      side: 'yes',
+      amount: 100,
+    });
+    const pos = await db.getPosition('u1', 'mc', 'yes');
+    const shares = pos!.shares;
+    const balanceBefore = (await wallet.getBalance('u1')).balance;
+
+    // Both sells must read the position before either claims its shares.
+    const gate = pairGate();
+    const origGetPosition = db.getPosition.bind(db);
+    db.getPosition = async (userId, marketId, side) => {
+      const result = await origGetPosition(userId, marketId, side);
+      if (side === 'yes') await gate.wait();
+      return result;
+    };
+
+    const settled: Array<PromiseSettledResult<PredictionTradeResult>> =
+      await Promise.allSettled([
+        service.sell({ userId: 'u1', marketId: 'mc', shares }),
+        service.sell({ userId: 'u1', marketId: 'mc', shares }),
+      ]);
+
+    // Exactly one seller wins the claim; the other is rejected instead of
+    // being paid for shares that were already sold.
+    const fulfilled = settled.filter(
+      (s): s is PromiseFulfilledResult<PredictionTradeResult> =>
+        s.status === 'fulfilled'
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(fulfilled[0]!.value.netProceeds ?? 0).toBeGreaterThan(0);
+
+    // The wallet was credited only once (the old race paid out twice).
+    const balanceDelta =
+      (await wallet.getBalance('u1')).balance - balanceBefore;
+    expect(balanceDelta).toBeCloseTo(fulfilled[0]!.value.netProceeds!);
+    expect(wallet.pnls.filter((p) => p.reason === 'pred_sell')).toHaveLength(1);
+
+    // The position is fully closed with no residual shares.
+    const closed = await db.getPosition('u1', 'mc', 'yes');
+    expect(closed?.status).toBe('closed');
+    expect(closed?.shares).toBe(0);
+  });
+
+  it('sell control: a single sell debits the position and credits exactly once', async () => {
+    const db = new InMemoryDb(baseMarket);
+    const { service, wallet } = makeConcurrencyService(db);
+    await service.buy({
+      userId: 'u1',
+      marketId: 'mc',
+      side: 'yes',
+      amount: 100,
+    });
+    const pos = await db.getPosition('u1', 'mc', 'yes');
+    const shares = pos!.shares / 2;
+    const balanceBefore = (await wallet.getBalance('u1')).balance;
+
+    const result = await service.sell({
+      userId: 'u1',
+      marketId: 'mc',
+      shares,
+    });
+
+    const balanceDelta =
+      (await wallet.getBalance('u1')).balance - balanceBefore;
+    expect(balanceDelta).toBeCloseTo(result.netProceeds!);
+    expect(wallet.pnls.filter((p) => p.reason === 'pred_sell')).toHaveLength(1);
+
+    const after = await db.getPosition('u1', 'mc', 'yes');
+    expect(after?.status).toBe('active');
+    expect(after?.shares).toBeCloseTo(pos!.shares - shares);
   });
 });
 

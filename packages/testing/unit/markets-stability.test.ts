@@ -67,6 +67,9 @@ function makeService(
       ...updates,
     })),
     getPosition: mock(async () => null),
+    claimPositionShares: mock(
+      async (_positionId: string, _shares: number) => null
+    ),
     upsertPosition: mock(async (pos) => ({
       ...pos,
       id: pos.id ?? 'new-pos',

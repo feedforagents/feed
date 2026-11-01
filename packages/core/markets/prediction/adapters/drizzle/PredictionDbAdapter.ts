@@ -310,6 +310,27 @@ export class PredictionDbAdapter implements PredictionDbPort {
     return p ? mapPosition(p) : null;
   }
 
+  async claimPositionShares(
+    positionId: string,
+    shares: number
+  ): Promise<PredictionPositionRecord | null> {
+    const [updated] = await this.client
+      .update(positions)
+      .set({
+        shares: sql`${positions.shares} - ${String(shares)}::numeric`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(positions.id, positionId),
+          eq(positions.status, 'active'),
+          sql`${positions.shares} >= ${String(shares)}::numeric`
+        )
+      )
+      .returning();
+    return updated ? mapPosition(updated) : null;
+  }
+
   async upsertPosition(
     position: Omit<PredictionPositionRecord, 'id'> & { id?: string }
   ): Promise<PredictionPositionRecord> {

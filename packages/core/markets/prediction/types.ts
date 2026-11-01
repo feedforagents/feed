@@ -108,6 +108,19 @@ export interface PredictionDbPort {
     marketId: string,
     side: PredictionSide
   ): Promise<PredictionPositionRecord | null>;
+  /**
+   * Atomically subtract `shares` from an active position (conditional
+   * UPDATE ... WHERE status = 'active' AND shares >= requested RETURNING).
+   * Returns the updated row, or null when the position does not exist, is
+   * not active, or holds fewer shares than requested. Sell() claims the
+   * shares it sells through this primitive so two concurrent sells of the
+   * same position cannot both read the same balance and credit proceeds
+   * twice (mirrors the perps port's lockOpenPositionById).
+   */
+  claimPositionShares(
+    positionId: string,
+    shares: number
+  ): Promise<PredictionPositionRecord | null>;
   upsertPosition(
     position: Omit<PredictionPositionRecord, 'id'> & { id?: string }
   ): Promise<PredictionPositionRecord>;
