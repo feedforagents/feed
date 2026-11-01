@@ -14,7 +14,7 @@
  * in the rewards system. Used by the points service to calculate rewards.
  */
 export const POINTS = {
-  INITIAL_SIGNUP: 1000,
+  INITIAL_SIGNUP: 100,
   PROFILE_COMPLETION: 200, // Username + Profile Image + Bio (consolidated)
   TWITTER_LINK: 300,
   TWITTER_FOLLOW: 100, // Follow Feed on Twitter/X

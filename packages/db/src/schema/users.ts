@@ -105,10 +105,10 @@ export const users = pgTable(
     postExample: text('postExample'),
     virtualBalance: decimal('virtualBalance', { precision: 18, scale: 2 })
       .notNull()
-      .default('1000'),
+      .default('0'),
     totalDeposited: decimal('totalDeposited', { precision: 18, scale: 2 })
       .notNull()
-      .default('1000'),
+      .default('0'),
     totalWithdrawn: decimal('totalWithdrawn', { precision: 18, scale: 2 })
       .notNull()
       .default('0'),

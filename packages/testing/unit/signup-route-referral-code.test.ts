@@ -174,7 +174,6 @@ mock.module('@feed/shared', () => ({
   OnboardingProfileSchema: mockOnboardingProfileSchema,
   POINTS: {
     ..._actualShared.POINTS,
-    INITIAL_SIGNUP: 1000,
     REFERRAL_BONUS: 100,
   },
   toISO: (val: Date | string) =>
@@ -228,8 +227,8 @@ describe('signup route referral code handling', () => {
     mockNotifyNewAccount.mockResolvedValue(undefined);
     mockAwardWelcomeBonus.mockResolvedValue({
       success: true,
-      balanceDelta: 1000,
-      newBalance: 1000,
+      balanceDelta: 100,
+      newBalance: 100,
       alreadyProcessed: false,
       transactionId: 'funding-tx-1',
     });
@@ -295,6 +294,10 @@ describe('signup route referral code handling', () => {
 
     expect(response.status).toBe(200);
     expect(data.user.referralCode).toBe('alice');
+    // Starting grant: exactly 100 pts, funded once through the ledgered
+    // welcome-bonus path (PRD §9.1 [D-11]).
+    expect(mockAwardWelcomeBonus).toHaveBeenCalledTimes(1);
+    expect(mockAwardWelcomeBonus).toHaveBeenCalledWith('user_1', 100);
     expect(mockGetOrCreateReferralCode).not.toHaveBeenCalled();
     expect(mockInvalidateUserIdentifierCaches).toHaveBeenCalled();
     expect(mockNotifyNewAccount).toHaveBeenCalledWith('user_1');

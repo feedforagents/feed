@@ -160,7 +160,7 @@ describe('balance transaction capital-base classification', () => {
   it('defaults legitimate wallet deposit funding to capital base without brittle text matching', () => {
     const welcomeBonusDeposit = {
       type: 'deposit',
-      amount: '1000',
+      amount: '100',
       description: WELCOME_BONUS_BALANCE_DESCRIPTION,
     };
 
@@ -170,9 +170,9 @@ describe('balance transaction capital-base classification', () => {
     expect(classification.descriptionDriven).toBe(true);
     expect(
       getCapitalBaseContributionAmount(welcomeBonusDeposit, 'wallet')
-    ).toBe(1000);
+    ).toBe(100);
     expect(getCapitalBaseContributionAmount(welcomeBonusDeposit, 'team')).toBe(
-      1000
+      100
     );
   });
 

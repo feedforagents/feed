@@ -47,6 +47,10 @@ const fakeTx = {
 };
 
 const awardTwitterLinkMock = mock(async () => ({ reputationAwarded: 0 }));
+const awardWelcomeBonusMock = mock(async () => ({
+  success: true,
+  alreadyProcessed: true,
+}));
 const trackServerEventMock = mock(async () => undefined);
 
 const actualDb = await import('@feed/db');
@@ -78,7 +82,7 @@ mock.module('@feed/api', () => ({
     awardReputation: async () => ({ reputationAwarded: 0 }),
   },
   TradingBalanceFundingService: {
-    awardWelcomeBonus: async () => ({ success: true, alreadyProcessed: true }),
+    awardWelcomeBonus: awardWelcomeBonusMock,
   },
   withErrorHandling:
     (handler: (request: NextRequest) => Promise<Response>) =>
@@ -148,6 +152,7 @@ describe('POST /api/users/signup', () => {
     insertPayloads.length = 0;
     existingUserRecord = null;
     awardTwitterLinkMock.mockClear();
+    awardWelcomeBonusMock.mockClear();
     trackServerEventMock.mockClear();
   });
 
@@ -211,6 +216,21 @@ describe('POST /api/users/signup', () => {
       })
     );
     expect('reputationPoints' in updatePayloads[0]!).toBe(false);
+  });
+
+  test('funds the starting grant once, as 100 pts, outside the user row write', async () => {
+    selectQueue.push([], [], []);
+
+    await POST(signupRequest({ username: 'bob', displayName: 'Bob' }));
+
+    // The row write carries no balance: the schema default is the only
+    // born-with funding, and it must be zero so the ledgered welcome
+    // bonus below is the single starting grant (PRD §9.1 [D-11]).
+    expect(insertPayloads).toHaveLength(1);
+    expect('virtualBalance' in insertPayloads[0]!).toBe(false);
+    expect('totalDeposited' in insertPayloads[0]!).toBe(false);
+    expect(awardWelcomeBonusMock).toHaveBeenCalledTimes(1);
+    expect(awardWelcomeBonusMock).toHaveBeenCalledWith('user-1', 100);
   });
 
   test('new waitlist users are created with the waitlist starting balance', async () => {
