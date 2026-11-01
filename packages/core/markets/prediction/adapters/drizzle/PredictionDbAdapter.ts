@@ -331,6 +331,34 @@ export class PredictionDbAdapter implements PredictionDbPort {
     return updated ? mapPosition(updated) : null;
   }
 
+  async claimResolution(
+    marketId: string,
+    updates: Partial<
+      Pick<
+        PredictionMarketRecord,
+        | 'resolution'
+        | 'liquidity'
+        | 'resolutionProofUrl'
+        | 'resolutionDescription'
+      >
+    >
+  ): Promise<PredictionMarketRecord | null> {
+    const [updated] = await this.client
+      .update(markets)
+      .set({
+        resolved: true,
+        resolution: updates.resolution,
+        liquidity:
+          updates.liquidity != null ? String(updates.liquidity) : undefined,
+        resolutionProofUrl: updates.resolutionProofUrl,
+        resolutionDescription: updates.resolutionDescription,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(markets.id, marketId), eq(markets.resolved, false)))
+      .returning();
+    return updated ? mapMarket(updated) : null;
+  }
+
   async upsertPosition(
     position: Omit<PredictionPositionRecord, 'id'> & { id?: string }
   ): Promise<PredictionPositionRecord> {

@@ -502,13 +502,15 @@ export class PredictionMarketService {
     const liquidityReduction = Math.min(totalPayout, market.liquidity);
     const newLiquidity = market.liquidity - liquidityReduction;
 
-    await this.db.updateMarketState(marketId, {
-      resolved: true,
+    // Arbitrate concurrent resolutions (game cron + admin tool) atomically:
+    // only the writer that flips resolved=false → true pays the winners.
+    const claimed = await this.db.claimResolution(marketId, {
       resolution: winningSide === 'yes',
       liquidity: newLiquidity,
       resolutionProofUrl: resolutionProofUrl ?? undefined,
       resolutionDescription: resolutionDescription ?? undefined,
     });
+    if (!claimed) return;
 
     for (const pos of positions) {
       const isWinner = isWinnerSide(pos);

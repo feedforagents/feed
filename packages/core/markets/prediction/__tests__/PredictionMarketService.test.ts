@@ -139,6 +139,17 @@ class InMemoryDb implements PredictionDbPort {
     return { ...updated };
   }
 
+  async claimResolution(
+    marketId: string,
+    updates: Partial<PredictionMarketRecord>
+  ): Promise<PredictionMarketRecord | null> {
+    const m = this.markets.get(marketId);
+    if (!m || m.resolved) return null;
+    const updated = { ...m, resolved: true, ...updates };
+    this.markets.set(marketId, updated);
+    return { ...updated };
+  }
+
   async getPosition(
     userId: string,
     marketId: string,
@@ -822,6 +833,110 @@ describe('PredictionMarketService concurrency', () => {
     const after = await db.getPosition('u1', 'mc', 'yes');
     expect(after?.status).toBe('active');
     expect(after?.shares).toBeCloseTo(pos!.shares - shares);
+  });
+
+  it('resolve: two concurrent resolutions credit winners exactly once', async () => {
+    const db = new InMemoryDb(baseMarket);
+    const { service, wallet } = makeConcurrencyService(db);
+    await service.buy({
+      userId: 'u1',
+      marketId: 'mc',
+      side: 'yes',
+      amount: 100,
+    });
+    await service.buy({
+      userId: 'u2',
+      marketId: 'mc',
+      side: 'no',
+      amount: 100,
+    });
+
+    // Expected single-winner payout, mirroring the pool-proportional model
+    // asserted in the resolve happy-path test.
+    const winnerPos = await db.getPosition('u1', 'mc', 'yes');
+    const loserPos = await db.getPosition('u2', 'mc', 'no');
+    const expectedPayout = PredictionPricing.calculateExpectedPayout(
+      winnerPos!.shares,
+      winnerPos!.avgPrice,
+      winnerPos!.shares,
+      loserPos!.shares * loserPos!.avgPrice
+    );
+    const winnerBefore = (await wallet.getBalance('u1')).balance;
+
+    // Both resolvers must list positions before either claims the market.
+    const gate = pairGate();
+    const origList = db.listPositionsForMarket.bind(db);
+    db.listPositionsForMarket = async (marketId) => {
+      const rows = await origList(marketId);
+      await gate.wait();
+      return rows;
+    };
+
+    await Promise.allSettled([
+      service.resolve({ marketId: 'mc', winningSide: 'yes' }),
+      service.resolve({ marketId: 'mc', winningSide: 'yes' }),
+    ]);
+
+    // The winner is paid exactly once (the old race paid out twice), and each
+    // position settles exactly once.
+    const winnerDelta = (await wallet.getBalance('u1')).balance - winnerBefore;
+    expect(winnerDelta).toBeCloseTo(expectedPayout);
+    expect(
+      wallet.pnls.filter(
+        (p) => p.userId === 'u1' && p.reason === 'pred_resolve'
+      )
+    ).toHaveLength(1);
+    expect(
+      wallet.pnls.filter(
+        (p) => p.userId === 'u2' && p.reason === 'pred_resolve'
+      )
+    ).toHaveLength(1);
+
+    const market = await db.getMarketById('mc');
+    expect(market?.resolved).toBe(true);
+    const settledWinner = await db.getPosition('u1', 'mc', 'yes');
+    expect(settledWinner?.status).toBe('resolved');
+  });
+
+  it('resolve control: a single resolution pays each winner exactly once', async () => {
+    const db = new InMemoryDb(baseMarket);
+    const { service, wallet } = makeConcurrencyService(db);
+    await service.buy({
+      userId: 'u1',
+      marketId: 'mc',
+      side: 'yes',
+      amount: 100,
+    });
+    await service.buy({
+      userId: 'u2',
+      marketId: 'mc',
+      side: 'no',
+      amount: 100,
+    });
+    const winnerPos = await db.getPosition('u1', 'mc', 'yes');
+    const loserPos = await db.getPosition('u2', 'mc', 'no');
+    const expectedPayout = PredictionPricing.calculateExpectedPayout(
+      winnerPos!.shares,
+      winnerPos!.avgPrice,
+      winnerPos!.shares,
+      loserPos!.shares * loserPos!.avgPrice
+    );
+    const winnerBefore = (await wallet.getBalance('u1')).balance;
+
+    await service.resolve({ marketId: 'mc', winningSide: 'yes' });
+
+    const winnerDelta = (await wallet.getBalance('u1')).balance - winnerBefore;
+    expect(winnerDelta).toBeCloseTo(expectedPayout);
+    expect(
+      wallet.pnls.filter(
+        (p) => p.userId === 'u1' && p.reason === 'pred_resolve'
+      )
+    ).toHaveLength(1);
+    expect(
+      wallet.pnls.filter(
+        (p) => p.userId === 'u2' && p.reason === 'pred_resolve'
+      )
+    ).toHaveLength(1);
   });
 });
 

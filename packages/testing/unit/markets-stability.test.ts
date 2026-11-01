@@ -66,6 +66,11 @@ function makeService(
       ...market,
       ...updates,
     })),
+    claimResolution: mock(async (_id, updates) => ({
+      ...market,
+      resolved: true,
+      ...updates,
+    })),
     getPosition: mock(async () => null),
     claimPositionShares: mock(
       async (_positionId: string, _shares: number) => null

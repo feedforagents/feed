@@ -121,6 +121,26 @@ export interface PredictionDbPort {
     positionId: string,
     shares: number
   ): Promise<PredictionPositionRecord | null>;
+  /**
+   * Atomically transition an unresolved market to resolved (conditional
+   * UPDATE ... WHERE resolved = false RETURNING), applying `updates` alongside
+   * resolved = true in the same statement. Returns the updated market row, or
+   * null when another writer already resolved the market. Resolve() claims the
+   * resolution through this primitive so concurrent resolvers (game cron and
+   * admin tool) cannot credit winners twice.
+   */
+  claimResolution(
+    marketId: string,
+    updates: Partial<
+      Pick<
+        PredictionMarketRecord,
+        | 'resolution'
+        | 'liquidity'
+        | 'resolutionProofUrl'
+        | 'resolutionDescription'
+      >
+    >
+  ): Promise<PredictionMarketRecord | null>;
   upsertPosition(
     position: Omit<PredictionPositionRecord, 'id'> & { id?: string }
   ): Promise<PredictionPositionRecord>;
