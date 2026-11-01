@@ -113,6 +113,25 @@ const mockTxDb = {
             Object.assign(marketRow, updates, { updatedAt: new Date() });
             return [marketRow];
           }
+          if (table === positions) {
+            // Emulate claimPositionShares: the adapter issues a conditional
+            // `UPDATE ... SET shares = shares - <n>` with the requested
+            // amount embedded in the mocked sql`` values.
+            const sqlValues = (
+              updates.shares as { values?: unknown[] } | undefined
+            )?.values;
+            const demanded = Number(sqlValues?.[1]);
+            if (
+              positionRow &&
+              positionRow.status === 'active' &&
+              positionRow.shares >= demanded
+            ) {
+              positionRow.shares -= demanded;
+              positionRow.updatedAt = new Date();
+              return [positionRow];
+            }
+            return [];
+          }
           return [];
         }),
       })),
