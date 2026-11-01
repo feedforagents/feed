@@ -1180,4 +1180,83 @@ describe('PerpMarketService', () => {
       expect((await db.listMarkets())[0]?.openInterest).toBeCloseTo(200, 6);
     });
   });
+
+  describe('add-to-position stranded margin compensation', () => {
+    /**
+     * Mirrors a concurrent close committing while an add-to-position request
+     * is between its optimistic position lookup and the transaction row lock:
+     * the add debits margin+fee first, then the transaction observes the
+     * position is gone and aborts. Without compensation the debit strands.
+     */
+    class CloseDuringLookupDb extends InMemoryPerpDb {
+      async getOpenPositionByUserAndTicker(
+        userId: string,
+        ticker: string
+      ): Promise<PerpPositionRecord | null> {
+        const pos = await super.getOpenPositionByUserAndTicker(userId, ticker);
+        if (pos) {
+          // Concurrent request wins the race and closes the position before
+          // this request's transaction acquires the row lock.
+          await this.closePosition(pos.id, { closedAt: new Date() });
+        }
+        return pos;
+      }
+    }
+
+    it('refunds the margin debit when the position vanishes before the add commits', async () => {
+      db = new CloseDuringLookupDb([baseMarket]);
+      wallet = new InMemoryWallet(10_000);
+      service = new PerpMarketService({ db, wallet, fees: feeConfig });
+
+      const open = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const balanceAfterOpen = (await wallet.getBalance('u1')).balance;
+
+      await expect(
+        service.openPosition({
+          userId: 'u1',
+          ticker: 'ABC',
+          side: 'long',
+          size: 100,
+          leverage: 10,
+        })
+      ).rejects.toThrow('Position no longer exists or was closed');
+
+      // Failed add must not strand the debited margin + fee.
+      const balance = (await wallet.getBalance('u1')).balance;
+      expect(balance).toBeCloseTo(balanceAfterOpen, 6);
+      expect(open.positionId).toBeDefined();
+    });
+
+    it('still debits exactly the margin + fee when the add succeeds', async () => {
+      db = new InMemoryPerpDb([baseMarket]);
+      wallet = new InMemoryWallet(10_000);
+      service = new PerpMarketService({ db, wallet, fees: feeConfig });
+
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+
+      const balance = (await wallet.getBalance('u1')).balance;
+      // Two successful adds: 2 × (margin 10 + fee 0.1)
+      expect(balance).toBeCloseTo(10_000 - 2 * 10.1, 6);
+    });
+  });
 });

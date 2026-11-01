@@ -1403,6 +1403,8 @@ export class PerpMarketService {
     const fee = this.calculateFee(addedSize);
     const totalCost = marginRequired + fee;
 
+    const now = this.deps.clock?.now() ?? new Date();
+
     // Debit wallet for additional margin (outside transaction - wallet is separate service)
     await this.deps.wallet.debit({
       userId: input.userId,
@@ -1411,81 +1413,50 @@ export class PerpMarketService {
       description: `Add ${addedSize} to ${effectiveLeverage}x ${existing.side} ${existing.ticker}`,
     });
 
-    const now = this.deps.clock?.now() ?? new Date();
+    let result: AddToPositionTransactionResult;
+    try {
+      result = await this.runAddToPositionTransaction(existing, {
+        addedSize,
+        currentPrice,
+        effectiveLeverage,
+        marginRequired,
+        fee,
+        now,
+      });
+    } catch (err) {
+      // The wallet is not enlisted in the DB transaction. If the transaction
+      // aborts after the debit (e.g. the position was closed concurrently, or
+      // its state is invalid), the debited margin + fee would be stranded.
+      // Best-effort compensating credit; the original error still surfaces.
+      try {
+        await this.deps.wallet.credit({
+          userId: input.userId,
+          amount: totalCost,
+          reason: 'perp_add_to_position_refund',
+          description: `Refund failed add to ${effectiveLeverage}x ${existing.side} ${existing.ticker}`,
+          relatedId: existing.id,
+        });
+      } catch (creditErr) {
+        logger.error(
+          'CRITICAL: Failed to refund wallet debit for aborted add-to-position',
+          {
+            userId: input.userId,
+            positionId: existing.id,
+            ticker: existing.ticker,
+            amount: totalCost,
+            error:
+              creditErr instanceof Error
+                ? creditErr.message
+                : String(creditErr),
+          },
+          'PerpService'
+        );
+      }
+      throw err;
+    }
 
     // Use transaction for atomic position + market stats update
     // This prevents race conditions when concurrent requests modify the same position
-    const result = await this.db.transaction<AddToPositionTransactionResult>(
-      async (tx) => {
-        // Re-fetch and row-lock the position so concurrent adds/closes on the
-        // same position serialize instead of overwriting each other.
-        const freshPosition = await tx.lockOpenPositionById(existing.id);
-        if (!freshPosition) {
-          throw new Error('Position no longer exists or was closed');
-        }
-        if (!isOpenPerpPositionStateValid(freshPosition)) {
-          this.assertOpenPositionIntegrity(freshPosition);
-        }
-
-        // Recalculate with fresh position data to handle concurrent updates
-        const actualNewSize = freshPosition.size + addedSize;
-        const newEntryPrice =
-          (freshPosition.size * freshPosition.entryPrice +
-            addedSize * currentPrice) /
-          actualNewSize;
-
-        // Recalculate liquidation price with new entry
-        const newLiquidationPrice = calculateLiquidationPrice(
-          newEntryPrice,
-          freshPosition.side,
-          effectiveLeverage
-        );
-
-        // Calculate unrealized PnL with new entry price
-        const { pnl, pnlPercent } = calculateUnrealizedPnL(
-          newEntryPrice,
-          currentPrice,
-          freshPosition.side,
-          actualNewSize
-        );
-
-        // Update the existing position
-        await tx.updateOpenPosition(freshPosition.id, {
-          size: actualNewSize,
-          entryPrice: newEntryPrice,
-          currentPrice,
-          liquidationPrice: newLiquidationPrice,
-          unrealizedPnL: pnl,
-          unrealizedPnLPercent: pnlPercent,
-          lastUpdated: now,
-        });
-
-        // Update market stats (atomic deltas)
-        const marketTotals = await tx.applyMarketDeltas(freshPosition.ticker, {
-          openInterest: addedSize,
-          volume24h: addedSize,
-        });
-
-        // Return result data for use after transaction commits
-        return {
-          positionId: freshPosition.id,
-          ticker: freshPosition.ticker,
-          side: freshPosition.side,
-          size: actualNewSize,
-          leverage: effectiveLeverage,
-          entryPrice: newEntryPrice,
-          liquidationPrice: newLiquidationPrice,
-          marginPaid: marginRequired,
-          feePaid: fee,
-          isRebalance: true,
-          rebalanceType: 'add' as const,
-          previousSize: freshPosition.size,
-          previousEntryPrice: freshPosition.entryPrice,
-          newOpenInterest: marketTotals.openInterest,
-          volume24h: marketTotals.volume24h,
-        };
-      }
-    );
 
     // Process fees outside transaction to avoid holding locks during external work.
     // Uses retry logic for reliability.
@@ -1568,6 +1539,103 @@ export class PerpMarketService {
     }
 
     return finalResult;
+  }
+
+  /**
+   * Run the add-to-position DB transaction: row-locks the position, applies
+   * the size/entry/stat updates, and returns the tx payload. The wallet debit
+   * is NOT part of this transaction; callers must compensate the debit if it
+   * aborts (see addToPosition).
+   */
+  private async runAddToPositionTransaction(
+    existing: PerpPositionRecord,
+    params: {
+      addedSize: number;
+      currentPrice: number;
+      effectiveLeverage: number;
+      marginRequired: number;
+      fee: number;
+      now: Date;
+    }
+  ): Promise<AddToPositionTransactionResult> {
+    const {
+      addedSize,
+      currentPrice,
+      effectiveLeverage,
+      marginRequired,
+      fee,
+      now,
+    } = params;
+
+    return this.db.transaction<AddToPositionTransactionResult>(async (tx) => {
+      // Re-fetch and row-lock the position so concurrent adds/closes on the
+      // same position serialize instead of overwriting each other.
+      const freshPosition = await tx.lockOpenPositionById(existing.id);
+      if (!freshPosition) {
+        throw new Error('Position no longer exists or was closed');
+      }
+      if (!isOpenPerpPositionStateValid(freshPosition)) {
+        this.assertOpenPositionIntegrity(freshPosition);
+      }
+
+      // Recalculate with fresh position data to handle concurrent updates
+      const actualNewSize = freshPosition.size + addedSize;
+      const newEntryPrice =
+        (freshPosition.size * freshPosition.entryPrice +
+          addedSize * currentPrice) /
+        actualNewSize;
+
+      // Recalculate liquidation price with new entry
+      const newLiquidationPrice = calculateLiquidationPrice(
+        newEntryPrice,
+        freshPosition.side,
+        effectiveLeverage
+      );
+
+      // Calculate unrealized PnL with new entry price
+      const { pnl, pnlPercent } = calculateUnrealizedPnL(
+        newEntryPrice,
+        currentPrice,
+        freshPosition.side,
+        actualNewSize
+      );
+
+      // Update the existing position
+      await tx.updateOpenPosition(freshPosition.id, {
+        size: actualNewSize,
+        entryPrice: newEntryPrice,
+        currentPrice,
+        liquidationPrice: newLiquidationPrice,
+        unrealizedPnL: pnl,
+        unrealizedPnLPercent: pnlPercent,
+        lastUpdated: now,
+      });
+
+      // Update market stats (atomic deltas)
+      const marketTotals = await tx.applyMarketDeltas(freshPosition.ticker, {
+        openInterest: addedSize,
+        volume24h: addedSize,
+      });
+
+      // Return result data for use after transaction commits
+      return {
+        positionId: freshPosition.id,
+        ticker: freshPosition.ticker,
+        side: freshPosition.side,
+        size: actualNewSize,
+        leverage: effectiveLeverage,
+        entryPrice: newEntryPrice,
+        liquidationPrice: newLiquidationPrice,
+        marginPaid: marginRequired,
+        feePaid: fee,
+        isRebalance: true,
+        rebalanceType: 'add' as const,
+        previousSize: freshPosition.size,
+        previousEntryPrice: freshPosition.entryPrice,
+        newOpenInterest: marketTotals.openInterest,
+        volume24h: marketTotals.volume24h,
+      };
+    });
   }
 
   /**
