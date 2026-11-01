@@ -1047,24 +1047,63 @@ export class PerpMarketService {
 
       // Liquidation check
       if (shouldLiquidate(newPrice, position.liquidationPrice, position.side)) {
-        const marginLoss = position.size / position.leverage;
+        const marginPaid = position.size / position.leverage;
 
         try {
+          // Settle exactly like closePosition does: trade PnL at the
+          // liquidation price plus accrued funding (debts and receivables
+          // alike), minus the trading fee on the closed notional. Any
+          // remaining equity from the prepaid margin goes back to the trader.
+          const { pnl: tradePnl } = calculateUnrealizedPnL(
+            position.entryPrice,
+            newPrice,
+            position.side,
+            position.size
+          );
+          const realizedPnL = tradePnl - position.fundingPaid;
+          const fee = this.calculateFee(position.size);
+          const netSettlement = Math.max(0, marginPaid + realizedPnL - fee);
+
           const closed = await this.db.closePosition(position.id, {
             currentPrice: newPrice,
             closedAt: now,
-            realizedPnL: -marginLoss,
+            realizedPnL,
             unrealizedPnL: 0,
             unrealizedPnLPercent: 0,
           });
           // Already closed concurrently (e.g. by the user): nothing to settle.
           if (!closed) continue;
 
+          if (netSettlement > 0) {
+            await this.deps.wallet.credit({
+              userId: position.userId,
+              amount: netSettlement,
+              reason: 'perp_liquidation',
+              description: `Liquidation surplus ${position.leverage}x ${position.side} ${position.ticker}`,
+              relatedId: position.id,
+            });
+          }
+
           await this.deps.wallet.recordPnL({
             userId: position.userId,
-            pnl: -marginLoss,
+            pnl: netSettlement - marginPaid,
             reason: 'perp_liquidation',
             relatedId: position.id,
+          });
+
+          // The fee is charged above by the settlement; book it to the fee
+          // recipient like a close does, or the platform silently eats it.
+          void this.processFeeWithRetry(
+            {
+              userId: position.userId,
+              amount: position.size,
+              type: 'perp_liquidation',
+              relatedId: position.ticker,
+              positionId: position.id,
+            },
+            { ticker: position.ticker }
+          ).catch(() => {
+            // Error already logged in processFeeWithRetry; avoid unhandled rejection
           });
 
           if (market) {
