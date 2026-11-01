@@ -1582,7 +1582,7 @@ export class PerpMarketService {
     input: PerpOpenInput,
     market: PerpMarketRecord
   ): Promise<PerpTradeResult> {
-    const { size: tradeSize, side: tradeSide, leverage } = input;
+    const { size: tradeSize, side: tradeSide, leverage, maxSlippage } = input;
 
     // Validate trade size
     const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
@@ -1599,6 +1599,7 @@ export class PerpMarketService {
         userId: input.userId,
         positionId: existing.id,
         percentage: closePercentage,
+        maxSlippage,
       });
 
       return {
@@ -1614,6 +1615,7 @@ export class PerpMarketService {
         userId: input.userId,
         positionId: existing.id,
         percentage: 1,
+        maxSlippage,
       });
 
       return {
@@ -1625,6 +1627,36 @@ export class PerpMarketService {
       };
     } else {
       // FLIP: Close existing and open inverse position
+      // Slippage protection for both legs against the fills the flip will
+      // execute at, checked before any funds move (same as a fresh open).
+      if (maxSlippage !== undefined && maxSlippage > 0) {
+        const closeFill = this.getCloseExecutionQuote(
+          market,
+          existing.side,
+          existing.size
+        ).executionPrice;
+        this.assertWithinSlippage(
+          closeFill,
+          market.markPrice ?? market.currentPrice,
+          maxSlippage
+        );
+        const inverseSize = tradeSize - existing.size;
+        const inverseQuote = this.getOpenExecutionQuote(
+          market,
+          tradeSide,
+          inverseSize
+        ).executionPrice;
+        this.assertWithinSlippage(
+          await this.expectedOpenFill(
+            market,
+            tradeSide,
+            inverseSize,
+            inverseQuote
+          ),
+          market.markPrice,
+          maxSlippage
+        );
+      }
       // Use transaction for atomicity - all DB operations use tx
       const flipResult =
         await this.db.transaction<FlipPositionTransactionResult>(async (tx) => {
