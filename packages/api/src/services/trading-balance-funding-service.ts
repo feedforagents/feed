@@ -431,7 +431,7 @@ export class TradingBalanceFundingService {
           .update(users)
           .set({
             virtualBalance: sql`GREATEST(0, COALESCE(CAST("virtualBalance" AS NUMERIC), 0) - ${requestedDeduction})`,
-            totalWithdrawn: sql`COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) + ${requestedDeduction}`,
+            totalWithdrawn: sql`COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) + ${actualDeduction}`,
           })
           .where(eq(users.id, userId));
 
