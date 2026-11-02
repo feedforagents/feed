@@ -119,6 +119,7 @@ export interface PerpDbPort {
         | 'lastUpdated'
         | 'size'
         | 'entryPrice'
+        | 'realizedPnL'
       >
     >
   ): Promise<void>;

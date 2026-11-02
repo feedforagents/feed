@@ -626,6 +626,21 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
     // 50% of 4000 = 2000
     expect(partialClose.size).toBeCloseTo(2000, 0);
 
+    // The open row carries the PnL realized by the partial close.
+    const [afterPartial] = await db
+      .select({
+        realizedPnL: perpPositions.realizedPnL,
+        closedAt: perpPositions.closedAt,
+      })
+      .from(perpPositions)
+      .where(eq(perpPositions.id, open.positionId));
+    expect(afterPartial?.closedAt).toBeNull();
+    expect(afterPartial?.realizedPnL).not.toBeNull();
+    expect(afterPartial?.realizedPnL).toBeCloseTo(
+      partialClose.realizedPnL ?? 0,
+      6
+    );
+
     // Close the rest
     const fullClose = await service.closePosition({
       userId: USER_C,
@@ -636,6 +651,16 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
       `  Full close: PnL=${(fullClose.realizedPnL ?? 0).toFixed(4)}, fullyClosed=${fullClose.fullyClosed}`
     );
     expect(fullClose.fullyClosed).toBe(true);
+
+    // The closed row reports the lifetime PnL of the position.
+    const [closedRow] = await db
+      .select({ realizedPnL: perpPositions.realizedPnL })
+      .from(perpPositions)
+      .where(eq(perpPositions.id, open.positionId));
+    expect(closedRow?.realizedPnL).toBeCloseTo(
+      (partialClose.realizedPnL ?? 0) + (fullClose.realizedPnL ?? 0),
+      6
+    );
   });
 
   // =========================================================================

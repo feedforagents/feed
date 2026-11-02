@@ -838,6 +838,9 @@ export class PerpMarketService {
           size: remainingSize,
           fundingPaid: remainingFunding,
           currentPrice: exitPrice,
+          // Keep the row's realized PnL in step with what has been settled,
+          // so the final close and the position views report lifetime PnL.
+          realizedPnL: (position.realizedPnL ?? 0) + realizedPnL,
           unrealizedPnL: remainingPnl,
           unrealizedPnLPercent: remainingPnlPercent,
           lastUpdated: now,
@@ -1053,7 +1056,7 @@ export class PerpMarketService {
           const closed = await this.db.closePosition(position.id, {
             currentPrice: newPrice,
             closedAt: now,
-            realizedPnL: -marginLoss,
+            realizedPnL: (position.realizedPnL ?? 0) - marginLoss,
             unrealizedPnL: 0,
             unrealizedPnLPercent: 0,
           });

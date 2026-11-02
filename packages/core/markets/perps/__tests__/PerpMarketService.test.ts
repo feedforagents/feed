@@ -175,6 +175,7 @@ class InMemoryPerpDb implements PerpDbPort {
         | 'lastUpdated'
         | 'size'
         | 'entryPrice'
+        | 'realizedPnL'
       >
     >
   ): Promise<void> {
@@ -450,6 +451,31 @@ describe('PerpMarketService', () => {
     );
   });
 
+  it('liquidation after a partial close keeps the realized PnL already settled', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 105 });
+    const partial = await service.closePosition({
+      userId: 'u1',
+      positionId: open.positionId,
+      percentage: 0.5,
+    });
+    expect(partial.realizedPnL).toBeGreaterThan(0);
+
+    await service.applyPriceUpdates({ 'org-abc': 80 });
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).not.toBeNull();
+    // Remaining margin loss = 50 / 10 = 5, on top of the settled partial PnL.
+    expect(pos?.realizedPnL).toBeCloseTo(partial.realizedPnL! - 5, 6);
+  });
+
   it('updates unrealized PnL on price move without liquidation', async () => {
     const open = await service.openPosition({
       userId: 'u1',
@@ -530,6 +556,75 @@ describe('PerpMarketService', () => {
     const m = markets[0]!;
     expect(m.volume24h).toBeCloseTo(150, 4); // open 100 + close 50
     expect(m.openInterest).toBeCloseTo(50, 4); // remaining
+  });
+
+  it('partial close records realized PnL on the position row and the final close accumulates it', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+    const partial = await service.closePosition({
+      userId: 'u1',
+      positionId: open.positionId,
+      percentage: 0.5,
+    });
+    expect(partial.fullyClosed).toBe(false);
+    expect(partial.realizedPnL).toBeGreaterThan(0);
+
+    // The row must carry the PnL realized so far while it stays open.
+    const afterPartial = await db.getPositionById(open.positionId);
+    expect(afterPartial?.closedAt).toBeNull();
+    expect(afterPartial?.realizedPnL).not.toBeNull();
+    expect(afterPartial?.realizedPnL).toBeCloseTo(partial.realizedPnL!, 6);
+
+    await db.updateMarketStats('ABC', { currentPrice: 90 });
+    const final = await service.closePosition({
+      userId: 'u1',
+      positionId: open.positionId,
+    });
+    expect(final.fullyClosed).toBe(true);
+    expect(final.realizedPnL).toBeLessThan(0);
+
+    // The closed row reports the whole lifetime PnL, not just the last chunk.
+    const closed = await db.getPositionById(open.positionId);
+    expect(closed?.closedAt).not.toBeNull();
+    expect(closed?.realizedPnL).toBeCloseTo(
+      partial.realizedPnL! + final.realizedPnL!,
+      6
+    );
+  });
+
+  it('reduce via an opposite-side open records realized PnL on the position row', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+    const reduce = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 40,
+      leverage: 10,
+    });
+    expect(reduce.isRebalance).toBe(true);
+    expect(reduce.rebalanceType).toBe('reduce');
+    expect(reduce.realizedPnL).toBeGreaterThan(0);
+
+    const row = await db.getPositionById(open.positionId);
+    expect(row?.closedAt).toBeNull();
+    expect(row?.size).toBeCloseTo(60, 4);
+    expect(row?.realizedPnL).not.toBeNull();
+    expect(row?.realizedPnL).toBeCloseTo(reduce.realizedPnL!, 6);
   });
 
   it('rejects partial close below the market minimum order size', async () => {
