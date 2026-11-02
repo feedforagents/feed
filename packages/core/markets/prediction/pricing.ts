@@ -88,14 +88,23 @@ export class PredictionPricing {
     let newNoShares: number;
     let sharesBought: number;
 
+    // Cash-in CPMM (complete-set mint), per PRD §9.2 [D-14] ("CPMM price =
+    // cost per share"): the amount paid mints that many complete sets
+    // (1 YES + 1 NO per pt). The buyer keeps the bought side's shares from
+    // the minted sets, and the opposite side's minted shares join the pool
+    // and are swapped along the invariant for more of the bought side.
+    // The pool state (and therefore the price path) is unchanged from the
+    // plain swap calculation; the minted bought-side shares are what make
+    // the marginal cost per share equal the quoted price instead of the
+    // odds ratio.
     if (side === 'yes') {
       newNoShares = currentNoShares + usdAmount;
       newYesShares = k / newNoShares;
-      sharesBought = currentYesShares - newYesShares;
+      sharesBought = currentYesShares - newYesShares + usdAmount;
     } else {
       newYesShares = currentYesShares + usdAmount;
       newNoShares = k / newYesShares;
-      sharesBought = currentNoShares - newNoShares;
+      sharesBought = currentNoShares - newNoShares + usdAmount;
     }
 
     if (sharesBought <= 0)
@@ -140,14 +149,29 @@ export class PredictionPricing {
     let newNoShares: number;
     let proceeds: number;
 
+    // Inverse of the cash-in buy (complete-set redemption): the pool
+    // absorbs the sold shares and redeems `proceeds` complete sets for
+    // cash, keeping the invariant. For a YES sell that is
+    //   (yesShares + sharesToSell - proceeds) * (noShares - proceeds) = k,
+    // solved below in the rationalized (numerically stable) root form.
+    // The marginal proceeds per share equal the quoted price, so a buy
+    // followed by a sell of the same shares returns the amount paid.
     if (side === 'yes') {
-      newYesShares = currentYesShares + sharesToSell;
-      newNoShares = k / newYesShares;
-      proceeds = currentNoShares - newNoShares;
+      const total = currentYesShares + sharesToSell + currentNoShares;
+      const discriminant = total * total - 4 * sharesToSell * currentNoShares;
+      proceeds =
+        (2 * sharesToSell * currentNoShares) /
+        (total + Math.sqrt(discriminant));
+      newYesShares = currentYesShares + sharesToSell - proceeds;
+      newNoShares = currentNoShares - proceeds;
     } else {
-      newNoShares = currentNoShares + sharesToSell;
-      newYesShares = k / newNoShares;
-      proceeds = currentYesShares - newYesShares;
+      const total = currentNoShares + sharesToSell + currentYesShares;
+      const discriminant = total * total - 4 * sharesToSell * currentYesShares;
+      proceeds =
+        (2 * sharesToSell * currentYesShares) /
+        (total + Math.sqrt(discriminant));
+      newNoShares = currentNoShares + sharesToSell - proceeds;
+      newYesShares = currentYesShares - proceeds;
     }
 
     if (!Number.isFinite(proceeds) || proceeds <= 0) {
