@@ -22,7 +22,12 @@ import {
   type TokenizeTextParams,
 } from '@elizaos/core';
 import { GROQ_MODELS, getAgentLLMBridge, type JsonValue } from '@feed/shared';
-import { generateObject, generateText, jsonSchema } from 'ai';
+import {
+  generateObject,
+  generateText,
+  jsonSchema,
+  NoObjectGeneratedError,
+} from 'ai';
 import { getEncoding } from 'js-tiktoken';
 import {
   createAgentGroq,
@@ -218,6 +223,67 @@ async function generateGroqText(
   return result.text;
 }
 
+function extractStructuredOutputUsage(error: unknown):
+  | {
+      inputTokens?: number;
+      outputTokens?: number;
+      totalTokens?: number;
+    }
+  | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const isNoObjectGenerated =
+    NoObjectGeneratedError.isInstance(error) ||
+    ('name' in error && error.name === 'AI_NoObjectGeneratedError');
+
+  if (!isNoObjectGenerated || !('usage' in error)) {
+    return undefined;
+  }
+
+  const usage = (error as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== 'object') {
+    return undefined;
+  }
+
+  const usageObj = usage as Record<string, unknown>;
+  const inputTokens =
+    typeof usageObj.inputTokens === 'number'
+      ? usageObj.inputTokens
+      : typeof usageObj.promptTokens === 'number'
+        ? usageObj.promptTokens
+        : undefined;
+
+  const outputTokens =
+    typeof usageObj.outputTokens === 'number'
+      ? usageObj.outputTokens
+      : typeof usageObj.completionTokens === 'number'
+        ? usageObj.completionTokens
+        : undefined;
+
+  const totalTokens =
+    typeof usageObj.totalTokens === 'number'
+      ? usageObj.totalTokens
+      : typeof inputTokens === 'number' && typeof outputTokens === 'number'
+        ? inputTokens + outputTokens
+        : undefined;
+
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+  };
+}
+
 /**
  * Generates structured object using Groq API
  * @internal
@@ -253,6 +319,7 @@ async function generateGroqObject(
       })
     : generateObject({ ...options, output: 'no-schema' })
   ).catch((error: Error) => {
+    const structuredUsage = extractStructuredOutputUsage(error);
     if (activeStep)
       activeStep.logger.logLLMCall(activeStep.stepId, {
         model,
@@ -265,6 +332,15 @@ async function generateGroqObject(
         actionType: 'groq_plugin_object',
         latencyMs: Date.now() - startTime,
         metadata: { success: false, error: error.message },
+        ...(structuredUsage?.inputTokens !== undefined
+          ? { promptTokens: structuredUsage.inputTokens }
+          : {}),
+        ...(structuredUsage?.outputTokens !== undefined
+          ? { completionTokens: structuredUsage.outputTokens }
+          : {}),
+        ...(structuredUsage?.totalTokens !== undefined
+          ? { totalTokens: structuredUsage.totalTokens }
+          : {}),
       });
     getAgentLLMBridge()?.({
       provider,
@@ -276,8 +352,11 @@ async function generateGroqObject(
       systemPrompt: system || '',
       userPrompt: params.prompt,
       rawResponse: '',
-      inputTokens: 0,
-      outputTokens: 0,
+      inputTokens: structuredUsage?.inputTokens ?? 0,
+      outputTokens: structuredUsage?.outputTokens ?? 0,
+      ...(structuredUsage?.totalTokens !== undefined
+        ? { totalTokens: structuredUsage.totalTokens }
+        : {}),
       success: false,
       error: error.message,
       durationMs: Date.now() - startTime,

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { IAgentRuntime } from '@elizaos/core';
 import type { AgentLLMBridgeData } from '@feed/shared';
+import { NoObjectGeneratedError } from 'ai';
 
 let surplusConfigured = false;
 const mockUsageBridge = mock((_call: AgentLLMBridgeData) => {});
@@ -30,6 +31,7 @@ mock.module('ai', () => ({
   generateObject: mockGenerateObject,
   jsonSchema: (schema: object) => schema,
   generateText: mockGenerateText,
+  NoObjectGeneratedError,
 }));
 
 mock.module('@feed/engine/embedding', () => ({
@@ -273,6 +275,23 @@ it('records failed text and object requests in the active training step', async 
       userPrompt: 'retain failed object context',
       metadata: { success: false, error: 'object provider failed' },
     });
+    const structuredFailure = new NoObjectGeneratedError({
+      message: 'schema mismatch',
+      usage: { promptTokens: 387, completionTokens: 1, totalTokens: 388 },
+    });
+    mockGenerateObject.mockRejectedValueOnce(structuredFailure);
+    await expect(
+      groqPlugin.models![ModelType.OBJECT_SMALL]!(runtime, {
+        prompt: 'retain failed object context with usage',
+      })
+    ).rejects.toThrow('schema mismatch');
+    expect(logLLMCall.mock.calls.at(-1)?.[1]).toMatchObject({
+      userPrompt: 'retain failed object context with usage',
+      metadata: { success: false, error: 'schema mismatch' },
+      promptTokens: 387,
+      completionTokens: 1,
+      totalTokens: 388,
+    });
   } finally {
     clearTrajectoryContext(runtime);
   }
@@ -361,6 +380,39 @@ describe('native inference usage attribution', () => {
           outputTokens: 0,
         });
       });
+      if (
+        modelType === ModelType.OBJECT_SMALL ||
+        modelType === ModelType.OBJECT_LARGE
+      ) {
+        it(`${provider} ${modelType} preserves provider-reported token usage on structured-output errors`, async () => {
+          surplusConfigured = provider === 'surplus';
+          const selectedRuntime = provider === 'groq' ? runtime : cloudRuntime;
+          const failure = new NoObjectGeneratedError({
+            message: 'No object generated: response was truncated',
+            text: '{"truncated":',
+            usage: {
+              promptTokens: 387,
+              completionTokens: 1,
+              totalTokens: 388,
+            },
+          });
+          mockGenerateObject.mockRejectedValueOnce(failure);
+          await expect(
+            groqPlugin.models![modelType]!(selectedRuntime, {
+              prompt: 'Hello schema',
+              schema: { type: 'object' },
+            })
+          ).rejects.toThrow('No object generated');
+          expect(mockUsageBridge).toHaveBeenCalledTimes(1);
+          expect(mockUsageBridge.mock.calls[0]?.[0]).toMatchObject({
+            provider,
+            success: false,
+            inputTokens: 387,
+            outputTokens: 1,
+            totalTokens: 388,
+          });
+        });
+      }
     }
   }
 });
