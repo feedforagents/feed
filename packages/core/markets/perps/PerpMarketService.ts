@@ -76,7 +76,21 @@ type FlipPositionTransactionResult = {
   volume24h: number;
 };
 
-const DEFAULT_MAX_LEVERAGE = 100;
+/** PRD §9.3 item 8 [D-17b]: max leverage is 20x. */
+const DEFAULT_MAX_LEVERAGE = 20;
+
+/**
+ * Effective leverage cap for a market. The PRD cap is global, so a market
+ * record stored above it (schema default / bootstrap seed from before the
+ * cap existed) must not reopen the old 100x ceiling; a market configured
+ * below the cap keeps its tighter limit.
+ */
+function effectiveMaxLeverage(market: { maxLeverage?: number | null }): number {
+  return Math.min(
+    market.maxLeverage ?? DEFAULT_MAX_LEVERAGE,
+    DEFAULT_MAX_LEVERAGE
+  );
+}
 const DEFAULT_MIN_ORDER_SIZE = 10;
 const MIN_MAX_POSITION_SIZE = 10_000;
 const OPEN_INTEREST_LIMIT_RATIO = 0.1;
@@ -498,6 +512,10 @@ export class PerpMarketService {
     }
 
     const market = await this.getRequiredMarket(input.ticker);
+    const maxLeverage = effectiveMaxLeverage(market);
+    if (input.leverage > maxLeverage) {
+      throw new Error(`Invalid leverage (1-${maxLeverage})`);
+    }
     return this.buildOpenExecutionPreview(market, input);
   }
 
@@ -515,6 +533,10 @@ export class PerpMarketService {
     }
 
     const market = await this.getRequiredMarket(input.ticker);
+    const maxLeverage = effectiveMaxLeverage(market);
+    if (input.leverage > maxLeverage) {
+      throw new Error(`Invalid leverage (1-${maxLeverage})`);
+    }
     const existingPosition = await this.db.getOpenPositionByUserAndTicker(
       input.userId,
       input.ticker
@@ -563,7 +585,7 @@ export class PerpMarketService {
     }
 
     const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
-    const maxLeverage = market.maxLeverage ?? DEFAULT_MAX_LEVERAGE;
+    const maxLeverage = effectiveMaxLeverage(market);
 
     if (size < minOrderSize) {
       throw new Error(`Order size below minimum (${minOrderSize})`);
@@ -1728,7 +1750,7 @@ export class PerpMarketService {
               tx,
               input.userId,
               (tradeSize - position.size) *
-                Math.min(leverage, market.maxLeverage ?? DEFAULT_MAX_LEVERAGE),
+                Math.min(leverage, effectiveMaxLeverage(market)),
               position.id
             );
 
@@ -1765,7 +1787,7 @@ export class PerpMarketService {
             // === STEP 2: Open inverse position ===
 
             const inverseSize = tradeSize - position.size;
-            const maxLeverage = market.maxLeverage ?? DEFAULT_MAX_LEVERAGE;
+            const maxLeverage = effectiveMaxLeverage(market);
             const effectiveLeverage = Math.min(leverage, maxLeverage);
 
             const entryPrice = this.getOpenExecutionQuote(
@@ -1938,7 +1960,7 @@ export class PerpMarketService {
         finalResult.positionId,
         finalResult.entryPrice,
         tradeSide,
-        Math.min(leverage, market.maxLeverage ?? DEFAULT_MAX_LEVERAGE),
+        Math.min(leverage, effectiveMaxLeverage(market)),
         tradeSize - existing.size
       );
       if (impactAdj) {
@@ -2164,7 +2186,7 @@ export class PerpMarketService {
     const inverseSize = input.size - existing.size;
     const effectiveLeverage = Math.min(
       input.leverage,
-      market.maxLeverage ?? DEFAULT_MAX_LEVERAGE
+      effectiveMaxLeverage(market)
     );
     const openExecution = this.getOpenExecutionQuote(
       market,
