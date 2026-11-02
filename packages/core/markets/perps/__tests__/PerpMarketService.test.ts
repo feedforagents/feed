@@ -533,14 +533,14 @@ describe('PerpMarketService', () => {
     await clocked.processFundingStep();
     const firstPeriod = await fundingPaidOf('u1');
     expect(firstPeriod).toBeGreaterThan(0);
-    const market = (await db.listMarkets())[0]!;
-    expect(market.fundingRate.nextFundingTime).toBe('2030-01-01T16:00:00.000Z');
 
     // Queue redelivery 30 s later, same period: nothing more is charged.
     current = new Date('2030-01-01T08:00:33.000Z');
     await clocked.processFundingStep();
     expect(await fundingPaidOf('u1')).toBeCloseTo(firstPeriod, 10);
     expect(await fundingPaidOf('u2')).toBeCloseTo(-firstPeriod / 2, 10);
+    const market = (await db.listMarkets())[0]!;
+    expect(market.fundingRate.nextFundingTime).toBe('2030-01-01T16:00:00.000Z');
 
     // Next scheduled run, next period: charged again.
     current = new Date('2030-01-01T16:00:02.000Z');
