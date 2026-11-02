@@ -10,6 +10,7 @@ import {
   eq,
   favorites,
   inArray,
+  markets,
   notifications,
   posts,
   users,
@@ -17,6 +18,7 @@ import {
 import { generateSnowflakeId } from '@feed/shared';
 import {
   executeGetFavoritePosts,
+  executeGetMarketPrices,
   executeGetMarkets,
   executeGetUnreadCount,
   executeGetUserWallet,
@@ -24,6 +26,7 @@ import {
 } from '../../mcp/src/handlers/tool-handlers';
 
 const userIds: string[] = [];
+const marketIds: string[] = [];
 let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
@@ -84,6 +87,7 @@ describe('MCP tool handlers', () => {
   });
 
   afterAll(async () => {
+    await db.delete(markets).where(inArray(markets.id, marketIds));
     await db
       .delete(notifications)
       .where(inArray(notifications.userId, userIds));
@@ -132,5 +136,31 @@ describe('MCP tool handlers', () => {
     await expect(
       executeGetMarkets({ type: 'perpetuals' }, agent())
     ).rejects.toThrow('get_perpetuals');
+  });
+
+  it.each([
+    { yesShares: '9000', noShares: '1000', yesPrice: 0.1, noPrice: 0.9 },
+    { yesShares: '1000', noShares: '9000', yesPrice: 0.9, noPrice: 0.1 },
+    { yesShares: '0', noShares: '0', yesPrice: 0.5, noPrice: 0.5 },
+  ])('quotes CPMM prices for $yesShares/$noShares reserves', async (pool) => {
+    const id = await generateSnowflakeId();
+    await db.insert(markets).values({
+      id,
+      question: 'MCP price consistency',
+      yesShares: pool.yesShares,
+      noShares: pool.noShares,
+      liquidity: '10000',
+      endDate: new Date(Date.now() + 86_400_000),
+      updatedAt: new Date(),
+    });
+    marketIds.push(id);
+
+    expect(
+      await executeGetMarketPrices(agent(), { marketId: id })
+    ).toMatchObject({
+      marketId: id,
+      yesPrice: pool.yesPrice,
+      noPrice: pool.noPrice,
+    });
   });
 });

@@ -49,6 +49,7 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
   PredictionDbAdapter,
   PredictionMarketService,
+  PredictionPricing,
 } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
@@ -1133,14 +1134,12 @@ export async function executeGetMarketPrices(
   if (!market) {
     throw new Error('Market not found');
   }
-  const totalShares = Number(market.yesShares) + Number(market.noShares);
-  const yesPrice =
-    totalShares > 0 ? Number(market.yesShares) / totalShares : 0.5;
-  const noPrice = totalShares > 0 ? Number(market.noShares) / totalShares : 0.5;
+  const yesShares = Number(market.yesShares);
+  const noShares = Number(market.noShares);
   return {
     marketId: market.id,
-    yesPrice,
-    noPrice,
+    yesPrice: PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes'),
+    noPrice: PredictionPricing.getCurrentPrice(yesShares, noShares, 'no'),
     timestamp: new Date().toISOString(),
   };
 }
