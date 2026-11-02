@@ -50,6 +50,42 @@ export function resolveAgentInferenceProvider(
   return elizacloudKey ? 'elizacloud' : 'groq';
 }
 
+/**
+ * Provider-reported usage carried by a failed text generation, when the SDK
+ * supplies it. A completion that arrived but produced no usable text (an empty
+ * or filtered response) still consumed provider tokens. Transport failures
+ * usually carry none, and a count the provider never reported stays absent
+ * instead of becoming an estimate.
+ */
+export function failedUsageOf(
+  error: unknown
+): { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined {
+  const candidates = [error, (error as { cause?: unknown } | null)?.cause];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const usage = (candidate as { usage?: unknown }).usage;
+    if (!usage || typeof usage !== 'object') continue;
+    const { inputTokens, outputTokens, totalTokens } = usage as {
+      inputTokens?: unknown;
+      outputTokens?: unknown;
+      totalTokens?: unknown;
+    };
+    if (
+      typeof inputTokens !== 'number' &&
+      typeof outputTokens !== 'number' &&
+      typeof totalTokens !== 'number'
+    ) {
+      continue;
+    }
+    return {
+      inputTokens: typeof inputTokens === 'number' ? inputTokens : undefined,
+      outputTokens: typeof outputTokens === 'number' ? outputTokens : undefined,
+      totalTokens: typeof totalTokens === 'number' ? totalTokens : undefined,
+    };
+  }
+  return undefined;
+}
+
 function resolveGroqBaseURL(runtime: IAgentRuntime | undefined): string {
   const surplus = getSurplusConfig();
   if (surplus) return surplus.baseURL;
@@ -196,6 +232,7 @@ export async function callGroqDirect(params: {
     abortSignal: AbortSignal.timeout(timeoutMs),
     experimental_telemetry: { isEnabled: false },
   }).catch((error: Error) => {
+    const usage = failedUsageOf(error);
     if (trajectoryLogger && stepId) {
       trajectoryLogger.logLLMCall(stepId, {
         model,
@@ -221,9 +258,9 @@ export async function callGroqDirect(params: {
       userPrompt: params.prompt,
       rawResponse: '',
       parsedResponse: null,
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
+      inputTokens: usage?.inputTokens ?? 0,
+      outputTokens: usage?.outputTokens ?? 0,
+      totalTokens: usage?.totalTokens,
       durationMs: Date.now() - startTime,
       success: false,
       error: error.message,
