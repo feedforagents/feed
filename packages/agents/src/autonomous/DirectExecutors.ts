@@ -1031,11 +1031,6 @@ async function executePerpTrade(params: {
 
   const perpSide = side === 'open_long' ? 'long' : 'short';
 
-  // Get org for price (search through all orgs by ticker)
-  const allOrgs = StaticDataRegistry.getAllOrganizations();
-  const org = allOrgs.find((o) => o.ticker === ticker);
-  const currentPrice = org?.initialPrice ?? 100;
-
   const perpTradeOperation = async () => {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
@@ -1051,7 +1046,7 @@ async function executePerpTrade(params: {
       priceImpact: createPerpPriceImpactPort(),
     });
 
-    await service.openPosition({
+    return service.openPosition({
       userId: agentUserId,
       ticker,
       side: perpSide,
@@ -1061,11 +1056,9 @@ async function executePerpTrade(params: {
   };
 
   // Execute with appropriate context
-  if (isNpc) {
-    await asSystem(perpTradeOperation, 'npc_perp_trade');
-  } else {
-    await asUser({ userId: agentUserId }, perpTradeOperation);
-  }
+  const openResult = isNpc
+    ? await asSystem(perpTradeOperation, 'npc_perp_trade')
+    : await asUser({ userId: agentUserId }, perpTradeOperation);
 
   // Record trade
   await agentPnLService.recordTrade({
@@ -1076,7 +1069,7 @@ async function executePerpTrade(params: {
     action: 'open',
     side: perpSide,
     amount,
-    price: currentPrice,
+    price: openResult.entryPrice,
     reasoning,
   });
 
