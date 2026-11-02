@@ -34,6 +34,7 @@ import { asUser, db, getRawDrizzle, sql } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
+  FEE_CONFIG,
   StaticDataRegistry,
   WalletService,
 } from '@feed/engine';
@@ -1552,10 +1553,10 @@ export class FeedAgentExecutor implements AgentExecutor {
         },
       },
       fees: {
-        tradingFeeRate: 0.01,
-        platformShare: 0.5,
-        referrerShare: 0.1,
-        minFeeAmount: 0,
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
     });
   }
