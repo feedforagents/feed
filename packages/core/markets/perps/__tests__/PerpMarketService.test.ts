@@ -1181,3 +1181,214 @@ describe('PerpMarketService', () => {
     });
   });
 });
+
+describe('funding accrual vs a close landing mid-step', () => {
+  const market: PerpMarketRecord = {
+    ticker: 'ABC',
+    organizationId: 'org-abc',
+    name: 'ABC Corp',
+    currentPrice: 100,
+    change24h: 0,
+    changePercent24h: 0,
+    high24h: 100,
+    low24h: 100,
+    volume24h: 0,
+    openInterest: 0,
+    fundingRate: {
+      ticker: 'ABC',
+      rate: 0,
+      nextFundingTime: new Date().toISOString(),
+      predictedRate: 0,
+    },
+    maxLeverage: 100,
+    minOrderSize: 10,
+    markPrice: 100,
+    indexPrice: 100,
+  };
+
+  /**
+   * Port wrapper that models the interleaving the production adapters
+   * allow: the funding step reads a snapshot of open positions, and a
+   * user close can commit before the step writes its accrued funding
+   * back. The first fundingPaid write for the target position first runs
+   * a 50% close of that position through a separate service on the same
+   * store (the close takes its own row lock, exactly like the real
+   * closePosition path). If the funding step itself holds the position
+   * lock (transaction + lockOpenPositionById), the close is deferred
+   * until the step's write has landed — the serialization the drizzle
+   * adapter's SELECT ... FOR UPDATE provides.
+   */
+  class InterleavingDb implements PerpDbPort {
+    private lockedIds = new Set<string>();
+    private interleaved = false;
+    onFirstFundingWrite: (() => Promise<void>) | null = null;
+
+    constructor(private inner: InMemoryPerpDb) {}
+
+    async listMarkets(options?: { limit?: number; offset?: number }) {
+      return this.inner.listMarkets(options);
+    }
+    async countMarkets() {
+      return this.inner.countMarkets();
+    }
+    async listOpenPositions() {
+      return this.inner.listOpenPositions();
+    }
+    async getPositionById(id: string) {
+      return this.inner.getPositionById(id);
+    }
+    async getOpenPositionsByUser(userId: string) {
+      return this.inner.getOpenPositionsByUser(userId);
+    }
+    async getOpenPositionByUserAndTicker(userId: string, ticker: string) {
+      return this.inner.getOpenPositionByUserAndTicker(userId, ticker);
+    }
+    async lockOpenPositionById(id: string) {
+      const pos = await this.inner.lockOpenPositionById(id);
+      if (pos) this.lockedIds.add(id);
+      return pos;
+    }
+    async upsertPosition(
+      position: Omit<PerpPositionRecord, 'id'> & { id?: string }
+    ) {
+      return this.inner.upsertPosition(position);
+    }
+    async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
+      try {
+        return await fn(this);
+      } finally {
+        this.lockedIds.clear();
+      }
+    }
+    async updateOpenPosition(
+      positionId: string,
+      updates: Partial<
+        Pick<
+          PerpPositionRecord,
+          | 'currentPrice'
+          | 'unrealizedPnL'
+          | 'unrealizedPnLPercent'
+          | 'fundingPaid'
+          | 'liquidationPrice'
+          | 'lastUpdated'
+          | 'size'
+          | 'entryPrice'
+        >
+      >
+    ): Promise<void> {
+      const isFundingWrite =
+        updates.fundingPaid !== undefined &&
+        this.onFirstFundingWrite !== null &&
+        !this.interleaved;
+      if (isFundingWrite) {
+        this.interleaved = true;
+        if (this.lockedIds.has(positionId)) {
+          // The step holds the row lock: the close can only run after
+          // this write commits, so apply the write first, then close.
+          await this.inner.updateOpenPosition(positionId, updates);
+          await this.onFirstFundingWrite!();
+          return;
+        }
+        // No lock held: the close commits first, then the (stale) write.
+        await this.onFirstFundingWrite!();
+      }
+      return this.inner.updateOpenPosition(positionId, updates);
+    }
+    async closePosition(
+      positionId: string,
+      updates: Partial<
+        Pick<
+          PerpPositionRecord,
+          | 'currentPrice'
+          | 'closedAt'
+          | 'realizedPnL'
+          | 'unrealizedPnL'
+          | 'unrealizedPnLPercent'
+        >
+      >
+    ) {
+      return this.inner.closePosition(positionId, updates);
+    }
+    async applyMarketDeltas(
+      ticker: string,
+      deltas: { openInterest?: number; volume24h?: number }
+    ) {
+      return this.inner.applyMarketDeltas(ticker, deltas);
+    }
+    async updateMarketStats(
+      ticker: string,
+      updates: Parameters<PerpDbPort['updateMarketStats']>[1]
+    ) {
+      return this.inner.updateMarketStats(ticker, updates);
+    }
+  }
+
+  it('never resurrects funding a partial close already settled', async () => {
+    const inner = new InMemoryPerpDb([market]);
+    const wallet = new InMemoryWallet(10_000);
+    const setup = new PerpMarketService({ db: inner, wallet, fees: feeConfig });
+
+    // Long 200 vs short 100: imbalance 1/3, longs pay.
+    // annualRate = 0.01 + 0.49 * (1/3)^3 = 0.028148..., period rate
+    // = annualRate / 1095.75. One step accrues F1 = 200 * periodRate
+    // = 0.0051375 on the long.
+    const open = await setup.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 200,
+      leverage: 10,
+    });
+    await setup.openPosition({
+      userId: 'u2',
+      ticker: 'ABC',
+      side: 'short',
+      size: 100,
+      leverage: 10,
+    });
+
+    await setup.processFundingAndLiquidations();
+    const afterFirst = await inner.getPositionById(open.positionId);
+    const accrued = afterFirst?.fundingPaid ?? 0;
+    expect(accrued).toBeGreaterThan(0);
+
+    // Second step: a 50% close of the long lands while the step is
+    // between its position snapshot and its funding write.
+    const interleaving = new InterleavingDb(inner);
+    const closer = new PerpMarketService({
+      db: inner,
+      wallet,
+      fees: feeConfig,
+    });
+    interleaving.onFirstFundingWrite = async () => {
+      await closer.closePosition({
+        userId: 'u1',
+        positionId: open.positionId,
+        percentage: 0.5,
+      });
+    };
+    const fundingService = new PerpMarketService({
+      db: interleaving,
+      wallet,
+      fees: feeConfig,
+    });
+    await fundingService.processFundingAndLiquidations();
+
+    const remaining = await inner.getPositionById(open.positionId);
+    expect(remaining?.closedAt).toBeNull();
+    expect(remaining?.size).toBeCloseTo(100, 6);
+    // Either serialization (close-then-funding on the fresh size 100, or
+    // funding-then-close settling half) leaves the remaining position
+    // owing exactly one period's accrual: accrued/2 still owed from the
+    // first step plus one period on the remaining 100 = accrued.
+    // A stale read-modify-write instead lands accrued + accrued, i.e.
+    // the settled half of the first accrual is charged a second time.
+    expect(remaining?.fundingPaid).toBeCloseTo(accrued, 6);
+
+    // The untouched short accrues its second period normally.
+    const shorts = (await inner.listOpenPositions()).filter(
+      (p) => p.userId === 'u2'
+    );
+    expect(shorts[0]?.fundingPaid).toBeCloseTo(-accrued, 6);
+  });
+});

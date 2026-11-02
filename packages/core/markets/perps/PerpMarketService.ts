@@ -1208,29 +1208,42 @@ export class PerpMarketService {
 
       const periodRate = funding.periodRate;
       for (const pos of agg.positions) {
-        // periodRate is signed (negative when shorts dominate); the payer is
-        // decided by paymentDirection, so apply only the magnitude here.
-        const payment = Math.abs(
-          calculateFundingPaymentForPeriod(pos.size, periodRate)
-        );
-        // Positive fundingPaid = paid by the position holder
-        const delta =
-          funding.paymentDirection === 'balanced'
-            ? 0
-            : funding.paymentDirection === 'longs_pay'
-              ? pos.side === 'long'
-                ? payment
-                : -payment
-              : pos.side === 'short'
-                ? payment
-                : -payment;
+        // Accrue under the same lock-and-reread discipline as the close,
+        // add and flip paths: the snapshot above can go stale while this
+        // step runs, and a close that lands in between settles funding
+        // proportionally from the value it locked. Writing
+        // snapshotFundingPaid + delta afterwards would resurrect the
+        // settled share (charging it again at the final close) and charge
+        // this period on the pre-close size. Recompute the payment from
+        // the locked row instead.
+        await this.db.transaction(async (tx) => {
+          const fresh = await tx.lockOpenPositionById(pos.id);
+          if (!fresh) return;
 
-        if (delta !== 0) {
-          await this.db.updateOpenPosition(pos.id, {
-            fundingPaid: pos.fundingPaid + delta,
-            lastUpdated: now,
-          });
-        }
+          // periodRate is signed (negative when shorts dominate); the payer is
+          // decided by paymentDirection, so apply only the magnitude here.
+          const payment = Math.abs(
+            calculateFundingPaymentForPeriod(fresh.size, periodRate)
+          );
+          // Positive fundingPaid = paid by the position holder
+          const delta =
+            funding.paymentDirection === 'balanced'
+              ? 0
+              : funding.paymentDirection === 'longs_pay'
+                ? fresh.side === 'long'
+                  ? payment
+                  : -payment
+                : fresh.side === 'short'
+                  ? payment
+                  : -payment;
+
+          if (delta !== 0) {
+            await tx.updateOpenPosition(fresh.id, {
+              fundingPaid: fresh.fundingPaid + delta,
+              lastUpdated: now,
+            });
+          }
+        });
       }
 
       await this.db.updateMarketStats(market.ticker, {
