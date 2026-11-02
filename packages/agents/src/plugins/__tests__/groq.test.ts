@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { IAgentRuntime } from '@elizaos/core';
 import type { AgentLLMBridgeData } from '@feed/shared';
+import * as actualAi from 'ai';
 
 let surplusConfigured = false;
 const mockUsageBridge = mock((_call: AgentLLMBridgeData) => {});
@@ -27,6 +28,7 @@ mock.module('@ai-sdk/groq', () => ({
 }));
 
 mock.module('ai', () => ({
+  ...actualAi,
   generateObject: mockGenerateObject,
   jsonSchema: (schema: object) => schema,
   generateText: mockGenerateText,
@@ -363,4 +365,96 @@ describe('native inference usage attribution', () => {
       });
     }
   }
+});
+
+describe('structured-output failure usage', () => {
+  const truncatedUsage = {
+    inputTokens: 387,
+    outputTokens: 1,
+    totalTokens: 388,
+  };
+  const truncatedResponse = () =>
+    new actualAi.NoObjectGeneratedError({
+      message: 'No object generated: response did not match schema.',
+      text: '{"decision"',
+      response: {
+        id: 'gen-truncated',
+        timestamp: new Date(0),
+        modelId: 'groq-small-model',
+      },
+      usage: truncatedUsage,
+      finishReason: 'length',
+    });
+
+  beforeEach(() => mockUsageBridge.mockClear());
+
+  it.each([
+    ModelType.OBJECT_SMALL,
+    ModelType.OBJECT_LARGE,
+  ])('%s keeps provider-reported usage when parsing fails', async (modelType) => {
+    mockGenerateObject.mockRejectedValueOnce(truncatedResponse());
+    await expect(
+      groqPlugin.models![modelType]!(runtime, {
+        prompt: 'truncated object',
+        schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+        temperature: 0,
+        maxTokens: 1,
+      })
+    ).rejects.toThrow('No object generated');
+    expect(mockUsageBridge).toHaveBeenCalledTimes(1);
+    expect(mockUsageBridge.mock.calls[0]?.[0]).toMatchObject({
+      success: false,
+      inputTokens: 387,
+      outputTokens: 1,
+      totalTokens: 388,
+      error: 'No object generated: response did not match schema.',
+    });
+  });
+
+  it('does not invent usage for ordinary failures', async () => {
+    mockGenerateObject.mockRejectedValueOnce(new Error('socket hang up'));
+    await expect(
+      groqPlugin.models![ModelType.OBJECT_SMALL]!(runtime, {
+        prompt: 'transport failure',
+      })
+    ).rejects.toThrow('socket hang up');
+    expect(mockUsageBridge).toHaveBeenCalledTimes(1);
+    const call = mockUsageBridge.mock.calls[0]?.[0];
+    expect(call).toMatchObject({
+      success: false,
+      inputTokens: 0,
+      outputTokens: 0,
+      error: 'socket hang up',
+    });
+    expect(call?.totalTokens).toBeUndefined();
+  });
+
+  it('records reported usage on the failed trajectory step', async () => {
+    const { setTrajectoryContext, clearTrajectoryContext } = await import(
+      '../plugin-trajectory-logger/src/action-interceptor'
+    );
+    const logLLMCall = mock();
+    setTrajectoryContext(runtime, 'usage-trajectory', {
+      startStep: () => 'usage-step',
+      getCurrentStepId: () => 'usage-step',
+      logLLMCall,
+      logProviderAccess: () => {},
+      completeStep: () => {},
+    });
+    try {
+      mockGenerateObject.mockRejectedValueOnce(truncatedResponse());
+      await expect(
+        groqPlugin.models![ModelType.OBJECT_SMALL]!(runtime, {
+          prompt: 'truncated object',
+        })
+      ).rejects.toThrow('No object generated');
+      expect(logLLMCall.mock.calls.at(-1)?.[1]).toMatchObject({
+        promptTokens: 387,
+        completionTokens: 1,
+        metadata: { success: false },
+      });
+    } finally {
+      clearTrajectoryContext(runtime);
+    }
+  });
 });
