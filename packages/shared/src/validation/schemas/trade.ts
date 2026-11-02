@@ -28,7 +28,7 @@ export const CreateTradeOrderSchema = z
     size: z.number().positive(),
     price: z.number().positive().optional(), // Required for limit orders
     stopPrice: z.number().positive().optional(), // For stop orders
-    leverage: z.number().min(1).max(100).default(1), // For perps
+    leverage: z.number().min(1).max(20).default(1), // For perps (PRD D-17b cap)
     timeInForce: z.enum(['GTC', 'IOC', 'FOK', 'GTT']).default('GTC'),
     expiresAt: DateTimeSchema.optional(), // For GTT orders
   })
@@ -156,7 +156,7 @@ export const TradeHistoryQuerySchema = z.object({
  */
 export const RiskParametersSchema = z.object({
   maxPositionSize: z.number().positive(),
-  maxLeverage: z.number().min(1).max(100),
+  maxLeverage: z.number().min(1).max(20),
   maxDrawdown: DecimalPercentageSchema,
   stopLossPercentage: DecimalPercentageSchema,
   takeProfitPercentage: DecimalPercentageSchema.optional(),
@@ -294,7 +294,7 @@ export const PerpOpenPositionSchema = z
       .number()
       .int({ message: 'Leverage must be an integer' })
       .min(1, { message: 'Minimum leverage is 1x' })
-      .max(100, { message: 'Maximum leverage is 100x' }),
+      .max(20, { message: 'Maximum leverage is 20x' }),
     orderType: z.enum(['market', 'limit']).default('market'),
     limitPrice: z.number().positive().optional(),
     /** Max slippage tolerance (0-1, e.g., 0.01 = 1%). Rejects if spot/mark deviation exceeds this. */
