@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { failedUsageOf } from '../direct-groq';
+import { failedUsageOf, failedTotalTokens } from '../direct-groq';
 
 describe('failedUsageOf', () => {
   test('reads provider-reported usage carried on the error itself', () => {
@@ -54,5 +54,28 @@ describe('failedUsageOf', () => {
     expect(failedUsageOf('boom')).toBeUndefined();
     expect(failedUsageOf(undefined)).toBeUndefined();
     expect(failedUsageOf(null)).toBeUndefined();
+  });
+});
+
+describe('failedTotalTokens', () => {
+  test('passes a provider-reported total through unchanged', () => {
+    expect(failedTotalTokens({ inputTokens: 412, outputTokens: 3, totalTokens: 415 })).toBe(415);
+  });
+
+  test('sums the parts when the provider reported a total that disagrees', () => {
+    expect(failedTotalTokens({ inputTokens: 81, outputTokens: 1, totalTokens: 82 })).toBe(82);
+  });
+
+  test('sums the parts when only the parts were reported', () => {
+    expect(failedTotalTokens({ inputTokens: 12, outputTokens: 5 })).toBe(17);
+  });
+
+  test('treats a missing part as zero rather than dropping the total', () => {
+    expect(failedTotalTokens({ inputTokens: 12 })).toBe(12);
+  });
+
+  test('reports nothing when the provider reported no usage at all', () => {
+    expect(failedTotalTokens(undefined)).toBeUndefined();
+    expect(failedTotalTokens({})).toBeUndefined();
   });
 });

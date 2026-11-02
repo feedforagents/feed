@@ -86,6 +86,21 @@ export function failedUsageOf(
   return undefined;
 }
 
+/**
+ * Total tokens for a failed call, from provider-reported parts. A count the
+ * provider never reported stays absent instead of becoming a fabricated zero.
+ */
+export function failedTotalTokens(
+  usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined
+): number | undefined {
+  if (!usage) return undefined;
+  if (typeof usage.totalTokens === 'number') return usage.totalTokens;
+  if (typeof usage.inputTokens === 'number' || typeof usage.outputTokens === 'number') {
+    return (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+  }
+  return undefined;
+}
+
 function resolveGroqBaseURL(runtime: IAgentRuntime | undefined): string {
   const surplus = getSurplusConfig();
   if (surplus) return surplus.baseURL;
@@ -260,7 +275,7 @@ export async function callGroqDirect(params: {
       parsedResponse: null,
       inputTokens: usage?.inputTokens ?? 0,
       outputTokens: usage?.outputTokens ?? 0,
-      totalTokens: usage?.totalTokens,
+      totalTokens: failedTotalTokens(usage),
       durationMs: Date.now() - startTime,
       success: false,
       error: error.message,
@@ -293,6 +308,7 @@ export async function callGroqDirect(params: {
       rawResponse: result.text || '',
       inputTokens: result.usage.inputTokens ?? 0,
       outputTokens: result.usage.outputTokens ?? 0,
+      totalTokens: result.usage.totalTokens,
       durationMs: Date.now() - startTime,
       success: false,
       error: 'LLM returned empty content',
