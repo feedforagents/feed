@@ -166,7 +166,7 @@ const OpenPositionArgsSchema = z.object({
   ticker: z.string().min(1),
   side: z.enum(['LONG', 'SHORT']),
   amount: z.number().positive(),
-  leverage: z.number().min(1).max(100),
+  leverage: z.number().min(1).max(20),
 }) satisfies z.ZodType<OpenPositionArgs>;
 
 const GetMarketPricesArgsSchema = z.object({
