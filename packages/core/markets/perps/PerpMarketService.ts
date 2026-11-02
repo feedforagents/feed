@@ -1190,11 +1190,20 @@ export class PerpMarketService {
     }
 
     const now = this.deps.clock?.now() ?? new Date();
-    const nextFundingTime = new Date(
-      now.getTime() + FUNDING_PERIOD_HOURS * 60 * 60 * 1000
-    ).toISOString();
+    // Funding periods are the fixed 8h cron boundaries (00:00 / 08:00 / 16:00
+    // UTC), not "8h after whenever this ran": the next due time is the end of
+    // the period that contains `now`.
+    const periodMs = FUNDING_PERIOD_HOURS * 60 * 60 * 1000;
+    const periodStart = Math.floor(now.getTime() / periodMs) * periodMs;
+    const nextFundingTime = new Date(periodStart + periodMs).toISOString();
 
     for (const market of markets) {
+      // Funding is charged once per period (PRD 9.3, item 4). A cron queue
+      // redelivery, a relayed duplicate run or a manual trigger inside the same
+      // period must not charge the positions a second time.
+      const dueAt = Date.parse(market.fundingRate?.nextFundingTime ?? '');
+      if (Number.isFinite(dueAt) && dueAt > now.getTime()) continue;
+
       const agg = positionsByTicker.get(market.ticker);
       if (!agg) continue;
 
@@ -1204,6 +1213,18 @@ export class PerpMarketService {
         baseFundingRate: BASE_FUNDING_RATE,
         maxFundingRate: MAX_FUNDING_RATE,
         imbalanceExponent: IMBALANCE_EXPONENT,
+      });
+
+      // Claim the period before touching positions: if the loop below is
+      // interrupted, the retry skips this market (some positions go uncharged
+      // for one period) instead of charging the already-updated ones twice.
+      await this.db.updateMarketStats(market.ticker, {
+        fundingRate: {
+          ticker: market.ticker,
+          rate: funding.annualRate,
+          nextFundingTime,
+          predictedRate: funding.annualRate,
+        },
       });
 
       const periodRate = funding.periodRate;
@@ -1232,15 +1253,6 @@ export class PerpMarketService {
           });
         }
       }
-
-      await this.db.updateMarketStats(market.ticker, {
-        fundingRate: {
-          ticker: market.ticker,
-          rate: funding.annualRate,
-          nextFundingTime,
-          predictedRate: funding.annualRate,
-        },
-      });
     }
   }
 

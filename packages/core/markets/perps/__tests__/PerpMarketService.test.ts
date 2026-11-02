@@ -501,6 +501,56 @@ describe('PerpMarketService', () => {
     expect(market.fundingRate.rate).not.toBe(0);
   });
 
+  it('charges funding once per 8h period even when the step runs twice', async () => {
+    // PRD 9.3 item 4: funding every 8 h. The cron worker only acks a job after
+    // an OK response, so a slow or failed run is redelivered inside the same
+    // period; that second run must be a no-op, and the next period must charge.
+    let current = new Date('2030-01-01T08:00:03.000Z');
+    const clocked = new PerpMarketService({
+      db,
+      wallet,
+      fees: feeConfig,
+      clock: { now: () => current },
+    });
+    await clocked.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+    await clocked.openPosition({
+      userId: 'u2',
+      ticker: 'ABC',
+      side: 'short',
+      size: 50,
+      leverage: 10,
+    });
+    const fundingPaidOf = async (userId: string) =>
+      (await db.listOpenPositions()).find((p) => p.userId === userId)
+        ?.fundingPaid ?? 0;
+
+    await clocked.processFundingStep();
+    const firstPeriod = await fundingPaidOf('u1');
+    expect(firstPeriod).toBeGreaterThan(0);
+    const market = (await db.listMarkets())[0]!;
+    expect(market.fundingRate.nextFundingTime).toBe('2030-01-01T16:00:00.000Z');
+
+    // Queue redelivery 30 s later, same period: nothing more is charged.
+    current = new Date('2030-01-01T08:00:33.000Z');
+    await clocked.processFundingStep();
+    expect(await fundingPaidOf('u1')).toBeCloseTo(firstPeriod, 10);
+    expect(await fundingPaidOf('u2')).toBeCloseTo(-firstPeriod / 2, 10);
+
+    // Next scheduled run, next period: charged again.
+    current = new Date('2030-01-01T16:00:02.000Z');
+    await clocked.processFundingStep();
+    expect(await fundingPaidOf('u1')).toBeCloseTo(firstPeriod * 2, 10);
+    expect((await db.listMarkets())[0]!.fundingRate.nextFundingTime).toBe(
+      '2030-01-02T00:00:00.000Z'
+    );
+  });
+
   it('partial close reduces position size and returns proportional margin', async () => {
     const open = await service.openPosition({
       userId: 'u1',
