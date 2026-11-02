@@ -1,4 +1,4 @@
-import { BadRequestError, NotFoundError } from '@feed/shared';
+import { BadRequestError, logger, NotFoundError } from '@feed/shared';
 import { PredictionPricing } from './pricing';
 import type {
   PredictionBuyInput,
@@ -185,40 +185,73 @@ export class PredictionMarketService {
     });
 
     const newLiquidity = market.liquidity + calc.netAmount;
-    await this.db.updateMarketState(marketId, {
-      yesShares: calc.newYesShares,
-      noShares: calc.newNoShares,
-      liquidity: newLiquidity,
-    });
+    let position: PredictionPositionRecord;
+    try {
+      await this.db.updateMarketState(marketId, {
+        yesShares: calc.newYesShares,
+        noShares: calc.newNoShares,
+        liquidity: newLiquidity,
+      });
 
-    const existingPos = await this.db.getPosition(userId, marketId, side);
-    const position = await this.db.upsertPosition(
-      existingPos
-        ? {
-            ...existingPos,
-            shares: existingPos.shares + calc.sharesBought,
-            avgPrice:
-              (existingPos.avgPrice * existingPos.shares +
-                calc.avgPrice * calc.sharesBought) /
-              (existingPos.shares + calc.sharesBought),
-            status: 'active',
-            updatedAt: this.now(),
-          }
-        : {
-            id: undefined,
+      const existingPos = await this.db.getPosition(userId, marketId, side);
+      position = await this.db.upsertPosition(
+        existingPos
+          ? {
+              ...existingPos,
+              shares: existingPos.shares + calc.sharesBought,
+              avgPrice:
+                (existingPos.avgPrice * existingPos.shares +
+                  calc.avgPrice * calc.sharesBought) /
+                (existingPos.shares + calc.sharesBought),
+              status: 'active',
+              updatedAt: this.now(),
+            }
+          : {
+              id: undefined,
+              userId,
+              marketId,
+              side,
+              shares: calc.sharesBought,
+              avgPrice: calc.avgPrice,
+              status: 'active',
+              outcome: null,
+              pnl: 0,
+              resolvedAt: null,
+              createdAt: this.now(),
+              updatedAt: this.now(),
+            }
+      );
+    } catch (err) {
+      // The wallet is a separate service and is not enlisted in the market
+      // writes above. If either write fails after the debit, the points are
+      // gone with no position to show for them. Best-effort compensating
+      // credit; the original error still surfaces to the caller.
+      try {
+        await this.deps.wallet.credit({
+          userId,
+          amount,
+          reason: 'pred_buy_refund',
+          description: `Refund failed buy ${side.toUpperCase()} in ${market.question}`,
+          relatedId: marketId,
+        });
+      } catch (creditErr) {
+        logger.error(
+          'CRITICAL: Failed to refund wallet debit for aborted prediction buy',
+          {
             userId,
             marketId,
             side,
-            shares: calc.sharesBought,
-            avgPrice: calc.avgPrice,
-            status: 'active',
-            outcome: null,
-            pnl: 0,
-            resolvedAt: null,
-            createdAt: this.now(),
-            updatedAt: this.now(),
-          }
-    );
+            amount,
+            error:
+              creditErr instanceof Error
+                ? creditErr.message
+                : String(creditErr),
+          },
+          'PredictionMarketService'
+        );
+      }
+      throw err;
+    }
 
     await this.recordSnapshot({
       marketId,

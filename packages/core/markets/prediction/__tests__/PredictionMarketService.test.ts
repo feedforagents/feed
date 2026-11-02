@@ -258,6 +258,33 @@ describe('PredictionMarketService', () => {
     expect(cache.keys).toContain('prediction:m1:*');
   });
 
+  it('refunds the debit when a market or position write fails after the wallet was charged', async () => {
+    // The wallet is a separate service, not enlisted in the market writes: a
+    // failed insert after the debit must not strand the user's points.
+    class FailingPositionDb extends InMemoryDb {
+      async upsertPosition(): Promise<PredictionPositionRecord> {
+        throw new Error('position insert failed');
+      }
+    }
+    const failing = new PredictionMarketService({
+      db: new FailingPositionDb(market),
+      wallet,
+      broadcast,
+      cache,
+      clock: { now: () => new Date() },
+      fees: feeConfig,
+      feeProcessor,
+    });
+    const before = (await wallet.getBalance('u1')).balance;
+
+    await expect(
+      failing.buy({ marketId: 'm1', userId: 'u1', amount: 100, side: 'yes' })
+    ).rejects.toThrow('position insert failed');
+
+    expect((await wallet.getBalance('u1')).balance).toBe(before);
+    expect(broadcast.events).toHaveLength(0);
+  });
+
   it('buy should allow overriding trade attribution', async () => {
     service = new PredictionMarketService({
       db,
