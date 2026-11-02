@@ -579,7 +579,9 @@ export class PredictionMarketService {
    *
    * Unlike resolve(), this:
    * - Sets resolution to null (no winner/loser)
-   * - Refunds each position at their original cost basis (shares * avgPrice)
+   * - Refunds each position at their original cost basis, grossed up by the
+   *   entry fee (position avgPrice is net of fees), so the refund equals the
+   *   amount that was debited at buy time
    * - Sets PnL to 0 for all positions (full refund)
    * - Marks positions as 'cancelled'
    */
@@ -622,8 +624,15 @@ export class PredictionMarketService {
         continue;
       }
 
-      // Calculate refund amount (original investment)
-      const refundAmount = pos.shares * pos.avgPrice;
+      // Calculate refund amount (original investment). Position avgPrice is
+      // based on the net buy amount (after fees), so gross the cost basis up
+      // by the entry fee — the same conversion sell() and resolve() apply —
+      // otherwise the "full refund" silently keeps the fee and the recorded
+      // PnL of 0 understates the user's loss.
+      const refundAmount = grossUpBuyAmount(
+        pos.shares * pos.avgPrice,
+        this.deps.fees.tradingFeeRate
+      );
 
       if (refundAmount > 0) {
         // Credit user their original investment
