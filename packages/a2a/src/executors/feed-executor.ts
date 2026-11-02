@@ -29,11 +29,12 @@ import {
   PredictionDbAdapter,
   PredictionMarketService,
 } from '@feed/core/markets/prediction';
-import type { WalletPort } from '@feed/core/markets/shared';
+import type { CachePort, WalletPort } from '@feed/core/markets/shared';
 import { asUser, db, getRawDrizzle, sql } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
+  invalidateAfterPredictionTrade,
   StaticDataRegistry,
   WalletService,
 } from '@feed/engine';
@@ -301,6 +302,25 @@ function requireContextAccountId(
 }
 
 /** Matches CreatePostSchema / ContentValidator post limit. */
+/**
+ * Cache invalidation for the prediction service built below. Every
+ * other trading surface (web trade routes, MCP handlers, agent
+ * executors) invalidates the traded market's recent-trades cache after
+ * a trade via invalidateAfterPredictionTrade(marketId), closing over
+ * the market id. This builder serves all markets, so the market id is
+ * recovered from the service's `prediction:<marketId>:*` pattern.
+ */
+function buildPredictionCachePort(): CachePort {
+  return {
+    invalidate: async (pattern: string) => {
+      const marketId = pattern.split(':')[1];
+      if (marketId) {
+        await invalidateAfterPredictionTrade(marketId);
+      }
+    },
+  };
+}
+
 const MAX_POST_CONTENT_LENGTH = 5000;
 /** Matches CreateCommentSchema (shared validation). */
 const MAX_COMMENT_LENGTH = 2000;
@@ -1551,6 +1571,7 @@ export class FeedAgentExecutor implements AgentExecutor {
           // No-op for A2A - broadcasts handled separately
         },
       },
+      cache: buildPredictionCachePort(),
       fees: {
         tradingFeeRate: 0.01,
         platformShare: 0.5,
