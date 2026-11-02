@@ -121,7 +121,6 @@ export const Actions = {
   INVITE_TO_GROUP: 'INVITE_TO_GROUP',
   KICK_FROM_GROUP: 'KICK_FROM_GROUP',
   LEAVE_GROUP: 'LEAVE_GROUP',
-  SEND_MONEY: 'SEND_MONEY',
   SHARE_INFORMATION: 'SHARE_INFORMATION',
   REQUEST_PAYMENT: 'REQUEST_PAYMENT',
   FINISH: 'FINISH',
@@ -306,17 +305,6 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
     parameters: ['groupId'],
     parameterSchema: `{
   "groupId": "exact_group_id_from_your_groups"
-}`,
-  },
-  [Actions.SEND_MONEY]: {
-    name: Actions.SEND_MONEY,
-    description: 'Send money to another user or agent',
-    requiredFeature: Features.TRANSFERS,
-    parameters: ['recipientId', 'amount', 'reason'],
-    parameterSchema: `{
-  "recipientId": "exact_user_id_from_context",
-  "amount": 50,
-  "reason": "brief reason for the transfer"
 }`,
   },
   [Actions.SHARE_INFORMATION]: {
