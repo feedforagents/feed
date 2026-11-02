@@ -1181,3 +1181,110 @@ describe('PerpMarketService', () => {
     });
   });
 });
+
+describe('funding rate sign on near-balanced books', () => {
+  const market: PerpMarketRecord = {
+    ticker: 'ABC',
+    organizationId: 'org-abc',
+    name: 'ABC Corp',
+    currentPrice: 100,
+    change24h: 0,
+    changePercent24h: 0,
+    high24h: 100,
+    low24h: 100,
+    volume24h: 0,
+    openInterest: 0,
+    fundingRate: {
+      ticker: 'ABC',
+      rate: 0,
+      nextFundingTime: new Date().toISOString(),
+      predictedRate: 0,
+    },
+    maxLeverage: 100,
+    minOrderSize: 10,
+    markPrice: 100,
+    indexPrice: 100,
+  };
+
+  function setup() {
+    const db = new InMemoryPerpDb([market]);
+    const wallet = new InMemoryWallet(10_000);
+    const service = new PerpMarketService({ db, wallet, fees: feeConfig });
+    return { db, service };
+  }
+
+  it('stores a negative rate when shorts slightly dominate', async () => {
+    const { db, service } = setup();
+    // Imbalance = (100 - 101) / 201 ≈ -0.00498: shorts dominate, so the
+    // premium (PRD 9.3 item 3) and the funding rate must point negative.
+    await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+    await service.openPosition({
+      userId: 'u2',
+      ticker: 'ABC',
+      side: 'short',
+      size: 101,
+      leverage: 10,
+    });
+
+    await service.processFundingAndLiquidations();
+
+    const m = (await db.listMarkets())[0]!;
+    expect(m.fundingRate.rate).toBeLessThan(0);
+    expect(m.fundingRate.predictedRate).toBeLessThan(0);
+  });
+
+  it('marks below the index when shorts slightly dominate', async () => {
+    const { db, service } = setup();
+    await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+    await service.openPosition({
+      userId: 'u2',
+      ticker: 'ABC',
+      side: 'short',
+      size: 101,
+      leverage: 10,
+    });
+
+    await service.processFundingAndLiquidations();
+    await service.applyPriceUpdates({ 'org-abc': 100 });
+
+    const m = (await db.listMarkets())[0]!;
+    // Mark = index * (1 + premium); a short-dominated book means a
+    // negative premium, so the mark must sit below the index price.
+    expect(m.markPrice).toBeLessThan(100);
+  });
+
+  it('stores a positive rate when longs slightly dominate', async () => {
+    const { db, service } = setup();
+    await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 101,
+      leverage: 10,
+    });
+    await service.openPosition({
+      userId: 'u2',
+      ticker: 'ABC',
+      side: 'short',
+      size: 100,
+      leverage: 10,
+    });
+
+    await service.processFundingAndLiquidations();
+
+    const m = (await db.listMarkets())[0]!;
+    expect(m.fundingRate.rate).toBeGreaterThan(0);
+  });
+});

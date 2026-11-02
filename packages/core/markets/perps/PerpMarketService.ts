@@ -2463,7 +2463,12 @@ function calculateDynamicFundingRate(params: {
 
   let annualRate: number;
   if (absImbalance < 0.01) {
-    annualRate = baseFundingRate;
+    // Keep the base magnitude near balance, but the sign must follow the
+    // imbalance: when shorts dominate, the perp premium (PRD 9.3 item 3)
+    // is negative, so the funding rate points negative too. Returning the
+    // unsigned base rate here would store a positive rate — and mark the
+    // market above its index — on a short-dominated book.
+    annualRate = imbalance < 0 ? -baseFundingRate : baseFundingRate;
   } else {
     const signedRate =
       (baseFundingRate + rateMultiplier) * Math.sign(imbalance);
