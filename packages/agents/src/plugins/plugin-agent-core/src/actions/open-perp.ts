@@ -18,6 +18,7 @@ import {
   createPerpTradesCachePort,
   createUserWalletAdapter,
   FEE_CONFIG,
+  FeeService,
   WalletService,
 } from '@feed/engine';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
@@ -180,6 +181,22 @@ export const openPerpAction: Action = {
           minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
         },
         priceImpact: createPerpPriceImpactPort(),
+        feeProcessor: {
+          processTradingFee: ({
+            userId,
+            amount,
+            type,
+            relatedId,
+            positionId,
+          }) =>
+            FeeService.processTradingFee(
+              userId,
+              type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
+              amount,
+              positionId,
+              relatedId
+            ),
+        },
       });
 
       // Check if market exists (case-insensitive lookup)

@@ -66,6 +66,7 @@ mock.module('@feed/engine', () => ({
     REFERRER_SHARE: 0.5,
     MIN_FEE_AMOUNT: 0.01,
   },
+  FeeService: { processTradingFee: async () => ({}) },
   WalletService: { getBalance: async () => ({ balance: mockBalance }) },
 }));
 
