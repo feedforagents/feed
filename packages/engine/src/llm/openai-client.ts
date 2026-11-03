@@ -370,7 +370,10 @@ WORLD RULES:
           '5. Do NOT write "Here is the XML" or any preamble\n' +
           '6. Just output the pure XML structure directly\n' +
           'WRONG: "Okay, let\'s see. I need to..."\n' +
-          'CORRECT: "<decisions><decision>..."'
+          'Match the requested XML root, field names and nesting.\n' +
+          (schema
+            ? `Use this schema for the XML child elements (nest object properties inside their parent tag): ${JSON.stringify(schema)}`
+            : '')
         : feedContext +
           'You are a JSON-only assistant. You must respond ONLY with valid JSON. No explanations, no markdown, no other text.';
 

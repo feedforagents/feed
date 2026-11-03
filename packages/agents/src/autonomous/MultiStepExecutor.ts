@@ -29,7 +29,7 @@ import {
   StaticDataRegistry,
   WalletService,
 } from '@feed/engine';
-import type { JsonValue } from '@feed/shared';
+import { getSurplusConfig, type JsonValue } from '@feed/shared';
 import { callAgentLLM } from '../llm/agent-llm';
 import { resolveGroqModel } from '../llm/direct-groq';
 import { getNpcGameContext } from '../plugins/feed/providers/npc-game-context';
@@ -378,6 +378,7 @@ export class MultiStepExecutor {
       const { prompt, tokenBreakdown } = buildMultiStepDecisionPrompt({
         agentName,
         tokenBudget:
+          getSurplusConfig() ||
           !process.env.AGENT_LLM_PROVIDER ||
           process.env.AGENT_LLM_PROVIDER === 'groq'
             ? getSafeContextLimit(resolveGroqModel({ runtime }), 1000) -

@@ -5,6 +5,8 @@
  * without depending on `@feed/api` (to avoid circular dependencies).
  */
 
+import { getSurplusConfig } from '@feed/shared';
+
 /**
  * Count tokens in text (synchronous approximation).
  *
@@ -79,6 +81,10 @@ const MODEL_TOKEN_LIMITS: Record<string, number> = {
 };
 
 export function getModelTokenLimit(model: string): number {
+  const surplus = getSurplusConfig();
+  if (surplus?.model === model && surplus.contextTokens !== undefined) {
+    return surplus.contextTokens;
+  }
   return MODEL_TOKEN_LIMITS[model] || 8192; // Conservative default
 }
 
