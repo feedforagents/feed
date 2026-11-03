@@ -1,10 +1,10 @@
 /**
- * Regression: flip settles wallet only after DB commit.
- * FEED-L7: reduceOrFlipPosition FLIP path mutates wallet INSIDE the DB
- * transaction callback, then calls recordPnL. Wallet is not enlisted in the
- * DB TX. If recordPnL throws after a successful wallet debit, the DB work
- * rolls back but the debit sticks → stranded funds (no new position).
- * Distinct from #1556/#1577/#1590 (open/add/buy debit-before-write).
+ * Regression: flip settles wallet LAST inside the DB TX callback; recordPnL
+ * runs only after commit. Wallet is not enlisted in the DB TX, so a throw
+ * AFTER a successful credit/debit would mint/strand against a rolled-back
+ * flip. Keeping the net mutation last means a debit failure aborts the
+ * callback (no committed-but-unpaid inverse). recordPnL after commit must
+ * not gate settle. Distinct from #1556/#1577/#1590.
  */
 import { describe, expect, it } from 'bun:test';
 import type { WalletPort } from '../../shared/common';
@@ -28,6 +28,7 @@ class WalletWithThrowingPnL implements WalletPort {
   creditCalls = 0;
   lastDebit = 0;
   throwOnPnL = true;
+  failNextDebit = false;
   constructor(private defaultBalance = 10_000) {}
   async debit({
     userId,
@@ -38,6 +39,10 @@ class WalletWithThrowingPnL implements WalletPort {
   }): Promise<void> {
     this.debitCalls++;
     this.lastDebit = amount;
+    if (this.failNextDebit) {
+      this.failNextDebit = false;
+      throw new Error('Insufficient funds');
+    }
     const balance = this.balances.get(userId) ?? this.defaultBalance;
     if (balance < amount) throw new Error('Insufficient funds');
     this.balances.set(userId, balance - amount);
@@ -228,8 +233,8 @@ const baseMarket: PerpMarketRecord = {
   indexPrice: 100,
 };
 
-describe('FEED-L7 flip wallet-after-commit', () => {
-  it('rolls back flip DB state but keeps wallet debit when recordPnL throws', async () => {
+describe('FEED-L7 flip wallet-last-in-tx', () => {
+  it('keeps flip + debit when recordPnL throws after commit', async () => {
     const wallet = new WalletWithThrowingPnL(10_000);
     const db = new RollbackAwarePerpDb([baseMarket]);
     const now = new Date();
@@ -279,8 +284,7 @@ describe('FEED-L7 flip wallet-after-commit', () => {
     expect(wallet.debitCalls).toBe(1);
   });
 
-
-  it('mints free balance when credit succeeds then recordPnL throws (DB rolls back)', async () => {
+  it('keeps flip + credit when recordPnL throws after commit (no free mint)', async () => {
     const wallet = new WalletWithThrowingPnL(10_000);
     const db = new RollbackAwarePerpDb([baseMarket]);
     const now = new Date();
@@ -321,4 +325,48 @@ describe('FEED-L7 flip wallet-after-commit', () => {
     expect(wallet.creditCalls).toBe(1);
   });
 
+  it('rolls back the flip when the net debit fails (no unpaid inverse)', async () => {
+    const wallet = new WalletWithThrowingPnL(10_000);
+    wallet.throwOnPnL = false;
+    wallet.failNextDebit = true;
+    const db = new RollbackAwarePerpDb([baseMarket]);
+    const now = new Date();
+    await db.upsertPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      organizationId: 'org-abc',
+      side: 'long',
+      entryPrice: 100,
+      currentPrice: 100,
+      size: 100,
+      leverage: 10,
+      liquidationPrice: 90,
+      unrealizedPnL: 0,
+      unrealizedPnLPercent: 0,
+      fundingPaid: 0,
+      openedAt: now,
+      lastUpdated: now,
+    });
+    const service = new PerpMarketService({ db, wallet, fees: feeConfig });
+    const before = (await wallet.getBalance('u1')).balance;
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 200,
+        leverage: 10,
+      })
+    ).rejects.toThrow('Insufficient funds');
+    const after = (await wallet.getBalance('u1')).balance;
+    const openPositions = await db.listOpenPositions();
+    // Debit failed last-in-TX → callback threw → DB rolled back. Original long
+    // restored; no committed-but-unpaid short.
+    expect(openPositions.length).toBe(1);
+    expect(openPositions[0]?.side).toBe('long');
+    expect(openPositions[0]?.size).toBe(100);
+    expect(after).toBe(before);
+    expect(wallet.debitCalls).toBe(1);
+    expect(wallet.creditCalls).toBe(0);
+  });
 });

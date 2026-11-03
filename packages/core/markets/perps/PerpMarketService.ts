@@ -72,9 +72,7 @@ type FlipPositionTransactionResult = {
   previousEntryPrice: number;
   newOpenInterest: number;
   volume24h: number;
-  /** Settled after the DB transaction commits (wallet is not enlisted). */
-  walletNet: number;
-  walletDescription: string;
+  /** recordPnL after commit; wallet settle stays last inside the TX. */
   netFlipPnL: number;
   previousPositionId: string;
 };
@@ -1725,13 +1723,33 @@ export class PerpMarketService {
             volume24h: volumeTraded,
           });
 
-          // === STEP 4: Compute wallet settlement but do NOT mutate the wallet
-          // inside this DB callback. The wallet is not enlisted in the TX: a
-          // credit/debit that succeeds before a later throw (e.g. recordPnL)
-          // would stick while the DB rolls back — free money or stranded debit.
-          // Apply the single net mutation only after this transaction commits.
+          // === STEP 4: Settle the wallet with ONE net mutation, LAST in the
+          // DB callback. Wallet is not enlisted in this TX, so any throw AFTER
+          // a successful credit/debit would leave the wallet change stuck while
+          // the DB rolls back (free money / stranded debit). Keep the mutation
+          // last so a debit/credit failure aborts the callback and rolls the
+          // flip back — no committed-but-unpaid inverse. Move only recordPnL
+          // after commit (accounting; must not gate the settle).
           const walletNet = netSettlement - totalCost;
           const walletDescription = `Flip ${position.leverage}x ${position.side} to ${effectiveLeverage}x ${tradeSide} ${position.ticker}`;
+          if (walletNet > 0) {
+            await this.deps.wallet.credit({
+              userId: input.userId,
+              amount: walletNet,
+              reason: 'perp_flip_position',
+              description: walletDescription,
+              relatedId: position.id,
+            });
+          } else if (walletNet < 0) {
+            await this.deps.wallet.debit({
+              userId: input.userId,
+              amount: -walletNet,
+              reason: 'perp_flip_position',
+              description: walletDescription,
+              relatedId: newPosition.id,
+            });
+          }
+
           const netClosePnL = netSettlement - closeMarginPaid;
           const netFlipPnL = netClosePnL - openFee;
 
@@ -1754,32 +1772,13 @@ export class PerpMarketService {
             previousEntryPrice: position.entryPrice,
             newOpenInterest: marketTotals.openInterest,
             volume24h: marketTotals.volume24h,
-            walletNet,
-            walletDescription,
             netFlipPnL,
             previousPositionId: position.id,
           };
         });
 
-      // Wallet settle AFTER the DB transaction commits so a later failure
-      // cannot roll back the position while leaving a credit/debit stuck.
-      if (flipResult.walletNet > 0) {
-        await this.deps.wallet.credit({
-          userId: input.userId,
-          amount: flipResult.walletNet,
-          reason: 'perp_flip_position',
-          description: flipResult.walletDescription,
-          relatedId: flipResult.previousPositionId,
-        });
-      } else if (flipResult.walletNet < 0) {
-        await this.deps.wallet.debit({
-          userId: input.userId,
-          amount: -flipResult.walletNet,
-          reason: 'perp_flip_position',
-          description: flipResult.walletDescription,
-          relatedId: flipResult.positionId,
-        });
-      }
+      // recordPnL AFTER commit only. Wallet settle already happened last
+      // inside the TX callback above.
       await this.deps.wallet.recordPnL({
         userId: input.userId,
         pnl: flipResult.netFlipPnL,
