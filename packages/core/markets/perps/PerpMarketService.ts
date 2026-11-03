@@ -72,6 +72,11 @@ type FlipPositionTransactionResult = {
   previousEntryPrice: number;
   newOpenInterest: number;
   volume24h: number;
+  /** Settled after the DB transaction commits (wallet is not enlisted). */
+  walletNet: number;
+  walletDescription: string;
+  netFlipPnL: number;
+  previousPositionId: string;
 };
 
 const DEFAULT_MAX_LEVERAGE = 100;
@@ -1720,44 +1725,15 @@ export class PerpMarketService {
             volume24h: volumeTraded,
           });
 
-          // === STEP 4: Settle the wallet with ONE net mutation, last. ===
-          // The wallet is not enlisted in this DB transaction. Two separate
-          // mutations (credit close settlement, then debit new margin) could
-          // leave the credit applied when the debit fails and the DB work
-          // rolls back, letting a user repeat the flip for free credit. A
-          // single net mutation either fully applies or not at all; if it
-          // fails, the DB transaction rolls back too.
+          // === STEP 4: Compute wallet settlement but do NOT mutate the wallet
+          // inside this DB callback. The wallet is not enlisted in the TX: a
+          // credit/debit that succeeds before a later throw (e.g. recordPnL)
+          // would stick while the DB rolls back — free money or stranded debit.
+          // Apply the single net mutation only after this transaction commits.
           const walletNet = netSettlement - totalCost;
           const walletDescription = `Flip ${position.leverage}x ${position.side} to ${effectiveLeverage}x ${tradeSide} ${position.ticker}`;
-          if (walletNet > 0) {
-            await this.deps.wallet.credit({
-              userId: input.userId,
-              amount: walletNet,
-              reason: 'perp_flip_position',
-              description: walletDescription,
-              relatedId: position.id,
-            });
-          } else if (walletNet < 0) {
-            await this.deps.wallet.debit({
-              userId: input.userId,
-              amount: -walletNet,
-              reason: 'perp_flip_position',
-              description: walletDescription,
-              relatedId: newPosition.id,
-            });
-          }
-
-          // Net realized PnL for the flip operation:
-          // - Close leg: settlement minus returned margin (includes any fee actually collected)
-          // - Open leg: fee is realized immediately
           const netClosePnL = netSettlement - closeMarginPaid;
           const netFlipPnL = netClosePnL - openFee;
-          await this.deps.wallet.recordPnL({
-            userId: input.userId,
-            pnl: netFlipPnL,
-            reason: 'perp_flip_position',
-            relatedId: position.id,
-          });
 
           // Return result data for use after transaction commits
           const totalFees = closeFee + openFee;
@@ -1778,8 +1754,38 @@ export class PerpMarketService {
             previousEntryPrice: position.entryPrice,
             newOpenInterest: marketTotals.openInterest,
             volume24h: marketTotals.volume24h,
+            walletNet,
+            walletDescription,
+            netFlipPnL,
+            previousPositionId: position.id,
           };
         });
+
+      // Wallet settle AFTER the DB transaction commits so a later failure
+      // cannot roll back the position while leaving a credit/debit stuck.
+      if (flipResult.walletNet > 0) {
+        await this.deps.wallet.credit({
+          userId: input.userId,
+          amount: flipResult.walletNet,
+          reason: 'perp_flip_position',
+          description: flipResult.walletDescription,
+          relatedId: flipResult.previousPositionId,
+        });
+      } else if (flipResult.walletNet < 0) {
+        await this.deps.wallet.debit({
+          userId: input.userId,
+          amount: -flipResult.walletNet,
+          reason: 'perp_flip_position',
+          description: flipResult.walletDescription,
+          relatedId: flipResult.positionId,
+        });
+      }
+      await this.deps.wallet.recordPnL({
+        userId: input.userId,
+        pnl: flipResult.netFlipPnL,
+        reason: 'perp_flip_position',
+        relatedId: flipResult.previousPositionId,
+      });
 
       // Fee bookkeeping for close + open legs (retries + optional outbox).
       void Promise.all([
