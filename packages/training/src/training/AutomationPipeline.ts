@@ -20,6 +20,7 @@ import {
   desc,
   eq,
   gte,
+  inArray,
   isNotNull,
   isNull,
   not,
@@ -670,6 +671,47 @@ export class AutomationPipeline {
     };
   }
 
+  private async markBatchTrajectoriesUsed(batchId: string): Promise<void> {
+    const [batch] = await db
+      .select({
+        id: trainingBatches.id,
+        trajectoryIds: trainingBatches.trajectoryIds,
+      })
+      .from(trainingBatches)
+      .where(
+        and(
+          eq(trainingBatches.batchId, batchId),
+          eq(trainingBatches.status, 'completed')
+        )
+      )
+      .limit(1);
+
+    if (!batch) {
+      throw new Error(`Completed training batch not found: ${batchId}`);
+    }
+
+    const trajectoryIds: unknown = JSON.parse(batch.trajectoryIds);
+    if (
+      !Array.isArray(trajectoryIds) ||
+      !trajectoryIds.every(
+        (id): id is string => typeof id === 'string' && id.length > 0
+      )
+    ) {
+      throw new Error(`Invalid trajectory IDs for training batch: ${batchId}`);
+    }
+    if (trajectoryIds.length === 0) return;
+
+    await db
+      .update(trajectories)
+      .set({ usedInTraining: true, trainedInBatch: batch.id })
+      .where(
+        and(
+          inArray(trajectories.trajectoryId, trajectoryIds),
+          eq(trajectories.usedInTraining, false)
+        )
+      );
+  }
+
   /**
    * Clean up export files to prevent disk space accumulation.
    *
@@ -700,6 +742,7 @@ export class AutomationPipeline {
     if (this.currentTrainingJob) {
       const status = await this.monitorTraining(this.currentTrainingJob);
       if (status.status === 'completed') {
+        await this.markBatchTrajectoriesUsed(this.currentTrainingJob);
         await this.cleanupExportFiles(this.currentTrainingJob);
         this.currentTrainingJob = null;
       } else if (status.status === 'failed') {
