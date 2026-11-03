@@ -650,29 +650,67 @@ export class PerpMarketService {
     });
 
     const now = this.deps.clock?.now() ?? new Date();
-    const position = await this.db.upsertPosition({
-      id: undefined,
-      userId: input.userId,
-      ticker,
-      organizationId: market.organizationId,
-      side,
-      entryPrice,
-      currentPrice: entryPrice,
-      size,
-      leverage,
-      liquidationPrice,
-      unrealizedPnL: 0,
-      unrealizedPnLPercent: 0,
-      fundingPaid: 0,
-      openedAt: now,
-      lastUpdated: now,
-    });
-
-    // Open interest = sum of notional values (size), not leveraged exposure
-    const marketTotals = await this.db.applyMarketDeltas(ticker, {
-      openInterest: size,
-      volume24h: size,
-    });
+    // Wallet debit is outside the DB transaction. If the position write or
+    // market-delta apply aborts after the debit, the funds would be stranded.
+    // Compensate with a best-effort credit before rethrowing (same pattern as
+    // addToPosition / prediction buy refunds).
+    let position: PerpPositionRecord;
+    let marketTotals: { openInterest: number; volume24h: number };
+    try {
+      const opened = await this.db.transaction(async (tx) => {
+        const pos = await tx.upsertPosition({
+          id: undefined,
+          userId: input.userId,
+          ticker,
+          organizationId: market.organizationId,
+          side,
+          entryPrice,
+          currentPrice: entryPrice,
+          size,
+          leverage,
+          liquidationPrice,
+          unrealizedPnL: 0,
+          unrealizedPnLPercent: 0,
+          fundingPaid: 0,
+          openedAt: now,
+          lastUpdated: now,
+        });
+        // Open interest = sum of notional values (size), not leveraged exposure
+        const totals = await tx.applyMarketDeltas(ticker, {
+          openInterest: size,
+          volume24h: size,
+        });
+        return { pos, totals };
+      });
+      position = opened.pos;
+      marketTotals = opened.totals;
+    } catch (err) {
+      try {
+        await this.deps.wallet.credit({
+          userId: input.userId,
+          amount: totalCost,
+          reason: 'perp_open_refund',
+          description: `Refund failed open ${leverage}x ${side} ${ticker}`,
+        });
+      } catch (creditErr) {
+        logger.error(
+          'CRITICAL: Failed to refund wallet debit for aborted perp open',
+          {
+            userId: input.userId,
+            ticker,
+            side,
+            leverage,
+            amount: totalCost,
+            error:
+              creditErr instanceof Error
+                ? creditErr.message
+                : String(creditErr),
+          },
+          'PerpService'
+        );
+      }
+      throw err;
+    }
 
     if (this.deps.feeProcessor) {
       await this.deps.feeProcessor.processTradingFee({

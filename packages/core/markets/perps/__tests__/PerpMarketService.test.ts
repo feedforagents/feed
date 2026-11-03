@@ -937,6 +937,57 @@ describe('PerpMarketService', () => {
 
   describe('money-path regressions', () => {
     /**
+     * openPosition debits margin+fee before the position upsert / market
+     * deltas. If that write path aborts, the debit must be refunded — same
+     * stranded-margin class as addToPosition (#1556) and prediction buy
+     * (#1577), but on the open path those PRs do not cover.
+     */
+    class FailingUpsertDb extends InMemoryPerpDb {
+      async upsertPosition(): Promise<PerpPositionRecord> {
+        throw new Error('position insert failed');
+      }
+    }
+
+    it('refunds margin+fee when openPosition upsert aborts after debit', async () => {
+      const failingDb = new FailingUpsertDb([baseMarket]);
+      service = new PerpMarketService({
+        db: failingDb,
+        wallet,
+        fees: feeConfig,
+      });
+      const before = (await wallet.getBalance('u1')).balance;
+
+      await expect(
+        service.openPosition({
+          userId: 'u1',
+          ticker: 'ABC',
+          side: 'long',
+          size: 100,
+          leverage: 10,
+        })
+      ).rejects.toThrow('position insert failed');
+
+      const after = (await wallet.getBalance('u1')).balance;
+      // size 100 / lev 10 = margin 10; fee = 100 * 0.001 = 0.1; totalCost = 10.1
+      expect(after).toBeCloseTo(before, 6);
+      expect(await failingDb.listOpenPositions()).toHaveLength(0);
+    });
+
+    it('still debits exactly once on a successful openPosition', async () => {
+      const before = (await wallet.getBalance('u1')).balance;
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const after = (await wallet.getBalance('u1')).balance;
+      expect(after).toBeCloseTo(before - 10.1, 6);
+      expect(await db.listOpenPositions()).toHaveLength(1);
+    });
+
+    /**
      * Price impact port that prices the market from the net open holdings,
      * mirroring the production adapter (constant-product reserves).
      */
