@@ -72,7 +72,7 @@ type FlipPositionTransactionResult = {
   previousEntryPrice: number;
   newOpenInterest: number;
   volume24h: number;
-  /** recordPnL after commit; wallet settle stays last inside the TX. */
+  /** Lifetime PnL recorded after commit; wallet settle stays last inside the TX. */
   netFlipPnL: number;
   previousPositionId: string;
 };
@@ -98,6 +98,13 @@ const FEE_PROCESSING_MAX_RETRIES = parseInt(
 );
 /** Base delay (ms) for exponential backoff */
 const FEE_PROCESSING_BASE_DELAY_MS = 100;
+/**
+ * Inline attempts for flip lifetime PnL after the flip has committed.
+ * There is no durable PnL outbox; exhaustion is logged for reconciliation.
+ */
+const FLIP_PNL_MAX_ATTEMPTS = 3;
+/** Base delay (ms) between post-commit flip PnL attempts. */
+const FLIP_PNL_BASE_DELAY_MS = 50;
 
 /** Perpetual markets domain service (open/close flows, framework-agnostic). */
 export class PerpMarketService {
@@ -218,6 +225,58 @@ export class PerpMarketService {
         );
       }
     }
+  }
+
+  /**
+   * Record flip lifetime PnL after the flip transaction has committed.
+   *
+   * `recordPnL` runs in its own transaction and rolls back when it throws, so
+   * a retry does not apply the same PnL twice. There is no durable PnL
+   * outbox. After these attempts are exhausted the failure is logged for
+   * reconciliation and the committed flip is still returned. Throwing here
+   * would make a client retry a flip that already settled (a second margin
+   * and fee charge).
+   */
+  private async recordCommittedFlipPnL(params: {
+    userId: string;
+    pnl: number;
+    relatedId: string;
+  }): Promise<void> {
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= FLIP_PNL_MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.deps.wallet.recordPnL({
+          userId: params.userId,
+          pnl: params.pnl,
+          reason: 'perp_flip_position',
+          relatedId: params.relatedId,
+        });
+        return;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt < FLIP_PNL_MAX_ATTEMPTS) {
+          const delay = FLIP_PNL_BASE_DELAY_MS * 2 ** (attempt - 1);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    logger.error(
+      'CRITICAL: flip recordPnL failed after commit — flip and wallet settle stand; reconcile lifetime PnL',
+      {
+        userId: params.userId,
+        relatedId: params.relatedId,
+        pnl: params.pnl,
+        retries: FLIP_PNL_MAX_ATTEMPTS,
+        error: lastError?.message,
+        alertLevel: 'critical',
+      },
+      'PerpService'
+    );
+
+    this.deps.metrics?.increment('perp.flip_pnl.inline_failure', 1, {
+      reason: 'perp_flip_position',
+    });
   }
 
   /**
@@ -1724,12 +1783,18 @@ export class PerpMarketService {
           });
 
           // === STEP 4: Settle the wallet with ONE net mutation, LAST in the
-          // DB callback. Wallet is not enlisted in this TX, so any throw AFTER
-          // a successful credit/debit would leave the wallet change stuck while
-          // the DB rolls back (free money / stranded debit). Keep the mutation
-          // last so a debit/credit failure aborts the callback and rolls the
-          // flip back — no committed-but-unpaid inverse. Move only recordPnL
-          // after commit (accounting; must not gate the settle).
+          // DB callback. The wallet is not enlisted in this TX (it commits in
+          // its own transaction). Keeping the mutation last means a
+          // debit/credit failure aborts the callback and rolls the flip back
+          // — no committed-but-unpaid inverse. A throw after a successful
+          // credit/debit would stick the wallet change while the DB rolls
+          // back, so nothing in this callback runs after the mutation.
+          //
+          // That does not close the commit window. If this callback returns
+          // and the DB commit then fails, the wallet change is already
+          // committed and stays while the flip rolls back. recordPnL stays
+          // after commit and must not throw: the flip already settled, and a
+          // client retry would trade again.
           const walletNet = netSettlement - totalCost;
           const walletDescription = `Flip ${position.leverage}x ${position.side} to ${effectiveLeverage}x ${tradeSide} ${position.ticker}`;
           if (walletNet > 0) {
@@ -1777,16 +1842,9 @@ export class PerpMarketService {
           };
         });
 
-      // recordPnL AFTER commit only. Wallet settle already happened last
-      // inside the TX callback above.
-      await this.deps.wallet.recordPnL({
-        userId: input.userId,
-        pnl: flipResult.netFlipPnL,
-        reason: 'perp_flip_position',
-        relatedId: flipResult.previousPositionId,
-      });
-
-      // Fee bookkeeping for close + open legs (retries + optional outbox).
+      // Fee bookkeeping before lifetime PnL. processFeeWithRetry handles its
+      // own errors; starting it first means a PnL failure cannot skip fees
+      // for a flip that already committed.
       void Promise.all([
         this.processFeeWithRetry(
           {
@@ -1810,6 +1868,14 @@ export class PerpMarketService {
         ),
       ]).catch(() => {
         // Errors logged inside processFeeWithRetry; avoid unhandled rejection
+      });
+
+      // Lifetime PnL is accounting. Inline retries, then a log. The flip and
+      // wallet settle already committed, so this must not throw.
+      await this.recordCommittedFlipPnL({
+        userId: input.userId,
+        pnl: flipResult.netFlipPnL,
+        relatedId: flipResult.previousPositionId,
       });
 
       // Get balance after transaction commits

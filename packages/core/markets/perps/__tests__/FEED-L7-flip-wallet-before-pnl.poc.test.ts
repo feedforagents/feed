@@ -3,11 +3,14 @@
  * runs only after commit. Wallet is not enlisted in the DB TX, so a throw
  * AFTER a successful credit/debit would mint/strand against a rolled-back
  * flip. Keeping the net mutation last means a debit failure aborts the
- * callback (no committed-but-unpaid inverse). recordPnL after commit must
- * not gate settle. Distinct from #1556/#1577/#1590.
+ * callback (no committed-but-unpaid inverse).
+ *
+ * A post-commit recordPnL failure must not reject the call. The flip and
+ * wallet settle already happened; an error-driven client retry would trade
+ * again. Fee bookkeeping still runs. Distinct from #1556/#1577/#1590.
  */
 import { describe, expect, it } from 'bun:test';
-import type { WalletPort } from '../../shared/common';
+import type { FeeProcessor, WalletPort } from '../../shared/common';
 import { PerpMarketService } from '../PerpMarketService';
 import type {
   PerpDbPort,
@@ -27,7 +30,9 @@ class WalletWithThrowingPnL implements WalletPort {
   debitCalls = 0;
   creditCalls = 0;
   lastDebit = 0;
-  throwOnPnL = true;
+  pnlAttempts = 0;
+  /** Throw this many recordPnL calls, then succeed. */
+  pnlFailuresRemaining = Number.POSITIVE_INFINITY;
   failNextDebit = false;
   constructor(private defaultBalance = 10_000) {}
   async debit({
@@ -59,7 +64,11 @@ class WalletWithThrowingPnL implements WalletPort {
     this.balances.set(userId, balance + amount);
   }
   async recordPnL(): Promise<void> {
-    if (this.throwOnPnL) throw new Error('recordPnL failed');
+    this.pnlAttempts++;
+    if (this.pnlFailuresRemaining > 0) {
+      this.pnlFailuresRemaining--;
+      throw new Error('recordPnL failed');
+    }
   }
   async getBalance(userId: string): Promise<{ balance: number }> {
     return { balance: this.balances.get(userId) ?? this.defaultBalance };
@@ -233,101 +242,146 @@ const baseMarket: PerpMarketRecord = {
   indexPrice: 100,
 };
 
+function recordingFeeProcessor(): FeeProcessor & { types: string[] } {
+  const types: string[] = [];
+  return {
+    types,
+    async processTradingFee(params) {
+      types.push(params.type);
+      return { feeCharged: 0 };
+    },
+  };
+}
+
+const flipInput = {
+  userId: 'u1',
+  ticker: 'ABC',
+  side: 'short' as const,
+  size: 200,
+  leverage: 10,
+};
+
+async function seedLong(db: RollbackAwarePerpDb, size: number): Promise<void> {
+  const now = new Date();
+  await db.upsertPosition({
+    userId: 'u1',
+    ticker: 'ABC',
+    organizationId: 'org-abc',
+    side: 'long',
+    entryPrice: 100,
+    currentPrice: 100,
+    size,
+    leverage: 10,
+    liquidationPrice: 90,
+    unrealizedPnL: 0,
+    unrealizedPnLPercent: 0,
+    fundingPaid: 0,
+    openedAt: now,
+    lastUpdated: now,
+  });
+}
+
 describe('FEED-L7 flip wallet-last-in-tx', () => {
-  it('keeps flip + debit when recordPnL throws after commit', async () => {
+  it('returns the committed flip when recordPnL keeps failing, so an error-driven retry does not double-flip', async () => {
     const wallet = new WalletWithThrowingPnL(10_000);
     const db = new RollbackAwarePerpDb([baseMarket]);
-    const now = new Date();
+    const fees = recordingFeeProcessor();
     // Existing LONG size 100. Flip with SHORT size 200 → close 100 + open inverse 100.
     // Close settlement ≈ margin 10 - fee 0.1 = 9.9; open cost = margin 10 + fee 0.1 = 10.1
     // walletNet = 9.9 - 10.1 = -0.2 → debit path
-    await db.upsertPosition({
-      userId: 'u1',
-      ticker: 'ABC',
-      organizationId: 'org-abc',
-      side: 'long',
-      entryPrice: 100,
-      currentPrice: 100,
-      size: 100,
-      leverage: 10,
-      liquidationPrice: 90,
-      unrealizedPnL: 0,
-      unrealizedPnLPercent: 0,
-      fundingPaid: 0,
-      openedAt: now,
-      lastUpdated: now,
-    });
+    await seedLong(db, 100);
 
     const service = new PerpMarketService({
       db,
       wallet,
       fees: feeConfig,
+      feeProcessor: fees,
     });
 
     const before = (await wallet.getBalance('u1')).balance;
-    await expect(
-      service.openPosition({
-        userId: 'u1',
-        ticker: 'ABC',
-        side: 'short',
-        size: 200,
-        leverage: 10,
-      })
-    ).rejects.toThrow('recordPnL failed');
+    let clientAttempts = 0;
+    const flipped = await (async () => {
+      try {
+        clientAttempts++;
+        return await service.openPosition(flipInput);
+      } catch {
+        clientAttempts++;
+        return await service.openPosition(flipInput);
+      }
+    })();
 
     const after = (await wallet.getBalance('u1')).balance;
     const openPositions = await db.listOpenPositions();
-    // DB commit finished before recordPnL; flip sticks with matching wallet debit
+    // Call resolved, so the client did not retry. One debit, one short.
+    expect(clientAttempts).toBe(1);
+    expect(flipped.side).toBe('short');
+    expect(flipped.rebalanceType).toBe('flip');
+    expect(flipped.size).toBeCloseTo(100, 6);
     expect(openPositions.length).toBe(1);
     expect(openPositions[0]?.side).toBe('short');
+    expect(openPositions[0]?.size).toBeCloseTo(100, 6);
     expect(after).toBeLessThan(before);
     expect(wallet.debitCalls).toBe(1);
+    expect(wallet.creditCalls).toBe(0);
+    expect(wallet.pnlAttempts).toBe(3);
+    expect(fees.types.sort()).toEqual(['perp_close', 'perp_flip_position']);
+  });
+
+  it('retries recordPnL without opening a second flip when the first attempt fails', async () => {
+    const wallet = new WalletWithThrowingPnL(10_000);
+    wallet.pnlFailuresRemaining = 1;
+    const db = new RollbackAwarePerpDb([baseMarket]);
+    const fees = recordingFeeProcessor();
+    await seedLong(db, 100);
+    const service = new PerpMarketService({
+      db,
+      wallet,
+      fees: feeConfig,
+      feeProcessor: fees,
+    });
+
+    const flipped = await service.openPosition(flipInput);
+    const openPositions = await db.listOpenPositions();
+    expect(flipped.side).toBe('short');
+    expect(openPositions.length).toBe(1);
+    expect(openPositions[0]?.side).toBe('short');
+    expect(wallet.debitCalls).toBe(1);
+    expect(wallet.pnlAttempts).toBe(2);
+    expect(fees.types.sort()).toEqual(['perp_close', 'perp_flip_position']);
   });
 
   it('keeps flip + credit when recordPnL throws after commit (no free mint)', async () => {
     const wallet = new WalletWithThrowingPnL(10_000);
     const db = new RollbackAwarePerpDb([baseMarket]);
-    const now = new Date();
+    const fees = recordingFeeProcessor();
     // Large long 200; flip short 210 → close 200 + open inverse 10; walletNet > 0
-    await db.upsertPosition({
-      userId: 'u1',
-      ticker: 'ABC',
-      organizationId: 'org-abc',
-      side: 'long',
-      entryPrice: 100,
-      currentPrice: 100,
-      size: 200,
-      leverage: 10,
-      liquidationPrice: 90,
-      unrealizedPnL: 0,
-      unrealizedPnLPercent: 0,
-      fundingPaid: 0,
-      openedAt: now,
-      lastUpdated: now,
+    await seedLong(db, 200);
+    const service = new PerpMarketService({
+      db,
+      wallet,
+      fees: feeConfig,
+      feeProcessor: fees,
     });
-    const service = new PerpMarketService({ db, wallet, fees: feeConfig });
     const before = (await wallet.getBalance('u1')).balance;
-    await expect(
-      service.openPosition({
-        userId: 'u1',
-        ticker: 'ABC',
-        side: 'short',
-        size: 210,
-        leverage: 10,
-      })
-    ).rejects.toThrow('recordPnL failed');
+    const flipped = await service.openPosition({
+      ...flipInput,
+      size: 210,
+    });
     const after = (await wallet.getBalance('u1')).balance;
     const openPositions = await db.listOpenPositions();
     // No free-money mint against a rolled-back long: flip committed with credit
+    expect(flipped.side).toBe('short');
     expect(openPositions.length).toBe(1);
     expect(openPositions[0]?.side).toBe('short');
     expect(after).toBeGreaterThan(before);
     expect(wallet.creditCalls).toBe(1);
+    expect(wallet.debitCalls).toBe(0);
+    expect(fees.types.sort()).toEqual(['perp_close', 'perp_flip_position']);
   });
 
   it('rolls back the flip when the net debit fails (no unpaid inverse)', async () => {
     const wallet = new WalletWithThrowingPnL(10_000);
-    wallet.throwOnPnL = false;
+    wallet.pnlFailuresRemaining = 0;
     wallet.failNextDebit = true;
     const db = new RollbackAwarePerpDb([baseMarket]);
     const now = new Date();
@@ -368,5 +422,6 @@ describe('FEED-L7 flip wallet-last-in-tx', () => {
     expect(after).toBe(before);
     expect(wallet.debitCalls).toBe(1);
     expect(wallet.creditCalls).toBe(0);
+    expect(wallet.pnlAttempts).toBe(0);
   });
 });
