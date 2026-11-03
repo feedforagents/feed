@@ -1,4 +1,4 @@
-import { BadRequestError, NotFoundError } from '@feed/shared';
+import { BadRequestError, logger, NotFoundError } from '@feed/shared';
 import { PredictionPricing } from './pricing';
 import type {
   PredictionBuyInput,
@@ -608,46 +608,18 @@ export class PredictionMarketService {
     let positionsRefunded = 0;
     let totalRefunded = 0;
 
-    // Mark market as cancelled (resolved = true, resolution = null)
-    await this.db.updateMarketState(marketId, {
-      resolved: true,
-      resolution: null,
-      resolutionDescription: reason ?? 'Market cancelled',
-    });
-
-    // Refund each active position at cost basis
+    // Claim each active position as cancelled BEFORE any wallet credit, then
+    // settle the refund. Credit-before-status left a window where sell (still
+    // allowed on cancelled markets) could pay a second time. Defer the market
+    // cancelled mark until after refunds so a mid-loop failure stays retryable.
     for (const pos of positions) {
       // Skip already closed/resolved/cancelled positions
       if (pos.status && pos.status !== 'active') {
         continue;
       }
 
-      // Calculate refund amount (original investment)
       const refundAmount = pos.shares * pos.avgPrice;
 
-      if (refundAmount > 0) {
-        // Credit user their original investment
-        await this.deps.wallet.credit({
-          userId: pos.userId,
-          amount: refundAmount,
-          reason: 'pred_cancel',
-          description: `Refund for cancelled market: ${market.question}`,
-          relatedId: marketId,
-        });
-
-        // Record PnL of 0 (full refund means no gain or loss)
-        await this.deps.wallet.recordPnL({
-          userId: pos.userId,
-          pnl: 0,
-          reason: 'pred_cancel',
-          relatedId: marketId,
-        });
-
-        totalRefunded += refundAmount;
-        positionsRefunded++;
-      }
-
-      // Mark position as cancelled
       await this.db.upsertPosition({
         ...pos,
         status: 'cancelled',
@@ -656,7 +628,68 @@ export class PredictionMarketService {
         resolvedAt: now,
         updatedAt: now,
       });
+
+      if (refundAmount > 0) {
+        try {
+          await this.deps.wallet.credit({
+            userId: pos.userId,
+            amount: refundAmount,
+            reason: 'pred_cancel',
+            description: `Refund for cancelled market: ${market.question}`,
+            relatedId: marketId,
+          });
+
+          await this.deps.wallet.recordPnL({
+            userId: pos.userId,
+            pnl: 0,
+            reason: 'pred_cancel',
+            relatedId: marketId,
+          });
+
+          totalRefunded += refundAmount;
+          positionsRefunded++;
+        } catch (creditErr) {
+          // Position write is not enlisted with the wallet. Restore active so a
+          // credit failure does not strand the user without refund or sell.
+          try {
+            await this.db.upsertPosition({
+              ...pos,
+              status: 'active',
+              outcome: null,
+              pnl: pos.pnl,
+              resolvedAt: null,
+              updatedAt: this.now(),
+            });
+          } catch (restoreErr) {
+            logger.error(
+              'CRITICAL: Failed to restore prediction position after cancel credit failure',
+              {
+                userId: pos.userId,
+                marketId,
+                positionId: pos.id,
+                refundAmount,
+                creditError:
+                  creditErr instanceof Error
+                    ? creditErr.message
+                    : String(creditErr),
+                restoreError:
+                  restoreErr instanceof Error
+                    ? restoreErr.message
+                    : String(restoreErr),
+              },
+              'PredictionMarketService'
+            );
+          }
+          throw creditErr;
+        }
+      }
     }
+
+    await this.db.updateMarketState(marketId, {
+      resolved: true,
+      resolution: null,
+      resolutionDescription: reason ?? 'Market cancelled',
+    });
 
     // Record a snapshot for the cancellation
     await this.recordSnapshot({
@@ -724,13 +757,15 @@ export class PredictionMarketService {
   /**
    * Assert market allows position exits (sells).
    * Users can sell on expired markets to close positions before resolution.
-   * Allows selling on cancelled/deactivated markets (resolved but no outcome determined).
-   * Only blocks if market has fully resolved with a determined outcome.
+   * Blocks resolved markets (outcome settled) and cancelled markets (refunded).
+   * Selling on a cancelled market enabled the cancel-refund + sell double-pay.
    */
   private assertMarketActiveForSell(market: PredictionMarketRecord) {
-    if (market.resolved && market.resolution !== null) {
+    if (market.resolved) {
       throw new BadRequestError(
-        'Market has resolved with outcome - positions are auto-settled'
+        market.resolution !== null
+          ? 'Market has resolved with outcome - positions are auto-settled'
+          : 'Market has been cancelled - positions are refunded'
       );
     }
     if (market.liquidity <= 0) {

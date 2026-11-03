@@ -421,7 +421,7 @@ describe('PredictionMarketService', () => {
     ).rejects.toThrow(/resolved/);
   });
 
-  it('should allow sells on cancelled markets (resolved but no outcome)', async () => {
+  it('should block sells on cancelled markets (resolved but no outcome)', async () => {
     // First buy a position
     await service.buy({
       userId: 'u1',
@@ -433,13 +433,14 @@ describe('PredictionMarketService', () => {
     // Cancel the market (resolved but no outcome)
     await db.updateMarketState('m1', { resolved: true, resolution: null });
 
-    // Should be able to sell on cancelled market
-    const result = await service.sell({
-      userId: 'u1',
-      marketId: 'm1',
-      shares: 1,
-    });
-    expect(result.shares).toBe(1);
+    // Selling on a cancelled market enabled refund+sell double-pay; block it.
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'm1',
+        shares: 1,
+      })
+    ).rejects.toThrow(/cancelled/);
   });
 
   it('should block sells on cancelled positions (double-refund prevention)', async () => {
@@ -471,11 +472,12 @@ describe('PredictionMarketService', () => {
     const pos = await db.getPosition('u1', 'm1', 'yes');
     expect(pos?.status).toBe('cancelled');
 
-    // Attempt to sell the cancelled position should fail
-    // This is the critical security check - without it, user could get double payment
+    // Attempt to sell the cancelled position should fail.
+    // Market-level guard rejects cancelled markets; position status filter is
+    // defense in depth (would throw NotFound if the market guard were absent).
     await expect(
       service.sell({ userId: 'u1', marketId: 'm1', shares: 1 })
-    ).rejects.toThrow(/not found/);
+    ).rejects.toThrow(/cancelled|not found/);
   });
 
   it('should prevent liquidity going negative on sell', async () => {
