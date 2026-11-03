@@ -37,6 +37,7 @@ interface MockQuestion {
   questionNumber: number;
   resolutionDate: Date;
   status: string;
+  resolutionDescription?: string | null;
 }
 
 /**
@@ -95,6 +96,12 @@ const nextMockSnowflakeId = (): string => {
 
 // Track which table is being queried for table-aware mocking
 let currentQueryTable: string | null = null;
+const savedReasons: string[] = [];
+const proofDescriptions: string[] = [];
+let resolutionEventCalls = 0;
+let proofReasonWasStored = false;
+let rejectResolutionProof = false;
+let payoutCalls = 0;
 
 // Table reference symbols for detection
 const TABLE_REFS = {
@@ -151,7 +158,7 @@ const createQueryBuilder = (
   operation: 'select' | 'insert' | 'update' | 'delete' = 'select'
 ) => {
   const builder = {
-    set: mock(() => builder),
+    set: mock((_values?: Record<string, unknown>) => builder),
     where: mock(() => builder),
     values: mock(() => builder),
     from: mock((table: { _tableName?: string }) => {
@@ -195,10 +202,22 @@ const createMutationBuilder = (operation: 'insert' | 'update' | 'delete') => {
     if (table && table._tableName) {
       currentQueryTable = table._tableName;
     }
-    return createQueryBuilder(
-      () => [{ id: `mock-${operation}-id` }],
-      operation
-    );
+    let pendingUpdate: Record<string, unknown> | undefined;
+    const builder = createQueryBuilder(() => {
+      if (
+        operation === 'update' &&
+        table._tableName === 'questions' &&
+        typeof pendingUpdate?.resolutionDescription === 'string'
+      ) {
+        savedReasons.push(pendingUpdate.resolutionDescription);
+      }
+      return [{ id: `mock-${operation}-id` }];
+    }, operation);
+    builder.set.mockImplementation((values) => {
+      pendingUpdate = values;
+      return builder;
+    });
+    return builder;
   });
 };
 
@@ -379,6 +398,7 @@ const registerMocks = () => {
       });
     },
     dailyTopicService: {
+      getTopicCandidatesForDate: async () => [],
       ensureTopicForDate: async () => ({
         topicKey: 'openai',
         topicLabel: 'OpenAI',
@@ -427,13 +447,34 @@ const registerMocks = () => {
           affiliatedOrgIds: [],
         };
       }
-      async generateResolutionWithProof() {
+      async generateResolutionEvent() {
+        resolutionEventCalls++;
+        return 'The product was launched';
+      }
+      async generateProofForResolution(
+        _question: unknown,
+        description: string
+      ) {
+        proofDescriptions.push(description);
+        proofReasonWasStored =
+          savedReasons.includes(description) ||
+          cronMockState.marketsActiveQuestions.some(
+            (question) => question.resolutionDescription === description
+          );
+        if (rejectResolutionProof)
+          throw new Error('Proof rejected by quality gate');
         return {
-          description: 'The product was launched',
+          description,
           confidence: 0.95,
           requiresManualReview: false,
           proof: null,
         };
+      }
+      async generateResolutionWithProof() {
+        return this.generateProofForResolution(
+          null,
+          await this.generateResolutionEvent()
+        );
       }
     },
     getActiveEventsForPosting: async () => ({ activeEvents: [] }),
@@ -453,7 +494,9 @@ const registerMocks = () => {
       factors: {},
     }),
     recalculateReputation: async () => {},
-    resolveQuestionPayouts: async () => {},
+    resolveQuestionPayouts: async () => {
+      payoutCalls++;
+    },
     SignalExtractionService: {
       extractMarketSignal: async () => ({
         suggestedOutcome: 'YES',
@@ -551,6 +594,12 @@ describe('Markets Tick Cron', () => {
     cronMockState.marketsCronAuthResult = true;
     cronMockState.marketsAcquireLockResult = true;
     currentQueryTable = null;
+    savedReasons.length = 0;
+    proofDescriptions.length = 0;
+    resolutionEventCalls = 0;
+    proofReasonWasStored = false;
+    rejectResolutionProof = false;
+    payoutCalls = 0;
   });
 
   describe('Authorization', () => {
@@ -655,6 +704,47 @@ describe('Markets Tick Cron', () => {
     // are in packages/testing/integration/markets-tick.integration.test.ts
     // These require real database access and are run separately.
   });
+
+  for (const storedReason of [
+    null,
+    'A previously generated resolution reason',
+  ]) {
+    test(`retains the resolution reason when proof is rejected: stored=${Boolean(storedReason)}`, async () => {
+      cronMockState.marketsGame = {
+        id: 'game-123',
+        isContinuous: true,
+        isRunning: true,
+        currentDay: 1,
+      };
+      cronMockState.marketsActiveQuestions = [
+        {
+          id: 'question-proof-failure',
+          questionNumber: 60,
+          resolutionDate: new Date(Date.now() - 1000),
+          status: 'active',
+          resolutionDescription: storedReason,
+        },
+      ];
+      rejectResolutionProof = true;
+      const response = await POST(
+        new NextRequest('http://localhost/api/cron/markets-tick', {
+          method: 'POST',
+        })
+      );
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(result.marketsResolved).toBe(1);
+      expect(payoutCalls).toBe(1);
+      expect(resolutionEventCalls).toBe(storedReason ? 0 : 1);
+      expect(proofDescriptions).toEqual([
+        storedReason ?? 'The product was launched',
+      ]);
+      expect(proofReasonWasStored).toBe(true);
+      expect(savedReasons).toEqual(
+        storedReason ? [] : ['The product was launched']
+      );
+    });
+  }
 });
 
 describe('Market Timeframe Configuration', () => {

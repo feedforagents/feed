@@ -980,14 +980,15 @@ export class MultiStepExecutor {
         const parsed = parseDecisionJson(jsonText);
 
         const normalizedAction = normalizeDecisionAction(parsed.action);
-        parsed.action = normalizedAction;
-        parsed.isFinish =
-          normalizedAction === Actions.FINISH ||
-          normalizedAction === Actions.WAIT
-            ? true
-            : false;
+        const decision: MultiStepDecision = {
+          ...parsed,
+          action: normalizedAction,
+          isFinish:
+            normalizedAction === Actions.FINISH ||
+            normalizedAction === Actions.WAIT,
+        };
 
-        return { decision: parsed, rawResponse: response };
+        return { decision, rawResponse: response };
       } catch (error) {
         if (
           !(error instanceof SyntaxError) &&
@@ -995,7 +996,9 @@ export class MultiStepExecutor {
         )
           throw error;
         retryFeedback =
-          'Your previous response contained malformed JSON. Return a single valid JSON object with double-quoted keys and strings only.';
+          error instanceof DecisionValidationError
+            ? `Your previous response was invalid: ${error.message}. Return a single JSON object with all required fields.`
+            : 'Your previous response contained malformed JSON. Return a single valid JSON object with double-quoted keys and strings only.';
         logger.warn(
           `[MultiStep] Failed to parse JSON (attempt ${attempt})`,
           { json: jsonText.substring(0, 200) },
@@ -1197,7 +1200,7 @@ export class MultiStepExecutor {
       case Actions.REPLY_CHAT:
         if (!chatId || !content) {
           return context.pendingChatMessages.length > 0
-            ? 'Your REPLY_CHAT was invalid because it requires a valid chatId from Pending Chat Messages and message content. Choose a valid chat target or a different action.'
+            ? 'Your REPLY_CHAT was invalid because it requires a valid chatId from Pending Chat Messages and message content. Copy chatId exactly as a double-quoted JSON string, never a number. Choose a valid chat target or a different action.'
             : 'Your REPLY_CHAT was invalid because there are no pending chat messages available right now. Choose a different valid action.';
         }
         return undefined;

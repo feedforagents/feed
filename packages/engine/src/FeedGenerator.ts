@@ -734,10 +734,8 @@ export class FeedGenerator extends EventEmitter {
         );
 
         mediaPosts.forEach((post, i) => {
-          const isOrg = i < mediaOrgs.length;
-          const entity = isOrg
-            ? mediaOrgs[i]
-            : journalists[i - mediaOrgs.length];
+          const isOrg = post.mediaIndex < mediaOrgs.length;
+          const entity = allMediaActors[post.mediaIndex];
           if (!entity) return; // Skip if entity doesn't exist
 
           // Fail-fast: Validate required fields using canonical validator
@@ -779,7 +777,7 @@ export class FeedGenerator extends EventEmitter {
             outcome,
             day
           );
-          return result;
+          return result ? { actor, reaction: result } : null;
         }
       );
 
@@ -795,10 +793,7 @@ export class FeedGenerator extends EventEmitter {
         index: number;
       }> = [];
 
-      reactions.forEach((reaction, i) => {
-        const actor = involvedActors[i];
-        if (!actor) return; // Skip if actor doesn't exist
-
+      reactions.forEach(({ actor, reaction }, i) => {
         cascade.push({
           id: `${worldEvent.id}-reaction-${actor.id}`,
           day,
@@ -946,7 +941,7 @@ export class FeedGenerator extends EventEmitter {
             worldEvent,
             day
           );
-          return result;
+          return result ? { actor: conspiracist, post: result } : null;
         }
       );
 
@@ -959,23 +954,20 @@ export class FeedGenerator extends EventEmitter {
         (c): c is NonNullable<typeof c> => c !== null
       );
 
-      conspiracyPosts.forEach((post, i) => {
-        const actor = conspiracists[i % conspiracists.length];
-        if (actor) {
-          cascade.push({
-            id: `${worldEvent.id}-conspiracy-${i}`,
-            day,
-            timestamp: `${baseTime}${String((16 + baseHourOffset + i * 3) % 24).padStart(2, '0')}:${String(Math.floor(Math.random() * 60)).padStart(2, '0')}:00Z`,
-            type: 'reaction',
-            content: post.post,
-            author: actor.id,
-            authorName: actor.name,
-            relatedEvent: worldEvent.id,
-            sentiment: post.sentiment,
-            clueStrength: post.clueStrength,
-            pointsToward: post.pointsToward,
-          });
-        }
+      conspiracyPosts.forEach(({ actor, post }, i) => {
+        cascade.push({
+          id: `${worldEvent.id}-conspiracy-${i}`,
+          day,
+          timestamp: `${baseTime}${String((16 + baseHourOffset + i * 3) % 24).padStart(2, '0')}:${String(Math.floor(Math.random() * 60)).padStart(2, '0')}:00Z`,
+          type: 'reaction',
+          content: post.post,
+          author: actor.id,
+          authorName: actor.name,
+          relatedEvent: worldEvent.id,
+          sentiment: post.sentiment,
+          clueStrength: post.clueStrength,
+          pointsToward: post.pointsToward,
+        });
       });
     }
 
@@ -1003,6 +995,7 @@ export class FeedGenerator extends EventEmitter {
     outcome: boolean
   ): Promise<
     Array<{
+      mediaIndex: number;
       post: string;
       sentiment: number;
       clueStrength: number;
@@ -1221,30 +1214,25 @@ ${voiceContext}
         );
       }
 
-      // Type helper for posts that may have different content field names
-      type PostWithContent = {
-        post?: string;
-        tweet?: string;
-        content?: string;
-        sentiment: number;
-        clueStrength: number;
-        pointsToward: boolean | null;
-      };
-
-      const validPosts = posts
-        .filter((p): p is PostWithContent => {
-          // Handle various content field names: post, tweet, or content
-          const content = p.post || p.tweet || p.content;
-          return Boolean(
-            content && typeof content === 'string' && content.trim().length > 0
-          );
-        })
-        .map((p) => ({
-          post: p.post || p.tweet || p.content!,
-          sentiment: p.sentiment ?? 0,
-          clueStrength: p.clueStrength ?? 0.5,
-          pointsToward: p.pointsToward ?? null,
-        }));
+      const validPosts = posts.flatMap((p, mediaIndex) => {
+        const content = p.post || p.tweet || p.content;
+        if (
+          mediaIndex >= mediaEntities.length ||
+          typeof content !== 'string' ||
+          !content.trim()
+        ) {
+          return [];
+        }
+        return [
+          {
+            mediaIndex,
+            post: content,
+            sentiment: p.sentiment ?? 0,
+            clueStrength: p.clueStrength ?? 0.5,
+            pointsToward: p.pointsToward ?? null,
+          },
+        ];
+      });
 
       // Apply post-processing (hashtag/emoji stripping, name mapping) and validation
       const processedPosts = await Promise.all(
@@ -1255,6 +1243,7 @@ ${voiceContext}
             'JOURNALIST'
           );
           return {
+            mediaIndex: p.mediaIndex,
             post: validation.cleanContent,
             sentiment: p.sentiment,
             clueStrength: p.clueStrength,
@@ -1293,6 +1282,7 @@ ${voiceContext}
       const validProcessedPosts = processedPosts
         .filter((p) => p.isValid)
         .map((p) => ({
+          mediaIndex: p.mediaIndex,
           post: p.post,
           sentiment: p.sentiment,
           clueStrength: p.clueStrength,
@@ -1460,27 +1450,9 @@ ${voiceContext}
       }
 
       const reactionData =
-        'response' in response && response.response
-          ? (
-              response.response as {
-                reaction: {
-                  post: string;
-                  sentiment: number;
-                  clueStrength: number;
-                  pointsToward: boolean | null;
-                };
-              }
-            ).reaction
-          : (
-              response as {
-                reaction: {
-                  post: string;
-                  sentiment: number;
-                  clueStrength: number;
-                  pointsToward: boolean | null;
-                };
-              }
-            ).reaction;
+        'response' in response
+          ? response.response?.reaction
+          : response.reaction;
 
       if (
         !reactionData?.post ||
@@ -1626,9 +1598,7 @@ ${voiceContext}
 
       // Handle nested response structure
       const commentData =
-        'response' in response && response.response
-          ? (response.response as { comment: CommentaryPost }).comment
-          : (response as { comment: CommentaryPost }).comment;
+        'response' in response ? response.response?.comment : response.comment;
 
       if (!commentData || typeof commentData !== 'object') {
         logger.warn(
@@ -2786,36 +2756,38 @@ ${voiceContext}
     }
 
     const params = getPromptParams(reply);
-    const rawResponse = await this.llm.generateJSON<
-      { post: string } | { response: { post: string } }
-    >(prompt, undefined, {
-      ...params,
-      promptType: 'feed_generate_reply_content',
-    });
+    const rawResponse = await this.llm.generateJSON<JsonValue>(
+      prompt,
+      {
+        properties: { post: { type: 'string', pattern: '\\S' } },
+        required: ['post'],
+      },
+      {
+        ...params,
+        format: 'json',
+        promptType: 'feed_generate_reply_content',
+      }
+    );
 
-    if (!rawResponse || typeof rawResponse !== 'object') {
-      logger.warn(
-        'LLM returned null/undefined/invalid reply content',
-        { type: typeof rawResponse },
-        'FeedGenerator'
-      );
-      return 'Interesting point.'; // Fallback
+    if (
+      !rawResponse ||
+      typeof rawResponse !== 'object' ||
+      Array.isArray(rawResponse)
+    ) {
+      throw new Error('Reply response must contain a nonempty string post');
     }
 
-    // Handle XML structure - response may be wrapped in 'response' key or be direct
     const response =
-      'response' in rawResponse && rawResponse.response
-        ? rawResponse.response
-        : (rawResponse as { post?: string });
+      'response' in rawResponse ? rawResponse.response : rawResponse;
 
-    // Guard against missing 'post' field in response
-    if (!response.post) {
-      logger.warn(
-        'LLM response missing post field',
-        { response },
-        'FeedGenerator'
-      );
-      return 'Interesting point.';
+    if (
+      !response ||
+      typeof response !== 'object' ||
+      Array.isArray(response) ||
+      typeof response.post !== 'string' ||
+      !response.post.trim()
+    ) {
+      throw new Error('Reply response must contain a nonempty string post');
     }
 
     return await this.postProcessContent(response.post);

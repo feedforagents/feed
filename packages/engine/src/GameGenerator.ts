@@ -35,6 +35,7 @@ import { FeedLLMClient } from './llm/openai-client';
 import {
   baselineEvent,
   dayEvents,
+  getPromptParams,
   getRealityGrounding,
   groupChatName,
   groupMessage,
@@ -45,6 +46,7 @@ import {
   renderPrompt,
   scenarios as scenariosPrompt,
 } from './prompts';
+import { characterMappingService } from './services/character-mapping-service';
 import { NPCPersonaGenerator } from './services/npc-persona-generator';
 import { QuestionArcPlanner } from './services/question-arc-planner';
 import { TrendingTopicsEngine } from './TrendingTopicsEngine';
@@ -215,7 +217,7 @@ MEDIA ORGANIZATIONS (Break Stories):
 ${
   organizations
     .filter((o) => o.type === 'media')
-    .map((o) => `- ${o.name}: ${o.description}`)
+    .map((o) => `- ${o.name} (ID: ${o.id}): ${o.description}`)
     .join('\n') || '(none)'
 }
 
@@ -223,7 +225,7 @@ COMPANIES (Announce Products, Manage Crises):
 ${
   organizations
     .filter((o) => o.type === 'company')
-    .map((o) => `- ${o.name}: ${o.description}`)
+    .map((o) => `- ${o.name} (ID: ${o.id}): ${o.description}`)
     .join('\n') || '(none)'
 }
 
@@ -231,7 +233,7 @@ GOVERNMENT AGENCIES (Investigate, Contain):
 ${
   organizations
     .filter((o) => o.type === 'government')
-    .map((o) => `- ${o.name}: ${o.description}`)
+    .map((o) => `- ${o.name} (ID: ${o.id}): ${o.description}`)
     .join('\n') || '(none)'
 }
 
@@ -245,7 +247,7 @@ Organizations should:
   const mainActorsList = mainActors
     .map(
       (a) =>
-        `- ${a.name}: ${a.description} (Domain: ${a.domain})${a.affiliations?.length ? ` [Affiliated: ${a.affiliations.join(', ')}]` : ''}`
+        `- ${a.name} (ID: ${a.id}): ${a.description} (Domain: ${a.domain})${a.affiliations?.length ? ` [Affiliated: ${a.affiliations.join(', ')}]` : ''}`
     )
     .join('\n');
 
@@ -321,6 +323,7 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
 
   return renderPrompt(questionsPrompt, {
     scenariosList,
+    scenarioIds: scenarios.map((scenario) => scenario.id).join(', '),
     organizationContext,
     richGameContext: richGameContextText,
   });
@@ -1470,9 +1473,19 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
       );
       throw new Error('LLM returned empty scenarios');
     }
+    if (!Array.isArray(scenarios) || scenarios.length !== 3) {
+      throw new Error('LLM must return exactly 3 scenarios');
+    }
 
     // Validate each scenario has required fields
+    const scenarioIds = new Set<number>();
     for (const scenario of scenarios) {
+      const id = this.parsePositiveInteger(scenario?.id);
+      if (id === undefined || id > 3 || scenarioIds.has(id)) {
+        throw new Error('Scenarios must have unique IDs 1, 2, and 3');
+      }
+      scenarioIds.add(id);
+      scenario.id = id;
       // Handle XML nested structures in mainActors
       if (scenario.mainActors) {
         if (
@@ -1517,7 +1530,7 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
       }
     }
 
-    return scenarios;
+    return scenarios.sort((a, b) => a.id - b.id);
   }
 
   /**
@@ -1739,67 +1752,82 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
       questionsList,
     });
 
-    const rawResult = await this.llm.generateJSON<
-      | { rankings: { questionId: number; rank: number }[] }
-      | { response: { rankings: { questionId: number; rank: number }[] } }
-    >(prompt, undefined, {
-      promptType: 'rank_questions',
-    });
+    const rawResult = await this.llm.generateJSON<unknown>(
+      prompt,
+      {
+        required: ['rankings'],
+      },
+      {
+        ...getPromptParams(questionRankings),
+        promptType: 'rank_questions',
+      }
+    );
 
-    if (!rawResult) {
-      logger.warn(
-        'LLM returned null/undefined rankings response, using default ranking',
-        undefined,
-        'GameGenerator'
+    const response =
+      rawResult && typeof rawResult === 'object' && 'response' in rawResult
+        ? rawResult.response
+        : rawResult;
+    if (
+      !response ||
+      typeof response !== 'object' ||
+      !('rankings' in response)
+    ) {
+      throw new Error('Invalid question rankings: missing rankings');
+    }
+    const container = response.rankings;
+    const entries =
+      container && typeof container === 'object' && 'ranking' in container
+        ? container.ranking
+        : container;
+    const rankings = Array.isArray(entries) ? entries : [entries];
+    if (rankings.length !== questions.length) {
+      throw new Error(
+        'Invalid question rankings: expected one entry per question'
       );
-      return questions.slice(0, 3);
     }
 
-    // Handle XML structure - may be nested like { rankings: { ranking: [...] } }
-    let rankings: Array<{ questionId: number; rank: number }> = [];
-
-    if ('response' in rawResult && rawResult.response) {
-      const responseRankings = rawResult.response.rankings;
-      if (Array.isArray(responseRankings)) {
-        rankings = responseRankings;
-      } else if (
-        responseRankings &&
-        typeof responseRankings === 'object' &&
-        'ranking' in responseRankings
-      ) {
-        const nested = (
-          responseRankings as {
-            ranking:
-              | Array<{ questionId: number; rank: number }>
-              | { questionId: number; rank: number };
-          }
-        ).ranking;
-        rankings = Array.isArray(nested) ? nested : [nested];
+    const positions = new Set<number>();
+    const ranks = new Set<number>();
+    const validated: Array<{ position: number; rank: number }> = [];
+    const parseRankingInteger = (value: unknown): number | undefined => {
+      if (typeof value === 'string' && !/^\d+$/.test(value.trim())) {
+        return undefined;
       }
-    } else if (rawResult && 'rankings' in rawResult && rawResult.rankings) {
-      if (Array.isArray(rawResult.rankings)) {
-        rankings = rawResult.rankings;
-      } else if (
-        typeof rawResult.rankings === 'object' &&
-        'ranking' in rawResult.rankings
+      const parsed = this.parsePositiveInteger(value);
+      return parsed !== undefined && Number.isSafeInteger(parsed)
+        ? parsed
+        : undefined;
+    };
+    for (const entry of rankings) {
+      if (
+        !entry ||
+        typeof entry !== 'object' ||
+        !('questionId' in entry) ||
+        !('rank' in entry)
       ) {
-        const nested = (
-          rawResult.rankings as {
-            ranking:
-              | Array<{ questionId: number; rank: number }>
-              | { questionId: number; rank: number };
-          }
-        ).ranking;
-        rankings = Array.isArray(nested) ? nested : [nested];
+        throw new Error('Invalid question rankings: missing position or rank');
       }
+      const position = parseRankingInteger(entry.questionId);
+      const rank = parseRankingInteger(entry.rank);
+      if (
+        position === undefined ||
+        rank === undefined ||
+        position > questions.length ||
+        rank > questions.length ||
+        positions.has(position) ||
+        ranks.has(rank)
+      ) {
+        throw new Error(
+          'Invalid question rankings: positions and ranks must be unique integers within range'
+        );
+      }
+      positions.add(position);
+      ranks.add(rank);
+      validated.push({ position, rank });
     }
 
-    // Apply rankings (with safety check)
-    if (rankings && rankings.length > 0) {
-      rankings.forEach((r) => {
-        const q = questions.find((q) => q.id === r.questionId);
-        if (q) q.rank = r.rank;
-      });
+    for (const { position, rank } of validated) {
+      questions[position - 1]!.rank = rank;
     }
 
     // Sort by rank and take top 3
@@ -2318,8 +2346,8 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
       luckMood
     );
 
-    // Generate resolution events during the Resolution phase (days 27-30)
-    if (phase === 'Resolution' && day >= 28) {
+    // Generate one resolution event per question on days 28-30.
+    if (day >= 28 && day <= 30) {
       // Generate one resolution event per question on days 28-30
       const questionIndex = day - 28; // Day 28 = question 0, day 29 = question 1, day 30 = question 2
       if (questionIndex < questions.length) {
@@ -2370,7 +2398,22 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
   > {
     const eventRequestsList = eventRequests
       .map((req, i) => {
-        const question = questions.find((q) => q.id === req.questionId);
+        const question =
+          questions.find(
+            (q) =>
+              q.questionNumber != null &&
+              String(q.questionNumber) === String(req.questionId)
+          ) ??
+          questions.find(
+            (q) =>
+              q.questionNumber == null &&
+              String(q.id) === String(req.questionId)
+          );
+        if (!question) {
+          throw new Error(
+            `No question found for day event ${i + 1}: ${req.questionId}`
+          );
+        }
         const actorsWithMood = req.actors
           .map((a) => {
             const state = luckMood.get(a.id);
@@ -2389,7 +2432,7 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
         return `${i + 1}. Type: ${req.type}
    Actors: 
    ${actorsWithMood}
-   Related to: ${question?.text || 'General drama'}
+   Related to: ${question.text}
    
    Create event involving these actors. Build on the narrative above.
    Their mood and luck should influence the nature of the event.
@@ -2420,125 +2463,96 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
       organizationBehaviorContext: '',
     });
 
-    const rawResponse = await this.llm.generateJSON<
-      | {
-          events: Array<{
-            eventNumber: number;
-            event: string;
-            pointsToward: 'YES' | 'NO' | null;
-          }>;
-        }
-      | {
-          response: {
-            events: Array<{
-              eventNumber: number;
-              event: string;
-              pointsToward: 'YES' | 'NO' | null;
-            }>;
-          };
-        }
-    >(prompt, undefined, {
-      temperature: 0.9,
-      maxTokens: 5000,
-      promptType: 'generate_day_events',
-    });
+    const rawResponse = await this.llm.generateJSON<unknown>(
+      prompt,
+      { required: ['events'] },
+      {
+        ...getPromptParams(dayEvents),
+        promptType: 'generate_day_events',
+      }
+    );
 
-    if (!rawResponse) {
-      logger.warn(
-        'LLM returned null/undefined events response, falling back to simple events',
-        undefined,
-        'GameGenerator'
-      );
-      // Fallback generation if LLM fails
-      return eventRequests.map((req) => ({
-        eventNumber: req.eventNumber,
-        event: `${req.actors.map((a) => a.name).join(' and ')} involved in ${req.type}`,
-        pointsToward: null,
-      }));
+    const response =
+      rawResponse &&
+      typeof rawResponse === 'object' &&
+      'response' in rawResponse
+        ? rawResponse.response
+        : rawResponse;
+    if (!response || typeof response !== 'object' || !('events' in response)) {
+      throw new Error('Invalid day events: missing events');
+    }
+    const container = response.events;
+    const items =
+      container && typeof container === 'object' && 'event' in container
+        ? container.event
+        : container;
+    const entries = Array.isArray(items) ? items : [items];
+    if (entries.length !== eventRequests.length) {
+      throw new Error('Invalid day events: expected one event per request');
     }
 
-    let parsedResponse = rawResponse;
-    if (typeof rawResponse === 'string') {
-      try {
-        parsedResponse = JSON.parse(
-          (rawResponse as string).replace(/```json\n?|\n?```/g, '').trim()
+    const eventsByNumber = new Map<
+      number,
+      { eventNumber: number; event: string; pointsToward: 'YES' | 'NO' | null }
+    >();
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object' || !('eventNumber' in entry)) {
+        throw new Error('Invalid day events: missing event number');
+      }
+      const rawNumber = entry.eventNumber;
+      const eventNumber =
+        typeof rawNumber === 'string' && !/^\d+$/.test(rawNumber.trim())
+          ? undefined
+          : this.parsePositiveInteger(rawNumber);
+      if (
+        eventNumber === undefined ||
+        !Number.isSafeInteger(eventNumber) ||
+        eventNumber > eventRequests.length ||
+        eventsByNumber.has(eventNumber)
+      ) {
+        throw new Error(
+          'Invalid day events: event numbers must be unique and within range'
         );
-      } catch {
-        // ignore
       }
-    }
-
-    if (typeof parsedResponse !== 'object') {
-      logger.warn(
-        'LLM returned non-object events response',
-        { type: typeof parsedResponse },
-        'GameGenerator'
-      );
-      return eventRequests.map((req) => ({
-        eventNumber: req.eventNumber,
-        event: `${req.actors.map((a) => a.name).join(' and ')} involved in ${req.type}`,
-        pointsToward: null,
-      }));
-    }
-
-    // Handle XML structure - may be nested like { events: { event: [...] } }
-    let events: Array<{
-      eventNumber: number;
-      event: string;
-      pointsToward: 'YES' | 'NO' | null;
-    }> = [];
-
-    if (
-      'response' in parsedResponse &&
-      parsedResponse.response &&
-      parsedResponse.response.events
-    ) {
-      if (Array.isArray(parsedResponse.response.events)) {
-        events = parsedResponse.response.events;
-      } else if (
-        typeof parsedResponse.response.events === 'object' &&
-        'event' in parsedResponse.response.events
+      const description =
+        'description' in entry && typeof entry.description === 'string'
+          ? entry.description.trim()
+          : 'event' in entry && typeof entry.event === 'string'
+            ? entry.event.trim()
+            : '';
+      if (!description)
+        throw new Error('Invalid day events: missing description');
+      if (!('pointsToward' in entry)) {
+        throw new Error('Invalid day events: missing pointsToward');
+      }
+      const signal =
+        typeof entry.pointsToward === 'string'
+          ? entry.pointsToward.trim().toUpperCase()
+          : entry.pointsToward;
+      if (
+        signal !== 'YES' &&
+        signal !== 'NO' &&
+        signal !== 'NEUTRAL' &&
+        signal !== null
       ) {
-        const nested = (
-          parsedResponse.response.events as {
-            event: Array<{
-              eventNumber: number;
-              event: string;
-              pointsToward: 'YES' | 'NO' | null;
-            }>;
-          }
-        ).event;
-        events = Array.isArray(nested) ? nested : [nested];
+        throw new Error(
+          'Invalid day events: pointsToward must be YES, NO, or NEUTRAL'
+        );
       }
-    } else if ('events' in parsedResponse && parsedResponse.events) {
-      if (Array.isArray(parsedResponse.events)) {
-        events = parsedResponse.events;
-      } else if (
-        typeof parsedResponse.events === 'object' &&
-        'event' in parsedResponse.events
-      ) {
-        const nested = (
-          parsedResponse.events as {
-            event: Array<{
-              eventNumber: number;
-              event: string;
-              pointsToward: 'YES' | 'NO' | null;
-            }>;
-          }
-        ).event;
-        events = Array.isArray(nested) ? nested : [nested];
-      }
+      eventsByNumber.set(eventNumber, {
+        eventNumber,
+        event: description,
+        pointsToward: signal === 'NEUTRAL' ? null : signal,
+      });
     }
 
-    // Validate and sanitize events
-    return events.map((e, i) => ({
-      eventNumber: e.eventNumber || i + 1,
-      event:
-        typeof e.event === 'string' && e.event.length > 0
-          ? e.event
-          : 'Generic event involving actors',
-      pointsToward: e.pointsToward || null,
-    }));
+    return Promise.all(
+      eventRequests.map(async (_, index) => {
+        const event = eventsByNumber.get(index + 1)!;
+        const mapped = await characterMappingService.transformText(event.event);
+        return { ...event, event: mapped.transformedText };
+      })
+    );
   }
 
   /**
@@ -2616,7 +2630,12 @@ Max 120 characters, one sentence.`;
     // Build context from previous events
     const relatedEvents = previousDays
       .flatMap((d) => d.events)
-      .filter((e) => e.relatedQuestion === question.id)
+      .filter(
+        (e) =>
+          e.relatedQuestion != null &&
+          String(e.relatedQuestion) ===
+            String(question.questionNumber ?? question.id)
+      )
       .slice(-3); // Last 3 related events
 
     const eventHistory =
@@ -2630,6 +2649,7 @@ Max 120 characters, one sentence.`;
       : 'PROVES it failed/was cancelled';
 
     const prompt = renderPrompt(questionResolutionValidation, {
+      realityGrounding: getRealityGrounding(),
       questionText: question.text,
       outcome,
       eventHistory,
@@ -2637,46 +2657,44 @@ Max 120 characters, one sentence.`;
       outcomeContext,
     });
 
-    const rawResponse = await this.llm.generateJSON<
-      | { event: string; type: 'announcement' | 'revelation' }
-      | { response: { event: string; type: 'announcement' | 'revelation' } }
-    >(prompt, undefined, {
-      temperature: 0.7,
-      maxTokens: 5000,
-      promptType: 'generate_resolution_event',
-    });
-
-    // Handle null/undefined or non-object response
-    if (!rawResponse || typeof rawResponse !== 'object') {
-      return {
-        id: `resolution-${day}-${question.id}`,
-        day,
-        type: 'revelation' as const,
-        actors: mainActors.map((a) => a.id),
-        description: `Resolution event for question ${question.id}`,
-        relatedQuestion: toQuestionIdNumberOrNull(question.id),
-        pointsToward: question.outcome ? 'YES' : 'NO',
-        visibility: 'public',
-      };
-    }
-
-    // Handle XML structure
+    const rawResponse = await this.llm.generateJSON<unknown>(
+      prompt,
+      { required: ['event', 'type'] },
+      {
+        ...getPromptParams(questionResolutionValidation),
+        promptType: 'generate_resolution_event',
+      }
+    );
     const response =
-      'response' in rawResponse && rawResponse.response
+      rawResponse &&
+      typeof rawResponse === 'object' &&
+      'response' in rawResponse
         ? rawResponse.response
-        : (rawResponse as {
-            event: string;
-            type: 'announcement' | 'revelation';
-          });
-
+        : rawResponse;
+    if (
+      !response ||
+      typeof response !== 'object' ||
+      !('event' in response) ||
+      typeof response.event !== 'string' ||
+      !response.event.trim() ||
+      !('type' in response) ||
+      (response.type !== 'announcement' && response.type !== 'revelation')
+    ) {
+      throw new Error(
+        'Invalid resolution event: expected description and supported event type'
+      );
+    }
+    const mapped = await characterMappingService.transformText(
+      response.event.trim()
+    );
     return {
       id: `resolution-${day}-${question.id}`,
       day,
-      type: response.type || 'revelation',
+      type: response.type,
       actors: mainActors.map((a) => a.id),
-      description:
-        response.event || `Resolution event for question ${question.id}`,
-      relatedQuestion: toQuestionIdNumberOrNull(question.id),
+      description: mapped.transformedText,
+      relatedQuestion:
+        question.questionNumber ?? toQuestionIdNumberOrNull(question.id),
       pointsToward: question.outcome ? 'YES' : 'NO',
       visibility: 'public',
     };
@@ -2792,12 +2810,12 @@ Max 120 characters, one sentence.`;
     const scenarioContext =
       scenarios && scenarios.length > 0
         ? `\n\nACTIVE SCENARIOS: ${scenarios.map((s) => s.description).join('; ')}`
-        : '';
+        : '\n\nNo active scenarios.';
 
     const questionContext =
       questions && questions.length > 0
         ? `\n\nQUESTIONS TO RESOLVE: ${questions.map((q) => q.text).join('; ')}`
-        : '';
+        : '\n\nNo active questions.';
 
     // Build emotional state context for actors
     const getEmotionalState = (actorId: string): string => {
@@ -2847,14 +2865,14 @@ Max 120 characters, one sentence.`;
 
     const groupsList = groupRequests
       .map(
-        (req, i) => `${i + 1}. "${req.groupName}"
+        (req, i) => `${i + 1}. "${req.groupName}" [groupId: ${req.groupId}]
    
    MEMBERS IN THIS CHAT (don't gossip about them):
 ${req.members
   .map((m, j) => {
     const actor = allActors.find((a) => a.id === m.actorId);
     const emotionalState = getEmotionalState(m.actorId);
-    return `   ${j + 1}. ${m.actorName}${emotionalState} [${actor?.affiliations?.join(', ') || 'independent'}]`;
+    return `   ${j + 1}. ${m.actorName} [actorId: ${m.actorId}]${emotionalState} [${actor?.affiliations?.join(', ') || 'independent'}]`;
   })
   .join('\n')}${getRelationshipContext(req.members)}
    
@@ -2953,10 +2971,11 @@ ${req.members
       scenarioContext,
       questionContext,
       day: day.toString(),
-      eventsList: events.map((e) => e.description).join('; '),
+      eventsList:
+        events.map((e) => e.description).join('; ') || 'No events today.',
       recentEventContext: recentEvent
         ? `\nMost talked about: ${recentEvent.description}`
-        : '',
+        : 'No recent event.',
       groupCount: groupRequests.length,
       groupsList,
       actorVoiceReference,
@@ -2986,7 +3005,9 @@ ${req.members
             };
           }
       >(
-        prompt,
+        attempt === 0
+          ? prompt
+          : `${prompt}\n\nYour previous response was invalid. Return each requested groupId exactly once, with nonempty messages from its listed actorIds.`,
         { required: ['groups'] },
         {
           temperature: 1.0,
@@ -3076,11 +3097,28 @@ ${req.members
 
       if (
         extractedGroups.length === groupRequests.length &&
-        extractedGroups.every((g) => g.messages && g.messages.length > 0)
+        new Set(extractedGroups.map((g) => g.groupId)).size ===
+          groupRequests.length &&
+        extractedGroups.every((g) => {
+          const req = groupRequests.find((r) => r.groupId === g.groupId);
+          return (
+            req &&
+            Array.isArray(g.messages) &&
+            g.messages.length > 0 &&
+            g.messages.every(
+              (msg) =>
+                msg &&
+                typeof msg.actorId === 'string' &&
+                req.members.some((member) => member.actorId === msg.actorId) &&
+                typeof (msg.message ?? msg.content) === 'string' &&
+                (msg.message ?? msg.content)?.trim()
+            )
+          );
+        })
       ) {
         // Convert to expected format - handle both 'message' and 'content' fields
-        extractedGroups.forEach((group, i) => {
-          const req = groupRequests[i];
+        extractedGroups.forEach((group) => {
+          const req = groupRequests.find((r) => r.groupId === group.groupId);
           if (!req) return; // Skip if no matching request
 
           messages[group.groupId] = (group.messages as GroupMessageItem[]).map(
@@ -3380,7 +3418,8 @@ ${req.members
         .flatMap((day) => day.events)
         .filter(
           (e) =>
-            e.relatedQuestion === q.id &&
+            e.relatedQuestion != null &&
+            String(e.relatedQuestion) === String(q.questionNumber ?? q.id) &&
             e.pointsToward === (q.outcome ? 'YES' : 'NO')
         )
         .slice(0, 3);

@@ -412,6 +412,7 @@ WORLD RULES:
     // Collect each API request, then publish its actual parsing outcome before
     // returning or throwing. Continuations retain separate raw request records.
     let attemptCalls: LLMCallInput[] = [];
+    let completionTemperature = temperature;
     const requestCompletion = async (
       requestMessages: Array<{
         role: 'system' | 'user' | 'assistant';
@@ -424,7 +425,7 @@ WORLD RULES:
         model,
         promptType,
         format,
-        temperature,
+        temperature: completionTemperature,
         maxTokens,
         systemPrompt: systemContent,
         userPrompt: requestMessages
@@ -437,7 +438,7 @@ WORLD RULES:
         model,
         messages: requestMessages,
         ...(useJsonFormat ? { response_format: useJsonFormat } : {}),
-        temperature,
+        temperature: completionTemperature,
         max_tokens: maxTokens,
         ...(model.includes('qwen3')
           ? { reasoning_effort: 'none' as const }
@@ -511,7 +512,7 @@ WORLD RULES:
           promptTemplate,
           provider: this.provider,
           model,
-          temperature,
+          temperature: completionTemperature,
           maxTokens,
           format,
         });
@@ -616,10 +617,11 @@ WORLD RULES:
               /^<([\w-]+)(?:\s|>)/
             )?.[1];
           }
-          // XML parsing discards the outer tag; validate its projection without
-          // changing the object or array shape returned to existing callers.
+          // XML parsing discards the root. Return whichever candidate actually
+          // satisfies the caller's schema, restoring the root when necessary.
           const schemaAlternatives: StructuredOutput[] = [];
-          if (rootName) schemaAlternatives.push({ [rootName]: parsed });
+          const rootProjection = rootName ? { [rootName]: parsed } : undefined;
+          if (rootProjection) schemaAlternatives.push(rootProjection);
           if (
             !Array.isArray(parsed) &&
             parsed.response !== null &&
@@ -627,12 +629,19 @@ WORLD RULES:
           ) {
             schemaAlternatives.push(parsed.response);
           }
-          if (
-            schema &&
-            !this.validateSchema(parsed, schema, schemaAlternatives)
-          ) {
+          const matched = schema
+            ? this.validateSchema(
+                parsed,
+                schema,
+                schemaAlternatives,
+                rootProjection && rootName
+                  ? { candidate: rootProjection, field: rootName }
+                  : undefined
+              )
+            : parsed;
+          if (!matched) {
             throw new StructuredOutputError(
-              `Response does not match schema. Missing required fields: ${schema.required?.join(', ')}`
+              `Response does not match schema. Missing required fields: ${schema?.required?.join(', ')}`
             );
           }
 
@@ -640,16 +649,16 @@ WORLD RULES:
             'Successfully parsed XML response',
             {
               hasData: true,
-              isArray: Array.isArray(parsed),
+              isArray: Array.isArray(matched),
             },
             'FeedLLMClient'
           );
 
-          // Log parsed output for monitoring
-          await this.logParsedOutput(parsed, promptType);
+          // Log and trace the same normalized value returned to the caller.
+          await this.logParsedOutput(matched, promptType);
 
-          parsedResponse = parsed;
-          return parsed as T;
+          parsedResponse = matched;
+          return matched as T;
         }
         // JSON format
         let jsonContent = cleanMarkdownCodeBlocks(content);
@@ -681,10 +690,11 @@ WORLD RULES:
 
         if (error instanceof StructuredOutputError && retryCount < maxRetries) {
           retryCount++;
+          completionTemperature = 0;
           validationFeedback =
             format === 'xml'
-              ? 'Your previous response was invalid. Return the complete requested XML structure, including every required field. No explanations, markdown, or truncated tags.'
-              : 'Your previous response was invalid. Return a complete JSON object or array matching the requested schema. No explanations, markdown, or truncated values.';
+              ? `Your previous response was invalid: ${error.message}. Return the complete requested XML structure, including every required field. Copy the field names exactly and close each tag with the identical name. No explanations, markdown, or truncated tags.`
+              : `Your previous response was invalid: ${error.message}. Return a complete JSON object or array matching the requested schema. No explanations, markdown, or truncated values.`;
           logger.warn(
             'Invalid structured response, retrying',
             { attempt: retryCount, maxRetries, format },
@@ -893,24 +903,60 @@ WORLD RULES:
   private validateSchema(
     data: StructuredOutput,
     schema: JSONSchema,
-    alternatives: StructuredOutput[] = []
-  ): boolean {
-    // Basic validation - check required fields exist
+    alternatives: StructuredOutput[] = [],
+    rootProjection?: { candidate: StructuredOutput; field: string }
+  ): StructuredOutput | null {
     const required = schema.required;
-    if (
-      required &&
-      ![data, ...alternatives].some((candidate) =>
-        required.every((field) => field in candidate)
-      )
-    ) {
+    const candidates = [data, ...alternatives].filter(
+      (candidate) => !required || required.every((field) => field in candidate)
+    );
+    if (candidates.length === 0) {
       logger.error(
-        `Missing required fields: ${required.join(', ')}`,
+        `Missing required fields: ${required?.join(', ')}`,
         undefined,
         'FeedLLMClient'
       );
-      return false;
+      return null;
     }
-    return true;
+    const patternedFields = Object.entries(schema.properties ?? {}).filter(
+      ([, property]) => property.pattern !== undefined
+    );
+    const firstViolation = (
+      candidate: StructuredOutput
+    ): string | undefined => {
+      if (candidate === rootProjection?.candidate) {
+        const field = rootProjection.field;
+        const expected = schema.properties?.[field]?.type;
+        const value = (candidate as Record<string, JsonValue>)[field];
+        const valid =
+          expected === undefined ||
+          (expected === 'array'
+            ? Array.isArray(value)
+            : expected === 'object'
+              ? value !== null &&
+                typeof value === 'object' &&
+                !Array.isArray(value)
+              : typeof value === expected);
+        if (!valid) return `Field "${field}" must have type ${expected}`;
+      }
+      const invalidPattern = patternedFields.find(([field, property]) => {
+        if (!(field in candidate)) return false;
+        const value = (candidate as Record<string, JsonValue>)[field];
+        return (
+          typeof value !== 'string' ||
+          !new RegExp(property.pattern!).test(value)
+        );
+      });
+      return invalidPattern
+        ? `Field "${invalidPattern[0]}" must be a string matching pattern ${JSON.stringify(invalidPattern[1].pattern)}`
+        : undefined;
+    };
+    const matched = candidates.find(
+      (candidate) => firstViolation(candidate) === undefined
+    );
+    if (!matched)
+      throw new StructuredOutputError(firstViolation(candidates[0]!)!);
+    return matched;
   }
 
   /**

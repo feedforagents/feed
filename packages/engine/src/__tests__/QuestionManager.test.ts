@@ -28,7 +28,7 @@
  * @see {@link QuestionManager} - Class under test
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import type { FeedLLMClient } from '../llm/openai-client';
 import { QuestionManager } from '../QuestionManager';
 import type { Question } from '../types/shared';
@@ -58,6 +58,108 @@ const mockLLMImpl: MockLLMClient = {
 const mockLLM = mockLLMImpl as FeedLLMClient;
 
 describe('QuestionManager', () => {
+  afterEach(() => mock.restore());
+
+  const resolutionQuestion: Question = {
+    id: 1,
+    text: 'Will OpenAGI publish its release schedule?',
+    scenario: 1,
+    outcome: true,
+    rank: 1,
+  };
+
+  test('assesses proof for a supplied reason without generating the event twice', async () => {
+    const manager = new QuestionManager(mockLLM);
+    const description =
+      'OpenAGI officially confirmed its published release schedule.';
+    const event = spyOn(manager, 'generateResolutionEvent').mockResolvedValue(
+      description
+    );
+    const proof = spyOn(manager, 'generateProofContent').mockResolvedValue(
+      null
+    );
+    const combined = await manager.generateResolutionWithProof(
+      resolutionQuestion,
+      [],
+      [],
+      []
+    );
+    const staged = await manager.generateProofForResolution(
+      resolutionQuestion,
+      description,
+      [],
+      []
+    );
+    expect(staged).toEqual(combined);
+    expect(staged).toMatchObject({
+      confidence: 0.95,
+      requiresManualReview: false,
+      confidenceSignals: [],
+    });
+    expect(event).toHaveBeenCalledTimes(1);
+    expect(proof).toHaveBeenCalledTimes(2);
+    expect(proof.mock.calls[1]).toEqual([
+      resolutionQuestion,
+      description,
+      [],
+      [],
+    ]);
+  });
+
+  test('retains the empty-evidence manual-review assessment', async () => {
+    const manager = new QuestionManager(mockLLM);
+    spyOn(manager, 'generateProofContent').mockResolvedValue(null);
+    const result = await manager.generateProofForResolution(
+      resolutionQuestion,
+      '',
+      [],
+      []
+    );
+    expect(result.requiresManualReview).toBe(true);
+    expect(result.confidence).toBe(0.2);
+    expect(result.confidenceSignals).toEqual(['no_evidence']);
+  });
+
+  test('retains speculative confidence deductions for supplied evidence', async () => {
+    const manager = new QuestionManager(mockLLM);
+    spyOn(manager, 'generateProofContent').mockResolvedValue(null);
+    const result = await manager.generateProofForResolution(
+      resolutionQuestion,
+      'An unconfirmed rumor describes a release.',
+      [],
+      []
+    );
+    expect(result.confidence).toBeCloseTo(0.45);
+    expect(result.requiresManualReview).toBe(true);
+    expect(result.confidenceSignals).toEqual(['rumor', 'unconfirmed']);
+  });
+
+  for (const response of [
+    {},
+    { event: '' },
+    { event: '  ' },
+    { event: { text: 'Not a string' } },
+    { event: 42 },
+  ]) {
+    test(`rejects invalid resolution event ${JSON.stringify(response)} before world impact`, async () => {
+      const manager = new QuestionManager(mockLLM);
+      spyOn(mockLLM, 'generateJSON').mockResolvedValue(response);
+      const impact = spyOn(
+        manager as unknown as {
+          assessAndRecordWorldImpact: (
+            question: Question,
+            event: string
+          ) => Promise<void>;
+        },
+        'assessAndRecordWorldImpact'
+      ).mockResolvedValue(undefined);
+      await expect(
+        manager.generateResolutionEvent(resolutionQuestion, [], [], [])
+      ).rejects.toThrow('Resolution event must be a nonempty string');
+      expect(impact).not.toHaveBeenCalled();
+    });
+  }
+
   test('detects questions that should be resolved', () => {
     const manager = new QuestionManager(mockLLM);
     const questions: Question[] = [

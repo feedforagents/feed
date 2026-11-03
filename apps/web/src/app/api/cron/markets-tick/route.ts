@@ -1396,7 +1396,7 @@ async function resolveMarket(
   // ==========================================================================
   const hasStoredProof =
     Boolean(question.resolutionProofUrl) &&
-    Boolean(question.resolutionDescription);
+    Boolean(question.resolutionDescription?.trim());
 
   if (!hasStoredProof) {
     try {
@@ -1505,11 +1505,28 @@ async function resolveMarket(
         status: 'active' as const,
       };
 
-      const proofResult = await questionManager.generateResolutionWithProof(
+      const storedDescription = question.resolutionDescription?.trim()
+        ? question.resolutionDescription
+        : null;
+      const description =
+        storedDescription ??
+        (await questionManager.generateResolutionEvent(
+          questionForManager,
+          allActors,
+          organizations,
+          recentTimelines
+        ));
+      if (!storedDescription) {
+        await db
+          .update(questions)
+          .set({ resolutionDescription: description, updatedAt: new Date() })
+          .where(eq(questions.id, question.id));
+      }
+      const proofResult = await questionManager.generateProofForResolution(
         questionForManager,
+        description,
         allActors,
-        organizations,
-        recentTimelines
+        organizations
       );
 
       // Save proof to database
@@ -1782,6 +1799,8 @@ async function createMarketForTimeframe(
       return false;
     }
 
+    const questionTopic = questionData.topic ?? dailyTopic;
+
     // Pre-generate IDs before transaction to track for potential cleanup
     const questionId = await generateSnowflakeId();
     const questionNumber = await getNextQuestionNumber();
@@ -1850,9 +1869,9 @@ async function createMarketForTimeframe(
         rank: 1,
         resolutionDate,
         status: 'active',
-        topicKey: dailyTopic.topicKey,
-        topicLabel: dailyTopic.topicLabel,
-        topicDate: dailyTopic.date,
+        topicKey: questionTopic.topicKey,
+        topicLabel: questionTopic.topicLabel,
+        topicDate: questionTopic.date,
         updatedAt: now,
       });
 
@@ -1892,9 +1911,9 @@ async function createMarketForTimeframe(
         timeframe: mapTimeframeToDbType(timeframe),
         granularTimeframe: timeframe, // Store precise timeframe key ('15m', '30m', etc.)
         category: inferCategory(questionData.text),
-        topicKey: dailyTopic.topicKey,
-        topicLabel: dailyTopic.topicLabel,
-        topicDate: dailyTopic.date,
+        topicKey: questionTopic.topicKey,
+        topicLabel: questionTopic.topicLabel,
+        topicDate: questionTopic.date,
         startTime: now,
         endTime: resolutionDate,
         arcState: (arcPlan.phaseOrder[0] || 'setup') as ArcStateType,
@@ -1913,8 +1932,8 @@ async function createMarketForTimeframe(
         marketId: market.id,
         timeframedMarketId,
         resolutionDate: toISO(resolutionDate),
-        topicKey: dailyTopic.topicKey,
-        topicLabel: dailyTopic.topicLabel,
+        topicKey: questionTopic.topicKey,
+        topicLabel: questionTopic.topicLabel,
         arcPhases: arcPlan.phaseOrder.length,
         insiders: arcPlan.insiders.length,
         deceivers: arcPlan.deceivers.length,

@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { CRYPTO_PARODY_NAMES } from '../data/reality-grounding';
+import { StaticDataRegistry } from '../services/static-data-registry';
 
 const rssRows: Array<{
   id: string;
@@ -130,7 +132,9 @@ mock.module('@feed/db', () => ({
   lt: (a: unknown, b: unknown) => [a, b],
 }));
 
+const { escapeRegex } = await import('@feed/shared');
 mock.module('@feed/shared', () => ({
+  escapeRegex,
   logger: {
     info: mock(() => {}),
     warn: mock(() => {}),
@@ -140,6 +144,7 @@ mock.module('@feed/shared', () => ({
 import {
   buildDailyTopicPromptContext,
   buildMultiTopicPromptContext,
+  type DailyTopicContext,
   dailyTopicService,
   deriveTopicFromText,
   isTextOnAnyTopic,
@@ -233,6 +238,93 @@ describe('daily-topic-service', () => {
       isTextOnTopic('Will OpenAI announce another feature today?', topic)
     ).toBe(true);
     expect(isTextOnTopic('Will Tesla stock jump today?', topic)).toBe(false);
+  });
+
+  describe('topic filtering', () => {
+    const date = new Date('2026-03-06T00:00:00.000Z');
+    const general: DailyTopicContext = {
+      date,
+      topicKey: 'general',
+      topicLabel: 'General',
+      summary: 'General market-moving developments across the Feed world',
+      sourceType: 'fallback_default',
+      sourceHeadlineIds: [],
+      selectionReason: null,
+      isLocked: false,
+    };
+
+    test('the automatic General fallback accepts specific world developments', () => {
+      expect(isTextOnTopic('Will TeslAI release its earnings?', general)).toBe(
+        true
+      );
+    });
+
+    test('previous-day, manual, and locked topics retain their topic constraints', () => {
+      const specificTopics: DailyTopicContext[] = [
+        {
+          ...general,
+          sourceType: 'fallback_previous_day',
+          summary: 'Election deadlines',
+        },
+        {
+          ...general,
+          sourceType: 'manual_override',
+          summary: 'Election deadlines',
+        },
+        { ...general, isLocked: true, summary: 'Election deadlines' },
+        { ...general, topicKey: 'election', summary: 'Election deadlines' },
+      ];
+      for (const topic of specificTopics) {
+        expect(isTextOnTopic('Will TeslAI release its earnings?', topic)).toBe(
+          false
+        );
+        expect(
+          isTextOnTopic('Will election results be published?', topic)
+        ).toBe(true);
+      }
+    });
+
+    for (const [realName, parodyName] of Object.entries(CRYPTO_PARODY_NAMES)) {
+      test(`locked ${realName} topics match the canonical crypto name without accepting unrelated text`, () => {
+        const topic: DailyTopicContext = {
+          ...general,
+          topicKey: realName.toLowerCase(),
+          topicLabel: realName,
+          summary: realName,
+          sourceType: 'manual_override',
+          isLocked: true,
+        };
+        expect(
+          isTextOnTopic(`Will ${parodyName} reach its target today?`, topic)
+        ).toBe(true);
+        expect(
+          isTextOnTopic(`Will ${realName} reach its target today?`, topic)
+        ).toBe(true);
+        expect(isTextOnTopic('Will OpenAGI release a new model?', topic)).toBe(
+          false
+        );
+      });
+    }
+
+    for (const realName of ['OpenAI', 'Tesla', 'Bill Gates']) {
+      test(`matches ${realName} and its registered parody without accepting unrelated text`, () => {
+        const parodyName =
+          StaticDataRegistry.getParodyName(realName) ??
+          StaticDataRegistry.getParodyOrgName(realName);
+        expect(parodyName).not.toBeNull();
+        const realTopic = deriveTopicFromText(realName, date);
+        const parodyTopic = deriveTopicFromText(parodyName!, date);
+        expect(
+          isTextOnTopic(`Will ${parodyName} publish a statement?`, realTopic)
+        ).toBe(true);
+        expect(
+          isTextOnTopic(`Will ${realName} publish a statement?`, parodyTopic)
+        ).toBe(true);
+        expect(
+          isTextOnTopic('Will Blue OrigAIn launch a rocket?', realTopic)
+        ).toBe(false);
+      });
+    }
   });
 
   describe('deriveTopicFromText frequency-based selection', () => {

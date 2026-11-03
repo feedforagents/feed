@@ -43,9 +43,11 @@ Write ONE reply as {{characterName}}.
 <format>
 <reply>
   <post>your reply here</post>
-  <sentiment>number -1 to 1</sentiment>
-  <clueStrength>number 0 to 1</clueStrength>
-  <pointsToward>true | false | null</pointsToward>
+  <sentiment>0</sentiment>
+  <clueStrength>0.3</clueStrength>
+  <pointsToward>null</pointsToward>
 </reply>
-</format>`.trim(),
+</format>
+
+Choose a numeric sentiment from -1 to 1 and clueStrength from 0 to 1. Set pointsToward to exactly true, false, or null. Keep the tag names exactly as shown.`.trim(),
 });
