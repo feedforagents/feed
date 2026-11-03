@@ -22,6 +22,7 @@ import { sql } from 'drizzle-orm';
 import type {
   PnlHistoryPoint,
   PnlHistoryRange,
+  PnlHistorySnapshot,
   UserPnlMetrics,
 } from './pnl-history-types';
 
@@ -315,20 +316,15 @@ export async function loadCurrentUserPnlMetrics(
 }
 
 /**
- * Load historical scoped P&L points from persisted snapshots and append the
- * latest live scoped value.
+ * Load one owner's chart and summary using the same canonical live metrics.
  */
-export async function loadScopedPnlHistoryPoints(params: {
+export async function loadUserPnlHistory(params: {
   cutoff?: Date;
   now?: Date;
-  scopeUserIds: string[];
-}): Promise<PnlHistoryPoint[]> {
-  const { cutoff, now = new Date(), scopeUserIds } = params;
-
-  if (scopeUserIds.length === 0) {
-    return [];
-  }
-
+  userId: string;
+}): Promise<PnlHistorySnapshot> {
+  const { cutoff, now = new Date(), userId } = params;
+  const scopeUserIds = [userId];
   const snapshotRows = await db
     .select({
       userId: userPnLSnapshots.userId,
@@ -339,21 +335,24 @@ export async function loadScopedPnlHistoryPoints(params: {
     .where(
       cutoff
         ? and(
-            inArray(userPnLSnapshots.userId, scopeUserIds),
+            eq(userPnLSnapshots.userId, userId),
             gte(userPnLSnapshots.snapshotAt, cutoff)
           )
-        : inArray(userPnLSnapshots.userId, scopeUserIds)
+        : eq(userPnLSnapshots.userId, userId)
     )
     .orderBy(asc(userPnLSnapshots.snapshotAt));
 
   const liveMetricsByUserId = await loadCurrentUserPnlMetrics(scopeUserIds);
 
-  return buildScopedPnlHistoryPoints({
-    liveMetricsByUserId,
-    now,
-    scopeUserIds,
-    snapshots: snapshotRows,
-  });
+  return {
+    metrics: liveMetricsByUserId.get(userId) ?? null,
+    points: buildScopedPnlHistoryPoints({
+      liveMetricsByUserId,
+      now,
+      scopeUserIds,
+      snapshots: snapshotRows,
+    }),
+  };
 }
 
 async function loadSnapshotCandidateUserIds(): Promise<string[]> {

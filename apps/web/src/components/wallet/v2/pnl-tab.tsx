@@ -3,20 +3,17 @@
 import { cn, formatCurrency } from '@feed/shared';
 import { useState } from 'react';
 import { usePnlHistory } from '@/hooks/usePnlHistory';
-import { useWalletBalance } from '@/stores/walletBalanceStore';
 import { PnLChart } from './pnl-chart';
 
 const timeFilters = ['1H', '4H', '1D', '1W', 'ALL'];
 
 export function PnLTab({ userId }: { userId: string }) {
   const [selectedTime, setSelectedTime] = useState('1D');
-  const wallet = useWalletBalance(userId);
   const history = usePnlHistory(userId, selectedTime, { scope: 'owner' });
-  const currentPnL = history.points.at(-1)?.value ?? wallet.lifetimePnL;
-  const unrealized = currentPnL - wallet.lifetimePnL;
-  const error = wallet.error ?? history.error?.message;
+  const metrics = history.metrics;
+  const error = history.error?.message;
 
-  if (wallet.loading || history.loading) {
+  if (history.loading) {
     return (
       <div className="space-y-3 md:space-y-4">
         <div className="h-8 w-32 animate-pulse rounded bg-muted" />
@@ -25,7 +22,7 @@ export function PnLTab({ userId }: { userId: string }) {
     );
   }
 
-  if (error) {
+  if (error || !metrics) {
     return (
       <div className="rounded-xl border border-border py-10 text-center">
         <p className="text-muted-foreground">Failed to load P&L</p>
@@ -60,9 +57,9 @@ export function PnLTab({ userId }: { userId: string }) {
 
       <div className="grid grid-cols-1 gap-1.5 md:grid-cols-3 md:gap-3">
         {[
-          { label: 'Current', value: currentPnL },
-          { label: 'Lifetime', value: wallet.lifetimePnL },
-          { label: 'Unrealized', value: unrealized },
+          { label: 'Current', value: metrics.currentPnL },
+          { label: 'Lifetime', value: metrics.lifetimePnL },
+          { label: 'Unrealized', value: metrics.unrealizedPnL },
         ].map(({ label, value }) => (
           <div
             key={label}

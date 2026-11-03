@@ -12,3 +12,8 @@ export interface UserPnlMetrics {
   unrealizedPnL: number;
   currentPnL: number;
 }
+
+export interface PnlHistorySnapshot {
+  points: PnlHistoryPoint[];
+  metrics: UserPnlMetrics | null;
+}

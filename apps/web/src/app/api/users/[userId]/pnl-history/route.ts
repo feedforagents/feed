@@ -11,7 +11,7 @@ import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import {
   getPnlHistoryCutoff,
-  loadScopedPnlHistoryPoints,
+  loadUserPnlHistory,
   type PnlHistoryRange,
 } from '@/lib/wallet/pnlHistory';
 
@@ -55,14 +55,14 @@ export const GET = withErrorHandling(
 
     const dbUser = await findUserByIdentifier(userId, { id: true });
     if (!dbUser) {
-      return successResponse({ points: [] });
+      return successResponse({ points: [], metrics: null });
     }
 
     const now = new Date();
-    const points = await loadScopedPnlHistoryPoints({
+    const snapshot = await loadUserPnlHistory({
       cutoff: getPnlHistoryCutoff(range, now),
       now,
-      scopeUserIds: [dbUser.id],
+      userId: dbUser.id,
     });
 
     logger.info(
@@ -70,14 +70,14 @@ export const GET = withErrorHandling(
       {
         userId: dbUser.id,
         range,
-        pointCount: points.length,
+        pointCount: snapshot.points.length,
       },
       'GET /api/users/[userId]/pnl-history'
     );
 
     return successResponse({
       metric: 'currentPnL',
-      points,
+      ...snapshot,
       scope: 'owner',
     });
   }

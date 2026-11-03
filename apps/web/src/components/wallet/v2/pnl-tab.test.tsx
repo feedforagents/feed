@@ -23,6 +23,12 @@ const { PnLTab } = await import('./pnl-tab');
 
 beforeEach(() => {
   history = {
+    metrics: {
+      userId: 'owner-1',
+      currentPnL: 130,
+      lifetimePnL: 20,
+      unrealizedPnL: 110,
+    },
     points: [
       { time: 1, value: 30 },
       { time: 2, value: 130 },
@@ -46,6 +52,27 @@ describe('personal wallet P&L', () => {
     expect(html).toContain('+$110.00');
     expect(html).toContain('data-current-pnl="130"');
     expect(renderChart.mock.calls[0]?.[0].history).toBe(history);
+  });
+
+  it('does not combine fresh wallet lifetime P&L with an older history snapshot', () => {
+    history = {
+      ...history,
+      points: [{ time: 1, value: 130 }],
+      metrics: {
+        userId: 'owner-1',
+        currentPnL: 130,
+        lifetimePnL: 10,
+        unrealizedPnL: 120,
+      },
+    };
+    const html = renderToStaticMarkup(<PnLTab userId="owner-1" />);
+
+    // The independent balance store reports 20. All displayed metrics must
+    // instead remain together at the history response's 10 + 120 = 130.
+    expect(html).toContain('+$130.00');
+    expect(html).toContain('+$10.00');
+    expect(html).toContain('+$120.00');
+    expect(html).not.toContain('+$110.00');
   });
 
   it('hides stale values while a timeframe refresh is pending', () => {
