@@ -1,4 +1,4 @@
-import { BadRequestError, NotFoundError } from '@feed/shared';
+import { BadRequestError, logger, NotFoundError } from '@feed/shared';
 import { PredictionPricing } from './pricing';
 import type {
   PredictionBuyInput,
@@ -340,14 +340,20 @@ export class PredictionMarketService {
     if (newLiquidity < 0) {
       throw new BadRequestError('Sale would exceed available liquidity');
     }
+    const remaining = pos.shares - shares;
+    const positionClosed = remaining <= MIN_SHARES;
+    const priorMarketState = {
+      yesShares: market.yesShares,
+      noShares: market.noShares,
+      liquidity: market.liquidity,
+    };
+
     await this.db.updateMarketState(marketId, {
       yesShares: calc.newYesShares,
       noShares: calc.newNoShares,
       liquidity: newLiquidity,
     });
 
-    const remaining = pos.shares - shares;
-    const positionClosed = remaining <= MIN_SHARES;
     if (positionClosed) {
       await this.db.upsertPosition({
         ...pos,
@@ -373,13 +379,46 @@ export class PredictionMarketService {
     );
     const profitLoss = netProceeds - costBasisWithFees;
 
-    await this.deps.wallet.credit({
-      userId,
-      amount: netProceeds,
-      reason: 'pred_sell',
-      description: `Sell ${side.toUpperCase()} in ${market.question}`,
-      relatedId: marketId,
-    });
+    try {
+      await this.deps.wallet.credit({
+        userId,
+        amount: netProceeds,
+        reason: 'pred_sell',
+        description: `Sell ${side.toUpperCase()} in ${market.question}`,
+        relatedId: marketId,
+      });
+    } catch (creditErr) {
+      // Market + position writes are not enlisted with the wallet. Restore both
+      // so a credit failure does not burn shares without paying proceeds.
+      try {
+        await this.db.updateMarketState(marketId, priorMarketState);
+        await this.db.upsertPosition({
+          ...pos,
+          updatedAt: this.now(),
+        });
+      } catch (restoreErr) {
+        logger.error(
+          'CRITICAL: Failed to restore prediction sell after credit failure',
+          {
+            userId,
+            marketId,
+            side,
+            shares,
+            netProceeds,
+            creditError:
+              creditErr instanceof Error
+                ? creditErr.message
+                : String(creditErr),
+            restoreError:
+              restoreErr instanceof Error
+                ? restoreErr.message
+                : String(restoreErr),
+          },
+          'PredictionMarketService'
+        );
+      }
+      throw creditErr;
+    }
 
     await this.deps.wallet.recordPnL({
       userId,
