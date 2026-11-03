@@ -117,20 +117,10 @@ export {
 
 export interface PortfolioBreakdownSnapshot {
   wallet: number;
-  agents: number;
   positions: number;
   available: number;
   netPeerTransfers: number;
   originalAmount: number;
   totalAssets: number;
   totalPnL: number;
-  agentCount: number;
-  members?: PortfolioBreakdownMember[];
-}
-
-export interface PortfolioBreakdownMember {
-  id: string;
-  name: string;
-  wallet: number;
-  isAgent: boolean;
 }

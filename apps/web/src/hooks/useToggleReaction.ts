@@ -2,7 +2,7 @@
  * useToggleReaction Hook
  *
  * Shared hook for toggling emoji reactions on chat messages.
- * Used by both useChatPage (DMs / group chats) and useTeamChat (team chat).
+ * Used by useChatPage for DMs and group chats.
  *
  * Provides optimistic UI updates, SSE echo suppression, and automatic rollback on failure.
  */

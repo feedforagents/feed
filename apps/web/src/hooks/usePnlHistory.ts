@@ -46,7 +46,7 @@ export function usePnlHistory(
     error: null,
   });
   const controllerRef = useRef<AbortController | null>(null);
-  const scope = options.scope ?? 'team';
+  const scope = options.scope ?? 'owner';
   const entityId = options.entityId ?? null;
 
   const fetch_ = useCallback(async () => {

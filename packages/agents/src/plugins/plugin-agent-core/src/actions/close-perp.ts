@@ -1,7 +1,6 @@
 /**
  * Close Perp Action
  * Close an open perpetual position via direct DB operations
- * (Same pattern as AutonomousTradingService)
  */
 
 import type {

@@ -29,10 +29,8 @@ import {
   users,
 } from '@feed/db';
 import { spawn } from 'child_process';
-import { inArray } from 'drizzle-orm';
 import { getExportGroupedForGRPO } from '../dependencies';
 import { logger } from '../utils/logger';
-import { benchmarkService } from './BenchmarkService';
 import { MarketOutcomesTracker } from './MarketOutcomesTracker';
 import { modelSelectionService } from './ModelSelectionService';
 import { rewardBackpropagationService } from './RewardBackpropagationService';
@@ -702,14 +700,6 @@ export class AutomationPipeline {
     if (this.currentTrainingJob) {
       const status = await this.monitorTraining(this.currentTrainingJob);
       if (status.status === 'completed') {
-        // Benchmark before deploying — only deploy if quality gate passes
-        const result = await this.benchmarkAndDeploy(this.currentTrainingJob);
-        if (!result.deployed) {
-          logger.warn('Trained model failed quality gate — not deploying', {
-            batchId: this.currentTrainingJob,
-            reason: result.reason,
-          });
-        }
         await this.cleanupExportFiles(this.currentTrainingJob);
         this.currentTrainingJob = null;
       } else if (status.status === 'failed') {
@@ -720,53 +710,6 @@ export class AutomationPipeline {
         this.currentTrainingJob = null;
       }
       return;
-    }
-
-    // Check for newly completed batches (Python script may have completed)
-    // Check last 24 hours to catch long-running training jobs
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const newlyCompletedResult = await db
-      .select()
-      .from(trainingBatches)
-      .where(
-        and(
-          eq(trainingBatches.status, 'completed'),
-          gte(trainingBatches.completedAt, twentyFourHoursAgo)
-        )
-      )
-      .orderBy(desc(trainingBatches.completedAt))
-      .limit(1);
-
-    const newlyCompleted = newlyCompletedResult[0];
-
-    // Check if this batch has already been deployed
-    if (newlyCompleted) {
-      const existingModelResult = await db
-        .select()
-        .from(trainedModels)
-        .where(
-          and(
-            eq(trainedModels.trainingBatch, newlyCompleted.batchId),
-            eq(trainedModels.status, 'deployed')
-          )
-        )
-        .limit(1);
-
-      if (existingModelResult.length > 0) {
-        return; // Skip if already deployed
-      }
-
-      logger.info('Found newly completed training batch', {
-        batchId: newlyCompleted.batchId,
-      });
-      // Benchmark before deploying — quality gate must pass
-      const result = await this.benchmarkAndDeploy(newlyCompleted.batchId);
-      if (!result.deployed) {
-        logger.warn('Completed batch failed quality gate — not deploying', {
-          batchId: newlyCompleted.batchId,
-          reason: result.reason,
-        });
-      }
     }
 
     // Check if we should trigger training
@@ -829,181 +772,6 @@ export class AutomationPipeline {
 
     // Health checks
     await this.runHealthChecks();
-  }
-
-  /**
-   * Deploy trained model.
-   *
-   * The model is created by the Python training script. This method marks
-   * trajectories as used and updates the training batch status.
-   */
-  private async deployModel(batchId: string): Promise<void> {
-    const batchResult = await db
-      .select()
-      .from(trainingBatches)
-      .where(eq(trainingBatches.batchId, batchId))
-      .limit(1);
-
-    const batch = batchResult[0];
-
-    if (!batch) {
-      logger.warn('Batch not found for deployment', { batchId });
-      return;
-    }
-
-    // Check if model was created by Python script
-    const modelResult = await db
-      .select()
-      .from(trainedModels)
-      .where(
-        and(
-          eq(trainedModels.trainingBatch, batch.id),
-          eq(trainedModels.status, 'ready')
-        )
-      )
-      .limit(1);
-
-    const model = modelResult[0];
-
-    if (!model) {
-      logger.warn('Model not found for batch', { batchId });
-      return;
-    }
-
-    logger.info('Deploying model', {
-      version: batch.modelVersion,
-      modelId: model.modelId,
-      batchId,
-    });
-
-    // Mark trajectories as used
-    // Parse trajectory IDs
-    let trajectoryIds: string[];
-    if (
-      !batch.trajectoryIds ||
-      batch.trajectoryIds === 'null' ||
-      batch.trajectoryIds === '[]'
-    ) {
-      logger.warn('Training batch has invalid trajectoryIds', {
-        batchId: batch.id,
-      });
-      trajectoryIds = [];
-    } else {
-      trajectoryIds = JSON.parse(batch.trajectoryIds) as string[];
-      if (!Array.isArray(trajectoryIds)) {
-        logger.warn('Training batch trajectoryIds is not an array', {
-          batchId: batch.id,
-        });
-        trajectoryIds = [];
-      }
-    }
-
-    if (trajectoryIds.length > 0) {
-      await db
-        .update(trajectories)
-        .set({
-          usedInTraining: true,
-          trainedInBatch: batch.id,
-        })
-        .where(inArray(trajectories.trajectoryId, trajectoryIds));
-    }
-
-    // Update model status to deployed
-    await db
-      .update(trainedModels)
-      .set({
-        status: 'deployed',
-        deployedAt: new Date(),
-      })
-      .where(eq(trainedModels.modelId, model.modelId));
-
-    logger.info('Model deployed', {
-      version: batch.modelVersion,
-      modelId: model.modelId,
-    });
-  }
-
-  /**
-   * Benchmark and conditionally deploy trained model
-   * Only deploys if performance meets threshold
-   */
-  async benchmarkAndDeploy(
-    batchId: string,
-    autoDeploy = true
-  ): Promise<{
-    benchmarked: boolean;
-    deployed: boolean;
-    reason?: string;
-  }> {
-    const batchResult = await db
-      .select()
-      .from(trainingBatches)
-      .where(eq(trainingBatches.batchId, batchId))
-      .limit(1);
-
-    const batch = batchResult[0];
-
-    if (!batch) {
-      return { benchmarked: false, deployed: false, reason: 'Batch not found' };
-    }
-
-    // Get model
-    const modelResult = await db
-      .select()
-      .from(trainedModels)
-      .where(
-        and(
-          eq(trainedModels.trainingBatch, batch.id),
-          eq(trainedModels.status, 'ready')
-        )
-      )
-      .limit(1);
-
-    const model = modelResult[0];
-
-    if (!model) {
-      return { benchmarked: false, deployed: false, reason: 'Model not found' };
-    }
-
-    // Benchmark the model
-    logger.info(
-      'Benchmarking model...',
-      { modelId: model.modelId },
-      'AutomationPipeline'
-    );
-    const benchmarkResults = await benchmarkService.benchmarkModel(
-      model.modelId
-    );
-
-    // Compare with previous models
-    const comparison = await benchmarkService.compareModels(model.modelId);
-
-    logger.info(
-      'Benchmark complete',
-      {
-        modelId: model.modelId,
-        score: benchmarkResults.benchmarkScore,
-        shouldDeploy: comparison.shouldDeploy,
-        reason: comparison.reason,
-      },
-      'AutomationPipeline'
-    );
-
-    // Deploy if performance is good enough (and autoDeploy is enabled)
-    if (comparison.shouldDeploy && autoDeploy) {
-      await this.deployModel(batchId);
-      return {
-        benchmarked: true,
-        deployed: true,
-        reason: comparison.reason,
-      };
-    }
-
-    return {
-      benchmarked: true,
-      deployed: false,
-      reason: comparison.reason || 'Performance below threshold',
-    };
   }
 
   /**

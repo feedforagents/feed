@@ -100,14 +100,13 @@ import {
   type PredictionMarketLiveState,
   type PredictionMarketTerminalState,
 } from './predictionTerminalState';
-import { TerminalAgentsChat } from './TerminalAgentsChat';
 import { TerminalPortfolio } from './TerminalPortfolio';
 import { TerminalSocialFeed } from './TerminalSocialFeed';
 
 type MarketsFilter = 'all' | 'favorites' | 'perp' | 'prediction';
 type MarketsSort = 'volume' | 'change' | 'openInterest' | 'name';
-type ContentTab = 'chart' | 'agents' | 'social' | 'trades';
-type BottomTab = 'agent' | 'social' | 'portfolio' | 'positions' | 'trades';
+type ContentTab = 'chart' | 'social' | 'trades';
+type BottomTab = 'social' | 'portfolio' | 'positions' | 'trades';
 type MobileTab = 'chart' | BottomTab;
 
 /** Minimum shares threshold for sellable positions */
@@ -121,7 +120,6 @@ const REFRESH_COOLDOWN_MS = 5000;
  * Centralizing these ensures consistency between button labels and panel headers.
  */
 const BOTTOM_TAB_LABELS: Record<BottomTab, string> = {
-  agent: 'Agents',
   social: 'Social',
   portfolio: 'Portfolio',
   positions: 'Positions',
@@ -135,7 +133,6 @@ const MOBILE_TAB_LABELS: Record<MobileTab, string> = {
 
 const MOBILE_TABS: readonly MobileTab[] = [
   'chart',
-  'agent',
   'social',
   'portfolio',
   'positions',
@@ -605,7 +602,7 @@ export function MarketsTradingTerminal({
     parseSelected(searchParams)
   );
 
-  const [bottomTab, setBottomTab] = useState<BottomTab>('agent');
+  const [bottomTab, setBottomTab] = useState<BottomTab>('social');
   const [contentTab, setContentTab] = useState<ContentTab>('chart');
 
   const [showMarketsMenu, setShowMarketsMenu] = useState(false);
@@ -657,8 +654,6 @@ export function MarketsTradingTerminal({
     // Auto-switch bottom tab based on step title
     if (step.title === 'Social Feed') {
       setBottomTab('social');
-    } else if (step.title === 'AI Agents') {
-      setBottomTab('agent');
     }
   }, [tutorial.isActive, tutorial.currentStep, tutorial.steps]);
 
@@ -1197,21 +1192,14 @@ export function MarketsTradingTerminal({
     );
   }, [predictionPositions, selectedPredictionId]);
 
-  // Sells execute for the authenticated user, so only the user's own
-  // positions (not their agents') are sellable here.
-  const ownSelectedPredictionPositions = useMemo(
-    () => selectedPredictionPositions.filter((p) => !p.isAgentPosition),
-    [selectedPredictionPositions]
-  );
-
   // Compute sellable positions per side - only positions with shares >= MIN_SELLABLE_SHARES
   // are actually sellable. We check individual positions, not aggregated totals, because
   // a user might have multiple small positions that sum above threshold but none are sellable.
   const sellablePositions = useMemo(() => {
-    const sellableYes = ownSelectedPredictionPositions.filter(
+    const sellableYes = selectedPredictionPositions.filter(
       (p) => p.side === 'YES' && p.shares >= MIN_SELLABLE_SHARES
     );
-    const sellableNo = ownSelectedPredictionPositions.filter(
+    const sellableNo = selectedPredictionPositions.filter(
       (p) => p.side === 'NO' && p.shares >= MIN_SELLABLE_SHARES
     );
     return {
@@ -1220,7 +1208,7 @@ export function MarketsTradingTerminal({
       sellableYesCount: sellableYes.length,
       sellableNoCount: sellableNo.length,
     };
-  }, [ownSelectedPredictionPositions]);
+  }, [selectedPredictionPositions]);
 
   const canSellPrediction =
     authenticated &&
@@ -1311,7 +1299,7 @@ export function MarketsTradingTerminal({
 
   const sellPosition = useMemo(() => {
     const wantedSide = predictionSide.toUpperCase() as 'YES' | 'NO';
-    const candidates = ownSelectedPredictionPositions.filter(
+    const candidates = selectedPredictionPositions.filter(
       (p) => p.side === wantedSide && p.shares >= MIN_SELLABLE_SHARES
     );
     if (candidates.length === 0) return null;
@@ -1320,7 +1308,7 @@ export function MarketsTradingTerminal({
     return candidates
       .slice(1)
       .reduce((best, pos) => (pos.shares > best.shares ? pos : best), first);
-  }, [predictionSide, ownSelectedPredictionPositions]);
+  }, [predictionSide, selectedPredictionPositions]);
 
   const maxSellShares = sellPosition?.shares ?? 0;
   const clampedSellShares =
@@ -2352,7 +2340,6 @@ export function MarketsTradingTerminal({
                 {(
                   [
                     { id: 'chart', label: 'Chart' },
-                    { id: 'agents', label: 'Agents' },
                     { id: 'social', label: 'Social' },
                     { id: 'trades', label: 'Trades' },
                   ] as const
@@ -2370,8 +2357,6 @@ export function MarketsTradingTerminal({
                 <Panel defaultSize={70} minSize={30} className="min-h-0">
                   {contentTab === 'chart' ? (
                     centerPanel
-                  ) : contentTab === 'agents' ? (
-                    <TerminalAgentsChat />
                   ) : contentTab === 'social' ? (
                     <TerminalSocialFeed
                       perpTicker={
@@ -2577,9 +2562,7 @@ export function MarketsTradingTerminal({
                 key={bottomTab}
                 className="fade-in min-h-0 flex-1 animate-in overflow-hidden duration-150"
               >
-                {bottomTab === 'agent' ? (
-                  <TerminalAgentsChat />
-                ) : bottomTab === 'social' ? (
+                {bottomTab === 'social' ? (
                   <TerminalSocialFeed
                     perpTicker={
                       selected?.kind === 'perp'

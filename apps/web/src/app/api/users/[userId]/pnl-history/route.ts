@@ -6,7 +6,6 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { and, db, eq, users } from '@feed/db';
 import { logger, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -14,7 +13,6 @@ import {
   getPnlHistoryCutoff,
   loadScopedPnlHistoryPoints,
   type PnlHistoryRange,
-  type PnlHistoryScope,
 } from '@/lib/wallet/pnlHistory';
 
 function parseRange(value: string | null): PnlHistoryRange {
@@ -28,45 +26,6 @@ function parseRange(value: string | null): PnlHistoryRange {
     default:
       return '1D';
   }
-}
-
-function parseScope(value: string | null): PnlHistoryScope {
-  switch (value) {
-    case 'owner':
-    case 'agent':
-      return value;
-    default:
-      return 'team';
-  }
-}
-
-async function resolveScopeUserIds(params: {
-  entityId: string | null;
-  ownerUserId: string;
-  scope: PnlHistoryScope;
-}): Promise<string[]> {
-  const { entityId, ownerUserId, scope } = params;
-
-  if (scope === 'owner') {
-    return [ownerUserId];
-  }
-
-  const agentRows = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(and(eq(users.managedBy, ownerUserId), eq(users.isAgent, true)));
-
-  if (scope === 'team') {
-    return [ownerUserId, ...agentRows.map((row) => row.id)];
-  }
-
-  if (!entityId) {
-    return [];
-  }
-
-  // Return an empty series for unknown/unowned agents to avoid exposing
-  // ownership information through this public endpoint.
-  return agentRows.some((row) => row.id === entityId) ? [entityId] : [];
 }
 
 export const GET = withErrorHandling(
@@ -93,21 +52,9 @@ export const GET = withErrorHandling(
     const { userId } = UserIdParamSchema.parse(await context.params);
     const { searchParams } = new URL(request.url);
     const range = parseRange(searchParams.get('range'));
-    const scope = parseScope(searchParams.get('scope'));
-    const entityId = searchParams.get('entityId');
 
     const dbUser = await findUserByIdentifier(userId, { id: true });
     if (!dbUser) {
-      return successResponse({ points: [] });
-    }
-
-    const scopeUserIds = await resolveScopeUserIds({
-      entityId,
-      ownerUserId: dbUser.id,
-      scope,
-    });
-
-    if (scopeUserIds.length === 0) {
       return successResponse({ points: [] });
     }
 
@@ -115,7 +62,7 @@ export const GET = withErrorHandling(
     const points = await loadScopedPnlHistoryPoints({
       cutoff: getPnlHistoryCutoff(range, now),
       now,
-      scopeUserIds,
+      scopeUserIds: [dbUser.id],
     });
 
     logger.info(
@@ -123,8 +70,6 @@ export const GET = withErrorHandling(
       {
         userId: dbUser.id,
         range,
-        scope,
-        entityId,
         pointCount: points.length,
       },
       'GET /api/users/[userId]/pnl-history'
@@ -133,7 +78,7 @@ export const GET = withErrorHandling(
     return successResponse({
       metric: 'currentPnL',
       points,
-      scope,
+      scope: 'owner',
     });
   }
 );

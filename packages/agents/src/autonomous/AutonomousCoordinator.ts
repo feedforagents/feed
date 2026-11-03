@@ -13,17 +13,7 @@
  */
 
 import type { IAgentRuntime } from '@elizaos/core';
-import {
-  actorState,
-  and,
-  db,
-  eq,
-  gte,
-  markets,
-  or,
-  userAgentConfigs,
-  users,
-} from '@feed/db';
+import { actorState, db, eq } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import type { JsonValue } from '@feed/shared';
 import { trajectoryRecorder } from '@feed/training';
@@ -31,17 +21,12 @@ import {
   clearTrajectoryContext,
   setTrajectoryContext,
 } from '../plugins/plugin-trajectory-logger/src/action-interceptor';
-import { getAgentConfig } from '../shared/agent-config';
 import { logger } from '../shared/logger';
 // Import services
-import { autonomousPlanningCoordinator } from './AutonomousPlanningCoordinator';
 import { populateIdentityMapOnRuntime } from './agent-identity-map';
 import { multiStepExecutor } from './MultiStepExecutor';
-import { priceAlertService } from './PriceAlertService';
-import { topicDiversityService } from './TopicDiversityService';
 import type { ActionTraceResult } from './templates/multi-step-decision';
 import { requireContextNumber } from './utils/context-validation';
-import { getPredictionMarketPrices } from './utils/prediction-pricing';
 
 /** Agent identity entry for interaction labeling */
 interface AgentIdentity {
@@ -293,7 +278,7 @@ export interface AutonomousTickResult {
     groupMessages: number;
     engagements: number;
   };
-  method: 'a2a' | 'database' | 'planning_coordinator' | 'multi_step';
+  method: 'a2a' | 'database' | 'multi_step';
   duration: number;
   trajectoryId?: string;
 }
@@ -328,7 +313,7 @@ function deriveArchetype(
 export class AutonomousCoordinator {
   /**
    * Execute complete autonomous tick for an agent
-   * Now uses goal-oriented multi-action planning when goals are configured
+   * Uses the shared multi-step NPC decision loop
    *
    * @param agentUserId - Agent user ID
    * @param runtime - Agent runtime
@@ -339,10 +324,17 @@ export class AutonomousCoordinator {
     agentUserId: string,
     runtime: IAgentRuntime,
     recordTrajectories = false,
-    isNpc = false,
+    isNpc = true,
     signal?: AbortSignal
   ): Promise<AutonomousTickResult> {
     signal?.throwIfAborted();
+    const actor = StaticDataRegistry.getActor(agentUserId);
+    if (!isNpc || actor?.id !== agentUserId) {
+      throw new Error(`Only NPCs can execute autonomous ticks: ${agentUserId}`);
+    }
+    if (runtime.agentId !== actor.id) {
+      throw new Error(`NPC runtime does not match actor: ${agentUserId}`);
+    }
     const startTime = Date.now();
 
     // Initialize trajectory recording if enabled
@@ -599,139 +591,8 @@ export class AutonomousCoordinator {
     };
 
     try {
-      // For NPCs, skip User table lookup (they don't have User records)
-      // For USER_CONTROLLED agents, verify they exist in User table
-      if (!isNpc) {
-        const agentResult = await db
-          .select({ id: users.id, isAgent: users.isAgent })
-          .from(users)
-          .where(eq(users.id, agentUserId))
-          .limit(1);
-
-        const agent = agentResult[0];
-        if (!agent || !agent.isAgent) {
-          throw new Error('Agent not found or not an agent');
-        }
-      }
-
-      // Get agent config (only for USER_CONTROLLED agents, NPCs don't have UserAgentConfig)
-      const config = isNpc ? null : await getAgentConfig(agentUserId);
-
-      // Populate identity map for interaction labeling
       if (recordTrajectories) {
-        await populateIdentityMapOnRuntime(runtime, agentUserId, isNpc);
-      }
-
-      // Price alert pre-step: lightweight DB checks, no LLM calls
-      // Only for user-controlled agents (NPCs don't have price alert configs)
-      if (!isNpc) {
-        const alertsSent = await priceAlertService.checkAlerts(agentUserId);
-        if (alertsSent > 0) {
-          logger.info(
-            `[PriceAlert] ${alertsSent} alert(s) triggered for agent ${agentUserId}`,
-            { agentUserId, alertsSent },
-            'AutonomousCoordinator'
-          );
-        }
-      }
-
-      // Check if agent has goals configured
-      const hasGoals =
-        (await db.agentGoal.count({
-          where: {
-            agentUserId,
-            status: 'active',
-          },
-        })) > 0;
-
-      // Use planning coordinator if agent has goals and multi-action planning enabled
-      if (hasGoals && config?.planningHorizon === 'multi') {
-        logger.info(
-          'Using goal-oriented planning coordinator',
-          undefined,
-          'AutonomousCoordinator'
-        );
-
-        // Generate comprehensive action plan
-        const plan = await autonomousPlanningCoordinator.generateActionPlan(
-          agentUserId,
-          runtime
-        );
-
-        // Execute the plan
-        const executionResult = await autonomousPlanningCoordinator.executePlan(
-          agentUserId,
-          runtime,
-          plan
-        );
-
-        // Map results to standard format
-        for (const actionResult of executionResult.results) {
-          if (actionResult.success) {
-            switch (actionResult.action.type) {
-              case 'trade':
-                result.actionsExecuted.trades++;
-                break;
-              case 'post':
-                result.actionsExecuted.posts++;
-                break;
-              case 'comment':
-              case 'respond':
-                result.actionsExecuted.comments++;
-                break;
-              case 'message':
-                result.actionsExecuted.messages++;
-                break;
-            }
-          }
-        }
-
-        const failedAction = executionResult.results.find(
-          (action) => !action.success
-        );
-        if (failedAction)
-          throw new Error(`Planned action ${failedAction.action.type} failed`);
-        result.success = true;
-        result.method = 'planning_coordinator';
-        result.duration = Date.now() - startTime;
-
-        logger.info(
-          'Completed autonomous tick via planning coordinator',
-          {
-            agentId: agentUserId,
-            planned: executionResult.planned,
-            executed: executionResult.executed,
-            successful: executionResult.successful,
-            duration: result.duration,
-          },
-          'AutonomousCoordinator'
-        );
-
-        // Derive interaction labels for planning coordinator path
-        const planIdentityMap = (
-          runtime as { _agentIdentityMap?: Map<string, AgentIdentity> }
-        )._agentIdentityMap;
-        if (planIdentityMap) {
-          const planTrace = executionResult.results
-            .filter((r) => r.action?.type)
-            .map((r) => ({
-              actionType: r.action!.type.toUpperCase(),
-              parameters: r.action!.params ?? {},
-              success: r.success,
-              timestamp: Date.now(),
-            }));
-          if (planTrace.length > 0) {
-            const labels = deriveInteractionLabels(
-              planTrace as ActionTraceResult[],
-              planIdentityMap
-            );
-            if (labels.length > 0) {
-              updateTrustOutcomesFromLabels(runtime, labels);
-            }
-          }
-        }
-
-        return result;
+        await populateIdentityMapOnRuntime(runtime, agentUserId, true);
       }
 
       // === USE MULTI-STEP EXECUTOR (Default Mode) ===
@@ -832,174 +693,21 @@ export class AutonomousCoordinator {
   /**
    * Execute autonomous tick for all active agents
    */
-  async executeTickForAllAgents(_runtime: IAgentRuntime): Promise<{
-    agentsProcessed: number;
-    totalActions: number;
-    errors: number;
-  }> {
-    // Get all agents with autonomous features enabled
-    // Join users with userAgentConfigs to filter by autonomous settings
-    const activeAgentResults = await db
-      .select({
-        id: users.id,
-        displayName: users.displayName,
-      })
-      .from(users)
-      .innerJoin(userAgentConfigs, eq(users.id, userAgentConfigs.userId))
-      .where(
-        and(
-          eq(users.isAgent, true),
-          or(
-            eq(userAgentConfigs.autonomousTrading, true),
-            eq(userAgentConfigs.autonomousPosting, true),
-            eq(userAgentConfigs.autonomousCommenting, true),
-            eq(userAgentConfigs.autonomousDMs, true),
-            eq(userAgentConfigs.autonomousGroupChats, true)
-          )
-        )
-      );
-
-    logger.info(
-      `Processing ${activeAgentResults.length} active agents`,
-      undefined,
-      'AutonomousCoordinator'
-    );
-
-    // TOPIC DIVERSITY: Seed tracker and assign topics before processing
-    await this.initializeTopicDiversity(activeAgentResults.map((a) => a.id));
-
-    let totalActions = 0;
-    let errors = 0;
-
-    const { agentRuntimeManager } = await import(
-      '../runtime/AgentRuntimeManager'
-    );
-    for (const agent of activeAgentResults) {
-      const runtime = await agentRuntimeManager.getRuntime(agent.id);
-      const tickResult = await this.executeAutonomousTick(agent.id, runtime);
-
-      if (tickResult.success) {
-        const actionCount = Object.values(tickResult.actionsExecuted).reduce(
-          (sum, count) => sum + count,
-          0
-        );
-        totalActions += actionCount;
-
-        logger.info(
-          `Agent ${agent.displayName}: ${actionCount} actions in ${tickResult.duration}ms`,
-          undefined,
-          'AutonomousCoordinator'
-        );
-      } else {
-        errors++;
-      }
-
-      // Small delay between agents to avoid overwhelming system
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-
-    return {
-      agentsProcessed: activeAgentResults.length,
-      totalActions,
-      errors,
-    };
-  }
-
-  /**
-   * Initialize topic diversity tracking and assignment for a batch of agents
-   */
-  private async initializeTopicDiversity(agentIds: string[]): Promise<void> {
-    // Seed the topic tracker with recent posts
-    await topicDiversityService.seedFromRecentPosts();
-
-    // Get active prediction markets for topic assignment
-    const activeMarkets = await db
-      .select({
-        id: markets.id,
-        question: markets.question,
-        yesShares: markets.yesShares,
-        noShares: markets.noShares,
-      })
-      .from(markets)
-      .where(and(eq(markets.resolved, false), gte(markets.endDate, new Date())))
-      .limit(20);
-
-    // Convert to format expected by diversity service
-    const marketsForTopics = activeMarkets.map((m) => {
-      const yesShares = Number(m.yesShares || 1);
-      const noShares = Number(m.noShares || 1);
-      const { yesPrice, noPrice } = getPredictionMarketPrices(
-        yesShares,
-        noShares
-      );
-      return {
-        id: m.id,
-        question: m.question,
-        yesPrice,
-        noPrice,
-      };
-    });
-
-    // Assign topics to agents
-    await topicDiversityService.assignTopicsToAgents(
-      agentIds,
-      marketsForTopics
-    );
-
-    // Log stats
-    const stats = topicDiversityService.getTopicStats();
-    logger.info(
-      `Topic diversity initialized`,
-      {
-        agentsAssigned: agentIds.length,
-        marketsAvailable: marketsForTopics.length,
-        topicsTracked: stats.topicsTracked,
-        mostCovered: stats.mostCovered.slice(0, 3),
-      },
-      'AutonomousCoordinator'
-    );
-  }
-
   /**
    * Capture current environment state for trajectory recording
    */
   private async captureEnvironmentState(agentUserId: string) {
-    const agentResult = await db
-      .select({
-        virtualBalance: users.virtualBalance,
-        lifetimePnL: users.lifetimePnL,
-      })
-      .from(users)
-      .where(eq(users.id, agentUserId))
+    const [state] = await db
+      .select({ balance: actorState.tradingBalance })
+      .from(actorState)
+      .where(eq(actorState.id, agentUserId))
       .limit(1);
-
-    const agent = agentResult[0];
-    const isNpc = Boolean(StaticDataRegistry.getActor(agentUserId));
-    let agentBalance: number;
-    let agentPnL: number;
-    if (isNpc) {
-      const [state] = await db
-        .select({ balance: actorState.tradingBalance })
-        .from(actorState)
-        .where(eq(actorState.id, agentUserId))
-        .limit(1);
-      agentBalance = requireContextNumber(
-        state?.balance,
-        `NPC ${agentUserId} trajectory balance`,
-        0
-      );
-      agentPnL = 0;
-    } else {
-      agentBalance = requireContextNumber(
-        agent?.virtualBalance,
-        `agent ${agentUserId} trajectory balance`,
-        0
-      );
-      agentPnL = requireContextNumber(
-        agent?.lifetimePnL,
-        `agent ${agentUserId} trajectory PnL`
-      );
-    }
+    const agentBalance = requireContextNumber(
+      state?.balance,
+      `NPC ${agentUserId} trajectory balance`,
+      0
+    );
+    const agentPnL = 0;
 
     // Get open positions count
     const positionsCount = await db.perpPosition.count({

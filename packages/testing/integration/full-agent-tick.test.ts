@@ -1,28 +1,10 @@
 /**
- * Full Agent Tick Integration Test
+ * NPC runtime integration checks.
  *
- * @module testing/integration/full-agent-tick.test
- *
- * @description
- * Simulates a complete agent tick cycle as it runs in production.
- * Tests ALL autonomous agent behaviors:
- *
- * **Agent Tick Operations:**
- * 1. Agent discovery via AgentRegistry
- * 2. Autonomous trading (perps + prediction markets)
- * 3. Autonomous posting on the feed
- * 4. Autonomous commenting on posts
- * 5. Autonomous DMs to other agents
- * 6. Autonomous group chat participation
- * 7. Multi-step action planning
- * 8. Trajectory recording for RL training
- *
- * **Output Files:**
- * - .output/agent-tick-discovery-{timestamp}.json
- * - .output/agent-tick-actions-{timestamp}.json
- * - .output/agent-tick-trades-{timestamp}.json
- * - .output/agent-tick-messages-{timestamp}.json
- * - .output/agent-tick-summary-{timestamp}.json
+ * Audits NPC registry, portfolios, trading components and persisted social/
+ * trading activity. The live group-dynamics case executes an NPC tick; the
+ * remaining cases inspect current state rather than launch hosted agents.
+ * Reports are written to .output/agent-tick-*.json.
  */
 
 import {
@@ -92,7 +74,6 @@ interface AgentTickResults {
   // Agent discovery
   discovery: {
     totalRegistered: number;
-    userAgents: number;
     npcAgents: number;
     eligibleAgents: number;
     agentSamples: Array<{
@@ -160,7 +141,7 @@ interface AgentTickResults {
   };
 }
 
-describe('Full Agent Tick Integration Test', () => {
+describe('NPC Runtime Integration Checks', () => {
   let results: AgentTickResults;
   const startTime = Date.now();
 
@@ -172,7 +153,7 @@ describe('Full Agent Tick Integration Test', () => {
       );
     }
     logger.info(
-      `Starting full agent tick test. Output dir: ${OUTPUT_DIR}`,
+      `Starting NPC runtime checks. Output dir: ${OUTPUT_DIR}`,
       undefined,
       'AgentTickTest'
     );
@@ -189,7 +170,6 @@ describe('Full Agent Tick Integration Test', () => {
       duration: 0,
       discovery: {
         totalRegistered: 0,
-        userAgents: 0,
         npcAgents: 0,
         eligibleAgents: 0,
         agentSamples: [],
@@ -227,14 +207,14 @@ describe('Full Agent Tick Integration Test', () => {
     };
   });
 
-  describe('1. Agent Registry Discovery', () => {
-    test('discovers registered agents', async () => {
+  describe('1. NPC Registry Discovery', () => {
+    test('discovers registered NPCs', async () => {
       const { AgentStatus, AgentType, agentRegistry } = await import(
         '@feed/agents'
       );
 
       const registeredAgents = await agentRegistry.discoverAgents({
-        types: [AgentType.USER_CONTROLLED, AgentType.NPC],
+        types: [AgentType.NPC],
         statuses: [
           AgentStatus.ACTIVE,
           AgentStatus.INITIALIZED,
@@ -244,9 +224,6 @@ describe('Full Agent Tick Integration Test', () => {
       });
 
       results.discovery.totalRegistered = registeredAgents.length;
-      results.discovery.userAgents = registeredAgents.filter(
-        (a) => a.type === AgentType.USER_CONTROLLED
-      ).length;
       results.discovery.npcAgents = registeredAgents.filter(
         (a) => a.type === AgentType.NPC
       ).length;
@@ -263,12 +240,14 @@ describe('Full Agent Tick Integration Test', () => {
       writeOutput('agent-tick-discovery', results.discovery);
 
       logger.info(
-        `Found ${registeredAgents.length} registered agents (${results.discovery.userAgents} USER, ${results.discovery.npcAgents} NPC)`,
+        `Found ${registeredAgents.length} registered NPCs`,
         undefined,
         'AgentTickTest'
       );
 
-      expect(registeredAgents.length).toBeGreaterThanOrEqual(0);
+      expect(
+        registeredAgents.every((agent) => agent.type === AgentType.NPC)
+      ).toBe(true);
     });
   });
 
@@ -703,18 +682,17 @@ describe('Full Agent Tick Integration Test', () => {
     writeOutput('agent-tick-summary', results);
 
     logger.info(
-      `Agent tick test completed in ${results.duration}ms`,
+      `NPC runtime checks completed in ${results.duration}ms`,
       undefined,
       'AgentTickTest'
     );
 
     // Log summary
-    console.log('\n📊 AGENT TICK TEST SUMMARY');
+    console.log('\n📊 NPC RUNTIME CHECK SUMMARY');
     console.log('==========================');
     console.log(`Duration: ${results.duration}ms`);
     console.log(`\nAgent Discovery:`);
     console.log(`  - Total registered: ${results.discovery.totalRegistered}`);
-    console.log(`  - User agents: ${results.discovery.userAgents}`);
     console.log(`  - NPC agents: ${results.discovery.npcAgents}`);
     console.log(`\nActions:`);
     console.log(`  - Total: ${results.actions.totalActions}`);

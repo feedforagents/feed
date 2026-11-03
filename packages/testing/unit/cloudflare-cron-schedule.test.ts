@@ -46,6 +46,7 @@ describe('Cloudflare cron schedule', () => {
     );
     expect(isCronJob({ path: jobs[0].path, scheduledTime: 0 })).toBe(true);
     for (const path of [
+      '/api/cron/agent-tick',
       '/api/cron/reputation-sync',
       '/api/cron/profile-chain-sync',
     ]) {

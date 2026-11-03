@@ -113,19 +113,12 @@ export async function apiFetch(
     const token = await getAccessToken();
     if (token) {
       finalHeaders.set('Authorization', `Bearer ${token}`);
-    } else if (typeof window !== 'undefined') {
-      // Check for embed token from Milady desktop/web host
-      const embedToken = (window as Window & { __feedEmbedToken?: string })
-        .__feedEmbedToken;
-      if (embedToken) {
-        finalHeaders.set('Authorization', `Bearer ${embedToken}`);
-      } else {
-        logger.warn(
-          'No access token available for authenticated request',
-          { url: typeof input === 'string' ? input : (input as Request).url },
-          'apiFetch'
-        );
-      }
+    } else {
+      logger.warn(
+        'No access token available for authenticated request',
+        { url: typeof input === 'string' ? input : (input as Request).url },
+        'apiFetch'
+      );
     }
   }
 

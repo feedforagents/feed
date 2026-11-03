@@ -56,7 +56,11 @@ describe('Swagger/OpenAPI Documentation', () => {
     expect(spec.paths).toHaveProperty('/api/health');
     expect(spec.paths).toHaveProperty('/api/docs');
     expect(spec.paths).toHaveProperty('/api/posts');
-    expect(spec.paths).toHaveProperty('/api/agents');
+    expect(
+      Object.keys(spec.paths).some((path) => path.startsWith('/api/agents'))
+    ).toBe(false);
+    expect(spec.paths).not.toHaveProperty('/api/cron/agent-tick');
+    expect(spec.paths).toHaveProperty('/api/a2a');
     expect(spec.paths).toHaveProperty('/api/chats');
     expect(spec.paths).toHaveProperty('/api/users/me');
   }, 30000);

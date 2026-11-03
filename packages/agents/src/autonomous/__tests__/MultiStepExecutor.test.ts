@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import type { IAgentRuntime } from '@elizaos/core';
+import { StaticDataRegistry } from '@feed/engine';
 import * as npcContextProvider from '../../plugins/feed/providers/npc-game-context';
-import * as agentConfig from '../../shared/agent-config';
 import { normalizeDecisionAction } from '../action-normalization';
 import { extractFirstJsonObject } from '../decision-json';
 import { MultiStepExecutor } from '../MultiStepExecutor';
@@ -506,12 +506,14 @@ describe('tick success reflects execution outcomes', () => {
 });
 
 describe('NPC iteration ceiling (PRD D-25)', () => {
+  const actor = StaticDataRegistry.getAllActors()[0]!;
   afterEach(() => mock.restore());
 
   function prepare(executor: MultiStepExecutor) {
     const runtime = {
+      agentId: actor.id,
       character: {
-        name: 'Budget test',
+        name: actor.name,
         feed: {
           autonomy: {
             trading: false,
@@ -553,7 +555,6 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       getLatestContextRefreshSummary: MultiStepExecutor['getLatestContextRefreshSummary'];
       recordTrajectoryStep: MultiStepExecutor['recordTrajectoryStep'];
     };
-    spyOn(agentConfig, 'getAgentConfig').mockResolvedValue(null);
     spyOn(npcContextProvider, 'getNpcGameContext').mockResolvedValue('');
     spyOn(executor, 'gatherContext').mockResolvedValue(context);
     spyOn(internal, 'getLatestContextRefreshSummary').mockResolvedValue(
@@ -581,13 +582,13 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
 
   for (const [label, executor, expected] of [
     ['default', () => new MultiStepExecutor(), 4],
-    ['explicit larger budget', () => new MultiStepExecutor(7, 12), 4],
-    ['smaller budget', () => new MultiStepExecutor(5, 2), 2],
+    ['explicit larger budget', () => new MultiStepExecutor(12), 4],
+    ['smaller budget', () => new MultiStepExecutor(2), 2],
   ] as const) {
     test(`NPC tick respects ${label}`, async () => {
       const instance = executor();
       const { runtime, decision, execute } = prepare(instance);
-      const result = await instance.execute('npc-test', runtime, true);
+      const result = await instance.execute(actor.id, runtime, true);
       expect(result.success).toBe(true);
       expect(result.iterations).toBe(expected);
       expect(decision).toHaveBeenCalledTimes(expected);
@@ -607,7 +608,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       },
       rawResponse: '{}',
     });
-    expect((await executor.execute('npc-test', runtime, true)).iterations).toBe(
+    expect((await executor.execute(actor.id, runtime, true)).iterations).toBe(
       0
     );
     expect(decision).toHaveBeenCalledTimes(1);
@@ -616,10 +617,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
 
   test('invalid configured budgets still fail', () => {
     for (const budget of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(() => new MultiStepExecutor(5, budget)).toThrow(
-        'Iteration budgets must be positive integers'
-      );
-      expect(() => new MultiStepExecutor(budget, 4)).toThrow(
+      expect(() => new MultiStepExecutor(budget)).toThrow(
         'Iteration budgets must be positive integers'
       );
     }

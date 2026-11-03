@@ -32,7 +32,6 @@ const includeOptionalIntegrationTests =
   process.env.RUN_OPTIONAL_INTEGRATION_TESTS === '1';
 const portReservationDir = path.join(tmpdir(), 'feed-integration-server-ports');
 const optionalIntegrationTestMatchers = [
-  /agent-actions-persistence\.integration\.test\.ts$/,
   /agent0-localnet\.test\.ts$/,
   /agent0-sdk\.integration\.test\.ts$/,
   /db-lazy-connection\.integration\.test\.ts$/,

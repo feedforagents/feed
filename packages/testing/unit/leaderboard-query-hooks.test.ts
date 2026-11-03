@@ -108,12 +108,12 @@ describe('fetchLeaderboardData — generatedAt support', () => {
       currentPage: 2,
       pageSize: 50,
       selectedMetric: 'trading',
-      selectedScope: 'team',
+      selectedScope: 'wallet',
     });
 
     const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
     expect(calledUrl).toContain('metric=trading');
-    expect(calledUrl).toContain('type=team');
+    expect(calledUrl).toContain('type=wallet');
     expect(calledUrl).toContain('page=2');
     expect(calledUrl).toContain('pageSize=50');
     expect(calledUrl).not.toContain('userId');
@@ -185,7 +185,7 @@ describe('fetchLeaderboardData — generatedAt support', () => {
 // by examining the source module exports directly (configuration-level test).
 
 describe('Leaderboard query key design', () => {
-  it('page queries isolate cache by metric, scope, page, user, and auth state', () => {
+  it('page queries isolate cache by metric, page, user, and auth state', () => {
     const key1 = getLeaderboardQueryKey({
       metric: 'reputation',
       page: 1,
@@ -232,7 +232,7 @@ describe('Leaderboard query key design', () => {
     );
   });
 
-  it('position queries isolate cache by metric, scope, page size, user, and auth state', () => {
+  it('position queries isolate cache by metric, page size, user, and auth state', () => {
     const key1 = getLeaderboardPositionQueryKey({
       metric: 'reputation',
       scope: 'wallet',
@@ -249,7 +249,7 @@ describe('Leaderboard query key design', () => {
     });
     const key3 = getLeaderboardPositionQueryKey({
       metric: 'reputation',
-      scope: 'team',
+      scope: 'wallet',
       pageSize: 50,
       userId: 'user-1',
       authToken: 'token-1',

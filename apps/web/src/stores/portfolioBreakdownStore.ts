@@ -53,27 +53,12 @@ export async function fetchPortfolioBreakdownSnapshot(
 
   return {
     wallet: toNumber(breakdownJson.wallet),
-    agents: toNumber(breakdownJson.agents),
     positions: toNumber(breakdownJson.positions),
     available: toNumber(breakdownJson.available),
     netPeerTransfers: toNumber(breakdownJson.netPeerTransfers),
     originalAmount: toNumber(breakdownJson.originalAmount),
     totalAssets: toNumber(breakdownJson.totalAssets),
     totalPnL: toNumber(breakdownJson.totalPnL),
-    agentCount: toNumber(breakdownJson.agentCount),
-    members: Array.isArray(breakdownJson.members)
-      ? breakdownJson.members
-          .filter(
-            (member): member is Record<string, unknown> =>
-              typeof member === 'object' && member !== null
-          )
-          .map((member) => ({
-            id: String(member.id ?? ''),
-            name: String(member.name ?? 'Agent'),
-            wallet: toNumber(member.wallet),
-            isAgent: Boolean(member.isAgent),
-          }))
-      : [],
   };
 }
 
