@@ -538,7 +538,7 @@ export class ReputationService {
           });
         }
 
-        // Same IP within 24 hours = flag for review (still award but mark suspicious)
+        // Same IP within 24 hours is logged for review. The signup does not pay points.
         if (
           timeDiff >= 0 &&
           timeDiff < twentyFourHours &&
@@ -555,7 +555,7 @@ export class ReputationService {
             },
             'ReputationService'
           );
-          // Continue to award points but mark as suspicious
+          // Continue. The signup records the referral and does not pay points.
         } else if (hasDifferentIdentifiers) {
           logger.info(
             'Allowing referral despite same IP: users have different identifiers',
@@ -759,9 +759,8 @@ export class ReputationService {
 
     const referrerId = user.referredBy;
 
-    // Claim the qualification (qualifiedAt IS NULL) and award the referrer in
-    // one transaction: concurrent callers (Twitter/Discord/profile hooks)
-    // qualify and pay once, and a failed award rolls back the claim.
+    // Claim the qualification (qualifiedAt IS NULL) once. Concurrent callers
+    // set qualifiedAt and do not pay points.
     const qualificationResult = await db.transaction(async (tx) => {
       const [claimed] = await tx
         .update(referrals)
