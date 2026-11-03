@@ -417,24 +417,17 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // Award referral reputation if user was referred.
   if (result.referrerId) {
-    // Award reputation to the referrer.
+    // Record the referral. awardReferralSignup no longer credits the referrer.
     const referralResult = await ReputationService.awardReferralSignup(
       result.referrerId,
       result.user.id
     );
     reputationBreakdown.referral = referralResult.reputationAwarded;
 
-    // Only proceed with referral rewards if the referrer was successfully awarded.
+    // The referrer is not paid. PRD §9.6 removes referral signup rewards and
+    // the new-user referral bonus. D-18 says points cannot be transferred
+    // between users. Still record the referral and the follow.
     if (referralResult.success) {
-      // Award bonus reputation to the new user for using a referral code.
-      const refereeBonus = await ReputationService.awardReputation(
-        result.user.id,
-        POINTS.REFERRAL_BONUS,
-        'referral_bonus',
-        { referrerId: result.referrerId }
-      );
-      reputationBreakdown.referralBonus = refereeBonus.reputationAwarded;
-
       // Update referral status to completed
       if (result.referralRecordId) {
         await db
@@ -469,12 +462,12 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       }
 
       logger.info(
-        'Awarded referral reputation to both referrer and referee',
+        'Recorded a referral without paying signup points',
         {
           referrerId: result.referrerId,
           referredUserId: result.user.id,
           referrerReputation: referralResult.reputationAwarded,
-          refereeReputationBonus: refereeBonus.reputationAwarded,
+          refereeReputationBonus: 0,
         },
         'POST /api/users/signup'
       );
