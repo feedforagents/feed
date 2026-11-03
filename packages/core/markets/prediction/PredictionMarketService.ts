@@ -44,6 +44,55 @@ function grossUpBuyAmount(netAmount: number, feeRate: number): number {
   return netAmount / divisor;
 }
 
+/**
+ * Same-process queue so buy, sell, resolve, and cancel on one market cannot
+ * interleave. Cross-process exclusion is PredictionDbPort.withMarketRowLock.
+ * The stored promise never rejects, so one failure does not wedge the queue.
+ */
+const predictionMarketLocks = new Map<string, Promise<void>>();
+
+function withInProcessMarketLock<T>(
+  marketId: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const previous = predictionMarketLocks.get(marketId) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(
+    () => gate,
+    () => gate
+  );
+  predictionMarketLocks.set(marketId, tail);
+  return previous
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        return await fn();
+      } finally {
+        release();
+        if (predictionMarketLocks.get(marketId) === tail) {
+          predictionMarketLocks.delete(marketId);
+        }
+      }
+    });
+}
+
+interface PreparedPredictionTrade {
+  result: PredictionTradeResult;
+  snapshot: PredictionPriceSnapshotRecord;
+  tradeEvent: Record<string, unknown>;
+  creditDescription?: string;
+  fee: {
+    userId: string;
+    amount: number;
+    type: string;
+    relatedId: string;
+    positionId: string;
+  } | null;
+}
+
 export class PredictionMarketService {
   private readonly db: PredictionDbPort;
   private readonly deps: PredictionServiceDeps;
@@ -127,14 +176,32 @@ export class PredictionMarketService {
   }
 
   async buy(input: PredictionBuyInput): Promise<PredictionTradeResult> {
-    const { marketId, userId, amount, side } = input;
+    const { marketId, amount } = input;
     if (!Number.isFinite(amount) || amount < MIN_TRADE_AMOUNT) {
       throw new BadRequestError(
         `Trade amount must be at least ${MIN_TRADE_AMOUNT}`
       );
     }
-    const market = await this.ensureMarket(marketId);
+    // Checked again inside the lock. This read is what a hook running under
+    // cancel observes without taking the lock cancel already holds.
+    const preview = await this.ensureMarket(marketId);
+    this.assertMarketActiveForBuy(preview);
 
+    return withInProcessMarketLock(marketId, async () => {
+      const prepared = await this.withLockedMarket(marketId, (db) =>
+        this.prepareBuy(db, input)
+      );
+      return this.finishTrade(prepared);
+    });
+  }
+
+  private async prepareBuy(
+    db: PredictionDbPort,
+    input: PredictionBuyInput
+  ): Promise<PreparedPredictionTrade> {
+    const { marketId, userId, amount, side } = input;
+    const market = await db.getMarketById(marketId);
+    if (!market) throw new NotFoundError('Market', marketId);
     this.assertMarketActiveForBuy(market);
 
     const tradeSource = this.deps.tradeSource ?? 'user_trade';
@@ -185,14 +252,14 @@ export class PredictionMarketService {
     });
 
     const newLiquidity = market.liquidity + calc.netAmount;
-    await this.db.updateMarketState(marketId, {
+    await db.updateMarketState(marketId, {
       yesShares: calc.newYesShares,
       noShares: calc.newNoShares,
       liquidity: newLiquidity,
     });
 
-    const existingPos = await this.db.getPosition(userId, marketId, side);
-    const position = await this.db.upsertPosition(
+    const existingPos = await db.getPosition(userId, marketId, side);
+    const position = await db.upsertPosition(
       existingPos
         ? {
             ...existingPos,
@@ -220,66 +287,63 @@ export class PredictionMarketService {
           }
     );
 
-    await this.recordSnapshot({
-      marketId,
-      yesPrice: calc.newYesPrice,
-      noPrice: calc.newNoPrice,
-      yesShares: calc.newYesShares,
-      noShares: calc.newNoShares,
-      liquidity: newLiquidity,
-      eventType: 'trade',
-      source: tradeSource,
-    });
-
-    await this.emitTrade({
-      type: 'prediction_trade',
-      marketId,
-      yesPrice: calc.newYesPrice,
-      noPrice: calc.newNoPrice,
-      yesShares: calc.newYesShares,
-      noShares: calc.newNoShares,
-      liquidity: newLiquidity,
-      trade: {
-        actorType: tradeActorType,
-        actorId: userId,
-        action: 'buy',
+    return {
+      result: {
+        positionId: position.id,
+        marketId,
         side,
         shares: calc.sharesBought,
-        amount,
-        price: calc.avgPrice,
-        source: tradeSource,
-        timestamp: this.now().toISOString(),
+        avgPrice: calc.avgPrice,
+        totalCost: amount,
+        feePaid: calc.fee,
+        market: {
+          yesPrice: calc.newYesPrice,
+          noPrice: calc.newNoPrice,
+          yesShares: calc.newYesShares,
+          noShares: calc.newNoShares,
+          priceImpact: calc.priceImpact,
+          liquidity: newLiquidity,
+        },
       },
-    });
-
-    await this.invalidateCaches(marketId);
-
-    if (this.deps.feeProcessor) {
-      await this.deps.feeProcessor.processTradingFee({
-        userId,
-        amount,
-        type: 'pred_buy',
-        relatedId: marketId,
-        positionId: position.id,
-      });
-    }
-
-    return {
-      positionId: position.id,
-      marketId,
-      side,
-      shares: calc.sharesBought,
-      avgPrice: calc.avgPrice,
-      totalCost: amount,
-      feePaid: calc.fee,
-      market: {
+      snapshot: {
+        marketId,
         yesPrice: calc.newYesPrice,
         noPrice: calc.newNoPrice,
         yesShares: calc.newYesShares,
         noShares: calc.newNoShares,
-        priceImpact: calc.priceImpact,
         liquidity: newLiquidity,
+        eventType: 'trade',
+        source: tradeSource,
       },
+      tradeEvent: {
+        type: 'prediction_trade',
+        marketId,
+        yesPrice: calc.newYesPrice,
+        noPrice: calc.newNoPrice,
+        yesShares: calc.newYesShares,
+        noShares: calc.newNoShares,
+        liquidity: newLiquidity,
+        trade: {
+          actorType: tradeActorType,
+          actorId: userId,
+          action: 'buy',
+          side,
+          shares: calc.sharesBought,
+          amount,
+          price: calc.avgPrice,
+          source: tradeSource,
+          timestamp: this.now().toISOString(),
+        },
+      },
+      fee: this.deps.feeProcessor
+        ? {
+            userId,
+            amount,
+            type: 'pred_buy',
+            relatedId: marketId,
+            positionId: position.id,
+          }
+        : null,
     };
   }
 
@@ -290,15 +354,45 @@ export class PredictionMarketService {
         `Shares to sell must be at least ${MIN_SHARES}`
       );
     }
-    const market = await this.ensureMarket(marketId);
+    const preview = await this.ensureMarket(marketId);
+    this.assertMarketActiveForSell(preview);
 
+    return withInProcessMarketLock(marketId, async () => {
+      const prepared = await this.withLockedMarket(marketId, (db) =>
+        this.prepareSell(db, input)
+      );
+      const netProceeds = prepared.result.netProceeds ?? 0;
+      await this.deps.wallet.credit({
+        userId,
+        amount: netProceeds,
+        reason: 'pred_sell',
+        description: prepared.creditDescription,
+        relatedId: marketId,
+      });
+      await this.deps.wallet.recordPnL({
+        userId,
+        pnl: prepared.result.pnl ?? 0,
+        reason: 'pred_sell',
+        relatedId: marketId,
+      });
+      return this.finishTrade(prepared);
+    });
+  }
+
+  private async prepareSell(
+    db: PredictionDbPort,
+    input: PredictionSellInput
+  ): Promise<PreparedPredictionTrade> {
+    const { marketId, userId, shares } = input;
+    const market = await db.getMarketById(marketId);
+    if (!market) throw new NotFoundError('Market', marketId);
     this.assertMarketActiveForSell(market);
 
     const tradeSource = this.deps.tradeSource ?? 'user_trade';
     const tradeActorType = this.deps.tradeActorType ?? 'user';
 
-    const yesPos = await this.db.getPosition(userId, marketId, 'yes');
-    const noPos = await this.db.getPosition(userId, marketId, 'no');
+    const yesPos = await db.getPosition(userId, marketId, 'yes');
+    const noPos = await db.getPosition(userId, marketId, 'no');
     const positions = [yesPos, noPos]
       .filter((p): p is NonNullable<typeof p> => !!p)
       // Only allow selling active positions (whitelist approach for security)
@@ -340,7 +434,7 @@ export class PredictionMarketService {
     if (newLiquidity < 0) {
       throw new BadRequestError('Sale would exceed available liquidity');
     }
-    await this.db.updateMarketState(marketId, {
+    await db.updateMarketState(marketId, {
       yesShares: calc.newYesShares,
       noShares: calc.newNoShares,
       liquidity: newLiquidity,
@@ -349,14 +443,14 @@ export class PredictionMarketService {
     const remaining = pos.shares - shares;
     const positionClosed = remaining <= MIN_SHARES;
     if (positionClosed) {
-      await this.db.upsertPosition({
+      await db.upsertPosition({
         ...pos,
         shares: 0,
         status: 'closed',
         updatedAt: this.now(),
       });
     } else {
-      await this.db.upsertPosition({
+      await db.upsertPosition({
         ...pos,
         shares: remaining,
         updatedAt: this.now(),
@@ -373,89 +467,80 @@ export class PredictionMarketService {
     );
     const profitLoss = netProceeds - costBasisWithFees;
 
-    await this.deps.wallet.credit({
-      userId,
-      amount: netProceeds,
-      reason: 'pred_sell',
-      description: `Sell ${side.toUpperCase()} in ${market.question}`,
-      relatedId: marketId,
-    });
-
-    await this.deps.wallet.recordPnL({
-      userId,
-      pnl: profitLoss,
-      reason: 'pred_sell',
-      relatedId: marketId,
-    });
-
-    await this.recordSnapshot({
-      marketId,
-      yesPrice: calc.newYesPrice,
-      noPrice: calc.newNoPrice,
-      yesShares: calc.newYesShares,
-      noShares: calc.newNoShares,
-      liquidity: newLiquidity,
-      eventType: 'trade',
-      source: tradeSource,
-    });
-
-    await this.emitTrade({
-      type: 'prediction_trade',
-      marketId,
-      yesPrice: calc.newYesPrice,
-      noPrice: calc.newNoPrice,
-      yesShares: calc.newYesShares,
-      noShares: calc.newNoShares,
-      liquidity: newLiquidity,
-      trade: {
-        actorType: tradeActorType,
-        actorId: userId,
-        action: 'sell',
+    return {
+      creditDescription: `Sell ${side.toUpperCase()} in ${market.question}`,
+      result: {
+        positionId: pos.id,
+        marketId,
         side,
         shares,
-        amount: netProceeds,
-        price: calc.avgPrice,
-        source: tradeSource,
-        timestamp: this.now().toISOString(),
+        avgPrice: calc.avgPrice,
+        totalProceeds: calc.totalCost,
+        netProceeds,
+        feePaid: calc.fee,
+        pnl: profitLoss,
+        remainingShares: positionClosed ? 0 : remaining,
+        positionClosed,
+        market: {
+          yesPrice: calc.newYesPrice,
+          noPrice: calc.newNoPrice,
+          yesShares: calc.newYesShares,
+          noShares: calc.newNoShares,
+          priceImpact: calc.priceImpact,
+          liquidity: newLiquidity,
+        },
       },
-    });
-
-    await this.invalidateCaches(marketId);
-
-    if (this.deps.feeProcessor) {
-      await this.deps.feeProcessor.processTradingFee({
-        userId,
-        amount: calc.totalCost,
-        type: 'pred_sell',
-        relatedId: marketId,
-        positionId: pos.id,
-      });
-    }
-
-    return {
-      positionId: pos.id,
-      marketId,
-      side,
-      shares,
-      avgPrice: calc.avgPrice,
-      totalProceeds: calc.totalCost,
-      netProceeds,
-      feePaid: calc.fee,
-      pnl: profitLoss,
-      remainingShares: positionClosed ? 0 : remaining,
-      positionClosed,
-      market: {
+      snapshot: {
+        marketId,
         yesPrice: calc.newYesPrice,
         noPrice: calc.newNoPrice,
         yesShares: calc.newYesShares,
         noShares: calc.newNoShares,
-        priceImpact: calc.priceImpact,
         liquidity: newLiquidity,
+        eventType: 'trade',
+        source: tradeSource,
       },
+      tradeEvent: {
+        type: 'prediction_trade',
+        marketId,
+        yesPrice: calc.newYesPrice,
+        noPrice: calc.newNoPrice,
+        yesShares: calc.newYesShares,
+        noShares: calc.newNoShares,
+        liquidity: newLiquidity,
+        trade: {
+          actorType: tradeActorType,
+          actorId: userId,
+          action: 'sell',
+          side,
+          shares,
+          amount: netProceeds,
+          price: calc.avgPrice,
+          source: tradeSource,
+          timestamp: this.now().toISOString(),
+        },
+      },
+      fee: this.deps.feeProcessor
+        ? {
+            userId,
+            amount: calc.totalCost,
+            type: 'pred_sell',
+            relatedId: marketId,
+            positionId: pos.id,
+          }
+        : null,
     };
   }
 
   async resolve(input: PredictionResolveInput): Promise<void> {
+    return withInProcessMarketLock(input.marketId, () =>
+      this.resolveWhileLocked(input)
+    );
+  }
+
+  private async resolveWhileLocked(
+    input: PredictionResolveInput
+  ): Promise<void> {
     const { marketId, winningSide, resolutionDescription, resolutionProofUrl } =
       input;
     const positions = await this.db.listPositionsForMarket(marketId);
@@ -579,141 +664,151 @@ export class PredictionMarketService {
    *
    * Unlike resolve(), this:
    * - Sets resolution to null (no winner/loser)
-   * - Refunds each position at their original cost basis (shares * avgPrice)
+   * - Refunds each position at their original cost basis (shares * avgPrice).
+   *   Fee gross-up of that basis is #1580 and is not applied here.
    * - Sets PnL to 0 for all positions (full refund)
    * - Marks positions as 'cancelled'
+   *
+   * The market is marked cancelled before any credit so buy and sell fail
+   * closed for the rest of the loop. A credit failure on the first refund
+   * clears that mark. A later failure leaves the mark so a retry can refund
+   * positions that are still active.
    */
   async cancel(input: PredictionCancelInput): Promise<PredictionCancelResult> {
+    return withInProcessMarketLock(input.marketId, () =>
+      this.cancelWhileLocked(input)
+    );
+  }
+
+  private async cancelWhileLocked(
+    input: PredictionCancelInput
+  ): Promise<PredictionCancelResult> {
     const { marketId, reason } = input;
-    const positions = await this.db.listPositionsForMarket(marketId);
-    const market = await this.ensureMarket(marketId);
-
-    // If already resolved with an outcome, can't cancel
-    if (market.resolved && market.resolution !== null) {
-      throw new BadRequestError(
-        'Market has already resolved with an outcome - cannot cancel'
-      );
-    }
-
-    // If already cancelled (resolved but no outcome), return early
-    if (market.resolved && market.resolution === null) {
-      return {
-        marketId,
-        positionsRefunded: 0,
-        totalRefunded: 0,
-      };
-    }
-
     const now = input.cancelledAt ?? this.now();
+    await this.ensureMarket(marketId);
+    const gated = await this.withLockedMarket(marketId, async (db) => {
+      const current = await db.getMarketById(marketId);
+      if (!current) throw new NotFoundError('Market', marketId);
+      if (current.resolved && typeof current.resolution === 'boolean') {
+        throw new BadRequestError(
+          'Market has already resolved with an outcome - cannot cancel'
+        );
+      }
+      const alreadyCancelled =
+        current.resolved && typeof current.resolution !== 'boolean';
+      if (!alreadyCancelled) {
+        await db.updateMarketState(marketId, {
+          resolved: true,
+          resolution: null,
+          resolutionDescription: reason ?? 'Market cancelled',
+        });
+      }
+      const positions = await db.listPositionsForMarket(marketId);
+      return {
+        market: current,
+        positions,
+        markedThisCall: !alreadyCancelled,
+        previousDescription: current.resolutionDescription ?? null,
+      };
+    });
+
     let positionsRefunded = 0;
     let totalRefunded = 0;
 
-    // Claim each active position as cancelled BEFORE any wallet credit, then
-    // settle the refund. Credit-before-status left a window where sell (still
-    // allowed on cancelled markets) could pay a second time. Defer the market
-    // cancelled mark until after refunds so a mid-loop failure stays retryable.
-    for (const pos of positions) {
-      // Skip already closed/resolved/cancelled positions
-      if (pos.status && pos.status !== 'active') {
-        continue;
-      }
+    try {
+      for (const pos of gated.positions) {
+        if (pos.status && pos.status !== 'active') continue;
 
-      const refundAmount = pos.shares * pos.avgPrice;
+        const claimed = await this.claimCancelledPosition(pos, now);
+        if (!claimed) continue;
 
-      await this.db.upsertPosition({
-        ...pos,
-        status: 'cancelled',
-        outcome: null,
-        pnl: 0,
-        resolvedAt: now,
-        updatedAt: now,
-      });
+        // Cost basis only. Do not gross up for fees; that arithmetic is #1580.
+        const refundAmount = claimed.shares * claimed.avgPrice;
+        if (!(refundAmount > 0)) continue;
 
-      if (refundAmount > 0) {
         try {
           await this.deps.wallet.credit({
-            userId: pos.userId,
+            userId: claimed.userId,
             amount: refundAmount,
             reason: 'pred_cancel',
-            description: `Refund for cancelled market: ${market.question}`,
+            description: `Refund for cancelled market: ${gated.market.question}`,
             relatedId: marketId,
           });
+        } catch (creditErr) {
+          await this.restoreActivePosition(pos, claimed, creditErr);
+          throw creditErr;
+        }
 
+        try {
           await this.deps.wallet.recordPnL({
-            userId: pos.userId,
+            userId: claimed.userId,
             pnl: 0,
             reason: 'pred_cancel',
             relatedId: marketId,
           });
+        } catch (pnlErr) {
+          // The refund already committed. Restoring the position here would
+          // let sell and a second cancel pay again.
+          logger.error(
+            'prediction cancel refund credited but recordPnL failed; leaving position cancelled',
+            {
+              userId: claimed.userId,
+              marketId,
+              positionId: claimed.id,
+              refundAmount,
+              error: pnlErr instanceof Error ? pnlErr.message : String(pnlErr),
+            },
+            'PredictionMarketService'
+          );
+        }
 
-          totalRefunded += refundAmount;
-          positionsRefunded++;
-        } catch (creditErr) {
-          // Position write is not enlisted with the wallet. Restore active so a
-          // credit failure does not strand the user without refund or sell.
-          try {
-            await this.db.upsertPosition({
-              ...pos,
-              status: 'active',
-              outcome: null,
-              pnl: pos.pnl,
-              resolvedAt: null,
-              updatedAt: this.now(),
-            });
-          } catch (restoreErr) {
-            logger.error(
-              'CRITICAL: Failed to restore prediction position after cancel credit failure',
-              {
-                userId: pos.userId,
-                marketId,
-                positionId: pos.id,
-                refundAmount,
-                creditError:
-                  creditErr instanceof Error
-                    ? creditErr.message
-                    : String(creditErr),
-                restoreError:
-                  restoreErr instanceof Error
-                    ? restoreErr.message
-                    : String(restoreErr),
-              },
-              'PredictionMarketService'
-            );
-          }
-          throw creditErr;
+        totalRefunded += refundAmount;
+        positionsRefunded++;
+      }
+    } catch (err) {
+      if (gated.markedThisCall && positionsRefunded === 0) {
+        try {
+          await this.db.updateMarketState(marketId, {
+            resolved: false,
+            resolution: null,
+            resolutionDescription: gated.previousDescription,
+          });
+        } catch (clearErr) {
+          logger.error(
+            'CRITICAL: Failed to reopen prediction market after cancel credit failure',
+            {
+              marketId,
+              error:
+                clearErr instanceof Error ? clearErr.message : String(clearErr),
+            },
+            'PredictionMarketService'
+          );
         }
       }
+      throw err;
     }
 
-    await this.db.updateMarketState(marketId, {
-      resolved: true,
-      resolution: null,
-      resolutionDescription: reason ?? 'Market cancelled',
-    });
-
-    // Record a snapshot for the cancellation
-    await this.recordSnapshot({
-      marketId,
-      yesPrice: 0,
-      noPrice: 0,
-      yesShares: market.yesShares,
-      noShares: market.noShares,
-      liquidity: market.liquidity,
-      eventType: 'resolution',
-      source: 'system',
-    });
-
-    // Emit cancellation event
-    await this.emitResolution({
-      type: 'prediction_cancellation',
-      marketId,
-      reason: reason ?? 'Market cancelled',
-      positionsRefunded,
-      totalRefunded,
-      timestamp: now.toISOString(),
-    });
-
-    await this.invalidateCaches(marketId);
+    if (gated.markedThisCall || positionsRefunded > 0) {
+      await this.recordSnapshot({
+        marketId,
+        yesPrice: 0,
+        noPrice: 0,
+        yesShares: gated.market.yesShares,
+        noShares: gated.market.noShares,
+        liquidity: gated.market.liquidity,
+        eventType: 'resolution',
+        source: 'system',
+      });
+      await this.emitResolution({
+        type: 'prediction_cancellation',
+        marketId,
+        reason: reason ?? 'Market cancelled',
+        positionsRefunded,
+        totalRefunded,
+        timestamp: now.toISOString(),
+      });
+      await this.invalidateCaches(marketId);
+    }
 
     return {
       marketId,
@@ -725,6 +820,94 @@ export class PredictionMarketService {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+  private async withLockedMarket<T>(
+    marketId: string,
+    fn: (db: PredictionDbPort) => Promise<T>
+  ): Promise<T> {
+    if (this.db.withMarketRowLock) {
+      return this.db.withMarketRowLock(marketId, fn);
+    }
+    const market = await this.db.getMarketById(marketId);
+    if (!market) throw new NotFoundError('Market', marketId);
+    return fn(this.db);
+  }
+
+  private async finishTrade(
+    prepared: PreparedPredictionTrade
+  ): Promise<PredictionTradeResult> {
+    await this.recordSnapshot(prepared.snapshot);
+    await this.emitTrade(prepared.tradeEvent);
+    await this.invalidateCaches(prepared.result.marketId);
+    if (prepared.fee && this.deps.feeProcessor) {
+      await this.deps.feeProcessor.processTradingFee(prepared.fee);
+    }
+    return prepared.result;
+  }
+
+  private async claimCancelledPosition(
+    pos: PredictionPositionRecord,
+    now: Date
+  ): Promise<PredictionPositionRecord | null> {
+    if (this.db.claimActivePosition) {
+      return this.db.claimActivePosition(pos.id, {
+        outcome: null,
+        pnl: 0,
+        resolvedAt: now,
+        updatedAt: now,
+      });
+    }
+    const current = await this.db.getPosition(
+      pos.userId,
+      pos.marketId,
+      pos.side
+    );
+    if (!current || current.id !== pos.id) return null;
+    if (current.status && current.status !== 'active') return null;
+    return this.db.upsertPosition({
+      ...current,
+      status: 'cancelled',
+      outcome: null,
+      pnl: 0,
+      resolvedAt: now,
+      updatedAt: now,
+    });
+  }
+
+  private async restoreActivePosition(
+    pos: PredictionPositionRecord,
+    claimed: PredictionPositionRecord,
+    creditErr: unknown
+  ): Promise<void> {
+    try {
+      await this.db.upsertPosition({
+        ...pos,
+        shares: claimed.shares,
+        avgPrice: claimed.avgPrice,
+        status: 'active',
+        outcome: null,
+        pnl: pos.pnl,
+        resolvedAt: null,
+        updatedAt: this.now(),
+      });
+    } catch (restoreErr) {
+      logger.error(
+        'CRITICAL: Failed to restore prediction position after cancel credit failure',
+        {
+          userId: pos.userId,
+          marketId: pos.marketId,
+          positionId: pos.id,
+          creditError:
+            creditErr instanceof Error ? creditErr.message : String(creditErr),
+          restoreError:
+            restoreErr instanceof Error
+              ? restoreErr.message
+              : String(restoreErr),
+        },
+        'PredictionMarketService'
+      );
+    }
+  }
+
   private async ensureMarket(
     marketId: string
   ): Promise<PredictionMarketRecord> {
@@ -763,7 +946,7 @@ export class PredictionMarketService {
   private assertMarketActiveForSell(market: PredictionMarketRecord) {
     if (market.resolved) {
       throw new BadRequestError(
-        market.resolution !== null
+        typeof market.resolution === 'boolean'
           ? 'Market has resolved with outcome - positions are auto-settled'
           : 'Market has been cancelled - positions are refunded'
       );

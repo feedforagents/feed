@@ -372,6 +372,45 @@ export class PredictionDbAdapter implements PredictionDbPort {
     return rows.map(mapPosition);
   }
 
+  async withMarketRowLock<T>(
+    marketId: string,
+    fn: (db: PredictionDbPort) => Promise<T>
+  ): Promise<T> {
+    return this.client.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ id: markets.id })
+        .from(markets)
+        .where(eq(markets.id, marketId))
+        .limit(1)
+        .for('update');
+      if (!row) throw new Error(`Market not found: ${marketId}`);
+      return fn(new PredictionDbAdapter(tx));
+    });
+  }
+
+  async claimActivePosition(
+    positionId: string,
+    patch: {
+      outcome: null;
+      pnl: number;
+      resolvedAt: Date;
+      updatedAt: Date;
+    }
+  ): Promise<PredictionPositionRecord | null> {
+    const [result] = await this.client
+      .update(positions)
+      .set({
+        status: 'cancelled',
+        outcome: null,
+        pnl: String(patch.pnl),
+        resolvedAt: patch.resolvedAt,
+        updatedAt: patch.updatedAt,
+      })
+      .where(and(eq(positions.id, positionId), eq(positions.status, 'active')))
+      .returning();
+    return result ? mapPosition(result) : null;
+  }
+
   async insertPriceSnapshot(
     snapshot: PredictionPriceSnapshotRecord
   ): Promise<void> {

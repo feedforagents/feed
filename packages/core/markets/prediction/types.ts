@@ -114,6 +114,28 @@ export interface PredictionDbPort {
   deletePosition(positionId: string): Promise<void>;
   listPositionsForMarket(marketId: string): Promise<PredictionPositionRecord[]>;
   insertPriceSnapshot(snapshot: PredictionPriceSnapshotRecord): Promise<void>;
+  /**
+   * Serialize market-row mutations across processes.
+   * `fn` must read and write this market through the provided port.
+   * Wallet calls inside `fn` commit on their own connection.
+   */
+  withMarketRowLock?<T>(
+    marketId: string,
+    fn: (db: PredictionDbPort) => Promise<T>
+  ): Promise<T>;
+  /**
+   * Mark the position cancelled only while it is still active.
+   * Returns null when the row was already claimed.
+   */
+  claimActivePosition?(
+    positionId: string,
+    patch: {
+      outcome: null;
+      pnl: number;
+      resolvedAt: Date;
+      updatedAt: Date;
+    }
+  ): Promise<PredictionPositionRecord | null>;
 }
 
 // DTOs

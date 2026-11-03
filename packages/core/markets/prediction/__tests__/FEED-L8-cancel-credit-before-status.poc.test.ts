@@ -1,8 +1,10 @@
 /**
  * FEED-L8 regression: PredictionMarketService.cancel must claim/mark the
  * position cancelled BEFORE wallet.credit(pred_cancel), and must restore
- * active if credit fails. Credit-before-status + sell-allowed-on-cancelled
- * market minted free money (refund + sell proceeds).
+ * active only if that credit fails. A recordPnL failure after a successful
+ * credit must not restore the position. Already-cancelled markets still
+ * refund positions left active. Buy and sell are rejected once cancel has
+ * marked the market, including during the refund loop.
  *
  * Distinct from:
  *   #1580 (cancel fee gross-up arithmetic)
@@ -35,6 +37,10 @@ class TrackingWallet implements WalletPort {
   creditCalls = 0;
   credits: Array<{ userId: string; amount: number; reason: string }> = [];
   failCredit = false;
+  failRecordPnL = false;
+  /** Throw on the credit attempt after this many successful credits. */
+  failAfterSuccesses = Number.POSITIVE_INFINITY;
+  onCredit: (() => Promise<void>) | null = null;
   constructor(private defaultBalance = 10_000) {}
   async debit({ userId, amount }: { userId: string; amount: number }) {
     const b = this.balances.get(userId) ?? this.defaultBalance;
@@ -50,15 +56,18 @@ class TrackingWallet implements WalletPort {
     amount: number;
     reason: string;
   }) {
-    if (this.failCredit) {
+    if (this.failCredit || this.creditCalls >= this.failAfterSuccesses) {
       throw new Error('wallet credit failed');
     }
+    if (this.onCredit) await this.onCredit();
     this.creditCalls++;
     this.credits.push({ userId, amount, reason });
     const b = this.balances.get(userId) ?? this.defaultBalance;
     this.balances.set(userId, b + amount);
   }
-  async recordPnL(): Promise<void> {}
+  async recordPnL(): Promise<void> {
+    if (this.failRecordPnL) throw new Error('recordPnL failed');
+  }
   async getBalance(userId: string) {
     return { balance: this.balances.get(userId) ?? this.defaultBalance };
   }
@@ -247,9 +256,11 @@ describe('FEED-L8 cancel claim-before-credit', () => {
     expect((await wallet.getBalance('u1')).balance).toBe(0);
     const pos = await db.getPosition('u1', 'm1', 'yes');
     expect(pos?.status).toBe('active');
-    // Market mark deferred until after refunds — still open / retryable.
+    // No refund landed, so the cancelling mark is cleared and the market
+    // stays open for a retry.
     const m = await db.getMarketById('m1');
     expect(m?.resolved).toBe(false);
+    expect(m?.resolution ?? null).toBeNull();
   });
 
   it('happy-path cancel refunds once and blocks subsequent sell', async () => {
@@ -298,5 +309,238 @@ describe('FEED-L8 cancel claim-before-credit', () => {
       })
     ).rejects.toThrow(/cancelled/);
     expect(wallet.creditCalls).toBe(1);
+    const closed = await db.getMarketById('m1');
+    expect(closed?.resolved).toBe(true);
+    expect(closed?.resolution ?? null).toBeNull();
+  });
+
+  it('keeps the position cancelled when recordPnL fails after credit', async () => {
+    const market: PredictionMarketRecord = {
+      id: 'm1',
+      question: 'Will it rain?',
+      yesShares: 6000,
+      noShares: 4000,
+      liquidity: 10_000,
+      endDate: new Date(Date.now() + 3600_000),
+      resolved: false,
+    };
+    const db = new MemoryDb(market);
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 100,
+      avgPrice: 0.5,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const wallet = new TrackingWallet(0);
+    wallet.balances.set('u1', 0);
+    wallet.failRecordPnL = true;
+    const service = makeService(db, wallet);
+
+    const result = await service.cancel({
+      marketId: 'm1',
+      reason: 'PoC cancel',
+    });
+    expect(result.positionsRefunded).toBe(1);
+    expect(result.totalRefunded).toBe(50);
+    expect((await wallet.getBalance('u1')).balance).toBe(50);
+    expect((await db.getPosition('u1', 'm1', 'yes'))?.status).toBe('cancelled');
+    expect((await db.getMarketById('m1'))?.resolved).toBe(true);
+
+    const again = await service.cancel({ marketId: 'm1', reason: 'retry' });
+    expect(again.positionsRefunded).toBe(0);
+    expect(again.totalRefunded).toBe(0);
+    expect(wallet.creditCalls).toBe(1);
+    expect((await wallet.getBalance('u1')).balance).toBe(50);
+    await expect(
+      service.sell({ marketId: 'm1', userId: 'u1', shares: 100 })
+    ).rejects.toThrow(/cancelled/);
+    expect(wallet.credits.filter((c) => c.reason === 'pred_sell')).toHaveLength(
+      0
+    );
+  });
+
+  it('refunds an active position left on an already-cancelled market', async () => {
+    const market: PredictionMarketRecord = {
+      id: 'm1',
+      question: 'Will it rain?',
+      yesShares: 6000,
+      noShares: 4000,
+      liquidity: 10_000,
+      endDate: new Date(Date.now() + 3600_000),
+      resolved: true,
+      resolution: null,
+      resolutionDescription: 'cancelled earlier',
+    };
+    const db = new MemoryDb(market);
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 80,
+      avgPrice: 0.25,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await db.upsertPosition({
+      userId: 'u2',
+      marketId: 'm1',
+      side: 'no',
+      shares: 10,
+      avgPrice: 0.4,
+      status: 'cancelled',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const wallet = new TrackingWallet(0);
+    wallet.balances.set('u1', 0);
+    wallet.balances.set('u2', 5);
+    const service = makeService(db, wallet);
+
+    const repaired = await service.cancel({
+      marketId: 'm1',
+      reason: 'repair',
+    });
+    expect(repaired.positionsRefunded).toBe(1);
+    expect(repaired.totalRefunded).toBe(20);
+    expect((await wallet.getBalance('u1')).balance).toBe(20);
+    expect((await wallet.getBalance('u2')).balance).toBe(5);
+    expect((await db.getPosition('u1', 'm1', 'yes'))?.status).toBe('cancelled');
+    expect(wallet.credits.map((c) => c.reason)).toEqual(['pred_cancel']);
+
+    await expect(
+      service.buy({
+        marketId: 'm1',
+        userId: 'u1',
+        side: 'yes',
+        amount: 10,
+      })
+    ).rejects.toThrow(/resolved/);
+    await expect(
+      service.sell({ marketId: 'm1', userId: 'u1', shares: 80 })
+    ).rejects.toThrow(/cancelled/);
+
+    const second = await service.cancel({ marketId: 'm1' });
+    expect(second.positionsRefunded).toBe(0);
+    expect(wallet.creditCalls).toBe(1);
+  });
+
+  it('refunds only the unpaid position when a later credit fails', async () => {
+    const market: PredictionMarketRecord = {
+      id: 'm1',
+      question: 'Will it rain?',
+      yesShares: 6000,
+      noShares: 4000,
+      liquidity: 10_000,
+      endDate: new Date(Date.now() + 3600_000),
+      resolved: false,
+    };
+    const db = new MemoryDb(market);
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 100,
+      avgPrice: 0.5,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await db.upsertPosition({
+      userId: 'u2',
+      marketId: 'm1',
+      side: 'no',
+      shares: 40,
+      avgPrice: 0.5,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const wallet = new TrackingWallet(0);
+    wallet.balances.set('u1', 0);
+    wallet.balances.set('u2', 0);
+    wallet.failAfterSuccesses = 1;
+    const service = makeService(db, wallet);
+
+    await expect(service.cancel({ marketId: 'm1' })).rejects.toThrow(
+      'wallet credit failed'
+    );
+    expect((await db.getPosition('u1', 'm1', 'yes'))?.status).toBe('cancelled');
+    expect((await db.getPosition('u2', 'm1', 'no'))?.status).toBe('active');
+    expect((await wallet.getBalance('u1')).balance).toBe(50);
+    expect((await wallet.getBalance('u2')).balance).toBe(0);
+    expect((await db.getMarketById('m1'))?.resolved).toBe(true);
+
+    wallet.failAfterSuccesses = Number.POSITIVE_INFINITY;
+    const repaired = await service.cancel({ marketId: 'm1' });
+    expect(repaired.positionsRefunded).toBe(1);
+    expect(repaired.totalRefunded).toBe(20);
+    expect((await db.getPosition('u2', 'm1', 'no'))?.status).toBe('cancelled');
+    expect((await wallet.getBalance('u1')).balance).toBe(50);
+    expect((await wallet.getBalance('u2')).balance).toBe(20);
+    expect(
+      wallet.credits.filter((c) => c.reason === 'pred_cancel')
+    ).toHaveLength(2);
+  });
+
+  it('rejects buy and sell while the refund loop is in progress', async () => {
+    const market: PredictionMarketRecord = {
+      id: 'm1',
+      question: 'Will it rain?',
+      yesShares: 6000,
+      noShares: 4000,
+      liquidity: 10_000,
+      endDate: new Date(Date.now() + 3600_000),
+      resolved: false,
+    };
+    const db = new MemoryDb(market);
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 100,
+      avgPrice: 0.5,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const wallet = new TrackingWallet(1_000);
+    wallet.balances.set('u1', 1_000);
+    const service = makeService(db, wallet);
+    const seen: string[] = [];
+    wallet.onCredit = async () => {
+      try {
+        await service.buy({
+          marketId: 'm1',
+          userId: 'u1',
+          side: 'no',
+          amount: 10,
+        });
+        seen.push('buy-allowed');
+      } catch (error) {
+        seen.push(error instanceof Error ? error.message : String(error));
+      }
+      try {
+        await service.sell({ marketId: 'm1', userId: 'u1', shares: 10 });
+        seen.push('sell-allowed');
+      } catch (error) {
+        seen.push(error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    const result = await service.cancel({ marketId: 'm1', reason: 'race' });
+    expect(result.positionsRefunded).toBe(1);
+    expect(result.totalRefunded).toBe(50);
+    expect(seen.some((line) => /resolved/i.test(line))).toBe(true);
+    expect(seen.some((line) => /cancelled/i.test(line))).toBe(true);
+    expect(seen.some((line) => line.endsWith('allowed'))).toBe(false);
+    expect(wallet.credits.map((c) => c.reason)).toEqual(['pred_cancel']);
+    const positions = await db.listPositionsForMarket('m1');
+    expect(positions.filter((p) => p.status === 'active')).toHaveLength(0);
+    expect((await wallet.getBalance('u1')).balance).toBe(1_050);
   });
 });
