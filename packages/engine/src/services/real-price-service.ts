@@ -79,7 +79,7 @@ const COINGECKO_API = 'https://api.coingecko.com/api/v3/simple/price';
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const FETCH_TIMEOUT_MS = 10_000;
 
-class RealPriceService {
+export class RealPriceService {
   private cache: CachedPrices | null = null;
 
   /**
@@ -146,6 +146,13 @@ class RealPriceService {
         err instanceof Error ? err : undefined,
         'RealPriceService'
       );
+    }
+
+    // Carry forward last-known-good live prices when the refresh failed, so a
+    // transient outage serves the freshest cached value instead of silently
+    // degrading to the older static reference while resetting the cache TTL.
+    for (const [key, value] of this.cache?.prices ?? []) {
+      if (!prices.has(key)) prices.set(key, value);
     }
 
     // Always add static prices for stock-based orgs
