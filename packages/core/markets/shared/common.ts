@@ -46,7 +46,22 @@ export interface WalletPort {
     reason: string;
     description?: string;
     relatedId?: string;
+    /**
+     * Stable id for this credit attempt. Stored as the balance-transaction
+     * primary key so a retry or a lost response can see whether it landed.
+     * `relatedId` stays the domain id (market id for prediction sells).
+     */
+    idempotencyKey?: string;
   }): Promise<void>;
+  /**
+   * True when a credit with this attempt id is already stored.
+   * Missing means the wallet cannot tell; callers must not treat that as
+   * "not applied".
+   */
+  creditWasApplied?(params: {
+    userId: string;
+    idempotencyKey: string;
+  }): Promise<boolean>;
   recordPnL(params: {
     userId: string;
     pnl: number;

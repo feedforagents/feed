@@ -18,7 +18,7 @@ import {
   sql,
   type Transaction,
 } from '@feed/db';
-import { logger } from '@feed/shared';
+import { logger, WalletCreditNotAppliedError } from '@feed/shared';
 
 type DbClient = typeof defaultDb | Transaction;
 
@@ -89,8 +89,15 @@ export function createNpcWalletAdapter(
     },
 
     async credit({ amount }: { amount: number }) {
-      assertValidAmount('credit', actorId, amount);
-      // Atomic credit using SQL increment
+      try {
+        assertValidAmount('credit', actorId, amount);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new WalletCreditNotAppliedError(message, { cause: err });
+      }
+      // Atomic credit using SQL increment. A zero-row update means the actor
+      // row was missing and nothing was paid. Driver errors stay unclassified
+      // so a lost response is not treated as "not applied".
       const result = await db
         .update(actorState)
         .set({
@@ -101,7 +108,7 @@ export function createNpcWalletAdapter(
         .returning({ id: actorState.id });
 
       if (result.length === 0) {
-        throw new Error(`Actor not found: ${actorId}`);
+        throw new WalletCreditNotAppliedError(`Actor not found: ${actorId}`);
       }
     },
 

@@ -5,6 +5,23 @@
 import { BusinessLogicError, FeedAppError } from './base.errors';
 
 /**
+ * A wallet credit failed before any balance row was committed.
+ * Callers may compensate. Timeouts and lost responses must not use this
+ * type: those can mean the credit landed and the caller only missed the ack.
+ */
+export class WalletCreditNotAppliedError extends Error {
+  readonly applied = false as const;
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message);
+    this.name = 'WalletCreditNotAppliedError';
+    if (options && 'cause' in options) {
+      this.cause = options.cause;
+    }
+  }
+}
+
+/**
  * Insufficient funds error for balance-related issues
  */
 export class InsufficientFundsError extends BusinessLogicError {

@@ -1548,7 +1548,14 @@ export async function resolveQuestionPayouts(
         debit: async () => {
           throw new Error('Unexpected debit during market resolution');
         },
-        credit: async ({ userId, amount, reason, description, relatedId }) => {
+        credit: async ({
+          userId,
+          amount,
+          reason,
+          description,
+          relatedId,
+          idempotencyKey,
+        }) => {
           totalPayout += amount;
           await WalletService.credit(
             userId,
@@ -1556,9 +1563,12 @@ export async function resolveQuestionPayouts(
             reason,
             description ?? '',
             relatedId,
-            tx
+            tx,
+            idempotencyKey
           );
         },
+        creditWasApplied: ({ userId, idempotencyKey }) =>
+          WalletService.creditWasApplied(userId, idempotencyKey, tx),
         recordPnL: async ({ userId, pnl }) => {
           pnlsToRecord.push({ userId, pnl });
         },

@@ -1,4 +1,10 @@
-import { BadRequestError, logger, NotFoundError } from '@feed/shared';
+import {
+  BadRequestError,
+  generateSnowflakeId,
+  logger,
+  NotFoundError,
+  WalletCreditNotAppliedError,
+} from '@feed/shared';
 import { PredictionPricing } from './pricing';
 import type {
   PredictionBuyInput,
@@ -35,6 +41,17 @@ const MAX_ODDS_MOVE_PER_TRADE = 0.2;
  */
 const ODDS_HARD_FLOOR = 0.02;
 const ODDS_HARD_CEILING = 0.98;
+
+function restoredPositionStatus(
+  status: PredictionPositionRecord['status'],
+  restoredShares: number
+): PredictionPositionRecord['status'] {
+  if (status === 'resolved' || status === 'cancelled' || status === 'voided') {
+    return status;
+  }
+  if (restoredShares > MIN_SHARES) return 'active';
+  return status ?? 'active';
+}
 
 function grossUpBuyAmount(netAmount: number, feeRate: number): number {
   if (!Number.isFinite(netAmount)) return 0;
@@ -342,11 +359,12 @@ export class PredictionMarketService {
     }
     const remaining = pos.shares - shares;
     const positionClosed = remaining <= MIN_SHARES;
-    const priorMarketState = {
-      yesShares: market.yesShares,
-      noShares: market.noShares,
-      liquidity: market.liquidity,
-    };
+    const yesDelta = calc.newYesShares - market.yesShares;
+    const noDelta = calc.newNoShares - market.noShares;
+    const liquidityDelta = newLiquidity - market.liquidity;
+    // Attempt id is the ledger primary key. relatedId stays the market id so
+    // trade history can still resolve the market.
+    const idempotencyKey = await generateSnowflakeId();
 
     await this.db.updateMarketState(marketId, {
       yesShares: calc.newYesShares,
@@ -379,45 +397,67 @@ export class PredictionMarketService {
     );
     const profitLoss = netProceeds - costBasisWithFees;
 
+    const creditParams = {
+      userId,
+      amount: netProceeds,
+      reason: 'pred_sell',
+      description: `Sell ${side.toUpperCase()} in ${market.question}`,
+      relatedId: marketId,
+      idempotencyKey,
+    };
+
     try {
-      await this.deps.wallet.credit({
-        userId,
-        amount: netProceeds,
-        reason: 'pred_sell',
-        description: `Sell ${side.toUpperCase()} in ${market.question}`,
-        relatedId: marketId,
-      });
+      await this.deps.wallet.credit(creditParams);
     } catch (creditErr) {
-      // Market + position writes are not enlisted with the wallet. Restore both
-      // so a credit failure does not burn shares without paying proceeds.
-      try {
-        await this.db.updateMarketState(marketId, priorMarketState);
-        await this.db.upsertPosition({
-          ...pos,
-          updatedAt: this.now(),
+      // Pool and position writes commit before the wallet. Undo them only when
+      // the credit is known not to have landed. A timeout after a successful
+      // credit must keep the sale, or the user is paid and also gets the shares.
+      if (creditErr instanceof WalletCreditNotAppliedError) {
+        await this.restoreFailedSell({
+          marketId,
+          userId,
+          side,
+          positionId: pos.id,
+          shares,
+          yesDelta,
+          noDelta,
+          liquidityDelta,
+          netProceeds,
+          creditErr,
         });
-      } catch (restoreErr) {
+        throw creditErr;
+      }
+      const landed = await this.creditLanded(userId, idempotencyKey);
+      if (!landed) {
         logger.error(
-          'CRITICAL: Failed to restore prediction sell after credit failure',
+          'CRITICAL: prediction sell credit outcome unknown; left shares sold',
           {
             userId,
             marketId,
             side,
             shares,
             netProceeds,
+            idempotencyKey,
             creditError:
               creditErr instanceof Error
                 ? creditErr.message
                 : String(creditErr),
-            restoreError:
-              restoreErr instanceof Error
-                ? restoreErr.message
-                : String(restoreErr),
           },
           'PredictionMarketService'
         );
+        throw creditErr;
       }
-      throw creditErr;
+      logger.warn(
+        'Prediction sell credit applied but the call failed; keeping the sale',
+        {
+          userId,
+          marketId,
+          idempotencyKey,
+          creditError:
+            creditErr instanceof Error ? creditErr.message : String(creditErr),
+        },
+        'PredictionMarketService'
+      );
     }
 
     await this.deps.wallet.recordPnL({
@@ -793,6 +833,116 @@ export class PredictionMarketService {
   private async emitResolution(payload: Record<string, unknown>) {
     if (!this.deps.broadcast) return;
     await this.deps.broadcast.emit('markets', payload);
+  }
+
+  private async creditLanded(
+    userId: string,
+    idempotencyKey: string
+  ): Promise<boolean> {
+    const probe = this.deps.wallet.creditWasApplied;
+    if (!probe) return false;
+    try {
+      return await probe.call(this.deps.wallet, {
+        userId,
+        idempotencyKey,
+      });
+    } catch (probeErr) {
+      logger.error(
+        'Prediction sell credit probe failed',
+        {
+          userId,
+          idempotencyKey,
+          probeError:
+            probeErr instanceof Error ? probeErr.message : String(probeErr),
+        },
+        'PredictionMarketService'
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Undo this sell's pool and share deltas on top of the current rows.
+   * Absolute snapshots would erase trades that committed during the credit.
+   */
+  private async restoreFailedSell(input: {
+    marketId: string;
+    userId: string;
+    side: PredictionSide;
+    positionId: string;
+    shares: number;
+    yesDelta: number;
+    noDelta: number;
+    liquidityDelta: number;
+    netProceeds: number;
+    creditErr: unknown;
+  }): Promise<void> {
+    const creditError =
+      input.creditErr instanceof Error
+        ? input.creditErr.message
+        : String(input.creditErr);
+    try {
+      if (this.db.applyMarketDelta) {
+        await this.db.applyMarketDelta(input.marketId, {
+          yesShares: -input.yesDelta,
+          noShares: -input.noDelta,
+          liquidity: -input.liquidityDelta,
+        });
+      } else {
+        const current = await this.db.getMarketById(input.marketId);
+        if (!current) throw new Error(`Market not found: ${input.marketId}`);
+        await this.db.updateMarketState(input.marketId, {
+          yesShares: current.yesShares - input.yesDelta,
+          noShares: current.noShares - input.noDelta,
+          liquidity: current.liquidity - input.liquidityDelta,
+        });
+      }
+
+      if (this.db.applyPositionShareDelta) {
+        const restored = await this.db.applyPositionShareDelta(
+          input.positionId,
+          input.shares,
+          MIN_SHARES
+        );
+        if (!restored) {
+          throw new Error(`Position not found: ${input.positionId}`);
+        }
+        return;
+      }
+
+      const current = await this.db.getPosition(
+        input.userId,
+        input.marketId,
+        input.side
+      );
+      if (!current || current.id !== input.positionId) {
+        throw new Error(`Position not found: ${input.positionId}`);
+      }
+      const restoredShares = current.shares + input.shares;
+      await this.db.upsertPosition({
+        ...current,
+        shares: restoredShares,
+        status: restoredPositionStatus(current.status, restoredShares),
+        updatedAt: this.now(),
+      });
+    } catch (restoreErr) {
+      logger.error(
+        'CRITICAL: Failed to restore prediction sell after credit failure',
+        {
+          userId: input.userId,
+          marketId: input.marketId,
+          side: input.side,
+          shares: input.shares,
+          netProceeds: input.netProceeds,
+          creditError,
+          restoreError:
+            restoreErr instanceof Error
+              ? restoreErr.message
+              : String(restoreErr),
+        },
+        'PredictionMarketService'
+      );
+    }
   }
 
   private async invalidateCaches(marketId: string) {

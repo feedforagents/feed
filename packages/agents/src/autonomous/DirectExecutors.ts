@@ -357,12 +357,14 @@ function createPredictionWalletAdapter(
       reason,
       description,
       relatedId,
+      idempotencyKey,
     }: {
       userId: string;
       amount: number;
       reason: string;
       description?: string;
       relatedId?: string;
+      idempotencyKey?: string;
     }) =>
       WalletService.credit(
         uid,
@@ -370,8 +372,16 @@ function createPredictionWalletAdapter(
         reason,
         description ?? '',
         relatedId,
-        txDb
+        txDb,
+        idempotencyKey
       ),
+    creditWasApplied: ({
+      userId,
+      idempotencyKey,
+    }: {
+      userId: string;
+      idempotencyKey: string;
+    }) => WalletService.creditWasApplied(userId, idempotencyKey, txDb),
     recordPnL: async ({
       userId: uid,
       pnl,

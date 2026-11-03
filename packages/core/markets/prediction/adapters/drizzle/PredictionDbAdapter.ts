@@ -283,6 +283,56 @@ export class PredictionDbAdapter implements PredictionDbPort {
     return mapMarket(updated);
   }
 
+  async applyMarketDelta(
+    marketId: string,
+    delta: { yesShares: number; noShares: number; liquidity: number }
+  ): Promise<PredictionMarketRecord> {
+    if (
+      !Number.isFinite(delta.yesShares) ||
+      !Number.isFinite(delta.noShares) ||
+      !Number.isFinite(delta.liquidity)
+    ) {
+      throw new Error(`Invalid market delta for ${marketId}`);
+    }
+    const [updated] = await this.client
+      .update(markets)
+      .set({
+        yesShares: sql`${markets.yesShares} + ${delta.yesShares}`,
+        noShares: sql`${markets.noShares} + ${delta.noShares}`,
+        liquidity: sql`${markets.liquidity} + ${delta.liquidity}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(markets.id, marketId))
+      .returning();
+    if (!updated) throw new Error(`Market not found: ${marketId}`);
+    return mapMarket(updated);
+  }
+
+  async applyPositionShareDelta(
+    positionId: string,
+    deltaShares: number,
+    minShares: number
+  ): Promise<PredictionPositionRecord | null> {
+    if (!Number.isFinite(deltaShares) || !Number.isFinite(minShares)) {
+      throw new Error(`Invalid position share delta for ${positionId}`);
+    }
+    const [updated] = await this.client
+      .update(positions)
+      .set({
+        shares: sql`${positions.shares} + ${deltaShares}`,
+        amount: sql`${positions.avgPrice} * (${positions.shares} + ${deltaShares})`,
+        status: sql`CASE
+          WHEN ${positions.status} IN ('resolved', 'cancelled', 'voided') THEN ${positions.status}
+          WHEN (${positions.shares} + ${deltaShares}) > ${minShares} THEN 'active'
+          ELSE ${positions.status}
+        END`,
+        updatedAt: new Date(),
+      })
+      .where(eq(positions.id, positionId))
+      .returning();
+    return updated ? mapPosition(updated) : null;
+  }
+
   async getPosition(
     userId: string,
     marketId: string,

@@ -24,15 +24,25 @@ export function createUserWalletAdapter(
         relatedId,
         dbClient
       ),
-    credit: ({ userId, amount, reason, description, relatedId }) =>
+    credit: ({
+      userId,
+      amount,
+      reason,
+      description,
+      relatedId,
+      idempotencyKey,
+    }) =>
       WalletService.credit(
         userId,
         amount,
         reason,
         description ?? '',
         relatedId,
-        dbClient
+        dbClient,
+        idempotencyKey
       ),
+    creditWasApplied: ({ userId, idempotencyKey }) =>
+      WalletService.creditWasApplied(userId, idempotencyKey, dbClient),
     recordPnL: async ({ userId, pnl, reason, relatedId }) => {
       await WalletService.recordPnL(userId, pnl, reason, relatedId, dbClient);
     },

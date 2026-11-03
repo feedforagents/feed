@@ -15,6 +15,7 @@ import {
   balanceTransactions,
   type DrizzleClient,
   db,
+  dbWrite,
   desc,
   eq,
   type Transaction,
@@ -25,8 +26,13 @@ import {
   generateSnowflakeId,
   InsufficientFundsError,
   logger,
+  WalletCreditNotAppliedError,
 } from '@feed/shared';
 import { EarnedPointsService } from './earned-points-service';
+import {
+  classifyCreditFailure,
+  walletRejectionMessage,
+} from './wallet-credit-outcome';
 
 /**
  * User balance information
@@ -151,7 +157,8 @@ export class WalletService {
     delta: number,
     type: string,
     description: string,
-    relatedId?: string
+    relatedId?: string,
+    idempotencyKey?: string
   ): Promise<void> {
     const result = await tx
       .select({
@@ -169,6 +176,15 @@ export class WalletService {
       throw new Error(
         `User not found for wallet operation: ${userId}. NPCs should have User records after bootstrap.`
       );
+    }
+
+    if (idempotencyKey) {
+      const [existing] = await tx
+        .select({ id: balanceTransactions.id })
+        .from(balanceTransactions)
+        .where(eq(balanceTransactions.id, idempotencyKey))
+        .limit(1);
+      if (existing) return;
     }
 
     const currentBalance = Number(user.virtualBalance ?? 0);
@@ -196,7 +212,7 @@ export class WalletService {
       .where(eq(users.id, userId));
 
     await tx.insert(balanceTransactions).values({
-      id: await generateSnowflakeId(),
+      id: idempotencyKey || (await generateSnowflakeId()),
       userId,
       type,
       amount: String(delta),
@@ -348,32 +364,104 @@ export class WalletService {
     type: string,
     description: string,
     relatedId?: string,
-    tx?: Transaction | DrizzleClient
+    tx?: Transaction | DrizzleClient,
+    idempotencyKey?: string
   ): Promise<void> {
-    WalletService.assertValidAmount('credit', userId, amount);
-    if (tx) {
-      await WalletService.applyBalanceChange(
-        tx,
+    const attemptKey = idempotencyKey || undefined;
+    try {
+      WalletService.assertValidAmount('credit', userId, amount);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new WalletCreditNotAppliedError(message, { cause: err });
+    }
+
+    const apply = (transaction: Transaction | DrizzleClient) =>
+      WalletService.applyBalanceChange(
+        transaction,
         userId,
         amount,
         type,
         description,
-        relatedId
+        relatedId,
+        attemptKey
       );
-    } else {
-      await withTransaction(async (transaction) => {
-        await WalletService.applyBalanceChange(
-          transaction,
-          userId,
-          amount,
-          type,
-          description,
-          relatedId
+
+    try {
+      if (tx) {
+        await apply(tx);
+      } else {
+        await withTransaction(apply);
+      }
+    } catch (err) {
+      if (err instanceof WalletCreditNotAppliedError) throw err;
+
+      // A caller-owned transaction is aborted after a statement error, so a
+      // lookup on it cannot prove the credit. Probe only the standalone path,
+      // on the primary, after that transaction has finished.
+      let probedApplied: boolean | null = false;
+      if (attemptKey && !tx) {
+        try {
+          probedApplied = await WalletService.creditWasApplied(
+            userId,
+            attemptKey
+          );
+        } catch (probeErr) {
+          logger.error(
+            'Wallet credit idempotency probe failed',
+            {
+              userId,
+              type,
+              relatedId,
+              idempotencyKey: attemptKey,
+              probeError:
+                probeErr instanceof Error ? probeErr.message : String(probeErr),
+            },
+            'WalletService'
+          );
+          probedApplied = null;
+        }
+      }
+
+      const outcome = classifyCreditFailure(err, probedApplied);
+      if (outcome === 'applied') {
+        logger.warn(
+          'Wallet credit settled after an ambiguous failure',
+          { userId, type, relatedId, idempotencyKey: attemptKey, amount },
+          'WalletService'
         );
-      });
+        await WalletService.invalidateCache(userId);
+        return;
+      }
+      if (outcome === 'not_applied') {
+        throw new WalletCreditNotAppliedError(walletRejectionMessage(err), {
+          cause: err,
+        });
+      }
+      throw err;
     }
 
     await WalletService.invalidateCache(userId);
+  }
+
+  /**
+   * Whether the balance transaction for this attempt id is stored.
+   * Reads the primary so a just-committed credit is visible.
+   */
+  static async creditWasApplied(
+    userId: string,
+    idempotencyKey: string,
+    tx?: Transaction | DrizzleClient
+  ): Promise<boolean> {
+    const client = tx ?? dbWrite;
+    const [row] = await client
+      .select({
+        id: balanceTransactions.id,
+        userId: balanceTransactions.userId,
+      })
+      .from(balanceTransactions)
+      .where(eq(balanceTransactions.id, idempotencyKey))
+      .limit(1);
+    return !!row && row.userId === userId;
   }
 
   /**

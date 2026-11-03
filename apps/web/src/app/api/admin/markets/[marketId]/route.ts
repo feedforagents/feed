@@ -63,14 +63,25 @@ const buildPredictionService = (marketId: string) =>
           description ?? '',
           relatedId
         ),
-      credit: ({ userId, amount, reason, description, relatedId }) =>
+      credit: ({
+        userId,
+        amount,
+        reason,
+        description,
+        relatedId,
+        idempotencyKey,
+      }) =>
         WalletService.credit(
           userId,
           amount,
           reason,
           description ?? '',
-          relatedId
+          relatedId,
+          undefined,
+          idempotencyKey
         ),
+      creditWasApplied: ({ userId, idempotencyKey }) =>
+        WalletService.creditWasApplied(userId, idempotencyKey),
       recordPnL: ({ userId, pnl, reason, relatedId }) =>
         WalletService.recordPnL(userId, pnl, reason, relatedId).then(
           () => undefined

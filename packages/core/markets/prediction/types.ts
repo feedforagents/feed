@@ -103,6 +103,24 @@ export interface PredictionDbPort {
       >
     >
   ): Promise<PredictionMarketRecord>;
+  /**
+   * Add deltas to the pool. Used to undo one sell without writing a stale
+   * absolute snapshot over trades that committed in between.
+   */
+  applyMarketDelta?(
+    marketId: string,
+    delta: { yesShares: number; noShares: number; liquidity: number }
+  ): Promise<PredictionMarketRecord>;
+  /**
+   * Add shares back onto one position row. Reopens a `closed` row when the
+   * restored size is above `minShares`. Leaves resolved, cancelled, and
+   * voided rows in that status.
+   */
+  applyPositionShareDelta?(
+    positionId: string,
+    deltaShares: number,
+    minShares: number
+  ): Promise<PredictionPositionRecord | null>;
   getPosition(
     userId: string,
     marketId: string,
