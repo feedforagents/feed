@@ -32,6 +32,44 @@ export interface TradingFeeOutboxPort {
   }): Promise<void>;
 }
 
+/**
+ * Credit failed before any balance change committed.
+ * Ambiguous failures (timeout, dropped connection) must not use this type:
+ * the credit may already have been applied.
+ */
+export class WalletCreditNotAppliedError extends Error {
+  readonly creditApplied = false as const;
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'WalletCreditNotAppliedError';
+  }
+}
+
+const AMBIGUOUS_CREDIT_FAILURE =
+  /timeout|etimedout|econnreset|econnrefused|econnaborted|connection|socket|deadlock|too many connections/i;
+
+/**
+ * Transport and lock failures where the wallet may have committed the credit
+ * before the client observed the error.
+ */
+export function isAmbiguousCreditFailure(err: unknown): boolean {
+  return err instanceof Error && AMBIGUOUS_CREDIT_FAILURE.test(err.message);
+}
+
+/**
+ * True when the caller knows the credit did not commit.
+ * Checks the flag as well as the class so a duplicated module copy still matches.
+ */
+export function isKnownCreditNotApplied(err: unknown): boolean {
+  if (err instanceof WalletCreditNotAppliedError) return true;
+  if (typeof err !== 'object' || err === null) return false;
+  return (
+    'creditApplied' in err &&
+    (err as { creditApplied?: unknown }).creditApplied === false
+  );
+}
+
 export interface WalletPort {
   debit(params: {
     userId: string;

@@ -12,6 +12,11 @@
  */
 
 import {
+  isAmbiguousCreditFailure,
+  isKnownCreditNotApplied,
+  WalletCreditNotAppliedError,
+} from '@feed/core/markets/shared';
+import {
   balanceTransactions,
   type DrizzleClient,
   db,
@@ -350,27 +355,37 @@ export class WalletService {
     relatedId?: string,
     tx?: Transaction | DrizzleClient
   ): Promise<void> {
-    WalletService.assertValidAmount('credit', userId, amount);
-    if (tx) {
-      await WalletService.applyBalanceChange(
-        tx,
-        userId,
-        amount,
-        type,
-        description,
-        relatedId
-      );
-    } else {
-      await withTransaction(async (transaction) => {
+    try {
+      WalletService.assertValidAmount('credit', userId, amount);
+      if (tx) {
         await WalletService.applyBalanceChange(
-          transaction,
+          tx,
           userId,
           amount,
           type,
           description,
           relatedId
         );
-      });
+      } else {
+        await withTransaction(async (transaction) => {
+          await WalletService.applyBalanceChange(
+            transaction,
+            userId,
+            amount,
+            type,
+            description,
+            relatedId
+          );
+        });
+      }
+    } catch (err) {
+      // Timeouts and dropped connections can surface after COMMIT. Leave
+      // those errors unchanged so callers do not treat them as "not applied".
+      if (isKnownCreditNotApplied(err) || isAmbiguousCreditFailure(err)) {
+        throw err;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      throw new WalletCreditNotAppliedError(message, { cause: err });
     }
 
     await WalletService.invalidateCache(userId);

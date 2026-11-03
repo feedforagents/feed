@@ -163,6 +163,16 @@ export class PerpDbAdapter implements PerpDbPort {
     return pos ? mapPosition(pos) : null;
   }
 
+  async lockPositionById(id: string): Promise<PerpPositionRecord | null> {
+    const [pos] = await this.dbClient
+      .select()
+      .from(perpPositions)
+      .where(eq(perpPositions.id, id))
+      .limit(1)
+      .for('update');
+    return pos ? mapPosition(pos) : null;
+  }
+
   async upsertPosition(
     position: Omit<PerpPositionRecord, 'id'> & { id?: string }
   ): Promise<PerpPositionRecord> {

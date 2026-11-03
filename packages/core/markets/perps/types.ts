@@ -98,6 +98,11 @@ export interface PerpDbPort {
    * Returns null if the position does not exist or is already closed.
    */
   lockOpenPositionById(id: string): Promise<PerpPositionRecord | null>;
+  /**
+   * Lock a position row whether it is open or closed.
+   * Returns null when the id does not exist.
+   */
+  lockPositionById(id: string): Promise<PerpPositionRecord | null>;
   upsertPosition(
     position: Omit<PerpPositionRecord, 'id'> & { id?: string }
   ): Promise<PerpPositionRecord>;

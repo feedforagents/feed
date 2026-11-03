@@ -5,6 +5,10 @@ import {
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
 import {
+  isAmbiguousCreditFailure,
+  isKnownCreditNotApplied,
+} from '../shared/common';
+import {
   evolveSyntheticPerpQuoteState,
   getSyntheticPerpExecutionPrice,
   getSyntheticPerpQuoteState,
@@ -816,24 +820,25 @@ export class PerpMarketService {
       const fee = this.calculateFee(closeSize);
       const netSettlement = Math.max(0, grossSettlement - fee);
       const now = this.deps.clock?.now() ?? new Date();
+      const remainingFunding = position.fundingPaid - proportionalFunding;
+      const { pnl: remainingPnl, pnlPercent: remainingPnlPercent } =
+        calculateUnrealizedPnL(
+          position.entryPrice,
+          exitPrice,
+          position.side,
+          remainingSize
+        );
+      const closedRealizedPnL = (position.realizedPnL ?? 0) + realizedPnL;
 
       if (isFullClose) {
         await tx.closePosition(position.id, {
           currentPrice: exitPrice,
           closedAt: now,
-          realizedPnL: (position.realizedPnL ?? 0) + realizedPnL,
+          realizedPnL: closedRealizedPnL,
           unrealizedPnL: 0,
           unrealizedPnLPercent: 0,
         });
       } else {
-        const remainingFunding = position.fundingPaid - proportionalFunding;
-        const { pnl: remainingPnl, pnlPercent: remainingPnlPercent } =
-          calculateUnrealizedPnL(
-            position.entryPrice,
-            exitPrice,
-            position.side,
-            remainingSize
-          );
         await tx.updateOpenPosition(position.id, {
           size: remainingSize,
           fundingPaid: remainingFunding,
@@ -849,6 +854,22 @@ export class PerpMarketService {
         volume24h: closeSize,
       });
 
+      const postClose: PostCloseSnapshot = {
+        closed: isFullClose,
+        size: isFullClose ? position.size : remainingSize,
+        fundingPaid: isFullClose ? position.fundingPaid : remainingFunding,
+        currentPrice: exitPrice,
+        unrealizedPnL: isFullClose ? 0 : remainingPnl,
+        unrealizedPnLPercent: isFullClose ? 0 : remainingPnlPercent,
+        realizedPnL: isFullClose
+          ? closedRealizedPnL
+          : (position.realizedPnL ?? null),
+        entryPrice: position.entryPrice,
+        side: position.side,
+        leverage: position.leverage,
+        liquidationPrice: position.liquidationPrice,
+      };
+
       return {
         closeImpact,
         closePercentage,
@@ -861,6 +882,7 @@ export class PerpMarketService {
         netSettlement,
         now,
         position,
+        postClose,
         requestedExitPrice,
         realizedPnL,
         remainingSize,
@@ -868,6 +890,24 @@ export class PerpMarketService {
     });
 
     if (settlement.netSettlement > 0) {
+      let balanceBefore: number | undefined;
+      try {
+        balanceBefore = (await this.deps.wallet.getBalance(input.userId))
+          .balance;
+      } catch (balanceErr) {
+        logger.error(
+          'Could not read balance before settlement credit',
+          {
+            userId: input.userId,
+            positionId: settlement.position.id,
+            error:
+              balanceErr instanceof Error
+                ? balanceErr.message
+                : String(balanceErr),
+          },
+          'PerpService'
+        );
+      }
       try {
         await this.deps.wallet.credit({
           userId: input.userId,
@@ -877,33 +917,43 @@ export class PerpMarketService {
           relatedId: settlement.position.id,
         });
       } catch (creditErr) {
-        // Position/OI already committed outside the wallet. Best-effort reopen
-        // so settlement is not permanently stranded when credit fails.
-        try {
-          await this.db.transaction(async (tx) => {
-            if (settlement.isFullClose) {
-              await tx.upsertPosition({
-                ...settlement.position,
-                closedAt: null,
-                currentPrice: settlement.exitPrice,
-                lastUpdated: settlement.now,
-              });
-            } else {
-              await tx.updateOpenPosition(settlement.position.id, {
-                size: settlement.position.size,
-                fundingPaid: settlement.position.fundingPaid,
-                currentPrice: settlement.exitPrice,
-                lastUpdated: settlement.now,
-              });
-            }
-            await tx.applyMarketDeltas(settlement.position.ticker, {
-              openInterest: settlement.closeSize,
-              volume24h: 0,
-            });
-          });
-        } catch (reopenErr) {
+        // The close transaction already committed. Reopen only when the
+        // credit is known not to have landed, or when an ambiguous failure
+        // (timeout / dropped connection) left the balance unchanged.
+        const shouldReopen =
+          balanceBefore === undefined
+            ? isKnownCreditNotApplied(creditErr)
+            : await creditFailureShouldReopen(
+                () => this.deps.wallet.getBalance(input.userId),
+                settlement.netSettlement,
+                balanceBefore,
+                creditErr
+              );
+        if (shouldReopen) {
+          try {
+            await reopenPositionAfterCreditFailure(this.db, settlement);
+          } catch (reopenErr) {
+            logger.error(
+              'CRITICAL: Failed to reopen position after close credit failure',
+              {
+                userId: input.userId,
+                positionId: settlement.position.id,
+                netSettlement: settlement.netSettlement,
+                creditError:
+                  creditErr instanceof Error
+                    ? creditErr.message
+                    : String(creditErr),
+                reopenError:
+                  reopenErr instanceof Error
+                    ? reopenErr.message
+                    : String(reopenErr),
+              },
+              'PerpService'
+            );
+          }
+        } else {
           logger.error(
-            'CRITICAL: Failed to reopen position after close credit failure',
+            'Settlement credit may have applied; leaving the close in place',
             {
               userId: input.userId,
               positionId: settlement.position.id,
@@ -912,10 +962,6 @@ export class PerpMarketService {
                 creditErr instanceof Error
                   ? creditErr.message
                   : String(creditErr),
-              reopenError:
-                reopenErr instanceof Error
-                  ? reopenErr.message
-                  : String(reopenErr),
             },
             'PerpService'
           );
@@ -2378,6 +2424,161 @@ function deriveNetHoldingsFromSpotPrice(
   }
 
   return currentQuote - quoteReserve;
+}
+
+interface PostCloseSnapshot {
+  closed: boolean;
+  size: number;
+  fundingPaid: number;
+  currentPrice: number;
+  unrealizedPnL: number;
+  unrealizedPnLPercent: number;
+  realizedPnL: number | null;
+  entryPrice: number;
+  side: PerpSide;
+  leverage: number;
+  liquidationPrice: number;
+}
+
+interface CloseSettlementSnapshot {
+  closeSize: number;
+  exitPrice: number;
+  isFullClose: boolean;
+  now: Date;
+  position: PerpPositionRecord;
+  postClose: PostCloseSnapshot;
+}
+
+const POSITION_MATCH_EPSILON = 1e-8;
+const MONEY_MATCH_EPSILON = 0.001;
+
+function sameNumber(a: number, b: number): boolean {
+  return Math.abs(a - b) <= POSITION_MATCH_EPSILON;
+}
+
+function sameOptionalNumber(
+  a: number | null | undefined,
+  b: number | null | undefined
+): boolean {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return sameNumber(a, b);
+}
+
+/**
+ * The reopen may proceed only when the row is still the close we just wrote.
+ * Open/closed is compared without the timestamp: a round-trip must not block
+ * a legitimate reopen, while size, funding, and mark fields catch a later write.
+ */
+function matchesPostClose(
+  current: PerpPositionRecord,
+  expected: PostCloseSnapshot
+): boolean {
+  if ((current.closedAt != null) !== expected.closed) return false;
+  return (
+    sameNumber(current.size, expected.size) &&
+    sameNumber(current.fundingPaid, expected.fundingPaid) &&
+    sameNumber(current.currentPrice, expected.currentPrice) &&
+    sameNumber(current.unrealizedPnL, expected.unrealizedPnL) &&
+    sameNumber(current.unrealizedPnLPercent, expected.unrealizedPnLPercent) &&
+    sameOptionalNumber(current.realizedPnL, expected.realizedPnL) &&
+    sameNumber(current.entryPrice, expected.entryPrice) &&
+    current.side === expected.side &&
+    current.leverage === expected.leverage &&
+    sameNumber(current.liquidationPrice, expected.liquidationPrice)
+  );
+}
+
+function roundedCents(amount: number): number {
+  return Math.round(amount * 100) / 100;
+}
+
+function settlementCreditLanded(
+  balanceBefore: number,
+  balanceAfter: number,
+  netSettlement: number
+): boolean {
+  const delta = balanceAfter - balanceBefore;
+  return (
+    Math.abs(delta - roundedCents(netSettlement)) <= MONEY_MATCH_EPSILON ||
+    Math.abs(delta - netSettlement) <= MONEY_MATCH_EPSILON
+  );
+}
+
+function balanceUnchanged(before: number, after: number): boolean {
+  return Math.abs(after - before) <= MONEY_MATCH_EPSILON;
+}
+
+/**
+ * Reopen when the credit is known not to have committed.
+ * For timeout and connection failures, reopen only when the wallet balance
+ * did not move by the settlement amount. A matching balance increase means
+ * the credit landed and reopening would pay it twice.
+ */
+async function creditFailureShouldReopen(
+  getBalance: () => Promise<{ balance: number }>,
+  netSettlement: number,
+  balanceBefore: number,
+  creditErr: unknown
+): Promise<boolean> {
+  if (isKnownCreditNotApplied(creditErr)) return true;
+  if (!isAmbiguousCreditFailure(creditErr)) return false;
+  try {
+    const balanceAfter = (await getBalance()).balance;
+    if (settlementCreditLanded(balanceBefore, balanceAfter, netSettlement)) {
+      return false;
+    }
+    return balanceUnchanged(balanceBefore, balanceAfter);
+  } catch (balanceErr) {
+    logger.error(
+      'Could not read balance after ambiguous settlement credit failure',
+      {
+        creditError:
+          creditErr instanceof Error ? creditErr.message : String(creditErr),
+        balanceError:
+          balanceErr instanceof Error ? balanceErr.message : String(balanceErr),
+      },
+      'PerpService'
+    );
+    return false;
+  }
+}
+
+async function reopenPositionAfterCreditFailure(
+  db: PerpDbPort,
+  settlement: CloseSettlementSnapshot
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const current = await tx.lockPositionById(settlement.position.id);
+    if (!current || !matchesPostClose(current, settlement.postClose)) {
+      throw new Error(
+        `Refusing to reopen position ${settlement.position.id}: state changed after close`
+      );
+    }
+
+    if (settlement.isFullClose) {
+      await tx.upsertPosition({
+        ...settlement.position,
+        closedAt: null,
+        currentPrice: settlement.exitPrice,
+        lastUpdated: settlement.now,
+      });
+    } else {
+      await tx.updateOpenPosition(settlement.position.id, {
+        size: settlement.position.size,
+        fundingPaid: settlement.position.fundingPaid,
+        currentPrice: settlement.exitPrice,
+        unrealizedPnL: settlement.position.unrealizedPnL,
+        unrealizedPnLPercent: settlement.position.unrealizedPnLPercent,
+        lastUpdated: settlement.now,
+      });
+    }
+
+    await tx.applyMarketDeltas(settlement.position.ticker, {
+      openInterest: settlement.closeSize,
+      volume24h: -settlement.closeSize,
+    });
+  });
 }
 
 function calculateUnrealizedPnL(

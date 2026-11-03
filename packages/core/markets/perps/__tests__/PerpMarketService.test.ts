@@ -130,6 +130,11 @@ class InMemoryPerpDb implements PerpDbPort {
     return { ...pos };
   }
 
+  async lockPositionById(id: string): Promise<PerpPositionRecord | null> {
+    const pos = this.positions.get(id);
+    return pos ? { ...pos } : null;
+  }
+
   async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
     // In-memory mock just runs the function directly
     return fn(this);
