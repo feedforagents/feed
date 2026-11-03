@@ -493,15 +493,14 @@ export class PredictionMarketService {
     const liquidityReduction = Math.min(totalPayout, market.liquidity);
     const newLiquidity = market.liquidity - liquidityReduction;
 
-    await this.db.updateMarketState(marketId, {
-      resolved: true,
-      resolution: winningSide === 'yes',
-      liquidity: newLiquidity,
-      resolutionProofUrl: resolutionProofUrl ?? undefined,
-      resolutionDescription: resolutionDescription ?? undefined,
-    });
-
+    // Do NOT mark the market resolved until winner credits succeed. A resolved
+    // flag with an early return on retry permanently strands unpaid winners
+    // when credit fails mid-loop. Skip positions already marked resolved so a
+    // retry can finish unpaid winners without double-paying.
     for (const pos of positions) {
+      if (pos.status === 'resolved') {
+        continue;
+      }
       const isWinner = isWinnerSide(pos);
       const payout = isWinner
         ? PredictionPricing.calculateExpectedPayout(
@@ -543,6 +542,14 @@ export class PredictionMarketService {
         updatedAt: now,
       });
     }
+
+    await this.db.updateMarketState(marketId, {
+      resolved: true,
+      resolution: winningSide === 'yes',
+      liquidity: newLiquidity,
+      resolutionProofUrl: resolutionProofUrl ?? undefined,
+      resolutionDescription: resolutionDescription ?? undefined,
+    });
 
     await this.recordSnapshot({
       marketId,
