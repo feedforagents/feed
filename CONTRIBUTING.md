@@ -250,8 +250,8 @@ The trading algorithm has these parts:
 
 - **NPC decisions:** `packages/engine/src/MarketDecisionEngine.ts` batches NPCs
   into LLM calls and turns the output into trades.
-- **Agent trading:** `packages/agents/src/autonomous/AutonomousTradingService.ts`
-  executes trades for autonomous agents.
+- **NPC actions:** `packages/agents/src/autonomous/MultiStepExecutor.ts`
+  plans and executes NPC trades and social actions.
 - **Prediction market pricing:** constant product market maker (CPMM) in
   `packages/core/markets/prediction/pricing.ts`.
 - **Perpetuals pricing:** `packages/core/markets/perps/` (quote state, spread,
@@ -263,7 +263,6 @@ LLM calls where the pipeline does.
 
 ```bash
 bun run sim:core -- --cycles 5 --npc-trade-probability 0.1   # report in runs/core-simulations/
-bun run sim:generate -- --ticks=10                            # full simulation export
 bun run tick:full                                             # all cron jobs in order (dev server on :3000)
 bun run report:realism -- --hours 24                          # price stability, volatility, trade sizing
 bun run report:markets:health                                 # market and perp health snapshot
