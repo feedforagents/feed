@@ -46,7 +46,16 @@ export interface PredictionPositionRecord {
   side: PredictionSide;
   shares: number;
   avgPrice: number;
-  status?: 'active' | 'closed' | 'resolved' | 'cancelled' | 'voided';
+  status?:
+    | 'active'
+    | 'closed'
+    | 'resolved'
+    | 'cancelled'
+    | 'voided'
+    // Claim written before the winner credit. A retry must not credit again.
+    | 'settling'
+    // Balance credit and PnL are recorded; the resolved mark has not landed.
+    | 'pnl_recorded';
   outcome?: boolean | null;
   pnl?: number;
   resolvedAt?: Date | null;
@@ -114,6 +123,13 @@ export interface PredictionDbPort {
   deletePosition(positionId: string): Promise<void>;
   listPositionsForMarket(marketId: string): Promise<PredictionPositionRecord[]>;
   insertPriceSnapshot(snapshot: PredictionPriceSnapshotRecord): Promise<void>;
+  /**
+   * Hold a per-market lock for the duration of `run`.
+   * Cross-process adapters use a transaction-scoped advisory lock so a second
+   * resolve, buy, or sell waits until this one commits or rolls back.
+   * In-memory adapters can omit it; the service also serializes in-process.
+   */
+  withMarketLock?<T>(marketId: string, run: () => Promise<T>): Promise<T>;
 }
 
 // DTOs

@@ -124,3 +124,21 @@ describe('PredictionDbAdapter.updateMarketState', () => {
     expect(setCalls[0]!.yesShares).toBe('3');
   });
 });
+
+describe('PredictionDbAdapter.withMarketLock', () => {
+  test('takes the advisory lock before the critical section on a caller transaction', async () => {
+    const events: string[] = [];
+    const client = {
+      execute: async (query: { queryChunks?: ReadonlyArray<unknown> }) => {
+        const text = JSON.stringify(query);
+        events.push(text.includes('pg_advisory_xact_lock') ? 'lock' : text);
+      },
+    };
+    // biome-ignore lint: mock client shape doesn't match full DrizzleClient
+    const adapter = new PredictionDbAdapter(client as any);
+    await adapter.withMarketLock('market-1', async () => {
+      events.push('work');
+    });
+    expect(events).toEqual(['lock', 'work']);
+  });
+});

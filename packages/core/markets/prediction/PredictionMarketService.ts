@@ -44,6 +44,58 @@ function grossUpBuyAmount(netAmount: number, feeRate: number): number {
   return netAmount / divisor;
 }
 
+type SettlementPhase = 'pay' | 'book' | 'finish' | 'skip';
+
+/**
+ * pay: credit has not been applied (or a thrown credit was reverted).
+ * book: credit was applied; PnL and the resolved mark may still be pending.
+ * finish: PnL was recorded; only the resolved mark is left.
+ * skip: nothing left to pay.
+ */
+function settlementPhase(
+  status: PredictionPositionRecord['status']
+): SettlementPhase {
+  switch (status) {
+    case undefined:
+    case 'active':
+      return 'pay';
+    case 'settling':
+      return 'book';
+    case 'pnl_recorded':
+      return 'finish';
+    case 'resolved':
+    case 'closed':
+    case 'cancelled':
+    case 'voided':
+      return 'skip';
+    default: {
+      const unreachable: never = status;
+      return unreachable;
+    }
+  }
+}
+
+const marketOperationTails = new Map<string, Promise<void>>();
+
+function withInProcessMarketLock<T>(
+  marketId: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const previous = marketOperationTails.get(marketId) ?? Promise.resolve();
+  const result = previous.then(run, run);
+  const tail = result.then(
+    () => undefined,
+    () => undefined
+  );
+  marketOperationTails.set(marketId, tail);
+  void tail.finally(() => {
+    if (marketOperationTails.get(marketId) === tail) {
+      marketOperationTails.delete(marketId);
+    }
+  });
+  return result;
+}
+
 export class PredictionMarketService {
   private readonly db: PredictionDbPort;
   private readonly deps: PredictionServiceDeps;
@@ -127,6 +179,12 @@ export class PredictionMarketService {
   }
 
   async buy(input: PredictionBuyInput): Promise<PredictionTradeResult> {
+    return this.withMarketLock(input.marketId, () => this.buyLocked(input));
+  }
+
+  private async buyLocked(
+    input: PredictionBuyInput
+  ): Promise<PredictionTradeResult> {
     const { marketId, userId, amount, side } = input;
     if (!Number.isFinite(amount) || amount < MIN_TRADE_AMOUNT) {
       throw new BadRequestError(
@@ -284,6 +342,12 @@ export class PredictionMarketService {
   }
 
   async sell(input: PredictionSellInput): Promise<PredictionTradeResult> {
+    return this.withMarketLock(input.marketId, () => this.sellLocked(input));
+  }
+
+  private async sellLocked(
+    input: PredictionSellInput
+  ): Promise<PredictionTradeResult> {
     const { marketId, userId, shares } = input;
     if (!Number.isFinite(shares) || shares < MIN_SHARES) {
       throw new BadRequestError(
@@ -456,6 +520,10 @@ export class PredictionMarketService {
   }
 
   async resolve(input: PredictionResolveInput): Promise<void> {
+    return this.withMarketLock(input.marketId, () => this.resolveLocked(input));
+  }
+
+  private async resolveLocked(input: PredictionResolveInput): Promise<void> {
     const { marketId, winningSide, resolutionDescription, resolutionProofUrl } =
       input;
     const positions = await this.db.listPositionsForMarket(marketId);
@@ -493,54 +561,23 @@ export class PredictionMarketService {
     const liquidityReduction = Math.min(totalPayout, market.liquidity);
     const newLiquidity = market.liquidity - liquidityReduction;
 
-    // Do NOT mark the market resolved until winner credits succeed. A resolved
-    // flag with an early return on retry permanently strands unpaid winners
-    // when credit fails mid-loop. Skip positions already marked resolved so a
-    // retry can finish unpaid winners without double-paying.
+    // The market stays unresolved until every position is settled, so a failed
+    // attempt can be retried. Each position is claimed as `settling` before
+    // its credit. A thrown credit is reverted (it did not apply). A later
+    // failure leaves `settling` or `pnl_recorded`, and the retry continues
+    // from that phase. The credit identity includes the position id;
+    // WalletService ignores a repeated pred_resolve credit with the same
+    // description, so a crash after the credit commits does not pay twice
+    // and does not leave the winner unpaid.
     for (const pos of positions) {
-      if (pos.status === 'resolved') {
-        continue;
-      }
-      const isWinner = isWinnerSide(pos);
-      const payout = isWinner
-        ? PredictionPricing.calculateExpectedPayout(
-            pos.shares,
-            pos.avgPrice,
-            totalWinnerShares,
-            totalLoserDeposits
-          )
-        : 0;
-      const costBasisWithFees = grossUpBuyAmount(
-        pos.avgPrice * pos.shares,
-        this.deps.fees.tradingFeeRate
+      await this.settlePosition(
+        pos,
+        market,
+        winningSide,
+        totalWinnerShares,
+        totalLoserDeposits,
+        now
       );
-      const pnl = payout - costBasisWithFees;
-
-      if (payout > 0) {
-        await this.deps.wallet.credit({
-          userId: pos.userId,
-          amount: payout,
-          reason: 'pred_resolve',
-          description: `Payout ${winningSide.toUpperCase()} for ${market.question}`,
-          relatedId: marketId,
-        });
-      }
-      if (pnl !== 0) {
-        await this.deps.wallet.recordPnL({
-          userId: pos.userId,
-          pnl,
-          reason: 'pred_resolve',
-          relatedId: marketId,
-        });
-      }
-      await this.db.upsertPosition({
-        ...pos,
-        status: 'resolved',
-        outcome: isWinner,
-        pnl,
-        resolvedAt: now,
-        updatedAt: now,
-      });
     }
 
     await this.db.updateMarketState(marketId, {
@@ -591,6 +628,12 @@ export class PredictionMarketService {
    * - Marks positions as 'cancelled'
    */
   async cancel(input: PredictionCancelInput): Promise<PredictionCancelResult> {
+    return this.withMarketLock(input.marketId, () => this.cancelLocked(input));
+  }
+
+  private async cancelLocked(
+    input: PredictionCancelInput
+  ): Promise<PredictionCancelResult> {
     const { marketId, reason } = input;
     const positions = await this.db.listPositionsForMarket(marketId);
     const market = await this.ensureMarket(marketId);
@@ -694,6 +737,102 @@ export class PredictionMarketService {
       positionsRefunded,
       totalRefunded,
     };
+  }
+
+  private async settlePosition(
+    pos: PredictionPositionRecord,
+    market: PredictionMarketRecord,
+    winningSide: PredictionSide,
+    totalWinnerShares: number,
+    totalLoserDeposits: number,
+    now: Date
+  ): Promise<void> {
+    const phase = settlementPhase(pos.status);
+    if (phase === 'skip') return;
+
+    const isWinner =
+      (winningSide === 'yes' && pos.side === 'yes') ||
+      (winningSide === 'no' && pos.side === 'no');
+    const payout = isWinner
+      ? PredictionPricing.calculateExpectedPayout(
+          pos.shares,
+          pos.avgPrice,
+          totalWinnerShares,
+          totalLoserDeposits
+        )
+      : 0;
+    const costBasisWithFees = grossUpBuyAmount(
+      pos.avgPrice * pos.shares,
+      this.deps.fees.tradingFeeRate
+    );
+    const pnl = payout - costBasisWithFees;
+    const settled = {
+      ...pos,
+      outcome: isWinner,
+      pnl,
+      resolvedAt: now,
+      updatedAt: now,
+    };
+
+    if (phase === 'pay') {
+      await this.db.upsertPosition({
+        ...pos,
+        status: 'settling',
+        updatedAt: now,
+      });
+    }
+
+    if (phase === 'pay' || phase === 'book') {
+      if (payout > 0) {
+        try {
+          await this.deps.wallet.credit({
+            userId: pos.userId,
+            amount: payout,
+            reason: 'pred_resolve',
+            description: `Payout ${winningSide.toUpperCase()} for ${market.question} [${pos.id}]`,
+            relatedId: market.id,
+          });
+        } catch (error) {
+          if (phase === 'pay') {
+            await this.db.upsertPosition({
+              ...pos,
+              status: 'active',
+              updatedAt: now,
+            });
+          }
+          throw error;
+        }
+      }
+      if (pnl !== 0) {
+        await this.deps.wallet.recordPnL({
+          userId: pos.userId,
+          pnl,
+          reason: 'pred_resolve',
+          relatedId: market.id,
+        });
+      }
+      await this.db.upsertPosition({
+        ...settled,
+        status: 'pnl_recorded',
+      });
+    }
+
+    await this.db.upsertPosition({
+      ...settled,
+      status: 'resolved',
+    });
+  }
+
+  private async withMarketLock<T>(
+    marketId: string,
+    run: () => Promise<T>
+  ): Promise<T> {
+    return withInProcessMarketLock(marketId, () => {
+      if (this.db.withMarketLock) {
+        return this.db.withMarketLock(marketId, run);
+      }
+      return run();
+    });
   }
 
   // ---------------------------------------------------------------------------

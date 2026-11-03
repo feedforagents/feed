@@ -12,11 +12,13 @@
  */
 
 import {
+  and,
   balanceTransactions,
   type DrizzleClient,
   db,
   desc,
   eq,
+  isNull,
   type Transaction,
   users,
   withTransaction,
@@ -188,6 +190,27 @@ export class WalletService {
     // Prevent negative balance on debits
     if (delta < 0 && newBalance < 0) {
       throw new InsufficientFundsError(Math.abs(delta), currentBalance, 'USD');
+    }
+
+    // Resolve retries re-issue the same payout after a crash between the
+    // credit commit and the position write. The user row lock makes the
+    // check-and-insert atomic for this user.
+    if (type === 'pred_resolve') {
+      const [existing] = await tx
+        .select({ id: balanceTransactions.id })
+        .from(balanceTransactions)
+        .where(
+          and(
+            eq(balanceTransactions.userId, userId),
+            eq(balanceTransactions.type, type),
+            eq(balanceTransactions.description, description),
+            relatedId
+              ? eq(balanceTransactions.relatedId, relatedId)
+              : isNull(balanceTransactions.relatedId)
+          )
+        )
+        .limit(1);
+      if (existing) return;
     }
 
     await tx

@@ -66,7 +66,25 @@ const mapPosition = (
 });
 
 export class PredictionDbAdapter implements PredictionDbPort {
-  constructor(private readonly client: DbClient = db) {}
+  private readonly client: DbClient;
+  private readonly boundToCallerTransaction: boolean;
+
+  constructor(client?: DbClient) {
+    this.client = client ?? db;
+    this.boundToCallerTransaction = client !== undefined;
+  }
+
+  async withMarketLock<T>(marketId: string, run: () => Promise<T>): Promise<T> {
+    const statement = sql`SELECT pg_advisory_xact_lock(hashtext(${`prediction-market:${marketId}`}))`;
+    if (this.boundToCallerTransaction) {
+      await this.client.execute(statement);
+      return run();
+    }
+    return this.client.transaction(async (tx) => {
+      await tx.execute(statement);
+      return run();
+    });
+  }
 
   async getMarketById(id: string): Promise<PredictionMarketRecord | null> {
     const [m] = await this.client
