@@ -16,10 +16,31 @@ import {
   extractJsonFromText,
 } from './json-continuation-parser';
 import type { LLMJsonSchema as JSONSchema } from './types';
-import { parseXML } from './xml-parser';
+import { cleanXMLMarkdown, extractXMLFromText, parseXML } from './xml-parser';
 
 type LLMProvider = 'surplus' | 'elizacloud' | 'groq' | 'claude' | 'openai';
 type LLMDisabledContext = 'default' | 'gameTick';
+type StructuredOutput = Record<string, JsonValue> | JsonValue[];
+
+class StructuredOutputError extends Error {}
+
+function requireStructuredOutput(value: JsonValue): StructuredOutput {
+  if (value === null || typeof value !== 'object') {
+    throw new StructuredOutputError('Response must be a JSON object or array');
+  }
+  return value;
+}
+
+function parseStructuredJSON(content: string): StructuredOutput {
+  let parsed: JsonValue;
+  try {
+    parsed = JSON.parse(content);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new StructuredOutputError(`Failed to parse JSON: ${error.message}`);
+  }
+  return requireStructuredOutput(parsed);
+}
 
 /**
  * Token usage callback function type
@@ -377,7 +398,7 @@ WORLD RULES:
         : feedContext +
           'You are a JSON-only assistant. You must respond ONLY with valid JSON. No explanations, no markdown, no other text.';
 
-    const messages = [
+    const baseMessages = [
       {
         role: 'system' as const,
         content: systemContent,
@@ -457,11 +478,18 @@ WORLD RULES:
     };
 
     let retryCount = 0;
+    let validationFeedback: string | undefined;
     const maxRetries = 3;
     const initialDelayMs = 2000;
     let callStartTime = Date.now();
 
     while (true) {
+      const messages = validationFeedback
+        ? [
+            ...baseMessages,
+            { role: 'user' as const, content: validationFeedback },
+          ]
+        : baseMessages;
       attemptCalls = [];
       let parsedResponse: JsonValue | null = null;
       let outcomeError: string | undefined;
@@ -471,7 +499,7 @@ WORLD RULES:
         const response = await requestCompletion(messages);
         const firstChoice = first(response.choices);
         if (!firstChoice || !firstChoice.message.content) {
-          throw new Error('LLM response missing content');
+          throw new StructuredOutputError('LLM response missing content');
         }
         let content = firstChoice.message.content;
         let finishReason = firstChoice.finish_reason;
@@ -560,7 +588,7 @@ WORLD RULES:
 
           // If still truncated after max continuations, throw error
           if (finishReason === 'length') {
-            throw new Error(
+            throw new StructuredOutputError(
               `Response truncated at ${maxTokens} tokens after ${continuationAttempts} continuation attempts.`
             );
           }
@@ -568,36 +596,69 @@ WORLD RULES:
 
         // Parse based on requested format
         if (format === 'xml') {
-          // Use XML parser (more robust, handles malformed content better)
-          const xmlResult = parseXML(content);
-
-          if (!xmlResult.success) {
-            throw new Error(`Failed to parse XML: ${xmlResult.error}`);
+          const trimmed = content.trim();
+          let parsed: StructuredOutput;
+          let rootName: string | undefined;
+          if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            parsed = parseStructuredJSON(trimmed);
+          } else {
+            const xmlResult = parseXML(content);
+            if (!xmlResult.success) {
+              throw new StructuredOutputError(
+                `Failed to parse XML: ${xmlResult.error}`
+              );
+            }
+            parsed =
+              typeof xmlResult.data === 'string'
+                ? parseStructuredJSON(xmlResult.data)
+                : requireStructuredOutput(xmlResult.data);
+            rootName = extractXMLFromText(cleanXMLMarkdown(content)).match(
+              /^<([\w-]+)(?:\s|>)/
+            )?.[1];
+          }
+          // XML parsing discards the outer tag; validate its projection without
+          // changing the object or array shape returned to existing callers.
+          const schemaAlternatives: StructuredOutput[] = [];
+          if (rootName) schemaAlternatives.push({ [rootName]: parsed });
+          if (
+            !Array.isArray(parsed) &&
+            parsed.response !== null &&
+            typeof parsed.response === 'object'
+          ) {
+            schemaAlternatives.push(parsed.response);
+          }
+          if (
+            schema &&
+            !this.validateSchema(parsed, schema, schemaAlternatives)
+          ) {
+            throw new StructuredOutputError(
+              `Response does not match schema. Missing required fields: ${schema.required?.join(', ')}`
+            );
           }
 
           logger.debug(
             'Successfully parsed XML response',
             {
-              hasData: xmlResult.data !== null,
-              isArray: Array.isArray(xmlResult.data),
+              hasData: true,
+              isArray: Array.isArray(parsed),
             },
             'FeedLLMClient'
           );
 
           // Log parsed output for monitoring
-          await this.logParsedOutput(xmlResult.data, promptType);
+          await this.logParsedOutput(parsed, promptType);
 
-          parsedResponse = xmlResult.data;
-          return xmlResult.data as T;
+          parsedResponse = parsed;
+          return parsed as T;
         }
         // JSON format
         let jsonContent = cleanMarkdownCodeBlocks(content);
         jsonContent = extractJsonFromText(jsonContent);
 
-        const parsed: Record<string, JsonValue> = JSON.parse(jsonContent);
+        const parsed = parseStructuredJSON(jsonContent);
 
         if (schema && !this.validateSchema(parsed, schema)) {
-          throw new Error(
+          throw new StructuredOutputError(
             `Response does not match schema. Missing required fields: ${schema.required?.join(', ')}`
           );
         }
@@ -617,6 +678,20 @@ WORLD RULES:
         };
         const isTestEnv =
           process.env.NODE_ENV === 'test' || process.env.BUN_ENV === 'test';
+
+        if (error instanceof StructuredOutputError && retryCount < maxRetries) {
+          retryCount++;
+          validationFeedback =
+            format === 'xml'
+              ? 'Your previous response was invalid. Return the complete requested XML structure, including every required field. No explanations, markdown, or truncated tags.'
+              : 'Your previous response was invalid. Return a complete JSON object or array matching the requested schema. No explanations, markdown, or truncated values.';
+          logger.warn(
+            'Invalid structured response, retrying',
+            { attempt: retryCount, maxRetries, format },
+            'FeedLLMClient'
+          );
+          continue;
+        }
 
         // Handle 429 rate limit errors
         const isRateLimitError =
@@ -816,21 +891,24 @@ WORLD RULES:
    * Simple schema validation
    */
   private validateSchema(
-    data: Record<string, JsonValue>,
-    schema: JSONSchema
+    data: StructuredOutput,
+    schema: JSONSchema,
+    alternatives: StructuredOutput[] = []
   ): boolean {
     // Basic validation - check required fields exist
-    if (schema.required) {
-      for (const field of schema.required) {
-        if (!(field in data)) {
-          logger.error(
-            `Missing required field: ${field}`,
-            undefined,
-            'FeedLLMClient'
-          );
-          return false;
-        }
-      }
+    const required = schema.required;
+    if (
+      required &&
+      ![data, ...alternatives].some((candidate) =>
+        required.every((field) => field in candidate)
+      )
+    ) {
+      logger.error(
+        `Missing required fields: ${required.join(', ')}`,
+        undefined,
+        'FeedLLMClient'
+      );
+      return false;
     }
     return true;
   }

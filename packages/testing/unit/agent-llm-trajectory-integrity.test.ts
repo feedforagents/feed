@@ -226,15 +226,205 @@ describe('actual provider transport and trajectory bridge', () => {
     await expect(
       client.generateJSON('Required market context')
     ).rejects.toThrow('Failed to parse XML');
-    expect(calls.slice(before)).toHaveLength(1);
-    expect(calls.at(-1)).toMatchObject({
-      success: false,
-      rawResponse: responseText,
-      userPrompt: 'Required market context',
-      totalTokens: 40,
-      parsedResponse: null,
-    });
+    const captured = calls.slice(before);
+    expect(captured).toHaveLength(4);
+    expect(captured[0]?.userPrompt).toBe('Required market context');
+    for (const call of captured) {
+      expect(call).toMatchObject({
+        success: false,
+        rawResponse: responseText,
+        totalTokens: 40,
+        parsedResponse: null,
+      });
+    }
     expect(calls.at(-1)?.error).toContain('Mismatched XML');
+  });
+  test('unwraps only whole top-level JSON containers inside XML text', async () => {
+    const client = new FeedLLMClient(undefined, 'groq');
+    queuedResponses = [
+      {
+        content: '<response>{"parodyTitle":"A new parody headline"}</response>',
+        finish: 'stop',
+      },
+      { content: '<response>[{"id":"opaque-id"}]</response>', finish: 'stop' },
+      {
+        content:
+          '<response><message>{"post":"literal text"}</message></response>',
+        finish: 'stop',
+      },
+    ];
+
+    expect(
+      await client.generateJSON<{ parodyTitle: string }>(
+        'Generate a headline',
+        {
+          required: ['parodyTitle'],
+        }
+      )
+    ).toEqual({ parodyTitle: 'A new parody headline' });
+    expect(
+      await client.generateJSON<Array<{ id: string }>>('Generate items')
+    ).toEqual([{ id: 'opaque-id' }]);
+    expect(
+      await client.generateJSON<{ message: string }>('Preserve message text', {
+        required: ['message'],
+      })
+    ).toEqual({ message: '{"post":"literal text"}' });
+  });
+  test('validates XML required fields without changing discarded-root or response-wrapper shapes', async () => {
+    const client = new FeedLLMClient(undefined, 'groq');
+    queuedResponses = [
+      {
+        content:
+          '<decisions><decision><npcId>opaque-id</npcId></decision></decisions>',
+        finish: 'stop',
+      },
+      {
+        content: '<output><response><name>Wrapped</name></response></output>',
+        finish: 'stop',
+      },
+      {
+        content: '<response><wrong>missing name</wrong></response>',
+        finish: 'stop',
+      },
+      {
+        content: '<response><name>Corrected</name></response>',
+        finish: 'stop',
+      },
+    ];
+
+    expect(
+      await client.generateJSON<{ decision: { npcId: string } }>(
+        'Generate decisions',
+        {
+          required: ['decisions'],
+        }
+      )
+    ).toEqual({ decision: { npcId: 'opaque-id' } });
+    expect(
+      await client.generateJSON<{ response: { name: string } }>(
+        'Generate a name',
+        { required: ['name'] }
+      )
+    ).toEqual({ response: { name: 'Wrapped' } });
+    const before = calls.length;
+    expect(
+      await client.generateJSON<{ name: string }>('Generate a valid name', {
+        required: ['name'],
+      })
+    ).toEqual({ name: 'Corrected' });
+    expect(calls.slice(before).map((call) => call.success)).toEqual([
+      false,
+      true,
+    ]);
+  });
+  test('does not treat an XML tag inside JSON text as a discarded root', async () => {
+    const before = calls.length;
+    const previousResponse = responseText;
+    responseText = '{"message":"<decisions>"}';
+    try {
+      const client = new FeedLLMClient(undefined, 'groq');
+      await expect(
+        client.generateJSON('Generate decisions', { required: ['decisions'] })
+      ).rejects.toThrow('Missing required fields: decisions');
+      expect(calls.slice(before)).toHaveLength(4);
+      expect(calls.slice(before).every((call) => !call.success)).toBe(true);
+    } finally {
+      responseText = previousResponse;
+    }
+  });
+  test('preserves complete XML fragments inside a bare JSON container', async () => {
+    const previousResponse = responseText;
+    const message =
+      '<decisions><decision>opaque</decision></decisions> <think>literal text</think>';
+    responseText = JSON.stringify({ message });
+    try {
+      const client = new FeedLLMClient(undefined, 'groq');
+      expect(
+        await client.generateJSON<{ message: string }>(
+          'Preserve message text',
+          {
+            required: ['message'],
+          }
+        )
+      ).toEqual({ message });
+
+      const before = calls.length;
+      await expect(
+        client.generateJSON('Generate decisions', { required: ['decisions'] })
+      ).rejects.toThrow('Missing required fields: decisions');
+      expect(calls.slice(before)).toHaveLength(4);
+      expect(calls.slice(before).every((call) => !call.success)).toBe(true);
+    } finally {
+      responseText = previousResponse;
+    }
+  });
+  for (const invalid of [
+    '<response><name>Truncated',
+    '<response><name>Mismatched</wrong></response>',
+    '<response>plain prose</response>',
+    '<response>{"name":"truncated JSON"</response>',
+  ]) {
+    test(`retries invalid structured output: ${invalid}`, async () => {
+      const usage: Array<Parameters<TokenUsageCallback>[0]> = [];
+      const before = calls.length;
+      queuedResponses = [
+        { content: invalid, finish: 'stop' },
+        {
+          content: '<response><name>Corrected</name></response>',
+          finish: 'stop',
+        },
+      ];
+      setTokenUsageCallback((call) => usage.push(call));
+      try {
+        const client = new FeedLLMClient(undefined, 'groq');
+        expect(
+          await client.generateJSON<{ name: string }>('Required context', {
+            required: ['name'],
+          })
+        ).toEqual({ name: 'Corrected' });
+        const captured = calls.slice(before);
+        expect(captured.map((call) => call.success)).toEqual([false, true]);
+        expect(captured[0]?.rawResponse).toBe(invalid);
+        expect(captured[0]?.messages).toHaveLength(2);
+        expect(captured[1]?.messages).toHaveLength(3);
+        const feedback = captured[1]?.messages?.[2]?.content;
+        expect(feedback).toContain('complete');
+        expect(feedback).not.toContain(invalid);
+        expect(usage.map((call) => call.success)).toEqual([false, true]);
+        expect(usage.reduce((sum, call) => sum + call.totalTokens, 0)).toBe(80);
+      } finally {
+        setTokenUsageCallback(null);
+        queuedResponses = [];
+      }
+    });
+  }
+  test('rejects primitive JSON after four attempts and accounts for every failed output', async () => {
+    const usage: Array<Parameters<TokenUsageCallback>[0]> = [];
+    const before = calls.length;
+    responseText = 'true';
+    setTokenUsageCallback((call) => usage.push(call));
+    try {
+      const client = new FeedLLMClient(undefined, 'groq');
+      await expect(
+        client.generateJSON('Return structured data', undefined, {
+          format: 'json',
+        })
+      ).rejects.toThrow('object or array');
+      const captured = calls.slice(before);
+      expect(captured).toHaveLength(4);
+      expect(
+        captured.every((call) => !call.success && call.rawResponse === 'true')
+      ).toBe(true);
+      expect(captured.map((call) => call.messages?.length)).toEqual([
+        2, 3, 3, 3,
+      ]);
+      expect(usage.every((call) => !call.success)).toBe(true);
+      expect(usage.reduce((sum, call) => sum + call.totalTokens, 0)).toBe(160);
+    } finally {
+      setTokenUsageCallback(null);
+      responseText = 'A model response';
+    }
   });
   test('captures engine transport failure with the exact prompt', async () => {
     status = 400;

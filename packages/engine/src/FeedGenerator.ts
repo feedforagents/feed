@@ -1579,9 +1579,10 @@ ${voiceContext}
         worldEvent.description || worldEvent.type || 'Event occurred',
       characterName: commentator.name,
       characterInfo: fullCharacterContext,
-      characterEventRelation,
-      involvedActors: involvedActorNames,
-      relatedNarrative,
+      eventContext:
+        [characterEventRelation, relatedNarrative].filter(Boolean).join('\n') ||
+        'No additional event context is available.',
+      trendContext: this.trendContext,
       ...this.buildActorPromptVars(commentator),
       ...buildFilteredWorldContext(commentator, this.worldContext),
     });
@@ -1740,6 +1741,9 @@ ${voiceContext}
         worldEvent.description || worldEvent.type || 'Event occurred',
       characterName: conspiracist.name,
       characterInfo: fullCharacterContext,
+      eventContext:
+        comprehensiveContext.ongoingNarratives ||
+        'No ongoing narrative context is available.',
       ...this.buildActorPromptVars(conspiracist),
       ...buildFilteredWorldContext(conspiracist, this.worldContext),
     });

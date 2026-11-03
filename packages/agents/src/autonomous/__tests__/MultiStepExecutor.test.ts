@@ -615,6 +615,68 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  test('retries a disabled action before executing the corrected allowed action', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockResolvedValueOnce({
+      decision: {
+        thought: 'Post an update',
+        action: Actions.POST,
+        parameters: { content: 'An update' },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      'feature "posting" is disabled'
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('repeated disabled decisions exhaust the existing two attempts without execution', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockResolvedValue({
+      decision: {
+        thought: 'Post an update',
+        action: Actions.POST,
+        parameters: { content: 'An update' },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    });
+
+    await expect(executor.execute(actor.id, runtime, true)).rejects.toThrow(
+      'feature "posting" is disabled'
+    );
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test('direct execution still blocks a disabled feature', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, execute } = prepare(executor);
+    execute.mockRestore();
+
+    const result = await executor['executeAction'](
+      actor.id,
+      Actions.POST,
+      { content: 'An update' },
+      [Features.ENGAGING],
+      runtime,
+      true
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Feature "posting" is disabled');
+  });
+
   test('invalid configured budgets still fail', () => {
     for (const budget of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => new MultiStepExecutor(budget)).toThrow(

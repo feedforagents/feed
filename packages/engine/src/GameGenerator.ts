@@ -576,7 +576,11 @@ export class GameGenerator {
       'GameGenerator'
     );
 
-    const groupChats = await this.createGroupChats(selectedActors, connections);
+    const groupChats = await this.createGroupChats(
+      selectedActors,
+      connections,
+      scenarios
+    );
     logger.info(
       `Created ${groupChats.length} group chats`,
       undefined,
@@ -732,7 +736,11 @@ export class GameGenerator {
     const connections = this.generateConnections(selectedActors);
 
     // Create group chats
-    const groupChats = await this.createGroupChats(selectedActors, connections);
+    const groupChats = await this.createGroupChats(
+      selectedActors,
+      connections,
+      []
+    );
     logger.info(
       `Created ${groupChats.length} group chats`,
       undefined,
@@ -1913,7 +1921,9 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
   private async generateGroupChatName(
     admin: SelectedActor,
     members: SelectedActor[],
-    domain: string
+    domain: string,
+    existingGroupNames: string[],
+    ongoingNarratives: string
   ): Promise<string> {
     const memberDescriptions = members
       .map((m) => {
@@ -1930,6 +1940,10 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
       adminAffiliations:
         admin.affiliations?.slice(0, 3).join(', ') || 'various organizations',
       memberDescriptions,
+      existingGroupNames: existingGroupNames.length
+        ? existingGroupNames.map((name) => `- ${name}`).join('\n')
+        : 'No groups have been named yet.',
+      ongoingNarratives,
     });
 
     const rawResponse = await this.llm.generateJSON<
@@ -1976,9 +1990,13 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
    */
   private async createGroupChats(
     selectedActors: SelectedActorsByTier,
-    connections: ActorConnection[]
+    connections: ActorConnection[],
+    scenarios: Scenario[]
   ): Promise<GroupChat[]> {
     const chats: GroupChat[] = [];
+    const ongoingNarratives = scenarios.length
+      ? `Upcoming scenarios:\n${scenarios.map((scenario) => `- ${scenario.title}: ${scenario.description}`).join('\n')}`
+      : 'No ongoing narratives yet; the game has not started.';
 
     // Helper to get positive relationships for an actor
     const getPositiveConnections = (actorId: string): string[] => {
@@ -2021,7 +2039,13 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
       const domain = main.domain?.[0] || 'general';
 
       // Generate contextual name using LLM
-      const groupName = await this.generateGroupChatName(main, members, domain);
+      const groupName = await this.generateGroupChatName(
+        main,
+        members,
+        domain,
+        chats.map((chat) => chat.name),
+        ongoingNarratives
+      );
       const kebabName = groupName
         .toLowerCase()
         .replace(/\s+/g, '-')
@@ -2063,7 +2087,9 @@ REMINDER: Generate SCENARIOS only. Do NOT generate questions.`;
       const groupName = await this.generateGroupChatName(
         supporting,
         members,
-        domain
+        domain,
+        chats.map((chat) => chat.name),
+        ongoingNarratives
       );
       const kebabName =
         groupName

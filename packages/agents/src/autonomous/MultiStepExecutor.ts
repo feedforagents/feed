@@ -403,11 +403,15 @@ export class MultiStepExecutor {
           candidateDecision.decision.isFinish = true;
         }
 
-        const validationError = this.getDecisionValidationError(
-          normalizedAction,
-          normalizedParameters,
-          context
-        );
+        const requiredFeature = getRequiredFeature(normalizedAction);
+        const validationError =
+          requiredFeature && !effectiveFeatures.includes(requiredFeature)
+            ? `Your ${normalizedAction} was invalid because feature "${requiredFeature}" is disabled for this iteration. Choose a different valid action.`
+            : this.getDecisionValidationError(
+                normalizedAction,
+                normalizedParameters,
+                context
+              );
         if (
           validationError &&
           normalizedAction !== Actions.FINISH &&
