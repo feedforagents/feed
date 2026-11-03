@@ -868,13 +868,60 @@ export class PerpMarketService {
     });
 
     if (settlement.netSettlement > 0) {
-      await this.deps.wallet.credit({
-        userId: input.userId,
-        amount: settlement.netSettlement,
-        reason: settlement.isFullClose ? 'perp_close' : 'perp_partial_close',
-        description: `${settlement.isFullClose ? 'Close' : `Partial close ${(settlement.closePercentage * 100).toFixed(0)}%`} ${settlement.position.leverage}x ${settlement.position.side} ${settlement.position.ticker}`,
-        relatedId: settlement.position.id,
-      });
+      try {
+        await this.deps.wallet.credit({
+          userId: input.userId,
+          amount: settlement.netSettlement,
+          reason: settlement.isFullClose ? 'perp_close' : 'perp_partial_close',
+          description: `${settlement.isFullClose ? 'Close' : `Partial close ${(settlement.closePercentage * 100).toFixed(0)}%`} ${settlement.position.leverage}x ${settlement.position.side} ${settlement.position.ticker}`,
+          relatedId: settlement.position.id,
+        });
+      } catch (creditErr) {
+        // Position/OI already committed outside the wallet. Best-effort reopen
+        // so settlement is not permanently stranded when credit fails.
+        try {
+          await this.db.transaction(async (tx) => {
+            if (settlement.isFullClose) {
+              await tx.upsertPosition({
+                ...settlement.position,
+                closedAt: null,
+                currentPrice: settlement.exitPrice,
+                lastUpdated: settlement.now,
+              });
+            } else {
+              await tx.updateOpenPosition(settlement.position.id, {
+                size: settlement.position.size,
+                fundingPaid: settlement.position.fundingPaid,
+                currentPrice: settlement.exitPrice,
+                lastUpdated: settlement.now,
+              });
+            }
+            await tx.applyMarketDeltas(settlement.position.ticker, {
+              openInterest: settlement.closeSize,
+              volume24h: 0,
+            });
+          });
+        } catch (reopenErr) {
+          logger.error(
+            'CRITICAL: Failed to reopen position after close credit failure',
+            {
+              userId: input.userId,
+              positionId: settlement.position.id,
+              netSettlement: settlement.netSettlement,
+              creditError:
+                creditErr instanceof Error
+                  ? creditErr.message
+                  : String(creditErr),
+              reopenError:
+                reopenErr instanceof Error
+                  ? reopenErr.message
+                  : String(reopenErr),
+            },
+            'PerpService'
+          );
+        }
+        throw creditErr;
+      }
     }
 
     await this.deps.wallet.recordPnL({
