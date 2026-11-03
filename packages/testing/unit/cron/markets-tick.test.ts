@@ -1173,16 +1173,6 @@ describe('Transactional Sub-Market Creation Logic', () => {
     expect(createCount).toBe(5);
   });
 
-  test('should handle concurrent tick scenario with SKIP LOCKED', () => {
-    // Simulate SKIP LOCKED behavior:
-    // If another transaction has locked the rows, we should get empty results
-    const lockedByOtherTransaction = true;
-    const parentMarketsReturned = lockedByOtherTransaction ? [] : [{ id: '1' }];
-
-    // When SKIP LOCKED returns empty, we create 0 sub-markets
-    expect(parentMarketsReturned.length).toBe(0);
-  });
-
   test('should track gapFillingSkippedDueToMax metric correctly', () => {
     // When activeSubMarketCount >= MAX_SUB_MARKETS, we should set the flag
     const testCases = [
