@@ -31,6 +31,7 @@ import { asUser, db, getRawDrizzle, sql } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
+  createPerpSettlement,
   type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
@@ -1554,6 +1555,7 @@ export class FeedAgentExecutor implements AgentExecutor {
 
   private buildPerpService() {
     return new PerpMarketService({
+      settlement: createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: this.buildWalletPort(),
       priceImpact: createPerpPriceImpactPort(),

@@ -67,6 +67,7 @@ import {
 } from '@feed/db';
 import {
   createPerpPriceImpactPort,
+  createPerpSettlement,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -636,6 +637,7 @@ const PREDICTION_SIDE_MAP: Record<'yes' | 'no', 'YES' | 'NO'> = {
  */
 function buildPerpService() {
   return new PerpMarketService({
+    settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: buildWalletPort(),
     priceImpact: createPerpPriceImpactPort(),

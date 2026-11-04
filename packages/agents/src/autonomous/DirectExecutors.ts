@@ -50,6 +50,7 @@ import {
 import {
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
+  createPerpSettlement,
   FEE_CONFIG,
   FeeService,
   type GeneratedTag,
@@ -823,37 +824,33 @@ async function executePerpTrade(params: {
   const org = allOrgs.find((o) => o.ticker === ticker);
   const currentPrice = org?.initialPrice ?? 100;
 
-  const perpTradeOperation = async () => {
-    const walletAdapter = createPerpWalletAdapter(isNpc);
+  const walletAdapter = createPerpWalletAdapter(isNpc);
 
-    const service = new PerpMarketService({
-      db: new PerpDbAdapter(),
-      wallet: walletAdapter,
-      fees: {
-        tradingFeeRate: 0.001,
-        platformShare: 0.5,
-        referrerShare: 0.5,
-        minFeeAmount: 0.01,
-      },
-      priceImpact: createPerpPriceImpactPort(),
-    });
+  const service = new PerpMarketService({
+    settlement: createPerpSettlement({
+      system: isNpc ? 'npc_perp_trade' : undefined,
+      wallet: isNpc
+        ? (userId, tx) => createNpcWalletAdapter(userId, tx)
+        : undefined,
+    }),
+    db: new PerpDbAdapter(),
+    wallet: walletAdapter,
+    fees: {
+      tradingFeeRate: 0.001,
+      platformShare: 0.5,
+      referrerShare: 0.5,
+      minFeeAmount: 0.01,
+    },
+    priceImpact: createPerpPriceImpactPort(),
+  });
 
-    await service.openPosition({
-      userId: agentUserId,
-      ticker,
-      side: perpSide,
-      size: amount,
-      leverage: 1,
-    });
-  };
-
-  // Execute with appropriate context
-  if (isNpc) {
-    await asSystem(perpTradeOperation, 'npc_perp_trade');
-  } else {
-    await asUser({ userId: agentUserId }, perpTradeOperation);
-  }
-
+  await service.openPosition({
+    userId: agentUserId,
+    ticker,
+    side: perpSide,
+    size: amount,
+    leverage: 1,
+  });
   // Record trade
   await agentPnLService.recordTrade({
     agentId: agentUserId,
@@ -916,6 +913,12 @@ async function executeClosePerpPosition(params: {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
     const service = new PerpMarketService({
+      settlement: createPerpSettlement({
+        system: isNpc ? 'npc_perp_trade' : undefined,
+        wallet: isNpc
+          ? (userId, tx) => createNpcWalletAdapter(userId, tx)
+          : undefined,
+      }),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
       fees: {

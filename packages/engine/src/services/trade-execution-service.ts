@@ -56,6 +56,7 @@ import { FeeService } from './fee-service';
 import { NpcTradeRateLimiter } from './npc-trade-rate-limiter';
 import { createNpcWalletAdapter } from './npc-wallet-adapter';
 import { createPerpPriceImpactPort } from './perp-price-impact-port';
+import { createPerpSettlement } from './perp-settlement';
 import {
   type PredictionSettlementOptions,
   withPredictionSettlement,
@@ -512,6 +513,10 @@ export class TradeExecutionService {
     // Use PerpMarketService for consistency with user trades
     // This ensures NPC positions get funding and liquidation applied
     const perpService = new PerpMarketService({
+      settlement: createPerpSettlement({
+        system: 'npc_perp_trade',
+        wallet: (userId, tx) => createNpcWalletAdapter(userId, tx),
+      }),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
       fees: {
@@ -1076,6 +1081,10 @@ export class TradeExecutionService {
     }
   ): Promise<ExecutedTrade> {
     const perpService = new PerpMarketService({
+      settlement: createPerpSettlement({
+        system: 'npc_perp_trade',
+        wallet: (userId, tx) => createNpcWalletAdapter(userId, tx),
+      }),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
       fees: {

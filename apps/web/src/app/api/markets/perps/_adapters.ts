@@ -35,6 +35,7 @@ import {
   perpPositions,
 } from '@feed/db';
 import {
+  createPerpSettlement,
   FEE_CONFIG,
   FeeService,
   PriceUpdateService,
@@ -200,6 +201,7 @@ export function createPerpMarketService(
   options: CreatePerpServiceOptions = {}
 ): PerpMarketService {
   const deps: PerpServiceDeps = {
+    settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: createWalletAdapter(),
     fees: perpFeeConfig,

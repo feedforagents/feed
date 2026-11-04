@@ -298,10 +298,19 @@ export interface MetricsPort {
   increment(name: string, value: number, tags?: Record<string, string>): void;
 }
 
+/** Serialize an owner's exposure check and financial writes in one transaction. */
+export interface PerpSettlementPort {
+  run<T>(
+    userId: string,
+    operation: (db: PerpDbPort, wallet: WalletPort) => Promise<T>
+  ): Promise<T>;
+}
+
 // Service deps bundle (optional helper)
 export interface PerpServiceDeps {
   db: PerpDbPort;
   wallet: WalletPort;
+  settlement: PerpSettlementPort;
   broadcast?: BroadcastPort;
   cache?: CachePort;
   clock?: ClockPort;

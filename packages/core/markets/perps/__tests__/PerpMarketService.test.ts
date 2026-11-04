@@ -295,6 +295,10 @@ describe('PerpMarketService', () => {
     db = new InMemoryPerpDb([baseMarket]);
     wallet = new InMemoryWallet(10_000);
     service = new PerpMarketService({
+      settlement: {
+        run: async (_userId, operation) =>
+          db.transaction((tx) => operation(tx, wallet)),
+      },
       db,
       wallet,
       fees: feeConfig,
@@ -1016,7 +1020,15 @@ describe('PerpMarketService', () => {
     beforeEach(() => {
       db = new InMemoryPerpDb([baseMarket, otherMarket]);
       wallet = new InMemoryWallet(1_000_000);
-      service = new PerpMarketService({ db, wallet, fees: feeConfig });
+      service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
+        db,
+        wallet,
+        fees: feeConfig,
+      });
     });
 
     // 900k notional on another ticker leaves 100k of headroom under the 1M cap.
@@ -1236,6 +1248,10 @@ describe('PerpMarketService', () => {
     it('keeps the weighted cost basis when adding at a different price', async () => {
       const basePrice = 100;
       service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
         db,
         wallet,
         fees: feeConfig,
@@ -1275,6 +1291,10 @@ describe('PerpMarketService', () => {
 
     it('rejects an open whose post-impact fill breaches maxSlippage', async () => {
       service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
         db,
         wallet,
         fees: feeConfig,
@@ -1374,6 +1394,10 @@ describe('PerpMarketService', () => {
         getBalance: async (u) => wallet.getBalance(u),
       };
       service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, trackingWallet)),
+        },
         db,
         wallet: trackingWallet,
         fees: feeConfig,
@@ -1422,7 +1446,15 @@ describe('PerpMarketService', () => {
     beforeEach(() => {
       db = new InMemoryPerpDb([marketWithRate(cappedRate)]);
       wallet = new InMemoryWallet(10_000);
-      service = new PerpMarketService({ db, wallet, fees: feeConfig });
+      service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
+        db,
+        wallet,
+        fees: feeConfig,
+      });
     });
 
     it('does not liquidate a long when the raw price wicks below the liquidation price but the mark stays above it', async () => {
@@ -1476,7 +1508,15 @@ describe('PerpMarketService', () => {
 
     it('does not liquidate a short on a raw-price wick above the liquidation price when a negative funding premium keeps the mark below it', async () => {
       db = new InMemoryPerpDb([marketWithRate(-cappedRate)]);
-      service = new PerpMarketService({ db, wallet, fees: feeConfig });
+      service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
+        db,
+        wallet,
+        fees: feeConfig,
+      });
 
       const open = await service.openPosition({
         userId: 'u1',
