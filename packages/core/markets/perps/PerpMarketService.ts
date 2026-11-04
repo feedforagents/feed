@@ -1416,6 +1416,18 @@ export class PerpMarketService {
       throw new Error(`Order size below minimum (${minOrderSize})`);
     }
 
+    // An add inherits the existing position's leverage, so the top-level
+    // input-leverage check in openPosition cannot catch a legacy position
+    // already above the cap: adding to it would grow above-cap exposure
+    // even when the add itself requests an at-cap leverage. Reject the
+    // exposure-increasing add; closing or reducing stays allowed.
+    const maxLeverage = effectiveMaxLeverage(market);
+    if (existing.leverage > maxLeverage) {
+      throw new Error(
+        `Cannot add to a position above the leverage cap (existing ${existing.leverage}x exceeds ${maxLeverage}x); close or reduce it first`
+      );
+    }
+
     // Check max position size
     const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
     const newTotalSize = existing.size + addedSize;

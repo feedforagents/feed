@@ -297,8 +297,37 @@ describe('Perp leverage cap (PRD 9.3 [D-17b]: max 20x)', () => {
   const setup = (markets: PerpMarketRecord[]) => {
     db = new InMemoryPerpDb(markets);
     wallet = new InMemoryWallet(10_000);
-    service = new PerpMarketService({ db, wallet, fees: feeConfig });
+    service = new PerpMarketService({
+      // #1604 made the settlement port required: fresh opens and flips run
+      // through it, so the in-memory port must be wired even here.
+      settlement: {
+        run: async (_userId, operation) =>
+          db.transaction((tx) => operation(tx, wallet)),
+      },
+      db,
+      wallet,
+      fees: feeConfig,
+    });
   };
+
+  const seedPosition = (overrides: Partial<PerpPositionRecord> = {}) =>
+    db.upsertPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      organizationId: 'org-abc',
+      side: 'long',
+      entryPrice: 100,
+      currentPrice: 100,
+      size: 1000,
+      leverage: 100,
+      liquidationPrice: 99,
+      unrealizedPnL: 0,
+      unrealizedPnLPercent: 0,
+      fundingPaid: 0,
+      openedAt: new Date(),
+      lastUpdated: new Date(),
+      ...overrides,
+    });
 
   const open = (leverage: number) =>
     service.openPosition({
@@ -365,6 +394,75 @@ describe('Perp leverage cap (PRD 9.3 [D-17b]: max 20x)', () => {
       leverage: 20,
     });
     expect(preview).toBeTruthy();
+  });
+
+  it('rejects a same-side add to a legacy 100x position even when the add requests 20x', async () => {
+    setup([makeMarket()]);
+    const seeded = await seedPosition();
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 1000,
+        leverage: 20,
+      })
+    ).rejects.toThrow(
+      'Cannot add to a position above the leverage cap (existing 100x exceeds 20x)'
+    );
+    const pos = await db.getPositionById(seeded.id);
+    expect(pos?.size).toBe(1000);
+    expect(pos?.leverage).toBe(100);
+  });
+
+  it('rejects a same-side add to a position above a tighter configured cap', async () => {
+    setup([makeMarket({ maxLeverage: 10 })]);
+    const seeded = await seedPosition({ leverage: 15 });
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      })
+    ).rejects.toThrow(
+      'Cannot add to a position above the leverage cap (existing 15x exceeds 10x)'
+    );
+    const pos = await db.getPositionById(seeded.id);
+    expect(pos?.size).toBe(1000);
+  });
+
+  it('still allows a same-side add to an at-cap position', async () => {
+    setup([makeMarket()]);
+    const seeded = await seedPosition({ leverage: 20 });
+    const res = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 20,
+    });
+    expect(res.positionId).toBe(seeded.id);
+    const pos = await db.getPositionById(seeded.id);
+    expect(pos?.size).toBe(1100);
+    expect(pos?.leverage).toBe(20);
+  });
+
+  it('still allows reducing a legacy above-cap position', async () => {
+    setup([makeMarket()]);
+    const seeded = await seedPosition();
+    const res = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 500,
+      leverage: 20,
+    });
+    expect(res.positionId).toBe(seeded.id);
+    const pos = await db.getPositionById(seeded.id);
+    expect(pos?.size).toBe(500);
+    expect(pos?.leverage).toBe(100);
   });
 
   it('previewOrder rejects leverage above the cap for a fresh open', async () => {
