@@ -36,28 +36,22 @@ export class PredictionPricing {
   }
 
   /**
-   * Calculate a winner's resolution payout using pool-proportional distribution.
+   * Calculate a winner's resolution payout.
    *
-   * Winners receive their net cost basis back plus their proportional share
-   * of all loser deposits. This is zero-sum among traders: losers fund
-   * winners, and seed liquidity stays in the pool.
+   * Each winning share redeems for 1 pt (PRD §9.2, D-14).
+   * Legacy cost/pool arguments remain accepted for existing callers but
+   * do not affect redemption.
    *
    * @param shares - Winner's shares held
-   * @param avgPrice - Winner's average purchase price per share
-   * @param totalWinnerShares - Sum of all winning positions' shares
-   * @param totalLoserDeposits - Sum of (shares × avgPrice) for all losing positions
    * @returns Gross payout to this winner
    */
   static calculateExpectedPayout(
     shares: number,
-    avgPrice: number,
-    totalWinnerShares: number = 0,
-    totalLoserDeposits: number = 0
+    _avgPrice: number,
+    _totalWinnerShares: number = 0,
+    _totalLoserDeposits: number = 0
   ): number {
-    const costBasis = shares * avgPrice;
-    if (totalWinnerShares <= 0) return costBasis;
-    const proportion = shares / totalWinnerShares;
-    return costBasis + proportion * totalLoserDeposits;
+    return shares;
   }
 
   /**
