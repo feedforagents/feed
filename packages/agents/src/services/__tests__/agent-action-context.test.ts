@@ -5,7 +5,6 @@ import {
   formatRelativeTime,
 } from '../../plugins/conversation-time';
 import { actionStateProvider } from '../../plugins/plugin-agent-core/src/providers/action-state';
-import { coordinatorActionStateProvider } from '../../plugins/plugin-user-core/src/providers/action-state';
 import { formatAgentActionResults } from '../agent-action-context';
 
 const runtime = {} as IAgentRuntime;
@@ -33,11 +32,12 @@ const results = [
 ];
 
 describe('ACTION_STATE providers', () => {
-  it.each([
-    ['agent', actionStateProvider],
-    ['coordinator', coordinatorActionStateProvider],
-  ])('%s provider renders exactly what the chat service renders', async (_name, provider) => {
-    const result = await provider.get(runtime, message, stateWith(results));
+  it('renders action results with the shared formatter', async () => {
+    const result = await actionStateProvider.get(
+      runtime,
+      message,
+      stateWith(results)
+    );
     const expected = formatAgentActionResults(results);
     expect(result.values?.actionResults).toBe(expected);
     expect(result.text).toBe(`# Actions Taken This Request\n\n${expected}`);
@@ -46,11 +46,9 @@ describe('ACTION_STATE providers', () => {
     expect(result.values?.totalActions).toBe(2);
   });
 
-  it('both providers produce identical output and drop malformed entries', async () => {
+  it('drops malformed action entries', async () => {
     const state = stateWith([...results, { actionType: 42 }, null]);
     const a = await actionStateProvider.get(runtime, message, state);
-    const c = await coordinatorActionStateProvider.get(runtime, message, state);
-    expect(a).toEqual(c);
     expect(a.values?.totalActions).toBe(2);
   });
 

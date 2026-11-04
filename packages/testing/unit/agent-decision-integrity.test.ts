@@ -9,11 +9,37 @@ describe('agent decision integrity', () => {
     isFinish: true,
     parameters: {},
   };
-  test('retains a complete model decision', () => {
-    expect(parseDecisionJson(JSON.stringify(decision))).toEqual(decision);
+  test('accepts a legacy boolean but excludes it from parsed decision data', () => {
+    expect(parseDecisionJson(JSON.stringify(decision))).toEqual({
+      action: 'WAIT',
+      thought: 'No actionable signal',
+      parameters: {},
+    });
+  });
+  test('accepts a decision without the derived finish flag', () => {
+    expect(
+      parseDecisionJson(
+        JSON.stringify({
+          action: 'TRADE',
+          thought: 'Signal improves',
+          parameters: { marketId: 'm' },
+        })
+      )
+    ).toEqual({
+      action: 'TRADE',
+      thought: 'Signal improves',
+      parameters: { marketId: 'm' },
+    });
+  });
+  test('rejects a supplied nonboolean legacy finish flag', () => {
+    for (const value of [null, 'true', 0, [], {}]) {
+      expect(() =>
+        parseDecisionJson(JSON.stringify({ ...decision, isFinish: value }))
+      ).toThrow();
+    }
   });
   test('rejects missing and invalid required fields', () => {
-    for (const field of ['action', 'thought', 'parameters', 'isFinish']) {
+    for (const field of ['action', 'thought', 'parameters']) {
       for (const value of [null, undefined, 123, []]) {
         expect(() =>
           parseDecisionJson(JSON.stringify({ ...decision, [field]: value }))

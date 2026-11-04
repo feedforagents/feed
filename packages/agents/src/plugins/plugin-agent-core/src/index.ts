@@ -49,11 +49,6 @@ import { closePerpAction } from './actions/close-perp';
 import { createCommentAction } from './actions/create-comment';
 import { createPostAction } from './actions/create-post';
 import { lookupUserAction } from './actions/lookup-user';
-import {
-  listPriceAlertsAction,
-  removePriceAlertAction,
-  setPriceAlertAction,
-} from './actions/manage-price-alerts';
 import { openPerpAction } from './actions/open-perp';
 import { sellPredictionAction } from './actions/sell-prediction';
 import { toggleAutonomyAction } from './actions/toggle-autonomy';
@@ -94,9 +89,6 @@ export const agentCorePlugin: Plugin = {
     // User lookup
     lookupUserAction,
     // Price alerts
-    setPriceAlertAction,
-    listPriceAlertsAction,
-    removePriceAlertAction,
     // Social actions
     createPostAction,
     createCommentAction,

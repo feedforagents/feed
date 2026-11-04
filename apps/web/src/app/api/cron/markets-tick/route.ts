@@ -28,7 +28,6 @@
  * - npc-tick: NPC behavior (trading + social)
  * - organization-tick: Org posts
  * - article-tick: Article generation
- * - agent-tick: Player agents
  */
 
 import {
@@ -74,17 +73,21 @@ import {
   dailyTopicService,
   deriveTopicFromText,
   FeedLLMClient,
+  getMaxSubMarketDuration,
   getPredictionMarketInitialization,
   isEligibleActor,
+  MAX_SUB_MARKETS,
   mapGranularToDbTimeframe,
   normalizeTopicDate,
   QuestionManager,
   resolveQuestionPayouts,
   SignalExtractionService,
   StaticDataRegistry,
+  SUB_MARKET_MIN_DURATION_MS,
   secureRandom,
   timeframeArcPlanner,
   weightedPick,
+  writeSubMarket,
 } from '@feed/engine';
 import { isStringArray, logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -213,58 +216,10 @@ const MARKET_STRUCTURE: Record<
 // ============================================================================
 
 /**
- * Maximum number of active sub-markets at any time.
- * Sub-markets are shorter duration markets linked to main markets.
- */
-const MAX_SUB_MARKETS = 10;
-
-/**
  * Maximum sub-markets to create per tick.
  * Allows faster ramp-up while preventing overload in a single tick.
  */
 const MAX_SUB_MARKETS_PER_TICK = 5;
-
-/**
- * Minimum duration for sub-markets: 15 minutes
- */
-const SUB_MARKET_MIN_DURATION_MS = 15 * 60 * 1000;
-
-/**
- * Maximum duration for sub-markets: 3 hours
- */
-const SUB_MARKET_MAX_DURATION_MS = 3 * 60 * 60 * 1000;
-
-/**
- * Buffer time before parent market resolution.
- * Sub-markets should end at least this much time before their parent resolves.
- * This ensures sub-markets have time to resolve and settle before the parent.
- */
-const SUB_MARKET_RESOLUTION_BUFFER_MS = 5 * 60 * 1000; // 5 minutes
-
-/**
- * Calculate the maximum allowed sub-market duration given the parent's remaining time.
- * Returns null if the parent doesn't have enough remaining time for even the minimum
- * sub-market duration.
- *
- * @param parentEndTime - The end time of the parent market
- * @param now - Current timestamp (defaults to Date.now())
- * @returns Maximum allowed duration in ms, or null if parent doesn't have enough time
- */
-function getMaxSubMarketDuration(
-  parentEndTime: Date,
-  now: number = Date.now()
-): number | null {
-  const remainingTimeMs =
-    parentEndTime.getTime() - now - SUB_MARKET_RESOLUTION_BUFFER_MS;
-
-  // Parent doesn't have enough time for even the minimum sub-market duration
-  if (remainingTimeMs < SUB_MARKET_MIN_DURATION_MS) {
-    return null;
-  }
-
-  // Cap at the standard maximum sub-market duration
-  return Math.min(remainingTimeMs, SUB_MARKET_MAX_DURATION_MS);
-}
 
 /**
  * Generate a random sub-market duration that fits within the parent's remaining time.
@@ -960,223 +915,179 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
 
     // Step 4: Manage sub-markets (maintain up to 10)
     // Sub-markets are shorter-duration markets with random 15min-3hour durations
-    // Uses transaction with FOR UPDATE SKIP LOCKED to prevent race conditions
+    // The final write transaction rechecks the cap and parent after inference.
     const subMarketStart = Date.now();
     let gapFillingSkippedDueToMax = false;
 
     if (Date.now() < deadline) {
-      // Use transaction with row-level locking to prevent race conditions
-      // between concurrent ticks. SKIP LOCKED ensures we don't block if another
-      // tick is already processing - we just skip gracefully.
-      await db.transaction(async (tx) => {
-        // Count active sub-markets with row-level lock
-        // This prevents another concurrent tick from counting the same rows
-        const [subMarketCountResult] = await tx
-          .select({ count: sql<number>`count(*)::int` })
-          .from(timeframedMarkets)
-          .where(
-            and(
-              eq(timeframedMarkets.isActive, true),
-              isNotNull(timeframedMarkets.parentMarketId)
-            )
-          );
-
-        const activeSubMarketCount = subMarketCountResult?.count ?? 0;
-        const subMarketsNeeded = Math.max(
-          0,
-          MAX_SUB_MARKETS - activeSubMarketCount
+      const [subMarketCountResult] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(timeframedMarkets)
+        .where(
+          and(
+            eq(timeframedMarkets.isActive, true),
+            isNotNull(timeframedMarkets.parentMarketId)
+          )
         );
+      const activeSubMarketCount = subMarketCountResult?.count ?? 0;
+      const subMarketsNeeded = Math.max(
+        0,
+        MAX_SUB_MARKETS - activeSubMarketCount
+      );
 
+      logger.info(
+        'Sub-market status',
+        {
+          activeSubMarkets: activeSubMarketCount,
+          needed: subMarketsNeeded,
+          max: MAX_SUB_MARKETS,
+        },
+        'MarketsTick'
+      );
+
+      gapFillingSkippedDueToMax = activeSubMarketCount >= MAX_SUB_MARKETS;
+
+      const createCount = Math.min(subMarketsNeeded, MAX_SUB_MARKETS_PER_TICK);
+      if (createCount > 0)
         logger.info(
-          'Sub-market status',
-          {
-            activeSubMarkets: activeSubMarketCount,
-            needed: subMarketsNeeded,
-            max: MAX_SUB_MARKETS,
-          },
+          `Creating up to ${createCount} sub-markets this tick`,
+          { needed: subMarketsNeeded, creating: createCount },
           'MarketsTick'
         );
 
-        // Track if we skipped due to cap for metrics
-        if (activeSubMarketCount >= MAX_SUB_MARKETS) {
-          gapFillingSkippedDueToMax = true;
-          return;
-        }
+      const parentMarkets =
+        createCount > 0 && Date.now() < deadline
+          ? await db
+              .select({
+                id: timeframedMarkets.id,
+                questionId: timeframedMarkets.questionId,
+                questionText: questions.text,
+                category: timeframedMarkets.category,
+                arcState: timeframedMarkets.arcState,
+                affiliatedActorIds: timeframedMarkets.affiliatedActorIds,
+                affiliatedOrgIds: timeframedMarkets.affiliatedOrgIds,
+                rootMarketId: timeframedMarkets.rootMarketId,
+                topicKey: timeframedMarkets.topicKey,
+                topicLabel: timeframedMarkets.topicLabel,
+                topicDate: timeframedMarkets.topicDate,
+                endTime: timeframedMarkets.endTime,
+              })
+              .from(timeframedMarkets)
+              .leftJoin(
+                questions,
+                eq(questions.id, timeframedMarkets.questionId)
+              )
+              .where(
+                and(
+                  eq(timeframedMarkets.isActive, true),
+                  isNull(timeframedMarkets.parentMarketId)
+                )
+              )
+              .orderBy(sql`RANDOM()`)
+              .limit(createCount)
+          : [];
 
-        // Create sub-markets if needed (up to MAX_SUB_MARKETS_PER_TICK per tick)
-        if (subMarketsNeeded > 0 && Date.now() < deadline) {
-          const createCount = Math.min(
-            subMarketsNeeded,
-            MAX_SUB_MARKETS_PER_TICK
-          );
-
+      // Create sub-markets for each parent, respecting deadline and parent's remaining time
+      let skippedDueToInsufficientTime = 0;
+      for (const parentMarket of parentMarkets) {
+        if (Date.now() > deadline) {
           logger.info(
-            `Creating up to ${createCount} sub-markets this tick`,
-            { needed: subMarketsNeeded, creating: createCount },
+            'Deadline reached, stopping sub-market creation',
+            { created: results.subMarketsCreated },
             'MarketsTick'
           );
-
-          // Pick random active main markets as parents (one per sub-market to create)
-          // Use FOR UPDATE SKIP LOCKED to avoid blocking on locked rows
-          const parentMarkets = await tx
-            .select({
-              id: timeframedMarkets.id,
-              questionId: timeframedMarkets.questionId,
-              questionText: questions.text,
-              category: timeframedMarkets.category,
-              arcState: timeframedMarkets.arcState,
-              affiliatedActorIds: timeframedMarkets.affiliatedActorIds,
-              affiliatedOrgIds: timeframedMarkets.affiliatedOrgIds,
-              rootMarketId: timeframedMarkets.rootMarketId,
-              topicKey: timeframedMarkets.topicKey,
-              topicLabel: timeframedMarkets.topicLabel,
-              topicDate: timeframedMarkets.topicDate,
-              endTime: timeframedMarkets.endTime,
-            })
-            .from(timeframedMarkets)
-            .leftJoin(questions, eq(questions.id, timeframedMarkets.questionId))
-            .where(
-              and(
-                eq(timeframedMarkets.isActive, true),
-                isNull(timeframedMarkets.parentMarketId)
-              )
-            )
-            .orderBy(sql`RANDOM()`)
-            .limit(createCount)
-            .for('update', { of: [timeframedMarkets], skipLocked: true });
-
-          // Re-verify sub-market count after acquiring locks to prevent race condition
-          // Another concurrent tick may have created sub-markets between our initial count and lock acquisition
-          const [refreshedCountResult] = await tx
-            .select({ count: sql<number>`count(*)::int` })
-            .from(timeframedMarkets)
-            .where(
-              and(
-                eq(timeframedMarkets.isActive, true),
-                isNotNull(timeframedMarkets.parentMarketId)
-              )
-            );
-
-          const refreshedSubMarketCount = refreshedCountResult?.count ?? 0;
-          if (refreshedSubMarketCount >= MAX_SUB_MARKETS) {
-            logger.info(
-              'Sub-market cap reached after lock acquisition, aborting creation',
-              {
-                initialCount: activeSubMarketCount,
-                refreshedCount: refreshedSubMarketCount,
-                max: MAX_SUB_MARKETS,
-              },
-              'MarketsTick'
-            );
-            gapFillingSkippedDueToMax = true;
-            return;
-          }
-
-          // Create sub-markets for each parent, respecting deadline and parent's remaining time
-          let skippedDueToInsufficientTime = 0;
-          for (const parentMarket of parentMarkets) {
-            if (Date.now() > deadline) {
-              logger.info(
-                'Deadline reached, stopping sub-market creation',
-                { created: results.subMarketsCreated },
-                'MarketsTick'
-              );
-              break;
-            }
-
-            try {
-              // Check if parent has enough remaining time for a sub-market
-              // Sub-market must end before parent resolves (with buffer)
-              const nowMs = Date.now();
-              const duration = getConstrainedSubMarketDuration(
-                parentMarket.endTime,
-                nowMs
-              );
-
-              if (duration === null) {
-                // Parent doesn't have enough remaining time for a sub-market
-                const remainingMinutes = Math.round(
-                  (parentMarket.endTime.getTime() - nowMs) / 60000
-                );
-                logger.debug(
-                  'Skipping parent market - insufficient remaining time',
-                  {
-                    parentId: parentMarket.id,
-                    remainingMinutes,
-                    minRequired: SUB_MARKET_MIN_DURATION_MS / 60000,
-                  },
-                  'MarketsTick'
-                );
-                skippedDueToInsufficientTime++;
-                continue;
-              }
-
-              // Extract parent market data with proper typing for arc relevance
-              // Use toStringArray for type-safe JSONB extraction
-              const parentMarketData: ParentMarketData = {
-                id: parentMarket.id,
-                questionId: parentMarket.questionId,
-                questionText: parentMarket.questionText,
-                category: parseMarketCategory(
-                  parentMarket.category,
-                  `parent market ${parentMarket.id}`
-                ),
-                arcState: parentMarket.arcState,
-                affiliatedActorIds: toStringArray(
-                  parentMarket.affiliatedActorIds
-                ),
-                affiliatedOrgIds: toStringArray(parentMarket.affiliatedOrgIds),
-                rootMarketId: parentMarket.rootMarketId,
-                topicKey: parentMarket.topicKey,
-                topicLabel: parentMarket.topicLabel,
-                topicDate: parentMarket.topicDate,
-              };
-              const created = await createSubMarket(
-                parentMarketData,
-                duration,
-                llmClient,
-                gameState
-              );
-
-              if (created) {
-                results.subMarketsCreated++;
-                logger.info(
-                  'Created sub-market',
-                  {
-                    parentId: parentMarket.id,
-                    duration: Math.round(duration / 60000),
-                    timeframe: inferSubMarketTimeframe(duration),
-                    parentEndsInMinutes: Math.round(
-                      (parentMarket.endTime.getTime() - nowMs) / 60000
-                    ),
-                  },
-                  'MarketsTick'
-                );
-              }
-            } catch (error) {
-              logger.error(
-                'Failed to create sub-market',
-                {
-                  error: error instanceof Error ? error.message : String(error),
-                },
-                'MarketsTick'
-              );
-            }
-          }
-
-          // Log if we skipped any parents due to time constraints
-          if (skippedDueToInsufficientTime > 0) {
-            logger.info(
-              'Some parent markets skipped due to insufficient remaining time',
-              {
-                skipped: skippedDueToInsufficientTime,
-                created: results.subMarketsCreated,
-              },
-              'MarketsTick'
-            );
-          }
+          break;
         }
-      });
+
+        try {
+          // Check if parent has enough remaining time for a sub-market
+          // Sub-market must end before parent resolves (with buffer)
+          const nowMs = Date.now();
+          const duration = getConstrainedSubMarketDuration(
+            parentMarket.endTime,
+            nowMs
+          );
+
+          if (duration === null) {
+            // Parent doesn't have enough remaining time for a sub-market
+            const remainingMinutes = Math.round(
+              (parentMarket.endTime.getTime() - nowMs) / 60000
+            );
+            logger.debug(
+              'Skipping parent market - insufficient remaining time',
+              {
+                parentId: parentMarket.id,
+                remainingMinutes,
+                minRequired: SUB_MARKET_MIN_DURATION_MS / 60000,
+              },
+              'MarketsTick'
+            );
+            skippedDueToInsufficientTime++;
+            continue;
+          }
+
+          // Extract parent market data with proper typing for arc relevance
+          // Use toStringArray for type-safe JSONB extraction
+          const parentMarketData: ParentMarketData = {
+            id: parentMarket.id,
+            questionId: parentMarket.questionId,
+            questionText: parentMarket.questionText,
+            category: parseMarketCategory(
+              parentMarket.category,
+              `parent market ${parentMarket.id}`
+            ),
+            arcState: parentMarket.arcState,
+            affiliatedActorIds: toStringArray(parentMarket.affiliatedActorIds),
+            affiliatedOrgIds: toStringArray(parentMarket.affiliatedOrgIds),
+            rootMarketId: parentMarket.rootMarketId,
+            topicKey: parentMarket.topicKey,
+            topicLabel: parentMarket.topicLabel,
+            topicDate: parentMarket.topicDate,
+          };
+          const created = await createSubMarket(
+            parentMarketData,
+            duration,
+            llmClient,
+            gameState
+          );
+
+          if (created) {
+            results.subMarketsCreated++;
+            logger.info(
+              'Created sub-market',
+              {
+                parentId: parentMarket.id,
+                duration: Math.round(duration / 60000),
+                timeframe: inferSubMarketTimeframe(duration),
+                parentEndsInMinutes: Math.round(
+                  (parentMarket.endTime.getTime() - nowMs) / 60000
+                ),
+              },
+              'MarketsTick'
+            );
+          }
+        } catch (error) {
+          logger.error(
+            'Failed to create sub-market',
+            {
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'MarketsTick'
+          );
+        }
+      }
+
+      // Log if we skipped any parents due to time constraints
+      if (skippedDueToInsufficientTime > 0) {
+        logger.info(
+          'Some parent markets skipped due to insufficient remaining time',
+          {
+            skipped: skippedDueToInsufficientTime,
+            created: results.subMarketsCreated,
+          },
+          'MarketsTick'
+        );
+      }
 
       // Invalidate cache after sub-market creation to ensure consistency
       if (results.subMarketsCreated > 0) {
@@ -1485,7 +1396,7 @@ async function resolveMarket(
   // ==========================================================================
   const hasStoredProof =
     Boolean(question.resolutionProofUrl) &&
-    Boolean(question.resolutionDescription);
+    Boolean(question.resolutionDescription?.trim());
 
   if (!hasStoredProof) {
     try {
@@ -1594,11 +1505,28 @@ async function resolveMarket(
         status: 'active' as const,
       };
 
-      const proofResult = await questionManager.generateResolutionWithProof(
+      const storedDescription = question.resolutionDescription?.trim()
+        ? question.resolutionDescription
+        : null;
+      const description =
+        storedDescription ??
+        (await questionManager.generateResolutionEvent(
+          questionForManager,
+          allActors,
+          organizations,
+          recentTimelines
+        ));
+      if (!storedDescription) {
+        await db
+          .update(questions)
+          .set({ resolutionDescription: description, updatedAt: new Date() })
+          .where(eq(questions.id, question.id));
+      }
+      const proofResult = await questionManager.generateProofForResolution(
         questionForManager,
+        description,
         allActors,
-        organizations,
-        recentTimelines
+        organizations
       );
 
       // Save proof to database
@@ -1871,6 +1799,8 @@ async function createMarketForTimeframe(
       return false;
     }
 
+    const questionTopic = questionData.topic ?? dailyTopic;
+
     // Pre-generate IDs before transaction to track for potential cleanup
     const questionId = await generateSnowflakeId();
     const questionNumber = await getNextQuestionNumber();
@@ -1939,9 +1869,9 @@ async function createMarketForTimeframe(
         rank: 1,
         resolutionDate,
         status: 'active',
-        topicKey: dailyTopic.topicKey,
-        topicLabel: dailyTopic.topicLabel,
-        topicDate: dailyTopic.date,
+        topicKey: questionTopic.topicKey,
+        topicLabel: questionTopic.topicLabel,
+        topicDate: questionTopic.date,
         updatedAt: now,
       });
 
@@ -1981,9 +1911,9 @@ async function createMarketForTimeframe(
         timeframe: mapTimeframeToDbType(timeframe),
         granularTimeframe: timeframe, // Store precise timeframe key ('15m', '30m', etc.)
         category: inferCategory(questionData.text),
-        topicKey: dailyTopic.topicKey,
-        topicLabel: dailyTopic.topicLabel,
-        topicDate: dailyTopic.date,
+        topicKey: questionTopic.topicKey,
+        topicLabel: questionTopic.topicLabel,
+        topicDate: questionTopic.date,
         startTime: now,
         endTime: resolutionDate,
         arcState: (arcPlan.phaseOrder[0] || 'setup') as ArcStateType,
@@ -2002,8 +1932,8 @@ async function createMarketForTimeframe(
         marketId: market.id,
         timeframedMarketId,
         resolutionDate: toISO(resolutionDate),
-        topicKey: dailyTopic.topicKey,
-        topicLabel: dailyTopic.topicLabel,
+        topicKey: questionTopic.topicKey,
+        topicLabel: questionTopic.topicLabel,
         arcPhases: arcPlan.phaseOrder.length,
         insiders: arcPlan.insiders.length,
         deceivers: arcPlan.deceivers.length,
@@ -2303,10 +2233,8 @@ async function createSubMarket(
   llmClient: FeedLLMClient,
   gameState: GameState
 ): Promise<boolean> {
-  const now = new Date();
-  const resolutionDate = new Date(now.getTime() + durationMs);
   const timeframe = inferSubMarketTimeframe(durationMs);
-  const inheritedTopic = resolveTopicForMarket(parentMarket, now);
+  const inheritedTopic = resolveTopicForMarket(parentMarket);
 
   try {
     // Get parent's affiliated entities for context - inherit these for arc relevance
@@ -2424,67 +2352,25 @@ async function createSubMarket(
       finalAffiliatedOrgIds
     );
 
-    // Wrap all DB writes in a transaction
-    await db.transaction(async (tx) => {
-      // Step 1: Create the question
-      await tx.insert(questions).values({
-        id: questionId,
-        questionNumber,
-        text: questionData.text,
-        scenarioId: DEFAULT_SCENARIO_ID,
-        outcome: questionData.expectedOutcome,
-        rank: 1,
-        resolutionDate,
-        status: 'active',
-        topicKey: inheritedTopic.topicKey,
-        topicLabel: inheritedTopic.topicLabel,
-        topicDate: inheritedTopic.date,
-        updatedAt: now,
-      });
-
-      // Step 2: Create market using CorePredictionMarketService
-      const marketService = new CorePredictionMarketService({
-        db: new CorePredictionDbAdapter(tx),
-        wallet: MOCK_WALLET,
-        fees: SYSTEM_MARKET_FEES,
-      });
-      const marketInitialization = getPredictionMarketInitialization({
-        marketId: questionId,
-        question: questionData.text,
-        endDate: resolutionDate,
-      });
-
-      await marketService.ensureMarketExists({
-        marketId: questionId,
-        initialLiquidity: marketInitialization.initialLiquidity,
-        initialYesProbability: marketInitialization.initialYesProbability,
-        description: questionData.resolutionCriteria,
-        gameId: gameState.id,
-        dayNumber: gameState.currentDay,
-      });
-
-      // Step 3: Register in timeframedMarkets with parentMarketId
-      // Inherit category from parent to maintain arc relevance
-      // rootMarketId tracks the top-level parent for nested hierarchies
-      await tx.insert(timeframedMarkets).values({
-        id: timeframedMarketId,
-        questionId,
-        timeframe: mapTimeframeToDbType(timeframe),
-        granularTimeframe: timeframe, // Store precise timeframe key ('15m', '30m', etc.)
-        category: parentMarket.category, // Inherit from parent (already validated)
-        topicKey: inheritedTopic.topicKey,
-        topicLabel: inheritedTopic.topicLabel,
-        topicDate: inheritedTopic.date,
-        parentMarketId: parentMarket.id,
-        rootMarketId: parentMarket.rootMarketId ?? parentMarket.id, // Use parent's root or parent itself
-        startTime: now,
-        endTime: resolutionDate,
-        arcState: (arcPlan.phaseOrder[0] || 'setup') as ArcStateType,
-        arcStateEnteredAt: now,
-        affiliatedActorIds: finalAffiliatedActorIds,
-        affiliatedOrgIds: finalAffiliatedOrgIds,
-      });
+    const created = await writeSubMarket({
+      parentId: parentMarket.id,
+      category: parentMarket.category,
+      questionId,
+      questionNumber,
+      questionText: questionData.text,
+      expectedOutcome: questionData.expectedOutcome,
+      resolutionCriteria: questionData.resolutionCriteria,
+      timeframedMarketId,
+      durationMs,
+      timeframe,
+      topic: inheritedTopic,
+      arcState: (arcPlan.phaseOrder[0] || 'setup') as ArcStateType,
+      affiliatedActorIds: finalAffiliatedActorIds,
+      affiliatedOrgIds: finalAffiliatedOrgIds,
+      gameId: gameState.id,
+      dayNumber: gameState.currentDay,
     });
+    if (!created) return false;
 
     // Create announcement post for the sub-market with market context
     await createSubMarketPost(questionId, questionData.text, gameState, {

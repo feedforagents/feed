@@ -1,8 +1,10 @@
 import {
+  ConflictError,
   calculateTradeImpact,
   getInitialReserves,
   logger,
   PERP_MARKET_CONFIG,
+  ValidationError,
 } from '@feed/shared';
 import {
   evolveSyntheticPerpQuoteState,
@@ -383,6 +385,7 @@ export class PerpMarketService {
     ticker: string;
     currentSpotPrice: number;
     signedTradeSize: number;
+    precedingTradeSize?: number;
   }): Promise<number | undefined> {
     if (!this.deps.priceImpact) return undefined;
 
@@ -412,7 +415,7 @@ export class PerpMarketService {
 
       const { avgFillPrice } = calculateTradeImpact(
         basePrice,
-        netHoldingsBefore,
+        netHoldingsBefore + (params.precedingTradeSize ?? 0),
         params.signedTradeSize,
         PERP_MARKET_CONFIG
       );
@@ -1045,8 +1048,17 @@ export class PerpMarketService {
 
       const now = this.deps.clock?.now() ?? new Date();
 
-      // Liquidation check
-      if (shouldLiquidate(newPrice, position.liquidationPrice, position.side)) {
+      // Liquidation check — PRD §9.3: liquidation is on the mark price
+      // (index × (1 + bounded funding premium)), not the raw feed price,
+      // so a raw-price wick through the liquidation price does not
+      // force-close a position the mark never confirmed. This is the same
+      // mark the market-stats update below computes and stores.
+      const markPrice = market
+        ? this.calculateMarkPrice(newPrice, market.fundingRate.rate)
+        : newPrice;
+      if (
+        shouldLiquidate(markPrice, position.liquidationPrice, position.side)
+      ) {
         const marginLoss = position.size / position.leverage;
 
         try {
@@ -1272,17 +1284,20 @@ export class PerpMarketService {
    * Expected average fill for opening/adding `size` on `side`: the
    * constant-product impact fill when a price impact port is configured
    * (this is what the position's entry is adjusted to), otherwise the quote.
+   * A flip applies its signed closing leg before pricing the inverse leg.
    */
   private async expectedOpenFill(
     market: PerpMarketRecord,
     side: PerpSide,
     size: number,
-    quotePrice: number
+    quotePrice: number,
+    precedingTradeSize = 0
   ): Promise<number> {
     const impactFill = await this.previewImpactFill({
       ticker: market.ticker,
       currentSpotPrice: market.currentPrice,
       signedTradeSize: side === 'long' ? size : -size,
+      precedingTradeSize,
     });
     return impactFill ?? quotePrice;
   }
@@ -1301,7 +1316,7 @@ export class PerpMarketService {
     const priceDeviation =
       Math.abs(fillPrice - referencePrice) / referencePrice;
     if (priceDeviation > maxSlippage) {
-      throw new Error(
+      throw new ValidationError(
         `Slippage exceeded: execution price ${fillPrice.toFixed(2)} deviates ` +
           `${(priceDeviation * 100).toFixed(2)}% from mark price ${referencePrice.toFixed(2)} ` +
           `(max allowed: ${(maxSlippage * 100).toFixed(2)}%)`
@@ -1582,7 +1597,7 @@ export class PerpMarketService {
     input: PerpOpenInput,
     market: PerpMarketRecord
   ): Promise<PerpTradeResult> {
-    const { size: tradeSize, side: tradeSide, leverage } = input;
+    const { size: tradeSize, side: tradeSide, leverage, maxSlippage } = input;
 
     // Validate trade size
     const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
@@ -1599,6 +1614,7 @@ export class PerpMarketService {
         userId: input.userId,
         positionId: existing.id,
         percentage: closePercentage,
+        maxSlippage,
       });
 
       return {
@@ -1614,6 +1630,7 @@ export class PerpMarketService {
         userId: input.userId,
         positionId: existing.id,
         percentage: 1,
+        maxSlippage,
       });
 
       return {
@@ -1625,6 +1642,56 @@ export class PerpMarketService {
       };
     } else {
       // FLIP: Close existing and open inverse position
+      // Exposure limit: the flip closes `existing` and opens the inverse leg,
+      // so the resulting exposure is every other open position plus that
+      // leg. Check it before any funds move, as a fresh open does.
+      const inverseNotional =
+        (tradeSize - existing.size) *
+        Math.min(leverage, market.maxLeverage ?? DEFAULT_MAX_LEVERAGE);
+      const userPositions = await this.db.getOpenPositionsByUser(input.userId);
+      for (const position of userPositions) {
+        this.assertOpenPositionIntegrity(position);
+      }
+      const otherExposure = userPositions
+        .filter((position) => position.id !== existing.id)
+        .reduce((sum, position) => sum + position.size * position.leverage, 0);
+      if (otherExposure + inverseNotional > MAX_PERP_USER_EXPOSURE) {
+        throw new ValidationError(
+          `Total exposure would exceed limit: current ${otherExposure.toLocaleString()}, ` +
+            `new ${inverseNotional.toLocaleString()}, max ${MAX_PERP_USER_EXPOSURE.toLocaleString()}`
+        );
+      }
+      // Slippage protection for both legs against the fills the flip will
+      // execute at, checked before any funds move (same as a fresh open).
+      if (maxSlippage !== undefined && maxSlippage > 0) {
+        const closeFill = this.getCloseExecutionQuote(
+          market,
+          existing.side,
+          existing.size
+        ).executionPrice;
+        this.assertWithinSlippage(
+          closeFill,
+          market.markPrice ?? market.currentPrice,
+          maxSlippage
+        );
+        const inverseSize = tradeSize - existing.size;
+        const inverseQuote = this.getOpenExecutionQuote(
+          market,
+          tradeSide,
+          inverseSize
+        ).executionPrice;
+        this.assertWithinSlippage(
+          await this.expectedOpenFill(
+            market,
+            tradeSide,
+            inverseSize,
+            inverseQuote,
+            existing.side === 'long' ? -existing.size : existing.size
+          ),
+          market.markPrice,
+          maxSlippage
+        );
+      }
       // Use transaction for atomicity - all DB operations use tx
       const flipResult =
         await this.db.transaction<FlipPositionTransactionResult>(async (tx) => {
@@ -1637,8 +1704,12 @@ export class PerpMarketService {
             );
           }
           this.assertOpenPositionIntegrity(position);
-          if (position.side === tradeSide || tradeSize <= position.size) {
-            throw new Error(
+          if (
+            position.side === tradeSide ||
+            tradeSize <= position.size ||
+            position.size !== existing.size
+          ) {
+            throw new ConflictError(
               'Position changed concurrently; retry the flip with fresh state'
             );
           }

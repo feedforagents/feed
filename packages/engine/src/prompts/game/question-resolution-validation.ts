@@ -44,10 +44,12 @@ The resolution event must:
 3. Feel like a natural climax to the storyline
 4. One sentence, max 150 chars
 
+Use announcement or revelation for the event type.
+
 Respond with ONLY this XML format:
 <response>
   <event>your resolution event</event>
-  <type>announcement | disclosure | action | outcome</type>
+  <type>announcement</type>
 </response>
 
 No other text.

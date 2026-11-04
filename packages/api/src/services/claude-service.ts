@@ -31,6 +31,9 @@ export async function callClaudeDirect(params: {
       ],
       temperature: params.temperature ?? 0.3,
       max_tokens: params.maxTokens || 8192,
+      ...(surplus.model.includes('qwen3')
+        ? { reasoning_effort: 'none' as const }
+        : {}),
     });
     const text = response.choices[0]?.message.content;
     if (!text) throw new Error('Inference returned no text');

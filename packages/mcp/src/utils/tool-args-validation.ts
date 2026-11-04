@@ -4,7 +4,7 @@
  * Validation schemas for each tool's arguments
  */
 
-import { JsonValueSchema } from '@feed/shared';
+import { JsonValueSchema, LEADERBOARD_SCOPES } from '@feed/shared';
 import { z } from 'zod';
 import type {
   AcceptGroupInviteArgs,
@@ -346,7 +346,7 @@ const DeclineGroupInviteArgsSchema = z.object({
 const GetLeaderboardArgsSchema = z.object({
   page: z.number().int().positive().optional().default(1),
   pageSize: z.number().int().positive().optional().default(100),
-  type: z.enum(['wallet', 'team']).optional().default('wallet'),
+  type: z.enum(LEADERBOARD_SCOPES).optional().default('wallet'),
   pointsType: z.enum(['all', 'earned', 'referral']).optional(),
   minPoints: z.number().nonnegative().optional().default(0),
 }) satisfies z.ZodType<GetLeaderboardArgs>;

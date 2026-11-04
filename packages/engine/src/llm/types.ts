@@ -14,6 +14,7 @@ export interface LLMJsonSchema {
 export interface LLMJsonSchemaProperty {
   type?: 'string' | 'number' | 'boolean' | 'object' | 'array';
   description?: string;
+  pattern?: string;
   items?: LLMJsonSchemaProperty;
   properties?: Record<string, LLMJsonSchemaProperty>;
 }

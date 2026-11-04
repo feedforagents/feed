@@ -16,7 +16,7 @@ import {
  */
 export const questions = definePrompt({
   id: 'questions',
-  version: '4.0.0',
+  version: '4.0.1',
   category: 'game',
   description:
     'Generates yes/no questions with full character and narrative context',
@@ -57,6 +57,8 @@ ${QUESTION_CONTINUITY_RULES}
 === QUESTION GENERATION REQUIREMENTS ===
 
 For each scenario, generate 5 yes/no questions that players can bet on.
+Allowed scenario IDs: {{scenarioIds}}
+Each question's scenario field must copy the ID of its source scenario from the list above. Do not invent or renumber scenario IDs.
 
 CRITICAL - DISTINCTNESS CHECK:
 Before generating each question, verify it is NOT similar to:

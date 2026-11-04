@@ -1,13 +1,10 @@
 'use client';
 
 import { formatCurrency } from '@feed/shared';
-import { useMemo } from 'react';
-import { calculateWalletPortfolioSummary } from '@/components/wallet/shared/portfolioBreakdown';
 import {
   usePortfolioPnL,
   usePortfolioPnLPolling,
 } from '@/hooks/usePortfolioPnL';
-import { useUserPositions } from '@/stores/userPositionsStore';
 
 interface BalanceTabProps {
   userId: string;
@@ -24,26 +21,7 @@ export function BalanceTab({ userId, onBuyPoints }: BalanceTabProps) {
   });
   usePortfolioPnLPolling({ userId, intervalMs: 15_000 });
 
-  const {
-    perpPositions,
-    predictionPositions,
-    loading: positionsLoading,
-  } = useUserPositions(userId);
-
-  const loading = portfolioLoading || positionsLoading;
-
-  const walletSummary = useMemo(() => {
-    if (!portfolioData) {
-      return null;
-    }
-
-    return calculateWalletPortfolioSummary({
-      userId,
-      snapshot: portfolioData,
-      perpPositions,
-      predictionPositions,
-    });
-  }, [portfolioData, predictionPositions, perpPositions, userId]);
+  const loading = portfolioLoading;
 
   const fmt = (amount: number) =>
     formatCurrency(amount, { useThousandsSeparator: true });
@@ -65,7 +43,7 @@ export function BalanceTab({ userId, onBuyPoints }: BalanceTabProps) {
     );
   }
 
-  if (!walletSummary && portfolioError) {
+  if (!portfolioData && portfolioError) {
     return (
       <div className="rounded-xl border border-border py-10 text-center">
         <p className="text-muted-foreground">Failed to load portfolio</p>
@@ -74,16 +52,9 @@ export function BalanceTab({ userId, onBuyPoints }: BalanceTabProps) {
     );
   }
 
-  const members = walletSummary?.members ?? [];
-  const owner = members.find((member) => member.isOwner) ?? members[0] ?? null;
-  const agentMembers = members.filter((member) => !member.isOwner);
-  const ownerCash = owner?.cash ?? 0;
-  const totalBalance = walletSummary?.summary.totalBalance ?? 0;
-  const openPositionsTotal = walletSummary?.summary.positions ?? 0;
-  const agentsOnlyTotal = agentMembers.reduce(
-    (sum, member) => sum + member.total,
-    0
-  );
+  const ownerCash = portfolioData?.wallet ?? 0;
+  const totalBalance = portfolioData?.totalAssets ?? 0;
+  const openPositionsTotal = portfolioData?.positions ?? 0;
 
   return (
     <div className="space-y-3 md:space-y-5">
@@ -120,13 +91,6 @@ export function BalanceTab({ userId, onBuyPoints }: BalanceTabProps) {
           <div className="font-semibold text-lg">{fmt(openPositionsTotal)}</div>
         </div>
       </div>
-
-      {agentsOnlyTotal > 0 && (
-        <div className="flex items-center justify-between rounded-xl border border-border px-3 py-2 md:px-5 md:py-3">
-          <span className="text-muted-foreground text-sm">Agents Total</span>
-          <span className="font-semibold text-sm">{fmt(agentsOnlyTotal)}</span>
-        </div>
-      )}
     </div>
   );
 }

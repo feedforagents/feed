@@ -40,7 +40,6 @@ DOMAINS:
   train     Training operations (list, pipeline, archetype, collect)
   model     Model management (list, upload, collect-data)
   game      Game control (start, pause, status, generate, validate)
-  agent     Agent management (spawn, list, enable, disable)
   test      Load & stress testing (load, a2a)
 
 EXAMPLES:
@@ -52,7 +51,6 @@ EXAMPLES:
   feed game status              Check game runtime status
   feed train list               List available archetypes
   feed train pipeline -a trader Train trader archetype
-  feed agent spawn --count 5    Spawn 5 test agents
 
 OPTIONS:
   -h, --help      Show help for any command
@@ -121,10 +119,6 @@ async function main(): Promise<void> {
 
     case 'game':
       await (await import('./commands/game.js')).runGameCommand(commandArgs);
-      break;
-
-    case 'agent':
-      await (await import('./commands/agent.js')).runAgentCommand(commandArgs);
       break;
 
     case 'test':

@@ -15,11 +15,9 @@ export * from './archetypes';
 // Re-export all sub-modules
 export * from './benchmark';
 export type {
-  CreateAgentParams,
   ExportGroupedForGRPOFn,
   ExportToHuggingFaceFn,
   IAgentRuntimeManager,
-  IAgentService,
   IAutonomousCoordinator,
   ILLMCaller,
   ToTrainingMessagesFn,
@@ -29,19 +27,15 @@ export type {
 } from './dependencies';
 // Dependencies configuration
 export {
-  areAgentDependenciesConfigured,
   areDependenciesConfigured,
   configureTrainingDependencies,
   getAgentRuntimeManager,
-  getAgentService,
   getAutonomousCoordinator,
   getExportGroupedForGRPO,
   getExportToHuggingFace,
   getLLMCaller,
   getToTrainingMessages,
 } from './dependencies';
-// Generation
-export * from './generation';
 export * from './huggingface';
 // Training initialization
 export {

@@ -12,7 +12,6 @@ import { PnLTab } from '@/components/wallet/v2/pnl-tab';
 import { PositionsTab } from '@/components/wallet/v2/positions-tab';
 import { useAuth } from '@/hooks/useAuth';
 import { useLoginModal } from '@/hooks/useLoginModal';
-import { useTeamTradingSummary } from '@/hooks/useTeamTradingSummary';
 import { useUserPositionsPolling } from '@/stores/userPositionsStore';
 import { useWalletBalancePolling } from '@/stores/walletBalanceStore';
 
@@ -26,7 +25,7 @@ const BuyPointsModal = nextDynamic(
 
 export default function WalletPage() {
   const router = useRouter();
-  const { ready, authenticated, getAccessToken, user } = useAuth();
+  const { ready, authenticated, user } = useAuth();
   const queueLoginModal = useLoginModal((state) => state.queueLoginModal);
   const [showBuyPoints, setShowBuyPoints] = useState(false);
 
@@ -35,15 +34,6 @@ export default function WalletPage() {
   // Start polling for wallet data when authenticated
   useWalletBalancePolling(userId ?? null, 15_000);
   useUserPositionsPolling(userId ?? null);
-
-  const {
-    summary: teamSummary,
-    loading: teamSummaryLoading,
-    error: teamSummaryError,
-  } = useTeamTradingSummary({
-    enabled: Boolean(ready && authenticated && userId),
-    getAccessToken,
-  });
 
   // Redirect unauthenticated users
   useEffect(() => {
@@ -82,12 +72,7 @@ export default function WalletPage() {
             />
 
             {/* P&L section */}
-            <PnLTab
-              userId={userId}
-              teamSummary={teamSummary}
-              teamSummaryLoading={teamSummaryLoading}
-              teamSummaryError={teamSummaryError}
-            />
+            <PnLTab userId={userId} />
           </div>
         </div>
 

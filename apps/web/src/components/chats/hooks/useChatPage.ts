@@ -140,16 +140,9 @@ export function useChatPage() {
         return new Date(bTime).getTime() - new Date(aTime).getTime();
       });
 
-      // Client-side fallback: filter out DMs with the user's own agents
-      return combined.filter((chat: Chat) => {
-        if (chat.isGroup) return true;
-        if (chat.otherUser?.isAgent && chat.otherUser?.managedBy === user?.id) {
-          return false;
-        }
-        return true;
-      });
+      return combined;
     },
-    [isDebugMode, user?.id]
+    [isDebugMode]
   );
 
   // Load chats — uses React Query for caching so revisiting the chat page is instant

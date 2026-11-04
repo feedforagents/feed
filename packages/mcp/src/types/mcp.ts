@@ -432,7 +432,7 @@ export interface DeclineGroupInviteArgs {
 export interface GetLeaderboardArgs {
   page?: number;
   pageSize?: number;
-  type?: 'wallet' | 'team';
+  type?: 'wallet';
   pointsType?: 'all' | 'earned' | 'referral';
   minPoints?: number;
 }

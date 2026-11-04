@@ -72,7 +72,9 @@ export function extractFirstJsonObject(response: string): string | null {
 export class DecisionValidationError extends Error {}
 
 /** Validate model output before normalization can turn missing values into actions. */
-export function parseDecisionJson(json: string): MultiStepDecision {
+export function parseDecisionJson(
+  json: string
+): Omit<MultiStepDecision, 'isFinish'> {
   const value: unknown = JSON.parse(json);
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new DecisionValidationError('Decision must be an object');
@@ -84,21 +86,19 @@ export function parseDecisionJson(json: string): MultiStepDecision {
     !('thought' in value) ||
     typeof value.thought !== 'string' ||
     !value.thought.trim() ||
-    !('isFinish' in value) ||
-    typeof value.isFinish !== 'boolean' ||
+    ('isFinish' in value && typeof value.isFinish !== 'boolean') ||
     !('parameters' in value) ||
     !value.parameters ||
     typeof value.parameters !== 'object' ||
     Array.isArray(value.parameters)
   ) {
     throw new DecisionValidationError(
-      'Decision requires action, thought, boolean isFinish, and object parameters'
+      'Decision requires action, thought, and object parameters; isFinish, if provided, must be boolean'
     );
   }
   return {
     action: value.action,
     thought: value.thought,
-    isFinish: value.isFinish,
     parameters: value.parameters as Record<string, unknown>,
   };
 }
