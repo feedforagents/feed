@@ -754,6 +754,7 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
       high24h: 100,
       low24h: 100,
       maxLeverage: 100,
+      openInterest: 1000000,
       fundingRate: {
         ticker: otherTicker,
         rate: 0,
@@ -766,8 +767,8 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
         userId: USER_A,
         ticker: otherTicker,
         side: 'long',
-        size: 9000,
-        leverage: 100,
+        size: 45000,
+        leverage: 20,
       });
       const initial = await service.openPosition({
         userId: USER_A,
@@ -783,7 +784,7 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
           ticker: TEST_TICKER,
           side: 'short',
           size: 10000,
-          leverage: 100,
+          leverage: 20,
         })
       ).rejects.toMatchObject({
         statusCode: 400,
@@ -799,10 +800,10 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
         userId: USER_A,
         ticker: TEST_TICKER,
         side: 'short',
-        size: 1100,
-        leverage: 100,
+        size: 5100,
+        leverage: 20,
       });
-      expect(inverse.size).toBe(1000);
+      expect(inverse.size).toBe(5000);
       const open = await adapter.getOpenPositionsByUser(USER_A);
       expect(open.reduce((sum, p) => sum + p.size * p.leverage, 0)).toBe(
         1_000_000

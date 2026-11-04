@@ -235,7 +235,9 @@ export function getAvailableTools(): MCPTool[] {
           amount: { type: 'number', description: 'Position amount' },
           leverage: {
             type: 'number',
-            description: 'Leverage (1-100)',
+            minimum: 1,
+            maximum: 20,
+            description: 'Leverage (1-20)',
           },
         },
         required: ['ticker', 'side', 'amount', 'leverage'],
