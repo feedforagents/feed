@@ -55,6 +55,9 @@ mock.module('@feed/core/markets/perps', () => ({
 
 mock.module('@feed/engine', () => ({
   createPerpPriceImpactPort: () => ({}),
+  createTradingFeeProcessor: () => ({
+    processTradingFee: async () => ({}),
+  }),
   createUserWalletAdapter: () => ({}),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0.001,
@@ -62,6 +65,7 @@ mock.module('@feed/engine', () => ({
     REFERRER_SHARE: 0.5,
     MIN_FEE_AMOUNT: 0.01,
   },
+  FeeService: { processTradingFee: async () => ({}) },
   WalletService: { getBalance: async () => ({ balance: 10_000 }) },
 }));
 

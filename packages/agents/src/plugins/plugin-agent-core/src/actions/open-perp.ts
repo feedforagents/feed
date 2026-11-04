@@ -14,6 +14,7 @@ import type {
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
   createPerpPriceImpactPort,
+  createTradingFeeProcessor,
   createUserWalletAdapter,
   FEE_CONFIG,
   WalletService,
@@ -167,6 +168,7 @@ export const openPerpAction: Action = {
           minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
         },
         priceImpact: createPerpPriceImpactPort(),
+        feeProcessor: createTradingFeeProcessor(),
       });
 
       // Check if market exists (case-insensitive lookup)

@@ -15,6 +15,7 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { and, db, eq, isNull, perpPositions } from '@feed/db';
 import {
   createPerpPriceImpactPort,
+  createTradingFeeProcessor,
   createUserWalletAdapter,
   FEE_CONFIG,
 } from '@feed/engine';
@@ -142,6 +143,7 @@ export const closePerpAction: Action = {
           minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
         },
         priceImpact: createPerpPriceImpactPort(),
+        feeProcessor: createTradingFeeProcessor(),
       });
 
       const positionSize = Number(position.size);
