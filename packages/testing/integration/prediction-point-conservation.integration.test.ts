@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test';
+import { FeedAgentExecutor } from '@feed/a2a';
 import { PredictionPricing } from '@feed/core/markets/prediction';
 import {
   balanceTransactions,
@@ -112,6 +113,67 @@ afterAll(async () => {
 });
 
 describe('prediction cash precision with real wallets and ledger', () => {
+  it('charges the same prediction fees and settles the same cash through A2A and MCP', async () => {
+    const a2a = await fixture();
+    const mcp = await fixture();
+    const a2aBuy = await FeedAgentExecutor.executeDirectly(
+      'markets.buy_shares',
+      {
+        marketId: a2a.marketId,
+        outcome: 'YES',
+        amount: 100,
+      },
+      a2a.id
+    );
+    await executeBuyShares(mcp.agent, {
+      marketId: mcp.marketId,
+      outcome: 'YES',
+      amount: 100,
+    });
+    expect(a2aBuy).toMatchObject({
+      fee: { amount: 100 * FEE_CONFIG.TRADING_FEE_RATE },
+    });
+    const a2aOpened = await state(a2a);
+    const mcpOpened = await state(mcp);
+    expect(a2aOpened.balance).toBe(mcpOpened.balance);
+    expect(a2aOpened.position!.shares).toBe(mcpOpened.position!.shares);
+    expect(a2aOpened.position!.cashCostBasis).toBe(
+      mcpOpened.position!.cashCostBasis
+    );
+    const sold = await FeedAgentExecutor.executeDirectly(
+      'markets.sell_shares',
+      {
+        positionId: a2aOpened.position!.id,
+        shares: Number(a2aOpened.position!.shares),
+      },
+      a2a.id
+    );
+    const mcpSold = await executeSellShares(mcp.agent, {
+      positionId: mcpOpened.position!.id,
+      shares: Number(mcpOpened.position!.shares),
+    });
+    expect(sold).toMatchObject({
+      netProceeds: mcpSold.netProceeds,
+      pnl: mcpSold.pnl,
+      positionClosed: true,
+    });
+    const a2aClosed = await state(a2a);
+    const mcpClosed = await state(mcp);
+    expect(a2aClosed.balance).toBe(mcpClosed.balance);
+    expect(a2aClosed.pnl).toBe(mcpClosed.pnl);
+    expect(Number(a2aClosed.position!.shares)).toBe(0);
+    expect(Number(a2aClosed.position!.cashCostBasis)).toBe(0);
+    expect(
+      a2aClosed.ledger
+        .map((row) => ({ type: row.type, amount: row.amount }))
+        .sort((a, b) => a.type.localeCompare(b.type))
+    ).toEqual(
+      mcpClosed.ledger
+        .map((row) => ({ type: row.type, amount: row.amount }))
+        .sort((a, b) => a.type.localeCompare(b.type))
+    );
+  });
+
   it('rejects the ten-buy rounding exploit at REST, MCP and domain boundaries before spending', async () => {
     const f = await fixture();
     expect(
