@@ -11,10 +11,12 @@
  * - Calculates PnL
  */
 
+import type { AfterCommitScheduler } from '@feed/core/markets/shared';
 import {
   balanceTransactions,
   type DrizzleClient,
   db,
+  dbWrite,
   desc,
   eq,
   type Transaction,
@@ -222,8 +224,11 @@ export class WalletService {
    * console.log(`Balance: $${balance.balance}`);
    * ```
    */
-  static async getBalance(userId: string): Promise<BalanceInfo> {
-    const result = await db
+  static async getBalance(
+    userId: string,
+    dbClient?: Transaction | DrizzleClient
+  ): Promise<BalanceInfo> {
+    const result = await (dbClient ?? dbWrite)
       .select({
         virtualBalance: users.virtualBalance,
         totalDeposited: users.totalDeposited,
@@ -309,7 +314,8 @@ export class WalletService {
     type: string,
     description: string,
     relatedId?: string,
-    tx?: Transaction | DrizzleClient
+    tx?: Transaction | DrizzleClient,
+    afterCommit?: AfterCommitScheduler
   ): Promise<void> {
     WalletService.assertValidAmount('debit', userId, amount);
     const delta = -amount;
@@ -336,7 +342,8 @@ export class WalletService {
       });
     }
 
-    await WalletService.invalidateCache(userId);
+    if (afterCommit) afterCommit(() => WalletService.invalidateCache(userId));
+    else await WalletService.invalidateCache(userId);
   }
 
   /**
@@ -348,7 +355,8 @@ export class WalletService {
     type: string,
     description: string,
     relatedId?: string,
-    tx?: Transaction | DrizzleClient
+    tx?: Transaction | DrizzleClient,
+    afterCommit?: AfterCommitScheduler
   ): Promise<void> {
     WalletService.assertValidAmount('credit', userId, amount);
     if (tx) {
@@ -373,7 +381,8 @@ export class WalletService {
       });
     }
 
-    await WalletService.invalidateCache(userId);
+    if (afterCommit) afterCommit(() => WalletService.invalidateCache(userId));
+    else await WalletService.invalidateCache(userId);
   }
 
   /**
