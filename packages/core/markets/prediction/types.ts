@@ -47,6 +47,8 @@ export interface PredictionPositionRecord {
   side: PredictionSide;
   shares: number;
   avgPrice: number;
+  /** Remaining gross cash paid; absent for positions created before precision tracking. */
+  cashCostBasis?: number;
   status?: 'active' | 'closed' | 'resolved' | 'cancelled' | 'voided';
   outcome?: boolean | null;
   pnl?: number;

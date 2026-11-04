@@ -66,6 +66,7 @@ import {
 import {
   AGENT_TRANSFER_IN_TRANSACTION_TYPE,
   AGENT_TRANSFER_OUT_TRANSACTION_TYPE,
+  floorPoints,
   isPureRepost,
 } from '@feed/shared';
 import { agentPnLService } from '../services/AgentPnLService';
@@ -647,12 +648,13 @@ async function executePredictionTrade(params: {
     agentUserId,
     marketId,
     side,
-    amount,
+    amount: requestedAmount,
     reasoning,
     isNpc,
     agentManagedBy,
   } = params;
 
+  const amount = floorPoints(requestedAmount);
   const isBuyYes = side === 'buy_yes';
   const sideLabel = isBuyYes ? 'yes' : 'no';
 

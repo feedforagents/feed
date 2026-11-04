@@ -1,3 +1,5 @@
+import { floorPoints } from '@feed/shared';
+
 /**
  * Prediction Market AMM Pricing — Constant Product Market Maker (CPMM)
  *
@@ -22,6 +24,7 @@ export interface ShareCalculationWithFees extends ShareCalculation {
   netAmount: number;
   totalWithFee?: number;
   netProceeds?: number;
+  roundingRemainder?: number;
 }
 
 export class PredictionPricing {
@@ -55,9 +58,9 @@ export class PredictionPricing {
     totalLoserDeposits: number = 0
   ): number {
     const costBasis = shares * avgPrice;
-    if (totalWinnerShares <= 0) return costBasis;
+    if (totalWinnerShares <= 0) return floorPoints(costBasis);
     const proportion = shares / totalWinnerShares;
-    return costBasis + proportion * totalLoserDeposits;
+    return floorPoints(costBasis + proportion * totalLoserDeposits);
   }
 
   /**
@@ -217,12 +220,15 @@ export class PredictionPricing {
     );
     const gross = base.totalCost;
     const fee = gross * feeRate;
-    const netProceeds = gross - fee;
+    const rawProceeds = gross - fee;
+    const netProceeds = floorPoints(rawProceeds);
+    const roundingRemainder = rawProceeds - netProceeds;
     return {
       ...base,
       fee,
       netAmount: netProceeds,
       netProceeds,
+      roundingRemainder,
       totalCost: gross,
     };
   }

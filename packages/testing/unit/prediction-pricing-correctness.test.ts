@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 
 // Import pricing directly — no mocks needed for pure math
+import { floorPoints } from '@feed/shared';
 import { PredictionPricing } from '../../core/markets/prediction/pricing';
 
 // ─── CPMM Buy/Sell Math ─────────────────────────────────────────────────────
@@ -140,7 +141,11 @@ describe('CPMM fee integration', () => {
     );
     const noFee = PredictionPricing.calculateSell(5000, 5000, 'yes', 100);
     expect(result.fee).toBeCloseTo(noFee.totalCost * 0.01, 6);
-    expect(result.netProceeds).toBeCloseTo(noFee.totalCost - result.fee, 6);
+    expect(result.netProceeds).toBe(floorPoints(noFee.totalCost - result.fee));
+    expect(result.roundingRemainder).toBeCloseTo(
+      noFee.totalCost - result.fee - result.netProceeds!,
+      10
+    );
   });
 });
 
@@ -264,7 +269,7 @@ describe('pool-proportional payout model', () => {
     expect(totalPayouts).toBeCloseTo(totalDeposits, 10);
   });
 
-  test('zero-sum verification: total payouts = total deposits', () => {
+  test('rounded payouts never exceed total deposits', () => {
     // 3 winners, 2 losers, varying sizes
     const winners = [
       { shares: 200, avgPrice: 0.4 },
@@ -297,10 +302,12 @@ describe('pool-proportional payout model', () => {
       0
     );
     // Total payouts = total winner deposits + total loser deposits
-    expect(totalPayouts).toBeCloseTo(
-      totalWinnerDeposits + totalLoserDeposits,
-      10
+    expect(totalPayouts).toBeLessThanOrEqual(
+      totalWinnerDeposits + totalLoserDeposits
     );
+    expect(
+      totalWinnerDeposits + totalLoserDeposits - totalPayouts
+    ).toBeLessThan(winners.length * 0.01);
   });
 
   test('default args (no pool context) returns cost basis', () => {

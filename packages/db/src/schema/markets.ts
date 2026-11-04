@@ -117,6 +117,8 @@ export const positions = pgTable(
     side: boolean('side').notNull(),
     shares: decimal('shares', { precision: 18, scale: 6 }).notNull(),
     avgPrice: decimal('avgPrice', { precision: 18, scale: 6 }).notNull(),
+    // Remaining gross cash paid, including entry fees. Null on legacy rows.
+    cashCostBasis: decimal('cashCostBasis', { precision: 18, scale: 2 }),
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
     updatedAt: timestamp('updatedAt', { mode: 'date' }).notNull(),
     amount: decimal('amount', { precision: 18, scale: 2 })

@@ -17,6 +17,7 @@ export * from './format';
 export * from './json-parser';
 export * from './logger';
 export * from './oasf-skill-mapper';
+export * from './points';
 export * from './post-utils';
 export * from './profile';
 export * from './retry';

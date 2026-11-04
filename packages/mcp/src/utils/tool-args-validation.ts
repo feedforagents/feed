@@ -4,7 +4,11 @@
  * Validation schemas for each tool's arguments
  */
 
-import { JsonValueSchema, LEADERBOARD_SCOPES } from '@feed/shared';
+import {
+  isPointsAmount,
+  JsonValueSchema,
+  LEADERBOARD_SCOPES,
+} from '@feed/shared';
 import { z } from 'zod';
 import type {
   AcceptGroupInviteArgs,
@@ -95,7 +99,9 @@ const GetMarketsArgsSchema = z.object({
 const PlaceBetArgsSchema = z.object({
   marketId: z.string().min(1),
   side: z.enum(['YES', 'NO']),
-  amount: z.number().positive(),
+  amount: z.number().positive().refine(isPointsAmount, {
+    message: 'Amount must have at most 2 decimal places',
+  }),
 }) satisfies z.ZodType<PlaceBetArgs>;
 
 const GetBalanceArgsSchema = z.object({}) satisfies z.ZodType<GetBalanceArgs>;
@@ -154,7 +160,9 @@ export function validateQueryFeedArgs(args: unknown): QueryFeedArgs {
 const BuySharesArgsSchema = z.object({
   marketId: z.string().min(1),
   outcome: z.enum(['YES', 'NO']),
-  amount: z.number().positive(),
+  amount: z.number().positive().refine(isPointsAmount, {
+    message: 'Amount must have at most 2 decimal places',
+  }),
 }) satisfies z.ZodType<BuySharesArgs>;
 
 const SellSharesArgsSchema = z.object({
