@@ -116,6 +116,7 @@ export {
 export * from './group-chat-invite-notifier';
 export * from './market-context-service';
 export * from './npc-wallet-adapter';
+export * from './perp-settlement';
 export * from './prediction-settlement';
 export * from './realtime-broadcaster';
 export * from './rss-feed-service';

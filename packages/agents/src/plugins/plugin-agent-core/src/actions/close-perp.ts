@@ -15,6 +15,7 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { and, db, eq, isNull, perpPositions } from '@feed/db';
 import {
   createPerpPriceImpactPort,
+  createPerpSettlement,
   createUserWalletAdapter,
   FEE_CONFIG,
 } from '@feed/engine';
@@ -133,6 +134,7 @@ export const closePerpAction: Action = {
       }
 
       const service = new PerpMarketService({
+        settlement: createPerpSettlement(),
         db: new PerpDbAdapter(),
         wallet: createUserWalletAdapter(),
         fees: {
