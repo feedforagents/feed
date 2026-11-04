@@ -127,6 +127,7 @@ export interface InitializeResult {
 export interface MCPToolInputSchemaProperty {
   type: string;
   minimum?: number;
+  maximum?: number;
   multipleOf?: number;
   description?: string;
   enum?: readonly string[];

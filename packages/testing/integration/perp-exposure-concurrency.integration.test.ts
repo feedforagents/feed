@@ -18,7 +18,10 @@ import {
   FEE_CONFIG,
 } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
-import { executeOpenPosition } from '../../mcp/src/handlers/tool-handlers';
+import {
+  executeClosePosition,
+  executeOpenPosition,
+} from '../../mcp/src/handlers/tool-handlers';
 
 const owners: string[] = [];
 const tickers: string[] = [];
@@ -156,6 +159,112 @@ afterAll(async () => {
 });
 
 describe('per-owner perpetual exposure with real Postgres and wallet', () => {
+  for (const [marketCap, legacyLeverage, requestedLeverage] of [
+    [100, 100, 20],
+    [10, 20, 10],
+  ] as const) {
+    it(`blocks a legacy ${legacyLeverage}x add at market cap ${marketCap} while allowing reductions`, async () => {
+      const f = await fixture();
+      const ticker = f.markets[0]!;
+      await dbWrite
+        .update(perpMarketSnapshots)
+        .set({ maxLeverage: marketCap })
+        .where(eq(perpMarketSnapshots.ticker, ticker));
+      const id = await generateSnowflakeId();
+      await dbWrite.transaction(async (tx) => {
+        await tx.insert(perpPositions).values({
+          id,
+          userId: f.userId,
+          ticker,
+          organizationId: ticker,
+          side: 'long',
+          entryPrice: 100,
+          currentPrice: 100,
+          size: 1000,
+          leverage: legacyLeverage,
+          liquidationPrice: 0,
+          unrealizedPnL: 0,
+          unrealizedPnLPercent: 0,
+          lastUpdated: new Date(),
+        });
+        await createUserWalletAdapter(tx).debit({
+          userId: f.userId,
+          amount: 1000 / legacyLeverage,
+          reason: 'perp_open',
+          description: 'Fund a historical over-cap position fixture',
+          relatedId: id,
+        });
+      });
+      const before = await state(f.userId);
+      await expect(
+        executeOpenPosition(f.agent, {
+          ticker,
+          side: 'LONG',
+          amount: 1000,
+          leverage: requestedLeverage,
+        })
+      ).rejects.toThrow('above the leverage cap');
+      expect(await state(f.userId)).toEqual(before);
+      const service = new PerpMarketService({
+        db: new PerpDbAdapter(),
+        wallet: createUserWalletAdapter(),
+        fees,
+        settlement: createPerpSettlement(),
+      });
+      await service.closePosition({
+        userId: f.userId,
+        positionId: id,
+        percentage: 0.5,
+      });
+      const reduced = await state(f.userId);
+      expect(reduced.positions[0]?.size).toBe(500);
+      expect(reduced.positions[0]?.leverage).toBe(legacyLeverage);
+      expect(reduced.positions[0]?.closedAt).toBeNull();
+      await executeClosePosition(f.agent, { positionId: id });
+      const closed = await state(f.userId);
+      expect(closed.positions[0]?.closedAt).not.toBeNull();
+      expect(
+        closed.ledger.filter((row) => row.type === 'perp_add_to_position')
+      ).toHaveLength(0);
+      expect(
+        closed.ledger.filter((row) => row.type === 'perp_close')
+      ).toHaveLength(1);
+      expect(
+        closed.ledger.filter((row) => row.type === 'perp_partial_close')
+      ).toHaveLength(1);
+    });
+  }
+
+  it('enforces 20x even on a stored 100x market, without charging a rejected order', async () => {
+    const f = await fixture();
+    const ticker = f.markets[0]!;
+    await dbWrite
+      .update(perpMarketSnapshots)
+      .set({ maxLeverage: 100 })
+      .where(eq(perpMarketSnapshots.ticker, ticker));
+    await expect(
+      executeOpenPosition(f.agent, {
+        ticker,
+        side: 'LONG',
+        amount: 1000,
+        leverage: 21,
+      })
+    ).rejects.toThrow('Invalid leverage (1-20)');
+    expect((await state(f.userId)).ledger).toHaveLength(0);
+    expect((await state(f.userId)).balance).toBe(10000);
+    await executeOpenPosition(f.agent, {
+      ticker,
+      side: 'LONG',
+      amount: 1000,
+      leverage: 20,
+    });
+    const after = await state(f.userId);
+    expect(after.positions[0]?.leverage).toBe(20);
+    expect(after.ledger.filter((row) => row.type === 'perp_open')).toHaveLength(
+      1
+    );
+  });
+
   it('rejects the second cross-ticker MCP open before it spends any points', async () => {
     const f = await fixture();
     const results = await contend(
