@@ -488,6 +488,7 @@ export interface DirectRepostResult {
   success: boolean;
   repostId?: string;
   quotePostId?: string;
+  alreadyReposted?: boolean;
   error?: string;
 }
 
@@ -2149,6 +2150,7 @@ export async function executeDirectRepost(
       success: true,
       repostId: shareId,
       quotePostId,
+      alreadyReposted: false,
     };
   } catch (error) {
     // Handle unique constraint violation (concurrent repost)
@@ -2174,7 +2176,13 @@ export async function executeDirectRepost(
         );
       }
 
-      return { success: true, repostId: share.id };
+      logger.info(
+        `[DirectExecutor] Post already reposted: ${targetPostId} -> existing share ${share.id}`,
+        { agentUserId },
+        'DirectExecutors'
+      );
+
+      return { success: true, repostId: share.id, alreadyReposted: true };
     }
     throw error;
   }

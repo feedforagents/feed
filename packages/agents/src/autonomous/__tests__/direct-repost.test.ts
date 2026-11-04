@@ -247,4 +247,55 @@ describe('executeDirectRepost', () => {
     expect(result.success).toBe(true);
     expect(sharedPostId).toBe(quotePost.id);
   });
+
+  test('marks a unique-constraint result as an already-existing repost', async () => {
+    const originalPost = {
+      id: 'post-original',
+      authorId: 'user-1',
+      content: 'Original content',
+      originalPostId: null,
+    };
+    let selectCallCount = 0;
+    mockDb.select = mock(() => ({
+      from: mock(() => ({
+        where: mock(() => ({
+          limit: mock(async () => {
+            selectCallCount += 1;
+            return selectCallCount === 1
+              ? [originalPost]
+              : [{ id: 'share-existing' }];
+          }),
+        })),
+      })),
+    }));
+
+    const uniqueError = Object.assign(
+      new Error('duplicate key value violates unique constraint'),
+      { code: '23505' }
+    );
+    mockDb.transaction = mock(
+      async (callback: (tx: unknown) => Promise<void>) => {
+        await callback({
+          insert: mock(() => ({
+            values: mock(async () => {
+              throw uniqueError;
+            }),
+          })),
+        });
+        return undefined;
+      }
+    ) as typeof mockDb.transaction;
+
+    const result = await executeDirectRepost({
+      agentUserId: 'user-2',
+      postId: 'post-original',
+      comment: undefined,
+    });
+
+    expect(result).toEqual({
+      success: true,
+      repostId: 'share-existing',
+      alreadyReposted: true,
+    });
+  });
 });
