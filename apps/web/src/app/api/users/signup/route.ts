@@ -96,7 +96,6 @@ import {
   notifyNewAccount,
   ReputationService,
   successResponse,
-  TradingBalanceFundingService,
   withErrorHandling,
 } from '@feed/api';
 import {
@@ -389,26 +388,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     username: result.user.username,
   });
 
-  // Fund the user's trading balance with the welcome bonus (idempotent).
-  const userId = result.user.id;
-  const welcomeBonus = POINTS.INITIAL_SIGNUP;
-  const welcomeBonusResult =
-    await TradingBalanceFundingService.awardWelcomeBonus(userId, welcomeBonus);
-
-  if (!welcomeBonusResult.success) {
-    throw new InternalServerError(
-      welcomeBonusResult.error ?? 'Failed to fund signup welcome bonus'
-    );
-  }
-
-  if (!welcomeBonusResult.alreadyProcessed) {
-    logger.info(
-      'Welcome bonus funded to trading balance at profile completion',
-      { userId, amount: welcomeBonus },
-      'POST /api/users/signup'
-    );
-  }
-
+  // The starting grant is NOT paid here. PRD §9.1 [D-11] pays it once at
+  // phone verification, through
+  // PhoneVerificationService.completePhoneVerification — profile
+  // completion alone never funds a trading balance.
   const reputationBreakdown = {
     profile: 0,
     referral: 0,

@@ -222,6 +222,9 @@ export const users = pgTable(
     telegramId: text('telegramId').unique(),
     telegramUsername: text('telegramUsername'),
     telegramVerifiedAt: timestamp('telegramVerifiedAt', { mode: 'date' }),
+    // Set when the account's phone number is verified (MVP Phase 2 schema).
+    // The starting grant (PRD §9.1 [D-11]) is paid at this event, once.
+    phoneVerifiedAt: timestamp('phoneVerifiedAt', { mode: 'date' }),
     tosAccepted: boolean('tosAccepted').notNull().default(false),
     tosAcceptedAt: timestamp('tosAcceptedAt', { mode: 'date' }),
     tosAcceptedVersion: text('tosAcceptedVersion').default('2025-11-11'),

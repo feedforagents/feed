@@ -29,6 +29,13 @@
       "when": 1793558343142,
       "tag": "0003_starting_grant_100",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793772903143,
+      "tag": "0004_phone_verified_at",
+      "breakpoints": true
     }
   ]
 }

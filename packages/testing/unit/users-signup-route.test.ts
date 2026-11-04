@@ -218,19 +218,20 @@ describe('POST /api/users/signup', () => {
     expect('reputationPoints' in updatePayloads[0]!).toBe(false);
   });
 
-  test('funds the starting grant once, as 100 pts, outside the user row write', async () => {
+  test('profile completion does not fund the starting grant', async () => {
     selectQueue.push([], [], []);
 
     await POST(signupRequest({ username: 'bob', displayName: 'Bob' }));
 
     // The row write carries no balance: the schema default is the only
-    // born-with funding, and it must be zero so the ledgered welcome
-    // bonus below is the single starting grant (PRD §9.1 [D-11]).
+    // born-with funding, and it must be zero. The starting grant itself
+    // is paid at phone verification (PRD §9.1 [D-11]) through
+    // PhoneVerificationService — never at profile completion, so this
+    // route must not touch the funding service at all.
     expect(insertPayloads).toHaveLength(1);
     expect('virtualBalance' in insertPayloads[0]!).toBe(false);
     expect('totalDeposited' in insertPayloads[0]!).toBe(false);
-    expect(awardWelcomeBonusMock).toHaveBeenCalledTimes(1);
-    expect(awardWelcomeBonusMock).toHaveBeenCalledWith('user-1', 100);
+    expect(awardWelcomeBonusMock).not.toHaveBeenCalled();
   });
 
   test('new waitlist users are created with the waitlist starting balance', async () => {

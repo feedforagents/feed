@@ -36,6 +36,7 @@ export * from './notification-service';
 // Org Coordination Service (Cross-NPC messaging coordination)
 export * from './org-coordination-service';
 export * from './participation-service';
+export * from './phone-verification-service';
 export * from './points-service';
 export * from './referral-service';
 export * from './reputation-service';

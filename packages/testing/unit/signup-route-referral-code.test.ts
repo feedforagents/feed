@@ -294,10 +294,9 @@ describe('signup route referral code handling', () => {
 
     expect(response.status).toBe(200);
     expect(data.user.referralCode).toBe('alice');
-    // Starting grant: exactly 100 pts, funded once through the ledgered
-    // welcome-bonus path (PRD §9.1 [D-11]).
-    expect(mockAwardWelcomeBonus).toHaveBeenCalledTimes(1);
-    expect(mockAwardWelcomeBonus).toHaveBeenCalledWith('user_1', 100);
+    // Profile completion pays no starting grant: PRD §9.1 [D-11] pays
+    // the 100 pts at phone verification, not here.
+    expect(mockAwardWelcomeBonus).not.toHaveBeenCalled();
     expect(mockGetOrCreateReferralCode).not.toHaveBeenCalled();
     expect(mockInvalidateUserIdentifierCaches).toHaveBeenCalled();
     expect(mockNotifyNewAccount).toHaveBeenCalledWith('user_1');
