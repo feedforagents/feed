@@ -32,6 +32,7 @@ import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  FEE_CONFIG,
   type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
@@ -1545,10 +1546,10 @@ export class FeedAgentExecutor implements AgentExecutor {
   private predictionServiceOptions(): PredictionSettlementOptions {
     return {
       fees: {
-        tradingFeeRate: 0.01,
-        platformShare: 0.5,
-        referrerShare: 0.1,
-        minFeeAmount: 0,
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
     };
   }
