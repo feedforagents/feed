@@ -27,7 +27,7 @@ import {
   TradeExecutionService,
   withPredictionSettlement,
 } from '@feed/engine';
-import { generateSnowflakeId } from '@feed/shared';
+import { floorPoints, generateSnowflakeId } from '@feed/shared';
 import { z } from 'zod';
 import {
   executeBuyShares as buyShares,
@@ -326,7 +326,7 @@ describe('atomic prediction settlement with real Postgres and wallet', () => {
         );
       await resolve();
       expect(await npcBalance(actor.id)).toEqual({
-        trading: 990 + Math.round(Number(holding.shares) * 100) / 100,
+        trading: 990 + floorPoints(Number(holding.shares)),
         user: actor.userBalance,
       });
       const after = await npcBalance(actor.id);
@@ -354,9 +354,7 @@ describe('atomic prediction settlement with real Postgres and wallet', () => {
     const after = await npcBalance(actor.id);
     expect(after.user).toBe(actor.userBalance);
     expect(after.trading).toBeCloseTo(
-      990 +
-        Math.round(Number(holding.shares) * Number(holding.avgPrice) * 100) /
-          100,
+      990 + floorPoints(Number(holding.shares) * Number(holding.avgPrice)),
       2
     );
     await cancel();
@@ -417,11 +415,11 @@ describe('atomic prediction settlement with real Postgres and wallet', () => {
     await resolveQuestionPayouts(questionNumber);
     const paid = await state(f.userId, f.marketId);
     expect(paid.balance).toBeCloseTo(
-      990 + Math.round(human.position.shares * 100) / 100,
+      990 + floorPoints(human.position.shares),
       2
     );
     expect(await npcBalance(actor.id)).toEqual({
-      trading: 990 + Math.round(Number(npc.shares) * 100) / 100,
+      trading: 990 + floorPoints(Number(npc.shares)),
       user: actor.userBalance,
     });
     const [question] = await dbWrite

@@ -3,6 +3,7 @@
  */
 
 import { z } from 'zod';
+import { isPointsAmount } from '../../utils/points';
 import {
   createQueryBooleanSchema,
   OptionalQueryBooleanSchema,
@@ -110,13 +111,9 @@ export const FundTradingBalanceSchema = z.object({
  */
 export const TransferTradingBalanceSchema = z.object({
   recipientUserId: UserIdSchema,
-  amount: z
-    .number()
-    .positive()
-    .max(1000000)
-    .refine((value) => Number(value.toFixed(2)) === value, {
-      message: 'Amount must have at most 2 decimal places',
-    }),
+  amount: z.number().positive().max(1000000).refine(isPointsAmount, {
+    message: 'Amount must have at most 2 decimal places',
+  }),
   description: z.string().trim().max(500).optional(),
 });
 

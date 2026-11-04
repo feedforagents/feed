@@ -57,6 +57,7 @@ const mapPosition = (
   side: fromSideBool(p.side),
   shares: Number(p.shares),
   avgPrice: Number(p.avgPrice),
+  cashCostBasis: p.cashCostBasis == null ? undefined : Number(p.cashCostBasis),
   status: p.status as PredictionPositionRecord['status'],
   outcome: p.outcome,
   pnl: p.pnl ? Number(p.pnl) : undefined,
@@ -330,6 +331,10 @@ export class PredictionDbAdapter implements PredictionDbPort {
       createdAt: position.createdAt ?? now,
       updatedAt: position.updatedAt ?? now,
       amount: String(position.avgPrice * position.shares),
+      cashCostBasis:
+        position.cashCostBasis == null
+          ? undefined
+          : String(position.cashCostBasis),
     };
 
     const [result] = await this.client
@@ -341,6 +346,9 @@ export class PredictionDbAdapter implements PredictionDbPort {
           shares: row.shares,
           avgPrice: row.avgPrice,
           amount: row.amount,
+          ...(row.cashCostBasis === undefined
+            ? {}
+            : { cashCostBasis: row.cashCostBasis }),
           pnl: row.pnl,
           outcome: row.outcome,
           resolvedAt: row.resolvedAt,

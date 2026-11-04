@@ -105,7 +105,12 @@ export function getAvailableTools(): MCPTool[] {
             enum: ['YES', 'NO'],
             description: 'Bet side',
           },
-          amount: { type: 'number', description: 'Bet amount in points' },
+          amount: {
+            type: 'number',
+            minimum: 1,
+            multipleOf: 0.01,
+            description: 'Bet amount in points (at most 2 decimal places)',
+          },
         },
         required: ['marketId', 'side', 'amount'],
       },
@@ -192,7 +197,13 @@ export function getAvailableTools(): MCPTool[] {
             enum: ['YES', 'NO'],
             description: 'Outcome to buy shares for',
           },
-          amount: { type: 'number', description: 'Amount to invest' },
+          amount: {
+            type: 'number',
+            minimum: 1,
+            multipleOf: 0.01,
+            description:
+              'Amount to invest in points (at most 2 decimal places)',
+          },
         },
         required: ['marketId', 'outcome', 'amount'],
       },

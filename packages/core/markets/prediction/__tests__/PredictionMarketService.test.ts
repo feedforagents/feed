@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { floorPoints } from '@feed/shared';
 import type {
   BroadcastPort,
   CachePort,
@@ -531,7 +532,7 @@ describe('PredictionMarketService', () => {
     // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
     // The payout is the share count, not cost basis plus a
     // pool-proportional share of the loser's deposits.
-    const expectedWinnerPayout = pos1!.shares;
+    const expectedWinnerPayout = floorPoints(pos1!.shares);
     const expectedWinnerPnl = expectedWinnerPayout - 100;
     const expectedLoserPnl = -100;
 
@@ -595,7 +596,7 @@ describe('PredictionMarketService', () => {
     expect(pos?.pnl).toBeLessThan(0);
   });
 
-  it('resolve pays a skewed-pool winner exactly shares x 1 pt (PRD D-14)', async () => {
+  it('resolve pays a skewed-pool winner at 1 pt per share with cent settlement', async () => {
     // Skewed pool: YES is the cheap side, so a 100-pt buy accumulates
     // ~817 shares. Pool-proportional payout credited only ~109.89 for
     // this position; [D-14] requires the full share count at 1 pt each.
@@ -639,7 +640,7 @@ describe('PredictionMarketService', () => {
       resolutionDescription: 'Skewed pool resolves',
     });
     const credited = (await skewedWallet.getBalance('u1')).balance - preBalance;
-    expect(credited).toBeCloseTo(pos!.shares, 4);
+    expect(credited).toBeCloseTo(floorPoints(pos!.shares), 8);
   });
 
   it('pricing getCurrentPrice returns 0.5 when total is zero for display', () => {

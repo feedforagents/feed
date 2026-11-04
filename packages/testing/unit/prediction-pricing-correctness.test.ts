@@ -5,6 +5,7 @@
  * redemption, and fee integration.
  */
 import { describe, expect, test } from 'bun:test';
+import { floorPoints } from '@feed/shared';
 
 // Import pricing directly — no mocks needed for pure math
 import {
@@ -143,7 +144,11 @@ describe('CPMM fee integration', () => {
     );
     const noFee = PredictionPricing.calculateSell(5000, 5000, 'yes', 100);
     expect(result.fee).toBeCloseTo(noFee.totalCost * 0.01, 6);
-    expect(result.netProceeds).toBeCloseTo(noFee.totalCost - result.fee, 6);
+    expect(result.netProceeds).toBe(floorPoints(noFee.totalCost - result.fee));
+    expect(result.roundingRemainder).toBeCloseTo(
+      noFee.totalCost - result.fee - result.netProceeds!,
+      10
+    );
   });
 });
 
@@ -167,8 +172,8 @@ describe('winning share redemption (PRD D-14)', () => {
     );
   });
 
-  test('fractional shares retain their value before wallet rounding', () => {
-    expect(calculateExpectedPayout(0.125, 0.8)).toBe(0.125);
+  test('fractional winning shares settle down to whole hundredths', () => {
+    expect(calculateExpectedPayout(0.125, 0.8)).toBe(0.12);
   });
 
   test('zero winning shares redeem for zero', () => {
