@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import { JsonValueSchema } from '../../types/common';
+import { isPointsAmount } from '../../utils/points';
 import {
   DateTimeSchema,
   DecimalPercentageSchema,
@@ -266,7 +267,10 @@ export const PredictionMarketTradeSchema = z.object({
   amount: z
     .number()
     .positive({ message: 'Amount must be positive' })
-    .min(1, { message: 'Minimum order size is $1' }),
+    .min(1, { message: 'Minimum order size is $1' })
+    .refine(isPointsAmount, {
+      message: 'Amount must have at most 2 decimal places',
+    }),
 });
 
 /**

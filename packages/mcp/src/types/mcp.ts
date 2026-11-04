@@ -126,6 +126,8 @@ export interface InitializeResult {
 // Tool Input Schema Property
 export interface MCPToolInputSchemaProperty {
   type: string;
+  minimum?: number;
+  multipleOf?: number;
   description?: string;
   enum?: readonly string[];
   default?: JsonValue;

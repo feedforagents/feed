@@ -41,7 +41,7 @@ import {
   sql,
   type Transaction,
 } from '@feed/db';
-import { generateSnowflakeId, logger } from '@feed/shared';
+import { floorPoints, generateSnowflakeId, logger } from '@feed/shared';
 import { FEE_CONFIG } from '../config/fees';
 import { getSimulationPrice } from '../config/simulation';
 import { isSimulationMode } from '../storage-bridge';
@@ -630,6 +630,7 @@ export class TradeExecutionService {
     if (!decision.marketId) {
       throw new Error('MarketId required for prediction position');
     }
+    const amount = floorPoints(decision.amount);
     const marketIdStr = decision.marketId.toString();
 
     const sideLabel: 'yes' | 'no' =
@@ -644,7 +645,7 @@ export class TradeExecutionService {
           userId: actorId,
           marketId: marketIdStr,
           side: sideLabel,
-          amount: decision.amount,
+          amount,
         }),
       this.npcPredictionOptions(actorId, marketIdStr)
     );
@@ -653,7 +654,7 @@ export class TradeExecutionService {
     // NOT a 0-1 probability. Store as-is without * 100 conversion.
     const entryPrice = result.avgPrice;
     const now = new Date();
-    const tradeCost = result.totalCost ?? decision.amount;
+    const tradeCost = result.totalCost ?? amount;
     const currentPrice =
       result.market[sideLabel === 'yes' ? 'yesPrice' : 'noPrice'];
 
@@ -711,7 +712,7 @@ export class TradeExecutionService {
             marketId: marketIdStr,
             action: decision.action,
             side: mirrorSide,
-            amount: decision.amount,
+            amount,
             price: entryPrice,
             sentiment: decision.confidence * (sideLabel === 'yes' ? 1 : -1),
             reason: decision.reasoning,
@@ -736,7 +737,7 @@ export class TradeExecutionService {
       marketId: decision.marketId,
       action: decision.action,
       side: mirrorSide,
-      amount: decision.amount,
+      amount,
       size: tradeCost,
       shares: result.shares,
       executionPrice: entryPrice,

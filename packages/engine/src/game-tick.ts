@@ -46,6 +46,7 @@ import {
   logger,
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
+import { FEE_CONFIG } from './config/fees';
 import {
   endTrace,
   getActiveTracer,
@@ -1599,10 +1600,10 @@ export async function resolveQuestionPayouts(
         invalidate: () => invalidateAfterPredictionTrade(marketId),
       },
       fees: {
-        tradingFeeRate: 0,
-        platformShare: 0,
-        referrerShare: 0,
-        minFeeAmount: 0,
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
       clock: { now: () => resolutionTimestamp },
     }
