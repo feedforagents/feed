@@ -579,10 +579,15 @@ export class PredictionMarketService {
    *
    * Unlike resolve(), this:
    * - Sets resolution to null (no winner/loser)
-   * - Refunds each position at their original cost basis, grossed up by the
-   *   entry fee (position avgPrice is net of fees), so the refund equals the
-   *   amount that was debited at buy time
-   * - Sets PnL to 0 for all positions (full refund)
+   * - Refunds each position at its net cost basis (shares * avgPrice). The
+   *   entry fee is NOT refunded: buy() already distributed it via
+   *   feeProcessor.processTradingFee and the FeeProcessor port has no
+   *   reversal, so refunding the full debit would mint the fee a second
+   *   time. (sell() and resolve() use grossUpBuyAmount for PnL only, never
+   *   for the amount credited, so they are not precedent for a grossed-up
+   *   refund.)
+   * - Sets PnL to the retained fee (refund minus the grossed-up cost basis,
+   *   the same PnL convention sell() and resolve() use)
    * - Marks positions as 'cancelled'
    */
   async cancel(input: PredictionCancelInput): Promise<PredictionCancelResult> {
@@ -624,18 +629,22 @@ export class PredictionMarketService {
         continue;
       }
 
-      // Calculate refund amount (original investment). Position avgPrice is
-      // based on the net buy amount (after fees), so gross the cost basis up
-      // by the entry fee — the same conversion sell() and resolve() apply —
-      // otherwise the "full refund" silently keeps the fee and the recorded
-      // PnL of 0 understates the user's loss.
-      const refundAmount = grossUpBuyAmount(
-        pos.shares * pos.avgPrice,
-        this.deps.fees.tradingFeeRate
-      );
+      // Refund the net cost basis (shares * avgPrice). Position avgPrice is
+      // based on the net buy amount (after fees), and that fee was already
+      // distributed when the position was bought (buy() calls
+      // feeProcessor.processTradingFee, which credits the referrer and
+      // records the platform share; the FeeProcessor port has no reversal).
+      // Grossing the refund up to the full debit would therefore re-credit
+      // an already-distributed fee. A cancelled market keeps the entry fee;
+      // the retained fee is the position's PnL, computed the same way sell()
+      // and resolve() compute PnL (proceeds minus the grossed-up cost basis).
+      const refundAmount = pos.shares * pos.avgPrice;
+      const pnl =
+        refundAmount -
+        grossUpBuyAmount(refundAmount, this.deps.fees.tradingFeeRate);
 
       if (refundAmount > 0) {
-        // Credit user their original investment
+        // Credit user their net cost basis
         await this.deps.wallet.credit({
           userId: pos.userId,
           amount: refundAmount,
@@ -644,10 +653,10 @@ export class PredictionMarketService {
           relatedId: marketId,
         });
 
-        // Record PnL of 0 (full refund means no gain or loss)
+        // Record the retained entry fee as the position's loss
         await this.deps.wallet.recordPnL({
           userId: pos.userId,
-          pnl: 0,
+          pnl,
           reason: 'pred_cancel',
           relatedId: marketId,
         });
@@ -661,7 +670,7 @@ export class PredictionMarketService {
         ...pos,
         status: 'cancelled',
         outcome: null,
-        pnl: 0,
+        pnl,
         resolvedAt: now,
         updatedAt: now,
       });

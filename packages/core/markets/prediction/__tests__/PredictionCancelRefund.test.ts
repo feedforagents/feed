@@ -209,13 +209,18 @@ describe('PredictionMarketService cancel refunds', () => {
   let db: InMemoryDb;
   let wallet: InMemoryWallet;
   let feeProcessor: FeeProcessor;
+  let feeCalls: { amount: number; type: string }[];
   let service: PredictionMarketService;
 
   beforeEach(() => {
     db = new InMemoryDb(market);
     wallet = new InMemoryWallet();
+    feeCalls = [];
     feeProcessor = {
-      processTradingFee: async () => ({ feeCharged: 0, referrerPaid: 0 }),
+      processTradingFee: async ({ amount, type }) => {
+        feeCalls.push({ amount, type });
+        return { feeCharged: 0, referrerPaid: 0 };
+      },
     };
     service = new PredictionMarketService({
       db,
@@ -228,8 +233,8 @@ describe('PredictionMarketService cancel refunds', () => {
     });
   });
 
-  it('cancel makes the buyer whole: refund equals the amount debited at buy', async () => {
-    await service.buy({
+  it('cancel refunds net cost basis; the distributed entry fee stays distributed', async () => {
+    const buyResult = await service.buy({
       userId: 'u1',
       marketId: 'm1',
       side: 'yes',
@@ -243,23 +248,29 @@ describe('PredictionMarketService cancel refunds', () => {
     });
 
     expect(result.positionsRefunded).toBe(1);
-    // The buy debited 1000 pts. cancel() documents a full refund at the
-    // original investment with PnL 0, so the credit must be 1000, not the
-    // 999 pts of net-of-fee cost basis the position carries.
-    expect(result.totalRefunded).toBeCloseTo(1000, 6);
-    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(10_000, 6);
+    // The buy debited 1000 pts, of which 1 pt was the entry fee that buy()
+    // already distributed via processTradingFee (no reversal exists), so
+    // cancel refunds the 999 pts of net cost basis — refunding the full
+    // debit would mint the distributed fee a second time.
+    expect(result.totalRefunded).toBeCloseTo(999, 6);
+    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(9999, 6);
     const cancelPnl = wallet.pnls.find((p) => p.reason === 'pred_cancel');
-    expect(cancelPnl?.pnl).toBe(0);
+    expect(cancelPnl?.pnl).toBeCloseTo(-1, 6);
+    // Conservation: refund + fee charged at buy == debit, and cancel runs
+    // no fee processing of its own.
+    expect(result.totalRefunded + buyResult.feePaid).toBeCloseTo(1000, 6);
+    expect(feeCalls.filter((c) => c.type === 'pred_buy').length).toBe(1);
+    expect(feeCalls.filter((c) => c.type === 'pred_cancel').length).toBe(0);
   });
 
-  it('cancel refunds every buyer their full debit, across sides', async () => {
-    await service.buy({
+  it('cancel refunds every buyer their net cost basis, across sides', async () => {
+    const buy1 = await service.buy({
       userId: 'u1',
       marketId: 'm1',
       side: 'yes',
       amount: 1000,
     });
-    await service.buy({
+    const buy2 = await service.buy({
       userId: 'u2',
       marketId: 'm1',
       side: 'no',
@@ -272,9 +283,12 @@ describe('PredictionMarketService cancel refunds', () => {
     });
 
     expect(result.positionsRefunded).toBe(2);
-    expect(result.totalRefunded).toBeCloseTo(1500, 6);
-    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(10_000, 6);
-    expect((await wallet.getBalance('u2')).balance).toBeCloseTo(10_000, 6);
+    expect(result.totalRefunded).toBeCloseTo(1498.5, 6);
+    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(9999, 6);
+    expect((await wallet.getBalance('u2')).balance).toBeCloseTo(9999.5, 6);
+    expect(
+      result.totalRefunded + buy1.feePaid + buy2.feePaid
+    ).toBeCloseTo(1500, 6);
   });
 
   it('with a zero fee rate the refund still equals the debit (no gross-up)', async () => {
