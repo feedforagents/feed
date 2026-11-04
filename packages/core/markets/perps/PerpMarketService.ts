@@ -1080,12 +1080,20 @@ export class PerpMarketService {
         shouldLiquidate(markPrice, position.liquidationPrice, position.side)
       ) {
         const marginLoss = position.size / position.leverage;
+        // Liquidation settles like a close at the recorded close price:
+        // realized PnL is the actual PnL less accrued funding, with the
+        // loss capped at the margin (the existing behaviour when
+        // fundingPaid is 0). Any positive remainder is the user's
+        // remaining equity (e.g. an accrued funding rebate) and is
+        // credited instead of silently discarded.
+        const realizedPnL = Math.max(pnl - position.fundingPaid, -marginLoss);
+        const settlement = Math.max(0, marginLoss + realizedPnL);
 
         try {
           const closed = await this.db.closePosition(position.id, {
             currentPrice: newPrice,
             closedAt: now,
-            realizedPnL: -marginLoss,
+            realizedPnL,
             unrealizedPnL: 0,
             unrealizedPnLPercent: 0,
           });
@@ -1094,10 +1102,20 @@ export class PerpMarketService {
 
           await this.deps.wallet.recordPnL({
             userId: position.userId,
-            pnl: -marginLoss,
+            pnl: realizedPnL,
             reason: 'perp_liquidation',
             relatedId: position.id,
           });
+
+          if (settlement > 0) {
+            await this.deps.wallet.credit({
+              userId: position.userId,
+              amount: settlement,
+              reason: 'perp_liquidation',
+              description: `Liquidation settlement ${position.ticker}`,
+              relatedId: position.id,
+            });
+          }
 
           if (market) {
             // OI decreases by notional (size), not leveraged exposure. Apply

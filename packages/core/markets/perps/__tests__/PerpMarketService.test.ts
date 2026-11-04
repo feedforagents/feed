@@ -454,6 +454,46 @@ describe('PerpMarketService', () => {
     );
   });
 
+  it('settles accrued funding on liquidation instead of discarding it', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    // Accrued funding rebate: this long received 5 pts of funding
+    // (negative fundingPaid), as processFundingStep records for longs
+    // when shorts dominate.
+    await db.updateOpenPosition(open.positionId, { fundingPaid: -5 });
+    const before = await db.getPositionById(open.positionId);
+
+    // Trigger just below the liquidation price so the raw PnL is close
+    // to the margin loss and the rebate leaves positive equity.
+    const trigger = Number((before!.liquidationPrice - 0.1).toFixed(2));
+    await service.applyPriceUpdates({ 'org-abc': trigger });
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeDefined();
+
+    const pnl = ((trigger - before!.entryPrice) / before!.entryPrice) * 100;
+    const expectedRealized = Math.max(pnl + 5, -10);
+    const expectedSettlement = Math.max(0, 10 + expectedRealized);
+    expect(pos?.realizedPnL).toBeCloseTo(expectedRealized, 4);
+
+    const pnls = wallet.getPnLs('u1');
+    expect(pnls.find((p) => p.reason === 'perp_liquidation')?.pnl).toBeCloseTo(
+      expectedRealized,
+      4
+    );
+
+    // Margin 10 + fee 0.1 deducted at open; liquidation credits the
+    // remaining equity instead of discarding the funding rebate.
+    const balance = await wallet.getBalance('u1');
+    expect(balance.balance).toBeCloseTo(9989.9 + expectedSettlement, 4);
+  });
+
   it('updates unrealized PnL on price move without liquidation', async () => {
     const open = await service.openPosition({
       userId: 'u1',
