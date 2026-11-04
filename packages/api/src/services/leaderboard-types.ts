@@ -2,7 +2,7 @@
 // They stay local to the API package to keep service-layer types lightweight
 // and avoid coupling them to shared validation implementation details.
 export type LeaderboardMetric = 'reputation' | 'trading';
-export type LeaderboardScope = 'wallet' | 'team';
+export type LeaderboardScope = 'wallet';
 
 export interface LeaderboardEntry {
   id: string;
@@ -20,16 +20,6 @@ export interface LeaderboardEntry {
   isAgent: boolean;
   managedBy?: string | null;
   nftTokenId: number | null;
-  teamReputationPoints?: number;
-  userReputationPoints?: number;
-  agentReputationPoints?: number;
-  teamLifetimePnL?: number;
-  userLifetimePnL?: number;
-  agentLifetimePnL?: number;
-  teamCapitalBase?: number;
-  teamEffectiveCapitalBase?: number;
-  teamTradingReturn?: number;
-  agentCount?: number;
 }
 
 export interface LeaderboardResult {

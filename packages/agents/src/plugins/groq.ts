@@ -218,6 +218,31 @@ async function generateGroqText(
   return result.text;
 }
 
+/** Preserve reported counts on structured-output errors; never estimate them. */
+function failedObjectUsage(error: Error): {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+} {
+  const cause = error.cause;
+  const candidate =
+    ('usage' in error ? error.usage : undefined) ??
+    (cause && typeof cause === 'object' && 'usage' in cause
+      ? cause.usage
+      : undefined);
+  if (!candidate || typeof candidate !== 'object') return {};
+  const usage = candidate as Record<string, unknown>;
+  const tokenCount = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? value
+      : undefined;
+  return {
+    inputTokens: tokenCount(usage.inputTokens),
+    outputTokens: tokenCount(usage.outputTokens),
+    totalTokens: tokenCount(usage.totalTokens),
+  };
+}
+
 /**
  * Generates structured object using Groq API
  * @internal
@@ -253,6 +278,10 @@ async function generateGroqObject(
       })
     : generateObject({ ...options, output: 'no-schema' })
   ).catch((error: Error) => {
+    // A structured-output failure can still carry the provider's reported usage
+    // when the completion arrived and parsing or validation failed. Keep it, and
+    // keep an unreported count absent rather than recording a second guess.
+    const failedUsage = failedObjectUsage(error);
     if (activeStep)
       activeStep.logger.logLLMCall(activeStep.stepId, {
         model,
@@ -264,6 +293,8 @@ async function generateGroqObject(
         purpose: 'action',
         actionType: 'groq_plugin_object',
         latencyMs: Date.now() - startTime,
+        promptTokens: failedUsage.inputTokens,
+        completionTokens: failedUsage.outputTokens,
         metadata: { success: false, error: error.message },
       });
     getAgentLLMBridge()?.({
@@ -276,8 +307,9 @@ async function generateGroqObject(
       systemPrompt: system || '',
       userPrompt: params.prompt,
       rawResponse: '',
-      inputTokens: 0,
-      outputTokens: 0,
+      inputTokens: failedUsage.inputTokens ?? 0,
+      outputTokens: failedUsage.outputTokens ?? 0,
+      totalTokens: failedUsage.totalTokens,
       success: false,
       error: error.message,
       durationMs: Date.now() - startTime,

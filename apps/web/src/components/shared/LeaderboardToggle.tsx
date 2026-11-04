@@ -1,20 +1,16 @@
 'use client';
 
-import type { LeaderboardMetric, LeaderboardScope } from '@feed/shared';
+import type { LeaderboardMetric } from '@feed/shared';
 import { cn } from '@feed/shared';
 
 interface LeaderboardToggleProps {
   activeMetric: LeaderboardMetric;
-  activeScope: LeaderboardScope;
   onMetricChange: (metric: LeaderboardMetric) => void;
-  onScopeChange: (scope: LeaderboardScope) => void;
 }
 
 export function LeaderboardToggle({
   activeMetric,
-  activeScope,
   onMetricChange,
-  onScopeChange,
 }: LeaderboardToggleProps) {
   const metricOptions: Array<{
     label: string;
@@ -22,14 +18,6 @@ export function LeaderboardToggle({
   }> = [
     { label: 'Reputation', value: 'reputation' },
     { label: 'Trading Return', value: 'trading' },
-  ];
-
-  const scopeOptions: Array<{
-    label: string;
-    value: LeaderboardScope;
-  }> = [
-    { label: 'Per Wallet', value: 'wallet' },
-    { label: 'Team', value: 'team' },
   ];
 
   const renderOption = <T extends string>({
@@ -68,11 +56,6 @@ export function LeaderboardToggle({
         activeValue: activeMetric,
         onChange: onMetricChange,
         options: metricOptions,
-      })}
-      {renderOption({
-        activeValue: activeScope,
-        onChange: onScopeChange,
-        options: scopeOptions,
       })}
     </div>
   );

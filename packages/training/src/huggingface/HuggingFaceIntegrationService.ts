@@ -11,7 +11,6 @@ import { ModelBenchmarkService } from '../benchmark/ModelBenchmarkService';
 import { getExportToHuggingFace } from '../dependencies';
 import { logger } from '../utils';
 import { HuggingFaceDatasetUploader } from './HuggingFaceDatasetUploader';
-import { HuggingFaceModelUploader } from './HuggingFaceModelUploader';
 import { getHuggingFaceToken } from './shared/HuggingFaceUploadUtil';
 
 export interface WeeklyUploadResult {
@@ -19,11 +18,6 @@ export interface WeeklyUploadResult {
   datasets: {
     benchmarks: { success: boolean; url?: string; error?: string };
     trajectories: { success: boolean; url?: string; error?: string };
-  };
-  models: {
-    processed: number;
-    benchmarked: number;
-    uploaded: number;
   };
   errors: string[];
   duration: number;
@@ -38,11 +32,9 @@ export interface DatasetUploadOptions {
 
 export class HuggingFaceIntegrationService {
   private datasetUploader: HuggingFaceDatasetUploader;
-  private modelUploader: HuggingFaceModelUploader;
 
   constructor() {
     this.datasetUploader = new HuggingFaceDatasetUploader();
-    this.modelUploader = new HuggingFaceModelUploader();
   }
 
   /**
@@ -63,11 +55,6 @@ export class HuggingFaceIntegrationService {
       datasets: {
         benchmarks: { success: false },
         trajectories: { success: false },
-      },
-      models: {
-        processed: 0,
-        benchmarked: 0,
-        uploaded: 0,
       },
       errors: [],
       duration: 0,
@@ -146,110 +133,6 @@ export class HuggingFaceIntegrationService {
         result.datasets.trajectories.success = true;
       }
 
-      // Step 3: Process models
-      const unbenchmarkedModels =
-        await ModelBenchmarkService.getUnbenchmarkedModels();
-      result.models.processed = unbenchmarkedModels.length;
-
-      logger.info(
-        `Step 3: Found ${unbenchmarkedModels.length} unbenchmarked models`,
-        undefined,
-        'HuggingFaceIntegration'
-      );
-
-      if (unbenchmarkedModels.length > 0) {
-        const standardBenchmarks =
-          await ModelBenchmarkService.getStandardBenchmarkPaths();
-
-        if (standardBenchmarks.length === 0) {
-          const error = 'No standard benchmarks available for model evaluation';
-          logger.error(error, undefined, 'HuggingFaceIntegration');
-          result.errors.push(error);
-        } else {
-          for (const modelId of unbenchmarkedModels) {
-            try {
-              // Benchmark model
-              logger.info(
-                `Benchmarking model: ${modelId}`,
-                undefined,
-                'HuggingFaceIntegration'
-              );
-              await ModelBenchmarkService.benchmarkModel({
-                modelId,
-                benchmarkPaths: standardBenchmarks,
-                saveResults: true,
-              });
-              result.models.benchmarked++;
-
-              // Compare to baseline
-              const comparison =
-                await ModelBenchmarkService.compareToBaseline(modelId);
-
-              // Upload if improved
-              if (comparison.recommendation === 'deploy' && !options.dryRun) {
-                logger.info(
-                  `Model ${modelId} improved, uploading`,
-                  undefined,
-                  'HuggingFaceIntegration'
-                );
-
-                const modelResult = await db
-                  .select()
-                  .from(trainedModels)
-                  .where(eq(trainedModels.modelId, modelId))
-                  .limit(1);
-
-                const model = modelResult[0];
-
-                if (model) {
-                  const modelName = options.modelNamePrefix
-                    ? `${options.modelNamePrefix}-${model.version}`
-                    : process.env.HF_MODEL_NAME
-                      ? `${process.env.HF_MODEL_NAME}-${model.version}`
-                      : `feedlabs/feed-agent-${model.version}`;
-
-                  const uploadResult = await this.modelUploader.uploadModel({
-                    modelId,
-                    modelName,
-                    description: `Feed autonomous trading agent - v${model.version}`,
-                    includeWeights: true,
-                  });
-
-                  if (uploadResult.success) {
-                    result.models.uploaded++;
-
-                    // Update model with HuggingFace repo
-                    await db
-                      .update(trainedModels)
-                      .set({ huggingFaceRepo: modelName })
-                      .where(eq(trainedModels.modelId, modelId));
-                  } else {
-                    result.errors.push(
-                      `Model upload ${modelId}: ${uploadResult.error}`
-                    );
-                  }
-                }
-              } else {
-                logger.info(
-                  `Model ${modelId} not ready for deployment: ${comparison.recommendation}`,
-                  undefined,
-                  'HuggingFaceIntegration'
-                );
-              }
-            } catch (error) {
-              const errorMsg =
-                error instanceof Error ? error.message : String(error);
-              logger.error(
-                `Failed to process model ${modelId}`,
-                { error },
-                'HuggingFaceIntegration'
-              );
-              result.errors.push(`Model ${modelId}: ${errorMsg}`);
-            }
-          }
-        }
-      }
-
       result.success = result.errors.length === 0;
       result.duration = Date.now() - startTime;
 
@@ -259,9 +142,6 @@ export class HuggingFaceIntegrationService {
           success: result.success,
           benchmarkDataset: result.datasets.benchmarks.success,
           trajectoryDataset: result.datasets.trajectories.success,
-          modelsProcessed: result.models.processed,
-          modelsBenchmarked: result.models.benchmarked,
-          modelsUploaded: result.models.uploaded,
           errors: result.errors.length,
           duration: result.duration,
         },

@@ -1,7 +1,6 @@
 /**
  * Open Perp Action
  * Open a leveraged perpetual position via direct DB operations
- * (Same pattern as AutonomousTradingService)
  */
 
 import type {

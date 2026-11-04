@@ -593,6 +593,125 @@ describe('PerpMarketService', () => {
     ).rejects.toThrow(/Slippage exceeded/);
   });
 
+  it('slippage protection rejects an opposite-side reduce when the exit fill moved beyond tolerance', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    // Spot moved 20% against the mark reference
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+
+    // Opposite-side order smaller than the position = reduce (partial close)
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 50,
+        leverage: 10,
+        maxSlippage: 0.1,
+      })
+    ).rejects.toThrow(/Slippage exceeded/);
+
+    // Nothing moved: position intact, no settlement credited
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.size).toBe(100);
+    expect(pos?.closedAt).toBeNull();
+    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(
+      10_000 - 10 - 0.1,
+      6
+    );
+  });
+
+  it('slippage protection rejects an opposite-side flat close when the exit fill moved beyond tolerance', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 100,
+        leverage: 10,
+        maxSlippage: 0.1,
+      })
+    ).rejects.toThrow(/Slippage exceeded/);
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeNull();
+  });
+
+  it('slippage protection rejects a flip when the fills moved beyond tolerance', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 150,
+        leverage: 10,
+        maxSlippage: 0.1,
+      })
+    ).rejects.toThrow(/Slippage exceeded/);
+
+    // The old position is still open and no inverse position was created
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeNull();
+    const positions = await db.getOpenPositionsByUser('u1');
+    expect(positions).toHaveLength(1);
+    expect(positions[0]?.side).toBe('long');
+    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(
+      10_000 - 10 - 0.1,
+      6
+    );
+  });
+
+  it('allows an opposite-side flip when the fills stay within tolerance', async () => {
+    await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 102 });
+
+    const result = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 150,
+      leverage: 10,
+      maxSlippage: 0.1,
+    });
+
+    expect(result.rebalanceType).toBe('flip');
+    expect(result.side).toBe('short');
+    expect(result.size).toBe(50);
+  });
+
   it('allows close when slippage is within tolerance', async () => {
     const open = await service.openPosition({
       userId: 'u1',

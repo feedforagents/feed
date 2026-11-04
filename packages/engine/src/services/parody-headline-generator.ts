@@ -18,7 +18,7 @@ import {
   or,
   parodyHeadlines,
 } from '@feed/db';
-import { generateSnowflakeId, logger } from '@feed/shared';
+import { generateSnowflakeId, type JsonValue, logger } from '@feed/shared';
 import { FeedLLMClient } from '../llm/openai-client';
 import { characterMappingService } from './character-mapping-service';
 import { ContentQualityGate } from './content-quality-gate';
@@ -119,18 +119,7 @@ export class ParodyHeadlineGenerator {
     );
 
     // Generate parody using LLM
-    const response = await this.llm.generateJSON<
-      | {
-          parodyTitle: string;
-          parodyContent?: string;
-        }
-      | {
-          response: {
-            parodyTitle: string;
-            parodyContent?: string;
-          };
-        }
-    >(
+    const response = await this.llm.generateJSON<JsonValue>(
       prompt,
       {
         properties: {
@@ -142,23 +131,42 @@ export class ParodyHeadlineGenerator {
       {
         temperature,
         maxTokens: 500,
-        format: 'xml',
+        format: 'json',
         promptType: 'parody_headline_generation',
       }
     );
 
-    // Handle XML structure
     const parodyData =
-      'response' in response && response.response
+      response &&
+      typeof response === 'object' &&
+      !Array.isArray(response) &&
+      'response' in response
         ? response.response
-        : (response as { parodyTitle: string; parodyContent?: string });
+        : response;
+    if (
+      !parodyData ||
+      typeof parodyData !== 'object' ||
+      Array.isArray(parodyData)
+    ) {
+      throw new Error('Parody generation must return an object');
+    }
+    const { parodyTitle, parodyContent } = parodyData;
+    if (typeof parodyTitle !== 'string' || !parodyTitle.trim()) {
+      throw new Error(
+        'Parody generation parodyTitle must be a nonempty string'
+      );
+    }
+    if (parodyContent !== undefined && typeof parodyContent !== 'string') {
+      throw new Error(
+        'Parody generation parodyContent must be a string when present'
+      );
+    }
 
     // Apply character mapping to replace any real names with fictional equivalents
-    const processedTitle = await characterMappingService.transformText(
-      parodyData.parodyTitle
-    );
-    const processedContent = parodyData.parodyContent
-      ? await characterMappingService.transformText(parodyData.parodyContent)
+    const processedTitle =
+      await characterMappingService.transformText(parodyTitle);
+    const processedContent = parodyContent
+      ? await characterMappingService.transformText(parodyContent)
       : null;
 
     // Combine mappings from title, content, and post-processing
@@ -241,11 +249,12 @@ AVOID:
 ❌ Pure nonsense — the humor should come from clever exaggeration, not gibberish
 
 OUTPUT FORMAT:
-Respond with ONLY this XML:
-<response>
-  <parodyTitle>Your satirical headline here</parodyTitle>
-  ${content ? '<parodyContent>Your satirical 2-3 sentence summary here</parodyContent>' : ''}
-</response>
+Respond with ONLY ONE JSON OBJECT:
+{
+  "parodyTitle": "Your satirical headline here"${content ? ',\n  "parodyContent": "Your satirical 2-3 sentence summary here"' : ''}
+}
+parodyTitle must be a nonempty JSON string. ${content ? 'parodyContent must also be a JSON string.' : 'parodyContent is optional and may be omitted.'}
+Do not use HTML, XML, or nested objects for prose. Escape quotation marks and newlines inside strings so the entire response is valid JSON.
 
 Generate the parody now.`;
   }

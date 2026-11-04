@@ -3,12 +3,8 @@
  *
  * Benchmark-gated deployment of trained models.
  *
- * Deployment flow:
- * 1. Training completes → model registered as 'ready' in trainedModels
- * 2. AutomationPipeline calls benchmarkAndDeploy()
- * 3. BenchmarkService scores the model
- * 4. If score passes threshold → ModelDeployer.deploy() marks as 'deployed'
- * 5. Agent runtime picks up deployed model on next tick
+ * Explicit deployment uses recorded benchmark results; it does not launch
+ * an agent or generate evaluation results.
  *
  * Runtime model selection is handled by ModelSelectionService which reads
  * from the trainedModels table. Deploy/rollback update that table.

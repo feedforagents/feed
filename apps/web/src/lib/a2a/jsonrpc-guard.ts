@@ -1,6 +1,5 @@
 /**
- * Shared request guards for the A2A JSON-RPC endpoints (`/api/a2a` and
- * `/api/agents/[agentId]/a2a`).
+ * Request guards for the A2A JSON-RPC endpoint (`/api/a2a`).
  *
  * - Validates the JSON-RPC envelope before anything reads from it, so null,
  *   primitive or array bodies return a protocol error instead of a 500.

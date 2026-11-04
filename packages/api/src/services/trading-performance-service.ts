@@ -5,7 +5,7 @@ export const TRADING_RETURN_CAPITAL_FLOOR = 1000;
 
 function buildCapitalContributionExpression(
   transactionAlias: string,
-  scope: 'wallet' | 'team'
+  scope: 'wallet'
 ): string {
   return buildCapitalBaseContributionSql(transactionAlias, scope);
 }
@@ -31,24 +31,6 @@ export interface WalletTradingPerformanceRow {
   nftTokenId: number | null;
   isAgent: boolean;
   managedBy: string | null;
-}
-
-export interface TeamTradingPerformanceRow {
-  id: string;
-  username: string | null;
-  displayName: string | null;
-  profileImageUrl: string | null;
-  reputationPoints: string;
-  balance: string;
-  userLifetimePnL: string;
-  agentLifetimePnL: string;
-  teamLifetimePnL: string;
-  teamCapitalBase: string;
-  teamEffectiveCapitalBase: string;
-  teamTradingReturn: string;
-  createdAt: Date | string;
-  nftTokenId: number | null;
-  agentCount: number;
 }
 
 export class TradingPerformanceService {
@@ -79,33 +61,6 @@ export class TradingPerformanceService {
         )::numeric AS "capitalBase"
       FROM "BalanceTransaction" bt
       GROUP BY bt."userId"
-    `);
-  }
-
-  private static teamCapitalCte() {
-    return sql.raw(`
-      SELECT
-        COALESCE(u."managedBy", u."id") AS "teamId",
-        GREATEST(
-          COALESCE(SUM(${buildCapitalContributionExpression('bt', 'team')}), 0),
-          0
-        )::numeric AS "teamCapitalBase"
-      FROM "BalanceTransaction" bt
-      INNER JOIN "User" u ON u."id" = bt."userId"
-      WHERE u."isActor" = false
-      GROUP BY COALESCE(u."managedBy", u."id")
-    `);
-  }
-
-  private static teamAgentsCte() {
-    return sql.raw(`
-      SELECT
-        "managedBy" AS "managerId",
-        COALESCE(SUM("lifetimePnL"::numeric), 0)::numeric AS "agentLifetimePnL",
-        COUNT(*)::int AS "agentCount"
-      FROM "User"
-      WHERE "isAgent" = true AND "isActor" = false
-      GROUP BY "managedBy"
     `);
   }
 
@@ -141,7 +96,7 @@ export class TradingPerformanceService {
         u."managedBy"
       FROM "User" u
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
-      WHERE u."isActor" = false
+      WHERE u."isActor" = false AND u."isAgent" = false
       ORDER BY "tradingReturn" DESC, u."createdAt" ASC, u."id" ASC
       LIMIT ${limit} OFFSET ${offset}
     `);
@@ -180,7 +135,7 @@ export class TradingPerformanceService {
         u."managedBy"
       FROM "User" u
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
-      WHERE u."isActor" = false AND u."id" = ${userId}
+      WHERE u."isActor" = false AND u."isAgent" = false AND u."id" = ${userId}
       LIMIT 1
     `);
 
@@ -209,7 +164,7 @@ export class TradingPerformanceService {
           )::numeric AS "tradingReturn"
         FROM "User" u
         LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
-        WHERE u."isActor" = false
+        WHERE u."isActor" = false AND u."isAgent" = false
       )
       SELECT COUNT(*)::int AS "count"
       FROM wallet_rows wr
@@ -222,146 +177,6 @@ export class TradingPerformanceService {
             OR (
               wr."createdAt" = ${createdAtISO}
               AND wr."id" < ${entry.id}
-            )
-          )
-        )
-    `);
-
-    const rows = result as unknown as Array<{ count: number }>;
-    return rows[0]?.count ?? 0;
-  }
-
-  static async getTeamLeaderboardRows(
-    limit: number,
-    offset: number
-  ): Promise<TeamTradingPerformanceRow[]> {
-    const result = await db.execute(sql`
-      WITH team_capital AS (${this.teamCapitalCte()}),
-      team_agents AS (${this.teamAgentsCte()})
-      SELECT
-        u."id",
-        u."username",
-        u."displayName",
-        u."profileImageUrl",
-        u."reputationPoints"::numeric AS "reputationPoints",
-        u."virtualBalance"::numeric AS "balance",
-        u."lifetimePnL"::numeric AS "userLifetimePnL",
-        COALESCE(ta."agentLifetimePnL", 0)::numeric AS "agentLifetimePnL",
-        (
-          u."lifetimePnL"::numeric + COALESCE(ta."agentLifetimePnL", 0)
-        )::numeric AS "teamLifetimePnL",
-        COALESCE(tc."teamCapitalBase", 0)::numeric AS "teamCapitalBase",
-        GREATEST(
-          COALESCE(tc."teamCapitalBase", 0)::numeric,
-          ${TRADING_RETURN_CAPITAL_FLOOR}
-        )::numeric AS "teamEffectiveCapitalBase",
-        (
-          (
-            u."lifetimePnL"::numeric + COALESCE(ta."agentLifetimePnL", 0)
-          ) /
-          GREATEST(
-            COALESCE(tc."teamCapitalBase", 0)::numeric,
-            ${TRADING_RETURN_CAPITAL_FLOOR}
-          )
-        )::numeric AS "teamTradingReturn",
-        u."createdAt",
-        u."nftTokenId",
-        COALESCE(ta."agentCount", 0)::int AS "agentCount"
-      FROM "User" u
-      LEFT JOIN team_agents ta ON ta."managerId" = u."id"
-      LEFT JOIN team_capital tc ON tc."teamId" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false
-      ORDER BY "teamTradingReturn" DESC, u."createdAt" ASC, u."id" ASC
-      LIMIT ${limit} OFFSET ${offset}
-    `);
-
-    return result as unknown as TeamTradingPerformanceRow[];
-  }
-
-  static async getTeamEntry(
-    teamOwnerId: string
-  ): Promise<TeamTradingPerformanceRow | null> {
-    const result = await db.execute(sql`
-      WITH team_capital AS (${this.teamCapitalCte()}),
-      team_agents AS (${this.teamAgentsCte()})
-      SELECT
-        u."id",
-        u."username",
-        u."displayName",
-        u."profileImageUrl",
-        u."reputationPoints"::numeric AS "reputationPoints",
-        u."virtualBalance"::numeric AS "balance",
-        u."lifetimePnL"::numeric AS "userLifetimePnL",
-        COALESCE(ta."agentLifetimePnL", 0)::numeric AS "agentLifetimePnL",
-        (
-          u."lifetimePnL"::numeric + COALESCE(ta."agentLifetimePnL", 0)
-        )::numeric AS "teamLifetimePnL",
-        COALESCE(tc."teamCapitalBase", 0)::numeric AS "teamCapitalBase",
-        GREATEST(
-          COALESCE(tc."teamCapitalBase", 0)::numeric,
-          ${TRADING_RETURN_CAPITAL_FLOOR}
-        )::numeric AS "teamEffectiveCapitalBase",
-        (
-          (
-            u."lifetimePnL"::numeric + COALESCE(ta."agentLifetimePnL", 0)
-          ) /
-          GREATEST(
-            COALESCE(tc."teamCapitalBase", 0)::numeric,
-            ${TRADING_RETURN_CAPITAL_FLOOR}
-          )
-        )::numeric AS "teamTradingReturn",
-        u."createdAt",
-        u."nftTokenId",
-        COALESCE(ta."agentCount", 0)::int AS "agentCount"
-      FROM "User" u
-      LEFT JOIN team_agents ta ON ta."managerId" = u."id"
-      LEFT JOIN team_capital tc ON tc."teamId" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false AND u."id" = ${teamOwnerId}
-      LIMIT 1
-    `);
-
-    const rows = result as unknown as TeamTradingPerformanceRow[];
-    return rows[0] ?? null;
-  }
-
-  static async countTeamsAbove(entry: {
-    id: string;
-    createdAt: Date | string;
-    teamTradingReturn: string;
-  }): Promise<number> {
-    const createdAtISO = toISO(entry.createdAt);
-    const result = await db.execute(sql`
-      WITH team_capital AS (${this.teamCapitalCte()}),
-      team_agents AS (${this.teamAgentsCte()}),
-      team_rows AS (
-        SELECT
-          u."id",
-          u."createdAt",
-          (
-            (
-              u."lifetimePnL"::numeric + COALESCE(ta."agentLifetimePnL", 0)
-            ) /
-            GREATEST(
-              COALESCE(tc."teamCapitalBase", 0)::numeric,
-              ${TRADING_RETURN_CAPITAL_FLOOR}
-            )
-          )::numeric AS "teamTradingReturn"
-        FROM "User" u
-        LEFT JOIN team_agents ta ON ta."managerId" = u."id"
-        LEFT JOIN team_capital tc ON tc."teamId" = u."id"
-        WHERE u."isActor" = false AND u."isAgent" = false
-      )
-      SELECT COUNT(*)::int AS "count"
-      FROM team_rows tr
-      WHERE
-        tr."teamTradingReturn" > ${entry.teamTradingReturn}
-        OR (
-          tr."teamTradingReturn" = ${entry.teamTradingReturn}
-          AND (
-            tr."createdAt" < ${createdAtISO}
-            OR (
-              tr."createdAt" = ${createdAtISO}
-              AND tr."id" < ${entry.id}
             )
           )
         )

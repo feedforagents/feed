@@ -56,14 +56,7 @@ test.describe('Admin Dashboard', () => {
   });
 
   test('admin tabs are present', async ({ page }) => {
-    const tabs = [
-      'Stats',
-      'Users',
-      'Agents',
-      'Registry',
-      'Reports',
-      'Training',
-    ];
+    const tabs = ['Stats', 'Users', 'Registry', 'Reports', 'Training'];
     let tabsFound = 0;
 
     for (const tabName of tabs) {
@@ -247,20 +240,6 @@ test.describe('Admin - All Tabs Navigation', () => {
     expect(body?.length).toBeGreaterThan(100);
   });
 
-  test('switches to Agents tab and shows agent controls', async ({ page }) => {
-    const switched = await clickTab(page, 'Agents');
-    if (switched) {
-      const hasAgentContent = await pageContainsText(
-        page,
-        'agent',
-        'pause',
-        'resume',
-        'running'
-      );
-      expect(hasAgentContent).toBe(true);
-    }
-  });
-
   test('switches to Escrow tab', async ({ page }) => {
     const _switched = await clickTab(page, 'Escrow');
     const body = await page.locator('body').textContent();
@@ -334,57 +313,6 @@ test.describe('Admin - Users Tab Interactions', () => {
 
     const body = await page.locator('body').textContent();
     expect(hasTable || (body?.length ?? 0) > 100).toBe(true);
-  });
-});
-
-test.describe('Admin - Agents Tab Interactions', () => {
-  test.beforeEach(async ({ page }) => {
-    if (!(await isServerHealthy())) {
-      test.skip();
-      return;
-    }
-    await page.setViewportSize(VIEWPORTS.DESKTOP);
-    await navigateTo(page, ROUTES.HOME);
-    await loginWithWallet(page);
-    await navigateToTab(page, '/admin', 'agents');
-    await waitForPageLoad(page);
-    await page.waitForTimeout(2000);
-  });
-
-  test.afterEach(async ({ page }) => {
-    await cooldownBetweenTests(page);
-  });
-
-  test('displays agent list with status indicators', async ({ page }) => {
-    const hasAgentContent = await pageContainsText(
-      page,
-      'agent',
-      'running',
-      'paused',
-      'active',
-      'idle'
-    );
-    expect(hasAgentContent).toBe(true);
-  });
-
-  test('has pause all agents button', async ({ page }) => {
-    const pauseButton = page.locator('button:has-text("Pause")').first();
-    const hasPause = await pauseButton
-      .isVisible({ timeout: TIMEOUTS.SHORT })
-      .catch(() => false);
-
-    const hasAgentContent = await pageContainsText(page, 'agent', 'pause');
-    expect(hasPause || hasAgentContent).toBe(true);
-  });
-
-  test('has resume all agents button', async ({ page }) => {
-    const resumeButton = page.locator('button:has-text("Resume")').first();
-    const hasResume = await resumeButton
-      .isVisible({ timeout: TIMEOUTS.SHORT })
-      .catch(() => false);
-
-    const hasAgentContent = await pageContainsText(page, 'agent', 'resume');
-    expect(hasResume || hasAgentContent).toBe(true);
   });
 });
 

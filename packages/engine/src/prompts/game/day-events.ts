@@ -104,15 +104,14 @@ NARRATIVE CONTINUITY:
 - Show cause and effect
 
 === OUTPUT FORMAT ===
+Return one entry for every numbered request, using its 1-based event number
+exactly once. Use YES, NO, or NEUTRAL for pointsToward. Close every XML tag.
 <response>
   <events>
     <event>
       <eventNumber>1</eventNumber>
-      <description>Specific event description using parody names (max 150 chars)</description>
-      <pointsToward>YES|NO|NEUTRAL</pointsToward>
-      <relatedQuestion>question ID this provides clue for</relatedQuestion>
-      <buildsOn>Day X event or "new thread"</buildsOn>
-      <advancesNarrative>which ongoing narrative this continues</advancesNarrative>
+      <description>Specific event description using parody names (max 120 chars)</description>
+      <pointsToward>NEUTRAL</pointsToward>
     </event>
   </events>
 </response>

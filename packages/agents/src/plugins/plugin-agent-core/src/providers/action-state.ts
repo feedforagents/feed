@@ -2,7 +2,7 @@
  * Action State Provider
  *
  * Provides previous action results from the current multi-step execution.
- * Rendering is shared with the coordinator provider and AgentChatService.
+ * Uses the shared action result formatter.
  */
 
 import type {

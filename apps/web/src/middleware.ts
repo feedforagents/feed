@@ -81,14 +81,6 @@ function isApiRequest(pathname: string) {
 }
 
 /**
- * Check if this is an agent API route (CORS headers set in next.config.ts headers())
- * Agent routes use Bearer token auth, not cookies, so they can have wildcard CORS
- */
-function isAgentApiRequest(pathname: string) {
-  return isPathOrSubtree(pathname, '/api/agents');
-}
-
-/**
  * Add CORS headers to response for API requests
  */
 function addCorsHeaders(
@@ -176,12 +168,6 @@ export function middleware(request: NextRequest) {
     if (redirectOrigin) {
       return NextResponse.redirect(`${redirectOrigin}${pathname}${search}`);
     }
-  }
-
-  // Skip CORS handling for agent routes - handled in next.config.ts headers() with wildcard
-  // Agent routes use Bearer token auth (not cookies), so they can use wildcard CORS
-  if (isAgentApiRequest(pathname)) {
-    return NextResponse.next();
   }
 
   // Handle CORS preflight (OPTIONS) requests for API routes

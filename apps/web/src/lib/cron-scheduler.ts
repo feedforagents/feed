@@ -18,7 +18,7 @@ interface CronSchedule {
 
 /**
  * Additional crons to trigger from game-tick.
- * Excludes game-tick (already running), agent-tick, reputation-sync, realtime-drain
+ * Excludes game-tick (already running), reputation-sync, realtime-drain
  * (driven by the local cron simulator or their own callers).
  */
 const ADDITIONAL_CRONS: CronSchedule[] = [
