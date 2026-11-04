@@ -46,7 +46,6 @@ import {
   executeDirectMessage,
   executeDirectPost,
   executeDirectRepost,
-  executeDirectSendMoney,
   executeDirectTrade,
   executeDirectUnfollow,
 } from './DirectExecutors';
@@ -55,10 +54,7 @@ import {
   extractFirstJsonObject,
   parseDecisionJson,
 } from './decision-json';
-import {
-  executeDirectRequestPayment,
-  executeDirectShareInformation,
-} from './intel-payment-executors';
+import { executeDirectShareInformation } from './intel-payment-executors';
 import { normalizeSocialDecisionParameters } from './social-parameter-normalization';
 import { topicDiversityService } from './TopicDiversityService';
 import {
@@ -1246,14 +1242,6 @@ export class MultiStepExecutor {
         return undefined;
       }
 
-      case Actions.SEND_MONEY: {
-        const sendAmount = Number(parameters.amount);
-        if (!recipientId || !Number.isFinite(sendAmount) || sendAmount <= 0) {
-          return 'Your SEND_MONEY was invalid because it requires a valid recipientId and a positive amount. Choose a valid recipient from the visible social context.';
-        }
-        return undefined;
-      }
-
       default:
         return undefined;
     }
@@ -1358,14 +1346,8 @@ export class MultiStepExecutor {
       case Actions.LEAVE_GROUP:
         return this.executeLeaveGroup(agentUserId, parameters, logContext);
 
-      case Actions.SEND_MONEY:
-        return this.executeSendMoney(agentUserId, parameters);
-
       case Actions.SHARE_INFORMATION:
         return this.executeShareInformation(agentUserId, parameters);
-
-      case Actions.REQUEST_PAYMENT:
-        return this.executeRequestPayment(agentUserId, parameters);
 
       case Actions.WAIT:
       case Actions.FINISH:
@@ -1943,65 +1925,6 @@ export class MultiStepExecutor {
     };
   }
 
-  private async executeSendMoney(
-    agentUserId: string,
-    parameters: Record<string, unknown>
-  ): Promise<ActionTraceResult> {
-    const recipientId = this.coerceParameterText(parameters.recipientId);
-    const amount = Number(parameters.amount);
-    const reason = parameters.reason as string | undefined;
-
-    if (!recipientId || !Number.isFinite(amount) || amount <= 0) {
-      return {
-        actionType: Actions.SEND_MONEY,
-        success: false,
-        summary: 'Missing or invalid parameters (recipientId, amount)',
-        error: 'Invalid parameters',
-        parameters,
-        timestamp: Date.now(),
-      };
-    }
-
-    const sendResult = await executeDirectSendMoney({
-      agentUserId,
-      recipientId,
-      amount,
-      reason,
-    });
-
-    await agentService.createLog(agentUserId, {
-      type: 'transfer',
-      level: sendResult.success ? 'info' : 'warn',
-      message: sendResult.success
-        ? `Sent $${amount} to ${recipientId}`
-        : `Send money failed: ${sendResult.error}`,
-      metadata: {
-        recipientId,
-        amount,
-        reason: reason ?? null,
-        transactionId: sendResult.transactionId ?? null,
-        success: sendResult.success,
-        error: sendResult.error ?? null,
-      },
-    });
-
-    return {
-      actionType: Actions.SEND_MONEY,
-      success: sendResult.success,
-      summary: sendResult.success
-        ? `Sent $${amount} to ${recipientId}`
-        : `Send money failed: ${sendResult.error}`,
-      result: {
-        success: sendResult.success,
-        transactionId: sendResult.transactionId,
-        newBalance: sendResult.newBalance,
-        error: sendResult.error,
-      },
-      parameters,
-      timestamp: Date.now(),
-    };
-  }
-
   private async executeShareInformation(
     agentUserId: string,
     parameters: Record<string, unknown>
@@ -2017,7 +1940,6 @@ export class MultiStepExecutor {
             .filter(Boolean)
         : [];
     const context = parameters.context as string | undefined;
-    const askingPrice = Number(parameters.askingPrice) || 0;
 
     if (!recipientId || keywords.length === 0) {
       return {
@@ -2035,7 +1957,6 @@ export class MultiStepExecutor {
       recipientId,
       keywords,
       context,
-      askingPrice,
     });
 
     return {
@@ -2049,51 +1970,6 @@ export class MultiStepExecutor {
         sharedWithRecipient: result.sharedWithRecipient,
         messageId: result.messageId,
         keywords: keywords.join(','),
-      },
-      parameters,
-      timestamp: Date.now(),
-    };
-  }
-
-  private async executeRequestPayment(
-    agentUserId: string,
-    parameters: Record<string, unknown>
-  ): Promise<ActionTraceResult> {
-    const recipientId = this.coerceParameterText(parameters.recipientId);
-    const amount = Number(parameters.amount);
-    const reason = parameters.reason as string | undefined;
-    const deadline = Number(parameters.deadline) || 10;
-
-    if (!recipientId || !Number.isFinite(amount) || amount <= 0 || !reason) {
-      return {
-        actionType: Actions.REQUEST_PAYMENT,
-        success: false,
-        summary: 'Missing parameters (recipientId, amount, reason)',
-        error: 'Invalid parameters',
-        parameters,
-        timestamp: Date.now(),
-      };
-    }
-
-    const result = await executeDirectRequestPayment({
-      agentUserId,
-      recipientId,
-      amount,
-      reason,
-      deadline,
-    });
-
-    return {
-      actionType: Actions.REQUEST_PAYMENT,
-      success: result.success,
-      summary: result.success
-        ? `Requested $${amount} from ${recipientId}: ${reason}`
-        : `Payment request failed: ${result.error}`,
-      result: {
-        requestId: result.requestId,
-        amount,
-        recipientId,
-        reason,
       },
       parameters,
       timestamp: Date.now(),
@@ -2676,7 +2552,6 @@ export class MultiStepExecutor {
 
       switch (result.actionType) {
         case Actions.TRADE:
-        case Actions.SEND_MONEY:
           counts.trades++;
           break;
         case Actions.POST:
@@ -2694,7 +2569,6 @@ export class MultiStepExecutor {
         case Actions.LEAVE_GROUP:
         case Actions.REPLY_CHAT:
         case Actions.SHARE_INFORMATION:
-        case Actions.REQUEST_PAYMENT:
           counts.messages++;
           break;
         case Actions.LIKE:

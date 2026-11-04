@@ -3,7 +3,6 @@
  */
 
 import { z } from 'zod';
-import { isPointsAmount } from '../../utils/points';
 import {
   createQueryBooleanSchema,
   OptionalQueryBooleanSchema,
@@ -104,17 +103,6 @@ export const FundTradingBalanceSchema = z.object({
     'promotional_credit',
   ]),
   description: z.string().max(500).optional(),
-});
-
-/**
- * Trading balance peer transfer schema
- */
-export const TransferTradingBalanceSchema = z.object({
-  recipientUserId: UserIdSchema,
-  amount: z.number().positive().max(1000000).refine(isPointsAmount, {
-    message: 'Amount must have at most 2 decimal places',
-  }),
-  description: z.string().trim().max(500).optional(),
 });
 
 /**
