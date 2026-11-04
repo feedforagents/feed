@@ -45,7 +45,6 @@ import {
   shares,
   sql,
   users,
-  withTransaction,
 } from '@feed/db';
 import {
   createNpcWalletAdapter,
@@ -63,12 +62,7 @@ import {
   WalletService,
   withPredictionSettlement,
 } from '@feed/engine';
-import {
-  AGENT_TRANSFER_IN_TRANSACTION_TYPE,
-  AGENT_TRANSFER_OUT_TRANSACTION_TYPE,
-  floorPoints,
-  isPureRepost,
-} from '@feed/shared';
+import { floorPoints, isPureRepost } from '@feed/shared';
 import { agentPnLService } from '../services/AgentPnLService';
 import { logger } from '../shared/logger';
 import { generateSnowflakeId } from '../shared/snowflake';
@@ -331,20 +325,6 @@ export interface DirectRepostResult {
   success: boolean;
   repostId?: string;
   quotePostId?: string;
-  error?: string;
-}
-
-export interface DirectSendMoneyParams {
-  agentUserId: string;
-  recipientId: string;
-  amount: number;
-  reason?: string;
-}
-
-export interface DirectSendMoneyResult {
-  success: boolean;
-  transactionId?: string;
-  newBalance?: number;
   error?: string;
 }
 
@@ -2451,124 +2431,4 @@ export async function executeDirectLeaveGroup(
   );
 
   return { success: true };
-}
-
-/**
- * Send money to another user directly without LLM decision-making.
- * Uses WalletService.debit + credit in sequence (each creates its own transaction).
- */
-export async function executeDirectSendMoney(
-  params: DirectSendMoneyParams
-): Promise<DirectSendMoneyResult> {
-  const { agentUserId, recipientId, amount, reason } = params;
-  const cleanRecipientId = recipientId?.trim();
-
-  if (!cleanRecipientId) {
-    return { success: false, error: 'Recipient ID is required' };
-  }
-
-  if (cleanRecipientId === agentUserId) {
-    return { success: false, error: 'Cannot send money to yourself' };
-  }
-
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { success: false, error: 'Amount must be a positive number' };
-  }
-
-  // Verify recipient exists
-  const [recipient] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.id, cleanRecipientId))
-    .limit(1);
-
-  if (!recipient) {
-    return {
-      success: false,
-      error: `Recipient not found: ${cleanRecipientId}`,
-    };
-  }
-
-  const MAX_TRANSFER_RATIO = 0.5;
-  const transactionId = await generateSnowflakeId();
-  const desc = reason
-    ? `Transfer to ${cleanRecipientId}: ${reason}`
-    : `Transfer to ${cleanRecipientId}`;
-
-  try {
-    // Balance check + cap + debit + credit all inside one transaction
-    // to eliminate TOCTOU race on the balance cap calculation.
-    const transferredAmount = await withTransaction(async (tx) => {
-      const balanceInfo = await WalletService.getBalance(agentUserId);
-      const balance = balanceInfo.balance;
-
-      if (balance <= 0) {
-        throw new Error('Insufficient balance');
-      }
-
-      // Cap transfer at 50% of balance to prevent agents from draining funds
-      const maxTransfer = balance * MAX_TRANSFER_RATIO;
-      let effectiveAmount = amount;
-      if (effectiveAmount > maxTransfer) {
-        logger.warn(
-          `[DirectExecutor] Transfer capped to ${MAX_TRANSFER_RATIO * 100}% of balance: $${amount} -> $${maxTransfer}`,
-          { agentUserId, recipientId: cleanRecipientId },
-          'DirectExecutors'
-        );
-        effectiveAmount = Math.floor(maxTransfer * 100) / 100;
-      }
-
-      await WalletService.debit(
-        agentUserId,
-        effectiveAmount,
-        AGENT_TRANSFER_OUT_TRANSACTION_TYPE,
-        desc,
-        transactionId,
-        tx
-      );
-
-      await WalletService.credit(
-        cleanRecipientId,
-        effectiveAmount,
-        AGENT_TRANSFER_IN_TRANSACTION_TYPE,
-        `Transfer from ${agentUserId}${reason ? `: ${reason}` : ''}`,
-        transactionId,
-        tx
-      );
-
-      return effectiveAmount;
-    });
-
-    const updatedBalance = await WalletService.getBalance(agentUserId);
-
-    logger.info(
-      `[DirectExecutor] Money sent: ${agentUserId} → ${cleanRecipientId} $${transferredAmount}`,
-      {
-        agentUserId,
-        recipientId: cleanRecipientId,
-        amount: transferredAmount,
-        transactionId,
-      },
-      'DirectExecutors'
-    );
-
-    return {
-      success: true,
-      transactionId,
-      newBalance: updatedBalance.balance,
-    };
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    logger.error(
-      `[DirectExecutor] Send money failed: ${errorMsg}`,
-      {
-        agentUserId,
-        recipientId: cleanRecipientId,
-        amount,
-        error: errorMsg,
-      },
-      'DirectExecutors'
-    );
-    return { success: false, error: errorMsg };
-  }
 }

@@ -121,9 +121,7 @@ export const Actions = {
   INVITE_TO_GROUP: 'INVITE_TO_GROUP',
   KICK_FROM_GROUP: 'KICK_FROM_GROUP',
   LEAVE_GROUP: 'LEAVE_GROUP',
-  SEND_MONEY: 'SEND_MONEY',
   SHARE_INFORMATION: 'SHARE_INFORMATION',
-  REQUEST_PAYMENT: 'REQUEST_PAYMENT',
   FINISH: 'FINISH',
   WAIT: 'WAIT',
 } as const;
@@ -139,7 +137,6 @@ export const Features = {
   ENGAGING: 'engaging',
   DMS: 'DMs',
   GROUP_CHATS: 'groupChats',
-  TRANSFERS: 'transfers',
   INTEL: 'intel',
 } as const;
 
@@ -308,17 +305,6 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
   "groupId": "exact_group_id_from_your_groups"
 }`,
   },
-  [Actions.SEND_MONEY]: {
-    name: Actions.SEND_MONEY,
-    description: 'Send money to another user or agent',
-    requiredFeature: Features.TRANSFERS,
-    parameters: ['recipientId', 'amount', 'reason'],
-    parameterSchema: `{
-  "recipientId": "exact_user_id_from_context",
-  "amount": 50,
-  "reason": "brief reason for the transfer"
-}`,
-  },
   [Actions.SHARE_INFORMATION]: {
     name: Actions.SHARE_INFORMATION,
     description:
@@ -326,27 +312,11 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
       'and team chat for messages matching the keywords, then sends a summary of real ' +
       'matching content to the recipient. The recipient sees VERIFIED intel, not just your claim.',
     requiredFeature: Features.INTEL,
-    parameters: ['recipientId', 'keywords', 'context', 'askingPrice'],
+    parameters: ['recipientId', 'keywords', 'context'],
     parameterSchema: `{
   "recipientId": "exact_user_id_to_share_with",
   "keywords": ["keyword1", "keyword2"],
-  "context": "brief description of what you are sharing and why",
-  "askingPrice": 0
-}`,
-  },
-  [Actions.REQUEST_PAYMENT]: {
-    name: Actions.REQUEST_PAYMENT,
-    description:
-      'Request payment from another agent for a service, information, or deal. ' +
-      'Creates a labeled payment request that the recipient can accept or decline. ' +
-      'Use this to set up negotiated exchanges — the outcome is tracked for training.',
-    requiredFeature: Features.TRANSFERS,
-    parameters: ['recipientId', 'amount', 'reason', 'deadline'],
-    parameterSchema: `{
-  "recipientId": "exact_user_id_to_request_from",
-  "amount": 50,
-  "reason": "brief description of what the payment is for",
-  "deadline": "optional: ticks until request expires (default 10)"
+  "context": "brief description of what you are sharing and why"
 }`,
   },
   [Actions.FINISH]: {

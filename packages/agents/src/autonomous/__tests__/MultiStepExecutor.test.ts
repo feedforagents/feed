@@ -910,3 +910,25 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     }
   });
 });
+
+describe('retired payment actions', () => {
+  for (const action of ['SEND_MONEY', 'REQUEST_PAYMENT']) {
+    test(`${action} cannot be restored by a legacy transfers feature flag`, async () => {
+      const result = await new MultiStepExecutor()['executeAction'](
+        'retired-sender',
+        action,
+        {
+          recipientId: 'retired-recipient',
+          amount: 25,
+          reason: 'Retired action regression',
+        },
+        ['transfers'],
+        {} as IAgentRuntime,
+        false
+      );
+      expect(Object.values(Actions)).not.toContain(action);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe(`Action "${action}" is not recognized`);
+    });
+  }
+});
