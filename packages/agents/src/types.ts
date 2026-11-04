@@ -85,21 +85,6 @@ export interface AgentTrade {
   executedAt: Date;
 }
 
-export interface CreateAgentParams {
-  userId: string;
-  name: string;
-  username?: string; // Optional: if not provided, will be auto-generated
-  description?: string;
-  profileImageUrl?: string;
-  coverImageUrl?: string;
-  system: string;
-  bio?: string[];
-  personality?: string;
-  tradingStrategy?: string;
-  initialDeposit?: number;
-  modelTier?: 'lite' | 'standard' | 'pro';
-}
-
 export interface ChatRequest {
   agentId: string;
   userId: string;

@@ -1,8 +1,10 @@
 import {
+  ConflictError,
   calculateTradeImpact,
   getInitialReserves,
   logger,
   PERP_MARKET_CONFIG,
+  ValidationError,
 } from '@feed/shared';
 import {
   evolveSyntheticPerpQuoteState,
@@ -383,6 +385,7 @@ export class PerpMarketService {
     ticker: string;
     currentSpotPrice: number;
     signedTradeSize: number;
+    precedingTradeSize?: number;
   }): Promise<number | undefined> {
     if (!this.deps.priceImpact) return undefined;
 
@@ -412,7 +415,7 @@ export class PerpMarketService {
 
       const { avgFillPrice } = calculateTradeImpact(
         basePrice,
-        netHoldingsBefore,
+        netHoldingsBefore + (params.precedingTradeSize ?? 0),
         params.signedTradeSize,
         PERP_MARKET_CONFIG
       );
@@ -1272,17 +1275,20 @@ export class PerpMarketService {
    * Expected average fill for opening/adding `size` on `side`: the
    * constant-product impact fill when a price impact port is configured
    * (this is what the position's entry is adjusted to), otherwise the quote.
+   * A flip applies its signed closing leg before pricing the inverse leg.
    */
   private async expectedOpenFill(
     market: PerpMarketRecord,
     side: PerpSide,
     size: number,
-    quotePrice: number
+    quotePrice: number,
+    precedingTradeSize = 0
   ): Promise<number> {
     const impactFill = await this.previewImpactFill({
       ticker: market.ticker,
       currentSpotPrice: market.currentPrice,
       signedTradeSize: side === 'long' ? size : -size,
+      precedingTradeSize,
     });
     return impactFill ?? quotePrice;
   }
@@ -1301,7 +1307,7 @@ export class PerpMarketService {
     const priceDeviation =
       Math.abs(fillPrice - referencePrice) / referencePrice;
     if (priceDeviation > maxSlippage) {
-      throw new Error(
+      throw new ValidationError(
         `Slippage exceeded: execution price ${fillPrice.toFixed(2)} deviates ` +
           `${(priceDeviation * 100).toFixed(2)}% from mark price ${referencePrice.toFixed(2)} ` +
           `(max allowed: ${(maxSlippage * 100).toFixed(2)}%)`
@@ -1651,7 +1657,8 @@ export class PerpMarketService {
             market,
             tradeSide,
             inverseSize,
-            inverseQuote
+            inverseQuote,
+            existing.side === 'long' ? -existing.size : existing.size
           ),
           market.markPrice,
           maxSlippage
@@ -1669,8 +1676,12 @@ export class PerpMarketService {
             );
           }
           this.assertOpenPositionIntegrity(position);
-          if (position.side === tradeSide || tradeSize <= position.size) {
-            throw new Error(
+          if (
+            position.side === tradeSide ||
+            tradeSize <= position.size ||
+            position.size !== existing.size
+          ) {
+            throw new ConflictError(
               'Position changed concurrently; retry the flip with fresh state'
             );
           }

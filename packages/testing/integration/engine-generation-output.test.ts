@@ -30,12 +30,18 @@ import {
   describe,
   expect,
   setDefaultTimeout,
+  spyOn,
   test,
 } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GameGenerator, type GeneratedGame } from '@feed/engine';
-import { logger } from '@feed/shared';
+import {
+  GameGenerator,
+  type GeneratedGame,
+  StaticDataRegistry,
+} from '@feed/engine';
+import { logger, type SelectedActor } from '@feed/shared';
+import { GameBootstrapService } from '../../engine/src/services/game-bootstrap-service';
 import { resolveLiveLlmTestConfig } from './helpers/live-runtime';
 
 // Set timeout to 15 minutes for LLM-based generation
@@ -349,6 +355,9 @@ describe('Engine Generation Output Tests', () => {
         liveLlmTestConfig.skipReason ?? 'Live LLM test setup failed'
       );
     }
+    if (liveLlmTestConfig.enabled) {
+      await GameBootstrapService.bootstrapIfNeeded();
+    }
     logger.info(
       `Starting engine generation tests. Output dir: ${OUTPUT_DIR}`,
       undefined,
@@ -375,25 +384,87 @@ describe('Engine Generation Output Tests', () => {
 
   describe('GameGenerator (With LLM)', () => {
     test.skipIf(!liveLlmTestConfig.enabled)(
-      'generates complete game with valid actors',
+      'generates all 30 days with a reduced canonical cast and three daily events',
       async () => {
         testResults.testsRun++;
 
         logger.info('Generating complete game...', undefined, 'EngineTest');
         const generator = new GameGenerator();
-        game = await generator.generateCompleteGame();
+        const selectable = generator as unknown as {
+          selectActors(): {
+            mains: SelectedActor[];
+            supporting: SelectedActor[];
+            extras: SelectedActor[];
+          };
+          getEventCount(day: number): number;
+          staticToSelectedActor(
+            actor: NonNullable<ReturnType<typeof StaticDataRegistry.getActor>>,
+            role: string,
+            luck: 'low' | 'medium' | 'high',
+            mood: number
+          ): SelectedActor;
+        };
+        const fullCast = selectable.selectActors();
+        expect(fullCast.mains).toHaveLength(3);
+        expect(fullCast.supporting).toHaveLength(15);
+        expect(fullCast.extras.length).toBeGreaterThan(0);
+        const canonical = (id: string, role: string) => {
+          const actor = StaticDataRegistry.getActor(id);
+          if (!actor) throw new Error(`Missing canonical fixture actor ${id}`);
+          return selectable.staticToSelectedActor(actor, role, 'medium', 0);
+        };
+        const cast = {
+          mains: ['ailon-musk', 'sam-ailtman', 'bernai-sanders'].map((id) =>
+            canonical(id, 'main')
+          ),
+          supporting: [canonical('jensen-huaing', 'supporting')],
+          extras: [canonical('org-the-daily-wire', 'extra')],
+        };
+        // Bound fixture volume only. Every downstream generation call is real;
+        // full-population/density coverage remains in game-validation/game-quality.
+        const selection = spyOn(selectable, 'selectActors').mockReturnValue(
+          cast
+        );
+        const eventCount = spyOn(selectable, 'getEventCount').mockReturnValue(
+          3
+        );
+        try {
+          game = await generator.generateCompleteGame();
+        } finally {
+          selection.mockRestore();
+          eventCount.mockRestore();
+        }
 
         expect(game).toBeDefined();
         expect(game.id).toBeDefined();
         expect(game.setup).toBeDefined();
-        expect(game.timeline).toBeDefined();
+        expect(game.timeline).toHaveLength(30);
+        expect(game.setup.mainActors).toHaveLength(3);
+        expect(game.setup.supportingActors).toHaveLength(1);
+        expect(game.setup.extras).toHaveLength(1);
+        expect(game.setup.questions).toHaveLength(3);
         expect(game.resolution).toBeDefined();
+        const selectedQuestions = new Set(
+          game.setup.questions.map((question) => question.questionNumber)
+        );
+        expect(selectedQuestions.size).toBe(3);
+        for (const day of game.timeline) {
+          const dailyEvents = day.events.filter((event) =>
+            event.id.startsWith('event-')
+          );
+          expect(dailyEvents).toHaveLength(3);
+          expect(
+            new Set(dailyEvents.map((event) => event.relatedQuestion))
+          ).toEqual(selectedQuestions);
+        }
 
         // Write full game output
         writeOutput('game-generation', game);
 
         testResults.testsPassed++;
-      }
+      },
+      // Thirty days of real inference is a batch job, separate from tick SLOs.
+      6 * 60 * 60 * 1000
     );
 
     test.skipIf(!liveLlmTestConfig.enabled)(
@@ -602,6 +673,10 @@ describe('Engine Generation Output Tests', () => {
         testResults.validationResults.feedPostsValid =
           postValidation.swapsDetected === 0;
 
+        expect(postValidation.totalPosts).toBeGreaterThan(0);
+        expect(allPosts.some((post) => post.id.startsWith('ambient-'))).toBe(
+          true
+        );
         expect(postValidation.swapsDetected).toBe(0);
         testResults.testsPassed++;
       }
@@ -671,6 +746,7 @@ describe('Engine Generation Output Tests', () => {
         testResults.validationResults.eventsValid =
           eventValidation.swapsDetected === 0;
 
+        expect(eventValidation.totalEvents).toBeGreaterThan(0);
         expect(eventValidation.swapsDetected).toBe(0);
         testResults.testsPassed++;
       }
@@ -759,6 +835,7 @@ describe('Engine Generation Output Tests', () => {
         testResults.validationResults.groupMessagesValid =
           groupMessageValidation.swapsDetected === 0;
 
+        expect(groupMessageValidation.totalMessages).toBeGreaterThan(0);
         expect(groupMessageValidation.swapsDetected).toBe(0);
         testResults.testsPassed++;
       }

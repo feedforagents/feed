@@ -3,7 +3,6 @@
 import { cn, getDisplayReferralUrl, getReferralUrl } from '@feed/shared';
 import {
   Bell,
-  Bot,
   Check,
   Copy,
   Gift,
@@ -196,12 +195,6 @@ function MobileHeaderContent() {
       href: '/feed',
       icon: HouseIcon,
       active: pathname === '/feed' || pathname === '/',
-    },
-    {
-      name: 'Agents',
-      href: '/agents/team',
-      icon: Bot,
-      active: pathname === '/agents' || pathname.startsWith('/agents/'),
     },
     {
       name: 'Markets',

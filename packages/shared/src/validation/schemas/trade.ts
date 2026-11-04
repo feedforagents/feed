@@ -297,12 +297,8 @@ export const PerpOpenPositionSchema = z
       .max(100, { message: 'Maximum leverage is 100x' }),
     orderType: z.enum(['market', 'limit']).default('market'),
     limitPrice: z.number().positive().optional(),
-    /**
-     * Max slippage tolerance (0-1, e.g., 0.01 = 1%). Rejects if the expected
-     * fill deviates from the mark price by more than this. Defaults to 1%,
-     * matching the close route; 0 disables the check.
-     */
-    maxSlippage: z.number().min(0).max(1).default(0.01),
+    /** Max slippage tolerance (0-1, e.g., 0.01 = 1%). Rejects if spot/mark deviation exceeds this. */
+    maxSlippage: z.number().min(0).max(1).optional(),
   })
   .superRefine((value, ctx) => {
     if (value.orderType === 'limit' && value.limitPrice === undefined) {

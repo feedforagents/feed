@@ -176,14 +176,7 @@ test.describe('Authentication - Admin Access', () => {
     await waitForPageLoad(page);
 
     // Check for common admin tabs
-    const expectedTabs = [
-      'Stats',
-      'Users',
-      'Agents',
-      'Registry',
-      'Reports',
-      'Training',
-    ];
+    const expectedTabs = ['Stats', 'Users', 'Registry', 'Reports', 'Training'];
 
     for (const tabName of expectedTabs) {
       const tab = page

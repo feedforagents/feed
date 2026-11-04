@@ -45,14 +45,15 @@ Consider:
 4. Dramatic potential (high stakes, uncertainty)
 5. Entertainment value (satirical, engaging)
 
-Return XML with ranks:
+Return exactly {{questionCount}} ranking entries: questionId is the 1-based number
+shown in the question list, and both questionId and rank must each use every
+integer from 1 through {{questionCount}} exactly once. Close every XML tag.
+Return only questionId and rank in this XML structure:
 <response>
   <rankings>
     <ranking>
       <questionId>1</questionId>
-      <rank>3</rank>
-      <reasoning>Brief explanation of ranking</reasoning>
-      <narrativeConnection>which storyline this connects to</narrativeConnection>
+      <rank>1</rank>
     </ranking>
   </rankings>
 </response>

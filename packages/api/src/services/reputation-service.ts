@@ -34,7 +34,6 @@ import {
   logger,
   POINTS,
   type PointsReason,
-  toISO,
 } from '@feed/shared';
 import type {
   LeaderboardPosition,
@@ -1278,7 +1277,7 @@ export class ReputationService {
   }
 
   /**
-   * Per-wallet leaderboard: every wallet (users AND agents) ranked by reputation.
+   * Per-wallet leaderboard: each human wallet ranked by reputation.
    */
   static async getWalletLeaderboard(
     page = 1,
@@ -1303,12 +1302,12 @@ export class ReputationService {
     const [countResult] = await db
       .select({ count: count() })
       .from(users)
-      .where(eq(users.isActor, false));
+      .where(and(eq(users.isActor, false), eq(users.isAgent, false)));
 
     const usersResult = await db
       .select(walletSelectFields)
       .from(users)
-      .where(eq(users.isActor, false))
+      .where(and(eq(users.isActor, false), eq(users.isAgent, false)))
       .orderBy(
         desc(users.reputationPoints),
         asc(users.createdAt),
@@ -1344,100 +1343,10 @@ export class ReputationService {
     };
   }
 
-  /**
-   * Team leaderboard: each user + their agents combined, ranked by sum of reputation.
-   */
-  static async getTeamLeaderboard(
-    page = 1,
-    pageSize = 100
-  ): Promise<LeaderboardResult> {
-    const skip = (page - 1) * pageSize;
-
-    const [countResult] = await db
-      .select({ count: count() })
-      .from(users)
-      .where(and(eq(users.isActor, false), eq(users.isAgent, false)));
-
-    const teamsResult = await db.execute(sql`
-      SELECT
-        u."id",
-        u."username",
-        u."displayName",
-        u."profileImageUrl",
-        u."reputationPoints"::numeric AS "userReputationPoints",
-        u."virtualBalance"::numeric AS "balance",
-        u."lifetimePnL"::numeric AS "lifetimePnL",
-        u."nftTokenId",
-        u."createdAt",
-        COALESCE(agents."agentReputationPoints", 0)::numeric AS "agentReputationPoints",
-        COALESCE(agents."agentCount", 0)::int AS "agentCount",
-        (u."reputationPoints"::numeric + COALESCE(agents."agentReputationPoints", 0))::numeric AS "teamReputationPoints"
-      FROM "User" u
-      LEFT JOIN (
-        SELECT "managedBy",
-               SUM("reputationPoints"::numeric) AS "agentReputationPoints",
-               COUNT(*)::int AS "agentCount"
-        FROM "User"
-        WHERE "isAgent" = true AND "isActor" = false
-        GROUP BY "managedBy"
-      ) agents ON agents."managedBy" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false
-      ORDER BY "teamReputationPoints" DESC, u."createdAt" ASC, u."id" ASC
-      LIMIT ${pageSize} OFFSET ${skip}
-    `);
-
-    const rows = teamsResult as unknown as Array<{
-      id: string;
-      username: string | null;
-      displayName: string | null;
-      profileImageUrl: string | null;
-      userReputationPoints: string;
-      balance: string;
-      lifetimePnL: string;
-      nftTokenId: number | null;
-      createdAt: Date;
-      agentReputationPoints: string;
-      agentCount: number;
-      teamReputationPoints: string;
-    }>;
-
-    const usersWithRank = rows.map((team, index) => ({
-      id: team.id,
-      username: team.username,
-      displayName: team.displayName,
-      profileImageUrl: team.profileImageUrl,
-      reputationPoints: Number(team.userReputationPoints ?? 0),
-      teamReputationPoints: Number(team.teamReputationPoints ?? 0),
-      userReputationPoints: Number(team.userReputationPoints ?? 0),
-      agentReputationPoints: Number(team.agentReputationPoints ?? 0),
-      agentCount: team.agentCount ?? 0,
-      balance: Number(team.balance ?? 0),
-      lifetimePnL: Number(team.lifetimePnL ?? 0),
-      createdAt: new Date(team.createdAt),
-      isAgent: false,
-      nftTokenId: team.nftTokenId,
-      rank: skip + index + 1,
-    }));
-
-    const totalCount = Number(countResult?.count ?? 0);
-    return {
-      users: usersWithRank,
-      totalCount,
-      page,
-      pageSize,
-      totalPages: Math.ceil(totalCount / pageSize),
-      leaderboardType: 'team',
-      leaderboardMetric: 'reputation',
-    };
-  }
-
-  /**
-   * Get a user's position on either the wallet or team leaderboard.
-   * For agents viewing the team leaderboard, resolves to their manager's team.
-   */
+  /** Get a user's position on the personal wallet leaderboard. */
   static async getUserPosition(
     userId: string,
-    leaderboardType: LeaderboardScope,
+    _leaderboardType: LeaderboardScope,
     pageSize = 100
   ): Promise<LeaderboardPosition | null> {
     const positionSelectFields = {
@@ -1457,147 +1366,55 @@ export class ReputationService {
     const userResult = await db
       .select(positionSelectFields)
       .from(users)
-      .where(eq(users.id, userId))
+      .where(
+        and(
+          eq(users.id, userId),
+          eq(users.isActor, false),
+          eq(users.isAgent, false)
+        )
+      )
       .limit(1);
 
     if (!userResult[0]) return null;
     const user = userResult[0];
 
-    const effectiveUserId =
-      leaderboardType === 'team' && user.isAgent && user.managedBy
-        ? user.managedBy
-        : user.id;
-
-    let effectiveUser = user;
-    if (effectiveUserId !== user.id) {
-      const managerResult = await db
-        .select(positionSelectFields)
-        .from(users)
-        .where(eq(users.id, effectiveUserId))
-        .limit(1);
-      if (!managerResult[0]) return null;
-      effectiveUser = managerResult[0];
-    }
-
-    if (leaderboardType === 'wallet') {
-      const effectiveReputationPoints = effectiveUser.reputationPoints ?? 0;
-      const [higherCount] = await db
-        .select({ count: count() })
-        .from(users)
-        .where(
-          and(
-            eq(users.isActor, false),
-            or(
-              gt(users.reputationPoints, effectiveReputationPoints),
-              and(
-                eq(users.reputationPoints, effectiveReputationPoints),
-                or(
-                  lt(users.createdAt, effectiveUser.createdAt),
-                  and(
-                    eq(users.createdAt, effectiveUser.createdAt),
-                    lt(users.id, effectiveUser.id)
-                  )
-                )
-              )
-            )
-          )
-        );
-
-      const rank = Number(higherCount?.count ?? 0) + 1;
-      return {
-        rank,
-        page: Math.ceil(rank / pageSize),
-        entry: {
-          id: effectiveUser.id,
-          username: effectiveUser.username,
-          displayName: effectiveUser.displayName,
-          profileImageUrl: effectiveUser.profileImageUrl,
-          reputationPoints: effectiveUser.reputationPoints ?? 0,
-          balance: Number(effectiveUser.virtualBalance ?? 0),
-          lifetimePnL: Number(effectiveUser.lifetimePnL ?? 0),
-          createdAt: new Date(effectiveUser.createdAt),
-          isAgent: effectiveUser.isAgent,
-          managedBy: effectiveUser.managedBy,
-          nftTokenId: effectiveUser.nftTokenId,
-          rank,
-        },
-      };
-    }
-
-    // Team leaderboard position
-    const [agentSum] = await db
-      .select({
-        reputationTotal: sql<string>`COALESCE(SUM("reputationPoints"::numeric), 0)`,
-      })
-      .from(users)
-      .where(
-        and(
-          eq(users.managedBy, effectiveUserId),
-          eq(users.isAgent, true),
-          eq(users.isActor, false)
-        )
-      );
-
-    const teamReputation =
-      Number(effectiveUser.reputationPoints ?? 0) +
-      Number(agentSum?.reputationTotal ?? 0);
-
-    const higherResult = await db.execute(sql`
-      SELECT COUNT(*)::int AS "count" FROM (
-        SELECT u."id"
-        FROM "User" u
-        LEFT JOIN (
-          SELECT
-            "managedBy",
-            SUM("reputationPoints"::numeric) AS "agentReputationPoints"
-          FROM "User" WHERE "isAgent" = true AND "isActor" = false GROUP BY "managedBy"
-        ) a ON a."managedBy" = u."id"
-        WHERE u."isActor" = false AND u."isAgent" = false
-          AND (
-            (u."reputationPoints"::numeric + COALESCE(a."agentReputationPoints", 0)) > ${teamReputation}
-            OR (
-              (u."reputationPoints"::numeric + COALESCE(a."agentReputationPoints", 0)) = ${teamReputation}
-              AND (
-                u."createdAt" < ${toISO(effectiveUser.createdAt)}
-                OR (u."createdAt" = ${toISO(effectiveUser.createdAt)} AND u."id" < ${effectiveUserId})
-              )
-            )
-          )
-      ) higher
-    `);
-
-    const higherRows = higherResult as unknown as Array<{ count: number }>;
-    const rank = Number(higherRows[0]?.count ?? 0) + 1;
-
-    const [agentCountResult] = await db
+    const effectiveReputationPoints = user.reputationPoints ?? 0;
+    const [higherCount] = await db
       .select({ count: count() })
       .from(users)
       .where(
         and(
-          eq(users.managedBy, effectiveUserId),
-          eq(users.isAgent, true),
-          eq(users.isActor, false)
+          eq(users.isActor, false),
+          eq(users.isAgent, false),
+          or(
+            gt(users.reputationPoints, effectiveReputationPoints),
+            and(
+              eq(users.reputationPoints, effectiveReputationPoints),
+              or(
+                lt(users.createdAt, user.createdAt),
+                and(eq(users.createdAt, user.createdAt), lt(users.id, user.id))
+              )
+            )
+          )
         )
       );
 
+    const rank = Number(higherCount?.count ?? 0) + 1;
     return {
       rank,
       page: Math.ceil(rank / pageSize),
       entry: {
-        id: effectiveUser.id,
-        username: effectiveUser.username,
-        displayName: effectiveUser.displayName,
-        profileImageUrl: effectiveUser.profileImageUrl,
-        reputationPoints: Number(effectiveUser.reputationPoints ?? 0),
-        teamReputationPoints: teamReputation,
-        userReputationPoints: Number(effectiveUser.reputationPoints ?? 0),
-        agentReputationPoints: Number(agentSum?.reputationTotal ?? 0),
-        agentCount: Number(agentCountResult?.count ?? 0),
-        balance: Number(effectiveUser.virtualBalance ?? 0),
-        lifetimePnL: Number(effectiveUser.lifetimePnL ?? 0),
-        createdAt: new Date(effectiveUser.createdAt),
-        isAgent: false,
-        nftTokenId: effectiveUser.nftTokenId,
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName,
+        profileImageUrl: user.profileImageUrl,
+        reputationPoints: user.reputationPoints ?? 0,
+        balance: Number(user.virtualBalance ?? 0),
+        lifetimePnL: Number(user.lifetimePnL ?? 0),
+        createdAt: new Date(user.createdAt),
+        isAgent: user.isAgent,
+        managedBy: user.managedBy,
+        nftTokenId: user.nftTokenId,
         rank,
       },
     };

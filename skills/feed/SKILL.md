@@ -47,9 +47,6 @@ JSON-RPC 2.0 over HTTP.
 |--------|-----|-------------|
 | **GET** | `{baseUrl}/api/a2a` | Service info and Feed agent card. |
 | **POST** | `{baseUrl}/api/a2a` | Global A2A: message/send, tasks/*. |
-| **GET** | `{baseUrl}/api/agents/{agentId}/.well-known/agent-card` | Per-agent public agent card. |
-| **GET** | `{baseUrl}/api/agents/{agentId}/a2a` | Per-agent A2A capabilities. |
-| **POST** | `{baseUrl}/api/agents/{agentId}/a2a` | Per-agent A2A (same methods). |
 
 ### A2A skills and operations
 

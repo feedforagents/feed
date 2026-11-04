@@ -349,15 +349,8 @@ describe('Achievement Engine (checkProgress)', () => {
         users: {
           _: 'users',
           id: 'u.id',
-          managedBy: 'u.managedBy',
-          isAgent: 'u.isAgent',
           createdAt: 'u.createdAt',
           dailyLoginStreak: 'u.dailyLoginStreak',
-        },
-        agentMessages: {
-          _: 'agentMessages',
-          agentUserId: 'am.agentUserId',
-          createdAt: 'am.createdAt',
         },
         messages: {
           _: 'messages',
@@ -441,6 +434,18 @@ describe('Achievement Engine (checkProgress)', () => {
     expect(mockAwardReputation).not.toHaveBeenCalled();
     expect(mockCreateNotification).not.toHaveBeenCalled();
     expect(mockBroadcastToChannel).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'agent_created',
+    'agent_message_sent',
+    'agent_trade_executed',
+  ])('does not award retired hosted-agent event %s', async (type) => {
+    await checkProgress('user-1', { type });
+    expect(dbInsertCalls).toEqual([]);
+    expect(dbUpdateCalls).toEqual([]);
+    expect(mockAwardReputation).not.toHaveBeenCalled();
+    expect(mockCreateNotification).not.toHaveBeenCalled();
   });
 
   // ── checkProgress: achievement unlock ──
@@ -600,27 +605,6 @@ describe('Achievement Engine (checkProgress)', () => {
 
   // ── checkProgress: multiple event types ──
 
-  it('handles agent_created event', async () => {
-    state.unlockedAchievementIds = [];
-    state.resolverResults.set('users', 1);
-    state.insertReturnsRow = true;
-
-    await checkProgress('user-1', { type: 'agent_created' });
-
-    // agent_created maps to 'agent_count' tracking type
-    // Should check achievements with agent_count trackingType
-    const agentAchievements = ACHIEVEMENT_DEFINITIONS.filter(
-      (a) => a.trackingType === 'agent_count'
-    );
-    // If there are agent achievements and threshold is met, should unlock
-    if (agentAchievements.length > 0) {
-      expect(
-        mockAwardReputation.mock.calls.length +
-          mockBroadcastToChannel.mock.calls.length
-      ).toBeGreaterThan(0);
-    }
-  });
-
   it('handles post_created event', async () => {
     state.unlockedAchievementIds = [];
     state.resolverResults.set('posts', 0);
@@ -657,12 +641,12 @@ describe('getUserAchievements', () => {
     resetState();
   });
 
-  it('returns all 15 achievements', async () => {
+  it('returns all 10 achievements', async () => {
     state.unlockedAchievementIds = [];
     state.resolverResults.set('positions', 0);
 
     const results = await getUserAchievements('user-1');
-    expect(results).toHaveLength(15);
+    expect(results).toHaveLength(10);
   });
 
   it('marks unlocked achievements correctly', async () => {
@@ -698,7 +682,7 @@ describe('getUserAchievements', () => {
     }>;
 
     // All should be in the results
-    expect(results).toHaveLength(15);
+    expect(results).toHaveLength(10);
     // Some may be unlocked (threshold <= 3), some may not
     for (const r of results) {
       expect(r.progress).toBeGreaterThanOrEqual(0);
@@ -896,13 +880,9 @@ describe('Resolver Coverage', () => {
       'total_trade_count',
       'distinct_markets',
       'prediction_win_count',
-      'agent_count',
-      'agent_message_count',
-      'agent_trade_count',
       'group_message_count',
       'comment_count',
       'terminal_visit_count',
-      'agents_visit_count',
       'login_streak',
     ];
 

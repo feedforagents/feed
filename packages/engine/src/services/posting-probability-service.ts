@@ -48,6 +48,9 @@ export interface PostingContext {
   /** Active event summaries for context */
   activeEvents: Array<{
     questionId: string;
+    /** Source event description and visibility for content generation. */
+    text?: string;
+    visibility?: string;
     affectedActorIds: string[];
     /** Stock tickers affected by this event */
     affectedStocks?: string[];
@@ -424,6 +427,8 @@ export async function getActiveEventsForPosting(): Promise<{
       const questionId = event.relatedQuestion.toString();
       activeEvents.push({
         questionId,
+        text: event.description,
+        visibility: event.visibility,
         affectedActorIds: actorIds,
         affectedStocks: Array.from(affectedStocks),
       });

@@ -4,7 +4,7 @@
  * Returns the Feed game's A2A agent card for discovery.
  * WHY: A2A and other agent protocols expect a well-known URL for agent discovery;
  * next.config rewrites /.well-known/agent-card.json → this route so agents find us at the standard path.
- * Content is the in-memory feedAgentCard (no DB); per-agent cards are at /api/agents/{id}/.well-known/agent-card.
+ * Content is the in-memory feedAgentCard (no DB).
  *
  * @see agent-patch-plan.md Phase 3.1
  */

@@ -1,5 +1,5 @@
 /**
- * Server-side portfolio breakdown (wallet + agents + positions) for consistent P/L.
+ * Server-side portfolio breakdown (wallet + positions) for consistent P/L.
  */
 
 import { isOpenPerpPositionStateValid } from '@feed/core/markets/perps';
@@ -27,22 +27,12 @@ import {
 
 export interface PortfolioBreakdownSnapshot {
   wallet: number;
-  agents: number;
   positions: number;
   available: number;
   netPeerTransfers: number;
   originalAmount: number;
   totalAssets: number;
   totalPnL: number;
-  agentCount: number;
-  members: PortfolioBreakdownMember[];
-}
-
-export interface PortfolioBreakdownMember {
-  id: string;
-  name: string;
-  wallet: number;
-  isAgent: boolean;
 }
 
 function clampFeeRate(rate: number): number {
@@ -86,7 +76,7 @@ function calculatePredictionPositionValue(position: {
  * Canonical portfolio breakdown used across Profile, Dashboard, OG, etc.
  *
  * Total P/L formula:
- *   totalPnL = (agents + positions + wallet) - originalAmount
+ *   totalPnL = (positions + wallet) - originalAmount
  * where originalAmount includes net peer transfers.
  *
  * **WHY classification-based routing on the initial user row?**
@@ -121,8 +111,6 @@ export async function calculatePortfolioBreakdown(
   const portfolioSelect = {
     id: users.id,
     privyId: users.privyId,
-    displayName: users.displayName,
-    username: users.username,
     virtualBalance: users.virtualBalance,
     totalDeposited: users.totalDeposited,
     totalWithdrawn: users.totalWithdrawn,
@@ -144,8 +132,6 @@ export async function calculatePortfolioBreakdown(
   type PortfolioUserRow = {
     id: string;
     privyId: string | null;
-    displayName: string | null;
-    username: string | null;
     virtualBalance: unknown;
     totalDeposited: unknown;
     totalWithdrawn: unknown;
@@ -171,32 +157,7 @@ export async function calculatePortfolioBreakdown(
     new Set([canonicalUserId, user.privyId].filter(Boolean))
   ) as string[];
 
-  const agentRows = await db
-    .select({
-      id: users.id,
-      displayName: users.displayName,
-      username: users.username,
-      virtualBalance: users.virtualBalance,
-    })
-    .from(users)
-    .where(and(eq(users.managedBy, canonicalUserId), eq(users.isAgent, true)));
-
-  const agentCount = agentRows.length;
-
-  // The ownership set is the owner (plus legacy privyId alias) and every
-  // managed agent. Agent wallets are counted in `agents`, so their open
-  // positions and external transfers must be counted too; otherwise an agent
-  // buying a position looks like a loss for the owner, and owner<->agent
-  // transfers would be counted on one side only.
-  const ownershipUserIds = Array.from(
-    new Set([...positionUserIds, ...agentRows.map((agent) => agent.id)])
-  );
-
   const wallet = toNumber(user.virtualBalance);
-  const agents = agentRows.reduce(
-    (sum, agent) => sum + toNumber(agent.virtualBalance),
-    0
-  );
 
   const [perpRows, predictionRows] = await Promise.all([
     db
@@ -208,7 +169,7 @@ export async function calculatePortfolioBreakdown(
       .from(perpPositions)
       .where(
         and(
-          inArray(perpPositions.userId, ownershipUserIds),
+          inArray(perpPositions.userId, positionUserIds),
           isNull(perpPositions.closedAt)
         )
       ),
@@ -224,7 +185,7 @@ export async function calculatePortfolioBreakdown(
       .innerJoin(markets, eq(positions.marketId, markets.id))
       .where(
         and(
-          inArray(positions.userId, ownershipUserIds),
+          inArray(positions.userId, positionUserIds),
           eq(markets.resolved, false)
         )
       ),
@@ -275,7 +236,7 @@ export async function calculatePortfolioBreakdown(
     .from(balanceTransactions)
     .where(
       and(
-        inArray(balanceTransactions.userId, ownershipUserIds),
+        inArray(balanceTransactions.userId, positionUserIds),
         inArray(balanceTransactions.type, [
           ...CANONICAL_AGENT_TRANSFER_TRANSACTION_TYPES,
           ...CANONICAL_PEER_TRANSFER_TRANSACTION_TYPES,
@@ -289,34 +250,16 @@ export async function calculatePortfolioBreakdown(
   const netPeerTransfers = toNumber(transferResult[0]?.netTransfers);
   const originalAmount = totalDeposited - totalWithdrawn + netPeerTransfers;
 
-  const available = wallet + agents;
-  const totalAssets = wallet + agents + positionsValue;
+  const available = wallet;
+  const totalAssets = wallet + positionsValue;
   const totalPnL = totalAssets - originalAmount;
-  const members: PortfolioBreakdownMember[] = [
-    {
-      id: canonicalUserId,
-      name: user.displayName || user.username || 'You (Owner)',
-      wallet,
-      isAgent: false,
-    },
-    ...agentRows.map((agent) => ({
-      id: agent.id,
-      name: agent.displayName || agent.username || 'Agent',
-      wallet: toNumber(agent.virtualBalance),
-      isAgent: true,
-    })),
-  ];
-
   return {
     wallet,
-    agents,
     positions: positionsValue,
     available,
     netPeerTransfers,
     originalAmount,
     totalAssets,
     totalPnL,
-    agentCount,
-    members,
   };
 }

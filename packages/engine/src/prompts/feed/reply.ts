@@ -11,7 +11,7 @@ import { PARODY_NAME_RULES } from '../shared-sections';
  */
 export const reply = definePrompt({
   id: 'reply',
-  version: '8.0.0',
+  version: '8.0.1',
   category: 'feed',
   description:
     'Generates single reply — lightweight, humor and dunks permitted',
@@ -50,8 +50,8 @@ Not every reply needs to be substantive. A well-timed "lol" is a valid reply if 
 
 Write ONE reply as {{characterName}}.
 
-<format>
-<post>your reply here</post>
-<sentiment>number -1 to 1</sentiment>
-</format>`.trim(),
+Return only one JSON object with a nonempty string post, using this structure:
+\`\`\`json
+{"post": "your reply here"}
+\`\`\``.trim(),
 });
