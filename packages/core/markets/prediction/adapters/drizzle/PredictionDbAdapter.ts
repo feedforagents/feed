@@ -368,7 +368,8 @@ export class PredictionDbAdapter implements PredictionDbPort {
     const rows = await this.client
       .select()
       .from(positions)
-      .where(eq(positions.marketId, marketId));
+      .where(eq(positions.marketId, marketId))
+      .orderBy(positions.userId, positions.id);
     return rows.map(mapPosition);
   }
 

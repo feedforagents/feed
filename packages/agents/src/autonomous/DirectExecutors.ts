@@ -18,10 +18,7 @@ import {
   type PostActivityData,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
-import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@feed/core/markets/prediction';
+import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import {
   actorState,
   aliasedTable,
@@ -51,16 +48,20 @@ import {
   withTransaction,
 } from '@feed/db';
 import {
+  createNpcWalletAdapter,
   createPerpPriceImpactPort,
+  createPerpSettlement,
   FEE_CONFIG,
   FeeService,
   type GeneratedTag,
   generateTagsFromPost,
   invalidateAfterPredictionTrade,
   PredictionPricing,
+  type PredictionSettlementOptions,
   StaticDataRegistry,
   storeTagsForPost,
   WalletService,
+  withPredictionSettlement,
 } from '@feed/engine';
 import {
   AGENT_TRANSFER_IN_TRANSACTION_TYPE,
@@ -232,165 +233,6 @@ function createPerpWalletAdapter(isNpc: boolean) {
       relatedId?: string;
     }) => {
       await WalletService.recordPnL(uid, pnl, reason, relatedId);
-    },
-    getBalance: (uid: string) => WalletService.getBalance(uid),
-  };
-}
-
-/** PnL record to be processed after transaction completes */
-interface DeferredPnLRecord {
-  userId: string;
-  pnl: number;
-  reason: string;
-  relatedId?: string;
-}
-
-/**
- * Creates a wallet adapter for prediction market trading operations.
- *
- * - NPCs use actorState.tradingBalance (within the provided transaction context).
- * - Regular users use WalletService.
- *
- * IMPORTANT: recordPnL is deferred to avoid nested transaction deadlocks.
- * The caller must process deferredPnL after the transaction completes.
- */
-function createPredictionWalletAdapter(
-  isNpc: boolean,
-  txDb?: Parameters<Parameters<typeof asUser>[1]>[0],
-  deferredPnL?: DeferredPnLRecord[]
-) {
-  if (isNpc) {
-    if (!txDb) {
-      throw new Error('Transaction context required for NPC prediction wallet');
-    }
-    return {
-      debit: async ({
-        userId: uid,
-        amount: amt,
-      }: {
-        userId: string;
-        amount: number;
-        reason: string;
-        description?: string;
-        relatedId?: string;
-      }) => {
-        const result = await txDb
-          .update(actorState)
-          .set({
-            tradingBalance: sql`${actorState.tradingBalance} - ${amt}`,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(actorState.id, uid),
-              gte(sql<number>`${actorState.tradingBalance}::numeric`, amt)
-            )
-          )
-          .returning({ id: actorState.id });
-
-        if (result.length === 0) {
-          throw new Error(
-            `Insufficient NPC balance for prediction trade: $${amt}`
-          );
-        }
-      },
-      credit: async ({
-        userId: uid,
-        amount: amt,
-      }: {
-        userId: string;
-        amount: number;
-        reason: string;
-        description?: string;
-        relatedId?: string;
-      }) => {
-        await txDb
-          .update(actorState)
-          .set({
-            tradingBalance: sql`${actorState.tradingBalance} + ${amt}`,
-            updatedAt: new Date(),
-          })
-          .where(eq(actorState.id, uid));
-      },
-      recordPnL: async (_args: {
-        userId: string;
-        pnl: number;
-        reason: string;
-        relatedId?: string;
-      }) => {
-        // NPCs don't track PnL
-      },
-      getBalance: async (uid: string) => {
-        const [actor] = await txDb
-          .select({ tradingBalance: actorState.tradingBalance })
-          .from(actorState)
-          .where(eq(actorState.id, uid))
-          .limit(1);
-        return {
-          balance: Number(actor?.tradingBalance ?? 0),
-          totalDeposited: 0,
-          totalWithdrawn: 0,
-          lifetimePnL: 0,
-        };
-      },
-    };
-  }
-
-  return {
-    debit: ({
-      userId: uid,
-      amount: amt,
-      reason,
-      description,
-      relatedId,
-    }: {
-      userId: string;
-      amount: number;
-      reason: string;
-      description?: string;
-      relatedId?: string;
-    }) =>
-      WalletService.debit(uid, amt, reason, description ?? '', relatedId, txDb),
-    credit: ({
-      userId: uid,
-      amount: amt,
-      reason,
-      description,
-      relatedId,
-    }: {
-      userId: string;
-      amount: number;
-      reason: string;
-      description?: string;
-      relatedId?: string;
-    }) =>
-      WalletService.credit(
-        uid,
-        amt,
-        reason,
-        description ?? '',
-        relatedId,
-        txDb
-      ),
-    recordPnL: async ({
-      userId: uid,
-      pnl,
-      reason,
-      relatedId,
-    }: {
-      userId: string;
-      pnl: number;
-      reason: string;
-      relatedId?: string;
-    }) => {
-      // Defer PnL recording to avoid nested transaction deadlocks
-      // The PnL will be recorded after the transaction completes
-      if (deferredPnL) {
-        deferredPnL.push({ userId: uid, pnl, reason, relatedId });
-      } else {
-        // Fallback for callers that don't use deferredPnL (shouldn't happen in new code)
-        await WalletService.recordPnL(uid, pnl, reason, relatedId);
-      }
     },
     getBalance: (uid: string) => WalletService.getBalance(uid),
   };
@@ -750,6 +592,48 @@ export async function executeDirectTrade(
   });
 }
 
+function predictionSettlementOptions(
+  agentUserId: string,
+  isNpc: boolean,
+  marketId: string
+): PredictionSettlementOptions {
+  return {
+    wallet: isNpc ? (tx) => createNpcWalletAdapter(agentUserId, tx) : undefined,
+    broadcast: {
+      emit: (channel, payload) =>
+        broadcastToChannel(channel, payload as Record<string, JsonValue>),
+    },
+    cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
+    fees: {
+      tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+      platformShare: FEE_CONFIG.PLATFORM_SHARE,
+      referrerShare: FEE_CONFIG.REFERRER_SHARE,
+      minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+    },
+    tradeSource: isNpc ? 'npc_trade' : 'user_trade',
+    tradeActorType: isNpc ? 'npc' : 'user',
+    feeProcessor: isNpc
+      ? undefined
+      : (tx) => ({
+          processTradingFee: ({
+            userId,
+            amount,
+            type,
+            relatedId,
+            positionId,
+          }) =>
+            FeeService.processTradingFee(
+              userId,
+              type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
+              amount,
+              positionId,
+              relatedId,
+              tx
+            ),
+        }),
+  };
+}
+
 async function executePredictionTrade(params: {
   agentUserId: string;
   marketId: string;
@@ -772,57 +656,13 @@ async function executePredictionTrade(params: {
   const isBuyYes = side === 'buy_yes';
   const sideLabel = isBuyYes ? 'yes' : 'no';
 
-  const tradeOperation = async (
-    txDb: Parameters<Parameters<typeof asUser>[1]>[0]
-  ) => {
-    const service = new PredictionMarketService({
-      db: new PredictionDbAdapter(txDb),
-      wallet: createPredictionWalletAdapter(isNpc, txDb),
-      broadcast: {
-        emit: (channel, payload) =>
-          broadcastToChannel(channel, payload as Record<string, JsonValue>),
-      },
-      cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
-      fees: {
-        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
-        platformShare: FEE_CONFIG.PLATFORM_SHARE,
-        referrerShare: FEE_CONFIG.REFERRER_SHARE,
-        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
-      },
-      tradeSource: isNpc ? 'npc_trade' : 'user_trade',
-      tradeActorType: isNpc ? 'npc' : 'user',
-      feeProcessor: isNpc
-        ? undefined
-        : {
-            processTradingFee: ({
-              userId,
-              amount,
-              type,
-              relatedId,
-              positionId,
-            }) =>
-              FeeService.processTradingFee(
-                userId,
-                type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
-                amount,
-                positionId,
-                relatedId,
-                txDb // Pass the existing transaction to avoid nested transaction deadlocks
-              ),
-          },
-    });
-
-    return service.buy({
-      userId: agentUserId,
-      marketId,
-      side: sideLabel,
-      amount,
-    });
-  };
-
-  const result = isNpc
-    ? await asSystem(tradeOperation, 'npc_prediction_trade')
-    : await asUser({ userId: agentUserId }, tradeOperation);
+  const result = await withPredictionSettlement(
+    marketId,
+    isNpc ? { system: 'npc_prediction_trade' } : { userId: agentUserId },
+    (service) =>
+      service.buy({ userId: agentUserId, marketId, side: sideLabel, amount }),
+    predictionSettlementOptions(agentUserId, isNpc, marketId)
+  );
 
   // Record in AgentTrade
   await agentPnLService.recordTrade({
@@ -878,109 +718,57 @@ async function executePredictionSell(params: {
   const isSellYes = side === 'sell_yes';
   const sideLabel = isSellYes ? 'yes' : 'no';
 
-  // Collect PnL records to process after transaction completes (avoids nested transaction deadlocks)
-  const deferredPnL: DeferredPnLRecord[] = [];
+  const { sellResult, sharesToSell } = await withPredictionSettlement(
+    marketId,
+    isNpc ? { system: 'npc_prediction_sell' } : { userId: agentUserId },
+    async (service, txDb) => {
+      const adapter = new PredictionDbAdapter(txDb);
+      const market = await service.getMarket(marketId);
+      if (!market) {
+        throw new Error(`Market not found: ${marketId}`);
+      }
 
-  const sellOperation = async (
-    txDb: Parameters<Parameters<typeof asUser>[1]>[0]
-  ) => {
-    const adapter = new PredictionDbAdapter(txDb);
-    const service = new PredictionMarketService({
-      db: adapter,
-      wallet: createPredictionWalletAdapter(isNpc, txDb, deferredPnL),
-      broadcast: {
-        emit: (channel, payload) =>
-          broadcastToChannel(channel, payload as Record<string, JsonValue>),
-      },
-      cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
-      fees: {
-        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
-        platformShare: FEE_CONFIG.PLATFORM_SHARE,
-        referrerShare: FEE_CONFIG.REFERRER_SHARE,
-        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
-      },
-      tradeSource: isNpc ? 'npc_trade' : 'user_trade',
-      tradeActorType: isNpc ? 'npc' : 'user',
-      feeProcessor: isNpc
-        ? undefined
-        : {
-            processTradingFee: ({
-              userId,
-              amount,
-              type,
-              relatedId,
-              positionId,
-            }) =>
-              FeeService.processTradingFee(
-                userId,
-                type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
-                amount,
-                positionId,
-                relatedId,
-                txDb // Pass the existing transaction to avoid nested transaction deadlocks
-              ),
-          },
-    });
+      const position = await adapter.getPosition(
+        agentUserId,
+        marketId,
+        sideLabel
+      );
+      if (
+        !position ||
+        position.status === 'closed' ||
+        position.shares <= MIN_SHARES_THRESHOLD
+      ) {
+        throw new Error(`No open position found for market ${marketId}`);
+      }
 
-    const market = await service.getMarket(marketId);
-    if (!market) {
-      throw new Error(`Market not found: ${marketId}`);
-    }
+      const currentPrice = PredictionPricing.getCurrentPrice(
+        market.yesShares,
+        market.noShares,
+        sideLabel
+      );
+      const safePrice = currentPrice > 0 ? currentPrice : 1e-9;
 
-    const position = await adapter.getPosition(
-      agentUserId,
-      marketId,
-      sideLabel
-    );
-    if (
-      !position ||
-      position.status === 'closed' ||
-      position.shares <= MIN_SHARES_THRESHOLD
-    ) {
-      throw new Error(`No open position found for market ${marketId}`);
-    }
+      // If amount is 0, close full position. Otherwise, approximate shares by current probability.
+      const sharesToSell =
+        amount > 0
+          ? Math.min(position.shares, amount / safePrice)
+          : position.shares;
 
-    const currentPrice = PredictionPricing.getCurrentPrice(
-      market.yesShares,
-      market.noShares,
-      sideLabel
-    );
-    const safePrice = currentPrice > 0 ? currentPrice : 1e-9;
+      if (sharesToSell <= MIN_SHARES_THRESHOLD) {
+        throw new Error('Amount too small to sell any shares');
+      }
 
-    // If amount is 0, close full position. Otherwise, approximate shares by current probability.
-    const sharesToSell =
-      amount > 0
-        ? Math.min(position.shares, amount / safePrice)
-        : position.shares;
+      const sellResult = await service.sell({
+        userId: agentUserId,
+        marketId,
+        shares: sharesToSell,
+        positionId: position.id,
+      });
 
-    if (sharesToSell <= MIN_SHARES_THRESHOLD) {
-      throw new Error('Amount too small to sell any shares');
-    }
-
-    const sellResult = await service.sell({
-      userId: agentUserId,
-      marketId,
-      shares: sharesToSell,
-      positionId: position.id,
-    });
-
-    return { sellResult, sharesToSell };
-  };
-
-  const { sellResult, sharesToSell } = isNpc
-    ? await asSystem(sellOperation, 'npc_prediction_sell')
-    : await asUser({ userId: agentUserId }, sellOperation);
-
-  // Process deferred PnL records AFTER transaction completes (avoids nested transaction deadlocks)
-  for (const pnlRecord of deferredPnL) {
-    if (pnlRecord.pnl === 0) continue;
-    await WalletService.recordPnL(
-      pnlRecord.userId,
-      pnlRecord.pnl,
-      pnlRecord.reason,
-      pnlRecord.relatedId
-    );
-  }
+      return { sellResult, sharesToSell };
+    },
+    predictionSettlementOptions(agentUserId, isNpc, marketId)
+  );
 
   // Record in AgentTrade
   await agentPnLService.recordTrade({
@@ -1036,37 +824,33 @@ async function executePerpTrade(params: {
   const org = allOrgs.find((o) => o.ticker === ticker);
   const currentPrice = org?.initialPrice ?? 100;
 
-  const perpTradeOperation = async () => {
-    const walletAdapter = createPerpWalletAdapter(isNpc);
+  const walletAdapter = createPerpWalletAdapter(isNpc);
 
-    const service = new PerpMarketService({
-      db: new PerpDbAdapter(),
-      wallet: walletAdapter,
-      fees: {
-        tradingFeeRate: 0.001,
-        platformShare: 0.5,
-        referrerShare: 0.5,
-        minFeeAmount: 0.01,
-      },
-      priceImpact: createPerpPriceImpactPort(),
-    });
+  const service = new PerpMarketService({
+    settlement: createPerpSettlement({
+      system: isNpc ? 'npc_perp_trade' : undefined,
+      wallet: isNpc
+        ? (userId, tx) => createNpcWalletAdapter(userId, tx)
+        : undefined,
+    }),
+    db: new PerpDbAdapter(),
+    wallet: walletAdapter,
+    fees: {
+      tradingFeeRate: 0.001,
+      platformShare: 0.5,
+      referrerShare: 0.5,
+      minFeeAmount: 0.01,
+    },
+    priceImpact: createPerpPriceImpactPort(),
+  });
 
-    await service.openPosition({
-      userId: agentUserId,
-      ticker,
-      side: perpSide,
-      size: amount,
-      leverage: 1,
-    });
-  };
-
-  // Execute with appropriate context
-  if (isNpc) {
-    await asSystem(perpTradeOperation, 'npc_perp_trade');
-  } else {
-    await asUser({ userId: agentUserId }, perpTradeOperation);
-  }
-
+  await service.openPosition({
+    userId: agentUserId,
+    ticker,
+    side: perpSide,
+    size: amount,
+    leverage: 1,
+  });
   // Record trade
   await agentPnLService.recordTrade({
     agentId: agentUserId,
@@ -1129,6 +913,12 @@ async function executeClosePerpPosition(params: {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
     const service = new PerpMarketService({
+      settlement: createPerpSettlement({
+        system: isNpc ? 'npc_perp_trade' : undefined,
+        wallet: isNpc
+          ? (userId, tx) => createNpcWalletAdapter(userId, tx)
+          : undefined,
+      }),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
       fees: {

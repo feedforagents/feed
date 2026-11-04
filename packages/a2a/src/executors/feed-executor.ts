@@ -25,17 +25,17 @@ import {
   RATE_LIMIT_CONFIGS,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
-import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@feed/core/markets/prediction';
+import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import type { WalletPort } from '@feed/core/markets/shared';
 import { asUser, db, getRawDrizzle, sql } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
+  createPerpSettlement,
+  type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
+  withPredictionSettlement,
 } from '@feed/engine';
 import type { JsonValue } from '@feed/shared';
 import {
@@ -1542,26 +1542,20 @@ export class FeedAgentExecutor implements AgentExecutor {
     };
   }
 
-  private buildPredictionService() {
-    return new PredictionMarketService({
-      db: new PredictionDbAdapter(),
-      wallet: this.buildWalletPort(),
-      broadcast: {
-        emit: async () => {
-          // No-op for A2A - broadcasts handled separately
-        },
-      },
+  private predictionServiceOptions(): PredictionSettlementOptions {
+    return {
       fees: {
         tradingFeeRate: 0.01,
         platformShare: 0.5,
         referrerShare: 0.1,
         minFeeAmount: 0,
       },
-    });
+    };
   }
 
   private buildPerpService() {
     return new PerpMarketService({
+      settlement: createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: this.buildWalletPort(),
       priceImpact: createPerpPriceImpactPort(),
@@ -1598,13 +1592,18 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (amount <= 0) throw new Error('amount must be positive');
 
     const side = outcome === 'YES' ? 'yes' : 'no';
-    const service = this.buildPredictionService();
-    const result = await service.buy({
-      userId,
+    const result = await withPredictionSettlement(
       marketId,
-      side,
-      amount,
-    });
+      { userId },
+      (service) =>
+        service.buy({
+          userId,
+          marketId,
+          side,
+          amount,
+        }),
+      this.predictionServiceOptions()
+    );
 
     const balance = await WalletService.getBalance(userId);
 
@@ -1652,13 +1651,18 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('Position has no associated market');
     }
 
-    const service = this.buildPredictionService();
-    const result = await service.sell({
-      userId,
-      marketId: position.marketId,
-      shares,
-      positionId,
-    });
+    const result = await withPredictionSettlement(
+      position.marketId,
+      { userId },
+      (service) =>
+        service.sell({
+          userId,
+          marketId: position.marketId,
+          shares,
+          positionId,
+        }),
+      this.predictionServiceOptions()
+    );
 
     const balance = await WalletService.getBalance(userId);
     if (typeof result.positionClosed !== 'boolean')
@@ -3643,8 +3647,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!marketId) throw new Error('marketId is required');
 
     // Try prediction market first
-    const predictionService = this.buildPredictionService();
-    const market = await predictionService.getMarket(marketId);
+    const market = await new PredictionDbAdapter().getMarketById(marketId);
 
     if (market) {
       const yesShares = Number(market.yesShares ?? 0);

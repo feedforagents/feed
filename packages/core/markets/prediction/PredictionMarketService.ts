@@ -733,18 +733,29 @@ export class PredictionMarketService {
   }
 
   private async emitTrade(payload: Record<string, unknown>) {
-    if (!this.deps.broadcast) return;
-    await this.deps.broadcast.emit('markets', payload);
+    const broadcast = this.deps.broadcast;
+    if (!broadcast) return;
+    await this.runEffect(() => broadcast.emit('markets', payload));
   }
 
   private async emitResolution(payload: Record<string, unknown>) {
-    if (!this.deps.broadcast) return;
-    await this.deps.broadcast.emit('markets', payload);
+    const broadcast = this.deps.broadcast;
+    if (!broadcast) return;
+    await this.runEffect(() => broadcast.emit('markets', payload));
   }
 
   private async invalidateCaches(marketId: string) {
-    if (!this.deps.cache) return;
-    await this.deps.cache.invalidate(`prediction:${marketId}:*`);
+    const cache = this.deps.cache;
+    if (!cache) return;
+    await this.runEffect(() => cache.invalidate(`prediction:${marketId}:*`));
+  }
+
+  private async runEffect(effect: () => Promise<void>): Promise<void> {
+    if (this.deps.afterCommit) {
+      this.deps.afterCommit(effect);
+      return;
+    }
+    await effect();
   }
 
   private now() {

@@ -1,3 +1,4 @@
+import { createPerpSettlement } from '@feed/engine';
 /**
  * Integration test: Perp Market Constant-Product AMM Average Fill Pricing
  *
@@ -25,6 +26,7 @@ import {
   isOpenPerpPositionStateValid,
   PerpDbAdapter,
   type PerpServiceDeps,
+  type PerpSettlementPort,
   type PriceImpactPort,
 } from '@feed/core/markets/perps';
 import {
@@ -231,9 +233,11 @@ function createTestPriceImpact(): PriceImpactPort {
 // ---------------------------------------------------------------------------
 function createTestService(
   wallet: TestWallet,
-  dbPort?: PerpDbPort
+  dbPort?: PerpDbPort,
+  settlement?: PerpSettlementPort
 ): PerpMarketService {
   const deps: PerpServiceDeps = {
+    settlement: settlement ?? createPerpSettlement({ wallet: () => wallet }),
     db: dbPort ?? new PerpDbAdapter(),
     wallet,
     fees: {
@@ -875,7 +879,10 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
       walletMutationsAfterClose = wallet.getLog().length;
       return transaction(fn);
     };
-    const flipService = createTestService(wallet, adapter);
+    const flipService = createTestService(wallet, adapter, {
+      run: (_userId, operation) =>
+        adapter.transaction((tx) => operation(tx, wallet)),
+    });
     await expect(
       flipService.openPosition({
         userId: USER_A,

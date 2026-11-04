@@ -1,4 +1,5 @@
 import type {
+  AfterCommitScheduler,
   BroadcastPort,
   CachePort,
   ClockPort,
@@ -192,4 +193,5 @@ export interface PredictionServiceDeps {
   feeProcessor?: FeeProcessor;
   tradeSource?: PredictionPriceSnapshotRecord['source'];
   tradeActorType?: 'user' | 'npc';
+  afterCommit?: AfterCommitScheduler;
 }
