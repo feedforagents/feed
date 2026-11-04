@@ -1401,4 +1401,103 @@ describe('PerpMarketService', () => {
       expect((await db.listMarkets())[0]?.openInterest).toBeCloseTo(200, 6);
     });
   });
+
+  describe('liquidation on mark price (PRD 9.3)', () => {
+    // Mark = price × (1 + annualRate / periodsPerYear). The stored funding
+    // rate is clamped to ±0.5 APR, so the premium is at most ~0.0456%.
+    const periodsPerYear = (365.25 * 24) / 8;
+    const cappedRate = 0.5;
+    const premium = cappedRate / periodsPerYear;
+
+    const marketWithRate = (rate: number): PerpMarketRecord => ({
+      ...baseMarket,
+      fundingRate: {
+        ticker: 'ABC',
+        rate,
+        nextFundingTime: new Date().toISOString(),
+        predictedRate: rate,
+      },
+    });
+
+    beforeEach(() => {
+      db = new InMemoryPerpDb([marketWithRate(cappedRate)]);
+      wallet = new InMemoryWallet(10_000);
+      service = new PerpMarketService({ db, wallet, fees: feeConfig });
+    });
+
+    it('does not liquidate a long when the raw price wicks below the liquidation price but the mark stays above it', async () => {
+      const open = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const pos = await db.getPositionById(open.positionId);
+      const liq = pos!.liquidationPrice;
+      // 0.02% below the liquidation price: inside the funding-premium band.
+      const rawPrice = liq * (1 - 0.0002);
+      const markPrice = rawPrice * (1 + premium);
+      expect(markPrice).toBeGreaterThan(liq);
+
+      const summary = await service.applyPriceUpdates({ 'org-abc': rawPrice });
+
+      expect(summary.liquidations).toBe(0);
+      const after = await db.getPositionById(open.positionId);
+      expect(after?.closedAt).toBeNull();
+    });
+
+    it('liquidates a long when the mark price also breaches the liquidation price', async () => {
+      const open = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const pos = await db.getPositionById(open.positionId);
+      const liq = pos!.liquidationPrice;
+      // 1% below the liquidation price: far outside the premium band, so
+      // the mark breaches too and the liquidation must still happen.
+      const rawPrice = liq * (1 - 0.01);
+      const markPrice = rawPrice * (1 + premium);
+      expect(markPrice).toBeLessThan(liq);
+
+      const summary = await service.applyPriceUpdates({ 'org-abc': rawPrice });
+
+      expect(summary.liquidations).toBe(1);
+      const after = await db.getPositionById(open.positionId);
+      expect(after?.closedAt).toBeDefined();
+      const pnls = wallet.getPnLs('u1');
+      expect(
+        pnls.find((p) => p.reason === 'perp_liquidation')?.pnl
+      ).toBeCloseTo(-10, 4);
+    });
+
+    it('does not liquidate a short on a raw-price wick above the liquidation price when a negative funding premium keeps the mark below it', async () => {
+      db = new InMemoryPerpDb([marketWithRate(-cappedRate)]);
+      service = new PerpMarketService({ db, wallet, fees: feeConfig });
+
+      const open = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 100,
+        leverage: 10,
+      });
+      const pos = await db.getPositionById(open.positionId);
+      const liq = pos!.liquidationPrice;
+      // 0.02% above the liquidation price; the negative premium pulls the
+      // mark back below it.
+      const rawPrice = liq * (1 + 0.0002);
+      const markPrice = rawPrice * (1 - premium);
+      expect(markPrice).toBeLessThan(liq);
+
+      const summary = await service.applyPriceUpdates({ 'org-abc': rawPrice });
+
+      expect(summary.liquidations).toBe(0);
+      const after = await db.getPositionById(open.positionId);
+      expect(after?.closedAt).toBeNull();
+    });
+  });
 });
