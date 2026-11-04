@@ -17,16 +17,6 @@ export interface LeaderboardUser {
   isAgent?: boolean;
   managedBy?: string | null;
   nftTokenId?: number | null;
-  teamReputationPoints?: number;
-  userReputationPoints?: number;
-  agentReputationPoints?: number;
-  teamLifetimePnL?: number;
-  userLifetimePnL?: number;
-  agentLifetimePnL?: number;
-  teamCapitalBase?: number;
-  teamEffectiveCapitalBase?: number;
-  teamTradingReturn?: number;
-  agentCount?: number;
 }
 
 export interface CurrentUserPosition {

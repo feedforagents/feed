@@ -10,7 +10,6 @@
  */
 
 import {
-  agentMessages,
   and,
   chats,
   comments,
@@ -191,35 +190,6 @@ const ACHIEVEMENT_RESOLVERS: Record<string, ProgressResolver> = {
     return result[0]!.c;
   },
 
-  agent_count: async (userId) => {
-    const result = await db
-      .select({ c: count() })
-      .from(users)
-      .where(and(eq(users.managedBy, userId), eq(users.isAgent, true)));
-    return result[0]!.c;
-  },
-
-  agent_message_count: async (userId) => {
-    // Count messages sent to agents managed by this user
-    const result = await db
-      .select({ c: count() })
-      .from(agentMessages)
-      .innerJoin(users, eq(agentMessages.agentUserId, users.id))
-      .where(eq(users.managedBy, userId));
-    return result[0]!.c;
-  },
-
-  agent_trade_count: async (userId) => {
-    // Count trades by agents managed by this user
-    // AgentTrade table has agentUserId; join to User where managedBy = userId
-    const result = await db
-      .select({ c: count() })
-      .from(sql`"AgentTrade" at2`)
-      .innerJoin(users, sql`at2."agentUserId" = ${users.id}`)
-      .where(eq(users.managedBy, userId));
-    return result[0]!.c;
-  },
-
   group_message_count: async (userId) => {
     const result = await db
       .select({ c: count() })
@@ -245,19 +215,6 @@ const ACHIEVEMENT_RESOLVERS: Record<string, ProgressResolver> = {
         and(
           eq(userActivityLogs.userId, userId),
           eq(userActivityLogs.activityType, 'open_terminal')
-        )
-      );
-    return result[0]!.c;
-  },
-
-  agents_visit_count: async (userId) => {
-    const result = await db
-      .select({ c: count() })
-      .from(userActivityLogs)
-      .where(
-        and(
-          eq(userActivityLogs.userId, userId),
-          eq(userActivityLogs.activityType, 'open_agents')
         )
       );
     return result[0]!.c;
@@ -409,21 +366,6 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
     return r[0]!.c;
   },
 
-  daily_agent_message: async (userId, start, end) => {
-    const r = await db
-      .select({ c: count() })
-      .from(agentMessages)
-      .innerJoin(users, eq(agentMessages.agentUserId, users.id))
-      .where(
-        and(
-          eq(users.managedBy, userId),
-          gte(agentMessages.createdAt, start),
-          lt(agentMessages.createdAt, end)
-        )
-      );
-    return r[0]!.c;
-  },
-
   daily_follow: async (userId, start, end) => {
     const r = await db
       .select({ c: count() })
@@ -463,21 +405,6 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
         and(
           eq(userActivityLogs.userId, userId),
           eq(userActivityLogs.activityType, 'open_terminal'),
-          eq(userActivityLogs.activityDate, dateOnly)
-        )
-      );
-    return r[0]!.c;
-  },
-
-  daily_agents_visit: async (userId, start, _end) => {
-    const dateOnly = getStartOfUTCDay(start);
-    const r = await db
-      .select({ c: count() })
-      .from(userActivityLogs)
-      .where(
-        and(
-          eq(userActivityLogs.userId, userId),
-          eq(userActivityLogs.activityType, 'open_agents'),
           eq(userActivityLogs.activityDate, dateOnly)
         )
       );
@@ -741,36 +668,6 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
     return r[0]!.c;
   },
 
-  weekly_agent_message: async (userId, start, end) => {
-    const r = await db
-      .select({ c: count() })
-      .from(agentMessages)
-      .innerJoin(users, eq(agentMessages.agentUserId, users.id))
-      .where(
-        and(
-          eq(users.managedBy, userId),
-          gte(agentMessages.createdAt, start),
-          lt(agentMessages.createdAt, end)
-        )
-      );
-    return r[0]!.c;
-  },
-
-  weekly_agent_trade: async (userId, start, end) => {
-    const r = await db
-      .select({ c: count() })
-      .from(sql`"AgentTrade" at2`)
-      .innerJoin(users, sql`at2."agentUserId" = ${users.id}`)
-      .where(
-        and(
-          eq(users.managedBy, userId),
-          sql`at2."executedAt" >= ${start}`,
-          sql`at2."executedAt" < ${end}`
-        )
-      );
-    return r[0]!.c;
-  },
-
   weekly_follow: async (userId, start, end) => {
     const r = await db
       .select({ c: count() })
@@ -880,65 +777,6 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
         )
       );
     return pred[0]!.c > 0 && perp[0]!.c > 0 ? 1 : 0;
-  },
-
-  weekly_agent_and_group: async (userId, start, end) => {
-    const hasAgent = await db
-      .select({ c: count() })
-      .from(agentMessages)
-      .innerJoin(users, eq(agentMessages.agentUserId, users.id))
-      .where(
-        and(
-          eq(users.managedBy, userId),
-          gte(agentMessages.createdAt, start),
-          lt(agentMessages.createdAt, end)
-        )
-      );
-    const hasGroup = await db
-      .select({ c: count() })
-      .from(messages)
-      .innerJoin(chats, eq(messages.chatId, chats.id))
-      .where(
-        and(
-          eq(messages.senderId, userId),
-          eq(chats.isGroup, true),
-          gte(messages.createdAt, start),
-          lt(messages.createdAt, end)
-        )
-      );
-    return hasAgent[0]!.c > 0 && hasGroup[0]!.c > 0 ? 1 : 0;
-  },
-
-  weekly_agent_interact: async (userId, start, end) => {
-    // Distinct agents created or messaged this week
-    const created = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(
-        and(
-          eq(users.managedBy, userId),
-          eq(users.isAgent, true),
-          gte(users.createdAt, start),
-          lt(users.createdAt, end)
-        )
-      );
-    const messaged = await db
-      .select({ agentId: agentMessages.agentUserId })
-      .from(agentMessages)
-      .innerJoin(users, eq(agentMessages.agentUserId, users.id))
-      .where(
-        and(
-          eq(users.managedBy, userId),
-          gte(agentMessages.createdAt, start),
-          lt(agentMessages.createdAt, end)
-        )
-      )
-      .groupBy(agentMessages.agentUserId);
-    const uniqueAgents = new Set([
-      ...created.map((r) => r.id),
-      ...messaged.map((r) => r.agentId),
-    ]);
-    return uniqueAgents.size;
   },
 
   weekly_positive_pnl: async (userId, start, end) => {

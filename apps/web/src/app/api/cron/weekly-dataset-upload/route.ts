@@ -5,8 +5,8 @@
  * @access Cron (CRON_SECRET)
  *
  * @description
- * Automated weekly job that aggregates benchmark data, uploads dataset to
- * HuggingFace, benchmarks RL models, and uploads improved models. Runs
+ * Automated weekly job that aggregates benchmark data and uploads datasets to
+ * HuggingFace. Runs
  * weekly on Sundays at 2 AM UTC.
  *
  * @openapi
@@ -15,7 +15,7 @@
  *     tags:
  *       - Cron
  *     summary: Weekly dataset upload
- *     description: Weekly job for dataset upload and model benchmarking
+ *     description: Weekly job for dataset upload
  *     security:
  *       - CronSecret: []
  *     responses:
@@ -29,8 +29,6 @@
  *                 success:
  *                   type: boolean
  *                 datasetsUploaded:
- *                   type: integer
- *                 modelsBenchmarked:
  *                   type: integer
  *       401:
  *         description: Unauthorized (invalid CRON_SECRET)
@@ -75,9 +73,6 @@ export const POST = withErrorHandling(async function POST(
       duration: result.duration,
       benchmarkDataset: result.datasets.benchmarks.success,
       trajectoryDataset: result.datasets.trajectories.success,
-      modelsProcessed: result.models.processed,
-      modelsBenchmarked: result.models.benchmarked,
-      modelsUploaded: result.models.uploaded,
       errors: result.errors.length,
     },
     'WeeklyDatasetUpload'
@@ -90,9 +85,6 @@ export const POST = withErrorHandling(async function POST(
       results: {
         benchmarkDataset: result.datasets.benchmarks,
         trajectoryDataset: result.datasets.trajectories,
-        modelsProcessed: result.models.processed,
-        modelsBenchmarked: result.models.benchmarked,
-        modelsUploaded: result.models.uploaded,
         errors: result.errors,
       },
     },

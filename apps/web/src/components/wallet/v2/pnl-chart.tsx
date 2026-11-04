@@ -9,14 +9,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { usePnlHistory } from '@/hooks/usePnlHistory';
-import type { PnlHistoryScope } from '@/lib/wallet/pnl-history-types';
+import type { usePnlHistory } from '@/hooks/usePnlHistory';
 
 interface PnLChartProps {
-  entityId?: string | null;
   metricLabel?: string;
-  scope: PnlHistoryScope;
-  userId: string;
+  history: ReturnType<typeof usePnlHistory>;
   timeframe: string;
 }
 
@@ -35,16 +32,11 @@ function formatChartTime(time: number, timeframe: string): string {
 }
 
 export function PnLChart({
-  entityId,
   metricLabel = 'Current P&L',
-  scope,
-  userId,
+  history,
   timeframe,
 }: PnLChartProps) {
-  const { points, loading } = usePnlHistory(userId, timeframe, {
-    entityId,
-    scope,
-  });
+  const { points, loading, error } = history;
 
   const chartData = useMemo(() => {
     if (points.length === 0) return [];
@@ -80,6 +72,14 @@ export function PnLChart({
     return (
       <div className="flex h-72 w-full items-center justify-center">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-72 w-full items-center justify-center text-muted-foreground text-sm">
+        Failed to load P&amp;L history
       </div>
     );
   }

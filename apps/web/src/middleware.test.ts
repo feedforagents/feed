@@ -32,11 +32,16 @@ describe('middleware', () => {
     );
   });
 
-  it('leaves agent API routes to next.config wildcard CORS (no credentials)', () => {
+  it('uses ordinary API CORS for retired hosted-agent paths', () => {
     const response = run('/api/agents/auth', {
       origin: 'https://feed.fun',
     });
-    expect(response.headers.get('Access-Control-Allow-Credentials')).toBeNull();
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(
+      'https://feed.fun'
+    );
+    expect(response.headers.get('Access-Control-Allow-Credentials')).toBe(
+      'true'
+    );
   });
 
   it('does not treat /api-docs or /apix as API routes', () => {

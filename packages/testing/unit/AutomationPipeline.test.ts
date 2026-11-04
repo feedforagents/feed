@@ -4,7 +4,16 @@
  * Tests core functionality without external dependencies
  */
 
-import { beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
 import * as actualFsPromises from 'node:fs/promises';
 import * as actualDbModule from '../../db/src/index';
 
@@ -17,11 +26,14 @@ import type {
   AutomationConfig,
   AutomationPipeline as AutomationPipelineType,
 } from '@feed/training';
+import type { SQL } from 'drizzle-orm';
 
 // Type for pipeline with private properties/methods exposed for testing
 // Uses a structural type to access private members in tests
 interface PipelineTestAccess {
   config: AutomationConfig;
+  currentTrainingJob: string | null;
+  cleanupExportFiles: (batchId: string) => Promise<void>;
   getNextModelVersion: () => Promise<string>;
   getTrajectoryIds: (limit?: number) => Promise<string[]>;
   runTrainingPipeline: () => Promise<void>;
@@ -76,6 +88,13 @@ const createQueryChain = (isGroupBy = false) => {
   });
 };
 
+const mockUpdateWhere = mock(async (_condition: SQL | undefined) => []);
+const mockUpdateSet = mock(
+  (_values: Partial<typeof actualDbModule.trajectories.$inferInsert>) => ({
+    where: mockUpdateWhere,
+  })
+);
+
 // Define mocks for db (Drizzle query builder style)
 const mockDb = {
   select: mock(() => createQueryChain()),
@@ -85,13 +104,7 @@ const mockDb = {
       onConflictDoNothing: () => Promise.resolve(),
     }),
   })),
-  update: mock(() => ({
-    set: () => ({
-      where: () => ({
-        returning: () => Promise.resolve([]),
-      }),
-    }),
-  })),
+  update: mock(() => ({ set: mockUpdateSet })),
   delete: mock(() => ({
     where: () => ({
       returning: () => Promise.resolve([]),
@@ -207,6 +220,8 @@ describeTests('AutomationPipeline - Unit Tests', () => {
       }
     });
     Object.values(mockLogger).forEach((fn) => fn.mockClear());
+    mockUpdateSet.mockClear();
+    mockUpdateWhere.mockClear();
 
     // Reset query result queues
     mockSelectResultsQueue = [];
@@ -517,6 +532,89 @@ describeTests('AutomationPipeline - Unit Tests', () => {
       expect(status.status).toBe('completed');
       expect(status.progress).toBe(1.0);
       expect(status.eta).toBeUndefined();
+    });
+  });
+
+  describe('Completed training bookkeeping', () => {
+    let cleanup: ReturnType<typeof spyOn>;
+    let monitor: ReturnType<typeof spyOn>;
+    const completedBatch = {
+      id: 'batch-record-1',
+      batchId: 'batch-1',
+      status: 'completed',
+      trajectoryIds: JSON.stringify(['traj-1', 'traj-2']),
+    };
+
+    beforeEach(() => {
+      asTestAccess(pipeline).currentTrainingJob = 'batch-1';
+      cleanup = spyOn(
+        asTestAccess(pipeline),
+        'cleanupExportFiles'
+      ).mockResolvedValue(undefined);
+      monitor = spyOn(pipeline, 'monitorTraining').mockResolvedValue({
+        status: 'completed',
+      });
+      mockSelectResultsQueue = [[completedBatch]];
+    });
+
+    afterEach(() => {
+      cleanup.mockRestore();
+      monitor.mockRestore();
+    });
+
+    test('records consumed trajectories before cleaning up a completed job', async () => {
+      cleanup.mockImplementation(async () => {
+        expect(mockUpdateSet).toHaveBeenCalledWith({
+          usedInTraining: true,
+          trainedInBatch: 'batch-record-1',
+        });
+        expect(mockUpdateWhere).toHaveBeenCalledTimes(1);
+        expect(asTestAccess(pipeline).currentTrainingJob).toBe('batch-1');
+      });
+
+      await pipeline.runAutomationCycle();
+
+      expect(mockDb.update).toHaveBeenCalledWith(actualDbModule.trajectories);
+      expect(cleanup).toHaveBeenCalledWith('batch-1');
+      expect(asTestAccess(pipeline).currentTrainingJob).toBeNull();
+    });
+
+    test('retains the job and export files when bookkeeping fails, then retries', async () => {
+      mockUpdateWhere.mockRejectedValueOnce(new Error('write failed'));
+      await expect(pipeline.runAutomationCycle()).rejects.toThrow(
+        'write failed'
+      );
+      expect(cleanup).not.toHaveBeenCalled();
+      expect(asTestAccess(pipeline).currentTrainingJob).toBe('batch-1');
+
+      mockSelectResultsQueue = [[completedBatch]];
+      await pipeline.runAutomationCycle();
+      expect(mockUpdateWhere).toHaveBeenCalledTimes(2);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(asTestAccess(pipeline).currentTrainingJob).toBeNull();
+    });
+
+    test('does not consume trajectories from a failed training job', async () => {
+      monitor.mockResolvedValueOnce({
+        status: 'failed',
+        error: 'trainer failed',
+      });
+      await pipeline.runAutomationCycle();
+      expect(mockDb.update).not.toHaveBeenCalled();
+      expect(cleanup).toHaveBeenCalledWith('batch-1');
+      expect(asTestAccess(pipeline).currentTrainingJob).toBeNull();
+    });
+
+    test('keeps malformed batch metadata available for recovery without consumption', async () => {
+      mockSelectResultsQueue = [
+        [{ ...completedBatch, trajectoryIds: '["traj-1", 42]' }],
+      ];
+      await expect(pipeline.runAutomationCycle()).rejects.toThrow(
+        'Invalid trajectory IDs'
+      );
+      expect(mockDb.update).not.toHaveBeenCalled();
+      expect(cleanup).not.toHaveBeenCalled();
+      expect(asTestAccess(pipeline).currentTrainingJob).toBe('batch-1');
     });
   });
 

@@ -7,7 +7,6 @@ import {
   formatNumberWithSeparators,
   getProfileUrl,
   type LeaderboardMetric,
-  type LeaderboardScope,
 } from '@feed/shared';
 import {
   Bot,
@@ -51,8 +50,7 @@ export default function LeaderboardPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedMetric, setSelectedMetric] =
     useState<LeaderboardMetric>('reputation');
-  const [selectedScope, setSelectedScope] =
-    useState<LeaderboardScope>('wallet');
+  const selectedScope = 'wallet';
   const [selectedUser, setSelectedUser] = useState<SelectedUser | null>(null);
   // Token is bound to the account it was issued for, so an A->B switch never
   // sends A's token with B's userId while B's token is resolving.
@@ -170,12 +168,6 @@ export default function LeaderboardPage() {
     resetLeaderboardView();
   };
 
-  const handleScopeChange = (scope: LeaderboardScope) => {
-    if (scope === selectedScope) return;
-    setSelectedScope(scope);
-    resetLeaderboardView();
-  };
-
   const handlePreviousPage = () => {
     if (currentPage > 1) {
       setCurrentPage(currentPage - 1);
@@ -219,44 +211,19 @@ export default function LeaderboardPage() {
       isAgent: player.isAgent,
       managedBy: player.managedBy,
       nftTokenId: player.nftTokenId,
-      teamReputationPoints: player.teamReputationPoints,
-      userReputationPoints: player.userReputationPoints,
-      agentReputationPoints: player.agentReputationPoints,
-      teamLifetimePnL: player.teamLifetimePnL,
-      teamCapitalBase: player.teamCapitalBase,
-      teamEffectiveCapitalBase: player.teamEffectiveCapitalBase,
-      teamTradingReturn: player.teamTradingReturn,
-      userLifetimePnL: player.userLifetimePnL,
-      agentLifetimePnL: player.agentLifetimePnL,
-      agentCount: player.agentCount,
     });
   };
 
-  const isTeamView = selectedScope === 'team';
-  const currentUserRowId =
-    authenticated && user
-      ? isTeamView && currentUserPosition
-        ? currentUserPosition.entry.id
-        : user.id
-      : null;
+  const currentUserRowId = authenticated && user ? user.id : null;
   const isCurrentUserOnPage = currentUserRowId
     ? leaderboardData?.leaderboard.some((p) => p.id === currentUserRowId)
     : false;
   const followedUserIds = new Set(leaderboardData?.followingUserIds ?? []);
 
-  const leaderboardDescriptions: Record<
-    LeaderboardMetric,
-    Record<LeaderboardScope, string>
-  > = {
-    reputation: {
-      wallet: 'Individual wallets ranked by reputation',
-      team: 'Users + their AI agents combined, ranked by team reputation',
-    },
-    trading: {
-      wallet:
-        'Individual wallets ranked by realized trading return: lifetime P&L divided by capital base',
-      team: 'Teams ranked by combined realized return, with owner-agent transfers excluded from team capital base',
-    },
+  const leaderboardDescriptions: Record<LeaderboardMetric, string> = {
+    reputation: 'Individual wallets ranked by reputation',
+    trading:
+      'Individual wallets ranked by realized trading return: lifetime P&L divided by capital base',
   };
 
   const formatRelativeTime = (iso: string): string => {
@@ -291,22 +258,14 @@ export default function LeaderboardPage() {
   };
 
   const getTradingReturn = (player: LeaderboardUser): number =>
-    isTeamView
-      ? (player.teamTradingReturn ?? player.tradingReturn ?? 0)
-      : (player.tradingReturn ?? 0);
+    player.tradingReturn ?? 0;
 
   const getTradingLifetimePnL = (player: LeaderboardUser): number =>
-    isTeamView
-      ? (player.teamLifetimePnL ?? player.lifetimePnL)
-      : player.lifetimePnL;
+    player.lifetimePnL;
 
   const getDisplayValue = (player: LeaderboardUser): number => {
     if (selectedMetric === 'trading') {
       return getTradingReturn(player);
-    }
-
-    if (isTeamView && player.teamReputationPoints !== undefined) {
-      return player.teamReputationPoints;
     }
 
     return player.reputationPoints;
@@ -321,9 +280,9 @@ export default function LeaderboardPage() {
 
   const getDisplayLabel = (): string => {
     if (selectedMetric === 'trading') {
-      return isTeamView ? 'Team Trading Return' : 'Trading Return';
+      return 'Trading Return';
     }
-    return isTeamView ? 'Team Reputation' : 'Reputation';
+    return 'Reputation';
   };
 
   const renderPlayerRow = (
@@ -340,11 +299,6 @@ export default function LeaderboardPage() {
         ? formatTradingPnL(getTradingLifetimePnL(player))
         : null;
     const isPinned = variant === 'pinned';
-    const agentLabel =
-      isTeamView && player.agentCount !== undefined && player.agentCount > 0
-        ? `${player.agentCount} ${player.agentCount === 1 ? 'agent' : 'agents'}`
-        : null;
-
     // One row tree for every breakpoint: compact stats under the name below
     // xl, right-aligned stats on xl.
     return (
@@ -413,9 +367,6 @@ export default function LeaderboardPage() {
                 <span className="font-bold text-foreground">
                   {formattedValue} {getDisplayLabel()}
                 </span>
-                {agentLabel && (
-                  <span className="text-muted-foreground">{agentLabel}</span>
-                )}
               </div>
               {secondaryTradingPnL && (
                 <div className="text-muted-foreground text-xs">
@@ -432,10 +383,7 @@ export default function LeaderboardPage() {
             {formattedValue}
           </div>
           <div className="space-y-0.5 text-right text-muted-foreground text-xs">
-            <div>
-              {getDisplayLabel()}
-              {agentLabel && ` (${agentLabel})`}
-            </div>
+            <div>{getDisplayLabel()}</div>
             {secondaryTradingPnL && (
               <div>Lifetime P&amp;L {secondaryTradingPnL}</div>
             )}
@@ -456,12 +404,8 @@ export default function LeaderboardPage() {
           </p>
           <p className="text-sm">
             {selectedMetric === 'trading'
-              ? isTeamView
-                ? 'No teams have realized trading return yet. Start trading to appear here!'
-                : 'No wallets have realized trading return yet. Start trading to appear here!'
-              : isTeamView
-                ? 'No teams have reputation yet. Start playing to appear here!'
-                : 'No wallets have reputation yet. Start playing to appear here!'}
+              ? 'No wallets have realized trading return yet. Start trading to appear here!'
+              : 'No wallets have reputation yet. Start playing to appear here!'}
           </p>
         </div>
       </div>
@@ -582,14 +526,12 @@ export default function LeaderboardPage() {
           <div className="sticky top-0 z-10 shrink-0 bg-background shadow-sm">
             <LeaderboardToggle
               activeMetric={selectedMetric}
-              activeScope={selectedScope}
               onMetricChange={handleMetricChange}
-              onScopeChange={handleScopeChange}
             />
             <div className="flex items-center justify-between px-3 py-2 sm:px-4 xl:px-6 xl:py-3">
               <div className="flex items-center gap-1.5 xl:gap-2">
                 <p className="text-muted-foreground text-xs sm:text-sm">
-                  {leaderboardDescriptions[selectedMetric][selectedScope]}
+                  {leaderboardDescriptions[selectedMetric]}
                 </p>
                 {isFetching && !isLoading && (
                   <span className="h-1 w-1 animate-pulse rounded-full bg-primary/60 xl:h-1.5 xl:w-1.5" />
@@ -620,7 +562,6 @@ export default function LeaderboardPage() {
         <LeaderboardWidgetSidebar
           selectedUser={selectedUser}
           leaderboardMetric={selectedMetric}
-          leaderboardScope={selectedScope}
         />
       </div>
     </PageContainer>

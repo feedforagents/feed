@@ -1,7 +1,7 @@
 'use client';
 
 import { cn } from '@feed/shared';
-import { Bot, MessageCircle, TrendingUp, Wallet } from 'lucide-react';
+import { MessageCircle, TrendingUp, Wallet } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -13,7 +13,7 @@ import { useUnreadMessages } from '@/hooks/useUnreadMessages';
 /**
  * Bottom navigation content component for mobile devices.
  *
- * Provides mobile navigation with Feed, Terminal, Chats, Agents, and Notifications tabs.
+ * Provides mobile navigation with Feed, Terminal, Chats, and Notifications tabs.
  * Shows unread message and notification badges. Automatically hides when WAITLIST_MODE
  * is enabled on home page.
  *
@@ -66,13 +66,6 @@ function BottomNavContent() {
       icon: HouseIcon,
       color: '#0066FF',
       active: pathname === '/feed' || pathname === '/',
-    },
-    {
-      name: 'Agents',
-      href: '/agents/team',
-      icon: Bot,
-      color: '#0066FF',
-      active: pathname === '/agents' || pathname.startsWith('/agents/'),
     },
     {
       name: 'Markets',
@@ -156,7 +149,7 @@ function BottomNavContent() {
 /**
  * Bottom navigation component for mobile devices.
  *
- * Provides mobile navigation with Feed, Terminal, Chats, Agents, and Notifications tabs.
+ * Provides mobile navigation with Feed, Terminal, Chats, and Notifications tabs.
  * Shows unread message and notification badges. Automatically hides when WAITLIST_MODE
  * is enabled on home page.
  *

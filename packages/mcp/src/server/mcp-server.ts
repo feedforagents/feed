@@ -4,6 +4,7 @@
  * Defines MCP server info, capabilities, and available tools
  */
 
+import { LEADERBOARD_SCOPES } from '@feed/shared';
 import type {
   Implementation,
   InitializeResult,
@@ -707,7 +708,7 @@ export function getAvailableTools(): MCPTool[] {
           pageSize: { type: 'number', description: 'Page size' },
           type: {
             type: 'string',
-            enum: ['wallet', 'team'],
+            enum: [...LEADERBOARD_SCOPES],
             description: 'Leaderboard type',
             default: 'wallet',
           },

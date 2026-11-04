@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import type { IAgentRuntime } from '@elizaos/core';
+import { StaticDataRegistry } from '@feed/engine';
+import * as agentLLM from '../../llm/agent-llm';
 import * as npcContextProvider from '../../plugins/feed/providers/npc-game-context';
-import * as agentConfig from '../../shared/agent-config';
 import { normalizeDecisionAction } from '../action-normalization';
 import { extractFirstJsonObject } from '../decision-json';
 import { MultiStepExecutor } from '../MultiStepExecutor';
@@ -9,9 +10,214 @@ import { normalizeSocialDecisionParameters } from '../social-parameter-normaliza
 import {
   Actions,
   type AgentTickContext,
+  buildMultiStepDecisionPrompt,
   Features,
 } from '../templates/multi-step-decision';
 import { normalizeTradeDecisionParameters } from '../trade-parameter-normalization';
+
+describe('decision response validation', () => {
+  const runtime = { character: { settings: {} } } as unknown as IAgentRuntime;
+  const missingThought = JSON.stringify({
+    action: 'TRADE',
+    parameters: {
+      marketId: 'market-1',
+      marketType: 'prediction',
+      side: 'buy_yes',
+      amount: 10,
+    },
+    isFinish: false,
+  });
+  const validDecision = JSON.stringify({
+    thought: 'I have no further action.',
+    action: 'FINISH',
+    parameters: {},
+    isFinish: true,
+  });
+
+  afterEach(() => mock.restore());
+
+  test('sends missing-field feedback on the next transport request', async () => {
+    const call = spyOn(agentLLM, 'callAgentLLM')
+      .mockResolvedValueOnce(missingThought)
+      .mockResolvedValueOnce(validDecision);
+    const result = await new MultiStepExecutor()['getDecision'](
+      'Choose an action',
+      runtime,
+      1
+    );
+    expect(result?.decision.thought).toBe('I have no further action.');
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(call.mock.calls[1]?.[0].prompt).toContain(
+      'Decision requires action, thought, and object parameters; isFinish, if provided, must be boolean'
+    );
+    expect(call.mock.calls[1]?.[0].prompt).not.toContain('malformed JSON');
+  });
+
+  test('exhausts all three attempts when thought is repeatedly missing', async () => {
+    const call = spyOn(agentLLM, 'callAgentLLM').mockResolvedValue(
+      missingThought
+    );
+    const result = await new MultiStepExecutor()['getDecision'](
+      'Choose an action',
+      runtime,
+      1
+    );
+    expect(result).toBeNull();
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(call.mock.calls[2]?.[0].prompt).toContain(
+      'Decision requires action, thought, and object parameters; isFinish, if provided, must be boolean'
+    );
+  });
+
+  for (const { action, isFinish, legacy } of [
+    { action: 'TRADE', isFinish: false, legacy: undefined },
+    { action: 'FINISH', isFinish: true, legacy: undefined },
+    { action: 'WAIT', isFinish: true, legacy: undefined },
+    { action: 'TRADE', isFinish: false, legacy: true },
+    { action: 'FINISH', isFinish: true, legacy: false },
+    { action: 'WAIT', isFinish: true, legacy: false },
+  ]) {
+    test(`derives terminal state for ${action} with legacy flag ${legacy}`, async () => {
+      const response = JSON.stringify({
+        thought: 'A brief decision.',
+        action,
+        parameters: {},
+        ...(legacy === undefined ? {} : { isFinish: legacy }),
+      });
+      const call = spyOn(agentLLM, 'callAgentLLM').mockResolvedValue(response);
+      const result = await new MultiStepExecutor()['getDecision'](
+        'Choose an action',
+        runtime,
+        1
+      );
+      expect(result?.decision).toEqual({
+        thought: 'A brief decision.',
+        action,
+        parameters: {},
+        isFinish,
+      });
+      expect(call).toHaveBeenCalledTimes(1);
+    });
+  }
+  test('rejects nonboolean legacy finish flags rather than inventing a decision', async () => {
+    const call = spyOn(agentLLM, 'callAgentLLM').mockResolvedValue(
+      JSON.stringify({
+        thought: 'Check the market.',
+        action: 'TRADE',
+        parameters: {},
+        isFinish: 'false',
+      })
+    );
+    const result = await new MultiStepExecutor()['getDecision'](
+      'Choose an action',
+      runtime,
+      1
+    );
+    expect(result).toBeNull();
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(call.mock.calls[1]?.[0].prompt).toContain(
+      'isFinish, if provided, must be boolean'
+    );
+  });
+
+  test('keeps malformed JSON feedback for syntax errors', async () => {
+    const call = spyOn(agentLLM, 'callAgentLLM')
+      .mockResolvedValueOnce('{"action":}')
+      .mockResolvedValueOnce(validDecision);
+    const result = await new MultiStepExecutor()['getDecision'](
+      'Choose an action',
+      runtime,
+      1
+    );
+    expect(result?.decision.action).toBe('FINISH');
+    expect(call.mock.calls[1]?.[0].prompt).toContain('malformed JSON');
+  });
+
+  test('specifies required decision fields without prescribing FINISH and respects the NPC step limit', () => {
+    const { prompt } = buildMultiStepDecisionPrompt({
+      agentName: 'Test NPC',
+      iterationCount: 1,
+      maxIterations: 4,
+      traceActionResults: [],
+      isNpc: true,
+      shareTradeRoll: 0.9,
+      context: {
+        balance: 100,
+        pnl: 0,
+        openPositions: 0,
+        pendingCommentReplies: [],
+        pendingChatMessages: [
+          {
+            id: 'message-1',
+            chatId: '376080731199242240',
+            chatName: 'Test DM',
+            isGroupChat: false,
+            author: 'observer',
+            content: 'What evidence would you watch?',
+            recentMessages: [],
+            formattedContext: 'observer: What evidence would you watch?',
+            timestamp: new Date(),
+          },
+        ],
+        enabledFeatures: [Features.TRADING, Features.DMS],
+        predictionMarkets: [],
+        perpMarkets: [],
+        recentPosts: [],
+        agentPositions: { predictions: [], perps: [] },
+      },
+    });
+    const format = prompt
+      .split('# Output Format (JSON only, no markdown)\n')[1]
+      ?.split('## Parameter Schemas')[0];
+    expect(format).toContain('three required fields');
+    expect(format).toContain('"thought": a nonempty string');
+    expect(format).toContain('"action": one action string');
+    expect(format).toContain('"parameters": an object');
+    expect(format).not.toContain('"isFinish"');
+    expect(format).not.toContain('"action": "FINISH"');
+    const displayedChatId = prompt.match(/chatId: ("\d+")/)?.[1];
+    expect(displayedChatId).toBeDefined();
+    expect(JSON.parse(displayedChatId!)).toBe('376080731199242240');
+    expect(prompt).toContain('Never use JSON numbers for IDs');
+    expect(prompt).toContain('up to 4 iterations');
+    expect(prompt).not.toContain('5-10 actions');
+    expect(prompt).not.toContain('at least 5 different things');
+  });
+
+  test('only encourages posting after trades when posting is enabled', () => {
+    const traceActionResults = Array.from({ length: 3 }, () => ({
+      actionType: Actions.TRADE,
+      success: true,
+      timestamp: Date.now(),
+    }));
+    const makePrompt = (enabledFeatures: string[]) =>
+      buildMultiStepDecisionPrompt({
+        agentName: 'Test NPC',
+        iterationCount: 4,
+        maxIterations: 4,
+        traceActionResults,
+        isNpc: true,
+        shareTradeRoll: 0.9,
+        context: {
+          balance: 100,
+          pnl: 0,
+          openPositions: 0,
+          pendingCommentReplies: [],
+          pendingChatMessages: [],
+          enabledFeatures,
+          predictionMarkets: [],
+          perpMarkets: [],
+          recentPosts: [],
+          agentPositions: { predictions: [], perps: [] },
+        },
+      }).prompt;
+
+    expect(makePrompt([Features.TRADING])).not.toContain('**TIME TO POST**');
+    expect(makePrompt([Features.TRADING, Features.POSTING])).toContain(
+      '**TIME TO POST**'
+    );
+  });
+});
 
 describe('normalizeDecisionAction', () => {
   test('preserves valid actions', () => {
@@ -506,12 +712,14 @@ describe('tick success reflects execution outcomes', () => {
 });
 
 describe('NPC iteration ceiling (PRD D-25)', () => {
+  const actor = StaticDataRegistry.getAllActors()[0]!;
   afterEach(() => mock.restore());
 
   function prepare(executor: MultiStepExecutor) {
     const runtime = {
+      agentId: actor.id,
       character: {
-        name: 'Budget test',
+        name: actor.name,
         feed: {
           autonomy: {
             trading: false,
@@ -553,7 +761,6 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       getLatestContextRefreshSummary: MultiStepExecutor['getLatestContextRefreshSummary'];
       recordTrajectoryStep: MultiStepExecutor['recordTrajectoryStep'];
     };
-    spyOn(agentConfig, 'getAgentConfig').mockResolvedValue(null);
     spyOn(npcContextProvider, 'getNpcGameContext').mockResolvedValue('');
     spyOn(executor, 'gatherContext').mockResolvedValue(context);
     spyOn(internal, 'getLatestContextRefreshSummary').mockResolvedValue(
@@ -581,13 +788,13 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
 
   for (const [label, executor, expected] of [
     ['default', () => new MultiStepExecutor(), 4],
-    ['explicit larger budget', () => new MultiStepExecutor(7, 12), 4],
-    ['smaller budget', () => new MultiStepExecutor(5, 2), 2],
+    ['explicit larger budget', () => new MultiStepExecutor(12), 4],
+    ['smaller budget', () => new MultiStepExecutor(2), 2],
   ] as const) {
     test(`NPC tick respects ${label}`, async () => {
       const instance = executor();
       const { runtime, decision, execute } = prepare(instance);
-      const result = await instance.execute('npc-test', runtime, true);
+      const result = await instance.execute(actor.id, runtime, true);
       expect(result.success).toBe(true);
       expect(result.iterations).toBe(expected);
       expect(decision).toHaveBeenCalledTimes(expected);
@@ -607,19 +814,97 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       },
       rawResponse: '{}',
     });
-    expect((await executor.execute('npc-test', runtime, true)).iterations).toBe(
+    expect((await executor.execute(actor.id, runtime, true)).iterations).toBe(
       0
     );
     expect(decision).toHaveBeenCalledTimes(1);
     expect(execute).not.toHaveBeenCalled();
   });
 
+  test('rejects a tick after three decisions omit the required thought', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockRestore();
+    const call = spyOn(agentLLM, 'callAgentLLM').mockResolvedValue(
+      JSON.stringify({
+        action: 'LIKE',
+        parameters: { postId: 'post-1' },
+        isFinish: false,
+      })
+    );
+
+    await expect(executor.execute(actor.id, runtime, true)).rejects.toThrow(
+      `Failed to parse decision for agent ${actor.id}`
+    );
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test('retries a disabled action before executing the corrected allowed action', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockResolvedValueOnce({
+      decision: {
+        thought: 'Post an update',
+        action: Actions.POST,
+        parameters: { content: 'An update' },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      'feature "posting" is disabled'
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('repeated disabled decisions exhaust the existing two attempts without execution', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockResolvedValue({
+      decision: {
+        thought: 'Post an update',
+        action: Actions.POST,
+        parameters: { content: 'An update' },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    });
+
+    await expect(executor.execute(actor.id, runtime, true)).rejects.toThrow(
+      'feature "posting" is disabled'
+    );
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test('direct execution still blocks a disabled feature', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, execute } = prepare(executor);
+    execute.mockRestore();
+
+    const result = await executor['executeAction'](
+      actor.id,
+      Actions.POST,
+      { content: 'An update' },
+      [Features.ENGAGING],
+      runtime,
+      true
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Feature "posting" is disabled');
+  });
+
   test('invalid configured budgets still fail', () => {
     for (const budget of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(() => new MultiStepExecutor(5, budget)).toThrow(
-        'Iteration budgets must be positive integers'
-      );
-      expect(() => new MultiStepExecutor(budget, 4)).toThrow(
+      expect(() => new MultiStepExecutor(budget)).toThrow(
         'Iteration budgets must be positive integers'
       );
     }

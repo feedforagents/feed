@@ -51,10 +51,6 @@ interface MessageListProps {
   ) => void;
   /** Compact action row: merge reactions + tags into one row, hide on own messages */
   compactActions?: boolean;
-  /** Set of agent user IDs — used to show settings icon on latest agent message */
-  agentIds?: ReadonlySet<string>;
-  /** Callback to open agent settings modal */
-  onViewSettings?: (agentId: string) => void;
   /** Callback when user wants to reply to a message */
   onReply?: (message: Message) => void;
 }
@@ -73,8 +69,6 @@ export function MessageList({
   onTagClick,
   onToggleReaction,
   compactActions = false,
-  agentIds,
-  onViewSettings,
   onReply,
 }: MessageListProps) {
   // Extract usernames from participants for @mention formatting
@@ -84,19 +78,6 @@ export function MessageList({
       .map((p) => p.username)
       .filter((username): username is string => !!username);
   }, [participants]);
-
-  // Compute latest message ID per agent (for settings icon placement)
-  const latestAgentMessageIds = useMemo(() => {
-    if (!agentIds?.size || !onViewSettings) return new Set<string>();
-    const latest = new Map<string, string>();
-    // Messages are in chronological order; last one per agent wins
-    for (const msg of messages) {
-      if (agentIds.has(msg.senderId)) {
-        latest.set(msg.senderId, msg.id);
-      }
-    }
-    return new Set(latest.values());
-  }, [messages, agentIds, onViewSettings]);
 
   // Build lookup map for resolving replyToMessage from local messages.
   // Used as fallback when SSE messages arrive without the full reply snippet.
@@ -213,10 +194,6 @@ export function MessageList({
             const isCurrentUser = currentUserId
               ? msg.senderId === currentUserId
               : false;
-            const showSettings =
-              onViewSettings && latestAgentMessageIds.has(msg.id)
-                ? onViewSettings
-                : undefined;
 
             return (
               <React.Fragment key={key}>
@@ -234,7 +211,6 @@ export function MessageList({
                       authenticated ? onToggleReaction : undefined
                     }
                     compactActions={compactActions}
-                    onViewSettings={showSettings}
                   />
                 )}
               </React.Fragment>

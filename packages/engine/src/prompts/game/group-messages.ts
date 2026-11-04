@@ -136,16 +136,13 @@ Respond with ONLY this XML:
         <message>
           <actorId>actor-id</actorId>
           <content>private message (max 200 chars, in character voice)</content>
-          <referencesEvent>what event/question this relates to</referencesEvent>
         </message>
       </messages>
-      <conversationTheme>what this conversation is really about</conversationTheme>
-      <buildsOnPrevious>what previous conversation this continues or "new thread"</buildsOnPrevious>
     </group>
   </groups>
 </response>
 
-Return EXACTLY {{groupCount}} groups. Each must have distinct themes and advance relationships.
+Return EXACTLY {{groupCount}} groups using the supplied groupId and actorId values. Each must have distinct themes and advance relationships.
 No other text.
 `.trim(),
 });

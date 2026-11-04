@@ -2,7 +2,7 @@
 /**
  * Local Cron Simulator
  *
- * Simulates the Cloudflare cron scheduler locally by calling game-tick, markets-tick, agent-tick, and npc-tick endpoints every minute.
+ * Simulates the Cloudflare cron scheduler locally by calling game-tick, markets-tick, and npc-tick endpoints every minute.
  * Use this if you don't want to run the full daemon but want content generation and agent activity.
  *
  * Usage:
@@ -15,11 +15,11 @@
 const CRON_INTERVAL = 60000; // 60 seconds
 const GAME_TICK_URL = 'http://localhost:3000/api/cron/game-tick';
 const MARKETS_TICK_URL = 'http://localhost:3000/api/cron/markets-tick';
-const AGENT_TICK_URL = 'http://localhost:3000/api/cron/agent-tick';
 const NPC_TICK_URL = 'http://localhost:3000/api/cron/npc-tick';
 
 let intervalId: NodeJS.Timeout | null = null;
 let tickCount = 0;
+let tickInProgress = false;
 
 async function executeGameTick() {
   tickCount++;
@@ -95,77 +95,6 @@ async function executeGameTick() {
       posts: data.result?.postsCreated || 0,
       events: data.result?.eventsCreated || 0,
       markets: data.result?.marketsUpdated || 0,
-    },
-    'LocalCron'
-  );
-}
-
-async function executeAgentTick() {
-  console.info(
-    `🤖 Triggering agent tick #${tickCount}...`,
-    undefined,
-    'LocalCron'
-  );
-
-  const response = await fetch(AGENT_TICK_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.CRON_SECRET || 'development'}`,
-      'Content-Type': 'application/json',
-    },
-  }).catch((error: Error) => {
-    const errorMessage = error.message;
-    console.error(
-      `Agent tick #${tickCount} error: ${errorMessage}`,
-      { error },
-      'LocalCron'
-    );
-    return null;
-  });
-
-  if (!response) return;
-
-  // Check content-type before parsing JSON
-  const contentType = response.headers.get('content-type') || '';
-
-  if (!response.ok) {
-    if (contentType.includes('application/json')) {
-      const data = await response.json();
-      console.error(
-        `Agent tick #${tickCount} failed (HTTP ${response.status})`,
-        data,
-        'LocalCron'
-      );
-    } else {
-      const text = await response.text();
-      console.error(
-        `Agent tick #${tickCount} failed (HTTP ${response.status})`,
-        {
-          body: text.slice(0, 500),
-        },
-        'LocalCron'
-      );
-    }
-    return;
-  }
-
-  if (!contentType.includes('application/json')) {
-    console.error(
-      `Agent tick #${tickCount} returned non-JSON response`,
-      { contentType },
-      'LocalCron'
-    );
-    return;
-  }
-
-  const data = await response.json();
-
-  console.info(
-    `✅ Agent tick #${tickCount} completed`,
-    {
-      agentsProcessed: data.processed || 0,
-      totalActions: data.totalActions || 0,
-      errors: data.errors || 0,
     },
     'LocalCron'
   );
@@ -279,7 +208,6 @@ async function executeMarketsTick() {
 async function executeTick() {
   await executeGameTick();
   await executeMarketsTick();
-  await executeAgentTick();
   await executeNpcTick();
 }
 
@@ -344,7 +272,7 @@ async function main() {
   console.info('🔄 LOCAL CRON SIMULATOR', undefined, 'LocalCron');
   console.info('======================', undefined, 'LocalCron');
   console.info(
-    'Simulating the cron scheduler by calling game-tick, markets-tick, agent-tick, npc-tick every minute',
+    'Simulating the cron scheduler by calling game-tick, markets-tick, npc-tick every minute',
     undefined,
     'LocalCron'
   );
@@ -367,7 +295,13 @@ async function main() {
 
   // Then execute every minute
   intervalId = setInterval(async () => {
-    await executeTick();
+    if (tickInProgress) return;
+    tickInProgress = true;
+    try {
+      await executeTick();
+    } finally {
+      tickInProgress = false;
+    }
   }, CRON_INTERVAL);
 
   // Handle shutdown gracefully

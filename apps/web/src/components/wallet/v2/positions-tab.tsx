@@ -7,8 +7,8 @@ import {
   formatCurrency,
   logger,
 } from '@feed/shared';
-import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import {
   type ClosePerpDetails,
@@ -17,7 +17,6 @@ import {
 } from '@/components/markets/TradeConfirmationDialog';
 import { useAuth } from '@/hooks/useAuth';
 import { useMarketPrices } from '@/hooks/useMarketPrices';
-import { useOnClickOutside } from '@/hooks/useOnClickOutside';
 import { usePerpTrade } from '@/hooks/usePerpTrade';
 import { usePredictionTrading } from '@/hooks/usePredictionTrading';
 import { invalidatePerpMarketsCache } from '@/stores/perpMarketsStore';
@@ -33,7 +32,6 @@ interface PositionsTabProps {
   userId: string;
 }
 
-type MemberFilter = 'all' | 'owner' | string;
 type OutcomeFilter = 'all' | 'won' | 'lost';
 
 type PendingTrade =
@@ -62,8 +60,6 @@ interface ClosedPerpPosition {
   leverage: number;
   realizedPnL: number;
   closedAt: string | null;
-  isAgentPosition: boolean;
-  agentName: string | null;
 }
 
 interface ClosedPredictionPosition {
@@ -78,8 +74,6 @@ interface ClosedPredictionPosition {
   outcome: boolean | null;
   resolvedAt: string | null;
   createdAt: string | null;
-  isAgentPosition: boolean;
-  agentName: string | null;
 }
 
 const CLOSED_PAGE_SIZE = 50; // Fetch a generous batch; paginate client-side
@@ -101,9 +95,6 @@ export function PositionsTab({ userId }: PositionsTabProps) {
   );
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
   const [pendingTrade, setPendingTrade] = useState<PendingTrade | null>(null);
-  const [memberFilter, setMemberFilter] = useState<MemberFilter>('all');
-  const [memberDropdownOpen, setMemberDropdownOpen] = useState(false);
-  const memberDropdownRef = useRef<HTMLDivElement>(null);
 
   // Closed positions state
   const [closedPerps, setClosedPerps] = useState<ClosedPerpPosition[]>([]);
@@ -187,61 +178,14 @@ export function PositionsTab({ userId }: PositionsTabProps) {
     [perpPositions, livePrices]
   );
 
-  // Build member list for filter dropdown
-  const memberOptions = useMemo(() => {
-    const agents = new Set<string>();
-    for (const pos of perpPositions) {
-      if (pos.isAgentPosition && pos.agentName) agents.add(pos.agentName);
-    }
-    for (const pos of predictionPositions) {
-      if (pos.isAgentPosition && pos.agentName) agents.add(pos.agentName);
-    }
-    for (const pos of closedPerps) {
-      if (pos.isAgentPosition && pos.agentName) agents.add(pos.agentName);
-    }
-    for (const pos of closedPredictions) {
-      if (pos.isAgentPosition && pos.agentName) agents.add(pos.agentName);
-    }
-    return ['all', 'owner', ...Array.from(agents)] as string[];
-  }, [perpPositions, predictionPositions, closedPerps, closedPredictions]);
-
-  useOnClickOutside(memberDropdownRef, () => {
-    setMemberDropdownOpen(false);
-  });
-
-  const memberFilterLabel =
-    memberFilter === 'all'
-      ? 'All Members'
-      : memberFilter === 'owner'
-        ? 'You'
-        : memberFilter;
-
-  // Filter positions by member
-  const filteredPerps = useMemo(() => {
-    if (memberFilter === 'all') return perpsWithPnL;
-    if (memberFilter === 'owner')
-      return perpsWithPnL.filter((p) => !p.position.isAgentPosition);
-    return perpsWithPnL.filter((p) => p.position.agentName === memberFilter);
-  }, [perpsWithPnL, memberFilter]);
-
-  const visiblePredictionPositions = predictionPositions.filter(
+  const filteredPerps = perpsWithPnL;
+  const filteredPredictions = predictionPositions.filter(
     (position) => !position.resolved
   );
 
-  const filteredPredictions = useMemo(() => {
-    const open = visiblePredictionPositions;
-    if (memberFilter === 'all') return open;
-    if (memberFilter === 'owner') return open.filter((p) => !p.isAgentPosition);
-    return open.filter((p) => p.agentName === memberFilter);
-  }, [visiblePredictionPositions, memberFilter]);
-
-  // Filter closed positions by member and outcome
+  // Filter personal closed positions by outcome
   const filteredClosedPerps = useMemo(() => {
     let filtered = closedPerps;
-    if (memberFilter === 'owner')
-      filtered = filtered.filter((p) => !p.isAgentPosition);
-    else if (memberFilter !== 'all')
-      filtered = filtered.filter((p) => p.agentName === memberFilter);
 
     if (outcomeFilter === 'won')
       filtered = filtered.filter((p) => p.realizedPnL >= 0);
@@ -249,21 +193,17 @@ export function PositionsTab({ userId }: PositionsTabProps) {
       filtered = filtered.filter((p) => p.realizedPnL < 0);
 
     return filtered;
-  }, [closedPerps, memberFilter, outcomeFilter]);
+  }, [closedPerps, outcomeFilter]);
 
   const filteredClosedPredictions = useMemo(() => {
     let filtered = closedPredictions;
-    if (memberFilter === 'owner')
-      filtered = filtered.filter((p) => !p.isAgentPosition);
-    else if (memberFilter !== 'all')
-      filtered = filtered.filter((p) => p.agentName === memberFilter);
 
     if (outcomeFilter === 'won') filtered = filtered.filter((p) => p.pnl >= 0);
     else if (outcomeFilter === 'lost')
       filtered = filtered.filter((p) => p.pnl < 0);
 
     return filtered;
-  }, [closedPredictions, memberFilter, outcomeFilter]);
+  }, [closedPredictions, outcomeFilter]);
 
   // Combine all filtered closed positions into one list for pagination
   const allFilteredClosed = useMemo(() => {
@@ -479,44 +419,7 @@ export function PositionsTab({ userId }: PositionsTabProps) {
 
   return (
     <div className="space-y-4 md:space-y-6">
-      {/* Header with member filter */}
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="font-semibold text-base">Positions</h2>
-        <div className="relative inline-block" ref={memberDropdownRef}>
-          <button
-            className="flex items-center gap-1.5 font-semibold text-base"
-            onClick={() => setMemberDropdownOpen((prev) => !prev)}
-          >
-            {memberFilterLabel}
-            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-          </button>
-          {memberDropdownOpen && (
-            <div className="absolute top-full right-0 z-50 mt-1 min-w-[160px] overflow-hidden rounded-lg border border-border bg-background shadow-lg">
-              {memberOptions.map((opt) => {
-                const label =
-                  opt === 'all' ? 'All Members' : opt === 'owner' ? 'You' : opt;
-                return (
-                  <button
-                    key={opt}
-                    onClick={() => {
-                      setMemberFilter(opt as MemberFilter);
-                      setMemberDropdownOpen(false);
-                    }}
-                    className={cn(
-                      'w-full px-3 py-2 text-left text-sm transition-colors',
-                      memberFilter === opt
-                        ? 'bg-muted font-medium'
-                        : 'hover:bg-muted/50'
-                    )}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
+      <h2 className="font-semibold text-base">Positions</h2>
 
       {!hasPositions && !closedLoading && (
         <div className="rounded-xl border border-border py-10 text-center">
@@ -558,11 +461,6 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                         >
                           {position.side.toUpperCase()} {position.leverage}X
                         </span>
-                        {position.isAgentPosition && (
-                          <span className="text-muted-foreground text-xs">
-                            {position.agentName ?? 'Agent'}
-                          </span>
-                        )}
                       </div>
                       <div className="flex items-baseline gap-1.5">
                         <span
@@ -693,12 +591,6 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                       </div>
                     </div>
                   </div>
-
-                  {position.isAgentPosition && (
-                    <div className="mt-1 text-muted-foreground text-xs">
-                      {position.agentName ?? 'Agent'}
-                    </div>
-                  )}
 
                   {/* Row 2: Details grid + action */}
                   <div className="mt-2 flex items-end justify-between whitespace-nowrap">
@@ -832,11 +724,6 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                           >
                             {won ? 'Won' : 'Lost'}
                           </span>
-                          {position.agentName && (
-                            <span className="text-muted-foreground/70 text-xs">
-                              {position.agentName}
-                            </span>
-                          )}
                         </div>
                         <div className="flex items-baseline gap-1.5">
                           <span
@@ -930,11 +817,6 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                           >
                             {won ? 'Won' : 'Lost'}
                           </span>
-                          {position.agentName && (
-                            <span className="text-muted-foreground/70 text-xs">
-                              {position.agentName}
-                            </span>
-                          )}
                         </div>
                       </div>
                       <div className="shrink-0 text-right">
@@ -1069,8 +951,6 @@ function parseClosedPerps(
     leverage: Number(p.leverage ?? 1),
     realizedPnL: Number(p.realizedPnL ?? 0),
     closedAt: (p.closedAt as string) ?? null,
-    isAgentPosition: (p.isAgentPosition as boolean) ?? false,
-    agentName: (p.agentName as string) ?? null,
   }));
 }
 
@@ -1089,7 +969,5 @@ function parseClosedPredictions(
     outcome: (p.outcome as boolean | null) ?? null,
     resolvedAt: (p.resolvedAt as string) ?? null,
     createdAt: (p.createdAt as string) ?? null,
-    isAgentPosition: (p.isAgentPosition as boolean) ?? false,
-    agentName: (p.agentName as string) ?? null,
   }));
 }
