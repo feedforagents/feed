@@ -2588,7 +2588,8 @@ function calculateDynamicFundingRate(params: {
 
   let annualRate: number;
   if (absImbalance < 0.01) {
-    annualRate = baseFundingRate;
+    // The premium must follow the imbalance even within the base-rate band.
+    annualRate = imbalance < 0 ? -baseFundingRate : baseFundingRate;
   } else {
     const signedRate =
       (baseFundingRate + rateMultiplier) * Math.sign(imbalance);
