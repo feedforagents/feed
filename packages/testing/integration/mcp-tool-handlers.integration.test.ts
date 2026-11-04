@@ -10,7 +10,9 @@ import {
   eq,
   favorites,
   inArray,
+  markets,
   notifications,
+  positions,
   posts,
   users,
 } from '@feed/db';
@@ -18,6 +20,7 @@ import { generateSnowflakeId } from '@feed/shared';
 import {
   executeGetFavoritePosts,
   executeGetMarkets,
+  executeGetPositions,
   executeGetUnreadCount,
   executeGetUserWallet,
   executeMarkNotificationsRead,
@@ -28,6 +31,8 @@ let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
 let postId: string;
+let marketId: string;
+let activePositionId: string;
 
 async function createUser(
   overrides: Partial<typeof users.$inferInsert> = {}
@@ -65,6 +70,34 @@ describe('MCP tool handlers', () => {
       userId: agentUserId,
       targetUserId: otherUserId,
     });
+    marketId = await generateSnowflakeId();
+    await db.insert(markets).values({
+      id: marketId,
+      question: 'Will the MCP list only open positions?',
+      yesShares: '500',
+      noShares: '500',
+      liquidity: '1000',
+      endDate: new Date(Date.now() + 86_400_000),
+      updatedAt: new Date(),
+    });
+    activePositionId = await generateSnowflakeId();
+    const positionRow = (id: string, side: boolean, status: string) => ({
+      id,
+      userId: agentUserId,
+      marketId,
+      side,
+      shares: status === 'closed' ? '0' : '10',
+      avgPrice: '0.5',
+      status,
+      updatedAt: new Date(),
+    });
+    await db
+      .insert(positions)
+      .values([
+        positionRow(activePositionId, true, 'active'),
+        positionRow(await generateSnowflakeId(), false, 'closed'),
+        positionRow(await generateSnowflakeId(), true, 'resolved'),
+      ]);
     await db.insert(notifications).values([
       {
         id: await generateSnowflakeId(),
@@ -88,6 +121,8 @@ describe('MCP tool handlers', () => {
       .delete(notifications)
       .where(inArray(notifications.userId, userIds));
     await db.delete(favorites).where(inArray(favorites.userId, userIds));
+    await db.delete(positions).where(inArray(positions.userId, userIds));
+    await db.delete(markets).where(eq(markets.id, marketId));
     await db.delete(posts).where(eq(posts.id, postId));
     await db.delete(users).where(inArray(users.id, userIds));
   });
@@ -132,5 +167,18 @@ describe('MCP tool handlers', () => {
     await expect(
       executeGetMarkets({ type: 'perpetuals' }, agent())
     ).rejects.toThrow('get_perpetuals');
+  });
+
+  it('lists only open prediction positions on get_positions', async () => {
+    const result = await executeGetPositions(agent(), {});
+    expect(result.positions.map((p) => p.id)).toEqual([activePositionId]);
+
+    const filtered = await executeGetPositions(agent(), { marketId });
+    expect(filtered.positions).toHaveLength(1);
+    expect(filtered.positions[0]).toMatchObject({
+      id: activePositionId,
+      side: 'YES',
+      question: 'Will the MCP list only open positions?',
+    });
   });
 });
