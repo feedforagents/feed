@@ -59,7 +59,9 @@ export function resolveAgentInferenceProvider(
  */
 export function failedUsageOf(
   error: unknown
-): { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined {
+):
+  | { inputTokens?: number; outputTokens?: number; totalTokens?: number }
+  | undefined {
   const candidates = [error, (error as { cause?: unknown } | null)?.cause];
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== 'object') continue;
@@ -71,16 +73,16 @@ export function failedUsageOf(
       totalTokens?: unknown;
     };
     if (
-      typeof inputTokens !== 'number' &&
-      typeof outputTokens !== 'number' &&
-      typeof totalTokens !== 'number'
+      !isUsableTokenCount(inputTokens) &&
+      !isUsableTokenCount(outputTokens) &&
+      !isUsableTokenCount(totalTokens)
     ) {
       continue;
     }
     return {
-      inputTokens: typeof inputTokens === 'number' ? inputTokens : undefined,
-      outputTokens: typeof outputTokens === 'number' ? outputTokens : undefined,
-      totalTokens: typeof totalTokens === 'number' ? totalTokens : undefined,
+      inputTokens: isUsableTokenCount(inputTokens) ? inputTokens : undefined,
+      outputTokens: isUsableTokenCount(outputTokens) ? outputTokens : undefined,
+      totalTokens: isUsableTokenCount(totalTokens) ? totalTokens : undefined,
     };
   }
   return undefined;
@@ -90,13 +92,35 @@ export function failedUsageOf(
  * Total tokens for a failed call, from provider-reported parts. A count the
  * provider never reported stays absent instead of becoming a fabricated zero.
  */
+/**
+ * A usage count is usable only when it is a finite, non-negative number.
+ * Providers occasionally report -1, NaN or Infinity for a count they could not
+ * measure; those are absences, not measurements.
+ */
+export function isUsableTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Total tokens for a failed call, taken only from what the provider actually
+ * reported. A count the provider never reported stays absent instead of
+ * becoming a fabricated zero or a summed estimate.
+ */
 export function failedTotalTokens(
-  usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined
+  usage:
+    | { inputTokens?: number; outputTokens?: number; totalTokens?: number }
+    | undefined
 ): number | undefined {
   if (!usage) return undefined;
-  if (typeof usage.totalTokens === 'number') return usage.totalTokens;
-  if (typeof usage.inputTokens === 'number' || typeof usage.outputTokens === 'number') {
-    return (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+  if (isUsableTokenCount(usage.totalTokens)) return usage.totalTokens;
+  if (
+    isUsableTokenCount(usage.inputTokens) ||
+    isUsableTokenCount(usage.outputTokens)
+  ) {
+    return (
+      (isUsableTokenCount(usage.inputTokens) ? usage.inputTokens : 0) +
+      (isUsableTokenCount(usage.outputTokens) ? usage.outputTokens : 0)
+    );
   }
   return undefined;
 }
@@ -248,6 +272,14 @@ export async function callGroqDirect(params: {
     experimental_telemetry: { isEnabled: false },
   }).catch((error: Error) => {
     const usage = failedUsageOf(error);
+    const trajUsage = {
+      ...(isUsableTokenCount(usage?.inputTokens)
+        ? { promptTokens: usage.inputTokens }
+        : {}),
+      ...(isUsableTokenCount(usage?.outputTokens)
+        ? { completionTokens: usage.outputTokens }
+        : {}),
+    };
     if (trajectoryLogger && stepId) {
       trajectoryLogger.logLLMCall(stepId, {
         model,
@@ -259,6 +291,7 @@ export async function callGroqDirect(params: {
         purpose: params.purpose || 'action',
         actionType: params.actionType,
         latencyMs: Date.now() - startTime,
+        ...trajUsage,
         metadata: { success: false, error: error.message },
       });
     }
@@ -283,6 +316,25 @@ export async function callGroqDirect(params: {
     throw error;
   });
   if (!result.text?.trim()) {
+    const emptyUsage = {
+      inputTokens: isUsableTokenCount(result.usage.inputTokens)
+        ? result.usage.inputTokens
+        : undefined,
+      outputTokens: isUsableTokenCount(result.usage.outputTokens)
+        ? result.usage.outputTokens
+        : undefined,
+      totalTokens: isUsableTokenCount(result.usage.totalTokens)
+        ? result.usage.totalTokens
+        : undefined,
+    };
+    const emptyTrajUsage = {
+      ...(emptyUsage.inputTokens !== undefined
+        ? { promptTokens: emptyUsage.inputTokens }
+        : {}),
+      ...(emptyUsage.outputTokens !== undefined
+        ? { completionTokens: emptyUsage.outputTokens }
+        : {}),
+    };
     if (trajectoryLogger && stepId) {
       trajectoryLogger.logLLMCall(stepId, {
         model,
@@ -294,8 +346,7 @@ export async function callGroqDirect(params: {
         purpose: params.purpose || 'action',
         actionType: params.actionType,
         latencyMs: Date.now() - startTime,
-        promptTokens: result.usage.inputTokens,
-        completionTokens: result.usage.outputTokens,
+        ...emptyTrajUsage,
         metadata: { success: false, error: 'LLM returned empty content' },
       });
     }
@@ -306,9 +357,9 @@ export async function callGroqDirect(params: {
       systemPrompt: params.system || '',
       userPrompt: params.prompt,
       rawResponse: result.text || '',
-      inputTokens: result.usage.inputTokens ?? 0,
-      outputTokens: result.usage.outputTokens ?? 0,
-      totalTokens: result.usage.totalTokens,
+      inputTokens: emptyUsage.inputTokens ?? 0,
+      outputTokens: emptyUsage.outputTokens ?? 0,
+      totalTokens: emptyUsage.totalTokens,
       durationMs: Date.now() - startTime,
       success: false,
       error: 'LLM returned empty content',
