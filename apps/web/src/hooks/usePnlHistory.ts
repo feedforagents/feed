@@ -1,15 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { PnlHistoryScope } from '@/lib/wallet/pnl-history-types';
+import type {
+  PnlHistoryScope,
+  PnlHistorySnapshot,
+} from '@/lib/wallet/pnl-history-types';
+import { useWalletBalanceStore } from '@/stores/walletBalanceStore';
 
-interface PnlPoint {
-  time: number;
-  value: number;
-}
-
-interface PnlHistoryState {
-  points: PnlPoint[];
+interface PnlHistoryState extends PnlHistorySnapshot {
+  requestKey: string | null;
   loading: boolean;
   error: Error | null;
 }
@@ -39,19 +38,30 @@ export function usePnlHistory(
   userId: string | undefined | null,
   timeframe: string,
   options: UsePnlHistoryOptions = {}
-) {
+): Omit<PnlHistoryState, 'requestKey'> {
+  const scope = options.scope ?? 'owner';
+  const entityId = options.entityId ?? null;
+  const requestKey = userId
+    ? buildPnlHistoryUrl({ entityId, scope, timeframe, userId })
+    : null;
   const [state, setState] = useState<PnlHistoryState>({
+    requestKey: null,
     points: [],
-    loading: false,
+    metrics: null,
+    loading: Boolean(userId),
     error: null,
   });
   const controllerRef = useRef<AbortController | null>(null);
-  const scope = options.scope ?? 'team';
-  const entityId = options.entityId ?? null;
 
   const fetch_ = useCallback(async () => {
-    if (!userId) {
-      setState({ points: [], loading: false, error: null });
+    if (!requestKey) {
+      setState({
+        requestKey: null,
+        points: [],
+        metrics: null,
+        loading: false,
+        error: null,
+      });
       return;
     }
 
@@ -59,18 +69,17 @@ export function usePnlHistory(
     const controller = new AbortController();
     controllerRef.current = controller;
 
-    setState((prev) => ({ ...prev, loading: true, error: null }));
+    setState((prev) => ({
+      ...prev,
+      requestKey,
+      points: prev.requestKey === requestKey ? prev.points : [],
+      metrics: prev.requestKey === requestKey ? prev.metrics : null,
+      loading: prev.requestKey !== requestKey || prev.metrics === null,
+      error: null,
+    }));
 
     try {
-      const response = await fetch(
-        buildPnlHistoryUrl({
-          entityId,
-          scope,
-          timeframe,
-          userId,
-        }),
-        { signal: controller.signal }
-      );
+      const response = await fetch(requestKey, { signal: controller.signal });
 
       if (controller.signal.aborted) return;
 
@@ -83,11 +92,15 @@ export function usePnlHistory(
         return;
       }
 
-      const data = await response.json();
+      const data: PnlHistorySnapshot | { data: PnlHistorySnapshot } =
+        await response.json();
       if (controller.signal.aborted) return;
 
+      const snapshot = 'data' in data ? data.data : data;
       setState({
-        points: data.data?.points ?? data.points ?? [],
+        requestKey,
+        points: snapshot.points,
+        metrics: snapshot.metrics,
         loading: false,
         error: null,
       });
@@ -100,14 +113,36 @@ export function usePnlHistory(
           err instanceof Error ? err : new Error('Failed to fetch P&L history'),
       }));
     }
-  }, [entityId, scope, timeframe, userId]);
+  }, [requestKey]);
 
   useEffect(() => {
     void fetch_();
+    if (!userId) return;
+
+    const interval = setInterval(() => void fetch_(), 15_000);
+    const unsubscribe = useWalletBalanceStore.subscribe((next, previous) => {
+      if (
+        next.userId === userId &&
+        next.lastFetchedAt === null &&
+        previous.lastFetchedAt !== null
+      ) {
+        void fetch_();
+      }
+    });
+
     return () => {
+      clearInterval(interval);
+      unsubscribe();
       controllerRef.current?.abort();
     };
-  }, [fetch_]);
+  }, [fetch_, userId]);
 
-  return state;
+  return state.requestKey === requestKey
+    ? state
+    : {
+        points: [],
+        metrics: null,
+        loading: Boolean(userId),
+        error: null,
+      };
 }

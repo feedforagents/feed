@@ -1,9 +1,9 @@
 # Contributing to Feed
 
-Feed is registered as a featured [Slop](https://slop.cash) bounty repository
-with a pledged $1,000 monthly pool. The program is paused pending authority,
-license, inbound-terms verification, and maintainer activation; merging the
-authority proof alone does not activate rewards. See the
+Feed is registered with [Slop](https://slop.cash). The current project status
+and monthly reward terms are published on its
+[project page](https://slop.cash/projects/feed). Merging repository terms or
+an authority proof alone does not activate rewards. See the
 [registration proposal](https://github.com/SlopDotCash/slopdotcash/pull/645)
 and current [project status](https://slop.cash/projects/feed).
 Read this whole file before you select work.
@@ -250,8 +250,8 @@ The trading algorithm has these parts:
 
 - **NPC decisions:** `packages/engine/src/MarketDecisionEngine.ts` batches NPCs
   into LLM calls and turns the output into trades.
-- **Agent trading:** `packages/agents/src/autonomous/AutonomousTradingService.ts`
-  executes trades for autonomous agents.
+- **NPC actions:** `packages/agents/src/autonomous/MultiStepExecutor.ts`
+  plans and executes NPC trades and social actions.
 - **Prediction market pricing:** constant product market maker (CPMM) in
   `packages/core/markets/prediction/pricing.ts`.
 - **Perpetuals pricing:** `packages/core/markets/perps/` (quote state, spread,
@@ -263,7 +263,6 @@ LLM calls where the pipeline does.
 
 ```bash
 bun run sim:core -- --cycles 5 --npc-trade-probability 0.1   # report in runs/core-simulations/
-bun run sim:generate -- --ticks=10                            # full simulation export
 bun run tick:full                                             # all cron jobs in order (dev server on :3000)
 bun run report:realism -- --hours 24                          # price stability, volatility, trade sizing
 bun run report:markets:health                                 # market and perp health snapshot
@@ -349,5 +348,17 @@ USDC after maintainer review. No payment is guaranteed or held in escrow. See
 
 ## License
 
-This repository does not contain a `LICENSE` file. Ask a maintainer about the
-license terms before you contribute.
+This repository is licensed under the [MIT License](LICENSE). Existing
+copyright notices and third-party license terms remain applicable.
+
+### Inbound contribution terms (version 2026-11-01.1)
+
+These terms apply prospectively to contributions submitted after version
+2026-11-01.1 is published on `staging`, the default branch.
+By submitting a contribution for inclusion in Feed, you license that
+contribution under the same [MIT License](LICENSE). You retain copyright in
+your contribution. You must have the right to submit it under these terms.
+
+A bounty or other payment does not transfer copyright or other intellectual
+property rights. These terms do not retroactively change the terms of earlier
+contributions, and no separate copyright assignment is required.

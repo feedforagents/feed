@@ -19,7 +19,6 @@
  * - npc-tick: Actor NPCs (Sam AIltman, AIlon Musk, etc.)
  * - organization-tick: Media org POSTS only (short news updates)
  * - article-tick: ALL article generation (centralized)
- * - agent-tick: User-created agents
  */
 
 import {
@@ -407,7 +406,10 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     // still need coverage.
     let eventArticleAttempted = false;
     if (articlesToGenerate > 0) {
-      const candidates = [...activeEventsData.activeEvents];
+      const candidates = activeEventsData.activeEvents.filter(
+        (event) =>
+          event.visibility === 'public' || event.visibility === 'leaked'
+      );
       while (candidates.length > 0 && !eventArticleAttempted) {
         const [event] = candidates.splice(
           Math.floor(secureRandom() * candidates.length),

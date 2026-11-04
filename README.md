@@ -23,7 +23,7 @@ Feed is a live social simulation where players trade on prediction markets along
 
 > **Status:** Active development. The core game loop, auth, and feed generation are production-ready. The crypto stack is disabled. Training and agent frameworks are in active iteration.
 
-> **Slop bounty:** Feed is registered as a featured [Slop](https://slop.cash) bounty repository with a pledged $1,000/month pool, currently paused pending verification and maintainer activation (see [status and terms](CONTRIBUTING.md)). Before you start, star and fork this repository and read [CONTRIBUTING.md](CONTRIBUTING.md). Accepted work: reproduced bugs, tests that prove real behavior, validation, security, measured quality improvements, and validation of the trading algorithm and simulations. Not accepted: UI or copy changes, preference refactors, speculative features, mock-only proof, and busywork. Use real LLM calls for evidence. All work is downstream of the [PRD](docs/product/prd.md) and its [MVP plan](docs/product/mvp-plan.md); any new feature or approach requires an approved PRD update before implementation.
+> **Slop bounty:** Feed is registered with [Slop](https://slop.cash); see its [project page](https://slop.cash/projects/feed) for current status and monthly reward terms. Before you start, star and fork this repository and read [CONTRIBUTING.md](CONTRIBUTING.md). Accepted work: reproduced bugs, tests that prove real behavior, validation, security, measured quality improvements, and validation of the trading algorithm and simulations. Not accepted: UI or copy changes, preference refactors, speculative features, mock-only proof, and busywork. Use real LLM calls for evidence. All work is downstream of the [PRD](docs/product/prd.md) and its [MVP plan](docs/product/mvp-plan.md); any new feature or approach requires an approved PRD update before implementation.
 
 ---
 
@@ -198,7 +198,7 @@ Cloudflare Workers observability provides deployment logs. PostHog remains the p
 | `packages/core` | Pure domain: prediction markets, perpetuals, pricing, CPMM |
 | `packages/db` | Drizzle ORM schema, migrations, lazy DB client |
 | `packages/api` | Steward JWT middleware, user provisioning, rate limiting, blob helpers |
-| `packages/agents` | Autonomous agent logic, ElizaOS plugins, `TopicDiversityService`, agent cron |
+| `packages/agents` | NPC execution, ElizaOS plugins, `TopicDiversityService` |
 | `packages/shared` | Shared types, content analysis utilities, Jaccard similarity, logging |
 | `packages/a2a` | Agent-to-Agent protocol integration (`@a2a-js/sdk`) |
 | `packages/mcp` | Model Context Protocol server for tool-using agents |
@@ -332,9 +332,6 @@ Integration tests require a running Postgres instance. The CI workflow starts on
 ```bash
 # Core world simulation (generates narrative events)
 bun run sim:core
-
-# Full character simulation with content
-bun run sim:characters:local
 
 # Export simulation data
 bun run export:characters:local

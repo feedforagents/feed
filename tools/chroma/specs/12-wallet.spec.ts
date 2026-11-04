@@ -316,20 +316,6 @@ test.describe('Wallet - P&L Tab', () => {
 
     expect(hasChart || hasPnlContent).toBe(true);
   });
-
-  test('displays team trading summary section', async ({ page }) => {
-    const hasTeamContent = await pageContainsText(
-      page,
-      'team',
-      'agent',
-      'trading',
-      'summary'
-    );
-
-    // Team section may or may not be present depending on user state
-    const body = await page.locator('body').textContent();
-    expect(hasTeamContent || (body?.length ?? 0) > 100).toBe(true);
-  });
 });
 
 test.describe('Wallet - Mobile', () => {

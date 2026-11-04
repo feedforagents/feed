@@ -1,6 +1,9 @@
 // Game Guide API - Integration Tests
 
 import { beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { db, eq, users } from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
+import { createStewardTestToken } from './helpers/steward-auth';
 
 setDefaultTimeout(20000);
 
@@ -18,14 +21,14 @@ async function checkServerHealth(): Promise<boolean> {
   return response?.ok ?? false;
 }
 
-describe('Game Guide API - POST /api/users/me/game-guide', () => {
-  beforeAll(async () => {
-    serverAvailable = await checkServerHealth();
-    if (!serverAvailable) {
-      console.warn('⚠️  Server not available - API tests will be skipped');
-    }
-  });
+beforeAll(async () => {
+  serverAvailable = await checkServerHealth();
+  if (!serverAvailable) {
+    console.warn('⚠️  Server not available - API tests will be skipped');
+  }
+});
 
+describe('Game Guide API - POST /api/users/me/game-guide', () => {
   // ============================================
   // ============================================
 
@@ -230,26 +233,55 @@ describe('Game Guide API - User State Integration', () => {
 // ============================================
 
 describe('Game Guide API - Idempotency', () => {
-  test('multiple completions should not cause errors (conceptual)', () => {
-    // The API should handle being called multiple times gracefully
-    // Each call just updates the timestamp to "now"
-    const firstCompletion = new Date('2025-01-06T10:00:00.000Z');
-    const secondCompletion = new Date('2025-01-06T11:00:00.000Z');
+  test('persists completion and preserves its first timestamp on retry', async () => {
+    expect(serverAvailable).toBe(true);
+    const userId = await generateSnowflakeId();
+    const stewardId = `game-guide-${userId}`;
+    await db.insert(users).values({
+      id: userId,
+      stewardId,
+      username: `test-game-guide-${userId}`,
+      displayName: 'Game Guide Test',
+      isTest: true,
+      updatedAt: new Date(),
+    });
 
-    // Second completion should overwrite first
-    expect(secondCompletion.getTime()).toBeGreaterThan(
-      firstCompletion.getTime()
-    );
-  });
+    try {
+      const headers = {
+        Authorization: `Bearer ${await createStewardTestToken(stewardId)}`,
+      };
+      const before = Date.now();
+      const first = await fetch(`${BASE_URL}/api/users/me/game-guide`, {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(15000),
+      });
+      expect(first.status).toBe(200);
+      const completion = (await first.json()) as {
+        gameGuideCompletedAt: string;
+      };
+      const timestamp = Date.parse(completion.gameGuideCompletedAt);
+      expect(timestamp).toBeGreaterThanOrEqual(before);
+      expect(timestamp).toBeLessThanOrEqual(Date.now());
 
-  test('completion timestamp should always be current server time', () => {
-    const before = Date.now();
-    const completionTime = new Date().toISOString();
-    const after = Date.now();
+      const retry = await fetch(`${BASE_URL}/api/users/me/game-guide`, {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(15000),
+      });
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toMatchObject(completion);
 
-    const completionMs = new Date(completionTime).getTime();
-    expect(completionMs).toBeGreaterThanOrEqual(before);
-    expect(completionMs).toBeLessThanOrEqual(after);
+      const [stored] = await db
+        .select({ completedAt: users.gameGuideCompletedAt })
+        .from(users)
+        .where(eq(users.id, userId));
+      expect(stored?.completedAt?.toISOString()).toBe(
+        completion.gameGuideCompletedAt
+      );
+    } finally {
+      await db.delete(users).where(eq(users.id, userId));
+    }
   });
 });
 

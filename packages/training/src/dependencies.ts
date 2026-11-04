@@ -11,7 +11,6 @@
  * import { configureTrainingDependencies } from '@feed/training';
  *
  * configureTrainingDependencies({
- *   agentService,
  *   agentRuntimeManager,
  *   autonomousCoordinator,
  *   llmCaller,
@@ -22,32 +21,7 @@
  */
 
 import type { IAgentRuntime } from '@elizaos/core';
-import type { User } from '@feed/db';
 import type { JsonValue } from '@feed/shared';
-
-/**
- * Parameters for creating an agent
- */
-export interface CreateAgentParams {
-  userId: string;
-  name: string;
-  description?: string;
-  profileImageUrl?: string;
-  coverImageUrl?: string;
-  system: string;
-  bio?: string[];
-  personality?: string;
-  tradingStrategy?: string;
-  initialDeposit?: number;
-  modelTier?: 'lite' | 'standard' | 'pro';
-}
-
-/**
- * Interface for agent creation service
- */
-export interface IAgentService {
-  createAgent(params: CreateAgentParams): Promise<User>;
-}
 
 /**
  * Interface for managing agent runtimes
@@ -184,7 +158,6 @@ export interface TrainingMessage {
  * Global configuration for external dependencies
  * This should be initialized before using the training package
  */
-let _agentService: IAgentService | null = null;
 let _agentRuntimeManager: IAgentRuntimeManager | null = null;
 let _autonomousCoordinator: IAutonomousCoordinator | null = null;
 let _llmCaller: ILLMCaller | null = null;
@@ -196,7 +169,6 @@ let _toTrainingMessages: ToTrainingMessagesFn | null = null;
  * Configure external dependencies
  */
 export function configureTrainingDependencies(config: {
-  agentService?: IAgentService;
   agentRuntimeManager?: IAgentRuntimeManager;
   autonomousCoordinator?: IAutonomousCoordinator;
   llmCaller?: ILLMCaller;
@@ -204,9 +176,6 @@ export function configureTrainingDependencies(config: {
   exportToHuggingFace?: ExportToHuggingFaceFn;
   toTrainingMessages?: ToTrainingMessagesFn;
 }): void {
-  if (config.agentService) {
-    _agentService = config.agentService;
-  }
   if (config.agentRuntimeManager) {
     _agentRuntimeManager = config.agentRuntimeManager;
   }
@@ -225,19 +194,6 @@ export function configureTrainingDependencies(config: {
   if (config.toTrainingMessages) {
     _toTrainingMessages = config.toTrainingMessages;
   }
-}
-
-/**
- * Get the agent service
- * @throws Error if not configured
- */
-export function getAgentService(): IAgentService {
-  if (!_agentService) {
-    throw new Error(
-      'AgentService not configured. Call configureTrainingDependencies() first.'
-    );
-  }
-  return _agentService;
 }
 
 /**
@@ -321,22 +277,7 @@ export function getToTrainingMessages(): ToTrainingMessagesFn {
  * Check if dependencies are configured
  */
 export function areDependenciesConfigured(): boolean {
-  return (
-    _agentService !== null &&
-    _agentRuntimeManager !== null &&
-    _autonomousCoordinator !== null
-  );
-}
-
-/**
- * Check if specific agent dependencies are configured for parallel generation
- */
-export function areAgentDependenciesConfigured(): boolean {
-  return (
-    _agentService !== null &&
-    _agentRuntimeManager !== null &&
-    _autonomousCoordinator !== null
-  );
+  return _agentRuntimeManager !== null && _autonomousCoordinator !== null;
 }
 
 /**

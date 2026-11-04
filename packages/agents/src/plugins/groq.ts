@@ -218,32 +218,28 @@ async function generateGroqText(
   return result.text;
 }
 
-/**
- * Provider-reported usage carried by a structured-output failure, when the SDK
- * supplies it. `NoObjectGeneratedError` reports usage for a completion that
- * arrived but failed parsing or schema validation. Transport failures usually
- * carry none, and a count the provider never reported stays absent instead of
- * becoming an estimate.
- */
-function failedObjectUsage(error: unknown): {
+/** Preserve reported counts on structured-output errors; never estimate them. */
+function failedObjectUsage(error: Error): {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
 } {
+  const cause = error.cause;
   const candidate =
-    (error as { usage?: unknown })?.usage ??
-    (error as { cause?: { usage?: unknown } })?.cause?.usage;
+    ('usage' in error ? error.usage : undefined) ??
+    (cause && typeof cause === 'object' && 'usage' in cause
+      ? cause.usage
+      : undefined);
   if (!candidate || typeof candidate !== 'object') return {};
-  const { inputTokens, outputTokens, totalTokens } = candidate as Record<
-    string,
-    unknown
-  >;
-  if (typeof inputTokens !== 'number' && typeof outputTokens !== 'number')
-    return {};
+  const usage = candidate as Record<string, unknown>;
+  const tokenCount = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? value
+      : undefined;
   return {
-    inputTokens: typeof inputTokens === 'number' ? inputTokens : undefined,
-    outputTokens: typeof outputTokens === 'number' ? outputTokens : undefined,
-    totalTokens: typeof totalTokens === 'number' ? totalTokens : undefined,
+    inputTokens: tokenCount(usage.inputTokens),
+    outputTokens: tokenCount(usage.outputTokens),
+    totalTokens: tokenCount(usage.totalTokens),
   };
 }
 

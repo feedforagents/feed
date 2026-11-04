@@ -686,7 +686,7 @@ export async function executeDirectTrade(
     };
   }
 
-  // Get agent's managed by for recording (for USER_CONTROLLED agents)
+  // Attribute the trade to the account executing it.
   const agentManagedBy = agentUserId;
 
   logger.info(
@@ -1536,8 +1536,7 @@ export async function executeDirectMessage(
 
   // If chatId not provided, resolve it from recipientId
   if (!chatId && recipientId) {
-    // Check if agent is trying to DM their owner - not allowed
-    // Agents should communicate with owners through Agents (team chat)
+    // Preserve the ownership restriction for legacy user-agent records.
     const [agent] = await db
       .select({ managedBy: users.managedBy })
       .from(users)
@@ -1547,7 +1546,7 @@ export async function executeDirectMessage(
     if (agent?.managedBy === recipientId) {
       return {
         success: false,
-        error: 'Agent-owner DMs are not allowed - use Agents chat instead',
+        error: 'Hosted user-agent messaging is no longer supported',
       };
     }
 

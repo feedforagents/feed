@@ -412,6 +412,51 @@ describe('native inference usage attribution', () => {
     });
   });
 
+  it('preserves total-only usage without inventing input or output counts', async () => {
+    const failure = Object.assign(new Error('Structured output failed'), {
+      usage: { totalTokens: 23 },
+    });
+    mockGenerateObject.mockRejectedValueOnce(failure);
+    await expect(
+      groqPlugin.models![ModelType.OBJECT_LARGE]!(runtime, { prompt: 'Hello' })
+    ).rejects.toBe(failure);
+    expect(mockUsageBridge.mock.calls[0]?.[0]).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 23,
+      success: false,
+    });
+  });
+
+  it('ignores invalid counts while preserving independently reported usage', async () => {
+    const failure = Object.assign(new Error('Structured output failed'), {
+      usage: { inputTokens: -1, outputTokens: Number.NaN, totalTokens: 23 },
+    });
+    mockGenerateObject.mockRejectedValueOnce(failure);
+    await expect(
+      groqPlugin.models![ModelType.OBJECT_SMALL]!(runtime, { prompt: 'Hello' })
+    ).rejects.toBe(failure);
+    expect(mockUsageBridge.mock.calls[0]?.[0]).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 23,
+    });
+
+    mockGenerateObject.mockRejectedValueOnce(
+      Object.assign(new Error('Structured output failed'), {
+        usage: { inputTokens: 20, outputTokens: 0, totalTokens: Infinity },
+      })
+    );
+    await expect(
+      groqPlugin.models![ModelType.OBJECT_SMALL]!(runtime, { prompt: 'Hello' })
+    ).rejects.toThrow('Structured output failed');
+    expect(mockUsageBridge.mock.calls[1]?.[0]).toMatchObject({
+      inputTokens: 20,
+      outputTokens: 0,
+    });
+    expect(mockUsageBridge.mock.calls[1]?.[0]?.totalTokens).toBeUndefined();
+  });
+
   it('reports no usage for an ordinary object error instead of an estimate', async () => {
     mockGenerateObject.mockRejectedValueOnce(new Error('socket hang up'));
     await expect(

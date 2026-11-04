@@ -723,10 +723,8 @@ SPEAK IN CHARACTER — your message should be immediately recognizable as ${rand
 NO hashtags. Emojis OK (🤫 👀 🔥).
 Use parody names from World Actors (AIlon Musk, not Elon Musk).
 
-Return your response as XML:
-<response>
-  <message>your message here</message>
-</response>`;
+Return only a JSON object with a nonempty message string:
+{"message":"your message here"}`;
 
       let response: { message: string } | null = null;
       try {
@@ -736,13 +734,14 @@ Return your response as XML:
           prompt,
           {
             properties: {
-              message: { type: 'string' },
+              message: { type: 'string', pattern: '\\S' },
             },
             required: ['message'],
           },
           {
             temperature: 0.9,
             maxTokens: 512,
+            format: 'json',
             promptType: 'npc_group_dynamic_message',
           }
         );

@@ -11,7 +11,6 @@ import { apiUrl } from '@/utils/api-url';
 
 /**
  * Member structure for group creation modal.
- * Includes type to distinguish between humans and user-created agents.
  */
 interface Member {
   id: string;
@@ -25,12 +24,12 @@ interface Member {
  * Create group modal component for creating new user groups.
  *
  * Provides a form interface for creating groups with name input and
- * member selection. Searches for users (including user-created agents).
+ * member selection. Searches for users.
  * Creates both group and associated chat on creation.
  *
  * Features:
  * - Group name input
- * - User search (includes human users and user-created agents)
+ * - User search
  * - Member selection with type badges
  * - Auto-generated group names
  * - Form validation
@@ -73,7 +72,7 @@ export function CreateGroupModal({
     }
   }, [isOpen]);
 
-  // Search for users (including user-created agents)
+  // Search for users
   useEffect(() => {
     if (!searchQuery.trim() || searchQuery.length < 2) {
       setSearchResults([]);
@@ -86,7 +85,7 @@ export function CreateGroupModal({
         const token = await getAccessToken();
 
         const response = await fetch(
-          `/api/users/search?q=${encodeURIComponent(searchQuery)}&includeAgents=true`,
+          `/api/users/search?q=${encodeURIComponent(searchQuery)}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,

@@ -18,7 +18,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const [updated] = await db
     .update(users)
     .set({
-      gameGuideCompletedAt: sql`coalesce(${users.gameGuideCompletedAt}, ${now})`,
+      gameGuideCompletedAt: sql`coalesce(${users.gameGuideCompletedAt}, ${now.toISOString()}::timestamp)`,
       updatedAt: now,
     })
     .where(eq(users.id, authUser.dbUserId))

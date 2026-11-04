@@ -12,7 +12,9 @@ import {
   parodyHeadlines,
   rssHeadlines,
 } from '@feed/db';
-import { logger } from '@feed/shared';
+import { escapeRegex, logger } from '@feed/shared';
+import { CRYPTO_PARODY_NAMES } from '../data/reality-grounding';
+import { StaticDataRegistry } from './static-data-registry';
 
 /**
  * Topics that should never be selected as the daily topic.
@@ -309,16 +311,49 @@ export function deriveTopicFromText(
   };
 }
 
+function normalizeTopicNames(text: string): string {
+  const names = new Map<string, string>();
+  for (const mapping of [
+    ...StaticDataRegistry.getAllCharacterMappings(),
+    ...StaticDataRegistry.getAllOrganizationMappings(),
+    ...Object.entries(CRYPTO_PARODY_NAMES).map(([realName, parodyName]) => ({
+      realName,
+      parodyName,
+    })),
+  ]) {
+    names.set(mapping.realName.toLowerCase(), mapping.parodyName);
+    names.set(mapping.parodyName.toLowerCase(), mapping.parodyName);
+  }
+  if (names.size === 0) return text.toLowerCase();
+  const pattern = new RegExp(
+    `(?<!\\p{L})(?:${[...names.keys()]
+      .sort((a, b) => b.length - a.length)
+      .map(escapeRegex)
+      .join('|')})(?!\\p{L})`,
+    'giu'
+  );
+  return text
+    .replace(pattern, (name) => names.get(name.toLowerCase()) ?? name)
+    .toLowerCase();
+}
+
 export function isTextOnTopic(
   text: string,
   topic: DailyTopicContext | null | undefined
 ): boolean {
   if (!topic) return true;
+  if (
+    topic.sourceType === 'fallback_default' &&
+    topic.topicKey === 'general' &&
+    !topic.isLocked
+  ) {
+    return true;
+  }
 
-  const haystack = text.toLowerCase();
+  const haystack = normalizeTopicNames(text);
   const topicTokens = [
-    ...extractTopicTokens(topic.topicLabel),
-    ...extractTopicTokens(topic.summary),
+    ...extractTopicTokens(normalizeTopicNames(topic.topicLabel)),
+    ...extractTopicTokens(normalizeTopicNames(topic.summary)),
   ].slice(0, 12);
 
   if (topicTokens.length === 0) return true;

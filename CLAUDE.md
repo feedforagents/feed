@@ -33,8 +33,8 @@ scope or claiming MVP completion.
 
 ## Slop bounty rules
 
-Feed is registered as a featured [Slop](https://slop.cash) bounty repository;
-the program is paused pending activation. Read
+Feed is registered with [Slop](https://slop.cash). See the
+[project page](https://slop.cash/projects/feed) for its current status and terms. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) before you select work. Summary:
 
 1. **Star and fork first.** Star and fork `feedforagents/feed` with the
@@ -206,7 +206,6 @@ bun scripts/prompt-diff.ts \
 
 # Simulations and measurements
 bun run sim:core -- --cycles 5            # report in runs/core-simulations/
-bun run sim:generate -- --ticks=10
 bun run tick:full                         # needs the dev server on :3000
 bun run report:realism -- --hours 24
 bun run report:markets:health

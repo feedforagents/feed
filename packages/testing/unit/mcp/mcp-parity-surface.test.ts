@@ -29,9 +29,9 @@ describe('MCP Parity Surface', () => {
     expect(args.type).toBe('post');
   });
 
-  it('accepts wallet/team leaderboard type arguments', () => {
+  it('accepts personal wallet rankings and rejects retired team scope', () => {
     expect(validateGetLeaderboardArgs({ type: 'wallet' }).type).toBe('wallet');
-    expect(validateGetLeaderboardArgs({ type: 'team' }).type).toBe('team');
+    expect(() => validateGetLeaderboardArgs({ type: 'team' })).toThrow();
   });
 
   it('validates new parity tool arguments', () => {

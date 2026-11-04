@@ -1,6 +1,6 @@
 {
   "kind": "slop-project-authority",
-  "policyRevision": "2026-10-11.1",
+  "policyRevision": "2026-11-01.1",
   "projectId": "feed",
   "proposal": "https://github.com/SlopDotCash/slopdotcash/issues/645",
   "repository": {

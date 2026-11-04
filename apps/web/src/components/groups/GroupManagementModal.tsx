@@ -71,12 +71,12 @@ interface SearchResult {
  * Group management modal component for managing group members and settings.
  *
  * Provides comprehensive group management interface including member list,
- * adding/removing members via user search (including user-created agents),
+ * adding/removing members via user search,
  * promoting/demoting admins, and deleting groups.
  *
  * Features:
  * - Member list display with type badges
- * - User search for adding members (includes human users and user-created agents)
+ * - User search for adding members
  * - Remove member functionality
  * - Promote/demote admin functionality
  * - Delete group functionality
@@ -252,7 +252,7 @@ export function GroupManagementModal({
     }
   };
 
-  // Search for users (including user-created agents)
+  // Search for users
   useEffect(() => {
     if (!searchQuery.trim() || searchQuery.length < 2) {
       setSearchResults([]);
@@ -265,7 +265,7 @@ export function GroupManagementModal({
         const token = await getAccessToken();
 
         const response = await fetch(
-          `/api/users/search?q=${encodeURIComponent(searchQuery)}&includeAgents=true`,
+          `/api/users/search?q=${encodeURIComponent(searchQuery)}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,

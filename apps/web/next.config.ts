@@ -119,18 +119,6 @@ const nextConfig: NextConfig = {
           },
         ],
       },
-      {
-        // Agent routes use Bearer token auth (not cookies), so wildcard CORS is safe.
-        source: '/api/agents/:path*',
-        headers: [
-          { key: 'Access-Control-Allow-Origin', value: '*' },
-          { key: 'Access-Control-Allow-Methods', value: 'GET,POST,OPTIONS' },
-          {
-            key: 'Access-Control-Allow-Headers',
-            value: 'Content-Type, Authorization',
-          },
-        ],
-      },
     ];
   },
   async rewrites() {
