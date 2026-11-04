@@ -730,6 +730,92 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
     return { service, initial, reference };
   }
 
+  it('rejects a flip above aggregate exposure and allows one exactly at the cap', async () => {
+    const otherTicker =
+      `CAP${crypto.randomUUID().replaceAll('-', '').slice(0, 8)}`.toUpperCase();
+    const wallet = new TestWallet();
+    const service = createTestService(wallet);
+    const adapter = new PerpDbAdapter();
+    await db.insert(organizationState).values({
+      id: otherTicker,
+      currentPrice: 100,
+      basePrice: 100,
+      updatedAt: new Date(),
+    });
+    await db.insert(perpMarketSnapshots).values({
+      ticker: otherTicker,
+      organizationId: otherTicker,
+      name: 'Exposure test market',
+      currentPrice: 100,
+      high24h: 100,
+      low24h: 100,
+      maxLeverage: 100,
+      fundingRate: {
+        ticker: otherTicker,
+        rate: 0,
+        nextFundingTime: new Date().toISOString(),
+        predictedRate: 0,
+      },
+    });
+    try {
+      await service.openPosition({
+        userId: USER_A,
+        ticker: otherTicker,
+        side: 'long',
+        size: 9000,
+        leverage: 100,
+      });
+      const initial = await service.openPosition({
+        userId: USER_A,
+        ticker: TEST_TICKER,
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const balanceBefore = wallet.bal(USER_A);
+      await expect(
+        service.openPosition({
+          userId: USER_A,
+          ticker: TEST_TICKER,
+          side: 'short',
+          size: 10000,
+          leverage: 100,
+        })
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining('Total exposure would exceed limit'),
+      });
+      const unchanged = await adapter.getOpenPositionsByUser(USER_A);
+      expect(unchanged).toHaveLength(2);
+      expect(unchanged.find((p) => p.id === initial.positionId)?.size).toBe(
+        100
+      );
+      expect(wallet.bal(USER_A)).toBe(balanceBefore);
+      const inverse = await service.openPosition({
+        userId: USER_A,
+        ticker: TEST_TICKER,
+        side: 'short',
+        size: 1100,
+        leverage: 100,
+      });
+      expect(inverse.size).toBe(1000);
+      const open = await adapter.getOpenPositionsByUser(USER_A);
+      expect(open.reduce((sum, p) => sum + p.size * p.leverage, 0)).toBe(
+        1_000_000
+      );
+    } finally {
+      await db
+        .delete(perpPositions)
+        .where(eq(perpPositions.ticker, otherTicker));
+      await db
+        .delete(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, otherTicker));
+      await db
+        .delete(organizationState)
+        .where(eq(organizationState.id, otherTicker));
+    }
+  });
+
   it('rejects a flip when the inverse fill after closing breaches the requested bound', async () => {
     const wallet = new TestWallet();
     const { service, initial } = await openFlipFixture(wallet);

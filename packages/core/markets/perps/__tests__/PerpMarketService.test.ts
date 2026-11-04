@@ -999,6 +999,108 @@ describe('PerpMarketService', () => {
     });
   });
 
+  describe('per-user exposure limit', () => {
+    const otherMarket: PerpMarketRecord = {
+      ...baseMarket,
+      ticker: 'XYZ',
+      organizationId: 'org-xyz',
+      name: 'XYZ Corp',
+      fundingRate: {
+        ticker: 'XYZ',
+        rate: 0,
+        nextFundingTime: new Date().toISOString(),
+        predictedRate: 0,
+      },
+    };
+
+    beforeEach(() => {
+      db = new InMemoryPerpDb([baseMarket, otherMarket]);
+      wallet = new InMemoryWallet(1_000_000);
+      service = new PerpMarketService({ db, wallet, fees: feeConfig });
+    });
+
+    // 900k notional on another ticker leaves 100k of headroom under the 1M cap.
+    async function openOtherExposure(userId: string) {
+      await service.openPosition({
+        userId,
+        ticker: 'XYZ',
+        side: 'long',
+        size: 9_000,
+        leverage: 100,
+      });
+    }
+
+    it('rejects a fresh open that would exceed the exposure limit', async () => {
+      await openOtherExposure('u1');
+
+      await expect(
+        service.openPosition({
+          userId: 'u1',
+          ticker: 'ABC',
+          side: 'short',
+          size: 9_900,
+          leverage: 100,
+        })
+      ).rejects.toThrow(/exposure would exceed limit/);
+    });
+
+    it('rejects a flip whose inverse leg would exceed the exposure limit', async () => {
+      await openOtherExposure('u1');
+      const initial = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const balanceBefore = (await wallet.getBalance('u1')).balance;
+
+      // Opposite side, larger than the position: closes 100 and opens an
+      // inverse 9,900 x 100 = 990k notional on top of 900k elsewhere.
+      await expect(
+        service.openPosition({
+          userId: 'u1',
+          ticker: 'ABC',
+          side: 'short',
+          size: 10_000,
+          leverage: 100,
+        })
+      ).rejects.toThrow(/exposure would exceed limit/);
+
+      // Nothing moved: original position still open, no inverse, wallet untouched
+      const pos = await db.getPositionById(initial.positionId);
+      expect(pos?.closedAt).toBeNull();
+      expect(pos?.side).toBe('long');
+      expect(pos?.size).toBe(100);
+      const open = await db.getOpenPositionsByUser('u1');
+      expect(open).toHaveLength(2);
+      expect((await wallet.getBalance('u1')).balance).toBe(balanceBefore);
+    });
+
+    it('allows a flip whose inverse leg stays within the exposure limit', async () => {
+      await openOtherExposure('u1');
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+
+      // Inverse 900 x 100 = 90k notional; 900k + 90k stays under the cap.
+      const result = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 1_000,
+        leverage: 100,
+      });
+
+      expect(result.rebalanceType).toBe('flip');
+      expect(result.size).toBe(900);
+    });
+  });
+
   it('allows different users to open positions on same ticker', async () => {
     await service.openPosition({
       userId: 'u4',
