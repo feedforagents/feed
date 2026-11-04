@@ -17,9 +17,9 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeProcessor,
   createUserWalletAdapter,
   FEE_CONFIG,
-  FeeService,
 } from '@feed/engine';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
 import { logger } from '../../../../shared/logger';
@@ -147,22 +147,7 @@ export const closePerpAction: Action = {
           minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
         },
         priceImpact: createPerpPriceImpactPort(),
-        feeProcessor: {
-          processTradingFee: ({
-            userId,
-            amount,
-            type,
-            relatedId,
-            positionId,
-          }) =>
-            FeeService.processTradingFee(
-              userId,
-              type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
-              amount,
-              positionId,
-              relatedId
-            ),
-        },
+        feeProcessor: createTradingFeeProcessor(),
       });
 
       const positionSize = Number(position.size);

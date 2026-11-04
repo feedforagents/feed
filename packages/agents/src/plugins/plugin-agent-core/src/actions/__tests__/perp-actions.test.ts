@@ -59,6 +59,9 @@ mock.module('@feed/engine', () => ({
   createPerpSettlement: () => ({}),
   createPerpTradesCachePort: () => ({}),
   createPerpPriceImpactPort: () => ({}),
+  createTradingFeeProcessor: () => ({
+    processTradingFee: async () => ({}),
+  }),
   createUserWalletAdapter: () => ({}),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0.001,

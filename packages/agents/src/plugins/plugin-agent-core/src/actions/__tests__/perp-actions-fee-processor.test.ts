@@ -56,6 +56,18 @@ mock.module('@feed/core/markets/perps', () => ({
 
 mock.module('@feed/engine', () => ({
   createPerpPriceImpactPort: () => ({}),
+  // Mirrors the real @feed/engine helper: the action under test only
+  // wires the helper, so the mock helper must delegate the same way.
+  createTradingFeeProcessor: () => ({
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+    }: Record<string, unknown>) =>
+      processTradingFeeMock(userId, type, amount, positionId, relatedId),
+  }),
   createUserWalletAdapter: () => ({}),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0.001,
