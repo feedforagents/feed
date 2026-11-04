@@ -68,6 +68,7 @@ import {
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -640,6 +641,7 @@ function buildPerpService() {
     settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: buildWalletPort(),
+    cache: createPerpTradesCachePort(),
     priceImpact: createPerpPriceImpactPort(),
     fees: {
       tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
