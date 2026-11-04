@@ -540,6 +540,7 @@ describe('PredictionMarketService', () => {
       expectedWinnerPayout
     );
     expect(pos1?.pnl).toBeCloseTo(expectedWinnerPnl);
+    expect(pos1?.pnl).toBeGreaterThan(0);
     expect(pos2?.pnl).toBeCloseTo(expectedLoserPnl);
 
     // Liquidity should decrease by total payouts (capped at available liquidity)
@@ -557,6 +558,7 @@ describe('PredictionMarketService', () => {
     const winnerPnl = pnlByUser.get('u1') ?? 0;
     const loserPnl = pnlByUser.get('u2') ?? 0;
     expect(winnerPnl).toBeCloseTo(expectedWinnerPnl);
+    expect(winnerPnl).toBeGreaterThan(0);
     expect(loserPnl).toBeCloseTo(expectedLoserPnl);
     expect(loserPnl).toBeLessThan(0);
   });

@@ -128,10 +128,12 @@ describe('PredictionPricing CPMM', () => {
     test('avg price reflects CPMM pricing', () => {
       const result = PredictionPricing.calculateBuy(500, 500, 'yes', 100);
 
-      // avgPrice = usdAmount / sharesBought
-      // In CPMM, this will be around $1 per share due to how reserves work
-      expect(result.avgPrice).toBeGreaterThan(0.8);
-      expect(result.avgPrice).toBeLessThan(1.5);
+      // avgPrice = usdAmount / sharesBought. Per [D-14] the CPMM price is
+      // the cost per share: the average sits between the pre-trade quote
+      // (0.50) and the post-trade quote, at ~0.545 here.
+      expect(result.avgPrice).toBeGreaterThan(0.5);
+      expect(result.avgPrice).toBeLessThan(result.newYesPrice);
+      expect(result.avgPrice).toBeCloseTo(0.545, 2);
     });
 
     test('proceeds from sell equal cost basis (no fees)', () => {
@@ -253,9 +255,9 @@ describe('PredictionPricing CPMM', () => {
 
       // $10 in deep pool should have minimal impact
       expect(result.priceImpact).toBeLessThan(0.1); // <0.1% impact
-      // avgPrice in CPMM is USD/shares, which is ~$1/share in this implementation
-      expect(result.avgPrice).toBeGreaterThan(0.9);
-      expect(result.avgPrice).toBeLessThan(1.1);
+      // avgPrice is the cost per share: with minimal slippage it stays at
+      // the quoted price, 0.50 in this balanced pool [D-14]
+      expect(result.avgPrice).toBeCloseTo(0.5, 2);
     });
 
     test('multiple small trades equivalent to one large', () => {

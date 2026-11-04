@@ -41,16 +41,18 @@ describe('CPMM constant product math', () => {
   });
 
   test('buy YES in 50/50 market: exact share calculation', () => {
-    // Pool: 5000/5000, buy $100 YES
+    // Pool: 5000/5000, buy $100 YES. Cash-in CPMM [D-14]: the $100 mints
+    // 100 complete sets (buyer keeps the 100 YES) and the 100 minted NO
+    // swap along the invariant for 5000 - 4901.96 ≈ 98.04 more YES.
     // newNoShares = 5000 + 100 = 5100
     // newYesShares = 25_000_000 / 5100 ≈ 4901.96
-    // sharesBought = 5000 - 4901.96 ≈ 98.04
+    // sharesBought = 100 + 98.04 ≈ 198.04
     const result = PredictionPricing.calculateBuy(Y, N, 'yes', 100);
-    expect(result.sharesBought).toBeCloseTo(98.04, 1);
+    expect(result.sharesBought).toBeCloseTo(198.04, 1);
     expect(result.newNoShares).toBe(5100);
     expect(result.newYesShares).toBeCloseTo(25_000_000 / 5100, 6);
-    // avgPrice = 100 / 98.04 ≈ 1.02 (slightly above YES price due to slippage)
-    expect(result.avgPrice).toBeCloseTo(1.02, 1);
+    // avgPrice = 100 / 198.04 ≈ 0.505 — the 0.50 quote plus curve slippage
+    expect(result.avgPrice).toBeCloseTo(0.505, 2);
   });
 
   test('buy YES in skewed market (80/20): cheaper shares', () => {
@@ -59,10 +61,10 @@ describe('CPMM constant product math', () => {
     const result = PredictionPricing.calculateBuy(8000, 2000, 'yes', 100);
     // newNoShares = 2000 + 100 = 2100
     // newYesShares = 16_000_000 / 2100 ≈ 7619.05
-    // sharesBought = 8000 - 7619.05 ≈ 380.95
-    expect(result.sharesBought).toBeCloseTo(380.95, 0);
-    // avgPrice ≈ 100/380.95 ≈ 0.2625 — close to YES price of 0.20
-    expect(result.avgPrice).toBeCloseTo(0.2625, 2);
+    // sharesBought = 100 minted + (8000 - 7619.05) swapped ≈ 480.95
+    expect(result.sharesBought).toBeCloseTo(480.95, 0);
+    // avgPrice ≈ 100/480.95 ≈ 0.208 — the 0.20 quote plus curve slippage
+    expect(result.avgPrice).toBeCloseTo(0.208, 2);
   });
 
   test('large buy moves price significantly', () => {
@@ -72,8 +74,8 @@ describe('CPMM constant product math', () => {
     // YES price moves from 0.50 to 7500/10833.33 ≈ 0.692
     expect(result.newYesPrice).toBeCloseTo(0.692, 2);
     expect(result.newNoPrice).toBeCloseTo(0.308, 2);
-    // sharesBought = 5000 - 3333.33 ≈ 1666.67
-    expect(result.sharesBought).toBeCloseTo(1666.67, 0);
+    // sharesBought = 2500 minted + (5000 - 3333.33) swapped ≈ 4166.67
+    expect(result.sharesBought).toBeCloseTo(4166.67, 0);
   });
 
   test('sell recovers exact buy cost (no-fee CPMM is reversible)', () => {
