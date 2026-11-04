@@ -14,16 +14,11 @@ import type {
 import type { JsonValue } from '@feed/api';
 import { broadcastToChannel } from '@feed/api';
 import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@feed/core/markets/prediction';
-import { asUser } from '@feed/db';
-import {
-  createUserWalletAdapter,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
   WalletService,
+  withPredictionSettlement,
 } from '@feed/engine';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
 import { logger } from '../../../../shared/logger';
@@ -138,11 +133,21 @@ export const buyPredictionAction: Action = {
       const isBuyYes = side === 'YES';
       const sideLabel = isBuyYes ? 'yes' : 'no';
 
-      const result = await asUser({ userId: agentUserId }, async (txDb) => {
-        const service = new PredictionMarketService({
-          db: new PredictionDbAdapter(txDb),
-          // Every wallet mutation (incl. PnL) enlists in the asUser transaction
-          wallet: createUserWalletAdapter(txDb),
+      const result = await withPredictionSettlement(
+        marketId,
+        { userId: agentUserId },
+        async (service) => {
+          const market = await service.ensureMarketExists({ marketId });
+          const buy = await service.buy({
+            userId: agentUserId,
+            marketId,
+            side: sideLabel,
+            amount,
+          });
+
+          return { market, buy };
+        },
+        {
           broadcast: {
             emit: (channel, payload) =>
               broadcastToChannel(channel, payload as Record<string, JsonValue>),
@@ -154,7 +159,7 @@ export const buyPredictionAction: Action = {
             referrerShare: FEE_CONFIG.REFERRER_SHARE,
             minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
           },
-          feeProcessor: {
+          feeProcessor: (tx) => ({
             processTradingFee: ({
               userId,
               amount,
@@ -168,22 +173,11 @@ export const buyPredictionAction: Action = {
                 amount,
                 positionId,
                 relatedId,
-                txDb // Pass the existing transaction to avoid nested transaction deadlocks
+                tx
               ),
-          },
-        });
-
-        const market = await service.ensureMarketExists({ marketId });
-        const buy = await service.buy({
-          userId: agentUserId,
-          marketId,
-          side: sideLabel,
-          amount,
-        });
-
-        return { market, buy };
-      });
-
+          }),
+        }
+      );
       // Record trade for UI/performance tracking. The buy is committed, so
       // an analytics failure must not report it as failed.
       await agentPnLService

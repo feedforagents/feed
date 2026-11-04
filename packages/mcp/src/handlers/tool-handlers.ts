@@ -46,10 +46,6 @@ import {
   RateLimitError,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
-import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   and,
@@ -74,8 +70,10 @@ import {
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
+  type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
+  withPredictionSettlement,
 } from '@feed/engine';
 import type { JsonValue, StringRecord } from '@feed/shared';
 import {
@@ -105,7 +103,7 @@ function buildWalletPort(): WalletPort {
   };
 }
 
-function buildFeeProcessor(): FeeProcessor {
+function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
   return {
     processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
       FeeService.processTradingFee(
@@ -113,7 +111,8 @@ function buildFeeProcessor(): FeeProcessor {
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
-        relatedId
+        relatedId,
+        tx
       ),
   };
 }
@@ -608,15 +607,10 @@ export async function executeGetMarkets(
 /**
  * Build prediction market service for a given market
  */
-function buildPredictionService(marketId: string) {
-  return new PredictionMarketService({
-    db: new PredictionDbAdapter(),
-    wallet: buildWalletPort(),
-    broadcast: {
-      emit: async () => {
-        // No-op for MCP - broadcasts handled separately
-      },
-    },
+function predictionServiceOptions(
+  marketId: string
+): PredictionSettlementOptions {
+  return {
     cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
     clock: { now: () => new Date() },
     fees: {
@@ -625,8 +619,8 @@ function buildPredictionService(marketId: string) {
       referrerShare: FEE_CONFIG.REFERRER_SHARE,
       minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
-    feeProcessor: buildFeeProcessor(),
-  });
+    feeProcessor: (tx) => buildFeeProcessor(tx),
+  };
 }
 
 /**
@@ -742,13 +736,18 @@ export async function executePlaceBet(
       // Validate and convert uppercase side to lowercase for service
       const side = validatePredictionSide(args.side);
 
-      const service = buildPredictionService(args.marketId);
-      const result = await service.buy({
-        userId: agent.userId,
-        marketId: args.marketId,
-        side,
-        amount: args.amount,
-      });
+      const result = await withPredictionSettlement(
+        args.marketId,
+        { userId: agent.userId },
+        (service) =>
+          service.buy({
+            userId: agent.userId,
+            marketId: args.marketId,
+            side,
+            amount: args.amount,
+          }),
+        predictionServiceOptions(args.marketId)
+      );
 
       const balance = await WalletService.getBalance(agent.userId);
 
@@ -997,13 +996,18 @@ export async function executeBuyShares(
     async () => {
       const side = validatePredictionSide(args.outcome);
 
-      const service = buildPredictionService(args.marketId);
-      const result = await service.buy({
-        userId: agent.userId,
-        marketId: args.marketId,
-        side,
-        amount: args.amount,
-      });
+      const result = await withPredictionSettlement(
+        args.marketId,
+        { userId: agent.userId },
+        (service) =>
+          service.buy({
+            userId: agent.userId,
+            marketId: args.marketId,
+            side,
+            amount: args.amount,
+          }),
+        predictionServiceOptions(args.marketId)
+      );
 
       const balance = await WalletService.getBalance(agent.userId);
 
@@ -1050,13 +1054,18 @@ export async function executeSellShares(
         throw new Error('Position has no associated market');
       }
 
-      const service = buildPredictionService(position.marketId);
-      const result = await service.sell({
-        userId: agent.userId,
-        marketId: position.marketId,
-        shares: args.shares,
-        positionId: args.positionId,
-      });
+      const result = await withPredictionSettlement(
+        position.marketId,
+        { userId: agent.userId },
+        (service) =>
+          service.sell({
+            userId: agent.userId,
+            marketId: position.marketId,
+            shares: args.shares,
+            positionId: args.positionId,
+          }),
+        predictionServiceOptions(position.marketId)
+      );
 
       const balance = await WalletService.getBalance(agent.userId);
 
@@ -2469,13 +2478,19 @@ export async function executeResolveMarket(
 
   const winningSide = args.resolution ? 'yes' : 'no';
 
-  const service = buildPredictionService(args.marketId);
-  await service.resolve({
-    marketId: args.marketId,
-    winningSide,
-    resolutionDescription:
-      args.reason || `Resolved by admin as ${args.resolution ? 'YES' : 'NO'}`,
-  });
+  await withPredictionSettlement(
+    args.marketId,
+    { system: 'mcp_admin_resolve' },
+    (service) =>
+      service.resolve({
+        marketId: args.marketId,
+        winningSide,
+        resolutionDescription:
+          args.reason ||
+          `Resolved by admin as ${args.resolution ? 'YES' : 'NO'}`,
+      }),
+    predictionServiceOptions(args.marketId)
+  );
 
   await logAdminModify({
     adminId: agent.userId,
