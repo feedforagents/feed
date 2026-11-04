@@ -66,7 +66,7 @@ import {
   calculateTrendingTags,
   createArcState,
   createParodyHeadlineGenerator,
-  createUserWalletAdapter,
+  createPredictionSettlementWallet,
   DistributedLockService,
   dailyTopicService,
   FeeRedistributionService,
@@ -1583,7 +1583,7 @@ export async function resolveQuestionPayouts(
     },
     {
       wallet: (tx, afterCommit) => {
-        const wallet = createUserWalletAdapter(tx, afterCommit);
+        const wallet = createPredictionSettlementWallet(tx, afterCommit);
         return {
           ...wallet,
           credit: async (payment) => {

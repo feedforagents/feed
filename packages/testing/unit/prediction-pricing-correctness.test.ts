@@ -1,14 +1,17 @@
 /**
  * Prediction Market Pricing Correctness Tests
  *
- * Verifies CPMM buy/sell math, k-invariant preservation, pool-proportional
- * payout model with concrete numerical examples, and fee integration.
+ * Verifies CPMM buy/sell math, k-invariant preservation, one-point share
+ * redemption, and fee integration.
  */
 import { describe, expect, test } from 'bun:test';
+import { floorPoints } from '@feed/shared';
 
 // Import pricing directly — no mocks needed for pure math
-import { floorPoints } from '@feed/shared';
-import { PredictionPricing } from '../../core/markets/prediction/pricing';
+import {
+  calculateExpectedPayout,
+  PredictionPricing,
+} from '../../core/markets/prediction/client';
 
 // ─── CPMM Buy/Sell Math ─────────────────────────────────────────────────────
 
@@ -149,171 +152,32 @@ describe('CPMM fee integration', () => {
   });
 });
 
-// ─── Pool-Proportional Payout Model ─────────────────────────────────────────
+// ─── Winning Share Redemption ──────────────────────────────────────────────
 
-describe('pool-proportional payout model', () => {
-  test('50/50 market, equal bets → winner doubles money', () => {
-    // Alice bets $100 YES (gets shares), Bob bets $100 NO
-    // Both buy in 50/50 market, so avgPrice ≈ $1.02/share
-    // But conceptually: Alice deposits $100, Bob deposits $100
-    // YES wins → Alice gets her $100 back + all of Bob's $100 = $200
-    const aliceShares = 100;
-    const aliceAvg = 1.0; // simplified: $1 per share
-    const bobShares = 100;
-    const bobAvg = 1.0;
-
-    const totalWinnerShares = aliceShares;
-    const totalLoserDeposits = bobShares * bobAvg; // $100
-
-    const payout = PredictionPricing.calculateExpectedPayout(
-      aliceShares,
-      aliceAvg,
-      totalWinnerShares,
-      totalLoserDeposits
-    );
-    // costBasis = 100 * 1.0 = 100
-    // + proportion(100/100) * loserDeposits(100) = 100
-    // total = 200
-    expect(payout).toBe(200);
+describe('winning share redemption (PRD D-14)', () => {
+  test('the client preview and resolution helper pay one point per share', () => {
+    expect(calculateExpectedPayout(10, 0.6)).toBe(10);
+    expect(PredictionPricing.calculateExpectedPayout(10, 0.6)).toBe(10);
   });
 
-  test('80/20 market: favorite wins → small profit', () => {
-    // 4 people bet $100 YES each (favorite), 1 person bets $100 NO (underdog)
-    // YES wins
-    const winnerShares = 400; // total YES shares across 4 winners
-    const loserDeposits = 100; // 1 loser's deposit
-
-    // Each winner's payout:
-    const perWinner = PredictionPricing.calculateExpectedPayout(
-      100, // each winner has 100 shares
-      1.0, // avgPrice
-      winnerShares,
-      loserDeposits
+  test('purchase cost and legacy pool context do not change redemption', () => {
+    expect(PredictionPricing.calculateExpectedPayout(100, 1, 400, 100)).toBe(
+      100
     );
-    // costBasis = 100, proportion = 100/400 = 0.25, loserShare = 0.25 * 100 = 25
-    // payout = 100 + 25 = 125 (25% profit on $100 bet)
-    expect(perWinner).toBe(125);
+    expect(PredictionPricing.calculateExpectedPayout(100, 0.5, 100, 400)).toBe(
+      100
+    );
+    expect(PredictionPricing.calculateExpectedPayout(100, 0.8, 200, 0)).toBe(
+      100
+    );
   });
 
-  test('80/20 market: underdog wins → big profit', () => {
-    // 4 people bet $100 YES (favorite), 1 person bets $100 NO (underdog)
-    // NO wins (underdog wins)
-    const winnerShares = 100; // 1 underdog winner
-    const loserDeposits = 400; // 4 losers × $100 each
-
-    const payout = PredictionPricing.calculateExpectedPayout(
-      100,
-      1.0,
-      winnerShares,
-      loserDeposits
-    );
-    // costBasis = 100, proportion = 100/100 = 1.0, loserShare = 400
-    // payout = 100 + 400 = 500 (400% profit — 5x return on $100 bet)
-    expect(payout).toBe(500);
+  test('fractional winning shares settle down to whole hundredths', () => {
+    expect(calculateExpectedPayout(0.125, 0.8)).toBe(0.12);
   });
 
-  test('all on one side (no losers) → winners get cost basis back', () => {
-    // Everyone bets YES, YES wins → no loser deposits to distribute
-    const payout = PredictionPricing.calculateExpectedPayout(
-      50,
-      0.8,
-      200, // totalWinnerShares
-      0 // no losers
-    );
-    // costBasis = 50 * 0.8 = 40, proportion * 0 = 0
-    expect(payout).toBe(40);
-  });
-
-  test('single trader wins → gets cost basis back', () => {
-    const payout = PredictionPricing.calculateExpectedPayout(
-      100,
-      0.5,
-      100, // only winner
-      0 // no losers
-    );
-    expect(payout).toBe(50); // costBasis = 100 * 0.5
-  });
-
-  test('multiple winners split losers proportionally to shares', () => {
-    // Alice: 300 shares @ 0.50, Bob: 100 shares @ 0.60
-    // Loser deposits: $500
-    const totalWinnerShares = 400;
-    const totalLoserDeposits = 500;
-
-    const alicePayout = PredictionPricing.calculateExpectedPayout(
-      300,
-      0.5,
-      totalWinnerShares,
-      totalLoserDeposits
-    );
-    const bobPayout = PredictionPricing.calculateExpectedPayout(
-      100,
-      0.6,
-      totalWinnerShares,
-      totalLoserDeposits
-    );
-
-    // Alice: costBasis=150, proportion=300/400=0.75, loserShare=0.75*500=375
-    // payout = 150 + 375 = 525
-    expect(alicePayout).toBe(525);
-
-    // Bob: costBasis=60, proportion=100/400=0.25, loserShare=0.25*500=125
-    // payout = 60 + 125 = 185
-    expect(bobPayout).toBe(185);
-
-    // Total payouts = 525 + 185 = 710
-    // Total deposits = alice(150) + bob(60) + losers(500) = 710
-    // Zero-sum ✓
-    const totalPayouts = alicePayout + bobPayout;
-    const totalDeposits = 300 * 0.5 + 100 * 0.6 + totalLoserDeposits;
-    expect(totalPayouts).toBeCloseTo(totalDeposits, 10);
-  });
-
-  test('rounded payouts never exceed total deposits', () => {
-    // 3 winners, 2 losers, varying sizes
-    const winners = [
-      { shares: 200, avgPrice: 0.4 },
-      { shares: 150, avgPrice: 0.55 },
-      { shares: 50, avgPrice: 0.7 },
-    ];
-    const losers = [
-      { shares: 300, avgPrice: 0.45 },
-      { shares: 100, avgPrice: 0.6 },
-    ];
-
-    const totalWinnerShares = winners.reduce((s, w) => s + w.shares, 0);
-    const totalLoserDeposits = losers.reduce(
-      (s, l) => s + l.shares * l.avgPrice,
-      0
-    );
-
-    let totalPayouts = 0;
-    for (const w of winners) {
-      totalPayouts += PredictionPricing.calculateExpectedPayout(
-        w.shares,
-        w.avgPrice,
-        totalWinnerShares,
-        totalLoserDeposits
-      );
-    }
-
-    const totalWinnerDeposits = winners.reduce(
-      (s, w) => s + w.shares * w.avgPrice,
-      0
-    );
-    // Total payouts = total winner deposits + total loser deposits
-    expect(totalPayouts).toBeLessThanOrEqual(
-      totalWinnerDeposits + totalLoserDeposits
-    );
-    expect(
-      totalWinnerDeposits + totalLoserDeposits - totalPayouts
-    ).toBeLessThan(winners.length * 0.01);
-  });
-
-  test('default args (no pool context) returns cost basis', () => {
-    // When called without totalWinnerShares/totalLoserDeposits
-    const payout = PredictionPricing.calculateExpectedPayout(100, 0.6);
-    expect(payout).toBe(60); // costBasis = 100 * 0.6
+  test('zero winning shares redeem for zero', () => {
+    expect(PredictionPricing.calculateExpectedPayout(0, 0.6, 100, 500)).toBe(0);
   });
 });
 

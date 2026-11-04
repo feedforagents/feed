@@ -1,12 +1,17 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import {
+  actorState,
+  and,
   balanceTransactions,
   dbWrite,
   eq,
   inArray,
   markets,
+  npcTrades,
+  poolPositions,
   positions,
   predictionPriceHistories,
+  questions,
   sql,
   tradingFees,
   users,
@@ -17,9 +22,12 @@ import {
   FeeService,
   type FeeType,
   type PredictionSettlementOptions,
+  resolveQuestionPayouts,
+  StaticDataRegistry,
+  TradeExecutionService,
   withPredictionSettlement,
 } from '@feed/engine';
-import { generateSnowflakeId } from '@feed/shared';
+import { floorPoints, generateSnowflakeId } from '@feed/shared';
 import { z } from 'zod';
 import {
   executeBuyShares as buyShares,
@@ -51,6 +59,89 @@ const options: PredictionSettlementOptions = {
 };
 const userIds: string[] = [];
 const marketIds: string[] = [];
+const npcSnapshots = new Map<
+  string,
+  { user?: typeof users.$inferSelect; actor?: typeof actorState.$inferSelect }
+>();
+
+async function npcFixture() {
+  const actor = StaticDataRegistry.getAllActors().find(
+    (actor) => !npcSnapshots.has(actor.id)
+  );
+  if (!actor)
+    throw new Error('No registered NPC available for payout fixtures');
+  const [user] = await dbWrite
+    .select()
+    .from(users)
+    .where(eq(users.id, actor.id));
+  const [state] = await dbWrite
+    .select()
+    .from(actorState)
+    .where(eq(actorState.id, actor.id));
+  npcSnapshots.set(actor.id, { user, actor: state });
+  if (!user) {
+    userIds.push(actor.id);
+    await dbWrite.insert(users).values({
+      id: actor.id,
+      username: `settlement-npc-${actor.id}`,
+      isActor: true,
+      virtualBalance: '1000',
+      updatedAt: new Date(),
+    });
+  }
+  if (state) {
+    await dbWrite
+      .update(actorState)
+      .set({ tradingBalance: '1000', updatedAt: new Date() })
+      .where(eq(actorState.id, actor.id));
+  } else {
+    await dbWrite
+      .insert(actorState)
+      .values({ id: actor.id, tradingBalance: '1000', updatedAt: new Date() });
+  }
+  return {
+    id: actor.id,
+    name: actor.name,
+    userBalance: Number(user?.virtualBalance ?? 1000),
+  };
+}
+
+async function npcBuy(
+  actor: { id: string; name: string },
+  marketId: string,
+  side: 'yes' | 'no' = 'yes'
+) {
+  await new TradeExecutionService().executeSingleDecision({
+    npcId: actor.id,
+    npcName: actor.name,
+    marketType: 'prediction',
+    marketId,
+    action: side === 'yes' ? 'buy_yes' : 'buy_no',
+    amount: 10,
+    confidence: 1,
+    reasoning: 'Isolated payout wallet verification',
+  });
+  const [holding] = await dbWrite
+    .select()
+    .from(positions)
+    .where(
+      and(eq(positions.userId, actor.id), eq(positions.marketId, marketId))
+    );
+  if (!holding) throw new Error('NPC trade did not create its real holding');
+  return holding;
+}
+
+async function npcBalance(id: string) {
+  const [actor] = await dbWrite
+    .select()
+    .from(actorState)
+    .where(eq(actorState.id, id));
+  const [user] = await dbWrite.select().from(users).where(eq(users.id, id));
+  return {
+    trading: Number(actor?.tradingBalance),
+    user: Number(user?.virtualBalance),
+  };
+}
 
 const positionSchema = z.object({
   id: z.string(),
@@ -162,7 +253,40 @@ async function contend<T>(
 }
 
 afterAll(async () => {
+  for (const [id, snapshot] of npcSnapshots) {
+    if (snapshot.actor) {
+      await dbWrite
+        .insert(actorState)
+        .values(snapshot.actor)
+        .onConflictDoUpdate({ target: actorState.id, set: snapshot.actor });
+    } else {
+      await dbWrite.delete(actorState).where(eq(actorState.id, id));
+    }
+    if (snapshot.user) {
+      const user = snapshot.user;
+      await dbWrite
+        .update(users)
+        .set({
+          virtualBalance: user.virtualBalance,
+          lifetimePnL: user.lifetimePnL,
+          earnedPoints: user.earnedPoints,
+          reputationPoints: user.reputationPoints,
+          updatedAt: user.updatedAt,
+        })
+        .where(eq(users.id, id));
+    }
+  }
   if (marketIds.length) {
+    await dbWrite
+      .delete(npcTrades)
+      .where(inArray(npcTrades.marketId, marketIds));
+    await dbWrite
+      .delete(poolPositions)
+      .where(inArray(poolPositions.marketId, marketIds));
+    await dbWrite
+      .delete(balanceTransactions)
+      .where(inArray(balanceTransactions.relatedId, marketIds));
+    await dbWrite.delete(questions).where(inArray(questions.id, marketIds));
     await dbWrite
       .delete(predictionPriceHistories)
       .where(inArray(predictionPriceHistories.marketId, marketIds));
@@ -183,6 +307,130 @@ afterAll(async () => {
 });
 
 describe('atomic prediction settlement with real Postgres and wallet', () => {
+  for (const side of ['yes', 'no'] as const) {
+    it(`pays a winning NPC ${side} holding into ActorState once`, async () => {
+      const f = await fixture();
+      const actor = await npcFixture();
+      const holding = await npcBuy(actor, f.marketId, side);
+      expect(await npcBalance(actor.id)).toEqual({
+        trading: 990,
+        user: actor.userBalance,
+      });
+      const resolve = () =>
+        withPredictionSettlement(
+          f.marketId,
+          { system: 'npc_payout_test' },
+          (service) =>
+            service.resolve({ marketId: f.marketId, winningSide: side }),
+          options
+        );
+      await resolve();
+      expect(await npcBalance(actor.id)).toEqual({
+        trading: 990 + floorPoints(Number(holding.shares)),
+        user: actor.userBalance,
+      });
+      const after = await npcBalance(actor.id);
+      await resolve();
+      expect(await npcBalance(actor.id)).toEqual(after);
+    });
+  }
+
+  it('refunds cancellation to the NPC trading wallet once', async () => {
+    const f = await fixture();
+    const actor = await npcFixture();
+    const holding = await npcBuy(actor, f.marketId);
+    const cancel = () =>
+      withPredictionSettlement(
+        f.marketId,
+        { system: 'npc_cancel_test' },
+        (service) =>
+          service.cancel({
+            marketId: f.marketId,
+            reason: 'Isolated cancellation',
+          }),
+        options
+      );
+    await cancel();
+    const after = await npcBalance(actor.id);
+    expect(after.user).toBe(actor.userBalance);
+    expect(after.trading).toBeCloseTo(
+      990 + floorPoints(Number(holding.shares) * Number(holding.avgPrice)),
+      2
+    );
+    await cancel();
+    expect(await npcBalance(actor.id)).toEqual(after);
+  });
+
+  it('rolls back resolution when the NPC trading wallet is missing instead of crediting its User balance', async () => {
+    const f = await fixture();
+    const actor = await npcFixture();
+    await npcBuy(actor, f.marketId);
+    await dbWrite.delete(actorState).where(eq(actorState.id, actor.id));
+    await expect(
+      withPredictionSettlement(
+        f.marketId,
+        { system: 'npc_payout_test' },
+        (service) =>
+          service.resolve({ marketId: f.marketId, winningSide: 'yes' }),
+        options
+      )
+    ).rejects.toThrow('Actor not found');
+    expect((await npcBalance(actor.id)).user).toBe(actor.userBalance);
+    const [market] = await dbWrite
+      .select()
+      .from(markets)
+      .where(eq(markets.id, f.marketId));
+    expect(market?.resolved).toBe(false);
+    await dbWrite
+      .insert(actorState)
+      .values({ id: actor.id, tradingBalance: '990', updatedAt: new Date() });
+  });
+
+  it('runs the real game-tick payout path for mixed human and NPC winners', async () => {
+    const f = await fixture();
+    const actor = await npcFixture();
+    const human = await executeBuyShares(f.agent, {
+      marketId: f.marketId,
+      outcome: 'YES',
+      amount: 10,
+    });
+    const npc = await npcBuy(actor, f.marketId);
+    const [maximum] = await dbWrite
+      .select({
+        value: sql<number>`coalesce(max(${questions.questionNumber}), 0)`,
+      })
+      .from(questions);
+    const questionNumber = Number(maximum?.value ?? 0) + 1;
+    await dbWrite.insert(questions).values({
+      id: f.marketId,
+      marketId: f.marketId,
+      questionNumber,
+      text: 'Mixed payout verification',
+      scenarioId: 1,
+      outcome: true,
+      rank: 1,
+      resolutionDate: new Date(),
+      updatedAt: new Date(),
+    });
+    await resolveQuestionPayouts(questionNumber);
+    const paid = await state(f.userId, f.marketId);
+    expect(paid.balance).toBeCloseTo(
+      990 + floorPoints(human.position.shares),
+      2
+    );
+    expect(await npcBalance(actor.id)).toEqual({
+      trading: 990 + floorPoints(Number(npc.shares)),
+      user: actor.userBalance,
+    });
+    const [question] = await dbWrite
+      .select()
+      .from(questions)
+      .where(eq(questions.id, f.marketId));
+    expect(question?.status).toBe('resolved');
+    await resolveQuestionPayouts(questionNumber);
+    expect((await state(f.userId, f.marketId)).balance).toBe(paid.balance);
+  });
+
   it('allows one overlapping full MCP sell and credits it once', async () => {
     const f = await fixture();
     const bought = await executeBuyShares(f.agent, {

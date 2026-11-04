@@ -10,6 +10,8 @@ import type {
 } from '@feed/core/markets/shared';
 import { dbWrite, eq, markets, sql, type Transaction } from '@feed/db';
 import { logger } from '@feed/shared';
+import { createNpcWalletAdapter } from './npc-wallet-adapter';
+import { StaticDataRegistry } from './static-data-registry';
 import { createUserWalletAdapter } from './user-wallet-adapter';
 
 type SettlementContext = { userId: string } | { system: string };
@@ -21,6 +23,24 @@ export type PredictionSettlementOptions = Omit<
   feeProcessor?: (tx: Transaction) => FeeProcessor;
   wallet?: (tx: Transaction, afterCommit: AfterCommitScheduler) => WalletPort;
 };
+
+/** Resolve mixed player/NPC holdings back to the wallet that funds trades. */
+export function createPredictionSettlementWallet(
+  tx: Transaction,
+  afterCommit: AfterCommitScheduler
+): WalletPort {
+  const userWallet = createUserWalletAdapter(tx, afterCommit);
+  const walletFor = (userId: string) =>
+    StaticDataRegistry.getActor(userId)
+      ? createNpcWalletAdapter(userId, tx)
+      : userWallet;
+  return {
+    debit: (payment) => walletFor(payment.userId).debit(payment),
+    credit: (payment) => walletFor(payment.userId).credit(payment),
+    recordPnL: (entry) => walletFor(entry.userId).recordPnL(entry),
+    getBalance: (userId) => walletFor(userId).getBalance(userId),
+  };
+}
 
 /** Keep a market, its holdings, and its wallet mutations in one commit. */
 export async function withPredictionSettlement<T>(
@@ -56,7 +76,7 @@ export async function withPredictionSettlement<T>(
       db: new PredictionDbAdapter(tx),
       wallet:
         walletFactory?.(tx, afterCommit) ??
-        createUserWalletAdapter(tx, afterCommit),
+        createPredictionSettlementWallet(tx, afterCommit),
       afterCommit,
       feeProcessor: feeProcessorFactory?.(tx),
     });

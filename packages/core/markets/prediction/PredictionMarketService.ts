@@ -498,29 +498,20 @@ export class PredictionMarketService {
 
     const now = input.resolvedAt ?? this.now();
 
-    // Pool-proportional payout: winners split losers' deposits
+    // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
+    // Payouts are not split pool-proportionally: each winner is credited
+    // shares x 1 pt and losers receive 0. Market liquidity is seeded by
+    // the house (virtual), so winners are credited in full even when the
+    // total redemption exceeds the pool's remaining liquidity.
     const isWinnerSide = (p: { side: string }) =>
       (winningSide === 'yes' && p.side === 'yes') ||
       (winningSide === 'no' && p.side === 'no');
 
-    const totalWinnerShares = positions
-      .filter(isWinnerSide)
-      .reduce((sum, p) => sum + p.shares, 0);
-    const totalLoserDeposits = positions
-      .filter((p) => !isWinnerSide(p))
-      .reduce((sum, p) => sum + p.shares * p.avgPrice, 0);
-
     const totalPayout = positions
       .filter(isWinnerSide)
       .reduce(
-        (acc, p) =>
-          acc +
-          PredictionPricing.calculateExpectedPayout(
-            p.shares,
-            p.avgPrice,
-            totalWinnerShares,
-            totalLoserDeposits
-          ),
+        (sum, p) =>
+          sum + PredictionPricing.calculateExpectedPayout(p.shares, p.avgPrice),
         0
       );
 
@@ -538,12 +529,7 @@ export class PredictionMarketService {
     for (const pos of positions) {
       const isWinner = isWinnerSide(pos);
       const payout = isWinner
-        ? PredictionPricing.calculateExpectedPayout(
-            pos.shares,
-            pos.avgPrice,
-            totalWinnerShares,
-            totalLoserDeposits
-          )
+        ? PredictionPricing.calculateExpectedPayout(pos.shares, pos.avgPrice)
         : 0;
       const pnl = pointsDifference(
         payout,

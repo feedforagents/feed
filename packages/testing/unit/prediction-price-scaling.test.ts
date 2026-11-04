@@ -55,16 +55,15 @@ describe('Prediction market price scaling', () => {
     expect(result.avgPrice).toBeGreaterThan(1.5);
   });
 
-  it('calculateExpectedPayout returns cost basis when no aggregate pool args are used', () => {
+  it('calculateExpectedPayout redeems shares without pool context', () => {
     const shares = 100;
     const avgPrice = 0.6;
 
     const payout = PredictionPricing.calculateExpectedPayout(shares, avgPrice);
-    // With totalWinnerShares <= 0, resolution helper returns cost basis only
-    expect(payout).toBe(shares * avgPrice);
+    expect(payout).toBe(shares);
   });
 
-  it('calculateExpectedPayout adds proportional share of loser deposits', () => {
+  it('calculateExpectedPayout is independent of loser deposits', () => {
     const shares = 100;
     const avgPrice = 0.6;
     const totalWinnerShares = 100;
@@ -76,8 +75,7 @@ describe('Prediction market price scaling', () => {
       totalWinnerShares,
       totalLoserDeposits
     );
-    const costBasis = shares * avgPrice;
-    expect(payout).toBe(costBasis + totalLoserDeposits);
+    expect(payout).toBe(shares);
   });
 });
 
