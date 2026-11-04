@@ -1,9 +1,6 @@
 'use client';
 
-import {
-  calculateExpectedPayout,
-  PredictionPricing,
-} from '@feed/core/markets/prediction/client';
+import { PredictionPricing } from '@feed/core/markets/prediction/client';
 import type { PerpPositionFromAPI, PredictionPosition } from '@feed/shared';
 import {
   cn,
@@ -28,6 +25,7 @@ import { FollowButton } from '@/components/interactions';
 import { useAuth } from '@/hooks/useAuth';
 import { usePredictionTrading } from '@/hooks/usePredictionTrading';
 import { formatPrice } from '@/lib/market-formatters';
+import { buildPredictionWinPreview } from '@/lib/prediction-win-preview';
 import { usePerpMarketsStore } from '@/stores/perpMarketsStore';
 
 /**
@@ -332,13 +330,13 @@ export function PositionDetailModal({
       (predictionMarket.status !== 'active' ||
         predictionMarket.resolvedOutcome !== undefined)
   );
-  const expectedPayout = predictionCalc
-    ? calculateExpectedPayout(
+  // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
+  const { expectedPayout, expectedProfit } = predictionCalc
+    ? buildPredictionWinPreview(
         predictionCalc.sharesBought,
-        predictionCalc.avgPrice
+        parseFloat(amount) || 0
       )
-    : 0;
-  const expectedProfit = expectedPayout - (parseFloat(amount) || 0);
+    : { expectedPayout: 0, expectedProfit: -(parseFloat(amount) || 0) };
 
   // Perp trade tab modifies an existing position, so a fresh-open preview
   // would be misleading here.

@@ -1,9 +1,6 @@
 'use client';
 
-import {
-  calculateExpectedPayout,
-  PredictionPricing,
-} from '@feed/core/markets/prediction/client';
+import { PredictionPricing } from '@feed/core/markets/prediction/client';
 import { cn, FEED_POINTS_SYMBOL, logger } from '@feed/shared';
 import {
   Ban,
@@ -20,6 +17,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useBodyScrollLock } from '@/hooks/useBodyScrollLock';
 import { useMarketTracking } from '@/hooks/usePostHog';
 import { usePredictionTrading } from '@/hooks/usePredictionTrading';
+import { buildPredictionWinPreview } from '@/lib/prediction-win-preview';
 import {
   invalidateUserPositions,
   usePredictionPositions,
@@ -180,10 +178,10 @@ export function PredictionTradingModal({
       : null;
   const tradeCalculation = calculation;
 
-  const expectedPayout = calculation
-    ? calculateExpectedPayout(calculation.sharesBought, calculation.avgPrice)
-    : 0;
-  const expectedProfit = expectedPayout - amountNum;
+  // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
+  const { expectedPayout, expectedProfit } = calculation
+    ? buildPredictionWinPreview(calculation.sharesBought, amountNum)
+    : { expectedPayout: 0, expectedProfit: -amountNum };
 
   const showBalanceWarning =
     authenticated && amountNum > 0 && balance < amountNum;

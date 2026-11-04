@@ -1,9 +1,6 @@
 'use client';
 
-import {
-  calculateExpectedPayout,
-  PredictionPricing,
-} from '@feed/core/markets/prediction/client';
+import { PredictionPricing } from '@feed/core/markets/prediction/client';
 import { FEE_CONFIG } from '@feed/engine/config/fees';
 import { cn, FEED_POINTS_SYMBOL, formatCompactNumber } from '@feed/shared';
 import {
@@ -56,6 +53,7 @@ import type {
 } from '@/hooks/usePredictionMarketStream';
 import { usePredictionMarketStream } from '@/hooks/usePredictionMarketStream';
 import { formatBalance } from '@/lib/market-formatters';
+import { buildPredictionWinPreview } from '@/lib/prediction-win-preview';
 import {
   type MarketKey,
   serializeMarketKey,
@@ -1350,14 +1348,15 @@ export function MarketsTradingTerminal({
     clampedSellShares,
   ]);
 
-  const expectedPayout = useMemo(() => {
-    if (!predictionBuyCalculation) return 0;
-    return calculateExpectedPayout(
+  // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
+  const { expectedPayout, expectedProfit } = useMemo(() => {
+    if (!predictionBuyCalculation)
+      return { expectedPayout: 0, expectedProfit: -predictionAmountNum };
+    return buildPredictionWinPreview(
       predictionBuyCalculation.sharesBought,
-      predictionBuyCalculation.avgPrice
+      predictionAmountNum
     );
-  }, [predictionBuyCalculation]);
-  const expectedProfit = expectedPayout - predictionAmountNum;
+  }, [predictionBuyCalculation, predictionAmountNum]);
 
   const handlePredictionSubmit = () => {
     if (!authenticated) {
