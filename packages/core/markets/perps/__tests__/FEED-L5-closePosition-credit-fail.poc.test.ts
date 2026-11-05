@@ -29,6 +29,7 @@ class FlakyCreditWallet implements WalletPort {
   creditCalls = 0;
   failCredits = true;
   timeoutAfterApply = false;
+  errorAfterApply: string | null = null;
   timeoutBeforeApply = false;
   beforeNotApplied: (() => void) | null = null;
   constructor(private defaultBalance = 10_000) {}
@@ -62,6 +63,9 @@ class FlakyCreditWallet implements WalletPort {
     this.balances.set(userId, balance + amount);
     if (this.timeoutAfterApply) {
       throw new Error('credit timeout');
+    }
+    if (this.errorAfterApply) {
+      throw new Error(this.errorAfterApply);
     }
   }
   async recordPnL(): Promise<void> {}
@@ -349,6 +353,45 @@ describe('FEED-L5 closePosition credit-fail compensation', () => {
     ).rejects.toThrow('already closed');
     expect(wallet.creditCalls).toBe(1);
     expect((await wallet.getBalance('u1')).balance).toBe(paid);
+  });
+
+  it('does not reopen when an unlisted error (EPIPE) follows an applied credit', async () => {
+    const wallet = new FlakyCreditWallet(0);
+    wallet['balances'].set('u1', 0);
+    wallet.failCredits = false;
+    wallet.errorAfterApply = 'write EPIPE';
+    const db = new InMemoryPerpDb([baseMarket]);
+    const position = await seedPosition(db);
+    const service = new PerpMarketService({ db, wallet, fees: feeConfig });
+    await expect(
+      service.closePosition({ userId: 'u1', positionId: position.id })
+    ).rejects.toThrow('EPIPE');
+    expect((await db.getPositionById(position.id))?.closedAt).toBeTruthy();
+    const paid = (await wallet.getBalance('u1')).balance;
+    expect(paid).toBeGreaterThan(0);
+    await expect(
+      service.closePosition({ userId: 'u1', positionId: position.id })
+    ).rejects.toThrow('already closed');
+    expect(wallet.creditCalls).toBe(1);
+    expect((await wallet.getBalance('u1')).balance).toBe(paid);
+  });
+
+  it('reopens when an unlisted error happens and the balance did not move', async () => {
+    const wallet = new FlakyCreditWallet(0);
+    wallet['balances'].set('u1', 0);
+    wallet.failCredits = false;
+    wallet.credit = async () => {
+      wallet.creditCalls++;
+      throw new Error('write EPIPE');
+    };
+    const db = new InMemoryPerpDb([baseMarket]);
+    const position = await seedPosition(db);
+    const service = new PerpMarketService({ db, wallet, fees: feeConfig });
+    await expect(
+      service.closePosition({ userId: 'u1', positionId: position.id })
+    ).rejects.toThrow('EPIPE');
+    expect((await db.getPositionById(position.id))?.closedAt).toBeFalsy();
+    expect((await wallet.getBalance('u1')).balance).toBe(0);
   });
 
   it('reopens when a timeout happens before the credit is applied', async () => {

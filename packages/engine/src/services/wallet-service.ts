@@ -12,7 +12,6 @@
  */
 
 import {
-  isAmbiguousCreditFailure,
   isKnownCreditNotApplied,
   WalletCreditNotAppliedError,
 } from '@feed/core/markets/shared';
@@ -77,6 +76,23 @@ export type CacheInvalidationCallback = (userId: string) => Promise<void>;
  * Provides methods for checking balances, debiting/crediting funds, and
  * retrieving transaction history.
  */
+/**
+ * Wallet error raised before any balance row is written. Safe to treat as
+ * "credit not applied".
+ */
+class WalletPreCommitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WalletPreCommitError';
+  }
+}
+
+function isWalletPreCommitError(err: unknown): boolean {
+  return (
+    err instanceof WalletPreCommitError || err instanceof InsufficientFundsError
+  );
+}
+
 export class WalletService {
   /**
    * Optional cache invalidation callback
@@ -127,7 +143,7 @@ export class WalletService {
     amount: number
   ): void {
     if (!Number.isFinite(amount) || amount < 0) {
-      throw new Error(
+      throw new WalletPreCommitError(
         `Invalid ${operation} amount for ${userId}: ${amount}. Amount must be a finite non-negative number.`
       );
     }
@@ -171,7 +187,7 @@ export class WalletService {
     if (!user) {
       // Fail-fast: NPCs should have User records after bootstrap (ensureNpcUsers).
       // A missing user here indicates a bug in bootstrap or an invalid userId.
-      throw new Error(
+      throw new WalletPreCommitError(
         `User not found for wallet operation: ${userId}. NPCs should have User records after bootstrap.`
       );
     }
@@ -185,7 +201,7 @@ export class WalletService {
       !Number.isFinite(currentBalance) ||
       !Number.isFinite(newBalance)
     ) {
-      throw new Error(
+      throw new WalletPreCommitError(
         `Invalid wallet mutation for ${userId}: delta=${delta}, balance=${currentBalance}, result=${newBalance}`
       );
     }
@@ -379,9 +395,12 @@ export class WalletService {
         });
       }
     } catch (err) {
-      // Timeouts and dropped connections can surface after COMMIT. Leave
-      // those errors unchanged so callers do not treat them as "not applied".
-      if (isKnownCreditNotApplied(err) || isAmbiguousCreditFailure(err)) {
+      // Only errors raised before the UPDATE/INSERT (validation, missing
+      // user, insufficient funds) prove the credit did not commit. Anything
+      // else (EPIPE, timeout, driver error during COMMIT) may surface after
+      // the credit landed, so it is rethrown unchanged and callers must
+      // verify via balance before compensating.
+      if (isKnownCreditNotApplied(err) || !isWalletPreCommitError(err)) {
         throw err;
       }
       const message = err instanceof Error ? err.message : String(err);

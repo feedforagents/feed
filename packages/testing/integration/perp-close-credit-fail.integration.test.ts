@@ -47,7 +47,32 @@ type CreditMode =
   | 'not-applied'
   | 'timeout-after-applied'
   | 'timeout-before-applied'
-  | 'tamper-then-not-applied';
+  | 'tamper-then-not-applied'
+  | 'epipe-after-applied';
+
+/**
+ * A db client whose balance_transactions insert commits (autocommit) and then
+ * throws an unlisted transport error, so the failure originates inside
+ * WalletService.credit after the balance already moved.
+ */
+function epipeAfterInsertClient(): typeof db {
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === 'insert') {
+        return (table: unknown) => {
+          const builder = target.insert(table as typeof balanceTransactions);
+          return {
+            values: async (vals: unknown) => {
+              await builder.values(vals as never);
+              throw new Error('write EPIPE');
+            },
+          };
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
 
 const priceImpact: PriceImpactPort = {
   async applyAndGetPrice() {
@@ -78,6 +103,16 @@ function wrapWallet(
       }
       if (mode.value === 'timeout-before-applied') {
         throw new Error('credit timeout');
+      }
+      if (mode.value === 'epipe-after-applied') {
+        return WalletService.credit(
+          args.userId,
+          args.amount,
+          args.reason,
+          args.description ?? '',
+          args.relatedId,
+          epipeAfterInsertClient()
+        );
       }
       const result = await base.credit(args);
       if (mode.value === 'timeout-after-applied') {
@@ -381,6 +416,58 @@ describe('closePosition against real Postgres (credit-fail reopen)', () => {
       })
     ).rejects.toThrow('already closed');
     expect(await readBalance(userId)).toBeCloseTo(paid, 6);
+  });
+
+  it('leaves the close in place when an unlisted error (EPIPE) follows an applied credit', async () => {
+    const positionId = await openLong();
+    const before = await readBalance(userId);
+
+    await expect(
+      serviceWith(
+        new PerpDbAdapter(),
+        { value: 'epipe-after-applied' },
+        { value: positionId }
+      ).closePosition({ userId, positionId })
+    ).rejects.toThrow('EPIPE');
+
+    const [row] = await db
+      .select()
+      .from(perpPositions)
+      .where(eq(perpPositions.id, positionId));
+    expect(row!.closedAt).not.toBeNull();
+    const paid = await readBalance(userId);
+    expect(paid).toBeGreaterThan(before);
+
+    await expect(
+      serviceWith(
+        new PerpDbAdapter(),
+        { value: 'ok' },
+        { value: positionId }
+      ).closePosition({ userId, positionId })
+    ).rejects.toThrow('already closed');
+    expect(await readBalance(userId)).toBeCloseTo(paid, 6);
+  });
+
+  it('WalletService.credit only wraps pre-commit errors as not-applied', async () => {
+    const before = await readBalance(userId);
+    const epipe = await WalletService.credit(
+      userId,
+      5,
+      'test',
+      'epipe',
+      undefined,
+      epipeAfterInsertClient()
+    ).catch((e: unknown) => e);
+    expect(epipe).toBeInstanceOf(Error);
+    expect(epipe).not.toBeInstanceOf(WalletCreditNotAppliedError);
+    expect(await readBalance(userId)).toBeCloseTo(before + 5, 6);
+
+    await expect(
+      WalletService.credit('no-such-user-close-credit', 5, 'test', 'missing')
+    ).rejects.toBeInstanceOf(WalletCreditNotAppliedError);
+    await expect(
+      WalletService.credit(userId, -1, 'test', 'invalid')
+    ).rejects.toBeInstanceOf(WalletCreditNotAppliedError);
   });
 
   it('reopens when a timeout happens before the credit is applied', async () => {

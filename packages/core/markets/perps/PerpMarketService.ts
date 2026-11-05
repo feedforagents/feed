@@ -4,10 +4,7 @@ import {
   logger,
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
-import {
-  isAmbiguousCreditFailure,
-  isKnownCreditNotApplied,
-} from '../shared/common';
+import { isKnownCreditNotApplied } from '../shared/common';
 import {
   evolveSyntheticPerpQuoteState,
   getSyntheticPerpExecutionPrice,
@@ -2511,7 +2508,7 @@ function balanceUnchanged(before: number, after: number): boolean {
 
 /**
  * Reopen when the credit is known not to have committed.
- * For timeout and connection failures, reopen only when the wallet balance
+ * For any other failure (timeout, EPIPE, unknown), reopen only when the wallet balance
  * did not move by the settlement amount. A matching balance increase means
  * the credit landed and reopening would pay it twice.
  */
@@ -2522,7 +2519,7 @@ async function creditFailureShouldReopen(
   creditErr: unknown
 ): Promise<boolean> {
   if (isKnownCreditNotApplied(creditErr)) return true;
-  if (!isAmbiguousCreditFailure(creditErr)) return false;
+  // Any other error may have surfaced after COMMIT: verify via balance.
   try {
     const balanceAfter = (await getBalance()).balance;
     if (settlementCreditLanded(balanceBefore, balanceAfter, netSettlement)) {
