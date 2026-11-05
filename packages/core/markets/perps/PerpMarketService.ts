@@ -1792,13 +1792,20 @@ export class PerpMarketService {
             const realizedPnL = closePnl - position.fundingPaid;
             const closeMarginPaid = position.size / position.leverage;
             const closeFee = this.calculateFee(position.size);
-            const grossSettlement = closeMarginPaid + realizedPnL;
+            // A close cannot lose more than the leg's margin: the
+            // settlement below is already floored at 0, but the uncapped
+            // realizedPnL was stored/returned while recordPnL booked only
+            // the capped loss, so the two records of the same close
+            // disagreed past the margin. Cap here, matching closePosition
+            // and the liquidation cap (Math.max(..., -marginLoss)).
+            const cappedRealizedPnL = Math.max(realizedPnL, -closeMarginPaid);
+            const grossSettlement = closeMarginPaid + cappedRealizedPnL;
             const netSettlement = Math.max(0, grossSettlement - closeFee);
 
             await tx.closePosition(position.id, {
               currentPrice: exitPrice,
               closedAt: now,
-              realizedPnL: (position.realizedPnL ?? 0) + realizedPnL,
+              realizedPnL: (position.realizedPnL ?? 0) + cappedRealizedPnL,
               unrealizedPnL: 0,
               unrealizedPnLPercent: 0,
             });
@@ -1895,7 +1902,7 @@ export class PerpMarketService {
               liquidationPrice,
               marginPaid: marginRequired,
               feePaid: totalFees,
-              realizedPnL,
+              realizedPnL: cappedRealizedPnL,
               isRebalance: true,
               rebalanceType: 'flip' as const,
               previousSize: position.size,
