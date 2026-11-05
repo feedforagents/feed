@@ -1228,18 +1228,20 @@ export class PerpMarketService {
 
     for (const market of markets) {
       const agg = positionsByTicker.get(market.ticker);
-      if (!agg) continue;
 
+      // Markets without open positions still get their funding terms
+      // refreshed (zero open interest yields the base rate), so the rate and
+      // nextFundingTime shown to users never go stale.
       const funding = calculateDynamicFundingRate({
-        longOpenInterest: agg.longOpenInterest,
-        shortOpenInterest: agg.shortOpenInterest,
+        longOpenInterest: agg?.longOpenInterest ?? 0,
+        shortOpenInterest: agg?.shortOpenInterest ?? 0,
         baseFundingRate: BASE_FUNDING_RATE,
         maxFundingRate: MAX_FUNDING_RATE,
         imbalanceExponent: IMBALANCE_EXPONENT,
       });
 
       const periodRate = funding.periodRate;
-      for (const pos of agg.positions) {
+      for (const pos of agg?.positions ?? []) {
         // A close may have settled funding since the snapshot. Recompute from
         // the locked row so settled funding is not restored or charged again.
         await this.db.transaction(async (tx) => {
