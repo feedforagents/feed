@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { calculatePredictionPositionSnapshot } from '../positionSnapshot';
 import { PredictionPricing } from '../pricing';
 
-describe('resolved winning snapshot uses settled credit (PRD §9.2)', () => {
+describe('resolved winning snapshot uses settled credit (PRD §9.1, §9.2)', () => {
   test('currentValue and P&L equal the floored payout actually credited', () => {
     // Ordinary trade: 10 pts YES buy on a fresh 5000/5000 pool at 1% fee
     const buy = PredictionPricing.calculateBuyWithFees(
