@@ -220,7 +220,9 @@ const UnlikePostArgsSchema = z.object({
 
 const SharePostArgsSchema = z.object({
   postId: z.string().min(1),
-  comment: z.string().optional(),
+  // Same limit as the web share route (SharePostSchema): the comment becomes
+  // the quote post's content.
+  comment: z.string().max(500).optional(),
 }) satisfies z.ZodType<SharePostArgs>;
 
 const GetCommentsArgsSchema = z.object({
