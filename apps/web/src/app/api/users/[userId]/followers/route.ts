@@ -188,8 +188,7 @@ export const GET = withErrorHandling(
         .from(userActorFollows)
         .innerJoin(users, eq(userActorFollows.userId, users.id))
         .where(eq(userActorFollows.actorId, targetId))
-        .orderBy(desc(userActorFollows.createdAt))
-        .limit(200);
+        .orderBy(desc(userActorFollows.createdAt));
 
       followersList = [
         ...actorFollowersList.map((f) => ({

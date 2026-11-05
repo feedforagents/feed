@@ -59,11 +59,22 @@ const dbModuleFactory = () => ({
   userActorFollows: {},
   users: {},
 });
+// The target is a regular user with no NPC followers, so the route only
+// needs StaticDataRegistry to exist; mocking it avoids loading the engine barrel.
+const engineModulePath = new URL(
+  '../../../../../../../../../packages/engine/src/index.ts',
+  import.meta.url
+).pathname;
+const engineModuleFactory = () => ({
+  StaticDataRegistry: { getActor: () => null },
+});
 
 mock.module('@feed/api', apiModuleFactory);
 mock.module(apiModulePath, apiModuleFactory);
 mock.module('@feed/db', dbModuleFactory);
 mock.module(dbModulePath, dbModuleFactory);
+mock.module('@feed/engine', engineModuleFactory);
+mock.module(engineModulePath, engineModuleFactory);
 
 describe('GET /api/users/[userId]/followers', () => {
   it('applies page/limit and reports total and hasMore', async () => {
