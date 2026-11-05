@@ -497,3 +497,103 @@ describe('cancel repair and in-loop trade block (real Postgres)', () => {
     }
   });
 });
+
+describe('cancel credit ambiguity and resolve row lock (real Postgres)', () => {
+  it('keeps the position cancelled when the refund commits then throws', async () => {
+    const seed = await seedOpenPosition();
+    try {
+      const base = createUserWalletAdapter();
+      const service = new PredictionMarketService({
+        db: new PredictionDbAdapter(),
+        wallet: {
+          debit: (args) => base.debit(args),
+          credit: async (args) => {
+            await base.credit(args);
+            throw new Error('write EPIPE');
+          },
+          recordPnL: (args) => base.recordPnL(args),
+          getBalance: (id) => base.getBalance(id),
+        },
+        fees: feeConfig,
+        clock: { now: () => new Date() },
+      });
+      const before = await readBalance(seed.userId);
+      await expect(
+        service.cancel({ marketId: seed.marketId, reason: 'apply then throw' })
+      ).rejects.toThrow('EPIPE');
+      expect(await readBalance(seed.userId)).toBeCloseTo(before + REFUND, 6);
+      const [pos] = await db
+        .select({ status: positions.status })
+        .from(positions)
+        .where(eq(positions.id, seed.positionId));
+      expect(pos?.status).toBe('cancelled');
+
+      const retry = await serviceWith(new PredictionDbAdapter(), {
+        value: false,
+      }).cancel({ marketId: seed.marketId });
+      expect(retry.positionsRefunded).toBe(0);
+      expect(await readBalance(seed.userId)).toBeCloseTo(before + REFUND, 6);
+      const credits = await db
+        .select()
+        .from(balanceTransactions)
+        .where(eq(balanceTransactions.userId, seed.userId));
+      expect(credits.filter((row) => row.type === 'pred_cancel')).toHaveLength(
+        1
+      );
+    } finally {
+      await cleanupSeed(seed);
+    }
+  });
+
+  it('resolve waits for a concurrent cancel holding the row lock and pays nothing', async () => {
+    const seed = await seedOpenPosition();
+    try {
+      const before = await readBalance(seed.userId);
+      let resolveDone = false;
+      let startResolve: () => void = () => {};
+      const lockHeld = new Promise<void>((r) => {
+        startResolve = r;
+      });
+      let resolving: Promise<void> | null = null;
+      // Another process: lock the market row, mark it cancelled, hold the
+      // lock while resolve starts, then commit.
+      await db.transaction(async (tx) => {
+        await tx
+          .select({ id: markets.id })
+          .from(markets)
+          .where(eq(markets.id, seed.marketId))
+          .for('update');
+        await tx
+          .update(markets)
+          .set({ resolved: true, resolution: null })
+          .where(eq(markets.id, seed.marketId));
+        startResolve();
+        await lockHeld;
+        resolving = serviceWith(new PredictionDbAdapter(), { value: false })
+          .resolve({ marketId: seed.marketId, winningSide: 'yes' })
+          .then(() => {
+            resolveDone = true;
+          });
+        await new Promise((r) => setTimeout(r, 150));
+        expect(resolveDone).toBe(false);
+      });
+      await resolving;
+      expect(resolveDone).toBe(true);
+      expect(await readBalance(seed.userId)).toBeCloseTo(before, 6);
+      const [market] = await db
+        .select({ resolved: markets.resolved, resolution: markets.resolution })
+        .from(markets)
+        .where(eq(markets.id, seed.marketId));
+      expect(market?.resolution).toBeNull();
+      const credits = await db
+        .select()
+        .from(balanceTransactions)
+        .where(eq(balanceTransactions.userId, seed.userId));
+      expect(credits.filter((row) => row.type === 'pred_resolve')).toHaveLength(
+        0
+      );
+    } finally {
+      await cleanupSeed(seed);
+    }
+  });
+});

@@ -41,6 +41,8 @@ class TrackingWallet implements WalletPort {
   /** Throw on the credit attempt after this many successful credits. */
   failAfterSuccesses = Number.POSITIVE_INFINITY;
   onCredit: (() => Promise<void>) | null = null;
+  /** Apply the credit, then throw (timeout after COMMIT). */
+  throwAfterApply: string | null = null;
   constructor(private defaultBalance = 10_000) {}
   async debit({ userId, amount }: { userId: string; amount: number }) {
     const b = this.balances.get(userId) ?? this.defaultBalance;
@@ -64,6 +66,7 @@ class TrackingWallet implements WalletPort {
     this.credits.push({ userId, amount, reason });
     const b = this.balances.get(userId) ?? this.defaultBalance;
     this.balances.set(userId, b + amount);
+    if (this.throwAfterApply) throw new Error(this.throwAfterApply);
   }
   async recordPnL(): Promise<void> {
     if (this.failRecordPnL) throw new Error('recordPnL failed');
@@ -542,5 +545,148 @@ describe('FEED-L8 cancel claim-before-credit', () => {
     const positions = await db.listPositionsForMarket('m1');
     expect(positions.filter((p) => p.status === 'active')).toHaveLength(0);
     expect((await wallet.getBalance('u1')).balance).toBe(1_050);
+  });
+});
+
+describe('FEED-L8 cancel credit ambiguity and resolve interleaving', () => {
+  const baseMarket = (): PredictionMarketRecord => ({
+    id: 'm1',
+    question: 'Will it rain?',
+    yesShares: 6000,
+    noShares: 4000,
+    liquidity: 10_000,
+    endDate: new Date(Date.now() + 3600_000),
+    resolved: false,
+  });
+  const seed = async (db: MemoryDb) =>
+    db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 100,
+      avgPrice: 0.5,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+  it('does not restore or double-refund when credit commits then throws', async () => {
+    const db = new MemoryDb(baseMarket());
+    await seed(db);
+    const wallet = new TrackingWallet(0);
+    wallet.balances.set('u1', 0);
+    wallet.throwAfterApply = 'credit timeout';
+    const service = makeService(db, wallet);
+
+    await expect(
+      service.cancel({ marketId: 'm1', reason: 'apply then throw' })
+    ).rejects.toThrow('credit timeout');
+    expect(wallet.creditCalls).toBe(1);
+    expect((await wallet.getBalance('u1')).balance).toBe(50);
+    expect((await db.getPosition('u1', 'm1', 'yes'))?.status).toBe('cancelled');
+    // Market stays cancelled so buy/sell remain blocked.
+    expect((await db.getMarketById('m1'))?.resolved).toBe(true);
+
+    wallet.throwAfterApply = null;
+    const retry = await service.cancel({ marketId: 'm1' });
+    expect(retry.positionsRefunded).toBe(0);
+    expect(wallet.creditCalls).toBe(1);
+    expect((await wallet.getBalance('u1')).balance).toBe(50);
+  });
+
+  it('leaves the position claimed when the post-error balance is unreadable', async () => {
+    const db = new MemoryDb(baseMarket());
+    await seed(db);
+    const wallet = new TrackingWallet(0);
+    wallet.balances.set('u1', 0);
+    wallet.failCredit = true;
+    let reads = 0;
+    const realGet = wallet.getBalance.bind(wallet);
+    wallet.getBalance = async (id: string) => {
+      reads++;
+      if (reads > 1) throw new Error('balance read failed');
+      return realGet(id);
+    };
+    const service = makeService(db, wallet);
+    await expect(service.cancel({ marketId: 'm1' })).rejects.toThrow(
+      'wallet credit failed'
+    );
+    expect((await db.getPosition('u1', 'm1', 'yes'))?.status).toBe('cancelled');
+  });
+
+  it('restores when the wallet marks the error as not applied', async () => {
+    const db = new MemoryDb(baseMarket());
+    await seed(db);
+    const wallet = new TrackingWallet(0);
+    wallet.balances.set('u1', 0);
+    wallet.credit = async () => {
+      throw Object.assign(new Error('not applied'), { creditApplied: false });
+    };
+    wallet.getBalance = async () => {
+      throw new Error('balance unavailable');
+    };
+    const service = makeService(db, wallet);
+    await expect(service.cancel({ marketId: 'm1' })).rejects.toThrow(
+      'not applied'
+    );
+    expect((await db.getPosition('u1', 'm1', 'yes'))?.status).toBe('active');
+    expect((await db.getMarketById('m1'))?.resolved).toBe(false);
+  });
+
+  it('resolve reads and writes under the market row lock (cancel then resolve)', async () => {
+    const db = new MemoryDb(baseMarket());
+    await seed(db);
+    const lockCalls: string[] = [];
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    let firstLock = true;
+    (db as unknown as PredictionDbPort).withMarketRowLock = async <T>(
+      marketId: string,
+      fn: (d: PredictionDbPort) => Promise<T>
+    ): Promise<T> => {
+      lockCalls.push(marketId);
+      if (firstLock) {
+        // Another process holds the row lock and cancels the market.
+        firstLock = false;
+        await held;
+      }
+      return fn(db);
+    };
+    const wallet = new TrackingWallet(0);
+    wallet.balances.set('u1', 0);
+    const service = makeService(db, wallet);
+
+    const resolving = service.resolve({ marketId: 'm1', winningSide: 'yes' });
+    await new Promise((r) => setTimeout(r, 10));
+    // Simulated other-process cancel commits while resolve waits on the lock.
+    await db.updateMarketState('m1', { resolved: true, resolution: null });
+    const pos = await db.getPosition('u1', 'm1', 'yes');
+    await db.upsertPosition({ ...pos!, status: 'cancelled' });
+    wallet.balances.set('u1', 50);
+    release();
+    await resolving;
+
+    expect(lockCalls).toEqual(['m1']);
+    expect(wallet.creditCalls).toBe(0);
+    expect((await wallet.getBalance('u1')).balance).toBe(50);
+    expect((await db.getPosition('u1', 'm1', 'yes'))?.status).toBe('cancelled');
+    expect((await db.getMarketById('m1'))?.resolution).toBeNull();
+  });
+
+  it('cancel after resolve is rejected and pays nothing extra', async () => {
+    const db = new MemoryDb(baseMarket());
+    await seed(db);
+    const wallet = new TrackingWallet(0);
+    wallet.balances.set('u1', 0);
+    const service = makeService(db, wallet);
+    await Promise.allSettled([
+      service.resolve({ marketId: 'm1', winningSide: 'yes' }),
+      service.cancel({ marketId: 'm1' }),
+    ]);
+    const paid = wallet.credits.map((c) => c.reason);
+    // Exactly one settlement path pays the position.
+    expect(paid).toHaveLength(1);
   });
 });

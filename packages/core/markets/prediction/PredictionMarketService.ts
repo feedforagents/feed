@@ -16,6 +16,20 @@ import type {
 } from './types';
 
 const DEFAULT_LIQUIDITY = 10_000;
+const MONEY_MATCH_EPSILON = 1e-6;
+
+/**
+ * Matches WalletCreditNotAppliedError (#1593) by its flag so this works
+ * whether or not that class is present in the shared module.
+ */
+function isKnownCreditNotApplied(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'creditApplied' in err &&
+    (err as { creditApplied?: unknown }).creditApplied === false
+  );
+}
 const MIN_SHARES = 0.01;
 const MIN_TRADE_AMOUNT = 1;
 
@@ -543,48 +557,76 @@ export class PredictionMarketService {
   ): Promise<void> {
     const { marketId, winningSide, resolutionDescription, resolutionProofUrl } =
       input;
-    const positions = await this.db.listPositionsForMarket(marketId);
-    const market = await this.ensureMarket(marketId);
-    if (market.resolved) return;
-
     const now = input.resolvedAt ?? this.now();
+    await this.ensureMarket(marketId);
 
-    // Pool-proportional payout: winners split losers' deposits
-    const isWinnerSide = (p: { side: string }) =>
-      (winningSide === 'yes' && p.side === 'yes') ||
-      (winningSide === 'no' && p.side === 'no');
-
-    const totalWinnerShares = positions
-      .filter(isWinnerSide)
-      .reduce((sum, p) => sum + p.shares, 0);
-    const totalLoserDeposits = positions
-      .filter((p) => !isWinnerSide(p))
-      .reduce((sum, p) => sum + p.shares * p.avgPrice, 0);
-
-    const totalPayout = positions
-      .filter(isWinnerSide)
-      .reduce(
-        (acc, p) =>
-          acc +
-          PredictionPricing.calculateExpectedPayout(
-            p.shares,
-            p.avgPrice,
-            totalWinnerShares,
-            totalLoserDeposits
-          ),
-        0
+    // Read, resolved-check and the resolved write all happen under the
+    // cross-process market row lock so cancel() cannot interleave and pay
+    // the same positions a second time.
+    const locked = await this.withLockedMarket(marketId, async (db) => {
+      const market = await db.getMarketById(marketId);
+      if (!market) throw new NotFoundError('Market', marketId);
+      if (market.resolved) return null;
+      const positions = (await db.listPositionsForMarket(marketId)).filter(
+        (p) => !p.status || p.status === 'active'
       );
 
-    const liquidityReduction = Math.min(totalPayout, market.liquidity);
-    const newLiquidity = market.liquidity - liquidityReduction;
+      // Pool-proportional payout: winners split losers' deposits
+      const isWinnerSide = (p: { side: string }) =>
+        (winningSide === 'yes' && p.side === 'yes') ||
+        (winningSide === 'no' && p.side === 'no');
 
-    await this.db.updateMarketState(marketId, {
-      resolved: true,
-      resolution: winningSide === 'yes',
-      liquidity: newLiquidity,
-      resolutionProofUrl: resolutionProofUrl ?? undefined,
-      resolutionDescription: resolutionDescription ?? undefined,
+      const totalWinnerShares = positions
+        .filter(isWinnerSide)
+        .reduce((sum, p) => sum + p.shares, 0);
+      const totalLoserDeposits = positions
+        .filter((p) => !isWinnerSide(p))
+        .reduce((sum, p) => sum + p.shares * p.avgPrice, 0);
+
+      const totalPayout = positions
+        .filter(isWinnerSide)
+        .reduce(
+          (acc, p) =>
+            acc +
+            PredictionPricing.calculateExpectedPayout(
+              p.shares,
+              p.avgPrice,
+              totalWinnerShares,
+              totalLoserDeposits
+            ),
+          0
+        );
+
+      const liquidityReduction = Math.min(totalPayout, market.liquidity);
+      const newLiquidity = market.liquidity - liquidityReduction;
+
+      await db.updateMarketState(marketId, {
+        resolved: true,
+        resolution: winningSide === 'yes',
+        liquidity: newLiquidity,
+        resolutionProofUrl: resolutionProofUrl ?? undefined,
+        resolutionDescription: resolutionDescription ?? undefined,
+      });
+      return {
+        market,
+        positions,
+        totalPayout,
+        newLiquidity,
+        isWinnerSide,
+        totalWinnerShares,
+        totalLoserDeposits,
+      };
     });
+    if (!locked) return;
+    const {
+      market,
+      positions,
+      totalPayout,
+      newLiquidity,
+      isWinnerSide,
+      totalWinnerShares,
+      totalLoserDeposits,
+    } = locked;
 
     for (const pos of positions) {
       const isWinner = isWinnerSide(pos);
@@ -714,6 +756,7 @@ export class PredictionMarketService {
 
     let positionsRefunded = 0;
     let totalRefunded = 0;
+    let leftClaimedAfterAmbiguousCredit = false;
 
     try {
       for (const pos of gated.positions) {
@@ -726,6 +769,7 @@ export class PredictionMarketService {
         const refundAmount = claimed.shares * claimed.avgPrice;
         if (!(refundAmount > 0)) continue;
 
+        const balanceBefore = await this.readBalanceOrUndefined(claimed.userId);
         try {
           await this.deps.wallet.credit({
             userId: claimed.userId,
@@ -735,7 +779,34 @@ export class PredictionMarketService {
             relatedId: marketId,
           });
         } catch (creditErr) {
-          await this.restoreActivePosition(pos, claimed, creditErr);
+          // Only restore when the refund provably did not land. A timeout or
+          // transport error can surface after COMMIT; restoring then would
+          // let a retry refund the same position twice.
+          if (
+            await this.refundCreditDidNotLand(
+              claimed.userId,
+              balanceBefore,
+              creditErr
+            )
+          ) {
+            await this.restoreActivePosition(pos, claimed, creditErr);
+          } else {
+            leftClaimedAfterAmbiguousCredit = true;
+            logger.error(
+              'CRITICAL: prediction cancel refund credit may have applied; leaving position cancelled',
+              {
+                userId: claimed.userId,
+                marketId,
+                positionId: claimed.id,
+                refundAmount,
+                creditError:
+                  creditErr instanceof Error
+                    ? creditErr.message
+                    : String(creditErr),
+              },
+              'PredictionMarketService'
+            );
+          }
           throw creditErr;
         }
 
@@ -766,7 +837,11 @@ export class PredictionMarketService {
         positionsRefunded++;
       }
     } catch (err) {
-      if (gated.markedThisCall && positionsRefunded === 0) {
+      if (
+        gated.markedThisCall &&
+        positionsRefunded === 0 &&
+        !leftClaimedAfterAmbiguousCredit
+      ) {
         try {
           await this.db.updateMarketState(marketId, {
             resolved: false,
@@ -871,6 +946,55 @@ export class PredictionMarketService {
       resolvedAt: now,
       updatedAt: now,
     });
+  }
+
+  private async readBalanceOrUndefined(
+    userId: string
+  ): Promise<number | undefined> {
+    try {
+      return (await this.deps.wallet.getBalance(userId)).balance;
+    } catch (err) {
+      logger.warn(
+        'Could not read balance before cancel refund credit',
+        { userId, error: err instanceof Error ? err.message : String(err) },
+        'PredictionMarketService'
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * True only when the refund credit is known not to have committed: either
+   * the wallet marked the error as not-applied, or the balance provably did
+   * not move. Any doubt (balance moved, balance unreadable) returns false so
+   * the position stays claimed instead of becoming refundable again.
+   */
+  private async refundCreditDidNotLand(
+    userId: string,
+    balanceBefore: number | undefined,
+    creditErr: unknown
+  ): Promise<boolean> {
+    if (isKnownCreditNotApplied(creditErr)) return true;
+    if (balanceBefore === undefined) return false;
+    try {
+      const balanceAfter = (await this.deps.wallet.getBalance(userId)).balance;
+      return Math.abs(balanceAfter - balanceBefore) <= MONEY_MATCH_EPSILON;
+    } catch (balanceErr) {
+      logger.error(
+        'Could not read balance after cancel refund credit failure',
+        {
+          userId,
+          creditError:
+            creditErr instanceof Error ? creditErr.message : String(creditErr),
+          balanceError:
+            balanceErr instanceof Error
+              ? balanceErr.message
+              : String(balanceErr),
+        },
+        'PredictionMarketService'
+      );
+      return false;
+    }
   }
 
   private async restoreActivePosition(
