@@ -1709,6 +1709,13 @@ export class PerpMarketService {
       };
     } else {
       // FLIP: Close existing and open inverse position
+      // The new leg is a fresh position, so it must clear the minimum order
+      // size on its own: the gross trade size clearing it is not enough,
+      // or a flip could open a dust position below the minimum.
+      const inverseSize = tradeSize - existing.size;
+      if (inverseSize < minOrderSize) {
+        throw new Error(`Order size below minimum (${minOrderSize})`);
+      }
       // Slippage protection for both legs against the fills the flip will
       // execute at, checked before any funds move (same as a fresh open).
       if (maxSlippage !== undefined && maxSlippage > 0) {
