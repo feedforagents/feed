@@ -1328,7 +1328,12 @@ export class PerpMarketService {
   }
 
   private calculateFee(notional: number): number {
-    const fee = notional * this.deps.fees.tradingFeeRate;
+    // FeeService records and splits the fee in integer cents (one
+    // canonical rounded fee), so charge that same cent-rounded amount:
+    // an unrounded charge would disagree with the fee ledger, the
+    // platform/referrer split and users.totalFeesPaid.
+    const fee =
+      Math.round(notional * this.deps.fees.tradingFeeRate * 100) / 100;
     return Math.max(fee, this.deps.fees.minFeeAmount);
   }
 
