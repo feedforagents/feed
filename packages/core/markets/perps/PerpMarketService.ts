@@ -863,6 +863,7 @@ export class PerpMarketService {
           currentPrice: exitPrice,
           unrealizedPnL: remainingPnl,
           unrealizedPnLPercent: remainingPnlPercent,
+          realizedPnL: (position.realizedPnL ?? 0) + realizedPnL,
           lastUpdated: now,
         });
       }
