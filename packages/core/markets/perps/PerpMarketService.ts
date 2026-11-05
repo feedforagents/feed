@@ -1712,13 +1712,22 @@ export class PerpMarketService {
       // Slippage protection for both legs against the fills the flip will
       // execute at, checked before any funds move (same as a fresh open).
       if (maxSlippage !== undefined && maxSlippage > 0) {
-        const closeFill = this.getCloseExecutionQuote(
+        const closeQuote = this.getCloseExecutionQuote(
           market,
           existing.side,
           existing.size
         ).executionPrice;
+        // The close leg executes at the AMM average exit fill (same as a
+        // standalone close), so check slippage against that fill.
+        const closeImpact = await this.previewCloseImpact({
+          ticker: market.ticker,
+          exitPrice: closeQuote,
+          currentSpotPrice: market.currentPrice,
+          side: existing.side,
+          closeSize: existing.size,
+        });
         this.assertWithinSlippage(
-          closeFill,
+          closeImpact?.avgExitPrice ?? closeQuote,
           market.markPrice ?? market.currentPrice,
           maxSlippage
         );
@@ -1778,7 +1787,18 @@ export class PerpMarketService {
               position.side,
               position.size
             );
-            const exitPrice = closeExecution.executionPrice;
+            // Settle the closing leg at the AMM average exit fill, exactly
+            // like a standalone close (closePosition), so a flip and a
+            // close + open round trip settle identically.
+            const closeImpact = await this.previewCloseImpact({
+              ticker: position.ticker,
+              exitPrice: closeExecution.executionPrice,
+              currentSpotPrice: market.currentPrice,
+              side: position.side,
+              closeSize: position.size,
+            });
+            const exitPrice =
+              closeImpact?.avgExitPrice ?? closeExecution.executionPrice;
 
             // === STEP 1: Close existing position (inline logic for atomicity) ===
 
