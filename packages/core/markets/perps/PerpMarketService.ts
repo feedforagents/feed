@@ -706,15 +706,23 @@ export class PerpMarketService {
       }
     );
 
-    if (this.deps.feeProcessor) {
-      await this.deps.feeProcessor.processTradingFee({
+    // Fee bookkeeping: retries + optional outbox (see processFeeWithRetry).
+    // The trade above is already committed, so a fee failure must not turn
+    // it into a reported failure (which would invite a retry that adds to
+    // the position a second time). The failure is already logged inside
+    // processFeeWithRetry; the close/add/flip paths already do this.
+    void this.processFeeWithRetry(
+      {
         userId: input.userId,
         amount: size,
         type: 'perp_open',
         relatedId: ticker,
         positionId: position.id,
-      });
-    }
+      },
+      { ticker }
+    ).catch(() => {
+      // Error already logged in processFeeWithRetry; catch to prevent unhandled rejection
+    });
 
     const result: PerpTradeResult = {
       positionId: position.id,
