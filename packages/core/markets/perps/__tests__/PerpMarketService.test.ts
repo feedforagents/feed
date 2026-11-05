@@ -476,6 +476,79 @@ describe('PerpMarketService', () => {
     expect(pos?.realizedPnL).toBeCloseTo(partial.realizedPnL! - 5, 6);
   });
 
+  it('liquidation settles the row as it is at lock time, not the tick snapshot', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    // A user partial close lands after the tick has read its position
+    // snapshot but before it reaches the liquidation write.
+    let partialPnl = 0;
+    const listOpenPositions = db.listOpenPositions.bind(db);
+    db.listOpenPositions = async () => {
+      const rows = await listOpenPositions();
+      await db.updateMarketStats('ABC', { currentPrice: 105 });
+      const partial = await service.closePosition({
+        userId: 'u1',
+        positionId: open.positionId,
+        percentage: 0.5,
+      });
+      partialPnl = partial.realizedPnL!;
+      return rows;
+    };
+
+    const summary = await service.applyPriceUpdates({ 'org-abc': 80 });
+    expect(summary.errors).toEqual([]);
+    expect(summary.liquidations).toBe(1);
+    expect(partialPnl).toBeGreaterThan(0);
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).not.toBeNull();
+    // Only the remaining margin (50 / 10 = 5) is lost, on top of the settled
+    // partial PnL; the stale 100-size snapshot must not overwrite it.
+    expect(pos?.realizedPnL).toBeCloseTo(partialPnl - 5, 6);
+    expect(
+      wallet.getPnLs('u1').find((p) => p.reason === 'perp_liquidation')?.pnl
+    ).toBeCloseTo(-5, 6);
+    const [m] = await db.listMarkets();
+    expect(m!.openInterest).toBeCloseTo(0, 6);
+  });
+
+  it('skips liquidation when the locked row no longer liquidates at the tick price', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    // The liquidation price moves out of range after the tick read its
+    // snapshot (e.g. a margin top-up), so the tick must refresh metrics only.
+    const listOpenPositions = db.listOpenPositions.bind(db);
+    db.listOpenPositions = async () => {
+      const rows = await listOpenPositions();
+      await db.updateOpenPosition(open.positionId, { liquidationPrice: 70 });
+      return rows;
+    };
+
+    const summary = await service.applyPriceUpdates({ 'org-abc': 80 });
+    expect(summary.errors).toEqual([]);
+    expect(summary.liquidations).toBe(0);
+    expect(summary.positionsUpdated).toBe(1);
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeNull();
+    expect(pos?.currentPrice).toBe(80);
+    expect(
+      wallet.getPnLs('u1').find((p) => p.reason === 'perp_liquidation')
+    ).toBeUndefined();
+  });
+
   it('updates unrealized PnL on price move without liquidation', async () => {
     const open = await service.openPosition({
       userId: 'u1',

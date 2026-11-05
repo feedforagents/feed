@@ -228,9 +228,12 @@ function createTestPriceImpact(): PriceImpactPort {
 // ---------------------------------------------------------------------------
 // Helper to create a test service
 // ---------------------------------------------------------------------------
-function createTestService(wallet: TestWallet): PerpMarketService {
+function createTestService(
+  wallet: TestWallet,
+  dbAdapter: PerpDbAdapter = new PerpDbAdapter()
+): PerpMarketService {
   const deps: PerpServiceDeps = {
-    db: new PerpDbAdapter(),
+    db: dbAdapter,
     wallet,
     fees: {
       tradingFeeRate: 0.001,
@@ -661,6 +664,103 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
       (partialClose.realizedPnL ?? 0) + (fullClose.realizedPnL ?? 0),
       6
     );
+  });
+
+  // =========================================================================
+  // TEST 7b: Liquidation tick overlapping a user partial close
+  // =========================================================================
+  it('liquidation overlapping a partial close settles only the remaining size', async () => {
+    const userWallet = new TestWallet(100_000);
+    const userService = createTestService(userWallet);
+
+    const open = await userService.openPosition({
+      userId: USER_A,
+      ticker: TEST_TICKER,
+      side: 'long',
+      size: 1000,
+      leverage: 10,
+    });
+    createdPositionIds.push(open.positionId);
+
+    // Mark the market up so the partial close realizes a profit.
+    const profitPrice = open.entryPrice * 1.2;
+    await db
+      .update(perpMarketSnapshots)
+      .set({ currentPrice: profitPrice })
+      .where(eq(perpMarketSnapshots.ticker, TEST_TICKER));
+    await db
+      .update(organizationState)
+      .set({ currentPrice: profitPrice })
+      .where(eq(organizationState.id, ORG_ID));
+
+    // The tick reads its real position rows, then pauses before using them.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let listed!: () => void;
+    const listedRows = new Promise<void>((resolve) => {
+      listed = resolve;
+    });
+    class PausingPerpDb extends PerpDbAdapter {
+      override async listOpenPositions() {
+        const rows = await super.listOpenPositions();
+        listed();
+        await released;
+        return rows;
+      }
+    }
+    const tickWallet = new TestWallet(100_000);
+    const tickService = createTestService(tickWallet, new PausingPerpDb());
+    const liquidationTick = tickService.applyPriceUpdates({
+      [ORG_ID]: open.liquidationPrice * 0.9,
+    });
+    await listedRows;
+
+    // An ordinary user close of 50% completes while the tick is paused.
+    const partial = await userService.closePosition({
+      userId: USER_A,
+      positionId: open.positionId,
+      percentage: 0.5,
+    });
+    expect(partial.fullyClosed).toBe(false);
+    expect(partial.realizedPnL ?? 0).toBeGreaterThan(0);
+    const remainingMargin = (partial.remainingSize ?? 0) / 10;
+    expect(remainingMargin).toBeCloseTo(50, 6);
+
+    release();
+    const summary = await liquidationTick;
+    console.log(
+      `  Interleaved: partial PnL=${(partial.realizedPnL ?? 0).toFixed(4)}, remaining margin=${remainingMargin}, liquidations=${summary.liquidations}, errors=${summary.errors.length}`
+    );
+    expect(summary.errors).toEqual([]);
+    expect(summary.liquidations).toBe(1);
+
+    // The liquidation takes the remaining margin only, on top of the settled
+    // partial PnL, and the ledger records the remaining margin.
+    const [row] = await db
+      .select({
+        realizedPnL: perpPositions.realizedPnL,
+        closedAt: perpPositions.closedAt,
+      })
+      .from(perpPositions)
+      .where(eq(perpPositions.id, open.positionId));
+    expect(row?.closedAt).not.toBeNull();
+    expect(row?.realizedPnL).toBeCloseTo(
+      (partial.realizedPnL ?? 0) - remainingMargin,
+      6
+    );
+    const liquidation = tickWallet
+      .getLog()
+      .find((entry) => entry.reason === 'perp_liquidation');
+    expect(liquidation?.amount).toBeCloseTo(-remainingMargin, 6);
+
+    // Open interest: 1000 - 500 (partial) - 500 (liquidation) = 0.
+    const [snapshot] = await db
+      .select({ openInterest: perpMarketSnapshots.openInterest })
+      .from(perpMarketSnapshots)
+      .where(eq(perpMarketSnapshots.ticker, TEST_TICKER));
+    expect(Number(snapshot?.openInterest)).toBeCloseTo(0, 6);
   });
 
   // =========================================================================
