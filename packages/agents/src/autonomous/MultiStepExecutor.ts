@@ -1720,12 +1720,20 @@ export class MultiStepExecutor {
 
     const likeResult = await executeDirectLike({ agentUserId, postId });
 
+    // executeDirectLike succeeds idempotently when the like already exists
+    // (liked=false, no new row). Record that honestly — mirroring how
+    // executeFollow distinguishes "Now following" from "Already following" —
+    // instead of claiming a new like happened.
+    const likeSummary = likeResult.success
+      ? likeResult.liked
+        ? `Liked post ${postId}`
+        : `Already liked post ${postId}`
+      : `Like failed: ${likeResult.error}`;
+
     await agentService.createLog(agentUserId, {
       type: 'like',
       level: likeResult.success ? 'info' : 'warn',
-      message: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      message: likeSummary,
       metadata: {
         postId,
         success: likeResult.success,
@@ -1737,9 +1745,7 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.LIKE,
       success: likeResult.success,
-      summary: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      summary: likeSummary,
       result: {
         success: likeResult.success,
         liked: likeResult.liked,
