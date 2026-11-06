@@ -1774,17 +1774,27 @@ export class MultiStepExecutor {
       comment,
     });
 
+    // executeDirectRepost succeeds idempotently when the share already
+    // exists (alreadyReposted=true, no new share or quote post). Record
+    // that honestly — mirroring how executeFollow distinguishes "Now
+    // following" from "Already following" — instead of claiming a new
+    // repost happened.
+    const repostSummary = repostResult.success
+      ? repostResult.alreadyReposted
+        ? `Already reposted ${postId}`
+        : `Reposted ${postId}${comment ? ' with comment' : ''}`
+      : `Repost failed: ${repostResult.error}`;
+
     await agentService.createLog(agentUserId, {
       type: 'repost',
       level: repostResult.success ? 'info' : 'warn',
-      message: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      message: repostSummary,
       metadata: {
         postId,
         success: repostResult.success,
         repostId: repostResult.repostId ?? null,
         quotePostId: repostResult.quotePostId ?? null,
+        alreadyReposted: repostResult.alreadyReposted ?? false,
         hasComment: !!comment,
         error: repostResult.error ?? null,
       },
@@ -1793,13 +1803,12 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.REPOST,
       success: repostResult.success,
-      summary: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      summary: repostSummary,
       result: {
         success: repostResult.success,
         repostId: repostResult.repostId,
         quotePostId: repostResult.quotePostId,
+        alreadyReposted: repostResult.alreadyReposted,
         error: repostResult.error,
       },
       parameters,

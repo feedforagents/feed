@@ -321,10 +321,24 @@ export class PerpMarketService {
         leverage
       );
 
+      // Entry and current price are rewritten here, so the stored
+      // unrealized PnL must be recomputed against the adjusted entry at
+      // the post-impact price — otherwise the record keeps the PnL of the
+      // pre-impact quote pair until the next price update overwrites it.
+      const positionSize = basis ? basis.previousSize + tradeSize : tradeSize;
+      const { pnl, pnlPercent } = calculateUnrealizedPnL(
+        newEntryPrice,
+        postImpactPrice,
+        side,
+        positionSize
+      );
+
       await this.db.updateOpenPosition(positionId, {
         entryPrice: newEntryPrice,
         currentPrice: postImpactPrice ?? preImpactEntry,
         liquidationPrice: newLiquidationPrice,
+        unrealizedPnL: pnl,
+        unrealizedPnLPercent: pnlPercent,
       });
 
       logger.info(
@@ -610,10 +624,18 @@ export class PerpMarketService {
       this.assertOpenPositionIntegrity(existingPosition);
       if (existingPosition.side === side) {
         // Same side → add to position (increase size, average entry price)
-        return this.addToPosition(existingPosition, input, market);
+        const added = await this.addToPosition(existingPosition, input, market);
+        await this.invalidateCaches(ticker);
+        return added;
       } else {
         // Opposite side → reduce, close, or flip position
-        return this.reduceOrFlipPosition(existingPosition, input, market);
+        const reduced = await this.reduceOrFlipPosition(
+          existingPosition,
+          input,
+          market
+        );
+        await this.invalidateCaches(ticker);
+        return reduced;
       }
     }
 
@@ -757,6 +779,8 @@ export class PerpMarketService {
       result.entryPrice = impactAdj.entryPrice;
       result.liquidationPrice = impactAdj.liquidationPrice;
     }
+
+    await this.invalidateCaches(ticker);
 
     return result;
   }
@@ -990,6 +1014,8 @@ export class PerpMarketService {
       // Error already logged in emitTradeEvent; catch to prevent unhandled rejection
     });
 
+    await this.invalidateCaches(settlement.position.ticker);
+
     if (settlement.closeImpact) {
       logger.info(
         `Exit price adjusted to avg fill: ${settlement.requestedExitPrice.toFixed(2)} → ${settlement.exitPrice.toFixed(2)} (delta: ${settlement.closeImpact.deltaImpact.toFixed(4)})`,
@@ -1107,6 +1133,7 @@ export class PerpMarketService {
             });
           }
           summary.liquidations++;
+          await this.invalidateCaches(position.ticker);
         } catch (err) {
           summary.errors.push({
             key: position.ticker,
@@ -1228,18 +1255,20 @@ export class PerpMarketService {
 
     for (const market of markets) {
       const agg = positionsByTicker.get(market.ticker);
-      if (!agg) continue;
 
+      // Markets without open positions still get their funding terms
+      // refreshed (zero open interest yields the base rate), so the rate and
+      // nextFundingTime shown to users never go stale.
       const funding = calculateDynamicFundingRate({
-        longOpenInterest: agg.longOpenInterest,
-        shortOpenInterest: agg.shortOpenInterest,
+        longOpenInterest: agg?.longOpenInterest ?? 0,
+        shortOpenInterest: agg?.shortOpenInterest ?? 0,
         baseFundingRate: BASE_FUNDING_RATE,
         maxFundingRate: MAX_FUNDING_RATE,
         imbalanceExponent: IMBALANCE_EXPONENT,
       });
 
       const periodRate = funding.periodRate;
-      for (const pos of agg.positions) {
+      for (const pos of agg?.positions ?? []) {
         // A close may have settled funding since the snapshot. Recompute from
         // the locked row so settled funding is not restored or charged again.
         await this.db.transaction(async (tx) => {
@@ -1372,6 +1401,27 @@ export class PerpMarketService {
         `Slippage exceeded: execution price ${fillPrice.toFixed(2)} deviates ` +
           `${(priceDeviation * 100).toFixed(2)}% from mark price ${referencePrice.toFixed(2)} ` +
           `(max allowed: ${(maxSlippage * 100).toFixed(2)}%)`
+      );
+    }
+  }
+
+  /**
+   * Invalidate the cached perp trades list for a ticker after a trade.
+   * Mirrors PredictionMarketService.invalidateCaches: the web perp
+   * trades route caches `perp-trades:<ticker>:<limit>:<offset>` for
+   * 30s, so without this the list keeps serving the pre-trade state
+   * until the TTL expires. Never throws — a cache failure must not
+   * fail a trade that has already settled.
+   */
+  private async invalidateCaches(ticker: string) {
+    if (!this.deps.cache) return;
+    try {
+      await this.deps.cache.invalidate(`perp:${ticker}:*`);
+    } catch (err) {
+      logger.warn(
+        'Perp trades cache invalidation failed',
+        { ticker, error: err instanceof Error ? err.message : String(err) },
+        'PerpMarketService'
       );
     }
   }
