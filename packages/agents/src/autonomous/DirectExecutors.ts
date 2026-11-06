@@ -50,6 +50,7 @@ import {
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
   type GeneratedTag,
@@ -817,6 +818,7 @@ async function executePerpTrade(params: {
     }),
     db: new PerpDbAdapter(),
     wallet: walletAdapter,
+    cache: createPerpTradesCachePort(),
     fees: {
       tradingFeeRate: 0.001,
       platformShare: 0.5,
@@ -903,6 +905,7 @@ async function executeClosePerpPosition(params: {
       }),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: 0.001,
         platformShare: 0.5,

@@ -32,6 +32,7 @@ import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   type PredictionSettlementOptions,
   StaticDataRegistry,
@@ -1559,6 +1560,7 @@ export class FeedAgentExecutor implements AgentExecutor {
       settlement: createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: this.buildWalletPort(),
+      cache: createPerpTradesCachePort(),
       priceImpact: createPerpPriceImpactPort(),
       broadcast: {
         emit: async () => {
