@@ -1,4 +1,5 @@
 import { buildCapitalBaseContributionSql, db, sql } from '@feed/db';
+import { FEE_CONFIG } from '@feed/engine/config/fees';
 import { toISO } from '@feed/shared';
 
 export const TRADING_RETURN_CAPITAL_FLOOR = 1000;
@@ -74,6 +75,23 @@ export class TradingPerformanceService {
    * prediction positions in unresolved markets. That function reads
    * positions keyed by user id or privyId, so both CTEs aggregate position
    * rows onto the owning user's id.
+   *
+   * The prediction leg marks a position at its CPMM probability price, but
+   * subtracts the remaining GROSS cash paid for it — not the net average
+   * entry cost. Position.avgPrice is net of the entry fee
+   * (calculateBuyWithFees strips the fee before pricing shares), while the
+   * fee already left the wallet in cash and is not in lifetimePnL until the
+   * position closes. Subtracting net avgPrice would therefore count the
+   * already-paid entry fee as profit (SYMBaiEX on #1565: a 100-point buy reported
+   * +0.978 instead of the equity-true +0.878). The gross basis is the net
+   * cost grossed up by the trading fee rate, rounded to cents — the same
+   * gross-up the sell path applies when realizing PnL (grossUpBuyAmount)
+   * and the position snapshot uses for costBasis, so realized and
+   * unrealized stay consistent across a partial exit.
+   *
+   * NOTE: this deliberately differs from calculatePortfolioPnL, which still
+   * marks prediction positions off net avgPrice — portfolio reporting needs
+   * the same reconciliation as follow-up.
    */
   private static perpUnrealizedCte() {
     return sql.raw(`
@@ -100,7 +118,11 @@ export class TradingPerformanceService {
                   ELSE m."yesShares" / (m."yesShares" + m."noShares")
                 END
               ELSE p."avgPrice"
-            END - p."avgPrice"
+            END
+          )
+          - ROUND(
+            p."shares" * p."avgPrice"::numeric / (1 - ${FEE_CONFIG.TRADING_FEE_RATE}),
+            2
           )
         ), 0)::numeric AS "predictionUnrealizedPnL"
       FROM "Position" p
@@ -113,11 +135,13 @@ export class TradingPerformanceService {
 
   /**
    * The D-15b rank key: net profit = lifetime (realized) PnL + unrealized
-   * PnL, the totalPnL of calculatePortfolioPnL. Purchases and the starting
-   * grant never enter this expression — they write balance transactions and
-   * the cash balance, neither of which the metric reads — so buying points
-   * cannot move a rank. The query aliases pu/du must match the joins in
-   * each query that embeds this fragment.
+   * PnL — cash-and-position equity less approved contributions. Purchases
+   * and the starting grant never enter this expression — they write balance
+   * transactions and the cash balance, neither of which the metric reads —
+   * so buying points cannot move a rank. The prediction leg subtracts the
+   * remaining gross cash basis (see predictionUnrealizedCte), so the entry
+   * fee already paid in cash is not counted as profit. The query aliases
+   * pu/du must match the joins in each query that embeds this fragment.
    */
   private static netProfitExpression() {
     return sql.raw(`(

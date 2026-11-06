@@ -4,8 +4,12 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 
 /**
  * D-15b equity ranking: the leaderboard rank key is net profit — realized
- * lifetimePnL plus unrealized PnL, the totalPnL of the engine's
- * calculatePortfolioPnL — not the return ratio and not realized PnL alone.
+ * lifetimePnL plus unrealized PnL — not the return ratio and not realized
+ * PnL alone. The prediction leg marks positions at the CPMM price but
+ * subtracts the remaining gross cash basis (net cost grossed up by the
+ * trading fee rate, entry fee included), so the fee already paid in cash
+ * is not counted as profit; that leg therefore differs from the engine's
+ * calculatePortfolioPnL, which still subtracts net avgPrice.
  *
  * These tests drive the real service methods with only the database client
  * stubbed (the mocking pattern of
@@ -180,6 +184,13 @@ describe('TradingPerformanceService equity metric SQL', () => {
     expect(sqlText).toContain('m."resolved" = false');
     expect(sqlText).toContain('m."noShares" / (m."yesShares" + m."noShares")');
     expect(sqlText).toContain('m."yesShares" / (m."yesShares" + m."noShares")');
+    // The mark subtracts the remaining GROSS cash basis, not net avgPrice:
+    // the entry fee already left the wallet in cash and is not in
+    // lifetimePnL until the position closes. The net cost is grossed up by
+    // the trading fee rate, rounded to cents.
+    expect(sqlText).toContain('ROUND(');
+    expect(sqlText).toContain('(1 - 0.001)');
+    expect(sqlText).not.toContain('END - p."avgPrice"');
     // The rank key is the shared net-profit expression, ordered with the
     // established tie-breaks; the return ratio no longer orders the board.
     expect(sqlText).toContain(NET_PROFIT_FRAGMENT);

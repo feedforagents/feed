@@ -23,11 +23,14 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
+import { TradingLeaderboardService } from '@feed/api/services/trading-leaderboard-service';
+import { TradingPerformanceService } from '@feed/api/services/trading-performance-service';
 import {
-  TradingLeaderboardService,
-  TradingPerformanceService,
-} from '@feed/api';
+  PredictionDbAdapter,
+  PredictionMarketService,
+} from '@feed/core/markets/prediction';
 import {
+  and,
   balanceTransactions,
   db,
   eq,
@@ -38,6 +41,8 @@ import {
   sql,
   users,
 } from '@feed/db';
+import { FEE_CONFIG } from '@feed/engine/config/fees';
+import { WalletService } from '@feed/engine/services/wallet-service';
 import { generateSnowflakeId } from '@feed/shared';
 
 setDefaultTimeout(30000);
@@ -156,6 +161,104 @@ async function seededOrder(): Promise<string[]> {
   return rows.map((row) => row.id).filter((id) => testUserIds.includes(id));
 }
 
+/** Real trade service wired to the production wallet (balance + lifetimePnL). */
+function realTradeService(): PredictionMarketService {
+  return new PredictionMarketService({
+    db: new PredictionDbAdapter(),
+    wallet: {
+      debit: ({ userId, amount, reason, description, relatedId }) =>
+        WalletService.debit(
+          userId,
+          amount,
+          reason,
+          description ?? '',
+          relatedId
+        ),
+      credit: ({ userId, amount, reason, description, relatedId }) =>
+        WalletService.credit(
+          userId,
+          amount,
+          reason,
+          description ?? '',
+          relatedId
+        ),
+      recordPnL: ({ userId, pnl, reason, relatedId }) =>
+        WalletService.recordPnL(userId, pnl, reason, relatedId).then(
+          () => undefined
+        ),
+      getBalance: (userId) => WalletService.getBalance(userId),
+    },
+    fees: {
+      tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+      platformShare: FEE_CONFIG.PLATFORM_SHARE,
+      referrerShare: FEE_CONFIG.REFERRER_SHARE,
+      minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+    },
+  });
+}
+
+async function readPredictionState(userId: string, marketId: string) {
+  const [userRow] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  const [marketRow] = await db
+    .select()
+    .from(markets)
+    .where(eq(markets.id, marketId))
+    .limit(1);
+  const [positionRow] = await db
+    .select()
+    .from(positions)
+    .where(and(eq(positions.userId, userId), eq(positions.marketId, marketId)))
+    .limit(1);
+  return { userRow, marketRow, positionRow };
+}
+
+/**
+ * The equity profit of an open prediction position, computed from the stored
+ * rows the way the leaderboard query defines it: mark value (shares x CPMM
+ * probability) minus the remaining gross cash basis (net cost grossed up by
+ * the fee rate), plus realized lifetimePnL. The old formula is the same
+ * expression with the net cost instead of the gross basis.
+ */
+function equityProfitFromState(state: {
+  userRow?: typeof users.$inferSelect;
+  marketRow?: typeof markets.$inferSelect;
+  positionRow?: typeof positions.$inferSelect;
+}) {
+  const { userRow, marketRow, positionRow } = state;
+  if (!userRow || !marketRow || !positionRow) {
+    throw new Error('missing prediction state');
+  }
+  const shares = Number(positionRow.shares);
+  const yesShares = Number(marketRow.yesShares);
+  const noShares = Number(marketRow.noShares);
+  const markPrice =
+    yesShares + noShares > 0
+      ? positionRow.side
+        ? noShares / (yesShares + noShares)
+        : yesShares / (yesShares + noShares)
+      : Number(positionRow.avgPrice);
+  const markValue = shares * markPrice;
+  const netCost = shares * Number(positionRow.avgPrice);
+  const grossBasis =
+    Math.round((netCost / (1 - FEE_CONFIG.TRADING_FEE_RATE)) * 100) / 100;
+  const lifetimePnL = Number(userRow.lifetimePnL);
+  const cash = Number(userRow.virtualBalance);
+  const contributions =
+    Number(userRow.totalDeposited) - Number(userRow.totalWithdrawn);
+  return {
+    markValue,
+    grossBasis,
+    netCost,
+    expectedNetProfit: lifetimePnL + (markValue - grossBasis),
+    expectedEquityProfit: cash + markValue - contributions,
+    oldFormulaNetProfit: lifetimePnL + (markValue - netCost),
+  };
+}
+
 beforeAll(async () => {
   dbAvailable = await checkDatabaseHealth();
 });
@@ -240,8 +343,103 @@ describe('Trading leaderboard equity ranking (D-15b)', () => {
     });
 
     const entry = await TradingPerformanceService.getWalletEntry(user);
-    expect(Number(entry?.unrealizedPnL)).toBe(25);
-    expect(Number(entry?.netProfit)).toBe(25);
+    // The mark subtracts the remaining gross cash basis: the net cost
+    // 100 x 0.5 is grossed up by the fee rate, 50 / (1 - 0.001) = 50.05,
+    // and 75 - 50.05 = 24.95. The 0.05 is the entry fee the old
+    // net-avgPrice formula counted as profit.
+    expect(Number(entry?.unrealizedPnL)).toBeCloseTo(24.95, 2);
+    expect(Number(entry?.netProfit)).toBeCloseTo(24.95, 2);
+  });
+
+  test('entry fee is not counted as profit on a real buy and partial exit', async () => {
+    if (!dbAvailable) return;
+
+    // The SYMBaiEX counterexample on #1565, replayed with real trades: a
+    // 100-point buy must rank by equity profit (cash + mark value -
+    // contributions), not by the mark minus net avgPrice, which counts the
+    // entry fee as profit.
+    const buyer = await createTestUser({
+      usernamePrefix: 'lb-eq-fee',
+      lifetimePnL: 0,
+      createdAt: new Date('2026-01-07T00:00:00.000Z'),
+    });
+    // Thin skewed market (YES 0.20): the buy moves the price, like the
+    // reviewer's market, so the mark value is near the amount spent.
+    const marketId = await createMarket({
+      yesShares: 400,
+      noShares: 100,
+      resolved: false,
+    });
+    const trades = realTradeService();
+
+    const buy = await trades.buy({
+      userId: buyer,
+      marketId,
+      side: 'yes',
+      amount: 100,
+      maxOddsMove: 0.5,
+    });
+    expect(buy.feePaid).toBeCloseTo(0.1, 2);
+
+    const buyState = equityProfitFromState(
+      await readPredictionState(buyer, marketId)
+    );
+    // The gross basis is the cash paid, including the fee.
+    expect(buyState.grossBasis).toBeCloseTo(100, 2);
+    expect(buyState.netCost).toBeCloseTo(99.9, 2);
+
+    const entryAfterBuy = await TradingPerformanceService.getWalletEntry(buyer);
+    expect(Number(entryAfterBuy?.netProfit)).toBeCloseTo(
+      buyState.expectedNetProfit,
+      2
+    );
+    expect(Number(entryAfterBuy?.netProfit)).toBeCloseTo(
+      buyState.expectedEquityProfit,
+      2
+    );
+    // The old net-avgPrice formula overstated by the entry fee.
+    expect(
+      buyState.oldFormulaNetProfit - Number(entryAfterBuy?.netProfit)
+    ).toBeCloseTo(0.1, 1);
+
+    // A control sitting between the true and the overstated profit ranks
+    // above the buyer only when the fee is excluded.
+    const control = await createTestUser({
+      usernamePrefix: 'lb-eq-fee-control',
+      lifetimePnL:
+        (buyState.expectedNetProfit + buyState.oldFormulaNetProfit) / 2,
+      createdAt: new Date('2026-01-08T00:00:00.000Z'),
+    });
+    const orderAfterBuy = await seededOrder();
+    expect(orderAfterBuy.indexOf(control)).toBeLessThan(
+      orderAfterBuy.indexOf(buyer)
+    );
+
+    // Sell half: the sold half's fee is realized into lifetimePnL, the
+    // remaining half's fee must stay out of unrealized PnL.
+    await trades.sell({
+      userId: buyer,
+      marketId,
+      shares: buy.shares / 2,
+    });
+
+    const sellState = equityProfitFromState(
+      await readPredictionState(buyer, marketId)
+    );
+    const entryAfterSell =
+      await TradingPerformanceService.getWalletEntry(buyer);
+    expect(Number(entryAfterSell?.netProfit)).toBeCloseTo(
+      sellState.expectedNetProfit,
+      2
+    );
+    expect(Number(entryAfterSell?.netProfit)).toBeCloseTo(
+      sellState.expectedEquityProfit,
+      2
+    );
+    // Only the remaining half's fee is still unrecognized.
+    expect(
+      sellState.oldFormulaNetProfit - Number(entryAfterSell?.netProfit)
+    ).toBeCloseTo(0.05, 1);
   });
 
   test('buying points changes neither net profit nor rank', async () => {
