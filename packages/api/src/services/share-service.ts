@@ -181,14 +181,6 @@ export async function sharePost(
   }
 
   const shareId = await generateSnowflakeId();
-  await db.insert(shares).values({
-    id: shareId,
-    userId,
-    postId: shareTargetPostId,
-  });
-
-  await NPCInteractionTracker.trackShare(userId, shareTargetPostId);
-
   const repostId = await generateSnowflakeId();
 
   const [originalPost] = await db
@@ -205,9 +197,57 @@ export async function sharePost(
     throw new NotFoundError('Post', shareTargetPostId);
   }
 
+  // The share and the repost/quote post are written together: a failure after
+  // the share row is inserted must not leave a share without its post (a retry
+  // would then fail with ALREADY_SHARED).
+  const createdRepost = await db.transaction(async (tx) => {
+    await tx.insert(shares).values({
+      id: shareId,
+      userId,
+      postId: shareTargetPostId,
+    });
+
+    if (!originalPost) {
+      return undefined;
+    }
+
+    const [created] = await tx
+      .insert(posts)
+      .values({
+        id: repostId,
+        content: quoteComment || '',
+        authorId: userId,
+        timestamp: new Date(),
+        originalPostId: shareTargetPostId,
+      })
+      .returning();
+
+    if (!created) {
+      throw new BusinessLogicError('Failed to create repost', 'CREATE_FAILED');
+    }
+
+    return created;
+  });
+
+  // NPC interaction tracking is ancillary: it must not fail a share that has
+  // already been committed.
+  try {
+    await NPCInteractionTracker.trackShare(userId, shareTargetPostId);
+  } catch (error) {
+    logger.warn(
+      'Failed to track share interaction',
+      {
+        userId,
+        postId: shareTargetPostId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      LOG_CONTEXT
+    );
+  }
+
   let repostPost: SharedRepostPost | null = null;
 
-  if (originalPost) {
+  if (originalPost && createdRepost) {
     const [originalUser] = await db
       .select({
         username: users.username,
@@ -235,21 +275,6 @@ export async function sharePost(
       originalUser?.profileImageUrl ||
       originalActor?.profileImageUrl ||
       originalOrg?.imageUrl;
-
-    const [createdRepost] = await db
-      .insert(posts)
-      .values({
-        id: repostId,
-        content: quoteComment || '',
-        authorId: userId,
-        timestamp: new Date(),
-        originalPostId: shareTargetPostId,
-      })
-      .returning();
-
-    if (!createdRepost) {
-      throw new BusinessLogicError('Failed to create repost', 'CREATE_FAILED');
-    }
 
     repostPost = {
       id: createdRepost.id,
