@@ -2199,6 +2199,28 @@ export async function executeLeaveChat(
   agent: AuthenticatedAgent,
   args: LeaveChatArgs
 ): Promise<LeaveChatResult> {
+  // Find the chat first so a rejected owner leave does not deactivate
+  // the participant. Same rule as DELETE /api/chats/[id]/participants/me.
+  const chat = await db.chat.findUnique({
+    where: { id: args.chatId },
+    select: { groupId: true },
+  });
+
+  if (chat?.groupId) {
+    const membership = await db.groupMember.findFirst({
+      where: {
+        groupId: chat.groupId,
+        userId: agent.userId,
+        isActive: true,
+      },
+    });
+    if (membership?.role === 'owner') {
+      throw new Error(
+        'Group owners cannot leave. Transfer ownership or delete the group.'
+      );
+    }
+  }
+
   // Mark chat participant as inactive
   await db.chatParticipant.updateMany({
     where: {
@@ -2206,12 +2228,6 @@ export async function executeLeaveChat(
       userId: agent.userId,
     },
     data: { isActive: false },
-  });
-
-  // Find the chat to get its groupId
-  const chat = await db.chat.findUnique({
-    where: { id: args.chatId },
-    select: { groupId: true },
   });
 
   // Also update GroupMember if there's an associated group
