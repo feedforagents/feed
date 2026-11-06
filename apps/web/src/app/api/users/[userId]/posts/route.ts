@@ -88,15 +88,19 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  aliasedTable,
   and,
   comments,
   count,
   db,
   desc,
   eq,
+  exists,
   inArray,
   isNull,
   lte,
+  ne,
+  or,
   posts,
   reactions,
   shares,
@@ -152,7 +156,7 @@ export const GET = withErrorHandling(
       page: searchParams.get('page') ?? undefined,
       limit: searchParams.get('limit') ?? undefined,
     };
-    const { type } = UserPostsQuerySchema.parse(queryParams);
+    const { type, page, limit } = UserPostsQuerySchema.parse(queryParams);
 
     if (type === 'replies') {
       // Get user's comments (replies)
@@ -587,6 +591,9 @@ export const GET = withErrorHandling(
     }
     // Get user's posts - filter out future posts
     const now = new Date();
+    // Simple reposts of a deleted or future original are hidden below, so
+    // exclude them here too; otherwise they would take up rows of a page.
+    const originalPost = aliasedTable(posts, 'originalPost');
     const userPosts = await db
       .select()
       .from(posts)
@@ -594,11 +601,28 @@ export const GET = withErrorHandling(
         and(
           eq(posts.authorId, canonicalUserId),
           isNull(posts.deletedAt),
-          lte(posts.timestamp, now)
+          lte(posts.timestamp, now),
+          or(
+            isNull(posts.originalPostId),
+            ne(posts.content, ''),
+            exists(
+              db
+                .select({ id: originalPost.id })
+                .from(originalPost)
+                .where(
+                  and(
+                    eq(originalPost.id, posts.originalPostId),
+                    isNull(originalPost.deletedAt),
+                    lte(originalPost.timestamp, now)
+                  )
+                )
+            )
+          )
         )
       )
-      .orderBy(desc(posts.timestamp))
-      .limit(100);
+      .orderBy(desc(posts.timestamp), desc(posts.id))
+      .limit(limit)
+      .offset((page - 1) * limit);
 
     if (userPosts.length === 0) {
       return successResponse({
