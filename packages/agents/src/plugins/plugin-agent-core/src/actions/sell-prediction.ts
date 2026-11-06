@@ -13,16 +13,12 @@ import type {
 } from '@elizaos/core';
 import type { JsonValue } from '@feed/api';
 import { broadcastToChannel } from '@feed/api';
+import { and, db, eq, positions } from '@feed/db';
 import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@feed/core/markets/prediction';
-import { and, asUser, db, eq, positions } from '@feed/db';
-import {
-  createUserWalletAdapter,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
+  withPredictionSettlement,
 } from '@feed/engine';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
 import { logger } from '../../../../shared/logger';
@@ -143,12 +139,21 @@ export const sellPredictionAction: Action = {
         };
       }
 
-      const sell = await asUser({ userId: agentUserId }, async (txDb) => {
-        const marketId = position.marketId;
-        const service = new PredictionMarketService({
-          db: new PredictionDbAdapter(txDb),
-          // Every wallet mutation (incl. PnL) enlists in the asUser transaction
-          wallet: createUserWalletAdapter(txDb),
+      const marketId = position.marketId;
+      const sell = await withPredictionSettlement(
+        marketId,
+        { userId: agentUserId },
+        async (service) => {
+          const result = await service.sell({
+            userId: agentUserId,
+            marketId,
+            positionId,
+            shares: sharesToSell,
+          });
+
+          return { marketId, result };
+        },
+        {
           broadcast: {
             emit: (channel, payload) =>
               broadcastToChannel(channel, payload as Record<string, JsonValue>),
@@ -162,7 +167,7 @@ export const sellPredictionAction: Action = {
             referrerShare: FEE_CONFIG.REFERRER_SHARE,
             minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
           },
-          feeProcessor: {
+          feeProcessor: (tx) => ({
             processTradingFee: ({
               userId,
               amount,
@@ -176,21 +181,11 @@ export const sellPredictionAction: Action = {
                 amount,
                 positionId,
                 relatedId,
-                txDb // Pass the existing transaction to avoid nested transaction deadlocks
+                tx
               ),
-          },
-        });
-
-        const result = await service.sell({
-          userId: agentUserId,
-          marketId,
-          positionId,
-          shares: sharesToSell,
-        });
-
-        return { marketId, result };
-      });
-
+          }),
+        }
+      );
       const proceeds = sell.result.netProceeds ?? 0;
       const realizedPnL = sell.result.pnl ?? 0;
       const remainingShares = sell.result.remainingShares ?? 0;

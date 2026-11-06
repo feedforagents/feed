@@ -188,6 +188,7 @@ describe('TradingPerformanceService equity metric SQL', () => {
     // the entry fee already left the wallet in cash and is not in
     // lifetimePnL until the position closes. The net cost is grossed up by
     // the trading fee rate, rounded to cents.
+    expect(sqlText).toContain('p."cashCostBasis"');
     expect(sqlText).toContain('ROUND(');
     expect(sqlText).toContain('(1 - 0.001)');
     expect(sqlText).not.toContain('END - p."avgPrice"');

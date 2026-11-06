@@ -73,6 +73,7 @@ export * from './utils/logger';
 // Name replacement utilities (pure functions)
 // OASF skill mapper (pure functions)
 export * from './utils/oasf-skill-mapper';
+export * from './utils/points';
 // Post utilities (pure functions)
 export * from './utils/post-utils';
 // Profile utilities (pure functions)

@@ -82,12 +82,10 @@ export class TradingPerformanceService {
    * (calculateBuyWithFees strips the fee before pricing shares), while the
    * fee already left the wallet in cash and is not in lifetimePnL until the
    * position closes. Subtracting net avgPrice would therefore count the
-   * already-paid entry fee as profit (SYMBaiEX on #1565: a 100-point buy reported
-   * +0.978 instead of the equity-true +0.878). The gross basis is the net
-   * cost grossed up by the trading fee rate, rounded to cents — the same
-   * gross-up the sell path applies when realizing PnL (grossUpBuyAmount)
-   * and the position snapshot uses for costBasis, so realized and
-   * unrealized stay consistent across a partial exit.
+   * already-paid entry fee as profit. Use the persisted cashCostBasis so
+   * repeated partial exits retain the settlement's cent-rounded remainder.
+   * Only historical rows without that value use the net-cost gross-up
+   * estimate, matching the settlement service's legacy fallback.
    *
    * NOTE: this deliberately differs from calculatePortfolioPnL, which still
    * marks prediction positions off net avgPrice — portfolio reporting needs
@@ -120,9 +118,12 @@ export class TradingPerformanceService {
               ELSE p."avgPrice"
             END
           )
-          - ROUND(
-            p."shares" * p."avgPrice"::numeric / (1 - ${FEE_CONFIG.TRADING_FEE_RATE}),
-            2
+          - COALESCE(
+            p."cashCostBasis",
+            ROUND(
+              p."shares" * p."avgPrice"::numeric / (1 - ${FEE_CONFIG.TRADING_FEE_RATE}),
+              2
+            )
           )
         ), 0)::numeric AS "predictionUnrealizedPnL"
       FROM "Position" p
@@ -139,7 +140,7 @@ export class TradingPerformanceService {
    * and the starting grant never enter this expression — they write balance
    * transactions and the cash balance, neither of which the metric reads —
    * so buying points cannot move a rank. The prediction leg subtracts the
-   * remaining gross cash basis (see predictionUnrealizedCte), so the entry
+   * recorded remaining gross cash basis (see predictionUnrealizedCte), so the entry
    * fee already paid in cash is not counted as profit. The query aliases
    * pu/du must match the joins in each query that embeds this fragment.
    */

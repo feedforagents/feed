@@ -2,22 +2,25 @@ import { describe, expect, it } from 'bun:test';
 import { PredictionPricing } from '@feed/core/markets/prediction';
 
 describe('Prediction market price scaling', () => {
-  it('CPMM avgPrice can exceed 1.0 for large trades', () => {
+  it('CPMM avgPrice stays below 1.0: a share redeems for at most 1 pt [D-14]', () => {
     // Market with 5000/5000 liquidity (10k initial)
     const result = PredictionPricing.calculateBuy(5000, 5000, 'yes', 2000);
 
-    // avgPrice = usdAmount / sharesBought
-    // For a $2000 buy on a 50/50 market, cost-per-share > 1
-    expect(result.avgPrice).toBeGreaterThan(1.0);
-    expect(result.sharesBought).toBeGreaterThan(0);
-    expect(result.sharesBought).toBeLessThan(2000);
+    // avgPrice = usdAmount / sharesBought. Under [D-14] the CPMM price is
+    // the cost per share, so even a large buy averages between the 0.50
+    // quote and the post-trade quote — never above 1.0.
+    expect(result.avgPrice).toBeGreaterThan(0.5);
+    expect(result.avgPrice).toBeLessThan(1.0);
+    expect(result.avgPrice).toBeLessThan(result.newYesPrice);
+    // At ~0.58 per share, $2000 buys more shares than points spent
+    expect(result.sharesBought).toBeGreaterThan(2000);
   });
 
   it('avgPrice should NOT be multiplied by 100 for storage', () => {
     const result = PredictionPricing.calculateBuy(5000, 5000, 'yes', 1000);
 
     // The raw avgPrice is the correct value for entryPrice storage
-    // Multiplying by 100 would create values like 140 for a $1.40 cost-per-share
+    // Multiplying by 100 would create values like 55 for a $0.55 cost-per-share
     const correctEntryPrice = result.avgPrice;
     const wrongEntryPrice = result.avgPrice * 100;
 
@@ -40,31 +43,32 @@ describe('Prediction market price scaling', () => {
     expect(result.newNoPrice).toBeLessThan(1);
   });
 
-  it('small trades have avgPrice close to 1.0 (cost per share)', () => {
+  it('small trades have avgPrice close to the quoted price', () => {
     const result = PredictionPricing.calculateBuy(5000, 5000, 'yes', 10);
 
-    // avgPrice is cost-per-share, NOT probability. On a balanced market
-    // you pay ~$1 per share, so avgPrice ≈ 1.0
-    expect(result.avgPrice).toBeCloseTo(1.0, 0);
+    // avgPrice is the cost per share, and [D-14] makes the CPMM price that
+    // cost: on a balanced market the quote is 0.50, so avgPrice ≈ 0.50
+    expect(result.avgPrice).toBeCloseTo(0.5, 2);
   });
 
-  it('large trades have avgPrice much higher than market price', () => {
+  it('large trades average between the pre- and post-trade quotes', () => {
     const result = PredictionPricing.calculateBuy(5000, 5000, 'yes', 4000);
 
-    // Large trade moves the price significantly: avgPrice >> initial 0.5
-    expect(result.avgPrice).toBeGreaterThan(1.5);
+    // A large trade moves along the curve: its average cost per share is
+    // above the initial 0.50 quote but below the post-trade quote.
+    expect(result.avgPrice).toBeGreaterThan(0.5);
+    expect(result.avgPrice).toBeLessThan(result.newYesPrice);
   });
 
-  it('calculateExpectedPayout returns cost basis when no aggregate pool args are used', () => {
+  it('calculateExpectedPayout redeems shares without pool context', () => {
     const shares = 100;
     const avgPrice = 0.6;
 
     const payout = PredictionPricing.calculateExpectedPayout(shares, avgPrice);
-    // With totalWinnerShares <= 0, resolution helper returns cost basis only
-    expect(payout).toBe(shares * avgPrice);
+    expect(payout).toBe(shares);
   });
 
-  it('calculateExpectedPayout adds proportional share of loser deposits', () => {
+  it('calculateExpectedPayout is independent of loser deposits', () => {
     const shares = 100;
     const avgPrice = 0.6;
     const totalWinnerShares = 100;
@@ -76,8 +80,7 @@ describe('Prediction market price scaling', () => {
       totalWinnerShares,
       totalLoserDeposits
     );
-    const costBasis = shares * avgPrice;
-    expect(payout).toBe(costBasis + totalLoserDeposits);
+    expect(payout).toBe(shares);
   });
 });
 
@@ -86,14 +89,14 @@ describe('Price storage conventions', () => {
     // Simulate what trade-execution-service does
     const result = PredictionPricing.calculateBuy(5000, 5000, 'yes', 2000);
 
-    // CORRECT: store raw avgPrice
+    // CORRECT: store raw avgPrice (~0.58 for this trade)
     const correctEntryPrice = result.avgPrice;
     expect(correctEntryPrice).toBeGreaterThan(0);
     expect(correctEntryPrice).toBeLessThan(5);
 
     // WRONG (the old bug): store avgPrice * 100
     const wrongEntryPrice = result.avgPrice * 100;
-    expect(wrongEntryPrice).toBeGreaterThan(100);
+    expect(wrongEntryPrice).toBeGreaterThan(50);
   });
 
   it('currentPrice should store raw market probability without * 100', () => {
@@ -129,7 +132,7 @@ describe('Price storage conventions', () => {
   it('entryPrice and currentPrice should be comparable in scale', () => {
     const result = PredictionPricing.calculateBuy(5000, 5000, 'yes', 1000);
 
-    const entryPrice = result.avgPrice; // cost per share (~1.0)
+    const entryPrice = result.avgPrice; // cost per share (~0.55 here)
     const currentPrice = result.newYesPrice; // probability (0-1)
 
     // These are in different units but both < 5. The old bug made

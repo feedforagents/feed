@@ -1,5 +1,7 @@
 export type MarketKind = 'prediction' | 'perp';
 
+export type AfterCommitScheduler = (effect: () => Promise<void>) => void;
+
 export interface FeeConfig {
   tradingFeeRate: number; // e.g. 0.001 = 0.1%
   platformShare: number; // 0-1

@@ -42,6 +42,7 @@ import {
   users,
 } from '@feed/db';
 import { FEE_CONFIG } from '@feed/engine/config/fees';
+import { withPredictionSettlement } from '@feed/engine/services/prediction-settlement';
 import { WalletService } from '@feed/engine/services/wallet-service';
 import { generateSnowflakeId } from '@feed/shared';
 
@@ -244,7 +245,9 @@ function equityProfitFromState(state: {
   const markValue = shares * markPrice;
   const netCost = shares * Number(positionRow.avgPrice);
   const grossBasis =
-    Math.round((netCost / (1 - FEE_CONFIG.TRADING_FEE_RATE)) * 100) / 100;
+    positionRow.cashCostBasis === null
+      ? Math.round((netCost / (1 - FEE_CONFIG.TRADING_FEE_RATE)) * 100) / 100
+      : Number(positionRow.cashCostBasis);
   const lifetimePnL = Number(userRow.lifetimePnL);
   const cash = Number(userRow.virtualBalance);
   const contributions =
@@ -440,6 +443,71 @@ describe('Trading leaderboard equity ranking (D-15b)', () => {
     expect(
       sellState.oldFormulaNetProfit - Number(entryAfterSell?.netProfit)
     ).toBeCloseTo(0.05, 1);
+  });
+
+  test('keeps the recorded cash basis after repeated partial sales', async () => {
+    if (!dbAvailable) return;
+
+    const buyer = await createTestUser({
+      usernamePrefix: 'lb-eq-rounded-basis',
+      lifetimePnL: 0,
+      createdAt: new Date('2026-01-09T00:00:00.000Z'),
+    });
+    const marketId = await createMarket({
+      yesShares: 10000,
+      noShares: 10000,
+      resolved: false,
+    });
+    const options = {
+      fees: {
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+      },
+    };
+    await withPredictionSettlement(
+      marketId,
+      { userId: buyer },
+      (service) =>
+        service.buy({ userId: buyer, marketId, side: 'yes', amount: 10 }),
+      options
+    );
+    for (let sale = 0; sale < 2; sale++) {
+      const { positionRow } = await readPredictionState(buyer, marketId);
+      if (!positionRow) throw new Error('Expected an open prediction position');
+      await withPredictionSettlement(
+        marketId,
+        { userId: buyer },
+        (service) =>
+          service.sell({
+            userId: buyer,
+            marketId,
+            shares: Number(positionRow.shares) / 3,
+          }),
+        options
+      );
+    }
+    const state = await readPredictionState(buyer, marketId);
+    expect(Number(state.positionRow?.cashCostBasis)).toBe(4.45);
+    const equity = equityProfitFromState(state);
+    const entry = await TradingPerformanceService.getWalletEntry(buyer);
+    expect(Number(entry?.netProfit)).toBeCloseTo(
+      equity.expectedEquityProfit,
+      8
+    );
+
+    const control = await createTestUser({
+      usernamePrefix: 'lb-eq-rounded-control',
+      lifetimePnL: -0.03,
+      createdAt: new Date('2026-01-10T00:00:00.000Z'),
+    });
+    await db
+      .update(users)
+      .set({ virtualBalance: '999.97' })
+      .where(eq(users.id, control));
+    const order = await seededOrder();
+    expect(order.indexOf(control)).toBeLessThan(order.indexOf(buyer));
   });
 
   test('buying points changes neither net profit nor rank', async () => {

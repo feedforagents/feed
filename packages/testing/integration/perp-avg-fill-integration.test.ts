@@ -1,3 +1,4 @@
+import { createPerpSettlement } from '@feed/engine';
 /**
  * Integration test: Perp Market Constant-Product AMM Average Fill Pricing
  *
@@ -25,6 +26,7 @@ import {
   isOpenPerpPositionStateValid,
   PerpDbAdapter,
   type PerpServiceDeps,
+  type PerpSettlementPort,
   type PriceImpactPort,
 } from '@feed/core/markets/perps';
 import {
@@ -231,9 +233,11 @@ function createTestPriceImpact(): PriceImpactPort {
 // ---------------------------------------------------------------------------
 function createTestService(
   wallet: TestWallet,
-  dbPort?: PerpDbPort
+  dbPort?: PerpDbPort,
+  settlement?: PerpSettlementPort
 ): PerpMarketService {
   const deps: PerpServiceDeps = {
+    settlement: settlement ?? createPerpSettlement({ wallet: () => wallet }),
     db: dbPort ?? new PerpDbAdapter(),
     wallet,
     fees: {
@@ -750,6 +754,7 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
       high24h: 100,
       low24h: 100,
       maxLeverage: 100,
+      openInterest: 1000000,
       fundingRate: {
         ticker: otherTicker,
         rate: 0,
@@ -762,8 +767,8 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
         userId: USER_A,
         ticker: otherTicker,
         side: 'long',
-        size: 9000,
-        leverage: 100,
+        size: 45000,
+        leverage: 20,
       });
       const initial = await service.openPosition({
         userId: USER_A,
@@ -779,7 +784,7 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
           ticker: TEST_TICKER,
           side: 'short',
           size: 10000,
-          leverage: 100,
+          leverage: 20,
         })
       ).rejects.toMatchObject({
         statusCode: 400,
@@ -795,10 +800,10 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
         userId: USER_A,
         ticker: TEST_TICKER,
         side: 'short',
-        size: 1100,
-        leverage: 100,
+        size: 5100,
+        leverage: 20,
       });
-      expect(inverse.size).toBe(1000);
+      expect(inverse.size).toBe(5000);
       const open = await adapter.getOpenPositionsByUser(USER_A);
       expect(open.reduce((sum, p) => sum + p.size * p.leverage, 0)).toBe(
         1_000_000
@@ -875,7 +880,10 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
       walletMutationsAfterClose = wallet.getLog().length;
       return transaction(fn);
     };
-    const flipService = createTestService(wallet, adapter);
+    const flipService = createTestService(wallet, adapter, {
+      run: (_userId, operation) =>
+        adapter.transaction((tx) => operation(tx, wallet)),
+    });
     await expect(
       flipService.openPosition({
         userId: USER_A,
