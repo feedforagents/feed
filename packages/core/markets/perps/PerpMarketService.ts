@@ -2171,11 +2171,33 @@ export class PerpMarketService {
     };
   }
 
-  private buildOppositeSidePreview(
+  /**
+   * Average exit fill for a close leg of `closeSize`: the constant-product
+   * impact fill when a price impact port is configured, otherwise the quote.
+   * Mirrors the settlement in closePosition and in the flip leg of
+   * reduceOrFlipPosition, so the preview and the execution agree.
+   */
+  private async resolveCloseExitPrice(
+    market: PerpMarketRecord,
+    existing: PerpPositionRecord,
+    closeSize: number,
+    closeExecution: ReturnType<PerpMarketService['getCloseExecutionQuote']>
+  ): Promise<number> {
+    const closeImpact = await this.previewCloseImpact({
+      ticker: market.ticker,
+      exitPrice: closeExecution.executionPrice,
+      currentSpotPrice: market.currentPrice,
+      side: existing.side,
+      closeSize,
+    });
+    return closeImpact?.avgExitPrice ?? closeExecution.executionPrice;
+  }
+
+  private async buildOppositeSidePreview(
     market: PerpMarketRecord,
     existing: PerpPositionRecord,
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
-  ): PerpOpenExecutionPreview {
+  ): Promise<PerpOpenExecutionPreview> {
     const currentPrice =
       Number.isFinite(market.currentPrice) && market.currentPrice > 0
         ? market.currentPrice
@@ -2187,12 +2209,19 @@ export class PerpMarketService {
         existing.side,
         input.size
       );
+      const closeExitPrice = await this.resolveCloseExitPrice(
+        market,
+        existing,
+        input.size,
+        closeExecution
+      );
       return this.buildReduceOrClosePreview({
         market,
         existing,
         input,
         closeSize: input.size,
         closeExecution,
+        closeExitPrice,
         rebalanceType: 'reduce',
         resultingSize: existing.size - input.size,
         currentPrice,
@@ -2205,12 +2234,19 @@ export class PerpMarketService {
         existing.side,
         existing.size
       );
+      const closeExitPrice = await this.resolveCloseExitPrice(
+        market,
+        existing,
+        existing.size,
+        closeExecution
+      );
       return this.buildReduceOrClosePreview({
         market,
         existing,
         input,
         closeSize: existing.size,
         closeExecution,
+        closeExitPrice,
         rebalanceType: 'close',
         resultingSize: 0,
         currentPrice,
@@ -2221,6 +2257,16 @@ export class PerpMarketService {
       market,
       existing.side,
       existing.size
+    );
+    // The close leg settles at the AMM average exit fill (same as a
+    // standalone close), so price the preview settlement at that fill —
+    // not at the raw-quote close price — or totalRequired disagrees
+    // with the debit the flip actually takes.
+    const closeExitPrice = await this.resolveCloseExitPrice(
+      market,
+      existing,
+      existing.size,
+      closeExecution
     );
     const inverseSize = input.size - existing.size;
     const effectiveLeverage = Math.min(
@@ -2246,7 +2292,7 @@ export class PerpMarketService {
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
     const { pnl: closePnl } = calculateUnrealizedPnL(
       existing.entryPrice,
-      closeExecution.executionPrice,
+      closeExitPrice,
       existing.side,
       existing.size
     );
@@ -2295,7 +2341,7 @@ export class PerpMarketService {
       totalRequired: Math.max(0, openCost - estimatedCloseSettlement),
       resultingSize: inverseSize,
       resultingSide: input.side,
-      estimatedClosePrice: closeExecution.executionPrice,
+      estimatedClosePrice: closeExitPrice,
       estimatedCloseSettlement,
       liquidationPrice,
       liquidationDistancePercent,
@@ -2308,6 +2354,7 @@ export class PerpMarketService {
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>;
     closeSize: number;
     closeExecution: ReturnType<PerpMarketService['getCloseExecutionQuote']>;
+    closeExitPrice: number;
     rebalanceType: 'reduce' | 'close';
     resultingSize: number;
     currentPrice: number;
@@ -2318,13 +2365,14 @@ export class PerpMarketService {
       input,
       closeSize,
       closeExecution,
+      closeExitPrice,
       rebalanceType,
       resultingSize,
       currentPrice,
     } = params;
     const { pnl: closePnl } = calculateUnrealizedPnL(
       existing.entryPrice,
-      closeExecution.executionPrice,
+      closeExitPrice,
       existing.side,
       closeSize
     );
@@ -2341,11 +2389,10 @@ export class PerpMarketService {
         : closeExecution.askPrice;
     const quoteImpactPrice = Math.max(
       0,
-      Math.abs(closeExecution.executionPrice - quotedPrice)
+      Math.abs(closeExitPrice - quotedPrice)
     );
     const totalSlippageBps =
-      (Math.abs(closeExecution.executionPrice - currentPrice) /
-        Math.max(currentPrice, 1)) *
+      (Math.abs(closeExitPrice - currentPrice) / Math.max(currentPrice, 1)) *
       10_000;
     const quoteImpactBps =
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
@@ -2374,7 +2421,7 @@ export class PerpMarketService {
       markPrice: market.markPrice,
       indexPrice: market.indexPrice,
       quotedPrice,
-      executionPrice: closeExecution.executionPrice,
+      executionPrice: closeExitPrice,
       quoteImpactPrice,
       quoteImpactBps,
       totalSlippageBps,
@@ -2389,7 +2436,7 @@ export class PerpMarketService {
       totalRequired: 0,
       resultingSize,
       resultingSide: resultingSize > 0 ? existing.side : null,
-      estimatedClosePrice: closeExecution.executionPrice,
+      estimatedClosePrice: closeExitPrice,
       estimatedCloseSettlement,
       liquidationPrice,
       liquidationDistancePercent,

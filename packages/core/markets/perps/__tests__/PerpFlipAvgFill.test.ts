@@ -476,3 +476,139 @@ describe('perp flip close leg vs standalone close (avg-fill parity)', () => {
     expect(aAfter).toBeCloseTo(bAfter, 6);
   });
 });
+
+describe('flip/reduce/close preview matches execution (avg-fill parity)', () => {
+  it('flip preview totalRequired and close settlement match execution (long)', async () => {
+    const { db, wallet, service } = build(true);
+    const opened = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 1000,
+      leverage: 2,
+    });
+    const before = (await wallet.getBalance('u1')).balance;
+    const preview = await service.previewOrder({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 1500,
+      leverage: 2,
+    });
+    const flip = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 1500,
+      leverage: 2,
+    });
+    const after = (await wallet.getBalance('u1')).balance;
+    const closed = await db.getPositionById(opened.positionId);
+
+    expect(preview.previewType).toBe('flip');
+    // The preview must price the close leg at the AMM average exit fill,
+    // exactly like the flip settles it — otherwise the UI submit gate
+    // (totalRequired) disagrees with the actual debit.
+    expect(preview.estimatedClosePrice).toBeCloseTo(closed?.currentPrice!, 6);
+    expect(preview.totalRequired).toBeCloseTo(Math.max(0, before - after), 6);
+    expect(preview.estimatedCloseSettlement).toBeCloseTo(
+      Math.max(0, 1000 / 2 + flip.realizedPnL! - 1),
+      6
+    );
+  });
+
+  it('flip preview matches execution (short)', async () => {
+    const { db, wallet, service } = build(true);
+    const opened = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 1000,
+      leverage: 2,
+    });
+    const before = (await wallet.getBalance('u1')).balance;
+    const preview = await service.previewOrder({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 1500,
+      leverage: 2,
+    });
+    const flip = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 1500,
+      leverage: 2,
+    });
+    const after = (await wallet.getBalance('u1')).balance;
+    const closed = await db.getPositionById(opened.positionId);
+
+    expect(preview.previewType).toBe('flip');
+    expect(preview.estimatedClosePrice).toBeCloseTo(closed?.currentPrice!, 6);
+    expect(preview.totalRequired).toBeCloseTo(Math.max(0, before - after), 6);
+    expect(preview.estimatedCloseSettlement).toBeCloseTo(
+      Math.max(0, 1000 / 2 + flip.realizedPnL! - 1),
+      6
+    );
+  });
+
+  it('reduce preview matches a partial close', async () => {
+    const { service } = build(true);
+    const opened = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 1000,
+      leverage: 2,
+    });
+    const preview = await service.previewOrder({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 500,
+      leverage: 2,
+    });
+    const close = await service.closePosition({
+      userId: 'u1',
+      positionId: opened.positionId,
+      percentage: 0.5,
+    });
+
+    expect(preview.previewType).toBe('reduce');
+    expect(preview.estimatedClosePrice).toBeCloseTo(close.exitPrice!, 6);
+    expect(preview.estimatedCloseSettlement).toBeCloseTo(
+      Math.max(0, close.marginPaid! + close.realizedPnL! - close.feePaid!),
+      6
+    );
+  });
+
+  it('close preview matches a full close', async () => {
+    const { service } = build(true);
+    const opened = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 1000,
+      leverage: 2,
+    });
+    const preview = await service.previewOrder({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 1000,
+      leverage: 2,
+    });
+    const close = await service.closePosition({
+      userId: 'u1',
+      positionId: opened.positionId,
+    });
+
+    expect(preview.previewType).toBe('close');
+    expect(preview.estimatedClosePrice).toBeCloseTo(close.exitPrice!, 6);
+    expect(preview.estimatedCloseSettlement).toBeCloseTo(
+      Math.max(0, close.marginPaid! + close.realizedPnL! - close.feePaid!),
+      6
+    );
+  });
+});
