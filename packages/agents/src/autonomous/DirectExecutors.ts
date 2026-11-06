@@ -2156,9 +2156,16 @@ export async function executeDirectRepost(
     // Handle unique constraint violation (concurrent repost)
     // Check error code for PostgreSQL (23505) or Prisma (P2002)
     const errorCode = (error as { code?: string }).code;
+    // Drizzle wraps the PostgreSQL error in its query error's cause.
+    const cause = error instanceof Error ? error.cause : undefined;
+    const causeCode =
+      typeof cause === 'object' && cause !== null && 'code' in cause
+        ? cause.code
+        : undefined;
     const isUniqueConstraint =
       errorCode === '23505' ||
       errorCode === 'P2002' ||
+      causeCode === '23505' ||
       (error as Error).message?.includes('unique constraint');
 
     if (isUniqueConstraint) {

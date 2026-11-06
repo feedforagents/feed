@@ -248,7 +248,10 @@ describe('executeDirectRepost', () => {
     expect(sharedPostId).toBe(quotePost.id);
   });
 
-  test('marks a unique-constraint result as an already-existing repost', async () => {
+  test.each([
+    'direct',
+    'drizzle',
+  ])('marks a %s unique-constraint result as an already-existing repost', async (shape) => {
     const originalPost = {
       id: 'post-original',
       authorId: 'user-1',
@@ -278,7 +281,11 @@ describe('executeDirectRepost', () => {
         await callback({
           insert: mock(() => ({
             values: mock(async () => {
-              throw uniqueError;
+              throw shape === 'drizzle'
+                ? new Error('Failed query: insert into shares', {
+                    cause: uniqueError,
+                  })
+                : uniqueError;
             }),
           })),
         });
@@ -297,5 +304,31 @@ describe('executeDirectRepost', () => {
       repostId: 'share-existing',
       alreadyReposted: true,
     });
+  });
+
+  test('does not treat another wrapped PostgreSQL failure as a duplicate', async () => {
+    const source = {
+      id: 'post-original',
+      authorId: 'user-1',
+      content: 'Original',
+      originalPostId: null,
+    };
+    mockDb.select = mock(() => ({
+      from: mock(() => ({
+        where: mock(() => ({ limit: mock(async () => [source]) })),
+      })),
+    }));
+    const queryError = new Error('Failed query: insert into shares', {
+      cause: Object.assign(new Error('foreign key violation'), {
+        code: '23503',
+      }),
+    });
+    mockDb.transaction = mock(async () => {
+      throw queryError;
+    });
+    await expect(
+      executeDirectRepost({ agentUserId: 'user-2', postId: source.id })
+    ).rejects.toBe(queryError);
+    expect(mockDb.select).toHaveBeenCalledTimes(1);
   });
 });
