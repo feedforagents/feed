@@ -648,18 +648,27 @@ async function executePredictionTrade(params: {
     predictionSettlementOptions(agentUserId, isNpc, marketId)
   );
 
-  // Record in AgentTrade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'prediction',
-    marketId,
-    action: 'open',
-    side: sideLabel,
-    amount,
-    price: result.avgPrice,
-    reasoning,
-  });
+  // Record in AgentTrade. The buy is committed, so an analytics failure
+  // must not report it as failed (which would invite a duplicate retry).
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'prediction',
+      marketId,
+      action: 'open',
+      side: sideLabel,
+      amount,
+      price: result.avgPrice,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        marketId,
+        error: error.message,
+      });
+    });
 
   const sharesRounded = Math.round(result.shares * 100) / 100;
 
@@ -754,19 +763,28 @@ async function executePredictionSell(params: {
     predictionSettlementOptions(agentUserId, isNpc, marketId)
   );
 
-  // Record in AgentTrade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'prediction',
-    marketId,
-    action: 'close',
-    side: sideLabel,
-    amount: sellResult.netProceeds ?? 0,
-    price: sellResult.avgPrice,
-    pnl: sellResult.pnl,
-    reasoning,
-  });
+  // Record in AgentTrade. The sale is committed, so an analytics
+  // failure must not report it as failed.
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'prediction',
+      marketId,
+      action: 'close',
+      side: sideLabel,
+      amount: sellResult.netProceeds ?? 0,
+      price: sellResult.avgPrice,
+      pnl: sellResult.pnl,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        marketId,
+        error: error.message,
+      });
+    });
 
   logger.info(
     `[DirectExecutor] Prediction sell executed: ${isSellYes ? 'YES' : 'NO'} on market ${marketId}`,
@@ -836,18 +854,28 @@ async function executePerpTrade(params: {
     size: amount,
     leverage: 1,
   });
-  // Record trade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'perp',
-    ticker,
-    action: 'open',
-    side: perpSide,
-    amount,
-    price: currentPrice,
-    reasoning,
-  });
+  // Record trade. The position is already committed, so an analytics
+  // failure must not report the trade as failed (which would invite a
+  // duplicate retry).
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'perp',
+      ticker,
+      action: 'open',
+      side: perpSide,
+      amount,
+      price: currentPrice,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        ticker,
+        error: error.message,
+      });
+    });
 
   logger.info(
     `[DirectExecutor] Perp trade executed: ${perpSide} $${amount} on ${ticker}`,
@@ -944,19 +972,28 @@ async function executeClosePerpPosition(params: {
   }
   const { realizedPnL, size, exitPrice } = closeResult;
 
-  // Record trade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'perp',
-    ticker,
-    action: 'close',
-    side: existingPosition.side as 'long' | 'short',
-    amount: size,
-    price: exitPrice,
-    pnl: realizedPnL,
-    reasoning,
-  });
+  // Record trade. The close is committed, so an analytics failure must
+  // not report it as failed.
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'perp',
+      ticker,
+      action: 'close',
+      side: existingPosition.side as 'long' | 'short',
+      amount: size,
+      price: exitPrice,
+      pnl: realizedPnL,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        ticker,
+        error: error.message,
+      });
+    });
 
   logger.info(
     `[DirectExecutor] Perp position closed: ${existingPosition.side} $${size} on ${ticker} (P&L: ${realizedPnL >= 0 ? '+' : ''}$${realizedPnL.toFixed(2)})`,
