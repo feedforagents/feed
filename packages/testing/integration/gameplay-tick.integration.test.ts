@@ -3,12 +3,7 @@ import { asSystem, db } from '@feed/db';
 import { executeGameTick } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
 
-const BASE_URL =
-  process.env.TEST_API_URL ||
-  process.env.TEST_BASE_URL ||
-  'http://localhost:3000';
 const gameplayFastPath = new Set<string>();
-let serverAvailable = false;
 
 describe('Gameplay Tick Integration', () => {
   let testQuestionId: string;
@@ -19,16 +14,6 @@ describe('Gameplay Tick Integration', () => {
   beforeAll(async () => {
     initialFastMode = process.env.FEED_TRUST_CORPUS_FAST_MODE;
     process.env.FEED_TRUST_CORPUS_FAST_MODE = 'true';
-
-    // Check if server is running
-    try {
-      const response = await fetch(`${BASE_URL}/api/health`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      serverAvailable = response.ok;
-    } catch {
-      serverAvailable = false;
-    }
 
     // Ensure game is running
     const gameState = await asSystem(async (db) => {
@@ -354,57 +339,4 @@ describe('Gameplay Tick Integration', () => {
       // Cleanup errors not critical
     }
   }, 60000);
-
-  test('should test agent-tick cron endpoint if server available', async () => {
-    if (!serverAvailable) {
-      console.log('⏭️  Skipping cron endpoint test - server not available');
-      return;
-    }
-
-    const cronSecret = process.env.CRON_SECRET;
-    if (!cronSecret) {
-      console.log('⏭️  Skipping cron endpoint test - CRON_SECRET not set');
-      return;
-    }
-
-    // Use a shorter timeout for the test to fail fast if endpoint hangs
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-
-    try {
-      const response = await fetch(`${BASE_URL}/api/cron/agent-tick`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${cronSecret}`,
-          'x-integration-probe': '1',
-        },
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      // Should return 200 or handle gracefully
-      expect(response.status).toBeGreaterThanOrEqual(200);
-      expect(response.status).toBeLessThan(500);
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log('✅ Cron endpoint response:', data);
-        expect(data).toHaveProperty('success');
-        expect(typeof data.success).toBe('boolean');
-        expect(data).toHaveProperty('probe', true);
-      }
-    } catch (error) {
-      clearTimeout(timeoutId);
-      // If it's an abort error, the endpoint took too long
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(
-          `Cron endpoint timed out after 10 seconds - endpoint may be hanging`
-        );
-      }
-      // Other network errors are acceptable for this test
-      console.log('⚠️  Cron endpoint test error (acceptable):', error);
-    }
-  }, 15000); // 15 second test timeout (longer than fetch timeout)
 });

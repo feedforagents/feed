@@ -29,19 +29,7 @@ describe('TradingPerformanceService date normalization', () => {
       TradingPerformanceService.countWalletsAbove({
         id: 'user-1',
         createdAt: '2026-04-07T11:35:04.013Z',
-        tradingReturn: '0.42',
-      })
-    ).resolves.toBe(0);
-
-    expect(mockExecute).toHaveBeenCalledTimes(1);
-  });
-
-  test('countTeamsAbove accepts cached ISO string dates', async () => {
-    await expect(
-      TradingPerformanceService.countTeamsAbove({
-        id: 'team-1',
-        createdAt: '2026-04-07T11:35:04.013Z',
-        teamTradingReturn: '0.84',
+        netProfit: '0.42',
       })
     ).resolves.toBe(0);
 

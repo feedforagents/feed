@@ -26,6 +26,14 @@ describe('normalizeNpcGroupMessageResponse', () => {
     ).toBeNull();
   });
 
+  test('rejects blank and non-string message fields', () => {
+    expect(normalizeNpcGroupMessageResponse({ message: '' })).toBeNull();
+    expect(normalizeNpcGroupMessageResponse({ message: '  ' })).toBeNull();
+    expect(normalizeNpcGroupMessageResponse({ message: {} })).toBeNull();
+    expect(normalizeNpcGroupMessageResponse({ message: [] })).toBeNull();
+    expect(normalizeNpcGroupMessageResponse({ message: 42 })).toBeNull();
+  });
+
   test('rejects empty or non-object responses', () => {
     expect(normalizeNpcGroupMessageResponse('   ')).toBeNull();
     expect(normalizeNpcGroupMessageResponse(42)).toBeNull();

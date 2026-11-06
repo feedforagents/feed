@@ -3,9 +3,8 @@
 export const dynamic = 'force-dynamic';
 
 import { cn } from '@feed/shared';
-import { Loader2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useEffect, useMemo } from 'react';
+import { useEffect } from 'react';
 import {
   ChatHeader,
   ChatList,
@@ -83,27 +82,6 @@ export default function ChatsPage() {
     loadChats,
   } = useChatPage();
 
-  // Detect if the current chat is with the user's own agent
-  // If so, redirect to team chat (Agents) instead of this DM
-  const ownAgentId = useMemo(() => {
-    if (!chatDetails?.chat.otherUser || chatDetails.chat.isGroup) return null;
-    const other = chatDetails.chat.otherUser;
-    // Check if the other user is an agent managed by the current user
-    if (other.isAgent && other.managedBy === user?.id) {
-      return other.id;
-    }
-    return null;
-  }, [chatDetails, user?.id]);
-
-  // Redirect owned agent DMs to team chat and select the agent
-  useEffect(() => {
-    if (ownAgentId) {
-      router.replace(
-        `/agents/team?selectAgent=${encodeURIComponent(ownAgentId)}`
-      );
-    }
-  }, [ownAgentId, router]);
-
   // Auth required — redirect to feed and show login
   useEffect(() => {
     if (!ready || authenticated) return;
@@ -161,46 +139,38 @@ export default function ChatsPage() {
           {/* Right Column: Chat View */}
           {/* Mobile/Tablet: only shown when chat selected */}
           {/* Desktop (xl): always shown */}
-          {/* Note: Owned agent DMs redirect to team chat automatically */}
           <div
             className={cn(
               'h-full min-h-0 min-w-0 flex-1 bg-background',
               selectedChatId ? 'block' : 'hidden xl:block'
             )}
           >
-            {ownAgentId ? (
-              // Redirecting to team chat...
-              <div className="flex h-full items-center justify-center">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-              </div>
-            ) : (
-              <ChatView
-                chatDetails={chatDetails}
-                currentUserId={user?.id}
-                authenticated={authenticated}
-                sseConnected={sseConnected}
-                loading={loadingChat}
-                isLoadingMore={isLoadingMore}
-                hasMore={hasMore}
-                messageInput={messageInput}
-                sending={sending}
-                sendError={sendError}
-                sendWarning={sendWarning}
-                sendSuccess={sendSuccess}
-                showBackButton={showBackButton}
-                containerRef={setRefs}
-                topSentinelRef={topSentinelRef}
-                messagesEndRef={messagesEndRef}
-                onBack={() => setSelectedChatId(null)}
-                onToggleReaction={toggleReaction}
-                onManageGroup={handleManageGroup}
-                onMessageChange={setMessageInput}
-                onSendMessage={sendMessage}
-                replyToMessage={replyToMessage}
-                onReply={handleReplyToMessage}
-                onDismissReply={clearReplyToMessage}
-              />
-            )}
+            <ChatView
+              chatDetails={chatDetails}
+              currentUserId={user?.id}
+              authenticated={authenticated}
+              sseConnected={sseConnected}
+              loading={loadingChat}
+              isLoadingMore={isLoadingMore}
+              hasMore={hasMore}
+              messageInput={messageInput}
+              sending={sending}
+              sendError={sendError}
+              sendWarning={sendWarning}
+              sendSuccess={sendSuccess}
+              showBackButton={showBackButton}
+              containerRef={setRefs}
+              topSentinelRef={topSentinelRef}
+              messagesEndRef={messagesEndRef}
+              onBack={() => setSelectedChatId(null)}
+              onToggleReaction={toggleReaction}
+              onManageGroup={handleManageGroup}
+              onMessageChange={setMessageInput}
+              onSendMessage={sendMessage}
+              replyToMessage={replyToMessage}
+              onReply={handleReplyToMessage}
+              onDismissReply={clearReplyToMessage}
+            />
           </div>
         </div>
       </div>

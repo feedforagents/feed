@@ -250,7 +250,7 @@ export const checkCommentDetailAction: Action = {
           ? 'You'
           : post.authorDisplayName || post.authorUsername || 'User';
 
-      // Build formatted view like AutonomousBatchResponseService
+      // Group the conversation by post for the decision context
       const threadLines = threadContext.map((msg) => {
         const marker = msg.isTarget ? ' [TARGET COMMENT]' : '';
         const depthLabel =

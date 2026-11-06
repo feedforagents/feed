@@ -1,4 +1,5 @@
 import type {
+  AfterCommitScheduler,
   BroadcastPort,
   CachePort,
   ClockPort,
@@ -46,6 +47,8 @@ export interface PredictionPositionRecord {
   side: PredictionSide;
   shares: number;
   avgPrice: number;
+  /** Remaining gross cash paid; absent for positions created before precision tracking. */
+  cashCostBasis?: number;
   status?: 'active' | 'closed' | 'resolved' | 'cancelled' | 'voided';
   outcome?: boolean | null;
   pnl?: number;
@@ -192,4 +195,5 @@ export interface PredictionServiceDeps {
   feeProcessor?: FeeProcessor;
   tradeSource?: PredictionPriceSnapshotRecord['source'];
   tradeActorType?: 'user' | 'npc';
+  afterCommit?: AfterCommitScheduler;
 }

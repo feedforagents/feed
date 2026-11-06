@@ -6,7 +6,7 @@
  *
  * @description
  * Dedicated cron job for NPC agents (non-player characters).
- * Runs separately from user agent-tick to:
+ * This job:
  * 1. Provide NPCs with game context (arc plans, phases, insider status)
  * 2. Use anti-slop quality rules for authentic social media voice
  * 3. Rotate through NPCs to ensure diverse feed coverage

@@ -1,3 +1,5 @@
+import { floorPoints } from '@feed/shared';
+
 /**
  * Prediction Market AMM Pricing — Constant Product Market Maker (CPMM)
  *
@@ -22,6 +24,7 @@ export interface ShareCalculationWithFees extends ShareCalculation {
   netAmount: number;
   totalWithFee?: number;
   netProceeds?: number;
+  roundingRemainder?: number;
 }
 
 export class PredictionPricing {
@@ -36,28 +39,22 @@ export class PredictionPricing {
   }
 
   /**
-   * Calculate a winner's resolution payout using pool-proportional distribution.
+   * Calculate a winner's resolution payout.
    *
-   * Winners receive their net cost basis back plus their proportional share
-   * of all loser deposits. This is zero-sum among traders: losers fund
-   * winners, and seed liquidity stays in the pool.
+   * Each winning share redeems for 1 pt (PRD §9.2, D-14).
+   * Legacy cost/pool arguments remain accepted for existing callers but
+   * do not affect redemption.
    *
    * @param shares - Winner's shares held
-   * @param avgPrice - Winner's average purchase price per share
-   * @param totalWinnerShares - Sum of all winning positions' shares
-   * @param totalLoserDeposits - Sum of (shares × avgPrice) for all losing positions
-   * @returns Gross payout to this winner
+   * @returns Settled payout to this winner under PRD §9.1
    */
   static calculateExpectedPayout(
     shares: number,
-    avgPrice: number,
-    totalWinnerShares: number = 0,
-    totalLoserDeposits: number = 0
+    _avgPrice: number,
+    _totalWinnerShares: number = 0,
+    _totalLoserDeposits: number = 0
   ): number {
-    const costBasis = shares * avgPrice;
-    if (totalWinnerShares <= 0) return costBasis;
-    const proportion = shares / totalWinnerShares;
-    return costBasis + proportion * totalLoserDeposits;
+    return floorPoints(shares);
   }
 
   /**
@@ -88,14 +85,23 @@ export class PredictionPricing {
     let newNoShares: number;
     let sharesBought: number;
 
+    // Cash-in CPMM (complete-set mint), per PRD §9.2 [D-14] ("CPMM price =
+    // cost per share"): the amount paid mints that many complete sets
+    // (1 YES + 1 NO per pt). The buyer keeps the bought side's shares from
+    // the minted sets, and the opposite side's minted shares join the pool
+    // and are swapped along the invariant for more of the bought side.
+    // The pool state (and therefore the price path) is unchanged from the
+    // plain swap calculation; the minted bought-side shares are what make
+    // the marginal cost per share equal the quoted price instead of the
+    // odds ratio.
     if (side === 'yes') {
       newNoShares = currentNoShares + usdAmount;
       newYesShares = k / newNoShares;
-      sharesBought = currentYesShares - newYesShares;
+      sharesBought = currentYesShares - newYesShares + usdAmount;
     } else {
       newYesShares = currentYesShares + usdAmount;
       newNoShares = k / newYesShares;
-      sharesBought = currentNoShares - newNoShares;
+      sharesBought = currentNoShares - newNoShares + usdAmount;
     }
 
     if (sharesBought <= 0)
@@ -140,14 +146,29 @@ export class PredictionPricing {
     let newNoShares: number;
     let proceeds: number;
 
+    // Inverse of the cash-in buy (complete-set redemption): the pool
+    // absorbs the sold shares and redeems `proceeds` complete sets for
+    // cash, keeping the invariant. For a YES sell that is
+    //   (yesShares + sharesToSell - proceeds) * (noShares - proceeds) = k,
+    // solved below in the rationalized (numerically stable) root form.
+    // The marginal proceeds per share equal the quoted price, so a buy
+    // followed by a sell of the same shares returns the amount paid.
     if (side === 'yes') {
-      newYesShares = currentYesShares + sharesToSell;
-      newNoShares = k / newYesShares;
-      proceeds = currentNoShares - newNoShares;
+      const total = currentYesShares + sharesToSell + currentNoShares;
+      const discriminant = total * total - 4 * sharesToSell * currentNoShares;
+      proceeds =
+        (2 * sharesToSell * currentNoShares) /
+        (total + Math.sqrt(discriminant));
+      newYesShares = currentYesShares + sharesToSell - proceeds;
+      newNoShares = currentNoShares - proceeds;
     } else {
-      newNoShares = currentNoShares + sharesToSell;
-      newYesShares = k / newNoShares;
-      proceeds = currentYesShares - newYesShares;
+      const total = currentNoShares + sharesToSell + currentYesShares;
+      const discriminant = total * total - 4 * sharesToSell * currentYesShares;
+      proceeds =
+        (2 * sharesToSell * currentYesShares) /
+        (total + Math.sqrt(discriminant));
+      newNoShares = currentNoShares + sharesToSell - proceeds;
+      newYesShares = currentYesShares - proceeds;
     }
 
     if (!Number.isFinite(proceeds) || proceeds <= 0) {
@@ -217,12 +238,15 @@ export class PredictionPricing {
     );
     const gross = base.totalCost;
     const fee = gross * feeRate;
-    const netProceeds = gross - fee;
+    const rawProceeds = gross - fee;
+    const netProceeds = floorPoints(rawProceeds);
+    const roundingRemainder = rawProceeds - netProceeds;
     return {
       ...base,
       fee,
       netAmount: netProceeds,
       netProceeds,
+      roundingRemainder,
       totalCost: gross,
     };
   }

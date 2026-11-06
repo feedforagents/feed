@@ -49,7 +49,8 @@ const AGENT_IDENTITY_MAX_SIZE = 10000;
 /**
  * Get agent identity from cache or database.
  * Optimized for high concurrency with lazy refresh.
- * Supports both USER_CONTROLLED agents (User table) and NPCs (StaticDataRegistry).
+ * Resolves legacy agent-account identities and NPCs for A2A transport.
+ * This lookup does not create a hosted runtime.
  */
 async function getCachedAgentIdentity(
   agentUserId: string
@@ -61,7 +62,7 @@ async function getCachedAgentIdentity(
     return cached;
   }
 
-  // First try User table (USER_CONTROLLED agents)
+  // Preserve transport identity for existing agent-account records.
   const user = await db.user.findUnique({
     where: { id: agentUserId },
     select: {
@@ -81,7 +82,7 @@ async function getCachedAgentIdentity(
     return identity;
   }
 
-  // Fall back to static actor data (NPC agents)
+  // NPC identities come from the static world data.
   const actor = StaticDataRegistry.getActor(agentUserId);
   if (actor) {
     const identity: CachedAgentIdentity = {

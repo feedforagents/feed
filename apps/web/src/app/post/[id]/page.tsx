@@ -146,8 +146,11 @@ export default function PostPage({ params }: PostPageProps) {
       };
       if (controller.signal.aborted) return;
 
-      // Articles have a dedicated reader at /article/[id].
-      if (postData.type === 'article' && postData.fullContent) {
+      // News and resolution proofs share the article reader.
+      if (
+        (postData.type === 'article' || postData.type === 'proof') &&
+        postData.fullContent
+      ) {
         router.replace(`/article/${encodeURIComponent(postId)}`);
         return;
       }

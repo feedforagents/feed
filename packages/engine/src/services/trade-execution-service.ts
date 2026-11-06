@@ -26,10 +26,7 @@
  * @see NpcTradeRateLimiter for rate limiting implementation details
  */
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
-import {
-  PredictionDbAdapter as CorePredictionDbAdapter,
-  PredictionMarketService as CorePredictionMarketService,
-} from '@feed/core/markets/prediction';
+import { PredictionDbAdapter as CorePredictionDbAdapter } from '@feed/core/markets/prediction';
 import {
   actorState,
   and,
@@ -44,7 +41,7 @@ import {
   sql,
   type Transaction,
 } from '@feed/db';
-import { generateSnowflakeId, logger } from '@feed/shared';
+import { floorPoints, generateSnowflakeId, logger } from '@feed/shared';
 import { FEE_CONFIG } from '../config/fees';
 import { getSimulationPrice } from '../config/simulation';
 import { isSimulationMode } from '../storage-bridge';
@@ -59,12 +56,20 @@ import { FeeService } from './fee-service';
 import { NpcTradeRateLimiter } from './npc-trade-rate-limiter';
 import { createNpcWalletAdapter } from './npc-wallet-adapter';
 import { createPerpPriceImpactPort } from './perp-price-impact-port';
+import { createPerpSettlement } from './perp-settlement';
+import {
+  type PredictionSettlementOptions,
+  withPredictionSettlement,
+} from './prediction-settlement';
 import { broadcastToChannel } from './realtime-broadcaster';
 import {
   StaticDataRegistry,
   type StaticOrganization,
 } from './static-data-registry';
-import { invalidateAfterPredictionTrade } from './trade-cache-invalidation';
+import {
+  createPerpTradesCachePort,
+  invalidateAfterPredictionTrade,
+} from './trade-cache-invalidation';
 
 type PredictionTradeBroadcast = {
   type: 'prediction_trade';
@@ -511,8 +516,13 @@ export class TradeExecutionService {
     // Use PerpMarketService for consistency with user trades
     // This ensures NPC positions get funding and liquidation applied
     const perpService = new PerpMarketService({
+      settlement: createPerpSettlement({
+        system: 'npc_perp_trade',
+        wallet: (userId, tx) => createNpcWalletAdapter(userId, tx),
+      }),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -593,10 +603,12 @@ export class TradeExecutionService {
   }
 
   /** Prediction market service wired to the NPC's actorState wallet. */
-  private createNpcPredictionService(actorId: string, marketId: string) {
-    return new CorePredictionMarketService({
-      db: new CorePredictionDbAdapter(),
-      wallet: createNpcWalletAdapter(actorId),
+  private npcPredictionOptions(
+    actorId: string,
+    marketId: string
+  ): PredictionSettlementOptions {
+    return {
+      wallet: (tx) => createNpcWalletAdapter(actorId, tx),
       broadcast: this.createPredictionBroadcast(),
       cache: {
         invalidate: () => invalidateAfterPredictionTrade(marketId),
@@ -609,7 +621,7 @@ export class TradeExecutionService {
       },
       tradeSource: 'npc_trade',
       tradeActorType: 'npc',
-    });
+    };
   }
 
   /**
@@ -622,27 +634,31 @@ export class TradeExecutionService {
     if (!decision.marketId) {
       throw new Error('MarketId required for prediction position');
     }
+    const amount = floorPoints(decision.amount);
     const marketIdStr = decision.marketId.toString();
 
     const sideLabel: 'yes' | 'no' =
       decision.action === 'buy_yes' ? 'yes' : 'no';
     const mirrorSide = sideLabel === 'yes' ? 'YES' : 'NO';
 
-    const result = await this.createNpcPredictionService(
-      actorId,
-      marketIdStr
-    ).buy({
-      userId: actorId,
-      marketId: marketIdStr,
-      side: sideLabel,
-      amount: decision.amount,
-    });
+    const result = await withPredictionSettlement(
+      marketIdStr,
+      { system: 'npc_prediction_trade' },
+      (service) =>
+        service.buy({
+          userId: actorId,
+          marketId: marketIdStr,
+          side: sideLabel,
+          amount,
+        }),
+      this.npcPredictionOptions(actorId, marketIdStr)
+    );
 
     // avgPrice from CPMM is cost-per-share (can exceed 1 for large trades),
     // NOT a 0-1 probability. Store as-is without * 100 conversion.
     const entryPrice = result.avgPrice;
     const now = new Date();
-    const tradeCost = result.totalCost ?? decision.amount;
+    const tradeCost = result.totalCost ?? amount;
     const currentPrice =
       result.market[sideLabel === 'yes' ? 'yesPrice' : 'noPrice'];
 
@@ -700,7 +716,7 @@ export class TradeExecutionService {
             marketId: marketIdStr,
             action: decision.action,
             side: mirrorSide,
-            amount: decision.amount,
+            amount,
             price: entryPrice,
             sentiment: decision.confidence * (sideLabel === 'yes' ? 1 : -1),
             reason: decision.reasoning,
@@ -725,7 +741,7 @@ export class TradeExecutionService {
       marketId: decision.marketId,
       action: decision.action,
       side: mirrorSide,
-      amount: decision.amount,
+      amount,
       size: tradeCost,
       shares: result.shares,
       executionPrice: entryPrice,
@@ -767,15 +783,18 @@ export class TradeExecutionService {
       );
     }
 
-    const sellResult = await this.createNpcPredictionService(
-      actorId,
-      marketId
-    ).sell({
-      userId: actorId,
+    const sellResult = await withPredictionSettlement(
       marketId,
-      shares: canonical.shares,
-      positionId: canonical.id,
-    });
+      { system: 'npc_prediction_sell' },
+      (service) =>
+        service.sell({
+          userId: actorId,
+          marketId,
+          shares: canonical.shares,
+          positionId: canonical.id,
+        }),
+      this.npcPredictionOptions(actorId, marketId)
+    );
     const now = new Date();
 
     await this.recordAfterCommit(
@@ -1067,8 +1086,13 @@ export class TradeExecutionService {
     }
   ): Promise<ExecutedTrade> {
     const perpService = new PerpMarketService({
+      settlement: createPerpSettlement({
+        system: 'npc_perp_trade',
+        wallet: (userId, tx) => createNpcWalletAdapter(userId, tx),
+      }),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,

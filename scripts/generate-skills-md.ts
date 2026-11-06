@@ -273,15 +273,6 @@ export function generateSkillsMarkdown(
   lines.push(
     '| **POST** | `{baseUrl}/api/a2a` | Global A2A: message/send, tasks/*. |'
   );
-  lines.push(
-    '| **GET** | `{baseUrl}/api/agents/{agentId}/.well-known/agent-card` | Per-agent public agent card. |'
-  );
-  lines.push(
-    '| **GET** | `{baseUrl}/api/agents/{agentId}/a2a` | Per-agent A2A capabilities. |'
-  );
-  lines.push(
-    '| **POST** | `{baseUrl}/api/agents/{agentId}/a2a` | Per-agent A2A (same methods). |'
-  );
   lines.push('');
   lines.push('### A2A skills and operations');
   lines.push('');

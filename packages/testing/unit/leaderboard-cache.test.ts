@@ -53,10 +53,7 @@ const mockSetCache = mock(async (key: string, value: unknown) => {
 const mockOptionalAuth = mock(async () => null);
 const mockFindUserByIdentifier = mock(async () => null);
 const mockGetWalletLeaderboard = mock(async () => mockLeaderboardResult);
-const mockGetTeamLeaderboard = mock(async () => ({
-  ...mockLeaderboardResult,
-  leaderboardType: 'team' as const,
-}));
+
 const mockGetTradingWalletLeaderboard = mock(async () => ({
   ...mockLeaderboardResult,
   users: [
@@ -69,11 +66,7 @@ const mockGetTradingWalletLeaderboard = mock(async () => ({
   ],
   leaderboardMetric: 'trading' as const,
 }));
-const mockGetTradingTeamLeaderboard = mock(async () => ({
-  ...mockLeaderboardResult,
-  leaderboardType: 'team' as const,
-  leaderboardMetric: 'trading' as const,
-}));
+
 const mockGetUserPosition = mock(async () => null);
 
 // ─── Module mocks ────────────────────────────────────────────────────────────
@@ -86,12 +79,10 @@ mock.module('@feed/api', () => ({
   getCache: mockGetCache,
   ReputationService: {
     getWalletLeaderboard: mockGetWalletLeaderboard,
-    getTeamLeaderboard: mockGetTeamLeaderboard,
     getUserPosition: mockGetUserPosition,
   },
   TradingLeaderboardService: {
     getWalletLeaderboard: mockGetTradingWalletLeaderboard,
-    getTeamLeaderboard: mockGetTradingTeamLeaderboard,
     getUserPosition: mockGetUserPosition,
   },
   setCache: mockSetCache,
@@ -179,9 +170,7 @@ describe('Leaderboard caching — generatedAt', () => {
     mockGetCache.mockClear();
     mockSetCache.mockClear();
     mockGetWalletLeaderboard.mockClear();
-    mockGetTeamLeaderboard.mockClear();
     mockGetTradingWalletLeaderboard.mockClear();
-    mockGetTradingTeamLeaderboard.mockClear();
     mockGetUserPosition.mockClear();
     mockOptionalAuth.mockClear();
     mockOptionalAuth.mockResolvedValue(null);
@@ -258,14 +247,6 @@ describe('Leaderboard caching — generatedAt', () => {
     expect(body.leaderboard).toHaveLength(1);
     expect(body.leaderboard[0].id).toBe('user-1');
     expect(mockSetCache).toHaveBeenCalledTimes(1);
-  });
-
-  test('team leaderboard: also includes generatedAt', async () => {
-    const response = await GET(makeRequest({ type: 'team' }));
-    const body = await response.json();
-
-    expect(body.generatedAt).toBeDefined();
-    expect(mockGetTeamLeaderboard).toHaveBeenCalledTimes(1);
   });
 
   test('trading metric uses a distinct cache key', async () => {

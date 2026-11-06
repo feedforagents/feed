@@ -10,7 +10,7 @@
  * Usage:
  *   bun run tick:full
  *   bun run tick:full -- --loop --interval=30
- *   bun run tick:full -- --skip npc-tick,agent-tick
+ *   bun run tick:full -- --skip npc-tick
  *   bun run tick:full -- --only markets-tick
  */
 
@@ -122,9 +122,6 @@ function summarize(r: CronResult): string {
   } else if (r.name === 'npc-tick') {
     if (d.npcsProcessed != null) parts.push(`npcs=${d.npcsProcessed}`);
     if (d.postsCreated != null) parts.push(`posts=${d.postsCreated}`);
-  } else if (r.name === 'agent-tick') {
-    if (d.processed != null) parts.push(`agents=${d.processed}`);
-    if (d.totalActions != null) parts.push(`actions=${d.totalActions}`);
   }
 
   return parts.length > 0 ? parts.join('  ') : JSON.stringify(d).slice(0, 120);
@@ -247,12 +244,7 @@ function printPredDiff(before: PredSnapshot[], after: PredSnapshot[]): void {
 // ---------------------------------------------------------------------------
 // Single tick run
 // ---------------------------------------------------------------------------
-const TICK_ORDER = [
-  'game-tick',
-  'markets-tick',
-  'npc-tick',
-  'agent-tick',
-] as const;
+const TICK_ORDER = ['game-tick', 'markets-tick', 'npc-tick'] as const;
 
 async function runTick(runNum: number): Promise<void> {
   console.log(`\n${bold}${cyan}=== Tick #${runNum} — ${ts()} ===${reset}`);

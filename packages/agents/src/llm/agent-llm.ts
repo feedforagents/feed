@@ -95,16 +95,48 @@ interface OpenAIUsage {
   completion_tokens?: number;
 }
 
+/** Provider-reported token counts for one call, as kept for accounting. */
+interface TokenCounts {
+  promptTokens?: number;
+  completionTokens?: number;
+}
+
 /** Preserve provider-reported usage; non-finite/negative values are dropped. */
 function toTokenCounts(
   usage: OpenAIUsage | undefined
-): { promptTokens?: number; completionTokens?: number } | undefined {
+): TokenCounts | undefined {
   if (!usage) return undefined;
   const valid = (n: number | undefined) =>
     typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : undefined;
   return {
     promptTokens: valid(usage.prompt_tokens),
     completionTokens: valid(usage.completion_tokens),
+  };
+}
+
+/**
+ * Attach provider-reported counts to an error thrown after the response
+ * arrived, so the caller's failure logging can still account for the usage
+ * (issue #1550). Errors thrown before any response carry no counts and
+ * keep their failure record at zero.
+ */
+function withTokenCounts(
+  error: Error,
+  tokenCounts: TokenCounts | undefined
+): Error {
+  if (tokenCounts)
+    (error as Error & { tokenCounts?: TokenCounts }).tokenCounts = tokenCounts;
+  return error;
+}
+
+/** Token counts a provider reported before the call failed, when present. */
+function tokenCountsFromError(error: unknown): TokenCounts | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const counts = (error as Error & { tokenCounts?: TokenCounts }).tokenCounts;
+  if (!counts) return undefined;
+  return {
+    promptTokens: counts.promptTokens,
+    completionTokens: counts.completionTokens,
   };
 }
 
@@ -225,7 +257,10 @@ async function callHuggingFace(params: AgentLLMParams): Promise<string> {
   }
 
   if (!responseText.trim())
-    throw new Error('HuggingFace returned empty content');
+    throw withTokenCounts(
+      new Error('HuggingFace returned empty content'),
+      'usage' in data ? toTokenCounts(data.usage) : undefined
+    );
   await logToTrajectory(
     params,
     process.env.HUGGINGFACE_MODEL_NAME ||
@@ -287,7 +322,11 @@ async function callPhala(params: AgentLLMParams): Promise<string> {
   const responseText =
     data.choices?.[0]?.message?.content || data.response || '';
 
-  if (!responseText.trim()) throw new Error('Phala returned empty content');
+  if (!responseText.trim())
+    throw withTokenCounts(
+      new Error('Phala returned empty content'),
+      toTokenCounts(data.usage)
+    );
   await logToTrajectory(
     params,
     params.archetype ? `feed-${params.archetype}` : 'feed-default',
@@ -466,7 +505,7 @@ export async function callAgentLLM(params: AgentLLMParams): Promise<string> {
               : 'feed-default',
           '',
           Date.now() - started,
-          undefined,
+          tokenCountsFromError(error),
           error instanceof Error ? error.message : String(error)
         );
         throw error;

@@ -77,7 +77,6 @@ export { MetricsValidator } from './MetricsValidator';
 export { MetricsVisualizer } from './MetricsVisualizer';
 export type {
   AverageMetrics,
-  ModelBenchmarkOptions,
   ModelBenchmarkResult,
   ModelComparisonResult,
 } from './ModelBenchmarkService';

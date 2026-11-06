@@ -79,7 +79,7 @@ export interface ComprehensiveNPCContext {
 /** World-event visibilities that belong in general (non-privileged) context */
 const WORLD_VISIBLE = ['public', 'leaked'] as const;
 
-function isWorldVisible(visibility: string | undefined): boolean {
+export function isWorldVisible(visibility: string | undefined): boolean {
   return (WORLD_VISIBLE as readonly string[]).includes(visibility ?? 'public');
 }
 

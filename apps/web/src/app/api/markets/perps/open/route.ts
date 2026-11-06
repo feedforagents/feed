@@ -1,5 +1,6 @@
 import {
   authenticate,
+  BadRequestError,
   checkProgress,
   checkRateLimitAsync,
   invalidateMarketsApiPerpsSnapshot,
@@ -38,7 +39,16 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     return rateLimitError(rateLimitResult.retryAfter);
 
   const body = await request.json();
-  const { ticker, side, size, leverage } = PerpOpenPositionSchema.parse(body);
+  const parsed = PerpOpenPositionSchema.parse(body);
+  // Limit opens are not supported by the service, so they are rejected
+  // rather than silently executed at market (same rule as the close route).
+  if (parsed.orderType !== 'market') {
+    throw new BadRequestError(
+      'Only market open orders are supported',
+      'UNSUPPORTED_ORDER_TYPE'
+    );
+  }
+  const { ticker, side, size, leverage, maxSlippage } = parsed;
 
   const normalizedSide = side.toLowerCase() as 'long' | 'short';
   const numericSize = typeof size === 'string' ? Number(size) : size;
@@ -56,6 +66,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     side: normalizedSide,
     size: numericSize,
     leverage,
+    maxSlippage,
   });
 
   // Track analytics event (fire and forget)

@@ -1,14 +1,11 @@
 /**
  * Leaderboard API
  *
- * Supports two ranking axes:
+ * Supports personal wallet rankings by metric:
  * - **metric**
  *   - `reputation`: general leaderboard based on reputation points
  *   - `trading`: trading leaderboard based on realized return
  *     (`lifetimePnL / max(capitalBase, 1000)`) with lifetime P&L included as context
- * - **type**
- *   - `wallet`: per-wallet ranking (users and agents as individuals)
- *   - `team`: user + their agents combined
  *
  * Supports optional `userId` param to return the requesting user's
  * rank/position alongside the page data. Leaderboard pages are cached
@@ -31,7 +28,7 @@
  *         name: type
  *         schema:
  *           type: string
- *           enum: [wallet, team]
+ *           enum: [wallet]
  *           default: wallet
  *       - in: query
  *         name: page
@@ -71,7 +68,7 @@ import type { NextRequest } from 'next/server';
 import { sanitizeForJson } from '@/lib/json/sanitize';
 import { parseLeaderboardQuery } from './query';
 
-const CACHE_KEY_NAMESPACE = 'leaderboard';
+const CACHE_KEY_NAMESPACE = 'leaderboard-personal';
 /**
  * LEADERBOARD_CACHE_MS: `0` disables caching; any other value must be a
  * whole number of milliseconds >= 1000 (TTL is applied in whole seconds).
@@ -100,10 +97,6 @@ type CachedLeaderboardEntry = {
 
 type LeaderboardService = {
   getWalletLeaderboard: (
-    page?: number,
-    pageSize?: number
-  ) => Promise<LeaderboardResult>;
-  getTeamLeaderboard: (
     page?: number,
     pageSize?: number
   ) => Promise<LeaderboardResult>;
@@ -152,10 +145,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   }
 
   if (!leaderboardData) {
-    leaderboardData =
-      leaderboardType === 'team'
-        ? await leaderboardService.getTeamLeaderboard(page, pageSize)
-        : await leaderboardService.getWalletLeaderboard(page, pageSize);
+    leaderboardData = await leaderboardService.getWalletLeaderboard(
+      page,
+      pageSize
+    );
     generatedAt = new Date().toISOString();
 
     if (CACHE_ENABLED) {

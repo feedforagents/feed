@@ -306,7 +306,7 @@ export const GET = withErrorHandling(
       ORDER BY bt."createdAt" DESC
       LIMIT ${mergedWindowSize}
     `;
-    const [{ total: totalBalanceTransactionsText }] = await db.$queryRaw<{
+    const totalBalanceTransactionRows = await db.$queryRaw<{
       total: string;
     }>`
         SELECT COUNT(*)::text AS total
@@ -318,7 +318,9 @@ export const GET = withErrorHandling(
               OR pp."organizationId" = ${organization.id}
           )
       `;
-    const totalBalanceTransactions = Number(totalBalanceTransactionsText);
+    const totalBalanceTransactions = Number(
+      totalBalanceTransactionRows[0]?.total ?? '0'
+    );
 
     // Fetch users for transactions
     const txUserIds = [...new Set(balanceTransactions.map((tx) => tx.userId))];

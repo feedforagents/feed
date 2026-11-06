@@ -1,3 +1,4 @@
+import { createPerpSettlement } from '@feed/engine';
 /**
  * Integration test: Perp Market Constant-Product AMM Average Fill Pricing
  *
@@ -24,8 +25,8 @@ import type { WalletPort } from '@feed/core/markets/perps';
 import {
   isOpenPerpPositionStateValid,
   PerpDbAdapter,
-  PerpMarketService,
   type PerpServiceDeps,
+  type PerpSettlementPort,
   type PriceImpactPort,
 } from '@feed/core/markets/perps';
 import {
@@ -42,6 +43,8 @@ import {
   calculateTradeImpact,
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
+import { PerpMarketService } from '../../core/markets/perps/PerpMarketService';
+import type { PerpDbPort } from '../../core/markets/perps/types';
 
 // ---------------------------------------------------------------------------
 // Test-local wallet (in-memory, no real wallet service needed)
@@ -228,9 +231,14 @@ function createTestPriceImpact(): PriceImpactPort {
 // ---------------------------------------------------------------------------
 // Helper to create a test service
 // ---------------------------------------------------------------------------
-function createTestService(wallet: TestWallet): PerpMarketService {
+function createTestService(
+  wallet: TestWallet,
+  dbPort?: PerpDbPort,
+  settlement?: PerpSettlementPort
+): PerpMarketService {
   const deps: PerpServiceDeps = {
-    db: new PerpDbAdapter(),
+    settlement: settlement ?? createPerpSettlement({ wallet: () => wallet }),
+    db: dbPort ?? new PerpDbAdapter(),
     wallet,
     fees: {
       tradingFeeRate: 0.001,
@@ -698,6 +706,201 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
   // =========================================================================
   // TEST 9: Math verification — constant-product AMM symmetry
   // =========================================================================
+  async function openFlipFixture(wallet: TestWallet) {
+    const service = createTestService(wallet);
+    const initial = await service.openPosition({
+      userId: USER_A,
+      ticker: TEST_TICKER,
+      side: 'long',
+      size: 5000,
+      leverage: 10,
+    });
+    const market = (await new PerpDbAdapter().listMarkets()).find(
+      (m) => m.ticker === TEST_TICKER
+    )!;
+    const reference = market.currentPrice;
+    await db
+      .update(perpMarketSnapshots)
+      .set({
+        markPrice: reference,
+        indexPrice: reference,
+        bidPrice: reference * 0.9996,
+        askPrice: reference * 1.0004,
+        spreadBps: 8,
+        bidDepth: 100000,
+        askDepth: 100000,
+      })
+      .where(eq(perpMarketSnapshots.ticker, TEST_TICKER));
+    return { service, initial, reference };
+  }
+
+  it('rejects a flip above aggregate exposure and allows one exactly at the cap', async () => {
+    const otherTicker =
+      `CAP${crypto.randomUUID().replaceAll('-', '').slice(0, 8)}`.toUpperCase();
+    const wallet = new TestWallet();
+    const service = createTestService(wallet);
+    const adapter = new PerpDbAdapter();
+    await db.insert(organizationState).values({
+      id: otherTicker,
+      currentPrice: 100,
+      basePrice: 100,
+      updatedAt: new Date(),
+    });
+    await db.insert(perpMarketSnapshots).values({
+      ticker: otherTicker,
+      organizationId: otherTicker,
+      name: 'Exposure test market',
+      currentPrice: 100,
+      high24h: 100,
+      low24h: 100,
+      maxLeverage: 100,
+      openInterest: 1000000,
+      fundingRate: {
+        ticker: otherTicker,
+        rate: 0,
+        nextFundingTime: new Date().toISOString(),
+        predictedRate: 0,
+      },
+    });
+    try {
+      await service.openPosition({
+        userId: USER_A,
+        ticker: otherTicker,
+        side: 'long',
+        size: 45000,
+        leverage: 20,
+      });
+      const initial = await service.openPosition({
+        userId: USER_A,
+        ticker: TEST_TICKER,
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const balanceBefore = wallet.bal(USER_A);
+      await expect(
+        service.openPosition({
+          userId: USER_A,
+          ticker: TEST_TICKER,
+          side: 'short',
+          size: 10000,
+          leverage: 20,
+        })
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining('Total exposure would exceed limit'),
+      });
+      const unchanged = await adapter.getOpenPositionsByUser(USER_A);
+      expect(unchanged).toHaveLength(2);
+      expect(unchanged.find((p) => p.id === initial.positionId)?.size).toBe(
+        100
+      );
+      expect(wallet.bal(USER_A)).toBe(balanceBefore);
+      const inverse = await service.openPosition({
+        userId: USER_A,
+        ticker: TEST_TICKER,
+        side: 'short',
+        size: 5100,
+        leverage: 20,
+      });
+      expect(inverse.size).toBe(5000);
+      const open = await adapter.getOpenPositionsByUser(USER_A);
+      expect(open.reduce((sum, p) => sum + p.size * p.leverage, 0)).toBe(
+        1_000_000
+      );
+    } finally {
+      await db
+        .delete(perpPositions)
+        .where(eq(perpPositions.ticker, otherTicker));
+      await db
+        .delete(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, otherTicker));
+      await db
+        .delete(organizationState)
+        .where(eq(organizationState.id, otherTicker));
+    }
+  });
+
+  it('rejects a flip when the inverse fill after closing breaches the requested bound', async () => {
+    const wallet = new TestWallet();
+    const { service, initial } = await openFlipFixture(wallet);
+    const balanceBefore = wallet.bal(USER_A);
+    await expect(
+      service.openPosition({
+        userId: USER_A,
+        ticker: TEST_TICKER,
+        side: 'short',
+        size: 7500,
+        leverage: 10,
+        maxSlippage: 0.01,
+      })
+    ).rejects.toThrow('Slippage exceeded');
+    const open = await new PerpDbAdapter().getOpenPositionsByUser(USER_A);
+    expect(open).toHaveLength(1);
+    expect(open[0]?.id).toBe(initial.positionId);
+    expect(open[0]?.size).toBe(5000);
+    expect(wallet.bal(USER_A)).toBe(balanceBefore);
+  });
+
+  it('persists a flip fill within a sufficiently wide explicit bound', async () => {
+    const wallet = new TestWallet();
+    const { service, reference } = await openFlipFixture(wallet);
+    const result = await service.openPosition({
+      userId: USER_A,
+      ticker: TEST_TICKER,
+      side: 'short',
+      size: 7500,
+      leverage: 10,
+      maxSlippage: 0.03,
+    });
+    const persisted = await new PerpDbAdapter().getPositionById(
+      result.positionId
+    );
+    expect(persisted?.entryPrice).toBeCloseTo(result.entryPrice, 8);
+    expect(
+      Math.abs(result.entryPrice - reference) / reference
+    ).toBeLessThanOrEqual(0.03);
+    expect(result.size).toBe(2500);
+  });
+
+  it('rejects stale flip validation if a partial close commits before the row lock', async () => {
+    const wallet = new TestWallet();
+    const { service, initial } = await openFlipFixture(wallet);
+    const adapter = new PerpDbAdapter();
+    const transaction = adapter.transaction.bind(adapter);
+    let walletMutationsAfterClose = 0;
+    adapter.transaction = async <T>(
+      fn: (tx: PerpDbPort) => Promise<T>
+    ): Promise<T> => {
+      await service.closePosition({
+        userId: USER_A,
+        positionId: initial.positionId,
+        percentage: 0.8,
+      });
+      walletMutationsAfterClose = wallet.getLog().length;
+      return transaction(fn);
+    };
+    const flipService = createTestService(wallet, adapter, {
+      run: (_userId, operation) =>
+        adapter.transaction((tx) => operation(tx, wallet)),
+    });
+    await expect(
+      flipService.openPosition({
+        userId: USER_A,
+        ticker: TEST_TICKER,
+        side: 'short',
+        size: 7500,
+        leverage: 10,
+        maxSlippage: 0.1,
+      })
+    ).rejects.toThrow('Position changed concurrently');
+    const open = await adapter.getOpenPositionsByUser(USER_A);
+    expect(open).toHaveLength(1);
+    expect(open[0]?.id).toBe(initial.positionId);
+    expect(open[0]?.size).toBeCloseTo(1000, 8);
+    expect(wallet.getLog()).toHaveLength(walletMutationsAfterClose);
+  });
+
   it('AMM avg fill formula produces symmetric round-trip values', () => {
     const price = 100;
     const size = 5000;

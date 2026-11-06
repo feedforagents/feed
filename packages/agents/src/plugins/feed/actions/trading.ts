@@ -144,7 +144,7 @@ export const openPerpPositionAction: Action = {
         ticker: id,
         side: z.enum(['LONG', 'SHORT']),
         amount: positive,
-        leverage: positive.min(1).max(100),
+        leverage: positive.min(1).max(20),
       })
       .parse(state?.data?.actionParams);
     const raw = await client.openPosition(

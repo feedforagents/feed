@@ -6,7 +6,6 @@ import {
   expect,
   test,
 } from 'bun:test';
-import { AgentStatus, createTestAgent } from '@feed/agents';
 import {
   AGENT_LOCK_DURATION_MS,
   acquireAgentLock,
@@ -14,56 +13,11 @@ import {
   createAgentLockOwner,
   releaseAgentLock,
 } from '@feed/agents/services/agent-lock-service';
-import { agentRegistry } from '@feed/agents/services/agent-registry.service';
-import { adminRoles, asSystem, db, inArray, userAgentConfigs } from '@feed/db';
+import { db } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
-import type {
-  AgentTickResponse,
-  AgentTickResultItem,
-} from '../types/test-types';
-import { waitForServerAvailability } from './helpers';
-
-const BASE_URL =
-  process.env.TEST_API_URL ||
-  process.env.TEST_BASE_URL ||
-  'http://localhost:3000';
 
 function getAgentLockId(agentId: string) {
   return `agent-tick-${agentId}`;
-}
-
-function getCronHeaders() {
-  return {
-    Authorization: `Bearer ${process.env.CRON_SECRET || 'development'}`,
-    'Content-Type': 'application/json',
-  };
-}
-
-function getTargetedTickUrl(agentId: string) {
-  const url = new URL(`${BASE_URL}/api/cron/agent-tick`);
-  url.searchParams.set('agentId', agentId);
-  return url.toString();
-}
-
-async function clearGlobalAgentTickLock() {
-  await db.generationLock.deleteMany({
-    where: { id: 'agent-tick-global' },
-  });
-}
-
-async function deleteTestAgents(agentIds: string[]) {
-  const ids = agentIds.filter(Boolean);
-  if (ids.length === 0) {
-    return;
-  }
-
-  await db.delete(adminRoles).where(inArray(adminRoles.userId, ids));
-  await db
-    .delete(userAgentConfigs)
-    .where(inArray(userAgentConfigs.userId, ids));
-  await db.user.deleteMany({
-    where: { id: { in: ids } },
-  });
 }
 
 describe('Agent Lock Service Integration', () => {
@@ -71,17 +25,8 @@ describe('Agent Lock Service Integration', () => {
   let testAgentId2: string;
 
   beforeAll(async () => {
-    const agent1 = await createTestAgent('lock-test-agent-1', {
-      autonomousTrading: true,
-      virtualBalance: 10000,
-    });
-    testAgentId1 = agent1.agentId;
-
-    const agent2 = await createTestAgent('lock-test-agent-2', {
-      autonomousTrading: true,
-      virtualBalance: 10000,
-    });
-    testAgentId2 = agent2.agentId;
+    testAgentId1 = await generateSnowflakeId();
+    testAgentId2 = await generateSnowflakeId();
   });
 
   afterAll(async () => {
@@ -92,7 +37,6 @@ describe('Agent Lock Service Integration', () => {
         },
       },
     });
-    await deleteTestAgents([testAgentId1, testAgentId2]);
   });
 
   beforeEach(async () => {
@@ -291,151 +235,4 @@ describe('Agent Lock Service Integration', () => {
 
     await releaseAgentLock(testAgentId1, 'expiry-test');
   });
-});
-
-describe('Agent Tick Endpoint Lock Integration', () => {
-  let testAgentId: string;
-  let createdGameId: string | null = null;
-  let initialGameRunning: boolean | undefined;
-
-  beforeAll(async () => {
-    expect(await waitForServerAvailability(BASE_URL)).toBe(true);
-
-    await clearGlobalAgentTickLock();
-
-    const gameState = await asSystem(async (systemDb) => {
-      return await systemDb.game.findFirst({
-        where: { isContinuous: true },
-      });
-    });
-
-    if (!gameState) {
-      createdGameId = await generateSnowflakeId();
-      await asSystem(async (systemDb) => {
-        await systemDb.game.create({
-          data: {
-            id: createdGameId!,
-            isContinuous: true,
-            isRunning: true,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          },
-        });
-      });
-    } else {
-      initialGameRunning = gameState.isRunning;
-      if (!gameState.isRunning) {
-        await asSystem(async (systemDb) => {
-          await systemDb.game.updateMany({
-            where: { isContinuous: true },
-            data: { isRunning: true },
-          });
-        });
-      }
-    }
-
-    const agent = await createTestAgent('endpoint-lock-test', {
-      autonomousTrading: true,
-      virtualBalance: 10000,
-    });
-    testAgentId = agent.agentId;
-    await agentRegistry.updateAgentStatus(testAgentId, AgentStatus.ACTIVE);
-
-    let agentVisibleToServer = false;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const response = await fetch(
-        `${BASE_URL}/api/agents/${testAgentId}/card`
-      );
-      agentVisibleToServer = response.status === 200;
-      if (agentVisibleToServer) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-
-    expect(agentVisibleToServer).toBe(true);
-  });
-
-  afterAll(async () => {
-    await clearGlobalAgentTickLock();
-    await db.generationLock.deleteMany({
-      where: { id: getAgentLockId(testAgentId) },
-    });
-    await deleteTestAgents([testAgentId]);
-
-    if (createdGameId) {
-      await db.game.deleteMany({
-        where: { id: createdGameId },
-      });
-      return;
-    }
-
-    if (initialGameRunning === false) {
-      await asSystem(async (systemDb) => {
-        await systemDb.game.updateMany({
-          where: { isContinuous: true },
-          data: { isRunning: false },
-        });
-      });
-    }
-  });
-
-  beforeEach(async () => {
-    await clearGlobalAgentTickLock();
-    await db.generationLock.deleteMany({
-      where: { id: getAgentLockId(testAgentId) },
-    });
-  });
-
-  test('skips a locked agent in the agent-tick endpoint', async () => {
-    const manualProcess = 'manual-lock-process';
-    await acquireAgentLock(testAgentId, manualProcess);
-
-    const response = await fetch(getTargetedTickUrl(testAgentId), {
-      method: 'POST',
-      headers: getCronHeaders(),
-      signal: AbortSignal.timeout(120_000),
-    });
-
-    expect(response.ok).toBe(true);
-
-    const result = (await response.json()) as AgentTickResponse;
-    expect(result.success).toBe(true);
-
-    const agentResult = result.results?.find(
-      (entry: AgentTickResultItem) => entry.agentId === testAgentId
-    );
-    expect(agentResult).toBeDefined();
-    expect(agentResult?.status).toBe('skipped');
-    expect(agentResult?.reason).toBe('locked');
-    expect(result.skippedLocked).toBeGreaterThanOrEqual(1);
-
-    await releaseAgentLock(testAgentId, manualProcess);
-  }, 120000);
-
-  test('processes an unlocked agent through the endpoint', async () => {
-    const response = await fetch(getTargetedTickUrl(testAgentId), {
-      method: 'POST',
-      headers: getCronHeaders(),
-      signal: AbortSignal.timeout(120_000),
-    });
-
-    expect(response.ok).toBe(true);
-
-    const result = (await response.json()) as AgentTickResponse;
-    expect(result.success).toBe(true);
-
-    const agentResult = result.results?.find(
-      (entry: AgentTickResultItem) => entry.agentId === testAgentId
-    );
-    expect(agentResult).toBeDefined();
-    expect(agentResult?.status).not.toBe('skipped');
-    expect(agentResult?.reason).not.toBe('locked');
-
-    expect(
-      await db.generationLock.findUnique({
-        where: { id: getAgentLockId(testAgentId) },
-      })
-    ).toBeNull();
-  }, 120000);
 });

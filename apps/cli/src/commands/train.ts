@@ -133,31 +133,6 @@ async function configureLLMCaller() {
   configureTrainingDependencies({ llmCaller });
 }
 
-async function getAgentImports() {
-  const agentsMod = await import('@feed/agents');
-  return {
-    agentService: agentsMod.agentService,
-    agentRuntimeManager: agentsMod.agentRuntimeManager,
-    autonomousCoordinator: agentsMod.autonomousCoordinator,
-  };
-}
-
-export async function configureAgentTrainingDependencies(): Promise<void> {
-  const { configureTrainingDependencies } = await getTrainingImports();
-  const { agentService, agentRuntimeManager, autonomousCoordinator } =
-    await getAgentImports();
-
-  configureTrainingDependencies({
-    agentService,
-    agentRuntimeManager,
-    autonomousCoordinator,
-  });
-}
-
-async function getParallelGenerationCommand() {
-  return import('./train-parallel.js');
-}
-
 function printHelp(): void {
   const archetypes = getAvailableArchetypes();
 
@@ -172,9 +147,7 @@ COMMANDS:
   pipeline    Run canonical training pipeline (Python)
   run         Alias for pipeline
   archetype   Score & export trajectories for archetype
-  collect     Collect trajectories for training
   score       Score collected trajectories
-  parallel    Generate REAL trajectories with parallel agents (requires server)
   online      Run continuous online RL training (single or multi-agent)
 
 PIPELINE OPTIONS:
@@ -225,9 +198,6 @@ ARCHETYPE OPTIONS:
   -d, --dry-run            Show what would be done
   -s, --score-only         Only score, don't export
 
-COLLECT OPTIONS:
-  -c, --count=N            Number of trajectories to collect (default: 10)
-
 AVAILABLE ARCHETYPES:
 ${archetypes.map((a) => `  - ${a}`).join('\n')}
 
@@ -249,7 +219,6 @@ EXAMPLES:
   feed train pipeline --archetypes=trader,scammer,degen
   feed train run -a all                    # Train all archetypes
   feed train archetype -a scammer          # Score & export scammer data
-  feed train collect --count=100           # Collect 100 trajectories
   feed train online --optimizer=apollo --kondo --turboquant --pbt
 `);
 }
@@ -503,118 +472,6 @@ Next step:
 To export for training, run without --score-only:
   feed train archetype -a ${archetype}
 `);
-  }
-}
-
-async function collectTrajectories(
-  args: ReturnType<typeof parseArgs>
-): Promise<void> {
-  const countArg = parseInt(getOption(args, 'count', 'c') || '10', 10);
-
-  logger.header('Trajectory Collection');
-  logger.success('Trajectory recording is always enabled');
-
-  const { db, eq, users, userAgentConfigs } = await getDbImports();
-  const { agentRuntimeManager, autonomousCoordinator } =
-    await getAgentImports();
-
-  // Find agents with their configs
-  const agentResults = await db
-    .select({
-      id: users.id,
-      username: users.username,
-      virtualBalance: users.virtualBalance,
-      autonomousTrading: userAgentConfigs.autonomousTrading,
-      autonomousPosting: userAgentConfigs.autonomousPosting,
-      autonomousCommenting: userAgentConfigs.autonomousCommenting,
-      autonomousDMs: userAgentConfigs.autonomousDMs,
-      autonomousGroupChats: userAgentConfigs.autonomousGroupChats,
-    })
-    .from(users)
-    .innerJoin(userAgentConfigs, eq(users.id, userAgentConfigs.userId))
-    .where(eq(users.isAgent, true))
-    .limit(10);
-
-  // Filter agents with sufficient balance and at least one feature enabled
-  const agents = agentResults.filter(
-    (a) =>
-      Number(a.virtualBalance ?? 0) >= 1 &&
-      (a.autonomousTrading ||
-        a.autonomousPosting ||
-        a.autonomousCommenting ||
-        a.autonomousDMs ||
-        a.autonomousGroupChats)
-  );
-
-  if (agents.length === 0) {
-    logger.fail('No agents found!');
-    console.log(`
-   Agents need:
-   - isAgent: true
-   - virtualBalance >= 1
-   - At least one autonomous feature enabled
-
-   Create agents with: feed agent spawn
-`);
-    process.exit(1);
-  }
-
-  console.log(`Found ${agents.length} agents`);
-  console.log(`Collecting ${countArg} trajectories...\n`);
-
-  const errors = 0;
-
-  // Get initial count
-  const initialCount = await db.trajectory.count();
-  console.log(`Current trajectories in database: ${initialCount}\n`);
-
-  for (let i = 0; i < countArg; i++) {
-    const agent = agents[i % agents.length]!;
-
-    console.log(
-      `[${i + 1}/${countArg}] Running agent: ${agent.username || agent.id}`
-    );
-
-    const runtime = await agentRuntimeManager.getRuntime(agent.id);
-    const result = await autonomousCoordinator.executeAutonomousTick(
-      agent.id,
-      runtime,
-      true // Always record trajectories
-    );
-
-    if (result.success) {
-      console.log(
-        `  ✅ Success - Actions: ${JSON.stringify(result.actionsExecuted)}`
-      );
-      if (result.trajectoryId) {
-        console.log(`  📊 Trajectory ID: ${result.trajectoryId}`);
-      }
-    } else {
-      console.log('  ⚠️  Completed but not successful');
-    }
-
-    // Small delay between runs
-    if (i < countArg - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-
-  // Get final count
-  const finalCount = await db.trajectory.count();
-  const newTrajectories = finalCount - initialCount;
-
-  logger.header('Summary');
-  console.log(`Trajectories collected: ${newTrajectories}`);
-  console.log(`Successful runs: ${countArg - errors}`);
-  console.log(`Errors: ${errors}`);
-  console.log(`Total trajectories in database: ${finalCount}`);
-
-  if (newTrajectories > 0) {
-    logger.success('Trajectories successfully collected!');
-    console.log('   Ready for training when you have enough data.\n');
-  } else {
-    logger.warn('No new trajectories collected.');
-    console.log('   Check agent configuration and logs.\n');
   }
 }
 
@@ -1210,19 +1067,8 @@ export async function runTrainCommand(args: string[]): Promise<void> {
       await trainArchetype(parsed);
       break;
 
-    case 'collect':
-      await collectTrajectories(parsed);
-      break;
-
     case 'score':
       await scoreTrajectories();
-      break;
-
-    case 'parallel':
-      await configureAgentTrainingDependencies();
-      await (await getParallelGenerationCommand()).runParallelGeneration(
-        parsed
-      );
       break;
 
     case 'online':

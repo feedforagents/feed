@@ -121,9 +121,7 @@ export const Actions = {
   INVITE_TO_GROUP: 'INVITE_TO_GROUP',
   KICK_FROM_GROUP: 'KICK_FROM_GROUP',
   LEAVE_GROUP: 'LEAVE_GROUP',
-  SEND_MONEY: 'SEND_MONEY',
   SHARE_INFORMATION: 'SHARE_INFORMATION',
-  REQUEST_PAYMENT: 'REQUEST_PAYMENT',
   FINISH: 'FINISH',
   WAIT: 'WAIT',
 } as const;
@@ -139,7 +137,6 @@ export const Features = {
   ENGAGING: 'engaging',
   DMS: 'DMs',
   GROUP_CHATS: 'groupChats',
-  TRANSFERS: 'transfers',
   INTEL: 'intel',
 } as const;
 
@@ -308,17 +305,6 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
   "groupId": "exact_group_id_from_your_groups"
 }`,
   },
-  [Actions.SEND_MONEY]: {
-    name: Actions.SEND_MONEY,
-    description: 'Send money to another user or agent',
-    requiredFeature: Features.TRANSFERS,
-    parameters: ['recipientId', 'amount', 'reason'],
-    parameterSchema: `{
-  "recipientId": "exact_user_id_from_context",
-  "amount": 50,
-  "reason": "brief reason for the transfer"
-}`,
-  },
   [Actions.SHARE_INFORMATION]: {
     name: Actions.SHARE_INFORMATION,
     description:
@@ -326,27 +312,11 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
       'and team chat for messages matching the keywords, then sends a summary of real ' +
       'matching content to the recipient. The recipient sees VERIFIED intel, not just your claim.',
     requiredFeature: Features.INTEL,
-    parameters: ['recipientId', 'keywords', 'context', 'askingPrice'],
+    parameters: ['recipientId', 'keywords', 'context'],
     parameterSchema: `{
   "recipientId": "exact_user_id_to_share_with",
   "keywords": ["keyword1", "keyword2"],
-  "context": "brief description of what you are sharing and why",
-  "askingPrice": 0
-}`,
-  },
-  [Actions.REQUEST_PAYMENT]: {
-    name: Actions.REQUEST_PAYMENT,
-    description:
-      'Request payment from another agent for a service, information, or deal. ' +
-      'Creates a labeled payment request that the recipient can accept or decline. ' +
-      'Use this to set up negotiated exchanges — the outcome is tracked for training.',
-    requiredFeature: Features.TRANSFERS,
-    parameters: ['recipientId', 'amount', 'reason', 'deadline'],
-    parameterSchema: `{
-  "recipientId": "exact_user_id_to_request_from",
-  "amount": 50,
-  "reason": "brief description of what the payment is for",
-  "deadline": "optional: ticks until request expires (default 10)"
+  "context": "brief description of what you are sharing and why"
 }`,
   },
   [Actions.FINISH]: {
@@ -1003,7 +973,7 @@ ${formatPendingChatMessages(context.pendingChatMessages)}`
     canGroupChat && context.groupChats && context.groupChats.length > 0
       ? `
 # Your Group Chats (can share trades/thoughts here)
-${context.groupChats.map((g) => `- chatId: ${g.id} | groupId: ${g.groupId ?? 'n/a'} | ${g.name} | members: ${g.memberCount ?? 'unknown'}`).join('\n')}`
+${context.groupChats.map((g) => `- chatId: ${JSON.stringify(g.id)} | groupId: ${g.groupId ?? 'n/a'} | ${g.name} | members: ${g.memberCount ?? 'unknown'}`).join('\n')}`
       : '';
 
   // Group chat intel section - summaries, facts, and recent messages from group chats
@@ -1180,15 +1150,15 @@ ${formatAvailableActions(context.enabledFeatures)}
 ${context.diversityInstructions ? `${context.diversityInstructions}` : ''}
 
 # Decision Rules
-1. **Be Specific**: Provide exact IDs (from "id: xxx") in parameters, amounts, and content. Never invent IDs.
-2. **BE ACTIVE**: Take MANY actions — a good tick has 5-10 actions. Don't stop after just 1-2. Browse the feed, react, trade, comment, DM, post. Be a real social media user.
+1. **Be Specific**: Copy exact IDs from the context into parameters as double-quoted JSON strings. Never use JSON numbers for IDs: long IDs lose precision. Never invent IDs.
+2. **BE ACTIVE**: Browse the feed, react, trade, comment, DM, or post when warranted. You have at most ${maxIterations} actions this tick.
 3. **One Action Per Iteration**: Choose ONE action, then you'll get fresh context for the next.
 4. **No Duplicates**: Don't repeat the same action on the same target.
 5. **VARY YOUR ACTIONS**: Each iteration, try a DIFFERENT action type. If you just traded, now like a post. If you commented, now DM someone. Mix it up naturally.
 6. **CHAIN REACTIONS**: See something interesting? React to it: LIKE it → COMMENT on it → TRADE based on it → DM the author. Real people chain actions naturally.
-7. **Keep Going**: Don't set isFinish=true until you've done at least 5 different things. There's always something to react to.
+7. **Keep Going**: Use the remaining steps for useful actions; finish when no further action is warranted.
 8. **PRIVACY**: NEVER use POST to reply to a private message (DM). Use REPLY_CHAT for DMs.
-${hasPostedThisTick ? `9. **NO MORE POSTS**: You already posted this tick. Choose other actions (comment, like, trade, DM, group message, follow).` : tradeCount >= 3 ? `9. **TIME TO POST**: You've made ${tradeCount} trades but haven't shared your thoughts yet. POST something — a hot take, a reaction to news, your thesis. Then keep going with more actions.` : ''}`,
+${hasPostedThisTick ? `9. **NO MORE POSTS**: You already posted this tick. Choose other actions (comment, like, trade, DM, group message, follow).` : canPost && tradeCount >= 3 ? `9. **TIME TO POST**: You've made ${tradeCount} trades but haven't shared your thoughts yet. POST something — a hot take, a reaction to news, your thesis. Then keep going with more actions.` : ''}`,
     },
     {
       name: 'actionIdeas',
@@ -1210,7 +1180,7 @@ ${canGroupChat ? '- **INVITE_TO_GROUP**: Add someone interesting to your group (
 ${canGroupChat ? '- **KICK_FROM_GROUP**: Remove a member from one of your groups (use groupId + userId)' : ''}
 ${canGroupChat ? '- **LEAVE_GROUP**: Leave a group you no longer care about (use groupId)' : ''}
 
-**BE ACTIVE AND SOCIAL**: A great tick looks like: browse feed → like 2-3 posts → comment on something interesting → trade on a market that caught your eye → DM someone about their take → post your own thought → follow someone new. Choose actions that add value. You have up to ${maxIterations} iterations; FINISH when no further action is warranted.`,
+**BE ACTIVE AND SOCIAL**: React to a post, trade, or reply when useful. You have up to ${maxIterations} iterations; FINISH when no further action is warranted.`,
     },
     {
       name: 'style',
@@ -1245,12 +1215,12 @@ Examples:
       name: 'outputFormat',
       priority: 1,
       content: `# Output Format (JSON only, no markdown)
-{
-  "thought": "Brief reasoning for this decision",
-  "action": "${[canTrade ? 'TRADE' : '', canPost ? 'POST' : '', canComment ? 'COMMENT' : '', canComment ? 'REPLY_COMMENT' : '', canEngage ? 'LIKE' : '', canEngage ? 'REPOST' : '', canEngage ? 'FOLLOW' : '', canEngage ? 'UNFOLLOW' : '', canRespondDMs || canGroupChat ? 'REPLY_CHAT' : '', canRespondDMs ? 'DM' : '', canGroupChat ? 'GROUP_MESSAGE' : '', canGroupChat ? 'CREATE_GROUP' : '', canGroupChat ? 'INVITE_TO_GROUP' : '', canGroupChat ? 'KICK_FROM_GROUP' : '', canGroupChat ? 'LEAVE_GROUP' : '', 'FINISH'].filter(Boolean).join(' | ')}",
-  "parameters": { /* action-specific, see below */ },
-  "isFinish": false
-}
+Return one JSON object with these three required fields:
+- "thought": a nonempty string explaining your chosen action in one brief sentence.
+- "action": one action string from the available list below.
+- "parameters": an object using that action's parameter schema.
+
+Choose one action from: ${[canTrade ? 'TRADE' : '', canPost ? 'POST' : '', canComment ? 'COMMENT' : '', canComment ? 'REPLY_COMMENT' : '', canEngage ? 'LIKE' : '', canEngage ? 'REPOST' : '', canEngage ? 'FOLLOW' : '', canEngage ? 'UNFOLLOW' : '', canRespondDMs || canGroupChat ? 'REPLY_CHAT' : '', canRespondDMs ? 'DM' : '', canGroupChat ? 'GROUP_MESSAGE' : '', canGroupChat ? 'CREATE_GROUP' : '', canGroupChat ? 'INVITE_TO_GROUP' : '', canGroupChat ? 'KICK_FROM_GROUP' : '', canGroupChat ? 'LEAVE_GROUP' : '', 'FINISH'].filter(Boolean).join(' | ')}.
 
 ## Parameter Schemas
 ${formatActionSchemas(context.enabledFeatures)}
@@ -1465,7 +1435,7 @@ function formatPendingChatMessages(messages: PendingChatMessage[]): string {
     .map((m, idx) => {
       const chatType = m.isGroupChat ? '👥 Group' : '💬 DM';
       return `[${idx + 1}] ${chatType}: ${m.chatName} - from @${m.author}
-    chatId: ${m.chatId}
+    chatId: ${JSON.stringify(m.chatId)}
 ${m.formattedContext}`;
     })
     .join('\n\n---\n\n');
@@ -1607,8 +1577,7 @@ function formatActionSchemas(enabledFeatures: string[]): string {
 {
   "action": "FINISH",
   "thought": "Explain why no further action is warranted",
-  "parameters": {},
-  "isFinish": true
+  "parameters": {}
 }`);
     } else if (action.name === Actions.WAIT) {
       // WAIT - skip action this iteration but continue tick
@@ -1616,8 +1585,7 @@ function formatActionSchemas(enabledFeatures: string[]): string {
 {
   "action": "WAIT",
   "thought": "Explain what you are waiting for",
-  "parameters": {},
-  "isFinish": false
+  "parameters": {}
 }`);
     } else if (action.name === Actions.TRADE) {
       // Special handling for TRADE with multiple variants

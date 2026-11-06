@@ -17,9 +17,6 @@
  * - article tick
  * - breaking news / trending widgets
  * - stories + for-you feed assembly (public, no user personalization)
- *
- * Explicitly excluded:
- * - agent-tick (user/external agents)
  */
 
 import 'dotenv/config';

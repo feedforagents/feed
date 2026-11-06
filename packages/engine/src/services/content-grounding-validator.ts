@@ -11,7 +11,7 @@
  *    (for content without a single source, e.g. consolidated facts)
  */
 
-import { logger } from '@feed/shared';
+import { escapeRegex, logger } from '@feed/shared';
 import { cosineSimilarity, getEmbedding } from '../llm/embedding-client';
 import { StaticDataRegistry } from './static-data-registry';
 
@@ -282,7 +282,7 @@ const MAX_UNKNOWN_ENTITIES = 1;
  * Check that generated text doesn't introduce entities absent from
  * both the source text and StaticDataRegistry.
  */
-function checkEntityConsistency(
+export function checkEntityConsistency(
   generatedText: string,
   sourceText?: string
 ): { passed: boolean; score: number; reasons: string[] } {
@@ -299,7 +299,13 @@ function checkEntityConsistency(
 
   const unknownEntities: string[] = [];
   for (const entity of generatedEntities) {
-    if (!allowed.has(entity.toLowerCase())) {
+    const inSource = sourceText
+      ? new RegExp(
+          `(?<![\\p{L}\\p{N}_])${escapeRegex(entity)}(?![\\p{L}\\p{N}_])`,
+          'iu'
+        ).test(sourceText)
+      : false;
+    if (!allowed.has(entity.toLowerCase()) && !inSource) {
       unknownEntities.push(entity);
     }
   }

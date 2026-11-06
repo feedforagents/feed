@@ -4,26 +4,22 @@ import { useWidgetCacheStore } from './widgetCacheStore';
 
 const portfolioA: PortfolioBreakdownSnapshot = {
   wallet: 100,
-  agents: 25,
   positions: 50,
-  available: 125,
+  available: 100,
   netPeerTransfers: 0,
   originalAmount: 90,
-  totalAssets: 175,
-  totalPnL: 85,
-  agentCount: 1,
+  totalAssets: 150,
+  totalPnL: 60,
 };
 
 const portfolioB: PortfolioBreakdownSnapshot = {
   wallet: 300,
-  agents: 40,
   positions: 10,
-  available: 340,
+  available: 300,
   netPeerTransfers: 0,
   originalAmount: 250,
-  totalAssets: 350,
-  totalPnL: 100,
-  agentCount: 2,
+  totalAssets: 310,
+  totalPnL: 60,
 };
 
 describe('widgetCacheStore portfolio widget cache', () => {

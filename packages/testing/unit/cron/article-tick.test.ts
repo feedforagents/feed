@@ -80,6 +80,12 @@ const cronMockState =
   });
 
 let mockSnowflakeCounter = 0;
+let articleEvents: Array<{
+  questionId: string;
+  text: string;
+  visibility: string;
+}> = [];
+let articleTopics: string[] = [];
 
 const nextMockSnowflakeId = (): string => {
   mockSnowflakeCounter += 1;
@@ -263,28 +269,30 @@ const registerMocks = () => {
       }),
     },
     ArticleGenerator: class {
-      generateArticleForQuestion = async () => ({
-        // Complete Article interface with all required fields
-        id: `mock-article-${Date.now()}`,
-        title: 'Test Article',
-        summary: 'Test summary',
-        content: 'Test content that is long enough to pass validation. '.repeat(
-          20
-        ),
-        authorOrgId: 'org-1',
-        authorOrgName: 'Test News',
-        byline: 'Test Author',
-        bylineActorId: 'actor-1',
-        biasScore: 0,
-        sentiment: 'neutral' as const,
-        slant: 'Neutral coverage',
-        relatedEventId: 'event-1',
-        relatedActorIds: [],
-        relatedOrgIds: ['org-1'],
-        category: 'news',
-        tags: ['test', 'article'],
-        publishedAt: new Date(),
-      });
+      generateArticleForQuestion = async (question: { text: string }) => {
+        articleTopics.push(question.text);
+        return {
+          // Complete Article interface with all required fields
+          id: `mock-article-${Date.now()}`,
+          title: 'Test Article',
+          summary: 'Test summary',
+          content:
+            'Test content that is long enough to pass validation. '.repeat(20),
+          authorOrgId: 'org-1',
+          authorOrgName: 'Test News',
+          byline: 'Test Author',
+          bylineActorId: 'actor-1',
+          biasScore: 0,
+          sentiment: 'neutral' as const,
+          slant: 'Neutral coverage',
+          relatedEventId: 'event-1',
+          relatedActorIds: [],
+          relatedOrgIds: ['org-1'],
+          category: 'news',
+          tags: ['test', 'article'],
+          publishedAt: new Date(),
+        };
+      };
     },
     FeedLLMClient: {
       forGameTick: () => ({
@@ -315,7 +323,7 @@ const registerMocks = () => {
         };
       }
     },
-    getActiveEventsForPosting: async () => ({ activeEvents: [] }),
+    getActiveEventsForPosting: async () => ({ activeEvents: articleEvents }),
     hasEventBeenCovered: async (eventId: string) =>
       cronMockState.articleCoveredEventIds.has(eventId),
     markEventAsCovered: async (eventId: string) => {
@@ -430,6 +438,8 @@ describe('Article Tick Cron', () => {
     cronMockState.articleCount = 0;
     cronMockState.articleCronAuthResult = true;
     cronMockState.articleCoveredEventIds.clear();
+    articleEvents = [];
+    articleTopics = [];
   });
 
   describe('Authorization', () => {
@@ -564,6 +574,59 @@ describe('Article Tick Cron', () => {
       // Should not be skipped due to rate limit
       expect(data.reason).not.toBe('Rate limit reached');
     });
+  });
+
+  test('articles only use publicly visible event descriptions', async () => {
+    cronMockState.articleGame = {
+      id: 'game-123',
+      isContinuous: true,
+      isRunning: true,
+      currentDay: 1,
+    };
+    articleEvents = [
+      {
+        questionId: 'private-1',
+        text: 'A private meeting',
+        visibility: 'private',
+      },
+      { questionId: 'secret-1', text: 'A secret plan', visibility: 'secret' },
+      {
+        questionId: 'public-1',
+        text: 'A public announcement',
+        visibility: 'public',
+      },
+    ];
+
+    const response = await POST(
+      new NextRequest('http://localhost/api/cron/article-tick', {
+        method: 'POST',
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(articleTopics).toEqual(['A public announcement']);
+    expect(cronMockState.articleCoveredEventIds.has('public-1')).toBe(true);
+    expect(cronMockState.articleCoveredEventIds.has('private-1')).toBe(false);
+    expect(cronMockState.articleCoveredEventIds.has('secret-1')).toBe(false);
+
+    articleTopics = [];
+    articleEvents = [
+      {
+        questionId: 'private-1',
+        text: 'A private meeting',
+        visibility: 'private',
+      },
+      { questionId: 'leaked-1', text: 'A leaked report', visibility: 'leaked' },
+    ];
+    const leakedResponse = await POST(
+      new NextRequest('http://localhost/api/cron/article-tick', {
+        method: 'POST',
+      })
+    );
+    expect(leakedResponse.status).toBe(200);
+    expect(articleTopics).toEqual(['A leaked report']);
+    expect(cronMockState.articleCoveredEventIds.has('leaked-1')).toBe(true);
+    expect(cronMockState.articleCoveredEventIds.has('private-1')).toBe(false);
   });
 
   describe('Response Structure', () => {

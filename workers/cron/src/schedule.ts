@@ -6,7 +6,6 @@ export const jobs = [
   { path: '/api/cron/npc-tick', cron: '*/2 * * * *' },
   { path: '/api/cron/organization-tick', cron: '*/5 * * * *' },
   { path: '/api/cron/article-tick', cron: '*/30 * * * *' },
-  { path: '/api/cron/agent-tick', cron: '*/3 * * * *' },
   { path: '/api/cron/realtime-drain', cron: '* * * * *' },
   { path: '/api/cron/perp-funding', cron: '0 */8 * * *' },
   { path: '/api/cron/world-facts', cron: '0 6,18 * * *' },
