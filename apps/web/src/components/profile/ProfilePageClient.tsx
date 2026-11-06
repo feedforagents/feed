@@ -192,14 +192,6 @@ export function ProfilePageClient({
 
     setIsCreatingDM(true);
 
-    if (actorInfo.isAgent && actorInfo.managedBy === user.id) {
-      router.push(
-        `/agents/team?selectAgent=${encodeURIComponent(actorInfo.id)}`
-      );
-      setIsCreatingDM(false);
-      return;
-    }
-
     const sortedIds = [user.id, actorInfo.id].sort();
     const chatId = `dm-${sortedIds.join('-')}`;
     router.push(`/chats?chat=${chatId}&newDM=${actorInfo.id}`);
@@ -938,12 +930,7 @@ export function ProfilePageClient({
                             onClick={() => void handleMessageClick()}
                             disabled={isCreatingDM}
                             className="rounded-full border border-border p-2 transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
-                            title={
-                              actorInfo.isAgent &&
-                              actorInfo.managedBy === user.id
-                                ? 'Message in Agents'
-                                : 'Send message'
-                            }
+                            title="Send message"
                           >
                             <MessageCircle className="h-5 w-5" />
                           </button>

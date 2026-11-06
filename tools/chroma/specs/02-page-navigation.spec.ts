@@ -183,34 +183,6 @@ test.describe('Markets Pages', () => {
 });
 
 // ============================================
-// AGENTS PAGES
-// ============================================
-test.describe('Agents Pages', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.setViewportSize(VIEWPORTS.DESKTOP);
-    await navigateTo(page, ROUTES.HOME);
-    await loginWithWallet(page);
-    await page.waitForTimeout(2000);
-  });
-
-  test.afterEach(async ({ page }) => {
-    await cooldownBetweenTests(page);
-  });
-
-  test('agents list page loads', async ({ page }) => {
-    await navigateTo(page, ROUTES.AGENTS);
-    await waitForPageLoad(page);
-    expect(page.url()).toContain('/agents');
-  });
-
-  test('agent create page loads', async ({ page }) => {
-    await navigateTo(page, ROUTES.AGENTS_CREATE);
-    await waitForPageLoad(page);
-    expect(page.url()).toContain('/agents/create');
-  });
-});
-
-// ============================================
 // ADMIN PAGES
 // ============================================
 test.describe('Admin Pages', () => {

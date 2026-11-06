@@ -121,6 +121,42 @@ describe('ContentQualityGate.validateArticle', () => {
     expect(result.score).toBeGreaterThan(0);
   });
 
+  test('allows source-mentioned product phrases with case differences', async () => {
+    const source =
+      'StrAItegy launches a viral meme coin at OpenAGI terminal secure Copilot. The launch uses Terminal Copilot for secure terminal access.';
+    const article =
+      'The launch of Meme Coin uses Terminal Copilot for secure terminal access. The viral meme coin launch uses the secure terminal for the product and its release.';
+    const result = await ContentQualityGate.validateArticle(article, source);
+    expect(result.passed).toBe(true);
+    expect(
+      result.reasons.some((reason) => reason.includes('unknown entities'))
+    ).toBe(false);
+  });
+
+  test('rejects unrelated invented entities even when another name is sourced', async () => {
+    const source =
+      'StrAItegy launches a viral meme coin with Terminal Copilot for secure terminal access.';
+    const article =
+      'The launch of Meme Coin uses Terminal Copilot for secure terminal access. Quantum Harbor and Silver Archive announced the launch of the viral meme coin.';
+    const result = await ContentQualityGate.validateArticle(article, source);
+    expect(result.passed).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.includes('unknown entities'))
+    ).toBe(true);
+  });
+
+  test('does not match entity phrases inside longer source words', async () => {
+    const source =
+      'StrAItegy launches a viral meme coinware with Terminal Copilot for secure terminal access.';
+    const article =
+      'The launch of Meme Coin uses Terminal Copilot for secure terminal access. Quantum Harbor announced the viral meme coin launch for terminal access.';
+    const result = await ContentQualityGate.validateArticle(article, source);
+    expect(result.passed).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.includes('unknown entities'))
+    ).toBe(true);
+  });
+
   test('too-short article fails structure check', async () => {
     const article = 'This is too short to be an article.';
     const source = 'Some event happened in the tech world.';

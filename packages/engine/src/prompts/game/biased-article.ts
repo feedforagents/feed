@@ -12,11 +12,11 @@ import {
  * based on organizational relationships with actors. Includes full narrative
  * context for connected journalism.
  *
- * Returns XML with title, summary, content, slant, sentiment, etc.
+ * Returns JSON with title, summary, content, slant, sentiment, etc.
  */
 export const biasedArticle = definePrompt({
   id: 'biased-article',
-  version: '2.0.0',
+  version: '2.0.2',
   category: 'game',
   description: 'Generates biased articles with full narrative context',
   temperature: 0.85,
@@ -61,31 +61,30 @@ ${ANTI_REPETITION_RULES}
 {{biasInstructions}}
 
 REQUIREMENTS:
-1. Write a LONG-FORM investigative article (800-1500 words)
-2. Include specific details and "insider information" (make it feel like you have sources)
+1. {{articleInstructions}}
+2. Use only facts supplied in the event and source context. Do not invent sources, people, organizations, events, or insider information.
 3. Use the bias instructions to shape your narrative and tone
-4. Include direct quotes (fabricated but realistic)
+4. Use direct quotes only when the exact quote is supplied in the source context; otherwise paraphrase without quotation marks.
 5. Have a clear slant/angle that reflects the organization's position
-6. Make it feel like REAL news with depth, not just a summary
+6. Explain the supplied facts and their implications without adding unsupported details
 7. Use journalistic writing style appropriate for {{orgName}}
 8. Create a compelling headline that hints at your angle
 9. Write a 2-3 sentence summary for listings
 
-FORMAT YOUR RESPONSE AS XML:
-<response>
-  <title>Compelling headline that hints at your angle</title>
-  <summary>2-3 sentence summary for article listings</summary>
-  <content>Full long-form article (800-1500 words, use \\n\\n for paragraph breaks)</content>
-  <slant>Brief description of your article's angle/bias (e.g., 'Critical of leadership decisions' or 'Sympathetic to company position')</slant>
-  <sentiment>positive | negative | neutral</sentiment>
-  <category>tech | politics | finance | scandal | business | etc.</category>
-  <tags>
-    <tag>relevant</tag>
-    <tag>tags</tag>
-    <tag>for</tag>
-    <tag>article</tag>
-  </tags>
-</response>
+FORMAT YOUR RESPONSE AS ONE JSON OBJECT:
+{
+  "title": "Compelling headline that hints at your angle",
+  "summary": "2-3 sentence summary for article listings",
+  "content": "Article body in plain paragraphs, separated by escaped newline characters.",
+  "slant": "Brief description of your article's angle or bias",
+  "sentiment": "neutral",
+  "category": "tech",
+  "tags": ["relevant", "article"]
+}
+
+Use exactly these field names. Sentiment must be positive, negative, or neutral.
+The content field must be a JSON string, not HTML, XML, or a nested object.
+Escape quotation marks and newlines inside strings so the entire response is valid JSON.
 
 No other text.
 `.trim(),

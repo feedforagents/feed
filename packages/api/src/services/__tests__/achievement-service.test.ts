@@ -4,6 +4,8 @@ import {
   ALL_CHALLENGE_DEFINITIONS,
   DAILY_CHALLENGE_DEFINITIONS,
   EVENT_TO_TRACKING_TYPES,
+  PATH_TO_ACTIVITY_TYPE,
+  VALID_PAGE_ACTIVITY_TYPES,
   WEEKLY_CHALLENGE_DEFINITIONS,
 } from '@feed/shared';
 import {
@@ -12,8 +14,8 @@ import {
 } from '../achievement-service';
 
 describe('Achievement Definitions', () => {
-  it('has exactly 15 achievements', () => {
-    expect(ACHIEVEMENT_DEFINITIONS).toHaveLength(15);
+  it('has exactly 10 achievements', () => {
+    expect(ACHIEVEMENT_DEFINITIONS).toHaveLength(10);
   });
 
   it('has unique achievement IDs', () => {
@@ -26,9 +28,7 @@ describe('Achievement Definitions', () => {
       expect(def.id).toBeTruthy();
       expect(def.name).toBeTruthy();
       expect(def.description).toBeTruthy();
-      expect(['trading', 'agents', 'social', 'exploration']).toContain(
-        def.category
-      );
+      expect(['trading', 'social', 'exploration']).toContain(def.category);
       expect(['bronze', 'silver', 'gold']).toContain(def.tier);
       expect(def.pointsReward).toBeGreaterThan(0);
       expect(def.threshold).toBeGreaterThan(0);
@@ -36,21 +36,21 @@ describe('Achievement Definitions', () => {
     }
   });
 
-  it('has 8 bronze, 5 silver, 2 gold', () => {
+  it('has 5 bronze, 3 silver, 2 gold', () => {
     const bronze = ACHIEVEMENT_DEFINITIONS.filter((a) => a.tier === 'bronze');
     const silver = ACHIEVEMENT_DEFINITIONS.filter((a) => a.tier === 'silver');
     const gold = ACHIEVEMENT_DEFINITIONS.filter((a) => a.tier === 'gold');
-    expect(bronze).toHaveLength(8);
-    expect(silver).toHaveLength(5);
+    expect(bronze).toHaveLength(5);
+    expect(silver).toHaveLength(3);
     expect(gold).toHaveLength(2);
   });
 });
 
 describe('Challenge Definitions', () => {
-  it('has 20 daily and 20 weekly challenges', () => {
-    expect(DAILY_CHALLENGE_DEFINITIONS).toHaveLength(20);
-    expect(WEEKLY_CHALLENGE_DEFINITIONS).toHaveLength(20);
-    expect(ALL_CHALLENGE_DEFINITIONS).toHaveLength(40);
+  it('has 17 daily and 16 weekly challenges', () => {
+    expect(DAILY_CHALLENGE_DEFINITIONS).toHaveLength(17);
+    expect(WEEKLY_CHALLENGE_DEFINITIONS).toHaveLength(16);
+    expect(ALL_CHALLENGE_DEFINITIONS).toHaveLength(33);
   });
 
   it('has unique challenge IDs', () => {
@@ -152,8 +152,27 @@ describe('Event to Tracking Types Mapping', () => {
     expect(types).toContain('total_trade_count');
   });
 
-  it('agent_created maps to agent_count', () => {
-    const types = EVENT_TO_TRACKING_TYPES.agent_created;
-    expect(types).toContain('agent_count');
+  it('does not advertise hosted-agent rewards or page activities', () => {
+    const definitions = [
+      ...ACHIEVEMENT_DEFINITIONS,
+      ...ALL_CHALLENGE_DEFINITIONS,
+    ];
+    expect(
+      definitions.some((definition) =>
+        definition.trackingType.includes('agent')
+      )
+    ).toBe(false);
+    expect(
+      Object.keys(EVENT_TO_TRACKING_TYPES).some((event) =>
+        event.startsWith('agent_')
+      )
+    ).toBe(false);
+    expect(
+      Object.values(EVENT_TO_TRACKING_TYPES)
+        .flat()
+        .some((trackingType) => trackingType.includes('agent'))
+    ).toBe(false);
+    expect(VALID_PAGE_ACTIVITY_TYPES).not.toContain('open_agents');
+    expect(PATH_TO_ACTIVITY_TYPE).not.toHaveProperty('/agents');
   });
 });

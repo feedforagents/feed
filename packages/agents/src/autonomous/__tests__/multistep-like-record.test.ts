@@ -14,48 +14,8 @@ let likeResult: { success: boolean; liked?: boolean; error?: string } = {
   liked: false,
 };
 
-mock.module('@feed/db', () => ({
-  actorState: {},
-  agentLogs: {},
-  and: (...args: unknown[]) => args,
-  chats: {},
-  db: {},
-  desc: (x: unknown) => x,
-  eq: (a: unknown, b: unknown) => ({ a, b }),
-  gte: (...args: unknown[]) => args,
-  npcTrades: {},
-  questions: {},
-  users: {},
-}));
-
-mock.module('@feed/engine', () => ({
-  countTokensSync: () => 0,
-  generateWorldContext: mock(async () => ({})),
-  getSafeContextLimit: () => 1000,
-  StaticDataRegistry: { getActor: () => undefined, getAllActors: () => [] },
-  WalletService: { getBalance: mock(async () => ({ balance: 0 })) },
-}));
-
-mock.module('@feed/api', () => ({
-  broadcastAgentActivity: mock(async () => undefined),
-  broadcastToChannel: mock(async () => undefined),
-  broadcastTypingIndicator: mock(async () => undefined),
-  cachedDb: { invalidateUserCache: mock(async () => undefined) },
-  checkProgress: mock(async () => undefined),
-  countTokensSync: () => 0,
-  createNotification: mock(async () => undefined),
-  DistributedLockService: {
-    acquireLock: mock(async () => true),
-    releaseLock: mock(async () => undefined),
-    renewLock: mock(async () => true),
-    checkLock: mock(async () => null),
-  },
-  getCacheOrFetch: mock(async (_k: string, fn: () => unknown) => fn()),
-  getModelTokenLimit: () => 100000,
-  truncateToTokenLimitSync: (s: string) => s,
-  verifyApiKey: mock(async () => null),
-}));
-
+// Mock only action execution and log persistence. Real dependency exports keep
+// this fixture compatible with the executor without invoking model inference.
 const stub = mock(async () => ({ success: false, error: 'stub' }));
 mock.module('../DirectExecutors', () => ({
   executeDirectComment: stub,

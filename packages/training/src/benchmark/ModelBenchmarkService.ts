@@ -1,11 +1,11 @@
 /**
  * Model Benchmark Service (For HuggingFace Integration)
  *
- * Runs benchmark tests on trained RL models for HuggingFace upload decisions.
+ * Reads recorded benchmark results for trained-model evaluation.
  * Compares new models against baselines and previous versions.
  *
  * **Purpose:** Evaluate models for HuggingFace upload
- * **Used by:** HuggingFace integration, weekly CRON, CLI scripts
+ * **Used by:** HuggingFace integration and model result consumers
  * **Storage:** benchmark_results table (dedicated table)
  * **Focus:** Public model release, baseline comparison
  *
@@ -14,33 +14,16 @@
  * @see BenchmarkService - For training pipeline evaluation
  */
 
-import {
-  benchmarkResults,
-  db,
-  trainedModels,
-  userAgentConfigs,
-  users,
-} from '@feed/db';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
-import { ethers } from 'ethers';
+import { benchmarkResults, db, trainedModels } from '@feed/db';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import { getAgentRuntimeManager } from '../dependencies';
 import { logger } from '../utils/logger';
-import { generateSnowflakeId } from '../utils/snowflake';
-import { BenchmarkRunner } from './BenchmarkRunner';
 import {
   type JsonValue,
   parseSimulationMetrics,
 } from './parseSimulationMetrics';
-import type { SimulationMetrics, SimulationResult } from './SimulationEngine';
-
-export interface ModelBenchmarkOptions {
-  modelId: string;
-  benchmarkPaths: string[]; // Paths to benchmark JSON files
-  outputDir?: string;
-  saveResults?: boolean;
-}
+import type { SimulationMetrics } from './SimulationEngine';
 
 export interface ModelBenchmarkResult {
   modelId: string;
@@ -85,142 +68,6 @@ export interface AverageMetrics {
 }
 
 export class ModelBenchmarkService {
-  /**
-   * Benchmark a trained model against standard benchmarks
-   */
-  static async benchmarkModel(
-    options: ModelBenchmarkOptions
-  ): Promise<ModelBenchmarkResult[]> {
-    logger.info('Starting model benchmark', { modelId: options.modelId });
-
-    // Load model from database
-    const modelResult = await db
-      .select()
-      .from(trainedModels)
-      .where(eq(trainedModels.modelId, options.modelId))
-      .limit(1);
-    const model = modelResult[0];
-
-    if (!model) {
-      throw new Error(`Model not found: ${options.modelId}`);
-    }
-
-    // Check if model already benchmarked
-    const existingBenchmarks = await this.getModelBenchmarks(options.modelId);
-    if (existingBenchmarks.length > 0 && !options.saveResults) {
-      logger.info('Model already benchmarked', {
-        modelId: options.modelId,
-        count: existingBenchmarks.length,
-      });
-      return existingBenchmarks;
-    }
-
-    // Create test agent for benchmarking
-    const testAgentId = await this.getOrCreateTestAgent();
-
-    const results: ModelBenchmarkResult[] = [];
-
-    // Run each benchmark
-    for (const benchmarkPath of options.benchmarkPaths) {
-      logger.info('Running benchmark', {
-        benchmark: benchmarkPath,
-        modelId: options.modelId,
-      });
-
-      try {
-        // Get agent runtime (will use the RL model if configured)
-        const runtime = await getAgentRuntimeManager().getRuntime(testAgentId);
-
-        // Run benchmark
-        const simulationResult: SimulationResult =
-          await BenchmarkRunner.runSingle({
-            benchmarkPath,
-            agentRuntime: runtime,
-            agentUserId: testAgentId,
-            saveTrajectory: false,
-            outputDir:
-              options.outputDir ||
-              path.join(
-                process.cwd(),
-                'benchmarks',
-                'model-results',
-                model.version
-              ),
-            forceModel: model.storagePath, // Use the RL model
-          });
-
-        // Create benchmark result
-        const benchmarkResult: ModelBenchmarkResult = {
-          modelId: options.modelId,
-          modelVersion: model.version,
-          benchmarkId: simulationResult.benchmarkId,
-          benchmarkPath,
-          runAt: new Date(),
-          metrics: simulationResult.metrics,
-        };
-
-        // Compare to baseline if available
-        const baseline = await this.getBaselineBenchmark(benchmarkPath);
-        if (baseline) {
-          benchmarkResult.comparisonToBaseline = {
-            pnlDelta: simulationResult.metrics.totalPnl - baseline.totalPnl,
-            accuracyDelta:
-              simulationResult.metrics.predictionMetrics.accuracy -
-              baseline.predictionMetrics.accuracy,
-            optimalityDelta:
-              simulationResult.metrics.optimalityScore -
-              baseline.optimalityScore,
-            improved: simulationResult.metrics.totalPnl > baseline.totalPnl,
-          };
-        }
-
-        results.push(benchmarkResult);
-
-        logger.info('Benchmark completed', {
-          benchmark: benchmarkPath,
-          pnl: simulationResult.metrics.totalPnl,
-          accuracy: simulationResult.metrics.predictionMetrics.accuracy,
-        });
-
-        // Save result if requested (to both database and files)
-        if (options.saveResults) {
-          await this.saveBenchmarkResultToDatabase(benchmarkResult);
-          await this.saveBenchmarkResult(benchmarkResult);
-        }
-      } catch (error) {
-        logger.error('Benchmark failed', { benchmark: benchmarkPath, error });
-      }
-    }
-
-    // Update model with aggregate benchmark score
-    if (results.length > 0) {
-      const avgOptimality =
-        results.reduce((sum, r) => sum + r.metrics.optimalityScore, 0) /
-        results.length;
-      const avgPnl =
-        results.reduce((sum, r) => sum + r.metrics.totalPnl, 0) /
-        results.length;
-
-      await db
-        .update(trainedModels)
-        .set({
-          benchmarkScore: avgOptimality,
-          avgReward: avgPnl,
-          lastBenchmarked: new Date(),
-          benchmarkCount: sql`${trainedModels.benchmarkCount} + ${results.length}`,
-          updatedAt: new Date(),
-        })
-        .where(eq(trainedModels.modelId, options.modelId));
-    }
-
-    logger.info('Model benchmark complete', {
-      modelId: options.modelId,
-      benchmarksRun: results.length,
-    });
-
-    return results;
-  }
-
   /**
    * Compare new model against baseline
    */
@@ -349,57 +196,6 @@ export class ModelBenchmarkService {
   }
 
   /**
-   * Save benchmark result to database
-   */
-  private static async saveBenchmarkResultToDatabase(
-    result: ModelBenchmarkResult
-  ): Promise<void> {
-    await db.insert(benchmarkResults).values({
-      id: await generateSnowflakeId(),
-      modelId: result.modelId,
-      benchmarkId: result.benchmarkId,
-      benchmarkPath: result.benchmarkPath,
-      runAt: result.runAt,
-      totalPnl: result.metrics.totalPnl,
-      predictionAccuracy: result.metrics.predictionMetrics.accuracy,
-      perpWinRate: result.metrics.perpMetrics.winRate,
-      optimalityScore: result.metrics.optimalityScore,
-      detailedMetrics: JSON.parse(JSON.stringify(result.metrics)),
-      baselinePnlDelta: result.comparisonToBaseline?.pnlDelta,
-      baselineAccuracyDelta: result.comparisonToBaseline?.accuracyDelta,
-      improved: result.comparisonToBaseline?.improved,
-      duration: result.metrics.timing.totalDuration,
-    });
-
-    logger.info('Benchmark result saved to database', {
-      modelId: result.modelId,
-      benchmarkId: result.benchmarkId,
-    });
-  }
-
-  /**
-   * Save benchmark result to file
-   */
-  private static async saveBenchmarkResult(
-    result: ModelBenchmarkResult
-  ): Promise<void> {
-    const outputDir = path.join(
-      process.cwd(),
-      'benchmarks',
-      'model-results',
-      result.modelVersion
-    );
-    await fs.mkdir(outputDir, { recursive: true });
-
-    const filename = `benchmark-${result.benchmarkId}-${Date.now()}.json`;
-    const filePath = path.join(outputDir, filename);
-
-    await fs.writeFile(filePath, JSON.stringify(result, null, 2));
-
-    logger.info('Benchmark result saved to file', { filePath });
-  }
-
-  /**
    * Get benchmark results from database
    */
   static async getBenchmarkResultsFromDatabase(
@@ -428,37 +224,6 @@ export class ModelBenchmarkService {
             }
           : undefined,
     }));
-  }
-
-  /**
-   * Get baseline benchmark for comparison
-   */
-  private static async getBaselineBenchmark(
-    benchmarkPath: string
-  ): Promise<SimulationMetrics | null> {
-    try {
-      // Look for baseline result for this benchmark
-      const baselinesDir = path.join(process.cwd(), 'benchmarks', 'baselines');
-      const files = await fs.readdir(baselinesDir).catch(() => []);
-
-      for (const file of files) {
-        if (file.endsWith('.json')) {
-          const filePath = path.join(baselinesDir, file);
-          const data = JSON.parse(await fs.readFile(filePath, 'utf-8'));
-
-          if (
-            data.benchmark?.path === benchmarkPath ||
-            data.benchmark === benchmarkPath
-          ) {
-            return data.metrics;
-          }
-        }
-      }
-    } catch (error) {
-      logger.warn('Could not load baseline benchmark', { error });
-    }
-
-    return null;
   }
 
   /**
@@ -523,66 +288,6 @@ export class ModelBenchmarkService {
     }
 
     return this.calculateAverageMetrics(metricsArray);
-  }
-
-  /**
-   * Get or create test agent for benchmarking
-   */
-  private static async getOrCreateTestAgent(): Promise<string> {
-    const testAgentUsername = 'model-benchmark-agent';
-
-    const agentResult = await db
-      .select()
-      .from(users)
-      .where(eq(users.username, testAgentUsername))
-      .limit(1);
-    let agent = agentResult[0];
-
-    if (agent) {
-      return agent.id;
-    }
-
-    // Create new test agent
-    const agentId = await generateSnowflakeId();
-    const newAgentResult = await db
-      .insert(users)
-      .values({
-        id: agentId,
-        privyId: `did:privy:model-benchmark-${agentId}`,
-        username: testAgentUsername,
-        displayName: 'Model Benchmark Agent',
-        walletAddress: ethers.Wallet.createRandom().address,
-        isAgent: true,
-        virtualBalance: '10000',
-        reputationPoints: 1000,
-        isTest: true,
-        updatedAt: new Date(),
-      })
-      .returning();
-    agent = newAgentResult[0];
-
-    // Create agent config in separate table
-    if (agent) {
-      await db.insert(userAgentConfigs).values({
-        id: await generateSnowflakeId(),
-        userId: agentId,
-        autonomousTrading: true,
-        autonomousPosting: false,
-        autonomousCommenting: false,
-        systemPrompt:
-          'You are a test agent for benchmarking model performance.',
-        modelTier: 'pro',
-        updatedAt: new Date(),
-      });
-    }
-
-    if (!agent) {
-      throw new Error('Failed to create model benchmark test agent');
-    }
-
-    logger.info('Created model benchmark test agent', { agentId: agent.id });
-
-    return agent.id;
   }
 
   /**

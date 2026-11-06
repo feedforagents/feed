@@ -1,8 +1,8 @@
 /**
  * Agent Registry Service
  *
- * Single source of truth for all agent types: USER_CONTROLLED, NPC, EXTERNAL.
- * Provides registration, discovery, and management for all agent types
+ * Registry for NPCs, external connections, and legacy user-agent records.
+ * Provides NPC/external registration, discovery, and record management
  * with support for ERC-8004, Agent0 SDK, and A2A Protocol.
  *
  * @packageDocumentation
@@ -75,105 +75,6 @@ type RegistryWithRelations = AgentRegistry & {
  * Service for managing agent registry with support for all agent types.
  */
 export class AgentRegistryService {
-  /**
-   * Registers a USER_CONTROLLED agent from User record
-   *
-   * Creates registry entry linked to existing User. Verifies user exists
-   * and is not already registered.
-   *
-   * @param params - Registration parameters
-   * @param params.userId - User ID
-   * @param params.name - Agent name
-   * @param params.systemPrompt - System prompt
-   * @param params.capabilities - Agent capabilities
-   * @param params.trustLevel - Trust level (default: 0)
-   * @returns Registered agent
-   * @throws Error if user not found or already registered
-   */
-  async registerUserAgent(params: {
-    userId: string;
-    name: string;
-    systemPrompt: string;
-    capabilities: AgentCapabilities;
-    trustLevel?: TrustLevel;
-  }): Promise<AgentRegistration> {
-    const { userId, name, systemPrompt, capabilities, trustLevel = 0 } = params;
-
-    // Verify user exists
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-
-    if (!user) {
-      throw new Error(`User not found: ${userId}`);
-    }
-
-    // Check if already registered
-    const [existing] = await db
-      .select()
-      .from(agentRegistries)
-      .where(eq(agentRegistries.userId, userId))
-      .limit(1);
-
-    if (existing) {
-      throw new Error(
-        `User ${userId} already registered as agent ${existing.agentId}`
-      );
-    }
-
-    const registryId = `agent-user-${userId}`;
-    const capabilityId = `cap-${userId}`;
-
-    // Create registry entry
-    await db.insert(agentRegistries).values({
-      id: registryId,
-      agentId: userId,
-      type: AgentType.USER_CONTROLLED,
-      status: AgentStatus.REGISTERED,
-      trustLevel,
-      userId,
-      name,
-      systemPrompt,
-      // Discovery metadata
-      discoveryAuthRequired: false,
-      discoveryAuthMethods: [],
-      updatedAt: new Date(),
-    });
-
-    // Create capabilities
-    await db.insert(agentCapabilities).values({
-      id: capabilityId,
-      agentRegistryId: registryId,
-      strategies: capabilities.strategies ?? [],
-      markets: capabilities.markets ?? [],
-      actions: capabilities.actions ?? [],
-      version: capabilities.version ?? '1.0.0',
-      x402Support: capabilities.x402Support ?? false,
-      platform: capabilities.platform,
-      userType: capabilities.userType,
-      gameNetworkChainId: capabilities.gameNetwork?.chainId,
-      gameNetworkRpcUrl: capabilities.gameNetwork?.registryAddress,
-      gameNetworkExplorerUrl: capabilities.gameNetwork?.reputationAddress,
-      // OASF Taxonomy Support (Agent0 SDK v0.31.0)
-      skills: capabilities.skills ?? [],
-      domains: capabilities.domains ?? [],
-      // A2A Communication Endpoints (Agent0 SDK v0.31.0)
-      a2aEndpoint: capabilities.a2aEndpoint,
-      mcpEndpoint: capabilities.mcpEndpoint,
-      updatedAt: new Date(),
-    });
-
-    // Fetch complete registry with relations
-    const registry = await this.getRegistryWithRelations(userId);
-    if (!registry) {
-      throw new Error('Failed to create agent registry');
-    }
-
-    return this.mapToRegistration(registry);
-  }
-
   /**
    * Register an NPC agent from Actor record
    *
@@ -564,7 +465,7 @@ export class AgentRegistryService {
   /**
    * Get agent by agentId
    *
-   * @description Gets agent by agentId (userId for USER_CONTROLLED, actorId for NPC,
+   * @description Gets agent by agentId (legacy userId, actorId for NPC,
    * externalId for EXTERNAL). Returns null if not found.
    *
    * @param {string} agentId - Agent ID
@@ -674,7 +575,8 @@ export class AgentRegistryService {
   /**
    * Link external agent to User account
    *
-   * @description Allows EXTERNAL agents to gain USER_CONTROLLED capabilities after verification.
+   * @description Associates an external connection with a verified User account.
+   * This link does not enable hosted execution.
    * Verifies agent is EXTERNAL type and user is not already linked to another agent.
    * Updates trust level to at least BASIC when linked.
    *

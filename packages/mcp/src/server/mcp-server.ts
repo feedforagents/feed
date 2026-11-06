@@ -4,6 +4,7 @@
  * Defines MCP server info, capabilities, and available tools
  */
 
+import { LEADERBOARD_SCOPES } from '@feed/shared';
 import type {
   Implementation,
   InitializeResult,
@@ -104,7 +105,12 @@ export function getAvailableTools(): MCPTool[] {
             enum: ['YES', 'NO'],
             description: 'Bet side',
           },
-          amount: { type: 'number', description: 'Bet amount in points' },
+          amount: {
+            type: 'number',
+            minimum: 1,
+            multipleOf: 0.01,
+            description: 'Bet amount in points (at most 2 decimal places)',
+          },
         },
         required: ['marketId', 'side', 'amount'],
       },
@@ -191,7 +197,13 @@ export function getAvailableTools(): MCPTool[] {
             enum: ['YES', 'NO'],
             description: 'Outcome to buy shares for',
           },
-          amount: { type: 'number', description: 'Amount to invest' },
+          amount: {
+            type: 'number',
+            minimum: 1,
+            multipleOf: 0.01,
+            description:
+              'Amount to invest in points (at most 2 decimal places)',
+          },
         },
         required: ['marketId', 'outcome', 'amount'],
       },
@@ -223,7 +235,9 @@ export function getAvailableTools(): MCPTool[] {
           amount: { type: 'number', description: 'Position amount' },
           leverage: {
             type: 'number',
-            description: 'Leverage (1-100)',
+            minimum: 1,
+            maximum: 20,
+            description: 'Leverage (1-20)',
           },
         },
         required: ['ticker', 'side', 'amount', 'leverage'],
@@ -707,7 +721,7 @@ export function getAvailableTools(): MCPTool[] {
           pageSize: { type: 'number', description: 'Page size' },
           type: {
             type: 'string',
-            enum: ['wallet', 'team'],
+            enum: [...LEADERBOARD_SCOPES],
             description: 'Leaderboard type',
             default: 'wallet',
           },

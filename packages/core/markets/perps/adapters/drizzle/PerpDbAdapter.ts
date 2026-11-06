@@ -92,7 +92,7 @@ export class PerpDbAdapter implements PerpDbPort {
         nextFundingTime: new Date().toISOString(),
         predictedRate: 0,
       }) as PerpMarketRecord['fundingRate'],
-      maxLeverage: Number(s.maxLeverage ?? 100),
+      maxLeverage: Number(s.maxLeverage ?? 20),
       minOrderSize: Number(s.minOrderSize ?? 10),
       bidPrice: s.bidPrice ? Number(s.bidPrice) : undefined,
       askPrice: s.askPrice ? Number(s.askPrice) : undefined,

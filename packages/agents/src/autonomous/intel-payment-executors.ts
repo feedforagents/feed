@@ -1,16 +1,12 @@
 /**
- * Direct executors for SHARE_INFORMATION and REQUEST_PAYMENT actions.
+ * Direct executor for SHARE_INFORMATION.
  *
  * SHARE_INFORMATION: Searches messages the agent can currently access (active
  * DM and group chat memberships) for keyword matches and sends the quoted
  * matches to the recipient. Quotes show provenance only; they are not a claim
  * that the content is true.
  *
- * REQUEST_PAYMENT: Sends a labeled payment request as a DM. The recipient can
- * accept (SEND_MONEY) or decline. The deadline is advisory text only; no
- * expiry is tracked and no payment is executed automatically.
- *
- * Both deliver through the canonical `executeDirectMessage` path (existing DM
+ * Delivers through the canonical `executeDirectMessage` path (existing DM
  * reuse, owner-DM rule, transactional chat creation).
  */
 
@@ -28,7 +24,6 @@ import {
   users,
 } from '@feed/db';
 import { logger } from '../shared/logger';
-import { generateSnowflakeId } from '../shared/snowflake';
 import { executeDirectMessage } from './DirectExecutors';
 
 const MAX_SHARE_KEYWORDS = 10;
@@ -52,7 +47,6 @@ export interface DirectShareInformationParams {
   recipientId: string;
   keywords: string[];
   context?: string;
-  askingPrice?: number;
 }
 
 export interface ShareInformationMatch {
@@ -74,26 +68,12 @@ export interface DirectShareInformationResult {
   error?: string;
 }
 
-export interface DirectRequestPaymentParams {
-  agentUserId: string;
-  recipientId: string;
-  amount: number;
-  reason: string;
-  deadline?: number;
-}
-
-export interface DirectRequestPaymentResult {
-  success: boolean;
-  requestId?: string;
-  error?: string;
-}
-
 // ── SHARE_INFORMATION executor ──────────────────────────────────────────────
 
 export async function executeDirectShareInformation(
   params: DirectShareInformationParams
 ): Promise<DirectShareInformationResult> {
-  const { agentUserId, recipientId, keywords, context, askingPrice } = params;
+  const { agentUserId, recipientId, keywords, context } = params;
   const cleanRecipientId = recipientId?.trim();
   const empty: DirectShareInformationResult = {
     success: false,
@@ -225,13 +205,11 @@ export async function executeDirectShareInformation(
       (m, i) =>
         `[${i + 1}] (${m.source}) ${m.speaker}: "${m.content.slice(0, 200)}"`
     );
-    const price =
-      askingPrice && askingPrice > 0 ? `\nAsking price: $${askingPrice}` : '';
     const body =
       `[INTEL SHARE - quoted messages, not verified as true]\nFrom: ${agentUserId}\n` +
       `Keywords: ${terms.join(', ')}\n` +
       `Context: ${context || 'Information share'}\n` +
-      `Matches: ${top.length}\n---\n${lines.join('\n')}${price}`;
+      `Matches: ${top.length}\n---\n${lines.join('\n')}`;
 
     const sent = await executeDirectMessage({
       agentUserId,
@@ -264,65 +242,5 @@ export async function executeDirectShareInformation(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return { ...empty, error: msg };
-  }
-}
-
-// ── REQUEST_PAYMENT executor ────────────────────────────────────────────────
-
-export async function executeDirectRequestPayment(
-  params: DirectRequestPaymentParams
-): Promise<DirectRequestPaymentResult> {
-  const { agentUserId, recipientId, amount, reason, deadline } = params;
-  const cleanRecipientId = recipientId?.trim();
-
-  if (!cleanRecipientId)
-    return { success: false, error: 'Recipient ID required' };
-  if (!Number.isFinite(amount) || amount <= 0)
-    return { success: false, error: 'Amount must be positive' };
-  if (!reason?.trim()) return { success: false, error: 'Reason is required' };
-  if (
-    deadline !== undefined &&
-    (!Number.isSafeInteger(deadline) || deadline <= 0)
-  ) {
-    return { success: false, error: 'Deadline must be a positive integer' };
-  }
-
-  try {
-    const [recipient] = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.id, cleanRecipientId))
-      .limit(1);
-    if (!recipient) return { success: false, error: 'Recipient not found' };
-
-    const requestId = await generateSnowflakeId();
-    const dl = deadline ?? 10;
-
-    const body =
-      `[PAYMENT REQUEST]\nRequest ID: ${requestId}\n` +
-      `From: ${agentUserId}\nAmount: $${amount}\n` +
-      `Reason: ${reason}\nRequested within: ${dl} ticks (advisory)\n---\n` +
-      `To accept: SEND_MONEY $${amount} to ${agentUserId}\n` +
-      `To decline: ignore or counter-offer`;
-
-    const sent = await executeDirectMessage({
-      agentUserId,
-      recipientId: cleanRecipientId,
-      content: body,
-    });
-    if (!sent.success) {
-      return { success: false, error: sent.error };
-    }
-
-    logger.info(
-      `[IntelExecutor] REQUEST_PAYMENT: ${agentUserId} → ${cleanRecipientId} $${amount}`,
-      { agentUserId, recipientId: cleanRecipientId, amount, requestId },
-      'IntelPaymentExecutors'
-    );
-
-    return { success: true, requestId };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return { success: false, error: msg };
   }
 }

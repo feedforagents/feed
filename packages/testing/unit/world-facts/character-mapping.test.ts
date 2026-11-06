@@ -60,6 +60,18 @@ const mockCharacterMappings = [
   },
 ];
 
+mockCharacterMappings.push({
+  id: '5',
+  realName: 'Marjorie Taylor Greene',
+  parodyName: 'MarjorAI TAIlor Meme',
+  category: 'politics',
+  aliases: ['Marjorie', 'Greene', 'Meme'],
+  isActive: true,
+  priority: 10,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+});
+
 const mockOrganizationMappings = [
   {
     id: '1',
@@ -125,6 +137,20 @@ describe('Word-to-Word Mapping', () => {
   beforeEach(() => {
     service = new TestableCharacterMappingService();
     service.setMockMappings(mockCharacterMappings, mockOrganizationMappings);
+  });
+
+  test('preserves the parody surname in ordinary language while mapping the real name', async () => {
+    const result = await service.transformText(
+      'A meme, another Meme, and Marjorie Taylor Greene met Elon Musk and Arthur Hayes.'
+    );
+    expect(result.transformedText).toBe(
+      'A meme, another Meme, and MarjorAI TAIlor Meme met AIlon Musk and Arthur HAIyes.'
+    );
+    expect(result.replacementCount).toBe(3);
+    expect(
+      (await service.transformText('MarjorAI TAIlor Meme shared a meme.'))
+        .transformedText
+    ).toBe('MarjorAI TAIlor Meme shared a meme.');
   });
 
   test('should replace full name with full parody name', async () => {
@@ -372,5 +398,27 @@ describe('Per-occurrence replacement', () => {
   test('accented letters are word characters for boundaries', async () => {
     const result = await service.transformText('Teslaé and éTesla');
     expect(result.transformedText).toBe('Teslaé and éTesla');
+  });
+});
+
+describe('canonical crypto names from reality grounding', () => {
+  test('maps declared asset names and hyphenated mentions without changing their parodies', async () => {
+    const service = new CharacterMappingService();
+    const result = await service.transformText(
+      'Bitcoin-related Ethereum and Solana news. BitcAIn, EtherAIum, SolanAI.'
+    );
+    expect(result.transformedText).toBe(
+      'BitcAIn-related EtherAIum and SolanAI news. BitcAIn, EtherAIum, SolanAI.'
+    );
+    expect(result.replacementCount).toBe(3);
+    expect(await service.transformText(result.transformedText)).toMatchObject({
+      transformedText: result.transformedText,
+      replacementCount: 0,
+    });
+    expect(
+      (await service.detectRealNames('Bitcoin Ethereum Solana')).map((name) =>
+        name.toLowerCase()
+      )
+    ).toEqual(expect.arrayContaining(['bitcoin', 'ethereum', 'solana']));
   });
 });

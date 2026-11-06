@@ -5,13 +5,11 @@
  *
  * Tests a trained model by:
  * 1. Loading model from database or path
- * 2. Running benchmark if available
- * 3. Testing inference
- * 4. Comparing to baseline
+ * 2. Comparing recorded evaluation results to a baseline
  *
  * Usage:
  *   bun run packages/training/scripts/test-trained-model.ts --model-id <id>
- *   bun run packages/training/scripts/test-trained-model.ts --model-path <path> --benchmark
+ *   bun run packages/training/scripts/test-trained-model.ts --model-path <path>
  */
 
 import { db, eq, trainedModels } from '@feed/db';
@@ -21,8 +19,6 @@ import { logger } from '../src/utils/logger';
 interface TestConfig {
   modelId?: string;
   modelPath?: string;
-  benchmark?: boolean;
-  benchmarkPath?: string;
   compareToBaseline?: boolean;
 }
 
@@ -89,61 +85,11 @@ async function testModel(config: TestConfig): Promise<void> {
     });
   }
 
-  // Test 2: Benchmark if requested
-  if (config.benchmark) {
-    logger.info('='.repeat(60));
-    logger.info('TEST 2: Running Benchmark');
-    logger.info('='.repeat(60));
-
-    if (config.modelId) {
-      const benchmarkService = new BenchmarkService();
-      const results = await benchmarkService.benchmarkModel(
-        config.modelId,
-        config.benchmarkPath
-      );
-
-      logger.info('Benchmark Results:', {
-        score: results.benchmarkScore,
-        pnl: results.pnl,
-        accuracy: results.accuracy,
-        optimality: results.optimality,
-      });
-
-      // Compare to baseline if requested
-      if (config.compareToBaseline) {
-        const comparison = await benchmarkService.compareModels(config.modelId);
-        logger.info('Comparison to Baseline:', {
-          newScore: comparison.newScore,
-          previousScore: comparison.previousScore,
-          improvement: comparison.improvement,
-          shouldDeploy: comparison.shouldDeploy,
-          reason: comparison.reason,
-        });
-      }
-    } else {
-      logger.warn('Benchmark requires model-id (model must be in database)');
-    }
-  }
-
-  // Test 3: Inference test (if we can get runtime)
-  logger.info('='.repeat(60));
-  logger.info('TEST 3: Inference Test');
-  logger.info('='.repeat(60));
-
-  try {
-    // Get test agent
-    const testAgentResult = await db.select().from(trainedModels).limit(1);
-
-    if (testAgentResult.length > 0) {
-      logger.info('✅ Inference test setup available');
-      logger.info('Run full benchmark to test inference with real agent');
-    } else {
-      logger.warn('No test agent available for inference test');
-    }
-  } catch (error) {
-    logger.warn('Inference test skipped', {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  if (config.compareToBaseline && config.modelId) {
+    const comparison = await new BenchmarkService().compareModels(
+      config.modelId
+    );
+    logger.info('Comparison to Baseline:', comparison);
   }
 
   // Summary
@@ -175,11 +121,6 @@ async function main() {
     } else if (arg === '--model-path' && i + 1 < args.length) {
       config.modelPath = args[i + 1];
       i++;
-    } else if (arg === '--benchmark') {
-      config.benchmark = true;
-    } else if (arg === '--benchmark-path' && i + 1 < args.length) {
-      config.benchmarkPath = args[i + 1];
-      i++;
     } else if (arg === '--compare') {
       config.compareToBaseline = true;
     }
@@ -188,11 +129,9 @@ async function main() {
   if (!config.modelId && !config.modelPath) {
     console.error('Usage:');
     console.error(
-      '  bun run test-trained-model.ts --model-id <id> [--benchmark] [--compare]'
+      '  bun run test-trained-model.ts --model-id <id> [--compare]'
     );
-    console.error(
-      '  bun run test-trained-model.ts --model-path <path> [--benchmark]'
-    );
+    console.error('  bun run test-trained-model.ts --model-path <path>');
     process.exit(1);
   }
 
