@@ -2734,22 +2734,48 @@ export async function executeBlockUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot block yourself');
   }
-  const existing = await db.userBlock.findFirst({
-    where: {
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
+
+  const targetUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
   });
-  if (existing) {
-    return { success: true };
+  if (!targetUser) {
+    throw new Error(`User ${args.userId} not found`);
   }
-  await db.userBlock.create({
-    data: {
-      id: await generateSnowflakeId(),
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
+
+  // Match POST /api/users/[userId]/block: the block row and both follow
+  // deletions commit together. An existing block still severs leftover edges.
+  await db.$transaction(async (tx) => {
+    const existing = await tx.userBlock.findFirst({
+      where: {
+        blockerId: agent.userId,
+        blockedId: args.userId,
+      },
+    });
+    if (!existing) {
+      await tx.userBlock.create({
+        data: {
+          id: await generateSnowflakeId(),
+          blockerId: agent.userId,
+          blockedId: args.userId,
+        },
+      });
+    }
+
+    await tx.follow.deleteMany({
+      where: {
+        followerId: agent.userId,
+        followingId: args.userId,
+      },
+    });
+    await tx.follow.deleteMany({
+      where: {
+        followerId: args.userId,
+        followingId: agent.userId,
+      },
+    });
   });
+
   return { success: true };
 }
 
