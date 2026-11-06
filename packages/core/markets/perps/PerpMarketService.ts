@@ -1086,7 +1086,7 @@ export class PerpMarketService {
           const closed = await this.db.closePosition(position.id, {
             currentPrice: newPrice,
             closedAt: now,
-            realizedPnL: -marginLoss,
+            realizedPnL: (position.realizedPnL ?? 0) - marginLoss,
             unrealizedPnL: 0,
             unrealizedPnLPercent: 0,
           });

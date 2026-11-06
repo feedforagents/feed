@@ -410,4 +410,48 @@ describe('PerpMarketService partial-close realized PnL record', () => {
       ((leg2.marginPaid ?? 0) + leg2.realizedPnL! - leg2.feePaid);
     expect(balance.balance).toBeCloseTo(expectedBalance, 4);
   });
+
+  it('keeps the partial-close leg in the closed record after a liquidation', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 500,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 104 });
+    const leg1 = await service.closePosition({
+      userId: 'u1',
+      positionId: open.positionId,
+      percentage: 0.5,
+    });
+    expect(leg1.fullyClosed).toBe(false);
+    expect(leg1.realizedPnL!).toBeGreaterThan(0);
+
+    // The still-open position record already carries the winning leg.
+    const afterPartial = await db.getPositionById(open.positionId);
+    expect(afterPartial?.realizedPnL ?? null).toBeCloseTo(leg1.realizedPnL!, 4);
+
+    // Remaining size 250 at 10x: liquidation takes the remaining margin.
+    const marginLoss = 250 / 10;
+    // Entry ~100, so the liquidation price is ~90; 85 liquidates.
+    const summary = await service.applyPriceUpdates({ ABC: 85 });
+    expect(summary.liquidations).toBe(1);
+
+    // Closed record total = winning partial leg minus the liquidation leg.
+    const closed = await db.getPositionById(open.positionId);
+    expect(closed?.closedAt).toBeDefined();
+    expect(closed?.realizedPnL ?? null).toBeCloseTo(
+      leg1.realizedPnL! - marginLoss,
+      4
+    );
+
+    // Wallet P&L is a per-leg delta and must not change: the liquidation leg
+    // alone is -marginLoss, the wallet already holds the partial leg.
+    const liq = wallet
+      .getPnLs('u1')
+      .find((p) => p.reason === 'perp_liquidation');
+    expect(liq?.pnl).toBeCloseTo(-marginLoss, 4);
+  });
 });
