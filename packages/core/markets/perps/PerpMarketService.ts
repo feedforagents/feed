@@ -1228,7 +1228,9 @@ export class PerpMarketService {
 
   /**
    * Run a funding step (8h by default), updating fundingPaid per position and fundingRate per market.
-   * Funding is accrued to positions (not settled to wallets here; PnL is adjusted on close).
+   * Each open position is accrued at most once per UTC 8h period (PRD §9.3).
+   * A replay in that period does not charge again. Funding is accrued to
+   * positions (not settled to wallets here; PnL is adjusted on close).
    */
   async processFundingStep(): Promise<void> {
     const markets = await this.db.listMarkets();
@@ -1249,6 +1251,7 @@ export class PerpMarketService {
     }
 
     const now = this.deps.clock?.now() ?? new Date();
+    const periodStart = fundingPeriodStart(now);
     const nextFundingTime = new Date(
       now.getTime() + FUNDING_PERIOD_HOURS * 60 * 60 * 1000
     ).toISOString();
@@ -1268,12 +1271,25 @@ export class PerpMarketService {
       });
 
       const periodRate = funding.periodRate;
-      for (const pos of agg?.positions ?? []) {
+      // Same id order on every worker so overlapping runs cannot deadlock
+      // on the per-position row locks.
+      const orderedPositions = [...(agg?.positions ?? [])].sort((a, b) =>
+        a.id.localeCompare(b.id)
+      );
+      for (const pos of orderedPositions) {
         // A close may have settled funding since the snapshot. Recompute from
         // the locked row so settled funding is not restored or charged again.
+        // The period marker is written in the same transaction as the accrual,
+        // so a crash rolls both back and a retry can finish the position.
         await this.db.transaction(async (tx) => {
           const fresh = await tx.lockOpenPositionById(pos.id);
           if (!fresh) return;
+          if (
+            fresh.lastFundingPeriodStart != null &&
+            fresh.lastFundingPeriodStart.getTime() >= periodStart.getTime()
+          ) {
+            return;
+          }
 
           // periodRate is signed (negative when shorts dominate); the payer is
           // decided by paymentDirection, so apply only the magnitude here.
@@ -1292,12 +1308,11 @@ export class PerpMarketService {
                   ? payment
                   : -payment;
 
-          if (delta !== 0) {
-            await tx.updateOpenPosition(fresh.id, {
-              fundingPaid: fresh.fundingPaid + delta,
-              lastUpdated: now,
-            });
-          }
+          await tx.updateOpenPosition(fresh.id, {
+            ...(delta !== 0 ? { fundingPaid: fresh.fundingPaid + delta } : {}),
+            lastFundingPeriodStart: periodStart,
+            lastUpdated: now,
+          });
         });
       }
 
@@ -2679,6 +2694,12 @@ function calculateFundingPaymentForPeriod(
 
 function periodsPerYear(): number {
   return (365.25 * 24) / FUNDING_PERIOD_HOURS;
+}
+
+/** Start of the UTC 8h funding window that contains `now` (00:00, 08:00, 16:00). */
+function fundingPeriodStart(now: Date): Date {
+  const periodMs = FUNDING_PERIOD_HOURS * 60 * 60 * 1000;
+  return new Date(Math.floor(now.getTime() / periodMs) * periodMs);
 }
 
 import { shouldLiquidate } from './utils';
