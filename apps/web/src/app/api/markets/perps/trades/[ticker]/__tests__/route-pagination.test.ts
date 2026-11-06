@@ -117,8 +117,34 @@ function applySelect(row: Row, select: Row | undefined): Row {
   );
 }
 
+// Every `where` object a repository query received, and every bound
+// parameter count a raw query received. The scale test below uses these to
+// prove the route never sends an unbounded ID list to the database.
+const seenWheres: (Row | undefined)[] = [];
+const seenRawParams: number[] = [];
+
+// Sizes of every `in: [...]` list inside a `where` object.
+function collectInSizes(where: Row | undefined): number[] {
+  if (!where || typeof where !== 'object') return [];
+  const sizes: number[] = [];
+  for (const value of Object.values(where)) {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        sizes.push(...collectInSizes(entry as Row));
+      }
+    } else if (value !== null && typeof value === 'object') {
+      if ('in' in value && Array.isArray((value as Row).in)) {
+        sizes.push(((value as Row).in as unknown[]).length);
+      }
+      sizes.push(...collectInSizes(value as Row));
+    }
+  }
+  return sizes;
+}
+
 function findMany(rows: Row[]) {
   return async (options: Row = {}) => {
+    seenWheres.push(options.where as Row | undefined);
     const orderBy = (options.orderBy ?? {}) as Row;
     const [sortField, direction] = Object.entries(orderBy)[0] ?? [];
     const result = rows
@@ -144,8 +170,11 @@ function findMany(rows: Row[]) {
 }
 
 function count(rows: Row[]) {
-  return async (options: Row = {}) =>
-    rows.filter((row) => matches(row, options.where as Row | undefined)).length;
+  return async (options: Row = {}) => {
+    seenWheres.push(options.where as Row | undefined);
+    return rows.filter((row) => matches(row, options.where as Row | undefined))
+      .length;
+  };
 }
 
 const db = {
@@ -166,6 +195,42 @@ const db = {
   },
   user: {
     findMany: findMany(users),
+  },
+  // Emulates the balance-transaction subquery the route sends: matching
+  // transactions are the perp_open/close/liquidation rows whose relatedId
+  // is a position of this ticker or organization, newest first. The count
+  // query returns the same match set as a single `{ total }` row.
+  $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    seenRawParams.push(values.length);
+    const sqlText = strings.join('');
+    const [ticker, orgId] = values as [string, string];
+    const matchingPositionIds = new Set(
+      positions
+        .filter((p) => p.ticker === ticker || p.organizationId === orgId)
+        .map((p) => p.id)
+    );
+    const matching = balanceTransactions.filter(
+      (tx) =>
+        ['perp_open', 'perp_close', 'perp_liquidation'].includes(
+          tx.type as string
+        ) && matchingPositionIds.has(tx.relatedId as string)
+    );
+    if (sqlText.includes('COUNT(*)')) {
+      return [{ total: String(matching.length) }];
+    }
+    const limit = values.find((value) => typeof value === 'number') as
+      | number
+      | undefined;
+    const sorted = [...matching].sort(
+      (a, b) =>
+        (b.createdAt as Date).getTime() - (a.createdAt as Date).getTime()
+    );
+    const rows = limit === undefined ? sorted : sorted.slice(0, limit);
+    // The real driver returns timestamps as strings for $queryRaw rows.
+    return rows.map((row) => ({
+      ...row,
+      createdAt: (row.createdAt as Date).toISOString(),
+    }));
   },
 };
 
@@ -264,5 +329,45 @@ describe('GET /api/markets/perps/trades/[ticker] merged pagination', () => {
 
     expect(pages.map((page) => page.total)).toEqual([10, 10, 10]);
     expect(pages.map((page) => page.hasMore)).toEqual([true, true, false]);
+  });
+
+  it('serves a small page at 66,000-position scale without loading every position ID', async () => {
+    const extra = Array.from({ length: 66_000 }, (_, i) => ({
+      id: `lp-${i + 1}`,
+      userId: 'user-p1',
+      side: 'long',
+      size: 1,
+      leverage: 2,
+      entryPrice: 100,
+      currentPrice: 101,
+      unrealizedPnL: 1,
+      liquidationPrice: 50,
+      openedAt: at(-66_000 + i),
+      closedAt: null,
+      ticker: 'ABC',
+      organizationId: 'abc-org',
+    }));
+    const fixtureCount = positions.length;
+    const wheresBefore = seenWheres.length;
+    const rawBefore = seenRawParams.length;
+    positions.push(...extra);
+    try {
+      const page = await fetchPage(0);
+
+      expect(page.trades.map((trade) => trade.id)).toEqual(['b1', 'p1']);
+      expect(page.total).toBe(66_010);
+      expect(page.hasMore).toBe(true);
+
+      // The defect: every historical position ID went into one IN (...)
+      // list, which the database rejects past 65,534 parameters. The
+      // page window bounds every list the route still sends.
+      const newWheres = seenWheres.slice(wheresBefore);
+      const maxIn = Math.max(0, ...newWheres.flatMap(collectInSizes));
+      expect(maxIn).toBeLessThanOrEqual(3);
+      const newRaw = seenRawParams.slice(rawBefore);
+      expect(Math.max(0, ...newRaw)).toBeLessThanOrEqual(3);
+    } finally {
+      positions.length = fixtureCount;
+    }
   });
 });
