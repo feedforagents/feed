@@ -766,7 +766,11 @@ export class PerpMarketService {
       timestamp: now.toISOString(),
     });
 
-    // BF-75: Apply price impact and adjust entry price to prevent self-impact exploit
+    // BF-75: Apply price impact and adjust entry price to prevent self-impact exploit.
+    // The trade above is already committed, so an impact failure must not
+    // turn it into a reported failure (which would invite a retry that adds
+    // to the position a second time). The failure is already logged inside
+    // applyPostTradeImpact; keep the pre-impact entry and report success.
     const impactAdj = await this.applyPostTradeImpact(
       ticker,
       position.id,
@@ -774,7 +778,7 @@ export class PerpMarketService {
       side,
       leverage,
       size
-    );
+    ).catch(() => undefined);
     if (impactAdj) {
       result.entryPrice = impactAdj.entryPrice;
       result.liquidationPrice = impactAdj.liquidationPrice;
@@ -949,8 +953,12 @@ export class PerpMarketService {
 
     // Apply market-level post-close impact after settlement to keep the close
     // path fail-safe (position is already settled if this step fails).
+    // The failure is already logged inside applyPostCloseMarketImpact, so
+    // fall back to no re-mark instead of reporting a settled close as failed.
     const postCloseMarketPrice = settlement.closeImpact
-      ? await this.applyPostCloseMarketImpact(settlement.position.ticker)
+      ? await this.applyPostCloseMarketImpact(
+          settlement.position.ticker
+        ).catch(() => undefined)
       : undefined;
 
     // For partial closes, re-mark remaining position to the post-impact price.
@@ -1686,7 +1694,9 @@ export class PerpMarketService {
     };
 
     // BF-75: Apply price impact to the added size only, then re-average it
-    // with the pre-add basis so historical cost is preserved.
+    // with the pre-add basis so historical cost is preserved. The add is
+    // already committed, so an impact failure must not report it as failed
+    // (the failure is already logged inside applyPostTradeImpact).
     const impactAdj = await this.applyPostTradeImpact(
       existing.ticker,
       finalResult.positionId,
@@ -1698,7 +1708,7 @@ export class PerpMarketService {
         previousSize: result.previousSize,
         previousEntryPrice: result.previousEntryPrice,
       }
-    );
+    ).catch(() => undefined);
     if (impactAdj) {
       finalResult.entryPrice = impactAdj.entryPrice;
       finalResult.liquidationPrice = impactAdj.liquidationPrice;
@@ -2028,7 +2038,10 @@ export class PerpMarketService {
         previousEntryPrice: flipResult.previousEntryPrice,
       };
 
-      // BF-75: Apply price impact and adjust entry for the new flipped position
+      // BF-75: Apply price impact and adjust entry for the new flipped position.
+      // The flip is already committed, so an impact failure must not report
+      // it as failed (the failure is already logged inside
+      // applyPostTradeImpact).
       const impactAdj = await this.applyPostTradeImpact(
         existing.ticker,
         finalResult.positionId,
@@ -2036,7 +2049,7 @@ export class PerpMarketService {
         tradeSide,
         Math.min(leverage, effectiveMaxLeverage(market)),
         tradeSize - existing.size
-      );
+      ).catch(() => undefined);
       if (impactAdj) {
         finalResult.entryPrice = impactAdj.entryPrice;
         finalResult.liquidationPrice = impactAdj.liquidationPrice;
