@@ -321,10 +321,24 @@ export class PerpMarketService {
         leverage
       );
 
+      // Entry and current price are rewritten here, so the stored
+      // unrealized PnL must be recomputed against the adjusted entry at
+      // the post-impact price — otherwise the record keeps the PnL of the
+      // pre-impact quote pair until the next price update overwrites it.
+      const positionSize = basis ? basis.previousSize + tradeSize : tradeSize;
+      const { pnl, pnlPercent } = calculateUnrealizedPnL(
+        newEntryPrice,
+        postImpactPrice,
+        side,
+        positionSize
+      );
+
       await this.db.updateOpenPosition(positionId, {
         entryPrice: newEntryPrice,
         currentPrice: postImpactPrice ?? preImpactEntry,
         liquidationPrice: newLiquidationPrice,
+        unrealizedPnL: pnl,
+        unrealizedPnLPercent: pnlPercent,
       });
 
       logger.info(
