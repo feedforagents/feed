@@ -361,6 +361,9 @@ describe('perp open fee consistency (charged vs recorded)', () => {
       size,
       leverage,
     });
+    if (result.marginPaid === undefined) {
+      throw new Error('openPosition did not return marginPaid');
+    }
 
     expect(feeProcessor.calls).toHaveLength(1);
     const recorded = feeProcessor.calls[0]!;
