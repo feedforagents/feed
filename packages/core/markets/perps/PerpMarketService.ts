@@ -427,12 +427,39 @@ export class PerpMarketService {
         );
       }
 
-      const { avgFillPrice } = calculateTradeImpact(
-        basePrice,
-        netHoldingsBefore + (params.precedingTradeSize ?? 0),
-        params.signedTradeSize,
-        PERP_MARKET_CONFIG
-      );
+      // A trade larger than the synthetic AMM's implied quote reserve cannot
+      // be priced by the constant-product curve, but the service itself
+      // allows the size (max position = 10% of OI can exceed the $500k
+      // reserve once OI grows past $5M). The preview is advisory — callers
+      // already fall back to the quoted price when no impact is available
+      // (expectedOpenFill, previewCloseImpact) — so degrade to "no impact
+      // info" instead of rejecting a trade the service allows. Other
+      // pricing errors still throw.
+      let avgFillPrice: number;
+      try {
+        ({ avgFillPrice } = calculateTradeImpact(
+          basePrice,
+          netHoldingsBefore + (params.precedingTradeSize ?? 0),
+          params.signedTradeSize,
+          PERP_MARKET_CONFIG
+        ));
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes('available quote reserves')
+        ) {
+          logger.warn(
+            'Trade exceeds AMM quote reserve; previewing without price impact',
+            {
+              ticker: params.ticker,
+              signedTradeSize: params.signedTradeSize,
+            },
+            'PerpService'
+          );
+          return undefined;
+        }
+        throw error;
+      }
       return avgFillPrice;
     } catch (error) {
       logger.error(
