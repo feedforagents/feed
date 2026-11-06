@@ -326,6 +326,7 @@ export interface DirectRepostResult {
   success: boolean;
   repostId?: string;
   quotePostId?: string;
+  alreadyReposted?: boolean;
   error?: string;
 }
 
@@ -1923,14 +1924,22 @@ export async function executeDirectRepost(
       success: true,
       repostId: shareId,
       quotePostId,
+      alreadyReposted: false,
     };
   } catch (error) {
     // Handle unique constraint violation (concurrent repost)
     // Check error code for PostgreSQL (23505) or Prisma (P2002)
     const errorCode = (error as { code?: string }).code;
+    // Drizzle wraps the PostgreSQL error in its query error's cause.
+    const cause = error instanceof Error ? error.cause : undefined;
+    const causeCode =
+      typeof cause === 'object' && cause !== null && 'code' in cause
+        ? cause.code
+        : undefined;
     const isUniqueConstraint =
       errorCode === '23505' ||
       errorCode === 'P2002' ||
+      causeCode === '23505' ||
       (error as Error).message?.includes('unique constraint');
 
     if (isUniqueConstraint) {
@@ -1948,7 +1957,13 @@ export async function executeDirectRepost(
         );
       }
 
-      return { success: true, repostId: share.id };
+      logger.info(
+        `[DirectExecutor] Post already reposted: ${targetPostId} -> existing share ${share.id}`,
+        { agentUserId },
+        'DirectExecutors'
+      );
+
+      return { success: true, repostId: share.id, alreadyReposted: true };
     }
     throw error;
   }
