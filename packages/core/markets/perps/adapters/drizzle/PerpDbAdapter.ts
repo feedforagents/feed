@@ -210,6 +210,7 @@ export class PerpDbAdapter implements PerpDbPort {
         | 'unrealizedPnL'
         | 'unrealizedPnLPercent'
         | 'fundingPaid'
+        | 'lastFundingPeriodStart'
         | 'liquidationPrice'
         | 'lastUpdated'
         | 'size'
@@ -232,6 +233,9 @@ export class PerpDbAdapter implements PerpDbPort {
     }
     if (updates.fundingPaid !== undefined) {
       setFields.fundingPaid = updates.fundingPaid;
+    }
+    if (updates.lastFundingPeriodStart !== undefined) {
+      setFields.lastFundingPeriodStart = updates.lastFundingPeriodStart;
     }
     if (updates.liquidationPrice !== undefined) {
       setFields.liquidationPrice = updates.liquidationPrice;
@@ -422,6 +426,14 @@ export class PerpDbAdapter implements PerpDbPort {
   }
 
   /**
+   * Adapter bound to an existing transaction. Subclasses override this when
+   * a test or caller needs the transactional port to keep their behavior.
+   */
+  protected bindTransaction(txClient: DrizzleClient): PerpDbAdapter {
+    return new PerpDbAdapter(txClient);
+  }
+
+  /**
    * Execute operations within a transaction for atomicity.
    * Creates a new PerpDbAdapter bound to the transaction context.
    */
@@ -432,8 +444,7 @@ export class PerpDbAdapter implements PerpDbPort {
     }
 
     return defaultDb.transaction(async (txClient) => {
-      const txAdapter = new PerpDbAdapter(txClient);
-      return fn(txAdapter);
+      return fn(this.bindTransaction(txClient));
     });
   }
 }
@@ -501,6 +512,9 @@ function mapPosition(pos: DbPerpPosition): PerpPositionRecord {
     unrealizedPnL: Number(pos.unrealizedPnL),
     unrealizedPnLPercent: Number(pos.unrealizedPnLPercent),
     fundingPaid: Number(pos.fundingPaid),
+    lastFundingPeriodStart: pos.lastFundingPeriodStart
+      ? new Date(pos.lastFundingPeriodStart)
+      : null,
     openedAt: new Date(pos.openedAt),
     lastUpdated: new Date(pos.lastUpdated),
     closedAt: pos.closedAt ? new Date(pos.closedAt) : undefined,

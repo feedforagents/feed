@@ -274,6 +274,13 @@ export const perpPositions = pgTable(
     unrealizedPnL: doublePrecision('unrealizedPnL').notNull(),
     unrealizedPnLPercent: doublePrecision('unrealizedPnLPercent').notNull(),
     fundingPaid: doublePrecision('fundingPaid').notNull().default(0),
+    /**
+     * Start of the UTC 8h funding period already applied to this position.
+     * A replay of that period must not accrue funding again.
+     */
+    lastFundingPeriodStart: timestamp('lastFundingPeriodStart', {
+      mode: 'date',
+    }),
     openedAt: timestamp('openedAt', { mode: 'date' }).notNull().defaultNow(),
     lastUpdated: timestamp('lastUpdated', { mode: 'date' }).notNull(),
     closedAt: timestamp('closedAt', { mode: 'date' }),

@@ -48,7 +48,34 @@ class FundingSnapshotDb extends PerpDbAdapter {
   }
 }
 
-async function fixture(longSize = 200, shortSize = 100, fundingPaid = 10) {
+class PartialFailureFundingDb extends FundingSnapshotDb {
+  private fundingWrites = 0;
+
+  protected override bindTransaction(
+    txClient: NonNullable<ConstructorParameters<typeof PerpDbAdapter>[0]>
+  ): PerpDbAdapter {
+    const inner = super.bindTransaction(txClient);
+    const originalUpdate = inner.updateOpenPosition.bind(inner);
+    const owner = this;
+    inner.updateOpenPosition = async (positionId, updates) => {
+      if (updates.lastFundingPeriodStart != null) {
+        owner.fundingWrites += 1;
+        if (owner.fundingWrites === 2) {
+          throw new Error('injected funding write failure');
+        }
+      }
+      return originalUpdate(positionId, updates);
+    };
+    return inner;
+  }
+}
+
+async function fixture(
+  longSize = 200,
+  shortSize = 100,
+  fundingPaid = 10,
+  Adapter: new (ticker: string) => FundingSnapshotDb = FundingSnapshotDb
+) {
   const userIds = [await generateSnowflakeId(), await generateSnowflakeId()];
   const positionIds = [
     await generateSnowflakeId(),
@@ -120,7 +147,7 @@ async function fixture(longSize = 200, shortSize = 100, fundingPaid = 10) {
       });
     }
   });
-  const adapter = new FundingSnapshotDb(ticker);
+  const adapter = new Adapter(ticker);
   const service = new PerpMarketService({
     db: adapter,
     wallet: createUserWalletAdapter(),
@@ -224,4 +251,70 @@ describe('funding sign on near-balanced books with real Postgres', () => {
       ).toEqual([1000 - 101 / 10, 1000 - 100 / 10]);
     });
   }
+});
+
+describe('funding is once per 8h period on real Postgres', () => {
+  function expectedPayment(size: number, sign: number): number {
+    const annualRate = 0.01 + (0.5 - 0.01) * (1 / 3) ** 3;
+    const periodRate = annualRate / ((365.25 * 24) / 8);
+    return sign * size * periodRate;
+  }
+
+  it('does not double-charge when two funding runs overlap', async () => {
+    const f = await fixture(200, 100, 0);
+    let listed = 0;
+    let release: () => void = () => {};
+    const bothListed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalList = f.adapter.listOpenPositions.bind(f.adapter);
+    f.adapter.listOpenPositions = async () => {
+      const rows = await originalList();
+      listed += 1;
+      if (listed >= 2) release();
+      else await bothListed;
+      return rows;
+    };
+    const other = new PerpMarketService({
+      db: f.adapter,
+      wallet: createUserWalletAdapter(),
+      settlement: createPerpSettlement(),
+      fees,
+    });
+
+    await Promise.all([
+      f.service.processFundingStep(),
+      other.processFundingStep(),
+    ]);
+
+    const positions = await originalList();
+    const long = positions.find((position) => position.side === 'long');
+    const short = positions.find((position) => position.side === 'short');
+    expect(long?.fundingPaid).toBeCloseTo(expectedPayment(200, 1), 8);
+    expect(short?.fundingPaid).toBeCloseTo(expectedPayment(100, -1), 8);
+  });
+
+  it('funds the position a failed write skipped, without charging the one that committed', async () => {
+    const f = await fixture(200, 100, 0, PartialFailureFundingDb);
+    await expect(f.service.processFundingStep()).rejects.toThrow(
+      'injected funding write failure'
+    );
+    const midway = await f.adapter.listOpenPositions();
+    expect(
+      midway.filter((position) => position.fundingPaid !== 0)
+    ).toHaveLength(1);
+    const committed = midway.find((position) => position.fundingPaid !== 0)!;
+
+    await f.service.processFundingStep();
+
+    const positions = await f.adapter.listOpenPositions();
+    const long = positions.find((position) => position.side === 'long')!;
+    const short = positions.find((position) => position.side === 'short')!;
+    expect(long.fundingPaid).toBeCloseTo(expectedPayment(200, 1), 8);
+    expect(short.fundingPaid).toBeCloseTo(expectedPayment(100, -1), 8);
+    const committedAfter = positions.find(
+      (position) => position.id === committed.id
+    )!;
+    expect(committedAfter.fundingPaid).toBeCloseTo(committed.fundingPaid, 8);
+  });
 });

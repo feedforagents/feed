@@ -71,6 +71,8 @@ export interface PerpPositionRecord {
   unrealizedPnL: number;
   unrealizedPnLPercent: number;
   fundingPaid: number;
+  /** Start of the UTC 8h period already accrued. Absent until the first charge. */
+  lastFundingPeriodStart?: Date | null;
   openedAt: Date;
   lastUpdated: Date;
   closedAt?: Date | null;
@@ -115,6 +117,7 @@ export interface PerpDbPort {
         | 'unrealizedPnL'
         | 'unrealizedPnLPercent'
         | 'fundingPaid'
+        | 'lastFundingPeriodStart'
         | 'liquidationPrice'
         | 'lastUpdated'
         | 'size'

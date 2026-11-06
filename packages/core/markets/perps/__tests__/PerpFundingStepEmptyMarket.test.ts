@@ -349,4 +349,61 @@ describe('processFundingStep funding terms for markets without positions', () =>
     expect(market.fundingRate.rate).toBe(0.5);
     expect(market.fundingRate.nextFundingTime).toBe(NEXT_FUNDING);
   });
+
+  it('charges an open position once per 8h period, not once per run', async () => {
+    const db = new InMemoryPerpDb([
+      marketWith('XYZ', {
+        ticker: 'XYZ',
+        rate: 0,
+        nextFundingTime: '2026-11-04T00:00:00.000Z',
+        predictedRate: 0,
+      }),
+    ]);
+    await db.upsertPosition({
+      userId: 'u1',
+      ticker: 'XYZ',
+      organizationId: 'org-xyz',
+      side: 'long',
+      entryPrice: 100,
+      currentPrice: 100,
+      size: 100,
+      leverage: 10,
+      liquidationPrice: 90,
+      unrealizedPnL: 0,
+      unrealizedPnLPercent: 0,
+      fundingPaid: 0,
+      openedAt: NOW,
+      lastUpdated: NOW,
+      closedAt: null,
+      realizedPnL: null,
+    });
+    let now = new Date(NOW);
+    const wallet = new InMemoryWallet(10_000);
+    const service = new PerpMarketService({
+      settlement: {
+        run: async (_userId, operation) =>
+          db.transaction((tx) => operation(tx, wallet)),
+      },
+      db,
+      wallet,
+      fees: feeConfig,
+      clock: { now: () => now },
+    });
+
+    await service.processFundingStep();
+    const once = (await db.listOpenPositions())[0]!.fundingPaid;
+    const onePeriod = 100 * (0.5 / 1095.75);
+    expect(once).toBeCloseTo(onePeriod, 8);
+
+    // A redelivered cron, fan-out, or manual replay inside the same 8h window.
+    await service.processFundingStep();
+    expect((await db.listOpenPositions())[0]!.fundingPaid).toBeCloseTo(once, 8);
+
+    now = new Date(NOW.getTime() + 8 * 60 * 60 * 1000);
+    await service.processFundingStep();
+    expect((await db.listOpenPositions())[0]!.fundingPaid).toBeCloseTo(
+      onePeriod * 2,
+      8
+    );
+  });
 });
