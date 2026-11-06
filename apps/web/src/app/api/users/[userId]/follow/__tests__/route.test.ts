@@ -42,6 +42,7 @@ mock.module('@feed/db', () => ({
     followerId: 'followerId',
     followingId: 'followingId',
   },
+  hasBlocked: mock(async () => false),
   userActorFollows: {},
   users: {},
   withTransaction: async () => undefined,
