@@ -17,9 +17,32 @@ import {
   toNumber,
 } from '@feed/shared';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { FEE_CONFIG } from '../config/fees';
 import type { PortfolioPnLSnapshot } from '../types/portfolio';
 
 export type { PortfolioPnLSnapshot };
+
+/**
+ * Remaining gross cash paid for a prediction position, including the entry
+ * fee. Prefers the persisted cashCostBasis (the same value the prediction
+ * settlement service records and settles against); legacy rows without one
+ * fall back to the net-cost gross-up estimate, rounded to cents.
+ */
+function grossCashCost(position: {
+  shares: unknown;
+  avgPrice: unknown;
+  cashCostBasis: unknown;
+}): number {
+  if (position.cashCostBasis !== null && position.cashCostBasis !== undefined) {
+    return toNumber(position.cashCostBasis);
+  }
+  const netCost = toNumber(position.shares) * toNumber(position.avgPrice);
+  const feeRate = FEE_CONFIG.TRADING_FEE_RATE;
+  if (feeRate > 0 && feeRate < 1) {
+    return Math.round((netCost / (1 - feeRate)) * 100) / 100;
+  }
+  return netCost;
+}
 
 export async function calculatePortfolioPnL(
   userId: string
@@ -91,6 +114,7 @@ export async function calculatePortfolioPnL(
     .select({
       shares: positions.shares,
       avgPrice: positions.avgPrice,
+      cashCostBasis: positions.cashCostBasis,
       side: positions.side,
       marketYesShares: markets.yesShares,
       marketNoShares: markets.noShares,
@@ -148,7 +172,13 @@ export async function calculatePortfolioPnL(
             : yesShares / totalShares // No price = yesShares / total
           : avgPrice;
 
-      return sum + shares * (currentPrice - avgPrice);
+      // Mark against the remaining GROSS cash paid, not net avgPrice:
+      // avgPrice is net of the entry fee, while the fee already left the
+      // wallet in cash and is not in lifetimePnL until the position
+      // closes. Subtracting net avgPrice would count the already-paid
+      // entry fee as profit. Use the persisted cashCostBasis when present,
+      // else the net-cost gross-up estimate for legacy rows.
+      return sum + shares * currentPrice - grossCashCost(position);
     },
     0
   );
