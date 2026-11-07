@@ -36,6 +36,7 @@ import {
 } from '@feed/db';
 import {
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
   PriceUpdateService,
@@ -204,6 +205,7 @@ export function createPerpMarketService(
     settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: createWalletAdapter(),
+    cache: createPerpTradesCachePort(),
     fees: perpFeeConfig,
   };
 

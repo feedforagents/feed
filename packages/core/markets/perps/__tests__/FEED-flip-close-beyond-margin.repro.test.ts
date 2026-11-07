@@ -89,7 +89,7 @@ class ReproDb implements PerpDbPort {
     const pos = this.positions.get(id);
     return pos && !pos.closedAt ? { ...pos } : null;
   }
-  async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>) {
+  async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
     return fn(this);
   }
   async upsertPosition(
@@ -111,9 +111,16 @@ class ReproDb implements PerpDbPort {
   ) {
     const pos = this.positions.get(positionId);
     if (!pos || pos.closedAt) return;
-    this.positions.set(positionId, { ...pos, ...updates, lastUpdated: new Date() });
+    this.positions.set(positionId, {
+      ...pos,
+      ...updates,
+      lastUpdated: new Date(),
+    });
   }
-  async closePosition(positionId: string, updates: Partial<PerpPositionRecord>) {
+  async closePosition(
+    positionId: string,
+    updates: Partial<PerpPositionRecord>
+  ) {
     const pos = this.positions.get(positionId);
     if (!pos || pos.closedAt) return false;
     this.positions.set(positionId, {
@@ -139,10 +146,7 @@ class ReproDb implements PerpDbPort {
     this.markets.set(ticker, { ...current, openInterest, volume24h });
     return { openInterest, volume24h };
   }
-  async updateMarketStats(
-    ticker: string,
-    updates: Partial<PerpMarketRecord>
-  ) {
+  async updateMarketStats(ticker: string, updates: Partial<PerpMarketRecord>) {
     const current = this.markets.get(ticker)!;
     this.markets.set(ticker, { ...current, ...updates });
   }
@@ -224,9 +228,7 @@ describe('FEED flip close leg beyond margin (repro)', () => {
     // The wallet books the capped loss (close leg -10, minus the 0.2
     // open fee on the 200 inverse leg), so the stored value must agree
     // with it up to that open fee.
-    const flipPnl = wallet.pnls.find(
-      (p) => p.reason === 'perp_flip_position'
-    );
+    const flipPnl = wallet.pnls.find((p) => p.reason === 'perp_flip_position');
     expect(flipPnl?.pnl).toBeCloseTo(-closeMarginPaid - 0.2, 4);
   });
 });
