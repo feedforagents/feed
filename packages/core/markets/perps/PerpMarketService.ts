@@ -67,6 +67,7 @@ type FlipPositionTransactionResult = {
   liquidationPrice: number;
   marginPaid: number;
   feePaid: number;
+  exitPrice: number;
   realizedPnL: number;
   isRebalance: true;
   rebalanceType: 'flip';
@@ -260,7 +261,10 @@ export class PerpMarketService {
     leverage: number,
     tradeSize: number,
     basis?: { previousSize: number; previousEntryPrice: number }
-  ): Promise<{ entryPrice: number; liquidationPrice: number } | undefined> {
+  ): Promise<
+    | { entryPrice: number; liquidationPrice: number; fillPrice: number }
+    | undefined
+  > {
     if (!this.deps.priceImpact) return undefined;
 
     try {
@@ -321,10 +325,24 @@ export class PerpMarketService {
         leverage
       );
 
+      // Entry and current price are rewritten here, so the stored
+      // unrealized PnL must be recomputed against the adjusted entry at
+      // the post-impact price — otherwise the record keeps the PnL of the
+      // pre-impact quote pair until the next price update overwrites it.
+      const positionSize = basis ? basis.previousSize + tradeSize : tradeSize;
+      const { pnl, pnlPercent } = calculateUnrealizedPnL(
+        newEntryPrice,
+        postImpactPrice,
+        side,
+        positionSize
+      );
+
       await this.db.updateOpenPosition(positionId, {
         entryPrice: newEntryPrice,
         currentPrice: postImpactPrice ?? preImpactEntry,
         liquidationPrice: newLiquidationPrice,
+        unrealizedPnL: pnl,
+        unrealizedPnLPercent: pnlPercent,
       });
 
       logger.info(
@@ -350,6 +368,7 @@ export class PerpMarketService {
       return {
         entryPrice: newEntryPrice,
         liquidationPrice: newLiquidationPrice,
+        fillPrice: avgFillPrice,
       };
     } catch (error) {
       logger.error(
@@ -610,10 +629,18 @@ export class PerpMarketService {
       this.assertOpenPositionIntegrity(existingPosition);
       if (existingPosition.side === side) {
         // Same side → add to position (increase size, average entry price)
-        return this.addToPosition(existingPosition, input, market);
+        const added = await this.addToPosition(existingPosition, input, market);
+        await this.invalidateCaches(ticker);
+        return added;
       } else {
         // Opposite side → reduce, close, or flip position
-        return this.reduceOrFlipPosition(existingPosition, input, market);
+        const reduced = await this.reduceOrFlipPosition(
+          existingPosition,
+          input,
+          market
+        );
+        await this.invalidateCaches(ticker);
+        return reduced;
       }
     }
 
@@ -723,6 +750,7 @@ export class PerpMarketService {
       size,
       leverage,
       entryPrice,
+      fillPrice: entryPrice,
       liquidationPrice,
       marginPaid: marginRequired,
       feePaid: fee,
@@ -755,8 +783,11 @@ export class PerpMarketService {
     );
     if (impactAdj) {
       result.entryPrice = impactAdj.entryPrice;
+      result.fillPrice = impactAdj.fillPrice;
       result.liquidationPrice = impactAdj.liquidationPrice;
     }
+
+    await this.invalidateCaches(ticker);
 
     return result;
   }
@@ -861,6 +892,9 @@ export class PerpMarketService {
           size: remainingSize,
           fundingPaid: remainingFunding,
           currentPrice: exitPrice,
+          // Keep the row's realized PnL in step with what has been settled,
+          // so the final close and the position views report lifetime PnL.
+          realizedPnL: (position.realizedPnL ?? 0) + realizedPnL,
           unrealizedPnL: remainingPnl,
           unrealizedPnLPercent: remainingPnlPercent,
           lastUpdated: now,
@@ -960,6 +994,7 @@ export class PerpMarketService {
       leverage: settlement.position.leverage,
       entryPrice: settlement.position.entryPrice,
       exitPrice: settlement.exitPrice,
+      fillPrice: settlement.exitPrice,
       liquidationPrice: settlement.position.liquidationPrice,
       realizedPnL: settlement.realizedPnL,
       feePaid: settlement.fee,
@@ -989,6 +1024,8 @@ export class PerpMarketService {
     }).catch(() => {
       // Error already logged in emitTradeEvent; catch to prevent unhandled rejection
     });
+
+    await this.invalidateCaches(settlement.position.ticker);
 
     if (settlement.closeImpact) {
       logger.info(
@@ -1054,68 +1091,93 @@ export class PerpMarketService {
         null;
       if (newPrice === null || newPrice === undefined) continue;
 
-      // Update unrealized
-      const { pnl, pnlPercent } = calculateUnrealizedPnL(
-        position.entryPrice,
-        newPrice,
-        position.side,
-        position.size
-      );
-
       const market =
         marketByOrg.get(position.organizationId) ??
         marketByTicker.get(position.ticker);
 
       const now = this.deps.clock?.now() ?? new Date();
 
-      // Liquidation check — PRD §9.3: liquidation is on the mark price
-      // (index × (1 + bounded funding premium)), not the raw feed price,
-      // so a raw-price wick through the liquidation price does not
-      // force-close a position the mark never confirmed. This is the same
-      // mark the market-stats update below computes and stores.
+      // A user close can change the snapshot before the liquidation write.
+      // Reread under the row lock before settling its remaining margin.
+      let live = position;
+
+      // PRD §9.3: liquidation uses the mark price, not the raw feed price.
       const markPrice = market
         ? this.calculateMarkPrice(newPrice, market.fundingRate.rate)
         : newPrice;
       if (
         shouldLiquidate(markPrice, position.liquidationPrice, position.side)
       ) {
-        const marginLoss = position.size / position.leverage;
-
         try {
-          const closed = await this.db.closePosition(position.id, {
-            currentPrice: newPrice,
-            closedAt: now,
-            realizedPnL: -marginLoss,
-            unrealizedPnL: 0,
-            unrealizedPnLPercent: 0,
-          });
-          // Already closed concurrently (e.g. by the user): nothing to settle.
-          if (!closed) continue;
+          const outcome = await this.db.transaction(async (tx) => {
+            const current = await tx.lockOpenPositionById(position.id);
+            // Already closed concurrently (e.g. by the user): nothing to settle.
+            if (!current) return null;
+            if (
+              !shouldLiquidate(
+                markPrice,
+                current.liquidationPrice,
+                current.side
+              )
+            ) {
+              return { liquidated: false as const, current };
+            }
 
-          await this.deps.wallet.recordPnL({
-            userId: position.userId,
-            pnl: -marginLoss,
-            reason: 'perp_liquidation',
-            relatedId: position.id,
-          });
-
-          if (market) {
-            // OI decreases by notional (size), not leveraged exposure. Apply
-            // as a delta so multiple liquidations on one market accumulate.
-            await this.db.applyMarketDeltas(position.ticker, {
-              openInterest: -position.size,
+            // Remaining margin is what the liquidation takes: the current
+            // size, on top of whatever earlier partial closes already settled.
+            const marginLoss = current.size / current.leverage;
+            const closed = await tx.closePosition(current.id, {
+              currentPrice: newPrice,
+              closedAt: now,
+              realizedPnL: (current.realizedPnL ?? 0) - marginLoss,
+              unrealizedPnL: 0,
+              unrealizedPnLPercent: 0,
             });
+            if (!closed) return null;
+
+            if (market) {
+              // OI decreases by the remaining notional (size), not leveraged
+              // exposure. Apply as a delta so multiple liquidations on one
+              // market accumulate.
+              await tx.applyMarketDeltas(current.ticker, {
+                openInterest: -current.size,
+              });
+            }
+            return { liquidated: true as const, current, marginLoss };
+          });
+
+          if (outcome === null) continue;
+          if (outcome.liquidated) {
+            await this.deps.wallet.recordPnL({
+              userId: outcome.current.userId,
+              pnl: -outcome.marginLoss,
+              reason: 'perp_liquidation',
+              relatedId: outcome.current.id,
+            });
+            summary.liquidations++;
+            await this.invalidateCaches(outcome.current.ticker);
+            continue;
           }
-          summary.liquidations++;
+          // The locked row no longer liquidates at this mark; fall through
+          // and refresh its metrics from the current values instead.
+          live = outcome.current;
         } catch (err) {
           summary.errors.push({
             key: position.ticker,
             positionId: position.id,
             error: `Liquidation failed: ${err instanceof Error ? err.message : String(err)}`,
           });
+          continue;
         }
-        continue;
       }
+
+      // Update unrealized
+      const { pnl, pnlPercent } = calculateUnrealizedPnL(
+        live.entryPrice,
+        newPrice,
+        live.side,
+        live.size
+      );
 
       // Persist open position metrics
       try {
@@ -1228,18 +1290,20 @@ export class PerpMarketService {
 
     for (const market of markets) {
       const agg = positionsByTicker.get(market.ticker);
-      if (!agg) continue;
 
+      // Markets without open positions still get their funding terms
+      // refreshed (zero open interest yields the base rate), so the rate and
+      // nextFundingTime shown to users never go stale.
       const funding = calculateDynamicFundingRate({
-        longOpenInterest: agg.longOpenInterest,
-        shortOpenInterest: agg.shortOpenInterest,
+        longOpenInterest: agg?.longOpenInterest ?? 0,
+        shortOpenInterest: agg?.shortOpenInterest ?? 0,
         baseFundingRate: BASE_FUNDING_RATE,
         maxFundingRate: MAX_FUNDING_RATE,
         imbalanceExponent: IMBALANCE_EXPONENT,
       });
 
       const periodRate = funding.periodRate;
-      for (const pos of agg.positions) {
+      for (const pos of agg?.positions ?? []) {
         // A close may have settled funding since the snapshot. Recompute from
         // the locked row so settled funding is not restored or charged again.
         await this.db.transaction(async (tx) => {
@@ -1328,7 +1392,12 @@ export class PerpMarketService {
   }
 
   private calculateFee(notional: number): number {
-    const fee = notional * this.deps.fees.tradingFeeRate;
+    // FeeService records and splits the fee in integer cents (one
+    // canonical rounded fee), so charge that same cent-rounded amount:
+    // an unrounded charge would disagree with the fee ledger, the
+    // platform/referrer split and users.totalFeesPaid.
+    const fee =
+      Math.round(notional * this.deps.fees.tradingFeeRate * 100) / 100;
     return Math.max(fee, this.deps.fees.minFeeAmount);
   }
 
@@ -1372,6 +1441,27 @@ export class PerpMarketService {
         `Slippage exceeded: execution price ${fillPrice.toFixed(2)} deviates ` +
           `${(priceDeviation * 100).toFixed(2)}% from mark price ${referencePrice.toFixed(2)} ` +
           `(max allowed: ${(maxSlippage * 100).toFixed(2)}%)`
+      );
+    }
+  }
+
+  /**
+   * Invalidate the cached perp trades list for a ticker after a trade.
+   * Mirrors PredictionMarketService.invalidateCaches: the web perp
+   * trades route caches `perp-trades:<ticker>:<limit>:<offset>` for
+   * 30s, so without this the list keeps serving the pre-trade state
+   * until the TTL expires. Never throws — a cache failure must not
+   * fail a trade that has already settled.
+   */
+  private async invalidateCaches(ticker: string) {
+    if (!this.deps.cache) return;
+    try {
+      await this.deps.cache.invalidate(`perp:${ticker}:*`);
+    } catch (err) {
+      logger.warn(
+        'Perp trades cache invalidation failed',
+        { ticker, error: err instanceof Error ? err.message : String(err) },
+        'PerpMarketService'
       );
     }
   }
@@ -1620,6 +1710,8 @@ export class PerpMarketService {
       size: result.size,
       leverage: result.leverage,
       entryPrice: result.entryPrice,
+      // The added size filled at the open quote; entryPrice is the blend.
+      fillPrice: currentPrice,
       liquidationPrice: result.liquidationPrice,
       marginPaid: result.marginPaid,
       feePaid: result.feePaid,
@@ -1646,6 +1738,7 @@ export class PerpMarketService {
     );
     if (impactAdj) {
       finalResult.entryPrice = impactAdj.entryPrice;
+      finalResult.fillPrice = impactAdj.fillPrice;
       finalResult.liquidationPrice = impactAdj.liquidationPrice;
     }
 
@@ -1714,18 +1807,27 @@ export class PerpMarketService {
       // or a flip could open a dust position below the minimum.
       const inverseSize = tradeSize - existing.size;
       if (inverseSize < minOrderSize) {
-        throw new Error(`Order size below minimum (${minOrderSize})`);
+        throw new ValidationError(`Order size below minimum (${minOrderSize})`);
       }
       // Slippage protection for both legs against the fills the flip will
       // execute at, checked before any funds move (same as a fresh open).
       if (maxSlippage !== undefined && maxSlippage > 0) {
-        const closeFill = this.getCloseExecutionQuote(
+        const closeQuote = this.getCloseExecutionQuote(
           market,
           existing.side,
           existing.size
         ).executionPrice;
+        // The close leg executes at the AMM average exit fill (same as a
+        // standalone close), so check slippage against that fill.
+        const closeImpact = await this.previewCloseImpact({
+          ticker: market.ticker,
+          exitPrice: closeQuote,
+          currentSpotPrice: market.currentPrice,
+          side: existing.side,
+          closeSize: existing.size,
+        });
         this.assertWithinSlippage(
-          closeFill,
+          closeImpact?.avgExitPrice ?? closeQuote,
           market.markPrice ?? market.currentPrice,
           maxSlippage
         );
@@ -1785,7 +1887,18 @@ export class PerpMarketService {
               position.side,
               position.size
             );
-            const exitPrice = closeExecution.executionPrice;
+            // Settle the closing leg at the AMM average exit fill, exactly
+            // like a standalone close (closePosition), so a flip and a
+            // close + open round trip settle identically.
+            const closeImpact = await this.previewCloseImpact({
+              ticker: position.ticker,
+              exitPrice: closeExecution.executionPrice,
+              currentSpotPrice: market.currentPrice,
+              side: position.side,
+              closeSize: position.size,
+            });
+            const exitPrice =
+              closeImpact?.avgExitPrice ?? closeExecution.executionPrice;
 
             // === STEP 1: Close existing position (inline logic for atomicity) ===
 
@@ -1902,6 +2015,7 @@ export class PerpMarketService {
               liquidationPrice,
               marginPaid: marginRequired,
               feePaid: totalFees,
+              exitPrice,
               realizedPnL,
               isRebalance: true,
               rebalanceType: 'flip' as const,
@@ -1969,6 +2083,8 @@ export class PerpMarketService {
         size: flipResult.size,
         leverage: flipResult.leverage,
         entryPrice: flipResult.entryPrice,
+        fillPrice: flipResult.entryPrice,
+        exitPrice: flipResult.exitPrice,
         liquidationPrice: flipResult.liquidationPrice,
         marginPaid: flipResult.marginPaid,
         feePaid: flipResult.feePaid,
@@ -1991,6 +2107,7 @@ export class PerpMarketService {
       );
       if (impactAdj) {
         finalResult.entryPrice = impactAdj.entryPrice;
+        finalResult.fillPrice = impactAdj.fillPrice;
         finalResult.liquidationPrice = impactAdj.liquidationPrice;
       }
 
@@ -2158,11 +2275,33 @@ export class PerpMarketService {
     };
   }
 
-  private buildOppositeSidePreview(
+  /**
+   * Average exit fill for a close leg of `closeSize`: the constant-product
+   * impact fill when a price impact port is configured, otherwise the quote.
+   * Mirrors the settlement in closePosition and in the flip leg of
+   * reduceOrFlipPosition, so the preview and the execution agree.
+   */
+  private async resolveCloseExitPrice(
+    market: PerpMarketRecord,
+    existing: PerpPositionRecord,
+    closeSize: number,
+    closeExecution: ReturnType<PerpMarketService['getCloseExecutionQuote']>
+  ): Promise<number> {
+    const closeImpact = await this.previewCloseImpact({
+      ticker: market.ticker,
+      exitPrice: closeExecution.executionPrice,
+      currentSpotPrice: market.currentPrice,
+      side: existing.side,
+      closeSize,
+    });
+    return closeImpact?.avgExitPrice ?? closeExecution.executionPrice;
+  }
+
+  private async buildOppositeSidePreview(
     market: PerpMarketRecord,
     existing: PerpPositionRecord,
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
-  ): PerpOpenExecutionPreview {
+  ): Promise<PerpOpenExecutionPreview> {
     const currentPrice =
       Number.isFinite(market.currentPrice) && market.currentPrice > 0
         ? market.currentPrice
@@ -2174,12 +2313,19 @@ export class PerpMarketService {
         existing.side,
         input.size
       );
+      const closeExitPrice = await this.resolveCloseExitPrice(
+        market,
+        existing,
+        input.size,
+        closeExecution
+      );
       return this.buildReduceOrClosePreview({
         market,
         existing,
         input,
         closeSize: input.size,
         closeExecution,
+        closeExitPrice,
         rebalanceType: 'reduce',
         resultingSize: existing.size - input.size,
         currentPrice,
@@ -2192,12 +2338,19 @@ export class PerpMarketService {
         existing.side,
         existing.size
       );
+      const closeExitPrice = await this.resolveCloseExitPrice(
+        market,
+        existing,
+        existing.size,
+        closeExecution
+      );
       return this.buildReduceOrClosePreview({
         market,
         existing,
         input,
         closeSize: existing.size,
         closeExecution,
+        closeExitPrice,
         rebalanceType: 'close',
         resultingSize: 0,
         currentPrice,
@@ -2209,7 +2362,21 @@ export class PerpMarketService {
       existing.side,
       existing.size
     );
+    // The close leg settles at the AMM average exit fill (same as a
+    // standalone close), so price the preview settlement at that fill —
+    // not at the raw-quote close price — or totalRequired disagrees
+    // with the debit the flip actually takes.
+    const closeExitPrice = await this.resolveCloseExitPrice(
+      market,
+      existing,
+      existing.size,
+      closeExecution
+    );
     const inverseSize = input.size - existing.size;
+    const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
+    if (inverseSize < minOrderSize) {
+      throw new ValidationError(`Order size below minimum (${minOrderSize})`);
+    }
     const effectiveLeverage = Math.min(
       input.leverage,
       effectiveMaxLeverage(market)
@@ -2233,7 +2400,7 @@ export class PerpMarketService {
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
     const { pnl: closePnl } = calculateUnrealizedPnL(
       existing.entryPrice,
-      closeExecution.executionPrice,
+      closeExitPrice,
       existing.side,
       existing.size
     );
@@ -2282,7 +2449,7 @@ export class PerpMarketService {
       totalRequired: Math.max(0, openCost - estimatedCloseSettlement),
       resultingSize: inverseSize,
       resultingSide: input.side,
-      estimatedClosePrice: closeExecution.executionPrice,
+      estimatedClosePrice: closeExitPrice,
       estimatedCloseSettlement,
       liquidationPrice,
       liquidationDistancePercent,
@@ -2295,6 +2462,7 @@ export class PerpMarketService {
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>;
     closeSize: number;
     closeExecution: ReturnType<PerpMarketService['getCloseExecutionQuote']>;
+    closeExitPrice: number;
     rebalanceType: 'reduce' | 'close';
     resultingSize: number;
     currentPrice: number;
@@ -2305,13 +2473,14 @@ export class PerpMarketService {
       input,
       closeSize,
       closeExecution,
+      closeExitPrice,
       rebalanceType,
       resultingSize,
       currentPrice,
     } = params;
     const { pnl: closePnl } = calculateUnrealizedPnL(
       existing.entryPrice,
-      closeExecution.executionPrice,
+      closeExitPrice,
       existing.side,
       closeSize
     );
@@ -2328,11 +2497,10 @@ export class PerpMarketService {
         : closeExecution.askPrice;
     const quoteImpactPrice = Math.max(
       0,
-      Math.abs(closeExecution.executionPrice - quotedPrice)
+      Math.abs(closeExitPrice - quotedPrice)
     );
     const totalSlippageBps =
-      (Math.abs(closeExecution.executionPrice - currentPrice) /
-        Math.max(currentPrice, 1)) *
+      (Math.abs(closeExitPrice - currentPrice) / Math.max(currentPrice, 1)) *
       10_000;
     const quoteImpactBps =
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
@@ -2361,7 +2529,7 @@ export class PerpMarketService {
       markPrice: market.markPrice,
       indexPrice: market.indexPrice,
       quotedPrice,
-      executionPrice: closeExecution.executionPrice,
+      executionPrice: closeExitPrice,
       quoteImpactPrice,
       quoteImpactBps,
       totalSlippageBps,
@@ -2376,7 +2544,7 @@ export class PerpMarketService {
       totalRequired: 0,
       resultingSize,
       resultingSide: resultingSize > 0 ? existing.side : null,
-      estimatedClosePrice: closeExecution.executionPrice,
+      estimatedClosePrice: closeExitPrice,
       estimatedCloseSettlement,
       liquidationPrice,
       liquidationDistancePercent,
