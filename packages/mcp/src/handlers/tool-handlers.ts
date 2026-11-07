@@ -2199,28 +2199,49 @@ export async function executeLeaveChat(
   agent: AuthenticatedAgent,
   args: LeaveChatArgs
 ): Promise<LeaveChatResult> {
-  // Mark chat participant as inactive
-  await db.chatParticipant.updateMany({
-    where: {
-      chatId: args.chatId,
-      userId: agent.userId,
-    },
-    data: { isActive: false },
-  });
-
-  // Find the chat to get its groupId
+  // Find the chat first so a rejected owner leave does not deactivate
+  // the participant. Same rule as DELETE /api/chats/[id]/participants/me.
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
     select: { groupId: true },
   });
 
-  // Also update GroupMember if there's an associated group
-  if (chat?.groupId) {
-    await db.groupMember.updateMany({
-      where: {
-        groupId: chat.groupId,
-        userId: agent.userId,
-      },
+  // A missing chat, or a chat the caller never joined, has no participant
+  // row. Refuse that before the owner guard so the tool does not report
+  // success after updating zero rows.
+  const participant = await db.chatParticipant.findFirst({
+    where: { chatId: args.chatId, userId: agent.userId },
+  });
+  if (!participant) {
+    throw new Error('You are not a member of this chat.');
+  }
+
+  const membership = chat?.groupId
+    ? await db.groupMember.findFirst({
+        where: {
+          groupId: chat.groupId,
+          userId: agent.userId,
+          isActive: true,
+        },
+      })
+    : null;
+  if (membership?.role === 'owner') {
+    throw new Error(
+      'Group owners cannot leave. Transfer ownership or delete the group.'
+    );
+  }
+
+  // Deactivate the participant row just validated.
+  await db.chatParticipant.update({
+    where: { id: participant.id },
+    data: { isActive: false },
+  });
+
+  // Write the same active membership the owner guard checked, by its id.
+  // An already-inactive row, including an inactive owner, is left alone.
+  if (membership) {
+    await db.groupMember.update({
+      where: { id: membership.id },
       data: {
         isActive: false,
         kickedAt: new Date(),
