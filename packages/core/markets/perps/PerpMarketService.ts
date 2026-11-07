@@ -924,14 +924,45 @@ export class PerpMarketService {
       });
     }
 
-    await this.deps.wallet.recordPnL({
-      userId: input.userId,
-      pnl: settlement.netSettlement - settlement.marginPaid,
-      reason: settlement.isFullClose ? 'perp_close' : 'perp_partial_close',
-      relatedId: settlement.position.id,
-    });
+    // The close already settled above (position closed, credit applied), so
+    // a failure in the auxiliary PnL record must not report the committed
+    // close as failed: the entry is lost either way, but the trade result
+    // is true. Log it for observability instead.
+    try {
+      await this.deps.wallet.recordPnL({
+        userId: input.userId,
+        pnl: settlement.netSettlement - settlement.marginPaid,
+        reason: settlement.isFullClose ? 'perp_close' : 'perp_partial_close',
+        relatedId: settlement.position.id,
+      });
+    } catch (error) {
+      logger.warn(
+        'Post-close PnL record failed; close already settled',
+        {
+          userId: input.userId,
+          positionId: settlement.position.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'PerpService'
+      );
+    }
 
-    const balanceResult = await this.deps.wallet.getBalance(input.userId);
+    // The balance read is informational only: the close already settled, so
+    // a transient read failure omits the balance instead of failing the trade.
+    let balanceResult: { balance: number } | undefined;
+    try {
+      balanceResult = await this.deps.wallet.getBalance(input.userId);
+    } catch (error) {
+      logger.warn(
+        'Post-close balance read failed; returning result without balance',
+        {
+          userId: input.userId,
+          positionId: settlement.position.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'PerpService'
+      );
+    }
 
     // Fee bookkeeping: retries + optional outbox (see processFeeWithRetry).
     void this.processFeeWithRetry(
@@ -988,7 +1019,7 @@ export class PerpMarketService {
       realizedPnL: settlement.realizedPnL,
       feePaid: settlement.fee,
       marginPaid: settlement.marginPaid,
-      balance: balanceResult.balance,
+      balance: balanceResult?.balance,
       remainingSize: settlement.isFullClose ? 0 : settlement.remainingSize,
       fullyClosed: settlement.isFullClose,
     };
@@ -1647,8 +1678,23 @@ export class PerpMarketService {
       // Error already logged in processFeeWithRetry; catch to prevent unhandled rejection
     });
 
-    // Get balance after transaction commits
-    const balance = (await this.deps.wallet.getBalance(input.userId)).balance;
+    // Get balance after transaction commits. A transient read failure must
+    // not report the committed add as failed (a retry would debit again),
+    // so the balance is omitted instead.
+    let balance: number | undefined;
+    try {
+      balance = (await this.deps.wallet.getBalance(input.userId)).balance;
+    } catch (error) {
+      logger.warn(
+        'Post-add balance read failed; returning result without balance',
+        {
+          userId: input.userId,
+          positionId: result.positionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'PerpService'
+      );
+    }
 
     // Broadcast trade event outside transaction (SSE should not hold DB locks)
     void this.emitTradeEvent({
@@ -1987,8 +2033,23 @@ export class PerpMarketService {
         // Errors logged inside processFeeWithRetry; avoid unhandled rejection
       });
 
-      // Get balance after transaction commits
-      const balance = (await this.deps.wallet.getBalance(input.userId)).balance;
+      // Get balance after transaction commits. A transient read failure must
+      // not report the committed flip as failed (a retry would re-flip),
+      // so the balance is omitted instead.
+      let balance: number | undefined;
+      try {
+        balance = (await this.deps.wallet.getBalance(input.userId)).balance;
+      } catch (error) {
+        logger.warn(
+          'Post-flip balance read failed; returning result without balance',
+          {
+            userId: input.userId,
+            positionId: flipResult.positionId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'PerpService'
+        );
+      }
 
       // Broadcast flip event outside transaction (SSE should not hold DB locks)
       void this.emitTradeEvent({
