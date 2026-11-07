@@ -103,6 +103,7 @@ import {
   db,
   eq,
   follows,
+  hasBlocked,
   userActorFollows,
   users,
   withTransaction,
@@ -175,6 +176,17 @@ export const POST = withErrorHandling(
     // Also check if targetActor exists (could be actor ID that doesn't match a user)
     if (targetUser && !targetUser.isActor) {
       // Target is a regular user - use Follow model
+      // A block removes follow relationships in both directions (see the
+      // block route), so neither side may recreate the edge while a block
+      // stands — the same rule the comment and share POSTs enforce.
+      const [targetBlockedMe, iBlockedTarget] = await Promise.all([
+        hasBlocked(targetId, user.userId),
+        hasBlocked(user.userId, targetId),
+      ]);
+      if (targetBlockedMe || iBlockedTarget) {
+        throw new BusinessLogicError('Cannot follow this user', 'BLOCKED_USER');
+      }
+
       // Check if already following and create follow inside transaction
       const newFollow = await withTransaction(async (tx) => {
         const [existingFollow] = await tx
