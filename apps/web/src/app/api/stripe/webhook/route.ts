@@ -727,7 +727,8 @@ async function handleDisputeClosed(
     originalPurchase.userId,
     dispute.id,
     amountUSD,
-    eventId
+    eventId,
+    paymentIntentId
   );
 
   if (result.success && result.alreadyProcessed) {
