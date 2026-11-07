@@ -885,6 +885,9 @@ export class PerpMarketService {
           size: remainingSize,
           fundingPaid: remainingFunding,
           currentPrice: exitPrice,
+          // Keep the row's realized PnL in step with what has been settled,
+          // so the final close and the position views report lifetime PnL.
+          realizedPnL: (position.realizedPnL ?? 0) + realizedPnL,
           unrealizedPnL: remainingPnl,
           unrealizedPnLPercent: remainingPnlPercent,
           lastUpdated: now,
@@ -1080,69 +1083,93 @@ export class PerpMarketService {
         null;
       if (newPrice === null || newPrice === undefined) continue;
 
-      // Update unrealized
-      const { pnl, pnlPercent } = calculateUnrealizedPnL(
-        position.entryPrice,
-        newPrice,
-        position.side,
-        position.size
-      );
-
       const market =
         marketByOrg.get(position.organizationId) ??
         marketByTicker.get(position.ticker);
 
       const now = this.deps.clock?.now() ?? new Date();
 
-      // Liquidation check — PRD §9.3: liquidation is on the mark price
-      // (index × (1 + bounded funding premium)), not the raw feed price,
-      // so a raw-price wick through the liquidation price does not
-      // force-close a position the mark never confirmed. This is the same
-      // mark the market-stats update below computes and stores.
+      // A user close can change the snapshot before the liquidation write.
+      // Reread under the row lock before settling its remaining margin.
+      let live = position;
+
+      // PRD §9.3: liquidation uses the mark price, not the raw feed price.
       const markPrice = market
         ? this.calculateMarkPrice(newPrice, market.fundingRate.rate)
         : newPrice;
       if (
         shouldLiquidate(markPrice, position.liquidationPrice, position.side)
       ) {
-        const marginLoss = position.size / position.leverage;
-
         try {
-          const closed = await this.db.closePosition(position.id, {
-            currentPrice: newPrice,
-            closedAt: now,
-            realizedPnL: -marginLoss,
-            unrealizedPnL: 0,
-            unrealizedPnLPercent: 0,
-          });
-          // Already closed concurrently (e.g. by the user): nothing to settle.
-          if (!closed) continue;
+          const outcome = await this.db.transaction(async (tx) => {
+            const current = await tx.lockOpenPositionById(position.id);
+            // Already closed concurrently (e.g. by the user): nothing to settle.
+            if (!current) return null;
+            if (
+              !shouldLiquidate(
+                markPrice,
+                current.liquidationPrice,
+                current.side
+              )
+            ) {
+              return { liquidated: false as const, current };
+            }
 
-          await this.deps.wallet.recordPnL({
-            userId: position.userId,
-            pnl: -marginLoss,
-            reason: 'perp_liquidation',
-            relatedId: position.id,
-          });
-
-          if (market) {
-            // OI decreases by notional (size), not leveraged exposure. Apply
-            // as a delta so multiple liquidations on one market accumulate.
-            await this.db.applyMarketDeltas(position.ticker, {
-              openInterest: -position.size,
+            // Remaining margin is what the liquidation takes: the current
+            // size, on top of whatever earlier partial closes already settled.
+            const marginLoss = current.size / current.leverage;
+            const closed = await tx.closePosition(current.id, {
+              currentPrice: newPrice,
+              closedAt: now,
+              realizedPnL: (current.realizedPnL ?? 0) - marginLoss,
+              unrealizedPnL: 0,
+              unrealizedPnLPercent: 0,
             });
+            if (!closed) return null;
+
+            if (market) {
+              // OI decreases by the remaining notional (size), not leveraged
+              // exposure. Apply as a delta so multiple liquidations on one
+              // market accumulate.
+              await tx.applyMarketDeltas(current.ticker, {
+                openInterest: -current.size,
+              });
+            }
+            return { liquidated: true as const, current, marginLoss };
+          });
+
+          if (outcome === null) continue;
+          if (outcome.liquidated) {
+            await this.deps.wallet.recordPnL({
+              userId: outcome.current.userId,
+              pnl: -outcome.marginLoss,
+              reason: 'perp_liquidation',
+              relatedId: outcome.current.id,
+            });
+            summary.liquidations++;
+            await this.invalidateCaches(outcome.current.ticker);
+            continue;
           }
-          summary.liquidations++;
-          await this.invalidateCaches(position.ticker);
+          // The locked row no longer liquidates at this mark; fall through
+          // and refresh its metrics from the current values instead.
+          live = outcome.current;
         } catch (err) {
           summary.errors.push({
             key: position.ticker,
             positionId: position.id,
             error: `Liquidation failed: ${err instanceof Error ? err.message : String(err)}`,
           });
+          continue;
         }
-        continue;
       }
+
+      // Update unrealized
+      const { pnl, pnlPercent } = calculateUnrealizedPnL(
+        live.entryPrice,
+        newPrice,
+        live.side,
+        live.size
+      );
 
       // Persist open position metrics
       try {
