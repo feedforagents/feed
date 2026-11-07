@@ -530,7 +530,7 @@ export class PerpMarketService {
     if (input.leverage > maxLeverage) {
       throw new Error(`Invalid leverage (1-${maxLeverage})`);
     }
-    return this.buildOpenExecutionPreview(market, input);
+    return await this.buildOpenExecutionPreview(market, input);
   }
 
   async previewOrder(
@@ -557,16 +557,16 @@ export class PerpMarketService {
     );
 
     if (!existingPosition) {
-      return this.buildOpenExecutionPreview(market, input);
+      return await this.buildOpenExecutionPreview(market, input);
     }
 
     this.assertOpenPositionIntegrity(existingPosition);
 
     if (existingPosition.side === input.side) {
-      return this.buildAddPreview(market, existingPosition, input);
+      return await this.buildAddPreview(market, existingPosition, input);
     }
 
-    return this.buildOppositeSidePreview(market, existingPosition, input);
+    return await this.buildOppositeSidePreview(market, existingPosition, input);
   }
 
   /**
@@ -1389,6 +1389,75 @@ export class PerpMarketService {
   }
 
   /**
+   * Fill a preview should quote for an open leg: the constant-product AMM
+   * average fill when a price-impact port is configured — the fill
+   * execution actually settles at via applyPostTradeImpact — otherwise the
+   * synthetic quote. A port failure falls back to the synthetic quote so a
+   * broken port degrades the preview instead of failing it outright.
+   */
+  private async resolvePreviewOpenFill(
+    market: PerpMarketRecord,
+    side: PerpSide,
+    size: number,
+    quotePrice: number,
+    precedingTradeSize = 0
+  ): Promise<number> {
+    try {
+      return await this.expectedOpenFill(
+        market,
+        side,
+        size,
+        quotePrice,
+        precedingTradeSize
+      );
+    } catch (error) {
+      logger.warn(
+        'Preview AMM fill unavailable; falling back to synthetic quote',
+        {
+          ticker: market.ticker,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'PerpService'
+      );
+      return quotePrice;
+    }
+  }
+
+  /**
+   * Exit a preview should quote for a close leg: the constant-product AMM
+   * average exit fill when a price-impact port is configured — the fill
+   * closePosition actually settles at via previewCloseImpact — otherwise
+   * the synthetic quote. Falls back the same way as the open leg.
+   */
+  private async resolvePreviewCloseFill(params: {
+    market: PerpMarketRecord;
+    exitPrice: number;
+    side: PerpSide;
+    closeSize: number;
+  }): Promise<number> {
+    try {
+      const impact = await this.previewCloseImpact({
+        ticker: params.market.ticker,
+        exitPrice: params.exitPrice,
+        currentSpotPrice: params.market.currentPrice,
+        side: params.side,
+        closeSize: params.closeSize,
+      });
+      return impact?.avgExitPrice ?? params.exitPrice;
+    } catch (error) {
+      logger.warn(
+        'Preview AMM exit fill unavailable; falling back to synthetic quote',
+        {
+          ticker: params.market.ticker,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'PerpService'
+      );
+      return params.exitPrice;
+    }
+  }
+
+  /**
    * Reject when the execution fill deviates from the reference price by more
    * than the requested tolerance (0 or undefined disables the check).
    */
@@ -2063,14 +2132,24 @@ export class PerpMarketService {
     return market;
   }
 
-  private buildOpenExecutionPreview(
+  private async buildOpenExecutionPreview(
     market: PerpMarketRecord,
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
-  ): PerpOpenExecutionPreview {
+  ): Promise<PerpOpenExecutionPreview> {
     const execution = this.getOpenExecutionQuote(
       market,
       input.side,
       input.size
+    );
+    // Quote the fill execution actually settles at: the AMM average fill
+    // when a price-impact port is configured, otherwise the synthetic
+    // quote. Quoting the synthetic price here understates the entry (and
+    // the liquidation price derived from it) once the impact cap binds.
+    const executionPrice = await this.resolvePreviewOpenFill(
+      market,
+      input.side,
+      input.size,
+      execution.executionPrice
     );
     const currentPrice =
       Number.isFinite(market.currentPrice) && market.currentPrice > 0
@@ -2080,16 +2159,15 @@ export class PerpMarketService {
       input.side === 'long' ? execution.askPrice : execution.bidPrice;
     const quoteImpactPrice = Math.max(
       0,
-      Math.abs(execution.executionPrice - quotedPrice)
+      Math.abs(executionPrice - quotedPrice)
     );
     const totalSlippageBps =
-      (Math.abs(execution.executionPrice - currentPrice) /
-        Math.max(currentPrice, 1)) *
+      (Math.abs(executionPrice - currentPrice) / Math.max(currentPrice, 1)) *
       10_000;
     const quoteImpactBps =
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
     const liquidationPrice = calculateLiquidationPrice(
-      execution.executionPrice,
+      executionPrice,
       input.side,
       input.leverage
     );
@@ -2111,7 +2189,7 @@ export class PerpMarketService {
       markPrice: market.markPrice,
       indexPrice: market.indexPrice,
       quotedPrice,
-      executionPrice: execution.executionPrice,
+      executionPrice,
       quoteImpactPrice,
       quoteImpactBps,
       totalSlippageBps,
@@ -2129,17 +2207,25 @@ export class PerpMarketService {
     };
   }
 
-  private buildAddPreview(
+  private async buildAddPreview(
     market: PerpMarketRecord,
     existing: PerpPositionRecord,
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
-  ): PerpOpenExecutionPreview {
+  ): Promise<PerpOpenExecutionPreview> {
     const addedSize = input.size;
     const effectiveLeverage = existing.leverage;
     const execution = this.getOpenExecutionQuote(
       market,
       existing.side,
       addedSize
+    );
+    // Same AMM-fill quoting as the open preview: execution blends this
+    // fill with the existing basis via applyPostTradeImpact.
+    const executionPrice = await this.resolvePreviewOpenFill(
+      market,
+      existing.side,
+      addedSize,
+      execution.executionPrice
     );
     const currentPrice =
       Number.isFinite(market.currentPrice) && market.currentPrice > 0
@@ -2149,18 +2235,16 @@ export class PerpMarketService {
       existing.side === 'long' ? execution.askPrice : execution.bidPrice;
     const quoteImpactPrice = Math.max(
       0,
-      Math.abs(execution.executionPrice - quotedPrice)
+      Math.abs(executionPrice - quotedPrice)
     );
     const totalSlippageBps =
-      (Math.abs(execution.executionPrice - currentPrice) /
-        Math.max(currentPrice, 1)) *
+      (Math.abs(executionPrice - currentPrice) / Math.max(currentPrice, 1)) *
       10_000;
     const quoteImpactBps =
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
     const resultingSize = existing.size + addedSize;
     const averagedEntryPrice =
-      (existing.size * existing.entryPrice +
-        addedSize * execution.executionPrice) /
+      (existing.size * existing.entryPrice + addedSize * executionPrice) /
       resultingSize;
     const liquidationPrice = calculateLiquidationPrice(
       averagedEntryPrice,
@@ -2186,7 +2270,7 @@ export class PerpMarketService {
       markPrice: market.markPrice,
       indexPrice: market.indexPrice,
       quotedPrice,
-      executionPrice: execution.executionPrice,
+      executionPrice,
       quoteImpactPrice,
       quoteImpactBps,
       totalSlippageBps,
@@ -2206,11 +2290,11 @@ export class PerpMarketService {
     };
   }
 
-  private buildOppositeSidePreview(
+  private async buildOppositeSidePreview(
     market: PerpMarketRecord,
     existing: PerpPositionRecord,
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
-  ): PerpOpenExecutionPreview {
+  ): Promise<PerpOpenExecutionPreview> {
     const currentPrice =
       Number.isFinite(market.currentPrice) && market.currentPrice > 0
         ? market.currentPrice
@@ -2222,7 +2306,7 @@ export class PerpMarketService {
         existing.side,
         input.size
       );
-      return this.buildReduceOrClosePreview({
+      return await this.buildReduceOrClosePreview({
         market,
         existing,
         input,
@@ -2240,7 +2324,7 @@ export class PerpMarketService {
         existing.side,
         existing.size
       );
-      return this.buildReduceOrClosePreview({
+      return await this.buildReduceOrClosePreview({
         market,
         existing,
         input,
@@ -2267,14 +2351,25 @@ export class PerpMarketService {
       input.side,
       inverseSize
     );
+    // The inverse leg settles at the AMM fill (applyPostTradeImpact prices
+    // it after the close leg clears the old holdings — same
+    // preceding-trade accounting as the flip slippage check). The close
+    // leg itself settles at the synthetic quote, so it stays as quoted.
+    const openExecutionPrice = await this.resolvePreviewOpenFill(
+      market,
+      input.side,
+      inverseSize,
+      openExecution.executionPrice,
+      existing.side === 'long' ? -existing.size : existing.size
+    );
     const quotedPrice =
       input.side === 'long' ? openExecution.askPrice : openExecution.bidPrice;
     const quoteImpactPrice = Math.max(
       0,
-      Math.abs(openExecution.executionPrice - quotedPrice)
+      Math.abs(openExecutionPrice - quotedPrice)
     );
     const totalSlippageBps =
-      (Math.abs(openExecution.executionPrice - currentPrice) /
+      (Math.abs(openExecutionPrice - currentPrice) /
         Math.max(currentPrice, 1)) *
       10_000;
     const quoteImpactBps =
@@ -2294,7 +2389,7 @@ export class PerpMarketService {
     const openFee = this.calculateFee(inverseSize);
     const openCost = marginRequired + openFee;
     const liquidationPrice = calculateLiquidationPrice(
-      openExecution.executionPrice,
+      openExecutionPrice,
       input.side,
       effectiveLeverage
     );
@@ -2315,7 +2410,7 @@ export class PerpMarketService {
       markPrice: market.markPrice,
       indexPrice: market.indexPrice,
       quotedPrice,
-      executionPrice: openExecution.executionPrice,
+      executionPrice: openExecutionPrice,
       quoteImpactPrice,
       quoteImpactBps,
       totalSlippageBps,
@@ -2337,7 +2432,7 @@ export class PerpMarketService {
     };
   }
 
-  private buildReduceOrClosePreview(params: {
+  private async buildReduceOrClosePreview(params: {
     market: PerpMarketRecord;
     existing: PerpPositionRecord;
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>;
@@ -2346,7 +2441,7 @@ export class PerpMarketService {
     rebalanceType: 'reduce' | 'close';
     resultingSize: number;
     currentPrice: number;
-  }): PerpOpenExecutionPreview {
+  }): Promise<PerpOpenExecutionPreview> {
     const {
       market,
       existing,
@@ -2357,9 +2452,18 @@ export class PerpMarketService {
       resultingSize,
       currentPrice,
     } = params;
+    // The close settles at the AMM average exit fill when a price-impact
+    // port is configured (closePosition's previewCloseImpact), not at the
+    // synthetic quote.
+    const exitPrice = await this.resolvePreviewCloseFill({
+      market,
+      exitPrice: closeExecution.executionPrice,
+      side: existing.side,
+      closeSize,
+    });
     const { pnl: closePnl } = calculateUnrealizedPnL(
       existing.entryPrice,
-      closeExecution.executionPrice,
+      exitPrice,
       existing.side,
       closeSize
     );
@@ -2374,14 +2478,9 @@ export class PerpMarketService {
       existing.side === 'long'
         ? closeExecution.bidPrice
         : closeExecution.askPrice;
-    const quoteImpactPrice = Math.max(
-      0,
-      Math.abs(closeExecution.executionPrice - quotedPrice)
-    );
+    const quoteImpactPrice = Math.max(0, Math.abs(exitPrice - quotedPrice));
     const totalSlippageBps =
-      (Math.abs(closeExecution.executionPrice - currentPrice) /
-        Math.max(currentPrice, 1)) *
-      10_000;
+      (Math.abs(exitPrice - currentPrice) / Math.max(currentPrice, 1)) * 10_000;
     const quoteImpactBps =
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
     const liquidationPrice =
@@ -2409,7 +2508,7 @@ export class PerpMarketService {
       markPrice: market.markPrice,
       indexPrice: market.indexPrice,
       quotedPrice,
-      executionPrice: closeExecution.executionPrice,
+      executionPrice: exitPrice,
       quoteImpactPrice,
       quoteImpactBps,
       totalSlippageBps,
@@ -2424,7 +2523,7 @@ export class PerpMarketService {
       totalRequired: 0,
       resultingSize,
       resultingSide: resultingSize > 0 ? existing.side : null,
-      estimatedClosePrice: closeExecution.executionPrice,
+      estimatedClosePrice: exitPrice,
       estimatedCloseSettlement,
       liquidationPrice,
       liquidationDistancePercent,
