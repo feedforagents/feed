@@ -102,9 +102,6 @@ type TrainingStatus = z.infer<typeof TrainingStatusSchema>;
 const ActionResultSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
-  benchmark: z
-    .object({ benchmarkScore: z.number().nullable().optional() })
-    .optional(),
 });
 type ActionResult = z.infer<typeof ActionResultSchema>;
 
@@ -241,39 +238,6 @@ export default function RLTrainingDashboard() {
       finishAction(
         `❌ ${err instanceof Error ? err.message : 'Failed to trigger training'}`,
         5000
-      );
-    } finally {
-      setActionPending(false);
-    }
-  };
-
-  // Benchmark a model
-  const benchmarkModel = async (modelId: string) => {
-    if (actionPending) return;
-    setActionPending(true);
-    if (statusTimer.current) clearTimeout(statusTimer.current);
-    setActionStatus(`Benchmarking ${modelId}...`);
-    try {
-      const data = await postAction('/api/admin/training/benchmark', {
-        modelId,
-        compare: true,
-      });
-      if (data.success === true) {
-        const score = data.benchmark?.benchmarkScore;
-        finishAction(
-          typeof score === 'number'
-            ? `✅ Benchmark complete! Score: ${score.toFixed(3)}`
-            : '✅ Benchmark complete!',
-          8000
-        );
-        scheduleRefetch();
-      } else {
-        finishAction(`❌ ${data.error ?? 'Benchmarking failed'}`, 8000);
-      }
-    } catch (err) {
-      finishAction(
-        `❌ ${err instanceof Error ? err.message : 'Benchmarking failed'}`,
-        8000
       );
     } finally {
       setActionPending(false);
@@ -462,18 +426,6 @@ export default function RLTrainingDashboard() {
                             </>
                           )}
                         </div>
-                      </div>
-                      <div className="flex gap-2">
-                        {model.benchmarkScore === null && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={actionPending}
-                            onClick={() => void benchmarkModel(model.modelId)}
-                          >
-                            Benchmark
-                          </Button>
-                        )}
                       </div>
                     </div>
                   ))}
@@ -782,42 +734,6 @@ export default function RLTrainingDashboard() {
                   <RefreshCw className="mr-2 h-4 w-4" />
                   Refresh All Data
                 </Button>
-              </div>
-
-              <div className="rounded-lg border p-4">
-                <h3 className="mb-2 font-semibold">Benchmark Models</h3>
-                <p className="mb-4 text-muted-foreground text-sm">
-                  Benchmark models that haven't been tested yet.
-                </p>
-                <div className="space-y-2">
-                  {models
-                    .filter(
-                      (m) => m.benchmarkScore === null && m.status === 'ready'
-                    )
-                    .map((model) => (
-                      <div
-                        key={model.modelId}
-                        className="flex items-center justify-between"
-                      >
-                        <span className="text-sm">{model.modelId}</span>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={actionPending}
-                          onClick={() => void benchmarkModel(model.modelId)}
-                        >
-                          Benchmark
-                        </Button>
-                      </div>
-                    ))}
-                  {models.filter(
-                    (m) => m.benchmarkScore === null && m.status === 'ready'
-                  ).length === 0 && (
-                    <div className="text-muted-foreground text-sm">
-                      No models need benchmarking
-                    </div>
-                  )}
-                </div>
               </div>
             </CardContent>
           </Card>

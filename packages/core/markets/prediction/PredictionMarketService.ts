@@ -1,4 +1,10 @@
-import { BadRequestError, NotFoundError } from '@feed/shared';
+import {
+  BadRequestError,
+  floorPoints,
+  isPointsAmount,
+  NotFoundError,
+} from '@feed/shared';
+import Decimal from 'decimal.js-light';
 import { PredictionPricing } from './pricing';
 import type {
   PredictionBuyInput,
@@ -42,6 +48,27 @@ function grossUpBuyAmount(netAmount: number, feeRate: number): number {
   const divisor = 1 - feeRate;
   if (divisor <= 0) return netAmount;
   return netAmount / divisor;
+}
+
+// Historical rows cannot recover the original fee configuration; retain the old
+// estimate until a new trade records the remaining gross cash cost explicitly.
+function cashCostBasis(
+  position: PredictionPositionRecord,
+  feeRate: number
+): number {
+  return (
+    position.cashCostBasis ??
+    new Decimal(grossUpBuyAmount(position.avgPrice * position.shares, feeRate))
+      .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+      .toNumber()
+  );
+}
+
+function pointsDifference(a: number, b: number): number {
+  return new Decimal(a)
+    .minus(b)
+    .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+    .toNumber();
 }
 
 export class PredictionMarketService {
@@ -133,6 +160,11 @@ export class PredictionMarketService {
         `Trade amount must be at least ${MIN_TRADE_AMOUNT}`
       );
     }
+    if (!isPointsAmount(amount)) {
+      throw new BadRequestError(
+        'Trade amount must have at most 2 decimal places'
+      );
+    }
     const market = await this.ensureMarket(marketId);
 
     this.assertMarketActiveForBuy(market);
@@ -197,6 +229,11 @@ export class PredictionMarketService {
         ? {
             ...existingPos,
             shares: existingPos.shares + calc.sharesBought,
+            cashCostBasis: new Decimal(
+              cashCostBasis(existingPos, this.deps.fees.tradingFeeRate)
+            )
+              .plus(amount)
+              .toNumber(),
             avgPrice:
               (existingPos.avgPrice * existingPos.shares +
                 calc.avgPrice * calc.sharesBought) /
@@ -210,6 +247,7 @@ export class PredictionMarketService {
             marketId,
             side,
             shares: calc.sharesBought,
+            cashCostBasis: amount,
             avgPrice: calc.avgPrice,
             status: 'active',
             outcome: null,
@@ -336,7 +374,8 @@ export class PredictionMarketService {
       this.deps.fees.tradingFeeRate
     );
 
-    const newLiquidity = market.liquidity - calc.totalCost;
+    const newLiquidity =
+      market.liquidity - (calc.totalCost - (calc.roundingRemainder ?? 0));
     if (newLiquidity < 0) {
       throw new BadRequestError('Sale would exceed available liquidity');
     }
@@ -348,30 +387,25 @@ export class PredictionMarketService {
 
     const remaining = pos.shares - shares;
     const positionClosed = remaining <= MIN_SHARES;
-    if (positionClosed) {
-      await this.db.upsertPosition({
-        ...pos,
-        shares: 0,
-        status: 'closed',
-        updatedAt: this.now(),
-      });
-    } else {
-      await this.db.upsertPosition({
-        ...pos,
-        shares: remaining,
-        updatedAt: this.now(),
-      });
-    }
-
-    const costBasis = pos.avgPrice * shares;
+    const previousCost = cashCostBasis(pos, this.deps.fees.tradingFeeRate);
+    const remainingCost = positionClosed
+      ? 0
+      : new Decimal(previousCost)
+          .times(remaining)
+          .div(pos.shares)
+          .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+          .toNumber();
+    const allocatedCost = pointsDifference(previousCost, remainingCost);
     const netProceeds = calc.netProceeds ?? 0;
-    // Position.avgPrice is based on the net buy amount (after fees), so costBasis excludes entry fees.
-    // Gross-up the cost basis to include entry fees for accurate net PnL accounting.
-    const costBasisWithFees = grossUpBuyAmount(
-      costBasis,
-      this.deps.fees.tradingFeeRate
-    );
-    const profitLoss = netProceeds - costBasisWithFees;
+    const profitLoss = pointsDifference(netProceeds, allocatedCost);
+    await this.db.upsertPosition({
+      ...pos,
+      shares: positionClosed ? 0 : remaining,
+      cashCostBasis: remainingCost,
+      pnl: new Decimal(pos.pnl ?? 0).plus(profitLoss).toNumber(),
+      status: positionClosed ? 'closed' : 'active',
+      updatedAt: this.now(),
+    });
 
     await this.deps.wallet.credit({
       userId,
@@ -464,29 +498,20 @@ export class PredictionMarketService {
 
     const now = input.resolvedAt ?? this.now();
 
-    // Pool-proportional payout: winners split losers' deposits
+    // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
+    // Payouts are not split pool-proportionally: each winner is credited
+    // shares x 1 pt and losers receive 0. Market liquidity is seeded by
+    // the house (virtual), so winners are credited in full even when the
+    // total redemption exceeds the pool's remaining liquidity.
     const isWinnerSide = (p: { side: string }) =>
       (winningSide === 'yes' && p.side === 'yes') ||
       (winningSide === 'no' && p.side === 'no');
 
-    const totalWinnerShares = positions
-      .filter(isWinnerSide)
-      .reduce((sum, p) => sum + p.shares, 0);
-    const totalLoserDeposits = positions
-      .filter((p) => !isWinnerSide(p))
-      .reduce((sum, p) => sum + p.shares * p.avgPrice, 0);
-
     const totalPayout = positions
       .filter(isWinnerSide)
       .reduce(
-        (acc, p) =>
-          acc +
-          PredictionPricing.calculateExpectedPayout(
-            p.shares,
-            p.avgPrice,
-            totalWinnerShares,
-            totalLoserDeposits
-          ),
+        (sum, p) =>
+          sum + PredictionPricing.calculateExpectedPayout(p.shares, p.avgPrice),
         0
       );
 
@@ -504,18 +529,12 @@ export class PredictionMarketService {
     for (const pos of positions) {
       const isWinner = isWinnerSide(pos);
       const payout = isWinner
-        ? PredictionPricing.calculateExpectedPayout(
-            pos.shares,
-            pos.avgPrice,
-            totalWinnerShares,
-            totalLoserDeposits
-          )
+        ? PredictionPricing.calculateExpectedPayout(pos.shares, pos.avgPrice)
         : 0;
-      const costBasisWithFees = grossUpBuyAmount(
-        pos.avgPrice * pos.shares,
-        this.deps.fees.tradingFeeRate
+      const pnl = pointsDifference(
+        payout,
+        cashCostBasis(pos, this.deps.fees.tradingFeeRate)
       );
-      const pnl = payout - costBasisWithFees;
 
       if (payout > 0) {
         await this.deps.wallet.credit({
@@ -538,7 +557,8 @@ export class PredictionMarketService {
         ...pos,
         status: 'resolved',
         outcome: isWinner,
-        pnl,
+        cashCostBasis: 0,
+        pnl: new Decimal(pos.pnl ?? 0).plus(pnl).toNumber(),
         resolvedAt: now,
         updatedAt: now,
       });
@@ -623,7 +643,12 @@ export class PredictionMarketService {
       }
 
       // Calculate refund amount (original investment)
-      const refundAmount = pos.shares * pos.avgPrice;
+      const costBasis = pos.shares * pos.avgPrice;
+      const refundAmount = floorPoints(costBasis);
+      const refundPnl = pointsDifference(
+        refundAmount,
+        cashCostBasis(pos, this.deps.fees.tradingFeeRate)
+      );
 
       if (refundAmount > 0) {
         // Credit user their original investment
@@ -635,28 +660,33 @@ export class PredictionMarketService {
           relatedId: marketId,
         });
 
-        // Record PnL of 0 (full refund means no gain or loss)
-        await this.deps.wallet.recordPnL({
-          userId: pos.userId,
-          pnl: 0,
-          reason: 'pred_cancel',
-          relatedId: marketId,
-        });
-
         totalRefunded += refundAmount;
         positionsRefunded++;
       }
 
+      if (refundPnl !== 0) {
+        await this.deps.wallet.recordPnL({
+          userId: pos.userId,
+          pnl: refundPnl,
+          reason: 'pred_cancel',
+          relatedId: marketId,
+        });
+      }
       // Mark position as cancelled
       await this.db.upsertPosition({
         ...pos,
         status: 'cancelled',
         outcome: null,
-        pnl: 0,
+        pnl: new Decimal(pos.pnl ?? 0).plus(refundPnl).toNumber(),
+        cashCostBasis: 0,
         resolvedAt: now,
         updatedAt: now,
       });
     }
+
+    const newLiquidity =
+      market.liquidity - Math.min(totalRefunded, market.liquidity);
+    await this.db.updateMarketState(marketId, { liquidity: newLiquidity });
 
     // Record a snapshot for the cancellation
     await this.recordSnapshot({
@@ -665,7 +695,7 @@ export class PredictionMarketService {
       noPrice: 0,
       yesShares: market.yesShares,
       noShares: market.noShares,
-      liquidity: market.liquidity,
+      liquidity: newLiquidity,
       eventType: 'resolution',
       source: 'system',
     });
@@ -747,18 +777,29 @@ export class PredictionMarketService {
   }
 
   private async emitTrade(payload: Record<string, unknown>) {
-    if (!this.deps.broadcast) return;
-    await this.deps.broadcast.emit('markets', payload);
+    const broadcast = this.deps.broadcast;
+    if (!broadcast) return;
+    await this.runEffect(() => broadcast.emit('markets', payload));
   }
 
   private async emitResolution(payload: Record<string, unknown>) {
-    if (!this.deps.broadcast) return;
-    await this.deps.broadcast.emit('markets', payload);
+    const broadcast = this.deps.broadcast;
+    if (!broadcast) return;
+    await this.runEffect(() => broadcast.emit('markets', payload));
   }
 
   private async invalidateCaches(marketId: string) {
-    if (!this.deps.cache) return;
-    await this.deps.cache.invalidate(`prediction:${marketId}:*`);
+    const cache = this.deps.cache;
+    if (!cache) return;
+    await this.runEffect(() => cache.invalidate(`prediction:${marketId}:*`));
+  }
+
+  private async runEffect(effect: () => Promise<void>): Promise<void> {
+    if (this.deps.afterCommit) {
+      this.deps.afterCommit(effect);
+      return;
+    }
+    await effect();
   }
 
   private now() {

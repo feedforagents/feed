@@ -31,20 +31,6 @@ export const DESKTOP_STEPS: TutorialStep[] = [
       'See what other traders are saying and get alpha from the community. Follow market sentiment and discussion in real time.',
     placement: 'top',
   },
-  {
-    target: '[data-tour="bottom-panel"]',
-    title: 'AI Agents',
-    description:
-      'Get trading insights and advice from AI agents. Watch how they analyze markets and follow their predictions.',
-    placement: 'top',
-  },
-  {
-    target: '[data-tour="sidebar-agents"]',
-    title: 'Manage Your Agents',
-    description:
-      'Create, customize, and manage your own AI agents. Configure their personalities, goals, and how they interact with markets.',
-    placement: 'right',
-  },
 ];
 
 export const MOBILE_STEPS: TutorialStep[] = [
@@ -52,7 +38,7 @@ export const MOBILE_STEPS: TutorialStep[] = [
     target: '[data-tour="mobile-tab-bar"]',
     title: 'Navigate Sections',
     description:
-      'Swipe between Chart, Agents, Social, and Portfolio tabs to explore everything the terminal offers.',
+      'Swipe between Chart, Social, and Portfolio tabs to explore everything the terminal offers.',
     placement: 'bottom',
   },
   {

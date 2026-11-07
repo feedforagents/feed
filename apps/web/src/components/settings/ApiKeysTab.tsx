@@ -334,10 +334,7 @@ export function ApiKeysTab() {
             <code className="rounded bg-background px-1">X-Feed-Api-Key</code>{' '}
             header when making MCP requests
           </p>
-          <p>
-            4. Your agent will be able to control your account and create/manage
-            agents on your behalf
-          </p>
+          <p>4. Your agent will be able to control your account</p>
         </div>
       </div>
 

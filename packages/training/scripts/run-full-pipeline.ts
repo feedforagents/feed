@@ -5,7 +5,7 @@
  *
  * This script runs the complete training pipeline end-to-end:
  * 1. Initialize training package
- * 2. Generate real trajectories (or use existing)
+ * 2. Use recorded NPC trajectories
  * 3. Score trajectories with LLM-as-judge
  * 4. Export training data
  * 5. Run archetype matchup benchmark
@@ -14,11 +14,8 @@
  *   bun run packages/training/scripts/run-full-pipeline.ts
  *
  * Options:
- *   --skip-generation    Skip trajectory generation (use existing data)
  *   --skip-scoring       Skip LLM scoring
  *   --archetypes         Comma-separated archetypes (default: trader,researcher)
- *   --agents             Agents per archetype (default: 2)
- *   --ticks              Ticks per agent (default: 10)
  */
 
 import { count, db, eq, isNotNull, trajectories } from '@feed/db';
@@ -28,11 +25,8 @@ import { parseArgs } from 'util';
 const { values } = parseArgs({
   args: process.argv.slice(2),
   options: {
-    'skip-generation': { type: 'boolean', default: false },
     'skip-scoring': { type: 'boolean', default: false },
     archetypes: { type: 'string', default: 'trader,researcher' },
-    agents: { type: 'string', default: '2' },
-    ticks: { type: 'string', default: '10' },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -45,31 +39,22 @@ Usage:
   bun run packages/training/scripts/run-full-pipeline.ts [options]
 
 Options:
-  --skip-generation    Skip trajectory generation (use existing data)
   --skip-scoring       Skip LLM scoring
   --archetypes         Comma-separated archetypes (default: trader,researcher)
-  --agents             Agents per archetype (default: 2)
-  --ticks              Ticks per agent (default: 10)
   -h, --help           Show this help message
 `);
   process.exit(0);
 }
 
 const config = {
-  skipGeneration: values['skip-generation'] as boolean,
   skipScoring: values['skip-scoring'] as boolean,
   archetypes: (values.archetypes as string).split(','),
-  agentsPerArchetype: parseInt(values.agents as string, 10),
-  ticksPerAgent: parseInt(values.ticks as string, 10),
 };
 
 console.log('═══════════════════════════════════════════════════════════════');
 console.log('  Feed Full Training Pipeline');
 console.log('═══════════════════════════════════════════════════════════════');
 console.log(`  Archetypes: ${config.archetypes.join(', ')}`);
-console.log(`  Agents per archetype: ${config.agentsPerArchetype}`);
-console.log(`  Ticks per agent: ${config.ticksPerAgent}`);
-console.log(`  Skip generation: ${config.skipGeneration}`);
 console.log(`  Skip scoring: ${config.skipScoring}`);
 console.log(
   '═══════════════════════════════════════════════════════════════\n'
@@ -102,58 +87,7 @@ async function runPipeline() {
     console.log('  Will continue with limited functionality.\n');
   }
 
-  // Step 3: Generate trajectories
-  if (!config.skipGeneration) {
-    console.log('Step 3: Generating real trajectories...');
-    try {
-      const { TrajectoryGenerator } = await import(
-        '../src/generation/TrajectoryGenerator'
-      );
-
-      // Get a manager ID (first user in DB or create one)
-      const { users, desc } = await import('@feed/db');
-      const managerResult = await db
-        .select({ id: users.id })
-        .from(users)
-        .orderBy(desc(users.createdAt))
-        .limit(1);
-
-      if (managerResult.length === 0) {
-        console.log('  ⚠️  No users found in database. Skipping generation.');
-        console.log('  Create a user first or use --skip-generation.\n');
-      } else {
-        const managerId = managerResult[0].id;
-
-        const generator = new TrajectoryGenerator({
-          archetypes: config.archetypes,
-          agentsPerArchetype: config.agentsPerArchetype,
-          ticksPerAgent: config.ticksPerAgent,
-          parallelAgents: 3,
-          recordTrajectories: true,
-          managerId,
-        });
-
-        const result = await generator.generate();
-        console.log(
-          `  ✅ Generated ${result.trajectoryIds.length} trajectories.`
-        );
-        console.log(`  Agents created: ${result.agentsCreated.length}`);
-        console.log(`  Duration: ${result.duration}ms\n`);
-
-        // Cleanup test agents
-        await generator.cleanup();
-      }
-    } catch (error) {
-      console.log(`  ❌ Generation failed: ${error}`);
-      console.log(
-        '  Make sure the server is running or use --skip-generation.\n'
-      );
-    }
-  } else {
-    console.log(
-      'Step 3: Skipping trajectory generation (--skip-generation).\n'
-    );
-  }
+  console.log('Step 3: Using recorded NPC trajectories.\n');
 
   // Step 4: Score trajectories
   if (!config.skipScoring) {

@@ -11,11 +11,7 @@
 // ── Types ──────────────────────────────────────────────────────────
 
 export type AchievementTier = 'bronze' | 'silver' | 'gold';
-export type AchievementCategory =
-  | 'trading'
-  | 'agents'
-  | 'exploration'
-  | 'social';
+export type AchievementCategory = 'trading' | 'exploration' | 'social';
 export type ChallengePool = 'daily' | 'weekly';
 
 export interface AchievementDef {
@@ -55,9 +51,6 @@ export type AchievementEventType =
   | 'post_created'
   | 'comment_created'
   | 'group_message_sent'
-  | 'agent_created'
-  | 'agent_message_sent'
-  | 'agent_trade_executed'
   | 'follow_created'
   | 'reaction_created'
   | 'share_created'
@@ -73,9 +66,6 @@ export type AchievementEvent =
   | { type: 'post_created' }
   | { type: 'comment_created' }
   | { type: 'group_message_sent' }
-  | { type: 'agent_created' }
-  | { type: 'agent_message_sent' }
-  | { type: 'agent_trade_executed' }
   | { type: 'follow_created' }
   | { type: 'reaction_created' }
   | { type: 'share_created' }
@@ -134,17 +124,7 @@ export const EVENT_TO_TRACKING_TYPES: Record<AchievementEventType, string[]> = {
     'group_message_count',
     'daily_group_message',
     'weekly_group_message',
-    'weekly_agent_and_group',
   ],
-  agent_created: ['agent_count', 'weekly_agent_interact'],
-  agent_message_sent: [
-    'agent_message_count',
-    'daily_agent_message',
-    'weekly_agent_message',
-    'weekly_agent_interact',
-    'weekly_agent_and_group',
-  ],
-  agent_trade_executed: ['agent_trade_count', 'weekly_agent_trade'],
   follow_created: ['daily_follow', 'weekly_follow'],
   reaction_created: ['daily_reaction', 'weekly_reaction', 'weekly_feed_engage'],
   share_created: ['daily_share', 'weekly_share'],
@@ -153,9 +133,7 @@ export const EVENT_TO_TRACKING_TYPES: Record<AchievementEventType, string[]> = {
   daily_login: ['login_streak', 'weekly_login_days', 'weekly_referral_play'],
   page_visited: [
     'terminal_visit_count',
-    'agents_visit_count',
     'daily_terminal_visit',
-    'daily_agents_visit',
     'daily_markets_visit',
     'daily_feed_visit',
     'daily_leaderboard_visit',
@@ -170,7 +148,6 @@ export const EVENT_TO_TRACKING_TYPES: Record<AchievementEventType, string[]> = {
  */
 export const VALID_PAGE_ACTIVITY_TYPES = [
   'open_terminal',
-  'open_agents',
   'open_markets',
   'open_feed',
   'open_leaderboard',
@@ -186,16 +163,15 @@ export type PageActivityType = (typeof VALID_PAGE_ACTIVITY_TYPES)[number];
  */
 export const PATH_TO_ACTIVITY_TYPE: Record<string, PageActivityType> = {
   '/markets': 'open_terminal',
-  '/agents': 'open_agents',
   '/feed': 'open_feed',
   '/leaderboard': 'open_leaderboard',
   '/notifications': 'open_notifications',
 };
 
-// ── Achievement Definitions (15 total: 8 Bronze + 5 Silver + 2 Gold) ──
+// ── Achievement Definitions (10 total: 5 Bronze + 3 Silver + 2 Gold) ──
 
 export const ACHIEVEMENT_DEFINITIONS: AchievementDef[] = [
-  // Bronze (8) — first-time actions, 60-80% expected completion
+  // Bronze (5) — first-time actions, 60-80% expected completion
   {
     id: 'first_prediction_trade',
     name: 'First Prediction',
@@ -221,30 +197,6 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDef[] = [
     sortOrder: 2,
   },
   {
-    id: 'first_agent',
-    name: 'Agent Creator',
-    description: 'Create your first agent',
-    category: 'agents',
-    tier: 'bronze',
-    iconKey: 'bot',
-    pointsReward: 100,
-    threshold: 1,
-    trackingType: 'agent_count',
-    sortOrder: 3,
-  },
-  {
-    id: 'first_agent_message',
-    name: 'Chat with Agent',
-    description: 'Send your first message to an agent',
-    category: 'agents',
-    tier: 'bronze',
-    iconKey: 'message-square',
-    pointsReward: 50,
-    threshold: 1,
-    trackingType: 'agent_message_count',
-    sortOrder: 4,
-  },
-  {
     id: 'terminal_explorer',
     name: 'Terminal Explorer',
     description: 'Visit the Terminal page',
@@ -255,18 +207,6 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDef[] = [
     threshold: 1,
     trackingType: 'terminal_visit_count',
     sortOrder: 5,
-  },
-  {
-    id: 'agents_explorer',
-    name: 'Agents Explorer',
-    description: 'Visit the Agents page',
-    category: 'exploration',
-    tier: 'bronze',
-    iconKey: 'users',
-    pointsReward: 50,
-    threshold: 1,
-    trackingType: 'agents_visit_count',
-    sortOrder: 6,
   },
   {
     id: 'group_chatter',
@@ -293,7 +233,7 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDef[] = [
     sortOrder: 8,
   },
 
-  // Silver (5) — intermediate milestones, 20-40% expected completion
+  // Silver (3) — intermediate milestones, 20-40% expected completion
   {
     id: 'five_markets',
     name: 'Five Markets',
@@ -330,30 +270,6 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDef[] = [
     trackingType: 'prediction_win_count',
     sortOrder: 11,
   },
-  {
-    id: 'three_agents',
-    name: 'Agent Squad',
-    description: 'Create 3 agents',
-    category: 'agents',
-    tier: 'silver',
-    iconKey: 'cpu',
-    pointsReward: 200,
-    threshold: 3,
-    trackingType: 'agent_count',
-    sortOrder: 12,
-  },
-  {
-    id: 'agent_trader',
-    name: 'Agent Trader',
-    description: 'Have an agent execute a trade',
-    category: 'agents',
-    tier: 'silver',
-    iconKey: 'bot-message-square',
-    pointsReward: 150,
-    threshold: 1,
-    trackingType: 'agent_trade_count',
-    sortOrder: 13,
-  },
 
   // Gold (2) — expert milestones, 5-15% expected completion
   {
@@ -382,7 +298,7 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDef[] = [
   },
 ];
 
-// ── Challenge Definitions (20 daily + 20 weekly) ──
+// ── Challenge Definitions (17 daily + 16 weekly) ──
 
 export const DAILY_CHALLENGE_DEFINITIONS: ChallengeDef[] = [
   {
@@ -412,19 +328,6 @@ export const DAILY_CHALLENGE_DEFINITIONS: ChallengeDef[] = [
     hint: 'Go to Terminal \u2192 Perpetuals tab \u2192 pick a ticker \u2192 tap Long or Short',
   },
   {
-    id: 'daily_agent_message',
-    name: 'Agent Chat',
-    description: 'Send a message to an agent',
-    pool: 'daily',
-    category: 'agents',
-    iconKey: 'bot',
-    pointsReward: 35,
-    threshold: 1,
-    trackingType: 'daily_agent_message',
-    sortOrder: 3,
-    hint: 'Go to Agents \u2192 open any agent\u2019s chat \u2192 send a message',
-  },
-  {
     id: 'daily_open_terminal',
     name: 'Open Terminal',
     description: 'Visit the Terminal page',
@@ -436,19 +339,6 @@ export const DAILY_CHALLENGE_DEFINITIONS: ChallengeDef[] = [
     trackingType: 'daily_terminal_visit',
     sortOrder: 4,
     hint: 'Open Terminal from the navigation \u2014 just visiting counts!',
-  },
-  {
-    id: 'daily_open_agents',
-    name: 'Visit Agents',
-    description: 'Visit the Agents page',
-    pool: 'daily',
-    category: 'exploration',
-    iconKey: 'users',
-    pointsReward: 25,
-    threshold: 1,
-    trackingType: 'daily_agents_visit',
-    sortOrder: 5,
-    hint: 'Open Agents from the navigation \u2014 just visiting counts!',
   },
   {
     id: 'daily_comment_post',
@@ -555,19 +445,6 @@ export const DAILY_CHALLENGE_DEFINITIONS: ChallengeDef[] = [
     hint: 'Trade in 3 separate markets today \u2014 different tickers needed',
   },
   {
-    id: 'daily_agent_chat',
-    name: 'Agent Deep Dive',
-    description: 'Have a 3-message conversation with an agent',
-    pool: 'daily',
-    category: 'agents',
-    iconKey: 'bot-message-square',
-    pointsReward: 30,
-    threshold: 3,
-    trackingType: 'daily_agent_message',
-    sortOrder: 14,
-    hint: 'Send 3 messages to any agent \u2014 have a real conversation',
-  },
-  {
     id: 'daily_follow_user',
     name: 'New Connection',
     description: 'Follow a new user',
@@ -662,19 +539,6 @@ export const WEEKLY_CHALLENGE_DEFINITIONS: ChallengeDef[] = [
     hint: 'Place trades in 5 separate markets this week \u2014 any trade type',
   },
   {
-    id: 'weekly_agent_trade',
-    name: 'Agent Profit',
-    description: 'Have an agent execute a trade',
-    pool: 'weekly',
-    category: 'agents',
-    iconKey: 'bot',
-    pointsReward: 200,
-    threshold: 1,
-    trackingType: 'weekly_agent_trade',
-    sortOrder: 2,
-    hint: 'Command your agent to trade (e.g. "open a position in METAI")',
-  },
-  {
     id: 'weekly_group_chat',
     name: 'Group Regular',
     description: 'Send 10 messages in group chats',
@@ -725,32 +589,6 @@ export const WEEKLY_CHALLENGE_DEFINITIONS: ChallengeDef[] = [
     trackingType: 'weekly_total_trade',
     sortOrder: 6,
     hint: 'Make 10 trades this week \u2014 predictions and perps both count',
-  },
-  {
-    id: 'weekly_three_agents',
-    name: 'Agent Collector',
-    description: 'Create or interact with 3 agents',
-    pool: 'weekly',
-    category: 'agents',
-    iconKey: 'cpu',
-    pointsReward: 200,
-    threshold: 3,
-    trackingType: 'weekly_agent_interact',
-    sortOrder: 7,
-    hint: 'Create new agents or send messages to 3 different agents',
-  },
-  {
-    id: 'weekly_agent_chat_5',
-    name: 'Agent Conversationalist',
-    description: 'Have 5 agent conversations',
-    pool: 'weekly',
-    category: 'agents',
-    iconKey: 'bot-message-square',
-    pointsReward: 100,
-    threshold: 5,
-    trackingType: 'weekly_agent_message',
-    sortOrder: 8,
-    hint: 'Send messages to agents 5 times \u2014 can be same or different agents',
   },
   {
     id: 'weekly_five_comments',
@@ -855,19 +693,6 @@ export const WEEKLY_CHALLENGE_DEFINITIONS: ChallengeDef[] = [
     trackingType: 'weekly_pred_trade',
     sortOrder: 16,
     hint: 'Place 5 YES/NO prediction trades on any markets',
-  },
-  {
-    id: 'weekly_agent_in_group',
-    name: 'Agent + Group',
-    description: 'Message an agent AND a group chat',
-    pool: 'weekly',
-    category: 'agents',
-    iconKey: 'link',
-    pointsReward: 220,
-    threshold: 1,
-    trackingType: 'weekly_agent_and_group',
-    sortOrder: 17,
-    hint: 'Send at least 1 agent message AND 1 group chat message',
   },
   {
     id: 'weekly_five_days',

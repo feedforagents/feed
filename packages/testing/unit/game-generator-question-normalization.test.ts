@@ -1,11 +1,24 @@
 import { describe, expect, test } from 'bun:test';
-import { GameGenerator } from '@feed/engine';
-import type { Organization, Question, Scenario } from '@feed/shared';
+import {
+  createQuestionPrompt,
+  createScenarioPrompt,
+  GameGenerator,
+} from '@feed/engine';
+import type {
+  Organization,
+  Question,
+  Scenario,
+  SelectedActor,
+} from '@feed/shared';
 
 type TestableGameGenerator = {
   llm: {
     generateJSON: () => Promise<unknown>;
   };
+  generateScenarios: (
+    mains: SelectedActor[],
+    organizations: Organization[]
+  ) => Promise<Scenario[]>;
   generateQuestions: (
     scenarios: Scenario[],
     organizations: Organization[]
@@ -70,6 +83,15 @@ function buildOrganizations(): Organization[] {
 }
 
 describe('GameGenerator question normalization', () => {
+  test('prompts only the actual available scenario IDs', async () => {
+    const prompt = await createQuestionPrompt(
+      buildScenarios(),
+      buildOrganizations()
+    );
+    expect(prompt).toContain('Allowed scenario IDs: 1, 2');
+    expect(prompt).toContain('Do not invent or renumber scenario IDs');
+  });
+
   test('derives scenario ids from grouped question responses', async () => {
     const generator = buildGeneratorWithQuestionsResponse([
       {
@@ -133,5 +155,89 @@ describe('GameGenerator question normalization', () => {
     await expect(
       generator.generateQuestions(buildScenarios(), buildOrganizations())
     ).rejects.toThrow(/outside range 1-2/);
+  });
+});
+
+describe('GameGenerator scenario contract', () => {
+  const scenario = buildScenarios()[0]!;
+  const mains: SelectedActor[] = [1, 2, 3].map((id) => ({
+    id: `actor-${id}`,
+    name: `Actor ${id}`,
+    tier: 'S_TIER',
+    role: 'main',
+    initialLuck: 'medium',
+    initialMood: 0,
+  }));
+
+  for (const count of [1, 2, 4]) {
+    test(`rejects ${count} scenarios instead of the required three`, async () => {
+      const generator = buildGeneratorWithQuestionsResponse({
+        scenarios: {
+          scenario: Array.from({ length: count }, (_, index) => ({
+            ...scenario,
+            id: index + 1,
+          })),
+        },
+      });
+      await expect(
+        generator.generateScenarios(mains, buildOrganizations())
+      ).rejects.toThrow('exactly 3 scenarios');
+    });
+  }
+
+  for (const ids of [
+    [1, 1, 3],
+    [1, 2, 4],
+    [1, 2, 0],
+    [1, 2, 1.5],
+    [1, 2, undefined],
+  ]) {
+    test(`rejects invalid scenario IDs ${JSON.stringify(ids)}`, async () => {
+      const generator = buildGeneratorWithQuestionsResponse({
+        scenarios: { scenario: ids.map((id) => ({ ...scenario, id })) },
+      });
+      await expect(
+        generator.generateScenarios(mains, buildOrganizations())
+      ).rejects.toThrow('unique IDs 1, 2, and 3');
+    });
+  }
+
+  test('normalizes XML numeric IDs without replacing or dropping scenarios', async () => {
+    const generator = buildGeneratorWithQuestionsResponse({
+      scenarios: {
+        scenario: ['3', '1', '2'].map((id) => ({
+          ...scenario,
+          id,
+          mainActors: { actorId: ['actor-1', 'actor-2'] },
+        })),
+      },
+    });
+    const scenarios = await generator.generateScenarios(
+      mains,
+      buildOrganizations()
+    );
+    expect(scenarios.map((item) => item.id)).toEqual([1, 2, 3]);
+    expect(scenarios[0]?.mainActors).toEqual(['actor-1', 'actor-2']);
+  });
+
+  test('renders three scenario nodes and exact actor and organization IDs', async () => {
+    const prompt = await createScenarioPrompt(
+      [
+        {
+          id: 'actor-1',
+          name: 'Actor One',
+          description: 'A main actor',
+          domain: ['tech'],
+        },
+      ],
+      buildOrganizations()
+    );
+    const format = prompt.split('Return XML:')[1];
+    expect(format?.match(/<scenario>/g)).toHaveLength(3);
+    for (const id of [1, 2, 3]) expect(format).toContain(`<id>${id}</id>`);
+    expect(prompt).toContain('Actor One (ID: actor-1)');
+    expect(prompt).toContain('Org One (ID: org-1)');
+    expect(prompt).toContain('Org Two (ID: org-2)');
+    expect(prompt).toContain('actorId and orgId must use the exact listed IDs');
   });
 });

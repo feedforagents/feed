@@ -17,7 +17,7 @@ export interface PerpPosition {
   entryPrice: number;
   currentPrice: number;
   size: number; // Position size in USD
-  leverage: number; // 1x to 100x
+  leverage: number; // 1x to 20x (PRD D-17b cap)
   liquidationPrice: number;
   unrealizedPnL: number;
   unrealizedPnLPercent: number;

@@ -6,7 +6,7 @@
  */
 
 import { expect, test } from './fixtures';
-import { clickTab, pageContainsText } from './helpers/interaction-helpers';
+import { pageContainsText } from './helpers/interaction-helpers';
 import {
   cooldownBetweenTests,
   isServerHealthy,
@@ -49,50 +49,6 @@ test.describe('Leaderboard - Tab Toggle', () => {
       'points'
     );
     expect(hasLeaderboardContent).toBe(true);
-  });
-
-  test('switches to Team tab and shows team rankings', async ({ page }) => {
-    const switched = await clickTab(page, 'Team');
-
-    if (switched) {
-      const hasTeamContent = await pageContainsText(
-        page,
-        'team',
-        'agent',
-        'rank',
-        'score'
-      );
-      expect(hasTeamContent).toBe(true);
-    } else {
-      const body = await page.locator('body').textContent();
-      expect(body?.length).toBeGreaterThan(100);
-    }
-  });
-
-  test('switches back to Wallet tab', async ({ page }) => {
-    // First switch to Team
-    await clickTab(page, 'Team');
-    await page.waitForTimeout(500);
-
-    // Then switch back to Wallet
-    const _switched = await clickTab(page, 'Wallet');
-
-    const body = await page.locator('body').textContent();
-    expect(body?.length).toBeGreaterThan(100);
-  });
-
-  test('shows different content per tab', async ({ page }) => {
-    // Capture content from first tab
-    const _firstTabContent = await page.locator('body').textContent();
-
-    // Switch to second tab
-    const switched = await clickTab(page, 'Team');
-
-    if (switched) {
-      const secondTabContent = await page.locator('body').textContent();
-      // Content should differ between tabs (at minimum the active tab indicator changes)
-      expect(secondTabContent).toBeTruthy();
-    }
   });
 });
 

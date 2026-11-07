@@ -198,7 +198,7 @@ Cloudflare Workers observability provides deployment logs. PostHog remains the p
 | `packages/core` | Pure domain: prediction markets, perpetuals, pricing, CPMM |
 | `packages/db` | Drizzle ORM schema, migrations, lazy DB client |
 | `packages/api` | Steward JWT middleware, user provisioning, rate limiting, blob helpers |
-| `packages/agents` | Autonomous agent logic, ElizaOS plugins, `TopicDiversityService`, agent cron |
+| `packages/agents` | NPC execution, ElizaOS plugins, `TopicDiversityService` |
 | `packages/shared` | Shared types, content analysis utilities, Jaccard similarity, logging |
 | `packages/a2a` | Agent-to-Agent protocol integration (`@a2a-js/sdk`) |
 | `packages/mcp` | Model Context Protocol server for tool-using agents |
@@ -332,9 +332,6 @@ Integration tests require a running Postgres instance. The CI workflow starts on
 ```bash
 # Core world simulation (generates narrative events)
 bun run sim:core
-
-# Full character simulation with content
-bun run sim:characters:local
 
 # Export simulation data
 bun run export:characters:local

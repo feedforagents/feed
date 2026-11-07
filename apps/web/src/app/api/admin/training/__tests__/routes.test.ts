@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { NextResponse } from 'next/server';
 
 const triggerTraining = mock(async () => ({ success: true }));
-const benchmarkModel = mock(async () => ({ benchmarkScore: 1 }));
-const compareModels = mock(async () => ({ shouldDeploy: true }));
+const requireAdmin = mock(async () => ({ userId: 'admin-1' }));
+const getBenchmarkSummary = mock(async () => ({ totalBenchmarks: 1 }));
 
 mock.module('@feed/training', () => ({
   automationPipeline: {
@@ -11,9 +11,7 @@ mock.module('@feed/training', () => ({
     checkTrainingReadiness: async () => ({ ready: true }),
   },
   benchmarkService: {
-    benchmarkModel,
-    compareModels,
-    getBenchmarkSummary: async () => ({}),
+    getBenchmarkSummary,
   },
 }));
 
@@ -21,13 +19,13 @@ mock.module('@feed/api', () => ({
   getClientIp: () => null,
   logAdminModify: async () => undefined,
   logAdminView: async () => undefined,
-  requireAdmin: async () => ({ userId: 'admin-1' }),
+  requireAdmin,
   successResponse: (data: object) => NextResponse.json(data),
   withErrorHandling: (handler: (req: Request) => Promise<Response>) => handler,
 }));
 
 const trigger = (await import('../trigger/route')).POST;
-const benchmark = (await import('../benchmark/route')).POST;
+const benchmark = (await import('../benchmark/route')).GET;
 
 function post(handler: typeof trigger, body: object) {
   return handler(
@@ -41,8 +39,9 @@ function post(handler: typeof trigger, body: object) {
 describe('admin training routes', () => {
   beforeEach(() => {
     triggerTraining.mockClear();
-    benchmarkModel.mockClear();
-    compareModels.mockClear();
+    requireAdmin.mockClear();
+    requireAdmin.mockResolvedValue({ userId: 'admin-1' });
+    getBenchmarkSummary.mockClear();
   });
 
   it('trigger rejects string force and unbounded batchSize', async () => {
@@ -61,20 +60,26 @@ describe('admin training routes', () => {
     });
   });
 
-  it('benchmark rejects object modelId and string compare', async () => {
-    expect((await post(benchmark, { modelId: { a: 1 } })).status).toBe(400);
-    expect(
-      (await post(benchmark, { modelId: 'm1', compare: 'false' })).status
-    ).toBe(400);
-    expect(
-      (await post(benchmark, { modelId: 'm1', threshold: -1 })).status
-    ).toBe(400);
-    expect(benchmarkModel).not.toHaveBeenCalled();
+  it('benchmark summary requires admin and returns historical results', async () => {
+    const request = new Request(
+      'http://localhost/api/admin/training/benchmark'
+    );
+    const response = await benchmark(request as never);
+    expect(requireAdmin).toHaveBeenCalledWith(request);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      success: true,
+      summary: { totalBenchmarks: 1 },
+    });
   });
 
-  it('benchmark skips comparison when compare is false', async () => {
-    const res = await post(benchmark, { modelId: 'm1', compare: false });
-    expect(res.status).toBe(200);
-    expect(compareModels).not.toHaveBeenCalled();
+  it('does not read benchmark history when admin authorization fails', async () => {
+    requireAdmin.mockRejectedValueOnce(new Error('Admin access required'));
+    await expect(
+      benchmark(
+        new Request('http://localhost/api/admin/training/benchmark') as never
+      )
+    ).rejects.toThrow('Admin access required');
+    expect(getBenchmarkSummary).not.toHaveBeenCalled();
   });
 });

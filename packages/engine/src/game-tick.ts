@@ -10,10 +10,6 @@ import {
   isOpenPerpPositionStateValid,
 } from '@feed/core/markets/perps';
 import {
-  PredictionDbAdapter as CorePredictionDbAdapter,
-  PredictionMarketService as CorePredictionMarketService,
-} from '@feed/core/markets/prediction';
-import {
   actorRelationships,
   and,
   arcStates,
@@ -50,6 +46,7 @@ import {
   logger,
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
+import { FEE_CONFIG } from './config/fees';
 import {
   endTrace,
   getActiveTracer,
@@ -69,6 +66,7 @@ import {
   calculateTrendingTags,
   createArcState,
   createParodyHeadlineGenerator,
+  createPredictionSettlementWallet,
   DistributedLockService,
   dailyTopicService,
   FeeRedistributionService,
@@ -85,7 +83,7 @@ import {
   syncReputationIfAvailable,
   timeframeArcProcessor,
   tokenStatsService,
-  WalletService,
+  withPredictionSettlement,
   worldFactsGenerator,
 } from './services';
 import {
@@ -1537,32 +1535,62 @@ export async function resolveQuestionPayouts(
 
   const marketId = market.id;
 
-  const pnlsToRecord: Array<{ userId: string; pnl: number }> = [];
   let totalPayout = 0;
   let positionsSettled = 0;
 
-  await db.transaction(async (tx) => {
-    const coreService = new CorePredictionMarketService({
-      db: new CorePredictionDbAdapter(tx),
-      wallet: {
-        debit: async () => {
-          throw new Error('Unexpected debit during market resolution');
-        },
-        credit: async ({ userId, amount, reason, description, relatedId }) => {
-          totalPayout += amount;
-          await WalletService.credit(
-            userId,
-            amount,
-            reason,
-            description ?? '',
-            relatedId,
-            tx
-          );
-        },
-        recordPnL: async ({ userId, pnl }) => {
-          pnlsToRecord.push({ userId, pnl });
-        },
-        getBalance: (userId: string) => WalletService.getBalance(userId),
+  await withPredictionSettlement(
+    marketId,
+    { system: 'game_tick_prediction_resolve' },
+    async (coreService, tx) => {
+      // Estimate positions settled for logging (coreService updates all positions for the market)
+      // Use COUNT(*) instead of SELECT to avoid loading all position IDs into memory
+      // Note: count(*) returns bigint in Postgres; we parse as string to avoid overflow
+      const countResult = await tx
+        .select({ count: sql<string>`count(*)` })
+        .from(positions)
+        .where(eq(positions.marketId, marketId));
+      positionsSettled = Number(countResult[0]?.count ?? 0);
+
+      await coreService.resolve({
+        marketId,
+        winningSide: winningSide ? 'yes' : 'no',
+        resolvedAt: resolutionTimestamp,
+        resolutionDescription: question.resolutionDescription ?? undefined,
+        resolutionProofUrl: question.resolutionProofUrl ?? undefined,
+      });
+
+      await tx
+        .update(questionsSchema)
+        .set({
+          status: 'resolved',
+          resolvedOutcome: winningSide,
+          resolutionReviewedAt: resolutionTimestamp,
+          resolutionReviewedBy: 'system',
+          updatedAt: resolutionTimestamp,
+        })
+        .where(eq(questionsSchema.id, question.id));
+
+      // Update timeframedMarkets in the same transaction for atomicity
+      await tx
+        .update(timeframedMarkets)
+        .set({
+          isResolved: true,
+          isActive: false,
+          resolvedAt: resolutionTimestamp,
+          updatedAt: resolutionTimestamp,
+        })
+        .where(eq(timeframedMarkets.questionId, question.id));
+    },
+    {
+      wallet: (tx, afterCommit) => {
+        const wallet = createPredictionSettlementWallet(tx, afterCommit);
+        return {
+          ...wallet,
+          credit: async (payment) => {
+            await wallet.credit(payment);
+            totalPayout += payment.amount;
+          },
+        };
       },
       broadcast: {
         emit: (_channel, payload) =>
@@ -1572,64 +1600,14 @@ export async function resolveQuestionPayouts(
         invalidate: () => invalidateAfterPredictionTrade(marketId),
       },
       fees: {
-        tradingFeeRate: 0,
-        platformShare: 0,
-        referrerShare: 0,
-        minFeeAmount: 0,
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
       clock: { now: () => resolutionTimestamp },
-    });
-
-    // Estimate positions settled for logging (coreService updates all positions for the market)
-    // Use COUNT(*) instead of SELECT to avoid loading all position IDs into memory
-    // Note: count(*) returns bigint in Postgres; we parse as string to avoid overflow
-    const countResult = await tx
-      .select({ count: sql<string>`count(*)` })
-      .from(positions)
-      .where(eq(positions.marketId, marketId));
-    positionsSettled = Number(countResult[0]?.count ?? 0);
-
-    await coreService.resolve({
-      marketId,
-      winningSide: winningSide ? 'yes' : 'no',
-      resolvedAt: resolutionTimestamp,
-      resolutionDescription: question.resolutionDescription ?? undefined,
-      resolutionProofUrl: question.resolutionProofUrl ?? undefined,
-    });
-
-    await tx
-      .update(questionsSchema)
-      .set({
-        status: 'resolved',
-        resolvedOutcome: winningSide,
-        resolutionReviewedAt: resolutionTimestamp,
-        resolutionReviewedBy: 'system',
-        updatedAt: resolutionTimestamp,
-      })
-      .where(eq(questionsSchema.id, question.id));
-
-    // Update timeframedMarkets in the same transaction for atomicity
-    await tx
-      .update(timeframedMarkets)
-      .set({
-        isResolved: true,
-        isActive: false,
-        resolvedAt: resolutionTimestamp,
-        updatedAt: resolutionTimestamp,
-      })
-      .where(eq(timeframedMarkets.questionId, question.id));
-  });
-
-  // Record PnL post-transaction to avoid nested transactions inside the DB tx.
-  for (const entry of pnlsToRecord) {
-    if (entry.pnl === 0) continue;
-    await WalletService.recordPnL(
-      entry.userId,
-      entry.pnl,
-      'pred_resolve',
-      marketId
-    );
-  }
+    }
+  );
 
   // Update reputation in database (no longer requires deployer key or on-chain calls)
   await ReputationService.updateReputationForResolvedMarket({

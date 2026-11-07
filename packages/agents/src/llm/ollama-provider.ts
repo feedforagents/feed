@@ -213,6 +213,11 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
     prompt_eval_count?: number;
     eval_count?: number;
   };
+  // Provider-reported counts from a parsed response, captured as soon as the
+  // body is parsed so a content-validation failure below still reports the
+  // usage Ollama already returned. Stays undefined when no response was
+  // parsed (transport failure), which records zero usage.
+  let parsedUsage: { inputTokens: number; outputTokens: number } | undefined;
   try {
     // Call Ollama chat API
     const timeoutMs =
@@ -239,6 +244,10 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
     }
 
     data = (await response.json()) as typeof data;
+    parsedUsage = {
+      inputTokens: data?.prompt_eval_count ?? 0,
+      outputTokens: data?.eval_count ?? 0,
+    };
 
     const content = data?.message?.content;
     if (typeof content !== 'string') {
@@ -258,6 +267,8 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
         purpose: params.purpose || 'action',
         actionType: params.actionType,
         latencyMs: Date.now() - startTime,
+        promptTokens: parsedUsage?.inputTokens,
+        completionTokens: parsedUsage?.outputTokens,
         metadata: {
           success: false,
           error: error instanceof Error ? error.message : String(error),
@@ -267,8 +278,8 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
     getAgentLLMBridge()?.({
       ...callMetadata,
       rawResponse: '',
-      inputTokens: 0,
-      outputTokens: 0,
+      inputTokens: parsedUsage?.inputTokens ?? 0,
+      outputTokens: parsedUsage?.outputTokens ?? 0,
       durationMs: Date.now() - startTime,
       success: false,
       error: error instanceof Error ? error.message : String(error),

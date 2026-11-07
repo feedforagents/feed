@@ -9,7 +9,7 @@
  */
 
 import { escapeRegex } from '@feed/shared';
-import { getForbiddenRealNames } from './world-context';
+import { getForbiddenRealNames, getParodyActorNames } from './world-context';
 
 export interface ValidationResult {
   isValid: boolean;
@@ -89,10 +89,24 @@ const FORBIDDEN_PATTERNS = [
 export function validateNoRealNames(text: string): string[] {
   const violations: string[] = [];
   const reported = new Set<string>();
+  const parodyNames = getParodyActorNames()
+    .filter((name) => name.trim())
+    .sort((a, b) => b.length - a.length);
+  // Protect exact canonical casing, including case-only parodies. A separator
+  // keeps real-name matches from spanning a protected name.
+  const validationText = parodyNames.length
+    ? text.replace(
+        new RegExp(
+          `(?<!\\p{L})(?:${parodyNames.map(escapeRegex).join('|')})(?!\\p{L})`,
+          'gu'
+        ),
+        '\0'
+      )
+    : text;
 
   // Pattern-based detection (catches variations and common misspellings)
   for (const pattern of FORBIDDEN_PATTERNS) {
-    const match = pattern.exec(text);
+    const match = pattern.exec(validationText);
     if (match) {
       reported.add(match[0].toLowerCase());
       violations.push(
@@ -106,7 +120,7 @@ export function validateNoRealNames(text: string): string[] {
   for (const realName of getForbiddenRealNames()) {
     if (reported.has(realName.toLowerCase())) continue;
     const regex = new RegExp(`\\b${escapeRegex(realName)}\\b`, 'i');
-    if (regex.test(text)) {
+    if (regex.test(validationText)) {
       reported.add(realName.toLowerCase());
       violations.push(`FORBIDDEN: Contains real name "${realName}"`);
     }

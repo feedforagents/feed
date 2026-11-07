@@ -10,7 +10,9 @@ import {
 import type { JsonValue } from '@feed/shared';
 import { logger } from '@feed/shared';
 import { FEE_CONFIG } from '../config/fees';
+import { createPerpSettlement } from './perp-settlement';
 import { broadcastToChannel } from './realtime-broadcaster';
+import { createPerpTradesCachePort } from './trade-cache-invalidation';
 import { createUserWalletAdapter } from './user-wallet-adapter';
 
 export type PriceUpdateSource =
@@ -65,8 +67,10 @@ export class PriceUpdateService {
     if (updates.length === 0) return [];
 
     const perpService = new PerpMarketService({
+      settlement: createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: createUserWalletAdapter(),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,

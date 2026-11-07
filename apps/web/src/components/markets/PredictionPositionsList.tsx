@@ -2,7 +2,7 @@
 
 import type { UserPredictionPosition } from '@feed/shared';
 import { cn, formatCurrency, logger } from '@feed/shared';
-import { Bot, CheckCircle, XCircle } from 'lucide-react';
+import { CheckCircle, XCircle } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { usePredictionTrading } from '@/hooks/usePredictionTrading';
@@ -181,12 +181,6 @@ export function PredictionPositionsList({
                   )}
                   {position.side}
                 </span>
-                {position.isAgentPosition && (
-                  <span className="flex shrink-0 items-center gap-0.5 rounded bg-muted px-1 py-0.5 font-medium text-[11px] text-muted-foreground">
-                    <Bot size={10} />
-                    {position.agentName || 'Agent'}
-                  </span>
-                )}
                 <span className="truncate font-medium text-foreground text-xs">
                   {position.question}
                 </span>

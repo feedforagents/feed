@@ -6,10 +6,7 @@ import type {
   PredictionServiceDeps,
   QuestionRecord,
 } from '../../core/markets/prediction';
-import {
-  PredictionMarketService,
-  PredictionPricing,
-} from '../../core/markets/prediction';
+import { PredictionMarketService } from '../../core/markets/prediction';
 
 describe('PredictionMarketService broadcast events', () => {
   const mockBroadcast = {
@@ -172,11 +169,10 @@ describe('PredictionMarketService broadcast events', () => {
     expect(payload.marketId).toBe('market-1');
     expect(payload.winningSide).toBe('yes');
     // Winner: 100 shares @ avg 0.5, loser: 50 shares @ avg 0.5
-    // totalWinnerShares=100, totalLoserDeposits=50*0.5=25
-    // payout = costBasis + proportion*loserDeposits = 50 + 1.0*25 = 75
-    expect(payload.totalPayout).toBe(
-      PredictionPricing.calculateExpectedPayout(100, 0.5, 100, 25)
-    );
+    // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt, so the
+    // total payout is the winning share count (100), not the
+    // pool-proportional 75 (cost basis + share of loser deposits).
+    expect(payload.totalPayout).toBe(100);
   });
 
   test('no broadcast when broadcast dep is not provided', async () => {

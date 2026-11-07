@@ -40,15 +40,7 @@ const mockGetWalletLeaderboard = mock(async () => ({
   leaderboardType: 'wallet' as const,
   leaderboardMetric: 'reputation' as const,
 }));
-const mockGetTeamLeaderboard = mock(async () => ({
-  users: [],
-  totalCount: 0,
-  page: 1,
-  pageSize: 100,
-  totalPages: 0,
-  leaderboardType: 'team' as const,
-  leaderboardMetric: 'reputation' as const,
-}));
+
 const mockGetTradingWalletLeaderboard = mock(async () => ({
   users: [
     {
@@ -100,12 +92,10 @@ mock.module('@feed/api', () => ({
   getCache: mockGetCache,
   ReputationService: {
     getWalletLeaderboard: mockGetWalletLeaderboard,
-    getTeamLeaderboard: mockGetTeamLeaderboard,
     getUserPosition: mockGetUserPosition,
   },
   TradingLeaderboardService: {
     getWalletLeaderboard: mockGetTradingWalletLeaderboard,
-    getTeamLeaderboard: mockGetTeamLeaderboard,
     getUserPosition: mockGetUserPosition,
   },
   setCache: mockSetCache,
@@ -202,7 +192,6 @@ describe('Leaderboard route follow state enrichment', () => {
     mockGetCache.mockClear();
     mockSetCache.mockClear();
     mockGetWalletLeaderboard.mockClear();
-    mockGetTeamLeaderboard.mockClear();
     mockGetTradingWalletLeaderboard.mockClear();
     mockGetUserPosition.mockClear();
     mockDbSelect.mockClear();

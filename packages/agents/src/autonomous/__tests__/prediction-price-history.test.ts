@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import type { PredictionMarketService } from '@feed/core/markets/prediction';
+import type { PredictionSettlementOptions } from '@feed/engine';
 
 const actorState = {
   id: 'id',
@@ -182,6 +184,36 @@ mock.module('@feed/core/markets/perps', () => ({
 }));
 
 mock.module('@feed/engine', () => ({
+  withPredictionSettlement: async <T>(
+    _marketId: string,
+    _context: { userId: string } | { system: string },
+    operation: (
+      service: PredictionMarketService,
+      tx: typeof mockTxDb
+    ) => Promise<T>,
+    options: PredictionSettlementOptions
+  ) => {
+    const { PredictionDbAdapter, PredictionMarketService } = await import(
+      '@feed/core/markets/prediction'
+    );
+    return operation(
+      new PredictionMarketService({
+        ...options,
+        feeProcessor: options.feeProcessor?.(mockTxDb as never),
+        db: new PredictionDbAdapter(mockTxDb as never),
+        wallet: {
+          debit: async () => undefined,
+          credit: async () => undefined,
+          recordPnL: async () => undefined,
+          getBalance: walletGetBalance,
+        },
+      }),
+      mockTxDb
+    );
+  },
+  createNpcWalletAdapter: mock(() => {
+    throw new Error('NPC fixture not configured');
+  }),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0.001,
     PLATFORM_SHARE: 0.5,

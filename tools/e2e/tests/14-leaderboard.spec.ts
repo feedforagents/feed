@@ -1,5 +1,5 @@
 import { expect, test } from './fixtures';
-import { clickTab, pageContainsText } from './helpers/interaction-helpers';
+import { pageContainsText } from './helpers/interaction-helpers';
 import {
   cooldownBetweenTests,
   isServerHealthy,
@@ -11,7 +11,7 @@ import { loginWithWallet } from './helpers/wallet-auth';
 
 test.setTimeout(60000);
 
-test.describe('Leaderboard - Tab Toggle', () => {
+test.describe('Leaderboard - Content', () => {
   test.beforeEach(async ({ page, wallets }) => {
     const healthy = await isServerHealthy();
     test.skip(!healthy, 'Server is not healthy');
@@ -36,33 +36,6 @@ test.describe('Leaderboard - Tab Toggle', () => {
       'player'
     );
     expect(hasContent).toBe(true);
-  });
-
-  test('Team tab accessible', async ({ page }) => {
-    const switched = await clickTab(page, 'Team');
-    expect(typeof switched).toBe('boolean');
-  });
-
-  test('switch back to individual tab', async ({ page }) => {
-    await clickTab(page, 'Team');
-    await page.waitForTimeout(500);
-    const switched = await clickTab(page, 'Individual');
-    if (!switched) {
-      // Try alternative tab names
-      const alt = await clickTab(page, 'Players');
-      expect(typeof alt).toBe('boolean');
-    } else {
-      expect(switched).toBe(true);
-    }
-  });
-
-  test('each tab shows different content', async ({ page }) => {
-    const individualBody = await page.locator('body').textContent();
-    await clickTab(page, 'Team');
-    await page.waitForTimeout(500);
-    const teamBody = await page.locator('body').textContent();
-    expect(individualBody).toBeTruthy();
-    expect(teamBody).toBeTruthy();
   });
 });
 

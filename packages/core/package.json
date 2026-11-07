@@ -58,7 +58,8 @@
   },
   "dependencies": {
     "@feed/shared": "workspace:*",
-    "@feed/db": "workspace:*"
+    "@feed/db": "workspace:*",
+    "decimal.js-light": "2.5.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

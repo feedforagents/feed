@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  executeDirectRequestPayment,
   executeDirectShareInformation,
   normalizeShareKeywords,
 } from '../intel-payment-executors';
@@ -26,23 +25,5 @@ describe('executeDirectShareInformation', () => {
     });
     expect(result.success).toBe(false);
     expect(result.error).toBe('At least one keyword is required');
-  });
-});
-
-describe('executeDirectRequestPayment', () => {
-  test('rejects non-integer or non-positive deadlines', async () => {
-    for (const deadline of [0, -3, 2.5, Number.NaN]) {
-      const result = await executeDirectRequestPayment({
-        agentUserId: 'a',
-        recipientId: 'b',
-        amount: 10,
-        reason: 'r',
-        deadline,
-      });
-      expect(result).toEqual({
-        success: false,
-        error: 'Deadline must be a positive integer',
-      });
-    }
   });
 });

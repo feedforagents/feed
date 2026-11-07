@@ -68,6 +68,7 @@ import { biasedArticle, renderPrompt, validateArticle } from './prompts';
 import { characterMappingService } from './services/character-mapping-service';
 import { ContentQualityGate } from './services/content-quality-gate';
 import type { Actor, Organization, Question, WorldEvent } from './types/shared';
+import { isWorldVisible } from './utils/context-builder';
 import { shuffleArray } from './utils/randomization';
 import { stripHashtagsAndEmojis } from './utils/shared-utils';
 
@@ -78,6 +79,7 @@ type ArticleStage = 'breaking' | 'commentary' | 'resolution';
 
 interface ArticleGenerationContext {
   event: WorldEvent;
+  stage?: ArticleStage;
   organization: Organization;
   journalist?: Actor;
   alignedActors: string[]; // Actors the org is aligned with
@@ -175,7 +177,10 @@ export class ArticleGenerator {
       worldContext
     );
 
-    const article = await this.generateArticle(context);
+    let article = await this.generateArticle(context);
+    if (!article && stage === 'resolution') {
+      article = await this.generateArticle(context, true);
+    }
 
     if (!article) {
       throw new Error(
@@ -219,7 +224,16 @@ export class ArticleGenerator {
 
     // Create synthetic event from question for consistency with existing code
     const questionIdNumber =
-      typeof question.id === 'number' ? question.id : null;
+      question.questionNumber ??
+      (typeof question.id === 'number' ? question.id : null);
+    const relevantEvents = recentEvents
+      .filter(
+        (e) =>
+          questionIdNumber !== null &&
+          e.relatedQuestion === questionIdNumber &&
+          isWorldVisible(e.visibility)
+      )
+      .slice(0, 3);
     const syntheticEvent: WorldEvent = {
       id: `question-${question.id}-${stage}`,
       day: 0, // Set by caller
@@ -229,7 +243,16 @@ export class ArticleGenerator {
           : stage === 'resolution'
             ? 'revelation'
             : 'development',
-      description: question.text,
+      description:
+        stage === 'resolution'
+          ? [
+              `Question: ${question.text}`,
+              `Resolved outcome: ${question.outcome ? 'YES' : 'NO'}`,
+              ...relevantEvents.map(
+                (e) => `Resolution evidence: ${e.description}`
+              ),
+            ].join('\n')
+          : question.text,
       actors: [], // Question-level articles don't focus on specific actors
       visibility: 'public',
       pointsToward:
@@ -239,13 +262,12 @@ export class ArticleGenerator {
 
     return {
       event: syntheticEvent,
+      stage,
       organization: org,
       journalist,
       alignedActors: [],
       opposingActors: [],
-      recentEvents: recentEvents
-        .filter((e) => e.relatedQuestion === questionIdNumber)
-        .slice(0, 3),
+      recentEvents: relevantEvents,
       worldContext,
     };
   }
@@ -362,7 +384,9 @@ export class ArticleGenerator {
       journalist,
       alignedActors: aligned,
       opposingActors: opposing,
-      recentEvents: recentEvents.filter((e) => e.id !== event.id).slice(0, 3),
+      recentEvents: recentEvents
+        .filter((e) => e.id !== event.id && isWorldVisible(e.visibility))
+        .slice(0, 3),
     };
   }
 
@@ -370,7 +394,8 @@ export class ArticleGenerator {
    * Generate a single article with bias based on organizational relationships
    */
   private async generateArticle(
-    context: ArticleGenerationContext
+    context: ArticleGenerationContext,
+    qualityRetry = false
   ): Promise<Article | null> {
     const {
       event,
@@ -378,7 +403,7 @@ export class ArticleGenerator {
       journalist,
       alignedActors,
       opposingActors,
-      recentEvents: _recentEvents,
+      recentEvents,
       worldContext,
     } = context;
 
@@ -395,9 +420,12 @@ export class ArticleGenerator {
     }
 
     // Build article prompt
-    const prompt = await this.buildArticlePrompt(context, biasDirection);
+    const basePrompt = await this.buildArticlePrompt(context, biasDirection);
+    const prompt = qualityRetry
+      ? `${basePrompt}\n\nThe previous article failed validation. Use only the supplied question and resolution evidence; keep the article focused on those facts and omit unsupported details. The body must contain at least 500 characters.`
+      : basePrompt;
 
-    // Generate article content using kimi for high-quality content generation
+    // Generate the article as a JSON string body so prose cannot become XML tags.
     const response = await this.llm.generateJSON<
       | {
           title: string;
@@ -434,9 +462,9 @@ export class ArticleGenerator {
         required: ['title', 'summary', 'content', 'slant', 'sentiment'],
       },
       {
-        temperature: 0.85,
+        temperature: qualityRetry ? 0.2 : 0.85,
         maxTokens: 2500,
-        format: 'xml',
+        format: 'json',
         promptType: 'article_generate',
       }
     );
@@ -513,8 +541,7 @@ export class ArticleGenerator {
         `Generated article has empty summary for event ${event.id} by ${organization.name}`
       );
     }
-    // Content should be a full article (800-1500 words = ~4000-7500 chars)
-    // Minimum 500 chars to ensure it's not just a summary
+    // Keep the full-body minimum for every article stage.
     if (!content || content.trim().length < 500) {
       logger.error(
         'Article generation failed: content too short',
@@ -525,6 +552,7 @@ export class ArticleGenerator {
         },
         'ArticleGenerator'
       );
+      if (context.stage === 'resolution') return null;
       throw new Error(
         `Generated article content too short (${content?.length || 0} chars, min 500) for event ${event.id} by ${organization.name}`
       );
@@ -621,9 +649,17 @@ export class ArticleGenerator {
     // Grounding check: verify article stays on-topic with its source context
     // Note: Skip check when source context is too sparse (< 100 chars) to avoid false positives.
     // Short event descriptions may lack enough keywords for meaningful overlap comparison.
-    const sourceContext = [event.description, worldContext ?? '']
-      .filter(Boolean)
-      .join('\n');
+    const sourceContext = (
+      await characterMappingService.transformText(
+        [
+          event.description,
+          ...recentEvents.map((recentEvent) => recentEvent.description),
+          worldContext ?? '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      )
+    ).transformedText;
     if (sourceContext.length >= 100) {
       const quality = await ContentQualityGate.validateArticle(
         contentTransformed.transformedText,
@@ -732,6 +768,10 @@ BIAS INSTRUCTIONS:
     const relatedQuestionContext = event.relatedQuestion
       ? `Related to Prediction Market Question #${event.relatedQuestion}`
       : '';
+    const articleInstructions =
+      context.stage === 'resolution'
+        ? 'Write a concise resolution proof article of 100-150 words and at least 500 characters. Restate the exact question and resolved YES or NO outcome, then explain how the supplied resolution evidence establishes it. Stay close to the supplied wording and facts; do not expand a short source with filler or unsupported details. Use plain paragraphs.'
+        : 'Write a long-form investigative article (800-1500 words) when the supplied source material supports that depth. With sparse source material, stay concise rather than adding unsupported details.';
 
     return renderPrompt(biasedArticle, {
       orgName: organization.name,
@@ -743,6 +783,7 @@ BIAS INSTRUCTIONS:
       worldContext: worldContextSection,
       recentContext,
       biasInstructions,
+      articleInstructions,
     });
   }
 

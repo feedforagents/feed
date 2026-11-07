@@ -8,7 +8,7 @@ describe('parseLeaderboardQuery', () => {
         page: '2',
         pageSize: '25',
         metric: 'trading',
-        type: 'team',
+        type: 'wallet',
         userId: 'user-1',
       })
     );
@@ -16,8 +16,14 @@ describe('parseLeaderboardQuery', () => {
     expect(result.page).toBe(2);
     expect(result.pageSize).toBe(25);
     expect(result.metric).toBe('trading');
-    expect(result.type).toBe('team');
+    expect(result.type).toBe('wallet');
     expect(result.userId).toBe('user-1');
+  });
+
+  it('rejects the retired team scope', () => {
+    expect(() =>
+      parseLeaderboardQuery(new URLSearchParams({ type: 'team' }))
+    ).toThrow();
   });
 
   it('rejects silently-ignored params with a 400-style error', () => {

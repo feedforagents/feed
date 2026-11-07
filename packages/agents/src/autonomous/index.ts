@@ -7,23 +7,13 @@
  * @packageDocumentation
  */
 
-export { autonomousBatchResponseService } from './AutonomousBatchResponseService';
-export { autonomousCommentingService } from './AutonomousCommentingService';
 export {
   AutonomousCoordinator,
   type AutonomousTickResult,
   autonomousCoordinator,
 } from './AutonomousCoordinator';
-export { autonomousDMService } from './AutonomousDMService';
-export { autonomousGroupChatService } from './AutonomousGroupChatService';
-export {
-  autonomousPlanningCoordinator,
-  type PlannedAction,
-} from './AutonomousPlanningCoordinator';
-export { autonomousPostingService } from './AutonomousPostingService';
-export { autonomousTradingService } from './AutonomousTradingService';
 // Agent context utilities
-export { type AgentContext, getAgentContext, isNpcUser } from './agent-context';
+export { type AgentContext, getAgentContext } from './agent-context';
 export {
   type DirectCommentParams,
   type DirectCommentResult,
