@@ -199,6 +199,21 @@ export class PredictionPricing {
     };
   }
 
+  /**
+   * The fee actually charged must be the one canonical fee the fee ledger
+   * records and splits: FeeService.calculateFee works in integer cents
+   * (Math.round(amount * rate * 100) / 100) and processTradingFee skips
+   * fees below its minimum, so an unrounded charge disagrees with the fee
+   * ledger, the platform/referrer split and users.totalFeesPaid.
+   * PerpMarketService.calculateFee already charges this same cent-rounded
+   * fee (#1611); prediction charges align with it here.
+   */
+  static canonicalFee(amount: number, feeRate: number): number {
+    if (!Number.isFinite(amount) || !Number.isFinite(feeRate) || feeRate <= 0)
+      return 0;
+    return Math.round(amount * feeRate * 100) / 100;
+  }
+
   static calculateBuyWithFees(
     currentYesShares: number,
     currentNoShares: number,
@@ -206,7 +221,7 @@ export class PredictionPricing {
     totalAmount: number,
     feeRate: number
   ): ShareCalculationWithFees {
-    const fee = totalAmount * feeRate;
+    const fee = PredictionPricing.canonicalFee(totalAmount, feeRate);
     const netAmount = totalAmount - fee;
     const base = this.calculateBuy(
       currentYesShares,
@@ -237,7 +252,7 @@ export class PredictionPricing {
       sharesToSell
     );
     const gross = base.totalCost;
-    const fee = gross * feeRate;
+    const fee = PredictionPricing.canonicalFee(gross, feeRate);
     const rawProceeds = gross - fee;
     const netProceeds = floorPoints(rawProceeds);
     const roundingRemainder = rawProceeds - netProceeds;
