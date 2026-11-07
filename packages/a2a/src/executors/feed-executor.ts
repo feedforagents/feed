@@ -2344,6 +2344,12 @@ export class FeedAgentExecutor implements AgentExecutor {
     const limit = this.parsePositiveInt(params.limit, 20, 50);
     const users = await db.user.findMany({
       where: {
+        // Match the web people search (GET /api/users/search): banned
+        // accounts are never returned, and test accounts are not real
+        // users — every user-facing surface hides them (feeds strip
+        // their posts, a test author's post list is empty).
+        isBanned: false,
+        isTest: false,
         OR: [
           { username: { contains: query, mode: 'insensitive' } },
           { displayName: { contains: query, mode: 'insensitive' } },
