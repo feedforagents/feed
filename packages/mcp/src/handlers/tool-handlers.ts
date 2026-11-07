@@ -1555,10 +1555,14 @@ export async function executeGetPostsByTag(
     orderBy: { createdAt: 'desc' },
   });
   const postIds = postTagsList.map((pt) => pt.postId);
+  // Fetch the actual posts. Only posts up to the current time:
+  // future-dated posts are scheduled and must not be exposed early
+  // (the web tag surface applies the same timestamp bound).
   const postsList = await db.post.findMany({
     where: {
       id: { in: postIds },
       deletedAt: null,
+      timestamp: { lte: new Date() },
     },
     orderBy: { timestamp: 'desc' },
   });
