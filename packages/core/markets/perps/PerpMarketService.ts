@@ -748,9 +748,7 @@ export class PerpMarketService {
         positionId: position.id,
       },
       { ticker }
-    ).catch(() => {
-      // Error already logged in processFeeWithRetry; catch to prevent unhandled rejection
-    });
+    );
 
     const result: PerpTradeResult = {
       positionId: position.id,

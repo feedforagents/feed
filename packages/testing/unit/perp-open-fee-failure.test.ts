@@ -7,9 +7,12 @@
  * settlement transaction had committed, so a fee-ledger error surfaced as
  * an exception while the 200-notional position and the cash debit were
  * already committed — and an agent retry would open a second position.
- * The open path now uses the same fire-and-forget `processFeeWithRetry`
- * (+ outbox) as close / add-to-position / flip, so the successful trade
- * result is preserved and the fee intent survives for the outbox drain.
+ * The open path awaits `processFeeWithRetry` (+ outbox) — unlike close /
+ * add-to-position / flip, which stay fire-and-forget — so the fee intent is
+ * durable (settled inline or persisted to the outbox) before `openPosition`
+ * resolves: the A2A request path has no waitUntil/after to finish a detached
+ * promise if the serverless invocation ends first. `processFeeWithRetry`
+ * never throws, so awaiting it cannot fail the committed trade.
  *
  * Mirrors the in-memory fakes in perp-open-fee-consistency.test.ts so the
  * test runs without Postgres.
@@ -242,15 +245,6 @@ class InMemoryPerpDb implements PerpDbPort {
   async updateMarketStats(): Promise<void> {}
 }
 
-async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (cond()) return;
-    if (Date.now() >= deadline) throw new Error('waitFor timed out');
-    await Bun.sleep(25);
-  }
-}
-
 describe('perp open fee failure (post-commit bookkeeping)', () => {
   let db: InMemoryPerpDb;
   let wallet: InMemoryWallet;
@@ -328,8 +322,11 @@ describe('perp open fee failure (post-commit bookkeeping)', () => {
     expect(balance.balance).toBeCloseTo(9899.8, 6);
 
     // Retries exhausted, then the fee intent is persisted for the cron
-    // drain instead of being dropped silently.
-    await waitFor(() => outbox.calls.length === 1);
+    // drain instead of being dropped silently — and it must already exist
+    // when openPosition resolves (no waitFor): the A2A path has no
+    // waitUntil/after, so a later row would only prove eventual recovery
+    // while the process stays alive, not durability at resolve time.
+    expect(outbox.calls).toHaveLength(1);
     expect(feeProcessor.calls).toHaveLength(3);
     expect(feeProcessor.calls[0]).toEqual({
       amount: 200,
@@ -358,7 +355,9 @@ describe('perp open fee failure (post-commit bookkeeping)', () => {
     });
     expect(result.positionId).toBeTruthy();
 
-    await waitFor(() => feeProcessor.calls === 3);
+    // Awaited inline: all three attempts complete before openPosition
+    // resolves, so no waitFor is needed.
+    expect(feeProcessor.calls).toBe(3);
     expect(outbox.calls).toHaveLength(0);
   });
 
@@ -380,6 +379,8 @@ describe('perp open fee failure (post-commit bookkeeping)', () => {
     expect(positions).toHaveLength(1);
     // The fee intent could not be persisted; the critical log inside
     // processFeeWithRetry is the only record — the trade still stands.
-    await waitFor(() => feeProcessor.calls.length === 3);
+    // Awaited inline: all three attempts complete before openPosition
+    // resolves, so no waitFor is needed.
+    expect(feeProcessor.calls).toHaveLength(3);
   });
 });
