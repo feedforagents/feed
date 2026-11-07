@@ -54,6 +54,8 @@ interface NPCState {
   npcId: string;
   archetype: string;
   balance: number;
+  /** Amount staked in open long/short positions; closes draw down this. */
+  openExposure: number;
 }
 
 interface SimulationState {
@@ -531,6 +533,7 @@ Bun.serve({
             npcId,
             archetype: archetypeMap[npcId] ?? 'trader',
             balance: 10_000,
+            openExposure: 0,
           });
         }
 
@@ -610,7 +613,17 @@ Bun.serve({
         } else
           switch (action.type) {
             case 'open_long':
-            case 'open_short':
+            case 'open_short': {
+              const amount = amountOrError;
+              if (amount > npc.balance) {
+                success = false;
+                error = 'Insufficient balance';
+              } else {
+                npc.balance -= amount;
+                npc.openExposure += amount;
+              }
+              break;
+            }
             case 'buy_yes':
             case 'buy_no':
             case 'sell_yes':
@@ -628,8 +641,14 @@ Bun.serve({
             case 'close_short':
             case 'close_position': {
               const closeAmount = amountOrError;
-              pnl = (random() - 0.4) * closeAmount * 0.2;
-              npc.balance += closeAmount + pnl;
+              if (closeAmount > npc.openExposure) {
+                success = false;
+                error = 'Insufficient open position';
+              } else {
+                pnl = (random() - 0.4) * closeAmount * 0.2;
+                npc.openExposure -= closeAmount;
+                npc.balance += closeAmount + pnl;
+              }
               break;
             }
             case 'buy':
