@@ -1508,7 +1508,7 @@ export class MultiStepExecutor {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.warn(
-        `[MultiStep] Activity log failed after action committed: ${message}`,
+        `[MultiStep] Activity log failed after action completed: ${message}`,
         { agentUserId },
         'MultiStepExecutor'
       );
@@ -1741,12 +1741,20 @@ export class MultiStepExecutor {
 
     const likeResult = await executeDirectLike({ agentUserId, postId });
 
+    // executeDirectLike succeeds idempotently when the like already exists
+    // (liked=false, no new row). Record that honestly — mirroring how
+    // executeFollow distinguishes "Now following" from "Already following" —
+    // instead of claiming a new like happened.
+    const likeSummary = likeResult.success
+      ? likeResult.liked
+        ? `Liked post ${postId}`
+        : `Already liked post ${postId}`
+      : `Like failed: ${likeResult.error}`;
+
     await this.logActivity(agentUserId, {
       type: 'like',
       level: likeResult.success ? 'info' : 'warn',
-      message: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      message: likeSummary,
       metadata: {
         postId,
         success: likeResult.success,
@@ -1758,9 +1766,7 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.LIKE,
       success: likeResult.success,
-      summary: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      summary: likeSummary,
       result: {
         success: likeResult.success,
         liked: likeResult.liked,
@@ -1795,17 +1801,27 @@ export class MultiStepExecutor {
       comment,
     });
 
+    // executeDirectRepost succeeds idempotently when the share already
+    // exists (alreadyReposted=true, no new share or quote post). Record
+    // that honestly — mirroring how executeFollow distinguishes "Now
+    // following" from "Already following" — instead of claiming a new
+    // repost happened.
+    const repostSummary = repostResult.success
+      ? repostResult.alreadyReposted
+        ? `Already reposted ${postId}`
+        : `Reposted ${postId}${comment ? ' with comment' : ''}`
+      : `Repost failed: ${repostResult.error}`;
+
     await this.logActivity(agentUserId, {
       type: 'repost',
       level: repostResult.success ? 'info' : 'warn',
-      message: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      message: repostSummary,
       metadata: {
         postId,
         success: repostResult.success,
         repostId: repostResult.repostId ?? null,
         quotePostId: repostResult.quotePostId ?? null,
+        alreadyReposted: repostResult.alreadyReposted ?? false,
         hasComment: !!comment,
         error: repostResult.error ?? null,
       },
@@ -1814,13 +1830,12 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.REPOST,
       success: repostResult.success,
-      summary: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      summary: repostSummary,
       result: {
         success: repostResult.success,
         repostId: repostResult.repostId,
         quotePostId: repostResult.quotePostId,
+        alreadyReposted: repostResult.alreadyReposted,
         error: repostResult.error,
       },
       parameters,

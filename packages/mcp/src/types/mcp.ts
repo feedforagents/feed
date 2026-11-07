@@ -735,6 +735,9 @@ export interface UnlikePostResult {
 export interface SharePostResult {
   success: boolean;
   shareId: string;
+  /** The repost (or quote post) created in the sharer's feed. */
+  repostId: string;
+  shareCount: number;
 }
 
 export interface GetCommentsResult {
