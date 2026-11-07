@@ -1,0 +1,174 @@
+/**
+ * Integration test: OPEN_PERP plugin action balance pre-check must cover
+ * the trading fee.
+ *
+ * Runs against a real Postgres database (DATABASE_URL) with the real
+ * WalletService, PerpDbAdapter and settlement, because the defect is the
+ * mismatch between the action's pre-check and the service's debit:
+ * the action checked `balance < amount` (collateral only) while the
+ * service debits `amount + fee`, so a balance equal to the collateral
+ * passed the pre-check and then failed inside the service with a generic
+ * InsufficientFunds error.
+ *
+ * Run with: DATABASE_URL=postgresql://... bun test packages/testing/integration/open-perp-fee-precheck.integration.test.ts
+ */
+
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import type { IAgentRuntime, Memory, State } from '@elizaos/core';
+import {
+  db,
+  eq,
+  organizationState,
+  perpMarketSnapshots,
+  perpPositions,
+  users,
+} from '@feed/db';
+import { WalletService } from '@feed/engine';
+import { generateSnowflakeId } from '@feed/shared';
+import { openPerpAction } from '../../agents/src/plugins/plugin-agent-core/src/actions/open-perp';
+
+const BASE_PRICE = 100;
+
+let TEST_TICKER = '';
+let ORG_ID = '';
+
+const testUserIds: string[] = [];
+
+async function createTestUser(virtualBalance: string): Promise<string> {
+  const userId = await generateSnowflakeId();
+  const username = `test-openperp-${userId.slice(-8)}`;
+  await db.insert(users).values({
+    id: userId,
+    privyId: `did:privy:test-${userId}`,
+    username,
+    displayName: username,
+    profileComplete: true,
+    virtualBalance,
+    updatedAt: new Date(),
+  });
+  testUserIds.push(userId);
+  return userId;
+}
+
+async function createTestMarket(): Promise<void> {
+  const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 10);
+  TEST_TICKER = `OPENFEE${suffix}`.toUpperCase();
+  ORG_ID = `test-openperp-org-${suffix}`;
+  const now = new Date();
+
+  await db.insert(organizationState).values({
+    id: ORG_ID,
+    currentPrice: BASE_PRICE,
+    basePrice: BASE_PRICE,
+    updatedAt: now,
+  });
+  await db.insert(perpMarketSnapshots).values({
+    ticker: TEST_TICKER,
+    organizationId: ORG_ID,
+    name: 'Open Perp Fee Test Org',
+    currentPrice: BASE_PRICE,
+    high24h: BASE_PRICE,
+    low24h: BASE_PRICE,
+    fundingRate: {
+      ticker: TEST_TICKER,
+      rate: 0,
+      nextFundingTime: now.toISOString(),
+      predictedRate: 0,
+    },
+  });
+}
+
+async function deleteTestData(): Promise<void> {
+  await db.delete(perpPositions).where(eq(perpPositions.ticker, TEST_TICKER));
+  await db
+    .delete(perpMarketSnapshots)
+    .where(eq(perpMarketSnapshots.ticker, TEST_TICKER));
+  await db.delete(organizationState).where(eq(organizationState.id, ORG_ID));
+  for (const userId of testUserIds) {
+    await db.delete(users).where(eq(users.id, userId));
+  }
+}
+
+function runOpenPerp(userId: string, amount: number, leverage: number) {
+  const runtime = { agentId: userId } as IAgentRuntime;
+  const message = {} as Memory;
+  const state = {
+    data: {
+      actionParams: { ticker: TEST_TICKER, side: 'LONG', amount, leverage },
+    },
+  } as unknown as State;
+  return openPerpAction.handler(runtime, message, state);
+}
+
+describe('OPEN_PERP fee-aware balance pre-check (real DB)', () => {
+  let exactBalanceUserId = '';
+  let fundedUserId = '';
+  let leveragedUserId = '';
+
+  beforeAll(async () => {
+    await createTestMarket();
+    exactBalanceUserId = await createTestUser('100');
+    fundedUserId = await createTestUser('200');
+    leveragedUserId = await createTestUser('100.5');
+  });
+
+  afterAll(async () => {
+    await deleteTestData();
+  });
+
+  it('rejects an open whose balance covers the collateral but not the fee', async () => {
+    // $100 collateral at 1x: fee is max(100 x 0.1%, $0.01) = $0.10, so the
+    // open costs $100.10 and a $100.00 balance must be rejected up front
+    // with the insufficient-balance error — not with the service's generic
+    // "Failed to open position: Insufficient funds" failure.
+    const result = await runOpenPerp(exactBalanceUserId, 100, 1);
+
+    expect(result?.success).toBe(false);
+    expect(result?.error).toBe('Insufficient balance');
+    expect(result?.text).toContain('100.10');
+    expect(result?.text).toContain('fee');
+
+    // No position was created and the balance is untouched.
+    const positions = await db
+      .select({ id: perpPositions.id })
+      .from(perpPositions)
+      .where(eq(perpPositions.userId, exactBalanceUserId));
+    expect(positions).toHaveLength(0);
+    const balance = await WalletService.getBalance(exactBalanceUserId);
+    expect(balance.balance).toBe(100);
+  });
+
+  it('rejects a leveraged open whose balance covers the collateral but not the fee', async () => {
+    // $100 collateral at 10x: fee is max(1000 x 0.1%, $0.01) = $1.00, so
+    // the open costs $101.00 and a $100.50 balance must be rejected.
+    const result = await runOpenPerp(leveragedUserId, 100, 10);
+
+    expect(result?.success).toBe(false);
+    expect(result?.error).toBe('Insufficient balance');
+    expect(result?.text).toContain('101.00');
+
+    const positions = await db
+      .select({ id: perpPositions.id })
+      .from(perpPositions)
+      .where(eq(perpPositions.userId, leveragedUserId));
+    expect(positions).toHaveLength(0);
+    const balance = await WalletService.getBalance(leveragedUserId);
+    expect(balance.balance).toBe(100.5);
+  });
+
+  it('opens when the balance covers collateral plus the trading fee', async () => {
+    const result = await runOpenPerp(fundedUserId, 100, 1);
+
+    expect(result?.success).toBe(true);
+
+    const positions = await db
+      .select({ id: perpPositions.id })
+      .from(perpPositions)
+      .where(eq(perpPositions.userId, fundedUserId));
+    expect(positions).toHaveLength(1);
+
+    // $200 - $100 collateral - $0.10 fee.
+    const balance = await WalletService.getBalance(fundedUserId);
+    expect(balance.balance).toBeCloseTo(99.9, 2);
+  });
+});
