@@ -27,7 +27,7 @@ import {
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import type { WalletPort } from '@feed/core/markets/shared';
-import { asUser, db, getRawDrizzle, sql } from '@feed/db';
+import { asUser, db, getRawDrizzle, hasBlocked, sql } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
@@ -1313,6 +1313,17 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     if (!followingId) throw new Error('userId is required');
     if (followerId === followingId) throw new Error('Cannot follow yourself');
+
+    // A block removes follow relationships in both directions (see the block
+    // route), so neither side may recreate the edge while a block stands —
+    // the same rule the web follow route and the comment/share posts enforce.
+    const [targetBlockedMe, iBlockedTarget] = await Promise.all([
+      hasBlocked(followingId, followerId),
+      hasBlocked(followerId, followingId),
+    ]);
+    if (targetBlockedMe || iBlockedTarget) {
+      throw new Error('Cannot follow this user');
+    }
 
     // Check if already following
     const existingFollow = await db.follow.findFirst({

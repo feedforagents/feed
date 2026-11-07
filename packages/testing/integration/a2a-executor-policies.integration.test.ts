@@ -13,10 +13,12 @@ import {
   comments,
   db,
   eq,
+  follows,
   groupMembers,
   groups,
   inArray,
   posts,
+  userBlocks,
   users,
 } from '@feed/db';
 import { generateSnowflakeId, type JsonValue } from '@feed/shared';
@@ -24,6 +26,9 @@ import { generateSnowflakeId, type JsonValue } from '@feed/shared';
 const createdUsers: string[] = [];
 const createdPosts: string[] = [];
 let userId: string;
+let blockedByUserId: string;
+let blockerOfUserId: string;
+let cleanFollowId: string;
 let liveFeedPostId: string;
 let deletedFeedPostId: string;
 let groupId: string;
@@ -92,9 +97,44 @@ describe('FeedAgentExecutor policies', () => {
       chatId,
       userId,
     });
+
+    // Users for the users.follow block check: one blocked by the executor
+    // user, one who blocked the executor user, and one with no block.
+    for (const slot of ['blockedBy', 'blockerOf', 'clean'] as const) {
+      const id = await generateSnowflakeId();
+      await db.insert(users).values({
+        id,
+        username: `exec_${slot}_${id.slice(-10)}`,
+        isActor: false,
+        updatedAt: new Date(),
+      });
+      createdUsers.push(id);
+      if (slot === 'blockedBy') blockedByUserId = id;
+      if (slot === 'blockerOf') blockerOfUserId = id;
+      if (slot === 'clean') cleanFollowId = id;
+    }
+    await db.insert(userBlocks).values([
+      {
+        id: await generateSnowflakeId(),
+        blockerId: userId,
+        blockedId: blockedByUserId,
+      },
+      {
+        id: await generateSnowflakeId(),
+        blockerId: blockerOfUserId,
+        blockedId: userId,
+      },
+    ]);
   });
 
   afterAll(async () => {
+    await db.delete(follows).where(inArray(follows.followerId, createdUsers));
+    await db
+      .delete(userBlocks)
+      .where(inArray(userBlocks.blockerId, createdUsers));
+    await db
+      .delete(userBlocks)
+      .where(inArray(userBlocks.blockedId, createdUsers));
     await db.delete(comments).where(inArray(comments.postId, createdPosts));
     await db.delete(posts).where(inArray(posts.id, createdPosts));
     await db
@@ -145,6 +185,31 @@ describe('FeedAgentExecutor policies', () => {
       displayName: '  Exec Tester  ',
     })) as { user: { displayName: string } };
     expect(ok.user.displayName).toBe('Exec Tester');
+  });
+
+  it('rejects users.follow in either block direction', async () => {
+    await expect(
+      run('users.follow', { userId: blockedByUserId })
+    ).rejects.toThrow('Cannot follow this user');
+    await expect(
+      run('users.follow', { userId: blockerOfUserId })
+    ).rejects.toThrow('Cannot follow this user');
+
+    const blockedRows = await db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(eq(follows.followerId, userId));
+    expect(blockedRows).toHaveLength(0);
+
+    const ok = (await run('users.follow', {
+      userId: cleanFollowId,
+    })) as { success: boolean };
+    expect(ok.success).toBe(true);
+    const cleanRows = await db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(eq(follows.followerId, userId));
+    expect(cleanRows).toHaveLength(1);
   });
 
   it('leaving a group chat also deactivates group membership', async () => {

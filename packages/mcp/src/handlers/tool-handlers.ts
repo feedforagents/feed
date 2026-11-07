@@ -1666,6 +1666,16 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
+  // A block removes follow relationships in both directions (see the block
+  // route), so neither side may recreate the edge while a block stands —
+  // the same rule the web follow route and the comment/share posts enforce.
+  const [targetBlockedMe, iBlockedTarget] = await Promise.all([
+    hasBlocked(args.userId, agent.userId),
+    hasBlocked(agent.userId, args.userId),
+  ]);
+  if (targetBlockedMe || iBlockedTarget) {
+    throw new Error('Cannot follow this user');
+  }
   const existing = await db.follow.findFirst({
     where: {
       followerId: agent.userId,
