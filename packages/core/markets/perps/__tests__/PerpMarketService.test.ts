@@ -1019,6 +1019,14 @@ describe('PerpMarketService', () => {
       expect(result.entryPrice).toBeGreaterThan(initial.entryPrice);
       expect(result.entryPrice).toBeLessThan(130);
 
+      // fillPrice is what the added 100 filled at, not the blended entry.
+      expect(result.fillPrice).toBeDefined();
+      expect(result.fillPrice!).toBeGreaterThan(result.entryPrice);
+      // blend check: 100 @ initial + 100 @ fill = 200 @ entry
+      expect(
+        (initial.entryPrice * 100 + result.fillPrice! * 100) / 200
+      ).toBeCloseTo(result.entryPrice, 8);
+
       // Verify position in DB
       const pos = await db.getPositionById(initial.positionId);
       expect(pos?.size).toBe(200);
@@ -1048,6 +1056,11 @@ describe('PerpMarketService', () => {
       expect(result.rebalanceType).toBe('reduce');
       expect(result.previousSize).toBe(100);
       expect(result.remainingSize).toBeCloseTo(70, 4);
+      // The closed 30 executed at the exit price.
+      expect(result.size).toBeCloseTo(30, 8);
+      expect(result.exitPrice).toBeDefined();
+      expect(result.fillPrice).toBe(result.exitPrice);
+      expect(result.realizedPnL).toBeDefined();
 
       // Position should still exist with reduced size
       const pos = await db.getPositionById(initial.positionId);
@@ -1077,6 +1090,9 @@ describe('PerpMarketService', () => {
       expect(result.isRebalance).toBe(true);
       expect(result.rebalanceType).toBe('close');
       expect(result.fullyClosed).toBe(true);
+      expect(result.size).toBeCloseTo(100, 8);
+      expect(result.exitPrice).toBeDefined();
+      expect(result.fillPrice).toBe(result.exitPrice);
 
       // Position should be closed
       const pos = await db.getPositionById(initial.positionId);
@@ -1107,6 +1123,11 @@ describe('PerpMarketService', () => {
       expect(result.side).toBe('short');
       // New position size should be 150 - 100 = 50
       expect(result.size).toBe(50);
+      // Both legs are reported: the long closed at exitPrice, the short
+      // opened at fillPrice (its entry).
+      expect(result.exitPrice).toBeDefined();
+      expect(result.realizedPnL).toBeDefined();
+      expect(result.fillPrice).toBe(result.entryPrice);
 
       // Original position should be closed
       const oldPos = await db.getPositionById(initial.positionId);
