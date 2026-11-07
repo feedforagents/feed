@@ -140,6 +140,7 @@ import {
   db,
   eq,
   inArray,
+  isNull,
   posts,
   reactions,
   shares,
@@ -187,6 +188,7 @@ async function getParentChain(commentId: string | null): Promise<
         authorId: comments.authorId,
         createdAt: comments.createdAt,
         parentCommentId: comments.parentCommentId,
+        deletedAt: comments.deletedAt,
       })
       .from(comments)
       .where(eq(comments.id, currentParentId))
@@ -194,7 +196,11 @@ async function getParentChain(commentId: string | null): Promise<
 
     if (!parent) break;
 
-    parents.unshift(parent); // Add to beginning (oldest first)
+    // Soft-deleted (moderated) parents are hidden: skip their content but
+    // keep walking so a visible grandparent can still be shown.
+    if (!parent.deletedAt) {
+      parents.unshift(parent); // Add to beginning (oldest first)
+    }
     currentParentId = parent.parentCommentId;
     depth++;
   }
@@ -225,10 +231,16 @@ async function countAllRepliesBatch(
     // BFS through reply tree, but stop at MAX_REPLY_COUNT
     while (currentLevel.length > 0 && count < MAX_REPLY_COUNT) {
       // Get all direct replies to current level comments
+      // (soft-deleted replies are hidden and do not count)
       const replies = await db
         .select({ id: comments.id })
         .from(comments)
-        .where(inArray(comments.parentCommentId, currentLevel));
+        .where(
+          and(
+            inArray(comments.parentCommentId, currentLevel),
+            isNull(comments.deletedAt)
+          )
+        );
 
       count += replies.length;
 
@@ -270,7 +282,9 @@ export const GET = withErrorHandling(
       .where(eq(comments.id, commentId))
       .limit(1);
 
-    if (!comment) {
+    if (!comment || comment.deletedAt) {
+      // Soft-deleted (moderated) comments must never be returned; treat
+      // them exactly like comments that do not exist.
       throw new NotFoundError('Comment', commentId);
     }
 
@@ -346,7 +360,9 @@ export const GET = withErrorHandling(
           db
             .select({ count: count() })
             .from(comments)
-            .where(eq(comments.postId, post.id)),
+            .where(
+              and(eq(comments.postId, post.id), isNull(comments.deletedAt))
+            ),
           db
             .select({ count: count() })
             .from(shares)
@@ -399,10 +415,13 @@ export const GET = withErrorHandling(
       .limit(1);
 
     // Get direct replies to this comment
+    // (soft-deleted (moderated) replies must never be returned)
     const directReplies = await db
       .select()
       .from(comments)
-      .where(eq(comments.parentCommentId, commentId))
+      .where(
+        and(eq(comments.parentCommentId, commentId), isNull(comments.deletedAt))
+      )
       .orderBy(asc(comments.createdAt));
 
     // Get author IDs for replies
