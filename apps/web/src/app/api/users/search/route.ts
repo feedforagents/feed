@@ -187,18 +187,37 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ...(includeAgents && { isAgent: true }),
     };
 
-    const exactMatches = await db.user.findMany({
-      where: {
-        AND: [
-          ...baseFilters,
-          {
-            username: searchTerm,
-          },
-        ],
-      },
-      select,
-      take: 5,
-    });
+    // The adapter has no case-insensitive equals, so find exact usernames with
+    // the same filters in SQL. The viewer id keeps the NOT IN list non-empty.
+    const exactIds = await db.$queryRaw<{ id: string }>`
+      SELECT id FROM "User"
+      WHERE lower(username) = lower(${rawSearchTerm})
+        AND id NOT IN ${[user.userId, ...excludedUserIds]}
+        AND "isActor" = false
+        AND (${includeAgents} OR "isAgent" = false)
+        AND "isBanned" = false
+      ORDER BY username
+      LIMIT 5
+    `;
+
+    const exactMatches =
+      exactIds.length > 0
+        ? await db.user.findMany({
+            where: {
+              AND: [
+                ...baseFilters,
+                { id: { in: exactIds.map((row) => row.id) } },
+              ],
+            },
+            select,
+            take: 5,
+            orderBy: [
+              {
+                username: 'asc',
+              },
+            ],
+          })
+        : [];
 
     const seenIds = new Set(exactMatches.map((entry) => entry.id));
     const remainingAfterExact = 20 - exactMatches.length;
@@ -214,7 +233,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                   OR: [
                     {
                       username: {
-                        startsWith: searchTerm,
+                        startsWith: rawSearchTerm,
+                        mode: 'insensitive',
                       },
                     },
                     {
