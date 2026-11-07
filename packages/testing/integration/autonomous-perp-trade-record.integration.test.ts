@@ -408,6 +408,8 @@ describe('autonomous perp trade record (static NPC)', () => {
     expect(openLeg).toMatchObject({ side: 'short' });
     expect(openLeg!.amount).toBeCloseTo(150, 6);
     expect(openLeg!.price).toBeCloseTo(flipped!.entryPrice, 8);
-    expect(Math.abs(openLeg!.price - closeLeg!.price)).toBeGreaterThan(0.01);
+    // Both legs now use AMM average fills. They can differ by only a cent;
+    // each exact execution price is pinned above, so only require distinct fills.
+    expect(Math.abs(openLeg!.price - closeLeg!.price)).toBeGreaterThan(1e-6);
   });
 });
