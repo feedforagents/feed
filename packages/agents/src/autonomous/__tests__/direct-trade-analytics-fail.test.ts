@@ -37,7 +37,7 @@ class MockPredictionDbAdapter {
 class MockPerpMarketService {
   async openPosition() {
     committedPerpOpen = true;
-    return { entryPrice: 100 };
+    return { entryPrice: 100, fillPrice: 100 };
   }
   async closePosition() {
     committedPerpClose = true;
@@ -117,6 +117,7 @@ mock.module('@feed/engine', () => ({
   FeeService: { processTradingFee: mock(async () => ({ feeCharged: 0 })) },
   createNpcWalletAdapter: mock(() => ({})),
   createPerpPriceImpactPort: mock(() => ({})),
+  createPerpTradesCachePort: mock(() => ({})),
   createPerpSettlement: mock(() => ({})),
   generateTagsFromPost: mock(async () => []),
   invalidateAfterPredictionTrade: mock(async () => undefined),
