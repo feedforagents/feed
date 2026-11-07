@@ -7,18 +7,8 @@ import type {
   PerpPositionRecord,
 } from '../types';
 
-/**
- * REPRO (candidate): openPosition awaits feeProcessor.processTradingFee
- * directly AFTER the settlement commit, while close/add/flip all route
- * fee bookkeeping through fire-and-forget processFeeWithRetry (retries +
- * outbox). A transient fee failure therefore makes openPosition reject
- * even though the debit, position row and market deltas already committed.
- * A caller that reports failure invites a retry, and a retry open routes
- * to addToPosition — growing the position a second time.
- *
- * Expected after fix: openPosition resolves, position exists, and the
- * failed fee lands in the trading-fee outbox for async retry.
- */
+/** A gap close may settle at zero, so stored and returned PnL must cap the
+ * loss at the margin actually available on each closed leg. */
 
 const feeConfig = {
   tradingFeeRate: 0.001,
@@ -85,7 +75,7 @@ class ReproDb implements PerpDbPort {
     const pos = this.positions.get(id);
     return pos && !pos.closedAt ? { ...pos } : null;
   }
-  async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>) {
+  async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
     return fn(this);
   }
   async upsertPosition(
@@ -107,9 +97,16 @@ class ReproDb implements PerpDbPort {
   ) {
     const pos = this.positions.get(positionId);
     if (!pos || pos.closedAt) return;
-    this.positions.set(positionId, { ...pos, ...updates, lastUpdated: new Date() });
+    this.positions.set(positionId, {
+      ...pos,
+      ...updates,
+      lastUpdated: new Date(),
+    });
   }
-  async closePosition(positionId: string, updates: Partial<PerpPositionRecord>) {
+  async closePosition(
+    positionId: string,
+    updates: Partial<PerpPositionRecord>
+  ) {
     const pos = this.positions.get(positionId);
     if (!pos || pos.closedAt) return false;
     this.positions.set(positionId, {
@@ -135,10 +132,7 @@ class ReproDb implements PerpDbPort {
     this.markets.set(ticker, { ...current, openInterest, volume24h });
     return { openInterest, volume24h };
   }
-  async updateMarketStats(
-    ticker: string,
-    updates: Partial<PerpMarketRecord>
-  ) {
+  async updateMarketStats(ticker: string, updates: Partial<PerpMarketRecord>) {
     const current = this.markets.get(ticker)!;
     this.markets.set(ticker, { ...current, ...updates });
   }
@@ -181,12 +175,17 @@ describe('close beyond margin: stored vs recorded PnL', () => {
       fees: feeConfig,
     });
     const open = await service.openPosition({
-      userId: 'u1', ticker: 'ABC', side: 'long', size: 100, leverage: 10,
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
     });
     // Gap down 50%: raw PnL -50 on margin 10, no liquidation step ran.
     await db.updateMarketStats('ABC', { currentPrice: 50 });
     const close = await service.closePosition({
-      userId: 'u1', positionId: open.positionId,
+      userId: 'u1',
+      positionId: open.positionId,
     });
     const stored = await db.getPositionById(open.positionId);
     const recorded = wallet.pnls.filter((p) => p.reason === 'perp_close');
