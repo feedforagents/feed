@@ -497,14 +497,20 @@ describe('Trading leaderboard equity ranking (D-15b)', () => {
       8
     );
 
+    // The control sits a hair above the buyer's true equity profit
+    // (≈ -0.0102). Both partial sales are small enough that their fees
+    // round to zero under the canonical cent-rounded fee, so the buyer
+    // realizes no fee loss on them; the control is calibrated to that
+    // post-fee profit, keeping the same hair-thin gap this assertion
+    // was written against.
     const control = await createTestUser({
       usernamePrefix: 'lb-eq-rounded-control',
-      lifetimePnL: -0.03,
+      lifetimePnL: -0.01,
       createdAt: new Date('2026-01-10T00:00:00.000Z'),
     });
     await db
       .update(users)
-      .set({ virtualBalance: '999.97' })
+      .set({ virtualBalance: '999.99' })
       .where(eq(users.id, control));
     const order = await seededOrder();
     expect(order.indexOf(control)).toBeLessThan(order.indexOf(buyer));
