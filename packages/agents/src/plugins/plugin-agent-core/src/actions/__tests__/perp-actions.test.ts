@@ -56,6 +56,8 @@ mock.module('@feed/core/markets/perps', () => ({
 let mockBalance = 10_000;
 
 mock.module('@feed/engine', () => ({
+  createPerpSettlement: () => ({}),
+  createPerpTradesCachePort: () => ({}),
   createPerpPriceImpactPort: () => ({}),
   createUserWalletAdapter: () => ({}),
   FEE_CONFIG: {
@@ -126,6 +128,30 @@ describe('OPEN_PERP', () => {
     );
     expect(result?.success).toBe(true);
     expect(openPositionMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('accepts the exact balance after rounding the service fee down', async () => {
+    mockBalance = 100.11;
+    const result = await openPerpAction.handler(
+      runtime,
+      message,
+      stateWith({ ticker: 'ABC', side: 'LONG', amount: 100.01, leverage: 1 })
+    );
+    expect(result?.success).toBe(true);
+    expect(openPositionMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('reports the same rounded-up fee the service charges', async () => {
+    mockBalance = 105.1;
+    const result = await openPerpAction.handler(
+      runtime,
+      message,
+      stateWith({ ticker: 'ABC', side: 'LONG', amount: 105, leverage: 1 })
+    );
+    expect(result?.success).toBe(false);
+    expect(result?.values?.required).toBe(105.11);
+    expect(result?.text).toContain('$0.11 fee');
+    expect(openPositionMock).not.toHaveBeenCalled();
   });
 
   test('treats amount as collateral and opens notional = amount x leverage', async () => {

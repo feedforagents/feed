@@ -92,7 +92,11 @@ mock.module('@feed/core/markets/prediction', () => ({
       pages[offset] ?? [];
     listUserPositions = async () => positions;
   },
-  PredictionPricing: { getCurrentPrice: () => 0.5 },
+  PredictionPricing: {
+    getCurrentPrice: () => 0.5,
+    // Mirrors floorPoints(shares) in the real implementation.
+    calculateExpectedPayout: (shares: number) => Math.floor(shares * 100) / 100,
+  },
   calculatePredictionPositionSnapshot: () => ({
     currentUnitPrice: 0.5,
     currentProbability: 0.5,

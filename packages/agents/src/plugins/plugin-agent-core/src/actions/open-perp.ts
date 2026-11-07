@@ -15,6 +15,7 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   createUserWalletAdapter,
   FEE_CONFIG,
   WalletService,
@@ -150,7 +151,7 @@ export const openPerpAction: Action = {
     // too — otherwise a balance equal to `amount` passes here and the open
     // then fails inside the service with a generic InsufficientFunds error.
     const fee = Math.max(
-      notionalSize * FEE_CONFIG.TRADING_FEE_RATE,
+      Math.round(notionalSize * FEE_CONFIG.TRADING_FEE_RATE * 100) / 100,
       FEE_CONFIG.MIN_FEE_AMOUNT
     );
     const totalCost = amount + fee;
@@ -171,6 +172,7 @@ export const openPerpAction: Action = {
         settlement: createPerpSettlement(),
         db: new PerpDbAdapter(),
         wallet: createUserWalletAdapter(),
+        cache: createPerpTradesCachePort(),
         fees: {
           tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
           platformShare: FEE_CONFIG.PLATFORM_SHARE,

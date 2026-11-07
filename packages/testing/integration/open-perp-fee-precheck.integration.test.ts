@@ -16,11 +16,16 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import type { IAgentRuntime, Memory, State } from '@elizaos/core';
 import {
+  agentLogs,
+  agentTrades,
+  balanceTransactions,
   db,
   eq,
   organizationState,
   perpMarketSnapshots,
   perpPositions,
+  pointsTransactions,
+  stockPrices,
   users,
 } from '@feed/db';
 import { WalletService } from '@feed/engine';
@@ -83,8 +88,13 @@ async function deleteTestData(): Promise<void> {
   await db
     .delete(perpMarketSnapshots)
     .where(eq(perpMarketSnapshots.ticker, TEST_TICKER));
+  await db.delete(stockPrices).where(eq(stockPrices.organizationId, ORG_ID));
   await db.delete(organizationState).where(eq(organizationState.id, ORG_ID));
   for (const userId of testUserIds) {
+    for (const table of [agentTrades, agentLogs])
+      await db.delete(table).where(eq(table.agentUserId, userId));
+    for (const table of [balanceTransactions, pointsTransactions])
+      await db.delete(table).where(eq(table.userId, userId));
     await db.delete(users).where(eq(users.id, userId));
   }
 }
@@ -170,5 +180,33 @@ describe('OPEN_PERP fee-aware balance pre-check (real DB)', () => {
     // $200 - $100 collateral - $0.10 fee.
     const balance = await WalletService.getBalance(fundedUserId);
     expect(balance.balance).toBeCloseTo(99.9, 2);
+  });
+  it('opens with exactly the rounded-down fee-inclusive balance', async () => {
+    const userId = await createTestUser('100.11');
+    const result = await runOpenPerp(userId, 100.01, 1);
+    expect(result?.success).toBe(true);
+    const positions = await db
+      .select()
+      .from(perpPositions)
+      .where(eq(perpPositions.userId, userId));
+    expect(positions).toHaveLength(1);
+    expect(positions[0]?.size).toBe(100.01);
+    expect((await WalletService.getBalance(userId)).balance).toBe(0);
+  });
+
+  it('reports the rounded-up service fee without debiting a short wallet', async () => {
+    const userId = await createTestUser('105.10');
+    const result = await runOpenPerp(userId, 105, 1);
+    expect(result?.success).toBe(false);
+    expect(result?.error).toBe('Insufficient balance');
+    expect(result?.values?.required).toBe(105.11);
+    expect(result?.text).toContain('$0.11 fee');
+    expect(
+      await db
+        .select()
+        .from(perpPositions)
+        .where(eq(perpPositions.userId, userId))
+    ).toHaveLength(0);
+    expect((await WalletService.getBalance(userId)).balance).toBe(105.1);
   });
 });
