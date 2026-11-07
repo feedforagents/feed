@@ -104,6 +104,7 @@ mock.module('@feed/engine', () => ({
   createNpcWalletAdapter: mock(() => ({})),
   createPerpPriceImpactPort: mock(() => ({})),
   createPerpSettlement: mock(() => ({})),
+  createPerpTradesCachePort: mock(() => ({})),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0,
     PLATFORM_SHARE: 0,
@@ -133,7 +134,7 @@ mock.module('@feed/shared', () => ({
   isPureRepost: mock(() => false),
 }));
 
-mock.module('../services/AgentPnLService', () => ({
+mock.module('../../services/AgentPnLService', () => ({
   agentPnLService: { recordTrade: mock(async () => undefined) },
 }));
 
