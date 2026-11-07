@@ -487,14 +487,35 @@ export async function executeDirectTrade(
       );
     }
 
-    // Cannot trade more than balance
-    if (amount > balance) {
+    // Cannot trade more than the balance can afford. Perp opens charge
+    // margin + trading fee on top (margin = size at 1x leverage here), so
+    // capping a perp size to the raw balance still fails with
+    // InsufficientFunds once the fee is added. Cap perp sizes to what
+    // margin + fee can afford. Prediction buys debit exactly `amount`
+    // (the fee comes out of the shares), so they keep the raw-balance cap.
+    const cappedAmount =
+      marketType === 'perp'
+        ? Math.max(
+            0,
+            Math.floor(
+              (() => {
+                const rate = FEE_CONFIG.TRADING_FEE_RATE;
+                const minFee = FEE_CONFIG.MIN_FEE_AMOUNT;
+                const byRate = balance / (1 + rate);
+                // fee(size) = max(minFee, rate * size);
+                // size + fee(size) <= balance.
+                return byRate * rate >= minFee ? byRate : balance - minFee;
+              })() * 100
+            ) / 100
+          )
+        : balance;
+    if (amount > cappedAmount) {
       logger.warn(
-        `[DirectExecutor] Trade capped to balance: $${amount} -> $${balance}`,
+        `[DirectExecutor] Trade capped to fee-affordable balance: $${amount} -> $${cappedAmount}`,
         { agentUserId, isNpc },
         'DirectExecutors'
       );
-      amount = balance;
+      amount = cappedAmount;
     }
 
     // Reject if insufficient funds
@@ -558,6 +579,7 @@ export async function executeDirectTrade(
     return executeClosePerpPosition({
       agentUserId,
       ticker: perpTicker,
+      amount,
       reasoning,
       isNpc,
       agentManagedBy,
@@ -614,6 +636,42 @@ function predictionSettlementOptions(
               tx
             ),
         }),
+  };
+}
+
+/**
+ * Fee distributor for perp trades. Unlike the prediction settlement, the
+ * perp service takes a plain FeeProcessor (no transaction factory): it calls
+ * processTradingFee after the trade settles. Without this, the perp fee is
+ * debited from the trader (margin + fee on open, fee withheld from the close
+ * settlement) but never distributed — no tradingFees row, no referrer
+ * credit, no stability-fund diversion, no totalFeesPaid increment.
+ * NPCs have no user fee ledger, so they get no processor (same as
+ * prediction trades).
+ */
+function perpFeeProcessor(isNpc: boolean) {
+  if (isNpc) return undefined;
+  return {
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+    }: {
+      userId: string;
+      amount: number;
+      type: string;
+      relatedId?: string;
+      positionId?: string;
+    }) =>
+      FeeService.processTradingFee(
+        userId,
+        type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
+        amount,
+        positionId,
+        relatedId
+      ),
   };
 }
 
@@ -821,11 +879,12 @@ async function executePerpTrade(params: {
     wallet: walletAdapter,
     cache: createPerpTradesCachePort(),
     fees: {
-      tradingFeeRate: 0.001,
-      platformShare: 0.5,
-      referrerShare: 0.5,
-      minFeeAmount: 0.01,
+      tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+      platformShare: FEE_CONFIG.PLATFORM_SHARE,
+      referrerShare: FEE_CONFIG.REFERRER_SHARE,
+      minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
+    feeProcessor: perpFeeProcessor(isNpc),
     priceImpact: createPerpPriceImpactPort(),
   });
 
@@ -863,16 +922,21 @@ async function executePerpTrade(params: {
 }
 
 /**
- * Close an existing perp position
+ * Close an existing perp position.
+ * `amount` is the notional dollars to close, or 0 for the full position
+ * (same convention as prediction sells). A positive amount below the
+ * position size closes only that portion.
  */
 async function executeClosePerpPosition(params: {
   agentUserId: string;
   ticker: string;
+  amount: number;
   reasoning?: string;
   isNpc: boolean;
   agentManagedBy: string;
 }): Promise<DirectTradeResult> {
-  const { agentUserId, ticker, reasoning, isNpc, agentManagedBy } = params;
+  const { agentUserId, ticker, amount, reasoning, isNpc, agentManagedBy } =
+    params;
 
   // Find the open position for this ticker
   const [existingPosition] = await db
@@ -894,6 +958,19 @@ async function executeClosePerpPosition(params: {
     };
   }
 
+  const positionSize = Number(existingPosition.size);
+  // Tolerate float noise when the agent asks for exactly the full size
+  // (same tolerance as the chat-initiated CLOSE_PERP action).
+  const FULL_CLOSE_TOLERANCE = 0.01;
+  if (amount > positionSize + FULL_CLOSE_TOLERANCE) {
+    return {
+      success: false,
+      error: `Close amount $${amount} exceeds position size $${positionSize.toFixed(2)}. Use 0 to close the entire position.`,
+    };
+  }
+  const isPartialClose =
+    amount > 0 && amount < positionSize - FULL_CLOSE_TOLERANCE;
+
   const closeOperation = async () => {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
@@ -908,11 +985,12 @@ async function executeClosePerpPosition(params: {
       wallet: walletAdapter,
       cache: createPerpTradesCachePort(),
       fees: {
-        tradingFeeRate: 0.001,
-        platformShare: 0.5,
-        referrerShare: 0.5,
-        minFeeAmount: 0.01,
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
+      feeProcessor: perpFeeProcessor(isNpc),
       priceImpact: createPerpPriceImpactPort(),
     });
 
@@ -920,6 +998,7 @@ async function executeClosePerpPosition(params: {
     const result = await service.closePosition({
       positionId: existingPosition.id,
       userId: agentUserId,
+      percentage: isPartialClose ? amount / positionSize : undefined,
     });
 
     return result;
