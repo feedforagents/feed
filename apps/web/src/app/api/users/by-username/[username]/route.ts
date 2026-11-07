@@ -85,6 +85,7 @@ import {
   positions,
   reactions,
   sql,
+  userActorFollows,
   users,
 } from '@feed/db';
 import { logger, toISO, UsernameParamSchema } from '@feed/shared';
@@ -149,6 +150,7 @@ export const GET = withErrorHandling(
       [reactionCount],
       [followerCount],
       [followingCount],
+      [actorFollowingCount],
     ] = await Promise.all([
       db
         .select({ count: count() })
@@ -170,6 +172,13 @@ export const GET = withErrorHandling(
         .select({ count: count() })
         .from(follows)
         .where(eq(follows.followerId, dbUser.id)),
+      // Actor follows live in their own table; the by-id profile stats
+      // (CachedDatabaseService.getUserProfileStats) and the following list
+      // both add them to the following total.
+      db
+        .select({ count: count() })
+        .from(userActorFollows)
+        .where(eq(userActorFollows.userId, dbUser.id)),
     ]);
 
     logger.info(
@@ -211,7 +220,9 @@ export const GET = withErrorHandling(
           comments: Number(commentCount?.count || 0),
           reactions: Number(reactionCount?.count || 0),
           followers: Number(followerCount?.count || 0),
-          following: Number(followingCount?.count || 0),
+          following:
+            Number(followingCount?.count || 0) +
+            Number(actorFollowingCount?.count || 0),
         },
       },
     });
