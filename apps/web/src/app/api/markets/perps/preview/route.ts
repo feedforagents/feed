@@ -1,6 +1,7 @@
 import {
   addPublicReadHeaders,
   authenticate,
+  BadRequestError,
   publicRateLimit,
   successResponse,
   withErrorHandling,
@@ -22,7 +23,18 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   if (error) return error;
 
   const body = await request.json();
-  const { ticker, side, size, leverage } = PerpOpenPositionSchema.parse(body);
+  const { ticker, side, size, leverage, orderType } =
+    PerpOpenPositionSchema.parse(body);
+  // Limit opens are not supported by the service, so they are rejected
+  // rather than silently quoted at market (same rule as the open and
+  // close routes). The schema always resolves orderType (default
+  // 'market'); the check tolerates an absent value for direct callers.
+  if (orderType && orderType !== 'market') {
+    throw new BadRequestError(
+      'Only market open orders are supported',
+      'UNSUPPORTED_ORDER_TYPE'
+    );
+  }
   const normalizedSide = side.toLowerCase() as 'long' | 'short';
   const numericSize = typeof size === 'string' ? Number(size) : size;
   let authenticatedUser: Awaited<ReturnType<typeof authenticate>> | null = null;
