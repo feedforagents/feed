@@ -7,6 +7,7 @@ import {
   organizationState,
   perpMarketSnapshots,
   perpPositions,
+  pointsTransactions,
   stockPrices,
   users,
 } from '@feed/db';
@@ -114,6 +115,9 @@ for (const { side, opposite, size } of cases) {
         expect(preview.totalRequired).toBeLessThanOrEqual(510);
       }
     } finally {
+      await db
+        .delete(pointsTransactions)
+        .where(eq(pointsTransactions.userId, userId));
       await db
         .delete(balanceTransactions)
         .where(eq(balanceTransactions.userId, userId));
