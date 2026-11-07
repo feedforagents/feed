@@ -67,6 +67,7 @@ type FlipPositionTransactionResult = {
   liquidationPrice: number;
   marginPaid: number;
   feePaid: number;
+  exitPrice: number;
   realizedPnL: number;
   isRebalance: true;
   rebalanceType: 'flip';
@@ -260,7 +261,10 @@ export class PerpMarketService {
     leverage: number,
     tradeSize: number,
     basis?: { previousSize: number; previousEntryPrice: number }
-  ): Promise<{ entryPrice: number; liquidationPrice: number } | undefined> {
+  ): Promise<
+    | { entryPrice: number; liquidationPrice: number; fillPrice: number }
+    | undefined
+  > {
     if (!this.deps.priceImpact) return undefined;
 
     try {
@@ -364,6 +368,7 @@ export class PerpMarketService {
       return {
         entryPrice: newEntryPrice,
         liquidationPrice: newLiquidationPrice,
+        fillPrice: avgFillPrice,
       };
     } catch (error) {
       logger.error(
@@ -745,6 +750,7 @@ export class PerpMarketService {
       size,
       leverage,
       entryPrice,
+      fillPrice: entryPrice,
       liquidationPrice,
       marginPaid: marginRequired,
       feePaid: fee,
@@ -777,6 +783,7 @@ export class PerpMarketService {
     );
     if (impactAdj) {
       result.entryPrice = impactAdj.entryPrice;
+      result.fillPrice = impactAdj.fillPrice;
       result.liquidationPrice = impactAdj.liquidationPrice;
     }
 
@@ -984,6 +991,7 @@ export class PerpMarketService {
       leverage: settlement.position.leverage,
       entryPrice: settlement.position.entryPrice,
       exitPrice: settlement.exitPrice,
+      fillPrice: settlement.exitPrice,
       liquidationPrice: settlement.position.liquidationPrice,
       realizedPnL: settlement.realizedPnL,
       feePaid: settlement.fee,
@@ -1675,6 +1683,8 @@ export class PerpMarketService {
       size: result.size,
       leverage: result.leverage,
       entryPrice: result.entryPrice,
+      // The added size filled at the open quote; entryPrice is the blend.
+      fillPrice: currentPrice,
       liquidationPrice: result.liquidationPrice,
       marginPaid: result.marginPaid,
       feePaid: result.feePaid,
@@ -1701,6 +1711,7 @@ export class PerpMarketService {
     );
     if (impactAdj) {
       finalResult.entryPrice = impactAdj.entryPrice;
+      finalResult.fillPrice = impactAdj.fillPrice;
       finalResult.liquidationPrice = impactAdj.liquidationPrice;
     }
 
@@ -1950,6 +1961,7 @@ export class PerpMarketService {
               liquidationPrice,
               marginPaid: marginRequired,
               feePaid: totalFees,
+              exitPrice,
               realizedPnL,
               isRebalance: true,
               rebalanceType: 'flip' as const,
@@ -2017,6 +2029,8 @@ export class PerpMarketService {
         size: flipResult.size,
         leverage: flipResult.leverage,
         entryPrice: flipResult.entryPrice,
+        fillPrice: flipResult.entryPrice,
+        exitPrice: flipResult.exitPrice,
         liquidationPrice: flipResult.liquidationPrice,
         marginPaid: flipResult.marginPaid,
         feePaid: flipResult.feePaid,
@@ -2039,6 +2053,7 @@ export class PerpMarketService {
       );
       if (impactAdj) {
         finalResult.entryPrice = impactAdj.entryPrice;
+        finalResult.fillPrice = impactAdj.fillPrice;
         finalResult.liquidationPrice = impactAdj.liquidationPrice;
       }
 
