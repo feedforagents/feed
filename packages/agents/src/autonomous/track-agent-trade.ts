@@ -1,13 +1,11 @@
 /**
  * Server-side PostHog tracking for agent trades.
- * Used by AutonomousTradingService and MultiStepExecutor
+ * Used by MultiStepExecutor
  * when running in the Next.js app (e.g. cron); no-ops when NEXT_PUBLIC_POSTHOG_PROJECT_ID is not set.
  * Environment properties match apps/web/src/lib/posthog/server.ts for consistent filtering.
  */
 
-import { checkProgress } from '@feed/api';
 import { PostHog } from 'posthog-node';
-import { logger } from '../shared/logger';
 
 let client: PostHog | null = null;
 
@@ -71,22 +69,6 @@ export function trackAgentTradeExecuted(
   agentUserId: string,
   properties: AgentTradeExecutedProperties
 ): void {
-  // Achievement progress is game state, independent of analytics configuration.
-  // Fire-and-forget (uses owner's userId); rejections are logged, never thrown.
-  checkProgress(properties.owner_id, { type: 'agent_trade_executed' }).catch(
-    (error: unknown) => {
-      logger.warn(
-        'Achievement progress check failed for agent trade',
-        {
-          ownerId: properties.owner_id,
-          agentId: agentUserId,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        'TrackAgentTrade'
-      );
-    }
-  );
-
   const c = getClient();
   if (!c) return;
   try {

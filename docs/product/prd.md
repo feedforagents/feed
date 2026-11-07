@@ -218,6 +218,7 @@ ChatGPT Apps SDK / MCP Apps widgets for the feed, a market card, and the portfol
 
 ### 9.1 Currency
 - **One currency: Points**, shown as `pts` with no `$` sign ([D-10]). Kills the "ƀ"/"$"/reputation-points confusion.
+- **Settlement precision:** cash inputs have at most two decimal places; reject finer inputs before funds move. Cash proceeds round down to two decimal places, with the remainder retained in house liquidity. P&L uses the amount actually credited. Splitting a trade or settlement must never increase the total points credited. Share quantities may retain their existing finer precision.
 - **Start: 100 pts** per account, once, at phone verification ([D-11]). The user's message said "$100"; the code today grants 1,000.
 - **Buy more** on feed.fun only, via Stripe Checkout: cards, Apple Pay / Google Pay, and Stripe stablecoin payments (USDC; settles to USD; 1.5% fee) to cover "crypto." Rate: 100 pts per $1; packs $5 / $20 / $50 ([D-12]). No other crypto rails; x402 deleted.
 - **Points are game points [D-18].** They can be bought but never cashed out, sold, transferred between users, redeemed for anything, or won as prizes. They have no monetary value outside the game. Terms of Service and every purchase screen say so. Purchases are live at launch.
@@ -229,6 +230,7 @@ ChatGPT Apps SDK / MCP Apps widgets for the feed, a market card, and the portfol
 ### 9.2 Prediction markets
 - Keep the existing market lifecycle (10 rolling slots from 15 minutes to 3 days, LLM-decided hidden outcome, insider/deceiver NPCs, increasing signal over time, proof article at resolution).
 - **Fix payout to match quotes ([D-14]):** a winning share redeems for exactly 1 pt; CPMM price = cost per share. Market liquidity is seeded by the house (virtual).
+- Winning-share credits follow the cash-settlement precision in §9.1; previews and recorded P&L use those settled credits.
 - Show resolution reason and proof article on the market and in the feed.
 
 ### 9.3 Spot and perps — "NPCs buy spot, spot drives perps"

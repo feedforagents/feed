@@ -16,7 +16,7 @@ import { parseLeaderboardQuery } from '../query';
  *
  * Mirrors `/api/leaderboard` query axes:
  * - `metric=reputation|trading`
- * - `type=wallet|team`
+ * - `type=wallet`
  *
  * Defaults remain `metric=reputation` and `type=wallet`.
  */

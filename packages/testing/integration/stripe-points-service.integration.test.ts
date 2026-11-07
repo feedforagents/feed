@@ -17,6 +17,7 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import { TradingBalanceFundingService } from '@feed/api';
 import { and, balanceTransactions, db, eq, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
+import { calculatePortfolioBreakdown } from '../../engine/src/services/portfolio-breakdown';
 import { TestScenarios } from '../unit/stripe/test-fixtures';
 
 // Test user ID prefix for cleanup
@@ -282,6 +283,48 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
   });
 
   describe('reversePurchaseFunding', () => {
+    for (const reason of ['refund', 'dispute'] as const) {
+      for (const balance of [0, 50]) {
+        it(`preserves portfolio P&L when a ${reason} can only deduct ${balance} points`, async () => {
+          const userId = await createDbUser(balance, 100, 20);
+          const before = await calculatePortfolioBreakdown(userId);
+          expect(before).not.toBeNull();
+          const eventId = `evt_${crypto.randomUUID()}`;
+          const paymentIntentId = `pi_${crypto.randomUUID()}`;
+          const results = await Promise.all(
+            Array.from({ length: 2 }, () =>
+              TradingBalanceFundingService.reversePurchaseFunding(
+                userId,
+                paymentIntentId,
+                reason,
+                1,
+                eventId
+              )
+            )
+          );
+          expect(results.every((result) => result.success)).toBe(true);
+          expect(
+            results.filter((result) => !result.alreadyProcessed)
+          ).toHaveLength(1);
+          expect(await getUserBalance(userId)).toBe(0);
+          const totals = await getUserFundingTotals(userId);
+          expect(totals.totalDeposited).toBe(100);
+          expect(totals.totalWithdrawn).toBe(20 + balance);
+          const rows = await db
+            .select()
+            .from(balanceTransactions)
+            .where(eq(balanceTransactions.userId, userId));
+          expect(rows).toHaveLength(1);
+          expect(Number(rows[0]!.amount)).toBe(balance === 0 ? 0 : -balance);
+          expect(Number(rows[0]!.balanceBefore)).toBe(balance);
+          expect(Number(rows[0]!.balanceAfter)).toBe(0);
+          const after = await calculatePortfolioBreakdown(userId);
+          expect(after).not.toBeNull();
+          expect(after!.totalPnL).toBeCloseTo(before!.totalPnL, 8);
+        });
+      }
+    }
+
     it('should deduct full amount for refund with sufficient balance', async () => {
       // First create and fund user
       const userId = await createDbUser();
@@ -338,7 +381,7 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
       expect(balance).toBe(0);
       const totals = await getUserFundingTotals(userId);
       expect(totals.totalDeposited).toBe(1000);
-      expect(totals.totalWithdrawn).toBe(5000);
+      expect(totals.totalWithdrawn).toBe(1000);
     });
 
     it('should be idempotent - same event processed twice', async () => {

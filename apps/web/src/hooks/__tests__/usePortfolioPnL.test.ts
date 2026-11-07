@@ -17,27 +17,11 @@ describe('fetchPortfolioBreakdownSnapshot', () => {
       new Response(
         JSON.stringify({
           wallet: '12.5',
-          agents: 3,
           positions: '4.5',
-          available: '15.5',
+          available: '12.5',
           originalAmount: '10',
-          totalAssets: '20',
-          totalPnL: '10',
-          agentCount: '2',
-          members: [
-            {
-              id: 'user-1',
-              name: 'Owner',
-              wallet: '12.5',
-              isAgent: false,
-            },
-            {
-              id: 'agent-1',
-              name: 'Apex Force',
-              wallet: 3,
-              isAgent: true,
-            },
-          ],
+          totalAssets: '17',
+          totalPnL: '7',
         }),
         { status: 200 }
       )
@@ -48,28 +32,12 @@ describe('fetchPortfolioBreakdownSnapshot', () => {
 
     expect(snapshot).toEqual({
       wallet: 12.5,
-      agents: 3,
       positions: 4.5,
-      available: 15.5,
+      available: 12.5,
       netPeerTransfers: 0,
       originalAmount: 10,
-      totalAssets: 20,
-      totalPnL: 10,
-      agentCount: 2,
-      members: [
-        {
-          id: 'user-1',
-          name: 'Owner',
-          wallet: 12.5,
-          isAgent: false,
-        },
-        {
-          id: 'agent-1',
-          name: 'Apex Force',
-          wallet: 3,
-          isAgent: true,
-        },
-      ],
+      totalAssets: 17,
+      totalPnL: 7,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

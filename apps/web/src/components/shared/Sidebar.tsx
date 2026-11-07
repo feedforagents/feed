@@ -3,7 +3,6 @@
 import { cn, extractErrorMessage, getReferralUrl, logger } from '@feed/shared';
 import {
   Bell,
-  Bot,
   Check,
   Copy,
   LogOut,
@@ -168,13 +167,6 @@ function SidebarContent() {
       active: pathname === '/feed' || pathname === '/',
     },
     {
-      name: 'Agents',
-      href: '/agents/team',
-      icon: Bot,
-      active: pathname === '/agents' || pathname.startsWith('/agents/'),
-      requiresAuth: true,
-    },
-    {
       name: 'Markets',
       href: '/markets',
       icon: TrendingUp,
@@ -318,9 +310,6 @@ function SidebarContent() {
                   onClick={login}
                   className={cn(sharedClassName, 'w-full')}
                   title={item.name}
-                  {...(item.name === 'Agents'
-                    ? { 'data-tour': 'sidebar-agents' }
-                    : {})}
                 >
                   {navContent}
                 </button>
@@ -335,9 +324,6 @@ function SidebarContent() {
                 className={sharedClassName}
                 title={item.name}
                 onClick={() => trackNavigation(item.href, 'sidebar')}
-                {...(item.name === 'Agents'
-                  ? { 'data-tour': 'sidebar-agents' }
-                  : {})}
               >
                 {navContent}
               </Link>

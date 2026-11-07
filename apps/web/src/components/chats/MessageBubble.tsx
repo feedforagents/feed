@@ -1,7 +1,7 @@
 'use client';
 
 import { ALLOWED_REACTION_EMOJIS, cn, type MessageTag } from '@feed/shared';
-import { ChevronRight, Plus, Settings } from 'lucide-react';
+import { ChevronRight, Plus } from 'lucide-react';
 import Link from 'next/link';
 import { Response } from '@/components/chat/Response';
 import { Avatar } from '@/components/shared/Avatar';
@@ -18,9 +18,7 @@ import { getProfilePath } from './types';
  * Extracts the displayable content from a message, stripping `<think>...</think>` reasoning blocks.
  * AI models use these tags for internal reasoning which should not be displayed to users.
  *
- * Note: For agent-generated messages (e.g., DMs, team chat responses), think tags are now
- * stripped before storage by executeDirectMessage and scheduleAgentResponse. This function
- * serves as a fallback for older messages or edge cases where tags persist.
+ * This function also handles older messages where reasoning tags persist.
  *
  * If the message only contains reasoning with no actual response, returns empty string
  * which will render as a minimal placeholder in the UI.
@@ -51,8 +49,6 @@ interface MessageBubbleProps {
   ) => void;
   /** Compact action row: merge reactions + tags into one row; hides "add reaction" control on own messages */
   compactActions?: boolean;
-  /** Callback to open settings for this agent (mobile only, latest message only) */
-  onViewSettings?: (agentId: string) => void;
 }
 
 export function MessageBubble({
@@ -65,7 +61,6 @@ export function MessageBubble({
   onTagClick,
   onToggleReaction,
   compactActions = false,
-  onViewSettings,
 }: MessageBubbleProps) {
   const msgDate = new Date(message.createdAt);
   const senderName = sender?.displayName || 'Unknown';
@@ -205,16 +200,6 @@ export function MessageBubble({
               minute: '2-digit',
             })}
           </span>
-          {onViewSettings && (
-            <button
-              type="button"
-              onClick={() => onViewSettings(message.senderId)}
-              className="text-muted-foreground transition-colors hover:text-foreground"
-              aria-label="Agent settings"
-            >
-              <Settings className="h-3.5 w-3.5" />
-            </button>
-          )}
         </div>
         {/* Quoted reply block */}
         {message.replyToMessage && !isThinking && (

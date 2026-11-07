@@ -63,7 +63,6 @@ test.describe('Admin Panel - Tab Switching', () => {
   const adminTabs = [
     'Overview',
     'Users',
-    'Agents',
     'Markets',
     'Reports',
     'Content',
@@ -134,54 +133,6 @@ test.describe('Admin Panel - Users', () => {
       .locator('table, [role="grid"], [data-testid*="user-list"]')
       .first();
     const isVisible = await table
-      .isVisible({ timeout: 5000 })
-      .catch(() => false);
-    expect(typeof isVisible).toBe('boolean');
-  });
-});
-
-test.describe('Admin Panel - Agents', () => {
-  test.beforeEach(async ({ page, wallets }) => {
-    const healthy = await isServerHealthy();
-    test.skip(!healthy, 'Server is not healthy');
-    await page.setViewportSize(VIEWPORTS.DESKTOP);
-    await navigateTo(page, ROUTES.HOME);
-    await waitForPageLoad(page);
-    await loginWithWallet(page, wallets);
-    await navigateTo(page, ROUTES.ADMIN);
-    await waitForPageLoad(page);
-    await clickTab(page, 'Agents');
-  });
-
-  test.afterEach(async ({ page }) => {
-    await cooldownBetweenTests(page);
-  });
-
-  test('agents list renders', async ({ page }) => {
-    const body = await page.locator('body').textContent();
-    expect(body).toBeTruthy();
-    expect(body!.length).toBeGreaterThan(0);
-  });
-
-  test('pause agent button visible', async ({ page }) => {
-    const pauseBtn = page
-      .locator(
-        'button:has-text("Pause"), button:has-text("Stop"), button:has-text("Disable")'
-      )
-      .first();
-    const isVisible = await pauseBtn
-      .isVisible({ timeout: 5000 })
-      .catch(() => false);
-    expect(typeof isVisible).toBe('boolean');
-  });
-
-  test('resume agent button visible', async ({ page }) => {
-    const resumeBtn = page
-      .locator(
-        'button:has-text("Resume"), button:has-text("Start"), button:has-text("Enable")'
-      )
-      .first();
-    const isVisible = await resumeBtn
       .isVisible({ timeout: 5000 })
       .catch(() => false);
     expect(typeof isVisible).toBe('boolean');

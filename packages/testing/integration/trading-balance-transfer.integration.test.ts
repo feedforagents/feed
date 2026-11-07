@@ -7,298 +7,119 @@ import {
   test,
 } from 'bun:test';
 import {
-  TradingBalanceTransferService,
-  TradingPerformanceService,
-} from '@feed/api';
-import { balanceTransactions, db, eq, inArray, sql, users } from '@feed/db';
-import {
-  calculatePortfolioBreakdown,
-  calculatePortfolioPnL,
-} from '@feed/engine';
-import {
-  generateSnowflakeId,
-  PEER_TRANSFER_IN_TRANSACTION_TYPE,
-  PEER_TRANSFER_OUT_TRANSACTION_TYPE,
-} from '@feed/shared';
+  balanceTransactions,
+  dbWrite,
+  eq,
+  inArray,
+  sql,
+  users,
+} from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
+import { requireServer, waitForServerAvailability } from './helpers';
+import { createStewardTestToken } from './helpers/steward-auth';
 
 setDefaultTimeout(30000);
+const baseUrl =
+  process.env.TEST_API_URL ||
+  process.env.TEST_BASE_URL ||
+  'http://localhost:3000';
+const ids: string[] = [];
 
-let dbAvailable = false;
-const testUserIds: string[] = [];
-
-async function checkDatabaseHealth(): Promise<boolean> {
-  if (!process.env.DATABASE_URL) return false;
-
-  try {
-    await db.execute(sql`SELECT 1`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function createTestUser(params: {
-  usernamePrefix: string;
-  initialBalance: number;
-  totalDeposited: number;
-  isActor?: boolean;
-  isAgent?: boolean;
-}): Promise<{ id: string; username: string }> {
+async function createUser() {
   const id = await generateSnowflakeId();
-  const username = `${params.usernamePrefix}-${id}`;
-
-  await db.insert(users).values({
+  const stewardId = `retired-transfer-${id}`;
+  ids.push(id);
+  await dbWrite.insert(users).values({
     id,
-    privyId: `did:privy:test-${id}`,
-    username,
-    displayName: username,
-    virtualBalance: params.initialBalance.toFixed(2),
-    totalDeposited: params.totalDeposited.toFixed(2),
-    totalWithdrawn: '0',
-    reputationPoints: 1000,
-    isActor: params.isActor ?? false,
-    isAgent: params.isAgent ?? false,
+    stewardId,
+    username: `retired-${id}`,
+    virtualBalance: '1000',
+    totalDeposited: '1000',
     profileComplete: true,
     updatedAt: new Date(),
   });
-
-  if (params.totalDeposited > 0) {
-    await db.insert(balanceTransactions).values({
-      id: await generateSnowflakeId(),
-      userId: id,
-      type: 'deposit',
-      amount: params.totalDeposited.toFixed(2),
-      balanceBefore: '0',
-      balanceAfter: params.initialBalance.toFixed(2),
-      description: 'integration seed deposit',
-    });
-  }
-
-  testUserIds.push(id);
-  return { id, username };
+  return { id, token: await createStewardTestToken(stewardId) };
 }
 
-describe('TradingBalanceTransferService - Integration', () => {
-  beforeAll(async () => {
-    dbAvailable = await checkDatabaseHealth();
+async function state() {
+  const balances = await dbWrite
+    .select({
+      id: users.id,
+      balance: users.virtualBalance,
+      pnl: users.lifetimePnL,
+    })
+    .from(users)
+    .where(inArray(users.id, ids))
+    .orderBy(users.id);
+  const ledger = await dbWrite
+    .select()
+    .from(balanceTransactions)
+    .where(inArray(balanceTransactions.userId, ids));
+  return { balances, ledger };
+}
 
-    if (!dbAvailable) {
-      console.warn(
-        '⚠️  Database not available - trading balance transfer integration tests will be skipped'
-      );
-    }
-  });
+beforeAll(async () => {
+  requireServer(await waitForServerAvailability(baseUrl), baseUrl);
+  await dbWrite.execute(sql`SELECT 1`);
+});
 
-  afterAll(async () => {
-    if (!dbAvailable || testUserIds.length === 0) {
-      return;
-    }
-
-    await db
+afterAll(async () => {
+  if (ids.length) {
+    await dbWrite
       .delete(balanceTransactions)
-      .where(inArray(balanceTransactions.userId, testUserIds));
-    await db.delete(users).where(inArray(users.id, testUserIds));
+      .where(inArray(balanceTransactions.userId, ids));
+    await dbWrite.delete(users).where(inArray(users.id, ids));
+  }
+});
+
+describe('retired peer transfers with real API and wallets', () => {
+  test('a valid authenticated caller cannot move points to another user', async () => {
+    const sender = await createUser(),
+      recipient = await createUser();
+    const headers = {
+      Authorization: `Bearer ${sender.token}`,
+      'Content-Type': 'application/json',
+    };
+    const identity = await fetch(`${baseUrl}/api/users/me`, {
+      headers,
+      signal: AbortSignal.timeout(20000),
+    });
+    expect(identity.status).toBe(200);
+    const before = await state();
+    const response = await fetch(
+      `${baseUrl}/api/users/trading-balance/transfer`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ recipientUserId: recipient.id, amount: 25 }),
+        signal: AbortSignal.timeout(20000),
+      }
+    );
+    expect(response.status).toBe(410);
+    expect((await response.json()).code).toBe(
+      'TRADING_BALANCE_TRANSFER_DISABLED'
+    );
+    expect(await state()).toEqual(before);
+    const [senderAfter] = await dbWrite
+      .select()
+      .from(users)
+      .where(eq(users.id, sender.id));
+    expect(Number(senderAfter?.virtualBalance)).toBe(1000);
   });
 
-  test('moves trading balance atomically without polluting funding totals or PnL', async () => {
-    if (!dbAvailable) {
-      return;
-    }
-
-    const sender = await createTestUser({
-      usernamePrefix: 'tb-transfer-sender',
-      initialBalance: 500,
-      totalDeposited: 500,
-    });
-    const receiver = await createTestUser({
-      usernamePrefix: 'tb-transfer-receiver',
-      initialBalance: 0,
-      totalDeposited: 0,
-    });
-
-    const result = await TradingBalanceTransferService.transfer({
-      senderUserId: sender.id,
-      recipientIdentifier: receiver.username,
-      amount: 200,
-      note: 'integration test',
-    });
-
-    expect(result.success).toBe(true);
-    if (!result.success) {
-      return;
-    }
-
-    const [senderUser] = await db
-      .select({
-        virtualBalance: users.virtualBalance,
-        totalDeposited: users.totalDeposited,
-        totalWithdrawn: users.totalWithdrawn,
-      })
-      .from(users)
-      .where(eq(users.id, sender.id))
-      .limit(1);
-    const [receiverUser] = await db
-      .select({
-        virtualBalance: users.virtualBalance,
-        totalDeposited: users.totalDeposited,
-        totalWithdrawn: users.totalWithdrawn,
-      })
-      .from(users)
-      .where(eq(users.id, receiver.id))
-      .limit(1);
-
-    expect(Number(senderUser?.virtualBalance ?? 0)).toBe(300);
-    expect(Number(senderUser?.totalDeposited ?? 0)).toBe(500);
-    expect(Number(senderUser?.totalWithdrawn ?? 0)).toBe(0);
-    expect(Number(receiverUser?.virtualBalance ?? 0)).toBe(200);
-    expect(Number(receiverUser?.totalDeposited ?? 0)).toBe(0);
-    expect(Number(receiverUser?.totalWithdrawn ?? 0)).toBe(0);
-
-    const transferRows = await db
-      .select({
-        userId: balanceTransactions.userId,
-        type: balanceTransactions.type,
-        amount: balanceTransactions.amount,
-        relatedId: balanceTransactions.relatedId,
-      })
-      .from(balanceTransactions)
-      .where(inArray(balanceTransactions.userId, [sender.id, receiver.id]));
-
-    const peerTransferRows = transferRows.filter((row) =>
-      [
-        PEER_TRANSFER_OUT_TRANSACTION_TYPE,
-        PEER_TRANSFER_IN_TRANSACTION_TYPE,
-      ].includes(row.type)
+  test('a malformed anonymous request is retired before authentication or body parsing', async () => {
+    const response = await fetch(
+      `${baseUrl}/api/users/trading-balance/transfer`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{',
+        signal: AbortSignal.timeout(20000),
+      }
     );
-
-    expect(peerTransferRows).toHaveLength(2);
-    expect(
-      peerTransferRows.some(
-        (row) =>
-          row.userId === sender.id &&
-          row.type === PEER_TRANSFER_OUT_TRANSACTION_TYPE &&
-          Number(row.amount) === -200 &&
-          row.relatedId === result.transferId
-      )
-    ).toBe(true);
-    expect(
-      peerTransferRows.some(
-        (row) =>
-          row.userId === receiver.id &&
-          row.type === PEER_TRANSFER_IN_TRANSACTION_TYPE &&
-          Number(row.amount) === 200 &&
-          row.relatedId === result.transferId
-      )
-    ).toBe(true);
-
-    const senderBreakdown = await calculatePortfolioBreakdown(sender.id);
-    const receiverBreakdown = await calculatePortfolioBreakdown(receiver.id);
-    const senderPnL = await calculatePortfolioPnL(sender.id);
-    const receiverPnL = await calculatePortfolioPnL(receiver.id);
-    const senderTrading = await TradingPerformanceService.getWalletEntry(
-      sender.id
+    expect(response.status).toBe(410);
+    expect((await response.json()).code).toBe(
+      'TRADING_BALANCE_TRANSFER_DISABLED'
     );
-    const receiverTrading = await TradingPerformanceService.getWalletEntry(
-      receiver.id
-    );
-
-    expect(senderBreakdown?.netPeerTransfers).toBe(-200);
-    expect(senderBreakdown?.originalAmount).toBe(300);
-    expect(senderBreakdown?.totalPnL).toBe(0);
-    expect(receiverBreakdown?.netPeerTransfers).toBe(200);
-    expect(receiverBreakdown?.originalAmount).toBe(200);
-    expect(receiverBreakdown?.totalPnL).toBe(0);
-
-    expect(senderPnL?.netPeerTransfers).toBe(-200);
-    expect(senderPnL?.netContributions).toBe(300);
-    expect(senderPnL?.accountEquity).toBe(300);
-    expect(receiverPnL?.netPeerTransfers).toBe(200);
-    expect(receiverPnL?.netContributions).toBe(200);
-    expect(receiverPnL?.accountEquity).toBe(200);
-
-    expect(Number(senderTrading?.capitalBase ?? 0)).toBe(500);
-    expect(Number(receiverTrading?.capitalBase ?? 0)).toBe(200);
-  });
-
-  test('rejects actor recipients', async () => {
-    if (!dbAvailable) {
-      return;
-    }
-
-    const sender = await createTestUser({
-      usernamePrefix: 'tb-transfer-human',
-      initialBalance: 100,
-      totalDeposited: 100,
-    });
-    const actor = await createTestUser({
-      usernamePrefix: 'tb-transfer-actor',
-      initialBalance: 0,
-      totalDeposited: 0,
-      isActor: true,
-    });
-
-    const result = await TradingBalanceTransferService.transfer({
-      senderUserId: sender.id,
-      recipientIdentifier: actor.username,
-      amount: 10,
-    });
-
-    expect(result).toEqual({
-      success: false,
-      errorCode: 'RECIPIENT_NOT_ALLOWED',
-      error: 'Recipient must be a Feed user, not an actor or agent',
-    });
-  });
-
-  test('opposing concurrent transfers neither deadlock nor lose money', async () => {
-    if (!dbAvailable) {
-      return;
-    }
-
-    const a = await createTestUser({
-      usernamePrefix: 'tb-transfer-a',
-      initialBalance: 100,
-      totalDeposited: 100,
-    });
-    const b = await createTestUser({
-      usernamePrefix: 'tb-transfer-b',
-      initialBalance: 100,
-      totalDeposited: 100,
-    });
-
-    const transfers = Array.from({ length: 10 }, (_, i) =>
-      TradingBalanceTransferService.transfer(
-        i % 2 === 0
-          ? { senderUserId: a.id, recipientIdentifier: b.username, amount: 0.1 }
-          : { senderUserId: b.id, recipientIdentifier: a.username, amount: 0.3 }
-      )
-    );
-    const results = await Promise.all(transfers);
-    expect(results.every((r) => r.success)).toBe(true);
-
-    const rows = await db
-      .select({ id: users.id, virtualBalance: users.virtualBalance })
-      .from(users)
-      .where(inArray(users.id, [a.id, b.id]));
-    const balances = Object.fromEntries(
-      rows.map((r) => [r.id, String(r.virtualBalance)])
-    );
-    // 5 x 0.1 out, 5 x 0.3 in for A; exact decimal results.
-    expect(Number(balances[a.id])).toBeCloseTo(101, 10);
-    expect(Number(balances[b.id])).toBeCloseTo(99, 10);
-
-    // Each ledger row's balanceAfter equals before + amount exactly.
-    const ledger = await db
-      .select({
-        amount: balanceTransactions.amount,
-        before: balanceTransactions.balanceBefore,
-        after: balanceTransactions.balanceAfter,
-      })
-      .from(balanceTransactions)
-      .where(inArray(balanceTransactions.userId, [a.id, b.id]));
-    for (const row of ledger) {
-      const cents = (value: string | number) => Math.round(Number(value) * 100);
-      expect(cents(row.after)).toBe(cents(row.before) + cents(row.amount));
-    }
   });
 });

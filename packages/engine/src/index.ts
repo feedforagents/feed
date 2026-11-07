@@ -245,6 +245,12 @@ export {
   getSignalDirection,
 } from './services/narrative-state-service';
 export { sharedChatContextService } from './services/shared-chat-context-service';
+export {
+  getMaxSubMarketDuration,
+  MAX_SUB_MARKETS,
+  SUB_MARKET_MIN_DURATION_MS,
+  writeSubMarket,
+} from './services/sub-market-write';
 export { setGeneratedImageStorage } from './services/surplus-image-service';
 // Tier Configuration
 export {

@@ -8,14 +8,12 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@feed/core/markets/prediction';
-import {
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
+  type PredictionSettlementOptions,
   WalletService,
+  withPredictionSettlement,
 } from '@feed/engine';
 import {
   logger,
@@ -25,55 +23,31 @@ import {
 import type { NextRequest } from 'next/server';
 import { trackServerEvent } from '@/lib/posthog/server';
 
-const buildService = (marketId: string) =>
-  new PredictionMarketService({
-    db: new PredictionDbAdapter(),
-    wallet: {
-      debit: ({ userId, amount, reason, description, relatedId }) =>
-        WalletService.debit(
-          userId,
-          amount,
-          reason,
-          description ?? '',
-          relatedId
-        ),
-      credit: ({ userId, amount, reason, description, relatedId }) =>
-        WalletService.credit(
-          userId,
-          amount,
-          reason,
-          description ?? '',
-          relatedId
-        ),
-      recordPnL: ({ userId, pnl, reason, relatedId }) =>
-        WalletService.recordPnL(userId, pnl, reason, relatedId).then(
-          () => undefined
-        ),
-      getBalance: (userId: string) => WalletService.getBalance(userId),
-    },
-    broadcast: {
-      emit: (channel, payload) =>
-        broadcastToChannel(channel, payload as Record<string, JsonValue>),
-    },
-    cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
-    clock: { now: () => new Date() },
-    fees: {
-      tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
-      platformShare: FEE_CONFIG.PLATFORM_SHARE,
-      referrerShare: FEE_CONFIG.REFERRER_SHARE,
-      minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
-    },
-    feeProcessor: {
-      processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
-        FeeService.processTradingFee(
-          userId,
-          type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
-          amount,
-          positionId,
-          relatedId
-        ),
-    },
-  });
+const serviceOptions = (marketId: string): PredictionSettlementOptions => ({
+  broadcast: {
+    emit: (channel, payload) =>
+      broadcastToChannel(channel, payload as Record<string, JsonValue>),
+  },
+  cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
+  clock: { now: () => new Date() },
+  fees: {
+    tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+    platformShare: FEE_CONFIG.PLATFORM_SHARE,
+    referrerShare: FEE_CONFIG.REFERRER_SHARE,
+    minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+  },
+  feeProcessor: (tx) => ({
+    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+      FeeService.processTradingFee(
+        userId,
+        type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
+        amount,
+        positionId,
+        relatedId,
+        tx
+      ),
+  }),
+});
 
 // POST /api/markets/predictions/[id]/sell - offchain prediction market sell
 export const POST = withErrorHandling(
@@ -89,13 +63,18 @@ export const POST = withErrorHandling(
       await request.json()
     );
 
-    const service = buildService(marketId);
-    const result = await service.sell({
-      userId: user.userId,
+    const result = await withPredictionSettlement(
       marketId,
-      shares,
-      positionId,
-    });
+      { userId: user.userId },
+      (service) =>
+        service.sell({
+          userId: user.userId,
+          marketId,
+          shares,
+          positionId,
+        }),
+      serviceOptions(marketId)
+    );
 
     const balance = await WalletService.getBalance(user.userId);
 

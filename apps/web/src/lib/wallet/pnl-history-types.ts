@@ -1,5 +1,5 @@
 export type PnlHistoryRange = '1H' | '4H' | '1D' | '1W' | 'ALL';
-export type PnlHistoryScope = 'team' | 'owner' | 'agent';
+export type PnlHistoryScope = 'owner';
 
 export interface PnlHistoryPoint {
   time: number;
@@ -11,4 +11,9 @@ export interface UserPnlMetrics {
   lifetimePnL: number;
   unrealizedPnL: number;
   currentPnL: number;
+}
+
+export interface PnlHistorySnapshot {
+  points: PnlHistoryPoint[];
+  metrics: UserPnlMetrics | null;
 }

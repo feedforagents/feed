@@ -23,25 +23,6 @@ interface RateLimitConfig {
   actionType: string;
 }
 
-/**
- * Read a positive integer from the environment; invalid values (zero,
- * negative, fractional, non-numeric) fall back to the default with a warning.
- */
-function parsePositiveIntegerEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    logger.warn(
-      `Invalid ${name}, using default`,
-      { value: raw, default: fallback },
-      'RateLimiter'
-    );
-    return fallback;
-  }
-  return value;
-}
-
 // In-memory fallback store for when Redis is unavailable
 // This is NOT suitable for production serverless environments
 const memoryFallbackStore = new Map<string, RateLimitRecord>();
@@ -219,13 +200,6 @@ export const RATE_LIMIT_CONFIGS = {
     windowMs: 3600000,
     actionType: 'external_agent_register',
   }, // 5 registrations per hour per user
-
-  // A2A transfer operations (stricter limit for points/token transfers)
-  A2A_TRANSFER_OPS: {
-    maxRequests: parsePositiveIntegerEnv('A2A_TRANSFER_RATE_LIMIT', 10),
-    windowMs: 60000,
-    actionType: 'a2a_transfer_ops',
-  }, // 10 transfers per minute (configurable via env)
 
   /**
    * Public read endpoints (GETs that allow unauthenticated access).

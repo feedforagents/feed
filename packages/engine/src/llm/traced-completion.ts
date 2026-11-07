@@ -11,6 +11,7 @@ export async function tracedCompletion(
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
     temperature: number;
     max_tokens: number;
+    reasoning_effort?: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming['reasoning_effort'];
   }
 ) {
   const started = Date.now();
@@ -33,7 +34,13 @@ export async function tracedCompletion(
     parsedResponse: null,
   };
   const response = await client.chat.completions
-    .create(params)
+    .create({
+      ...params,
+      ...(params.model.includes('qwen3') &&
+      params.reasoning_effort === undefined
+        ? { reasoning_effort: 'none' as const }
+        : {}),
+    })
     .catch((error: Error) => {
       getLLMCallCallback()?.({
         ...base,

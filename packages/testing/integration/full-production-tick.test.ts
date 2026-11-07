@@ -4,7 +4,7 @@
  * @module testing/integration/full-production-tick.test
  *
  * @description
- * Simulates a complete production game tick and agent tick cycle.
+ * Exercises the production game tick and inspects its persisted outputs.
  * Tests ALL production systems together as they run in deployment:
  *
  * **Game Tick Operations:**
@@ -16,14 +16,6 @@
  * 6. Reputation sync
  * 7. Trending tag calculation
  * 8. Widget cache updates
- *
- * **Agent Tick Operations:**
- * 1. Agent discovery (USER + NPC agents)
- * 2. Autonomous trading
- * 3. Autonomous posting
- * 4. Autonomous commenting
- * 5. Autonomous DMs
- * 6. Autonomous group chats
  *
  * **Output Files:**
  * - .output/full-tick-game-result-{timestamp}.json

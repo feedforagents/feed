@@ -216,11 +216,6 @@ test.describe('Wallet - P&L', () => {
     );
     expect(canvasVisible || hasPnl).toBe(true);
   });
-
-  test('team summary visible', async ({ page }) => {
-    const hasTeam = await pageContainsText(page, 'team', 'summary', 'total');
-    expect(typeof hasTeam).toBe('boolean');
-  });
 });
 
 test.describe('Wallet - Mobile', () => {

@@ -14,12 +14,13 @@ import {
   describe,
   expect,
   mock,
+  spyOn,
   test,
 } from 'bun:test';
 import { db, rssFeedSources } from '@feed/db';
-import type { FeedLLMClient } from '@feed/engine';
-import { ParodyHeadlineGenerator } from '@feed/engine';
+import { FeedLLMClient, ParodyHeadlineGenerator } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
+import { characterMappingService } from '../../../engine/src/services/character-mapping-service';
 
 // Skip tests if DATABASE_URL is not set
 const shouldSkip = !process.env.DATABASE_URL;
@@ -96,6 +97,7 @@ describeTests('ParodyHeadlineGenerator', () => {
   });
 
   afterEach(async () => {
+    mock.restore();
     if (!dbAvailable) return;
     // Cleanup parodies first (foreign key constraint)
     await db.parodyHeadline.deleteMany({
@@ -117,6 +119,83 @@ describeTests('ParodyHeadlineGenerator', () => {
         id: testFeedId,
       },
     });
+  });
+
+  for (const { label, response, field } of [
+    {
+      label: 'an object title',
+      response: { parodyTitle: { text: 'A headline' } },
+      field: 'parodyTitle',
+    },
+    {
+      label: 'a blank title',
+      response: { parodyTitle: '   ' },
+      field: 'parodyTitle',
+    },
+    {
+      label: 'an object body',
+      response: { parodyTitle: 'A headline', parodyContent: { text: 'Body' } },
+      field: 'parodyContent',
+    },
+    {
+      label: 'a numeric body',
+      response: { parodyTitle: 'A headline', parodyContent: 42 },
+      field: 'parodyContent',
+    },
+    {
+      label: 'a null body',
+      response: { parodyTitle: 'A headline', parodyContent: null },
+      field: 'parodyContent',
+    },
+  ]) {
+    test(`structured prose boundary rejects ${label} before generated text mapping`, async () => {
+      if (!dbAvailable) throw new Error('Database is required for regression');
+      const client = new FeedLLMClient('boundary-test-only', 'openai');
+      spyOn(client, 'generateJSON').mockResolvedValue(response);
+      const mapping = spyOn(characterMappingService, 'transformText');
+      await expect(
+        new ParodyHeadlineGenerator(client).generateParody(
+          'OpenAI releases notes'
+        )
+      ).rejects.toThrow(`${field} must be`);
+      expect(mapping).toHaveBeenCalledTimes(1);
+      expect(mapping.mock.calls[0]?.[0]).toBe('OpenAI releases notes');
+    });
+  }
+
+  test('structured prose boundary requests JSON strings and preserves quoted content', async () => {
+    if (!dbAvailable) throw new Error('Database is required for regression');
+    const client = new FeedLLMClient('boundary-test-only', 'openai');
+    const completion = spyOn(client, 'generateJSON').mockResolvedValue({
+      parodyTitle: 'OpenAI publishes "release notes"',
+      parodyContent:
+        'OpenAI calls the update "ready".\n<note>Details follow.</note>',
+    });
+    const result = await new ParodyHeadlineGenerator(client).generateParody(
+      'OpenAI releases notes',
+      'The company published an update.'
+    );
+    expect(result.parodyTitle).toBe('OpenAGI publishes "release notes"');
+    expect(result.parodyContent).toBe(
+      'OpenAGI calls the update "ready".\n<note>Details follow.</note>'
+    );
+    expect(completion.mock.calls[0]?.[0]).toContain('ONE JSON OBJECT');
+    expect(completion.mock.calls[0]?.[0]).not.toContain('ONLY this XML');
+    expect(completion.mock.calls[0]?.[1]?.required).toEqual(['parodyTitle']);
+    expect(completion.mock.calls[0]?.[2]).toMatchObject({ format: 'json' });
+  });
+
+  test('structured prose boundary allows the body to be omitted', async () => {
+    if (!dbAvailable) throw new Error('Database is required for regression');
+    const client = new FeedLLMClient('boundary-test-only', 'openai');
+    spyOn(client, 'generateJSON').mockResolvedValue({
+      parodyTitle: 'OpenAGI ships',
+    });
+    const result = await new ParodyHeadlineGenerator(client).generateParody(
+      'OpenAI ships'
+    );
+    expect(result.parodyTitle).toBe('OpenAGI ships');
+    expect(result.parodyContent).toBeUndefined();
   });
 
   test('should generate parody from headline', async () => {

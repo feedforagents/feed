@@ -17,7 +17,7 @@ import type {
   State,
 } from '@elizaos/core';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
-import { FEE_CONFIG, WalletService } from '@feed/engine';
+import { createPerpSettlement, FEE_CONFIG, WalletService } from '@feed/engine';
 import type { MessageTag } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
@@ -75,6 +75,7 @@ export const checkPerpsHandler = async (
       : 'volume';
 
   const perpMarkets = await new PerpMarketService({
+    settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     // Read-only use: any balance mutation is a bug and must fail loudly.
     wallet: {

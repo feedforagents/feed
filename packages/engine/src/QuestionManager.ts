@@ -75,13 +75,12 @@ import {
 } from '@feed/db';
 import {
   generateSnowflakeId,
+  type JsonValue,
   logger,
   RESOLUTION_CONFIDENCE_CONFIG,
 } from '@feed/shared';
 import { type Article, ArticleGenerator } from './ArticleGenerator';
 import type { FeedLLMClient } from './llm/openai-client';
-import { FeedLLMClient as FeedLLMClientValue } from './llm/openai-client';
-import { MarketDecisionEngine } from './MarketDecisionEngine';
 import {
   generateWorldContext,
   questionGeneration,
@@ -89,6 +88,7 @@ import {
   renderPrompt,
   worldImpactAssessment,
 } from './prompts';
+import { characterMappingService } from './services/character-mapping-service';
 import {
   filterIncoherent as filterIncoherentBase,
   validateCoherence,
@@ -124,15 +124,12 @@ import {
   buildMultiTopicPromptContext,
   type DailyTopicContext,
   dailyTopicService,
-  isTextOnAnyTopic,
   isTextOnTopic,
 } from './services/daily-topic-service';
-import { MarketContextService } from './services/market-context-service';
 import { MarketMetricsService } from './services/market-metrics-service';
 import { saveArcPlan } from './services/narrative-state-service';
 import { QuestionArcPlanner } from './services/question-arc-planner';
 import { StaticDataRegistry } from './services/static-data-registry';
-import { TradeExecutionService } from './services/trade-execution-service';
 import type {
   DayTimeline,
   Organization,
@@ -151,6 +148,12 @@ import { worldFactsService } from './world-facts-service';
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+function hasOpenEndedQuestionLead(text: string): boolean {
+  return /^(?:(?:in|by|after|before|within|for|at|over)\s+)?(?:how|when|who|what|where|which|why)\b/i.test(
+    text.trim()
+  );
+}
 
 /**
  * Determines if an actor is eligible for question generation.
@@ -233,19 +236,11 @@ export interface ResolutionWithProof {
  * @usage
  * Instantiated once by GameEngine and used throughout the game lifecycle.
  */
-export interface QuestionManagerServices {
-  contextService?: MarketContextService;
-  decisionEngine?: MarketDecisionEngine;
-  executionService?: TradeExecutionService;
-}
-
 export class QuestionManager {
   private llm: FeedLLMClient;
-  private injectedServices?: QuestionManagerServices;
 
-  constructor(llm: FeedLLMClient, services?: QuestionManagerServices) {
+  constructor(llm: FeedLLMClient) {
     this.llm = llm;
-    this.injectedServices = services;
   }
 
   /**
@@ -648,7 +643,8 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
       description: eventDescription,
       actors: [],
       relatedQuestion:
-        typeof question.id === 'number' ? question.id : undefined,
+        question.questionNumber ??
+        (typeof question.id === 'number' ? question.id : undefined),
       pointsToward: question.outcome ? 'YES' : 'NO',
       visibility: 'public',
     };
@@ -700,6 +696,21 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
       recentEvents
     );
 
+    return this.generateProofForResolution(
+      question,
+      description,
+      actors,
+      organizations
+    );
+  }
+
+  /** Generate proof and confidence for an already generated resolution reason. */
+  async generateProofForResolution(
+    question: Question,
+    description: string,
+    actors: SelectedActor[],
+    organizations: Organization[]
+  ): Promise<ResolutionWithProof> {
     // Generate proof
     const proof = await this.generateProofContent(
       question,
@@ -858,24 +869,32 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
       outcomeContext,
     });
 
-    const rawResponse = await this.llm.generateJSON<
-      | { event: string; type: string }
-      | { response: { event: string; type: string } }
-    >(prompt, undefined, {
-      temperature: 0.7,
-      maxTokens: 5000,
-      promptType: 'question_resolution_event',
-    });
+    const rawResponse = await this.llm.generateJSON<JsonValue>(
+      prompt,
+      undefined,
+      {
+        temperature: 0.7,
+        maxTokens: 5000,
+        promptType: 'question_resolution_event',
+      }
+    );
 
     // Handle XML structure
     const response =
-      'response' in rawResponse && rawResponse.response
+      rawResponse &&
+      typeof rawResponse === 'object' &&
+      !Array.isArray(rawResponse) &&
+      'response' in rawResponse
         ? rawResponse.response
-        : (rawResponse as { event: string; type: string });
+        : rawResponse;
 
     const eventDescription =
-      response.event ||
-      `Resolution: ${question.text} outcome is ${question.outcome ? 'YES' : 'NO'}`;
+      response && typeof response === 'object' && !Array.isArray(response)
+        ? response.event
+        : undefined;
+    if (typeof eventDescription !== 'string' || !eventDescription.trim()) {
+      throw new Error('Resolution event must be a nonempty string');
+    }
 
     // Assess world impact
     await this.assessAndRecordWorldImpact(question, eventDescription);
@@ -1275,6 +1294,7 @@ ${contextParts}
 RULES:
 - Use EXACT parody names from lists (AIlon Musk, Sam AIltman, Mark Zuckerborg)
 - YES/NO only, specific & measurable, future events, publicly verifiable
+- Ask whether a specific event or threshold will occur by the deadline. Never ask how many, how much, when, who, or which; those cannot resolve YES/NO.
 - NO resignations/acquisitions/relationship-breaking
 - Resolution: 1-7 days (1-2d=fast, 3-5d=medium, 6-7d=slow)
 - Don't duplicate active questions
@@ -1386,7 +1406,7 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
       expectedOutcome: string;
     };
     type QuestionsResponse = {
-      questions: QuestionData[] | { question: QuestionData[] };
+      questions: QuestionData[] | { question: QuestionData[] | QuestionData };
     };
 
     const rawQuestions =
@@ -1394,14 +1414,15 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
         ? (response.response as QuestionsResponse).questions
         : (response as QuestionsResponse).questions;
 
-    // Handle nested XML format {questions: {question: [...]}}
-    const questionsData: QuestionData[] = Array.isArray(rawQuestions)
+    // A single XML <question> parses as an object, repeated tags as an array.
+    const nestedQuestions = Array.isArray(rawQuestions)
       ? rawQuestions
-      : rawQuestions &&
-          'question' in rawQuestions &&
-          Array.isArray(rawQuestions.question)
-        ? rawQuestions.question
-        : [];
+      : rawQuestions?.question;
+    const questionsData: QuestionData[] = !nestedQuestions
+      ? []
+      : Array.isArray(nestedQuestions)
+        ? nestedQuestions
+        : [nestedQuestions];
 
     if (questionsData.length === 0) {
       logger.warn(
@@ -1452,7 +1473,12 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
         break;
       }
 
-      if (!questionData.text || !questionData.resolutionCriteria) {
+      if (
+        typeof questionData?.text !== 'string' ||
+        !questionData.text.trim() ||
+        typeof questionData.resolutionCriteria !== 'string' ||
+        !questionData.resolutionCriteria.trim()
+      ) {
         logger.warn(
           'Invalid question data, skipping',
           { questionData },
@@ -1462,7 +1488,12 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
       }
 
       // Sanitize question text to remove any template variables that leaked through
-      const sanitizedText = questionData.text
+      const [mappedText, mappedCriteria] = await Promise.all([
+        characterMappingService.transformText(questionData.text),
+        characterMappingService.transformText(questionData.resolutionCriteria),
+      ]);
+      questionData.resolutionCriteria = mappedCriteria.transformedText;
+      const sanitizedText = mappedText.transformedText
         .replace(/\{resolutionDate\}/gi, '')
         .replace(/\{resolution_date\}/gi, '')
         .replace(/\{date\}/gi, '')
@@ -1473,6 +1504,15 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
 
       // Update the question text with sanitized version
       questionData.text = sanitizedText;
+
+      if (hasOpenEndedQuestionLead(sanitizedText)) {
+        logger.warn(
+          'Rejected open-ended question before storage',
+          { text: sanitizedText.substring(0, 100) },
+          'QuestionManager'
+        );
+        continue;
+      }
 
       // Reject questions that fail coherence checks (garbled/hallucinated text)
       const coherence = validateCoherence(sanitizedText);
@@ -1486,9 +1526,17 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
       }
 
       // Convert "yes"/"no" to boolean
-      const expectedOutcomeStr = String(questionData.expectedOutcome || '')
+      const expectedOutcomeStr = String(questionData.expectedOutcome ?? '')
         .toLowerCase()
         .trim();
+      if (!['yes', 'true', 'no', 'false'].includes(expectedOutcomeStr)) {
+        logger.warn(
+          'Rejected question without a binary expected outcome',
+          { expectedOutcome: questionData.expectedOutcome },
+          'QuestionManager'
+        );
+        continue;
+      }
       const expectedOutcome =
         expectedOutcomeStr === 'yes' || expectedOutcomeStr === 'true';
 
@@ -1633,69 +1681,7 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
       // Save arc plan to database for use in subsequent ticks
       await saveArcPlan(question.id, arcPlan);
 
-      const skipNpcBetting = process.env.FEED_TRUST_CORPUS_FAST_MODE === 'true';
-      if (skipNpcBetting) {
-        logger.info(
-          'Skipping NPC betting on new question in fast mode',
-          {
-            questionId: question.id,
-            questionNumber: question.questionNumber,
-          },
-          'QuestionManager'
-        );
-      } else {
-        // Trigger NPC betting on this new question
-        const decisionEngine =
-          this.injectedServices?.decisionEngine ??
-          (() => {
-            const contextService =
-              this.injectedServices?.contextService ??
-              new MarketContextService();
-            const marketDecisionLLM = FeedLLMClientValue.forGameTick();
-            const modelName =
-              process.env.MARKET_DECISION_MODEL || 'openai/gpt-oss-120b';
-            const isKimiModel = modelName.toLowerCase().includes('kimi');
-            const defaultMaxOutput = isKimiModel ? 16000 : 32000;
-            const maxOutputTokens = Number.parseInt(
-              process.env.MARKET_DECISION_MAX_OUTPUT_TOKENS ||
-                defaultMaxOutput.toString(),
-              10
-            );
-            return new MarketDecisionEngine(marketDecisionLLM, contextService, {
-              model: modelName,
-              maxOutputTokens,
-            });
-          })();
-
-        // Generate decisions for NPCs - they will see the new question in context
-        const decisions = await decisionEngine.generateBatchDecisions();
-
-        // Filter to decisions for this new question
-        const questionDecisions = decisions.filter(
-          (d) => d.marketType === 'prediction' && d.marketId === question.id
-        );
-
-        if (questionDecisions.length > 0) {
-          const executionService =
-            this.injectedServices?.executionService ??
-            new TradeExecutionService();
-          const executionResult =
-            await executionService.executeDecisionBatch(questionDecisions);
-
-          logger.info(
-            `NPC betting on new question Q${question.questionNumber}`,
-            {
-              questionId: question.id,
-              questionText: question.text,
-              decisionsGenerated: questionDecisions.length,
-              successfulTrades: executionResult.successfulTrades,
-              failedTrades: executionResult.failedTrades,
-            },
-            'QuestionManager'
-          );
-        }
-      }
-
+      // NPC trading runs through npc-tick, including its budget and step cap.
       questionsCreated++;
     }
 
@@ -1730,6 +1716,7 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
     expectedOutcome: boolean;
     affiliatedActorIds: string[];
     affiliatedOrgIds: string[];
+    topic: DailyTopicContext | null;
   } | null> {
     const category = this.getTimeframeCategory(timeframe);
     const durationLabel = this.getDurationLabel(durationMs);
@@ -1873,6 +1860,8 @@ ${categoryGuidance}
 
 CRITICAL RULES:
 - Must be binary (YES/NO answer only)
+- Ask whether a specific event or threshold will occur by the deadline. Never ask how many, how much, when, who, or which.
+- Set expectedOutcome to exactly "yes" or "no", choosing the likely resolution. Do not write both options.
 - Must be VERIFIABLE within ${durationLabel}
 - Must use ONLY parody names (AIlon Musk, Sam AIltman, Mark Zuckerborg, Sim Cook, etc.)
 - Must be SPECIFIC and ENGAGING
@@ -1886,7 +1875,7 @@ DIVERSITY REQUIREMENT:
 - Draw inspiration from trending topics or recent events when possible
 - Vary the subject (different actor/company than recent questions)
 
-XML: <response><question><text>Your question here</text><resolutionCriteria>How to verify</resolutionCriteria><expectedOutcome>yes or no</expectedOutcome><primaryActor>Actor name if relevant</primaryActor><primaryOrg>Company name if relevant</primaryOrg></question></response>`;
+XML: <response><question><text>Your question here</text><resolutionCriteria>How to verify</resolutionCriteria><expectedOutcome>yes</expectedOutcome><primaryActor>Actor name if relevant</primaryActor><primaryOrg>Company name if relevant</primaryOrg></question></response>`;
 
     try {
       type QuestionResponse = {
@@ -1937,7 +1926,12 @@ XML: <response><question><text>Your question here</text><resolutionCriteria>How 
       const questionData =
         response?.question || response?.response?.question || null;
 
-      if (!questionData?.text) {
+      if (
+        typeof questionData?.text !== 'string' ||
+        !questionData.text.trim() ||
+        typeof questionData.resolutionCriteria !== 'string' ||
+        !questionData.resolutionCriteria.trim()
+      ) {
         logger.warn(
           'Failed to generate timeframe question - empty response',
           { timeframe, response },
@@ -1947,10 +1941,24 @@ XML: <response><question><text>Your question here</text><resolutionCriteria>How 
       }
 
       // Sanitize question text
-      const sanitizedText = questionData.text
+      const [mappedText, mappedCriteria] = await Promise.all([
+        characterMappingService.transformText(questionData.text),
+        characterMappingService.transformText(questionData.resolutionCriteria),
+      ]);
+      questionData.resolutionCriteria = mappedCriteria.transformedText;
+      const sanitizedText = mappedText.transformedText
         .replace(/\{[a-zA-Z_]+\}/g, '')
         .replace(/\s+/g, ' ')
         .trim();
+
+      if (hasOpenEndedQuestionLead(sanitizedText)) {
+        logger.warn(
+          'Rejected open-ended timeframe question before storage',
+          { timeframe, text: sanitizedText.substring(0, 100) },
+          'QuestionManager'
+        );
+        return null;
+      }
 
       // Reject questions that fail coherence checks (garbled/hallucinated text)
       const coherence = validateCoherence(sanitizedText);
@@ -1968,9 +1976,17 @@ XML: <response><question><text>Your question here</text><resolutionCriteria>How 
       }
 
       // Parse expected outcome
-      const outcomeStr = String(questionData.expectedOutcome || '')
+      const outcomeStr = String(questionData.expectedOutcome ?? '')
         .toLowerCase()
         .trim();
+      if (!['yes', 'true', 'no', 'false'].includes(outcomeStr)) {
+        logger.warn(
+          'Rejected timeframe question without a binary expected outcome',
+          { timeframe, expectedOutcome: questionData.expectedOutcome },
+          'QuestionManager'
+        );
+        return null;
+      }
       const expectedOutcome = outcomeStr === 'yes' || outcomeStr === 'true';
 
       // Find affiliated actor/org IDs
@@ -1992,20 +2008,23 @@ XML: <response><question><text>Your question here</text><resolutionCriteria>How 
         if (org) affiliatedOrgIds.push(org.id);
       }
 
-      const affiliatedNames = [
-        ...affiliatedActorIds
-          .map((id) => actorsList.find((actor) => actor.id === id)?.name)
-          .filter((name): name is string => Boolean(name)),
-        ...affiliatedOrgIds
-          .map((id) => organizationsList.find((org) => org.id === id)?.name)
-          .filter((name): name is string => Boolean(name)),
-      ].join(' ');
-
-      const combinedText = `${sanitizedText} ${questionData.resolutionCriteria || ''} ${questionData.primaryActor || ''} ${questionData.primaryOrg || ''} ${affiliatedNames}`;
-      const onTopic =
+      const combinedText = `${sanitizedText} ${questionData.resolutionCriteria}`;
+      const candidateTopics =
         allTopics.length > 1
-          ? isTextOnAnyTopic(combinedText, allTopics)
-          : isTextOnTopic(combinedText, resolvedDailyTopic);
+          ? allTopics
+          : resolvedDailyTopic
+            ? [resolvedDailyTopic]
+            : [];
+      // Attribute a multi-topic question to the topic it actually matches.
+      const matchedTopic =
+        candidateTopics.find(
+          (topic) =>
+            topic.sourceType !== 'fallback_default' &&
+            isTextOnTopic(combinedText, topic)
+        ) ??
+        candidateTopics.find((topic) => isTextOnTopic(combinedText, topic)) ??
+        null;
+      const onTopic = candidateTopics.length === 0 || matchedTopic !== null;
 
       if (resolvedDailyTopic && !onTopic) {
         logger.warn(
@@ -2025,18 +2044,18 @@ XML: <response><question><text>Your question here</text><resolutionCriteria>How 
         {
           text: sanitizedText,
           expectedOutcome,
-          topicKey: resolvedDailyTopic?.topicKey,
+          topicKey: matchedTopic?.topicKey,
         },
         'QuestionManager'
       );
 
       return {
         text: sanitizedText,
-        resolutionCriteria:
-          questionData.resolutionCriteria || 'Verifiable via public sources',
+        resolutionCriteria: questionData.resolutionCriteria.trim(),
         expectedOutcome,
         affiliatedActorIds,
         affiliatedOrgIds,
+        topic: matchedTopic,
       };
     } catch (error) {
       logger.error(

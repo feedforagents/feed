@@ -6,6 +6,7 @@
  */
 
 import { logger } from '@feed/shared';
+import { CRYPTO_PARODY_NAMES } from '../data/reality-grounding';
 import {
   type CharacterMapping,
   type OrganizationMapping,
@@ -112,9 +113,16 @@ export class CharacterMappingService {
       return parodyName;
     }
 
+    const searchLower = searchName.toLowerCase();
+    if (
+      !/\s/.test(searchName) &&
+      parodyName.split(/\s+/).some((word) => word.toLowerCase() === searchLower)
+    ) {
+      return searchName;
+    }
+
     // Build word mapping and look for the search term
     const wordMap = this.buildWordMapping(realName, parodyName);
-    const searchLower = searchName.toLowerCase();
 
     // Check if searchName is a single word that maps
     if (wordMap.has(searchLower)) {
@@ -255,6 +263,10 @@ export class CharacterMappingService {
           });
         }
       }
+    }
+    for (const [realName, parodyName] of Object.entries(CRYPTO_PARODY_NAMES)) {
+      add({ term: realName, kind: 'organization', replacement: parodyName });
+      add({ term: parodyName, kind: 'organization', replacement: null });
     }
     // Parody names are protected: real terms take precedence on an exact
     // case-insensitive collision because they were added first.

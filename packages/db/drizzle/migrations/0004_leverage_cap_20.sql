@@ -1,0 +1,1 @@
+ALTER TABLE "PerpMarketSnapshot" ALTER COLUMN "maxLeverage" SET DEFAULT 20;
