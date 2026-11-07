@@ -166,7 +166,13 @@ export const POST = withErrorHandling(
           where: { id: chatId },
         }),
         db.chatParticipant.findMany({
-          where: { chatId: { equals: chatId } },
+          // Only active participants: an inactive row means the member was
+          // moved out of this chat (e.g. tier promotion/demotion), and every
+          // other chat surface (chat GET, reactions, realtime tokens)
+          // already treats inactive participants as having no access. The
+          // list drives both the DM membership check and the group
+          // notification recipients, so inactive rows must not leak in.
+          where: { chatId: { equals: chatId }, isActive: true },
         }),
       ]);
       return { chat, participants };
