@@ -9,15 +9,18 @@ import {
   db,
   eq,
   favorites,
+  follows,
   inArray,
   markets,
   notifications,
   positions,
   posts,
+  userBlocks,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import {
+  executeFollowUser,
   executeGetFavoritePosts,
   executeGetMarkets,
   executeGetPositions,
@@ -30,6 +33,9 @@ const userIds: string[] = [];
 let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
+let blockedByAgentId: string;
+let blockerOfAgentId: string;
+let cleanFollowId: string;
 let postId: string;
 let marketId: string;
 let activePositionId: string;
@@ -59,6 +65,21 @@ describe('MCP tool handlers', () => {
       showWalletPublic: false,
       walletAddress: '0x00000000000000000000000000000000000000aa',
     });
+    blockedByAgentId = await createUser();
+    blockerOfAgentId = await createUser();
+    cleanFollowId = await createUser();
+    await db.insert(userBlocks).values([
+      {
+        id: await generateSnowflakeId(),
+        blockerId: agentUserId,
+        blockedId: blockedByAgentId,
+      },
+      {
+        id: await generateSnowflakeId(),
+        blockerId: blockerOfAgentId,
+        blockedId: agentUserId,
+      },
+    ]);
     postId = await generateSnowflakeId();
     await db.insert(posts).values({
       id: postId,
@@ -117,6 +138,9 @@ describe('MCP tool handlers', () => {
   });
 
   afterAll(async () => {
+    await db.delete(follows).where(inArray(follows.followerId, userIds));
+    await db.delete(userBlocks).where(inArray(userBlocks.blockerId, userIds));
+    await db.delete(userBlocks).where(inArray(userBlocks.blockedId, userIds));
     await db
       .delete(notifications)
       .where(inArray(notifications.userId, userIds));
@@ -125,6 +149,31 @@ describe('MCP tool handlers', () => {
     await db.delete(markets).where(eq(markets.id, marketId));
     await db.delete(posts).where(eq(posts.id, postId));
     await db.delete(users).where(inArray(users.id, userIds));
+  });
+
+  it('rejects follows in either block direction and allows a clean follow', async () => {
+    await expect(
+      executeFollowUser(agent(), { userId: blockedByAgentId })
+    ).rejects.toThrow('Cannot follow this user');
+    await expect(
+      executeFollowUser(agent(), { userId: blockerOfAgentId })
+    ).rejects.toThrow('Cannot follow this user');
+
+    const blockedRows = await db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(eq(follows.followerId, agentUserId));
+    expect(blockedRows).toHaveLength(0);
+
+    const result = await executeFollowUser(agent(), {
+      userId: cleanFollowId,
+    });
+    expect(result.success).toBe(true);
+    const cleanRows = await db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(eq(follows.followerId, agentUserId));
+    expect(cleanRows).toHaveLength(1);
   });
 
   it('counts real unread notifications and reports rows actually marked', async () => {
