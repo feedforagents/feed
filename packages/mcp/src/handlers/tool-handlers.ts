@@ -2206,37 +2206,42 @@ export async function executeLeaveChat(
     select: { groupId: true },
   });
 
-  if (chat?.groupId) {
-    const membership = await db.groupMember.findFirst({
-      where: {
-        groupId: chat.groupId,
-        userId: agent.userId,
-        isActive: true,
-      },
-    });
-    if (membership?.role === 'owner') {
-      throw new Error(
-        'Group owners cannot leave. Transfer ownership or delete the group.'
-      );
-    }
+  // A missing chat, or a chat the caller never joined, has no participant
+  // row. Refuse that before the owner guard so the tool does not report
+  // success after updating zero rows.
+  const participant = await db.chatParticipant.findFirst({
+    where: { chatId: args.chatId, userId: agent.userId },
+  });
+  if (!participant) {
+    throw new Error('You are not a member of this chat.');
   }
 
-  // Mark chat participant as inactive
-  await db.chatParticipant.updateMany({
-    where: {
-      chatId: args.chatId,
-      userId: agent.userId,
-    },
+  const membership = chat?.groupId
+    ? await db.groupMember.findFirst({
+        where: {
+          groupId: chat.groupId,
+          userId: agent.userId,
+          isActive: true,
+        },
+      })
+    : null;
+  if (membership?.role === 'owner') {
+    throw new Error(
+      'Group owners cannot leave. Transfer ownership or delete the group.'
+    );
+  }
+
+  // Deactivate the participant row just validated.
+  await db.chatParticipant.update({
+    where: { id: participant.id },
     data: { isActive: false },
   });
 
-  // Also update GroupMember if there's an associated group
-  if (chat?.groupId) {
-    await db.groupMember.updateMany({
-      where: {
-        groupId: chat.groupId,
-        userId: agent.userId,
-      },
+  // Write the same active membership the owner guard checked, by its id.
+  // An already-inactive row, including an inactive owner, is left alone.
+  if (membership) {
+    await db.groupMember.update({
+      where: { id: membership.id },
       data: {
         isActive: false,
         kickedAt: new Date(),
