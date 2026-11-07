@@ -82,7 +82,7 @@ class ReproDb implements PerpDbPort {
     const pos = this.positions.get(id);
     return pos && !pos.closedAt ? { ...pos } : null;
   }
-  async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>) {
+  async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
     return fn(this);
   }
   async upsertPosition(
@@ -110,7 +110,10 @@ class ReproDb implements PerpDbPort {
       lastUpdated: new Date(),
     });
   }
-  async closePosition(positionId: string, updates: Partial<PerpPositionRecord>) {
+  async closePosition(
+    positionId: string,
+    updates: Partial<PerpPositionRecord>
+  ) {
     const pos = this.positions.get(positionId);
     if (!pos || pos.closedAt) return false;
     this.positions.set(positionId, {
