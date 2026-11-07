@@ -26,7 +26,7 @@ import {
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
-import type { WalletPort } from '@feed/core/markets/shared';
+import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import { asUser, db, getRawDrizzle, sql } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
@@ -34,6 +34,7 @@ import {
   createPerpSettlement,
   createPerpTradesCachePort,
   FEE_CONFIG,
+  FeeService,
   type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
@@ -303,6 +304,30 @@ function requireContextAccountId(
 }
 
 /** Matches CreatePostSchema / ContentValidator post limit. */
+/**
+ * Fee settlement wiring shared by the market services built below.
+ * Mirrors the adapter every other trading surface uses (web trade
+ * routes, MCP handlers, agent executors): the market services charge
+ * the trading fee in their trade math, and this processor is what
+ * records the fee, pays the referrer share, and updates the trader's
+ * lifetime fee total via FeeService. The tx-aware form matches MCP:
+ * inside withPredictionSettlement the processor runs in the same
+ * transaction as the trade.
+ */
+function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
+  return {
+    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+      FeeService.processTradingFee(
+        userId,
+        type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
+        amount,
+        positionId,
+        relatedId,
+        tx
+      ),
+  };
+}
+
 const MAX_POST_CONTENT_LENGTH = 5000;
 /** Matches CreateCommentSchema (shared validation). */
 const MAX_COMMENT_LENGTH = 2000;
@@ -1552,6 +1577,7 @@ export class FeedAgentExecutor implements AgentExecutor {
         referrerShare: FEE_CONFIG.REFERRER_SHARE,
         minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
+      feeProcessor: (tx) => buildFeeProcessor(tx),
     };
   }
 
@@ -1573,6 +1599,7 @@ export class FeedAgentExecutor implements AgentExecutor {
         referrerShare: FEE_CONFIG.REFERRER_SHARE,
         minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
+      feeProcessor: buildFeeProcessor(),
     });
   }
 
