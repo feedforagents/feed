@@ -4,12 +4,11 @@
  *
  * The list excludes notifications from actors the viewer blocked, muted or
  * was blocked by; a count that still includes them shows unread items the
- * viewer can never open. Only authentication is replaced; the database,
- * moderation filters and cache run unmodified.
+ * viewer can never open. Uses the real HTTP listener and the built-in CI test authentication.
+ * The database, moderation predicates and route are unmodified.
  */
 
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import {
   db,
   eq,
@@ -21,10 +20,9 @@ import {
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
 
 type NotificationsResponse = {
-  notifications: Array<{ id: string; read: boolean; actorId: string }>;
+  notifications: Array<{ id: string; read: boolean; actorId: string | null }>;
   unreadCount: number;
 };
 
@@ -35,27 +33,26 @@ let blockerId: string;
 let visibleId: string;
 let plainViewerId: string;
 let currentViewerId: string;
-const ids: Record<string, string> = {};
-let GET: typeof import('../route').GET;
+const ids = {
+  muted: '',
+  blocked: '',
+  blockedBy: '',
+  visibleUnread: '',
+  systemUnread: '',
+  visibleRead: '',
+  plainLikeUnread: '',
+  plainFollowUnread: '',
+  plainLikeRead: '',
+};
 
 beforeAll(async () => {
-  [viewerId, mutedId, blockedId, blockerId, visibleId, plainViewerId] =
-    await Promise.all(Array.from({ length: 6 }, () => generateSnowflakeId()));
+  viewerId = await generateSnowflakeId();
+  mutedId = await generateSnowflakeId();
+  blockedId = await generateSnowflakeId();
+  blockerId = await generateSnowflakeId();
+  visibleId = await generateSnowflakeId();
+  plainViewerId = await generateSnowflakeId();
   currentViewerId = viewerId;
-
-  const apiIndex = path.resolve(
-    import.meta.dir,
-    '../../../../../../../packages/api/src/index.ts'
-  );
-  const actualApi = await import(apiIndex);
-  mock.module('@feed/api', () => ({
-    ...actualApi,
-    authenticate: async () => ({
-      userId: currentViewerId,
-      dbUserId: currentViewerId,
-    }),
-  }));
-  ({ GET } = await import('../route'));
 
   const now = new Date();
   await db.insert(users).values(
@@ -82,7 +79,11 @@ beforeAll(async () => {
     },
   ]);
 
-  const rows: Array<{ key: string; actorId: string | null; read: boolean }> = [
+  const rows: Array<{
+    key: keyof typeof ids;
+    actorId: string | null;
+    read: boolean;
+  }> = [
     { key: 'muted', actorId: mutedId, read: false },
     { key: 'blocked', actorId: blockedId, read: false },
     { key: 'blockedBy', actorId: blockerId, read: false },
@@ -105,7 +106,11 @@ beforeAll(async () => {
   }
 
   // A viewer with no blocks or mutes, across notification types.
-  const plainRows: Array<{ key: string; type: string; read: boolean }> = [
+  const plainRows: Array<{
+    key: keyof typeof ids;
+    type: string;
+    read: boolean;
+  }> = [
     { key: 'plainLikeUnread', type: 'like', read: false },
     { key: 'plainFollowUnread', type: 'follow', read: false },
     { key: 'plainLikeRead', type: 'like', read: true },
@@ -126,7 +131,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  mock.restore();
   if (!viewerId) return;
   await db
     .delete(notifications)
@@ -152,9 +156,13 @@ afterAll(async () => {
 });
 
 async function fetchNotifications(query: string) {
-  const response = await GET(
-    new NextRequest(`https://feed.example/api/notifications${query}`)
-  );
+  const baseUrl =
+    process.env.TEST_API_URL ||
+    process.env.TEST_BASE_URL ||
+    'http://127.0.0.1:3100';
+  const response = await fetch(new URL(`/api/notifications${query}`, baseUrl), {
+    headers: { authorization: `Bearer steward:test:${currentViewerId}` },
+  });
   expect(response.status).toBe(200);
   return (await response.json()) as NotificationsResponse;
 }
