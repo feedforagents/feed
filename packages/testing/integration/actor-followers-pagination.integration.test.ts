@@ -7,10 +7,11 @@
  * before the merge. Nothing is mocked: the request is anonymous, the actor
  * comes from the static registry and the follows come from the database.
  *
- * Fixture rows are namespaced by a per-run id and are not deleted.
+ * Uses the real HTTP listener. Every owned fixture row is removed afterwards.
  */
 
-import { beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import assert from 'node:assert/strict';
 import {
   actorFollows,
   count,
@@ -19,20 +20,44 @@ import {
   followStatuses,
   follows,
   ilike,
+  inArray,
   or,
   userActorFollows,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
-import { GET } from '../route';
 
 type FollowersResponse = {
-  followers: Array<{ id: string; isActor: boolean }>;
+  followers: Array<{
+    id: string;
+    isActor: boolean;
+    displayName: string;
+    viewerFollows?: boolean;
+  }>;
   count: number;
   hasMore: boolean;
 };
+
+const ownedIds: string[] = [];
+async function generateFixtureId() {
+  const id = await generateSnowflakeId();
+  ownedIds.push(id);
+  return id;
+}
+
+afterAll(async () => {
+  if (!ownedIds.length) return;
+  for (const table of [
+    actorFollows,
+    userActorFollows,
+    follows,
+    followStatuses,
+  ]) {
+    await db.delete(table).where(inArray(table.id, ownedIds));
+  }
+  await db.delete(users).where(inArray(users.id, ownedIds));
+});
 
 const FOLLOWER_COUNT = 201;
 const PAGE_SIZE = 100;
@@ -41,23 +66,29 @@ let actorId: string;
 // Newest first, matching the route's followedAt DESC order.
 const followerIds: string[] = [];
 
-/** First registry actor with no user row of the same identifier and no follows. */
+/** Choose an unused real registry username that routes to the actor, even in a seeded DB. */
 async function pickUnfollowedActor(): Promise<string> {
   for (const actor of StaticDataRegistry.getAllActors()) {
+    if (!actor.username) continue;
     const [userMatch] = await db
       .select({ n: count() })
       .from(users)
-      .where(or(eq(users.id, actor.id), ilike(users.username, actor.id)));
+      .where(
+        or(eq(users.id, actor.username), ilike(users.username, actor.username))
+      );
+    assert.ok(userMatch);
     if (userMatch.n > 0) continue;
     const [userFollows] = await db
       .select({ n: count() })
       .from(userActorFollows)
       .where(eq(userActorFollows.actorId, actor.id));
+    assert.ok(userFollows);
     if (userFollows.n > 0) continue;
     const [npcFollows] = await db
       .select({ n: count() })
       .from(actorFollows)
       .where(eq(actorFollows.followingId, actor.id));
+    assert.ok(npcFollows);
     if (npcFollows.n > 0) continue;
     return actor.id;
   }
@@ -68,11 +99,11 @@ async function pickUnfollowedActor(): Promise<string> {
 
 beforeAll(async () => {
   actorId = await pickUnfollowedActor();
-  const runId = await generateSnowflakeId();
+  const runId = await generateFixtureId();
   const now = Date.now();
 
   for (let i = 0; i < FOLLOWER_COUNT; i++) {
-    followerIds.push(await generateSnowflakeId());
+    followerIds.push(await generateFixtureId());
   }
   await db.insert(users).values(
     followerIds.map((id, i) => ({
@@ -82,10 +113,10 @@ beforeAll(async () => {
       updatedAt: new Date(now),
     }))
   );
-  const follows = [];
+  const follows: Array<typeof userActorFollows.$inferInsert> = [];
   for (const [i, userId] of followerIds.entries()) {
     follows.push({
-      id: await generateSnowflakeId(),
+      id: await generateFixtureId(),
       userId,
       actorId,
       createdAt: new Date(now - i * 1000),
@@ -95,14 +126,7 @@ beforeAll(async () => {
 });
 
 async function fetchPage(page: number) {
-  const response = await GET(
-    new NextRequest(
-      `https://feed.example/api/users/${actorId}/followers?page=${page}&limit=${PAGE_SIZE}`
-    ),
-    { params: Promise.resolve({ userId: actorId }) }
-  );
-  expect(response.status).toBe(200);
-  return (await response.json()) as FollowersResponse;
+  return getFollowers(actorId, `page=${page}&limit=${PAGE_SIZE}`);
 }
 
 describe('GET /api/users/[userId]/followers for an actor with >200 followers', () => {
@@ -135,20 +159,23 @@ describe('GET /api/users/[userId]/followers for an actor with >200 followers', (
 });
 
 async function getFollowers(target: string, query: string) {
-  const response = await GET(
-    new NextRequest(
-      `https://feed.example/api/users/${target}/followers?${query}`
-    ),
-    { params: Promise.resolve({ userId: target }) }
+  const identifier = StaticDataRegistry.getActor(target)?.username ?? target;
+  const baseUrl =
+    process.env.TEST_API_URL ||
+    process.env.TEST_BASE_URL ||
+    'http://127.0.0.1:3100';
+  const response = await fetch(
+    new URL(
+      `/api/users/${encodeURIComponent(identifier)}/followers?${query}`,
+      baseUrl
+    )
   );
   expect(response.status).toBe(200);
-  return (await response.json()) as FollowersResponse & {
-    followers: Array<{ id: string; isActor: boolean; displayName: string }>;
-  };
+  return (await response.json()) as FollowersResponse;
 }
 
 async function insertUser(prefix: string): Promise<string> {
-  const id = await generateSnowflakeId();
+  const id = await generateFixtureId();
   await db.insert(users).values({
     id,
     username: `${prefix}-${id}`,
@@ -175,7 +202,7 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
   beforeAll(async () => {
     target = await pickUnfollowedActor();
     const others = StaticDataRegistry.getAllActors().filter(
-      (a) => a.id !== target && a.username
+      (a) => a.id !== target && a.id !== actorId && a.username
     );
     const [first, second] = others;
     if (!first || !second?.username) {
@@ -190,42 +217,42 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
     await db.insert(actorFollows).values([
       // Newest, then a tie with a human follower (actor sorts first).
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         followerId: registryFollower,
         followingId: target,
         createdAt: new Date(base),
       },
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         followerId: usernameFollower,
         followingId: target,
         createdAt: new Date(base - 1000),
       },
       // Not in the registry: excluded from page and count.
       {
-        id: await generateSnowflakeId(),
-        followerId: `missing-${await generateSnowflakeId()}`,
+        id: await generateFixtureId(),
+        followerId: `missing-${await generateFixtureId()}`,
         followingId: target,
         createdAt: new Date(base - 500),
       },
     ]);
     await db.insert(userActorFollows).values([
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         userId: humanTie,
         actorId: target,
         createdAt: new Date(base - 1000),
       },
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         userId: humanOld,
         actorId: target,
         createdAt: new Date(base - 2000),
       },
       // No User row: excluded by the join.
       {
-        id: await generateSnowflakeId(),
-        userId: await generateSnowflakeId(),
+        id: await generateFixtureId(),
+        userId: await generateFixtureId(),
         actorId: target,
         createdAt: new Date(base - 1500),
       },
@@ -235,9 +262,9 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
     tieA = await insertUser('fua');
     tieB = await insertUser('fub');
     npcKnown = registryFollower;
-    npcMissing = `missing-npc-${await generateSnowflakeId()}`;
-    const followA = await generateSnowflakeId();
-    const followB = await generateSnowflakeId();
+    npcMissing = `missing-npc-${await generateFixtureId()}`;
+    const followA = await generateFixtureId();
+    const followB = await generateFixtureId();
     await db.insert(follows).values([
       {
         id: followA,
@@ -253,15 +280,15 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
       },
       // No User row: excluded by the join.
       {
-        id: await generateSnowflakeId(),
-        followerId: await generateSnowflakeId(),
+        id: await generateFixtureId(),
+        followerId: await generateFixtureId(),
         followingId: userTarget,
         createdAt: new Date(base),
       },
     ]);
     await db.insert(followStatuses).values([
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         userId: userTarget,
         npcId: npcKnown,
         followedAt: new Date(base - 1000),
@@ -269,7 +296,7 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
         followReason: 'fixture',
       },
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         userId: userTarget,
         npcId: npcMissing,
         followedAt: new Date(base - 2000),
@@ -278,7 +305,7 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
       },
       // Excluded: user_followed, NULL reason, inactive.
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         userId: userTarget,
         npcId: `x1-${followA}`,
         followedAt: new Date(base - 100),
@@ -286,7 +313,7 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
         followReason: 'user_followed',
       },
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         userId: userTarget,
         npcId: `x2-${followA}`,
         followedAt: new Date(base - 100),
@@ -294,7 +321,7 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
         followReason: null,
       },
       {
-        id: await generateSnowflakeId(),
+        id: await generateFixtureId(),
         userId: userTarget,
         npcId: `x3-${followA}`,
         followedAt: new Date(base - 100),
