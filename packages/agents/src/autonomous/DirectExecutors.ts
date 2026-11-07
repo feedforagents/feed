@@ -803,11 +803,6 @@ async function executePerpTrade(params: {
 
   const perpSide = side === 'open_long' ? 'long' : 'short';
 
-  // Get org for price (search through all orgs by ticker)
-  const allOrgs = StaticDataRegistry.getAllOrganizations();
-  const org = allOrgs.find((o) => o.ticker === ticker);
-  const currentPrice = org?.initialPrice ?? 100;
-
   const walletAdapter = createPerpWalletAdapter(isNpc);
 
   const service = new PerpMarketService({
@@ -829,28 +824,78 @@ async function executePerpTrade(params: {
     priceImpact: createPerpPriceImpactPort(),
   });
 
-  await service.openPosition({
+  const openResult = await service.openPosition({
     userId: agentUserId,
     ticker,
     side: perpSide,
     size: amount,
     leverage: 1,
   });
-  // Record trade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'perp',
-    ticker,
-    action: 'open',
-    side: perpSide,
-    amount,
-    price: currentPrice,
-    reasoning,
-  });
+
+  // Record what the service actually did. openPosition opens a fresh
+  // position, adds to one, reduces or closes an opposite one, or flips it;
+  // each leg is recorded at the price it executed at. The result carries
+  // those prices; never substitute a quote or the position's average entry.
+  const rebalanceType = openResult.rebalanceType;
+  const closedSide: 'long' | 'short' = perpSide === 'long' ? 'short' : 'long';
+  const recordClosedLeg = async (closedSize: number) => {
+    if (openResult.exitPrice == null || openResult.realizedPnL == null) {
+      throw new Error(
+        `[DirectExecutor] openPosition (${rebalanceType}) did not return the closed leg: exitPrice=${openResult.exitPrice}, realizedPnL=${openResult.realizedPnL}`
+      );
+    }
+    await agentPnLService.recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'perp',
+      ticker,
+      action: 'close',
+      side: closedSide,
+      amount: closedSize,
+      price: openResult.exitPrice,
+      pnl: openResult.realizedPnL,
+      reasoning,
+    });
+  };
+  const recordOpenedLeg = async (openedSize: number) => {
+    if (openResult.fillPrice == null) {
+      throw new Error(
+        `[DirectExecutor] openPosition (${rebalanceType ?? 'open'}) did not return a fill price`
+      );
+    }
+    await agentPnLService.recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'perp',
+      ticker,
+      action: 'open',
+      side: perpSide,
+      amount: openedSize,
+      price: openResult.fillPrice,
+      reasoning,
+    });
+  };
+
+  if (rebalanceType === 'reduce' || rebalanceType === 'close') {
+    // Opposite-side trade not larger than the position: only a close leg,
+    // for the size that was closed.
+    await recordClosedLeg(openResult.size);
+  } else if (rebalanceType === 'flip') {
+    // The previous position closed in full, then the remainder opened.
+    if (openResult.previousSize == null) {
+      throw new Error(
+        '[DirectExecutor] openPosition (flip) did not return previousSize'
+      );
+    }
+    await recordClosedLeg(openResult.previousSize);
+    await recordOpenedLeg(openResult.size);
+  } else {
+    // Fresh open or add: the requested size opened at its own fill.
+    await recordOpenedLeg(amount);
+  }
 
   logger.info(
-    `[DirectExecutor] Perp trade executed: ${perpSide} $${amount} on ${ticker}`,
+    `[DirectExecutor] Perp trade executed: ${perpSide} $${amount} on ${ticker} (${rebalanceType ?? 'open'})`,
     undefined,
     'DirectExecutors'
   );
