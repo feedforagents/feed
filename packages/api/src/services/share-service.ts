@@ -11,7 +11,13 @@
 
 import { and, count, db, eq, hasBlocked, posts, shares, users } from '@feed/db';
 import { NPCInteractionTracker, StaticDataRegistry } from '@feed/engine';
-import { generateSnowflakeId, isPureRepost, logger, toISO } from '@feed/shared';
+import {
+  generateSnowflakeId,
+  isPureRepost,
+  logger,
+  SharePostSchema,
+  toISO,
+} from '@feed/shared';
 import { cachedDb } from '../cache';
 import { BusinessLogicError, NotFoundError } from '../errors';
 import { broadcastToChannel } from '../sse/event-broadcaster';
@@ -74,7 +80,7 @@ export async function sharePost(
   comment?: string,
   sharer?: SharePostSharer
 ): Promise<SharePostOutcome> {
-  const quoteComment = comment?.trim() || undefined;
+  const quoteComment = SharePostSchema.parse({ comment }).comment || undefined;
   const now = new Date();
   const [post] = await db
     .select({
@@ -332,7 +338,21 @@ export async function sharePost(
       .limit(1);
 
     if (postAuthorUser) {
-      await notifyShare(postAuthorId, userId, shareTargetPostId);
+      // The share and quote have committed. A notification outage must not
+      // tell the caller that the share failed and invite an unsuccessful retry.
+      try {
+        await notifyShare(postAuthorId, userId, shareTargetPostId);
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed share',
+          {
+            postId: shareTargetPostId,
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          LOG_CONTEXT
+        );
+      }
     }
   }
 
