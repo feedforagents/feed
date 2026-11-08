@@ -8,8 +8,8 @@ import { PgDialect } from 'drizzle-orm/pg-core';
  * PnL alone. The prediction leg marks positions at the CPMM price but
  * subtracts the remaining gross cash basis (net cost grossed up by the
  * trading fee rate, entry fee included), so the fee already paid in cash
- * is not counted as profit; that leg therefore differs from the engine's
- * calculatePortfolioPnL, which still subtracts net avgPrice.
+ * is not counted as profit. Keep this aligned with the engine's
+ * calculatePortfolioPnL and settlement's remaining cash basis.
  *
  * These tests drive the real service methods with only the database client
  * stubbed (the mocking pattern of
