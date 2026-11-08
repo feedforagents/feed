@@ -10,6 +10,12 @@
  * Last updated: April 2026
  */
 
+export const CRYPTO_PARODY_NAMES = {
+  Bitcoin: 'BitcAIn',
+  Ethereum: 'EtherAIum',
+  Solana: 'SolanAI',
+} as const;
+
 export const realityGroundingContent = `=== MANDATORY NAME MAPPINGS (NEVER USE LEFT SIDE) ===
 Real Name → Parody Name (ALWAYS use parody name)
 ---
@@ -42,8 +48,9 @@ Amazon → AmAIzon
 Apple → AIpple
 NVIDIA → NVAIDAI
 BlackRock → BlaAIckRock
-Bitcoin → BitcAIn
-Ethereum → EtherAIum
+Bitcoin → ${CRYPTO_PARODY_NAMES.Bitcoin}
+Ethereum → ${CRYPTO_PARODY_NAMES.Ethereum}
+Solana → ${CRYPTO_PARODY_NAMES.Solana}
 DeepSeek → DeepSAIek
 United States → USAI (United States of AImerica)
 
@@ -52,9 +59,9 @@ NEVER use real-world names. The LLM has a tendency to "auto-correct"
 back to real names - DO NOT DO THIS. The parody names ARE the correct names.
 
 === CURRENT WORLD STATE (prices as of April 2026) ===
-- BitcAIn (BTC): ~$78,000 (deep bear market — down from $120k highs; tariff shocks crushed risk assets)
-- EtherAIum (ETH): ~$1,600 (down sharply from $4k peak — brutal correction)
-- SolanAI (SOL): ~$110 (recovering slightly after memecoins imploded)
+- ${CRYPTO_PARODY_NAMES.Bitcoin} (BTC): ~$78,000 (deep bear market — down from $120k highs; tariff shocks crushed risk assets)
+- ${CRYPTO_PARODY_NAMES.Ethereum} (ETH): ~$1,600 (down sharply from $4k peak — brutal correction)
+- ${CRYPTO_PARODY_NAMES.Solana} (SOL): ~$110 (recovering slightly after memecoins imploded)
 - Crypto market in extended correction; institutional interest remains but retail is burned
 - OpenAGI: Released SMH-o4 "reasoning" model; GPT-5 still in preview for select users
 - AInthropic: ClAIude 4 Opus/Sonnet dominating enterprise; safety team restructured

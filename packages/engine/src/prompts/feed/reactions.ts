@@ -6,7 +6,7 @@ import { definePrompt } from '../define-prompt';
  */
 export const reactions = definePrompt({
   id: 'reactions',
-  version: '6.0.0',
+  version: '6.0.1',
   category: 'feed',
   description: 'Generates actor reaction to event — actor identity first',
   temperature: 1,
@@ -42,12 +42,16 @@ RULES:
 
 Write ONE reaction post. How would {{characterName}} react to this event?
 
-<format>
+Respond with only this XML:
+<response>
 <reaction>
   <post>your reaction here</post>
-  <sentiment>number -1 to 1</sentiment>
-  <clueStrength>number 0 to 1</clueStrength>
-  <pointsToward>true | false | null</pointsToward>
+  <sentiment>0.2</sentiment>
+  <clueStrength>0.3</clueStrength>
+  <pointsToward>null</pointsToward>
 </reaction>
-</format>`.trim(),
+</response>
+
+sentiment must be a number from -1 to 1; clueStrength a number from 0 to 1.
+pointsToward must be true, false, or null. Write the actual post text in post.`.trim(),
 });

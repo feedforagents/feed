@@ -119,6 +119,7 @@ export interface PerpDbPort {
         | 'lastUpdated'
         | 'size'
         | 'entryPrice'
+        | 'realizedPnL'
       >
     >
   ): Promise<void>;
@@ -206,8 +207,18 @@ export interface PerpTradeResult {
   size: number;
   leverage: number;
   entryPrice: number;
-  /** Exit price (present on close operations) */
+  /**
+   * Exit price of the closed size (present on close, reduce and flip
+   * operations; on a flip it is the price the previous position closed at).
+   */
   exitPrice?: number;
+  /**
+   * Average execution price of this trade's own size: the opened size on a
+   * fresh open, the added size on an add (not the blended entry), the closed
+   * size on a reduce or close (equals exitPrice), and the newly opened size
+   * on a flip. Post-impact when a price impact port is configured.
+   */
+  fillPrice?: number;
   liquidationPrice: number;
   marginPaid?: number;
   /** Realized P&L from the trade (present on close operations) */
@@ -298,10 +309,19 @@ export interface MetricsPort {
   increment(name: string, value: number, tags?: Record<string, string>): void;
 }
 
+/** Serialize an owner's exposure check and financial writes in one transaction. */
+export interface PerpSettlementPort {
+  run<T>(
+    userId: string,
+    operation: (db: PerpDbPort, wallet: WalletPort) => Promise<T>
+  ): Promise<T>;
+}
+
 // Service deps bundle (optional helper)
 export interface PerpServiceDeps {
   db: PerpDbPort;
   wallet: WalletPort;
+  settlement: PerpSettlementPort;
   broadcast?: BroadcastPort;
   cache?: CachePort;
   clock?: ClockPort;

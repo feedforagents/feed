@@ -186,25 +186,11 @@ export function TerminalPortfolio({
 
         <div className="mt-1.5 grid grid-cols-2 gap-1.5 lg:grid-cols-4">
           <StatCard
-            label="Agents"
-            value={formatPortfolioValue(
-              portfolioLoading,
-              portfolio,
-              (p) => p.agents
-            )}
-          />
-          <StatCard
             label="Positions"
             value={formatPortfolioValue(
               portfolioLoading,
               portfolio,
               (p) => p.positions
-            )}
-          />
-          <StatCard
-            label="Agent Count"
-            value={formatPortfolioValue(portfolioLoading, portfolio, (p) =>
-              p.agentCount.toLocaleString()
             )}
           />
           <StatCard

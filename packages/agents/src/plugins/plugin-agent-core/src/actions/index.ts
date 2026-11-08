@@ -20,11 +20,6 @@ export { closePerpAction } from './close-perp';
 export { createCommentAction } from './create-comment';
 export { createPostAction } from './create-post';
 export { lookupUserAction } from './lookup-user';
-export {
-  listPriceAlertsAction,
-  removePriceAlertAction,
-  setPriceAlertAction,
-} from './manage-price-alerts';
 export { openPerpAction } from './open-perp';
 export { sellPredictionAction } from './sell-prediction';
 export { toggleAutonomyAction } from './toggle-autonomy';

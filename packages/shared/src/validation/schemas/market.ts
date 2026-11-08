@@ -25,7 +25,7 @@ export const OpenPerpPositionSchema = z.object({
     .number()
     .int()
     .min(1)
-    .max(100, 'Leverage must be between 1x and 100x'),
+    .max(20, 'Leverage must be between 1x and 20x'),
   slippage: z.number().min(0).max(0.1).default(0.01), // 1% default max slippage
 });
 

@@ -37,12 +37,6 @@ export const ROUTES = {
   SETTINGS: '/settings',
   SETTINGS_MODERATION: '/settings/moderation',
 
-  // Agents
-  AGENTS: '/agents',
-  AGENTS_CREATE: '/agents/create',
-  AGENTS_BY_ID: (id: string) => `/agents/${id}`,
-  AGENTS_TEAM_CHAT: '/agents/team',
-
   // Content
   POST_BY_ID: (id: string) => `/post/${id}`,
   ARTICLE_BY_ID: (id: string) => `/article/${id}`,
@@ -100,7 +94,6 @@ export const PUBLIC_ROUTES = [
   ROUTES.REGISTRY,
   ROUTES.REPUTATION,
   ROUTES.PROFILE,
-  ROUTES.AGENTS,
   ROUTES.API_DOCS,
 ];
 
@@ -113,8 +106,6 @@ export const AUTHENTICATED_ROUTES = [
   ROUTES.REWARDS,
   ROUTES.SETTINGS,
   ROUTES.SETTINGS_MODERATION,
-  ROUTES.AGENTS_CREATE,
-  ROUTES.AGENTS_TEAM_CHAT,
 ];
 
 /**
@@ -233,21 +224,11 @@ export const SELECTORS = {
   // Leaderboard
   LEADERBOARD_TOGGLE_WALLET:
     'button:has-text("Wallet"), [role="tab"]:has-text("Wallet")',
-  LEADERBOARD_TOGGLE_TEAM:
-    'button:has-text("Team"), [role="tab"]:has-text("Team")',
   PAGINATION_PREV:
     'button:has-text("Previous"), button:has-text("Prev"), button[aria-label*="previous" i]',
   PAGINATION_NEXT: 'button:has-text("Next"), button[aria-label*="next" i]',
   JUMP_TO_POSITION:
     'button:has-text("#"), button:has-text("Jump"), button[aria-label*="jump" i]',
-
-  // Agents
-  AGENT_CARD: '[data-testid="agent-card"], .agent-card',
-  AGENT_FILTER_ALL: 'button:has-text("All")',
-  AGENT_FILTER_ACTIVE: 'button:has-text("Active")',
-  AGENT_FILTER_IDLE: 'button:has-text("Idle")',
-  CREATE_AGENT_BUTTON:
-    'button:has-text("Create Agent"), button:has-text("New Agent"), a:has-text("Create")',
 
   // Common
   LOADING_SKELETON: '[data-testid="skeleton"], .skeleton',

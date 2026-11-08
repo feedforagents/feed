@@ -20,22 +20,19 @@ import {
   gte,
   npcTrades,
   questions,
-  users,
 } from '@feed/db';
 import {
   countTokensSync,
   generateWorldContext,
   getSafeContextLimit,
   StaticDataRegistry,
-  WalletService,
 } from '@feed/engine';
-import type { JsonValue } from '@feed/shared';
+import { getSurplusConfig, type JsonValue } from '@feed/shared';
 import { callAgentLLM } from '../llm/agent-llm';
 import { resolveGroqModel } from '../llm/direct-groq';
 import { getNpcGameContext } from '../plugins/feed/providers/npc-game-context';
 import { ensureTrajectoryStep } from '../plugins/plugin-trajectory-logger/src/action-interceptor';
-import { agentService } from '../services/AgentService';
-import { getAgentConfig, getAutonomousFeatures } from '../shared/agent-config';
+import { type AgentService, agentService } from '../services/AgentService';
 import { logger } from '../shared/logger';
 import { normalizeDecisionAction } from './action-normalization';
 import {
@@ -49,7 +46,6 @@ import {
   executeDirectMessage,
   executeDirectPost,
   executeDirectRepost,
-  executeDirectSendMoney,
   executeDirectTrade,
   executeDirectUnfollow,
 } from './DirectExecutors';
@@ -58,10 +54,7 @@ import {
   extractFirstJsonObject,
   parseDecisionJson,
 } from './decision-json';
-import {
-  executeDirectRequestPayment,
-  executeDirectShareInformation,
-} from './intel-payment-executors';
+import { executeDirectShareInformation } from './intel-payment-executors';
 import { normalizeSocialDecisionParameters } from './social-parameter-normalization';
 import { topicDiversityService } from './TopicDiversityService';
 import {
@@ -82,11 +75,8 @@ import {
   gatherPendingChatMessages,
   gatherPendingCommentReplies,
   getAgentGroupChats,
-  getAgentMemory,
   getAgentOwnPosts,
   getAgentPositions,
-  getAgentSocialGraph,
-  getAgentTradeHistory,
   getGroupChatIntel,
   getMarketTrends,
   getMoodState,
@@ -149,16 +139,9 @@ export class MultiStepExecutor {
   /** NPC ticks have a hard four-step ceiling (PRD D-25). */
   private readonly npcMaxIterations: number;
 
-  private readonly maxIterations: number;
-
-  constructor(maxIterations = 5, npcMaxIterations = 4) {
-    if (
-      ![maxIterations, npcMaxIterations].every(
-        (n) => Number.isSafeInteger(n) && n > 0
-      )
-    )
+  constructor(npcMaxIterations = 4) {
+    if (!Number.isSafeInteger(npcMaxIterations) || npcMaxIterations <= 0)
       throw new Error('Iteration budgets must be positive integers');
-    this.maxIterations = maxIterations;
     this.npcMaxIterations = Math.min(npcMaxIterations, 4);
   }
 
@@ -182,17 +165,25 @@ export class MultiStepExecutor {
    * The LLM decides what action to take at each step, seeing the results
    * of previous actions to make informed decisions.
    *
-   * @param agentUserId - User ID for USER_CONTROLLED agents, or agentId for NPCs
+   * @param agentUserId - Canonical NPC actor ID
    * @param runtime - Agent runtime
-   * @param isNpc - Whether this is an NPC agent (skips User table lookup)
+   * @param isNpc - Must be true; hosted user agents are not supported
    */
   async execute(
     agentUserId: string,
     runtime: IAgentRuntime,
-    isNpc = false,
+    isNpc = true,
     signal?: AbortSignal
   ): Promise<MultiStepExecutorResult> {
     signal?.throwIfAborted();
+    const actor = StaticDataRegistry.getActor(agentUserId);
+    if (!isNpc || actor?.id !== agentUserId) {
+      throw new Error(`Only NPCs can execute autonomous ticks: ${agentUserId}`);
+    }
+    // AgentRuntime preserves the canonical ID passed by AgentRuntimeManager.
+    if (runtime.agentId !== actor.id) {
+      throw new Error(`NPC runtime does not match actor: ${agentUserId}`);
+    }
     const startTime = Date.now();
     const trace: ActionTraceResult[] = [];
 
@@ -202,76 +193,44 @@ export class MultiStepExecutor {
       'MultiStepExecutor'
     );
 
-    // Get agent info (for USER_CONTROLLED agents)
-    let agent: typeof users.$inferSelect | undefined;
-    if (!isNpc) {
-      const [userAgent] = await db
-        .select()
-        .from(users)
-        .where(eq(users.id, agentUserId))
-        .limit(1);
+    const baseSystemPrompt = 'You are an autonomous trading agent on Feed.';
 
-      if (!userAgent) {
-        throw new Error('Agent not found');
-      }
-      agent = userAgent;
-    }
-
-    // Get agent config (may be null for NPCs)
-    const config = await getAgentConfig(agentUserId);
-    const baseSystemPrompt =
-      config?.systemPrompt ?? 'You are an autonomous trading agent on Feed.';
-
-    // Determine enabled features - NPCs use per-character autonomy flags if available
-    // For USER_CONTROLLED agents: trading defaults to true, others default to false
     let enabledFeatures: string[] = [];
-    if (isNpc) {
-      // Read per-character autonomy flags from PackActor feed metadata
-      const autonomy = (runtime.character as unknown as Record<string, unknown>)
-        ?.feed
-        ? (
-            (runtime.character as unknown as Record<string, unknown>).feed as {
-              autonomy?: {
-                trading: boolean;
-                posting: boolean;
-                commenting: boolean;
-                dms: boolean;
-                groups: boolean;
-              };
-            }
-          )?.autonomy
-        : undefined;
+    // Read per-character autonomy flags from PackActor feed metadata
+    const autonomy = (runtime.character as unknown as Record<string, unknown>)
+      ?.feed
+      ? (
+          (runtime.character as unknown as Record<string, unknown>).feed as {
+            autonomy?: {
+              trading: boolean;
+              posting: boolean;
+              commenting: boolean;
+              dms: boolean;
+              groups: boolean;
+            };
+          }
+        )?.autonomy
+      : undefined;
 
-      if (autonomy) {
-        // Use per-character feature flags from pack definition
-        if (autonomy.trading) enabledFeatures.push(Features.TRADING);
-        if (autonomy.posting) enabledFeatures.push(Features.POSTING);
-        if (autonomy.commenting) enabledFeatures.push(Features.COMMENTING);
-        enabledFeatures.push(Features.ENGAGING); // always on
-        if (autonomy.dms) enabledFeatures.push(Features.DMS);
-        if (autonomy.groups) enabledFeatures.push(Features.GROUP_CHATS);
-      } else {
-        // Fallback: enable everything (backward compat)
-        enabledFeatures.push(
-          Features.TRADING,
-          Features.POSTING,
-          Features.COMMENTING,
-          Features.ENGAGING,
-          Features.DMS,
-          Features.GROUP_CHATS
-        );
-      }
-    } else {
-      const features = getAutonomousFeatures(config);
-      if (features.trading) enabledFeatures.push(Features.TRADING);
-      if (features.posting) enabledFeatures.push(Features.POSTING);
-      if (features.commenting) enabledFeatures.push(Features.COMMENTING);
+    if (autonomy) {
+      // Use per-character feature flags from pack definition
+      if (autonomy.trading) enabledFeatures.push(Features.TRADING);
+      if (autonomy.posting) enabledFeatures.push(Features.POSTING);
+      if (autonomy.commenting) enabledFeatures.push(Features.COMMENTING);
       enabledFeatures.push(Features.ENGAGING); // always on
-      if (features.dms) enabledFeatures.push(Features.DMS);
-      if (features.groupChats) enabledFeatures.push(Features.GROUP_CHATS);
-      if (features.transfers) enabledFeatures.push(Features.TRANSFERS);
+      if (autonomy.dms) enabledFeatures.push(Features.DMS);
+      if (autonomy.groups) enabledFeatures.push(Features.GROUP_CHATS);
+    } else {
+      // Fallback: enable everything (backward compat)
+      enabledFeatures.push(
+        Features.TRADING,
+        Features.POSTING,
+        Features.COMMENTING,
+        Features.ENGAGING,
+        Features.DMS,
+        Features.GROUP_CHATS
+      );
     }
-
     // Add entropy by randomly disabling some non-essential features (15% chance each)
     // TRADING is never disabled (agents need to exit positions)
     // At least one social feature is kept enabled
@@ -318,15 +277,13 @@ export class MultiStepExecutor {
       : baseSystemPrompt;
 
     // Missing NPC context is a failed tick, never permission to act without it.
-    const npcGameContext = isNpc ? await getNpcGameContext(agentUserId) : '';
+    const npcGameContext = await getNpcGameContext(agentUserId);
 
     const contextRefreshSummary =
       await this.getLatestContextRefreshSummary(agentUserId);
 
     // NPC budgets may be reduced, but cannot exceed the four-step ceiling.
-    const effectiveMaxIterations = isNpc
-      ? this.npcMaxIterations
-      : this.maxIterations;
+    const effectiveMaxIterations = this.npcMaxIterations;
     for (let iteration = 1; iteration <= effectiveMaxIterations; iteration++) {
       signal?.throwIfAborted();
       const iterationStartTime = Date.now();
@@ -360,12 +317,7 @@ export class MultiStepExecutor {
       const actionability = this.getActionabilitySummary(context);
 
       // Build decision prompt (systemPrompt passed separately to LLM system role)
-      // For NPCs, prefer character name, fall back to StaticDataRegistry; for users, use displayName
-      const agentName = isNpc
-        ? (runtime.character?.name ??
-          StaticDataRegistry.getActor(agentUserId)?.name ??
-          agentUserId)
-        : (agent?.displayName ?? agentUserId);
+      const agentName = runtime.character.name ?? actor.name;
 
       // Extract character voice/style for prompt injection
       const characterStyle = (
@@ -378,6 +330,7 @@ export class MultiStepExecutor {
       const { prompt, tokenBreakdown } = buildMultiStepDecisionPrompt({
         agentName,
         tokenBudget:
+          getSurplusConfig() ||
           !process.env.AGENT_LLM_PROVIDER ||
           process.env.AGENT_LLM_PROVIDER === 'groq'
             ? getSafeContextLimit(resolveGroqModel({ runtime }), 1000) -
@@ -446,11 +399,15 @@ export class MultiStepExecutor {
           candidateDecision.decision.isFinish = true;
         }
 
-        const validationError = this.getDecisionValidationError(
-          normalizedAction,
-          normalizedParameters,
-          context
-        );
+        const requiredFeature = getRequiredFeature(normalizedAction);
+        const validationError =
+          requiredFeature && !effectiveFeatures.includes(requiredFeature)
+            ? `Your ${normalizedAction} was invalid because feature "${requiredFeature}" is disabled for this iteration. Choose a different valid action.`
+            : this.getDecisionValidationError(
+                normalizedAction,
+                normalizedParameters,
+                context
+              );
         if (
           validationError &&
           normalizedAction !== Actions.FINISH &&
@@ -542,7 +499,7 @@ export class MultiStepExecutor {
         runtime,
         isNpc,
         { prompt, completion: rawResponse, thought: decision.thought },
-        agent?.managedBy ?? agentUserId
+        agentUserId
       );
       await this.recordTrajectoryStep(runtime, decision, actionResult);
       iterationTimings.actionExecution = Date.now() - actionStartTime;
@@ -599,71 +556,40 @@ export class MultiStepExecutor {
     isNpc: boolean,
     contextRefreshSummary?: string
   ): Promise<AgentTickContext> {
+    if (
+      !isNpc ||
+      StaticDataRegistry.getActor(agentUserId)?.id !== agentUserId
+    ) {
+      throw new Error(
+        `Only NPCs can gather autonomous context: ${agentUserId}`
+      );
+    }
     const contextStartTime = Date.now();
     const timings: Record<string, number> = {};
 
     // Get balance and PnL
     let balance = 0;
     let pnl = 0;
-    let creator: { name: string; username?: string } | undefined;
 
     const balanceStart = Date.now();
-    if (isNpc) {
-      const [actor] = await db
-        .select({ tradingBalance: actorState.tradingBalance })
-        .from(actorState)
-        .where(eq(actorState.id, agentUserId))
-        .limit(1);
+    const [actor] = await db
+      .select({ tradingBalance: actorState.tradingBalance })
+      .from(actorState)
+      .where(eq(actorState.id, agentUserId))
+      .limit(1);
 
-      if (!actor) {
-        throw new Error(
-          `NPC ${agentUserId} has no actorState record. Run NPC bootstrap to create it.`
-        );
-      }
-
-      balance = requireContextNumber(
-        actor.tradingBalance,
-        `NPC ${agentUserId} tradingBalance`,
-        0
+    if (!actor) {
+      throw new Error(
+        `NPC ${agentUserId} has no actorState record. Run NPC bootstrap to create it.`
       );
-      pnl = 0;
-    } else {
-      const walletBalance = await WalletService.getBalance(agentUserId);
-      balance = requireContextNumber(
-        walletBalance.balance,
-        `agent ${agentUserId} balance`,
-        0
-      );
-      pnl = requireContextNumber(
-        walletBalance.lifetimePnL,
-        `agent ${agentUserId} lifetimePnL`
-      );
-
-      // Fetch creator info for user-controlled agents
-      const [agentUser] = await db
-        .select({ managedBy: users.managedBy })
-        .from(users)
-        .where(eq(users.id, agentUserId))
-        .limit(1);
-
-      if (agentUser?.managedBy) {
-        const [creatorUser] = await db
-          .select({
-            displayName: users.displayName,
-            username: users.username,
-          })
-          .from(users)
-          .where(eq(users.id, agentUser.managedBy))
-          .limit(1);
-
-        if (creatorUser) {
-          creator = {
-            name: creatorUser.displayName || creatorUser.username || 'Unknown',
-            username: creatorUser.username || undefined,
-          };
-        }
-      }
     }
+
+    balance = requireContextNumber(
+      actor.tradingBalance,
+      `NPC ${agentUserId} tradingBalance`,
+      0
+    );
+    pnl = 0;
     timings.balance = Date.now() - balanceStart;
 
     // Only fetch data for enabled features (saves DB queries and tokens)
@@ -690,15 +616,9 @@ export class MultiStepExecutor {
       relationshipsResult,
       worldEventsResult,
       moodStateResult,
-      // Agent trade history (user-controlled agents only)
-      agentTradeHistoryResult,
       // NPC-only narrative context (insider knowledge)
       resolvedQuestionsResult,
       recentNpcTradesResult,
-      // Social graph for user-controlled agents
-      socialGraphResult,
-      // Agent memory for user-controlled agents
-      agentMemoryResult,
     ] = await Promise.all([
       canTrade
         ? this.timedOperation('predictionMarkets', () => getPredictionMarkets())
@@ -739,62 +659,29 @@ export class MultiStepExecutor {
       canTrade
         ? this.timedOperation('marketTrends', () => getMarketTrends())
         : Promise.resolve({ data: [], duration: 0 }),
-      // Relationships (friends/enemies) for NPCs
-      isNpc
-        ? this.timedOperation('relationships', () =>
-            getRelationships(agentUserId)
-          )
-        : Promise.resolve({ data: [], duration: 0 }),
-      // World events for narrative awareness (all agent types)
-      // NPCs get all events + signal direction; user agents get public events only
+      this.timedOperation('relationships', () => getRelationships(agentUserId)),
       this.timedOperation('worldEvents', () =>
-        getWorldEventsContext(agentUserId, isNpc)
+        getWorldEventsContext(agentUserId, true)
       ),
-      // Mood/state for NPCs
-      isNpc
-        ? this.timedOperation('moodState', () => getMoodState(agentUserId))
-        : Promise.resolve({ data: null, duration: 0 }),
-      // Trade history for user-controlled agents (NPCs get this via NPC trading pipeline)
-      !isNpc
-        ? this.timedOperation('agentTradeHistory', () =>
-            getAgentTradeHistory(agentUserId)
-          )
-        : Promise.resolve({ data: [], duration: 0 }),
-      // Resolved questions — NPC insider knowledge (outcomes of resolved markets)
-      isNpc
-        ? this.timedOperation('resolvedQuestions', () =>
-            db
-              .select()
-              .from(questions)
-              .where(eq(questions.status, 'resolved'))
-              .orderBy(desc(questions.resolutionDate))
-              .limit(10)
-          )
-        : Promise.resolve({ data: [], duration: 0 }),
-      // Recent NPC trades — NPC insider knowledge (what other NPCs are doing)
-      isNpc
-        ? this.timedOperation('recentNpcTrades', () => {
-            const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-            return db
-              .select()
-              .from(npcTrades)
-              .where(gte(npcTrades.executedAt, oneDayAgo))
-              .orderBy(desc(npcTrades.executedAt))
-              .limit(20);
-          })
-        : Promise.resolve({ data: [], duration: 0 }),
-      // Social graph for user-controlled agents (NPCs use actorRelationships)
-      !isNpc
-        ? this.timedOperation('socialGraph', () =>
-            getAgentSocialGraph(agentUserId)
-          )
-        : Promise.resolve({ data: [], duration: 0 }),
-      // Memory for user-controlled agents (NPCs have NpcMemoryService)
-      !isNpc
-        ? this.timedOperation('agentMemory', () =>
-            getAgentMemory(agentUserId, ['trade'])
-          )
-        : Promise.resolve({ data: [], duration: 0 }),
+      this.timedOperation('moodState', () => getMoodState(agentUserId)),
+      // NPC insider context: resolved markets and recent NPC trades.
+      this.timedOperation('resolvedQuestions', () =>
+        db
+          .select()
+          .from(questions)
+          .where(eq(questions.status, 'resolved'))
+          .orderBy(desc(questions.resolutionDate))
+          .limit(10)
+      ),
+      this.timedOperation('recentNpcTrades', () => {
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        return db
+          .select()
+          .from(npcTrades)
+          .where(gte(npcTrades.executedAt, oneDayAgo))
+          .orderBy(desc(npcTrades.executedAt))
+          .limit(20);
+      }),
     ]);
     timings.parallelTotal = Date.now() - parallelStart;
 
@@ -812,11 +699,8 @@ export class MultiStepExecutor {
     const relationships = relationshipsResult.data;
     const worldEventsData = worldEventsResult.data;
     const moodState = moodStateResult.data;
-    const agentTradeHistory = agentTradeHistoryResult.data;
     const resolvedQsRows = resolvedQuestionsResult.data;
     const recentNpcTradesRows = recentNpcTradesResult.data;
-    const socialGraph = socialGraphResult.data;
-    const agentMemory = agentMemoryResult.data;
 
     // Collect individual operation timings
     timings.predictionMarkets = predictionMarketsResult.duration;
@@ -832,11 +716,8 @@ export class MultiStepExecutor {
     timings.relationships = relationshipsResult.duration;
     timings.worldEvents = worldEventsResult.duration;
     timings.moodState = moodStateResult.duration;
-    timings.agentTradeHistory = agentTradeHistoryResult.duration;
     timings.resolvedQuestions = resolvedQuestionsResult.duration;
     timings.recentNpcTrades = recentNpcTradesResult.duration;
-    timings.socialGraph = socialGraphResult.duration;
-    timings.agentMemory = agentMemoryResult.duration;
 
     // Filter chat messages based on DMs vs group chats feature
     const pendingChatMessages = pendingChatMessagesRaw.filter((m) =>
@@ -925,7 +806,6 @@ export class MultiStepExecutor {
       personality: assignment?.personality,
       postStyle: assignment?.postStyle,
       agentOwnPosts,
-      creator,
       contextRefreshSummary,
       worldContext: {
         realityGrounding: worldCtx.realityGrounding,
@@ -936,12 +816,8 @@ export class MultiStepExecutor {
         recentTrades: recentTradesText,
         // Event-market connections are insider knowledge (relatedQuestion mapping).
         // Only NPCs get to see which events affect which markets directly.
-        eventSignals: isNpc ? buildEventSignals(worldEventsData) : '',
+        eventSignals: buildEventSignals(worldEventsData),
       },
-      agentTradeHistory:
-        agentTradeHistory.length > 0 ? agentTradeHistory : undefined,
-      socialGraph: socialGraph.length > 0 ? socialGraph : undefined,
-      recentMemory: agentMemory.length > 0 ? agentMemory : undefined,
       // Engine-grade context (Phase 1: unified NPC pipeline)
       marketTrends: marketTrends.length > 0 ? marketTrends : undefined,
       relationships: relationships.length > 0 ? relationships : undefined,
@@ -1100,14 +976,15 @@ export class MultiStepExecutor {
         const parsed = parseDecisionJson(jsonText);
 
         const normalizedAction = normalizeDecisionAction(parsed.action);
-        parsed.action = normalizedAction;
-        parsed.isFinish =
-          normalizedAction === Actions.FINISH ||
-          normalizedAction === Actions.WAIT
-            ? true
-            : false;
+        const decision: MultiStepDecision = {
+          ...parsed,
+          action: normalizedAction,
+          isFinish:
+            normalizedAction === Actions.FINISH ||
+            normalizedAction === Actions.WAIT,
+        };
 
-        return { decision: parsed, rawResponse: response };
+        return { decision, rawResponse: response };
       } catch (error) {
         if (
           !(error instanceof SyntaxError) &&
@@ -1115,7 +992,9 @@ export class MultiStepExecutor {
         )
           throw error;
         retryFeedback =
-          'Your previous response contained malformed JSON. Return a single valid JSON object with double-quoted keys and strings only.';
+          error instanceof DecisionValidationError
+            ? `Your previous response was invalid: ${error.message}. Return a single JSON object with all required fields.`
+            : 'Your previous response contained malformed JSON. Return a single valid JSON object with double-quoted keys and strings only.';
         logger.warn(
           `[MultiStep] Failed to parse JSON (attempt ${attempt})`,
           { json: jsonText.substring(0, 200) },
@@ -1317,7 +1196,7 @@ export class MultiStepExecutor {
       case Actions.REPLY_CHAT:
         if (!chatId || !content) {
           return context.pendingChatMessages.length > 0
-            ? 'Your REPLY_CHAT was invalid because it requires a valid chatId from Pending Chat Messages and message content. Choose a valid chat target or a different action.'
+            ? 'Your REPLY_CHAT was invalid because it requires a valid chatId from Pending Chat Messages and message content. Copy chatId exactly as a double-quoted JSON string, never a number. Choose a valid chat target or a different action.'
             : 'Your REPLY_CHAT was invalid because there are no pending chat messages available right now. Choose a different valid action.';
         }
         return undefined;
@@ -1359,14 +1238,6 @@ export class MultiStepExecutor {
         const groupId4 = this.coerceParameterText(parameters.groupId);
         if (!groupId4) {
           return 'Your LEAVE_GROUP was invalid because it requires a groupId.';
-        }
-        return undefined;
-      }
-
-      case Actions.SEND_MONEY: {
-        const sendAmount = Number(parameters.amount);
-        if (!recipientId || !Number.isFinite(sendAmount) || sendAmount <= 0) {
-          return 'Your SEND_MONEY was invalid because it requires a valid recipientId and a positive amount. Choose a valid recipient from the visible social context.';
         }
         return undefined;
       }
@@ -1475,14 +1346,8 @@ export class MultiStepExecutor {
       case Actions.LEAVE_GROUP:
         return this.executeLeaveGroup(agentUserId, parameters, logContext);
 
-      case Actions.SEND_MONEY:
-        return this.executeSendMoney(agentUserId, parameters);
-
       case Actions.SHARE_INFORMATION:
         return this.executeShareInformation(agentUserId, parameters);
-
-      case Actions.REQUEST_PAYMENT:
-        return this.executeRequestPayment(agentUserId, parameters);
 
       case Actions.WAIT:
       case Actions.FINISH:
@@ -1629,6 +1494,27 @@ export class MultiStepExecutor {
   // Action Executors
   // ===========================================================================
 
+  /**
+   * Best-effort activity logging. The action already committed in the
+   * direct executor, so a logging failure must not report the action as
+   * failed or abort the tick.
+   */
+  private async logActivity(
+    agentUserId: string,
+    log: Parameters<AgentService['createLog']>[1]
+  ): Promise<void> {
+    try {
+      await agentService.createLog(agentUserId, log);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(
+        `[MultiStep] Activity log failed after action completed: ${message}`,
+        { agentUserId },
+        'MultiStepExecutor'
+      );
+    }
+  }
+
   private async executeTrade(
     agentUserId: string,
     parameters: Record<string, unknown>,
@@ -1746,7 +1632,7 @@ export class MultiStepExecutor {
     const postResult = await executeDirectPost({ agentUserId, content });
 
     if (postResult.success && logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'post',
         level: 'info',
         message: `Created post: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`,
@@ -1804,7 +1690,7 @@ export class MultiStepExecutor {
     });
 
     if (commentResult.success && logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'comment',
         level: 'info',
         message: `Created comment on post ${postId}${parentCommentId ? ` (reply to ${parentCommentId})` : ''}: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`,
@@ -1855,12 +1741,20 @@ export class MultiStepExecutor {
 
     const likeResult = await executeDirectLike({ agentUserId, postId });
 
-    await agentService.createLog(agentUserId, {
+    // executeDirectLike succeeds idempotently when the like already exists
+    // (liked=false, no new row). Record that honestly — mirroring how
+    // executeFollow distinguishes "Now following" from "Already following" —
+    // instead of claiming a new like happened.
+    const likeSummary = likeResult.success
+      ? likeResult.liked
+        ? `Liked post ${postId}`
+        : `Already liked post ${postId}`
+      : `Like failed: ${likeResult.error}`;
+
+    await this.logActivity(agentUserId, {
       type: 'like',
       level: likeResult.success ? 'info' : 'warn',
-      message: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      message: likeSummary,
       metadata: {
         postId,
         success: likeResult.success,
@@ -1872,9 +1766,7 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.LIKE,
       success: likeResult.success,
-      summary: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      summary: likeSummary,
       result: {
         success: likeResult.success,
         liked: likeResult.liked,
@@ -1909,17 +1801,27 @@ export class MultiStepExecutor {
       comment,
     });
 
-    await agentService.createLog(agentUserId, {
+    // executeDirectRepost succeeds idempotently when the share already
+    // exists (alreadyReposted=true, no new share or quote post). Record
+    // that honestly — mirroring how executeFollow distinguishes "Now
+    // following" from "Already following" — instead of claiming a new
+    // repost happened.
+    const repostSummary = repostResult.success
+      ? repostResult.alreadyReposted
+        ? `Already reposted ${postId}`
+        : `Reposted ${postId}${comment ? ' with comment' : ''}`
+      : `Repost failed: ${repostResult.error}`;
+
+    await this.logActivity(agentUserId, {
       type: 'repost',
       level: repostResult.success ? 'info' : 'warn',
-      message: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      message: repostSummary,
       metadata: {
         postId,
         success: repostResult.success,
         repostId: repostResult.repostId ?? null,
         quotePostId: repostResult.quotePostId ?? null,
+        alreadyReposted: repostResult.alreadyReposted ?? false,
         hasComment: !!comment,
         error: repostResult.error ?? null,
       },
@@ -1928,13 +1830,12 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.REPOST,
       success: repostResult.success,
-      summary: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      summary: repostSummary,
       result: {
         success: repostResult.success,
         repostId: repostResult.repostId,
         quotePostId: repostResult.quotePostId,
+        alreadyReposted: repostResult.alreadyReposted,
         error: repostResult.error,
       },
       parameters,
@@ -1965,7 +1866,7 @@ export class MultiStepExecutor {
       targetUserId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'follow',
       level: followResult.success ? 'info' : 'warn',
       message: followResult.success
@@ -2024,7 +1925,7 @@ export class MultiStepExecutor {
       targetUserId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'follow',
       level: unfollowResult.success ? 'info' : 'warn',
       message: unfollowResult.success
@@ -2060,65 +1961,6 @@ export class MultiStepExecutor {
     };
   }
 
-  private async executeSendMoney(
-    agentUserId: string,
-    parameters: Record<string, unknown>
-  ): Promise<ActionTraceResult> {
-    const recipientId = this.coerceParameterText(parameters.recipientId);
-    const amount = Number(parameters.amount);
-    const reason = parameters.reason as string | undefined;
-
-    if (!recipientId || !Number.isFinite(amount) || amount <= 0) {
-      return {
-        actionType: Actions.SEND_MONEY,
-        success: false,
-        summary: 'Missing or invalid parameters (recipientId, amount)',
-        error: 'Invalid parameters',
-        parameters,
-        timestamp: Date.now(),
-      };
-    }
-
-    const sendResult = await executeDirectSendMoney({
-      agentUserId,
-      recipientId,
-      amount,
-      reason,
-    });
-
-    await agentService.createLog(agentUserId, {
-      type: 'transfer',
-      level: sendResult.success ? 'info' : 'warn',
-      message: sendResult.success
-        ? `Sent $${amount} to ${recipientId}`
-        : `Send money failed: ${sendResult.error}`,
-      metadata: {
-        recipientId,
-        amount,
-        reason: reason ?? null,
-        transactionId: sendResult.transactionId ?? null,
-        success: sendResult.success,
-        error: sendResult.error ?? null,
-      },
-    });
-
-    return {
-      actionType: Actions.SEND_MONEY,
-      success: sendResult.success,
-      summary: sendResult.success
-        ? `Sent $${amount} to ${recipientId}`
-        : `Send money failed: ${sendResult.error}`,
-      result: {
-        success: sendResult.success,
-        transactionId: sendResult.transactionId,
-        newBalance: sendResult.newBalance,
-        error: sendResult.error,
-      },
-      parameters,
-      timestamp: Date.now(),
-    };
-  }
-
   private async executeShareInformation(
     agentUserId: string,
     parameters: Record<string, unknown>
@@ -2134,7 +1976,6 @@ export class MultiStepExecutor {
             .filter(Boolean)
         : [];
     const context = parameters.context as string | undefined;
-    const askingPrice = Number(parameters.askingPrice) || 0;
 
     if (!recipientId || keywords.length === 0) {
       return {
@@ -2152,7 +1993,6 @@ export class MultiStepExecutor {
       recipientId,
       keywords,
       context,
-      askingPrice,
     });
 
     return {
@@ -2166,51 +2006,6 @@ export class MultiStepExecutor {
         sharedWithRecipient: result.sharedWithRecipient,
         messageId: result.messageId,
         keywords: keywords.join(','),
-      },
-      parameters,
-      timestamp: Date.now(),
-    };
-  }
-
-  private async executeRequestPayment(
-    agentUserId: string,
-    parameters: Record<string, unknown>
-  ): Promise<ActionTraceResult> {
-    const recipientId = this.coerceParameterText(parameters.recipientId);
-    const amount = Number(parameters.amount);
-    const reason = parameters.reason as string | undefined;
-    const deadline = Number(parameters.deadline) || 10;
-
-    if (!recipientId || !Number.isFinite(amount) || amount <= 0 || !reason) {
-      return {
-        actionType: Actions.REQUEST_PAYMENT,
-        success: false,
-        summary: 'Missing parameters (recipientId, amount, reason)',
-        error: 'Invalid parameters',
-        parameters,
-        timestamp: Date.now(),
-      };
-    }
-
-    const result = await executeDirectRequestPayment({
-      agentUserId,
-      recipientId,
-      amount,
-      reason,
-      deadline,
-    });
-
-    return {
-      actionType: Actions.REQUEST_PAYMENT,
-      success: result.success,
-      summary: result.success
-        ? `Requested $${amount} from ${recipientId}: ${reason}`
-        : `Payment request failed: ${result.error}`,
-      result: {
-        requestId: result.requestId,
-        amount,
-        recipientId,
-        reason,
       },
       parameters,
       timestamp: Date.now(),
@@ -2245,7 +2040,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'comment',
         level: commentResult.success ? 'info' : 'warn',
         message: commentResult.success
@@ -2338,7 +2133,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'chat',
         level: messageResult.success ? 'info' : 'warn',
         message: messageResult.success
@@ -2409,7 +2204,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'dm',
         level: messageResult.success ? 'info' : 'warn',
         message: messageResult.success
@@ -2498,7 +2293,7 @@ export class MultiStepExecutor {
       content,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: groupMessageResult.success ? 'info' : 'warn',
       message: groupMessageResult.success
@@ -2568,7 +2363,7 @@ export class MultiStepExecutor {
       memberIds: memberIdsRaw,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2626,7 +2421,7 @@ export class MultiStepExecutor {
       targetUserId: userId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2689,7 +2484,7 @@ export class MultiStepExecutor {
       reason,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2744,7 +2539,7 @@ export class MultiStepExecutor {
       groupId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2793,7 +2588,6 @@ export class MultiStepExecutor {
 
       switch (result.actionType) {
         case Actions.TRADE:
-        case Actions.SEND_MONEY:
           counts.trades++;
           break;
         case Actions.POST:
@@ -2811,7 +2605,6 @@ export class MultiStepExecutor {
         case Actions.LEAVE_GROUP:
         case Actions.REPLY_CHAT:
         case Actions.SHARE_INFORMATION:
-        case Actions.REQUEST_PAYMENT:
           counts.messages++;
           break;
         case Actions.LIKE:

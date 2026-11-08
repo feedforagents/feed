@@ -2,7 +2,7 @@ import 'server-only';
 
 import { findUserByIdentifier } from '@feed/api';
 import { calculatePredictionPositionSnapshot } from '@feed/core/markets/prediction';
-import { asPublic, asUser, db, eq, users } from '@feed/db';
+import { asPublic, asUser, db } from '@feed/db';
 import { FEE_CONFIG } from '@feed/engine/config/fees';
 import { toISO, toISOOrNull } from '@feed/shared';
 import type {
@@ -68,17 +68,9 @@ async function loadDbPerpPositions(params: {
       }
     | undefined
     | null;
-  agentIds: string[];
-  agentNameById: Map<string, string | null>;
 }): Promise<UserPerpPositionSnapshot[]> {
-  const {
-    viewerUserId,
-    canonicalUserId,
-    positionUserIds,
-    closedAtFilter,
-    agentIds,
-    agentNameById,
-  } = params;
+  const { viewerUserId, canonicalUserId, positionUserIds, closedAtFilter } =
+    params;
 
   const perpWhereBase = {
     userId:
@@ -86,45 +78,14 @@ async function loadDbPerpPositions(params: {
     ...(closedAtFilter !== undefined ? { closedAt: closedAtFilter } : {}),
   };
 
-  const [userPerpPositions, agentPerpPositions] = await Promise.all([
-    readWithViewer({
-      viewerUserId,
-      operation: async (database) => {
-        return database.perpPosition.findMany({
-          where: perpWhereBase,
-        });
-      },
-    }),
-    agentIds.length > 0
-      ? asPublic(async (database) => {
-          return database.perpPosition.findMany({
-            where: {
-              userId: { in: agentIds },
-              ...(closedAtFilter !== undefined
-                ? { closedAt: closedAtFilter }
-                : {}),
-            },
-          });
-        })
-      : Promise.resolve([]),
-  ]);
+  const positions = await readWithViewer({
+    viewerUserId,
+    operation: async (database) => {
+      return database.perpPosition.findMany({ where: perpWhereBase });
+    },
+  });
 
-  const allPerpPositions = [
-    ...userPerpPositions.map((position) => ({
-      ...position,
-      isAgentPosition: false,
-      agentId: null as string | null,
-      agentName: null as string | null,
-    })),
-    ...agentPerpPositions.map((position) => ({
-      ...position,
-      isAgentPosition: true,
-      agentId: position.userId,
-      agentName: agentNameById.get(position.userId) ?? null,
-    })),
-  ];
-
-  return allPerpPositions.map((position) => ({
+  return positions.map((position) => ({
     id: position.id,
     ticker: position.ticker,
     side: position.side.toLowerCase() as 'long' | 'short',
@@ -139,9 +100,6 @@ async function loadDbPerpPositions(params: {
     realizedPnL: Number((position as Record<string, unknown>).realizedPnL ?? 0),
     openedAt: toISO(position.openedAt),
     closedAt: toISOOrNull(position.closedAt),
-    isAgentPosition: position.isAgentPosition,
-    agentId: position.agentId,
-    agentName: position.agentName,
   }));
 }
 
@@ -185,21 +143,6 @@ export async function getUserPositionsSnapshot({
   const includePerps = type !== 'prediction';
   const includePredictions = type !== 'perp';
 
-  const userAgents = await asPublic(async () => {
-    return db
-      .select({
-        id: users.id,
-        displayName: users.displayName,
-      })
-      .from(users)
-      .where(eq(users.managedBy, canonicalUserId));
-  });
-
-  const agentIds = userAgents.map((agent) => agent.id);
-  const agentNameById = new Map(
-    userAgents.map((agent) => [agent.id, agent.displayName])
-  );
-
   const predictionWhereBase = {
     userId:
       positionUserIds.length === 1 ? canonicalUserId : { in: positionUserIds },
@@ -211,54 +154,21 @@ export async function getUserPositionsSnapshot({
         canonicalUserId,
         positionUserIds,
         closedAtFilter,
-        agentIds,
-        agentNameById,
       })
     : [];
 
   // type=perp must not load (or fail on) prediction positions.
-  const [userPredictionPositions, agentPredictionPositions] = includePredictions
-    ? await Promise.all([
-        readWithViewer({
-          viewerUserId,
-          operation: async (database) => {
-            return database.position.findMany({
-              where: predictionWhereBase,
-            });
-          },
-        }),
-        agentIds.length > 0
-          ? asPublic(async (database) => {
-              return database.position.findMany({
-                where: {
-                  userId: { in: agentIds },
-                  ...(predictionStatusFilter
-                    ? { status: predictionStatusFilter }
-                    : {}),
-                },
-              });
-            })
-          : Promise.resolve([]),
-      ])
-    : [[], []];
-
-  const allPredictionPositions = [
-    ...userPredictionPositions.map((position) => ({
-      ...position,
-      isAgentPosition: false,
-      agentId: null as string | null,
-      agentName: null as string | null,
-    })),
-    ...agentPredictionPositions.map((position) => ({
-      ...position,
-      isAgentPosition: true,
-      agentId: position.userId,
-      agentName: agentNameById.get(position.userId) ?? null,
-    })),
-  ];
+  const predictionPositions = includePredictions
+    ? await readWithViewer({
+        viewerUserId,
+        operation: async (database) => {
+          return database.position.findMany({ where: predictionWhereBase });
+        },
+      })
+    : [];
 
   const marketIds = [
-    ...new Set(allPredictionPositions.map((position) => position.marketId)),
+    ...new Set(predictionPositions.map((position) => position.marketId)),
   ];
   const markets =
     marketIds.length > 0
@@ -285,7 +195,7 @@ export async function getUserPositionsSnapshot({
 
   const marketById = new Map(markets.map((market) => [market.id, market]));
 
-  const mappedPredictions = allPredictionPositions
+  const mappedPredictions = predictionPositions
     .map((position) => {
       const market = marketById.get(position.marketId);
       if (!market) {
@@ -328,9 +238,6 @@ export async function getUserPositionsSnapshot({
         outcome: position.outcome ?? null,
         pnl: position.pnl == null ? null : Number(position.pnl),
         resolvedAt: toISOOrNull(position.resolvedAt),
-        isAgentPosition: position.isAgentPosition,
-        agentId: position.agentId,
-        agentName: position.agentName,
       };
     })
     .filter((position) => position.shares >= 0.01);

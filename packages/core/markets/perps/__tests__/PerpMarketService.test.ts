@@ -175,6 +175,7 @@ class InMemoryPerpDb implements PerpDbPort {
         | 'lastUpdated'
         | 'size'
         | 'entryPrice'
+        | 'realizedPnL'
       >
     >
   ): Promise<void> {
@@ -295,6 +296,10 @@ describe('PerpMarketService', () => {
     db = new InMemoryPerpDb([baseMarket]);
     wallet = new InMemoryWallet(10_000);
     service = new PerpMarketService({
+      settlement: {
+        run: async (_userId, operation) =>
+          db.transaction((tx) => operation(tx, wallet)),
+      },
       db,
       wallet,
       fees: feeConfig,
@@ -450,6 +455,104 @@ describe('PerpMarketService', () => {
     );
   });
 
+  it('liquidation after a partial close keeps the realized PnL already settled', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 105 });
+    const partial = await service.closePosition({
+      userId: 'u1',
+      positionId: open.positionId,
+      percentage: 0.5,
+    });
+    expect(partial.realizedPnL).toBeGreaterThan(0);
+
+    await service.applyPriceUpdates({ 'org-abc': 80 });
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).not.toBeNull();
+    // Remaining margin loss = 50 / 10 = 5, on top of the settled partial PnL.
+    expect(pos?.realizedPnL).toBeCloseTo(partial.realizedPnL! - 5, 6);
+  });
+
+  it('liquidation settles the row as it is at lock time, not the tick snapshot', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    // A user partial close lands after the tick has read its position
+    // snapshot but before it reaches the liquidation write.
+    let partialPnl = 0;
+    const listOpenPositions = db.listOpenPositions.bind(db);
+    db.listOpenPositions = async () => {
+      const rows = await listOpenPositions();
+      await db.updateMarketStats('ABC', { currentPrice: 105 });
+      const partial = await service.closePosition({
+        userId: 'u1',
+        positionId: open.positionId,
+        percentage: 0.5,
+      });
+      partialPnl = partial.realizedPnL!;
+      return rows;
+    };
+
+    const summary = await service.applyPriceUpdates({ 'org-abc': 80 });
+    expect(summary.errors).toEqual([]);
+    expect(summary.liquidations).toBe(1);
+    expect(partialPnl).toBeGreaterThan(0);
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).not.toBeNull();
+    // Only the remaining margin (50 / 10 = 5) is lost, on top of the settled
+    // partial PnL; the stale 100-size snapshot must not overwrite it.
+    expect(pos?.realizedPnL).toBeCloseTo(partialPnl - 5, 6);
+    expect(
+      wallet.getPnLs('u1').find((p) => p.reason === 'perp_liquidation')?.pnl
+    ).toBeCloseTo(-5, 6);
+    const [m] = await db.listMarkets();
+    expect(m!.openInterest).toBeCloseTo(0, 6);
+  });
+
+  it('skips liquidation when the locked row no longer liquidates at the tick price', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    // The liquidation price moves out of range after the tick read its
+    // snapshot (e.g. a margin top-up), so the tick must refresh metrics only.
+    const listOpenPositions = db.listOpenPositions.bind(db);
+    db.listOpenPositions = async () => {
+      const rows = await listOpenPositions();
+      await db.updateOpenPosition(open.positionId, { liquidationPrice: 70 });
+      return rows;
+    };
+
+    const summary = await service.applyPriceUpdates({ 'org-abc': 80 });
+    expect(summary.errors).toEqual([]);
+    expect(summary.liquidations).toBe(0);
+    expect(summary.positionsUpdated).toBe(1);
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeNull();
+    expect(pos?.currentPrice).toBe(80);
+    expect(
+      wallet.getPnLs('u1').find((p) => p.reason === 'perp_liquidation')
+    ).toBeUndefined();
+  });
+
   it('updates unrealized PnL on price move without liquidation', async () => {
     const open = await service.openPosition({
       userId: 'u1',
@@ -532,6 +635,75 @@ describe('PerpMarketService', () => {
     expect(m.openInterest).toBeCloseTo(50, 4); // remaining
   });
 
+  it('partial close records realized PnL on the position row and the final close accumulates it', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+    const partial = await service.closePosition({
+      userId: 'u1',
+      positionId: open.positionId,
+      percentage: 0.5,
+    });
+    expect(partial.fullyClosed).toBe(false);
+    expect(partial.realizedPnL).toBeGreaterThan(0);
+
+    // The row must carry the PnL realized so far while it stays open.
+    const afterPartial = await db.getPositionById(open.positionId);
+    expect(afterPartial?.closedAt).toBeNull();
+    expect(afterPartial?.realizedPnL).not.toBeNull();
+    expect(afterPartial?.realizedPnL).toBeCloseTo(partial.realizedPnL!, 6);
+
+    await db.updateMarketStats('ABC', { currentPrice: 90 });
+    const final = await service.closePosition({
+      userId: 'u1',
+      positionId: open.positionId,
+    });
+    expect(final.fullyClosed).toBe(true);
+    expect(final.realizedPnL).toBeLessThan(0);
+
+    // The closed row reports the whole lifetime PnL, not just the last chunk.
+    const closed = await db.getPositionById(open.positionId);
+    expect(closed?.closedAt).not.toBeNull();
+    expect(closed?.realizedPnL).toBeCloseTo(
+      partial.realizedPnL! + final.realizedPnL!,
+      6
+    );
+  });
+
+  it('reduce via an opposite-side open records realized PnL on the position row', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+    const reduce = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 40,
+      leverage: 10,
+    });
+    expect(reduce.isRebalance).toBe(true);
+    expect(reduce.rebalanceType).toBe('reduce');
+    expect(reduce.realizedPnL).toBeGreaterThan(0);
+
+    const row = await db.getPositionById(open.positionId);
+    expect(row?.closedAt).toBeNull();
+    expect(row?.size).toBeCloseTo(60, 4);
+    expect(row?.realizedPnL).not.toBeNull();
+    expect(row?.realizedPnL).toBeCloseTo(reduce.realizedPnL!, 6);
+  });
+
   it('rejects partial close below the market minimum order size', async () => {
     const open = await service.openPosition({
       userId: 'u1',
@@ -591,6 +763,125 @@ describe('PerpMarketService', () => {
         maxSlippage: 0.1, // 10% max - price moved 20%
       })
     ).rejects.toThrow(/Slippage exceeded/);
+  });
+
+  it('slippage protection rejects an opposite-side reduce when the exit fill moved beyond tolerance', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    // Spot moved 20% against the mark reference
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+
+    // Opposite-side order smaller than the position = reduce (partial close)
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 50,
+        leverage: 10,
+        maxSlippage: 0.1,
+      })
+    ).rejects.toThrow(/Slippage exceeded/);
+
+    // Nothing moved: position intact, no settlement credited
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.size).toBe(100);
+    expect(pos?.closedAt).toBeNull();
+    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(
+      10_000 - 10 - 0.1,
+      6
+    );
+  });
+
+  it('slippage protection rejects an opposite-side flat close when the exit fill moved beyond tolerance', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 100,
+        leverage: 10,
+        maxSlippage: 0.1,
+      })
+    ).rejects.toThrow(/Slippage exceeded/);
+
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeNull();
+  });
+
+  it('slippage protection rejects a flip when the fills moved beyond tolerance', async () => {
+    const open = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 120 });
+
+    await expect(
+      service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 150,
+        leverage: 10,
+        maxSlippage: 0.1,
+      })
+    ).rejects.toThrow(/Slippage exceeded/);
+
+    // The old position is still open and no inverse position was created
+    const pos = await db.getPositionById(open.positionId);
+    expect(pos?.closedAt).toBeNull();
+    const positions = await db.getOpenPositionsByUser('u1');
+    expect(positions).toHaveLength(1);
+    expect(positions[0]?.side).toBe('long');
+    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(
+      10_000 - 10 - 0.1,
+      6
+    );
+  });
+
+  it('allows an opposite-side flip when the fills stay within tolerance', async () => {
+    await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 10,
+    });
+
+    await db.updateMarketStats('ABC', { currentPrice: 102 });
+
+    const result = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 150,
+      leverage: 10,
+      maxSlippage: 0.1,
+    });
+
+    expect(result.rebalanceType).toBe('flip');
+    expect(result.side).toBe('short');
+    expect(result.size).toBe(50);
   });
 
   it('allows close when slippage is within tolerance', async () => {
@@ -728,6 +1019,14 @@ describe('PerpMarketService', () => {
       expect(result.entryPrice).toBeGreaterThan(initial.entryPrice);
       expect(result.entryPrice).toBeLessThan(130);
 
+      // fillPrice is what the added 100 filled at, not the blended entry.
+      expect(result.fillPrice).toBeDefined();
+      expect(result.fillPrice!).toBeGreaterThan(result.entryPrice);
+      // blend check: 100 @ initial + 100 @ fill = 200 @ entry
+      expect(
+        (initial.entryPrice * 100 + result.fillPrice! * 100) / 200
+      ).toBeCloseTo(result.entryPrice, 8);
+
       // Verify position in DB
       const pos = await db.getPositionById(initial.positionId);
       expect(pos?.size).toBe(200);
@@ -757,6 +1056,11 @@ describe('PerpMarketService', () => {
       expect(result.rebalanceType).toBe('reduce');
       expect(result.previousSize).toBe(100);
       expect(result.remainingSize).toBeCloseTo(70, 4);
+      // The closed 30 executed at the exit price.
+      expect(result.size).toBeCloseTo(30, 8);
+      expect(result.exitPrice).toBeDefined();
+      expect(result.fillPrice).toBe(result.exitPrice);
+      expect(result.realizedPnL).toBeDefined();
 
       // Position should still exist with reduced size
       const pos = await db.getPositionById(initial.positionId);
@@ -786,6 +1090,9 @@ describe('PerpMarketService', () => {
       expect(result.isRebalance).toBe(true);
       expect(result.rebalanceType).toBe('close');
       expect(result.fullyClosed).toBe(true);
+      expect(result.size).toBeCloseTo(100, 8);
+      expect(result.exitPrice).toBeDefined();
+      expect(result.fillPrice).toBe(result.exitPrice);
 
       // Position should be closed
       const pos = await db.getPositionById(initial.positionId);
@@ -816,6 +1123,11 @@ describe('PerpMarketService', () => {
       expect(result.side).toBe('short');
       // New position size should be 150 - 100 = 50
       expect(result.size).toBe(50);
+      // Both legs are reported: the long closed at exitPrice, the short
+      // opened at fillPrice (its entry).
+      expect(result.exitPrice).toBeDefined();
+      expect(result.realizedPnL).toBeDefined();
+      expect(result.fillPrice).toBe(result.entryPrice);
 
       // Original position should be closed
       const oldPos = await db.getPositionById(initial.positionId);
@@ -826,6 +1138,36 @@ describe('PerpMarketService', () => {
       expect(positions.length).toBe(1);
       expect(positions[0]?.side).toBe('short');
       expect(positions[0]?.size).toBe(50);
+    });
+
+    it('rejects a flip whose inverse leg is below the minimum order size', async () => {
+      // Open LONG position of 100 (minimum order size is 10)
+      const initial = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+
+      // Open SHORT with size 101: the trade itself clears the minimum,
+      // but the inverse leg would be only 1 — a dust position.
+      await expect(
+        service.openPosition({
+          userId: 'u3',
+          ticker: 'ABC',
+          side: 'short',
+          size: 101,
+          leverage: 10,
+        })
+      ).rejects.toThrow('Order size below minimum (10)');
+
+      // Original position must be untouched, not closed by the rejected flip
+      const oldPos = await db.getPositionById(initial.positionId);
+      expect(oldPos?.closedAt).toBeNull();
+      const positions = await db.getOpenPositionsByUser('u3');
+      expect(positions.length).toBe(1);
+      expect(positions[0]?.size).toBe(100);
     });
 
     it('uses existing leverage when adding to position', async () => {
@@ -877,6 +1219,122 @@ describe('PerpMarketService', () => {
       // Total deducted = 10.1
       expect(balanceAfterFirst - balanceAfterSecond).toBeCloseTo(10.1, 4);
       expect(result.feePaid).toBeCloseTo(0.1, 4);
+    });
+  });
+
+  describe('per-user exposure limit', () => {
+    const otherMarket: PerpMarketRecord = {
+      ...baseMarket,
+      ticker: 'XYZ',
+      organizationId: 'org-xyz',
+      name: 'XYZ Corp',
+      fundingRate: {
+        ticker: 'XYZ',
+        rate: 0,
+        nextFundingTime: new Date().toISOString(),
+        predictedRate: 0,
+      },
+    };
+
+    beforeEach(() => {
+      // The 20x cap (PRD D-17b) forces the same exposures to be built with
+      // 5x the size at 20x instead of 100x, so seed enough open interest
+      // that the market-size limit (10% of OI) does not interfere.
+      db = new InMemoryPerpDb([
+        { ...baseMarket, openInterest: 1_000_000 },
+        { ...otherMarket, openInterest: 1_000_000 },
+      ]);
+      wallet = new InMemoryWallet(1_000_000);
+      service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
+        db,
+        wallet,
+        fees: feeConfig,
+      });
+    });
+
+    // 900k notional on another ticker leaves 100k of headroom under the 1M cap.
+    async function openOtherExposure(userId: string) {
+      await service.openPosition({
+        userId,
+        ticker: 'XYZ',
+        side: 'long',
+        size: 45_000,
+        leverage: 20,
+      });
+    }
+
+    it('rejects a fresh open that would exceed the exposure limit', async () => {
+      await openOtherExposure('u1');
+
+      await expect(
+        service.openPosition({
+          userId: 'u1',
+          ticker: 'ABC',
+          side: 'short',
+          size: 49_500,
+          leverage: 20,
+        })
+      ).rejects.toThrow(/exposure would exceed limit/);
+    });
+
+    it('rejects a flip whose inverse leg would exceed the exposure limit', async () => {
+      await openOtherExposure('u1');
+      const initial = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const balanceBefore = (await wallet.getBalance('u1')).balance;
+
+      // Opposite side, larger than the position: closes 100 and opens an
+      // inverse 49,500 x 20 = 990k notional on top of 900k elsewhere.
+      await expect(
+        service.openPosition({
+          userId: 'u1',
+          ticker: 'ABC',
+          side: 'short',
+          size: 49_600,
+          leverage: 20,
+        })
+      ).rejects.toThrow(/exposure would exceed limit/);
+
+      // Nothing moved: original position still open, no inverse, wallet untouched
+      const pos = await db.getPositionById(initial.positionId);
+      expect(pos?.closedAt).toBeNull();
+      expect(pos?.side).toBe('long');
+      expect(pos?.size).toBe(100);
+      const open = await db.getOpenPositionsByUser('u1');
+      expect(open).toHaveLength(2);
+      expect((await wallet.getBalance('u1')).balance).toBe(balanceBefore);
+    });
+
+    it('allows a flip whose inverse leg stays within the exposure limit', async () => {
+      await openOtherExposure('u1');
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+
+      // Inverse 4,500 x 20 = 90k notional; 900k + 90k stays under the cap.
+      const result = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 4_600,
+        leverage: 20,
+      });
+
+      expect(result.rebalanceType).toBe('flip');
+      expect(result.size).toBe(4_500);
     });
   });
 
@@ -1015,6 +1473,10 @@ describe('PerpMarketService', () => {
     it('keeps the weighted cost basis when adding at a different price', async () => {
       const basePrice = 100;
       service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
         db,
         wallet,
         fees: feeConfig,
@@ -1054,6 +1516,10 @@ describe('PerpMarketService', () => {
 
     it('rejects an open whose post-impact fill breaches maxSlippage', async () => {
       service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
         db,
         wallet,
         fees: feeConfig,
@@ -1153,6 +1619,10 @@ describe('PerpMarketService', () => {
         getBalance: async (u) => wallet.getBalance(u),
       };
       service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, trackingWallet)),
+        },
         db,
         wallet: trackingWallet,
         fees: feeConfig,
@@ -1178,6 +1648,166 @@ describe('PerpMarketService', () => {
       expect(flip.rebalanceType).toBe('flip');
       expect(calls).toHaveLength(1);
       expect((await db.listMarkets())[0]?.openInterest).toBeCloseTo(200, 6);
+    });
+  });
+
+  describe('liquidation on mark price (PRD 9.3)', () => {
+    // Mark = price × (1 + annualRate / periodsPerYear). The stored funding
+    // rate is clamped to ±0.5 APR, so the premium is at most ~0.0456%.
+    const periodsPerYear = (365.25 * 24) / 8;
+    const cappedRate = 0.5;
+    const premium = cappedRate / periodsPerYear;
+
+    const marketWithRate = (rate: number): PerpMarketRecord => ({
+      ...baseMarket,
+      fundingRate: {
+        ticker: 'ABC',
+        rate,
+        nextFundingTime: new Date().toISOString(),
+        predictedRate: rate,
+      },
+    });
+
+    beforeEach(() => {
+      db = new InMemoryPerpDb([marketWithRate(cappedRate)]);
+      wallet = new InMemoryWallet(10_000);
+      service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
+        db,
+        wallet,
+        fees: feeConfig,
+      });
+    });
+
+    it('does not liquidate a long when the raw price wicks below the liquidation price but the mark stays above it', async () => {
+      const open = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const pos = await db.getPositionById(open.positionId);
+      const liq = pos!.liquidationPrice;
+      // 0.02% below the liquidation price: inside the funding-premium band.
+      const rawPrice = liq * (1 - 0.0002);
+      const markPrice = rawPrice * (1 + premium);
+      expect(markPrice).toBeGreaterThan(liq);
+
+      const summary = await service.applyPriceUpdates({ 'org-abc': rawPrice });
+
+      expect(summary.liquidations).toBe(0);
+      const after = await db.getPositionById(open.positionId);
+      expect(after?.closedAt).toBeNull();
+    });
+
+    it('liquidates a long when the mark price also breaches the liquidation price', async () => {
+      const open = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      const pos = await db.getPositionById(open.positionId);
+      const liq = pos!.liquidationPrice;
+      // 1% below the liquidation price: far outside the premium band, so
+      // the mark breaches too and the liquidation must still happen.
+      const rawPrice = liq * (1 - 0.01);
+      const markPrice = rawPrice * (1 + premium);
+      expect(markPrice).toBeLessThan(liq);
+
+      const summary = await service.applyPriceUpdates({ 'org-abc': rawPrice });
+
+      expect(summary.liquidations).toBe(1);
+      const after = await db.getPositionById(open.positionId);
+      expect(after?.closedAt).toBeDefined();
+      const pnls = wallet.getPnLs('u1');
+      expect(
+        pnls.find((p) => p.reason === 'perp_liquidation')?.pnl
+      ).toBeCloseTo(-10, 4);
+    });
+
+    for (const side of ['long', 'short'] as const) {
+      it(`rechecks the locked ${side} position against mark when raw price has not breached`, async () => {
+        const rate = side === 'long' ? -cappedRate : cappedRate;
+        db = new InMemoryPerpDb([marketWithRate(rate)]);
+        service = new PerpMarketService({
+          settlement: {
+            run: async (_userId, operation) =>
+              db.transaction((tx) => operation(tx, wallet)),
+          },
+          db,
+          wallet,
+          fees: feeConfig,
+        });
+        const open = await service.openPosition({
+          userId: 'u1',
+          ticker: 'ABC',
+          side,
+          size: 100,
+          leverage: 10,
+        });
+        const pos = await db.getPositionById(open.positionId);
+        const liq = pos!.liquidationPrice;
+        const rawPrice = liq * (side === 'long' ? 1.0002 : 0.9998);
+        const mark = rawPrice * (1 + rate / periodsPerYear);
+        if (side === 'long') {
+          expect(rawPrice).toBeGreaterThan(liq);
+          expect(mark).toBeLessThan(liq);
+        } else {
+          expect(rawPrice).toBeLessThan(liq);
+          expect(mark).toBeGreaterThan(liq);
+        }
+        const summary = await service.applyPriceUpdates({
+          'org-abc': rawPrice,
+        });
+        expect(summary.errors).toEqual([]);
+        expect(summary.liquidations).toBe(1);
+        expect(
+          (await db.getPositionById(open.positionId))?.closedAt
+        ).not.toBeNull();
+        expect(
+          wallet.getPnLs('u1').find((p) => p.reason === 'perp_liquidation')?.pnl
+        ).toBe(-10);
+      });
+    }
+
+    it('does not liquidate a short on a raw-price wick above the liquidation price when a negative funding premium keeps the mark below it', async () => {
+      db = new InMemoryPerpDb([marketWithRate(-cappedRate)]);
+      service = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
+        db,
+        wallet,
+        fees: feeConfig,
+      });
+
+      const open = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 100,
+        leverage: 10,
+      });
+      const pos = await db.getPositionById(open.positionId);
+      const liq = pos!.liquidationPrice;
+      // 0.02% above the liquidation price; the negative premium pulls the
+      // mark back below it.
+      const rawPrice = liq * (1 + 0.0002);
+      const markPrice = rawPrice * (1 - premium);
+      expect(markPrice).toBeLessThan(liq);
+
+      const summary = await service.applyPriceUpdates({ 'org-abc': rawPrice });
+
+      expect(summary.liquidations).toBe(0);
+      const after = await db.getPositionById(open.positionId);
+      expect(after?.closedAt).toBeNull();
     });
   });
 });

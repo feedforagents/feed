@@ -16,7 +16,7 @@ import {
  */
 export const scenarios = definePrompt({
   id: 'scenarios',
-  version: '4.0.0',
+  version: '4.0.1',
   category: 'game',
   description: 'Generates 3 satirical scenarios with full character context',
   temperature: 0.8,
@@ -50,7 +50,7 @@ The current date is {{currentDate}}. Always act as though it is the current date
 
 === SCENARIO GENERATION ===
 
-Create 3 dramatic, satirical scenarios using the main actors below.
+Create exactly 3 dramatic, satirical scenarios with unique IDs 1, 2, and 3 using the main actors below.
 USE the character profiles above to make scenarios true to their personalities.
 
 MAIN ACTORS FOR THIS GAME:
@@ -66,7 +66,7 @@ ${NARRATIVE_CONTINUITY_RULES}
 === SCENARIO REQUIREMENTS ===
 
 Each scenario must:
-1. Involve 2-3 main actors (use exact names from list above)
+1. Involve 2-3 main actors. actorId and orgId must use the exact listed IDs, never names or invented IDs; use names only in prose.
 2. Include affiliated organizations when relevant
 3. Be absurd yet plausible
 4. Lead to interesting yes/no questions (but DON'T include questions)
@@ -113,10 +113,38 @@ Return XML:
       <buildsOn>previous scenario ID or "new"</buildsOn>
       <distinctFrom>why this is different from previous scenarios</distinctFrom>
     </scenario>
+    <scenario>
+      <id>2</id>
+      <title>A different scenario title</title>
+      <description>2-3 sentence setup with a different theme</description>
+      <mainActors>
+        <actorId>id1</actorId>
+        <actorId>id2</actorId>
+      </mainActors>
+      <involvedOrganizations>
+        <orgId>org-id1</orgId>
+      </involvedOrganizations>
+      <theme>tech</theme>
+      <stakesLevel>high</stakesLevel>
+    </scenario>
+    <scenario>
+      <id>3</id>
+      <title>A third distinct scenario title</title>
+      <description>2-3 sentence setup covering the remaining theme</description>
+      <mainActors>
+        <actorId>id1</actorId>
+        <actorId>id2</actorId>
+      </mainActors>
+      <involvedOrganizations>
+        <orgId>org-id1</orgId>
+      </involvedOrganizations>
+      <theme>culture</theme>
+      <stakesLevel>high</stakesLevel>
+    </scenario>
   </scenarios>
 </response>
 
-CRITICAL: Do NOT output questions. Only generate the 3 scenarios.
+CRITICAL: Emit all 3 scenario nodes with IDs 1, 2, and 3. Replace actorId/orgId placeholders with actual listed IDs. Do NOT output questions.
 No other text.
 `.trim(),
 });

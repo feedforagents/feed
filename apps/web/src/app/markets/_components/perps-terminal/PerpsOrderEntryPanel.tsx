@@ -69,12 +69,8 @@ export function PerpsOrderEntryPanel({
 
   const activePositions = useMemo(() => {
     if (!market) return [];
-    // Orders execute for the authenticated user, so only the user's own
-    // positions (not their agents') determine add/reduce/close/flip.
     return perpPositions.filter(
-      (p) =>
-        !p.isAgentPosition &&
-        p.ticker.toLowerCase() === market.ticker.toLowerCase()
+      (p) => p.ticker.toLowerCase() === market.ticker.toLowerCase()
     );
   }, [perpPositions, market]);
 

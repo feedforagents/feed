@@ -125,7 +125,7 @@ describe('isSameLeaderboardExceptPage', () => {
     ).toBe(true);
   });
 
-  it('drops placeholder data across viewer, scope or metric changes', () => {
+  it('drops placeholder data across viewer, authentication or metric changes', () => {
     const key = getLeaderboardQueryKey(base);
     expect(
       isSameLeaderboardExceptPage(
@@ -136,7 +136,7 @@ describe('isSameLeaderboardExceptPage', () => {
     expect(
       isSameLeaderboardExceptPage(
         key,
-        getLeaderboardQueryKey({ ...base, scope: 'team' })
+        getLeaderboardQueryKey({ ...base, authToken: null })
       )
     ).toBe(false);
     expect(

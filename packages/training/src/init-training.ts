@@ -2,7 +2,7 @@
  * Training Package Initialization
  *
  * This module sets up all dependencies required by the training package.
- * Import this before using TrajectoryGenerator or other training services.
+ * Import this before using runtime-dependent training services.
  *
  * Usage:
  *   import { configureTrainingDependencies, initializeTrainingPackage } from '@feed/training';

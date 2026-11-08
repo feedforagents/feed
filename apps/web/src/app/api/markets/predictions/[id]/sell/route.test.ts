@@ -6,7 +6,6 @@ const mockBroadcastToChannel = mock(async () => undefined);
 const mockCheckProgress = mock(async () => undefined);
 const mockTrackServerEvent = mock(async () => undefined);
 const mockWalletBalance = mock(async () => ({ balance: 987 }));
-const mockGetMarket = mock();
 const mockSell = mock();
 
 class BusinessLogicError extends Error {
@@ -60,15 +59,12 @@ mock.module('@feed/api', () => ({
     },
 }));
 
-mock.module('@feed/core/markets/prediction', () => ({
-  PredictionDbAdapter: class PredictionDbAdapter {},
-  PredictionMarketService: class PredictionMarketService {
-    getMarket = mockGetMarket;
-    sell = mockSell;
-  },
-}));
-
 mock.module('@feed/engine', () => ({
+  withPredictionSettlement: async (
+    _marketId: string,
+    _context: { userId: string },
+    operation: (service: { sell: typeof mockSell }) => Promise<unknown>
+  ) => operation({ sell: mockSell }),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0.02,
     PLATFORM_SHARE: 0.5,
@@ -114,7 +110,6 @@ describe('POST /api/markets/predictions/[id]/sell', () => {
     mockCheckProgress.mockClear();
     mockTrackServerEvent.mockClear();
     mockWalletBalance.mockClear();
-    mockGetMarket.mockReset();
     mockSell.mockReset();
   });
 

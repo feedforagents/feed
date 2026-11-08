@@ -197,29 +197,6 @@ test.describe('Page Navigation - Authenticated Pages', () => {
     expect(body!.length).toBeGreaterThan(0);
   });
 
-  test('agents list page loads', async ({ page }) => {
-    await navigateTo(page, ROUTES.AGENTS);
-    await waitForPageLoad(page);
-    const hasContent = await pageContainsText(page, 'agent', 'create', 'list');
-    expect(hasContent).toBe(true);
-  });
-
-  test('agents create page loads', async ({ page }) => {
-    await navigateTo(page, ROUTES.AGENTS_CREATE);
-    await waitForPageLoad(page);
-    const body = await page.locator('body').textContent();
-    expect(body).toBeTruthy();
-    expect(body!.length).toBeGreaterThan(0);
-  });
-
-  test('agents team chat page loads', async ({ page }) => {
-    await navigateTo(page, ROUTES.AGENTS_TEAM_CHAT);
-    await waitForPageLoad(page);
-    const body = await page.locator('body').textContent();
-    expect(body).toBeTruthy();
-    expect(body!.length).toBeGreaterThan(0);
-  });
-
   test('wallet page loads', async ({ page }) => {
     await navigateTo(page, ROUTES.WALLET);
     await waitForPageLoad(page);

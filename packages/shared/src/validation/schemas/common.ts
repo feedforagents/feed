@@ -452,12 +452,12 @@ export function createBatchSchema<T extends z.ZodType>(
 export const LEADERBOARD_METRICS = ['reputation', 'trading'] as const;
 export type LeaderboardMetric = (typeof LEADERBOARD_METRICS)[number];
 
-export const LEADERBOARD_SCOPES = ['wallet', 'team'] as const;
+export const LEADERBOARD_SCOPES = ['wallet'] as const;
 export type LeaderboardScope = (typeof LEADERBOARD_SCOPES)[number];
 
 // Canonical leaderboard contract:
 // - metric selects the ranking metric (`reputation` or `trading`)
-// - type selects the aggregation scope (`wallet` or `team`)
+// - type selects the aggregation scope (`wallet`)
 export const LeaderboardQuerySchema = z.object({
   page: z.coerce
     .number()

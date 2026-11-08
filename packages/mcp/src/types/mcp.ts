@@ -126,6 +126,9 @@ export interface InitializeResult {
 // Tool Input Schema Property
 export interface MCPToolInputSchemaProperty {
   type: string;
+  minimum?: number;
+  maximum?: number;
+  multipleOf?: number;
   description?: string;
   enum?: readonly string[];
   default?: JsonValue;
@@ -432,7 +435,7 @@ export interface DeclineGroupInviteArgs {
 export interface GetLeaderboardArgs {
   page?: number;
   pageSize?: number;
-  type?: 'wallet' | 'team';
+  type?: 'wallet';
   pointsType?: 'all' | 'earned' | 'referral';
   minPoints?: number;
 }
@@ -732,6 +735,9 @@ export interface UnlikePostResult {
 export interface SharePostResult {
   success: boolean;
   shareId: string;
+  /** The repost (or quote post) created in the sharer's feed. */
+  repostId: string;
+  shareCount: number;
 }
 
 export interface GetCommentsResult {

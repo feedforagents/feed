@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { floorPoints } from '@feed/shared';
 import type {
   BroadcastPort,
   CachePort,
@@ -478,6 +479,81 @@ describe('PredictionMarketService', () => {
     ).rejects.toThrow(/not found/);
   });
 
+  it('cancel should refund the full cash paid, including the entry fee', async () => {
+    const startBalance = (await wallet.getBalance('u1')).balance;
+
+    await service.buy({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      amount: 1000,
+    });
+    expect((await wallet.getBalance('u1')).balance).toBe(startBalance - 1000);
+
+    const cancelResult = await service.cancel({
+      marketId: 'm1',
+      reason: 'Test cancel',
+    });
+
+    // Full refund: the user is made whole, not refunded net of the 1 pt
+    // entry fee (0.1% of 1000), and the cancellation records no PnL loss.
+    expect(cancelResult.totalRefunded).toBe(1000);
+    expect((await wallet.getBalance('u1')).balance).toBe(startBalance);
+    expect(wallet.pnls.filter((p) => p.reason === 'pred_cancel')).toEqual([]);
+    const pos = await db.getPosition('u1', 'm1', 'yes');
+    expect(pos?.pnl).toBe(0);
+  });
+
+  it('cancel after a partial sell should refund the remaining gross cash basis', async () => {
+    await service.buy({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      amount: 1000,
+    });
+    const pos = await db.getPosition('u1', 'm1', 'yes');
+    await service.sell({
+      userId: 'u1',
+      marketId: 'm1',
+      shares: Math.floor((pos?.shares ?? 0) / 2),
+    });
+
+    const balanceBeforeCancel = (await wallet.getBalance('u1')).balance;
+    const cancelResult = await service.cancel({
+      marketId: 'm1',
+      reason: 'Test cancel',
+    });
+
+    // Remaining gross cash basis after selling half the shares bought for
+    // 1000 (fee included): 500.45, not the 499.94 net-of-fee shares*avgPrice.
+    expect(cancelResult.totalRefunded).toBe(500.45);
+    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(
+      balanceBeforeCancel + 500.45
+    );
+    expect(wallet.pnls.filter((p) => p.reason === 'pred_cancel')).toEqual([]);
+  });
+
+  it('cancel should refund legacy positions at their grossed-up cash basis', async () => {
+    // Position row without a stored cashCostBasis (pre-migration shape):
+    // 100 shares at avgPrice 0.5 were bought with 50.05 gross cash at the
+    // 0.1% fee rate, so the refund is 50.05, not the 50 net amount.
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 100,
+      avgPrice: 0.5,
+    });
+
+    const cancelResult = await service.cancel({
+      marketId: 'm1',
+      reason: 'Test cancel',
+    });
+
+    expect(cancelResult.totalRefunded).toBe(50.05);
+    expect(wallet.pnls.filter((p) => p.reason === 'pred_cancel')).toEqual([]);
+  });
+
   it('should prevent liquidity going negative on sell', async () => {
     // Force tiny liquidity but large reserves so proceeds exceed liquidity
     await db.updateMarketState('m1', { liquidity: 1 });
@@ -528,15 +604,10 @@ describe('PredictionMarketService', () => {
     expect(postWinnerBalance).toBeGreaterThan(preWinnerBalance);
     expect(postLoserBalance).toBeLessThanOrEqual(preLoserBalance);
 
-    // Pool-proportional payout: winner gets cost back + loser's deposits
-    const totalWinnerShares = pos1!.shares;
-    const totalLoserDeposits = pos2!.shares * pos2!.avgPrice;
-    const expectedWinnerPayout = PredictionPricing.calculateExpectedPayout(
-      pos1!.shares,
-      pos1!.avgPrice,
-      totalWinnerShares,
-      totalLoserDeposits
-    );
+    // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
+    // The payout is the share count, not cost basis plus a
+    // pool-proportional share of the loser's deposits.
+    const expectedWinnerPayout = floorPoints(pos1!.shares);
     const expectedWinnerPnl = expectedWinnerPayout - 100;
     const expectedLoserPnl = -100;
 
@@ -562,12 +633,12 @@ describe('PredictionMarketService', () => {
     const winnerPnl = pnlByUser.get('u1') ?? 0;
     const loserPnl = pnlByUser.get('u2') ?? 0;
     expect(winnerPnl).toBeCloseTo(expectedWinnerPnl);
+    expect(winnerPnl).toBeGreaterThan(0);
     expect(loserPnl).toBeCloseTo(expectedLoserPnl);
     expect(loserPnl).toBeLessThan(0);
-    expect(winnerPnl).toBeGreaterThan(0);
   });
 
-  it('resolve with no losers returns net cost basis minus fees', async () => {
+  it('resolve with no losers still pays exactly 1 pt per winning share', async () => {
     await db.upsertPosition({
       userId: 'u1',
       marketId: 'm1',
@@ -595,11 +666,58 @@ describe('PredictionMarketService', () => {
 
     expect(pos?.status).toBe('resolved');
     expect(pos?.outcome).toBe(true);
-    // With no losers, payout = cost basis (net). PnL is slightly negative
-    // because the entry fee is not recovered.
-    const netCostBasis = 10 * 999; // 9990
-    expect(postBalance - preBalance).toBeCloseTo(netCostBasis);
-    expect(pos?.pnl).toBeLessThanOrEqual(0);
+    // PRD §9.2 [D-14]: payout is shares x 1 pt regardless of cost basis
+    // or of whether any losing positions exist. 10 shares pay 10 pts,
+    // not the 9,990-pt cost basis the pool-proportional model returned.
+    expect(postBalance - preBalance).toBeCloseTo(10);
+    expect(pos?.pnl).toBeLessThan(0);
+  });
+
+  it('resolve pays a skewed-pool winner at 1 pt per share with cent settlement', async () => {
+    // Skewed pool: YES is the cheap side, so a 100-pt buy accumulates
+    // ~817 shares. Pool-proportional payout credited only ~109.89 for
+    // this position; [D-14] requires the full share count at 1 pt each.
+    const skewedDb = new InMemoryDb({
+      id: 'm2',
+      question: 'Skewed?',
+      yesShares: 9000,
+      noShares: 1000,
+      liquidity: 10_000,
+      endDate: new Date(Date.now() + 3600_000),
+      resolved: false,
+    });
+    const skewedWallet = new InMemoryWallet();
+    const skewedService = new PredictionMarketService({
+      db: skewedDb,
+      wallet: skewedWallet,
+      broadcast: new InMemoryBroadcast(),
+      cache: new InMemoryCache(),
+      clock: { now: () => new Date() },
+      fees: feeConfig,
+      feeProcessor,
+    });
+    await skewedService.buy({
+      userId: 'u1',
+      marketId: 'm2',
+      side: 'yes',
+      amount: 100,
+    });
+    await skewedService.buy({
+      userId: 'u3',
+      marketId: 'm2',
+      side: 'no',
+      amount: 10,
+    });
+    const pos = await skewedDb.getPosition('u1', 'm2', 'yes');
+    expect(pos!.shares).toBeGreaterThan(800);
+    const preBalance = (await skewedWallet.getBalance('u1')).balance;
+    await skewedService.resolve({
+      marketId: 'm2',
+      winningSide: 'yes',
+      resolutionDescription: 'Skewed pool resolves',
+    });
+    const credited = (await skewedWallet.getBalance('u1')).balance - preBalance;
+    expect(credited).toBeCloseTo(floorPoints(pos!.shares), 8);
   });
 
   it('pricing getCurrentPrice returns 0.5 when total is zero for display', () => {

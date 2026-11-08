@@ -26,7 +26,6 @@
  * - npc-tick: Actor NPCs (Sam AIltman, AIlon Musk, etc.)
  * - organization-tick: ALL org POSTS (type-specific content)
  * - article-tick: ALL article generation (centralized, rate-limited)
- * - agent-tick: User-created agents
  */
 
 import {

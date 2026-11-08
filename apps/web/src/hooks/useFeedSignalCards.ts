@@ -119,7 +119,6 @@ export function useFeedSignalCards(): FeedSignalCardsResult {
           marketName: pos.question,
           pointsGained: Math.round(pos.unrealizedPnL),
           gainPercent,
-          agentName: pos.agentName,
         };
         capState = markShown(capState, 'gainer', pos.marketId);
         break;
@@ -137,7 +136,6 @@ export function useFeedSignalCards(): FeedSignalCardsResult {
           marketName: pos.question,
           pointsLost: Math.round(pos.unrealizedPnL),
           lossPercent,
-          agentName: pos.agentName,
         };
         capState = markShown(capState, 'loser', pos.marketId);
         break;

@@ -3,7 +3,7 @@
  *
  * @description Main admin dashboard providing access to various administrative tabs for managing
  * system statistics, game control, fees, users, groups, notifications, reports, AI models,
- * training data, agents, and escrow. Requires admin authentication.
+ * training data and escrow. Requires admin authentication.
  *
  * @page /admin
  * @access Admin only
@@ -37,7 +37,6 @@ import {
   Activity,
   BarChart,
   Bell,
-  Bot,
   ChevronDown,
   Crown,
   Database,
@@ -61,7 +60,6 @@ import {
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AdminManagementTab } from '@/components/admin/AdminManagementTab';
-import { AgentsTab } from '@/components/admin/AgentsTab';
 import { AIModelsTab } from '@/components/admin/AIModelsTab';
 import { AlphaGroupsTab } from '@/components/admin/AlphaGroupsTab';
 import { AnalyticsTab } from '@/components/admin/AnalyticsTab';
@@ -113,7 +111,6 @@ const TAB_IDS = [
   'human-review',
   'ai-models',
   'training-data',
-  'agents',
   'escrow',
   'audit-logs',
   'alpha-groups',
@@ -292,7 +289,6 @@ export default function AdminDashboard() {
     {
       name: 'AI & Agents',
       items: [
-        { id: 'agents' as const, label: 'Agents', icon: Bot },
         { id: 'ai-models' as const, label: 'AI Models', icon: Sparkles },
         {
           id: 'training-data' as const,
@@ -439,7 +435,6 @@ export default function AdminDashboard() {
         {activeTab === 'admins' && <AdminManagementTab />}
         {activeTab === 'registry' && <RegistryTab />}
         {activeTab === 'groups' && <GroupsTab />}
-        {activeTab === 'agents' && <AgentsTab />}
         {activeTab === 'ai-models' && <AIModelsTab />}
         {activeTab === 'training-data' && <TrainingDataTab />}
         {activeTab === 'notifications' && <NotificationsTab />}

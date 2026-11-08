@@ -6,7 +6,7 @@ import { definePrompt } from '../define-prompt';
  */
 export const commentary = definePrompt({
   id: 'commentary',
-  version: '6.0.0',
+  version: '6.0.1',
   category: 'feed',
   description: 'Generates in-character commentary — actor identity first',
   temperature: 1,
@@ -39,12 +39,16 @@ RULES:
 
 Write ONE commentary post as {{characterName}}.
 
-<format>
+Respond with only this XML:
+<response>
 <comment>
   <post>your commentary here</post>
-  <sentiment>number -1 to 1</sentiment>
-  <clueStrength>number 0 to 1</clueStrength>
-  <pointsToward>true | false | null</pointsToward>
+  <sentiment>0.2</sentiment>
+  <clueStrength>0.3</clueStrength>
+  <pointsToward>null</pointsToward>
 </comment>
-</format>`.trim(),
+</response>
+
+sentiment must be a number from -1 to 1; clueStrength a number from 0 to 1.
+pointsToward must be true, false, or null. Write the actual post text in post.`.trim(),
 });
