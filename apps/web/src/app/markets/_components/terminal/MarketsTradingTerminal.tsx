@@ -261,6 +261,14 @@ function parsePredictionSide(params: URLSearchParams): 'yes' | 'no' | null {
   return null;
 }
 
+/**
+ * Cashtag ($SYMBOL) links in posts and comments navigate to
+ * `/markets?search=<symbol>`; the symbol is the search the user arrived with.
+ */
+export function parseSearchQuery(params: URLSearchParams): string {
+  return params.get('search') ?? '';
+}
+
 function formatYesPct(raw: number): string {
   const clamped = Math.min(100, Math.max(0, raw));
   const rounded =
@@ -597,7 +605,7 @@ export function MarketsTradingTerminal({
     parseSort(searchParams)
   );
   const [sortDesc, setSortDesc] = useState(() => parseSortDesc(searchParams));
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(() => parseSearchQuery(searchParams));
   const [selected, setSelected] = useState<MarketKey | null>(() =>
     parseSelected(searchParams)
   );
@@ -869,6 +877,7 @@ export function MarketsTradingTerminal({
     setSelected(parseSelected(searchParams));
     setSortBy(parseSort(searchParams));
     setSortDesc(parseSortDesc(searchParams));
+    setQuery(parseSearchQuery(searchParams));
 
     const nextPerpSide = parsePerpSide(searchParams);
     const nextPredSide = parsePredictionSide(searchParams);
@@ -2316,6 +2325,7 @@ export function MarketsTradingTerminal({
       <div className="hidden min-h-0 flex-1 flex-col md:flex">
         {!selected ? (
           <MarketsDashboard
+            initialSearchQuery={parseSearchQuery(searchParams)}
             perpMarkets={perpMarkets}
             predictionMarkets={predictionMarkets}
             perpLoading={perpLoading}
