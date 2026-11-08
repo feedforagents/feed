@@ -19,7 +19,7 @@ import {
   test,
 } from 'bun:test';
 import { DailyLoginService } from '@feed/api';
-import { db, eq, sql, users } from '@feed/db';
+import { balanceTransactions, db, eq, sql, users } from '@feed/db';
 import { generateSnowflakeId, POINTS } from '@feed/shared';
 import { waitForEndpointAvailability } from './helpers';
 
@@ -372,9 +372,12 @@ describe('Daily Login - DailyLoginService Integration', () => {
 
       expect(info.currentStreak).toBe(0);
       expect(info.longestStreak).toBe(0);
-      expect(info.canClaim).toBe(true);
       expect(info.lastClaim).toBeNull();
-      expect(info.nextReward).toBe(POINTS.DAILY_LOGIN_DAY_1);
+      // Rewards are retired: nothing to claim, no future reward advertised.
+      expect(info.canClaim).toBe(false);
+      expect(info.nextReward).toBe(0);
+      expect(info.nextMilestone).toBe(0);
+      expect(info.daysUntilMilestone).toBe(0);
     });
 
     test('throws for invalid userId format', async () => {
@@ -407,13 +410,11 @@ describe('Daily Login - DailyLoginService Integration', () => {
       expect(info.currentStreak).toBe(0);
       // longestStreak is historical and should still be 50
       expect(info.longestStreak).toBe(50);
-      // Next milestone should be calculated from 0, not 50
-      expect(info.nextMilestone).toBe(7);
-      expect(info.daysUntilMilestone).toBe(7);
-      // Next reward should be for day 1 (since streak will reset)
-      expect(info.nextReward).toBe(POINTS.DAILY_LOGIN_DAY_1);
-      // Can claim (past grace period)
-      expect(info.canClaim).toBe(true);
+      // Rewards are retired: no milestone, no next reward, nothing to claim
+      expect(info.nextMilestone).toBe(0);
+      expect(info.daysUntilMilestone).toBe(0);
+      expect(info.nextReward).toBe(0);
+      expect(info.canClaim).toBe(false);
     });
   });
 });
@@ -495,9 +496,97 @@ describe('Daily Login - Error Handling', () => {
 
       const streakInfo = await DailyLoginService.getStreakInfo(tempUserId);
       expect(streakInfo.currentStreak).toBe(0);
-      expect(streakInfo.nextReward).toBe(POINTS.DAILY_LOGIN_DAY_1);
+      expect(streakInfo.nextReward).toBe(0);
     } finally {
       await deleteTestUser(tempUserId);
+    }
+  });
+});
+
+// ─── Authenticated HTTP: rewards retired ─────────────────────────────────────
+
+describe('Daily Login - Authenticated HTTP (rewards retired)', () => {
+  // No early-return skips here: if the server or database is missing these
+  // tests fail, so an unexecuted assertion can never report as a pass.
+  const accounts: { id: string; streak: number }[] = [];
+
+  beforeAll(async () => {
+    serverAvailable = await checkServerHealth();
+    dbAvailable = await checkDatabaseHealth();
+    if (!dbAvailable) return;
+    // A new account and an existing 3-day streak claimed 25 hours ago (the
+    // state where the old GET advertised a claimable 125-point reward).
+    for (const streak of [0, 3]) {
+      const id = await createTestUser();
+      if (streak > 0) {
+        await setUserStreak(id, streak, new Date(Date.now() - 25 * 3600000));
+      }
+      accounts.push({ id, streak });
+    }
+  });
+
+  afterAll(async () => {
+    for (const { id } of accounts) {
+      await db
+        .delete(balanceTransactions)
+        .where(eq(balanceTransactions.userId, id));
+      await deleteTestUser(id);
+    }
+  });
+
+  async function ledgerRows(userId: string) {
+    return db
+      .select({ id: balanceTransactions.id })
+      .from(balanceTransactions)
+      .where(eq(balanceTransactions.userId, userId));
+  }
+
+  test('server and database are available', () => {
+    expect(serverAvailable).toBe(true);
+    expect(dbAvailable).toBe(true);
+    expect(accounts).toHaveLength(2);
+  });
+
+  test('GET advertises no claimable or future reward', async () => {
+    expect(accounts).toHaveLength(2);
+    for (const { id, streak } of accounts) {
+      const res = await fetch(`${BASE_URL}/api/users/daily-login`, {
+        headers: { Authorization: `Bearer steward:test:${id}` },
+        signal: AbortSignal.timeout(10000),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.canClaim).toBe(false);
+      expect(body.nextReward).toBe(0);
+      expect(body.nextMilestone).toBe(0);
+      expect(body.daysUntilMilestone).toBe(0);
+      // Historical counters are kept.
+      expect(body.currentStreak).toBe(streak);
+      expect(body.longestStreak).toBe(streak);
+    }
+  });
+
+  test('repeated and concurrent POSTs return 410 and change nothing', async () => {
+    expect(accounts).toHaveLength(2);
+    for (const { id } of accounts) {
+      const before = await getUserStreak(id);
+      const ledgerBefore = await ledgerRows(id);
+
+      const post = () =>
+        fetch(`${BASE_URL}/api/users/daily-login`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer steward:test:${id}` },
+          signal: AbortSignal.timeout(10000),
+        });
+      const first = await post();
+      const repeats = await Promise.all(Array.from({ length: 5 }, post));
+      for (const res of [first, ...repeats]) {
+        expect(res.status).toBe(410);
+        expect((await res.json()).code).toBe('DAILY_LOGIN_REWARDS_RETIRED');
+      }
+
+      expect(await getUserStreak(id)).toEqual(before);
+      expect(await ledgerRows(id)).toEqual(ledgerBefore);
     }
   });
 });

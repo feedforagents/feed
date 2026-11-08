@@ -3,11 +3,13 @@
  *
  * Reads daily login streak history (BAB-88). Claiming a daily reward is retired:
  * PRD §9.1 allows no free refills and MVP Phase 0 deletes daily login rewards,
- * so nothing here credits points.
+ * so nothing here credits points and nothing advertises a future reward.
+ * The reward fields stay in the response shape for existing clients, always
+ * retired: nextReward 0, canClaim false, no next milestone.
  */
 
 import { db, eq, users } from '@feed/db';
-import { DAILY_LOGIN, isValidSnowflakeId, POINTS } from '@feed/shared';
+import { DAILY_LOGIN, isValidSnowflakeId } from '@feed/shared';
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
@@ -42,49 +44,7 @@ interface ClaimStatus {
   timeUntilReset: number;
 }
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-const MILESTONES = [
-  { days: 7, bonus: POINTS.DAILY_LOGIN_MILESTONE_7D },
-  { days: 14, bonus: POINTS.DAILY_LOGIN_MILESTONE_14D },
-  { days: 30, bonus: POINTS.DAILY_LOGIN_MILESTONE_30D },
-  { days: 60, bonus: POINTS.DAILY_LOGIN_MILESTONE_60D },
-  { days: 90, bonus: POINTS.DAILY_LOGIN_MILESTONE_90D },
-] as const;
-
-const DAILY_REWARDS = [
-  POINTS.DAILY_LOGIN_DAY_1, // index 0 = Day 1
-  POINTS.DAILY_LOGIN_DAY_2,
-  POINTS.DAILY_LOGIN_DAY_3,
-  POINTS.DAILY_LOGIN_DAY_4,
-  POINTS.DAILY_LOGIN_DAY_5,
-  POINTS.DAILY_LOGIN_DAY_6,
-  POINTS.DAILY_LOGIN_DAY_7,
-] as const;
-
 // ─── Helper Functions (exported for testing) ─────────────────────────────────
-
-export function getDailyReward(streakDay: number): number {
-  // Math.floor ensures floats like 1.9 are handled predictably (treated as day 1)
-  const idx = Math.floor(Math.max(0, streakDay - 1)) % DAILY_LOGIN.CYCLE_LENGTH;
-  return DAILY_REWARDS[idx] ?? DAILY_REWARDS[0];
-}
-
-export function getMilestoneBonus(streak: number): number {
-  return MILESTONES.find((m) => m.days === streak)?.bonus ?? 0;
-}
-
-export function getNextMilestone(streak: number): {
-  nextMilestone: number;
-  daysUntilMilestone: number;
-} {
-  // Clamp to 0 to handle negative input defensively (e.g., corrupted data)
-  const safeStreak = Math.max(0, streak);
-  const next = MILESTONES.find((m) => safeStreak < m.days);
-  return next
-    ? { nextMilestone: next.days, daysUntilMilestone: next.days - safeStreak }
-    : { nextMilestone: 0, daysUntilMilestone: 0 };
-}
 
 export function getClaimStatus(
   lastClaim: Date | null,
@@ -167,20 +127,19 @@ export class DailyLoginService {
     const currentStreak = Math.max(0, user.dailyLoginStreak);
     const longestStreak = Math.max(0, user.longestStreak);
     const totalDailyLogins = Math.max(0, user.totalDailyLogins);
-    // Use effective streak (0 if expired) for all calculations to avoid
-    // inconsistent UI state (e.g., "50 day streak" but "7 days to 7-day milestone")
+    // Use effective streak (0 if expired) so the history shown is not stale.
     const effectiveStreak = status.shouldResetStreak ? 0 : currentStreak;
-    const milestone = getNextMilestone(effectiveStreak);
 
     return {
       currentStreak: effectiveStreak, // Use effective, not raw DB value
       longestStreak,
-      nextReward: getDailyReward(effectiveStreak + 1),
-      ...milestone,
+      nextReward: 0,
+      nextMilestone: 0,
+      daysUntilMilestone: 0,
       lastClaim: user.lastDailyLogin,
-      canClaim: status.canClaim,
-      timeUntilClaim: status.timeUntilClaim,
-      timeUntilReset: status.timeUntilReset,
+      canClaim: false,
+      timeUntilClaim: 0,
+      timeUntilReset: 0,
       totalDailyLogins,
     };
   }
