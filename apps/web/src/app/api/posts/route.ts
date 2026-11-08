@@ -754,7 +754,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               count: count(),
             })
             .from(comments)
-            .where(inArray(comments.postId, postIds))
+            .where(
+              and(inArray(comments.postId, postIds), isNull(comments.deletedAt))
+            )
             .groupBy(comments.postId)
         : [],
     ]);
