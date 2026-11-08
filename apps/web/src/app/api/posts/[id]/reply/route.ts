@@ -185,15 +185,12 @@ export const POST = withErrorHandling(
     const { user: dbUser } = await ensureUserForAuth(user, { displayName });
     const canonicalUserId = dbUser.id;
 
-    // 4. Check rate limiting
-    const rateLimitResult = await ReplyRateLimiter.canReply(
-      canonicalUserId,
-      npcId
-    );
+    // 4. Check rate limiting (fast reject; enforced again in step 7)
+    const preCheck = await ReplyRateLimiter.canReply(canonicalUserId, npcId);
 
-    if (!rateLimitResult.allowed) {
+    if (!preCheck.allowed) {
       throw new BusinessLogicError(
-        rateLimitResult.reason || 'Rate limit exceeded',
+        preCheck.reason || 'Rate limit exceeded',
         'RATE_LIMIT_EXCEEDED'
       );
     }
@@ -213,25 +210,51 @@ export const POST = withErrorHandling(
       );
     }
 
-    // 7. Create comment
-    const now = new Date();
+    // 7. Create the comment and record the interaction atomically: the rate
+    // limit is re-checked under a per-(user, NPC) lock, so concurrent replies
+    // cannot both pass it.
     const commentId = await generateSnowflakeId();
 
-    const [newComment] = await db
-      .insert(comments)
-      .values({
-        id: commentId,
-        content: content.trim(),
-        postId,
-        authorId: canonicalUserId,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
+    const claim = await ReplyRateLimiter.claimReply(
+      canonicalUserId,
+      npcId,
+      async (tx) => {
+        const now = new Date();
+        const [comment] = await tx
+          .insert(comments)
+          .values({
+            id: commentId,
+            content: content.trim(),
+            postId,
+            authorId: canonicalUserId,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning();
 
-    if (!newComment) {
-      throw new BusinessLogicError('Failed to create comment', 'CREATE_FAILED');
+        if (!comment) {
+          throw new BusinessLogicError(
+            'Failed to create comment',
+            'CREATE_FAILED'
+          );
+        }
+        return {
+          postId,
+          commentId: comment.id,
+          qualityScore: qualityResult.score,
+          comment,
+        };
+      }
+    );
+
+    if (!claim.allowed) {
+      throw new BusinessLogicError(
+        claim.rateLimit.reason || 'Rate limit exceeded',
+        'RATE_LIMIT_EXCEEDED'
+      );
     }
+    const rateLimitResult = claim.rateLimit;
+    const newComment = claim.reply.comment;
 
     // Get user info for the response
     const [commentAuthor] = await db
@@ -244,15 +267,6 @@ export const POST = withErrorHandling(
       .from(users)
       .where(eq(users.id, canonicalUserId))
       .limit(1);
-
-    // 8. Record the interaction
-    await ReplyRateLimiter.recordReply(
-      canonicalUserId,
-      npcId,
-      postId,
-      newComment.id,
-      qualityResult.score
-    );
 
     // 9. Check for following chance
     const followingChance = await FollowingMechanics.calculateFollowingChance(
