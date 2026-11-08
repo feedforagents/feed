@@ -192,6 +192,7 @@ import {
 } from '@feed/api';
 import {
   and,
+  comments,
   count,
   db,
   desc,
@@ -204,6 +205,7 @@ import {
   notInArray,
   notifications,
   or,
+  posts,
   type SQL,
   users,
 } from '@feed/db';
@@ -359,6 +361,34 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ) as SQL
     );
   }
+
+  // Exclude notifications whose linked content is no longer visible, in
+  // the query so pagination stays exact: a soft-deleted post errors with
+  // POST_DELETED when opened, a soft-deleted comment is treated as
+  // nonexistent by the comment endpoint, and hard-deleted rows are gone.
+  // Notifications without a post/comment target (follows, system,
+  // trades) are always kept.
+  conditions.push(
+    or(
+      isNull(notifications.postId),
+      inArray(
+        notifications.postId,
+        db.select({ id: posts.id }).from(posts).where(isNull(posts.deletedAt))
+      )
+    ) as SQL
+  );
+  conditions.push(
+    or(
+      isNull(notifications.commentId),
+      inArray(
+        notifications.commentId,
+        db
+          .select({ id: comments.id })
+          .from(comments)
+          .where(isNull(comments.deletedAt))
+      )
+    ) as SQL
+  );
 
   // OPTIMIZED: Cache notifications with short TTL (high-frequency polling endpoint).
   // The key includes page and a fingerprint of the moderation set so a new
