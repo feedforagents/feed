@@ -249,7 +249,12 @@ export async function loadCurrentUserPnlMetrics(
     const perpUnrealizedRows = await db
       .select({
         userId: perpPositions.userId,
-        unrealizedPnL: sql<number>`COALESCE(SUM(${perpPositions.unrealizedPnL}), 0)`,
+        // Net of accrued funding, matching the canonical portfolio P&L:
+        // funding settles at close (realizedPnL = pnl - fundingPaid), so
+        // the stored price-only unrealizedPnL overstates an open position
+        // by fundingPaid and current P&L would drop by that amount the
+        // moment the position closes.
+        unrealizedPnL: sql<number>`COALESCE(SUM(${perpPositions.unrealizedPnL} - ${perpPositions.fundingPaid}), 0)`,
       })
       .from(perpPositions)
       .where(
