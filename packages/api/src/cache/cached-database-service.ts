@@ -39,7 +39,7 @@ import {
   userActorFollows,
   users,
 } from '@feed/db';
-import { StaticDataRegistry } from '@feed/engine';
+import { StaticDataRegistry, WalletService } from '@feed/engine';
 import { logger, resolveUserIdentifierKind } from '@feed/shared';
 import {
   CACHE_KEYS,
@@ -652,3 +652,14 @@ class CachedDatabaseService {
 }
 
 export const cachedDb = new CachedDatabaseService();
+
+// Wire the wallet's cache invalidation. WalletService lives in @feed/engine,
+// which cannot import this package (dependency direction is api -> engine),
+// so it invalidates through a callback registered by the cache owner. Every
+// debit/credit (trades, settlement payouts, funding) must drop the cached
+// user/balance entries; without this registration the callback stayed null
+// and the balance display path served the pre-mutation balance until the
+// 30 s TTL expired.
+WalletService.setCacheInvalidationCallback((userId) =>
+  cachedDb.invalidateUserCache(userId)
+);
