@@ -29,23 +29,25 @@ let quotes: string[];
 let visibleRepost: string;
 let visibleOriginal: string;
 async function postId() {
-  const id = await generateSnowflakeId();
-  ownedPosts.push(id);
-  return id;
+  return generateSnowflakeId();
 }
 
 beforeAll(async () => {
   authorId = await generateSnowflakeId();
   const originalAuthor = await generateSnowflakeId();
-  ownedUsers.push(authorId, originalAuthor);
+  const userIds = [authorId, originalAuthor];
   const now = Date.now();
-  await db.insert(users).values(
-    ownedUsers.map((id) => ({
-      id,
-      username: `profile-page-${id}`,
-      updatedAt: new Date(),
-    }))
-  );
+  const insertedUsers = await db
+    .insert(users)
+    .values(
+      userIds.map((id) => ({
+        id,
+        username: `profile-page-${id}`,
+        updatedAt: new Date(),
+      }))
+    )
+    .returning({ id: users.id });
+  ownedUsers.push(...insertedUsers.map((row) => row.id));
   const rows: Array<typeof posts.$inferInsert> = [];
   async function add(
     owner: string,
@@ -120,7 +122,11 @@ beforeAll(async () => {
     { originalPostId: visibleOriginal },
     true
   );
-  await db.insert(posts).values(rows);
+  const insertedPosts = await db
+    .insert(posts)
+    .values(rows)
+    .returning({ id: posts.id });
+  ownedPosts.push(...insertedPosts.map((row) => row.id));
   expected = [...visible]
     .sort(
       (a, b) =>

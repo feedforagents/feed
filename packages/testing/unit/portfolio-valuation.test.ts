@@ -114,4 +114,37 @@ describe('calculatePerpPositionMarketValue', () => {
     });
     expect(value).toBe(0);
   });
+
+  it('nets accrued funding owed from the position value', () => {
+    // size=100, leverage=5 → margin=20, unrealizedPnL=10, fundingPaid=5
+    // (funding settles at close: realizedPnL = pnl - fundingPaid), so the
+    // open position is worth 20 + 10 - 5 = 25, not 30.
+    const value = calculatePerpPositionMarketValue({
+      size: 100,
+      leverage: 5,
+      unrealizedPnL: 10,
+      fundingPaid: 5,
+    });
+    expect(value).toBe(25);
+  });
+
+  it('adds an accrued funding rebate to the position value', () => {
+    // fundingPaid=-5 means the holder is owed 5 pts of funding at close.
+    const value = calculatePerpPositionMarketValue({
+      size: 100,
+      leverage: 5,
+      unrealizedPnL: 10,
+      fundingPaid: -5,
+    });
+    expect(value).toBe(35);
+  });
+
+  it('treats a missing fundingPaid as zero (legacy callers)', () => {
+    const value = calculatePerpPositionMarketValue({
+      size: 100,
+      leverage: 5,
+      unrealizedPnL: 10,
+    });
+    expect(value).toBe(30);
+  });
 });

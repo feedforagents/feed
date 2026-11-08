@@ -34,6 +34,7 @@ mock.module('@feed/api', () => ({
 }));
 
 mock.module('@feed/db', () => ({
+  acquireUserBlockPairLock: mock(async () => undefined),
   and: (...conditions: unknown[]) => ({ and: conditions }),
   db: { select: () => selectQuery() },
   eq: (column: unknown, value: unknown) => ({ column, value }),
@@ -42,6 +43,7 @@ mock.module('@feed/db', () => ({
     followerId: 'followerId',
     followingId: 'followingId',
   },
+  hasBlocked: mock(async () => false),
   userActorFollows: {},
   users: {},
   withTransaction: async () => undefined,
