@@ -23,9 +23,7 @@ let upperPrefixId: string;
 let token: string;
 let excludedIds: string[];
 async function userId() {
-  const id = await generateSnowflakeId();
-  ownedUserIds.push(id);
-  return id;
+  return generateSnowflakeId();
 }
 
 beforeAll(async () => {
@@ -42,35 +40,51 @@ beforeAll(async () => {
   token = `csx${exactId}`;
   for (let i = 0; i < 20; i++) prefixIds.push(await userId());
   const now = new Date();
-  await db.insert(users).values([
-    { id: viewerId, username: `${token}viewer`, updatedAt: now },
-    { id: exactId, username: `CSX${exactId}`, updatedAt: now },
-    { id: agentId, username: `CSx${exactId}`, isAgent: true, updatedAt: now },
-    {
-      id: upperPrefixId,
-      username: `${token.toUpperCase()}B20`,
-      updatedAt: now,
-    },
-    { id: banned, username: `csX${exactId}`, isBanned: true, updatedAt: now },
-    { id: blocked, username: `cSx${exactId}`, updatedAt: now },
-    { id: blockedBy, username: `cSX${exactId}`, updatedAt: now },
-    { id: muted, username: `Csx${exactId}`, updatedAt: now },
-    { id: actor, username: `CsX${exactId}`, isActor: true, updatedAt: now },
-    ...prefixIds.map((id, i) => ({
-      id,
-      username: `${token}a${String(i).padStart(2, '0')}`,
-      updatedAt: now,
-    })),
-  ]);
-  blockIds.push(await generateSnowflakeId(), await generateSnowflakeId());
-  muteIds.push(await generateSnowflakeId());
-  await db.insert(userBlocks).values([
-    { id: blockIds[0]!, blockerId: viewerId, blockedId: blocked },
-    { id: blockIds[1]!, blockerId: blockedBy, blockedId: viewerId },
-  ]);
-  await db
+  const insertedUsers = await db
+    .insert(users)
+    .values([
+      { id: viewerId, username: `${token}viewer`, updatedAt: now },
+      { id: exactId, username: `CSX${exactId}`, updatedAt: now },
+      { id: agentId, username: `CSx${exactId}`, isAgent: true, updatedAt: now },
+      {
+        id: upperPrefixId,
+        username: `${token.toUpperCase()}B20`,
+        updatedAt: now,
+      },
+      { id: banned, username: `csX${exactId}`, isBanned: true, updatedAt: now },
+      { id: blocked, username: `cSx${exactId}`, updatedAt: now },
+      { id: blockedBy, username: `cSX${exactId}`, updatedAt: now },
+      { id: muted, username: `Csx${exactId}`, updatedAt: now },
+      { id: actor, username: `CsX${exactId}`, isActor: true, updatedAt: now },
+      ...prefixIds.map((id, i) => ({
+        id,
+        username: `${token}a${String(i).padStart(2, '0')}`,
+        updatedAt: now,
+      })),
+    ])
+    .returning({ id: users.id });
+  ownedUserIds.push(...insertedUsers.map((row) => row.id));
+  const candidateBlockIds = [
+    await generateSnowflakeId(),
+    await generateSnowflakeId(),
+  ];
+  const insertedBlocks = await db
+    .insert(userBlocks)
+    .values([
+      { id: candidateBlockIds[0]!, blockerId: viewerId, blockedId: blocked },
+      { id: candidateBlockIds[1]!, blockerId: blockedBy, blockedId: viewerId },
+    ])
+    .returning({ id: userBlocks.id });
+  blockIds.push(...insertedBlocks.map((row) => row.id));
+  const insertedMutes = await db
     .insert(userMutes)
-    .values({ id: muteIds[0]!, muterId: viewerId, mutedId: muted });
+    .values({
+      id: await generateSnowflakeId(),
+      muterId: viewerId,
+      mutedId: muted,
+    })
+    .returning({ id: userMutes.id });
+  muteIds.push(...insertedMutes.map((row) => row.id));
 });
 
 afterAll(async () => {
@@ -129,3 +143,60 @@ test('includes agents only when requested while preserving moderation filters', 
 test('treats SQL-looking search input as a value', async () => {
   expect(await search(`${token}' OR true --`)).toEqual([]);
 });
+
+for (const exactCount of [8, 32]) {
+  test(`ranks ${exactCount} folded-exact usernames before prefixes within the response cap`, async () => {
+    const ownedIds: string[] = [];
+    const exactIds = new Set<string>();
+    const namespace = `rank${await generateSnowflakeId()}`;
+    const query = `${namespace}abcde`;
+    const fixtures: Array<{ id: string; username: string; updatedAt: Date }> =
+      [];
+    for (let bits = 0; bits < exactCount; bits++) {
+      const id = await generateSnowflakeId();
+      exactIds.add(id);
+      const suffix = [...'abcde']
+        .map((character, index) =>
+          bits & (1 << index) ? character.toUpperCase() : character
+        )
+        .join('');
+      fixtures.push({
+        id,
+        username: namespace + suffix,
+        updatedAt: new Date(),
+      });
+    }
+    for (const username of [
+      `${namespace.toUpperCase()}ABCDE0`,
+      `${namespace}abcde1`,
+    ]) {
+      fixtures.push({
+        id: await generateSnowflakeId(),
+        username,
+        updatedAt: new Date(),
+      });
+    }
+    try {
+      const inserted = await db
+        .insert(users)
+        .values(fixtures)
+        .returning({ id: users.id });
+      ownedIds.push(...inserted.map((row) => row.id));
+      let previousIds: string[] | undefined;
+      for (const input of [query, query.toUpperCase(), query]) {
+        const rows = await search(input);
+        const ids = rows.map((row) => row.id);
+        const returnedExactIds = ids.filter((id) => exactIds.has(id));
+        expect(ids).toHaveLength(Math.min(20, exactCount + 2));
+        expect(new Set(ids).size).toBe(ids.length);
+        expect(returnedExactIds).toHaveLength(Math.min(20, exactCount));
+        expect(ids.slice(0, returnedExactIds.length)).toEqual(returnedExactIds);
+        if (previousIds) expect(ids).toEqual(previousIds);
+        previousIds = ids;
+      }
+    } finally {
+      if (ownedIds.length)
+        await db.delete(users).where(inArray(users.id, ownedIds));
+    }
+  });
+}

@@ -197,7 +197,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         AND (${includeAgents} OR "isAgent" = false)
         AND "isBanned" = false
       ORDER BY username
-      LIMIT 5
+      LIMIT 20
     `;
 
     const exactMatches =
@@ -210,7 +210,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               ],
             },
             select,
-            take: 5,
+            take: 20,
             orderBy: [
               {
                 username: 'asc',

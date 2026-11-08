@@ -166,6 +166,8 @@ export const POST = withErrorHandling(
           where: { id: chatId },
         }),
         db.chatParticipant.findMany({
+          // Retain departed peers for DM identity and block checks. Active
+          // membership and notification eligibility are checked separately.
           where: { chatId: { equals: chatId } },
         }),
       ]);
@@ -284,7 +286,9 @@ export const POST = withErrorHandling(
     let isMember = true;
     // For DMs, check ChatParticipant
     if (isDMChat) {
-      isMember = chatParticipantsList.some((p) => p.userId === user.userId);
+      isMember = chatParticipantsList.some(
+        (p) => p.userId === user.userId && p.isActive
+      );
       if (!isMember) {
         throw new AuthorizationError(
           'You are not a participant in this DM',
@@ -460,9 +464,9 @@ export const POST = withErrorHandling(
 
     // 12. Send notifications to other participants
     if (isDMChat) {
-      // For DMs, notify the other participant
+      // Departed peers retain block protection but do not receive previews.
       const otherParticipant = chatParticipantsList.find(
-        (p) => p.userId !== user.userId
+        (p) => p.userId !== user.userId && p.isActive
       );
       if (otherParticipant) {
         await notifyDMMessage(
@@ -475,7 +479,7 @@ export const POST = withErrorHandling(
     } else if (isGroupChat) {
       // For group chats, notify all participants except sender
       const recipientUserIds = chatParticipantsList
-        .filter((p) => p.userId !== user.userId)
+        .filter((p) => p.userId !== user.userId && p.isActive)
         .map((p) => p.userId);
       const chatInfo = await asUser(user, async (db) => {
         return await db.chat.findUnique({
