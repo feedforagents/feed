@@ -2,6 +2,7 @@
  * Server-side portfolio P&L calculation
  */
 
+import { calculatePredictionCashCostBasis } from '@feed/core/markets/prediction';
 import {
   balanceTransactions,
   db,
@@ -17,6 +18,7 @@ import {
   toNumber,
 } from '@feed/shared';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { FEE_CONFIG } from '../config/fees';
 import type { PortfolioPnLSnapshot } from '../types/portfolio';
 
 export type { PortfolioPnLSnapshot };
@@ -77,6 +79,7 @@ export async function calculatePortfolioPnL(
   const perpPositionResults = await db
     .select({
       unrealizedPnL: perpPositions.unrealizedPnL,
+      fundingPaid: perpPositions.fundingPaid,
     })
     .from(perpPositions)
     .where(
@@ -91,6 +94,7 @@ export async function calculatePortfolioPnL(
     .select({
       shares: positions.shares,
       avgPrice: positions.avgPrice,
+      cashCostBasis: positions.cashCostBasis,
       side: positions.side,
       marketYesShares: markets.yesShares,
       marketNoShares: markets.noShares,
@@ -126,8 +130,13 @@ export async function calculatePortfolioPnL(
     )
     .limit(1);
 
+  // Open perp unrealized PnL is net of accrued funding: funding settles
+  // at close (realizedPnL = pnl - fundingPaid), so the stored price-only
+  // unrealizedPnL overstates equity by fundingPaid while the position is
+  // open. Missing rows (legacy) default to zero funding.
   const perpUnrealized = perpPositionResults.reduce(
-    (sum, position) => sum + toNumber(position.unrealizedPnL),
+    (sum, position) =>
+      sum + toNumber(position.unrealizedPnL) - toNumber(position.fundingPaid),
     0
   );
 
@@ -148,7 +157,27 @@ export async function calculatePortfolioPnL(
             : yesShares / totalShares // No price = yesShares / total
           : avgPrice;
 
-      return sum + shares * (currentPrice - avgPrice);
+      // Mark against the remaining GROSS cash paid, not net avgPrice:
+      // avgPrice is net of the entry fee, while the fee already left the
+      // wallet in cash and is not in lifetimePnL until the position
+      // closes. Subtracting net avgPrice would count the already-paid
+      // entry fee as profit. Use the persisted cashCostBasis when present,
+      // else the net-cost gross-up estimate for legacy rows.
+      return (
+        sum +
+        shares * currentPrice -
+        calculatePredictionCashCostBasis(
+          {
+            shares,
+            avgPrice,
+            cashCostBasis:
+              position.cashCostBasis == null
+                ? undefined
+                : toNumber(position.cashCostBasis),
+          },
+          FEE_CONFIG.TRADING_FEE_RATE
+        )
+      );
     },
     0
   );
