@@ -36,9 +36,7 @@ async function fixtureUser(): Promise<string> {
   ownedUsers.push(userId);
   await db.insert(users).values({
     id: userId,
-    stewardId: `follow-block-${userId}`,
-    privyId: `did:privy:test-${userId}`,
-    username: `follow-block-${userId}`,
+    username: `fb-${userId}`,
     updatedAt: new Date(),
   });
   return userId;
@@ -51,6 +49,7 @@ async function postFollow(followerId: string, targetId: string) {
       'Content-Type': 'application/json',
       Authorization: testAuthHeader(followerId),
     },
+    signal: AbortSignal.timeout(30000),
   });
 }
 
@@ -62,6 +61,7 @@ async function postBlock(blockerId: string, targetId: string) {
       Authorization: testAuthHeader(blockerId),
     },
     body: JSON.stringify({ action: 'block' }),
+    signal: AbortSignal.timeout(30000),
   });
 }
 
@@ -169,94 +169,101 @@ describe('POST /api/users/[userId]/follow block enforcement', () => {
     expect(await followRow(userCId, userAId)).not.toBeNull();
   });
 
-  it('a block committed while a follow is in flight leaves no follow behind', async () => {
-    const userAId = await fixtureUser();
-    const userBId = await fixtureUser();
-
-    // Warm the block route first: its first-hit compile must not eat the
-    // window between the follow pausing and the block running. The target
-    // does not exist, so this only loads the route (404, no side effects).
-    const warmup = await postBlock(userAId, '0000000000000000001');
-    expect(warmup.status).toBe(404);
-
-    // Pause the follow request at its INSERT with an uncommitted,
-    // uniquely conflicting fixture edge: the INSERT waits on the
-    // speculative-insertion lock while the block request runs.
-    const barrierId = await generateSnowflakeId();
-    const release = Promise.withResolvers<void>();
-    const barrier = dbWrite.transaction(async (tx) => {
-      await tx.insert(follows).values({
-        id: barrierId,
-        followerId: userBId,
-        followingId: userAId,
-      });
-      await release.promise;
-    });
-    // The barrier rolls back when released; swallow that expected error.
-    const barrierDone = barrier.catch(() => undefined);
-    try {
-      const followPromise = postFollow(userBId, userAId);
-
-      // Wait until the follow request is actually paused at its INSERT
-      // before starting the block, or the race is not exercised.
-      const until = Date.now() + 15_000;
-      let waiting = 0;
-      while (Date.now() < until) {
-        const rows = await dbWrite.execute(
-          sql<{
-            count: number;
-          }>`SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query ILIKE '%Follow%'`
-        );
-        waiting = Number(rows[0]?.count ?? 0);
-        if (waiting >= 1) break;
-        await Bun.sleep(25);
-      }
-      expect(waiting).toBeGreaterThanOrEqual(1);
-
-      const blockPromise = postBlock(userAId, userBId);
-
-      // Wait until the block has either committed (its row is visible) or
-      // is queued behind the follow's pair lock (it waits on the advisory
-      // lock). Only then release the barrier, so the follow's INSERT is
-      // guaranteed to land after the block committed — otherwise the
-      // block could still be compiling while the follow slips through,
-      // and the race would not be exercised at all.
-      const untilBlock = Date.now() + 15_000;
-      let blockSettled = false;
-      while (Date.now() < untilBlock) {
-        if (await blockRow(userAId, userBId)) {
-          blockSettled = true;
-          break;
+  for (const first of ['follow', 'block'] as const) {
+    for (const reverse of [false, true]) {
+      it(`${first} first leaves no blocked follow (${reverse ? 'reverse' : 'forward'})`, async () => {
+        const blocker = await fixtureUser();
+        const blocked = await fixtureUser();
+        const from = reverse ? blocked : blocker;
+        const to = reverse ? blocker : blocked;
+        const barrierId = await generateSnowflakeId();
+        const ready = Promise.withResolvers<number>();
+        const release = Promise.withResolvers<void>();
+        const rollback = new Error('Owned follow/block barrier rollback');
+        const requests: Promise<Response>[] = [];
+        const barrierDone = dbWrite
+          .transaction(async (tx) => {
+            const rows = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+            if (first === 'follow') {
+              await tx
+                .insert(follows)
+                .values({ id: barrierId, followerId: from, followingId: to });
+            } else {
+              await tx.insert(userBlocks).values({
+                id: barrierId,
+                blockerId: blocker,
+                blockedId: blocked,
+              });
+            }
+            ready.resolve(Number(rows[0]?.pid));
+            await release.promise;
+          })
+          .catch((error: Error) => {
+            ready.reject(error);
+            if (error !== rollback) throw error;
+          });
+        try {
+          const barrierPid = await ready.promise;
+          expect(Number.isInteger(barrierPid)).toBe(true);
+          requests.push(
+            first === 'follow'
+              ? postFollow(from, to)
+              : postBlock(blocker, blocked)
+          );
+          // Observe the actual request waiting on this run's exact barrier PID.
+          const table = first === 'follow' ? 'Follow' : 'UserBlock';
+          let firstPid = 0;
+          const deadline = Date.now() + 10000;
+          while (Date.now() < deadline) {
+            const rows = await dbWrite.execute(
+              sql`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND ${barrierPid}=ANY(pg_blocking_pids(pid)) AND query ILIKE ${'%insert into "' + table + '"%'}`
+            );
+            if (rows.length) {
+              firstPid = Number(rows[0]?.pid);
+              break;
+            }
+            await Bun.sleep(25);
+          }
+          expect(firstPid).toBeGreaterThan(0);
+          requests.push(
+            first === 'follow'
+              ? postBlock(blocker, blocked)
+              : postFollow(from, to)
+          );
+          const allResponses = Promise.all(requests);
+          let secondObserved = false;
+          const secondDeadline = Date.now() + 10000;
+          while (Date.now() < secondDeadline) {
+            const completed =
+              first === 'follow'
+                ? await blockRow(blocker, blocked)
+                : await followRow(from, to);
+            const rows = await dbWrite.execute(
+              sql`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND ${firstPid}=ANY(pg_blocking_pids(pid)) AND query ILIKE '%pg_advisory_xact_lock%'`
+            );
+            if (completed || rows.length) {
+              secondObserved = true;
+              break;
+            }
+            await Bun.sleep(25);
+          }
+          expect(secondObserved).toBe(true);
+          release.reject(rollback);
+          await barrierDone;
+          const responses = await allResponses;
+          const followResponse = responses[first === 'follow' ? 0 : 1]!;
+          const blockResponse = responses[first === 'follow' ? 1 : 0]!;
+          expect(blockResponse.status).toBe(200);
+          expect(followResponse.status).toBe(first === 'follow' ? 201 : 400);
+          expect(await blockRow(blocker, blocked)).not.toBeNull();
+          expect(await followRow(from, to)).toBeNull();
+          expect(await followRow(to, from)).toBeNull();
+        } finally {
+          release.reject(rollback);
+          await barrierDone;
+          await Promise.allSettled(requests);
         }
-        const lockRows = await dbWrite.execute(
-          sql<{
-            count: number;
-          }>`SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query ILIKE '%pg_advisory_xact_lock%'`
-        );
-        if (Number(lockRows[0]?.count ?? 0) >= 1) {
-          blockSettled = true;
-          break;
-        }
-        await Bun.sleep(25);
-      }
-      expect(blockSettled).toBe(true);
-
-      release.reject(new Error('release barrier'));
-
-      const [followResponse, blockResponse] = await Promise.all([
-        followPromise,
-        blockPromise,
-      ]);
-      expect(blockResponse.status).toBe(200);
-      // The follow may legitimately win the race (201) — the block then
-      // deletes it. What must never survive is a follow alongside a block.
-      expect(followResponse.status).toBe(201);
-      expect(await blockRow(userAId, userBId)).not.toBeNull();
-      expect(await followRow(userBId, userAId)).toBeNull();
-      expect(await followRow(userAId, userBId)).toBeNull();
-    } finally {
-      release.reject(new Error('release barrier'));
-      await barrierDone;
+      }, 45000);
     }
-  }, 60_000);
+  }
 });
