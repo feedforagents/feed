@@ -9,6 +9,7 @@ import {
   verifyRealtimeToken,
   withErrorHandling,
 } from '@feed/api';
+import { chats, db, eq, inArray, userBlocks, userMutes } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -106,6 +107,51 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   const cursors = parseCursor(cursorParam);
   if (!cursors) {
     return new Response('Invalid cursor', { status: 400 });
+  }
+
+  // Live delivery must honor the same viewer moderation rule as the group
+  // chat history: in a group chat, authors the viewer blocked or muted —
+  // and authors who blocked the viewer — must not reach the viewer's
+  // stream, and a visible message must not quote a hidden author's message
+  // back in. The broadcast is one copy for the whole channel, so the rule
+  // is applied per viewer here, at delivery. DM chats are out of scope: a
+  // block relationship already prevents creating a DM and sending in one.
+  // Loaded before the stream starts so a failure aborts the connection
+  // instead of falling back to an unfiltered feed.
+  const groupChatExclusions = new Map<string, Set<string>>();
+  const chatIds = allowedChannels
+    .filter((ch) => ch.startsWith('chat:'))
+    .map((ch) => ch.slice('chat:'.length));
+  if (chatIds.length > 0) {
+    const chatRows = await db
+      .select({ id: chats.id, isGroup: chats.isGroup })
+      .from(chats)
+      .where(inArray(chats.id, chatIds));
+    const groupChatIds = chatRows.filter((c) => c.isGroup).map((c) => c.id);
+    if (groupChatIds.length > 0) {
+      const [blocked, muted, blockedBy] = await Promise.all([
+        db
+          .select({ id: userBlocks.blockedId })
+          .from(userBlocks)
+          .where(eq(userBlocks.blockerId, userId)),
+        db
+          .select({ id: userMutes.mutedId })
+          .from(userMutes)
+          .where(eq(userMutes.muterId, userId)),
+        db
+          .select({ id: userBlocks.blockerId })
+          .from(userBlocks)
+          .where(eq(userBlocks.blockedId, userId)),
+      ]);
+      const excluded = new Set(
+        [...blocked, ...muted, ...blockedBy].map((row) => row.id)
+      );
+      if (excluded.size > 0) {
+        for (const id of groupChatIds) {
+          groupChatExclusions.set(`chat:${id}`, excluded);
+        }
+      }
+    }
   }
 
   const encoder = new TextEncoder();
@@ -340,10 +386,49 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
               ? (payload as { data: unknown }).data
               : payload;
 
+          // Per-viewer group-chat moderation (same rule as history):
+          // drop a live message from an author hidden for this viewer,
+          // and strip the quoted message from a visible reply when the
+          // quoted author is hidden, so the hidden author's text is
+          // never delivered through a quote.
+          let forwardedData = innerData;
+          const excludedSenders = groupChatExclusions.get(channel);
+          if (excludedSenders && innerType === 'new_message') {
+            const asRecord = (
+              value: unknown
+            ): Record<string, unknown> | null =>
+              value !== null && typeof value === 'object'
+                ? (value as Record<string, unknown>)
+                : null;
+            const dataRecord = asRecord(innerData);
+            const messageRecord = asRecord(dataRecord?.message);
+            if (messageRecord) {
+              const senderId = messageRecord.senderId;
+              if (
+                typeof senderId === 'string' &&
+                excludedSenders.has(senderId)
+              ) {
+                lastIds.set(msg.stream, msg.id);
+                continue;
+              }
+              const replyRecord = asRecord(messageRecord.replyToMessage);
+              if (
+                replyRecord &&
+                typeof replyRecord.senderId === 'string' &&
+                excludedSenders.has(replyRecord.senderId)
+              ) {
+                forwardedData = {
+                  ...dataRecord,
+                  message: { ...messageRecord, replyToMessage: null },
+                };
+              }
+            }
+          }
+
           const sseData = JSON.stringify({
             channel,
             type: innerType,
-            data: innerData,
+            data: forwardedData,
             timestamp: innerTimestamp,
             version: innerVersion,
           });
