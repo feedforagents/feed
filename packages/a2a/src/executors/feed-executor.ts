@@ -754,8 +754,24 @@ export class FeedAgentExecutor implements AgentExecutor {
 
   private async getFeed(params: Record<string, JsonValue>) {
     const limit = this.parsePositiveInt(params.limit, 20, 100);
+    // The web feed excludes test authors in SQL before paginating
+    // (DatabaseService.getRecentPosts): test accounts — the isTest
+    // flag or a 'test-' id prefix — must not leak into the agent feed
+    // either. The exclusion is part of the post query, so pages stay
+    // full.
+    const testFlagged = await db.user.findMany({
+      where: { isTest: true },
+      select: { id: true },
+    });
+    const testFlaggedIds = testFlagged.map((u) => u.id);
     const posts = await db.post.findMany({
-      where: { deletedAt: null },
+      where: {
+        deletedAt: null,
+        NOT: { authorId: { startsWith: 'test-' } },
+        ...(testFlaggedIds.length > 0 && {
+          authorId: { notIn: testFlaggedIds },
+        }),
+      },
       take: limit,
       orderBy: { timestamp: 'desc' },
       select: {

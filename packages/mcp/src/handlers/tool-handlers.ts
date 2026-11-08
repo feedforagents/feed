@@ -965,11 +965,25 @@ export async function executeQueryFeed(
     relatedQuestion = question.questionNumber;
   }
 
+  // The web feed excludes test authors in SQL before paginating
+  // (DatabaseService.getRecentPosts): test accounts — the isTest flag
+  // or a 'test-' id prefix — must not leak into the agent feed either.
+  // The exclusion is part of the post query, so pages stay full.
+  const testFlagged = await db.user.findMany({
+    where: { isTest: true },
+    select: { id: true },
+  });
+  const testFlaggedIds = testFlagged.map((u) => u.id);
+
   const now = new Date();
   const posts = await db.post.findMany({
     where: {
       deletedAt: null,
       timestamp: { lte: now }, // No future posts
+      NOT: { authorId: { startsWith: 'test-' } },
+      ...(testFlaggedIds.length > 0 && {
+        authorId: { notIn: testFlaggedIds },
+      }),
       ...(relatedQuestion !== undefined && { relatedQuestion }),
     },
     orderBy: { timestamp: 'desc' },
