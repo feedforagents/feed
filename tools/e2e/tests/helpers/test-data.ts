@@ -24,10 +24,6 @@ export const ROUTES = {
   WALLET: '/wallet',
   NFT: '/nft',
   RESEARCH: '/research',
-  AGENTS: '/agents',
-  AGENTS_CREATE: '/agents/create',
-  AGENTS_BY_ID: (id: string) => `/agents/${id}`,
-  AGENTS_TEAM_CHAT: '/agents/team',
   POST_BY_ID: (id: string) => `/post/${id}`,
   ARTICLE_BY_ID: (id: string) => `/article/${id}`,
   TRENDING_BY_TAG: (tag: string) => `/trending/${tag}`,
@@ -82,8 +78,6 @@ export const SELECTORS = {
   PAGINATION_NEXT: 'button:has-text("Next"), button[aria-label*="next" i]',
   PAGINATION_PREV:
     'button:has-text("Previous"), button:has-text("Prev"), button[aria-label*="previous" i]',
-  CREATE_AGENT_BUTTON:
-    'button:has-text("Create Agent"), button:has-text("New Agent"), a:has-text("Create")',
 } as const;
 
 export const VIEWPORTS = {

@@ -1,3 +1,4 @@
+import { createPerpSettlement } from '../../services/perp-settlement';
 /**
  * Engine Components Validation Test
  *
@@ -274,6 +275,7 @@ describe.skipIf(shouldSkipLiveLlmTests)('Engine Components Validation', () => {
       const { FEE_CONFIG } = await import('../../config/fees');
 
       const service = new PerpMarketService({
+        settlement: createPerpSettlement(),
         db: new PerpDbAdapter(),
         wallet: {
           debit: ({ userId, amount, reason, description, relatedId }) =>

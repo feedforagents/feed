@@ -58,7 +58,7 @@ export default function ArticlePage({ params }: ArticlePageProps) {
     setState({ status: 'loading' });
 
     const loadArticle = async () => {
-      // Articles are posts with type='article'
+      // News and resolution proofs share the article reader.
       const response = await fetch(
         apiUrl(`/api/posts/${encodeURIComponent(articleId)}`),
         { signal: controller.signal }
@@ -85,7 +85,7 @@ export default function ArticlePage({ params }: ArticlePageProps) {
       const result = (await response.json()) as { data: ArticlePost };
       if (controller.signal.aborted) return;
 
-      if (result.data.type !== 'article') {
+      if (result.data.type !== 'article' && result.data.type !== 'proof') {
         router.replace(`/post/${encodeURIComponent(articleId)}`);
         return;
       }

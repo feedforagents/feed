@@ -4,8 +4,13 @@ import { describe, expect, test } from 'bun:test';
 import { GAME_GUIDE_SLIDES } from '../../../apps/web/src/components/onboarding/game-guide-slides';
 
 describe('Game Guide - Slide Content', () => {
-  test('should have exactly 5 slides', () => {
-    expect(GAME_GUIDE_SLIDES.length).toBe(5);
+  test('does not advertise hosted agent creation', () => {
+    for (const slide of GAME_GUIDE_SLIDES) {
+      expect(slide.title).not.toBe('Run Your Agents');
+      for (const cta of slide.ctas ?? []) {
+        expect(cta.href.startsWith('/agents')).toBe(false);
+      }
+    }
   });
 
   test('each slide should have a non-empty title', () => {

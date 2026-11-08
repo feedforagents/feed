@@ -6,14 +6,12 @@
  * database connections, or Node.js built-in modules.
  *
  * Use this import for React client components:
- * import type { AgentTemplate, A2AReputationResponse } from '@feed/agents/client';
+ * import type { A2AReputationResponse } from '@feed/agents/client';
  */
 
 // =============================================================================
 // Agent Template Types (used for agent creation UI)
 // =============================================================================
-
-export type { AgentTemplate } from './types/agent-template';
 
 // =============================================================================
 // A2A Response Types (used for widget caching and API responses)

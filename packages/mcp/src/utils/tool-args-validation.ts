@@ -4,7 +4,11 @@
  * Validation schemas for each tool's arguments
  */
 
-import { JsonValueSchema } from '@feed/shared';
+import {
+  isPointsAmount,
+  JsonValueSchema,
+  LEADERBOARD_SCOPES,
+} from '@feed/shared';
 import { z } from 'zod';
 import type {
   AcceptGroupInviteArgs,
@@ -95,7 +99,9 @@ const GetMarketsArgsSchema = z.object({
 const PlaceBetArgsSchema = z.object({
   marketId: z.string().min(1),
   side: z.enum(['YES', 'NO']),
-  amount: z.number().positive(),
+  amount: z.number().positive().refine(isPointsAmount, {
+    message: 'Amount must have at most 2 decimal places',
+  }),
 }) satisfies z.ZodType<PlaceBetArgs>;
 
 const GetBalanceArgsSchema = z.object({}) satisfies z.ZodType<GetBalanceArgs>;
@@ -154,7 +160,9 @@ export function validateQueryFeedArgs(args: unknown): QueryFeedArgs {
 const BuySharesArgsSchema = z.object({
   marketId: z.string().min(1),
   outcome: z.enum(['YES', 'NO']),
-  amount: z.number().positive(),
+  amount: z.number().positive().refine(isPointsAmount, {
+    message: 'Amount must have at most 2 decimal places',
+  }),
 }) satisfies z.ZodType<BuySharesArgs>;
 
 const SellSharesArgsSchema = z.object({
@@ -166,7 +174,7 @@ const OpenPositionArgsSchema = z.object({
   ticker: z.string().min(1),
   side: z.enum(['LONG', 'SHORT']),
   amount: z.number().positive(),
-  leverage: z.number().min(1).max(100),
+  leverage: z.number().min(1).max(20),
 }) satisfies z.ZodType<OpenPositionArgs>;
 
 const GetMarketPricesArgsSchema = z.object({
@@ -212,7 +220,9 @@ const UnlikePostArgsSchema = z.object({
 
 const SharePostArgsSchema = z.object({
   postId: z.string().min(1),
-  comment: z.string().optional(),
+  // The comment becomes the quote post's content; the PRD caps posts at 280
+  // characters.
+  comment: z.string().max(280).optional(),
 }) satisfies z.ZodType<SharePostArgs>;
 
 const GetCommentsArgsSchema = z.object({
@@ -346,7 +356,7 @@ const DeclineGroupInviteArgsSchema = z.object({
 const GetLeaderboardArgsSchema = z.object({
   page: z.number().int().positive().optional().default(1),
   pageSize: z.number().int().positive().optional().default(100),
-  type: z.enum(['wallet', 'team']).optional().default('wallet'),
+  type: z.enum(LEADERBOARD_SCOPES).optional().default('wallet'),
   pointsType: z.enum(['all', 'earned', 'referral']).optional(),
   minPoints: z.number().nonnegative().optional().default(0),
 }) satisfies z.ZodType<GetLeaderboardArgs>;

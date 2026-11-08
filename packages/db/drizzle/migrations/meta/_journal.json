@@ -22,6 +22,20 @@
       "when": 1791756357957,
       "tag": "0002_remove_collectible_nfts",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793815597156,
+      "tag": "0003_prediction_cash_cost_basis",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793818723317,
+      "tag": "0004_leverage_cap_20",
+      "breakpoints": true
     }
   ]
 }

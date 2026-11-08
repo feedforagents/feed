@@ -351,6 +351,10 @@ describe('Markets Tick Integration', () => {
         isActive: true,
       });
 
+      const afterParentCount = await countActiveMainMarkets();
+      expect(afterParentCount).toBe(initialCount + 1);
+      const gapFillBeforeSubMarkets = afterParentCount < 10;
+
       // Create 10 sub-markets to simulate the MAX_SUB_MARKETS scenario
       const subMarketCount = 10;
       for (let i = 0; i < subMarketCount; i++) {
@@ -407,11 +411,11 @@ describe('Markets Tick Integration', () => {
         initialCount + 1 + subMarketCount
       );
 
-      // Gap-filling logic uses countActiveMainMarkets(), which excludes sub-markets
-      // This verifies that even with 10 sub-markets, gap-filling would still trigger
-      // based on the main market count, not the total count
-      const gapFillShouldTrigger = afterManySubsCount < 10; // MARKET_STRUCTURE total is 10
-      expect(gapFillShouldTrigger).toBe(true);
+      // Sub-markets must not change the gap decision. A prior real cron run
+      // may already have filled the ten main slots, in which case neither
+      // count should request gap-filling. Do not assume an empty database.
+      const gapFillAfterSubMarkets = afterManySubsCount < 10;
+      expect(gapFillAfterSubMarkets).toBe(gapFillBeforeSubMarkets);
     });
   });
 

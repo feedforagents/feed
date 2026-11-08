@@ -6,9 +6,9 @@
  *
  * @description
  * Returns a canonical portfolio breakdown for consistent P/L across the app.
- * This includes wallet balance, agents-held balance, open positions value, and
+ * This includes wallet balance, open positions value, and
  * a unified Total P/L computed as:
- *   (Agents + Positions + Wallet) - Original Amount (net deposits/withdrawals + transfers)
+ *   (Positions + Wallet) - Original Amount (net deposits/withdrawals + transfers)
  */
 
 import {

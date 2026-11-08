@@ -206,7 +206,6 @@ bun scripts/prompt-diff.ts \
 
 # Simulations and measurements
 bun run sim:core -- --cycles 5            # report in runs/core-simulations/
-bun run sim:generate -- --ticks=10
 bun run tick:full                         # needs the dev server on :3000
 bun run report:realism -- --hours 24
 bun run report:markets:health

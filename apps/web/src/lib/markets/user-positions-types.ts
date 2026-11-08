@@ -17,9 +17,6 @@ export interface UserPerpPositionSnapshot {
   realizedPnL: number;
   openedAt: string;
   closedAt: string | null;
-  isAgentPosition: boolean;
-  agentId: string | null;
-  agentName: string | null;
 }
 
 export interface UserPredictionPositionSnapshot {
@@ -42,9 +39,6 @@ export interface UserPredictionPositionSnapshot {
   outcome: boolean | string | null;
   pnl: number | null;
   resolvedAt: string | null;
-  isAgentPosition: boolean;
-  agentId: string | null;
-  agentName: string | null;
 }
 
 export interface UserPositionsSnapshot {

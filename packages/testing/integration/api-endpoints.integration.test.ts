@@ -8,6 +8,9 @@
  */
 
 import { beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { ReputationService, TradingLeaderboardService } from '@feed/api';
+import { db, inArray, perpPositions, users } from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
 import { requireServer, waitForServerAvailability } from './helpers';
 
 const BASE_URL =
@@ -198,27 +201,142 @@ describe('API Endpoints - Complete Coverage', () => {
   // ============================================
   // AGENTS ENDPOINTS
   // ============================================
-  describe('Agents', () => {
-    test('GET /api/agents', async () => {
-      const res = await get('/api/agents');
-      expect(res.status).toBe(401);
+  describe('Retired hosted-agent endpoints', () => {
+    test('personal wallets exclude legacy hosted-agent positions and P&L', async () => {
+      const ownerId = await generateSnowflakeId();
+      const legacyAgentId = await generateSnowflakeId();
+      const ownerPositionId = await generateSnowflakeId();
+      const legacyPositionId = await generateSnowflakeId();
+      const fixtureUserIds = [ownerId, legacyAgentId];
+      await db.insert(users).values([
+        {
+          id: ownerId,
+          username: `wallet-owner-${ownerId}`,
+          virtualBalance: '103',
+          totalDeposited: '150',
+          lifetimePnL: '3',
+          isTest: true,
+          updatedAt: new Date(),
+        },
+        {
+          id: legacyAgentId,
+          username: `legacy-agent-${legacyAgentId}`,
+          isAgent: true,
+          managedBy: ownerId,
+          virtualBalance: '10950',
+          totalDeposited: '10000',
+          lifetimePnL: '1000',
+          isTest: true,
+          updatedAt: new Date(),
+        },
+      ]);
+      try {
+        await db.insert(perpPositions).values(
+          [
+            { id: ownerPositionId, userId: ownerId, pnl: 5 },
+            { id: legacyPositionId, userId: legacyAgentId, pnl: 20 },
+          ].map(({ id, userId, pnl }) => ({
+            id,
+            userId,
+            ticker: 'FIXTURE',
+            organizationId: 'wallet-scope-fixture',
+            side: 'long',
+            entryPrice: 100,
+            currentPrice: 100 + pnl,
+            size: 100,
+            leverage: 2,
+            liquidationPrice: 50,
+            unrealizedPnL: pnl,
+            unrealizedPnLPercent: pnl * 2,
+            lastUpdated: new Date(),
+          }))
+        );
+        const positionsResponse = await get(
+          `/api/markets/positions/${ownerId}?type=perp`
+        );
+        expect(positionsResponse.status).toBe(200);
+        const snapshot = (await positionsResponse.json()) as {
+          perpetuals: { positions: Array<{ id: string }>; total: number };
+        };
+        expect(snapshot.perpetuals.positions.map(({ id }) => id)).toEqual([
+          ownerPositionId,
+        ]);
+        expect(snapshot.perpetuals.total).toBe(1);
+
+        const historyResponse = await get(
+          `/api/users/${ownerId}/pnl-history?range=ALL&scope=team`
+        );
+        expect(historyResponse.status).toBe(200);
+        const history = (await historyResponse.json()) as {
+          scope: string;
+          points: Array<{ value: number }>;
+        };
+        expect(history.scope).toBe('owner');
+        expect(history.points.at(-1)?.value).toBe(8);
+
+        const portfolioResponse = await get(
+          `/api/users/${ownerId}/portfolio-breakdown`
+        );
+        expect(portfolioResponse.status).toBe(200);
+        const portfolio = (await portfolioResponse.json()) as Record<
+          string,
+          number
+        >;
+        expect(portfolio.wallet).toBe(103);
+        expect(portfolio.positions).toBe(55);
+        expect(portfolio.available).toBe(103);
+        expect(portfolio.totalAssets).toBe(158);
+        expect(portfolio.totalPnL).toBe(8);
+        expect(portfolio).not.toHaveProperty('agents');
+        expect(portfolio).not.toHaveProperty('agentCount');
+        expect(portfolio).not.toHaveProperty('members');
+
+        for (const service of [ReputationService, TradingLeaderboardService]) {
+          const ownerPosition = await service.getUserPosition(
+            ownerId,
+            'wallet'
+          );
+          expect(ownerPosition?.entry.id).toBe(ownerId);
+          expect(ownerPosition?.entry.lifetimePnL).toBe(3);
+          expect(
+            await service.getUserPosition(legacyAgentId, 'wallet')
+          ).toBeNull();
+        }
+        const retiredTeamResponse = await get('/api/leaderboard?type=team');
+        expect(retiredTeamResponse.status).toBe(400);
+      } finally {
+        await db
+          .delete(perpPositions)
+          .where(inArray(perpPositions.userId, fixtureUserIds));
+        await db.delete(users).where(inArray(users.id, fixtureUserIds));
+      }
     });
 
-    test('GET /api/agents/discover', async () => {
-      const res = await get('/api/agents/discover?limit=5');
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(Array.isArray(data.agents)).toBe(true);
+    test('benchmark summaries no longer accept launch requests', async () => {
+      const response = await post('/api/admin/training/benchmark', {});
+      expect(response.status).toBe(405);
     });
 
-    test('GET /api/agent-templates', async () => {
-      const res = await get('/api/agent-templates');
-      expect(res.status).toBe(200);
+    test.each([
+      '/api/agents',
+      '/api/agents/discover',
+      '/api/agent-templates',
+      '/api/admin/agents',
+    ])('GET %s is no longer available', async (path) => {
+      const response = await get(path);
+      expect(response.status).toBe(404);
     });
 
-    test('POST /api/agents/onboard - requires auth', async () => {
-      const res = await post('/api/agents/onboard', {});
-      expect(res.status).toBe(401);
+    test.each([
+      '/api/agents',
+      '/api/agents/onboard',
+      '/api/agents/external/register',
+      '/api/agents/auth',
+      '/api/agents/team-chat',
+      '/api/cron/agent-tick',
+    ])('POST %s cannot launch a hosted agent', async (path) => {
+      const response = await post(path, {});
+      expect(response.status).toBe(404);
     });
   });
 
@@ -489,8 +607,16 @@ describe('API Endpoints - Complete Coverage', () => {
   // ============================================
   describe('NPC', () => {
     test('POST /api/npc/allocation', async () => {
-      const res = await post('/api/npc/allocation', {});
-      // Cron-secret route: requireCronAuth rejects with AuthorizationError (403)
+      const res = await fetch(`${BASE_URL}/api/npc/allocation`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer invalid-cron-credential',
+        },
+        body: '{}',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      // Explicitly invalid credentials are rejected in development and production.
       expect(res.status).toBe(403);
     });
 

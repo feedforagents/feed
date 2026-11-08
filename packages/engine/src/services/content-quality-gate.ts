@@ -18,9 +18,8 @@
 
 import { logger } from '@feed/shared';
 import {
+  checkEntityConsistency,
   clearKnownNamesCache,
-  extractProperNouns,
-  getKnownNames,
   validateCoherence,
   validateGrounding,
 } from './content-grounding-validator';
@@ -66,7 +65,7 @@ export class ContentQualityGate {
     if (!structure.passed) reasons.push(...structure.reasons);
 
     // 2. Entity allowlist
-    const entity = this.checkEntityAllowlist(parodyTitle);
+    const entity = checkEntityConsistency(parodyTitle);
     scores.push(entity.score);
     if (!entity.passed) reasons.push(...entity.reasons);
 
@@ -129,7 +128,7 @@ export class ContentQualityGate {
     if (!structure.passed) reasons.push(...structure.reasons);
 
     // 2. Entity allowlist
-    const entity = this.checkEntityAllowlist(factText);
+    const entity = checkEntityConsistency(factText);
     scores.push(entity.score);
     if (!entity.passed) reasons.push(...entity.reasons);
 
@@ -187,7 +186,7 @@ export class ContentQualityGate {
     if (!structure.passed) reasons.push(...structure.reasons);
 
     // 2. Entity allowlist
-    const entity = this.checkEntityAllowlist(articleText);
+    const entity = checkEntityConsistency(articleText, sourceContext);
     scores.push(entity.score);
     if (!entity.passed) reasons.push(...entity.reasons);
 
@@ -249,51 +248,5 @@ export class ContentQualityGate {
 
     const score = reasons.length === 0 ? 1 : 0;
     return { passed: reasons.length === 0, score, reasons };
-  }
-
-  /**
-   * Maximum unknown entities allowed before failing validation.
-   * Matches MAX_UNKNOWN_ENTITIES in content-grounding-validator.ts.
-   * Value of 1 means: allow up to 1 unknown proper noun (could be a real-world
-   * reference), but 2+ suggests the LLM is inventing entities.
-   */
-  private static readonly MAX_UNKNOWN_ENTITIES = 1;
-
-  /**
-   * Check that capitalized multi-word proper nouns exist in StaticDataRegistry.
-   *
-   * Extracts capitalized phrases (2+ words starting with uppercase) that look
-   * like proper nouns and checks them against known actor names and org names.
-   * Single unknown proper nouns are allowed (common in news), but 2+ unknown
-   * multi-word proper nouns suggest the LLM invented entities.
-   *
-   * Uses the shared cache from content-grounding-validator to avoid
-   * duplicate caches and ensure consistent invalidation.
-   */
-  private static checkEntityAllowlist(text: string): {
-    passed: boolean;
-    score: number;
-    reasons: string[];
-  } {
-    // Use shared cache from content-grounding-validator
-    const knownNames = getKnownNames();
-
-    // Shared extraction with content-grounding-validator (distinct names).
-    const unknownEntities = extractProperNouns(text).filter(
-      (name) => !knownNames.has(name.toLowerCase())
-    );
-
-    // Allow up to MAX_UNKNOWN_ENTITIES unknown proper nouns (could be real-world references),
-    // but more suggests the LLM is inventing entities
-    const passed = unknownEntities.length <= this.MAX_UNKNOWN_ENTITIES;
-    const score = passed ? 1 : 0;
-    const reasons =
-      unknownEntities.length > this.MAX_UNKNOWN_ENTITIES
-        ? [
-            `${unknownEntities.length} unknown entities: ${unknownEntities.slice(0, 3).join(', ')}`,
-          ]
-        : [];
-
-    return { passed, score, reasons };
   }
 }

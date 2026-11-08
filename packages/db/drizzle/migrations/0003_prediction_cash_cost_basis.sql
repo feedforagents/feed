@@ -1,0 +1,1 @@
+ALTER TABLE "Position" ADD COLUMN "cashCostBasis" numeric(18, 2);

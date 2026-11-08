@@ -81,6 +81,31 @@ describe('Strict trading contracts', () => {
     expect(() => getSafeContextLimit('qwen3-32b', 32768)).toThrow();
     expect(() => getSafeContextLimit('qwen3-32b', Number.NaN)).toThrow();
   });
+  test('uses the configured compatible endpoint context size', () => {
+    const keys = ['SURPLUS_API_KEY', 'SURPLUS_MODEL', 'SURPLUS_CONTEXT_TOKENS'];
+    const previous = keys.map((key) => process.env[key]);
+    try {
+      process.env.SURPLUS_API_KEY = 'local-test-key';
+      process.env.SURPLUS_MODEL = 'local-instruct';
+      process.env.SURPLUS_CONTEXT_TOKENS = '32768';
+      expect(getSafeContextLimit('local-instruct', 1000)).toBe(31112);
+      expect(getSafeContextLimit('other-model', 1000)).toBe(7028);
+      delete process.env.SURPLUS_CONTEXT_TOKENS;
+      expect(getSafeContextLimit('local-instruct', 1000)).toBe(7028);
+      for (const invalid of ['0', '-1', '1.5', 'NaN', 'Infinity']) {
+        process.env.SURPLUS_CONTEXT_TOKENS = invalid;
+        expect(() => getSafeContextLimit('local-instruct', 1000)).toThrow(
+          'SURPLUS_CONTEXT_TOKENS must be a positive integer'
+        );
+      }
+    } finally {
+      keys.forEach((key, index) => {
+        const value = previous[index];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      });
+    }
+  });
   test('keeps opaque XML identifiers as strings', () => {
     const parsed = parseXML(
       '<response><marketId>367525326588215296</marketId><npcId>1234</npcId><amount>25</amount></response>'

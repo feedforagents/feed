@@ -192,6 +192,9 @@ export async function callGroqDirect(params: {
     system: params.system,
     temperature: params.temperature ?? 0.7,
     maxOutputTokens: params.maxTokens ?? 8192,
+    ...(model.includes('qwen3')
+      ? { providerOptions: { groq: { reasoningEffort: 'none' } } }
+      : {}),
     maxRetries: 0, // Every request is observable; callers own explicit retries.
     abortSignal: AbortSignal.timeout(timeoutMs),
     experimental_telemetry: { isEnabled: false },

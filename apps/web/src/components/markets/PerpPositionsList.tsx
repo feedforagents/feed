@@ -6,7 +6,7 @@ import {
   formatCurrency,
   logger,
 } from '@feed/shared';
-import { AlertTriangle, Bot, TrendingDown, TrendingUp } from 'lucide-react';
+import { AlertTriangle, TrendingDown, TrendingUp } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { useAuth } from '@/hooks/useAuth';
@@ -258,12 +258,6 @@ export function PerpPositionsList({
                   <span className="font-bold text-foreground text-xs">
                     ${position.ticker}
                   </span>
-                  {position.isAgentPosition && (
-                    <span className="flex shrink-0 items-center gap-0.5 rounded bg-muted px-1 py-0.5 font-medium text-[11px] text-muted-foreground">
-                      <Bot size={10} />
-                      {position.agentName || 'Agent'}
-                    </span>
-                  )}
                 </div>
                 <span
                   className={cn(
