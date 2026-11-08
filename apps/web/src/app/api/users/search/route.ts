@@ -3,7 +3,7 @@
  *
  * @description
  * Search for users by username or display name with fuzzy matching.
- * Returns real users only by default (excludes NPCs, agents, banned users, and current user).
+ * Returns real users only by default (excludes NPCs, agents, banned users, test users, and current user).
  * Designed for user mention autocomplete, friend finding, and social discovery.
  *
  * **Features:**
@@ -13,6 +13,7 @@
  * - Excludes NPCs/actors by default
  * - Excludes agents by default (use includeAgents=true to include)
  * - Excludes banned users
+ * - Excludes test users (isTest flag or 'test-' id prefix)
  * - Limits to 20 results (performance)
  * - Alphabetically sorted results
  *
@@ -175,6 +176,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ...(includeAgents ? [] : [{ isAgent: false }]),
       {
         isBanned: false,
+      },
+      // Test accounts are not real people: sibling discovery surfaces drop
+      // them before paginating (DatabaseService.getRecentPosts excludes
+      // authors with isTest set or an id starting with 'test-').
+      {
+        isTest: false,
+      },
+      {
+        NOT: {
+          id: {
+            startsWith: 'test-',
+          },
+        },
       },
     ];
 
