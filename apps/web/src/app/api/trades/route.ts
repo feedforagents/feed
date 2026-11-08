@@ -182,7 +182,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const userFilter = params.userId ? { userId: params.userId } : {};
 
   // Get recent balance transactions (deposits, withdrawals, trades)
-  // Only include market-related transactions (buys/sells)
+  // Only include market-related transactions: every balance-changing trade
+  // event the services record. Settlement payouts (pred_resolve), cancelled
+  // market refunds (pred_cancel), perp adds and flips, and partial closes
+  // move the balance exactly like buys/sells do, so the history must list
+  // them too — otherwise the balance changes with no visible entry.
   const balanceTransactions = await db.balanceTransaction.findMany({
     take: params.limit,
     skip: params.offset,
@@ -193,8 +197,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         in: [
           'pred_buy',
           'pred_sell',
+          'pred_resolve',
+          'pred_cancel',
           'perp_open',
           'perp_close',
+          'perp_partial_close',
+          'perp_add_to_position',
+          'perp_flip_position',
           'perp_liquidation',
         ],
       },
@@ -352,7 +361,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ...balanceTransactions
         .filter(
           (tx) =>
-            (tx.type === 'pred_buy' || tx.type === 'pred_sell') && tx.relatedId
+            (tx.type === 'pred_buy' ||
+              tx.type === 'pred_sell' ||
+              tx.type === 'pred_resolve' ||
+              tx.type === 'pred_cancel') &&
+            tx.relatedId
         )
         .map((tx) => tx.relatedId as string),
       ...npcTrades
@@ -383,7 +396,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         return !user?.isActor; // Exclude NPC actors
       })
       .map((tx) => {
-        const isPrediction = tx.type === 'pred_buy' || tx.type === 'pred_sell';
+        const isPrediction =
+          tx.type === 'pred_buy' ||
+          tx.type === 'pred_sell' ||
+          tx.type === 'pred_resolve' ||
+          tx.type === 'pred_cancel';
         const market =
           isPrediction && tx.relatedId
             ? (predictionMarketsMap.get(tx.relatedId) ?? null)
