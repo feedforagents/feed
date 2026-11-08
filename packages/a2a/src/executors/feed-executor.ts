@@ -28,12 +28,19 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import type { WalletPort } from '@feed/core/markets/shared';
 import {
+  and,
   asUser,
   db,
+  desc,
+  eq,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
   getRawDrizzle,
+  isNull,
+  lte,
+  posts,
+  postTags,
   sql,
 } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
@@ -2485,35 +2492,34 @@ export class FeedAgentExecutor implements AgentExecutor {
       return { posts: [] };
     }
 
-    // Find posts with this tag via PostTag join table
-    const postTagEntries = await db.postTag.findMany({
-      where: { tagId: tag.id },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-    });
-
-    const postIds = postTagEntries.map((pt) => pt.postId);
-
-    if (postIds.length === 0) {
-      return { posts: [] };
-    }
-
-    // Fetch the actual posts. Only posts up to the current time:
-    // future-dated posts are scheduled and must not be exposed early
-    // (the web tag surface applies the same timestamp bound).
-    const posts = await db.post.findMany({
-      where: {
-        id: { in: postIds },
-        deletedAt: null,
-        timestamp: { lte: new Date() },
-        type: 'post',
-      },
-      orderBy: { timestamp: 'desc' },
-    });
+    // Join memberships to posts so eligibility is applied BEFORE
+    // limit/offset: paginating the memberships first returns empty pages
+    // when the newest memberships point at future or deleted posts.
+    // Same joined pattern as getPostsByTag in
+    // packages/engine/src/services/tag-service.ts. Only posts up to the
+    // current time: future-dated posts are scheduled and must not be
+    // exposed early (the web tag surface applies the same timestamp
+    // bound). Ordering keeps the previous response order (newest post
+    // first, membership order breaking timestamp ties).
+    const now = new Date();
+    const rows = await getRawDrizzle()
+      .select({ post: posts })
+      .from(postTags)
+      .innerJoin(posts, eq(postTags.postId, posts.id))
+      .where(
+        and(
+          eq(postTags.tagId, tag.id),
+          isNull(posts.deletedAt),
+          lte(posts.timestamp, now),
+          eq(posts.type, 'post')
+        )
+      )
+      .orderBy(desc(posts.timestamp), desc(postTags.createdAt))
+      .offset(offset)
+      .limit(limit);
 
     return {
-      posts: posts.map((p) => ({
+      posts: rows.map(({ post: p }) => ({
         id: p.id,
         content: p.content,
         authorId: p.authorId,
