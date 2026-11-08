@@ -74,6 +74,9 @@ import {
   lt,
   messageReactions,
   messages,
+  notInArray,
+  userBlocks,
+  userMutes,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -169,6 +172,45 @@ export const GET = withErrorHandling(
         .from(chatParticipants)
         .where(eq(chatParticipants.chatId, chatId));
 
+      // A group chat is a reading surface like any other feed: authors the
+      // viewer blocked or muted, and authors who blocked the viewer, must
+      // not appear in the viewer's message list — the same rule the home
+      // feeds, the post list, the comment thread, and the notification
+      // list apply (see api/feed/_lib/viewer-moderation). Loaded through
+      // this route's own handle so failures propagate instead of falling
+      // back to an unfiltered list. DM history is out of scope here: a
+      // block relationship already prevents creating a DM and sending in
+      // one.
+      let excludedAuthorIds = new Set<string>();
+      if (chat.isGroup) {
+        const [blocked, muted, blockedBy] = await Promise.all([
+          db
+            .select({ id: userBlocks.blockedId })
+            .from(userBlocks)
+            .where(eq(userBlocks.blockerId, userId)),
+          db
+            .select({ id: userMutes.mutedId })
+            .from(userMutes)
+            .where(eq(userMutes.muterId, userId)),
+          db
+            .select({ id: userBlocks.blockerId })
+            .from(userBlocks)
+            .where(eq(userBlocks.blockedId, userId)),
+        ]);
+        excludedAuthorIds = new Set(
+          [...blocked, ...muted, ...blockedBy].map((row) => row.id)
+        );
+      }
+      const excludedSenderIds = [...excludedAuthorIds];
+
+      // Filter at the query level so pagination counts only the messages
+      // the viewer may see; a post-fetch filter would shrink pages and
+      // strand the ones behind them.
+      const senderScope =
+        excludedSenderIds.length > 0
+          ? notInArray(messages.senderId, excludedSenderIds)
+          : undefined;
+
       // Build message query — three modes:
       // 1. `after` (ISO timestamp): fetch messages NEWER than this time (ASC order, for sync)
       // 2. `cursor` (message ID): fetch messages OLDER than this cursor (DESC order, for load-more)
@@ -180,7 +222,11 @@ export const GET = withErrorHandling(
           .select()
           .from(messages)
           .where(
-            and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
+            and(
+              eq(messages.chatId, chatId),
+              gt(messages.createdAt, after),
+              senderScope
+            )
           )
           .orderBy(asc(messages.createdAt))
           .limit(effectiveLimit);
@@ -207,7 +253,8 @@ export const GET = withErrorHandling(
           .where(
             and(
               eq(messages.chatId, chatId),
-              lt(messages.createdAt, cursorMessage.createdAt)
+              lt(messages.createdAt, cursorMessage.createdAt),
+              senderScope
             )
           )
           .orderBy(desc(messages.createdAt))
@@ -217,12 +264,17 @@ export const GET = withErrorHandling(
         messagesList = await db
           .select()
           .from(messages)
-          .where(eq(messages.chatId, chatId))
+          .where(and(eq(messages.chatId, chatId), senderScope))
           .orderBy(desc(messages.createdAt))
           .limit(effectiveLimit + 1);
       }
 
-      return { chat, participants: participantsList, messages: messagesList };
+      return {
+        chat,
+        participants: participantsList,
+        messages: messagesList,
+        excludedAuthorIds,
+      };
     };
 
     const fullChat = await asUser(authUser, fetchChatData);
@@ -435,6 +487,9 @@ export const GET = withErrorHandling(
       }, 'get-reply-to-messages');
 
       for (const rm of replyMessages) {
+        // A reply must not quote a hidden author's message back into the
+        // viewer's feed; treat it like an unresolvable reply instead.
+        if (fullChat.excludedAuthorIds.has(rm.senderId)) continue;
         const sender = usersMap.get(rm.senderId);
         const actor = actorsMap.get(rm.senderId);
         replyToMessagesMap.set(rm.id, {
