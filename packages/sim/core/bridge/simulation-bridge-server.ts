@@ -35,10 +35,12 @@
  *     not advance tickNumber.
  */
 
+import { PredictionPricing } from '@feed/core/markets/prediction';
 import {
   db,
   desc,
   eq,
+  markets,
   perpPositions,
   positions as positionsTable,
   questions,
@@ -158,27 +160,39 @@ function assignArchetypes(
 }
 
 async function getPredictionMarketsData() {
-  const activeQuestions = await db
-    .select()
+  const rows = await db
+    .select({
+      id: questions.id,
+      text: questions.text,
+      yesShares: markets.yesShares,
+      noShares: markets.noShares,
+    })
     .from(questions)
+    .leftJoin(markets, eq(markets.id, questions.marketId))
     .where(eq(questions.status, 'active'))
     .orderBy(desc(questions.createdAt))
     .limit(20);
 
-  return activeQuestions.map((q) => ({
-    id: q.id,
-    question: q.text ?? 'Unknown',
-    yesPrice: Number(
-      (q as Record<string, unknown>).yesPrice ??
-        (q as Record<string, unknown>).currentYesPrice ??
-        50
-    ),
-    noPrice: Number(
-      (q as Record<string, unknown>).noPrice ??
-        (q as Record<string, unknown>).currentNoPrice ??
-        50
-    ),
-  }));
+  return rows.map((row) => {
+    // The Question table carries no price column: the live price is the
+    // CPMM price of the linked Market pool (yesShares / noShares), on the
+    // same 0-100 scale the synthetic markets below use. A question with no
+    // linked market has no pool to price from, so it stays at 50/50.
+    const yesShares = row.yesShares === null ? null : Number(row.yesShares);
+    const noShares = row.noShares === null ? null : Number(row.noShares);
+    const hasPool =
+      yesShares !== null && noShares !== null && yesShares + noShares > 0;
+    return {
+      id: row.id,
+      question: row.text ?? 'Unknown',
+      yesPrice: hasPool
+        ? PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes') * 100
+        : 50,
+      noPrice: hasPool
+        ? PredictionPricing.getCurrentPrice(yesShares, noShares, 'no') * 100
+        : 50,
+    };
+  });
 }
 
 async function getPositionsForUser(npcId: string) {
