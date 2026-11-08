@@ -1,0 +1,177 @@
+/**
+ * POST /api/comments/[id]/like against a real database: a comment that
+ * moderation soft-deleted must not be likable.
+ *
+ * The sibling post like route states the rule for the same action on a
+ * post: a soft-deleted post rejects a new like ("Cannot like deleted
+ * post", POST_DELETED) while an existing like can still be removed. The
+ * comment list route states why: "Soft-deleted (moderated) comments must
+ * never be returned" — the comment is hidden everywhere, and the comment
+ * detail route no longer returns it either. The comment like route never
+ * looked at `deletedAt`, so a hidden comment could still collect a like,
+ * raise its like count, and send its author a "liked your comment"
+ * notification.
+ *
+ * The request is authenticated with the non-production x-dev-user-id
+ * header. The only stub is the `server-only` marker package (an empty
+ * environment guard that throws outside a Server Component); every
+ * database dependency runs for real.
+ */
+
+import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+
+mock.module('server-only', () => ({}));
+
+import {
+  and,
+  comments,
+  db,
+  eq,
+  inArray,
+  notifications,
+  posts,
+  reactions,
+  users,
+} from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
+import { NextRequest } from 'next/server';
+
+let likerId: string;
+let authorId: string;
+let postId: string;
+let visibleCommentId: string;
+let deletedCommentId: string;
+
+let POST: typeof import('../route').POST;
+
+async function likeComment(commentId: string) {
+  const request = new NextRequest(
+    new Request(`http://localhost/api/comments/${commentId}/like`, {
+      method: 'POST',
+    }),
+    { headers: { 'x-dev-user-id': likerId } }
+  );
+  const response = await POST(request, {
+    params: Promise.resolve({ id: commentId }),
+  });
+  const body = (await response.json().catch(() => null)) as {
+    data?: { likeCount: number; isLiked: boolean };
+    error?: unknown;
+  } | null;
+  return { status: response.status, body };
+}
+
+async function likeRows(commentId: string) {
+  return db
+    .select({ id: reactions.id })
+    .from(reactions)
+    .where(and(eq(reactions.commentId, commentId), eq(reactions.type, 'like')));
+}
+
+async function reactionNotifications(commentId: string) {
+  return db
+    .select({ id: notifications.id })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, authorId),
+        eq(notifications.commentId, commentId),
+        eq(notifications.type, 'reaction')
+      )
+    );
+}
+
+beforeAll(async () => {
+  ({ POST } = await import('../route'));
+
+  [likerId, authorId, postId, visibleCommentId, deletedCommentId] =
+    await Promise.all([
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+    ]);
+
+  const now = new Date();
+  const past = new Date(now.getTime() - 10 * 60_000);
+
+  await db.insert(users).values([
+    {
+      id: likerId,
+      username: `test-f12-liker-${likerId}`,
+      displayName: 'Comment Like Fixture Liker',
+      updatedAt: now,
+    },
+    {
+      id: authorId,
+      username: `test-f12-author-${authorId}`,
+      displayName: 'Comment Like Fixture Author',
+      updatedAt: now,
+    },
+  ]);
+
+  await db.insert(posts).values({
+    id: postId,
+    content: 'Fixture post for comment like moderation test',
+    authorId,
+    timestamp: past,
+    createdAt: past,
+  });
+
+  // One comment anyone can see, and one moderation soft-deleted comment
+  // (deletedAt set) on the same post by the same author.
+  await db.insert(comments).values([
+    {
+      id: visibleCommentId,
+      content: 'A visible fixture comment',
+      postId,
+      authorId,
+      createdAt: past,
+      updatedAt: past,
+    },
+    {
+      id: deletedCommentId,
+      content: 'A soft-deleted fixture comment',
+      postId,
+      authorId,
+      createdAt: past,
+      updatedAt: past,
+      deletedAt: now,
+    },
+  ]);
+});
+
+afterAll(async () => {
+  await db
+    .delete(notifications)
+    .where(
+      inArray(notifications.commentId, [visibleCommentId, deletedCommentId])
+    );
+  await db
+    .delete(reactions)
+    .where(inArray(reactions.commentId, [visibleCommentId, deletedCommentId]));
+  await db
+    .delete(comments)
+    .where(inArray(comments.id, [visibleCommentId, deletedCommentId]));
+  await db.delete(posts).where(eq(posts.id, postId));
+  await db.delete(users).where(inArray(users.id, [likerId, authorId]));
+});
+
+describe('POST /api/comments/[id]/like moderation', () => {
+  it('still likes a visible comment and notifies its author', async () => {
+    const { status, body } = await likeComment(visibleCommentId);
+    expect(status).toBe(201);
+    expect(body?.data?.isLiked).toBe(true);
+    expect(body?.data?.likeCount).toBe(1);
+    expect(await likeRows(visibleCommentId)).toHaveLength(1);
+    expect(await reactionNotifications(visibleCommentId)).toHaveLength(1);
+  });
+
+  it('rejects a like on a soft-deleted comment and creates nothing', async () => {
+    const { status } = await likeComment(deletedCommentId);
+    expect(status).toBe(400);
+    expect(await likeRows(deletedCommentId)).toHaveLength(0);
+    expect(await reactionNotifications(deletedCommentId)).toHaveLength(0);
+  });
+});
