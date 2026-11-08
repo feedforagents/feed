@@ -72,7 +72,12 @@ export function calculateModelPilotEstimateRange(
     min += 4000;
     max += 6000;
   }
-  if (input.privateDeployment || input.dataExclusivity) {
+  // The form states each of these options adds its own surcharge.
+  if (input.privateDeployment) {
+    min += 5000;
+    max += 10000;
+  }
+  if (input.dataExclusivity) {
     min += 5000;
     max += 10000;
   }
