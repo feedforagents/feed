@@ -2,6 +2,7 @@
  * Server-side portfolio P&L calculation
  */
 
+import { calculatePredictionCashCostBasis } from '@feed/core/markets/prediction';
 import {
   balanceTransactions,
   db,
@@ -21,28 +22,6 @@ import { FEE_CONFIG } from '../config/fees';
 import type { PortfolioPnLSnapshot } from '../types/portfolio';
 
 export type { PortfolioPnLSnapshot };
-
-/**
- * Remaining gross cash paid for a prediction position, including the entry
- * fee. Prefers the persisted cashCostBasis (the same value the prediction
- * settlement service records and settles against); legacy rows without one
- * fall back to the net-cost gross-up estimate, rounded to cents.
- */
-function grossCashCost(position: {
-  shares: unknown;
-  avgPrice: unknown;
-  cashCostBasis: unknown;
-}): number {
-  if (position.cashCostBasis !== null && position.cashCostBasis !== undefined) {
-    return toNumber(position.cashCostBasis);
-  }
-  const netCost = toNumber(position.shares) * toNumber(position.avgPrice);
-  const feeRate = FEE_CONFIG.TRADING_FEE_RATE;
-  if (feeRate > 0 && feeRate < 1) {
-    return Math.round((netCost / (1 - feeRate)) * 100) / 100;
-  }
-  return netCost;
-}
 
 export async function calculatePortfolioPnL(
   userId: string
@@ -178,7 +157,21 @@ export async function calculatePortfolioPnL(
       // closes. Subtracting net avgPrice would count the already-paid
       // entry fee as profit. Use the persisted cashCostBasis when present,
       // else the net-cost gross-up estimate for legacy rows.
-      return sum + shares * currentPrice - grossCashCost(position);
+      return (
+        sum +
+        shares * currentPrice -
+        calculatePredictionCashCostBasis(
+          {
+            shares,
+            avgPrice,
+            cashCostBasis:
+              position.cashCostBasis == null
+                ? undefined
+                : toNumber(position.cashCostBasis),
+          },
+          FEE_CONFIG.TRADING_FEE_RATE
+        )
+      );
     },
     0
   );

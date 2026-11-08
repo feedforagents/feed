@@ -15,6 +15,7 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   createUserWalletAdapter,
   FEE_CONFIG,
   WalletService,
@@ -145,16 +146,25 @@ export const openPerpAction: Action = {
     const leverage = Math.min(Math.max(requestedLeverage, 1), 10);
     // `amount` is collateral (margin); the market service takes notional size.
     const notionalSize = amount * leverage;
+    // The service debits margin plus the trading fee on the notional size
+    // (PerpMarketService.calculateFee), so the pre-check must cover the fee
+    // too — otherwise a balance equal to `amount` passes here and the open
+    // then fails inside the service with a generic InsufficientFunds error.
+    const fee = Math.max(
+      Math.round(notionalSize * FEE_CONFIG.TRADING_FEE_RATE * 100) / 100,
+      FEE_CONFIG.MIN_FEE_AMOUNT
+    );
+    const totalCost = amount + fee;
 
     try {
       // Check balance
       const balance = await WalletService.getBalance(agentUserId);
-      if (balance.balance < amount) {
+      if (balance.balance < totalCost) {
         return {
           success: false,
-          text: `Insufficient balance ($${balance.balance.toFixed(2)}). Call CHECK_BALANCE first.`,
+          text: `Insufficient balance ($${balance.balance.toFixed(2)}). Opening this position costs $${totalCost.toFixed(2)} ($${amount.toFixed(2)} collateral + $${fee.toFixed(2)} fee). Call CHECK_BALANCE first.`,
           error: 'Insufficient balance',
-          values: { balance: balance.balance },
+          values: { balance: balance.balance, required: totalCost },
         };
       }
 
@@ -162,6 +172,7 @@ export const openPerpAction: Action = {
         settlement: createPerpSettlement(),
         db: new PerpDbAdapter(),
         wallet: createUserWalletAdapter(),
+        cache: createPerpTradesCachePort(),
         fees: {
           tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
           platformShare: FEE_CONFIG.PLATFORM_SHARE,
