@@ -54,6 +54,22 @@ export class TradingPerformanceService {
     };
   }
 
+  /**
+   * Board membership for the wallet trading leaderboard: the same
+   * non-player accounts the rest of the product keeps off ranking
+   * surfaces — actors and agents, plus test accounts (isTest flag or a
+   * 'test-' id prefix) and banned accounts, matching the reputation
+   * board's membership rule. Every trading-board query (rows, single
+   * entry, rank count) must use this one fragment so the list, the
+   * totals, and a player's own rank can never disagree about who is on
+   * the board.
+   */
+  private static walletMembershipSql() {
+    return sql.raw(
+      `u."isActor" = false AND u."isAgent" = false AND u."isTest" = false AND u."isBanned" = false AND u."id" NOT LIKE 'test-%'`
+    );
+  }
+
   private static walletCapitalCte() {
     return sql.raw(`
       SELECT
@@ -196,7 +212,7 @@ export class TradingPerformanceService {
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
       LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
       LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false
+      WHERE ${this.walletMembershipSql()}
       ORDER BY "netProfit" DESC, u."createdAt" ASC, u."id" ASC
       LIMIT ${limit} OFFSET ${offset}
     `);
@@ -241,7 +257,7 @@ export class TradingPerformanceService {
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
       LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
       LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false AND u."id" = ${userId}
+      WHERE ${this.walletMembershipSql()} AND u."id" = ${userId}
       LIMIT 1
     `);
 
@@ -266,7 +282,7 @@ export class TradingPerformanceService {
         FROM "User" u
         LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
         LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-        WHERE u."isActor" = false AND u."isAgent" = false
+        WHERE ${this.walletMembershipSql()}
       )
       SELECT COUNT(*)::int AS "count"
       FROM wallet_rows wr

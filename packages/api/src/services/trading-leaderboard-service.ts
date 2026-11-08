@@ -1,4 +1,4 @@
-import { and, count, db, eq, users } from '@feed/db';
+import { and, count, db, eq, like, not, users } from '@feed/db';
 import type {
   LeaderboardEntry,
   LeaderboardPosition,
@@ -35,6 +35,23 @@ function mapWalletEntry(
   };
 }
 
+/**
+ * Board membership for the wallet trading leaderboard, mirroring the
+ * fragment TradingPerformanceService applies to its row, entry, and
+ * rank queries: actors, agents, test accounts (isTest flag or a
+ * 'test-' id prefix), and banned accounts are not board members, so
+ * the total count can never include accounts the rows exclude.
+ */
+function walletLeaderboardMembership() {
+  return [
+    eq(users.isActor, false),
+    eq(users.isAgent, false),
+    eq(users.isTest, false),
+    eq(users.isBanned, false),
+    not(like(users.id, 'test-%')),
+  ];
+}
+
 export class TradingLeaderboardService {
   static async getWalletLeaderboard(
     page = 1,
@@ -46,7 +63,7 @@ export class TradingLeaderboardService {
       db
         .select({ count: count() })
         .from(users)
-        .where(and(eq(users.isActor, false), eq(users.isAgent, false))),
+        .where(and(...walletLeaderboardMembership())),
       TradingPerformanceService.getWalletLeaderboardRows(pageSize, skip),
     ]);
 
