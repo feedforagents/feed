@@ -30,7 +30,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     authenticatedUser = await authenticate(request);
   }
 
-  const service = createPerpMarketService();
+  const service = createPerpMarketService({ withPriceImpact: true });
   const preview = authenticatedUser
     ? {
         settlementMode: 'offchain',
