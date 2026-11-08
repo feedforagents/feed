@@ -312,6 +312,13 @@ describe('Achievement Engine (checkProgress)', () => {
           completedAt: 'ucp.completedAt',
           pointsAwarded: 'ucp.pointsAwarded',
         },
+        balanceTransactions: {
+          _: 'balanceTransactions',
+          userId: 'bt.userId',
+          type: 'bt.type',
+          relatedId: 'bt.relatedId',
+          createdAt: 'bt.createdAt',
+        },
         positions: {
           _: 'positions',
           userId: 'p.userId',

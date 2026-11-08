@@ -11,6 +11,7 @@
 
 import {
   and,
+  balanceTransactions,
   chats,
   comments,
   count,
@@ -238,6 +239,37 @@ type WindowedResolver = (
   end: Date
 ) => Promise<number>;
 
+// Ledger rows that record an executed prediction trade. Prediction
+// trade rows carry the market in relatedId; settlement (pred_resolve)
+// and refund (pred_cancel) rows are not trades.
+const DISTINCT_MARKET_TRADE_TYPES = ['pred_buy', 'pred_sell'];
+
+// Distinct prediction markets actually traded inside a window. The
+// wallet ledger is the per-trade record; counting position rows
+// instead credits a market to the window in which its row was born
+// (the first trade ever placed on it), not to the windows in which
+// it is traded.
+async function countDistinctLedgerMarketsInWindow(
+  userId: string,
+  start: Date,
+  end: Date
+): Promise<number> {
+  const r = await db
+    .select({
+      c: sql<number>`COUNT(DISTINCT ${balanceTransactions.relatedId})`,
+    })
+    .from(balanceTransactions)
+    .where(
+      and(
+        eq(balanceTransactions.userId, userId),
+        inArray(balanceTransactions.type, DISTINCT_MARKET_TRADE_TYPES),
+        gte(balanceTransactions.createdAt, start),
+        lt(balanceTransactions.createdAt, end)
+      )
+    );
+  return Number(r[0]!.c);
+}
+
 const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
   // ── Simple counts ──
 
@@ -294,17 +326,7 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
   },
 
   daily_distinct_markets: async (userId, start, end) => {
-    const r = await db
-      .select({ c: sql<number>`COUNT(DISTINCT ${positions.marketId})` })
-      .from(positions)
-      .where(
-        and(
-          eq(positions.userId, userId),
-          gte(positions.createdAt, start),
-          lt(positions.createdAt, end)
-        )
-      );
-    return Number(r[0]!.c);
+    return countDistinctLedgerMarketsInWindow(userId, start, end);
   },
 
   daily_post: async (userId, start, end) => {
@@ -581,17 +603,7 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
   },
 
   weekly_distinct_markets: async (userId, start, end) => {
-    const r = await db
-      .select({ c: sql<number>`COUNT(DISTINCT ${positions.marketId})` })
-      .from(positions)
-      .where(
-        and(
-          eq(positions.userId, userId),
-          gte(positions.createdAt, start),
-          lt(positions.createdAt, end)
-        )
-      );
-    return Number(r[0]!.c);
+    return countDistinctLedgerMarketsInWindow(userId, start, end);
   },
 
   weekly_trade_win: async (userId, start, end) => {
