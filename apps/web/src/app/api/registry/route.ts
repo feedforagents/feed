@@ -175,8 +175,27 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   } = await publicRateLimit(request);
   if (error) return error;
 
-  // Build where clause
-  const where = {};
+  // Build where clause — the public directory lists real members only.
+  // Test accounts (isTest set, or an id starting with 'test-', the
+  // definition DatabaseService uses for test authors) and banned accounts
+  // are hidden on every sibling discovery surface: the people search,
+  // the wallet leaderboard, profile follow lists, and the A2A search all
+  // exclude them in the query. This route's payload carries neither
+  // isTest nor isBanned, so consumers cannot filter them out either.
+  // The one surface that must keep banned users visible is the admin
+  // registry panel, and it reads /api/registry/all, not this route.
+  // The same where feeds the list and the count, so pagination.total
+  // counts only the members the directory actually shows. Actors and
+  // agents stay listed: they are part of this directory's contract.
+  const where = {
+    isTest: false,
+    isBanned: false,
+    NOT: {
+      id: {
+        startsWith: 'test-',
+      },
+    },
+  };
 
   // Build order by clause
   const orderBy = filters.sortBy
