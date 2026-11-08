@@ -34,9 +34,10 @@ let deletedCommentId: string;
 let visibleReplyId: string;
 let deletedReplyId: string;
 let childOfDeletedId: string;
+let visibleGrandchildId: string;
 const allCommentIds: string[] = [];
 
-let GET: typeof import('../route').GET;
+let GET: typeof import('../../../apps/web/src/app/api/comments/[id]/route').GET;
 
 async function fetchComment(id: string) {
   const request = new NextRequest(
@@ -53,7 +54,7 @@ async function fetchComment(id: string) {
 }
 
 beforeAll(async () => {
-  ({ GET } = await import('../route'));
+  ({ GET } = await import('../../../apps/web/src/app/api/comments/[id]/route'));
 
   [authorA, authorB, postId] = await Promise.all([
     generateSnowflakeId(),
@@ -66,13 +67,22 @@ beforeAll(async () => {
     visibleReplyId,
     deletedReplyId,
     childOfDeletedId,
-  ] = await Promise.all(Array.from({ length: 5 }, () => generateSnowflakeId()));
+    visibleGrandchildId,
+  ] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ]);
   allCommentIds.push(
     visibleCommentId,
     deletedCommentId,
     visibleReplyId,
     deletedReplyId,
-    childOfDeletedId
+    childOfDeletedId,
+    visibleGrandchildId
   );
 
   const now = new Date();
@@ -155,6 +165,16 @@ beforeAll(async () => {
       updatedAt: now,
       deletedAt: null,
     },
+    {
+      id: visibleGrandchildId,
+      content: 'visible grandchild through hidden reply',
+      postId,
+      authorId: authorA,
+      parentCommentId: deletedReplyId,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
   ]);
 });
 
@@ -177,9 +197,9 @@ describe('GET /api/comments/[id] moderation visibility', () => {
     const detail = body as CommentDetailResponse;
     expect(detail.comment.id).toBe(visibleCommentId);
     expect(detail.replies.map((r) => r.id)).toEqual([visibleReplyId]);
-    expect(detail.comment.replyCount).toBe(1);
-    // The post holds 5 comment rows, 2 of them soft-deleted.
-    expect(detail.post?.commentCount).toBe(3);
+    expect(detail.comment.replyCount).toBe(2);
+    // Four visible rows remain, including the visible grandchild.
+    expect(detail.post?.commentCount).toBe(4);
   });
 
   it('does not leak a soft-deleted parent through the parent chain', async () => {
@@ -190,5 +210,42 @@ describe('GET /api/comments/[id] moderation visibility', () => {
     expect(JSON.stringify(detail.parentChain)).not.toContain(
       'hidden moderated comment'
     );
+  });
+  it('keeps a visible grandchild reachable without exposing its hidden parent', async () => {
+    const { status, body } = await fetchComment(visibleGrandchildId);
+    expect(status).toBe(200);
+    const detail = body as CommentDetailResponse;
+    expect(detail.parentChain.map((p) => p.id)).toEqual([visibleCommentId]);
+    expect(JSON.stringify(detail)).not.toContain('hidden moderated reply');
+  });
+
+  it('keeps the traversal budget when every intermediate reply is hidden', async () => {
+    const ids = await Promise.all(
+      Array.from({ length: 102 }, () => generateSnowflakeId())
+    );
+    allCommentIds.push(...ids);
+    const now = new Date();
+    await db.insert(comments).values(
+      ids.map((id, index) => ({
+        id,
+        content: `bounded traversal fixture ${index}`,
+        postId,
+        authorId: authorA,
+        parentCommentId: index === 0 ? null : ids[index - 1],
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: index > 0 && index < ids.length - 1 ? now : null,
+      }))
+    );
+    try {
+      const { status, body } = await fetchComment(ids[0]!);
+      expect(status).toBe(200);
+      // The visible leaf lies beyond the pre-existing 99-row traversal budget.
+      // Hidden nodes must consume that budget even though they do not count.
+      expect((body as CommentDetailResponse).comment.replyCount).toBe(0);
+      expect((body as CommentDetailResponse).replies).toEqual([]);
+    } finally {
+      await db.delete(comments).where(inArray(comments.id, ids));
+    }
   });
 });

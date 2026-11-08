@@ -87,9 +87,8 @@ export class TradingPerformanceService {
    * Only historical rows without that value use the net-cost gross-up
    * estimate, matching the settlement service's legacy fallback.
    *
-   * NOTE: this deliberately differs from calculatePortfolioPnL, which still
-   * marks prediction positions off net avgPrice — portfolio reporting needs
-   * the same reconciliation as follow-up.
+   * Keep this expression aligned with calculatePortfolioPnL and the
+   * settlement service's shared cash-cost-basis calculation.
    */
   private static perpUnrealizedCte() {
     return sql.raw(`

@@ -226,23 +226,21 @@ async function countAllRepliesBatch(
   // For each comment, do BFS to count all nested replies
   for (const rootId of commentIds) {
     let count = 0;
+    let visitedCount = 0;
     let currentLevel = [rootId];
 
     // BFS through reply tree, but stop at MAX_REPLY_COUNT
-    while (currentLevel.length > 0 && count < MAX_REPLY_COUNT) {
-      // Get all direct replies to current level comments
-      // (soft-deleted replies are hidden and do not count)
+    while (currentLevel.length > 0 && visitedCount < MAX_REPLY_COUNT) {
+      // Walk through hidden parents to count their still-visible descendants.
+      // Keep the existing traversal budget, including hidden rows, so an
+      // all-hidden chain cannot cause unbounded database work.
       const replies = await db
-        .select({ id: comments.id })
+        .select({ id: comments.id, deletedAt: comments.deletedAt })
         .from(comments)
-        .where(
-          and(
-            inArray(comments.parentCommentId, currentLevel),
-            isNull(comments.deletedAt)
-          )
-        );
+        .where(inArray(comments.parentCommentId, currentLevel));
 
-      count += replies.length;
+      visitedCount += replies.length;
+      count += replies.filter((reply) => !reply.deletedAt).length;
 
       // Cap at max
       if (count >= MAX_REPLY_COUNT) {
