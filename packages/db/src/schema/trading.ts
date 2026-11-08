@@ -8,6 +8,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import type { JsonValue } from '../types';
 import { users } from './users';
@@ -91,6 +92,14 @@ export const tradingFees = pgTable(
     platformFee: decimal('platformFee', { precision: 18, scale: 2 }).notNull(),
     referrerFee: decimal('referrerFee', { precision: 18, scale: 2 }).notNull(),
     referrerId: text('referrerId'),
+    /**
+     * Idempotency key for this fee intent, generated once at the trade call
+     * site. Nullable for rows written before the key existed; unique when
+     * present so a retried fee can never insert a second row for the same
+     * intent. Postgres treats NULLs as distinct, so legacy rows are
+     * unaffected.
+     */
+    idempotencyKey: text('idempotencyKey'),
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
   },
   (table) => [
@@ -101,6 +110,7 @@ export const tradingFees = pgTable(
     ),
     index('TradingFee_tradeType_idx').on(table.tradeType),
     index('TradingFee_userId_createdAt_idx').on(table.userId, table.createdAt),
+    uniqueIndex('TradingFee_idempotencyKey_idx').on(table.idempotencyKey),
   ]
 );
 
@@ -119,6 +129,13 @@ export const tradingFeeOutbox = pgTable(
     tradeId: text('tradeId'),
     marketId: text('marketId'),
     lastError: text('lastError'),
+    /**
+     * Same idempotency key the inline attempts used. Unique when present so
+     * a retried enqueue can never queue the same fee intent twice; the drain
+     * replays with this key, so a fee the drain already recorded is returned
+     * instead of charged again.
+     */
+    idempotencyKey: text('idempotencyKey'),
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
   },
   (table) => [
@@ -127,6 +144,7 @@ export const tradingFeeOutbox = pgTable(
       table.userId,
       table.createdAt
     ),
+    uniqueIndex('TradingFeeOutbox_idempotencyKey_idx').on(table.idempotencyKey),
   ]
 );
 

@@ -1,6 +1,7 @@
 import {
   ConflictError,
   calculateTradeImpact,
+  generateSnowflakeId,
   getInitialReserves,
   logger,
   PERP_MARKET_CONFIG,
@@ -162,6 +163,13 @@ export class PerpMarketService {
       type: string;
       relatedId: string;
       positionId: string;
+      /**
+       * Idempotency key generated once at the trade call site. Every retry
+       * attempt and the outbox enqueue reuse this exact key, so an ambiguous
+       * commit (fee already recorded, caller only saw an error) can never
+       * charge twice.
+       */
+      idempotencyKey?: string;
     },
     context: { ticker: string }
   ): Promise<void> {
@@ -214,6 +222,7 @@ export class PerpMarketService {
           relatedId: params.relatedId,
           positionId: params.positionId,
           lastError: lastError?.message,
+          idempotencyKey: params.idempotencyKey,
         });
       } catch (enqueueErr) {
         logger.error(
@@ -746,6 +755,10 @@ export class PerpMarketService {
         type: 'perp_open',
         relatedId: ticker,
         positionId: position.id,
+        // One open creates exactly one position, so the key can be derived
+        // from the position id; a later open gets a new position id and a
+        // new key.
+        idempotencyKey: `perp_open:${position.id}`,
       },
       { ticker }
     ).catch(() => {
@@ -957,6 +970,8 @@ export class PerpMarketService {
     const balanceResult = await this.deps.wallet.getBalance(input.userId);
 
     // Fee bookkeeping: retries + optional outbox (see processFeeWithRetry).
+    // One position can be partially closed many times, so the key must be
+    // generated per close — never derived from the position id.
     void this.processFeeWithRetry(
       {
         userId: input.userId,
@@ -964,6 +979,7 @@ export class PerpMarketService {
         type: 'perp_close',
         relatedId: settlement.position.ticker,
         positionId: settlement.position.id,
+        idempotencyKey: await generateSnowflakeId(),
       },
       { ticker: settlement.position.ticker }
     ).catch(() => {
@@ -1714,7 +1730,9 @@ export class PerpMarketService {
       );
 
     // Process fees outside transaction to avoid holding locks during external work.
-    // Uses retry logic for reliability.
+    // Uses retry logic for reliability. One position can be added to many
+    // times, so the key must be generated per add — never derived from the
+    // position id.
     void this.processFeeWithRetry(
       {
         userId: input.userId,
@@ -1722,6 +1740,7 @@ export class PerpMarketService {
         type: 'perp_add_to_position',
         relatedId: result.ticker,
         positionId: result.positionId,
+        idempotencyKey: await generateSnowflakeId(),
       },
       { ticker: result.ticker }
     ).catch(() => {
@@ -2083,6 +2102,9 @@ export class PerpMarketService {
         );
 
       // Fee bookkeeping for close + open legs (retries + optional outbox).
+      // The close leg gets a generated key (a position is closed once here,
+      // but the key must stay unique per fee intent); the flip leg creates
+      // a new position, so its key can be derived from the new position id.
       void Promise.all([
         this.processFeeWithRetry(
           {
@@ -2091,6 +2113,7 @@ export class PerpMarketService {
             type: 'perp_close',
             relatedId: existing.ticker,
             positionId: existing.id,
+            idempotencyKey: await generateSnowflakeId(),
           },
           { ticker: existing.ticker }
         ),
@@ -2101,6 +2124,7 @@ export class PerpMarketService {
             type: 'perp_flip_position',
             relatedId: existing.ticker,
             positionId: flipResult.positionId,
+            idempotencyKey: `perp_flip_position:${flipResult.positionId}`,
           },
           { ticker: existing.ticker }
         ),

@@ -62,6 +62,7 @@ mock.module('@feed/engine', () => ({
   createTradingFeeProcessor: () => ({
     processTradingFee: async () => ({}),
   }),
+  createTradingFeeOutboxAdapter: () => ({}),
   createUserWalletAdapter: () => ({}),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0.001,

@@ -9,16 +9,14 @@
  */
 
 import { describe, expect, mock, test } from 'bun:test';
-import {
-  createTradingFeeProcessor,
-  FeeService,
-} from '../services/fee-service';
+import { createTradingFeeProcessor, FeeService } from '../services/fee-service';
 
 describe('createTradingFeeProcessor', () => {
   test('delegates to FeeService.processTradingFee with the canonical order', async () => {
-    const processTradingFeeMock = mock(
-      async () => ({ feeCharged: 0, referrerPaid: 0 })
-    );
+    const processTradingFeeMock = mock(async () => ({
+      feeCharged: 0,
+      referrerPaid: 0,
+    }));
     const original = FeeService.processTradingFee;
     // @ts-expect-error test stub replaces the static method
     FeeService.processTradingFee = processTradingFeeMock;
@@ -30,13 +28,16 @@ describe('createTradingFeeProcessor', () => {
         type: 'perp_open',
         relatedId: 'rel-1',
         positionId: 'pos-1',
+        idempotencyKey: 'key-1',
       });
       expect(processTradingFeeMock).toHaveBeenCalledWith(
         'user-1',
         'perp_open',
         0.5,
         'pos-1',
-        'rel-1'
+        'rel-1',
+        undefined,
+        'key-1'
       );
       expect(processTradingFeeMock).toHaveBeenCalledTimes(1);
     } finally {

@@ -17,6 +17,7 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   createTradingFeeProcessor,
   createUserWalletAdapter,
   FEE_CONFIG,
@@ -148,6 +149,7 @@ export const closePerpAction: Action = {
         },
         priceImpact: createPerpPriceImpactPort(),
         feeProcessor: createTradingFeeProcessor(),
+        tradingFeeOutbox: createTradingFeeOutboxAdapter(),
       });
 
       const positionSize = Number(position.size);

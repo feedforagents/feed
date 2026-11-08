@@ -56,6 +56,9 @@ mock.module('@feed/core/markets/perps', () => ({
 
 mock.module('@feed/engine', () => ({
   createPerpPriceImpactPort: () => ({}),
+  createPerpSettlement: () => ({}),
+  createPerpTradesCachePort: () => ({}),
+  createTradingFeeOutboxAdapter: () => ({}),
   // Mirrors the real @feed/engine helper: the action under test only
   // wires the helper, so the mock helper must delegate the same way.
   createTradingFeeProcessor: () => ({

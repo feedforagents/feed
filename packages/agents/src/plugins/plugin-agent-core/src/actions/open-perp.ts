@@ -16,6 +16,7 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   createTradingFeeProcessor,
   createUserWalletAdapter,
   FEE_CONFIG,
@@ -182,6 +183,7 @@ export const openPerpAction: Action = {
         },
         priceImpact: createPerpPriceImpactPort(),
         feeProcessor: createTradingFeeProcessor(),
+        tradingFeeOutbox: createTradingFeeOutboxAdapter(),
       });
 
       // Check if market exists (case-insensitive lookup)

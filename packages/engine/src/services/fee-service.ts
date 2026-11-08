@@ -6,6 +6,7 @@
  * Handles both platform fees and referrer share distribution.
  */
 
+import type { FeeProcessor } from '@feed/core/markets/shared';
 import {
   and,
   balanceTransactions,
@@ -26,7 +27,6 @@ import {
 } from '@feed/db';
 import { generateSnowflakeId, logger } from '@feed/shared';
 import type { SQL } from 'drizzle-orm';
-import type { FeeProcessor } from '@feed/core/markets/shared';
 import { FEE_CONFIG, type FeeType } from '../config/fees';
 import { FeeRedistributionService } from './fee-redistribution-service';
 
@@ -176,6 +176,7 @@ export class FeeService {
    * @param {string} [tradeId] - Optional trade ID for reference
    * @param {string} [marketId] - Optional market ID for reference
    * @param {TransactionContext} [existingTx] - Optional existing transaction/client to reuse (avoids nested transactions)
+   * @param {string} [idempotencyKey] - Optional idempotency key for this fee intent, generated once at the trade call site. When provided, a retry that arrives after the fee row already committed returns the stored result instead of charging again.
    * @returns {Promise<FeeDistributionResult>} Fee distribution result
    *
    * @example
@@ -195,7 +196,8 @@ export class FeeService {
     tradeAmount: number,
     tradeId?: string,
     marketId?: string,
-    existingTx?: TransactionContext
+    existingTx?: TransactionContext,
+    idempotencyKey?: string
   ): Promise<FeeDistributionResult> {
     const feeCalc = FeeService.calculateFee(tradeAmount);
 
@@ -225,6 +227,38 @@ export class FeeService {
     const processFee = async (
       tx: TransactionContext
     ): Promise<FeeDistributionResult & { stabilityFundDiversion: number }> => {
+      // Idempotency: an ambiguous commit (fee row committed, caller only saw
+      // an error) must not charge twice. The key is checked inside the same
+      // transaction that would write the fee, so a retry returns the stored
+      // result without writing a row, touching totalFeesPaid, or crediting
+      // the referrer again.
+      if (idempotencyKey) {
+        const [existing] = await tx
+          .select({
+            feeAmount: tradingFees.feeAmount,
+            platformFee: tradingFees.platformFee,
+            referrerFee: tradingFees.referrerFee,
+            referrerId: tradingFees.referrerId,
+          })
+          .from(tradingFees)
+          .where(eq(tradingFees.idempotencyKey, idempotencyKey))
+          .limit(1);
+        if (existing) {
+          logger.info(
+            'Trading fee already recorded for idempotency key — returning stored result',
+            { userId, tradeType, idempotencyKey },
+            'FeeService'
+          );
+          return {
+            feeCharged: Number(existing.feeAmount),
+            referrerPaid: Number(existing.referrerFee),
+            platformReceived: Number(existing.platformFee),
+            referrerId: existing.referrerId,
+            stabilityFundDiversion: 0,
+          };
+        }
+      }
+
       const referredBy = await FeeService.getUserReferrerInTx(userId, tx);
 
       // Credit the referrer first so the persisted fee record reflects the
@@ -256,6 +290,7 @@ export class FeeService {
         platformFee: new Decimal(platformReceived).toString(),
         referrerFee: new Decimal(referrerPaid).toString(),
         referrerId,
+        idempotencyKey: idempotencyKey ?? null,
       });
 
       // Atomic increment: concurrent fees for the same trader must not lose
@@ -566,13 +601,22 @@ export class FeeService {
  */
 export function createTradingFeeProcessor(): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      idempotencyKey,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as FeeType,
         amount,
         positionId,
-        relatedId
+        relatedId,
+        undefined,
+        idempotencyKey
       ),
   };
 }

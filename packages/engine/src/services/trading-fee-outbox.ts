@@ -5,6 +5,13 @@
  * transaction that runs `FeeService.processTradingFee`, so concurrent drains
  * cannot both charge a row and a crash after charging cannot leave a stale
  * row that would double-charge on retry.
+ *
+ * Idempotency: every fee intent carries an `idempotencyKey` generated once
+ * at the trade call site. Retries and the outbox drain all reuse that key,
+ * and `FeeService.processTradingFee` returns the already-recorded fee when
+ * the key exists, so an ambiguous commit (fee committed, caller only saw
+ * an error) never charges twice. The outbox insert is
+ * on-conflict-do-nothing on the key for the same reason.
  */
 
 import type { TradingFeeOutboxPort } from '@feed/core/markets/shared';
@@ -16,9 +23,10 @@ import {
   tradingFeeOutbox,
   withTransaction,
 } from '@feed/db';
-import { FeeService, type FeeType, isValidFeeType } from '@feed/engine';
 import { generateSnowflakeId, logger } from '@feed/shared';
 import { asc } from 'drizzle-orm';
+import { type FeeType, isValidFeeType } from '../config/fees';
+import { FeeService } from './fee-service';
 
 const DRAIN_BATCH_SIZE = 50;
 
@@ -29,17 +37,22 @@ export async function enqueueFailedTradingFee(params: {
   relatedId: string;
   positionId: string;
   lastError?: string;
+  idempotencyKey?: string;
 }): Promise<void> {
   const id = await generateSnowflakeId();
-  await db.insert(tradingFeeOutbox).values({
-    id,
-    userId: params.userId,
-    tradeType: params.type,
-    tradeAmount: String(params.amount),
-    tradeId: params.positionId,
-    marketId: params.relatedId,
-    lastError: params.lastError ?? null,
-  });
+  await db
+    .insert(tradingFeeOutbox)
+    .values({
+      id,
+      userId: params.userId,
+      tradeType: params.type,
+      tradeAmount: String(params.amount),
+      tradeId: params.positionId,
+      marketId: params.relatedId,
+      lastError: params.lastError ?? null,
+      idempotencyKey: params.idempotencyKey ?? null,
+    })
+    .onConflictDoNothing({ target: tradingFeeOutbox.idempotencyKey });
 }
 
 export function createTradingFeeOutboxAdapter(): TradingFeeOutboxPort {
@@ -96,7 +109,8 @@ export async function drainTradingFeeOutboxBatch(): Promise<{
           Number(row.tradeAmount),
           row.tradeId ?? undefined,
           row.marketId ?? undefined,
-          tx
+          tx,
+          row.idempotencyKey ?? undefined
         );
         return true;
       });
