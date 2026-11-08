@@ -209,12 +209,22 @@ contract PerpetualMarketFacet is ReentrancyGuard {
         // Collect taker fee (markPrice is in 8 decimals)
         // fee = (size * price * feeBps) / (10000 * 1e8)
         // Example: (1e18 * 50000e8 * 10) / (10000 * 1e8) = 50 ether (0.1% of $50k)
+        //
+        // The fee is capped at the trader's balance (close proceeds included)
+        // so a close never reverts on a wallet that cannot cover the full
+        // fee: a trader with collateral left must always be able to exit,
+        // even when the loss leaves less than the fee.
         uint256 fee = (_size * markPrice * takerFee) / (10000 * 1e8);
         if (fee > 0) {
-            LibMarket.subtractBalance(msg.sender, fee);
-            LibPerpetual.PerpetualStorage storage ps = LibPerpetual.perpetualStorage();
-            if (ps.feeRecipient != address(0)) {
-                LibMarket.addBalance(ps.feeRecipient, fee);
+            uint256 available = LibMarket.getBalance(msg.sender);
+            uint256 feePaid = fee > available ? available : fee;
+            if (feePaid > 0) {
+                LibMarket.subtractBalance(msg.sender, feePaid);
+                LibPerpetual.PerpetualStorage storage ps =
+                    LibPerpetual.perpetualStorage();
+                if (ps.feeRecipient != address(0)) {
+                    LibMarket.addBalance(ps.feeRecipient, feePaid);
+                }
             }
         }
 
