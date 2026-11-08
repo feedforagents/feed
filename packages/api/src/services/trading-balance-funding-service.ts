@@ -87,9 +87,21 @@ export class TradingBalanceFundingService {
     ]);
   }
 
+  /**
+   * The user's complete funding history, newest first.
+   *
+   * This is the only surface that shows funding rows (the profile trades
+   * feed lists only pred/perp types), and the settings Billing tab renders
+   * the returned array as the whole history — its count badge and its
+   * "Show all N transactions" button both use the array length. The list
+   * must therefore not be capped: a cap silently drops the oldest rows
+   * (daily-login deposit rows alone add roughly one row per day), and the
+   * tab would still present the truncated window as the full history.
+   * Funding rows are bounded by real payment and daily-reward events, so
+   * a single user's history stays small.
+   */
   static async getFundingHistory(
-    userId: string,
-    limit = 100
+    userId: string
   ): Promise<TradingBalanceFundingHistoryItem[]> {
     const transactions = await db
       .select({
@@ -109,8 +121,7 @@ export class TradingBalanceFundingService {
           inArray(balanceTransactions.type, [...FUNDING_TRANSACTION_TYPES])
         )
       )
-      .orderBy(desc(balanceTransactions.createdAt))
-      .limit(limit);
+      .orderBy(desc(balanceTransactions.createdAt));
 
     return transactions.map((transaction) => ({
       id: transaction.id,
