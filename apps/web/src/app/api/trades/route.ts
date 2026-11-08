@@ -153,7 +153,17 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db } from '@feed/db';
+import {
+  and,
+  balanceTransactions as balanceTransactionsTable,
+  db,
+  count as drizzleCount,
+  eq,
+  inArray,
+  npcTrades as npcTradesTable,
+  perpPositions as perpPositionsTable,
+  users as usersTable,
+} from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -181,11 +191,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const userFilter = params.userId ? { userId: params.userId } : {};
 
+  // The three sources below are merged and sorted in memory before the
+  // page is cut, so each source must be fetched from the top with a
+  // window wide enough to cover the requested page (offset + limit).
+  // Applying offset per source instead would skip rows that lost the
+  // merge race on an earlier page, leaving them unreachable.
+  const fetchWindow = params.offset + params.limit;
+
   // Get recent balance transactions (deposits, withdrawals, trades)
   // Only include market-related transactions (buys/sells)
   const balanceTransactions = await db.balanceTransaction.findMany({
-    take: params.limit,
-    skip: params.offset,
+    take: fetchWindow,
     orderBy: { createdAt: 'desc' },
     where: {
       ...userFilter,
@@ -222,8 +238,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   let npcTrades: Awaited<ReturnType<typeof db.npcTrade.findMany>> = [];
   if (!params.userId) {
     npcTrades = await db.npcTrade.findMany({
-      take: params.limit,
-      skip: params.offset,
+      take: fetchWindow,
       orderBy: { executedAt: 'desc' },
     });
   } else {
@@ -231,8 +246,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
     if (actor) {
       npcTrades = await db.npcTrade.findMany({
-        take: params.limit,
-        skip: params.offset,
+        take: fetchWindow,
         orderBy: { executedAt: 'desc' },
         where: { npcActorId: params.userId },
       });
@@ -308,16 +322,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   let perpPositions: Awaited<ReturnType<typeof db.perpPosition.findMany>> = [];
   if (params.userId) {
     perpPositions = await db.perpPosition.findMany({
-      take: params.limit,
-      skip: params.offset,
+      take: fetchWindow,
       orderBy: { openedAt: 'desc' },
       where: { userId: params.userId },
     });
   } else {
     // Get recent perp positions from all users
     perpPositions = await db.perpPosition.findMany({
-      take: params.limit,
-      skip: params.offset,
+      take: fetchWindow,
       orderBy: { openedAt: 'desc' },
     });
   }
@@ -464,13 +476,69 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // Sort by timestamp
   allTrades.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
 
-  // Limit to requested amount
-  const limitedTrades = allTrades.slice(0, params.limit);
+  // `total` is the full merged trade count, counted per source with the
+  // same filters the list applies — not the length of the fetched
+  // window. Balance transactions owned by actors are excluded (NPC
+  // trades represent them), matching the list filter above; the inner
+  // join also drops rows whose user no longer exists, which the list
+  // filters out as well.
+  const balanceCountConditions = [
+    inArray(balanceTransactionsTable.type, [
+      'pred_buy',
+      'pred_sell',
+      'perp_open',
+      'perp_close',
+      'perp_liquidation',
+    ]),
+    eq(usersTable.isActor, false),
+  ];
+  if (params.userId) {
+    balanceCountConditions.push(
+      eq(balanceTransactionsTable.userId, params.userId)
+    );
+  }
+  const [balanceCountRow] = await db
+    .select({ value: drizzleCount() })
+    .from(balanceTransactionsTable)
+    .innerJoin(usersTable, eq(balanceTransactionsTable.userId, usersTable.id))
+    .where(and(...balanceCountConditions));
+
+  let npcCount = 0;
+  if (!params.userId) {
+    const [npcCountRow] = await db
+      .select({ value: drizzleCount() })
+      .from(npcTradesTable);
+    npcCount = Number(npcCountRow?.value ?? 0);
+  } else if (StaticDataRegistry.getActor(params.userId)) {
+    const [npcCountRow] = await db
+      .select({ value: drizzleCount() })
+      .from(npcTradesTable)
+      .where(eq(npcTradesTable.npcActorId, params.userId));
+    npcCount = Number(npcCountRow?.value ?? 0);
+  }
+
+  const [perpCountRow] = await db
+    .select({ value: drizzleCount() })
+    .from(perpPositionsTable)
+    .where(
+      params.userId ? eq(perpPositionsTable.userId, params.userId) : undefined
+    );
+
+  const total =
+    Number(balanceCountRow?.value ?? 0) +
+    npcCount +
+    Number(perpCountRow?.value ?? 0);
+
+  // Cut the requested page out of the merged, sorted list
+  const limitedTrades = allTrades.slice(
+    params.offset,
+    params.offset + params.limit
+  );
 
   const res = successResponse({
     trades: limitedTrades,
-    total: allTrades.length,
-    hasMore: allTrades.length > params.limit,
+    total,
+    hasMore: params.offset + limitedTrades.length < total,
   });
   if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
   return res;
