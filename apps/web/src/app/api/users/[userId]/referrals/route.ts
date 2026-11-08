@@ -68,12 +68,10 @@ import {
 } from '@feed/api';
 import {
   and,
-  count,
   db,
   desc,
   eq,
   follows,
-  gte,
   inArray,
   pointsTransactions,
   referrals,
@@ -249,23 +247,6 @@ export const GET = withErrorHandling(
 
     const totalFeesEarned = Number(feeEarnings?.total || 0);
 
-    // Calculate weekly referral count (last 7 days) - only completed
-    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const [weeklyCountResult] = await db
-      .select({
-        count: count(),
-      })
-      .from(referrals)
-      .where(
-        and(
-          eq(referrals.referrerId, canonicalUserId),
-          eq(referrals.status, 'completed'),
-          gte(referrals.completedAt, oneWeekAgo)
-        )
-      );
-
-    const weeklyReferralCount = Number(weeklyCountResult?.count || 0);
-
     // Check if referrer (current user) is following the referred users
     const completedUserIds = completedReferralsData
       .map((r) => r.referredUserId)
@@ -309,6 +290,16 @@ export const GET = withErrorHandling(
           status: 'completed' as const,
         };
       });
+
+    // Count over the listed population only. A completed row whose
+    // referee deleted their account has referredUserId null (the
+    // delete-account route nulls it instead of deleting the row) and
+    // never appears in referredUsers, so it must not inflate the total
+    // or the weekly count either.
+    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const weeklyReferralCount = completedReferredUsers.filter(
+      (u) => u.joinedAt !== null && u.joinedAt >= oneWeekAgo
+    ).length;
 
     // Format pending referred users
     const formattedPendingUsers = pendingReferredUsers.map((u) => ({
@@ -356,7 +347,7 @@ export const GET = withErrorHandling(
         walletAddress: user.walletAddress,
       },
       stats: {
-        totalReferrals: completedReferralsData.length, // Only completed count
+        totalReferrals: completedReferredUsers.length, // Only listed completed count
         pendingReferrals: pendingReferredUsers.length, // NEW: Pending count
         totalReputationEarned: Number(referralReputation?.total || 0),
         totalFeesEarned,
