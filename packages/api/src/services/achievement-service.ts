@@ -314,6 +314,7 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
       .where(
         and(
           eq(posts.authorId, userId),
+          isNull(posts.deletedAt),
           gte(posts.timestamp, start),
           lt(posts.timestamp, end)
         )
@@ -616,6 +617,7 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
       .where(
         and(
           eq(posts.authorId, userId),
+          isNull(posts.deletedAt),
           gte(posts.timestamp, start),
           lt(posts.timestamp, end)
         )
