@@ -67,13 +67,13 @@ async function collectHttpPages(authorId: string, limit: number) {
 
 async function createAuthor(prefix: string): Promise<string> {
   const id = await generateSnowflakeId();
-  ownedUsers.push(id);
   await db.insert(users).values({
     id,
     username: `${prefix}-${id}`,
     displayName: 'Post cursor fixture',
     updatedAt: new Date(),
   });
+  ownedUsers.push(id);
   return id;
 }
 
@@ -84,8 +84,6 @@ async function insertPosts(
   const ids: string[] = [];
   for (const timestamp of timestamps) {
     const id = await generateSnowflakeId();
-    ids.push(id);
-    ownedPosts.push(id);
     await db.insert(posts).values({
       id,
       content: `post cursor fixture ${id}`,
@@ -94,6 +92,8 @@ async function insertPosts(
       timestamp,
       createdAt: timestamp,
     });
+    ids.push(id);
+    ownedPosts.push(id);
   }
   return ids;
 }
@@ -144,13 +144,13 @@ describe('post feed keyset cursor (real database)', () => {
     const base = pastSecond(180).toISOString().replace('T', ' ').slice(0, 23);
     for (const micros of ['', '400', '700']) {
       const id = await generateSnowflakeId();
-      microIds.push(id);
-      ownedPosts.push(id);
       await db.execute(sql`
         INSERT INTO "Post" ("id", "content", "authorId", "type", "timestamp", "createdAt")
         VALUES (${id}, ${`post cursor fixture ${id}`}, ${microAuthor}, 'post',
                 ${`${base}${micros}`}::timestamp, ${`${base}${micros}`}::timestamp)
       `);
+      microIds.push(id);
+      ownedPosts.push(id);
     }
   });
 
@@ -220,7 +220,6 @@ describe('post feed keyset cursor (real database)', () => {
     const author = await createAuthor('pcd');
     const [visible] = await insertPosts(author, [t]);
     const deletedId = await generateSnowflakeId();
-    ownedPosts.push(deletedId);
     const deletedAt = new Date(t.getTime() - 5000);
     await db.insert(posts).values({
       id: deletedId,
@@ -231,6 +230,7 @@ describe('post feed keyset cursor (real database)', () => {
       createdAt: deletedAt,
       deletedAt,
     });
+    ownedPosts.push(deletedId);
     // Cursor claims a time above the visible post but names the deleted one.
     const claimed = new Date(t.getTime() + 1000);
     const legacy = await service.getPostsByActor(
