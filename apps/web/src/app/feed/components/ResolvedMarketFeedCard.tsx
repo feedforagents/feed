@@ -1,5 +1,6 @@
 'use client';
 
+import { PredictionPricing } from '@feed/core/markets/prediction/client';
 import { cn } from '@feed/shared';
 import Link from 'next/link';
 import type { NarrativeStory } from '@/app/feed/types/narrative';
@@ -9,13 +10,22 @@ interface ResolvedMarketFeedCardProps {
   onOpenMarket?: () => void;
 }
 
-function computePercentages(
+/**
+ * Final YES/NO percentages for a resolved market's pool share counts.
+ *
+ * The story's yesShares/noShares are the AMM pool balances from the markets
+ * table, not outcome totals: the CPMM price of YES is noShares / total
+ * (PredictionPricing.getCurrentPrice — the same definition the market pages
+ * use). Using yesShares / total would show the complement of the final
+ * price. An empty pool prices at 50/50.
+ */
+export function computePercentages(
   yesShares: number,
   noShares: number
 ): { yesPercent: number; noPercent: number } {
-  const total = yesShares + noShares;
-  if (total === 0) return { yesPercent: 50, noPercent: 50 };
-  const yesPercent = Math.round((yesShares / total) * 100);
+  const yesPercent = Math.round(
+    PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes') * 100
+  );
   return { yesPercent, noPercent: 100 - yesPercent };
 }
 

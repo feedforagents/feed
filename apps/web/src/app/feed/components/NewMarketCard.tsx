@@ -1,5 +1,6 @@
 'use client';
 
+import { PredictionPricing } from '@feed/core/markets/prediction/client';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
@@ -64,13 +65,22 @@ function formatEndInfo(isoDate: string): { label: string; ended: boolean } {
   return { label: formatCountdown(isoDate), ended: false };
 }
 
-function computePercentages(
+/**
+ * Displayed YES/NO percentages for a market's pool share counts.
+ *
+ * The story's yesShares/noShares are the AMM pool balances from the markets
+ * table, not outcome totals: the CPMM price of YES is noShares / total
+ * (PredictionPricing.getCurrentPrice — the same definition the market pages
+ * and trading modal use). Using yesShares / total would show the complement
+ * of the real price. An empty pool prices at 50/50.
+ */
+export function computePercentages(
   yesShares: number,
   noShares: number
 ): { yesPercent: number; noPercent: number } {
-  const total = yesShares + noShares;
-  if (total === 0) return { yesPercent: 50, noPercent: 50 };
-  const yesPercent = Math.round((yesShares / total) * 100);
+  const yesPercent = Math.round(
+    PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes') * 100
+  );
   return { yesPercent, noPercent: 100 - yesPercent };
 }
 
