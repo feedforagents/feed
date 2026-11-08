@@ -79,6 +79,7 @@ export async function calculatePortfolioPnL(
   const perpPositionResults = await db
     .select({
       unrealizedPnL: perpPositions.unrealizedPnL,
+      fundingPaid: perpPositions.fundingPaid,
     })
     .from(perpPositions)
     .where(
@@ -129,8 +130,13 @@ export async function calculatePortfolioPnL(
     )
     .limit(1);
 
+  // Open perp unrealized PnL is net of accrued funding: funding settles
+  // at close (realizedPnL = pnl - fundingPaid), so the stored price-only
+  // unrealizedPnL overstates equity by fundingPaid while the position is
+  // open. Missing rows (legacy) default to zero funding.
   const perpUnrealized = perpPositionResults.reduce(
-    (sum, position) => sum + toNumber(position.unrealizedPnL),
+    (sum, position) =>
+      sum + toNumber(position.unrealizedPnL) - toNumber(position.fundingPaid),
     0
   );
 

@@ -515,9 +515,11 @@ export const GET = withErrorHandling(
       };
     });
 
-    // Get immediate parent for "Replying to" indicator
+    // A visible ancestor is not necessarily the immediate parent after moderation.
+    // Do not attribute a reply to its grandparent when its actual parent is hidden.
     const parentComment =
-      parentChain.length > 0 ? parentChain[parentChain.length - 1] : null;
+      parentChain.find((parent) => parent.id === comment.parentCommentId) ??
+      null;
 
     // Get total reply counts for main comment and all direct replies (batched)
     const allIdsToCount = [commentId, ...directReplies.map((r) => r.id)];

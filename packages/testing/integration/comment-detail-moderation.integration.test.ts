@@ -20,6 +20,7 @@ type CommentDetailResponse = {
     id: string;
     content: string;
     replyCount: number;
+    parentComment: { id: string } | null;
   };
   replies: Array<{ id: string; content: string }>;
   parentChain: Array<{ id: string; content: string }>;
@@ -216,6 +217,7 @@ describe('GET /api/comments/[id] moderation visibility', () => {
     expect(status).toBe(200);
     const detail = body as CommentDetailResponse;
     expect(detail.parentChain.map((p) => p.id)).toEqual([visibleCommentId]);
+    expect(detail.comment.parentComment).toBeNull();
     expect(JSON.stringify(detail)).not.toContain('hidden moderated reply');
   });
 
