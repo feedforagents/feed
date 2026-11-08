@@ -27,6 +27,7 @@ import { NextRequest } from 'next/server';
 
 let TICKER: string;
 let userId: string;
+let clientIp: string;
 
 let POST: (request: NextRequest) => Promise<Response>;
 const routePath = '../../../apps/web/src/app/api/markets/perps/preview/route';
@@ -35,7 +36,10 @@ async function postPreview(body: Record<string, unknown>) {
   const request = new NextRequest(
     new Request('http://localhost/api/markets/perps/preview', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': clientIp,
+      },
       body: JSON.stringify(body),
     })
   );
@@ -51,6 +55,13 @@ beforeAll(async () => {
   ({ POST } = await import(routePath));
 
   userId = await generateSnowflakeId();
+  // Keep real rate limits enabled without sharing CI's anonymous bucket
+  // with unrelated route tests. Use one documentation-range IP per fixture.
+  clientIp = `2001:db8:1660:0:${BigInt(userId)
+    .toString(16)
+    .padStart(16, '0')
+    .match(/.{4}/g)!
+    .join(':')}`;
   TICKER = `L${BigInt(userId).toString(16).toUpperCase()}`;
   await db.insert(users).values({
     id: userId,
@@ -150,6 +161,7 @@ it('preserves authenticated market preview and rejects limits without a trade', 
         method: 'POST',
         headers: {
           'content-type': 'application/json',
+          'x-forwarded-for': clientIp,
           authorization: `Bearer steward:test:${userId}`,
         },
         body: JSON.stringify({

@@ -11,8 +11,9 @@
  * than one tag — only filtered soft-deleted posts, so a future-dated
  * post tagged with any of the group's tags was returned in full.
  *
- * Both anonymous and CI-authenticated reads use the real route and database;
- * no module is mocked.
+ * Reads without and with the CI bearer use the real route and database;
+ * no module is mocked. This route's optionalAuth does not accept the CI
+ * bearer, so neither case claims production authenticated-viewer coverage.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
@@ -32,17 +33,23 @@ let tagBId: string;
 let visiblePostId: string;
 let futurePostId: string;
 let deletedPostId: string;
+let clientIp: string;
 const allPostIds: string[] = [];
 
 let GET: typeof import('../../../apps/web/src/app/api/trending/group/route').GET;
 
-async function fetchGroup(authenticated = false) {
+async function fetchGroup(withCiBearer = false) {
   const request = new NextRequest(
     new Request(
       `http://localhost/api/trending/group?tags=f4-alpha-${authorId},f4-beta-${authorId}&limit=10`,
-      authenticated
-        ? { headers: { authorization: `Bearer steward:test:${authorId}` } }
-        : undefined
+      {
+        headers: {
+          'x-forwarded-for': clientIp,
+          ...(withCiBearer
+            ? { authorization: `Bearer steward:test:${authorId}` }
+            : {}),
+        },
+      }
     )
   );
   const response = await GET(request);
@@ -68,6 +75,13 @@ beforeAll(async () => {
       generateSnowflakeId(),
     ]);
   allPostIds.push(visiblePostId, futurePostId, deletedPostId);
+  // Isolate this fixture from other public reads while exercising the real
+  // limiter. No request falls into CI's shared anonymous bucket.
+  clientIp = `2001:db8:1656:0:${BigInt(authorId)
+    .toString(16)
+    .padStart(16, '0')
+    .match(/.{4}/g)!
+    .join(':')}`;
 
   const now = new Date();
   const past = new Date(now.getTime() - 10 * 60_000);
@@ -159,10 +173,10 @@ afterAll(async () => {
   await db.delete(users).where(eq(users.id, authorId));
 });
 
-for (const authenticated of [false, true]) {
-  describe(`GET /api/trending/group future posts (${authenticated ? 'authenticated' : 'public'})`, () => {
+for (const withCiBearer of [false, true]) {
+  describe(`GET /api/trending/group future posts (${withCiBearer ? 'CI bearer' : 'public'})`, () => {
     it('returns the published post but not the future-dated one', async () => {
-      const { status, body } = await fetchGroup(authenticated);
+      const { status, body } = await fetchGroup(withCiBearer);
       expect(status).toBe(200);
       const group = body as GroupResponse;
       const ids = group.posts.map((p) => p.id);
@@ -184,7 +198,7 @@ for (const authenticated of [false, true]) {
           .update(posts)
           .set({ timestamp: new Date(Date.now() - 1000) })
           .where(eq(posts.id, futurePostId));
-        const { status, body } = await fetchGroup(authenticated);
+        const { status, body } = await fetchGroup(withCiBearer);
         expect(status).toBe(200);
         const ids = (body as GroupResponse).posts.map((post) => post.id);
         expect(ids).toContain(futurePostId);
@@ -199,7 +213,7 @@ for (const authenticated of [false, true]) {
     });
 
     it('still excludes the soft-deleted post', async () => {
-      const { status, body } = await fetchGroup(authenticated);
+      const { status, body } = await fetchGroup(withCiBearer);
       expect(status).toBe(200);
       const group = body as GroupResponse;
       const ids = group.posts.map((p) => p.id);
