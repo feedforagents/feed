@@ -67,14 +67,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     offset: searchParams.get('offset') || '0',
   });
 
-  const [mutes, total] = await Promise.all([
-    db.userMute.findMany({
-      where: { muterId: authUser.userId },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-      include: {
-        muted: {
+  const allMutes = await db.userMute.findMany({
+    where: { muterId: authUser.userId },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  // Mute rows can outlive the muted user: the UserMute table has no
+  // foreign key to User and account deletion removes the user row
+  // without removing mutes that point at it. Such orphaned mutes must
+  // not count toward the total or consume a pagination slot, so resolve
+  // targets first and page over the mutes whose user still exists.
+  // (Resolving through a separate lookup also avoids the
+  // include-with-select read, which fails for these relations.)
+  const mutedUsers =
+    allMutes.length === 0
+      ? []
+      : await db.user.findMany({
+          where: {
+            id: { in: allMutes.map((mute) => mute.mutedId) },
+          },
           select: {
             id: true,
             username: true,
@@ -82,13 +93,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             profileImageUrl: true,
             isActor: true,
           },
-        },
-      },
-    }),
-    db.userMute.count({
-      where: { muterId: authUser.userId },
-    }),
-  ]);
+        });
+  const userMap = new Map(
+    mutedUsers.map((mutedUser) => [mutedUser.id, mutedUser])
+  );
+
+  const visibleMutes = allMutes.filter((mute) => userMap.has(mute.mutedId));
+  const total = visibleMutes.length;
+  const mutes = visibleMutes
+    .slice(offset, offset + limit)
+    .map((mute) => ({ ...mute, muted: userMap.get(mute.mutedId) }));
 
   return successResponse({
     mutes,
