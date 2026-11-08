@@ -24,31 +24,6 @@ import { generateSnowflakeId, logger } from '@feed/shared';
  * Provides methods for converting P&L to points and syncing earned points.
  */
 export class EarnedPointsService {
-  /** Base reputation points for all users */
-  private static readonly BASE_POINTS = 100;
-
-  /**
-   * Calculate total reputation points from component values.
-   * Centralizes the reputation formula to ensure consistency.
-   *
-   * @param invitePoints - Points earned from invites
-   * @param earnedPoints - Points earned from trading P&L
-   * @param bonusPoints - Bonus points from onboarding, events, etc.
-   * @returns Total reputation points
-   */
-  private static calculateReputationPoints(
-    invitePoints: number,
-    earnedPoints: number,
-    bonusPoints: number
-  ): number {
-    return (
-      EarnedPointsService.BASE_POINTS +
-      invitePoints +
-      earnedPoints +
-      bonusPoints
-    );
-  }
-
   /**
    * Convert P&L to earned points
    *
@@ -122,12 +97,13 @@ export class EarnedPointsService {
       return;
     }
 
-    // Calculate new total reputation points using centralized helper
-    const newReputationPoints = EarnedPointsService.calculateReputationPoints(
-      user.invitePoints,
-      newEarnedPoints,
-      user.bonusPoints
-    );
+    // Move the total by the earned-points delta only. The stored counter is
+    // the ledger-backed balance (a fresh user starts at the schema default
+    // of 1000 and ReputationService awards add to it), so recomputing it
+    // from the point buckets would silently rewrite that base and break the
+    // pointsTransactions chain (pointsBefore/pointsAfter).
+    const newReputationPoints =
+      user.reputationPoints + (newEarnedPoints - user.earnedPoints);
 
     await tx
       .update(users)
@@ -236,12 +212,10 @@ export class EarnedPointsService {
     }
 
     const newEarnedPoints = computedEarnedPoints;
-    // Calculate new total reputation points using centralized helper
-    const newReputationPoints = EarnedPointsService.calculateReputationPoints(
-      user.invitePoints,
-      newEarnedPoints,
-      user.bonusPoints
-    );
+    // Move the total by the earned delta so the ledger row below chains
+    // exactly (pointsAfter - pointsBefore = amount) against the stored,
+    // ledger-backed counter.
+    const newReputationPoints = user.reputationPoints + earnedPointsDelta;
 
     // Update user and create transaction
     await database
@@ -290,8 +264,8 @@ export class EarnedPointsService {
    * Award bonus points to a user
    *
    * @description Awards bonus points for actions like onboarding completion,
-   * referrals, special events, etc. Updates bonusPoints and recalculates
-   * total reputationPoints.
+   * referrals, special events, etc. Updates bonusPoints and adds the award
+   * to total reputationPoints.
    *
    * @param {string} userId - User ID to award points to
    * @param {number} points - Number of bonus points to award (must be finite and non-negative)
@@ -358,12 +332,10 @@ export class EarnedPointsService {
 
     const newBonusPoints = user.bonusPoints + points;
 
-    // Calculate new total reputation points using centralized helper
-    const newReputationPoints = EarnedPointsService.calculateReputationPoints(
-      user.invitePoints,
-      user.earnedPoints,
-      newBonusPoints
-    );
+    // Move the total by the awarded amount so the ledger row below chains
+    // exactly (pointsAfter - pointsBefore = amount) against the stored,
+    // ledger-backed counter.
+    const newReputationPoints = user.reputationPoints + points;
 
     // Update user
     await tx
