@@ -29,7 +29,7 @@
  *         name: cursor
  *         schema:
  *           type: string
- *         description: Cursor for pagination (timestamp)
+ *         description: Cursor returned by the previous page. Legacy timestamp-only cursors are also accepted.
  *       - in: query
  *         name: actorId
  *         schema:

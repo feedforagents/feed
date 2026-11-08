@@ -3,28 +3,71 @@
  * share the page-boundary timestamp. The service methods are called with the
  * cursor the route emits (encodePostCursor of the last post).
  *
- * Fixture rows are namespaced per run and are not deleted.
+ * Fixture rows are owned by this run and removed after the suite.
+ * PRD §12 / MVP phase 5: restore the existing chronological feed contract.
  */
 
-import { beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import assert from 'node:assert/strict';
 import {
   db,
   encodePostCursor,
   getDbInstance,
+  inArray,
   posts,
   sql,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
+import { z } from 'zod';
 
 type PostPage = Awaited<
   ReturnType<ReturnType<typeof getDbInstance>['getPostsByActor']>
 >;
 
 const service = getDbInstance();
+const ownedUsers: string[] = [],
+  ownedPosts: string[] = [];
+const fixtureClock = Math.floor(Date.now() / 1000) * 1000;
+const baseUrl =
+  process.env.TEST_API_URL ||
+  process.env.TEST_BASE_URL ||
+  'http://localhost:3000';
+const responseSchema = z.object({
+  success: z.literal(true),
+  posts: z.array(z.object({ id: z.string() })),
+  cursor: z.string().nullable(),
+  hasMore: z.boolean(),
+});
+afterAll(async () => {
+  if (ownedPosts.length)
+    await db.delete(posts).where(inArray(posts.id, ownedPosts));
+  if (ownedUsers.length)
+    await db.delete(users).where(inArray(users.id, ownedUsers));
+});
+async function collectHttpPages(authorId: string, limit: number) {
+  const pages: string[][] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < 10; i++) {
+    const query = new URLSearchParams({
+      actorId: authorId,
+      limit: String(limit),
+    });
+    if (cursor) query.set('cursor', cursor);
+    const response = await fetch(`${baseUrl}/api/posts?${query}`);
+    assert.equal(response.status, 200);
+    const body = responseSchema.parse(await response.json());
+    pages.push(body.posts.map((post) => post.id));
+    if (!body.hasMore) return pages;
+    assert.ok(body.cursor);
+    cursor = body.cursor;
+  }
+  throw new Error('Profile pagination did not terminate');
+}
 
 async function createAuthor(prefix: string): Promise<string> {
   const id = await generateSnowflakeId();
+  ownedUsers.push(id);
   await db.insert(users).values({
     id,
     username: `${prefix}-${id}`,
@@ -42,6 +85,7 @@ async function insertPosts(
   for (const timestamp of timestamps) {
     const id = await generateSnowflakeId();
     ids.push(id);
+    ownedPosts.push(id);
     await db.insert(posts).values({
       id,
       content: `post cursor fixture ${id}`,
@@ -73,7 +117,7 @@ async function collectActorPages(authorId: string, limit: number) {
 }
 
 function pastSecond(offsetSeconds: number): Date {
-  return new Date(Math.floor(Date.now() / 1000) * 1000 - offsetSeconds * 1000);
+  return new Date(fixtureClock - offsetSeconds * 1000);
 }
 
 describe('post feed keyset cursor (real database)', () => {
@@ -101,12 +145,25 @@ describe('post feed keyset cursor (real database)', () => {
     for (const micros of ['', '400', '700']) {
       const id = await generateSnowflakeId();
       microIds.push(id);
+      ownedPosts.push(id);
       await db.execute(sql`
         INSERT INTO "Post" ("id", "content", "authorId", "type", "timestamp", "createdAt")
         VALUES (${id}, ${`post cursor fixture ${id}`}, ${microAuthor}, 'post',
                 ${`${base}${micros}`}::timestamp, ${`${base}${micros}`}::timestamp)
       `);
     }
+  });
+
+  it('follows actual HTTP cursors across equal-timestamp pages', async () => {
+    const pages = await collectHttpPages(equalAuthor, 2);
+    expect(pages[0]).toHaveLength(2);
+    expect(pages.flat()).toEqual([...equalIds].sort().reverse());
+  });
+
+  it('preserves microsecond order through actual HTTP cursors', async () => {
+    expect((await collectHttpPages(microAuthor, 1)).flat()).toEqual(
+      [...microIds].reverse()
+    );
   });
 
   it('returns every equal-timestamp post exactly once across pages', async () => {
@@ -163,6 +220,7 @@ describe('post feed keyset cursor (real database)', () => {
     const author = await createAuthor('pcd');
     const [visible] = await insertPosts(author, [t]);
     const deletedId = await generateSnowflakeId();
+    ownedPosts.push(deletedId);
     const deletedAt = new Date(t.getTime() - 5000);
     await db.insert(posts).values({
       id: deletedId,
