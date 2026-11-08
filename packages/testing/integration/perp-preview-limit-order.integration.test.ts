@@ -11,9 +11,8 @@
  * execution anyway: the caller received execution prices, margin and a
  * liquidation price for an order the open route then refuses with a 400.
  *
- * The requests are anonymous (no authorization header), so the route uses
- * its public previewOpenPosition path against a seeded perp market
- * snapshot. The only stub is the `server-only` marker package (an empty
+ * Requests cover the public path and authenticated previewOrder path using
+ * the existing CI synthetic bearer against an owned perp market snapshot. The only stub is the `server-only` marker package (an empty
  * environment guard that throws outside a Server Component); every
  * database dependency runs for real.
  */
@@ -22,12 +21,15 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { db, eq, perpMarketSnapshots } from '@feed/db';
+import { db, eq, perpMarketSnapshots, perpPositions, users } from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 
-const TICKER = 'F9TST';
+let TICKER: string;
+let userId: string;
 
-let POST: typeof import('../route').POST;
+let POST: (request: NextRequest) => Promise<Response>;
+const routePath = '../../../apps/web/src/app/api/markets/perps/preview/route';
 
 async function postPreview(body: Record<string, unknown>) {
   const request = new NextRequest(
@@ -46,11 +48,19 @@ async function postPreview(body: Record<string, unknown>) {
 }
 
 beforeAll(async () => {
-  ({ POST } = await import('../route'));
+  ({ POST } = await import(routePath));
 
+  userId = await generateSnowflakeId();
+  TICKER = `L${BigInt(userId).toString(16).toUpperCase()}`;
+  await db.insert(users).values({
+    id: userId,
+    username: `lp-${userId}`,
+    virtualBalance: '1000',
+    updatedAt: new Date(),
+  });
   await db.insert(perpMarketSnapshots).values({
     ticker: TICKER,
-    organizationId: 'f9-test-org',
+    organizationId: `limit-preview-${userId}`,
     name: 'F9 Test Market',
     currentPrice: 100,
     high24h: 110,
@@ -65,6 +75,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await db.delete(users).where(eq(users.id, userId));
   await db
     .delete(perpMarketSnapshots)
     .where(eq(perpMarketSnapshots.ticker, TICKER));
@@ -110,4 +121,71 @@ describe('POST /api/markets/perps/preview order types', () => {
     expect(status).toBe(200);
     expect(body?.preview?.executionPrice).toBeGreaterThan(0);
   });
+});
+
+it('rejects short limits and malformed order payloads without quoting', async () => {
+  for (const order of [
+    { side: 'short', orderType: 'limit', limitPrice: 110 },
+    { orderType: 'limit' },
+    { orderType: 'limit', limitPrice: 0 },
+    { orderType: 'stop' },
+    { orderType: null },
+  ]) {
+    const { status, body } = await postPreview({
+      ticker: TICKER,
+      side: 'long',
+      size: 100,
+      leverage: 5,
+      ...order,
+    });
+    expect(status).toBe(400);
+    expect(body?.preview).toBeUndefined();
+  }
+});
+
+it('preserves authenticated market preview and rejects limits without a trade', async () => {
+  for (const orderType of ['market', 'limit']) {
+    const response = await POST(
+      new NextRequest('http://localhost/api/markets/perps/preview', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer steward:test:${userId}`,
+        },
+        body: JSON.stringify({
+          ticker: TICKER,
+          side: 'long',
+          size: 100,
+          leverage: 5,
+          orderType,
+          limitPrice: 90,
+        }),
+      })
+    );
+    const body = await response.json();
+    expect(response.status).toBe(orderType === 'market' ? 200 : 400);
+    if (orderType === 'market') {
+      expect(body.preview.previewType).toBe('open');
+      expect(body.preview.executionPrice).toBeGreaterThan(0);
+    } else {
+      expect(body.error).toBe('Only market open orders are supported');
+      expect(body.preview).toBeUndefined();
+    }
+  }
+  expect(
+    Number(
+      (
+        await db
+          .select({ balance: users.virtualBalance })
+          .from(users)
+          .where(eq(users.id, userId))
+      )[0]?.balance
+    )
+  ).toBe(1000);
+  expect(
+    await db
+      .select({ id: perpPositions.id })
+      .from(perpPositions)
+      .where(eq(perpPositions.userId, userId))
+  ).toHaveLength(0);
 });
