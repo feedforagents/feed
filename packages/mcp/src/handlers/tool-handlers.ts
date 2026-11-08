@@ -39,9 +39,12 @@ import {
 } from '@feed/a2a';
 import {
   acceptGroupInvite,
+  BusinessLogicError,
   checkRateLimitAsync,
   declineGroupInvite,
   logAdminModify,
+  NotFoundError,
+  notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
 } from '@feed/api';
@@ -1354,12 +1357,34 @@ export async function executeDeletePost(
 }
 
 /**
- * Execute like_post tool
+ * Execute like_post tool (same rules as the web like route: the post must
+ * exist, be published and not deleted; a fresh like notifies the author).
  */
 export async function executeLikePost(
   agent: AuthenticatedAgent,
   args: LikePostArgs
 ): Promise<LikePostResult> {
+  const now = new Date();
+  const [post] = await db
+    .select({
+      id: posts.id,
+      authorId: posts.authorId,
+      deletedAt: posts.deletedAt,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(eq(posts.id, args.postId))
+    .limit(1);
+
+  // Unknown or not-yet-published posts cannot be liked (and are never
+  // created from the ID).
+  if (!post || post.timestamp > now) {
+    throw new NotFoundError('Post', args.postId);
+  }
+  if (post.deletedAt) {
+    throw new BusinessLogicError('Cannot like deleted post', 'POST_DELETED');
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       postId: args.postId,
@@ -1378,6 +1403,30 @@ export async function executeLikePost(
       type: 'like',
     },
   });
+
+  // The like has committed. A notification outage must not tell the caller
+  // that the like failed and invite an unsuccessful retry.
+  if (post.authorId && post.authorId !== agent.userId) {
+    try {
+      await notifyReactionOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        'like'
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed like',
+        {
+          postId: args.postId,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return { success: true, liked: true };
 }
 

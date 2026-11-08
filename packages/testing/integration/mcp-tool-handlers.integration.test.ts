@@ -4,8 +4,9 @@
  * Requires DATABASE_URL pointing at a disposable database with schema applied.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import {
+  and,
   db,
   eq,
   favorites,
@@ -14,19 +15,23 @@ import {
   notifications,
   positions,
   posts,
+  reactions,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
+import * as notificationService from '../../api/src/services/notification-service';
 import {
   executeGetFavoritePosts,
   executeGetMarkets,
   executeGetPositions,
   executeGetUnreadCount,
   executeGetUserWallet,
+  executeLikePost,
   executeMarkNotificationsRead,
 } from '../../mcp/src/handlers/tool-handlers';
 
 const userIds: string[] = [];
+const likePostIds: string[] = [];
 let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
@@ -47,6 +52,47 @@ async function createUser(
   });
   userIds.push(id);
   return id;
+}
+
+async function createLikePost(
+  authorId: string,
+  overrides: Partial<typeof posts.$inferInsert> = {}
+): Promise<string> {
+  const id = await generateSnowflakeId();
+  await db.insert(posts).values({
+    id,
+    content: 'post to like',
+    authorId,
+    timestamp: new Date(Date.now() - 60_000),
+    ...overrides,
+  });
+  likePostIds.push(id);
+  return id;
+}
+
+async function authorNotifications(postIdToCheck: string) {
+  return db
+    .select({
+      userId: notifications.userId,
+      type: notifications.type,
+      actorId: notifications.actorId,
+      postId: notifications.postId,
+    })
+    .from(notifications)
+    .where(eq(notifications.postId, postIdToCheck));
+}
+
+async function likeReactions(postIdToCheck: string, likerId: string) {
+  return db
+    .select({ id: reactions.id })
+    .from(reactions)
+    .where(
+      and(
+        eq(reactions.postId, postIdToCheck),
+        eq(reactions.userId, likerId),
+        eq(reactions.type, 'like')
+      )
+    );
 }
 
 describe('MCP tool handlers', () => {
@@ -120,10 +166,12 @@ describe('MCP tool handlers', () => {
     await db
       .delete(notifications)
       .where(inArray(notifications.userId, userIds));
+    await db.delete(reactions).where(inArray(reactions.userId, userIds));
     await db.delete(favorites).where(inArray(favorites.userId, userIds));
     await db.delete(positions).where(inArray(positions.userId, userIds));
     await db.delete(markets).where(eq(markets.id, marketId));
     await db.delete(posts).where(eq(posts.id, postId));
+    await db.delete(posts).where(inArray(posts.id, likePostIds));
     await db.delete(users).where(inArray(users.id, userIds));
   });
 
@@ -180,5 +228,83 @@ describe('MCP tool handlers', () => {
       side: 'YES',
       question: 'Will the MCP list only open positions?',
     });
+  });
+
+  it('notifies the post author when the agent likes a post', async () => {
+    const targetPostId = await createLikePost(otherUserId);
+
+    const result = await executeLikePost(agent(), { postId: targetPostId });
+
+    expect(result).toEqual({ success: true, liked: true });
+    expect(await likeReactions(targetPostId, agentUserId)).toHaveLength(1);
+    expect(await authorNotifications(targetPostId)).toEqual([
+      {
+        userId: otherUserId,
+        type: 'reaction',
+        actorId: agentUserId,
+        postId: targetPostId,
+      },
+    ]);
+  });
+
+  it('does not notify the author when the agent likes its own post', async () => {
+    const ownPostId = await createLikePost(agentUserId);
+
+    const result = await executeLikePost(agent(), { postId: ownPostId });
+
+    expect(result).toEqual({ success: true, liked: true });
+    expect(await likeReactions(ownPostId, agentUserId)).toHaveLength(1);
+    expect(await authorNotifications(ownPostId)).toHaveLength(0);
+  });
+
+  it('notifies only once for a repeated like', async () => {
+    const targetPostId = await createLikePost(otherUserId);
+    const notify = spyOn(notificationService, 'notifyReactionOnPost');
+    try {
+      await executeLikePost(agent(), { postId: targetPostId });
+      const second = await executeLikePost(agent(), { postId: targetPostId });
+
+      expect(second).toEqual({ success: true, liked: true });
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(await likeReactions(targetPostId, agentUserId)).toHaveLength(1);
+      expect(await authorNotifications(targetPostId)).toHaveLength(1);
+    } finally {
+      notify.mockRestore();
+    }
+  });
+
+  it('rejects a like on a deleted post', async () => {
+    const deletedPostId = await createLikePost(otherUserId, {
+      deletedAt: new Date(),
+    });
+
+    await expect(
+      executeLikePost(agent(), { postId: deletedPostId })
+    ).rejects.toThrow('deleted');
+    expect(await likeReactions(deletedPostId, agentUserId)).toHaveLength(0);
+  });
+
+  it('rejects a like on an unknown post', async () => {
+    const unknownPostId = await generateSnowflakeId();
+
+    await expect(
+      executeLikePost(agent(), { postId: unknownPostId })
+    ).rejects.toThrow('not found');
+    expect(await likeReactions(unknownPostId, agentUserId)).toHaveLength(0);
+  });
+
+  it('still reports the committed like when the author notification fails', async () => {
+    const notify = spyOn(notificationService, 'notifyReactionOnPost');
+    notify.mockRejectedValueOnce(new Error('notification unavailable'));
+    try {
+      const targetPostId = await createLikePost(otherUserId);
+
+      const result = await executeLikePost(agent(), { postId: targetPostId });
+
+      expect(result).toEqual({ success: true, liked: true });
+      expect(await likeReactions(targetPostId, agentUserId)).toHaveLength(1);
+    } finally {
+      notify.mockRestore();
+    }
   });
 });
