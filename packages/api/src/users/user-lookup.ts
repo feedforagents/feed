@@ -366,6 +366,25 @@ export async function findTargetByIdentifier(
     };
   }
 
+  // Organization profiles are keyed by organization ID, but the follow graph
+  // lives on the organization's shadow actor (`org-<id>`): ActorFollow and
+  // UserActorFollow rows reference the actor ID, never the organization ID.
+  // Resolve the organization ID to that actor so org follow lists work for
+  // every organization, not just the ones whose shadow actor's username
+  // happens to equal the organization ID.
+  const organization = StaticDataRegistry.getOrganization(identifier);
+  if (organization) {
+    const orgActor = StaticDataRegistry.getActor(`org-${organization.id}`);
+    if (orgActor) {
+      return {
+        user: null,
+        actor: orgActor,
+        targetId: orgActor.id,
+        isActor: true,
+      };
+    }
+  }
+
   // Neither found
   return {
     user: null,
