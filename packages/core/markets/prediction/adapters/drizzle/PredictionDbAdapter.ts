@@ -102,9 +102,12 @@ export class PredictionDbAdapter implements PredictionDbPort {
   }
 
   /**
-   * WHY orderBy createdAt DESC: Newest markets first — matches user expectation
-   * that recent questions appear at the top. Provides stable pagination when
-   * new markets aren't being created during the request.
+   * WHY orderBy createdAt DESC, id DESC: Newest markets first — matches user
+   * expectation that recent questions appear at the top. The id tiebreaker
+   * makes the order total: markets created in one batch share a createdAt
+   * (one now() per statement), and with a non-total order Postgres may return
+   * tied rows in a different sequence per page query, so offset pagination
+   * duplicates some markets and never reaches others.
    */
   async listMarkets(options?: {
     limit?: number;
@@ -114,7 +117,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
       .select()
       .from(markets)
       .where(eq(markets.resolved, false))
-      .orderBy(desc(markets.createdAt));
+      .orderBy(desc(markets.createdAt), desc(markets.id));
     const rows =
       options?.limit != null
         ? await base.limit(options.limit).offset(options.offset ?? 0)
