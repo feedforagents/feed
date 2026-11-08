@@ -729,6 +729,32 @@ export async function generateGameCompletionFeedback(
     'AutoFeedback'
   );
 
+  // One game counts once toward the game record. The direct submission
+  // route (POST /api/feedback/game-to-agent) rejects a second record for
+  // the same agent + gameId; generated feedback must uphold the same rule,
+  // so a regenerated or cross-submitted completion returns the record that
+  // already exists instead of counting the game again.
+  const [existingFeedback] = await db
+    .select()
+    .from(feedbacks)
+    .where(
+      and(
+        eq(feedbacks.toUserId, agentId),
+        eq(feedbacks.gameId, gameId),
+        eq(feedbacks.interactionType, 'game_to_agent')
+      )
+    )
+    .limit(1);
+
+  if (existingFeedback) {
+    logger.info(
+      'Game feedback already recorded; returning existing record',
+      { agentId, gameId, feedbackId: existingFeedback.id },
+      'AutoFeedback'
+    );
+    return existingFeedback;
+  }
+
   // Calculate feedback score from performance
   const score = calculateGameScore(performanceMetrics);
 
@@ -746,14 +772,19 @@ export async function generateGameCompletionFeedback(
       'Challenging game. Focus on improving risk management and decision quality.';
   }
 
-  // Create feedback record
+  // Create feedback record. Feedback.score is an integer column, so the
+  // record stores the rounded score (the float score still feeds the
+  // double-precision metric averages below). The gameId column must be
+  // set — not only metadata — so the direct route's duplicate check can
+  // see generated records.
   const feedbackId = await generateSnowflakeId();
   await db.insert(feedbacks).values({
     id: feedbackId,
     toUserId: agentId,
-    score,
+    score: Math.round(score),
     comment,
     category: 'game_performance',
+    gameId,
     interactionType: 'game_to_agent',
     metadata: {
       gameId,
