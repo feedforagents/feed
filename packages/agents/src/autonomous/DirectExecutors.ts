@@ -46,6 +46,7 @@ import {
   sql,
   users,
 } from '@feed/db';
+import { npcTrades } from '@feed/db/schema';
 import {
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
@@ -617,6 +618,53 @@ function predictionSettlementOptions(
   };
 }
 
+/**
+ * Mirror an executed NPC prediction trade into NPCTrade, the record the
+ * market detail screen reads: its tradeCount and its trades feed union
+ * BalanceTransaction rows with NPCTrade rows, and NPC trades pay from the
+ * actorState wallet, so they never produce a BalanceTransaction row.
+ * TradeExecutionService writes this mirror for the NPC trades it executes;
+ * without the same mirror here, an autonomous-loop trade moves the price
+ * and opens or closes a real position while the market screen counts and
+ * lists no trade at all. A failed mirror must not fail the committed
+ * trade, so errors are logged, not thrown.
+ */
+async function recordNpcPredictionTrade(params: {
+  npcActorId: string;
+  marketId: string;
+  action: string;
+  side: 'YES' | 'NO';
+  amount: number;
+  price: number;
+  reason?: string;
+}): Promise<void> {
+  try {
+    await db.insert(npcTrades).values({
+      id: await generateSnowflakeId(),
+      npcActorId: params.npcActorId,
+      poolId: null,
+      marketType: 'prediction',
+      marketId: params.marketId,
+      action: params.action,
+      side: params.side,
+      amount: params.amount,
+      price: params.price,
+      sentiment: null,
+      reason: params.reason ?? null,
+    });
+  } catch (error) {
+    logger.error(
+      '[DIRECT_TRADE] Failed to mirror NPC prediction trade into NPCTrade',
+      {
+        agentUserId: params.npcActorId,
+        marketId: params.marketId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
+  }
+}
+
 async function executePredictionTrade(params: {
   agentUserId: string;
   marketId: string;
@@ -667,6 +715,18 @@ async function executePredictionTrade(params: {
         error: error.message,
       });
     });
+
+  if (isNpc) {
+    await recordNpcPredictionTrade({
+      npcActorId: agentUserId,
+      marketId,
+      action: side,
+      side: isBuyYes ? 'YES' : 'NO',
+      amount,
+      price: result.avgPrice,
+      reason: reasoning,
+    });
+  }
 
   const sharesRounded = Math.round(result.shares * 100) / 100;
 
@@ -781,6 +841,18 @@ async function executePredictionSell(params: {
         error: error.message,
       });
     });
+
+  if (isNpc) {
+    await recordNpcPredictionTrade({
+      npcActorId: agentUserId,
+      marketId,
+      action: side,
+      side: isSellYes ? 'YES' : 'NO',
+      amount: sellResult.netProceeds ?? 0,
+      price: sellResult.avgPrice ?? 0,
+      reason: reasoning,
+    });
+  }
 
   logger.info(
     `[DirectExecutor] Prediction sell executed: ${isSellYes ? 'YES' : 'NO'} on market ${marketId}`,
