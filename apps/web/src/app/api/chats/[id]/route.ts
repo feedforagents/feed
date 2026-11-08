@@ -74,6 +74,7 @@ import {
   lt,
   messageReactions,
   messages,
+  or,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -182,14 +183,22 @@ export const GET = withErrorHandling(
           .where(
             and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
           )
-          .orderBy(asc(messages.createdAt))
+          .orderBy(asc(messages.createdAt), asc(messages.id))
           .limit(effectiveLimit);
       } else if (cursor) {
-        // Load older messages: get cursor's timestamp, then fetch before it.
-        // The cursor must belong to this chat; an unknown cursor is an error
-        // rather than a silent reset to the latest page.
+        // Load older messages: get the cursor's position, then fetch the
+        // messages before it. The cursor must belong to this chat; an
+        // unknown cursor is an error rather than a silent reset to the
+        // latest page.
+        // The position is the (createdAt, id) pair, not the timestamp
+        // alone: createdAt is a millisecond timestamp, so bursts of
+        // messages routinely share it. Resuming with createdAt alone
+        // would skip every not-yet-loaded message that shares the cursor
+        // message's millisecond — the page boundary cut them off the
+        // previous page, and a strict < on the timestamp excludes them
+        // from every later page.
         const [cursorMessage] = await db
-          .select({ createdAt: messages.createdAt })
+          .select({ createdAt: messages.createdAt, id: messages.id })
           .from(messages)
           .where(and(eq(messages.id, cursor), eq(messages.chatId, chatId)))
           .limit(1);
@@ -207,18 +216,26 @@ export const GET = withErrorHandling(
           .where(
             and(
               eq(messages.chatId, chatId),
-              lt(messages.createdAt, cursorMessage.createdAt)
+              or(
+                lt(messages.createdAt, cursorMessage.createdAt),
+                and(
+                  eq(messages.createdAt, cursorMessage.createdAt),
+                  lt(messages.id, cursorMessage.id)
+                )
+              )
             )
           )
-          .orderBy(desc(messages.createdAt))
+          .orderBy(desc(messages.createdAt), desc(messages.id))
           .limit(effectiveLimit + 1);
       } else {
-        // Initial load: latest messages
+        // Initial load: latest messages. Order by (createdAt, id) so the
+        // page boundary inside a same-millisecond group is deterministic
+        // and the cursor walk above can resume from it exactly.
         messagesList = await db
           .select()
           .from(messages)
           .where(eq(messages.chatId, chatId))
-          .orderBy(desc(messages.createdAt))
+          .orderBy(desc(messages.createdAt), desc(messages.id))
           .limit(effectiveLimit + 1);
       }
 
