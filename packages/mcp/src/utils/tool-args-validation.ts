@@ -220,7 +220,9 @@ const UnlikePostArgsSchema = z.object({
 
 const SharePostArgsSchema = z.object({
   postId: z.string().min(1),
-  comment: z.string().optional(),
+  // The comment becomes the quote post's content; the PRD caps posts at 280
+  // characters.
+  comment: z.string().max(280).optional(),
 }) satisfies z.ZodType<SharePostArgs>;
 
 const GetCommentsArgsSchema = z.object({

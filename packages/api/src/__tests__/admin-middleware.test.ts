@@ -1,4 +1,10 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+const previousAdminDomain = process.env.ADMIN_EMAIL_DOMAIN;
+afterAll(() => {
+  if (previousAdminDomain === undefined) delete process.env.ADMIN_EMAIL_DOMAIN;
+  else process.env.ADMIN_EMAIL_DOMAIN = previousAdminDomain;
+});
 
 const mockSelect = mock();
 const mockLoggerInfo = mock();
