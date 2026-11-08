@@ -43,6 +43,13 @@
       "when": 1793980097274,
       "tag": "0005_perp_funding_period",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794161819538,
+      "tag": "0006_perp_funding_period_accrual",
+      "breakpoints": true
     }
   ]
 }

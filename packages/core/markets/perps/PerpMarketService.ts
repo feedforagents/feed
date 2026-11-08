@@ -1228,9 +1228,11 @@ export class PerpMarketService {
 
   /**
    * Run a funding step (8h by default), updating fundingPaid per position and fundingRate per market.
-   * Each open position is accrued at most once per UTC 8h period (PRD §9.3).
-   * A replay in that period does not charge again. Funding is accrued to
-   * positions (not settled to wallets here; PnL is adjusted on close).
+   * Each open position is accrued at most once per UTC 8h period (PRD §9.3 item 4).
+   * The claim is keyed by position and period, so a later period does not hide
+   * an earlier one when workers finish out of order, and a replay of either
+   * period does not charge again. Funding is accrued to positions (not settled
+   * to wallets here; PnL is adjusted on close).
    */
   async processFundingStep(): Promise<void> {
     const markets = await this.db.listMarkets();
@@ -1279,17 +1281,14 @@ export class PerpMarketService {
       for (const pos of orderedPositions) {
         // A close may have settled funding since the snapshot. Recompute from
         // the locked row so settled funding is not restored or charged again.
-        // The period marker is written in the same transaction as the accrual,
-        // so a crash rolls both back and a retry can finish the position.
         await this.db.transaction(async (tx) => {
           const fresh = await tx.lockOpenPositionById(pos.id);
           if (!fresh) return;
-          if (
-            fresh.lastFundingPeriodStart != null &&
-            fresh.lastFundingPeriodStart.getTime() >= periodStart.getTime()
-          ) {
-            return;
-          }
+          // One row per (position, period). A later period already recorded
+          // does not hide this one, and a replay conflicts. The insert rolls
+          // back with the fundingPaid write if that write fails.
+          const claimed = await tx.claimFundingPeriod(fresh.id, periodStart);
+          if (!claimed) return;
 
           // periodRate is signed (negative when shorts dominate); the payer is
           // decided by paymentDirection, so apply only the magnitude here.
@@ -1310,7 +1309,6 @@ export class PerpMarketService {
 
           await tx.updateOpenPosition(fresh.id, {
             ...(delta !== 0 ? { fundingPaid: fresh.fundingPaid + delta } : {}),
-            lastFundingPeriodStart: periodStart,
             lastUpdated: now,
           });
         });

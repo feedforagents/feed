@@ -3,6 +3,7 @@ import {
   db as defaultDb,
   organizations,
   perpMarketSnapshots,
+  perpPositionFundingAccruals,
   perpPositions,
   type Transaction,
 } from '@feed/db';
@@ -163,6 +164,20 @@ export class PerpDbAdapter implements PerpDbPort {
     return pos ? mapPosition(pos) : null;
   }
 
+  async claimFundingPeriod(
+    positionId: string,
+    periodStart: Date
+  ): Promise<boolean> {
+    const inserted = await this.dbClient
+      .insert(perpPositionFundingAccruals)
+      .values({ positionId, periodStart })
+      .onConflictDoNothing()
+      .returning({
+        positionId: perpPositionFundingAccruals.positionId,
+      });
+    return inserted.length > 0;
+  }
+
   async upsertPosition(
     position: Omit<PerpPositionRecord, 'id'> & { id?: string }
   ): Promise<PerpPositionRecord> {
@@ -210,7 +225,6 @@ export class PerpDbAdapter implements PerpDbPort {
         | 'unrealizedPnL'
         | 'unrealizedPnLPercent'
         | 'fundingPaid'
-        | 'lastFundingPeriodStart'
         | 'liquidationPrice'
         | 'lastUpdated'
         | 'size'
@@ -233,9 +247,6 @@ export class PerpDbAdapter implements PerpDbPort {
     }
     if (updates.fundingPaid !== undefined) {
       setFields.fundingPaid = updates.fundingPaid;
-    }
-    if (updates.lastFundingPeriodStart !== undefined) {
-      setFields.lastFundingPeriodStart = updates.lastFundingPeriodStart;
     }
     if (updates.liquidationPrice !== undefined) {
       setFields.liquidationPrice = updates.liquidationPrice;
@@ -512,9 +523,6 @@ function mapPosition(pos: DbPerpPosition): PerpPositionRecord {
     unrealizedPnL: Number(pos.unrealizedPnL),
     unrealizedPnLPercent: Number(pos.unrealizedPnLPercent),
     fundingPaid: Number(pos.fundingPaid),
-    lastFundingPeriodStart: pos.lastFundingPeriodStart
-      ? new Date(pos.lastFundingPeriodStart)
-      : null,
     openedAt: new Date(pos.openedAt),
     lastUpdated: new Date(pos.lastUpdated),
     closedAt: pos.closedAt ? new Date(pos.closedAt) : undefined,

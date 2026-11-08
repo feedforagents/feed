@@ -71,8 +71,6 @@ export interface PerpPositionRecord {
   unrealizedPnL: number;
   unrealizedPnLPercent: number;
   fundingPaid: number;
-  /** Start of the UTC 8h period already accrued. Absent until the first charge. */
-  lastFundingPeriodStart?: Date | null;
   openedAt: Date;
   lastUpdated: Date;
   closedAt?: Date | null;
@@ -100,6 +98,12 @@ export interface PerpDbPort {
    * Returns null if the position does not exist or is already closed.
    */
   lockOpenPositionById(id: string): Promise<PerpPositionRecord | null>;
+  /**
+   * Record that this position was accrued for the UTC 8h period starting at
+   * `periodStart`. Returns false when that period was already recorded.
+   * Must run in the same transaction as the fundingPaid update.
+   */
+  claimFundingPeriod(positionId: string, periodStart: Date): Promise<boolean>;
   upsertPosition(
     position: Omit<PerpPositionRecord, 'id'> & { id?: string }
   ): Promise<PerpPositionRecord>;
@@ -117,7 +121,6 @@ export interface PerpDbPort {
         | 'unrealizedPnL'
         | 'unrealizedPnLPercent'
         | 'fundingPaid'
-        | 'lastFundingPeriodStart'
         | 'liquidationPrice'
         | 'lastUpdated'
         | 'size'

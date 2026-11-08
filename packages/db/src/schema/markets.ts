@@ -7,6 +7,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
 } from 'drizzle-orm/pg-core';
@@ -274,13 +275,6 @@ export const perpPositions = pgTable(
     unrealizedPnL: doublePrecision('unrealizedPnL').notNull(),
     unrealizedPnLPercent: doublePrecision('unrealizedPnLPercent').notNull(),
     fundingPaid: doublePrecision('fundingPaid').notNull().default(0),
-    /**
-     * Start of the UTC 8h funding period already applied to this position.
-     * A replay of that period must not accrue funding again.
-     */
-    lastFundingPeriodStart: timestamp('lastFundingPeriodStart', {
-      mode: 'date',
-    }),
     openedAt: timestamp('openedAt', { mode: 'date' }).notNull().defaultNow(),
     lastUpdated: timestamp('lastUpdated', { mode: 'date' }).notNull(),
     closedAt: timestamp('closedAt', { mode: 'date' }),
@@ -293,6 +287,23 @@ export const perpPositions = pgTable(
     index('PerpPosition_userId_closedAt_idx').on(table.userId, table.closedAt),
     index('PerpPosition_userId_openedAt_idx').on(table.userId, table.openedAt),
   ]
+);
+
+/**
+ * One row per open-position funding period (UTC 00:00, 08:00, 16:00).
+ * The primary key is the idempotency key: inserting the same pair again
+ * does nothing, and an earlier period can still be inserted after a later
+ * one. Written in the same transaction as that position's fundingPaid change.
+ */
+export const perpPositionFundingAccruals = pgTable(
+  'PerpPositionFundingAccrual',
+  {
+    positionId: text('positionId')
+      .notNull()
+      .references(() => perpPositions.id, { onDelete: 'cascade' }),
+    periodStart: timestamp('periodStart', { mode: 'date' }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.positionId, table.periodStart] })]
 );
 
 // Relations
