@@ -95,8 +95,8 @@ import {
   db,
   desc,
   eq,
-  exists,
   inArray,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -593,6 +593,8 @@ export const GET = withErrorHandling(
     const now = new Date();
     // Simple reposts of a deleted or future original are hidden below, so
     // exclude them here too; otherwise they would take up rows of a page.
+    // A scalar lookup on the unique original id avoids hashing every visible
+    // post for an EXISTS subplan when only a small page is requested.
     const originalPost = aliasedTable(posts, 'originalPost');
     const userPosts = await db
       .select()
@@ -605,7 +607,7 @@ export const GET = withErrorHandling(
           or(
             isNull(posts.originalPostId),
             ne(posts.content, ''),
-            exists(
+            isNotNull(
               db
                 .select({ id: originalPost.id })
                 .from(originalPost)
@@ -616,6 +618,7 @@ export const GET = withErrorHandling(
                     lte(originalPost.timestamp, now)
                   )
                 )
+                .limit(1)
             )
           )
         )
