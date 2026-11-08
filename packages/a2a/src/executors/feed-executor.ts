@@ -2662,6 +2662,15 @@ export class FeedAgentExecutor implements AgentExecutor {
         throw new Error('Current perp price must be positive');
       if (position.side !== 'long' && position.side !== 'short')
         throw new Error(`Position ${position.id} has invalid side`);
+      // Accrued funding settles only at close (realizedPnL = pnl -
+      // fundingPaid in PerpMarketService), so the stored price-only
+      // unrealizedPnL overstates what the holder will realize by
+      // fundingPaid. Net it here, as calculatePerpPositionMarketValue does
+      // for the engine portfolio paths; a missing value (legacy row) is zero.
+      const fundingPaid =
+        position.fundingPaid == null
+          ? 0
+          : requiredFinancialValue(position.fundingPaid, 'fundingPaid');
       return {
         id: position.id,
         ticker: position.ticker,
@@ -2670,10 +2679,9 @@ export class FeedAgentExecutor implements AgentExecutor {
         entryPrice: requiredFinancialValue(position.entryPrice, 'entryPrice'),
         currentPrice,
         leverage: requiredFinancialValue(position.leverage, 'leverage'),
-        unrealizedPnL: requiredFinancialValue(
-          position.unrealizedPnL,
-          'unrealizedPnL'
-        ),
+        unrealizedPnL:
+          requiredFinancialValue(position.unrealizedPnL, 'unrealizedPnL') -
+          fundingPaid,
       };
     });
 
