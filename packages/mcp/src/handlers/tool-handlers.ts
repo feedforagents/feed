@@ -65,6 +65,8 @@ import {
   markets,
   perpMarketSnapshots,
   posts,
+  questions,
+  timeframedMarkets,
   users,
 } from '@feed/db';
 import {
@@ -2483,17 +2485,43 @@ export async function executeResolveMarket(
 
   const winningSide = args.resolution ? 'yes' : 'no';
 
+  // Mirror the admin web route: settlement, question, and timeframed
+  // updates commit together. The trending widget and the new-markets feed
+  // list a market while its question is 'active', so resolving only the
+  // market row would leave a settled market displayed as live there.
+  const resolvedAt = new Date();
   await withPredictionSettlement(
     args.marketId,
     { system: 'mcp_admin_resolve' },
-    (service) =>
-      service.resolve({
+    async (service, tx: import('@feed/db').Transaction) => {
+      await service.resolve({
         marketId: args.marketId,
         winningSide,
+        resolvedAt,
         resolutionDescription:
           args.reason ||
           `Resolved by admin as ${args.resolution ? 'YES' : 'NO'}`,
-      }),
+      });
+      await tx
+        .update(questions)
+        .set({
+          status: 'resolved',
+          resolvedOutcome: args.resolution,
+          resolutionReviewedAt: resolvedAt,
+          resolutionReviewedBy: agent.userId,
+          updatedAt: resolvedAt,
+        })
+        .where(eq(questions.id, args.marketId));
+      await tx
+        .update(timeframedMarkets)
+        .set({
+          isActive: false,
+          isResolved: true,
+          resolvedAt,
+          updatedAt: resolvedAt,
+        })
+        .where(eq(timeframedMarkets.questionId, args.marketId));
+    },
     predictionServiceOptions(args.marketId)
   );
 
