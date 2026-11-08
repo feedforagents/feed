@@ -49,7 +49,7 @@ export const MARKET_CONFIG = {
   OPEN_INTEREST_LIMIT_RATIO: 0.1, // Max position = 10% of market open interest
 
   // Leverage limits
-  DEFAULT_MAX_LEVERAGE: 100,
+  DEFAULT_MAX_LEVERAGE: 20,
   DEFAULT_MIN_ORDER_SIZE: 10, // $10 minimum order
 } as const;
 

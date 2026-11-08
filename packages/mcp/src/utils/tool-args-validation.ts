@@ -174,7 +174,7 @@ const OpenPositionArgsSchema = z.object({
   ticker: z.string().min(1),
   side: z.enum(['LONG', 'SHORT']),
   amount: z.number().positive(),
-  leverage: z.number().min(1).max(100),
+  leverage: z.number().min(1).max(20),
 }) satisfies z.ZodType<OpenPositionArgs>;
 
 const GetMarketPricesArgsSchema = z.object({
@@ -220,7 +220,9 @@ const UnlikePostArgsSchema = z.object({
 
 const SharePostArgsSchema = z.object({
   postId: z.string().min(1),
-  comment: z.string().optional(),
+  // The comment becomes the quote post's content; the PRD caps posts at 280
+  // characters.
+  comment: z.string().max(280).optional(),
 }) satisfies z.ZodType<SharePostArgs>;
 
 const GetCommentsArgsSchema = z.object({

@@ -45,12 +45,12 @@ import {
   shares,
   sql,
   users,
-  withTransaction,
 } from '@feed/db';
 import {
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
   type GeneratedTag,
@@ -63,12 +63,7 @@ import {
   WalletService,
   withPredictionSettlement,
 } from '@feed/engine';
-import {
-  AGENT_TRANSFER_IN_TRANSACTION_TYPE,
-  AGENT_TRANSFER_OUT_TRANSACTION_TYPE,
-  floorPoints,
-  isPureRepost,
-} from '@feed/shared';
+import { floorPoints, isPureRepost } from '@feed/shared';
 import { agentPnLService } from '../services/AgentPnLService';
 import { logger } from '../shared/logger';
 import { generateSnowflakeId } from '../shared/snowflake';
@@ -331,20 +326,7 @@ export interface DirectRepostResult {
   success: boolean;
   repostId?: string;
   quotePostId?: string;
-  error?: string;
-}
-
-export interface DirectSendMoneyParams {
-  agentUserId: string;
-  recipientId: string;
-  amount: number;
-  reason?: string;
-}
-
-export interface DirectSendMoneyResult {
-  success: boolean;
-  transactionId?: string;
-  newBalance?: number;
+  alreadyReposted?: boolean;
   error?: string;
 }
 
@@ -667,17 +649,24 @@ async function executePredictionTrade(params: {
   );
 
   // Record in AgentTrade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'prediction',
-    marketId,
-    action: 'open',
-    side: sideLabel,
-    amount,
-    price: result.avgPrice,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'prediction',
+      marketId,
+      action: 'open',
+      side: sideLabel,
+      amount,
+      price: result.avgPrice,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
 
   const sharesRounded = Math.round(result.shares * 100) / 100;
 
@@ -773,18 +762,25 @@ async function executePredictionSell(params: {
   );
 
   // Record in AgentTrade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'prediction',
-    marketId,
-    action: 'close',
-    side: sideLabel,
-    amount: sellResult.netProceeds ?? 0,
-    price: sellResult.avgPrice,
-    pnl: sellResult.pnl,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'prediction',
+      marketId,
+      action: 'close',
+      side: sideLabel,
+      amount: sellResult.netProceeds ?? 0,
+      price: sellResult.avgPrice,
+      pnl: sellResult.pnl,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
 
   logger.info(
     `[DirectExecutor] Prediction sell executed: ${isSellYes ? 'YES' : 'NO'} on market ${marketId}`,
@@ -821,11 +817,6 @@ async function executePerpTrade(params: {
 
   const perpSide = side === 'open_long' ? 'long' : 'short';
 
-  // Get org for price (search through all orgs by ticker)
-  const allOrgs = StaticDataRegistry.getAllOrganizations();
-  const org = allOrgs.find((o) => o.ticker === ticker);
-  const currentPrice = org?.initialPrice ?? 100;
-
   const walletAdapter = createPerpWalletAdapter(isNpc);
 
   const service = new PerpMarketService({
@@ -837,6 +828,7 @@ async function executePerpTrade(params: {
     }),
     db: new PerpDbAdapter(),
     wallet: walletAdapter,
+    cache: createPerpTradesCachePort(),
     fees: {
       tradingFeeRate: 0.001,
       platformShare: 0.5,
@@ -846,28 +838,92 @@ async function executePerpTrade(params: {
     priceImpact: createPerpPriceImpactPort(),
   });
 
-  await service.openPosition({
+  const openResult = await service.openPosition({
     userId: agentUserId,
     ticker,
     side: perpSide,
     size: amount,
     leverage: 1,
   });
-  // Record trade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'perp',
-    ticker,
-    action: 'open',
-    side: perpSide,
-    amount,
-    price: currentPrice,
-    reasoning,
-  });
+
+  // Record what the service actually did. openPosition opens a fresh
+  // position, adds to one, reduces or closes an opposite one, or flips it;
+  // each leg is recorded at the price it executed at. The result carries
+  // those prices; never substitute a quote or the position's average entry.
+  const rebalanceType = openResult.rebalanceType;
+  const closedSide: 'long' | 'short' = perpSide === 'long' ? 'short' : 'long';
+  const recordClosedLeg = async (closedSize: number) => {
+    if (openResult.exitPrice == null || openResult.realizedPnL == null) {
+      throw new Error(
+        `[DirectExecutor] openPosition (${rebalanceType}) did not return the closed leg: exitPrice=${openResult.exitPrice}, realizedPnL=${openResult.realizedPnL}`
+      );
+    }
+    await agentPnLService
+      .recordTrade({
+        agentId: agentUserId,
+        userId: agentManagedBy,
+        marketType: 'perp',
+        ticker,
+        action: 'close',
+        side: closedSide,
+        amount: closedSize,
+        price: openResult.exitPrice,
+        pnl: openResult.realizedPnL,
+        reasoning,
+      })
+      .catch((error: Error) => {
+        logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+          agentUserId,
+          error: error.message,
+        });
+      });
+  };
+  const recordOpenedLeg = async (openedSize: number) => {
+    if (openResult.fillPrice == null) {
+      throw new Error(
+        `[DirectExecutor] openPosition (${rebalanceType ?? 'open'}) did not return a fill price`
+      );
+    }
+    await agentPnLService
+      .recordTrade({
+        agentId: agentUserId,
+        userId: agentManagedBy,
+        marketType: 'perp',
+        ticker,
+        action: 'open',
+        side: perpSide,
+        amount: openedSize,
+        price: openResult.fillPrice,
+        reasoning,
+      })
+      .catch((error: Error) => {
+        logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+          agentUserId,
+          error: error.message,
+        });
+      });
+  };
+
+  if (rebalanceType === 'reduce' || rebalanceType === 'close') {
+    // Opposite-side trade not larger than the position: only a close leg,
+    // for the size that was closed.
+    await recordClosedLeg(openResult.size);
+  } else if (rebalanceType === 'flip') {
+    // The previous position closed in full, then the remainder opened.
+    if (openResult.previousSize == null) {
+      throw new Error(
+        '[DirectExecutor] openPosition (flip) did not return previousSize'
+      );
+    }
+    await recordClosedLeg(openResult.previousSize);
+    await recordOpenedLeg(openResult.size);
+  } else {
+    // Fresh open or add: the requested size opened at its own fill.
+    await recordOpenedLeg(amount);
+  }
 
   logger.info(
-    `[DirectExecutor] Perp trade executed: ${perpSide} $${amount} on ${ticker}`,
+    `[DirectExecutor] Perp trade executed: ${perpSide} $${amount} on ${ticker} (${rebalanceType ?? 'open'})`,
     undefined,
     'DirectExecutors'
   );
@@ -923,6 +979,7 @@ async function executeClosePerpPosition(params: {
       }),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: 0.001,
         platformShare: 0.5,
@@ -961,18 +1018,25 @@ async function executeClosePerpPosition(params: {
   const { realizedPnL, size, exitPrice } = closeResult;
 
   // Record trade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'perp',
-    ticker,
-    action: 'close',
-    side: existingPosition.side as 'long' | 'short',
-    amount: size,
-    price: exitPrice,
-    pnl: realizedPnL,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'perp',
+      ticker,
+      action: 'close',
+      side: existingPosition.side as 'long' | 'short',
+      amount: size,
+      price: exitPrice,
+      pnl: realizedPnL,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
 
   logger.info(
     `[DirectExecutor] Perp position closed: ${existingPosition.side} $${size} on ${ticker} (P&L: ${realizedPnL >= 0 ? '+' : ''}$${realizedPnL.toFixed(2)})`,
@@ -1103,10 +1167,27 @@ export async function executeDirectPost(
   // Record topic coverage for future diversity checks
   topicDiversityService.recordTopicCoverage(agentUserId, cleanContent);
 
-  // Generate and store tags
-  const tags: GeneratedTag[] = await generateTagsFromPost(cleanContent);
-  if (tags.length > 0) {
-    await storeTagsForPost(postId, tags);
+  // Generate and store tags. Tagging is best-effort: the post is already
+  // committed, so a tag-generation or tag-storage failure must not report
+  // the post as failed (which would invite a duplicate retry on the next
+  // tick). Matches plugin-agent-core create-post, which fire-and-forgets
+  // tagging for the same reason.
+  let tags: GeneratedTag[] = [];
+  try {
+    tags = await generateTagsFromPost(cleanContent);
+    if (tags.length > 0) {
+      await storeTagsForPost(postId, tags);
+    }
+  } catch (error) {
+    logger.warn(
+      `[DirectExecutor] Failed to tag post ${postId}`,
+      {
+        agentUserId,
+        postId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
   }
 
   logger.info(
@@ -1940,14 +2021,22 @@ export async function executeDirectRepost(
       success: true,
       repostId: shareId,
       quotePostId,
+      alreadyReposted: false,
     };
   } catch (error) {
     // Handle unique constraint violation (concurrent repost)
     // Check error code for PostgreSQL (23505) or Prisma (P2002)
     const errorCode = (error as { code?: string }).code;
+    // Drizzle wraps the PostgreSQL error in its query error's cause.
+    const cause = error instanceof Error ? error.cause : undefined;
+    const causeCode =
+      typeof cause === 'object' && cause !== null && 'code' in cause
+        ? cause.code
+        : undefined;
     const isUniqueConstraint =
       errorCode === '23505' ||
       errorCode === 'P2002' ||
+      causeCode === '23505' ||
       (error as Error).message?.includes('unique constraint');
 
     if (isUniqueConstraint) {
@@ -1965,7 +2054,13 @@ export async function executeDirectRepost(
         );
       }
 
-      return { success: true, repostId: share.id };
+      logger.info(
+        `[DirectExecutor] Post already reposted: ${targetPostId} -> existing share ${share.id}`,
+        { agentUserId },
+        'DirectExecutors'
+      );
+
+      return { success: true, repostId: share.id, alreadyReposted: true };
     }
     throw error;
   }
@@ -2451,124 +2546,4 @@ export async function executeDirectLeaveGroup(
   );
 
   return { success: true };
-}
-
-/**
- * Send money to another user directly without LLM decision-making.
- * Uses WalletService.debit + credit in sequence (each creates its own transaction).
- */
-export async function executeDirectSendMoney(
-  params: DirectSendMoneyParams
-): Promise<DirectSendMoneyResult> {
-  const { agentUserId, recipientId, amount, reason } = params;
-  const cleanRecipientId = recipientId?.trim();
-
-  if (!cleanRecipientId) {
-    return { success: false, error: 'Recipient ID is required' };
-  }
-
-  if (cleanRecipientId === agentUserId) {
-    return { success: false, error: 'Cannot send money to yourself' };
-  }
-
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { success: false, error: 'Amount must be a positive number' };
-  }
-
-  // Verify recipient exists
-  const [recipient] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.id, cleanRecipientId))
-    .limit(1);
-
-  if (!recipient) {
-    return {
-      success: false,
-      error: `Recipient not found: ${cleanRecipientId}`,
-    };
-  }
-
-  const MAX_TRANSFER_RATIO = 0.5;
-  const transactionId = await generateSnowflakeId();
-  const desc = reason
-    ? `Transfer to ${cleanRecipientId}: ${reason}`
-    : `Transfer to ${cleanRecipientId}`;
-
-  try {
-    // Balance check + cap + debit + credit all inside one transaction
-    // to eliminate TOCTOU race on the balance cap calculation.
-    const transferredAmount = await withTransaction(async (tx) => {
-      const balanceInfo = await WalletService.getBalance(agentUserId);
-      const balance = balanceInfo.balance;
-
-      if (balance <= 0) {
-        throw new Error('Insufficient balance');
-      }
-
-      // Cap transfer at 50% of balance to prevent agents from draining funds
-      const maxTransfer = balance * MAX_TRANSFER_RATIO;
-      let effectiveAmount = amount;
-      if (effectiveAmount > maxTransfer) {
-        logger.warn(
-          `[DirectExecutor] Transfer capped to ${MAX_TRANSFER_RATIO * 100}% of balance: $${amount} -> $${maxTransfer}`,
-          { agentUserId, recipientId: cleanRecipientId },
-          'DirectExecutors'
-        );
-        effectiveAmount = Math.floor(maxTransfer * 100) / 100;
-      }
-
-      await WalletService.debit(
-        agentUserId,
-        effectiveAmount,
-        AGENT_TRANSFER_OUT_TRANSACTION_TYPE,
-        desc,
-        transactionId,
-        tx
-      );
-
-      await WalletService.credit(
-        cleanRecipientId,
-        effectiveAmount,
-        AGENT_TRANSFER_IN_TRANSACTION_TYPE,
-        `Transfer from ${agentUserId}${reason ? `: ${reason}` : ''}`,
-        transactionId,
-        tx
-      );
-
-      return effectiveAmount;
-    });
-
-    const updatedBalance = await WalletService.getBalance(agentUserId);
-
-    logger.info(
-      `[DirectExecutor] Money sent: ${agentUserId} → ${cleanRecipientId} $${transferredAmount}`,
-      {
-        agentUserId,
-        recipientId: cleanRecipientId,
-        amount: transferredAmount,
-        transactionId,
-      },
-      'DirectExecutors'
-    );
-
-    return {
-      success: true,
-      transactionId,
-      newBalance: updatedBalance.balance,
-    };
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    logger.error(
-      `[DirectExecutor] Send money failed: ${errorMsg}`,
-      {
-        agentUserId,
-        recipientId: cleanRecipientId,
-        amount,
-        error: errorMsg,
-      },
-      'DirectExecutors'
-    );
-    return { success: false, error: errorMsg };
-  }
 }

@@ -240,7 +240,7 @@ export const perpMarketSnapshots = pgTable(
     volume24h: doublePrecision('volume24h').notNull().default(0),
     openInterest: doublePrecision('openInterest').notNull().default(0),
     fundingRate: jsonb('fundingRate').$type<FundingRate>().notNull(),
-    maxLeverage: integer('maxLeverage').notNull().default(100),
+    maxLeverage: integer('maxLeverage').notNull().default(20),
     minOrderSize: integer('minOrderSize').notNull().default(10),
     bidPrice: doublePrecision('bidPrice'),
     askPrice: doublePrecision('askPrice'),
