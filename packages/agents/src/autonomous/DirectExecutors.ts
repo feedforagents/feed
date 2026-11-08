@@ -1167,10 +1167,27 @@ export async function executeDirectPost(
   // Record topic coverage for future diversity checks
   topicDiversityService.recordTopicCoverage(agentUserId, cleanContent);
 
-  // Generate and store tags
-  const tags: GeneratedTag[] = await generateTagsFromPost(cleanContent);
-  if (tags.length > 0) {
-    await storeTagsForPost(postId, tags);
+  // Generate and store tags. Tagging is best-effort: the post is already
+  // committed, so a tag-generation or tag-storage failure must not report
+  // the post as failed (which would invite a duplicate retry on the next
+  // tick). Matches plugin-agent-core create-post, which fire-and-forgets
+  // tagging for the same reason.
+  let tags: GeneratedTag[] = [];
+  try {
+    tags = await generateTagsFromPost(cleanContent);
+    if (tags.length > 0) {
+      await storeTagsForPost(postId, tags);
+    }
+  } catch (error) {
+    logger.warn(
+      `[DirectExecutor] Failed to tag post ${postId}`,
+      {
+        agentUserId,
+        postId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
   }
 
   logger.info(

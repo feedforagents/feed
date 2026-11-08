@@ -39,24 +39,29 @@ type FollowersResponse = {
   hasMore: boolean;
 };
 
-const ownedIds: string[] = [];
+const ownedUserIds: string[] = [];
+const ownedActorFollowIds: string[] = [];
+const ownedUserActorFollowIds: string[] = [];
+const ownedFollowIds: string[] = [];
+const ownedFollowStatusIds: string[] = [];
 async function generateFixtureId() {
-  const id = await generateSnowflakeId();
-  ownedIds.push(id);
-  return id;
+  return generateSnowflakeId();
 }
 
 afterAll(async () => {
-  if (!ownedIds.length) return;
-  for (const table of [
-    actorFollows,
-    userActorFollows,
-    follows,
-    followStatuses,
-  ]) {
-    await db.delete(table).where(inArray(table.id, ownedIds));
+  for (const [table, ids] of [
+    [actorFollows, ownedActorFollowIds],
+    [userActorFollows, ownedUserActorFollowIds],
+    [follows, ownedFollowIds],
+    [followStatuses, ownedFollowStatusIds],
+  ] as const) {
+    if (ids.length > 0) {
+      await db.delete(table).where(inArray(table.id, ids));
+    }
   }
-  await db.delete(users).where(inArray(users.id, ownedIds));
+  if (ownedUserIds.length > 0) {
+    await db.delete(users).where(inArray(users.id, ownedUserIds));
+  }
 });
 
 const FOLLOWER_COUNT = 201;
@@ -105,14 +110,18 @@ beforeAll(async () => {
   for (let i = 0; i < FOLLOWER_COUNT; i++) {
     followerIds.push(await generateFixtureId());
   }
-  await db.insert(users).values(
-    followerIds.map((id, i) => ({
-      id,
-      username: `test-actfol-${runId}-${i}`,
-      displayName: 'Actor follower pagination fixture',
-      updatedAt: new Date(now),
-    }))
-  );
+  const insertedUsers = await db
+    .insert(users)
+    .values(
+      followerIds.map((id, i) => ({
+        id,
+        username: `test-actfol-${runId}-${i}`,
+        displayName: 'Actor follower pagination fixture',
+        updatedAt: new Date(now),
+      }))
+    )
+    .returning({ id: users.id });
+  ownedUserIds.push(...insertedUsers.map((row) => row.id));
   const follows: Array<typeof userActorFollows.$inferInsert> = [];
   for (const [i, userId] of followerIds.entries()) {
     follows.push({
@@ -122,7 +131,11 @@ beforeAll(async () => {
       createdAt: new Date(now - i * 1000),
     });
   }
-  await db.insert(userActorFollows).values(follows);
+  const insertedFollows = await db
+    .insert(userActorFollows)
+    .values(follows)
+    .returning({ id: userActorFollows.id });
+  ownedUserActorFollowIds.push(...insertedFollows.map((row) => row.id));
 });
 
 async function fetchPage(page: number) {
@@ -176,12 +189,16 @@ async function getFollowers(target: string, query: string) {
 
 async function insertUser(prefix: string): Promise<string> {
   const id = await generateFixtureId();
-  await db.insert(users).values({
-    id,
-    username: `${prefix}-${id}`,
-    displayName: `Followers fixture ${prefix}`,
-    updatedAt: new Date(),
-  });
+  const inserted = await db
+    .insert(users)
+    .values({
+      id,
+      username: `${prefix}-${id}`,
+      displayName: `Followers fixture ${prefix}`,
+      updatedAt: new Date(),
+    })
+    .returning({ id: users.id });
+  ownedUserIds.push(...inserted.map((row) => row.id));
   return id;
 }
 
@@ -214,49 +231,59 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
 
     humanTie = await insertUser('fmt');
     humanOld = await insertUser('fmo');
-    await db.insert(actorFollows).values([
-      // Newest, then a tie with a human follower (actor sorts first).
-      {
-        id: await generateFixtureId(),
-        followerId: registryFollower,
-        followingId: target,
-        createdAt: new Date(base),
-      },
-      {
-        id: await generateFixtureId(),
-        followerId: usernameFollower,
-        followingId: target,
-        createdAt: new Date(base - 1000),
-      },
-      // Not in the registry: excluded from page and count.
-      {
-        id: await generateFixtureId(),
-        followerId: `missing-${await generateFixtureId()}`,
-        followingId: target,
-        createdAt: new Date(base - 500),
-      },
-    ]);
-    await db.insert(userActorFollows).values([
-      {
-        id: await generateFixtureId(),
-        userId: humanTie,
-        actorId: target,
-        createdAt: new Date(base - 1000),
-      },
-      {
-        id: await generateFixtureId(),
-        userId: humanOld,
-        actorId: target,
-        createdAt: new Date(base - 2000),
-      },
-      // No User row: excluded by the join.
-      {
-        id: await generateFixtureId(),
-        userId: await generateFixtureId(),
-        actorId: target,
-        createdAt: new Date(base - 1500),
-      },
-    ]);
+    const insertedActorFollows = await db
+      .insert(actorFollows)
+      .values([
+        // Newest, then a tie with a human follower (actor sorts first).
+        {
+          id: await generateFixtureId(),
+          followerId: registryFollower,
+          followingId: target,
+          createdAt: new Date(base),
+        },
+        {
+          id: await generateFixtureId(),
+          followerId: usernameFollower,
+          followingId: target,
+          createdAt: new Date(base - 1000),
+        },
+        // Not in the registry: excluded from page and count.
+        {
+          id: await generateFixtureId(),
+          followerId: `missing-${await generateFixtureId()}`,
+          followingId: target,
+          createdAt: new Date(base - 500),
+        },
+      ])
+      .returning({ id: actorFollows.id });
+    ownedActorFollowIds.push(...insertedActorFollows.map((row) => row.id));
+    const insertedUserActorFollows = await db
+      .insert(userActorFollows)
+      .values([
+        {
+          id: await generateFixtureId(),
+          userId: humanTie,
+          actorId: target,
+          createdAt: new Date(base - 1000),
+        },
+        {
+          id: await generateFixtureId(),
+          userId: humanOld,
+          actorId: target,
+          createdAt: new Date(base - 2000),
+        },
+        // No User row: excluded by the join.
+        {
+          id: await generateFixtureId(),
+          userId: await generateFixtureId(),
+          actorId: target,
+          createdAt: new Date(base - 1500),
+        },
+      ])
+      .returning({ id: userActorFollows.id });
+    ownedUserActorFollowIds.push(
+      ...insertedUserActorFollows.map((row) => row.id)
+    );
 
     userTarget = await insertUser('fut');
     tieA = await insertUser('fua');
@@ -265,70 +292,78 @@ describe('GET /api/users/[userId]/followers merged sources (real database)', () 
     npcMissing = `missing-npc-${await generateFixtureId()}`;
     const followA = await generateFixtureId();
     const followB = await generateFixtureId();
-    await db.insert(follows).values([
-      {
-        id: followA,
-        followerId: tieA,
-        followingId: userTarget,
-        createdAt: new Date(base),
-      },
-      {
-        id: followB,
-        followerId: tieB,
-        followingId: userTarget,
-        createdAt: new Date(base),
-      },
-      // No User row: excluded by the join.
-      {
-        id: await generateFixtureId(),
-        followerId: await generateFixtureId(),
-        followingId: userTarget,
-        createdAt: new Date(base),
-      },
-    ]);
-    await db.insert(followStatuses).values([
-      {
-        id: await generateFixtureId(),
-        userId: userTarget,
-        npcId: npcKnown,
-        followedAt: new Date(base - 1000),
-        isActive: true,
-        followReason: 'fixture',
-      },
-      {
-        id: await generateFixtureId(),
-        userId: userTarget,
-        npcId: npcMissing,
-        followedAt: new Date(base - 2000),
-        isActive: true,
-        followReason: 'fixture',
-      },
-      // Excluded: user_followed, NULL reason, inactive.
-      {
-        id: await generateFixtureId(),
-        userId: userTarget,
-        npcId: `x1-${followA}`,
-        followedAt: new Date(base - 100),
-        isActive: true,
-        followReason: 'user_followed',
-      },
-      {
-        id: await generateFixtureId(),
-        userId: userTarget,
-        npcId: `x2-${followA}`,
-        followedAt: new Date(base - 100),
-        isActive: true,
-        followReason: null,
-      },
-      {
-        id: await generateFixtureId(),
-        userId: userTarget,
-        npcId: `x3-${followA}`,
-        followedAt: new Date(base - 100),
-        isActive: false,
-        followReason: 'fixture',
-      },
-    ]);
+    const insertedFollows = await db
+      .insert(follows)
+      .values([
+        {
+          id: followA,
+          followerId: tieA,
+          followingId: userTarget,
+          createdAt: new Date(base),
+        },
+        {
+          id: followB,
+          followerId: tieB,
+          followingId: userTarget,
+          createdAt: new Date(base),
+        },
+        // No User row: excluded by the join.
+        {
+          id: await generateFixtureId(),
+          followerId: await generateFixtureId(),
+          followingId: userTarget,
+          createdAt: new Date(base),
+        },
+      ])
+      .returning({ id: follows.id });
+    ownedFollowIds.push(...insertedFollows.map((row) => row.id));
+    const insertedFollowStatuses = await db
+      .insert(followStatuses)
+      .values([
+        {
+          id: await generateFixtureId(),
+          userId: userTarget,
+          npcId: npcKnown,
+          followedAt: new Date(base - 1000),
+          isActive: true,
+          followReason: 'fixture',
+        },
+        {
+          id: await generateFixtureId(),
+          userId: userTarget,
+          npcId: npcMissing,
+          followedAt: new Date(base - 2000),
+          isActive: true,
+          followReason: 'fixture',
+        },
+        // Excluded: user_followed, NULL reason, inactive.
+        {
+          id: await generateFixtureId(),
+          userId: userTarget,
+          npcId: `x1-${followA}`,
+          followedAt: new Date(base - 100),
+          isActive: true,
+          followReason: 'user_followed',
+        },
+        {
+          id: await generateFixtureId(),
+          userId: userTarget,
+          npcId: `x2-${followA}`,
+          followedAt: new Date(base - 100),
+          isActive: true,
+          followReason: null,
+        },
+        {
+          id: await generateFixtureId(),
+          userId: userTarget,
+          npcId: `x3-${followA}`,
+          followedAt: new Date(base - 100),
+          isActive: false,
+          followReason: 'fixture',
+        },
+      ])
+      .returning({ id: followStatuses.id });
+    ownedFollowStatusIds.push(...insertedFollowStatuses.map((row) => row.id));
   });
 
   it('actor target: registry id/username followers, users, missing actors excluded', async () => {

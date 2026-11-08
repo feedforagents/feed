@@ -106,7 +106,7 @@ describe('Referral Points Integration Tests', () => {
       expect(user?.referralCode).toBe(username);
     });
 
-    it('should award REFERRAL_SIGNUP points to referrer when new user signs up', async () => {
+    it('does not credit the referrer when a new user signs up', async () => {
       // Create referrer
       const { userId: referrerId } = await createTestUser();
 
@@ -134,10 +134,9 @@ describe('Referral Points Integration Tests', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.pointsAwarded).toBe(POINTS.REFERRAL_SIGNUP);
-      expect(result.newTotal).toBe(pointsBefore + POINTS.REFERRAL_SIGNUP);
+      expect(result.pointsAwarded).toBe(0);
+      expect(result.newTotal).toBe(pointsBefore);
 
-      // Verify invite points were incremented
       const [referrerAfter] = await db
         .select({
           reputationPoints: users.reputationPoints,
@@ -146,9 +145,8 @@ describe('Referral Points Integration Tests', () => {
         .from(users)
         .where(eq(users.id, referrerId));
 
-      expect(referrerAfter?.invitePoints).toBe(
-        invitePointsBefore + POINTS.REFERRAL_SIGNUP
-      );
+      expect(referrerAfter?.invitePoints).toBe(invitePointsBefore);
+      expect(referrerAfter?.reputationPoints).toBe(pointsBefore);
     });
 
     it('should award REFERRAL_BONUS points to new user who used referral code', async () => {
@@ -250,7 +248,7 @@ describe('Referral Points Integration Tests', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.pointsAwarded).toBe(POINTS.REFERRAL_SIGNUP);
+      expect(result.pointsAwarded).toBe(0);
     });
 
     it('should allow referral with different IPs regardless of timing', async () => {
@@ -277,7 +275,7 @@ describe('Referral Points Integration Tests', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.pointsAwarded).toBe(POINTS.REFERRAL_SIGNUP);
+      expect(result.pointsAwarded).toBe(0);
     });
   });
 
@@ -341,7 +339,7 @@ describe('Referral Points Integration Tests', () => {
   });
 
   describe('Concurrency and idempotency', () => {
-    it('pays a referral signup once across retries and concurrent requests', async () => {
+    it('does not pay a referral signup across retries or concurrent requests', async () => {
       const { userId: referrerId } = await createTestUser({
         registrationIpHash: 'idem-referrer',
       });
@@ -355,13 +353,14 @@ describe('Referral Points Integration Tests', () => {
           PointsService.awardReferralSignup(referrerId, referredUserId)
         )
       );
-      expect(results.filter((r) => r.reputationAwarded > 0)).toHaveLength(1);
+      expect(results.every((r) => r.reputationAwarded === 0)).toBe(true);
 
       const retry = await PointsService.awardReferralSignup(
         referrerId,
         referredUserId
       );
-      expect(retry.alreadyAwarded).toBe(true);
+      expect(retry.success).toBe(true);
+      expect(retry.reputationAwarded).toBe(0);
 
       const [referrer] = await db
         .select({
@@ -371,8 +370,8 @@ describe('Referral Points Integration Tests', () => {
         .from(users)
         .where(eq(users.id, referrerId));
       expect(referrer).toEqual({
-        reputationPoints: 1000 + POINTS.REFERRAL_SIGNUP,
-        referralCount: 1,
+        reputationPoints: 1000,
+        referralCount: 0,
       });
     });
 
@@ -454,7 +453,7 @@ describe('Referral Points Integration Tests', () => {
 
       expect(result).not.toBeNull();
       expect(result?.success).toBe(true);
-      expect(result?.pointsAwarded).toBe(POINTS.REFERRAL_QUALIFIED);
+      expect(result?.pointsAwarded).toBe(0);
 
       // Verify referral was marked as qualified
       const [referral] = await db
@@ -472,9 +471,7 @@ describe('Referral Points Integration Tests', () => {
         .from(users)
         .where(eq(users.id, referrerId));
 
-      expect(referrerAfter?.reputationPoints).toBe(
-        pointsBefore + POINTS.REFERRAL_QUALIFIED
-      );
+      expect(referrerAfter?.reputationPoints).toBe(pointsBefore);
     });
 
     it('does not qualify a referral without a supported social account', async () => {
@@ -520,7 +517,7 @@ describe('Referral Points Integration Tests', () => {
   });
 
   describe('Points Tracking', () => {
-    it('should create points transaction record for referral award', async () => {
+    it('does not write a referral signup ledger row', async () => {
       // Create referrer and referred user
       const { userId: referrerId } = await createTestUser();
       const { userId: referredUserId } = await createTestUser({
@@ -542,14 +539,10 @@ describe('Referral Points Integration Tests', () => {
           )
         );
 
-      expect(transactions.length).toBeGreaterThan(0);
-
-      const transaction = transactions[0];
-      expect(transaction?.amount).toBe(POINTS.REFERRAL_SIGNUP);
-      expect(transaction?.reason).toBe('referral_signup');
+      expect(transactions.length).toBe(0);
     });
 
-    it('should increment referralCount on user record', async () => {
+    it('does not increment referralCount when signup points are not paid', async () => {
       // Create referrer
       const { userId: referrerId } = await createTestUser();
 
@@ -575,7 +568,7 @@ describe('Referral Points Integration Tests', () => {
         .from(users)
         .where(eq(users.id, referrerId));
 
-      expect(userAfter?.referralCount).toBe(countBefore + 1);
+      expect(userAfter?.referralCount).toBe(countBefore);
     });
   });
 });
