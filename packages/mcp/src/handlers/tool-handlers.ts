@@ -39,6 +39,7 @@ import {
 } from '@feed/a2a';
 import {
   acceptGroupInvite,
+  checkProgress,
   checkRateLimitAsync,
   declineGroupInvite,
   logAdminModify,
@@ -64,6 +65,7 @@ import {
   lte,
   markets,
   perpMarketSnapshots,
+  positions,
   posts,
   users,
 } from '@feed/db';
@@ -2496,6 +2498,26 @@ export async function executeResolveMarket(
       }),
     predictionServiceOptions(args.marketId)
   );
+
+  // Track prediction_win for achievement/challenge progress (fire-and-forget),
+  // mirroring the markets-tick cron: winners of MCP-resolved markets must
+  // advance the same win-based rewards as winners of cron-resolved markets.
+  // Without this, the rewards page shows their win challenges at full
+  // progress (counted from the settled positions) but they never complete
+  // and the reputation is never credited.
+  try {
+    const winners = await db
+      .select({ userId: positions.userId })
+      .from(positions)
+      .where(
+        and(eq(positions.marketId, args.marketId), eq(positions.outcome, true))
+      );
+    for (const w of winners) {
+      void checkProgress(w.userId, { type: 'prediction_win' });
+    }
+  } catch {
+    // Non-critical — don't block resolution flow
+  }
 
   await logAdminModify({
     adminId: agent.userId,

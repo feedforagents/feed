@@ -49,6 +49,7 @@ mock.module('@/lib/services/market-resolution-notifications', () => ({
 
 mock.module('@feed/api', () => ({
   broadcastToChannel: async () => undefined,
+  checkProgress: async () => undefined,
   checkRateLimitAndDuplicates: () => null,
   errorResponse: (message: string, code: string, status: number) =>
     NextResponse.json({ error: { message, code } }, { status }),
