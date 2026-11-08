@@ -44,6 +44,7 @@ import {
   logAdminModify,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
+  sharePost,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
@@ -301,6 +302,7 @@ async function checkMcpRateLimit(
     | 'close_position'
     | 'transfer'
     | 'post'
+    | 'share_post'
 ): Promise<void> {
   const configMap: Record<
     string,
@@ -312,6 +314,7 @@ async function checkMcpRateLimit(
     close_position: RATE_LIMIT_CONFIGS.CLOSE_POSITION,
     transfer: RATE_LIMIT_CONFIGS.DEFAULT, // Use default for transfers
     post: RATE_LIMIT_CONFIGS.CREATE_POST,
+    share_post: RATE_LIMIT_CONFIGS.SHARE_POST,
   };
   const config = configMap[operation];
   if (!config) return;
@@ -1401,21 +1404,20 @@ export async function executeUnlikePost(
 }
 
 /**
- * Execute share_post tool
+ * Execute share_post tool (canonical sharePost, same as the web share route)
  */
 export async function executeSharePost(
   agent: AuthenticatedAgent,
   args: SharePostArgs
 ): Promise<SharePostResult> {
-  const shareId = await generateSnowflakeId();
-  await db.share.create({
-    data: {
-      id: shareId,
-      userId: agent.userId,
-      postId: args.postId,
-    },
-  });
-  return { success: true, shareId };
+  await checkMcpRateLimit(agent.userId, 'share_post');
+  const result = await sharePost(agent.userId, args.postId, args.comment);
+  return {
+    success: true,
+    shareId: result.shareId,
+    repostId: result.repostId,
+    shareCount: result.shareCount,
+  };
 }
 
 /**
@@ -2762,16 +2764,21 @@ export async function executeBlockUser(
       });
     }
 
+    // Reciprocal blocks must lock follow rows in the same order. Otherwise
+    // each transaction can delete one direction and deadlock on the other.
+    const firstUserId = agent.userId < args.userId ? agent.userId : args.userId;
+    const secondUserId =
+      agent.userId < args.userId ? args.userId : agent.userId;
     await tx.follow.deleteMany({
       where: {
-        followerId: agent.userId,
-        followingId: args.userId,
+        followerId: firstUserId,
+        followingId: secondUserId,
       },
     });
     await tx.follow.deleteMany({
       where: {
-        followerId: args.userId,
-        followingId: agent.userId,
+        followerId: secondUserId,
+        followingId: firstUserId,
       },
     });
   });
