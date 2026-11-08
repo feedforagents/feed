@@ -19,8 +19,10 @@ import {
   gte,
   isNull,
   type JsonValue,
+  like,
   lt,
   ne,
+  not,
   or,
   pointsTransactions,
   referrals,
@@ -1277,6 +1279,25 @@ export class ReputationService {
   }
 
   /**
+   * Membership rule for the personal wallet leaderboard: real players
+   * only. Actors and agents were already excluded. Test accounts — the
+   * isTest flag or a 'test-' id prefix, the same definition the feed
+   * surfaces use to keep test content out — and banned accounts, which
+   * the web people search excludes outright, do not belong on a public
+   * ranking either. The list, its totalCount, and getUserPosition must
+   * all apply this one rule or the ranks disagree with each other.
+   */
+  private static walletLeaderboardMembership() {
+    return [
+      eq(users.isActor, false),
+      eq(users.isAgent, false),
+      eq(users.isTest, false),
+      eq(users.isBanned, false),
+      not(like(users.id, 'test-%')),
+    ];
+  }
+
+  /**
    * Per-wallet leaderboard: each human wallet ranked by reputation.
    */
   static async getWalletLeaderboard(
@@ -1302,12 +1323,12 @@ export class ReputationService {
     const [countResult] = await db
       .select({ count: count() })
       .from(users)
-      .where(and(eq(users.isActor, false), eq(users.isAgent, false)));
+      .where(and(...ReputationService.walletLeaderboardMembership()));
 
     const usersResult = await db
       .select(walletSelectFields)
       .from(users)
-      .where(and(eq(users.isActor, false), eq(users.isAgent, false)))
+      .where(and(...ReputationService.walletLeaderboardMembership()))
       .orderBy(
         desc(users.reputationPoints),
         asc(users.createdAt),
@@ -1369,8 +1390,7 @@ export class ReputationService {
       .where(
         and(
           eq(users.id, userId),
-          eq(users.isActor, false),
-          eq(users.isAgent, false)
+          ...ReputationService.walletLeaderboardMembership()
         )
       )
       .limit(1);
@@ -1384,8 +1404,7 @@ export class ReputationService {
       .from(users)
       .where(
         and(
-          eq(users.isActor, false),
-          eq(users.isAgent, false),
+          ...ReputationService.walletLeaderboardMembership(),
           or(
             gt(users.reputationPoints, effectiveReputationPoints),
             and(
