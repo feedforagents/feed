@@ -754,10 +754,24 @@ export class FeedAgentExecutor implements AgentExecutor {
 
   private async getFeed(params: Record<string, JsonValue>) {
     const limit = this.parsePositiveInt(params.limit, 20, 100);
+    const offsetRaw =
+      typeof params.offset === 'number'
+        ? params.offset
+        : typeof params.offset === 'string'
+          ? Number.parseInt(params.offset, 10)
+          : Number.NaN;
+    const offset =
+      Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0;
+    // The order carries id as a tiebreaker so it is total: batched
+    // generation writes many posts at one timestamp, and offset paging
+    // over ties alone could repeat or skip posts between pages. offset
+    // continues past the first `limit` rows — without it, posts beyond
+    // the newest 100 were unreachable.
     const posts = await db.post.findMany({
       where: { deletedAt: null },
       take: limit,
-      orderBy: { timestamp: 'desc' },
+      skip: offset,
+      orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
       select: {
         id: true,
         content: true,
