@@ -517,6 +517,81 @@ describe('PredictionMarketService', () => {
     ).rejects.toThrow(/not found/);
   });
 
+  it('cancel should refund the full cash paid, including the entry fee', async () => {
+    const startBalance = (await wallet.getBalance('u1')).balance;
+
+    await service.buy({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      amount: 1000,
+    });
+    expect((await wallet.getBalance('u1')).balance).toBe(startBalance - 1000);
+
+    const cancelResult = await service.cancel({
+      marketId: 'm1',
+      reason: 'Test cancel',
+    });
+
+    // Full refund: the user is made whole, not refunded net of the 1 pt
+    // entry fee (0.1% of 1000), and the cancellation records no PnL loss.
+    expect(cancelResult.totalRefunded).toBe(1000);
+    expect((await wallet.getBalance('u1')).balance).toBe(startBalance);
+    expect(wallet.pnls.filter((p) => p.reason === 'pred_cancel')).toEqual([]);
+    const pos = await db.getPosition('u1', 'm1', 'yes');
+    expect(pos?.pnl).toBe(0);
+  });
+
+  it('cancel after a partial sell should refund the remaining gross cash basis', async () => {
+    await service.buy({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      amount: 1000,
+    });
+    const pos = await db.getPosition('u1', 'm1', 'yes');
+    await service.sell({
+      userId: 'u1',
+      marketId: 'm1',
+      shares: Math.floor((pos?.shares ?? 0) / 2),
+    });
+
+    const balanceBeforeCancel = (await wallet.getBalance('u1')).balance;
+    const cancelResult = await service.cancel({
+      marketId: 'm1',
+      reason: 'Test cancel',
+    });
+
+    // Remaining gross cash basis after selling half the shares bought for
+    // 1000 (fee included): 500.45, not the 499.94 net-of-fee shares*avgPrice.
+    expect(cancelResult.totalRefunded).toBe(500.45);
+    expect((await wallet.getBalance('u1')).balance).toBeCloseTo(
+      balanceBeforeCancel + 500.45
+    );
+    expect(wallet.pnls.filter((p) => p.reason === 'pred_cancel')).toEqual([]);
+  });
+
+  it('cancel should refund legacy positions at their grossed-up cash basis', async () => {
+    // Position row without a stored cashCostBasis (pre-migration shape):
+    // 100 shares at avgPrice 0.5 were bought with 50.05 gross cash at the
+    // 0.1% fee rate, so the refund is 50.05, not the 50 net amount.
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 100,
+      avgPrice: 0.5,
+    });
+
+    const cancelResult = await service.cancel({
+      marketId: 'm1',
+      reason: 'Test cancel',
+    });
+
+    expect(cancelResult.totalRefunded).toBe(50.05);
+    expect(wallet.pnls.filter((p) => p.reason === 'pred_cancel')).toEqual([]);
+  });
+
   it('should prevent liquidity going negative on sell', async () => {
     // Force tiny liquidity but large reserves so proceeds exceed liquidity
     await db.updateMarketState('m1', { liquidity: 1 });
