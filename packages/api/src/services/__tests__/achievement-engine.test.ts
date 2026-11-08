@@ -386,6 +386,11 @@ describe('Achievement Engine (checkProgress)', () => {
           activityType: 'ual.activityType',
           activityDate: 'ual.activityDate',
         },
+        balanceTransactions: {
+          _: 'balanceTransactions',
+          userId: 'bt.userId',
+          type: 'bt.type',
+        },
         // Drizzle operators
         eq: (..._args: unknown[]) => ({}),
         and: (..._args: unknown[]) => ({}),
@@ -461,6 +466,7 @@ describe('Achievement Engine (checkProgress)', () => {
     state.unlockedAchievementIds = [];
     // Resolver returns count = 1 (meets threshold)
     state.resolverResults.set('positions', 1);
+    state.resolverResults.set('balanceTransactions', 1);
     state.insertReturnsRow = true;
 
     await checkProgress('user-1', {
@@ -537,6 +543,7 @@ describe('Achievement Engine (checkProgress)', () => {
   it('handles concurrent unlock gracefully (onConflictDoNothing returns empty)', async () => {
     state.unlockedAchievementIds = [];
     state.resolverResults.set('positions', 1);
+    state.resolverResults.set('balanceTransactions', 1);
     // Simulate race condition: insert returns empty (another request already inserted)
     state.insertReturnsRow = false;
 
@@ -561,6 +568,7 @@ describe('Achievement Engine (checkProgress)', () => {
     state.unlockedAchievementIds = [];
     state.resolverResults.set('positions', 999);
     state.resolverResults.set('perpPositions', 999);
+    state.resolverResults.set('balanceTransactions', 999);
     state.resolverResults.set('users', 999);
     state.insertReturnsRow = true;
 
@@ -584,6 +592,7 @@ describe('Achievement Engine (checkProgress)', () => {
     state.unlockedAchievementIds = [];
     state.resolverResults.set('positions', 999);
     state.resolverResults.set('perpPositions', 999);
+    state.resolverResults.set('balanceTransactions', 999);
     state.insertReturnsRow = true;
 
     await checkProgress('user-1', {

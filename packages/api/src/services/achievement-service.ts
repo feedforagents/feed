@@ -11,6 +11,7 @@
 
 import {
   and,
+  balanceTransactions,
   chats,
   comments,
   count,
@@ -145,33 +146,52 @@ export function getActiveWeeklyChallengeIds(date: Date = new Date()): string[] {
 
 type ProgressResolver = (userId: string) => Promise<number>;
 
+// Trade counts come from the wallet ledger, not position rows: repeated
+// buys on one market/side and adds to one perp position merge into a
+// single position row (upsert), so counting rows reports one trade for a
+// user who actually traded many times. The ledger records one row per
+// executed trade — the same record the trades history lists. Settlement
+// and refund rows (pred_resolve, pred_cancel) are not trades.
+const PREDICTION_TRADE_TYPES = ['pred_buy', 'pred_sell'];
+const PERP_TRADE_TYPES = [
+  'perp_open',
+  'perp_close',
+  'perp_partial_close',
+  'perp_add_to_position',
+  'perp_flip_position',
+  'perp_liquidation',
+];
+
+async function countLedgerTrades(
+  userId: string,
+  types: string[]
+): Promise<number> {
+  const result = await db
+    .select({ c: count() })
+    .from(balanceTransactions)
+    .where(
+      and(
+        eq(balanceTransactions.userId, userId),
+        inArray(balanceTransactions.type, types)
+      )
+    );
+  return result[0]!.c;
+}
+
 const ACHIEVEMENT_RESOLVERS: Record<string, ProgressResolver> = {
   prediction_trade_count: async (userId) => {
-    const result = await db
-      .select({ c: count() })
-      .from(positions)
-      .where(eq(positions.userId, userId));
-    return result[0]!.c;
+    return countLedgerTrades(userId, PREDICTION_TRADE_TYPES);
   },
 
   perp_trade_count: async (userId) => {
-    const result = await db
-      .select({ c: count() })
-      .from(perpPositions)
-      .where(eq(perpPositions.userId, userId));
-    return result[0]!.c;
+    return countLedgerTrades(userId, PERP_TRADE_TYPES);
   },
 
   total_trade_count: async (userId) => {
-    const predResult = await db
-      .select({ c: count() })
-      .from(positions)
-      .where(eq(positions.userId, userId));
-    const perpResult = await db
-      .select({ c: count() })
-      .from(perpPositions)
-      .where(eq(perpPositions.userId, userId));
-    return predResult[0]!.c + perpResult[0]!.c;
+    return countLedgerTrades(userId, [
+      ...PREDICTION_TRADE_TYPES,
+      ...PERP_TRADE_TYPES,
+    ]);
   },
 
   distinct_markets: async (userId) => {
