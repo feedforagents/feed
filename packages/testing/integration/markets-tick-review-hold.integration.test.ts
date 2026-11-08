@@ -17,36 +17,55 @@ import {
   test,
 } from 'bun:test';
 import {
+  balanceTransactions,
   db,
   eq,
   games,
   markets,
+  notifications,
+  pointsTransactions,
+  positions,
+  predictionPriceHistories,
   questions,
   sql,
   timeframedMarkets,
+  tradingFeeOutbox,
+  tradingFees,
+  users,
 } from '@feed/db';
+import { FEE_CONFIG, withPredictionSettlement } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
+import { getAdminToken } from './helpers';
 
 setDefaultTimeout(120000);
 
-let dbAvailable = false;
 let gameId: string | null = null;
-const created: { questionId: string; timeframedId: string }[] = [];
+type Fixture = {
+  questionId: string;
+  timeframedId: string;
+  userId: string;
+  payout: number;
+};
+const created: Fixture[] = [];
 const originalCronSecret = process.env.CRON_SECRET;
+const originalGameStart = process.env.GAME_START;
+const originalRelay = process.env.REDIRECT_CRON_STAGING;
 
 beforeAll(async () => {
   process.env.CRON_SECRET = 'review-hold-integration';
-  try {
-    await db.execute(sql`SELECT 1`);
-    dbAvailable = true;
-  } catch {
-    dbAvailable = false;
-    return;
-  }
-  const [running] = await db.execute(
-    sql`SELECT id FROM "Game" WHERE "isContinuous" = true AND "isRunning" = true LIMIT 1`
-  );
+  process.env.GAME_START = 'true';
+  process.env.REDIRECT_CRON_STAGING = 'false';
+  await db.execute(sql`SELECT 1`);
+  const [running] = await db
+    .select()
+    .from(games)
+    .where(eq(games.isContinuous, true))
+    .limit(1);
+  if (running && !running.isRunning)
+    throw new Error(
+      'This whole-cron test requires a disposable database with a running game or no game.'
+    );
   if (!running) {
     gameId = await generateSnowflakeId();
     await db.insert(games).values({
@@ -62,23 +81,50 @@ beforeAll(async () => {
 afterAll(async () => {
   if (originalCronSecret === undefined) delete process.env.CRON_SECRET;
   else process.env.CRON_SECRET = originalCronSecret;
-  if (!dbAvailable) return;
+  if (originalGameStart === undefined) delete process.env.GAME_START;
+  else process.env.GAME_START = originalGameStart;
+  if (originalRelay === undefined) delete process.env.REDIRECT_CRON_STAGING;
+  else process.env.REDIRECT_CRON_STAGING = originalRelay;
+  await Bun.sleep(100);
   for (const c of created) {
+    for (const table of [
+      notifications,
+      pointsTransactions,
+      balanceTransactions,
+      tradingFees,
+      tradingFeeOutbox,
+      positions,
+    ])
+      await db.delete(table).where(eq(table.userId, c.userId));
+    await db
+      .delete(predictionPriceHistories)
+      .where(eq(predictionPriceHistories.marketId, c.questionId));
     await db
       .delete(timeframedMarkets)
       .where(eq(timeframedMarkets.id, c.timeframedId));
     await db.delete(markets).where(eq(markets.id, c.questionId));
     await db.delete(questions).where(eq(questions.id, c.questionId));
+    await db.delete(users).where(eq(users.id, c.userId));
   }
   if (gameId) await db.delete(games).where(eq(games.id, gameId));
 });
 
-type Review = 'pending' | 'rejected' | 'approved';
+type Review = 'pending' | 'unset' | 'rejected' | 'approved';
 
 async function seedEndedMarket(review: Review) {
   const now = Date.now();
   const questionId = await generateSnowflakeId();
   const timeframedId = await generateSnowflakeId();
+  const userId = await generateSnowflakeId();
+  const fixture = { questionId, timeframedId, userId, payout: 0 };
+  created.push(fixture);
+  await db.insert(users).values({
+    id: userId,
+    username: `review-hold-${userId}`,
+    virtualBalance: '500',
+    totalDeposited: '500',
+    updatedAt: new Date(),
+  });
   const [max] = await db
     .select({ max: sql<number>`COALESCE(MAX("questionNumber"), 0)` })
     .from(questions);
@@ -104,7 +150,7 @@ async function seedEndedMarket(review: Review) {
         }
       : {
           requiresManualReview: true,
-          resolutionReviewStatus: review,
+          resolutionReviewStatus: review === 'unset' ? null : review,
           resolutionDate: new Date(now - 60_000),
           resolutionDescription: 'Low-confidence proof',
           resolutionProofUrl: 'https://example.invalid/proof',
@@ -113,10 +159,36 @@ async function seedEndedMarket(review: Review) {
   await db.insert(markets).values({
     id: questionId,
     question: text,
-    liquidity: '1000',
-    endDate: new Date(now - 60_000),
+    liquidity: '10000',
+    yesShares: '5000',
+    noShares: '5000',
+    endDate: new Date(now + 3_600_000),
     updatedAt: new Date(),
   });
+  const bought = await withPredictionSettlement(
+    questionId,
+    { userId },
+    (service) =>
+      service.buy({ userId, marketId: questionId, side: 'yes', amount: 100 }),
+    {
+      fees: {
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+      },
+    }
+  );
+  const [held] = await db
+    .select()
+    .from(positions)
+    .where(eq(positions.id, bought.positionId));
+  expect(held).toBeDefined();
+  fixture.payout = Math.floor(Number(held!.shares) * 100) / 100;
+  await db
+    .update(markets)
+    .set({ endDate: new Date(now - 60_000) })
+    .where(eq(markets.id, questionId));
   await db.insert(timeframedMarkets).values({
     id: timeframedId,
     questionId,
@@ -127,11 +199,10 @@ async function seedEndedMarket(review: Review) {
     isResolved: false,
     arcStateEnteredAt: new Date(now - 3_600_000),
   });
-  created.push({ questionId, timeframedId });
-  return { questionId, timeframedId };
+  return fixture;
 }
 
-async function stateOf(ids: { questionId: string; timeframedId: string }) {
+async function stateOf(ids: Fixture) {
   const [q] = await db
     .select({ status: questions.status })
     .from(questions)
@@ -144,7 +215,16 @@ async function stateOf(ids: { questionId: string; timeframedId: string }) {
     .select({ isActive: timeframedMarkets.isActive })
     .from(timeframedMarkets)
     .where(eq(timeframedMarkets.id, ids.timeframedId));
+  const [user] = await db.select().from(users).where(eq(users.id, ids.userId));
+  const ledger = await db
+    .select()
+    .from(balanceTransactions)
+    .where(eq(balanceTransactions.userId, ids.userId));
   return {
+    balance: Number(user?.virtualBalance),
+    payouts: ledger
+      .filter((row) => row.type === 'pred_resolve')
+      .map((row) => Number(row.amount)),
     status: q?.status,
     paid: m?.resolved,
     timeframedActive: t?.isActive,
@@ -160,34 +240,69 @@ async function runTick() {
     })
   );
   expect(res.status).toBe(200);
+  expect((await res.json()).skipped).not.toBe(true);
+}
+
+async function decide(fixture: Fixture, action: 'approve' | 'reject') {
+  const { POST } = await import('@/app/api/admin/resolutions/[id]/route');
+  const token = getAdminToken();
+  if (!token) throw new Error('Integration admin token is required');
+  const response = await POST(
+    new NextRequest(
+      `http://localhost/api/admin/resolutions/${fixture.questionId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-dev-admin-token': token,
+        },
+        body: JSON.stringify({ action }),
+      }
+    ),
+    { params: Promise.resolve({ id: fixture.questionId }) }
+  );
+  expect(response.status).toBe(200);
+}
+
+function heldState() {
+  return {
+    balance: 400,
+    payouts: [],
+    status: 'active',
+    paid: false,
+    timeframedActive: true,
+  };
+}
+function paidState(fixture: Fixture) {
+  return {
+    balance: 400 + fixture.payout,
+    payouts: [fixture.payout],
+    status: 'resolved',
+    paid: true,
+    timeframedActive: false,
+  };
 }
 
 describe('markets-tick manual resolution review', () => {
-  test('a pending review and a rejected review stay active and unpaid; an approved review pays', async () => {
-    if (!dbAvailable) {
-      console.log('Skipping - database not available');
-      return;
-    }
+  test('funded reviews stay held across ticks until approval; rejection postpones payment', async () => {
     const pending = await seedEndedMarket('pending');
+    const unset = await seedEndedMarket('unset');
     const rejected = await seedEndedMarket('rejected');
     const approved = await seedEndedMarket('approved');
-
-    await runTick();
-
-    expect(await stateOf(pending)).toEqual({
-      status: 'active',
-      paid: false,
-      timeframedActive: true,
-    });
-    expect(await stateOf(rejected)).toEqual({
-      status: 'active',
-      paid: false,
-      timeframedActive: true,
-    });
-    expect(await stateOf(approved)).toEqual({
-      status: 'resolved',
-      paid: true,
-      timeframedActive: false,
-    });
+    for (let i = 0; i < 2; i++) {
+      await runTick();
+      for (const fixture of [pending, unset, rejected])
+        expect(await stateOf(fixture)).toEqual(heldState());
+      expect(await stateOf(approved)).toEqual(paidState(approved));
+    }
+    await decide(pending, 'approve');
+    await decide(unset, 'reject');
+    for (let i = 0; i < 2; i++) {
+      await runTick();
+      for (const fixture of [unset, rejected])
+        expect(await stateOf(fixture)).toEqual(heldState());
+      for (const fixture of [pending, approved])
+        expect(await stateOf(fixture)).toEqual(paidState(fixture));
+    }
   });
 });
