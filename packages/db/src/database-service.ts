@@ -24,7 +24,9 @@ import {
   lt,
   lte,
   notExists,
+  notInArray,
   notLike,
+  type SQL,
   sql,
 } from 'drizzle-orm';
 import { db } from './db';
@@ -45,6 +47,43 @@ import {
   users,
   worldEvents,
 } from './schema';
+
+/**
+ * Visibility filters a paged post feed applies in SQL, before the page is
+ * cut. Filtering after `LIMIT` instead strands later posts: the caller
+ * derives its next cursor and `hasMore` from the rows it returns, so a page
+ * shortened by a post-query filter looks like the end of the feed.
+ */
+export interface PostFeedVisibilityOptions {
+  /** Authors the viewer must not see (blocked, muted, or blocking them). */
+  excludedAuthorIds?: string[];
+  /**
+   * Exclude simple reposts whose original post is soft-deleted or gone.
+   * Quote posts (non-empty content) are kept, matching the posts route,
+   * which renders a quote even when its original is deleted.
+   */
+  excludeDeadReposts?: boolean;
+}
+
+/**
+ * SQL conditions for {@link PostFeedVisibilityOptions}, for a query on the
+ * posts table. Returns an empty array when no visibility filter applies.
+ */
+export function postFeedVisibilityConditions(
+  options?: PostFeedVisibilityOptions
+): SQL[] {
+  const conditions: SQL[] = [];
+  const excludedAuthorIds = options?.excludedAuthorIds;
+  if (excludedAuthorIds && excludedAuthorIds.length > 0) {
+    conditions.push(notInArray(posts.authorId, excludedAuthorIds));
+  }
+  if (options?.excludeDeadReposts) {
+    conditions.push(
+      sql`NOT (${posts.originalPostId} IS NOT NULL AND ${posts.content} = '' AND NOT EXISTS (SELECT 1 FROM "Post" AS "feed_original" WHERE "feed_original"."id" = ${posts.originalPostId} AND "feed_original"."deletedAt" IS NULL))`
+    );
+  }
+  return conditions;
+}
 
 /**
  * FeedPost type representing a post in the feed.
@@ -323,7 +362,11 @@ class DatabaseService {
    * @param cursorOrOffset - Cursor string for cursor-based pagination or number for offset-based
    * @returns Array of recent posts
    */
-  async getRecentPosts(limit = 100, cursorOrOffset?: string | number) {
+  async getRecentPosts(
+    limit = 100,
+    cursorOrOffset?: string | number,
+    visibility?: PostFeedVisibilityOptions
+  ) {
     const isCursor = typeof cursorOrOffset === 'string';
     const cursor = isCursor ? cursorOrOffset : undefined;
     const offset =
@@ -337,7 +380,10 @@ class DatabaseService {
 
     const now = new Date();
 
-    const conditions = [isNull(posts.deletedAt)];
+    const conditions = [
+      isNull(posts.deletedAt),
+      ...postFeedVisibilityConditions(visibility),
+    ];
 
     if (cursor) {
       conditions.push(lt(posts.timestamp, new Date(cursor)));
@@ -391,7 +437,8 @@ class DatabaseService {
   async getPostsByActor(
     authorId: string,
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    visibility?: PostFeedVisibilityOptions
   ) {
     const isCursor = typeof cursorOrOffset === 'string';
     const cursor = isCursor ? cursorOrOffset : undefined;
@@ -425,7 +472,11 @@ class DatabaseService {
 
     const now = new Date();
 
-    const conditions = [eq(posts.authorId, authorId), isNull(posts.deletedAt)];
+    const conditions = [
+      eq(posts.authorId, authorId),
+      isNull(posts.deletedAt),
+      ...postFeedVisibilityConditions(visibility),
+    ];
 
     if (cursor) {
       conditions.push(lt(posts.timestamp, new Date(cursor)));

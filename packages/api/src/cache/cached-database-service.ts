@@ -31,6 +31,7 @@ import {
   markets,
   not,
   type Post,
+  type PostFeedVisibilityOptions,
   positions,
   posts,
   reactions,
@@ -49,6 +50,24 @@ import {
   invalidateCache,
   invalidateCachePattern,
 } from './cache-service';
+
+/**
+ * Cache-key suffix for post-feed visibility filters. Filtered results must
+ * never be served under the unfiltered key (or another viewer's key), so a
+ * non-empty filter becomes part of the key; no filter keeps the public key.
+ */
+function visibilityCacheKeySuffix(
+  visibility?: PostFeedVisibilityOptions
+): string {
+  if (!visibility) return '';
+  const parts: string[] = [];
+  const excluded = visibility.excludedAuthorIds;
+  if (excluded && excluded.length > 0) {
+    parts.push(`excl:${[...excluded].sort().join(',')}`);
+  }
+  if (visibility.excludeDeadReposts) parts.push('nodead');
+  return parts.length > 0 ? `:${parts.join(':')}` : '';
+}
 
 /**
  * Cached Database Service Class
@@ -71,16 +90,19 @@ class CachedDatabaseService {
    */
   async getRecentPosts(
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    visibility?: PostFeedVisibilityOptions
   ): Promise<Post[]> {
     const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${limit}:cursor:${cursorOrOffset}`
-      : `${limit}:offset:${cursorOrOffset || 0}`;
+    const cacheKey =
+      (isCursor
+        ? `${limit}:cursor:${cursorOrOffset}`
+        : `${limit}:offset:${cursorOrOffset || 0}`) +
+      visibilityCacheKeySuffix(visibility);
 
     return getCacheOrFetch(
       cacheKey,
-      () => getDbInstance().getRecentPosts(limit, cursorOrOffset),
+      () => getDbInstance().getRecentPosts(limit, cursorOrOffset, visibility),
       {
         namespace: CACHE_KEYS.POSTS_LIST,
         ttl: DEFAULT_TTLS.POSTS_LIST,
@@ -94,16 +116,25 @@ class CachedDatabaseService {
   async getPostsByActor(
     authorId: string,
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    visibility?: PostFeedVisibilityOptions
   ): Promise<Post[]> {
     const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${authorId}:${limit}:cursor:${cursorOrOffset}`
-      : `${authorId}:${limit}:offset:${cursorOrOffset || 0}`;
+    const cacheKey =
+      (isCursor
+        ? `${authorId}:${limit}:cursor:${cursorOrOffset}`
+        : `${authorId}:${limit}:offset:${cursorOrOffset || 0}`) +
+      visibilityCacheKeySuffix(visibility);
 
     return getCacheOrFetch(
       cacheKey,
-      () => getDbInstance().getPostsByActor(authorId, limit, cursorOrOffset),
+      () =>
+        getDbInstance().getPostsByActor(
+          authorId,
+          limit,
+          cursorOrOffset,
+          visibility
+        ),
       {
         namespace: CACHE_KEYS.POSTS_BY_ACTOR,
         ttl: DEFAULT_TTLS.POSTS_BY_ACTOR,
