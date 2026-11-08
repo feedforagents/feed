@@ -17,6 +17,8 @@ interface ApiUser {
   bio?: string;
   imageUrl?: string;
   isActor?: boolean;
+  isBanned?: boolean;
+  isTest?: boolean;
 }
 
 /**
@@ -40,6 +42,47 @@ interface RegistryEntity {
   bio?: string;
   imageUrl?: string;
   type: 'user' | 'actor';
+}
+
+/**
+ * Build the suggestion list from a registry response.
+ *
+ * Membership rules for the user entries (the same rules the sibling
+ * discovery surfaces apply — people search drops banned users, and the
+ * feed drops test authors): NPC users (isActor) appear through the
+ * actors array instead, banned users are not discoverable people, and
+ * test accounts (isTest flag or an id starting with 'test-') are not
+ * real people. The filtering lives here, not in the API route: the
+ * admin registry panel shares /api/registry/all and must keep seeing
+ * every registered user (it renders the Banned badge and the Ban/Unban
+ * actions).
+ */
+export function buildAutocompleteEntities(data: {
+  users?: ApiUser[];
+  actors?: ApiActor[];
+}): RegistryEntity[] {
+  const users: RegistryEntity[] = (data.users || [])
+    .filter(
+      (u: ApiUser) =>
+        !u.isActor && !u.isBanned && !u.isTest && !u.id.startsWith('test-')
+    )
+    .map((u: ApiUser) => ({
+      id: u.id,
+      name: u.name,
+      username: u.username,
+      bio: u.bio,
+      imageUrl: u.imageUrl,
+      type: 'user' as const,
+    }));
+  const actors: RegistryEntity[] = (data.actors || []).map((a: ApiActor) => ({
+    id: a.id,
+    name: a.name,
+    username: undefined,
+    bio: a.description || a.role,
+    imageUrl: a.imageUrl,
+    type: 'actor' as const,
+  }));
+  return [...users, ...actors];
 }
 
 /**
@@ -134,29 +177,8 @@ export function EntitySearchAutocomplete({
       if (controller.signal.aborted) return;
       if (response.ok) {
         const data = await response.json();
-        // Filter out NPC users (isActor: true) - they appear in the actors array
-        const users: RegistryEntity[] = (data.users || [])
-          .filter((u: ApiUser) => !u.isActor)
-          .map((u: ApiUser) => ({
-            id: u.id,
-            name: u.name,
-            username: u.username,
-            bio: u.bio,
-            imageUrl: u.imageUrl,
-            type: 'user' as const,
-          }));
-        const actors: RegistryEntity[] = (data.actors || []).map(
-          (a: ApiActor) => ({
-            id: a.id,
-            name: a.name,
-            username: undefined,
-            bio: a.description || a.role,
-            imageUrl: a.imageUrl,
-            type: 'actor' as const,
-          })
-        );
         if (controller.signal.aborted) return;
-        const allEntities = [...users, ...actors];
+        const allEntities = buildAutocompleteEntities(data);
         setSuggestions(allEntities.slice(0, 10));
         setIsOpen(true);
         setSelectedIndex(allEntities.length ? 0 : -1);

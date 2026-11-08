@@ -180,6 +180,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           bio: user.bio,
           imageUrl: user.profileImageUrl,
           isActor: user.isActor,
+          isTest: user.isTest,
           isBanned: user.isBanned,
           isScammer: user.isScammer,
           isCSAM: user.isCSAM,
