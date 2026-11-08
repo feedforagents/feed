@@ -220,6 +220,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       resolutionDate: toISOOrNull(m.endDate),
       endDate: toISOOrNull(m.endDate), // Also include as 'endDate'
       createdDate: toISOOrNull(m.createdAt),
+      // Scenario of the market's question (null when none is linked)
+      scenario: m.scenario ?? null,
       yesShares,
       noShares,
       yesProbability: yesProb,

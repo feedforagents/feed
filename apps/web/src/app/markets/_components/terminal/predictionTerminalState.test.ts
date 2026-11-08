@@ -9,6 +9,7 @@ import {
   buildPredictionLiveStateFromTrade,
   buildPredictionTerminalState,
   isSamePredictionLiveState,
+  predictionScenarioLabel,
 } from './predictionTerminalState';
 
 const baseMarket: PredictionMarket = {
@@ -313,5 +314,21 @@ describe('predictionTerminalState', () => {
     );
     expect(state?.liquidity).toBe(250);
     expect(state?.yesShares).toBe(70);
+  });
+});
+
+describe('predictionScenarioLabel', () => {
+  it('labels a market with its recorded scenario number', () => {
+    expect(predictionScenarioLabel(baseMarket)).toBe('Scenario 7');
+    expect(predictionScenarioLabel({ scenario: 0 })).toBe('Scenario 0');
+  });
+
+  it('returns null when no scenario is recorded, instead of a label with an empty value', () => {
+    expect(predictionScenarioLabel({ scenario: null })).toBeNull();
+    expect(
+      predictionScenarioLabel({} as Pick<PredictionMarket, 'scenario'>)
+    ).toBeNull();
+    expect(predictionScenarioLabel(null)).toBeNull();
+    expect(predictionScenarioLabel(undefined)).toBeNull();
   });
 });
