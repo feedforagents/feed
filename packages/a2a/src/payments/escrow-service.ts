@@ -324,12 +324,38 @@ export async function refundEscrowPayment(
     return fail('invalid_params', 'Invalid refund transaction hash format');
   }
 
-  // Refund evidence: the refund transaction must exist and have succeeded.
+  // Refund evidence: the refund transaction must actually return the
+  // escrowed funds — sent from the treasury that received the escrow, to
+  // one of the escrow's recorded parties (the admin who paid it in, or
+  // the recipient), for at least the escrowed amount. Checking only that
+  // *some* transaction succeeded would let any unrelated hash mark the
+  // escrow refunded while the money never moved.
+  const receiver = getEscrowReceiver();
+  const metadata = (escrow.metadata ?? {}) as {
+    adminWalletAddress?: string;
+    recipientWalletAddress?: string;
+  };
+  const refundRecipients = [
+    metadata.adminWalletAddress,
+    metadata.recipientWalletAddress,
+  ].filter((address): address is string => Boolean(address));
+  if (!receiver || refundRecipients.length === 0) {
+    return fail(
+      'invalid_state',
+      'Cannot verify refund: escrow receiver or refund recipient wallet is not recorded'
+    );
+  }
   const x402Manager = await getSharedX402Manager();
-  if (!(await x402Manager.isTransactionSuccessful(input.refundTxHash))) {
+  const refundResult = await x402Manager.verifyRefundTransaction({
+    txHash: input.refundTxHash,
+    from: receiver,
+    to: refundRecipients,
+    amount: escrow.amountWei,
+  });
+  if (!refundResult.verified) {
     return fail(
       'verification_failed',
-      'Refund transaction not found or not successful on chain'
+      refundResult.error || 'Refund verification failed'
     );
   }
 

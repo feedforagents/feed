@@ -15,12 +15,23 @@ import {
 } from '../../a2a/src/payments/x402-manager';
 
 const successfulTxs = new Set<string>();
+const txDetails = new Map<
+  string,
+  { from: string; to: string | null; value: bigint }
+>();
 const chain: ChainReader = {
-  getTransaction: async () => null,
+  getTransaction: async (h) => txDetails.get(h.toLowerCase()) ?? null,
   getTransactionReceipt: async (h) =>
     successfulTxs.has(h) ? { status: 1, blockNumber: 1 } : null,
   getBlock: async () => ({ timestamp: Math.floor(Date.now() / 1000) }),
 };
+
+// Escrow funds sit in the treasury (the receiver); a refund returns them
+// from there to one of the escrow's recorded parties.
+const TREASURY = '0x3333333333333333333333333333333333333333';
+const ADMIN_WALLET = '0x4444444444444444444444444444444444444444';
+const RECIPIENT_WALLET = '0x5555555555555555555555555555555555555555';
+const ESCROW_WEI = '10000000000000000';
 
 const createdUsers: string[] = [];
 const createdEscrows: string[] = [];
@@ -75,7 +86,10 @@ async function escrowStatus(id: string): Promise<string | undefined> {
 }
 
 describe('moderation escrow', () => {
+  let prevReceiver: string | undefined;
   beforeAll(async () => {
+    prevReceiver = process.env.MODERATION_ESCROW_RECEIVER;
+    process.env.MODERATION_ESCROW_RECEIVER = TREASURY;
     const sharedManagerPath = path.resolve(
       import.meta.dir,
       '../../a2a/src/payments/shared-manager.ts'
@@ -97,6 +111,11 @@ describe('moderation escrow', () => {
       .delete(moderationEscrows)
       .where(inArray(moderationEscrows.id, createdEscrows));
     await db.delete(users).where(inArray(users.id, createdUsers));
+    if (prevReceiver === undefined) {
+      delete process.env.MODERATION_ESCROW_RECEIVER;
+    } else {
+      process.env.MODERATION_ESCROW_RECEIVER = prevReceiver;
+    }
     mock.restore();
   });
 
@@ -133,7 +152,14 @@ describe('moderation escrow', () => {
   });
 
   it('requires on-chain evidence and refunds exactly once', async () => {
-    const id = await createEscrow({ status: 'paid', paymentTxHash: txHash() });
+    const id = await createEscrow({
+      status: 'paid',
+      paymentTxHash: txHash(),
+      metadata: {
+        adminWalletAddress: ADMIN_WALLET,
+        recipientWalletAddress: RECIPIENT_WALLET,
+      },
+    });
 
     const unproven = await escrowService.refundEscrowPayment({
       escrowId: id,
@@ -146,6 +172,16 @@ describe('moderation escrow', () => {
     const [a, b] = [txHash(), txHash()];
     successfulTxs.add(a);
     successfulTxs.add(b);
+    txDetails.set(a, {
+      from: TREASURY,
+      to: ADMIN_WALLET,
+      value: BigInt(ESCROW_WEI),
+    });
+    txDetails.set(b, {
+      from: TREASURY,
+      to: ADMIN_WALLET,
+      value: BigInt(ESCROW_WEI),
+    });
     const results = await Promise.all([
       escrowService.refundEscrowPayment({
         escrowId: id,
@@ -159,6 +195,68 @@ describe('moderation escrow', () => {
       }),
     ]);
     expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(await escrowStatus(id)).toBe('refunded');
+  });
+
+  it('rejects a refund whose transaction did not return the escrowed funds', async () => {
+    const id = await createEscrow({
+      status: 'paid',
+      paymentTxHash: txHash(),
+      amountWei: ESCROW_WEI,
+      metadata: {
+        adminWalletAddress: ADMIN_WALLET,
+        recipientWalletAddress: RECIPIENT_WALLET,
+      },
+    });
+
+    // Any successful transaction, even one that moves nothing out of the
+    // treasury, must not count as a refund.
+    const unrelated = txHash();
+    txDetails.set(unrelated, {
+      from: '0x9999999999999999999999999999999999999999',
+      to: '0x8888888888888888888888888888888888888888',
+      value: 0n,
+    });
+    successfulTxs.add(unrelated);
+    const wrongTx = await escrowService.refundEscrowPayment({
+      escrowId: id,
+      refundTxHash: unrelated,
+      refundedBy: 'admin',
+    });
+    expect(wrongTx).toMatchObject({ ok: false, code: 'verification_failed' });
+    expect(await escrowStatus(id)).toBe('paid');
+
+    // A real treasury payment that returns less than the escrowed amount
+    // is not a refund of the escrow either.
+    const underpaid = txHash();
+    txDetails.set(underpaid, {
+      from: TREASURY,
+      to: ADMIN_WALLET,
+      value: 1n,
+    });
+    successfulTxs.add(underpaid);
+    const short = await escrowService.refundEscrowPayment({
+      escrowId: id,
+      refundTxHash: underpaid,
+      refundedBy: 'admin',
+    });
+    expect(short).toMatchObject({ ok: false, code: 'verification_failed' });
+    expect(await escrowStatus(id)).toBe('paid');
+
+    // The escrowed amount leaving the treasury for the admin is a refund.
+    const good = txHash();
+    txDetails.set(good, {
+      from: TREASURY,
+      to: ADMIN_WALLET,
+      value: BigInt(ESCROW_WEI),
+    });
+    successfulTxs.add(good);
+    const ok = await escrowService.refundEscrowPayment({
+      escrowId: id,
+      refundTxHash: good,
+      refundedBy: 'admin',
+    });
+    expect(ok.ok).toBe(true);
     expect(await escrowStatus(id)).toBe('refunded');
   });
 

@@ -467,6 +467,101 @@ export class X402Manager {
   }
 
   /**
+   * Verify a refund transaction actually returned the escrowed funds.
+   * Unlike a payment verification, there is no payment request to match
+   * against: the caller states the expected sender (the account holding
+   * the funds), the acceptable recipients, and the minimum amount, and
+   * the on-chain transaction must match all three.
+   */
+  async verifyRefundTransaction(params: {
+    txHash: string;
+    from: string;
+    to: string | string[];
+    amount: string;
+  }): Promise<PaymentVerificationResult> {
+    let tx;
+    try {
+      tx = await this.withRpcTimeout(
+        'getTransaction',
+        this.provider.getTransaction(params.txHash)
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('timed out')) {
+        return {
+          verified: false,
+          error:
+            'Blockchain RPC timed out. Wait for confirmation, then try again.',
+        };
+      }
+      throw e;
+    }
+    if (!tx) {
+      return { verified: false, error: 'Transaction not found on blockchain' };
+    }
+
+    let txReceipt;
+    try {
+      txReceipt = await this.withRpcTimeout(
+        'getTransactionReceipt',
+        this.provider.getTransactionReceipt(params.txHash)
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('timed out')) {
+        return {
+          verified: false,
+          error:
+            'Blockchain RPC timed out. Wait for confirmation, then try again.',
+        };
+      }
+      throw e;
+    }
+    if (!txReceipt) {
+      return { verified: false, error: 'Transaction not yet confirmed' };
+    }
+
+    if (txReceipt.status !== 1) {
+      return { verified: false, error: 'Transaction failed on blockchain' };
+    }
+
+    const errors: string[] = [];
+
+    if (tx.from.toLowerCase() !== params.from.toLowerCase()) {
+      errors.push(`Sender mismatch: expected ${params.from}, got ${tx.from}`);
+    }
+
+    const expectedRecipients = Array.isArray(params.to)
+      ? params.to
+      : [params.to];
+    if (
+      !tx.to ||
+      !expectedRecipients.some(
+        (recipient) => tx.to!.toLowerCase() === recipient.toLowerCase()
+      )
+    ) {
+      errors.push(
+        `Recipient mismatch: expected one of ${expectedRecipients.join(', ')}, got ${tx.to}`
+      );
+    }
+
+    // tx.value is the transferred amount (gas is paid separately), so the
+    // full refunded amount is required.
+    const expectedAmount = BigInt(params.amount);
+    if (tx.value < expectedAmount) {
+      errors.push(
+        `Insufficient refund: expected at least ${expectedAmount}, got ${tx.value}`
+      );
+    }
+
+    if (errors.length > 0) {
+      return { verified: false, error: errors.join('; ') };
+    }
+
+    return { verified: true };
+  }
+
+  /**
    * Check that a transaction exists on chain and succeeded.
    */
   async isTransactionSuccessful(txHash: string): Promise<boolean> {
