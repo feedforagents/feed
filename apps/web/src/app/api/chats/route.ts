@@ -180,6 +180,9 @@ import {
   groups,
   inArray,
   messages,
+  notInArray,
+  userBlocks,
+  userMutes,
   users,
 } from '@feed/db';
 import {
@@ -346,13 +349,47 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     // Map chatId -> chat details
     const chatDetailsMap = new Map(filteredGroupChats.map((c) => [c.id, c]));
 
+    // The group chat history applies the viewer's moderation rule — authors
+    // the viewer blocked or muted, and authors who blocked the viewer,
+    // never appear in the message list (see the group branch of
+    // GET /api/chats/[id]). The preview below is built from the same
+    // messages, so it applies the same rule at the query level: the preview
+    // is the newest message the viewer may see, not the newest message
+    // overall. Loaded through this request's own handle so failures
+    // propagate instead of falling back to an unfiltered preview. DM
+    // previews are out of scope here, matching the history route: a block
+    // relationship already prevents creating a DM and sending in one.
+    const [blockedRows, mutedRows, blockedByRows] = await Promise.all([
+      dbClient
+        .select({ id: userBlocks.blockedId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockerId, user.userId)),
+      dbClient
+        .select({ id: userMutes.mutedId })
+        .from(userMutes)
+        .where(eq(userMutes.muterId, user.userId)),
+      dbClient
+        .select({ id: userBlocks.blockerId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockedId, user.userId)),
+    ]);
+    const excludedSenderIds = [
+      ...blockedRows,
+      ...mutedRows,
+      ...blockedByRows,
+    ].map((row) => row.id);
+    const groupSenderScope =
+      excludedSenderIds.length > 0
+        ? notInArray(messages.senderId, excludedSenderIds)
+        : undefined;
+
     // Get last messages for group chats
     const groupChatMessages = await Promise.all(
       groupChatIds.map(async (chatId) => {
         const msgs = await dbClient
           .select()
           .from(messages)
-          .where(eq(messages.chatId, chatId))
+          .where(and(eq(messages.chatId, chatId), groupSenderScope))
           .orderBy(desc(messages.createdAt))
           .limit(1);
         return { chatId, messages: msgs };
