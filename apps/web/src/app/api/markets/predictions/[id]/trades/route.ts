@@ -129,7 +129,7 @@ export const GET = withErrorHandling(
       where nt."marketType" = 'prediction'
         and nt."marketId" = ${marketId}
 
-      order by "timestampMs" desc
+      order by "timestampMs" desc, "id" desc
       limit ${limitPlusOne}
       offset ${queryParams.offset}
     `)) as PredictionTradeRow[];
