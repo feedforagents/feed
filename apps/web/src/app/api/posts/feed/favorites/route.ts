@@ -177,7 +177,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           lte(posts.timestamp, now)
         )
       )
-      .orderBy(desc(posts.createdAt))
+      // A total order is required for OFFSET paging: posts written by
+      // one batch insert share a createdAt (now() is the transaction
+      // timestamp), and without the id tiebreaker each page's top-N
+      // sort may pick a different subset of the tie group, duplicating
+      // some posts and leaving others unreachable.
+      .orderBy(desc(posts.createdAt), desc(posts.id))
       .offset(offset)
       .limit(limit + 1);
 
