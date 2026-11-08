@@ -2202,8 +2202,36 @@ export class FeedAgentExecutor implements AgentExecutor {
     context: RequestContext
   ) {
     const userId = requireContextAccountId({}, context);
+
+    // Match the notification list above (and the web chat badge, GET
+    // /api/chats/unread-count): chat notifications whose actor is blocked
+    // by the user, muted by the user, or has blocked the user are excluded
+    // at read time. The filter has to live at read time — muting never
+    // stops notification creation, and a block placed later must hide chat
+    // notifications created before it. System chat notifications have a
+    // null actor and are always kept.
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(userId),
+      getMutedUserIds(userId),
+      getBlockedByUserIds(userId),
+    ]);
+    const excludedActorIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+    const moderationFilter =
+      excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {};
+
     const unreadCount = await db.notification.count({
-      where: { userId, read: false, chatId: { not: null } },
+      where: {
+        userId,
+        read: false,
+        chatId: { not: null },
+        ...moderationFilter,
+      },
     });
     return { unreadCount };
   }
