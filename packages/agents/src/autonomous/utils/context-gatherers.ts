@@ -430,7 +430,7 @@ export async function resolveUserByUsername(
   const [user] = await db
     .select({ id: users.id })
     .from(users)
-    .where(eq(users.username, clean))
+    .where(sql`lower(${users.username}) = ${clean}`)
     .limit(1);
 
   return user?.id ?? null;
