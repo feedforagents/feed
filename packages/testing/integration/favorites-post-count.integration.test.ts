@@ -13,8 +13,7 @@
  * profile's count included moderated-away posts and unpublished scheduled
  * posts that appear nowhere else.
  *
- * The request is authenticated with the non-production x-dev-user-id
- * header. The only stub is the `server-only` marker package (an empty
+ * The request is authenticated with the existing CI synthetic bearer. The only stub is the `server-only` marker package (an empty
  * environment guard that throws outside a Server Component); every
  * database dependency runs for real.
  */
@@ -23,7 +22,7 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { and, db, eq, favorites, inArray, posts, users } from '@feed/db';
+import { db, eq, favorites, inArray, posts, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 
@@ -34,14 +33,15 @@ type FavoritesResponse = {
 
 let viewerId: string;
 let authorId: string;
+let emptyAuthorId: string;
 const allPostIds: string[] = [];
 
-let GET: typeof import('../route').GET;
+let GET: typeof import('../../../apps/web/src/app/api/profiles/favorites/route').GET;
 
 async function fetchFavorites() {
   const request = new NextRequest(
     new Request('http://localhost/api/profiles/favorites'),
-    { headers: { 'x-dev-user-id': viewerId } }
+    { headers: { authorization: `Bearer steward:test:${viewerId}` } }
   );
   const response = await GET(request);
   const body = (await response.json().catch(() => null)) as
@@ -52,9 +52,12 @@ async function fetchFavorites() {
 }
 
 beforeAll(async () => {
-  ({ GET } = await import('../route'));
+  ({ GET } = await import(
+    '../../../apps/web/src/app/api/profiles/favorites/route'
+  ));
 
-  [viewerId, authorId] = await Promise.all([
+  [viewerId, authorId, emptyAuthorId] = await Promise.all([
+    generateSnowflakeId(),
     generateSnowflakeId(),
     generateSnowflakeId(),
   ]);
@@ -66,14 +69,20 @@ beforeAll(async () => {
   await db.insert(users).values([
     {
       id: viewerId,
-      username: `test-f7-viewer-${viewerId}`,
+      username: `f7v-${viewerId}`,
       displayName: 'Favorites Fixture Viewer',
       updatedAt: now,
     },
     {
       id: authorId,
-      username: `test-f7-author-${authorId}`,
+      username: `f7a-${authorId}`,
       displayName: 'Favorites Fixture Author',
+      updatedAt: now,
+    },
+    {
+      id: emptyAuthorId,
+      username: `f7e-${emptyAuthorId}`,
+      displayName: 'Empty fixture author',
       updatedAt: now,
     },
   ]);
@@ -82,6 +91,13 @@ beforeAll(async () => {
     id: await generateSnowflakeId(),
     userId: viewerId,
     targetUserId: authorId,
+    createdAt: now,
+  });
+
+  await db.insert(favorites).values({
+    id: await generateSnowflakeId(),
+    userId: viewerId,
+    targetUserId: emptyAuthorId,
     createdAt: now,
   });
 
@@ -125,13 +141,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await db
-    .delete(favorites)
-    .where(
-      and(eq(favorites.userId, viewerId), eq(favorites.targetUserId, authorId))
-    );
+  await db.delete(favorites).where(eq(favorites.userId, viewerId));
   await db.delete(posts).where(inArray(posts.id, allPostIds));
-  await db.delete(users).where(inArray(users.id, [viewerId, authorId]));
+  await db
+    .delete(users)
+    .where(inArray(users.id, [viewerId, authorId, emptyAuthorId]));
 });
 
 describe('GET /api/profiles/favorites postCount', () => {
@@ -145,5 +159,63 @@ describe('GET /api/profiles/favorites postCount', () => {
     // be counted (staging counts all 4).
     expect(entry!.postCount).toBe(2);
     expect(entry!.favoriteCount).toBe(1);
+  });
+});
+
+describe('favorite counts track publication and moderation', () => {
+  it('returns zero for a favorited author without posts', async () => {
+    const { status, body } = await fetchFavorites();
+    expect(status).toBe(200);
+    const list = body as FavoritesResponse;
+    expect(list.total).toBe(2);
+    expect(list.profiles.find((p) => p.id === emptyAuthorId)?.postCount).toBe(
+      0
+    );
+  });
+
+  it('counts a future post once its owned timestamp becomes eligible', async () => {
+    const postId = allPostIds[3]!;
+    const [original] = await db
+      .select({ timestamp: posts.timestamp })
+      .from(posts)
+      .where(eq(posts.id, postId));
+    try {
+      await db
+        .update(posts)
+        .set({ timestamp: new Date(Date.now() - 1000) })
+        .where(eq(posts.id, postId));
+      const { status, body } = await fetchFavorites();
+      expect(status).toBe(200);
+      expect(
+        (body as FavoritesResponse).profiles.find((p) => p.id === authorId)
+          ?.postCount
+      ).toBe(3);
+    } finally {
+      await db
+        .update(posts)
+        .set({ timestamp: original!.timestamp })
+        .where(eq(posts.id, postId));
+    }
+  });
+
+  it('removes an owned post from the count when soft-deleted', async () => {
+    const postId = allPostIds[0]!;
+    try {
+      await db
+        .update(posts)
+        .set({ deletedAt: new Date() })
+        .where(eq(posts.id, postId));
+      const { status, body } = await fetchFavorites();
+      expect(status).toBe(200);
+      expect(
+        (body as FavoritesResponse).profiles.find((p) => p.id === authorId)
+          ?.postCount
+      ).toBe(1);
+    } finally {
+      await db
+        .update(posts)
+        .set({ deletedAt: null })
+        .where(eq(posts.id, postId));
+    }
   });
 });
