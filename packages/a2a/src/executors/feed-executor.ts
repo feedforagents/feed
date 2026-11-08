@@ -1968,8 +1968,43 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('Chat not found or access denied');
     }
 
+    const chat = await db.chat.findUnique({
+      where: { id: chatId },
+      select: { isGroup: true },
+    });
+
+    if (!chat) {
+      throw new Error('Chat not found or access denied');
+    }
+
+    // A group chat is a reading surface like any other feed: authors the
+    // viewer blocked or muted, and authors who blocked the viewer, must
+    // not appear in the viewer's message list — the same rule the web
+    // group chat history (GET /api/chats/[id]) and this executor's
+    // get_notifications apply at read time, so a block or mute placed
+    // later also hides earlier messages. The filter lives in the query
+    // itself so limit/offset page over only the messages the viewer may
+    // see. DM history is out of scope: a block relationship already
+    // prevents creating a DM and sending in one.
+    let excludedSenderIds: string[] = [];
+    if (chat.isGroup) {
+      const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+        getBlockedUserIds(userId),
+        getMutedUserIds(userId),
+        getBlockedByUserIds(userId),
+      ]);
+      excludedSenderIds = [
+        ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+      ];
+    }
+
     const messages = await db.message.findMany({
-      where: { chatId },
+      where: {
+        chatId,
+        ...(excludedSenderIds.length > 0
+          ? { senderId: { notIn: excludedSenderIds } }
+          : {}),
+      },
       orderBy: { createdAt: 'desc' },
       take: limit,
       skip: offset,
