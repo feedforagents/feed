@@ -42,6 +42,7 @@ import {
   checkRateLimitAsync,
   declineGroupInvite,
   logAdminModify,
+  NotFoundError,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
   sharePost,
@@ -1464,12 +1465,32 @@ export async function executeGetComments(
 }
 
 /**
- * Execute create_comment tool
+ * Execute create_comment tool (same rules as the web post comments route
+ * and the A2A createComment executor: the post must exist and not be
+ * soft-deleted).
  */
 export async function executeCreateComment(
   agent: AuthenticatedAgent,
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
+  const post = await db.post.findFirst({
+    where: { id: args.postId },
+  });
+
+  // Unknown posts cannot take comments (and are never created from the ID:
+  // comments.postId has no foreign key, so an unchecked comment would
+  // become an orphan row).
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
+  // Soft-deleted posts are hidden everywhere, so they cannot collect new
+  // comments — the web post comments route applies the same rule, as does
+  // the A2A createComment executor.
+  if (post.deletedAt) {
+    throw new NotFoundError('Post (deleted)', args.postId);
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {

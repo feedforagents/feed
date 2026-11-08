@@ -6,6 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import {
+  comments,
   db,
   eq,
   favorites,
@@ -14,10 +15,12 @@ import {
   notifications,
   positions,
   posts,
+  reactions,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import {
+  executeCreateComment,
   executeGetFavoritePosts,
   executeGetMarketPrices,
   executeGetMarkets,
@@ -33,6 +36,7 @@ let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
 let postId: string;
+let deletedPostId: string;
 let marketId: string;
 let activePositionId: string;
 
@@ -66,6 +70,13 @@ describe('MCP tool handlers', () => {
       id: postId,
       content: 'favorite post',
       authorId: otherUserId,
+    });
+    deletedPostId = await generateSnowflakeId();
+    await db.insert(posts).values({
+      id: deletedPostId,
+      content: 'deleted post',
+      authorId: otherUserId,
+      deletedAt: new Date(),
     });
     await db.insert(favorites).values({
       id: await generateSnowflakeId(),
@@ -120,6 +131,12 @@ describe('MCP tool handlers', () => {
 
   afterAll(async () => {
     await db
+      .delete(reactions)
+      .where(inArray(reactions.postId, [postId, deletedPostId]));
+    await db
+      .delete(comments)
+      .where(inArray(comments.postId, [postId, deletedPostId]));
+    await db
       .delete(notifications)
       .where(inArray(notifications.userId, userIds));
     await db.delete(favorites).where(inArray(favorites.userId, userIds));
@@ -127,6 +144,7 @@ describe('MCP tool handlers', () => {
     await db.delete(markets).where(eq(markets.id, marketId));
     await db.delete(markets).where(inArray(markets.id, marketIds));
     await db.delete(posts).where(eq(posts.id, postId));
+    await db.delete(posts).where(eq(posts.id, deletedPostId));
     await db.delete(users).where(inArray(users.id, userIds));
   });
 
@@ -209,5 +227,42 @@ describe('MCP tool handlers', () => {
       side: 'YES',
       question: 'Will the MCP list only open positions?',
     });
+  });
+
+  it('comments on a live post via create_comment', async () => {
+    const result = await executeCreateComment(agent(), {
+      postId,
+      content: 'live comment',
+    });
+    expect(result.success).toBe(true);
+    const rows = await db
+      .select()
+      .from(comments)
+      .where(eq(comments.postId, postId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toBe('live comment');
+  });
+
+  it('rejects comments on unknown or soft-deleted posts via create_comment', async () => {
+    const unknownPostId = await generateSnowflakeId();
+    await expect(
+      executeCreateComment(agent(), {
+        postId: unknownPostId,
+        content: 'orphan comment',
+      })
+    ).rejects.toThrow('Post not found');
+    expect(
+      await db.select().from(comments).where(eq(comments.postId, unknownPostId))
+    ).toHaveLength(0);
+
+    await expect(
+      executeCreateComment(agent(), {
+        postId: deletedPostId,
+        content: 'comment on deleted post',
+      })
+    ).rejects.toThrow('Post (deleted) not found');
+    expect(
+      await db.select().from(comments).where(eq(comments.postId, deletedPostId))
+    ).toHaveLength(0);
   });
 });
