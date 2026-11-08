@@ -86,6 +86,13 @@ interface InteractionStoreActions {
    */
   syncPostInteraction: (interaction: PostInteraction) => void;
 
+  /**
+   * Merge authoritative server interaction data for a comment. Skipped
+   * while a mutation for that comment is in flight (its own result is
+   * authoritative).
+   */
+  syncCommentInteraction: (interaction: CommentInteraction) => void;
+
   // Utility actions
   clearError: (id: string) => void;
   resetStore: () => void;
@@ -245,6 +252,21 @@ export const useInteractionStore = create<InteractionStore>()(
           patchPost(postId, interaction);
         },
 
+        syncCommentInteraction: (interaction: CommentInteraction) => {
+          const { commentId } = interaction;
+          if (get().loadingStates.get(commentId)) return;
+          const current = get().commentInteractions.get(commentId);
+          if (
+            current &&
+            current.likeCount === interaction.likeCount &&
+            current.replyCount === interaction.replyCount &&
+            current.isLiked === interaction.isLiked
+          ) {
+            return;
+          }
+          patchComment(commentId, interaction);
+        },
+
         toggleLike: async (postId: string) => {
           const current =
             get().postInteractions.get(postId) ?? emptyPostInteraction(postId);
@@ -373,6 +395,24 @@ export const useInteractionStore = create<InteractionStore>()(
             });
             return [];
           }
+          // The payload is authoritative for like state: reconcile the
+          // persisted per-comment entries with it, like posts reconcile
+          // through syncPostInteraction. Without this, an entry left by an
+          // earlier toggle shadows the server values in LikeButton for
+          // good — the count freezes and the viewer's liked flag can no
+          // longer be corrected once the record changes anywhere else.
+          const syncCommentTree = (list: CommentWithReplies[]): void => {
+            for (const comment of list) {
+              get().syncCommentInteraction({
+                commentId: comment.id,
+                likeCount: comment.likeCount,
+                replyCount: comment.replies.length,
+                isLiked: comment.isLiked,
+              });
+              syncCommentTree(comment.replies);
+            }
+          };
+          syncCommentTree(comments);
           return comments;
         },
 
