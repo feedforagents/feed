@@ -11,17 +11,28 @@
  * must agree with that total for the same user.
  *
  * Nothing is mocked: all three routes run against the real database.
- * Fixture rows are namespaced by a per-run id and are not deleted.
+ * Fixture rows and cache entries are owned and removed after the run.
  */
 
-import { beforeAll, describe, expect, it } from 'bun:test';
-import { db, followStatuses, follows, users } from '@feed/db';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { invalidateCache } from '@feed/api';
+import {
+  and,
+  db,
+  eq,
+  followStatuses,
+  follows,
+  inArray,
+  notifications,
+  users,
+} from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
-import { GET as getByUsername } from '../../../by-username/[username]/route';
-import { GET as getFollowers } from '../../followers/route';
-import { GET as getProfile } from '../route';
+import { GET as getFollowers } from '../../../apps/web/src/app/api/users/[userId]/followers/route';
+import { GET as getProfile } from '../../../apps/web/src/app/api/users/[userId]/profile/route';
+import { GET as getByUsername } from '../../../apps/web/src/app/api/users/by-username/[username]/route';
+import { FollowingMechanics } from '../../engine/src/services/following-mechanics';
 
 const HUMAN_FOLLOWERS = 2;
 const NPC_FOLLOWERS = 2;
@@ -30,6 +41,7 @@ const EXPECTED_FOLLOWERS = HUMAN_FOLLOWERS + NPC_FOLLOWERS;
 let targetId: string;
 let targetUsername: string;
 const npcIds: string[] = [];
+const humanIds: string[] = [];
 
 beforeAll(async () => {
   const runId = await generateSnowflakeId();
@@ -45,7 +57,6 @@ beforeAll(async () => {
   });
 
   // Human followers: plain Follow rows.
-  const humanIds: string[] = [];
   for (let i = 0; i < HUMAN_FOLLOWERS; i++) {
     humanIds.push(await generateSnowflakeId());
   }
@@ -108,6 +119,14 @@ beforeAll(async () => {
   ]);
 });
 
+afterAll(async () => {
+  await invalidateCache(targetId, { namespace: 'user:profile:stats' });
+  await db.delete(notifications).where(eq(notifications.userId, targetId));
+  await db.delete(followStatuses).where(eq(followStatuses.userId, targetId));
+  await db.delete(follows).where(eq(follows.followingId, targetId));
+  await db.delete(users).where(inArray(users.id, [targetId, ...humanIds]));
+});
+
 describe('profile follower count vs followers list', () => {
   it('followers list counts human and NPC followers', async () => {
     const response = await getFollowers(
@@ -158,5 +177,73 @@ describe('profile follower count vs followers list', () => {
     };
     const user = body.data?.user ?? body.user;
     expect(user?.stats.followers).toBe(EXPECTED_FOLLOWERS);
+  });
+});
+
+describe('profile count after real NPC follow changes', () => {
+  it('keeps the full count when the followers list is paginated', async () => {
+    const response = await getFollowers(
+      new NextRequest(
+        `http://localhost/api/users/${targetId}/followers?limit=1&page=2`
+      ),
+      { params: Promise.resolve({ userId: targetId }) }
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    const payload = body.data ?? body;
+    expect(payload.count).toBe(EXPECTED_FOLLOWERS);
+    expect(payload.followers).toHaveLength(1);
+  });
+
+  it('reflects actual NPC unfollow and re-follow when the stats cache is cold', async () => {
+    const npcId = npcIds[0]!;
+    async function readCounts() {
+      // Explicitly invalidate only this fixture's cache. Warm-cache TTL behavior
+      // is separate from the aggregation regression under test.
+      await invalidateCache(targetId, { namespace: 'user:profile:stats' });
+      const profile = await getProfile(
+        new NextRequest(`http://localhost/api/users/${targetId}/profile`),
+        { params: Promise.resolve({ userId: targetId }) }
+      );
+      const username = await getByUsername(
+        new NextRequest(
+          `http://localhost/api/users/by-username/${targetUsername}`
+        ),
+        { params: Promise.resolve({ username: targetUsername }) }
+      );
+      expect(profile.status).toBe(200);
+      expect(username.status).toBe(200);
+      const p = await profile.json();
+      const u = await username.json();
+      return [
+        (p.data ?? p).user.stats.followers,
+        (u.data ?? u).user.stats.followers,
+      ];
+    }
+    try {
+      await FollowingMechanics.unfollow(
+        targetId,
+        npcId,
+        'Owned integration fixture'
+      );
+      expect(await readCounts()).toEqual([3, 3]);
+      await FollowingMechanics.recordFollow(
+        targetId,
+        npcId,
+        'Owned integration fixture'
+      );
+      expect(await readCounts()).toEqual([4, 4]);
+    } finally {
+      await db
+        .update(followStatuses)
+        .set({ isActive: true, unfollowedAt: null })
+        .where(
+          and(
+            eq(followStatuses.userId, targetId),
+            eq(followStatuses.npcId, npcId)
+          )
+        );
+      await invalidateCache(targetId, { namespace: 'user:profile:stats' });
+    }
   });
 });
