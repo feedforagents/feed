@@ -11,6 +11,7 @@
 
 import {
   and,
+  balanceTransactions,
   chats,
   comments,
   count,
@@ -238,59 +239,72 @@ type WindowedResolver = (
   end: Date
 ) => Promise<number>;
 
+// Trade challenges count executed trades from the wallet ledger, not
+// position rows created/opened inside the window: a repeat buy on a
+// market opened yesterday is a trade today, but it only updates the
+// existing position row, so counting rows by createdAt misses it (and
+// counts one trade for many same-day buys on one market). The ledger
+// records one row per executed trade — the same record the trades
+// history lists. Settlement and refund rows (pred_resolve, pred_cancel)
+// are not trades.
+const CHALLENGE_PRED_TRADE_TYPES = ['pred_buy', 'pred_sell'];
+const CHALLENGE_PERP_TRADE_TYPES = [
+  'perp_open',
+  'perp_close',
+  'perp_partial_close',
+  'perp_add_to_position',
+  'perp_flip_position',
+  'perp_liquidation',
+];
+
+async function countLedgerTradesInWindow(
+  userId: string,
+  types: string[],
+  start: Date,
+  end: Date
+): Promise<number> {
+  const result = await db
+    .select({ c: count() })
+    .from(balanceTransactions)
+    .where(
+      and(
+        eq(balanceTransactions.userId, userId),
+        inArray(balanceTransactions.type, types),
+        gte(balanceTransactions.createdAt, start),
+        lt(balanceTransactions.createdAt, end)
+      )
+    );
+  return result[0]!.c;
+}
+
 const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
   // ── Simple counts ──
 
   daily_pred_trade: async (userId, start, end) => {
-    const r = await db
-      .select({ c: count() })
-      .from(positions)
-      .where(
-        and(
-          eq(positions.userId, userId),
-          gte(positions.createdAt, start),
-          lt(positions.createdAt, end)
-        )
-      );
-    return r[0]!.c;
+    return countLedgerTradesInWindow(
+      userId,
+      CHALLENGE_PRED_TRADE_TYPES,
+      start,
+      end
+    );
   },
 
   daily_perp_trade: async (userId, start, end) => {
-    const r = await db
-      .select({ c: count() })
-      .from(perpPositions)
-      .where(
-        and(
-          eq(perpPositions.userId, userId),
-          gte(perpPositions.openedAt, start),
-          lt(perpPositions.openedAt, end)
-        )
-      );
-    return r[0]!.c;
+    return countLedgerTradesInWindow(
+      userId,
+      CHALLENGE_PERP_TRADE_TYPES,
+      start,
+      end
+    );
   },
 
   daily_total_trade: async (userId, start, end) => {
-    const pred = await db
-      .select({ c: count() })
-      .from(positions)
-      .where(
-        and(
-          eq(positions.userId, userId),
-          gte(positions.createdAt, start),
-          lt(positions.createdAt, end)
-        )
-      );
-    const perp = await db
-      .select({ c: count() })
-      .from(perpPositions)
-      .where(
-        and(
-          eq(perpPositions.userId, userId),
-          gte(perpPositions.openedAt, start),
-          lt(perpPositions.openedAt, end)
-        )
-      );
-    return pred[0]!.c + perp[0]!.c;
+    return countLedgerTradesInWindow(
+      userId,
+      [...CHALLENGE_PRED_TRADE_TYPES, ...CHALLENGE_PERP_TRADE_TYPES],
+      start,
+      end
+    );
   },
 
   daily_distinct_markets: async (userId, start, end) => {
@@ -503,81 +517,48 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
   // ── Compound daily ──
 
   daily_pred_and_perp: async (userId, start, end) => {
-    const pred = await db
-      .select({ c: count() })
-      .from(positions)
-      .where(
-        and(
-          eq(positions.userId, userId),
-          gte(positions.createdAt, start),
-          lt(positions.createdAt, end)
-        )
-      );
-    const perp = await db
-      .select({ c: count() })
-      .from(perpPositions)
-      .where(
-        and(
-          eq(perpPositions.userId, userId),
-          gte(perpPositions.openedAt, start),
-          lt(perpPositions.openedAt, end)
-        )
-      );
-    return pred[0]!.c > 0 && perp[0]!.c > 0 ? 1 : 0;
+    const pred = await countLedgerTradesInWindow(
+      userId,
+      CHALLENGE_PRED_TRADE_TYPES,
+      start,
+      end
+    );
+    const perp = await countLedgerTradesInWindow(
+      userId,
+      CHALLENGE_PERP_TRADE_TYPES,
+      start,
+      end
+    );
+    return pred > 0 && perp > 0 ? 1 : 0;
   },
 
   // ── Weekly resolvers ──
 
   weekly_pred_trade: async (userId, start, end) => {
-    const r = await db
-      .select({ c: count() })
-      .from(positions)
-      .where(
-        and(
-          eq(positions.userId, userId),
-          gte(positions.createdAt, start),
-          lt(positions.createdAt, end)
-        )
-      );
-    return r[0]!.c;
+    return countLedgerTradesInWindow(
+      userId,
+      CHALLENGE_PRED_TRADE_TYPES,
+      start,
+      end
+    );
   },
 
   weekly_perp_trade: async (userId, start, end) => {
-    const r = await db
-      .select({ c: count() })
-      .from(perpPositions)
-      .where(
-        and(
-          eq(perpPositions.userId, userId),
-          gte(perpPositions.openedAt, start),
-          lt(perpPositions.openedAt, end)
-        )
-      );
-    return r[0]!.c;
+    return countLedgerTradesInWindow(
+      userId,
+      CHALLENGE_PERP_TRADE_TYPES,
+      start,
+      end
+    );
   },
 
   weekly_total_trade: async (userId, start, end) => {
-    const pred = await db
-      .select({ c: count() })
-      .from(positions)
-      .where(
-        and(
-          eq(positions.userId, userId),
-          gte(positions.createdAt, start),
-          lt(positions.createdAt, end)
-        )
-      );
-    const perp = await db
-      .select({ c: count() })
-      .from(perpPositions)
-      .where(
-        and(
-          eq(perpPositions.userId, userId),
-          gte(perpPositions.openedAt, start),
-          lt(perpPositions.openedAt, end)
-        )
-      );
-    return pred[0]!.c + perp[0]!.c;
+    return countLedgerTradesInWindow(
+      userId,
+      [...CHALLENGE_PRED_TRADE_TYPES, ...CHALLENGE_PERP_TRADE_TYPES],
+      start,
+      end
+    );
   },
 
   weekly_distinct_markets: async (userId, start, end) => {
@@ -756,27 +737,19 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
   // ── Compound weekly ──
 
   weekly_pred_and_perp: async (userId, start, end) => {
-    const pred = await db
-      .select({ c: count() })
-      .from(positions)
-      .where(
-        and(
-          eq(positions.userId, userId),
-          gte(positions.createdAt, start),
-          lt(positions.createdAt, end)
-        )
-      );
-    const perp = await db
-      .select({ c: count() })
-      .from(perpPositions)
-      .where(
-        and(
-          eq(perpPositions.userId, userId),
-          gte(perpPositions.openedAt, start),
-          lt(perpPositions.openedAt, end)
-        )
-      );
-    return pred[0]!.c > 0 && perp[0]!.c > 0 ? 1 : 0;
+    const pred = await countLedgerTradesInWindow(
+      userId,
+      CHALLENGE_PRED_TRADE_TYPES,
+      start,
+      end
+    );
+    const perp = await countLedgerTradesInWindow(
+      userId,
+      CHALLENGE_PERP_TRADE_TYPES,
+      start,
+      end
+    );
+    return pred > 0 && perp > 0 ? 1 : 0;
   },
 
   weekly_positive_pnl: async (userId, start, end) => {

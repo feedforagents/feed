@@ -386,6 +386,12 @@ describe('Achievement Engine (checkProgress)', () => {
           activityType: 'ual.activityType',
           activityDate: 'ual.activityDate',
         },
+        balanceTransactions: {
+          _: 'balanceTransactions',
+          userId: 'bt.userId',
+          type: 'bt.type',
+          createdAt: 'bt.createdAt',
+        },
         // Drizzle operators
         eq: (..._args: unknown[]) => ({}),
         and: (..._args: unknown[]) => ({}),
