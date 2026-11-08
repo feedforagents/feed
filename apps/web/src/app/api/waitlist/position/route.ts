@@ -65,7 +65,7 @@ import {
   WaitlistService,
   withErrorHandling,
 } from '@feed/api';
-import { and, db, desc, eq, referrals, users } from '@feed/db';
+import { and, count, db, desc, eq, gte, referrals, users } from '@feed/db';
 import { logger, toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
@@ -213,9 +213,33 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     .orderBy(desc(referrals.completedAt))
     .limit(MAX_REFERRALS_PER_LIST);
 
-  const weeklyReferralCount = completedReferralsRaw.filter(
-    (r) => r.completedAt && r.completedAt >= oneWeekAgo
-  ).length;
+  // The counts below are totals over the full referral sets, computed with
+  // dedicated COUNT queries — never lengths of the capped list windows
+  // above. Deriving them from the windows reported 25 for every count once
+  // a set grew past the list cap, contradicting the response's own
+  // referralCount. The lists themselves stay capped.
+  const [weeklyCountResult] = await db
+    .select({ count: count() })
+    .from(referrals)
+    .where(
+      and(
+        eq(referrals.referrerId, userId),
+        eq(referrals.status, 'completed'),
+        gte(referrals.completedAt, oneWeekAgo)
+      )
+    );
+  const weeklyReferralCount = Number(weeklyCountResult?.count || 0);
+
+  // Qualified = completed referrals whose referred user still exists (the
+  // same population the qualifiedUsers list is drawn from, uncapped).
+  const [qualifiedCountResult] = await db
+    .select({ count: count() })
+    .from(referrals)
+    .innerJoin(users, eq(referrals.referredUserId, users.id))
+    .where(
+      and(eq(referrals.referrerId, userId), eq(referrals.status, 'completed'))
+    );
+  const qualifiedTotal = Number(qualifiedCountResult?.count || 0);
 
   // Get pending referrals (invited but not qualified) - limit to prevent unbounded payloads
   const pendingReferredUsers = await db
@@ -231,6 +255,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     .where(and(eq(users.referredBy, userId), eq(users.profileComplete, false)))
     .orderBy(desc(users.createdAt))
     .limit(MAX_REFERRALS_PER_LIST);
+
+  const [invitedCountResult] = await db
+    .select({ count: count() })
+    .from(users)
+    .where(and(eq(users.referredBy, userId), eq(users.profileComplete, false)));
+  const invitedTotal = Number(invitedCountResult?.count || 0);
 
   const WEEKLY_REFERRAL_LIMIT = 10;
 
@@ -281,8 +311,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     // Referral details
     invitedUsers,
     qualifiedUsers,
-    invitedCount: invitedUsers.length,
-    qualifiedCount: qualifiedUsers.length,
+    invitedCount: invitedTotal,
+    qualifiedCount: qualifiedTotal,
     totalReferralPoints: position.invitePoints, // Total points from referrals
   };
 
