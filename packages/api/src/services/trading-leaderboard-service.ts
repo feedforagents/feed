@@ -22,6 +22,8 @@ function mapWalletEntry(
     reputationPoints: Number(row.reputationPoints ?? 0),
     balance: Number(row.balance ?? 0),
     lifetimePnL: Number(row.lifetimePnL ?? 0),
+    unrealizedPnL: Number(row.unrealizedPnL ?? 0),
+    netProfit: Number(row.netProfit ?? 0),
     capitalBase: Number(row.capitalBase ?? 0),
     effectiveCapitalBase: Number(row.effectiveCapitalBase ?? 0),
     tradingReturn: Number(row.tradingReturn ?? 0),
@@ -75,7 +77,7 @@ export class TradingLeaderboardService {
     const higherCount = await TradingPerformanceService.countWalletsAbove({
       id: row.id,
       createdAt: row.createdAt,
-      tradingReturn: row.tradingReturn,
+      netProfit: row.netProfit,
     });
 
     const rank = higherCount + 1;
