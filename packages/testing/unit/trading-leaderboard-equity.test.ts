@@ -176,7 +176,9 @@ describe('TradingPerformanceService equity metric SQL', () => {
     // Open perp positions contribute their stored unrealized PnL.
     expect(sqlText).toContain('FROM "PerpPosition" pp');
     expect(sqlText).toContain('pp."closedAt" IS NULL');
-    expect(sqlText).toContain('SUM(pp."unrealizedPnL"::numeric)');
+    expect(sqlText).toContain(
+      'SUM(pp."unrealizedPnL"::numeric - COALESCE(pp."fundingPaid"::numeric, 0))'
+    );
     // Prediction positions are marked to market at the CPMM price of
     // unresolved markets, mirroring calculatePortfolioPnL.
     expect(sqlText).toContain('FROM "Position" p');
