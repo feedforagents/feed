@@ -52,8 +52,11 @@ function grossUpBuyAmount(netAmount: number, feeRate: number): number {
 
 // Historical rows cannot recover the original fee configuration; retain the old
 // estimate until a new trade records the remaining gross cash cost explicitly.
-function cashCostBasis(
-  position: PredictionPositionRecord,
+export function calculatePredictionCashCostBasis(
+  position: Pick<
+    PredictionPositionRecord,
+    'cashCostBasis' | 'avgPrice' | 'shares'
+  >,
   feeRate: number
 ): number {
   return (
@@ -230,7 +233,10 @@ export class PredictionMarketService {
             ...existingPos,
             shares: existingPos.shares + calc.sharesBought,
             cashCostBasis: new Decimal(
-              cashCostBasis(existingPos, this.deps.fees.tradingFeeRate)
+              calculatePredictionCashCostBasis(
+                existingPos,
+                this.deps.fees.tradingFeeRate
+              )
             )
               .plus(amount)
               .toNumber(),
@@ -387,7 +393,10 @@ export class PredictionMarketService {
 
     const remaining = pos.shares - shares;
     const positionClosed = remaining <= MIN_SHARES;
-    const previousCost = cashCostBasis(pos, this.deps.fees.tradingFeeRate);
+    const previousCost = calculatePredictionCashCostBasis(
+      pos,
+      this.deps.fees.tradingFeeRate
+    );
     const remainingCost = positionClosed
       ? 0
       : new Decimal(previousCost)
@@ -533,7 +542,7 @@ export class PredictionMarketService {
         : 0;
       const pnl = pointsDifference(
         payout,
-        cashCostBasis(pos, this.deps.fees.tradingFeeRate)
+        calculatePredictionCashCostBasis(pos, this.deps.fees.tradingFeeRate)
       );
 
       if (payout > 0) {
@@ -599,7 +608,8 @@ export class PredictionMarketService {
    *
    * Unlike resolve(), this:
    * - Sets resolution to null (no winner/loser)
-   * - Refunds each position at their original cost basis (shares * avgPrice)
+   * - Refunds each position at their original cost basis (the gross cash
+   *   paid for the held shares, entry fees included)
    * - Sets PnL to 0 for all positions (full refund)
    * - Marks positions as 'cancelled'
    */
@@ -642,13 +652,16 @@ export class PredictionMarketService {
         continue;
       }
 
-      // Calculate refund amount (original investment)
-      const costBasis = pos.shares * pos.avgPrice;
-      const refundAmount = floorPoints(costBasis);
-      const refundPnl = pointsDifference(
-        refundAmount,
-        cashCostBasis(pos, this.deps.fees.tradingFeeRate)
+      // Calculate refund amount (original investment): the gross cash the
+      // user actually paid for the held shares, entry fees included. Using
+      // shares * avgPrice here would refund only the net-of-fee amount and
+      // book the entry fee as a loss on a market the user did not exit.
+      const costBasis = calculatePredictionCashCostBasis(
+        pos,
+        this.deps.fees.tradingFeeRate
       );
+      const refundAmount = floorPoints(costBasis);
+      const refundPnl = pointsDifference(refundAmount, costBasis);
 
       if (refundAmount > 0) {
         // Credit user their original investment

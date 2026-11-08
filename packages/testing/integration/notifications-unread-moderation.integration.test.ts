@@ -33,6 +33,7 @@ let blockerId: string;
 let visibleId: string;
 let plainViewerId: string;
 let currentViewerId: string;
+let usersInserted = false;
 const ids = {
   muted: '',
   blocked: '',
@@ -65,6 +66,7 @@ beforeAll(async () => {
       })
     )
   );
+  usersInserted = true;
   await db.insert(userMutes).values({
     id: await generateSnowflakeId(),
     muterId: viewerId,
@@ -131,7 +133,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (!viewerId) return;
+  if (!usersInserted) return;
   await db
     .delete(notifications)
     .where(inArray(notifications.userId, [viewerId, plainViewerId]));
