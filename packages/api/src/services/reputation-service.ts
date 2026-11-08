@@ -1045,7 +1045,14 @@ export class ReputationService {
       .select()
       .from(pointsTransactions)
       .where(eq(pointsTransactions.userId, userId))
-      .orderBy(desc(pointsTransactions.createdAt))
+      // Total order: rows written in one bulk operation share the exact
+      // same createdAt (now() is the transaction timestamp), so a
+      // createdAt-only sort leaves their order — and, at the limit,
+      // which of them are returned — undefined, breaking the
+      // pointsBefore/pointsAfter chain this ledger is read by. Ids are
+      // snowflakes issued in creation order, so id desc makes the
+      // order deterministic and chain-consistent.
+      .orderBy(desc(pointsTransactions.createdAt), desc(pointsTransactions.id))
       .limit(limit);
 
     return transactions.map((transaction) => ({
