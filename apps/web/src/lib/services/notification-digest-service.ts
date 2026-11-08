@@ -27,6 +27,9 @@ interface DigestCandidateUser {
   id: string;
   email: string | null;
   emailVerified: boolean;
+  emailNotificationsEnabled: boolean;
+  emailNotificationsDailySummary: boolean;
+  emailNotificationsWeeklySummary: boolean;
   digestEnabled: boolean;
   digestFrequency: NotificationDigestFrequency;
   deliveryChannel: NotificationDeliveryChannel;
@@ -50,6 +53,9 @@ interface ValidatedDigestRow {
   id: string;
   email: string | null;
   emailVerified: boolean;
+  emailNotificationsEnabled: boolean;
+  emailNotificationsDailySummary: boolean;
+  emailNotificationsWeeklySummary: boolean;
   digestEnabled: boolean;
   digestFrequency: NotificationDigestFrequency;
   deliveryChannel: NotificationDeliveryChannel;
@@ -60,6 +66,9 @@ function isValidDigestCandidateRow(row: {
   id: string;
   email: string | null;
   emailVerified: boolean;
+  emailNotificationsEnabled: boolean;
+  emailNotificationsDailySummary: boolean;
+  emailNotificationsWeeklySummary: boolean;
   digestEnabled: boolean;
   digestFrequency: string | null;
   deliveryChannel: string | null;
@@ -119,6 +128,9 @@ export async function listDigestCandidates(): Promise<DigestCandidateUser[]> {
       id: users.id,
       email: users.email,
       emailVerified: users.emailVerified,
+      emailNotificationsEnabled: users.emailNotificationsEnabled,
+      emailNotificationsDailySummary: users.emailNotificationsDailySummary,
+      emailNotificationsWeeklySummary: users.emailNotificationsWeeklySummary,
       digestEnabled: users.notificationDigestEnabled,
       digestFrequency: users.notificationDigestFrequency,
       deliveryChannel: users.notificationDigestDeliveryChannel,
@@ -297,23 +309,39 @@ export async function deliverDigestForUser(params: {
     delivered = delivered || result.created;
   }
 
+  const emailCategory =
+    params.settings.frequency === 'hourly'
+      ? 'hourly_summary'
+      : params.settings.frequency === 'weekly'
+        ? 'weekly_summary'
+        : 'daily_summary';
+
+  // Digest emails follow the same preference gate as every other
+  // notification email: the master email toggle plus the per-category
+  // summary flag (hourly has no dedicated flag, so the master toggle
+  // governs it). Unsubscribing clears every flag, so an unsubscribed user
+  // must not receive digest emails either.
+  const emailCategoryEnabled =
+    emailCategory === 'hourly_summary' ||
+    (emailCategory === 'daily_summary' &&
+      params.candidate.emailNotificationsDailySummary) ||
+    (emailCategory === 'weekly_summary' &&
+      params.candidate.emailNotificationsWeeklySummary);
+
   if (
     (params.settings.deliveryChannel === 'email' ||
       params.settings.deliveryChannel === 'both') &&
     params.candidate.email &&
-    params.candidate.emailVerified
+    params.candidate.emailVerified &&
+    params.candidate.emailNotificationsEnabled &&
+    emailCategoryEnabled
   ) {
     await sendNotificationEmail({
       userId: params.candidate.id,
       userEmail: params.candidate.email,
       title: digest.title,
       message: digest.message,
-      category:
-        params.settings.frequency === 'hourly'
-          ? 'hourly_summary'
-          : params.settings.frequency === 'weekly'
-            ? 'weekly_summary'
-            : 'daily_summary',
+      category: emailCategory,
     });
 
     delivered = true;
