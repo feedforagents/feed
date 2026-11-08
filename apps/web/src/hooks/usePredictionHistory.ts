@@ -1,3 +1,4 @@
+import { PredictionPricing } from '@feed/core/markets/prediction/client';
 import { logger } from '@feed/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -51,6 +52,38 @@ const getSeedSignature = (seed?: SeedSnapshot) =>
   );
 
 /**
+ * Build the two-point flat seed history shown before any recorded price
+ * history exists (e.g. a brand-new market with no trades yet).
+ *
+ * The seed carries the market's live pool balances (markets.yesShares /
+ * markets.noShares). Those are AMM inventory, not outcome totals, so the
+ * current YES price must come from the canonical CPMM definition
+ * (PredictionPricing.getCurrentPrice — the same definition the market pages
+ * and the recorded price-history snapshots use). Using the raw share ratio
+ * would draw the flat line at the complement of the current price.
+ */
+export function buildPredictionSeedHistory(
+  seed: SeedSnapshot
+): PredictionHistoryPoint[] {
+  const yesPrice = PredictionPricing.getCurrentPrice(
+    seed.yesShares ?? 0,
+    seed.noShares ?? 0,
+    'yes'
+  );
+  const now = Date.now();
+  const point = {
+    yesPrice,
+    noPrice: 1 - yesPrice,
+    volume: 0,
+    liquidity: seed.liquidity ?? 0,
+  };
+  return [
+    { time: now - 60_000, ...point },
+    { time: now, ...point },
+  ];
+}
+
+/**
  * Hook for fetching and managing prediction market price history.
  *
  * Loads historical price data from the API and maintains a rolling window
@@ -101,27 +134,7 @@ export function usePredictionHistory(
     const seed = seedRef.current;
     if (!marketId || !seed) return;
     if (history.length > 0) return;
-    const yesShares = seed.yesShares ?? 0;
-    const noShares = seed.noShares ?? 0;
-    const totalShares = yesShares + noShares;
-    const yesPrice = totalShares === 0 ? 0.5 : yesShares / totalShares;
-    const now = Date.now();
-    setHistory([
-      {
-        time: now - 60_000,
-        yesPrice,
-        noPrice: 1 - yesPrice,
-        volume: 0,
-        liquidity: seed.liquidity ?? 0,
-      },
-      {
-        time: now,
-        yesPrice,
-        noPrice: 1 - yesPrice,
-        volume: 0,
-        liquidity: seed.liquidity ?? 0,
-      },
-    ]);
+    setHistory(buildPredictionSeedHistory(seed));
   }, [marketId, seedSignature, history.length]);
 
   /**
@@ -163,27 +176,7 @@ export function usePredictionHistory(
   const fallbackFromSeed = useCallback(() => {
     const seed = seedRef.current;
     if (!seed) return [];
-    const yesShares = seed.yesShares ?? 0;
-    const noShares = seed.noShares ?? 0;
-    const totalShares = yesShares + noShares;
-    const yesPrice = totalShares === 0 ? 0.5 : yesShares / totalShares;
-    const now = Date.now();
-    return [
-      {
-        time: now - 60_000,
-        yesPrice,
-        noPrice: 1 - yesPrice,
-        volume: 0,
-        liquidity: seed.liquidity ?? 0,
-      },
-      {
-        time: now,
-        yesPrice,
-        noPrice: 1 - yesPrice,
-        volume: 0,
-        liquidity: seed.liquidity ?? 0,
-      },
-    ];
+    return buildPredictionSeedHistory(seed);
   }, []);
 
   /**
