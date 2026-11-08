@@ -24,7 +24,7 @@ import {
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
-import { FeedAgentExecutor } from '../feed-executor';
+import { FeedAgentExecutor } from '../../a2a/src/executors/feed-executor';
 
 type NotificationsResult = {
   unreadCount: number;
@@ -67,9 +67,18 @@ beforeAll(async () => {
     blockedNotificationId,
     blockerNotificationId,
     systemNotificationId,
-  ] = await Promise.all(
-    Array.from({ length: 10 }, () => generateSnowflakeId())
-  );
+  ] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ]);
   allUserIds.push(
     recipientId,
     normalActorId,
@@ -92,7 +101,7 @@ beforeAll(async () => {
   await db.insert(users).values(
     allUserIds.map((id, i) => ({
       id,
-      username: `test-f8-${i}-${id}`,
+      username: `f8-${i}-${id}`,
       displayName: `F8 Fixture ${i}`,
       updatedAt: now,
     }))
@@ -100,9 +109,11 @@ beforeAll(async () => {
 
   // The recipient muted one actor, blocked another, and is blocked by a
   // third — the three sets the web list excludes at read time.
-  const [blockRowA, blockRowB, muteRow] = await Promise.all(
-    Array.from({ length: 3 }, () => generateSnowflakeId())
-  );
+  const [blockRowA, blockRowB, muteRow] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ]);
   await db.insert(userBlocks).values([
     { id: blockRowA, blockerId: recipientId, blockedId: blockedActorId },
     { id: blockRowB, blockerId: blockerActorId, blockedId: recipientId },
@@ -196,5 +207,46 @@ describe('A2A messaging.get_notifications moderation filter', () => {
   it('counts only the visible unread notifications', async () => {
     const { unreadCount } = await fetchNotifications();
     expect(unreadCount).toBe(2);
+  });
+});
+
+describe('A2A notification moderation edge cases', () => {
+  it('applies moderation before limit and keeps total count independent of limit', async () => {
+    const result = (await FeedAgentExecutor.executeDirectly(
+      'messaging.get_notifications',
+      { limit: 1 },
+      recipientId
+    )) as unknown as NotificationsResult;
+    expect(result.notifications.map((n) => n.id)).toEqual([
+      systemNotificationId,
+    ]);
+    expect(result.unreadCount).toBe(2);
+    const two = (await FeedAgentExecutor.executeDirectly(
+      'messaging.get_notifications',
+      { limit: 2 },
+      recipientId
+    )) as unknown as NotificationsResult;
+    expect(two.notifications.map((n) => n.id)).toEqual([
+      systemNotificationId,
+      normalNotificationId,
+    ]);
+  });
+  it('uses authenticated context instead of a supplied userId', async () => {
+    const result = (await FeedAgentExecutor.executeDirectly(
+      'messaging.get_notifications',
+      { limit: 50, userId: recipientId },
+      normalActorId
+    )) as unknown as NotificationsResult;
+    expect(result.notifications).toEqual([]);
+    expect(result.unreadCount).toBe(0);
+  });
+  it('refreshes moderation immediately after unblocking and unmuting', async () => {
+    await db
+      .delete(userBlocks)
+      .where(inArray(userBlocks.blockerId, allUserIds));
+    await db.delete(userMutes).where(inArray(userMutes.muterId, allUserIds));
+    const result = await fetchNotifications();
+    expect(result.notifications).toHaveLength(5);
+    expect(result.unreadCount).toBe(5);
   });
 });
