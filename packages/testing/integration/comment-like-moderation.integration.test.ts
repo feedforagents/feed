@@ -41,6 +41,9 @@ let authorId: string;
 let postId: string;
 let visibleCommentId: string;
 let deletedCommentId: string;
+const ownedUserIds: string[] = [];
+const ownedPostIds: string[] = [];
+const ownedCommentIds: string[] = [];
 
 let DELETE: typeof import('../../../apps/web/src/app/api/comments/[id]/like/route').DELETE;
 let POST: typeof import('../../../apps/web/src/app/api/comments/[id]/like/route').POST;
@@ -118,6 +121,8 @@ beforeAll(async () => {
     },
   ]);
 
+  ownedUserIds.push(likerId, authorId);
+
   await db.insert(posts).values({
     id: postId,
     content: 'Fixture post for comment like moderation test',
@@ -125,6 +130,8 @@ beforeAll(async () => {
     timestamp: past,
     createdAt: past,
   });
+
+  ownedPostIds.push(postId);
 
   // One comment anyone can see, and one moderation soft-deleted comment
   // (deletedAt set) on the same post by the same author.
@@ -147,22 +154,27 @@ beforeAll(async () => {
       deletedAt: now,
     },
   ]);
+  ownedCommentIds.push(visibleCommentId, deletedCommentId);
 });
 
 afterAll(async () => {
-  await db
-    .delete(notifications)
-    .where(
-      inArray(notifications.commentId, [visibleCommentId, deletedCommentId])
-    );
-  await db
-    .delete(reactions)
-    .where(inArray(reactions.commentId, [visibleCommentId, deletedCommentId]));
-  await db
-    .delete(comments)
-    .where(inArray(comments.id, [visibleCommentId, deletedCommentId]));
-  await db.delete(posts).where(eq(posts.id, postId));
-  await db.delete(users).where(inArray(users.id, [likerId, authorId]));
+  // Generated IDs are not ownership: a failed insert may have collided with
+  // an existing row. Only clean batches whose atomic insert succeeded.
+  if (ownedCommentIds.length > 0) {
+    await db
+      .delete(notifications)
+      .where(inArray(notifications.commentId, ownedCommentIds));
+    await db
+      .delete(reactions)
+      .where(inArray(reactions.commentId, ownedCommentIds));
+    await db.delete(comments).where(inArray(comments.id, ownedCommentIds));
+  }
+  if (ownedPostIds.length > 0) {
+    await db.delete(posts).where(inArray(posts.id, ownedPostIds));
+  }
+  if (ownedUserIds.length > 0) {
+    await db.delete(users).where(inArray(users.id, ownedUserIds));
+  }
 });
 
 describe('POST /api/comments/[id]/like moderation', () => {
