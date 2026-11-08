@@ -20,6 +20,7 @@ import type {
 } from '@a2a-js/sdk/server';
 import {
   acceptGroupInvite,
+  sharePost as canonicalSharePost,
   checkRateLimitAsync,
   declineGroupInvite,
   RATE_LIMIT_CONFIGS,
@@ -919,28 +920,21 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!postId) throw new Error('postId is required');
 
     const userId = requireContextAccountId({}, context);
+    const comment =
+      typeof params.comment === 'string' ? params.comment : undefined;
 
-    // Verify post exists
-    const post = await db.post.findFirst({
-      where: { id: postId, deletedAt: null },
-    });
-
-    if (!post) {
-      throw new Error('Post not found');
-    }
-
-    // Create share
-    const share = await db.share.create({
-      data: {
-        id: await generateSnowflakeId(),
-        postId,
-        userId,
-      },
-    });
+    // Route through the canonical share service (the same one the HTTP route
+    // and the MCP tool use) so every transport applies the same rules: the
+    // post must exist, be published and not deleted; blocked users cannot
+    // share; a post is shared once per user; the share creates a repost post
+    // in the sharer's feed and notifies the original author.
+    const result = await canonicalSharePost(userId, postId, comment);
 
     return {
       success: true,
-      shareId: share.id,
+      shareId: result.shareId,
+      repostId: result.repostId,
+      shareCount: result.shareCount,
       message: 'Post shared',
     };
   }
