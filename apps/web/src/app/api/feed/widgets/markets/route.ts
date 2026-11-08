@@ -45,6 +45,7 @@ import {
   optionalAuth,
   withErrorHandling,
 } from '@feed/api';
+import { PredictionPricing } from '@feed/core/markets/prediction';
 import { asPublic, asUser, getDbInstance } from '@feed/db';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -132,8 +133,19 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
                 const pastTotal = pastYesShares + pastNoShares;
                 if (pastTotal > 0) {
-                  const pastYesPrice = pastYesShares / pastTotal;
-                  const currentYesPrice = currentYesShares / currentTotal;
+                  // CPMM price (PredictionPricing.getCurrentPrice): the YES
+                  // price is the NO side's share of the pool, not the YES
+                  // side's — a scarcer YES pool means a pricier YES.
+                  const pastYesPrice = PredictionPricing.getCurrentPrice(
+                    pastYesShares,
+                    pastNoShares,
+                    'yes'
+                  );
+                  const currentYesPrice = PredictionPricing.getCurrentPrice(
+                    currentYesShares,
+                    currentNoShares,
+                    'yes'
+                  );
                   const priceChange = currentYesPrice - pastYesPrice;
                   const changePercent =
                     pastYesPrice > 0 ? (priceChange / pastYesPrice) * 100 : 0;
@@ -155,8 +167,16 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
               const noShares = market ? Number(market.noShares) : 0;
               const totalShares = yesShares + noShares;
 
-              const yesPrice = totalShares > 0 ? yesShares / totalShares : 0.5;
-              const noPrice = totalShares > 0 ? noShares / totalShares : 0.5;
+              const yesPrice = PredictionPricing.getCurrentPrice(
+                yesShares,
+                noShares,
+                'yes'
+              );
+              const noPrice = PredictionPricing.getCurrentPrice(
+                yesShares,
+                noShares,
+                'no'
+              );
               const changePercent24h = priceChangeMap.get(String(q.id));
 
               return {
@@ -279,8 +299,19 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
           const pastTotal = pastYesShares + pastNoShares;
           if (pastTotal > 0) {
-            const pastYesPrice = pastYesShares / pastTotal;
-            const currentYesPrice = currentYesShares / currentTotal;
+            // CPMM price (PredictionPricing.getCurrentPrice): the YES
+            // price is the NO side's share of the pool, not the YES
+            // side's — a scarcer YES pool means a pricier YES.
+            const pastYesPrice = PredictionPricing.getCurrentPrice(
+              pastYesShares,
+              pastNoShares,
+              'yes'
+            );
+            const currentYesPrice = PredictionPricing.getCurrentPrice(
+              currentYesShares,
+              currentNoShares,
+              'yes'
+            );
             const priceChange = currentYesPrice - pastYesPrice;
             const changePercent =
               pastYesPrice > 0 ? (priceChange / pastYesPrice) * 100 : 0;
@@ -301,8 +332,16 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
       const noShares = market ? Number(market.noShares) : 0;
       const totalShares = yesShares + noShares;
 
-      const yesPrice = totalShares > 0 ? yesShares / totalShares : 0.5;
-      const noPrice = totalShares > 0 ? noShares / totalShares : 0.5;
+      const yesPrice = PredictionPricing.getCurrentPrice(
+        yesShares,
+        noShares,
+        'yes'
+      );
+      const noPrice = PredictionPricing.getCurrentPrice(
+        yesShares,
+        noShares,
+        'no'
+      );
       const changePercent24h = priceChangeMap.get(String(q.id));
 
       return {
