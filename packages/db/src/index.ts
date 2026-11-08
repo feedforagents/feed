@@ -131,6 +131,7 @@ export {
 import { DatabaseService, getDbInstance } from './database-service';
 
 export type { FeedPost } from './database-service';
+export { postCursorConditions } from './database-service';
 // Re-export query helpers
 export {
   $connect,
@@ -142,6 +143,11 @@ export {
 } from './helpers';
 // Re-export moderation filters
 export * from './moderation/filters';
+export {
+  decodePostCursor,
+  encodePostCursor,
+  type PostCursor,
+} from './post-cursor';
 // Re-export query monitor
 export {
   type QueryMetrics,
