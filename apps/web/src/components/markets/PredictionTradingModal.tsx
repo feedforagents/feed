@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
+import { calculatePredictionBuyQuote } from '@/components/markets/predictionBuyQuote';
 import { useAuth } from '@/hooks/useAuth';
 import { useBodyScrollLock } from '@/hooks/useBodyScrollLock';
 import { useMarketTracking } from '@/hooks/usePostHog';
@@ -173,10 +174,12 @@ export function PredictionTradingModal({
   const displayedYesPrice = question.yesProbability ?? currentYesPrice;
   const displayedNoPrice = question.noProbability ?? currentNoPrice;
 
-  // Calculate what would happen if user buys
+  // Calculate what would happen if user buys. The quote must match
+  // execution, which charges the trading fee before the CPMM swap, so
+  // use the fee-aware quote (same computation as the markets terminal).
   const calculation =
     amountNum > 0
-      ? PredictionPricing.calculateBuy(yesShares, noShares, side, amountNum)
+      ? calculatePredictionBuyQuote(yesShares, noShares, side, amountNum)
       : null;
   const tradeCalculation = calculation;
 
@@ -571,6 +574,13 @@ export function PredictionTradingModal({
                         </span>
                         <span className="font-medium text-orange-500">
                           +{Math.abs(tradeCalculation.priceImpact).toFixed(2)}%
+                        </span>
+                      </div>
+
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Fee</span>
+                        <span className="font-medium text-foreground">
+                          {formatPrice(tradeCalculation.fee)}
                         </span>
                       </div>
 
