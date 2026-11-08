@@ -2053,10 +2053,23 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     if (!name) throw new Error('name is required');
 
+    // Only add members that exist and are not banned, mirroring the web
+    // group route (POST /api/groups). Unknown or banned IDs are skipped
+    // instead of becoming ghost members with chat access.
+    const otherMemberIds = memberIds.filter((id) => id !== userId);
+    const validMembers = await db.user.findMany({
+      where: { id: { in: otherMemberIds }, isBanned: false },
+      select: { id: true },
+    });
+    const validMemberIds = new Set(validMembers.map((m) => m.id));
+    const addableMemberIds = otherMemberIds.filter((id) =>
+      validMemberIds.has(id)
+    );
+
     // Generate all IDs before transaction
     const groupId = await generateSnowflakeId();
     const chatId = await generateSnowflakeId();
-    const allMembers = [userId, ...memberIds.filter((id) => id !== userId)];
+    const allMembers = [userId, ...addableMemberIds];
 
     // Pre-generate IDs for all participants and members
     const memberData = await Promise.all(
