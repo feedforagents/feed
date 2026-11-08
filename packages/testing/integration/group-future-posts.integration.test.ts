@@ -11,7 +11,8 @@
  * than one tag — only filtered soft-deleted posts, so a future-dated
  * post tagged with any of the group's tags was returned in full.
  *
- * The request is anonymous (no token), so no module is mocked.
+ * Both anonymous and CI-authenticated reads use the real route and database;
+ * no module is mocked.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
@@ -33,12 +34,15 @@ let futurePostId: string;
 let deletedPostId: string;
 const allPostIds: string[] = [];
 
-let GET: typeof import('../route').GET;
+let GET: typeof import('../../../apps/web/src/app/api/trending/group/route').GET;
 
-async function fetchGroup() {
+async function fetchGroup(authenticated = false) {
   const request = new NextRequest(
     new Request(
-      'http://localhost/api/trending/group?tags=f4-alpha,f4-beta&limit=10'
+      `http://localhost/api/trending/group?tags=f4-alpha-${authorId},f4-beta-${authorId}&limit=10`,
+      authenticated
+        ? { headers: { authorization: `Bearer steward:test:${authorId}` } }
+        : undefined
     )
   );
   const response = await GET(request);
@@ -50,10 +54,19 @@ async function fetchGroup() {
 }
 
 beforeAll(async () => {
-  ({ GET } = await import('../route'));
+  ({ GET } = await import(
+    '../../../apps/web/src/app/api/trending/group/route'
+  ));
 
   [authorId, tagAId, tagBId, visiblePostId, futurePostId, deletedPostId] =
-    await Promise.all(Array.from({ length: 6 }, () => generateSnowflakeId()));
+    await Promise.all([
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+    ]);
   allPostIds.push(visiblePostId, futurePostId, deletedPostId);
 
   const now = new Date();
@@ -70,7 +83,7 @@ beforeAll(async () => {
   await db.insert(tags).values([
     {
       id: tagAId,
-      name: 'f4-alpha',
+      name: `f4-alpha-${authorId}`,
       displayName: 'F4 Alpha',
       category: 'test',
       createdAt: past,
@@ -78,7 +91,7 @@ beforeAll(async () => {
     },
     {
       id: tagBId,
-      name: 'f4-beta',
+      name: `f4-beta-${authorId}`,
       displayName: 'F4 Beta',
       category: 'test',
       createdAt: past,
@@ -146,24 +159,51 @@ afterAll(async () => {
   await db.delete(users).where(eq(users.id, authorId));
 });
 
-describe('GET /api/trending/group future posts', () => {
-  it('returns the published post but not the future-dated one', async () => {
-    const { status, body } = await fetchGroup();
-    expect(status).toBe(200);
-    const group = body as GroupResponse;
-    const ids = group.posts.map((p) => p.id);
-    expect(ids).toContain(visiblePostId);
-    expect(ids).not.toContain(futurePostId);
-    expect(JSON.stringify(group.posts)).not.toContain(
-      'future post that must not leak early'
-    );
-  });
+for (const authenticated of [false, true]) {
+  describe(`GET /api/trending/group future posts (${authenticated ? 'authenticated' : 'public'})`, () => {
+    it('returns the published post but not the future-dated one', async () => {
+      const { status, body } = await fetchGroup(authenticated);
+      expect(status).toBe(200);
+      const group = body as GroupResponse;
+      const ids = group.posts.map((p) => p.id);
+      expect(ids).toContain(visiblePostId);
+      expect(ids).not.toContain(futurePostId);
+      expect(JSON.stringify(group.posts)).not.toContain(
+        'future post that must not leak early'
+      );
+    });
 
-  it('still excludes the soft-deleted post', async () => {
-    const { status, body } = await fetchGroup();
-    expect(status).toBe(200);
-    const group = body as GroupResponse;
-    const ids = group.posts.map((p) => p.id);
-    expect(ids).not.toContain(deletedPostId);
+    it('includes the post once its stored timestamp becomes eligible', async () => {
+      const [original] = await db
+        .select({ timestamp: posts.timestamp })
+        .from(posts)
+        .where(eq(posts.id, futurePostId));
+      if (!original) throw new Error('Owned future-post fixture is missing');
+      try {
+        await db
+          .update(posts)
+          .set({ timestamp: new Date(Date.now() - 1000) })
+          .where(eq(posts.id, futurePostId));
+        const { status, body } = await fetchGroup(authenticated);
+        expect(status).toBe(200);
+        const ids = (body as GroupResponse).posts.map((post) => post.id);
+        expect(ids).toContain(futurePostId);
+        expect(ids).toContain(visiblePostId);
+        expect(ids).not.toContain(deletedPostId);
+      } finally {
+        await db
+          .update(posts)
+          .set({ timestamp: original.timestamp })
+          .where(eq(posts.id, futurePostId));
+      }
+    });
+
+    it('still excludes the soft-deleted post', async () => {
+      const { status, body } = await fetchGroup(authenticated);
+      expect(status).toBe(200);
+      const group = body as GroupResponse;
+      const ids = group.posts.map((p) => p.id);
+      expect(ids).not.toContain(deletedPostId);
+    });
   });
-});
+}
