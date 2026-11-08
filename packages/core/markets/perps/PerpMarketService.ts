@@ -1,6 +1,7 @@
 import {
   ConflictError,
   calculateTradeImpact,
+  canonicalTradingFee,
   getInitialReserves,
   logger,
   PERP_MARKET_CONFIG,
@@ -1357,12 +1358,13 @@ export class PerpMarketService {
   }
 
   private calculateFee(notional: number): number {
-    // FeeService records and splits the fee in integer cents (one
-    // canonical rounded fee), so charge that same cent-rounded amount:
-    // an unrounded charge would disagree with the fee ledger, the
-    // platform/referrer split and users.totalFeesPaid.
-    const fee =
-      Math.round(notional * this.deps.fees.tradingFeeRate * 100) / 100;
+    // FeeService records and splits the one canonical fee (PRD §9.1):
+    // the fee on the cent-settled notional, rounded UP to whole cents.
+    // Charge that same amount — any other rounding would disagree with
+    // the fee ledger, the platform/referrer split and
+    // users.totalFeesPaid, and a round-to-nearest fee lets split trades
+    // pay less total fee than the same trade executed whole.
+    const fee = canonicalTradingFee(notional, this.deps.fees.tradingFeeRate);
     return Math.max(fee, this.deps.fees.minFeeAmount);
   }
 

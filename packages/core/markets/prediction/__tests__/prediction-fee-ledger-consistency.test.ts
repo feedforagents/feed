@@ -3,29 +3,41 @@ import { PredictionPricing } from '../pricing';
 
 /**
  * Repro: the prediction fee actually charged to the trader must equal the
- * fee the fee ledger records and splits.
+ * fee the fee ledger records and splits — and charging it must never make
+ * a split trade settle better than the same trade executed whole.
  *
  * Production wiring (web buy/sell routes, MCP, A2A, agent actions) passes
  * the trade amount to FeeService.processTradingFee, whose calculateFee
- * works in integer cents from ONE canonical rounded fee:
- *   feeCents = Math.round(tradeAmount * FEE_CONFIG.TRADING_FEE_RATE * 100)
- * and skips processing entirely when that fee is below MIN_FEE_AMOUNT
- * (0.01). PerpMarketService.calculateFee was aligned to that canonical fee
- * in #1611 ("charge that same cent-rounded amount: an unrounded charge
- * would disagree with the fee ledger, the platform/referrer split and
- * users.totalFeesPaid"). The prediction pricing helpers still charge the
- * unrounded amount * rate, so the two disagree on ordinary amounts.
+ * derives ONE canonical fee (PRD §9.1): the fee on the cent-settled
+ * amount (the trade amount floored to cents), rounded UP to whole cents,
+ * in decimal arithmetic (`canonicalTradingFee` in @feed/shared).
+ * PerpMarketService.calculateFee charges that same canonical fee (#1611).
+ * The prediction pricing helpers must charge it too, or the charged fee
+ * disagrees with the fee ledger, the platform/referrer split and
+ * users.totalFeesPaid.
+ *
+ * The ceiling (not round-to-nearest) is load-bearing: with a rounded fee,
+ * small split legs round down to a zero fee, so splitting a sell credited
+ * MORE than the whole sale (4,269 cases in a brute-force sweep) and
+ * splitting a buy received more shares (45,672 cases). Settling each leg
+ * to cents and ceiling each leg's fee makes the split totals provably no
+ * better than the whole trade.
  */
 const RATE = 0.001; // FEE_CONFIG.TRADING_FEE_RATE
 
-/** FeeService.calculateFee + the below-minimum skip in processTradingFee. */
+/**
+ * Mirror of FeeService.calculateFee + the below-minimum skip in
+ * processTradingFee (which records nothing when the canonical fee is 0 —
+ * under the ceiling rule that only happens for a zero settled amount).
+ */
 function ledgerFee(tradeAmount: number): number {
-  const feeCents = Math.round(tradeAmount * RATE * 100);
+  const settledCents = Math.floor(tradeAmount * 100 + 1e-9);
+  const feeCents = Math.ceil(settledCents * RATE - 1e-9);
   const feeAmount = feeCents / 100;
   return feeAmount < 0.01 ? 0 : feeAmount;
 }
 
-describe('prediction fee charged vs fee ledger (canonical cent fee)', () => {
+describe('prediction fee charged vs fee ledger (canonical settled fee)', () => {
   it('buy: charged fee equals the ledger fee on a 15 pt buy', () => {
     const calc = PredictionPricing.calculateBuyWithFees(
       5000,
@@ -34,8 +46,9 @@ describe('prediction fee charged vs fee ledger (canonical cent fee)', () => {
       15,
       RATE
     );
-    // Base: charged 0.015, ledger records 0.02.
+    // Base (unrounded): charged 0.015, ledger recorded 0.02.
     expect(calc.fee).toBe(ledgerFee(15));
+    expect(calc.fee).toBe(0.02);
     expect(calc.netAmount).toBe(15 - ledgerFee(15));
   });
 
@@ -47,11 +60,12 @@ describe('prediction fee charged vs fee ledger (canonical cent fee)', () => {
       25,
       RATE
     );
-    // Base: charged 0.025, ledger records 0.03.
+    // Base (unrounded): charged 0.025, ledger recorded 0.03.
     expect(calc.fee).toBe(ledgerFee(25));
+    expect(calc.fee).toBe(0.03);
   });
 
-  it('buy: a 4 pt buy is not charged a fee the ledger never records', () => {
+  it('buy: a 4 pt buy pays a one-cent fee and the ledger records it', () => {
     const calc = PredictionPricing.calculateBuyWithFees(
       5000,
       5000,
@@ -59,11 +73,15 @@ describe('prediction fee charged vs fee ledger (canonical cent fee)', () => {
       4,
       RATE
     );
-    // Base: charged 0.004 in reduced shares; the ledger rounds to 0 and
-    // processTradingFee skips, so the fee is collected but never recorded
-    // or distributed.
+    // Under the old nearest-cent fee this buy was charged 0.004 in
+    // reduced shares while the ledger rounded to 0 and
+    // processTradingFee skipped, so the fee was collected but never
+    // recorded or distributed. Under the ceiling rule the settled 4 pt
+    // pays exactly one cent — an effective 0.25% on this size — and the
+    // ledger records that same cent.
     expect(calc.fee).toBe(ledgerFee(4));
-    expect(calc.netAmount).toBe(4);
+    expect(calc.fee).toBe(0.01);
+    expect(calc.netAmount).toBe(3.99);
   });
 
   it('buy: control — a 100 pt buy already agrees', () => {
@@ -88,10 +106,90 @@ describe('prediction fee charged vs fee ledger (canonical cent fee)', () => {
     );
     // The sell fee processor is called with amount = calc.totalCost
     // (gross proceeds), so the ledger fee is computed on that amount.
-    // Base: gross ≈ 14.98, charged ≈ 0.0150, ledger records 0.01.
+    // The gross settles to cents first; the fee is charged on the
+    // settled amount and the seller is credited settled − fee.
     expect(calc.fee).toBe(ledgerFee(calc.totalCost));
-    expect(calc.netProceeds).toBe(
-      Math.floor((calc.totalCost - calc.fee) * 100) / 100
-    );
+    const settled = Math.floor(calc.totalCost * 100 + 1e-9) / 100;
+    expect(calc.netProceeds).toBe(Number((settled - calc.fee).toFixed(2)));
+  });
+
+  it('sell: splitting never credits more than the whole sale', () => {
+    // The review repro: selling 11 YES shares from a 5000/5000 pool in
+    // 3 legs credited 5.49 under the rounded fee vs 5.48 whole.
+    for (const [yes, no] of [
+      [5000, 5000],
+      [3000, 7000],
+    ] as const) {
+      for (const total of [5, 11, 13, 25, 30, 60, 100]) {
+        const whole = PredictionPricing.calculateSellWithFees(
+          yes,
+          no,
+          'yes',
+          total,
+          RATE
+        ).netProceeds!;
+        for (const legs of [2, 3, 5, 10]) {
+          let y: number = yes;
+          let n: number = no;
+          let credited = 0;
+          const per = total / legs;
+          for (let i = 0; i < legs; i++) {
+            const leg = PredictionPricing.calculateSellWithFees(
+              y,
+              n,
+              'yes',
+              per,
+              RATE
+            );
+            credited += leg.netProceeds!;
+            y = leg.newYesShares;
+            n = leg.newNoShares;
+          }
+          expect(Math.round(credited * 100) / 100).toBeLessThanOrEqual(whole);
+        }
+      }
+    }
+  });
+
+  it('buy: splitting never receives more shares than the whole buy', () => {
+    // The buy-side counterpart: a 5 pt buy split into legs received
+    // 9.995 shares vs 9.975 whole under the rounded fee, because each
+    // leg's fee rounded down. Ceiling fees sum to at least the whole
+    // trade's fee, so the split's total net spend — and shares — can
+    // only fall.
+    for (const [yes, no] of [
+      [5000, 5000],
+      [3000, 7000],
+    ] as const) {
+      for (const total of [4, 5, 15, 25, 100]) {
+        const whole = PredictionPricing.calculateBuyWithFees(
+          yes,
+          no,
+          'yes',
+          total,
+          RATE
+        ).sharesBought;
+        for (const legs of [2, 4, 5, 10]) {
+          if (total / legs < 1) continue;
+          let y: number = yes;
+          let n: number = no;
+          let shares = 0;
+          const per = total / legs;
+          for (let i = 0; i < legs; i++) {
+            const leg = PredictionPricing.calculateBuyWithFees(
+              y,
+              n,
+              'yes',
+              per,
+              RATE
+            );
+            shares += leg.sharesBought;
+            y = leg.newYesShares;
+            n = leg.newNoShares;
+          }
+          expect(shares).toBeLessThanOrEqual(whole + 1e-9);
+        }
+      }
+    }
   });
 });

@@ -498,19 +498,21 @@ describe('Trading leaderboard equity ranking (D-15b)', () => {
     );
 
     // The control sits a hair above the buyer's true equity profit
-    // (≈ -0.0102). Both partial sales are small enough that their fees
-    // round to zero under the canonical cent-rounded fee, so the buyer
-    // realizes no fee loss on them; the control is calibrated to that
-    // post-fee profit, keeping the same hair-thin gap this assertion
-    // was written against.
+    // (≈ -0.0302, measured against a real database). Both partial
+    // sales are small (gross 3.3311 and 2.2201), and under the
+    // canonical fee (PRD §9.1: fee on the cent-settled amount, rounded
+    // UP) each pays a one-cent fee, so the buyer realizes the two
+    // -0.01 PnL hits; the control is calibrated to that post-fee
+    // profit, keeping the same hair-thin gap this assertion was
+    // written against.
     const control = await createTestUser({
       usernamePrefix: 'lb-eq-rounded-control',
-      lifetimePnL: -0.01,
+      lifetimePnL: -0.03,
       createdAt: new Date('2026-01-10T00:00:00.000Z'),
     });
     await db
       .update(users)
-      .set({ virtualBalance: '999.99' })
+      .set({ virtualBalance: '999.97' })
       .where(eq(users.id, control));
     const order = await seededOrder();
     expect(order.indexOf(control)).toBeLessThan(order.indexOf(buyer));
