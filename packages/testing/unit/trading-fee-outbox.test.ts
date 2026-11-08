@@ -14,7 +14,12 @@ type Row = {
 let pendingRows: Row[] = [];
 /** IDs still present in the table (claimable). */
 let claimable = new Set<string>();
-const processTradingFee = mock(async () => undefined);
+const processTradingFee = mock(
+  async (...args: Parameters<typeof FeeService.processTradingFee>) => {
+    void args;
+    return undefined;
+  }
+);
 
 const tx = {
   delete: () => ({

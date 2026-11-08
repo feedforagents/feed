@@ -98,6 +98,12 @@ export const tradingFees = pgTable(
      * present so a retried fee can never insert a second row for the same
      * intent. Postgres treats NULLs as distinct, so legacy rows are
      * unaffected.
+     *
+     * The unique index below is NOT created by migration 0005: TradingFee
+     * is a populated table, so the index is built concurrently, outside
+     * any transaction, by scripts/apply-trading-fee-idempotency-index.ts
+     * after 0005 runs. The index definition matches this declaration, so
+     * drizzle-kit generate/check stay in sync.
      */
     idempotencyKey: text('idempotencyKey'),
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),

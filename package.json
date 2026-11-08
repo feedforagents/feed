@@ -47,6 +47,7 @@
     "db:pull": "bun run --cwd packages/db db:pull",
     "db:studio": "bun run --cwd packages/db db:studio",
     "db:check": "bun run --cwd packages/db db:check",
+    "db:apply-trading-fee-idempotency-index": "bun run --cwd packages/db db:apply-trading-fee-idempotency-index",
     "db:seed": "bun run scripts/seed-database.ts",
     "db:seed:test": "bun run scripts/seed-test-data.ts all",
     "test:chroma": "cd tools/chroma && bun run test",

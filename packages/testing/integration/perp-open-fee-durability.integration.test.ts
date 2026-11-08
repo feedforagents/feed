@@ -450,6 +450,91 @@ test('two partial closes write two perp_close fee rows', async () => {
   }
 });
 
+test('partial close still succeeds when the clock rolls back right after the post-settlement balance read', async () => {
+  const userId = await generateSnowflakeId();
+  const ticker = `FEEROLL${userId}`;
+  const realDateNow = Date.now;
+  let rollbackArmed = false;
+  try {
+    await db.insert(users).values({
+      id: userId,
+      username: `fee-roll-${userId}`,
+      virtualBalance: '10000',
+      totalDeposited: '10000',
+      updatedAt: new Date(),
+    });
+    await createFeeMarketFixture(ticker);
+    const realWallet = createUserWalletAdapter();
+    const service = new PerpMarketService({
+      db: new PerpDbAdapter(),
+      wallet: {
+        ...realWallet,
+        // Roll the clock back by one second immediately after the real
+        // post-settlement balance read, reproducing the reviewer's case:
+        // the close has already settled when the rollback lands.
+        getBalance: async (uid: string) => {
+          const result = await realWallet.getBalance(uid);
+          if (rollbackArmed) {
+            rollbackArmed = false;
+            Date.now = () => realDateNow() - 1000;
+          }
+          return result;
+        },
+      },
+      settlement: createPerpSettlement(),
+      fees: {
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+      },
+      tradingFeeOutbox: createTradingFeeOutboxAdapter(),
+      feeProcessor: createTradingFeeProcessor(),
+    });
+    const opened = await service.openPosition({
+      userId,
+      ticker,
+      side: 'long',
+      size: 1000,
+      leverage: 10,
+    });
+    expect(opened.size).toBeCloseTo(1000, 6);
+    // Pin the snowflake generator's last timestamp to "now" so the
+    // one-second rollback is actually backwards for the next id.
+    await generateSnowflakeId();
+    rollbackArmed = true;
+    // 40% partial close. Before the fix this threw "Clock moved
+    // backwards" after the position had already gone 1000 -> 600.
+    const closed = await service.closePosition({
+      userId,
+      positionId: opened.positionId,
+      percentage: 0.4,
+    });
+    // Restore the clock right away so the fee retries (100/200/400ms
+    // backoff) can land; the close itself already succeeded.
+    Date.now = realDateNow;
+    expect(closed.size).toBeCloseTo(400, 6);
+    expect(closed.remainingSize).toBeCloseTo(600, 6);
+    // Settlement credited the close (balance rose from the 9899
+    // post-open level). The exact figure depends on the fixture
+    // market's AMM impact on the exit price, so assert the direction,
+    // not the number.
+    expect(closed.balance).toBeGreaterThan(9899);
+    const [pos] = await db
+      .select()
+      .from(perpPositions)
+      .where(eq(perpPositions.id, opened.positionId));
+    expect(Number(pos!.size)).toBeCloseTo(600, 6);
+    const closes = await waitForFeeRows(userId, 'perp_close', 1);
+    expect(closes).toHaveLength(1);
+    expect(Number(closes[0]!.feeAmount)).toBeCloseTo(0.4, 6);
+  } finally {
+    Date.now = realDateNow;
+    await Bun.sleep(600);
+    await cleanupFeeMarketFixture(userId, ticker);
+  }
+});
+
 test('plugin openPerpAction with failing fees succeeds and the same fee intent retries once', async () => {
   const userId = await generateSnowflakeId();
   const ticker = `FEEPLUG${userId}`;
@@ -464,7 +549,6 @@ test('plugin openPerpAction with failing fees succeeds and the same fee intent r
     });
     await createFeeMarketFixture(ticker);
     // Fail every fee attempt: the handler must still report success.
-    // @ts-expect-error test stub replaces the static method
     FeeService.processTradingFee = async () => {
       throw new Error('Owned fee-ledger outage');
     };

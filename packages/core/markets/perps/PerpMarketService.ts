@@ -825,6 +825,13 @@ export class PerpMarketService {
    * @param input.maxSlippage - Maximum price deviation from entry. Rejects if exceeded.
    */
   async closePosition(input: PerpCloseInput): Promise<PerpTradeResult> {
+    // Generate the fee idempotency key BEFORE any settlement commits.
+    // generateSnowflakeId() throws when the wall clock moves backwards; if
+    // the key were generated after the close settles (as the fee call used
+    // to), a rollback between settlement and fee bookkeeping would report
+    // an already-settled close as failed and invite a retry that closes
+    // more exposure than intended.
+    const feeIdempotencyKey = await generateSnowflakeId();
     const settlement = await this.db.transaction(async (tx) => {
       const position = await tx.lockOpenPositionById(input.positionId);
       if (!position) {
@@ -971,7 +978,9 @@ export class PerpMarketService {
 
     // Fee bookkeeping: retries + optional outbox (see processFeeWithRetry).
     // One position can be partially closed many times, so the key must be
-    // generated per close — never derived from the position id.
+    // generated per close — never derived from the position id. The key was
+    // generated up front (see closePosition) so a clock rollback after
+    // settlement cannot fail the already-committed close here.
     void this.processFeeWithRetry(
       {
         userId: input.userId,
@@ -979,7 +988,7 @@ export class PerpMarketService {
         type: 'perp_close',
         relatedId: settlement.position.ticker,
         positionId: settlement.position.id,
-        idempotencyKey: await generateSnowflakeId(),
+        idempotencyKey: feeIdempotencyKey,
       },
       { ticker: settlement.position.ticker }
     ).catch(() => {
@@ -1562,6 +1571,11 @@ export class PerpMarketService {
     input: PerpOpenInput,
     market: PerpMarketRecord
   ): Promise<PerpTradeResult> {
+    // Generate the fee idempotency key BEFORE any settlement commits (same
+    // clock-rollback hazard as closePosition: generateSnowflakeId() throws
+    // when the wall clock moves backwards, and generating it after the add
+    // settles would report an already-committed add as failed).
+    const feeIdempotencyKey = await generateSnowflakeId();
     const { size: addedSize } = input;
     const currentPrice = this.getOpenExecutionQuote(
       market,
@@ -1732,7 +1746,8 @@ export class PerpMarketService {
     // Process fees outside transaction to avoid holding locks during external work.
     // Uses retry logic for reliability. One position can be added to many
     // times, so the key must be generated per add — never derived from the
-    // position id.
+    // position id. The key was generated up front (see addToPosition) so a
+    // clock rollback after settlement cannot fail the committed add here.
     void this.processFeeWithRetry(
       {
         userId: input.userId,
@@ -1740,7 +1755,7 @@ export class PerpMarketService {
         type: 'perp_add_to_position',
         relatedId: result.ticker,
         positionId: result.positionId,
-        idempotencyKey: await generateSnowflakeId(),
+        idempotencyKey: feeIdempotencyKey,
       },
       { ticker: result.ticker }
     ).catch(() => {
@@ -1916,6 +1931,13 @@ export class PerpMarketService {
           maxSlippage
         );
       }
+      // Generate the close-leg fee idempotency key BEFORE any settlement
+      // commits (same clock-rollback hazard as closePosition: the key used
+      // to be generated after the flip settled, so a rollback between
+      // settlement and fee bookkeeping would report a committed flip as
+      // failed). The flip leg creates a new position, so its key stays
+      // derived from the new position id.
+      const flipCloseFeeIdempotencyKey = await generateSnowflakeId();
       // Use transaction for atomicity - all DB operations use tx
       const flipResult =
         await this.deps.settlement.run<FlipPositionTransactionResult>(
@@ -2105,6 +2127,8 @@ export class PerpMarketService {
       // The close leg gets a generated key (a position is closed once here,
       // but the key must stay unique per fee intent); the flip leg creates
       // a new position, so its key can be derived from the new position id.
+      // The close-leg key was generated before settlement (see above) so a
+      // clock rollback after the flip commits cannot fail the flip here.
       void Promise.all([
         this.processFeeWithRetry(
           {
@@ -2113,7 +2137,7 @@ export class PerpMarketService {
             type: 'perp_close',
             relatedId: existing.ticker,
             positionId: existing.id,
-            idempotencyKey: await generateSnowflakeId(),
+            idempotencyKey: flipCloseFeeIdempotencyKey,
           },
           { ticker: existing.ticker }
         ),
