@@ -186,7 +186,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const balanceTransactions = await db.balanceTransaction.findMany({
     take: params.limit,
     skip: params.offset,
-    orderBy: { createdAt: 'desc' },
+    // Total order: batch-written transactions share one createdAt
+    // (the column defaults to the transaction timestamp), so a
+    // timestamp-only sort leaves tie rows in an undefined order and
+    // offset pages can repeat or skip them. The snowflake id breaks
+    // ties deterministically.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     where: {
       ...userFilter,
       type: {
@@ -224,7 +229,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     npcTrades = await db.npcTrade.findMany({
       take: params.limit,
       skip: params.offset,
-      orderBy: { executedAt: 'desc' },
+      orderBy: [{ executedAt: 'desc' }, { id: 'desc' }],
     });
   } else {
     const actor = StaticDataRegistry.getActor(params.userId);
@@ -233,7 +238,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       npcTrades = await db.npcTrade.findMany({
         take: params.limit,
         skip: params.offset,
-        orderBy: { executedAt: 'desc' },
+        orderBy: [{ executedAt: 'desc' }, { id: 'desc' }],
         where: { npcActorId: params.userId },
       });
     }
@@ -310,7 +315,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     perpPositions = await db.perpPosition.findMany({
       take: params.limit,
       skip: params.offset,
-      orderBy: { openedAt: 'desc' },
+      orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
       where: { userId: params.userId },
     });
   } else {
@@ -318,7 +323,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     perpPositions = await db.perpPosition.findMany({
       take: params.limit,
       skip: params.offset,
-      orderBy: { openedAt: 'desc' },
+      orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
     });
   }
 
@@ -461,8 +466,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     }),
   ].filter((trade) => trade.user !== null); // Filter out trades with missing users
 
-  // Sort by timestamp
-  allTrades.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+  // Sort by timestamp, breaking ties by id so the merged order is
+  // total and identical on every page request.
+  allTrades.sort((a, b) => {
+    const byTime = b.timestamp.getTime() - a.timestamp.getTime();
+    if (byTime !== 0) return byTime;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
 
   // Limit to requested amount
   const limitedTrades = allTrades.slice(0, params.limit);
