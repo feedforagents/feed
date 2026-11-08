@@ -240,27 +240,38 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
       // Get counts for all actors in parallel
       const actorIds = actors.map((a) => a.id);
-      const [poolCounts, tradeCounts, followerCounts, followingCounts] =
-        await Promise.all([
-          Promise.all(
-            actorIds.map((id) => db.pool.count({ where: { npcActorId: id } }))
-          ),
-          Promise.all(
-            actorIds.map((id) =>
-              db.npcTrade.count({ where: { npcActorId: id } })
-            )
-          ),
-          Promise.all(
-            actorIds.map((id) =>
-              db.actorFollow.count({ where: { followingId: id } })
-            )
-          ),
-          Promise.all(
-            actorIds.map((id) =>
-              db.actorFollow.count({ where: { followerId: id } })
-            )
-          ),
-        ]);
+      const [
+        poolCounts,
+        tradeCounts,
+        followerCounts,
+        userFollowerCounts,
+        followingCounts,
+      ] = await Promise.all([
+        Promise.all(
+          actorIds.map((id) => db.pool.count({ where: { npcActorId: id } }))
+        ),
+        Promise.all(
+          actorIds.map((id) => db.npcTrade.count({ where: { npcActorId: id } }))
+        ),
+        Promise.all(
+          actorIds.map((id) =>
+            db.actorFollow.count({ where: { followingId: id } })
+          )
+        ),
+        // Users following the actor live in UserActorFollow, not
+        // ActorFollow. The actor profile stats count both tables; leaving
+        // this source out understates every actor's follower count here.
+        Promise.all(
+          actorIds.map((id) =>
+            db.userActorFollow.count({ where: { actorId: id } })
+          )
+        ),
+        Promise.all(
+          actorIds.map((id) =>
+            db.actorFollow.count({ where: { followerId: id } })
+          )
+        ),
+      ]);
 
       return actors.map((actor, index) => {
         const state = stateMap.get(actor.id);
@@ -282,7 +293,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           stats: {
             pools: poolCounts[index] ?? 0,
             trades: tradeCounts[index] ?? 0,
-            followers: followerCounts[index] ?? 0,
+            followers:
+              (followerCounts[index] ?? 0) + (userFollowerCounts[index] ?? 0),
             following: followingCounts[index] ?? 0,
           },
         };
