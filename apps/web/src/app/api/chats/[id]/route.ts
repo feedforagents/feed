@@ -280,10 +280,14 @@ export const GET = withErrorHandling(
       fullChat.participants.map((p) => p.userId)
     );
 
-    // Build participants list including both active participants AND message senders
-    // This ensures users who left the chat still have their names displayed on old messages
+    // Build participants list including both participants AND message senders
+    // This ensures users who left the chat still have their names displayed on old messages.
+    // Each entry carries the row's isActive flag: participant rows are soft
+    // state (A2A/MCP leave, tier moves, and kicks keep the row inactive), and
+    // clients must be able to tell current members — the only valid mention
+    // targets — apart from departed ones whose names still resolve here.
     const participantsInfo = [
-      // Active participants
+      // Participants (active and departed, marked by isActive)
       ...fullChat.participants.map((p) => {
         const user = usersMap.get(p.userId);
         const actor = actorsMap.get(p.userId);
@@ -292,6 +296,7 @@ export const GET = withErrorHandling(
           displayName: user?.displayName || actor?.name || 'Unknown',
           username: user?.username,
           profileImageUrl: user?.profileImageUrl || actor?.profileImageUrl,
+          isActive: p.isActive,
         };
       }),
       // Message senders who are no longer participants (left the chat)
@@ -305,6 +310,7 @@ export const GET = withErrorHandling(
             displayName: user?.displayName || actor?.name || 'Unknown',
             username: user?.username,
             profileImageUrl: user?.profileImageUrl || actor?.profileImageUrl,
+            isActive: false,
           };
         }),
     ];
