@@ -54,6 +54,20 @@ export const dynamic = 'force-dynamic';
 // Cache config (60 seconds)
 export const revalidate = 60;
 
+/**
+ * A question belongs in the widget only while it can still be traded:
+ * status 'active' and its resolution date has not passed. The buy gate
+ * rejects expired markets with 'Market expired', and the widget has no
+ * ended state, so an expired-but-unresolved question must not be listed.
+ * The boundary matches the buy gate: it blocks only when now > endDate.
+ */
+function isWidgetMarketOpen(
+  q: { status: string; resolutionDate: Date | string },
+  now: number
+): boolean {
+  return q.status === 'active' && new Date(q.resolutionDate).getTime() >= now;
+}
+
 export const GET = withErrorHandling(async function GET(request: NextRequest) {
   // Optional auth - markets are public but RLS still applies
   const authUser: AuthenticatedUser | null = await optionalAuth(request).catch(
@@ -148,7 +162,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
         return (
           questions
             // Don't filter out questions without markets - show all active questions
-            .filter((q) => q.status === 'active')
+            .filter((q) => isWidgetMarketOpen(q, Date.now()))
             .map((q) => {
               const market = marketMap.get(String(q.id));
               const yesShares = market ? Number(market.yesShares) : 0;
@@ -294,7 +308,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   const formattedMarkets = questions
     // Don't filter out questions without markets - show all active questions
-    .filter((q) => q.status === 'active')
+    .filter((q) => isWidgetMarketOpen(q, Date.now()))
     .map((q) => {
       const market = marketMap.get(String(q.id));
       const yesShares = market ? Number(market.yesShares) : 0;
