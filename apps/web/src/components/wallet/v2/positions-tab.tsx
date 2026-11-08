@@ -27,6 +27,7 @@ import {
 } from '@/stores/userPositionsStore';
 import { invalidateWalletBalance } from '@/stores/walletBalanceStore';
 import type { DisplayPerpPosition } from '@/types/markets';
+import { fetchAllPositionsPages } from './closed-positions-pages';
 
 interface PositionsTabProps {
   userId: string;
@@ -76,7 +77,7 @@ interface ClosedPredictionPosition {
   createdAt: string | null;
 }
 
-const CLOSED_PAGE_SIZE = 50; // Fetch a generous batch; paginate client-side
+const CLOSED_PAGE_SIZE = 50; // Server page size; every page is fetched, display paginates client-side
 const CLOSED_DISPLAY_SIZE = 10; // Show 10 per page in the UI
 
 export function PositionsTab({ userId }: PositionsTabProps) {
@@ -106,38 +107,46 @@ export function PositionsTab({ userId }: PositionsTabProps) {
   // Client-side pagination for closed positions
   const [closedPage, setClosedPage] = useState(1);
 
-  // Fetch closed positions (both perps and predictions)
+  // Fetch closed positions (both perps and predictions). The endpoint
+  // pages the closed view, so walk every page: stopping at the first
+  // page would silently cut the history off at CLOSED_PAGE_SIZE rows.
   useEffect(() => {
     let cancelled = false;
     async function fetchClosed() {
       setClosedLoading(true);
       try {
-        const [perpsRes, predsRes] = await Promise.all([
-          fetch(
-            `/api/markets/positions/${encodeURIComponent(userId)}?status=closed&type=perps&limit=${CLOSED_PAGE_SIZE}&page=1`
+        const fetchSection = async (
+          type: 'perps' | 'predictions',
+          section: 'perpetuals' | 'predictions',
+          page: number
+        ) => {
+          const res = await fetch(
+            `/api/markets/positions/${encodeURIComponent(userId)}?status=closed&type=${type}&limit=${CLOSED_PAGE_SIZE}&page=${page}`
+          );
+          if (!res.ok) return null;
+          const data = await res.json();
+          const result = data?.[section];
+          if (!result) return null;
+          return {
+            positions: (result.positions ?? []) as Record<string, unknown>[],
+            total: (result.total ?? 0) as number,
+            hasMore: (result.hasMore ?? false) as boolean,
+          };
+        };
+
+        const [perpRows, predRows] = await Promise.all([
+          fetchAllPositionsPages((page) =>
+            fetchSection('perps', 'perpetuals', page)
           ),
-          fetch(
-            `/api/markets/positions/${encodeURIComponent(userId)}?status=closed&type=predictions&limit=${CLOSED_PAGE_SIZE}&page=1`
+          fetchAllPositionsPages((page) =>
+            fetchSection('predictions', 'predictions', page)
           ),
         ]);
 
         if (cancelled) return;
 
-        if (perpsRes.ok) {
-          const data = await perpsRes.json();
-          if (!cancelled) {
-            setClosedPerps(parseClosedPerps(data?.perpetuals?.positions ?? []));
-          }
-        }
-
-        if (predsRes.ok) {
-          const data = await predsRes.json();
-          if (!cancelled) {
-            setClosedPredictions(
-              parseClosedPredictions(data?.predictions?.positions ?? [])
-            );
-          }
-        }
+        setClosedPerps(parseClosedPerps(perpRows));
+        setClosedPredictions(parseClosedPredictions(predRows));
       } catch (err) {
         logger.warn(
           'Failed to fetch closed positions',
