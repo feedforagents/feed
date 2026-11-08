@@ -71,7 +71,7 @@ export class TradingPerformanceService {
    * Unrealized PnL per user, mirroring the canonical totalPnL definition of
    * the engine's calculatePortfolioPnL
    * (packages/engine/src/services/portfolio-pnl.ts): the stored unrealized
-   * PnL of open perp positions plus the mark-to-market unrealized PnL of
+   * PnL of open perp positions net of accrued funding, plus the mark-to-market PnL of
    * prediction positions in unresolved markets. That function reads
    * positions keyed by user id or privyId, so both CTEs aggregate position
    * rows onto the owning user's id.
@@ -87,15 +87,14 @@ export class TradingPerformanceService {
    * Only historical rows without that value use the net-cost gross-up
    * estimate, matching the settlement service's legacy fallback.
    *
-   * NOTE: this deliberately differs from calculatePortfolioPnL, which still
-   * marks prediction positions off net avgPrice — portfolio reporting needs
-   * the same reconciliation as follow-up.
+   * Keep this expression aligned with calculatePortfolioPnL and the
+   * settlement service's shared cash-cost-basis calculation.
    */
   private static perpUnrealizedCte() {
     return sql.raw(`
       SELECT
         usr."id" AS "userId",
-        COALESCE(SUM(pp."unrealizedPnL"::numeric), 0)::numeric AS "perpUnrealizedPnL"
+        COALESCE(SUM(pp."unrealizedPnL"::numeric - COALESCE(pp."fundingPaid"::numeric, 0)), 0)::numeric AS "perpUnrealizedPnL"
       FROM "PerpPosition" pp
       JOIN "User" usr ON pp."userId" = usr."id" OR pp."userId" = usr."privyId"
       WHERE pp."closedAt" IS NULL

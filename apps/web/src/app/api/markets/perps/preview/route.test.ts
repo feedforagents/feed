@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { NextRequest } from 'next/server';
 
+const { BadRequestError } = await import(
+  '../../../../../../../../packages/api/src/errors'
+);
+
 const mockPublicRateLimit = mock(async () => ({
   error: null,
   rateLimitInfo: null,
@@ -12,6 +16,7 @@ const mockPreviewOrder = mock();
 mock.module('@feed/api', () => ({
   addPublicReadHeaders: mock(() => undefined),
   authenticate: mockAuthenticate,
+  BadRequestError,
   publicRateLimit: mockPublicRateLimit,
   successResponse: (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), {
@@ -99,6 +104,26 @@ describe('POST /api/markets/perps/preview', () => {
         totalRequired: 20.1,
       }),
     });
+  });
+
+  it('rejects limit orders instead of quoting a market execution', async () => {
+    await expect(
+      POST(
+        new Request('http://localhost/api/markets/perps/preview', {
+          method: 'POST',
+          body: JSON.stringify({
+            ticker: 'abc',
+            side: 'long',
+            size: 100,
+            leverage: 5,
+            orderType: 'limit',
+            limitPrice: 95,
+          }),
+        }) as NextRequest
+      )
+    ).rejects.toThrow('Only market open orders are supported');
+    expect(mockPreviewOpenPosition).not.toHaveBeenCalled();
+    expect(mockPreviewOrder).not.toHaveBeenCalled();
   });
 
   it('uses authenticated offchain preview for rebalance-aware flows', async () => {
