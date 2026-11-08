@@ -2402,9 +2402,29 @@ export class FeedAgentExecutor implements AgentExecutor {
 
   private async getLeaderboard(params: Record<string, JsonValue>) {
     const limit = this.parsePositiveInt(params.limit, 10, 50);
+    const offset = this.parseNonNegativeInt(params.offset, 0);
     const users = await db.user.findMany({
+      // Same membership rule as the web points leaderboard over this
+      // table (ReputationService's wallet leaderboard, #1692): human
+      // wallets only — no actors, no agents, no test accounts (isTest
+      // flag or a 'test-' id prefix), no banned accounts. Without it,
+      // hidden accounts held the top ranks an agent reads back to its
+      // user, on no web surface's authority.
+      where: {
+        isActor: false,
+        isAgent: false,
+        isTest: false,
+        isBanned: false,
+        NOT: [{ id: { startsWith: 'test-' } }],
+      },
       take: limit,
-      orderBy: { reputationPoints: 'desc' },
+      skip: offset,
+      // reputationPoints alone is not a total order: accounts tied on
+      // points could repeat or vanish between offset pages. The id
+      // tiebreaker makes every page boundary deterministic, and offset
+      // continues past the first `limit` rows — without it, ranks past
+      // the cap were unreachable.
+      orderBy: [{ reputationPoints: 'desc' }, { id: 'desc' }],
       select: {
         id: true,
         username: true,
@@ -2534,6 +2554,19 @@ export class FeedAgentExecutor implements AgentExecutor {
       return fallback;
     }
     return Math.min(parsed, max);
+  }
+
+  private parseNonNegativeInt(value: unknown, fallback: number): number {
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string'
+          ? Number.parseInt(value, 10)
+          : Number.NaN;
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return fallback;
+    }
+    return Math.floor(parsed);
   }
 
   // Portfolio operations
