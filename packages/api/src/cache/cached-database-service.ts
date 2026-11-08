@@ -354,11 +354,21 @@ class CachedDatabaseService {
             .from(reactions)
             .where(eq(reactions.userId, userId)),
 
-          // Count posts
+          // Count posts the profile list can show: not soft-deleted and
+          // already published. getPostsByActor applies the same two
+          // filters and the actor stats route counts actor posts the
+          // same way, so the header number agrees with the list on the
+          // same profile screen and never hints at a scheduled post.
           db
             .select({ count: count() })
             .from(posts)
-            .where(eq(posts.authorId, userId)),
+            .where(
+              and(
+                eq(posts.authorId, userId),
+                isNull(posts.deletedAt),
+                lte(posts.timestamp, new Date())
+              )
+            ),
         ]);
 
         const followers =
