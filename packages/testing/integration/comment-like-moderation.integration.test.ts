@@ -42,21 +42,26 @@ let postId: string;
 let visibleCommentId: string;
 let deletedCommentId: string;
 
-let POST: typeof import('../route').POST;
+let DELETE: typeof import('../../../apps/web/src/app/api/comments/[id]/like/route').DELETE;
+let POST: typeof import('../../../apps/web/src/app/api/comments/[id]/like/route').POST;
 
-async function likeComment(commentId: string) {
+async function likeComment(
+  commentId: string,
+  method: 'POST' | 'DELETE' = 'POST'
+) {
   const request = new NextRequest(
     new Request(`http://localhost/api/comments/${commentId}/like`, {
-      method: 'POST',
+      method,
     }),
     { headers: { 'x-dev-user-id': likerId } }
   );
-  const response = await POST(request, {
+  const response = await (method === 'POST' ? POST : DELETE)(request, {
     params: Promise.resolve({ id: commentId }),
   });
   const body = (await response.json().catch(() => null)) as {
     data?: { likeCount: number; isLiked: boolean };
-    error?: unknown;
+    error?: string;
+    code?: string;
   } | null;
   return { status: response.status, body };
 }
@@ -82,7 +87,9 @@ async function reactionNotifications(commentId: string) {
 }
 
 beforeAll(async () => {
-  ({ POST } = await import('../route'));
+  ({ POST, DELETE } = await import(
+    '../../../apps/web/src/app/api/comments/[id]/like/route'
+  ));
 
   [likerId, authorId, postId, visibleCommentId, deletedCommentId] =
     await Promise.all([
@@ -166,12 +173,73 @@ describe('POST /api/comments/[id]/like moderation', () => {
     expect(body?.data?.likeCount).toBe(1);
     expect(await likeRows(visibleCommentId)).toHaveLength(1);
     expect(await reactionNotifications(visibleCommentId)).toHaveLength(1);
+    const repeated = await likeComment(visibleCommentId);
+    expect(repeated.status).toBe(400);
+    expect(repeated.body?.error).toBe('Comment already liked');
+    expect(repeated.body?.code).toBe(
+      process.env.NODE_ENV === 'development' ? 'ALREADY_LIKED' : undefined
+    );
+    expect(await likeRows(visibleCommentId)).toHaveLength(1);
+    expect(await reactionNotifications(visibleCommentId)).toHaveLength(1);
   });
 
   it('rejects a like on a soft-deleted comment and creates nothing', async () => {
-    const { status } = await likeComment(deletedCommentId);
-    expect(status).toBe(400);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { status, body } = await likeComment(deletedCommentId);
+      expect(status).toBe(400);
+      expect(body?.error).toBe('Cannot like deleted comment');
+      expect(body?.code).toBe(
+        process.env.NODE_ENV === 'development' ? 'COMMENT_DELETED' : undefined
+      );
+    }
     expect(await likeRows(deletedCommentId)).toHaveLength(0);
     expect(await reactionNotifications(deletedCommentId)).toHaveLength(0);
+  });
+  it('allows an existing like to be removed after moderation without re-liking', async () => {
+    const commentId = await generateSnowflakeId();
+    await db.insert(comments).values({
+      id: commentId,
+      postId,
+      authorId,
+      content: 'Comment moderated after a like',
+      updatedAt: new Date(),
+    });
+    try {
+      expect((await likeComment(commentId)).status).toBe(201);
+      await db
+        .update(comments)
+        .set({ deletedAt: new Date() })
+        .where(eq(comments.id, commentId));
+      const rejected = await likeComment(commentId);
+      expect(rejected.status).toBe(400);
+      expect(rejected.body?.error).toBe('Cannot like deleted comment');
+      expect(rejected.body?.code).toBe(
+        process.env.NODE_ENV === 'development' ? 'COMMENT_DELETED' : undefined
+      );
+      expect(await likeRows(commentId)).toHaveLength(1);
+      const removed = await likeComment(commentId, 'DELETE');
+      expect(removed.status).toBe(200);
+      expect(removed.body?.data?.isLiked).toBe(false);
+      expect(removed.body?.data?.likeCount).toBe(0);
+      expect(await likeRows(commentId)).toHaveLength(0);
+      expect((await likeComment(commentId, 'DELETE')).status).toBe(404);
+      expect((await likeComment(commentId)).body?.error).toBe(
+        'Cannot like deleted comment'
+      );
+      expect(await reactionNotifications(commentId)).toHaveLength(1);
+    } finally {
+      await db
+        .delete(notifications)
+        .where(eq(notifications.commentId, commentId));
+      await db.delete(reactions).where(eq(reactions.commentId, commentId));
+      await db.delete(comments).where(eq(comments.id, commentId));
+    }
+  });
+
+  it('keeps a missing comment distinct from a deleted comment', async () => {
+    const missingId = await generateSnowflakeId();
+    expect((await likeComment(missingId)).status).toBe(404);
+    expect(await likeRows(missingId)).toHaveLength(0);
+    expect(await reactionNotifications(missingId)).toHaveLength(0);
   });
 });
