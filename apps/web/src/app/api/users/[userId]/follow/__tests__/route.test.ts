@@ -34,6 +34,7 @@ mock.module('@feed/api', () => ({
 }));
 
 mock.module('@feed/db', () => ({
+  acquireUserBlockPairLock: mock(async () => undefined),
   and: (...conditions: unknown[]) => ({ and: conditions }),
   db: { select: () => selectQuery() },
   eq: (column: unknown, value: unknown) => ({ column, value }),
