@@ -48,6 +48,7 @@ import {
   buildChallengeCompletedNotification,
   type ChallengeDef,
   DAILY_CHALLENGE_DEFINITIONS,
+  DAILY_LOGIN,
   EVENT_TO_TRACKING_TYPES,
   logger,
   POINTS,
@@ -222,10 +223,26 @@ const ACHIEVEMENT_RESOLVERS: Record<string, ProgressResolver> = {
 
   login_streak: async (userId) => {
     const result = await db
-      .select({ streak: users.dailyLoginStreak })
+      .select({
+        streak: users.dailyLoginStreak,
+        lastDailyLogin: users.lastDailyLogin,
+      })
       .from(users)
       .where(eq(users.id, userId));
-    return result[0]?.streak ?? 0;
+    const row = result[0];
+    if (!row) return 0;
+    // The stored counter only resets on the user's next claim. Once the
+    // grace period since the last claim has passed, the streak is broken —
+    // DailyLoginService.getStreakInfo reports an effective streak of 0 in
+    // that state (see getClaimStatus there). Mirror that here so
+    // achievement progress never presents a dead streak as current.
+    if (
+      row.lastDailyLogin &&
+      Date.now() - row.lastDailyLogin.getTime() >= DAILY_LOGIN.GRACE_PERIOD_MS
+    ) {
+      return 0;
+    }
+    return Math.max(0, row.streak);
   },
 };
 
