@@ -9,11 +9,14 @@
  * GET /api/posts/[id]/interactions — filters deletedAt. The Following
  * branch must agree, or the card promises comments that do not exist.
  *
- * The route handler is exercised unmodified; the viewer authenticates with
- * a Steward JWT signed with the test secret, exactly like a real session.
+ * The real route and database use a short-lived synthetic test JWT. Only
+ * the server-only environment marker is stubbed; no business service is mocked.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+
+mock.module('server-only', () => ({}));
+
 import {
   and,
   comments,
@@ -28,8 +31,6 @@ import { generateSnowflakeId } from '@feed/shared';
 import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
 
-const STEWARD_SECRET = 'f5-test-steward-secret';
-
 type PostsResponse = {
   success: boolean;
   posts: Array<{ id: string; commentCount: number }>;
@@ -39,9 +40,11 @@ type PostsResponse = {
 let viewerId: string;
 let authorId: string;
 let postId: string;
+let token: string;
 const allCommentIds: string[] = [];
 
-let GET: typeof import('../route').GET;
+let GET: (request: NextRequest) => Promise<Response>;
+const routePath = '../../../apps/web/src/app/api/posts/route';
 
 async function fetchFollowingFeed(token: string) {
   const request = new NextRequest(
@@ -59,8 +62,7 @@ async function fetchFollowingFeed(token: string) {
 }
 
 beforeAll(async () => {
-  process.env.STEWARD_JWT_SECRET = STEWARD_SECRET;
-  ({ GET } = await import('../route'));
+  ({ GET } = await import(routePath));
 
   [viewerId, authorId, postId] = await Promise.all([
     generateSnowflakeId(),
@@ -78,20 +80,29 @@ beforeAll(async () => {
     string,
   ];
 
+  const secret =
+    process.env.STEWARD_JWT_SECRET ?? 'dev-jwt-secret-change-in-prod';
+  token = await new SignJWT({ userId: `following-${viewerId}` })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuer('steward')
+    .setIssuedAt()
+    .setExpirationTime('1m')
+    .sign(new TextEncoder().encode(secret));
+
   const now = new Date();
   const earlier = new Date(now.getTime() - 60_000);
 
   await db.insert(users).values([
     {
       id: viewerId,
-      username: `test-f5-viewer-${viewerId}`,
+      username: `f5v-${viewerId}`,
       displayName: 'Following Fixture Viewer',
-      stewardId: 'f5-viewer-steward',
+      stewardId: `following-${viewerId}`,
       updatedAt: now,
     },
     {
       id: authorId,
-      username: `test-f5-author-${authorId}`,
+      username: `f5a-${authorId}`,
       displayName: 'Following Fixture Author',
       updatedAt: now,
     },
@@ -168,23 +179,60 @@ afterAll(async () => {
       and(eq(follows.followerId, viewerId), eq(follows.followingId, authorId))
     );
   await db.delete(users).where(inArray(users.id, [viewerId, authorId]));
+  token = '';
 });
 
 describe('GET /api/posts?following=true comment counts', () => {
   it('does not count soft-deleted (moderated) comments', async () => {
-    const token = await new SignJWT({ userId: 'f5-viewer-steward' })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setIssuer('steward')
-      .setIssuedAt()
-      .setExpirationTime('5m')
-      .sign(new TextEncoder().encode(STEWARD_SECRET));
-
     const { status, body } = await fetchFollowingFeed(token);
     expect(status).toBe(200);
+    expect((body as PostsResponse).source).toBe('following');
     const post = (body as PostsResponse).posts.find((p) => p.id === postId);
     expect(post).toBeDefined();
     // 2 visible top-level comments + 1 visible reply; the moderated
     // comment is hidden everywhere else and must not inflate the count.
     expect(post?.commentCount).toBe(3);
+  });
+});
+
+describe('Following feed moderated count transitions', () => {
+  it('returns zero when every owned comment is hidden', async () => {
+    try {
+      await db
+        .update(comments)
+        .set({ deletedAt: new Date() })
+        .where(inArray(comments.id, allCommentIds));
+      const { status, body } = await fetchFollowingFeed(token);
+      expect(status).toBe(200);
+      expect((body as PostsResponse).source).toBe('following');
+      expect(
+        (body as PostsResponse).posts.find((p) => p.id === postId)?.commentCount
+      ).toBe(0);
+    } finally {
+      await db
+        .update(comments)
+        .set({ deletedAt: null })
+        .where(inArray(comments.id, allCommentIds.slice(0, 3)));
+    }
+  });
+
+  it('counts a previously hidden comment again when restored', async () => {
+    try {
+      await db
+        .update(comments)
+        .set({ deletedAt: null })
+        .where(eq(comments.id, allCommentIds[3]!));
+      const { status, body } = await fetchFollowingFeed(token);
+      expect(status).toBe(200);
+      expect((body as PostsResponse).source).toBe('following');
+      expect(
+        (body as PostsResponse).posts.find((p) => p.id === postId)?.commentCount
+      ).toBe(4);
+    } finally {
+      await db
+        .update(comments)
+        .set({ deletedAt: new Date() })
+        .where(eq(comments.id, allCommentIds[3]!));
+    }
   });
 });

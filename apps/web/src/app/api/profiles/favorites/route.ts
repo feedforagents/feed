@@ -128,8 +128,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           if (!targetUser) return null;
 
           const [postCount, favoriteCount] = await Promise.all([
+            // Count only posts a viewer can actually see: soft-deleted
+            // posts and future-dated (not yet published) posts are
+            // excluded, matching the actor stats route — future-scheduled
+            // posts must not be counted or hinted at.
             db.post.count({
-              where: { authorId: targetUser.id },
+              where: {
+                authorId: targetUser.id,
+                deletedAt: null,
+                timestamp: { lte: new Date() },
+              },
             }),
             db.favorite.count({
               where: { targetUserId: targetUser.id },
