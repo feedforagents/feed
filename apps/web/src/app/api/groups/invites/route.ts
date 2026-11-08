@@ -41,14 +41,38 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       },
     });
 
-    // Get member counts for each group
-    const memberCounts = await Promise.all(
-      groupIds.map((gid) =>
-        db.groupMember.count({ where: { groupId: gid, isActive: true } })
-      )
+    // Get member counts for each group. The count must use the same
+    // membership the member roster shows: hidden account tiers never
+    // appear on people surfaces (test accounts: isTest flag or 'test-'
+    // id; banned accounts), so memberships held by those accounts — or
+    // by a user row that no longer exists — are not counted.
+    const activeMemberships =
+      groupIds.length > 0
+        ? await db.groupMember.findMany({
+            where: { groupId: { in: groupIds }, isActive: true },
+            select: { groupId: true, userId: true },
+          })
+        : [];
+    const memberUserIds = [...new Set(activeMemberships.map((m) => m.userId))];
+    const memberUsers =
+      memberUserIds.length > 0
+        ? await db.user.findMany({
+            where: { id: { in: memberUserIds } },
+            select: { id: true, isTest: true, isBanned: true },
+          })
+        : [];
+    const visibleMemberIds = new Set(
+      memberUsers
+        .filter((u) => !u.isTest && !u.isBanned && !u.id.startsWith('test-'))
+        .map((u) => u.id)
     );
     const memberCountMap = new Map(
-      groupIds.map((gid, i) => [gid, memberCounts[i] ?? 0])
+      groupIds.map((gid) => [
+        gid,
+        activeMemberships.filter(
+          (m) => m.groupId === gid && visibleMemberIds.has(m.userId)
+        ).length,
+      ])
     );
     const groupMap = new Map(groups.map((g) => [g.id, g]));
 

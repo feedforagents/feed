@@ -90,6 +90,8 @@ export const GET = withErrorHandling(
                 profileImageUrl: true,
                 isActor: true,
                 isAgent: true,
+                isTest: true,
+                isBanned: true,
               },
             })
           : [];
@@ -97,7 +99,27 @@ export const GET = withErrorHandling(
         memberUsers.map((memberUser) => [memberUser.id, memberUser])
       );
 
-      return members.map((member) => {
+      // Hidden account tiers never appear on people surfaces (test
+      // accounts: isTest flag or 'test-' id; banned accounts) — the rule
+      // the follow lists and registry apply. This surface's own write
+      // paths enforce the banned half already: a banned user cannot be
+      // added as a member, but a member banned after joining keeps an
+      // active membership row, so filter the roster here. Memberships
+      // whose user row is gone are dropped too, matching the group
+      // detail read. The requester's own membership check above uses
+      // the unfiltered list on purpose: visibility is a display rule,
+      // not an authorization rule.
+      const visibleMembers = members.filter((member) => {
+        const memberUser = memberUserMap.get(member.userId);
+        return (
+          memberUser !== undefined &&
+          !memberUser.isTest &&
+          !memberUser.isBanned &&
+          !memberUser.id.startsWith('test-')
+        );
+      });
+
+      return visibleMembers.map((member) => {
         const memberUser = memberUserMap.get(member.userId);
         const memberType = memberUser?.isActor
           ? 'npc'

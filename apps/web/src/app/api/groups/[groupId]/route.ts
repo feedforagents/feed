@@ -73,6 +73,18 @@ export const GET = withErrorHandling(
         },
       });
 
+      // Hidden account tiers never appear on people surfaces (test
+      // accounts: isTest flag or 'test-' id; banned accounts) — the rule
+      // the follow lists and registry apply, and the one this surface's
+      // write paths enforce for banned users (they cannot be added as
+      // members, but a member banned after joining keeps an active
+      // membership row). The management screen renders both its
+      // "Members (N)" header and its roster from this array, so filter
+      // here to keep the number and the list on the same membership.
+      const visibleMemberUsers = memberUsers.filter(
+        (u) => !u.isTest && !u.isBanned && !u.id.startsWith('test-')
+      );
+
       // Get the chat for this group (Chat.groupId → Group.id)
       const groupChat = await db.chat.findFirst({
         where: { groupId },
@@ -89,7 +101,7 @@ export const GET = withErrorHandling(
         createdById: group.createdById,
         createdAt: group.createdAt,
         updatedAt: group.updatedAt,
-        members: memberUsers.map((u) => {
+        members: visibleMemberUsers.map((u) => {
           const membership = members.find((m) => m.userId === u.id);
           // Determine member type: NPC (isActor), Agent (isAgent), or User
           const memberType = u.isActor ? 'npc' : u.isAgent ? 'agent' : 'user';
