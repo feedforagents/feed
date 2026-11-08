@@ -9,6 +9,10 @@
  * counts (from both ActorFollow and UserActorFollow), following count, and post count.
  * Supports lookup by actor ID or name (case-insensitive).
  *
+ * Also serves the organization profile's header counts: for an organization ID,
+ * the post count covers posts authored under the organization ID (the posts its
+ * profile lists), while follow counts use the org's resolved actor account.
+ *
  * @openapi
  * /api/actors/{actorId}/stats:
  *   get:
@@ -120,6 +124,19 @@ export const GET = withErrorHandling(
 
     const actualActorId = actor.id;
 
+    // The organization profile (/orgs/[id]) reads its header counts from
+    // this route with the organization id, while its posts tab lists posts
+    // authored under that same organization id (generateOrgPost writes
+    // authorId: org.id). An org id resolves to the org's shadow actor
+    // above through their shared username, so counting posts under the
+    // resolved actor id would report a different author's posts than the
+    // ones the org page lists. When the identifier is an organization id,
+    // count the organization's own posts; the follow counts keep the
+    // resolved actor id, which is where follows of the org's account are
+    // recorded (the follow route resolves the same way).
+    const organization = StaticDataRegistry.getOrganization(actorId);
+    const postAuthorId = organization ? organization.id : actualActorId;
+
     // Get follower counts (both from ActorFollow and UserActorFollow)
     const [
       actorFollowerCount,
@@ -141,11 +158,11 @@ export const GET = withErrorHandling(
       db.actorFollow.count({
         where: { followerId: actualActorId },
       }),
-      // Visible posts by this actor: not deleted and already published
+      // Visible posts by this author: not deleted and already published
       // (future-scheduled posts must not be counted or hinted at).
       db.post.count({
         where: {
-          authorId: actualActorId,
+          authorId: postAuthorId,
           deletedAt: null,
           timestamp: { lte: new Date() },
         },
