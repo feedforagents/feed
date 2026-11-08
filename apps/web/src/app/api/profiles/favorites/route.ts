@@ -79,32 +79,31 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const { profiles: favoritedProfiles, total } = await asUser(
     user,
     async (db) => {
-      const [totalFavorites, favorites] = await Promise.all([
-        db.favorite.count({
-          where: {
-            userId: user.userId,
-          },
-        }),
-        db.favorite.findMany({
-          where: {
-            userId: user.userId,
-          },
-          orderBy: {
-            createdAt: 'desc',
-          },
-          skip: offset,
-          take: limit,
-        }),
-      ]);
+      const allFavorites = await db.favorite.findMany({
+        where: {
+          userId: user.userId,
+        },
+        orderBy: {
+          createdAt: 'desc',
+        },
+      });
 
-      if (favorites.length === 0) {
+      if (allFavorites.length === 0) {
         return {
           profiles: [],
-          total: totalFavorites,
+          total: 0,
         };
       }
 
-      const targetUserIds = favorites.map((favorite) => favorite.targetUserId);
+      // Favorite rows can outlive their target profile: the Favorite
+      // table has no foreign key to User and account deletion removes
+      // the user row without removing favorites that point at it. Such
+      // orphaned favorites must not count toward the total or consume a
+      // pagination slot, so resolve targets first and page over the
+      // favorites whose profile still exists.
+      const targetUserIds = allFavorites.map(
+        (favorite) => favorite.targetUserId
+      );
       const targetUsers = await db.user.findMany({
         where: {
           id: { in: targetUserIds },
@@ -121,6 +120,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const userMap = new Map(
         targetUsers.map((targetUser) => [targetUser.id, targetUser])
       );
+
+      const visibleFavorites = allFavorites.filter((favorite) =>
+        userMap.has(favorite.targetUserId)
+      );
+      const totalFavorites = visibleFavorites.length;
+      const favorites = visibleFavorites.slice(offset, offset + limit);
 
       const profiles = await Promise.all(
         favorites.map(async (favorite) => {
