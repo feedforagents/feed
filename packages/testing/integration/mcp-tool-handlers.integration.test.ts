@@ -6,6 +6,8 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import {
+  and,
+  comments,
   db,
   eq,
   favorites,
@@ -14,6 +16,7 @@ import {
   notifications,
   positions,
   posts,
+  reactions,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
@@ -23,6 +26,7 @@ import {
   executeGetPositions,
   executeGetUnreadCount,
   executeGetUserWallet,
+  executeLikeComment,
   executeMarkNotificationsRead,
 } from '../../mcp/src/handlers/tool-handlers';
 
@@ -33,6 +37,8 @@ let privateUserId: string;
 let postId: string;
 let marketId: string;
 let activePositionId: string;
+let liveCommentId: string;
+let deletedCommentId: string;
 
 async function createUser(
   overrides: Partial<typeof users.$inferInsert> = {}
@@ -70,6 +76,25 @@ describe('MCP tool handlers', () => {
       userId: agentUserId,
       targetUserId: otherUserId,
     });
+    liveCommentId = await generateSnowflakeId();
+    deletedCommentId = await generateSnowflakeId();
+    await db.insert(comments).values([
+      {
+        id: liveCommentId,
+        content: 'live comment',
+        postId,
+        authorId: otherUserId,
+        updatedAt: new Date(),
+      },
+      {
+        id: deletedCommentId,
+        content: 'moderated comment',
+        postId,
+        authorId: otherUserId,
+        updatedAt: new Date(),
+        deletedAt: new Date(),
+      },
+    ]);
     marketId = await generateSnowflakeId();
     await db.insert(markets).values({
       id: marketId,
@@ -120,6 +145,12 @@ describe('MCP tool handlers', () => {
     await db
       .delete(notifications)
       .where(inArray(notifications.userId, userIds));
+    await db
+      .delete(reactions)
+      .where(inArray(reactions.commentId, [liveCommentId, deletedCommentId]));
+    await db
+      .delete(comments)
+      .where(inArray(comments.id, [liveCommentId, deletedCommentId]));
     await db.delete(favorites).where(inArray(favorites.userId, userIds));
     await db.delete(positions).where(inArray(positions.userId, userIds));
     await db.delete(markets).where(eq(markets.id, marketId));
@@ -180,5 +211,86 @@ describe('MCP tool handlers', () => {
       side: 'YES',
       question: 'Will the MCP list only open positions?',
     });
+  });
+
+  it('likes a live comment and notifies its author', async () => {
+    const result = await executeLikeComment(agent(), {
+      commentId: liveCommentId,
+    });
+    expect(result).toEqual({ success: true });
+
+    const liked = await db
+      .select()
+      .from(reactions)
+      .where(
+        and(
+          eq(reactions.commentId, liveCommentId),
+          eq(reactions.userId, agentUserId),
+          eq(reactions.type, 'like')
+        )
+      );
+    expect(liked).toHaveLength(1);
+
+    const notes = await db
+      .select()
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.userId, otherUserId),
+          eq(notifications.commentId, liveCommentId),
+          eq(notifications.type, 'reaction')
+        )
+      );
+    expect(notes).toHaveLength(1);
+  });
+
+  it('does not like or notify twice for a repeated comment like', async () => {
+    const result = await executeLikeComment(agent(), {
+      commentId: liveCommentId,
+    });
+    expect(result).toEqual({ success: true });
+
+    const liked = await db
+      .select()
+      .from(reactions)
+      .where(eq(reactions.commentId, liveCommentId));
+    expect(liked).toHaveLength(1);
+
+    const notes = await db
+      .select()
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.userId, otherUserId),
+          eq(notifications.commentId, liveCommentId),
+          eq(notifications.type, 'reaction')
+        )
+      );
+    expect(notes).toHaveLength(1);
+  });
+
+  it('rejects a like on an unknown comment without writing a reaction', async () => {
+    const unknownId = await generateSnowflakeId();
+    await expect(
+      executeLikeComment(agent(), { commentId: unknownId })
+    ).rejects.toThrow('Comment');
+
+    const orphan = await db
+      .select()
+      .from(reactions)
+      .where(eq(reactions.commentId, unknownId));
+    expect(orphan).toHaveLength(0);
+  });
+
+  it('rejects a like on a soft-deleted comment without writing a reaction', async () => {
+    await expect(
+      executeLikeComment(agent(), { commentId: deletedCommentId })
+    ).rejects.toThrow('Cannot like deleted comment');
+
+    const liked = await db
+      .select()
+      .from(reactions)
+      .where(eq(reactions.commentId, deletedCommentId));
+    expect(liked).toHaveLength(0);
   });
 });
