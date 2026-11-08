@@ -178,12 +178,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // Build where clause
   const where = {};
 
-  // Build order by clause
+  // Build order by clause — always a total order. The sort keys tie in
+  // ordinary data (users created in one batch share a single createdAt,
+  // and nftTokenId is null for most accounts), and offset paging over a
+  // partial order lets each page's top-N sort pick a different subset of
+  // the tie group, so members repeat across pages and others are never
+  // reached even though the reported total counts them. The unique id
+  // breaks the tie, in the same direction as the primary key.
   const orderBy = filters.sortBy
-    ? {
-        [filters.sortBy]: filters.sortOrder,
-      }
-    : { createdAt: 'desc' as const };
+    ? [{ [filters.sortBy]: filters.sortOrder }, { id: filters.sortOrder }]
+    : [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
 
   // Fetch users from database with RLS (public registry, no auth required)
   const dbOperation = async (db: DrizzleClient) => {
