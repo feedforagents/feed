@@ -649,17 +649,24 @@ async function executePredictionTrade(params: {
   );
 
   // Record in AgentTrade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'prediction',
-    marketId,
-    action: 'open',
-    side: sideLabel,
-    amount,
-    price: result.avgPrice,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'prediction',
+      marketId,
+      action: 'open',
+      side: sideLabel,
+      amount,
+      price: result.avgPrice,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
 
   const sharesRounded = Math.round(result.shares * 100) / 100;
 
@@ -755,18 +762,25 @@ async function executePredictionSell(params: {
   );
 
   // Record in AgentTrade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'prediction',
-    marketId,
-    action: 'close',
-    side: sideLabel,
-    amount: sellResult.netProceeds ?? 0,
-    price: sellResult.avgPrice,
-    pnl: sellResult.pnl,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'prediction',
+      marketId,
+      action: 'close',
+      side: sideLabel,
+      amount: sellResult.netProceeds ?? 0,
+      price: sellResult.avgPrice,
+      pnl: sellResult.pnl,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
 
   logger.info(
     `[DirectExecutor] Prediction sell executed: ${isSellYes ? 'YES' : 'NO'} on market ${marketId}`,
@@ -844,18 +858,25 @@ async function executePerpTrade(params: {
         `[DirectExecutor] openPosition (${rebalanceType}) did not return the closed leg: exitPrice=${openResult.exitPrice}, realizedPnL=${openResult.realizedPnL}`
       );
     }
-    await agentPnLService.recordTrade({
-      agentId: agentUserId,
-      userId: agentManagedBy,
-      marketType: 'perp',
-      ticker,
-      action: 'close',
-      side: closedSide,
-      amount: closedSize,
-      price: openResult.exitPrice,
-      pnl: openResult.realizedPnL,
-      reasoning,
-    });
+    await agentPnLService
+      .recordTrade({
+        agentId: agentUserId,
+        userId: agentManagedBy,
+        marketType: 'perp',
+        ticker,
+        action: 'close',
+        side: closedSide,
+        amount: closedSize,
+        price: openResult.exitPrice,
+        pnl: openResult.realizedPnL,
+        reasoning,
+      })
+      .catch((error: Error) => {
+        logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+          agentUserId,
+          error: error.message,
+        });
+      });
   };
   const recordOpenedLeg = async (openedSize: number) => {
     if (openResult.fillPrice == null) {
@@ -863,17 +884,24 @@ async function executePerpTrade(params: {
         `[DirectExecutor] openPosition (${rebalanceType ?? 'open'}) did not return a fill price`
       );
     }
-    await agentPnLService.recordTrade({
-      agentId: agentUserId,
-      userId: agentManagedBy,
-      marketType: 'perp',
-      ticker,
-      action: 'open',
-      side: perpSide,
-      amount: openedSize,
-      price: openResult.fillPrice,
-      reasoning,
-    });
+    await agentPnLService
+      .recordTrade({
+        agentId: agentUserId,
+        userId: agentManagedBy,
+        marketType: 'perp',
+        ticker,
+        action: 'open',
+        side: perpSide,
+        amount: openedSize,
+        price: openResult.fillPrice,
+        reasoning,
+      })
+      .catch((error: Error) => {
+        logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+          agentUserId,
+          error: error.message,
+        });
+      });
   };
 
   if (rebalanceType === 'reduce' || rebalanceType === 'close') {
@@ -990,18 +1018,25 @@ async function executeClosePerpPosition(params: {
   const { realizedPnL, size, exitPrice } = closeResult;
 
   // Record trade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'perp',
-    ticker,
-    action: 'close',
-    side: existingPosition.side as 'long' | 'short',
-    amount: size,
-    price: exitPrice,
-    pnl: realizedPnL,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'perp',
+      ticker,
+      action: 'close',
+      side: existingPosition.side as 'long' | 'short',
+      amount: size,
+      price: exitPrice,
+      pnl: realizedPnL,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
 
   logger.info(
     `[DirectExecutor] Perp position closed: ${existingPosition.side} $${size} on ${ticker} (P&L: ${realizedPnL >= 0 ? '+' : ''}$${realizedPnL.toFixed(2)})`,
@@ -1132,10 +1167,27 @@ export async function executeDirectPost(
   // Record topic coverage for future diversity checks
   topicDiversityService.recordTopicCoverage(agentUserId, cleanContent);
 
-  // Generate and store tags
-  const tags: GeneratedTag[] = await generateTagsFromPost(cleanContent);
-  if (tags.length > 0) {
-    await storeTagsForPost(postId, tags);
+  // Generate and store tags. Tagging is best-effort: the post is already
+  // committed, so a tag-generation or tag-storage failure must not report
+  // the post as failed (which would invite a duplicate retry on the next
+  // tick). Matches plugin-agent-core create-post, which fire-and-forgets
+  // tagging for the same reason.
+  let tags: GeneratedTag[] = [];
+  try {
+    tags = await generateTagsFromPost(cleanContent);
+    if (tags.length > 0) {
+      await storeTagsForPost(postId, tags);
+    }
+  } catch (error) {
+    logger.warn(
+      `[DirectExecutor] Failed to tag post ${postId}`,
+      {
+        agentUserId,
+        postId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
   }
 
   logger.info(

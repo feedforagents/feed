@@ -1140,6 +1140,36 @@ describe('PerpMarketService', () => {
       expect(positions[0]?.size).toBe(50);
     });
 
+    it('rejects a flip whose inverse leg is below the minimum order size', async () => {
+      // Open LONG position of 100 (minimum order size is 10)
+      const initial = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+
+      // Open SHORT with size 101: the trade itself clears the minimum,
+      // but the inverse leg would be only 1 — a dust position.
+      await expect(
+        service.openPosition({
+          userId: 'u3',
+          ticker: 'ABC',
+          side: 'short',
+          size: 101,
+          leverage: 10,
+        })
+      ).rejects.toThrow('Order size below minimum (10)');
+
+      // Original position must be untouched, not closed by the rejected flip
+      const oldPos = await db.getPositionById(initial.positionId);
+      expect(oldPos?.closedAt).toBeNull();
+      const positions = await db.getOpenPositionsByUser('u3');
+      expect(positions.length).toBe(1);
+      expect(positions[0]?.size).toBe(100);
+    });
+
     it('uses existing leverage when adding to position', async () => {
       // Open with 10x leverage
       await service.openPosition({
