@@ -339,12 +339,21 @@ export async function getAgentGroupChats(
       .where(eq(groups.type, 'team'));
     const teamGroupIds = new Set(teamGroups.map((g) => g.id));
 
-    // Use DB-side aggregate count instead of loading all participant rows
+    // Use DB-side aggregate count instead of loading all participant rows.
+    // Only active participant rows count: leaving or being kicked keeps the
+    // row with isActive: false, and every other chat surface (A2A chat list,
+    // resolveGroupChatByName, GET /api/groups) treats inactive rows as
+    // "no longer a member".
     const rawDb = getRawDrizzle();
     const agentParticipation = rawDb
       .select({ chatId: chatParticipants.chatId })
       .from(chatParticipants)
-      .where(eq(chatParticipants.userId, agentUserId))
+      .where(
+        and(
+          eq(chatParticipants.userId, agentUserId),
+          eq(chatParticipants.isActive, true)
+        )
+      )
       .as('agent_participation');
 
     const groupChatsWithCount = await rawDb
@@ -356,7 +365,13 @@ export async function getAgentGroupChats(
       })
       .from(chats)
       .innerJoin(agentParticipation, eq(chats.id, agentParticipation.chatId))
-      .innerJoin(chatParticipants, eq(chats.id, chatParticipants.chatId))
+      .innerJoin(
+        chatParticipants,
+        and(
+          eq(chats.id, chatParticipants.chatId),
+          eq(chatParticipants.isActive, true)
+        )
+      )
       .where(eq(chats.isGroup, true))
       .groupBy(chats.id, chats.name, chats.groupId)
       .limit(10); // Fetch more to account for filtering
