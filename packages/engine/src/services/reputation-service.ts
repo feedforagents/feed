@@ -9,8 +9,15 @@
  * propagation handled by the ReputationBridge in @feed/agents.
  */
 
-import { db, eq, inArray, positions, sql, users } from '@feed/db';
-import { logger } from '@feed/shared';
+import {
+  db,
+  eq,
+  inArray,
+  pointsTransactions,
+  positions,
+  users,
+} from '@feed/db';
+import { generateSnowflakeId, logger } from '@feed/shared';
 
 // =============================================================================
 // Reputation Sync Interface
@@ -125,14 +132,52 @@ export class ReputationService {
       const isWinner = position.side === resolution.outcome;
       const change = isWinner ? 10 : -5;
 
-      const [updated] = await db
-        .update(users)
-        .set({
-          reputationPoints: sql`GREATEST(0, COALESCE(${users.reputationPoints}, 0) + ${change})`,
-          updatedAt: new Date(),
-        })
-        .where(eq(users.id, position.userId))
-        .returning({ reputationPoints: users.reputationPoints });
+      // The counter mutation and its PointsTransaction ledger entry
+      // commit together, as in every other reputation writer: the
+      // points history presents that ledger as the record of how the
+      // displayed reputationPoints balance was reached, so a change
+      // without an entry leaves the history unable to explain the
+      // balance. The row is re-read under a lock because one user can
+      // hold several positions in the same market.
+      const newReputation = await db.transaction(async (tx) => {
+        const [fresh] = await tx
+          .select({ reputationPoints: users.reputationPoints })
+          .from(users)
+          .where(eq(users.id, position.userId))
+          .limit(1)
+          .for('update');
+
+        if (!fresh) {
+          return null;
+        }
+
+        const pointsBefore = fresh.reputationPoints ?? 0;
+        const pointsAfter = Math.max(0, pointsBefore + change);
+        const actualChange = pointsAfter - pointsBefore;
+
+        await tx
+          .update(users)
+          .set({ reputationPoints: pointsAfter, updatedAt: new Date() })
+          .where(eq(users.id, position.userId));
+
+        if (actualChange !== 0) {
+          await tx.insert(pointsTransactions).values({
+            id: await generateSnowflakeId(),
+            userId: position.userId,
+            amount: actualChange,
+            pointsBefore,
+            pointsAfter,
+            reason: 'market_resolution',
+            metadata: JSON.stringify({
+              marketId: resolution.marketId,
+              outcome: resolution.outcome,
+              side: position.side,
+            }),
+          });
+        }
+
+        return pointsAfter;
+      });
 
       results.push({
         userId: position.userId,
@@ -142,7 +187,7 @@ export class ReputationService {
 
       logger.info(
         `Updated reputation for user ${position.userId}`,
-        { tokenId, change, newReputation: updated?.reputationPoints },
+        { tokenId, change, newReputation: newReputation ?? undefined },
         'ReputationService'
       );
     }
