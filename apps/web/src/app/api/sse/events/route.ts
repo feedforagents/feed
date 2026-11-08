@@ -191,6 +191,9 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
             errMsg.includes('no such key') ||
             errMsg.includes('ERR no such key');
           if (isStreamNotFound) {
+            // This stream has no history yet. Keep a fixed cursor so events
+            // arriving while another channel is read are not skipped by '$'.
+            lastIds.set(streamKey, '0-0');
             logger.debug('Stream does not exist yet', { streamKey }, 'SSE');
           } else {
             logger.warn(

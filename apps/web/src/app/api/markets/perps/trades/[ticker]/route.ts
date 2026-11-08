@@ -85,6 +85,20 @@ const QuerySchema = z.object({
   offset: z.coerce.number().int().min(0).max(10_000).default(0),
 });
 
+// One row of the balance-transaction subquery below. `$queryRaw` returns
+// raw driver values, so `amount` (numeric) arrives as a string and
+// `createdAt` (timestamp) arrives as a string; the formatter below applies
+// Number() / new Date() exactly as the repository query's Date values did.
+type BalanceTransactionRow = {
+  id: string;
+  type: string;
+  amount: string | number;
+  userId: string;
+  createdAt: Date | string;
+  relatedId: string | null;
+  description: string | null;
+};
+
 export const GET = withErrorHandling(
   async (
     request: NextRequest,
@@ -161,21 +175,26 @@ export const GET = withErrorHandling(
       organization.ticker ||
       organization.id.toUpperCase().replace(/-/g, '').substring(0, 12);
 
+    // Paginate the merged feed, not each source independently. A source row
+    // can appear in the requested merged window only if it is among the
+    // first offset + limit rows of that source, so fetch that window (plus
+    // one row, mirroring the prediction trades route) and slice after the
+    // sources have been sorted together.
+    const mergedWindowSize = queryParams.offset + queryParams.limit + 1;
+    const positionWhere = {
+      OR: [{ ticker: perpTicker }, { organizationId: organization.id }],
+    };
+
     // Get perp positions for this ticker (try both the ticker and organizationId)
     const perpPositions = await db.perpPosition.findMany({
-      where: {
-        OR: [{ ticker: perpTicker }, { organizationId: organization.id }],
-      },
+      where: positionWhere,
       orderBy: { openedAt: 'desc' },
-      take: queryParams.limit,
-      skip: queryParams.offset,
+      take: mergedWindowSize,
     });
 
     // Get total count for pagination
     const totalPositions = await db.perpPosition.count({
-      where: {
-        OR: [{ ticker: perpTicker }, { organizationId: organization.id }],
-      },
+      where: positionWhere,
     });
 
     // Fetch users for perp positions
@@ -193,19 +212,20 @@ export const GET = withErrorHandling(
     const perpUsersMap = new Map(perpUsers.map((u) => [u.id, u]));
 
     // Get NPC trades for this ticker (try multiple formats)
+    const npcWhere = {
+      marketType: 'perp',
+      OR: [
+        { ticker: perpTicker },
+        { ticker: tickerParam },
+        { ticker: tickerParam.toLowerCase() },
+      ],
+    };
     const npcTrades = await db.npcTrade.findMany({
-      where: {
-        marketType: 'perp',
-        OR: [
-          { ticker: perpTicker },
-          { ticker: tickerParam },
-          { ticker: tickerParam.toLowerCase() },
-        ],
-      },
+      where: npcWhere,
       orderBy: { executedAt: 'desc' },
-      take: queryParams.limit,
-      skip: queryParams.offset,
+      take: mergedWindowSize,
     });
+    const totalNpcTrades = await db.npcTrade.count({ where: npcWhere });
 
     // Fetch NPC actors - first try DB, then fallback to StaticDataRegistry
     const npcActorIds = [...new Set(npcTrades.map((t) => t.npcActorId))];
@@ -264,28 +284,43 @@ export const GET = withErrorHandling(
       }
     }
 
-    // Get balance transactions for these perp positions
-    const positionIds = perpPositions.map((p) => p.id);
-    const balanceTransactions =
-      positionIds.length > 0
-        ? await db.balanceTransaction.findMany({
-            where: {
-              type: { in: ['perp_open', 'perp_close', 'perp_liquidation'] },
-              relatedId: { in: positionIds },
-            },
-            orderBy: { createdAt: 'desc' },
-            take: queryParams.limit,
-            select: {
-              id: true,
-              type: true,
-              amount: true,
-              userId: true,
-              createdAt: true,
-              relatedId: true,
-              description: true,
-            },
-          })
-        : [];
+    // Get balance transactions for all matching perp positions. A close or
+    // liquidation transaction can be recent even when its position opened
+    // outside the position window above, so this source cannot be limited
+    // to the IDs on an independently paginated position page. Match them
+    // with a database-side subquery instead: loading every historical
+    // position ID into one IN (...) list blows the database parameter
+    // limit (66,000 positions returned 500 MAX_PARAMETERS_EXCEEDED for
+    // limit=2, offset=0), while this query binds 3 parameters at any
+    // history size.
+    const balanceTransactions = await db.$queryRaw<BalanceTransactionRow>`
+      SELECT bt.id, bt.type, bt.amount, bt."userId", bt."createdAt",
+        bt."relatedId", bt.description
+      FROM "BalanceTransaction" bt
+      WHERE bt.type IN ('perp_open', 'perp_close', 'perp_liquidation')
+        AND bt."relatedId" IN (
+          SELECT pp.id FROM "PerpPosition" pp
+          WHERE pp.ticker = ${perpTicker}
+            OR pp."organizationId" = ${organization.id}
+        )
+      ORDER BY bt."createdAt" DESC
+      LIMIT ${mergedWindowSize}
+    `;
+    const totalBalanceTransactionRows = await db.$queryRaw<{
+      total: string;
+    }>`
+        SELECT COUNT(*)::text AS total
+        FROM "BalanceTransaction" bt
+        WHERE bt.type IN ('perp_open', 'perp_close', 'perp_liquidation')
+          AND bt."relatedId" IN (
+            SELECT pp.id FROM "PerpPosition" pp
+            WHERE pp.ticker = ${perpTicker}
+              OR pp."organizationId" = ${organization.id}
+          )
+      `;
+    const totalBalanceTransactions = Number(
+      totalBalanceTransactionRows[0]?.total ?? '0'
+    );
 
     // Fetch users for transactions
     const txUserIds = [...new Set(balanceTransactions.map((tx) => tx.userId))];
@@ -344,17 +379,16 @@ export const GET = withErrorHandling(
         description: tx.description,
         relatedId: tx.relatedId,
         ticker: perpTicker,
-        timestamp: tx.createdAt,
+        timestamp: new Date(tx.createdAt),
       })),
     ]
-      // Sort by timestamp descending
+      // Sort by timestamp descending, then apply pagination to the merged
+      // feed so each trade appears on exactly one page.
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-      // Apply pagination
-      .slice(0, queryParams.limit);
+      .slice(queryParams.offset, queryParams.offset + queryParams.limit);
 
-    const total =
-      totalPositions + npcTrades.length + balanceTransactions.length;
-    const hasMore = queryParams.offset + queryParams.limit < total;
+    const total = totalPositions + totalNpcTrades + totalBalanceTransactions;
+    const hasMore = queryParams.offset + trades.length < total;
 
     const result = {
       trades,
