@@ -857,11 +857,21 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       };
     });
 
+    // Continuation for the next page: the last fetched post's
+    // (timestamp, id), so a client can resume inside a group of posts
+    // that share one timestamp instead of skipping the rest of it.
+    const lastFetchedPost = postsResult[postsResult.length - 1];
+    const followingNextCursor =
+      postsResult.length === limit && lastFetchedPost
+        ? `${new Date(lastFetchedPost.timestamp).toISOString()}_${lastFetchedPost.id}`
+        : null;
+
     const followingRes = NextResponse.json({
       success: true,
       posts: formattedFollowingPosts,
       limit,
       source: 'following',
+      nextCursor: followingNextCursor,
     });
     // Personalized (follows + moderation): never cacheable by shared caches.
     if (rateLimitInfo) addPrivateReadHeaders(followingRes, rateLimitInfo);
