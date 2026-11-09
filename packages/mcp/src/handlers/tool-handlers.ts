@@ -39,9 +39,13 @@ import {
 } from '@feed/a2a';
 import {
   acceptGroupInvite,
+  BusinessLogicError,
   checkRateLimitAsync,
   declineGroupInvite,
   logAdminModify,
+  NotFoundError,
+  notifyReactionOnComment,
+  notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
   sharePost,
@@ -1359,12 +1363,34 @@ export async function executeDeletePost(
 }
 
 /**
- * Execute like_post tool
+ * Execute like_post tool (same rules as the web like route: the post must
+ * exist, be published and not deleted; a fresh like notifies the author).
  */
 export async function executeLikePost(
   agent: AuthenticatedAgent,
   args: LikePostArgs
 ): Promise<LikePostResult> {
+  const now = new Date();
+  const [post] = await db
+    .select({
+      id: posts.id,
+      authorId: posts.authorId,
+      deletedAt: posts.deletedAt,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(eq(posts.id, args.postId))
+    .limit(1);
+
+  // Unknown or not-yet-published posts cannot be liked (and are never
+  // created from the ID).
+  if (!post || post.timestamp > now) {
+    throw new NotFoundError('Post', args.postId);
+  }
+  if (post.deletedAt) {
+    throw new BusinessLogicError('Cannot like deleted post', 'POST_DELETED');
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       postId: args.postId,
@@ -1383,6 +1409,30 @@ export async function executeLikePost(
       type: 'like',
     },
   });
+
+  // The like has committed. A notification outage must not tell the caller
+  // that the like failed and invite an unsuccessful retry.
+  if (post.authorId && post.authorId !== agent.userId) {
+    try {
+      await notifyReactionOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        'like'
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed like',
+        {
+          postId: args.postId,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return { success: true, liked: true };
 }
 
@@ -1512,12 +1562,35 @@ export async function executeDeleteComment(
 }
 
 /**
- * Execute like_comment tool
+ * Execute like_comment tool (same rules as the web comment like route: the
+ * comment must exist and not be soft-deleted; a fresh like notifies the
+ * comment author).
  */
 export async function executeLikeComment(
   agent: AuthenticatedAgent,
   args: LikeCommentArgs
 ): Promise<LikeCommentResult> {
+  const comment = await db.comment.findFirst({
+    where: { id: args.commentId },
+  });
+
+  // Unknown comments cannot be liked (and are never created from the ID:
+  // reactions.commentId has no foreign key, so an unchecked like would
+  // become an orphan row).
+  if (!comment) {
+    throw new NotFoundError('Comment', args.commentId);
+  }
+
+  // Soft-deleted (moderated) comments are hidden everywhere, so they cannot
+  // collect new likes — the web comment like route applies the same rule
+  // (COMMENT_DELETED), as does the A2A likeComment executor.
+  if (comment.deletedAt) {
+    throw new BusinessLogicError(
+      'Cannot like deleted comment',
+      'COMMENT_DELETED'
+    );
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       commentId: args.commentId,
@@ -1534,6 +1607,30 @@ export async function executeLikeComment(
         type: 'like',
       },
     });
+
+    // The like has committed. A notification outage must not tell the
+    // caller that the like failed and invite an unsuccessful retry.
+    if (comment.authorId && comment.authorId !== agent.userId) {
+      try {
+        await notifyReactionOnComment(
+          comment.authorId,
+          agent.userId,
+          args.commentId,
+          comment.postId,
+          'like'
+        );
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed comment like',
+          {
+            commentId: args.commentId,
+            userId: agent.userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'MCP'
+        );
+      }
+    }
   }
   return { success: true };
 }
