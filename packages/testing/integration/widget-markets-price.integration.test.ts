@@ -14,18 +14,33 @@
  *
  * The widget route instead divided the YES side's own shares by the total,
  * which is 1 − price: a market seeded at an 80% YES probability was shown in
- * the sidebar as "Yes 20% / No 80%", and its 24h change carried the opposite
- * sign (a rise from 50% to 80% was reported as −60% instead of +60%), so the
- * panel's Top Movers section promoted fallers as if the price had moved the
- * other way. The amounts are not stale — the cache is 60s — they are the
- * complement of the real price on every read.
+ * the sidebar as "Yes 20% / No 80%".
+ *
+ * The 24h change is read from the canonical recorded price history
+ * (PredictionPriceHistory): the latest snapshot at or before 24h ago is the
+ * baseline. A market with no snapshot that old reports no change. The past
+ * pool is never reconstructed from positions — held shares are not the
+ * inverse pool delta. A real YES buy of 1000 on a 5000/5000 pool leaves
+ * 4166.6667/6000 and 1833.3333 held shares; subtracting the held shares
+ * invents a past pool of 2333.3333/6000 (price 0.72) and reports −18.03%
+ * for a price that actually rose 0.5 → 0.590164 (+18.03%).
  *
  * Fixtures are built with the real creation path
  * (PredictionDbAdapter.createMarketFromQuestion with an explicit initial
- * probability) and, for the third case, a real trade through
- * PredictionMarketService. The only stub is the `server-only` marker package
- * and, for the trade, the wallet port (the market-engine integration
- * precedent); pool state, positions, and both routes run for real.
+ * probability) and real trades through PredictionMarketService. The only stub
+ * is the `server-only` marker package and, for the trades, the wallet port
+ * (the market-engine integration precedent); pool state, positions, price
+ * history, and both routes run for real.
+ *
+ * The widget's application cache is five minutes (DEFAULT_TTLS.WIDGET);
+ * Next revalidate is 60s — neither is the cause of the wrong values.
+ *
+ * Ownership: every row this file creates is recorded from its RETURNING
+ * clause, and teardown deletes only those owned rows — including the
+ * PredictionPriceHistory rows the real trades write, which have no
+ * cascading FK — then verifies zero rows remain. A setup collision (a
+ * second insert under an owned id) must reject instead of silently
+ * reusing or overwriting the fixture.
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
@@ -42,6 +57,7 @@ import {
   inArray,
   markets,
   positions,
+  predictionPriceHistories,
   questions,
   users,
 } from '@feed/db';
@@ -66,10 +82,14 @@ const suffix = crypto.randomUUID().slice(0, 8);
 const userId = `f43-wmp-user-${suffix}`;
 const skewedId = `f43-wmp-skewed-${suffix}`;
 const evenId = `f43-wmp-even-${suffix}`;
-const tradedId = `f43-wmp-traded-${suffix}`;
-const positionId = `f43-wmp-pos-${suffix}`;
-const questionIds = [skewedId, evenId, tradedId];
+const tradedBuyId = `f43-wmp-traded-buy-${suffix}`;
+const tradedSellId = `f43-wmp-traded-sell-${suffix}`;
 let questionNumber = 1_900_000_000 + Math.floor(Math.random() * 100_000_000);
+
+// Rows this file owns, recorded from each insert's RETURNING clause.
+// Teardown deletes only these — never the preallocated ids as such.
+const ownedQuestionIds: string[] = [];
+let ownedUserId: string | null = null;
 
 async function fetchWidget() {
   const response = await widgetGET(
@@ -103,13 +123,43 @@ async function createMarket(
       status: 'active',
       updatedAt: new Date(),
     })
-    .returning();
+    .returning({ id: questions.id });
   if (!question) throw new Error(`question insert failed for ${id}`);
+  ownedQuestionIds.push(question.id);
   await new PredictionDbAdapter().createMarketFromQuestion(
     { ...question, status: 'active' as const },
     10000,
     { initialYesProbability }
   );
+}
+
+/**
+ * Seed the recorded price 24h+ ago for a market: a PredictionPriceHistory
+ * row just outside the window, so the widget's baseline is a real recorded
+ * price rather than a reconstructed pool. Market creation writes no
+ * snapshot, so the baseline is seeded explicitly.
+ */
+async function seedBaselineHistory(
+  label: string,
+  marketId: string,
+  yesPrice: number
+): Promise<void> {
+  const [row] = await db
+    .insert(predictionPriceHistories)
+    .values({
+      id: `f43-wmp-hist-${label}-${suffix}`,
+      marketId,
+      yesPrice,
+      noPrice: 1 - yesPrice,
+      yesShares: '5000',
+      noShares: '5000',
+      liquidity: '10000',
+      eventType: 'trade',
+      source: 'system',
+      createdAt: new Date(Date.now() - 25 * 3600 * 1000),
+    })
+    .returning({ id: predictionPriceHistories.id });
+  if (!row) throw new Error(`history seed failed for ${marketId}`);
 }
 
 beforeAll(async () => {
@@ -120,35 +170,31 @@ beforeAll(async () => {
     '../../../apps/web/src/app/api/markets/predictions/[id]/route'
   ));
 
-  await db.insert(users).values({
-    id: userId,
-    username: `f43wmp-${suffix}`,
-    displayName: 'Widget Price Fixture User',
-    updatedAt: new Date(),
-  });
+  const [user] = await db
+    .insert(users)
+    .values({
+      id: userId,
+      username: `f43wmp-${suffix}`,
+      displayName: 'Widget Price Fixture User',
+      updatedAt: new Date(),
+    })
+    .returning({ id: users.id });
+  if (!user) throw new Error('user insert failed');
+  ownedUserId = user.id;
 
-  // Skewed pool: seeded at an 80% YES probability (yes 2000 / no 8000).
+  // Skewed pool: seeded at an 80% YES probability (yes 2000 / no 8000),
+  // with a recorded 0.5 price just outside the 24h window.
   await createMarket(skewedId, 0.8);
-  // Even pool: 50/50 — both price definitions agree, guard case.
+  await seedBaselineHistory('skewed', skewedId, 0.5);
+  // Even pool: 50/50 — both price definitions agree, guard case. No
+  // history is seeded, so no 24h change may be reported for it.
   await createMarket(evenId, 0.5);
-  // Traded pool: starts even, then a real YES buy moves the price up.
-  await createMarket(tradedId, 0.5);
-
-  // One NO position inside the 24h window for the skewed market. The
-  // widget's lookback subtracts it, estimating the past pool at
-  // yes 2000 / no 2000, so the canonical change is 0.5 -> 0.8 = +60%
-  // (the flipped definition reports 0.5 -> 0.2 = -60%).
-  await db.insert(positions).values({
-    id: positionId,
-    userId,
-    marketId: skewedId,
-    side: false,
-    shares: '6000',
-    avgPrice: '0.500000',
-    amount: '3000.00',
-    status: 'active',
-    updatedAt: new Date(),
-  });
+  // Traded pools: start even, with a recorded 0.5 price just outside
+  // the 24h window; then real trades move the price up.
+  await createMarket(tradedBuyId, 0.5);
+  await seedBaselineHistory('buy', tradedBuyId, 0.5);
+  await createMarket(tradedSellId, 0.5);
+  await seedBaselineHistory('sell', tradedSellId, 0.5);
 
   const service = new PredictionMarketService({
     db: new PredictionDbAdapter(),
@@ -156,7 +202,7 @@ beforeAll(async () => {
       debit: async () => {},
       credit: async () => {},
       recordPnL: async () => {},
-      getBalance: async () => 1_000_000,
+      getBalance: async () => ({ balance: 1_000_000 }),
     },
     fees: {
       tradingFeeRate: 0.001,
@@ -166,30 +212,81 @@ beforeAll(async () => {
     },
   });
   await service.buy({
-    marketId: tradedId,
+    marketId: tradedBuyId,
     userId,
     amount: 1000,
     side: 'yes',
   });
+  const sellBuy = await service.buy({
+    marketId: tradedSellId,
+    userId,
+    amount: 1000,
+    side: 'yes',
+  });
+  await service.sell({
+    marketId: tradedSellId,
+    userId,
+    shares: 500,
+    positionId: sellBuy.positionId,
+  });
 });
 
 afterAll(async () => {
+  // Delete only owned rows, in dependency order. The real trades also
+  // wrote PredictionPriceHistory rows (no cascading FK), so history for
+  // owned markets goes first. Any failure throws — cleanup is never
+  // swallowed — and the zero-check below proves nothing is left behind.
+  await db
+    .delete(predictionPriceHistories)
+    .where(inArray(predictionPriceHistories.marketId, ownedQuestionIds));
   await db
     .delete(positions)
-    .where(inArray(positions.marketId, questionIds))
-    .catch(() => {});
-  await db
+    .where(inArray(positions.marketId, ownedQuestionIds));
+  const deletedMarkets = await db
     .delete(markets)
-    .where(inArray(markets.id, questionIds))
-    .catch(() => {});
-  await db
+    .where(inArray(markets.id, ownedQuestionIds))
+    .returning({ id: markets.id });
+  expect(deletedMarkets.length).toBe(ownedQuestionIds.length);
+  const deletedQuestions = await db
     .delete(questions)
-    .where(inArray(questions.id, questionIds))
-    .catch(() => {});
-  await db
-    .delete(users)
-    .where(eq(users.id, userId))
-    .catch(() => {});
+    .where(inArray(questions.id, ownedQuestionIds))
+    .returning({ id: questions.id });
+  expect(deletedQuestions.length).toBe(ownedQuestionIds.length);
+  if (ownedUserId) {
+    const deletedUsers = await db
+      .delete(users)
+      .where(eq(users.id, ownedUserId))
+      .returning({ id: users.id });
+    expect(deletedUsers.length).toBe(1);
+  }
+
+  const leftoverHistory = await db
+    .select({ id: predictionPriceHistories.id })
+    .from(predictionPriceHistories)
+    .where(inArray(predictionPriceHistories.marketId, ownedQuestionIds));
+  expect(leftoverHistory).toHaveLength(0);
+  const leftoverPositions = await db
+    .select({ id: positions.id })
+    .from(positions)
+    .where(inArray(positions.marketId, ownedQuestionIds));
+  expect(leftoverPositions).toHaveLength(0);
+  const leftoverMarkets = await db
+    .select({ id: markets.id })
+    .from(markets)
+    .where(inArray(markets.id, ownedQuestionIds));
+  expect(leftoverMarkets).toHaveLength(0);
+  const leftoverQuestions = await db
+    .select({ id: questions.id })
+    .from(questions)
+    .where(inArray(questions.id, ownedQuestionIds));
+  expect(leftoverQuestions).toHaveLength(0);
+  if (ownedUserId) {
+    const leftoverUsers = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, ownedUserId));
+    expect(leftoverUsers).toHaveLength(0);
+  }
 });
 
 describe('markets widget prices', () => {
@@ -207,30 +304,81 @@ describe('markets widget prices', () => {
     expect(row?.noPrice).toBeCloseTo(0.2, 10);
   });
 
-  it('reports the 24h change with the canonical sign', async () => {
+  it('reports the 24h change from the recorded price history', async () => {
     const widget = await fetchWidget();
     const row = widget.markets.find((m) => m.id === skewedId);
     expect(row?.changePercent24h).toBeDefined();
+    // Recorded 0.5 -> current 0.8.
     expect(row?.changePercent24h ?? 0).toBeCloseTo(60, 6);
   });
 
-  it('keeps an even market at 50/50 (guard)', async () => {
+  it('keeps an even market at 50/50 and reports no change without history (guard)', async () => {
     const widget = await fetchWidget();
     const row = widget.markets.find((m) => m.id === evenId);
     expect(row).toBeDefined();
     expect(row?.yesPrice).toBeCloseTo(0.5, 10);
     expect(row?.noPrice).toBeCloseTo(0.5, 10);
+    expect(row?.changePercent24h).toBeUndefined();
   });
 
-  it('tracks a real trade: widget price rises with the detail price', async () => {
+  it('tracks a real buy: widget change matches the detail price move', async () => {
     const [widget, detail] = await Promise.all([
       fetchWidget(),
-      fetchDetail(tradedId),
+      fetchDetail(tradedBuyId),
     ]);
-    const row = widget.markets.find((m) => m.id === tradedId);
+    const row = widget.markets.find((m) => m.id === tradedBuyId);
     expect(row).toBeDefined();
     expect(detail.market.yesProbability).toBeGreaterThan(0.5);
     expect(row?.yesPrice).toBeCloseTo(detail.market.yesProbability, 10);
     expect(row?.yesPrice ?? 0).toBeGreaterThan(0.5);
+    // Recorded 0.5 baseline -> current detail price: a real YES buy
+    // must read as a rise, not a fall.
+    expect(row?.changePercent24h).toBeDefined();
+    const expected = ((detail.market.yesProbability - 0.5) / 0.5) * 100;
+    expect(row?.changePercent24h ?? 0).toBeCloseTo(expected, 6);
+    expect(row?.changePercent24h ?? 0).toBeGreaterThan(0);
+  });
+
+  it('tracks a real buy then sell: change stays positive and matches the detail price', async () => {
+    const [widget, detail] = await Promise.all([
+      fetchWidget(),
+      fetchDetail(tradedSellId),
+    ]);
+    const row = widget.markets.find((m) => m.id === tradedSellId);
+    expect(row).toBeDefined();
+    expect(detail.market.yesProbability).toBeGreaterThan(0.5);
+    expect(row?.yesPrice).toBeCloseTo(detail.market.yesProbability, 10);
+    const expected = ((detail.market.yesProbability - 0.5) / 0.5) * 100;
+    expect(row?.changePercent24h).toBeDefined();
+    expect(row?.changePercent24h ?? 0).toBeCloseTo(expected, 6);
+    expect(row?.changePercent24h ?? 0).toBeGreaterThan(0);
+    // The partial sell pulled the price back from the buy-only level.
+    const buyOnly = widget.markets.find((m) => m.id === tradedBuyId);
+    expect(buyOnly?.changePercent24h).toBeDefined();
+    expect(row?.changePercent24h ?? 0).toBeLessThan(
+      buyOnly?.changePercent24h ?? 0
+    );
+  });
+
+  it('setup collision: a second insert under an owned id rejects', async () => {
+    await expect(
+      db.insert(questions).values({
+        id: skewedId,
+        questionNumber: questionNumber++,
+        text: 'Widget price fixture collision',
+        scenarioId: 1,
+        outcome: false,
+        rank: 1,
+        resolutionDate: new Date(Date.now() + 7 * 86400000),
+        status: 'active',
+        updatedAt: new Date(),
+      })
+    ).rejects.toThrow();
+    // The original fixture row is untouched by the rejected insert.
+    const rows = await db
+      .select({ id: markets.id })
+      .from(markets)
+      .where(eq(markets.id, skewedId));
+    expect(rows).toHaveLength(1);
   });
 });
