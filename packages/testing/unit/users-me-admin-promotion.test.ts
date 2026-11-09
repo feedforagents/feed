@@ -76,6 +76,7 @@ function baseUser(overrides: Row): Row {
     createdAt: now,
     updatedAt: now,
     gameGuideCompletedAt: null,
+    tosAcceptedAt: null,
     ...overrides,
   };
 }
@@ -113,6 +114,21 @@ describe('GET /api/users/me admin promotion', () => {
 
     expect(updatePayloads).toHaveLength(1);
     expect(updatePayloads[0]!.isAdmin).toBe(true);
+  });
+
+  test('returns persisted Terms acceptance and keeps absent acceptance null', async () => {
+    const acceptedAt = new Date('2026-02-03T04:05:06.000Z');
+    for (const timestamp of [acceptedAt, null]) {
+      storedUser = baseUser({ tosAcceptedAt: timestamp });
+      const response = await GET(
+        new NextRequest('https://feed.fun/api/users/me')
+      );
+      const body = (await response.json()) as {
+        user: { tosAcceptedAt: string | null };
+      };
+      expect(body.user.tosAcceptedAt).toBe(timestamp?.toISOString() ?? null);
+    }
+    expect(updatePayloads).toHaveLength(0);
   });
 
   test('existing admins are left untouched', async () => {

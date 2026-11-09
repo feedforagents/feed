@@ -236,6 +236,7 @@ export function OnboardingProvider({
             profileImageUrl?: string;
             coverImageUrl?: string;
             profileComplete?: boolean;
+            tosAcceptedAt?: string | null;
             reputationPoints?: number;
             hasTwitter?: boolean;
             twitterUsername?: string;
@@ -255,6 +256,7 @@ export function OnboardingProvider({
             coverImageUrl:
               u.coverImageUrl ?? payload.coverImageUrl ?? undefined,
             profileComplete: u.profileComplete ?? true,
+            tosAcceptedAt: u.tosAcceptedAt ?? null,
             reputationPoints: u.reputationPoints ?? user?.reputationPoints,
             hasTwitter: u.hasTwitter ?? user?.hasTwitter,
             twitterUsername: u.twitterUsername ?? user?.twitterUsername,

@@ -119,6 +119,7 @@ import {
   OnboardingProfileSchema,
   POINTS,
   toISO,
+  toISOOrNull,
 } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -623,6 +624,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       coverImageUrl: result.user.coverImageUrl,
       walletAddress: result.user.walletAddress,
       profileComplete: result.user.profileComplete,
+      tosAcceptedAt: toISOOrNull(result.user.tosAcceptedAt),
       hasUsername: result.user.hasUsername,
       hasBio: result.user.hasBio,
       hasProfileImage: result.user.hasProfileImage,

@@ -213,6 +213,21 @@ describe('POST /api/users/signup', () => {
     expect('reputationPoints' in updatePayloads[0]!).toBe(false);
   });
 
+  test('returns the persisted Terms timestamp without inventing acceptance on profile completion', async () => {
+    const acceptedAt = new Date('2026-02-03T04:05:06.000Z');
+    for (const timestamp of [acceptedAt, null]) {
+      queueExistingUser({ ...baseExistingUser, tosAcceptedAt: timestamp });
+      const response = await POST(
+        signupRequest({ username: 'alice', displayName: 'Alice' })
+      );
+      const body = (await response.json()) as {
+        user: { tosAcceptedAt: string | null };
+      };
+      expect(body.user.tosAcceptedAt).toBe(timestamp?.toISOString() ?? null);
+      expect('tosAcceptedAt' in updatePayloads.at(-1)!).toBe(false);
+    }
+  });
+
   test('new waitlist users are created with the waitlist starting balance', async () => {
     selectQueue.push([], [], []);
 

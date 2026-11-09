@@ -157,6 +157,7 @@ const userSelectFields = {
   emailNotificationsWeeklySummary: users.emailNotificationsWeeklySummary,
   emailNotificationsMonthlySummary: users.emailNotificationsMonthlySummary,
   profileComplete: users.profileComplete,
+  tosAcceptedAt: users.tosAcceptedAt,
   hasUsername: users.hasUsername,
   hasBio: users.hasBio,
   hasProfileImage: users.hasProfileImage,
@@ -199,6 +200,7 @@ type UserSelectResult = {
   emailNotificationsWeeklySummary: boolean;
   emailNotificationsMonthlySummary: boolean;
   profileComplete: boolean;
+  tosAcceptedAt: Date | null;
   hasUsername: boolean;
   hasBio: boolean;
   hasProfileImage: boolean;
@@ -245,6 +247,7 @@ function buildUserResponse(
     emailNotificationsWeeklySummary: dbUser.emailNotificationsWeeklySummary,
     emailNotificationsMonthlySummary: dbUser.emailNotificationsMonthlySummary,
     profileComplete: dbUser.profileComplete,
+    tosAcceptedAt: toISOOrNull(dbUser.tosAcceptedAt),
     hasUsername: dbUser.hasUsername,
     hasBio: dbUser.hasBio,
     hasProfileImage: dbUser.hasProfileImage,
