@@ -304,7 +304,7 @@ export function LoginModal({
       }}
     >
       <DialogContent
-        className="ph-no-capture p-8 sm:max-w-sm"
+        className="ph-no-capture max-h-[calc(100dvh_-_2rem)] overflow-y-auto p-8 sm:max-w-sm"
         data-private
         data-feed-auth-open
         id={dialogId}
