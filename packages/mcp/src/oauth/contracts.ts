@@ -73,9 +73,7 @@ export function validRedirect(uri: string): boolean {
     !url.username &&
     !url.password &&
     !url.hash &&
-    (url.protocol === 'https:' ||
-      (url.protocol === 'http:' &&
-        (isLoopback(url) || url.hostname === 'localhost')))
+    (url.protocol === 'https:' || (url.protocol === 'http:' && isLoopback(url)))
   );
 }
 export function redirectMatches(
