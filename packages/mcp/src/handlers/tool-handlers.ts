@@ -2361,8 +2361,27 @@ export async function executeGetNotifications(
   agent: AuthenticatedAgent,
   args: GetNotificationsArgs
 ): Promise<GetNotificationsResult> {
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedActorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const notificationsList = await db.notification.findMany({
-    where: { userId: agent.userId },
+    where: {
+      userId: agent.userId,
+      // Match web notification visibility before taking the requested window.
+      // Existing notifications must disappear after a block or mute; system
+      // notifications have no actor and remain visible.
+      ...(excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {}),
+    },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 100,
   });
