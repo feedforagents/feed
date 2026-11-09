@@ -362,11 +362,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       groupChatMessages.map(({ chatId, messages }) => [chatId, messages])
     );
 
-    // Get DM chats the user participates in. Only active memberships
-    // count: leaving a chat (web, MCP, or A2A) marks the participant row
-    // inactive, and every other chat surface — the chat detail route,
-    // the A2A chat list, the DM service — treats an inactive row as no
-    // longer a member.
+    // Agent leave actions retain inactive participant rows. Only active
+    // viewer memberships should contribute DMs to this list.
     const dmParticipantsList = await dbClient
       .select()
       .from(chatParticipants)
