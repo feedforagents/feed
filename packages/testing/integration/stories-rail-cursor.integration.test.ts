@@ -9,7 +9,6 @@ test('stories rail cursor traversal delivers every story exactly once', async ()
   const child = Bun.spawn(
     [
       process.execPath,
-      '--config=/dev/null',
       '--no-env-file',
       resolve(import.meta.dir, 'helpers/stories-rail-cursor-fixture.ts'),
     ],
@@ -42,8 +41,10 @@ test('stories rail cursor traversal delivers every story exactly once', async ()
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ]);
-    assert.equal(code, 0, `${stdout}\n${stderr}`);
+    // Check the marker first: a child that printed OK but never exited is
+    // reported as a clean assertion with stdout, not a 60 s wall.
     assert.ok(stdout.includes('STORIES_RAIL_FIXTURE_OK rail'), stdout);
+    assert.equal(code, 0, `${stdout}\n${stderr}`);
   } finally {
     clearTimeout(timeout);
   }

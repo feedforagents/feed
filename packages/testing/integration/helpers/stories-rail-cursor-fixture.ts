@@ -168,3 +168,10 @@ try {
   await db.delete(users).where(inArray(users.id, [authorId]));
   await closeDatabase();
 }
+
+// The stories route import chain leaves the Bun event loop alive after the
+// database is closed (the sibling stories-test-authors fixture exits the
+// same way), so exit explicitly: without this the child never terminates,
+// the test's 55 s watchdog kill (SIGTERM) does not stop it either, and the
+// test times out at 60 s even though every assertion passed.
+process.exit(0);
