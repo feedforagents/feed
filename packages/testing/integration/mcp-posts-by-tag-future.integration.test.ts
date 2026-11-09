@@ -1,135 +1,303 @@
 /**
- * MCP get_posts_by_tag against a real database: the MCP posts-by-tag
- * tool must apply the same time rule as the web tag surface.
- *
- * The web surface for a tag (GET /api/trending/[tag], backed by the
- * engine's getPostsByTag) states the rule in code: "Deleted and
- * future-dated posts are excluded from both the page and the total so
- * pagination and counts agree", filtering posts with deletedAt IS NULL
- * and timestamp <= now. The API-wide time-filtering test bundle states
- * the same rule: "APIs should not expose future posts or events." The
- * MCP tool handler (packages/mcp executeGetPostsByTag) is a separate
- * implementation that filtered only deletedAt, so an MCP client asking
- * for a tag's posts received future-dated (scheduled, unpublished)
- * posts in full before their publication time.
- *
- * Requires DATABASE_URL pointing at a disposable database with schema applied.
+ * PRD §§8.1–8.2/12 retain consistent hashtag reads (MVP phases 3/5).
+ * Real database evidence for eligibility before pagination and stable ties.
  */
-
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { db, inArray, posts, postTags, tags, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { executeGetPostsByTag } from '../../mcp/src/handlers/tool-handlers';
 
-let authorId: string;
-let tagId: string;
-let tagName: string;
+const owned = {
+  users: [] as string[],
+  tags: [] as string[],
+  posts: [] as string[],
+  memberships: [] as string[],
+};
+let authorId = '';
+let tagName = '';
+let tiedTagName = '';
+let emptyTagName = '';
+const visibleIds: string[] = [];
+const tiedIds: string[] = [];
+const excludedIds: string[] = [];
 
-let pastPostId: string;
-let futurePostId: string;
-let deletedPostId: string;
-let untaggedPostId: string;
+async function insertUsers(
+  rows: Array<typeof users.$inferInsert>,
+  ids = owned.users
+) {
+  const inserted = await db
+    .insert(users)
+    .values(rows)
+    .returning({ id: users.id });
+  ids.push(...inserted.map((row) => row.id));
+}
 
-const allPostIds: string[] = [];
-
-async function fetchPostsByTag() {
-  const result = await executeGetPostsByTag(
-    { agentId: 'agent', userId: authorId } as never,
-    { tag: tagName, limit: 50, offset: 0 }
-  );
-  return result.posts;
+async function fetchPosts(tag = tagName, limit?: number, offset?: number) {
+  return (
+    await executeGetPostsByTag(
+      { agentId: authorId, userId: authorId },
+      { tag, limit, offset }
+    )
+  ).posts;
 }
 
 beforeAll(async () => {
-  [authorId, tagId, pastPostId, futurePostId, deletedPostId, untaggedPostId] =
-    await Promise.all(Array.from({ length: 6 }, () => generateSnowflakeId()));
-  allPostIds.push(pastPostId, futurePostId, deletedPostId, untaggedPostId);
-  tagName = `f21tag${tagId}`;
-
+  authorId = await generateSnowflakeId();
+  const tagId = await generateSnowflakeId();
+  const tiedTagId = await generateSnowflakeId();
+  const emptyTagId = await generateSnowflakeId();
+  tagName = `mcp1674${tagId}`;
+  tiedTagName = `mcp1674${tiedTagId}`;
+  emptyTagName = `mcp1674${emptyTagId}`;
   const now = new Date();
-  await db.insert(users).values([
+  await insertUsers([
     {
       id: authorId,
-      username: `test-f21-author-${authorId}`,
-      displayName: 'F21 Author',
-      reputationPoints: 0,
+      username: `mcp1674-${authorId}`,
+      displayName: 'MCP tag reader',
       updatedAt: now,
     },
   ]);
-
-  await db.insert(tags).values([
-    {
-      id: tagId,
-      name: tagName,
-      displayName: 'F21 Tag',
-      updatedAt: now,
-    },
-  ]);
-
-  const past = new Date(now.getTime() - 60 * 60 * 1000);
-  const future = new Date(now.getTime() + 2 * 60 * 60 * 1000);
-  await db.insert(posts).values([
-    {
-      id: pastPostId,
+  const insertedTags = await db
+    .insert(tags)
+    .values([
+      { id: tagId, name: tagName, displayName: 'MCP tag', updatedAt: now },
+      {
+        id: tiedTagId,
+        name: tiedTagName,
+        displayName: 'MCP tied tag',
+        updatedAt: now,
+      },
+      {
+        id: emptyTagId,
+        name: emptyTagName,
+        displayName: 'MCP empty tag',
+        updatedAt: now,
+      },
+    ])
+    .returning({ id: tags.id });
+  owned.tags.push(...insertedTags.map((row) => row.id));
+  const rows: Array<typeof posts.$inferInsert> = [];
+  const memberships: Array<typeof postTags.$inferInsert> = [];
+  for (let index = 0; index < 3; index++) {
+    const id = await generateSnowflakeId();
+    visibleIds.push(id);
+    rows.push({
+      id,
       authorId,
-      content: 'f21 past post',
-      timestamp: past,
+      content: `Published MCP tag fixture ${index}`,
+      timestamp: new Date(now.getTime() - (index + 3) * 3_600_000),
+      type: 'post',
+    });
+    memberships.push({
+      id: `pt-${id}`,
+      tagId,
+      postId: id,
+      createdAt: new Date(now.getTime() - (index + 5) * 60_000),
+    });
+  }
+  const futureId = await generateSnowflakeId();
+  const deletedId = await generateSnowflakeId();
+  const articleId = await generateSnowflakeId();
+  const untaggedId = await generateSnowflakeId();
+  visibleIds.unshift(articleId);
+  excludedIds.push(futureId, deletedId, untaggedId);
+  rows.push(
+    {
+      id: futureId,
+      authorId,
+      content: 'Unpublished MCP tag fixture',
+      timestamp: new Date(now.getTime() + 86_400_000),
       type: 'post',
     },
     {
-      id: futurePostId,
+      id: deletedId,
       authorId,
-      content: 'f21 future scheduled post',
-      timestamp: future,
+      content: 'Deleted MCP tag fixture',
+      timestamp: new Date(now.getTime() - 60_000),
+      deletedAt: now,
       type: 'post',
     },
     {
-      id: deletedPostId,
+      id: articleId,
       authorId,
-      content: 'f21 soft deleted post',
-      timestamp: past,
-      type: 'post',
-      deletedAt: past,
+      content: 'Published tagged article fixture',
+      articleTitle: 'MCP tagged article',
+      timestamp: new Date(now.getTime() - 120_000),
+      type: 'article',
     },
     {
-      id: untaggedPostId,
+      id: untaggedId,
       authorId,
-      content: 'f21 untagged past post',
-      timestamp: past,
+      content: 'Untagged MCP fixture',
+      timestamp: new Date(now.getTime() - 60_000),
       type: 'post',
-    },
-  ]);
-
-  await db.insert(postTags).values([
-    { id: `pt-${pastPostId}`, postId: pastPostId, tagId },
-    { id: `pt-${futurePostId}`, postId: futurePostId, tagId },
-    { id: `pt-${deletedPostId}`, postId: deletedPostId, tagId },
-  ]);
+    }
+  );
+  for (const [index, postId] of [futureId, deletedId, articleId].entries()) {
+    memberships.push({
+      id: `pt-${postId}`,
+      postId,
+      tagId,
+      createdAt: new Date(now.getTime() - index * 60_000),
+    });
+  }
+  const tiedTime = new Date(now.getTime() - 60_000);
+  for (let index = 0; index < 12; index++) {
+    const id = await generateSnowflakeId();
+    tiedIds.push(id);
+    rows.push({
+      id,
+      authorId,
+      content: `Tied MCP fixture ${index}`,
+      timestamp: tiedTime,
+      type: 'post',
+    });
+    memberships.push({
+      id: `pt-${id}`,
+      postId: id,
+      tagId: tiedTagId,
+      createdAt: tiedTime,
+    });
+  }
+  const insertedPosts = await db
+    .insert(posts)
+    .values(rows)
+    .returning({ id: posts.id });
+  owned.posts.push(...insertedPosts.map((row) => row.id));
+  const insertedMemberships = await db
+    .insert(postTags)
+    .values(memberships)
+    .returning({ id: postTags.id });
+  owned.memberships.push(...insertedMemberships.map((row) => row.id));
 });
 
 afterAll(async () => {
-  await db.delete(postTags).where(inArray(postTags.postId, allPostIds));
-  await db.delete(posts).where(inArray(posts.id, allPostIds));
-  await db.delete(tags).where(inArray(tags.id, [tagId]));
-  await db.delete(users).where(inArray(users.id, [authorId]));
+  if (owned.memberships.length)
+    await db.delete(postTags).where(inArray(postTags.id, owned.memberships));
+  if (owned.posts.length)
+    await db.delete(posts).where(inArray(posts.id, owned.posts));
+  if (owned.tags.length)
+    await db.delete(tags).where(inArray(tags.id, owned.tags));
+  if (owned.users.length)
+    await db.delete(users).where(inArray(users.id, owned.users));
 });
 
-describe('MCP get_posts_by_tag future-post rule', () => {
-  it('returns the visible past post and excludes the soft-deleted and untagged ones', async () => {
-    const result = await fetchPostsByTag();
-    const ids = result.map((p) => p.id);
-    expect(ids).toContain(pastPostId);
-    expect(ids).not.toContain(deletedPostId);
-    expect(ids).not.toContain(untaggedPostId);
+describe('MCP tag post eligibility and stable pages', () => {
+  it('retains published posts and articles while excluding future, deleted and untagged controls', async () => {
+    const result = await fetchPosts(tagName, 50, 0);
+    expect(result.map((post) => post.id)).toEqual(visibleIds);
+    for (const id of excludedIds)
+      expect(result.some((post) => post.id === id)).toBe(false);
+    for (const post of result) {
+      expect(Object.keys(post).sort()).toEqual([
+        'authorId',
+        'content',
+        'id',
+        'timestamp',
+      ]);
+      expect(post.authorId).toBe(authorId);
+      expect(Number.isFinite(Date.parse(post.timestamp))).toBe(true);
+    }
   });
 
-  it('does not return future-dated (unpublished) posts', async () => {
-    const result = await fetchPostsByTag();
-    const ids = result.map((p) => p.id);
-    expect(ids).not.toContain(futurePostId);
-    expect(result.map((p) => p.content)).not.toContain(
-      'f21 future scheduled post'
+  it('fills the first limit-one page despite newer ineligible memberships', async () => {
+    expect((await fetchPosts(tagName, 1, 0)).map((post) => post.id)).toEqual(
+      visibleIds.slice(0, 1)
     );
-    expect(ids).toEqual([pastPostId]);
+  });
+
+  it('walks every eligible post exactly once at page sizes one and two', async () => {
+    for (const limit of [1, 2]) {
+      const walked: string[] = [];
+      for (let offset = 0; offset < visibleIds.length; offset += limit) {
+        walked.push(
+          ...(await fetchPosts(tagName, limit, offset)).map((post) => post.id)
+        );
+      }
+      expect(walked).toEqual(visibleIds);
+      expect(new Set(walked).size).toBe(visibleIds.length);
+      expect(await fetchPosts(tagName, limit, visibleIds.length)).toEqual([]);
+    }
+  });
+
+  it('preserves explicit offsets and the default window', async () => {
+    expect((await fetchPosts(tagName, 2, 2)).map((post) => post.id)).toEqual(
+      visibleIds.slice(2)
+    );
+    expect((await fetchPosts()).map((post) => post.id)).toEqual(visibleIds);
+  });
+
+  it('walks post and membership timestamp ties once at sizes one, two and five', async () => {
+    const expected = [...tiedIds].sort().reverse();
+    for (const limit of [1, 2, 5]) {
+      const walked: string[] = [];
+      for (let offset = 0; offset < expected.length; offset += limit) {
+        walked.push(
+          ...(await fetchPosts(tiedTagName, limit, offset)).map(
+            (post) => post.id
+          )
+        );
+      }
+      console.info(
+        'MCP1674_TIE_WALK',
+        JSON.stringify({
+          limit,
+          expected: expected.length,
+          walked: walked.length,
+          unique: new Set(walked).size,
+        })
+      );
+      expect(walked).toEqual(expected);
+      expect(new Set(walked).size).toBe(expected.length);
+      expect(await fetchPosts(tiedTagName, limit, expected.length)).toEqual([]);
+    }
+  });
+
+  it('returns empty collections for an empty or missing tag', async () => {
+    expect(await fetchPosts(emptyTagName, 1, 0)).toEqual([]);
+    expect(await fetchPosts(`${emptyTagName}missing`, 1, 0)).toEqual([]);
+  });
+
+  it('does not claim a preexisting user after a failed atomic fixture insert', async () => {
+    const attempted: string[] = [];
+    const extraId = await generateSnowflakeId();
+    let uniqueViolation = false;
+    try {
+      await insertUsers(
+        [
+          {
+            id: extraId,
+            username: `mcp1674-${extraId}`,
+            updatedAt: new Date(),
+          },
+          {
+            id: authorId,
+            username: `mcp1674-collision-${extraId}`,
+            updatedAt: new Date(),
+          },
+        ],
+        attempted
+      );
+    } catch (error) {
+      if (typeof error !== 'object' || error === null || !('cause' in error))
+        throw error;
+      const cause = error.cause;
+      if (
+        typeof cause !== 'object' ||
+        cause === null ||
+        !('code' in cause) ||
+        cause.code !== '23505'
+      )
+        throw error;
+      uniqueViolation = true;
+    }
+    expect(uniqueViolation).toBe(true);
+    expect(attempted).toEqual([]);
+    const remaining = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(inArray(users.id, [authorId, extraId]));
+    expect(remaining.map((row) => row.id)).toEqual([authorId]);
   });
 });

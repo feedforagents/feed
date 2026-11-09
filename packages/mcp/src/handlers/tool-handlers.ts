@@ -44,6 +44,7 @@ import {
   logAdminModify,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
+  sharePost,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
@@ -64,6 +65,7 @@ import {
   markets,
   perpMarketSnapshots,
   posts,
+  postTags,
   users,
 } from '@feed/db';
 import {
@@ -301,6 +303,7 @@ async function checkMcpRateLimit(
     | 'close_position'
     | 'transfer'
     | 'post'
+    | 'share_post'
 ): Promise<void> {
   const configMap: Record<
     string,
@@ -312,6 +315,7 @@ async function checkMcpRateLimit(
     close_position: RATE_LIMIT_CONFIGS.CLOSE_POSITION,
     transfer: RATE_LIMIT_CONFIGS.DEFAULT, // Use default for transfers
     post: RATE_LIMIT_CONFIGS.CREATE_POST,
+    share_post: RATE_LIMIT_CONFIGS.SHARE_POST,
   };
   const config = configMap[operation];
   if (!config) return;
@@ -1401,21 +1405,20 @@ export async function executeUnlikePost(
 }
 
 /**
- * Execute share_post tool
+ * Execute share_post tool (canonical sharePost, same as the web share route)
  */
 export async function executeSharePost(
   agent: AuthenticatedAgent,
   args: SharePostArgs
 ): Promise<SharePostResult> {
-  const shareId = await generateSnowflakeId();
-  await db.share.create({
-    data: {
-      id: shareId,
-      userId: agent.userId,
-      postId: args.postId,
-    },
-  });
-  return { success: true, shareId };
+  await checkMcpRateLimit(agent.userId, 'share_post');
+  const result = await sharePost(agent.userId, args.postId, args.comment);
+  return {
+    success: true,
+    shareId: result.shareId,
+    repostId: result.repostId,
+    shareCount: result.shareCount,
+  };
 }
 
 /**
@@ -1548,26 +1551,25 @@ export async function executeGetPostsByTag(
   if (!tag) {
     return { posts: [] };
   }
-  const postTagsList = await db.postTag.findMany({
-    where: { tagId: tag.id },
-    take: args.limit || 20,
-    skip: args.offset || 0,
-    orderBy: { createdAt: 'desc' },
-  });
-  const postIds = postTagsList.map((pt) => pt.postId);
-  // Fetch the actual posts. Only posts up to the current time:
-  // future-dated posts are scheduled and must not be exposed early
-  // (the web tag surface applies the same timestamp bound).
-  const postsList = await db.post.findMany({
-    where: {
-      id: { in: postIds },
-      deletedAt: null,
-      timestamp: { lte: new Date() },
-    },
-    orderBy: { timestamp: 'desc' },
-  });
+  // Select the page after publication eligibility, so newer hidden
+  // memberships cannot consume its slots. Tagged articles remain supported.
+  const now = new Date();
+  const rows = await db
+    .select({ post: posts })
+    .from(postTags)
+    .innerJoin(posts, eq(postTags.postId, posts.id))
+    .where(
+      and(
+        eq(postTags.tagId, tag.id),
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now)
+      )
+    )
+    .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
+    .offset(args.offset || 0)
+    .limit(args.limit || 20);
   return {
-    posts: postsList.map((p) => ({
+    posts: rows.map(({ post: p }) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
