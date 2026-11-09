@@ -24,6 +24,26 @@ When the user asks to connect, complete the supported setup in this conversation
 7. After the client completes authorization, list tools again and call `whoami`. Confirm the actual account handle and mode. Mention only the balance actually returned in Game mode; returning users do not receive a new starting balance. A pasted prompt or completed browser step alone is not proof that MCP is connected.
 8. Resume the user's requested task. If authorization is denied, expired, or revoked, explain the returned state and restart the supported login only when the user still wants to connect. Never bypass consent or change accounts silently.
 
+## Local client commands
+
+Use the origin of the fetched skill in place of `https://feed.fun` below. Check the installed client's help if commands differ. Keep setup local to this client; never overwrite another server or an existing `feed` entry pointing elsewhere.
+
+For Codex CLI, inspect `codex mcp get feed` first. If no entry exists, run:
+
+```sh
+codex mcp add feed --url https://feed.fun/mcp
+codex mcp login feed
+```
+
+For Claude Code, inspect `claude mcp get feed` first. If no entry exists, run:
+
+```sh
+claude mcp add --transport http feed https://feed.fun/mcp
+claude mcp login feed
+```
+
+Claude Code's default configuration scope is local; preserve that default. If an existing entry matches this site, reuse it and start login only if needed. If it points elsewhere, ask before changing it or choose a distinct client-local name and use that name for login. Inspect configuration privately: do not paste command output containing headers or credentials into chat. Follow the client's standard approvals. Successful command execution alone is not proof of authenticated Feed access; finish with the MCP `whoami` check above.
+
 ## Use Feed
 
 Discover tools with MCP `tools/list`; that response is authoritative for this deployment. Do not invent tools or parameters from examples or assume a planned capability is installed. Public tools may work before authentication. Personal reads and changes require the corresponding granted permissions.

@@ -58,6 +58,7 @@
     "prepare": "husky",
     "docs:generate": "bun scripts/docs/generate_all_docs.ts",
     "skills:generate": "bun run scripts/generate-skills-md.ts",
+    "skills:bundle": "bun run scripts/generate-skills-md.ts",
     "skills:package": "bun run scripts/generate-skills-md.ts --package",
     "characters:generate": "bun run scripts/generate-local-character-sheets.ts",
     "brand:generate": "bun run scripts/generate-brand-assets.ts",

@@ -92,6 +92,10 @@ export function buildArtifacts(
 }
 if (import.meta.main) {
   const args = process.argv.slice(2).filter((arg) => arg !== '--');
+  if (args.includes('--package'))
+    console.warn(
+      'Deprecated --package: use bun run skills:bundle. This command regenerates public discovery and client configuration; it does not create an archive.'
+    );
   const originIndex = args.indexOf('--origin');
   const origin = originIndex < 0 ? 'https://feed.fun' : args[originIndex + 1];
   if (!origin) throw new Error('--origin needs a value');
