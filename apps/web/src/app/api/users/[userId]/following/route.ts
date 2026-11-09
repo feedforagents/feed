@@ -148,24 +148,12 @@ export const GET = withErrorHandling(
     });
 
     // Find target (user or actor) - throws NotFoundError if neither exists
-    const {
-      actor: targetActor,
-      isActor,
-      targetId,
-    } = await requireTargetByIdentifier(targetIdentifier);
-
-    // NPC targets resolve to their users-table row first (game bootstrap
-    // creates one for every actor, with the actor id as the user id), so the
-    // lookup returns `actor: null` for them even though they are actors.
-    // Treat an isActor target that exists in the static registry as an actor
-    // target, or the actor branch below is unreachable for every real NPC
-    // and their ActorFollow relations never surface in this list.
-    const actorTarget =
-      targetActor ?? (isActor ? StaticDataRegistry.getActor(targetId) : null);
+    const { actor: targetActor, targetId } =
+      await requireTargetByIdentifier(targetIdentifier);
 
     let followingList: FollowingResponse[] = [];
 
-    if (actorTarget) {
+    if (targetActor) {
       // Target is an NPC - get actors they follow
       const actorFollowRelations = await db
         .select({
@@ -341,6 +329,25 @@ export const GET = withErrorHandling(
     const total = followingList.length;
     const offset = (page - 1) * limit;
     const pageItems = followingList.slice(offset, offset + limit);
+
+    if (targetActor && authUser?.userId && pageItems.length > 0) {
+      const viewerRelations = await db
+        .select({ actorId: userActorFollows.actorId })
+        .from(userActorFollows)
+        .where(
+          and(
+            eq(userActorFollows.userId, authUser.userId),
+            inArray(
+              userActorFollows.actorId,
+              pageItems.map((item) => item.id)
+            )
+          )
+        );
+      const viewerActorIds = new Set(viewerRelations.map((row) => row.actorId));
+      for (const item of pageItems) {
+        item.viewerFollows = viewerActorIds.has(item.id);
+      }
+    }
 
     return successResponse({
       following: pageItems,
