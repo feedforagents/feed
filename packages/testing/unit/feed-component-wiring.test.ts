@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveFeedTab } from '../../../apps/web/src/app/feed/feed-tab';
 
 const ROOT = join(import.meta.dir, '..', '..', '..');
 const FEED_CLIENT_PATH = join(ROOT, 'apps/web/src/app/feed/FeedClient.tsx');
@@ -10,12 +11,16 @@ const COMPONENTS_INDEX_PATH = join(
 );
 
 describe('feed component wiring', () => {
-  it('defaults /feed to the For You tab', () => {
-    const source = readFileSync(FEED_CLIENT_PATH, 'utf8');
+  it('shows public Latest before sign-in and For You for an account without a chosen tab', () => {
+    expect(resolveFeedTab(null, false)).toBe('latest');
+    expect(resolveFeedTab(null, true)).toBe('forYou');
+  });
 
-    expect(source).toMatch(
-      /const \[tab,\s*setTab\] = useState<FeedTab>\('forYou'\)/
-    );
+  it('preserves the selected tab through account sign-in and sign-out', () => {
+    for (const tab of ['latest', 'forYou', 'following', 'stories'] as const) {
+      expect(resolveFeedTab(tab, false)).toBe(tab);
+      expect(resolveFeedTab(tab, true)).toBe(tab);
+    }
   });
 
   it('renders Stories through ForYouFeedList instead of the retired NarrativeStoryList', () => {

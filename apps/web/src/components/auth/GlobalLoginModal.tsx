@@ -1,15 +1,23 @@
 'use client';
 
 import { usePathname, useSearchParams } from 'next/navigation';
-import { Suspense, useEffect } from 'react';
+import { Suspense, useEffect, useRef } from 'react';
+import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
+import { useAuth } from '@/hooks/useAuth';
 import { useLoginModal } from '@/hooks/useLoginModal';
+import {
+  AGENT_INTRO_SEEN_KEY,
+  agentEntryView,
+} from '@/lib/onboarding/agent-entry';
+import { isPrivateAnalyticsPath } from '@/lib/posthog/privacy';
+import { readStorageItem, writeStorageItem } from '@/utils/browser-storage';
 import { LoginModal } from './LoginModal';
 
 /**
  * Global login modal content component.
  *
  * Connects to the global login modal state and displays LoginModal when needed.
- * Automatically hides on production home page unless dev mode is enabled.
+ * Keeps the prompt/sign-in dialog consistent across route transitions.
  * Uses Zustand store for global state management.
  *
  * @returns Global login modal element or null if hidden/not open
@@ -25,17 +33,16 @@ function GlobalLoginModalContent() {
     message,
   } = useLoginModal();
   const pathname = usePathname();
+  const { authenticated } = useAuth();
+  const { isLoading: checkingSession } = useStewardAuthContext();
+  const introduced = useRef(false);
   const searchParams = useSearchParams();
 
-  // Check if dev mode is enabled via URL parameter
-  const isDevMode = searchParams.get('dev') === 'true';
-
-  // Hide on production (feed.fun) on home page unless ?dev=true
-  const isProduction =
-    typeof window !== 'undefined' && window.location.hostname === 'feed.fun';
-  const isHomePage =
-    typeof window !== 'undefined' && window.location.pathname === '/';
-  const shouldHide = isProduction && isHomePage && !isDevMode;
+  const initialView = agentEntryView(
+    searchParams.get('onboardingPreview'),
+    process.env.NODE_ENV !== 'production' ||
+      process.env.NEXT_PUBLIC_DEPLOYMENT_ENV === 'staging'
+  );
 
   useEffect(() => {
     if (!queuedModal || pathname === '/') {
@@ -46,13 +53,42 @@ function GlobalLoginModalContent() {
     consumeQueuedLoginModal();
   }, [pathname, queuedModal, showLoginModal, consumeQueuedLoginModal]);
 
-  // If should be hidden, don't render anything
-  if (shouldHide) {
-    return null;
-  }
+  useEffect(() => {
+    if (
+      pathname !== '/feed' ||
+      checkingSession ||
+      authenticated ||
+      queuedModal ||
+      isOpen ||
+      introduced.current
+    )
+      return;
+    if (readStorageItem('localStorage', AGENT_INTRO_SEEN_KEY)) return;
+    introduced.current = true;
+    writeStorageItem('localStorage', AGENT_INTRO_SEEN_KEY, '1');
+    showLoginModal({
+      title: 'Welcome to Feed',
+      message: 'Sign in to play Feed from your account.',
+    });
+  }, [
+    pathname,
+    checkingSession,
+    authenticated,
+    queuedModal,
+    isOpen,
+    showLoginModal,
+  ]);
+
+  const pageOwnsAuthentication = isPrivateAnalyticsPath(pathname);
+  useEffect(() => {
+    if (pageOwnsAuthentication && (isOpen || queuedModal)) closeLoginModal();
+  }, [pageOwnsAuthentication, isOpen, queuedModal, closeLoginModal]);
+
+  if (pageOwnsAuthentication) return null;
 
   return (
     <LoginModal
+      initialView={initialView}
       isOpen={isOpen}
       onClose={closeLoginModal}
       title={title}
