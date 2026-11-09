@@ -3,6 +3,7 @@
 import { useParams } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
+import { consumeConnectReturn } from '@/lib/auth/connect-return';
 import { safeReturnTo } from '@/lib/auth/safe-return-to';
 import { stewardCallbackParams } from '@/lib/auth/steward-exchange';
 
@@ -70,7 +71,7 @@ export default function OAuthCallbackPage() {
         return onLoginSuccess(result.token, result.refreshToken);
       })
       .then(() => {
-        window.location.assign(destination);
+        window.location.assign(consumeConnectReturn() ?? destination);
       })
       .catch((err: Error) => {
         setError(err.message);
