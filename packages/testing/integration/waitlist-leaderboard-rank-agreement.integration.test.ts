@@ -18,6 +18,11 @@
  *
  * Both surfaces must share one total order: invite desc, reputation desc,
  * joinedAt asc, id asc.
+ *
+ * They must also see the same rows: the list excludes username-less
+ * signups (ne(username, '')), so the position counter mirrors that
+ * predicate — otherwise an active signup without a username is counted
+ * as ahead but never listed, and every rank below it is off by one.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
@@ -33,8 +38,11 @@ const SAME_REP_LATER = 'f104-d-samerep';
 const LOW_INVITE = 'f104-c-lowinvite';
 const TIE_A = 'f104-tie-a';
 const TIE_B = 'f104-tie-b';
+const BLANK_NAME = 'f104-z-blankname';
+const NULL_NAME = 'f104-z-nullname';
 
 const ALL_IDS = [REP_WINNER, EARLY, SAME_REP_LATER, LOW_INVITE, TIE_A, TIE_B];
+const EXTRA_IDS = [BLANK_NAME, NULL_NAME];
 
 function fixture(
   id: string,
@@ -69,11 +77,36 @@ beforeAll(async () => {
     // Exact triple tie (invite, reputation, joinedAt): id order decides.
     fixture(TIE_A, 10, 10, at(30_000), 5),
     fixture(TIE_B, 10, 10, at(30_000), 6),
+    // Active signups with no username: never listed, but the old counter
+    // counted them as ahead, shifting every rank below them by one.
+    // Invite points above every fixture so they sit ahead of the board.
+    {
+      id: BLANK_NAME,
+      username: '',
+      displayName: BLANK_NAME,
+      invitePoints: 500,
+      reputationPoints: 7,
+      isWaitlistActive: true,
+      waitlistPosition: 7,
+      waitlistJoinedAt: at(0),
+      updatedAt: at(0),
+    },
+    {
+      id: NULL_NAME,
+      username: null,
+      displayName: NULL_NAME,
+      invitePoints: 400,
+      reputationPoints: 7,
+      isWaitlistActive: true,
+      waitlistPosition: 8,
+      waitlistJoinedAt: at(0),
+      updatedAt: at(0),
+    },
   ]);
 });
 
 afterAll(async () => {
-  await db.delete(users).where(inArray(users.id, ALL_IDS));
+  await db.delete(users).where(inArray(users.id, [...ALL_IDS, ...EXTRA_IDS]));
 });
 
 describe('waitlist leaderboard list and position agree', () => {
@@ -106,6 +139,18 @@ describe('waitlist leaderboard list and position agree', () => {
     const listRank = new Map(board.map((entry) => [entry.id, entry.rank]));
 
     for (const id of [TIE_A, TIE_B]) {
+      const position = await WaitlistService.getWaitlistPosition(id);
+      expect(position?.leaderboardRank).toBe(listRank.get(id));
+    }
+  });
+
+  it('username-less active signups do not shift listed ranks', async () => {
+    const board = await WaitlistService.getTopWaitlistUsers(100, 0, 'invite');
+    const listRank = new Map(board.map((entry) => [entry.id, entry.rank]));
+    expect(listRank.has(BLANK_NAME)).toBe(false);
+    expect(listRank.has(NULL_NAME)).toBe(false);
+
+    for (const id of ALL_IDS) {
       const position = await WaitlistService.getWaitlistPosition(id);
       expect(position?.leaderboardRank).toBe(listRank.get(id));
     }

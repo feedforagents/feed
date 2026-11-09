@@ -14,6 +14,7 @@ import {
   desc,
   eq,
   gt,
+  isNotNull,
   lt,
   ne,
   or,
@@ -332,6 +333,13 @@ export class WaitlistService {
       .where(
         and(
           eq(users.isWaitlistActive, true),
+          // The leaderboard list only shows users with a username
+          // (getTopWaitlistUsers), so the rank counter must count the
+          // same rows: a username-less active signup otherwise shifts
+          // every rank below it by one. ne() alone drops NULLs in the
+          // list by three-valued logic, so mirror isNotNull too.
+          isNotNull(users.username),
+          ne(users.username, ''),
           or(
             // Primary sort: More invite points = better position
             gt(users.invitePoints, user.invitePoints),
