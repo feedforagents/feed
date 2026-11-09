@@ -339,8 +339,13 @@ export class PerpDbAdapter implements PerpDbPort {
         updatedAt: now,
       };
       if (rotation.metricsReset) {
-        setFields.high24h = updates.high24h ?? rotation.resetPrice;
-        setFields.low24h = updates.low24h ?? rotation.resetPrice;
+        // A reset starts a fresh 24h window whose only observed price is
+        // the reset price. Caller-passed extremes were accumulated against
+        // the previous window (the price sweep folds them in from its
+        // sweep-start read), so — exactly as in applyMarketDeltas — the
+        // reset price wins unconditionally.
+        setFields.high24h = rotation.resetPrice;
+        setFields.low24h = rotation.resetPrice;
         setFields.volume24h = updates.volume24h ?? 0;
       }
 
