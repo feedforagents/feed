@@ -63,6 +63,7 @@ import {
   isNull,
   lte,
   markets,
+  notExists,
   perpMarketSnapshots,
   posts,
   users,
@@ -86,6 +87,7 @@ import {
   logger,
   retryIfRetryable,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 
 function buildWalletPort(): WalletPort {
   return {
@@ -3296,7 +3298,19 @@ export async function executeGetFavoritePosts(
       and(
         inArray(posts.authorId, favoritedUserIds),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, new Date())
+        lte(posts.timestamp, new Date()),
+        // Apply the web feed's test-author rule (DatabaseService
+        // .getRecentPosts): test accounts — the isTest flag or a
+        // 'test-' id prefix — must not leak into the favorites feed
+        // either, even when the agent favorited them. Excluded in SQL
+        // before paginating, so pages stay full.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp))
