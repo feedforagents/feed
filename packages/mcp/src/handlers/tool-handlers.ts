@@ -2044,7 +2044,7 @@ export async function executeGetUserStats(
  */
 export async function executeGetChats(
   agent: AuthenticatedAgent,
-  _args: GetChatsArgs
+  args: GetChatsArgs
 ): Promise<GetChatsResult> {
   // Get all chats where user is a participant
   const participants = await db.chatParticipant.findMany({
@@ -2055,10 +2055,20 @@ export async function executeGetChats(
     select: { chatId: true },
   });
   const participantChatIds = participants.map((p) => p.chatId);
+  // The tool schema advertises filter: 'all' | 'dms' | 'groups'; apply it
+  // in the chat query so last-message lookups below only run for the
+  // chats actually being returned.
   const chatsList =
     participantChatIds.length > 0
       ? await db.chat.findMany({
-          where: { id: { in: participantChatIds } },
+          where: {
+            id: { in: participantChatIds },
+            ...(args.filter === 'dms'
+              ? { isGroup: false }
+              : args.filter === 'groups'
+                ? { isGroup: true }
+                : {}),
+          },
         })
       : [];
   const chatIds = chatsList.map((c) => c.id);
