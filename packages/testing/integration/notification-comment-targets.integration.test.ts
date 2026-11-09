@@ -11,6 +11,12 @@
  * the rows with the real GET-route serializer, and resolves the destination
  * with the same function the notifications page renders.
  *
+ * Fixture ownership: every ID is registered only from a successful
+ * INSERT ... RETURNING, and cleanup deletes exactly those owned rows.
+ * A setup that fails partway (for example on an ID collision with a
+ * pre-existing post or comment) therefore cannot delete data the fixture
+ * did not create; the ownership describe below proves that.
+ *
  * Requires DATABASE_URL pointing at a disposable database with schema applied.
  */
 
@@ -37,9 +43,97 @@ import { generateSnowflakeId } from '@feed/shared';
 import { serializeNotificationForApi } from '../../../apps/web/src/app/api/notifications/route';
 import { getNotificationHref } from '../../../apps/web/src/lib/notifications/presentation';
 
-const userIds: string[][] = [];
+interface FixtureRegistry {
+  commentIds: string[];
+  postId: string | null;
+  userIds: string[];
+}
+
+function newRegistry(): FixtureRegistry {
+  return { commentIds: [], postId: null, userIds: [] };
+}
+
+async function insertUser(registry: FixtureRegistry): Promise<string> {
+  const id = await generateSnowflakeId();
+  const [row] = await db
+    .insert(users)
+    .values({
+      id,
+      username: `ntgt_${id.slice(-10)}`,
+      isActor: false,
+      updatedAt: new Date(),
+    })
+    .returning({ id: users.id });
+  if (!row) throw new Error('user insert returned no row');
+  registry.userIds.push(row.id);
+  return row.id;
+}
+
+async function insertPost(
+  registry: FixtureRegistry,
+  authorId: string,
+  explicitId?: string
+): Promise<string> {
+  const id = explicitId ?? (await generateSnowflakeId());
+  const [row] = await db
+    .insert(posts)
+    .values({
+      id,
+      content: 'post',
+      authorId,
+    })
+    .returning({ id: posts.id });
+  if (!row) throw new Error('post insert returned no row');
+  registry.postId = row.id;
+  return row.id;
+}
+
+async function insertComment(
+  registry: FixtureRegistry,
+  postId: string,
+  authorId: string,
+  parentCommentId?: string,
+  explicitId?: string
+): Promise<string> {
+  const id = explicitId ?? (await generateSnowflakeId());
+  const [row] = await db
+    .insert(comments)
+    .values({
+      id,
+      content: 'comment',
+      postId,
+      authorId,
+      parentCommentId: parentCommentId ?? null,
+      updatedAt: new Date(),
+    })
+    .returning({ id: comments.id });
+  if (!row) throw new Error('comment insert returned no row');
+  registry.commentIds.push(row.id);
+  return row.id;
+}
+
+async function cleanupRegistry(registry: FixtureRegistry): Promise<void> {
+  if (registry.userIds.length > 0) {
+    await db
+      .delete(notifications)
+      .where(inArray(notifications.userId, registry.userIds));
+  }
+  if (registry.commentIds.length > 0) {
+    await db.delete(comments).where(inArray(comments.id, registry.commentIds));
+  }
+  if (registry.postId) {
+    await db.delete(posts).where(eq(posts.id, registry.postId));
+  }
+  if (registry.userIds.length > 0) {
+    await db.delete(users).where(inArray(users.id, registry.userIds));
+  }
+  registry.commentIds.length = 0;
+  registry.postId = null;
+  registry.userIds.length = 0;
+}
 
 describe('notification comment targets', () => {
+  const fixtures = newRegistry();
   let recipient: string;
   let actor: string;
   let postId: string;
@@ -50,50 +144,22 @@ describe('notification comment targets', () => {
   let chatId: string;
   let hrefByKey: Map<string, string>;
 
-  async function createUser(): Promise<string> {
-    const id = await generateSnowflakeId();
-    await db.insert(users).values({
-      id,
-      username: `ntgt_${id.slice(-10)}`,
-      isActor: false,
-      updatedAt: new Date(),
-    });
-    userIds.push([id]);
-    return id;
-  }
-
-  async function createComment(
-    authorId: string,
-    parentCommentId?: string
-  ): Promise<string> {
-    const id = await generateSnowflakeId();
-    await db.insert(comments).values({
-      id,
-      content: 'comment',
-      postId,
-      authorId,
-      parentCommentId: parentCommentId ?? null,
-      updatedAt: new Date(),
-    });
-    return id;
-  }
-
   beforeAll(async () => {
-    recipient = await createUser();
-    actor = await createUser();
+    recipient = await insertUser(fixtures);
+    actor = await insertUser(fixtures);
 
-    postId = await generateSnowflakeId();
-    await db.insert(posts).values({
-      id: postId,
-      content: 'post',
-      authorId: recipient,
-    });
+    postId = await insertPost(fixtures, recipient);
 
-    commentOnPost = await createComment(actor);
-    parentComment = await createComment(recipient);
-    const replyComment = await createComment(actor, parentComment);
-    mentionComment = await createComment(actor);
-    reactedComment = await createComment(recipient);
+    commentOnPost = await insertComment(fixtures, postId, actor);
+    parentComment = await insertComment(fixtures, postId, recipient);
+    const replyComment = await insertComment(
+      fixtures,
+      postId,
+      actor,
+      parentComment
+    );
+    mentionComment = await insertComment(fixtures, postId, actor);
+    reactedComment = await insertComment(fixtures, postId, recipient);
     chatId = await generateSnowflakeId();
 
     // Post reaction first: its dedupe check has no commentId condition, so
@@ -139,15 +205,7 @@ describe('notification comment targets', () => {
   });
 
   afterAll(async () => {
-    await db.delete(notifications).where(eq(notifications.userId, recipient));
-    await db.delete(comments).where(eq(comments.postId, postId));
-    await db.delete(posts).where(eq(posts.id, postId));
-    await db.delete(users).where(
-      inArray(
-        users.id,
-        userIds.map(([id]) => id)
-      )
-    );
+    await cleanupRegistry(fixtures);
   });
 
   it('sends a comment notification to the comment, not the post', () => {
@@ -181,5 +239,83 @@ describe('notification comment targets', () => {
   it('keeps follow and chat notifications on their existing targets', () => {
     expect(hrefByKey.get('follow:')).toBe(`/profile/${actor}`);
     expect(hrefByKey.get('system:')).toBe(`/chats?chat=${chatId}`);
+  });
+});
+
+describe('notification comment targets fixture ownership', () => {
+  it('cleanup after a colliding setup leaves pre-existing rows untouched', async () => {
+    const victim = newRegistry();
+    const attempt = newRegistry();
+    try {
+      const victimAuthor = await insertUser(victim);
+      const victimPostId = await insertPost(victim, victimAuthor);
+      const victimCommentId = await insertComment(
+        victim,
+        victimPostId,
+        victimAuthor
+      );
+
+      // A post INSERT reusing the pre-existing post's ID collides; the
+      // attempting fixture registers no post ownership, and cleaning up
+      // that incomplete setup is a no-op for the victim's rows.
+      let postCollisionFailed = false;
+      try {
+        await insertPost(attempt, victimAuthor, victimPostId);
+      } catch {
+        postCollisionFailed = true;
+      }
+      expect(postCollisionFailed).toBe(true);
+      expect(attempt.postId).toBeNull();
+      await cleanupRegistry(attempt);
+
+      const [postAfterFailedSetup] = await db
+        .select()
+        .from(posts)
+        .where(eq(posts.id, victimPostId));
+      expect(postAfterFailedSetup).toBeDefined();
+
+      // Partial setup: the attempt registers its own user and post, then a
+      // comment INSERT reusing the pre-existing comment's ID collides and
+      // registers no comment ownership.
+      const attemptAuthor = await insertUser(attempt);
+      const attemptPostId = await insertPost(attempt, attemptAuthor);
+      let commentCollisionFailed = false;
+      try {
+        await insertComment(
+          attempt,
+          attemptPostId,
+          attemptAuthor,
+          undefined,
+          victimCommentId
+        );
+      } catch {
+        commentCollisionFailed = true;
+      }
+      expect(commentCollisionFailed).toBe(true);
+      expect(attempt.commentIds).toEqual([]);
+
+      await cleanupRegistry(attempt);
+
+      // The pre-existing post, its comment and their author all survive.
+      const [survivingPost] = await db
+        .select()
+        .from(posts)
+        .where(eq(posts.id, victimPostId));
+      expect(survivingPost).toBeDefined();
+      const [survivingComment] = await db
+        .select()
+        .from(comments)
+        .where(eq(comments.id, victimCommentId));
+      expect(survivingComment).toBeDefined();
+      expect(survivingComment?.postId).toBe(victimPostId);
+      const [survivingAuthor] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, victimAuthor));
+      expect(survivingAuthor).toBeDefined();
+    } finally {
+      await cleanupRegistry(attempt);
+      await cleanupRegistry(victim);
+    }
   });
 });
