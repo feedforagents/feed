@@ -27,7 +27,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install
@@ -75,7 +75,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install
@@ -90,7 +90,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: nightly-7bff443b45b93efecfeae1779404d12a20f4c225
 
       - name: Start Anvil
         run: |
