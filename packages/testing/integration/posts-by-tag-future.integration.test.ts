@@ -49,10 +49,10 @@ const owned = {
   postTags: [] as string[],
 };
 
-async function fetchPostsByTag(limit = 50, offset = 0) {
+async function fetchPostsByTag(limit = 50, offset = 0, tag = tagName) {
   const result = (await FeedAgentExecutor.executeDirectly(
     'stats.posts_by_tag',
-    { tag: tagName, limit, offset },
+    { tag, limit, offset },
     authorId
   )) as unknown as PostsByTagResult;
   return result.posts;
@@ -248,5 +248,60 @@ describe('A2A stats.posts_by_tag future-post rule', () => {
       pastPostId3,
     ]);
     expect(await fetchPostsByTag(2, 4)).toEqual([]);
+  });
+
+  it('walks tied post and membership timestamps without gaps or repeats', async () => {
+    const tiedTagId = await generateSnowflakeId();
+    const tiedTagName = `${tagName}ties`;
+    const timestamp = new Date(Date.now() - 60 * 60 * 1000);
+    const tiedPostIds: string[] = [];
+    for (let index = 0; index < 12; index++) {
+      tiedPostIds.push(await generateSnowflakeId());
+    }
+    await db.insert(tags).values({
+      id: tiedTagId,
+      name: tiedTagName,
+      displayName: 'F18 tied tag',
+      updatedAt: new Date(),
+    });
+    owned.tags.push(tiedTagId);
+    await db.insert(posts).values(
+      tiedPostIds.map((id) => ({
+        id,
+        authorId,
+        content: 'f18 tied timestamp post',
+        timestamp,
+        type: 'post',
+      }))
+    );
+    owned.posts.push(...tiedPostIds);
+    await db.insert(postTags).values(
+      tiedPostIds.map((postId) => ({
+        id: `pt-${postId}`,
+        postId,
+        tagId: tiedTagId,
+        createdAt: timestamp,
+      }))
+    );
+    owned.postTags.push(...tiedPostIds);
+
+    const complete = (await fetchPostsByTag(50, 0, tiedTagName)).map(
+      (post) => post.id
+    );
+    expect(complete).toHaveLength(12);
+    expect(new Set(complete).size).toBe(12);
+    for (const limit of [1, 2, 5]) {
+      const walked: string[] = [];
+      for (let offset = 0; offset < 12; offset += limit) {
+        walked.push(
+          ...(await fetchPostsByTag(limit, offset, tiedTagName)).map(
+            (post) => post.id
+          )
+        );
+      }
+      expect(walked).toEqual(complete);
+      expect(new Set(walked).size).toBe(12);
+      expect(await fetchPostsByTag(limit, 12, tiedTagName)).toEqual([]);
+    }
   });
 });

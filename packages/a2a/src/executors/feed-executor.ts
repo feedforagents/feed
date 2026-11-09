@@ -2500,7 +2500,8 @@ export class FeedAgentExecutor implements AgentExecutor {
     // current time: future-dated posts are scheduled and must not be
     // exposed early (the web tag surface applies the same timestamp
     // bound). Ordering keeps the previous response order (newest post
-    // first, membership order breaking timestamp ties).
+    // first, then membership time and a unique post ID to keep tied
+    // pages stable).
     const now = new Date();
     const rows = await getRawDrizzle()
       .select({ post: posts })
@@ -2514,7 +2515,7 @@ export class FeedAgentExecutor implements AgentExecutor {
           eq(posts.type, 'post')
         )
       )
-      .orderBy(desc(posts.timestamp), desc(postTags.createdAt))
+      .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
       .offset(offset)
       .limit(limit);
 
