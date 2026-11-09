@@ -539,6 +539,9 @@ Bun.serve({
         state.seed = seed;
         state.syntheticMarkets = body.syntheticMarkets === true;
         random = createRng(seed);
+        // Clear run data without reusing IDs: polling cursors and existing
+        // SSE subscriptions survive /init within the same server epoch.
+        trajectoryBuffer.length = 0;
 
         return Response.json(
           {

@@ -65,6 +65,7 @@ import {
   markets,
   perpMarketSnapshots,
   posts,
+  postTags,
   users,
 } from '@feed/db';
 import {
@@ -1550,22 +1551,25 @@ export async function executeGetPostsByTag(
   if (!tag) {
     return { posts: [] };
   }
-  const postTagsList = await db.postTag.findMany({
-    where: { tagId: tag.id },
-    take: args.limit || 20,
-    skip: args.offset || 0,
-    orderBy: { createdAt: 'desc' },
-  });
-  const postIds = postTagsList.map((pt) => pt.postId);
-  const postsList = await db.post.findMany({
-    where: {
-      id: { in: postIds },
-      deletedAt: null,
-    },
-    orderBy: { timestamp: 'desc' },
-  });
+  // Select the page after publication eligibility, so newer hidden
+  // memberships cannot consume its slots. Tagged articles remain supported.
+  const now = new Date();
+  const rows = await db
+    .select({ post: posts })
+    .from(postTags)
+    .innerJoin(posts, eq(postTags.postId, posts.id))
+    .where(
+      and(
+        eq(postTags.tagId, tag.id),
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now)
+      )
+    )
+    .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
+    .offset(args.offset || 0)
+    .limit(args.limit || 20);
   return {
-    posts: postsList.map((p) => ({
+    posts: rows.map(({ post: p }) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
