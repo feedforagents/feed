@@ -18,7 +18,14 @@ import {
   PredictionDbAdapter,
   PredictionMarketService,
 } from '@feed/core/markets/prediction';
-import { db, eq, markets, predictionPriceHistories, users } from '@feed/db';
+import {
+  db,
+  eq,
+  markets,
+  positions,
+  predictionPriceHistories,
+  users,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { GET } from '@/app/api/markets/predictions/[id]/history/route';
@@ -100,21 +107,44 @@ async function getLastHistoryPoint(marketId: string) {
 }
 
 afterAll(async () => {
+  // Each buy() creates a durable Position and resolve() retains it with
+  // status 'resolved'. Position.marketId/userId have no cascading foreign
+  // keys, so deleting markets/users would orphan those rows. Delete
+  // positions through the owned market/user IDs (this also covers partial
+  // setup, e.g. a buy that succeeded before the test failed). Every
+  // deletion is attempted even if an earlier one fails, and any failure
+  // is surfaced instead of swallowed.
+  const failures: string[] = [];
+  const attempt = async (label: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+    } catch (error) {
+      failures.push(
+        `${label}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  };
   for (const id of marketIds) {
-    await db
-      .delete(predictionPriceHistories)
-      .where(eq(predictionPriceHistories.marketId, id))
-      .catch(() => {});
-    await db
-      .delete(markets)
-      .where(eq(markets.id, id))
-      .catch(() => {});
+    await attempt(`positions for market ${id}`, () =>
+      db.delete(positions).where(eq(positions.marketId, id))
+    );
+    await attempt(`price history for market ${id}`, () =>
+      db
+        .delete(predictionPriceHistories)
+        .where(eq(predictionPriceHistories.marketId, id))
+    );
+    await attempt(`market ${id}`, () =>
+      db.delete(markets).where(eq(markets.id, id))
+    );
   }
   for (const id of userIds) {
-    await db
-      .delete(users)
-      .where(eq(users.id, id))
-      .catch(() => {});
+    await attempt(`positions for user ${id}`, () =>
+      db.delete(positions).where(eq(positions.userId, id))
+    );
+    await attempt(`user ${id}`, () => db.delete(users).where(eq(users.id, id)));
+  }
+  if (failures.length > 0) {
+    throw new Error(`Test cleanup failed: ${failures.join('; ')}`);
   }
 });
 
