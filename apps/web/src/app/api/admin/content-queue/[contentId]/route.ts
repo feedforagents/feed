@@ -10,6 +10,7 @@
  */
 
 import {
+  cachedDb,
   checkRateLimitAndDuplicates,
   errorResponse,
   logAdminModify,
@@ -101,7 +102,11 @@ export const POST = withErrorHandling(
     if (contentType === 'post') {
       // Handle post moderation
       const [existingPost] = await db
-        .select({ id: posts.id, deletedAt: posts.deletedAt })
+        .select({
+          id: posts.id,
+          authorId: posts.authorId,
+          deletedAt: posts.deletedAt,
+        })
         .from(posts)
         .where(eq(posts.id, contentId))
         .limit(1);
@@ -162,6 +167,11 @@ export const POST = withErrorHandling(
               and(eq(reports.reportedPostId, contentId), OPEN_REPORT_STATUSES)
             );
         });
+
+        // A hidden post must leave the cached feed/profile lists at once;
+        // post creation and sharing invalidate the same caches.
+        await cachedDb.invalidatePostsCache();
+        await cachedDb.invalidateActorPostsCache(existingPost.authorId);
 
         await logAdminModify({
           adminId: admin.userId,
