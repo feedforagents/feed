@@ -2,7 +2,8 @@ import { dbWrite, eq, users } from '@feed/db';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
-import { type FeedAgentContext, OAuthError } from './contracts';
+import { type FeedAgentContext, type FeedScope, OAuthError } from './contracts';
+import { getPlayerActionScope, registerPlayerActions } from './player-actions';
 import type { FeedOAuthService } from './service';
 
 export interface FeedMcpContent {
@@ -30,10 +31,12 @@ export async function serveFeedMcp(
   let parsedBody: unknown;
   if (request.method === 'POST') {
     parsedBody = await readBody(request);
-    if (isWhoami(parsedBody)) {
-      if (!context) return challenge(service, requestId(parsedBody));
-      if (!context.scopes.includes('read'))
-        return challenge(service, requestId(parsedBody), 403);
+    const requiredScope = requestScope(parsedBody);
+    if (requiredScope) {
+      if (!context)
+        return challenge(service, requestId(parsedBody), 401, requiredScope);
+      if (!context.scopes.includes(requiredScope))
+        return challenge(service, requestId(parsedBody), 403, requiredScope);
     }
   }
   const server = new McpServer({ name: 'Feed', version: '2.0.0' });
@@ -105,6 +108,7 @@ export async function serveFeedMcp(
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
   );
+  registerPlayerActions(server, context, service);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -118,9 +122,10 @@ export async function serveFeedMcp(
 function challenge(
   service: FeedOAuthService,
   id: string | number | null = null,
-  status = 401
+  status = 401,
+  scope: FeedScope = 'read'
 ) {
-  const value = `Bearer resource_metadata="${service.origin}/.well-known/oauth-protected-resource/mcp", scope="read"${status === 403 ? ', error="insufficient_scope"' : ''}`;
+  const value = `Bearer resource_metadata="${service.origin}/.well-known/oauth-protected-resource/mcp", scope="${scope}"${status === 403 ? ', error="insufficient_scope"' : ''}`;
   return Response.json(
     {
       jsonrpc: '2.0',
@@ -140,7 +145,7 @@ function challenge(
   );
 }
 
-function isWhoami(body: unknown): boolean {
+function requestScope(body: unknown): FeedScope | null {
   if (
     !body ||
     typeof body !== 'object' ||
@@ -149,13 +154,17 @@ function isWhoami(body: unknown): boolean {
     body.method !== 'tools/call' ||
     !('params' in body)
   )
-    return false;
-  return (
-    !!body.params &&
-    typeof body.params === 'object' &&
-    'name' in body.params &&
-    body.params.name === 'whoami'
-  );
+    return null;
+  if (
+    !body.params ||
+    typeof body.params !== 'object' ||
+    !('name' in body.params) ||
+    typeof body.params.name !== 'string'
+  )
+    return null;
+  return body.params.name === 'whoami'
+    ? 'read'
+    : getPlayerActionScope(body.params.name);
 }
 function requestId(body: unknown): string | number | null {
   if (

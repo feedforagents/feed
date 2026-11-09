@@ -5,7 +5,7 @@ export const FEED_MCP_CAPABILITIES = {
   grantTypes: ['authorization_code', 'refresh_token'],
   clientRegistration: 'dynamic',
   scopes: ['read', 'social:write', 'messages', 'trade'],
-  tools: ['about_feed', 'how_to_play', 'whoami'],
+  tools: ['about_feed', 'how_to_play', 'whoami', 'repost', 'unrepost'],
   deviceAuthorization: false,
   clientIdMetadataDocuments: false,
 } as const;

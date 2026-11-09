@@ -9,7 +9,19 @@
  * the original author is notified.
  */
 
-import { and, count, db, eq, hasBlocked, posts, shares, users } from '@feed/db';
+import {
+  and,
+  count,
+  db,
+  eq,
+  hasBlocked,
+  isNull,
+  posts,
+  shares,
+  sql,
+  type Transaction,
+  users,
+} from '@feed/db';
 import { NPCInteractionTracker, StaticDataRegistry } from '@feed/engine';
 import {
   generateSnowflakeId,
@@ -66,6 +78,10 @@ export interface SharePostOutcome {
   repostPost: SharedRepostPost | null;
 }
 
+/** Optional audit write, awaited in the mutation transaction. Database work only;
+ * callers must never perform network or inference calls while locks are held. */
+export type ShareMutationObserver = (transaction: Transaction) => Promise<void>;
+
 const LOG_CONTEXT = 'sharePost';
 
 /**
@@ -78,7 +94,8 @@ export async function sharePost(
   userId: string,
   postId: string,
   comment?: string,
-  sharer?: SharePostSharer
+  sharer?: SharePostSharer,
+  observeMutation?: ShareMutationObserver
 ): Promise<SharePostOutcome> {
   const quoteComment = SharePostSchema.parse({ comment }).comment || undefined;
   const now = new Date();
@@ -214,7 +231,7 @@ export async function sharePost(
     });
 
     if (!originalPost) {
-      return undefined;
+      throw new NotFoundError('Post', shareTargetPostId);
     }
 
     const [created] = await tx
@@ -232,6 +249,7 @@ export async function sharePost(
       throw new BusinessLogicError('Failed to create repost', 'CREATE_FAILED');
     }
 
+    if (observeMutation) await observeMutation(tx);
     return created;
   });
 
@@ -376,4 +394,93 @@ export async function sharePost(
     repostId,
     repostPost,
   };
+}
+
+export interface UnsharePostOutcome {
+  shareTargetPostId: string;
+  shareCount: number;
+}
+
+/** Remove only this account's share and associated repost, together. */
+export async function unsharePost(
+  userId: string,
+  postId: string,
+  observeMutation?: ShareMutationObserver,
+  options: { pureOnly?: boolean } = {}
+): Promise<UnsharePostOutcome> {
+  const shareTargetPostId = await db.transaction(async (tx) => {
+    let targetPostId = postId;
+    let [share] = await tx
+      .select({ id: shares.id })
+      .from(shares)
+      .where(and(eq(shares.userId, userId), eq(shares.postId, postId)))
+      .limit(1)
+      .for('update');
+
+    if (!share) {
+      const [post] = await tx
+        .select({
+          content: posts.content,
+          originalPostId: posts.originalPostId,
+        })
+        .from(posts)
+        .where(eq(posts.id, postId))
+        .limit(1);
+      if (post && isPureRepost(post)) {
+        targetPostId = post.originalPostId;
+        const [redirectedShare] = await tx
+          .select({ id: shares.id })
+          .from(shares)
+          .where(
+            and(eq(shares.userId, userId), eq(shares.postId, targetPostId))
+          )
+          .limit(1)
+          .for('update');
+        share = redirectedShare;
+      }
+    }
+    if (!share) throw new NotFoundError('Share', `${postId}-${userId}`);
+
+    const [repost] = await tx
+      .select({ id: posts.id })
+      .from(posts)
+      .where(
+        and(
+          eq(posts.authorId, userId),
+          eq(posts.originalPostId, targetPostId),
+          isNull(posts.deletedAt),
+          ...(options.pureOnly ? [sql`btrim(${posts.content}) = ''`] : [])
+        )
+      )
+      .limit(1);
+    if (!repost && options.pureOnly) {
+      const [quote] = await tx
+        .select({ id: posts.id })
+        .from(posts)
+        .where(
+          and(
+            eq(posts.authorId, userId),
+            eq(posts.originalPostId, targetPostId),
+            isNull(posts.deletedAt)
+          )
+        )
+        .limit(1);
+      if (quote)
+        throw new BusinessLogicError(
+          'This is a quote post; delete the quote explicitly instead',
+          'NOT_A_REPOST'
+        );
+    }
+    if (repost) await tx.delete(posts).where(eq(posts.id, repost.id));
+    await tx.delete(shares).where(eq(shares.id, share.id));
+    if (observeMutation) await observeMutation(tx);
+    return targetPostId;
+  });
+  const [countResult] = await db
+    .select({ count: count() })
+    .from(shares)
+    .where(eq(shares.postId, shareTargetPostId));
+  await cachedDb.invalidatePostsCache();
+  await cachedDb.invalidateActorPostsCache(userId);
+  return { shareTargetPostId, shareCount: Number(countResult?.count ?? 0) };
 }
