@@ -197,6 +197,7 @@ import {
   db,
   desc,
   eq,
+  exists,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
@@ -352,43 +353,52 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const excludedList = [...excludedUserIds].sort();
 
   // Exclude blocked/muted actors in the query so pagination stays exact
-  // (system notifications have a null actor and are always kept).
-  if (excludedList.length > 0) {
-    conditions.push(
-      or(
-        isNull(notifications.actorId),
-        notInArray(notifications.actorId, excludedList)
-      ) as SQL
-    );
+  // (a null actor is not excluded by actor moderation). The unread count
+  // uses the same predicate so the badge never counts hidden actors.
+  const visibleActorCondition =
+    excludedList.length > 0
+      ? (or(
+          isNull(notifications.actorId),
+          notInArray(notifications.actorId, excludedList)
+        ) as SQL)
+      : undefined;
+  if (visibleActorCondition) {
+    conditions.push(visibleActorCondition);
   }
 
-  // Exclude notifications whose linked content is no longer visible, in
-  // the query so pagination stays exact: a soft-deleted post errors with
-  // POST_DELETED when opened, a soft-deleted comment is treated as
-  // nonexistent by the comment endpoint, and hard-deleted rows are gone.
-  // Notifications without a post/comment target (follows, system,
-  // trades) are always kept.
-  conditions.push(
+  // Canonical target columns can be null/empty for unlinked notifications.
+  // Present targets must exist and not be deleted. Share this condition with
+  // the global unread count; JSON metadata and implicit parents are separate.
+  const visibleContentCondition = and(
     or(
       isNull(notifications.postId),
-      inArray(
-        notifications.postId,
-        db.select({ id: posts.id }).from(posts).where(isNull(posts.deletedAt))
+      eq(notifications.postId, ''),
+      exists(
+        db
+          .select({ id: posts.id })
+          .from(posts)
+          .where(
+            and(eq(posts.id, notifications.postId), isNull(posts.deletedAt))
+          )
       )
-    ) as SQL
-  );
-  conditions.push(
+    ),
     or(
       isNull(notifications.commentId),
-      inArray(
-        notifications.commentId,
+      eq(notifications.commentId, ''),
+      exists(
         db
           .select({ id: comments.id })
           .from(comments)
-          .where(isNull(comments.deletedAt))
+          .where(
+            and(
+              eq(comments.id, notifications.commentId),
+              isNull(comments.deletedAt)
+            )
+          )
       )
-    ) as SQL
-  );
+    )
+  ) as SQL;
+  conditions.push(visibleContentCondition);
 
   // OPTIMIZED: Cache notifications with short TTL (high-frequency polling endpoint).
   // The key includes page and a fingerprint of the moderation set so a new
@@ -425,12 +435,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .where(
               and(
                 eq(notifications.userId, authUser.userId),
-                eq(notifications.read, false)
+                eq(notifications.read, false),
+                visibleActorCondition,
+                visibleContentCondition
               )
             );
 
           unreadCount = Number(unreadCountResult?.count ?? 0);
         } catch (error) {
+          // Missing Notification/Post/Comment query schema degrades to empty.
+          // Moderation lookups above remain outside this fallback.
           const missingSchemaCode =
             getMissingNotificationSchemaErrorCode(error);
           if (!missingSchemaCode) {

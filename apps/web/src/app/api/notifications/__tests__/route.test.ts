@@ -54,6 +54,7 @@ const dbModuleFactory = () => ({
   },
   desc: () => undefined,
   eq: () => undefined,
+  exists: () => undefined,
   getBlockedByUserIds: async () => [],
   getBlockedUserIds: async () => blocked,
   getMutedUserIds: async () => [],

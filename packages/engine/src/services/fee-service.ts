@@ -1,14 +1,12 @@
 /**
  * Fee Service
  *
- * @description Manages trading fees and referral fee distribution. Calculates
- * fees for trades, processes fee payments, and distributes referral earnings.
- * Handles both platform fees and referrer share distribution.
+ * @description Manages trading fees. Calculates fees for trades and records
+ * the platform fee. Referral fee shares are not paid.
  */
 
 import {
   and,
-  balanceTransactions,
   count,
   Decimal,
   type DrizzleClient,
@@ -102,9 +100,9 @@ export interface ReferralEarnings {
 /**
  * Fee Service Class
  *
- * @description Static service class for managing trading fees and referral
- * distributions. Provides methods for calculating fees, processing payments,
- * and retrieving referral earnings.
+ * @description Static service class for managing trading fees. Provides
+ * methods for calculating fees, recording payments, and reading historical
+ * referral earnings.
  */
 export class FeeService {
   /**
@@ -119,7 +117,7 @@ export class FeeService {
    * @example
    * ```typescript
    * const calc = FeeService.calculateFee(1000);
-   * // Returns: { feeAmount: 1, netAmount: 999, platformShare: 0.5, referrerShare: 0.5 }
+   * // Returns: { feeAmount: 1, netAmount: 999, platformShare: 1, referrerShare: 0 }
    * ```
    */
   static calculateFee(tradeAmount: number): FeeCalculation {
@@ -218,32 +216,16 @@ export class FeeService {
       };
     }
 
-    // Core fee processing logic. Everything — fee record, trader totals,
-    // referral credit and stability-fund diversion — commits or rolls back
-    // together with the caller's transaction.
+    // Core fee processing logic. The fee record, trader totals, and
+    // stability-fund diversion commit or roll back with the caller's transaction.
     const processFee = async (
       tx: TransactionContext
     ): Promise<FeeDistributionResult & { stabilityFundDiversion: number }> => {
-      const referredBy = await FeeService.getUserReferrerInTx(userId, tx);
-
-      // Credit the referrer first so the persisted fee record reflects the
-      // actual allocation (a missing referrer means the platform keeps it all).
-      const referrerId =
-        referredBy &&
-        feeCalc.referrerShare > 0 &&
-        (await FeeService.distributeReferralFeeInTx(
-          referredBy,
-          feeCalc.referrerShare,
-          userId,
-          tx
-        ))
-          ? referredBy
-          : null;
-
-      const referrerPaid = referrerId ? feeCalc.referrerShare : 0;
-      const platformReceived = Number(
-        (feeCalc.feeAmount - referrerPaid).toFixed(2)
-      );
+      // Do not credit another user. PRD §9.6 removes the referral fee share,
+      // and D-18 says points cannot be transferred between users.
+      const referrerPaid = 0;
+      const referrerId = null;
+      const platformReceived = Number(feeCalc.feeAmount.toFixed(2));
 
       await tx.insert(tradingFees).values({
         id: await generateSnowflakeId(),
@@ -316,81 +298,6 @@ export class FeeService {
       .limit(1);
 
     return user?.referredBy || null;
-  }
-
-  /**
-   * Get user's referrer within an existing transaction
-   */
-  private static async getUserReferrerInTx(
-    userId: string,
-    tx: TransactionContext
-  ): Promise<string | null> {
-    const [user] = await tx
-      .select({ referredBy: users.referredBy })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-
-    return user?.referredBy || null;
-  }
-
-  /**
-   * Distribute referral fee to referrer (within transaction)
-   *
-   * @returns true when the referrer exists and was credited
-   */
-  private static async distributeReferralFeeInTx(
-    referrerId: string,
-    feeAmount: number,
-    traderId: string,
-    tx: TransactionContext
-  ): Promise<boolean> {
-    // Atomic increment; the ledger before/after values come from the row the
-    // update actually produced, not from a stale pre-read.
-    const [credited] = await tx
-      .update(users)
-      .set({
-        virtualBalance: sql`COALESCE(${users.virtualBalance}, 0) + ${feeAmount}`,
-        totalFeesEarned: sql`COALESCE(${users.totalFeesEarned}, 0) + ${feeAmount}`,
-      })
-      .where(eq(users.id, referrerId))
-      .returning({
-        balanceAfter: users.virtualBalance,
-        balanceBefore: sql<string>`${users.virtualBalance} - ${feeAmount}`,
-      });
-
-    if (!credited) {
-      logger.warn(
-        `Referrer not found: ${referrerId}`,
-        { referrerId, traderId },
-        'FeeService'
-      );
-      return false;
-    }
-
-    const feeStr = new Decimal(feeAmount).toString();
-
-    await tx.insert(balanceTransactions).values({
-      id: await generateSnowflakeId(),
-      userId: referrerId,
-      type: FEE_CONFIG.TRANSACTION_TYPES.REFERRAL_FEE_EARNED,
-      amount: feeStr,
-      balanceBefore: String(credited.balanceBefore),
-      balanceAfter: String(credited.balanceAfter),
-      relatedId: traderId,
-      description: 'Referral fee earned from trading activity',
-    });
-
-    logger.info(
-      'Referral fee distributed',
-      {
-        referrerId,
-        traderId,
-        feeAmount,
-      },
-      'FeeService'
-    );
-    return true;
   }
 
   /**
