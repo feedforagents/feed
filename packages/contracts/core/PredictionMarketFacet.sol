@@ -239,8 +239,10 @@ contract PredictionMarketFacet is ReentrancyGuard {
         require(!position.claimed, "Already claimed");
 
         // Calculate payout: standard 1:1 for winning shares in prediction markets
-        // Each share represents a claim on 1 unit of currency if that outcome wins
-        uint256 payout = winningShares * 1 ether;
+        // Each share represents a claim on 1 unit of currency if that outcome wins.
+        // Shares are 18-decimal units, so one whole share (1e18 units) pays 1 ether
+        // (1e18 wei): the payout in wei equals the share amount, with no scaling.
+        uint256 payout = winningShares;
 
         // Mark as claimed and clear position (CEI pattern)
         position.claimed = true;

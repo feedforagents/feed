@@ -157,6 +157,60 @@ contract PredictionMarketTest is DiamondTestSetup {
         assertEq(position, 0, "Position should be cleared after claim");
     }
 
+    /// @notice Test claiming winnings pays exactly 1 ether per whole share
+    function testClaimWinningsPaysOneEtherPerShare() public {
+        bytes32 marketId = createBasicMarket();
+
+        vm.startPrank(user1);
+        market.deposit{value: 10 ether}();
+        uint256 cost = market.calculateCost(marketId, 0, 1 ether);
+        market.buyShares(marketId, 0, 1 ether);
+        vm.stopPrank();
+
+        // Warp and resolve
+        vm.warp(block.timestamp + 31 days);
+        market.resolveMarket(marketId, 0);
+
+        // Claim winnings
+        vm.prank(user1);
+        market.claimWinnings(marketId);
+
+        // One whole share (1e18 share-units) pays exactly 1 ether.
+        assertEq(
+            market.getBalance(user1),
+            10 ether - cost + 1 ether,
+            "winning share should pay 1 ether"
+        );
+    }
+
+    /// @notice Test a claim cannot fund a withdrawal larger than deposit plus winnings
+    function testClaimCannotDrainOtherDeposits() public {
+        bytes32 marketId = createBasicMarket();
+
+        vm.startPrank(user1);
+        market.deposit{value: 10 ether}();
+        market.buyShares(marketId, 0, 1 ether);
+        vm.stopPrank();
+
+        // A second user deposits without trading.
+        vm.prank(user2);
+        market.deposit{value: 10 ether}();
+
+        // Warp and resolve
+        vm.warp(block.timestamp + 31 days);
+        market.resolveMarket(marketId, 0);
+
+        // Claim winnings
+        vm.prank(user1);
+        market.claimWinnings(marketId);
+
+        // User1 deposited 10 ether and won about 1 ether: withdrawing 15 ether
+        // would take the other user's deposit, so it must fail.
+        vm.prank(user1);
+        vm.expectRevert("Insufficient balance");
+        market.withdraw(15 ether);
+    }
+
     /// @notice Test withdraw functionality
     function testWithdraw() public {
         vm.startPrank(user1);
