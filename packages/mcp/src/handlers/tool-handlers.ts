@@ -1835,6 +1835,15 @@ export async function executeSearchUsers(
 ): Promise<SearchUsersResult> {
   const usersList = await db.user.findMany({
     where: {
+      // Match the web people search (GET /api/users/search) and the A2A
+      // people lookup (users.search): banned accounts are never returned,
+      // and test accounts are not real users. A test account carries the
+      // isTest flag or a 'test-' id prefix — the membership rule the feed
+      // surfaces use. The exclusions run before the limit so hidden
+      // accounts cannot occupy result slots.
+      isBanned: false,
+      isTest: false,
+      NOT: { id: { startsWith: 'test-' } },
       OR: [
         { username: { contains: args.query, mode: 'insensitive' } },
         { displayName: { contains: args.query, mode: 'insensitive' } },
