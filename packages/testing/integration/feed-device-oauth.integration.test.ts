@@ -8,6 +8,7 @@ import {
   inArray,
   mcpOAuthRateLimits as rates,
   mcpOAuthRequests as requests,
+  mcpOAuthTokens as tokens,
   users,
 } from '@feed/db';
 import {
@@ -230,6 +231,19 @@ describe.skipIf(!canRun)(
       const context = await oauth.authenticate(credentials.access_token);
       expect(context?.accountId).toBe(actor);
       expect(context?.scopes).toEqual(['read']);
+      const issuedTokens = await dbWrite
+        .select()
+        .from(tokens)
+        .where(
+          inArray(tokens.hash, [
+            hash(credentials.access_token),
+            hash(credentials.refresh_token),
+          ])
+        );
+      expect(issuedTokens).toHaveLength(2);
+      expect(
+        issuedTokens.every((token) => token.scopes?.join(' ') === 'read')
+      ).toBe(true);
       const rotated = await oauth.exchange({
         grant_type: 'refresh_token',
         client_id: client.client_id,

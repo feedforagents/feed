@@ -250,6 +250,7 @@ export class FeedOAuthService {
       await tx.insert(tokens).values({
         hash: hash(code),
         kind: 'code',
+        scopes,
         grantId,
         redirectUri: request.redirectUri,
         challenge: request.challenge,
@@ -273,6 +274,7 @@ export class FeedOAuthService {
         grant_type: z.enum(['authorization_code', 'refresh_token']),
         client_id: z.string().max(100),
         resource: z.string().max(2048).optional(),
+        scope: z.string().max(200).optional(),
         code: z.string().max(200).optional(),
         redirect_uri: z.string().max(2048).optional(),
         code_verifier: z
@@ -353,6 +355,22 @@ export class FeedOAuthService {
             token.challenge !== hash(data.code_verifier ?? '')))
       )
         return null;
+      // Scope is a credential snapshot, not a mutable property of the grant.
+      // This also permits a code exchange to request less than consent allowed.
+      const priorScopes = z
+        .array(scopeSchema)
+        .min(1)
+        .safeParse(token.scopes ?? grant.scopes);
+      if (!priorScopes.success) return null;
+      const issuedScopes =
+        data.scope === undefined ? priorScopes.data : parseScopes(data.scope);
+      if (
+        issuedScopes.some(
+          (scope) =>
+            !priorScopes.data.includes(scope) || !grant.scopes.includes(scope)
+        )
+      )
+        throw new OAuthError('invalid_scope');
       await tx
         .update(tokens)
         .set({ consumedAt: now })
@@ -361,17 +379,23 @@ export class FeedOAuthService {
         {
           hash: hash(access),
           kind: 'access',
+          scopes: issuedScopes,
           grantId: grant.id,
           expiresAt: new Date(
             Math.min(now.getTime() + ACCESS_MS, grant.expiresAt.getTime())
           ),
         },
-        {
-          hash: hash(refresh),
-          kind: 'refresh',
-          grantId: grant.id,
-          expiresAt: grant.expiresAt,
-        },
+        ...(client.grantTypes.includes('refresh_token')
+          ? [
+              {
+                hash: hash(refresh),
+                kind: 'refresh',
+                scopes: issuedScopes,
+                grantId: grant.id,
+                expiresAt: grant.expiresAt,
+              },
+            ]
+          : []),
       ]);
       return {
         token_type: 'Bearer',
@@ -384,7 +408,7 @@ export class FeedOAuthService {
             now.getTime()) /
             1000
         ),
-        scope: grant.scopes.join(' '),
+        scope: issuedScopes.join(' '),
         resource: this.resource,
       };
     });
@@ -416,8 +440,17 @@ export class FeedOAuthService {
       )
       .limit(1);
     if (!row || row.banned || row.grant.resource !== this.resource) return null;
-    const scopes = z.array(scopeSchema).safeParse(row.grant.scopes);
-    if (!scopes.success) return null;
+    const grantScopes = z.array(scopeSchema).min(1).safeParse(row.grant.scopes);
+    const scopes = z
+      .array(scopeSchema)
+      .min(1)
+      .safeParse(row.token.scopes ?? row.grant.scopes);
+    if (
+      !grantScopes.success ||
+      !scopes.success ||
+      scopes.data.some((scope) => !grantScopes.data.includes(scope))
+    )
+      return null;
     await dbWrite
       .update(grants)
       .set({ lastUsedAt: new Date() })

@@ -50,6 +50,13 @@
       "when": 1794261406023,
       "tag": "0006_mcp_device_authorization",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794263689123,
+      "tag": "0007_mcp_token_scope_snapshots",
+      "breakpoints": true
     }
   ]
 }

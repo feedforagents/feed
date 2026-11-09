@@ -343,6 +343,7 @@ export class FeedDeviceService {
       await tx.insert(tokens).values({
         hash: hash(access),
         kind: 'access',
+        scopes: grant.scopes,
         grantId: grant.id,
         expiresAt: accessExpiry,
       });
@@ -350,6 +351,7 @@ export class FeedDeviceService {
         await tx.insert(tokens).values({
           hash: hash(refresh),
           kind: 'refresh',
+          scopes: grant.scopes,
           grantId: grant.id,
           expiresAt: grant.expiresAt,
         });
