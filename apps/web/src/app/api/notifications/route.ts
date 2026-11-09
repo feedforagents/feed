@@ -350,14 +350,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const excludedList = [...excludedUserIds].sort();
 
   // Exclude blocked/muted actors in the query so pagination stays exact
-  // (system notifications have a null actor and are always kept).
-  if (excludedList.length > 0) {
-    conditions.push(
-      or(
-        isNull(notifications.actorId),
-        notInArray(notifications.actorId, excludedList)
-      ) as SQL
-    );
+  // (system notifications have a null actor and are always kept). The unread
+  // count uses the same predicate so the badge never counts hidden items.
+  const visibleActorCondition =
+    excludedList.length > 0
+      ? (or(
+          isNull(notifications.actorId),
+          notInArray(notifications.actorId, excludedList)
+        ) as SQL)
+      : undefined;
+  if (visibleActorCondition) {
+    conditions.push(visibleActorCondition);
   }
 
   // OPTIMIZED: Cache notifications with short TTL (high-frequency polling endpoint).
@@ -395,7 +398,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .where(
               and(
                 eq(notifications.userId, authUser.userId),
-                eq(notifications.read, false)
+                eq(notifications.read, false),
+                visibleActorCondition
               )
             );
 
