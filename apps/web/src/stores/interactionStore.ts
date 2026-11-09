@@ -176,6 +176,24 @@ const emptyCommentInteraction = (commentId: string): CommentInteraction => ({
   isLiked: false,
 });
 
+/**
+ * Per-comment mutation ordering for loadComments reconciliation. Each
+ * toggleCommentLike bumps its comment's epoch when it starts; loadComments
+ * snapshots the epochs (and which comments had a mutation in flight) before
+ * dispatching its GET, and only applies the payload to a comment whose
+ * epoch is unchanged. A GET issued while a toggle was in flight, or before
+ * a toggle that started after dispatch, predates that toggle — its payload
+ * must not overwrite the toggle's confirmed result once it lands.
+ */
+const commentMutationEpochs = new Map<string, number>();
+
+const noteCommentMutationStarted = (commentId: string): void => {
+  commentMutationEpochs.set(
+    commentId,
+    (commentMutationEpochs.get(commentId) ?? 0) + 1
+  );
+};
+
 export const useInteractionStore = create<InteractionStore>()(
   persist(
     (set, get) => {
@@ -297,6 +315,7 @@ export const useInteractionStore = create<InteractionStore>()(
         },
 
         toggleCommentLike: async (commentId: string) => {
+          noteCommentMutationStarted(commentId);
           const current =
             get().commentInteractions.get(commentId) ??
             emptyCommentInteraction(commentId);
@@ -381,6 +400,12 @@ export const useInteractionStore = create<InteractionStore>()(
         },
 
         loadComments: async (postId: string) => {
+          // Snapshot request/mutation ordering before the GET is
+          // dispatched: any toggle already in flight for a comment, or
+          // started after this snapshot, makes the payload stale for
+          // that comment (see commentMutationEpochs).
+          const issuedEpochs = new Map(commentMutationEpochs);
+          const loadingAtDispatch = new Set(get().loadingStates.keys());
           const result = await run(`load-comments-${postId}`, () =>
             requestJson<{ data?: { comments?: CommentWithReplies[] } }>(
               `/api/posts/${encodeURIComponent(postId)}/comments`
@@ -403,12 +428,25 @@ export const useInteractionStore = create<InteractionStore>()(
           // longer be corrected once the record changes anywhere else.
           const syncCommentTree = (list: CommentWithReplies[]): void => {
             for (const comment of list) {
-              get().syncCommentInteraction({
-                commentId: comment.id,
-                likeCount: comment.likeCount,
-                replyCount: comment.replies.length,
-                isLiked: comment.isLiked,
-              });
+              // Skip a comment whose payload predates a mutation: a toggle
+              // was in flight for it when the GET was issued, or one
+              // started after the GET was issued. The toggle's own
+              // confirmed result (or its optimistic state while in
+              // flight) is authoritative for that comment; other comments
+              // in the tree still reconcile.
+              const issuedEpoch = issuedEpochs.get(comment.id) ?? 0;
+              const currentEpoch = commentMutationEpochs.get(comment.id) ?? 0;
+              const payloadPredatesMutation =
+                loadingAtDispatch.has(comment.id) ||
+                issuedEpoch !== currentEpoch;
+              if (!payloadPredatesMutation) {
+                get().syncCommentInteraction({
+                  commentId: comment.id,
+                  likeCount: comment.likeCount,
+                  replyCount: comment.replies.length,
+                  isLiked: comment.isLiked,
+                });
+              }
               syncCommentTree(comment.replies);
             }
           };
@@ -462,6 +500,7 @@ export const useInteractionStore = create<InteractionStore>()(
         },
 
         resetStore: () => {
+          commentMutationEpochs.clear();
           set({
             postInteractions: new Map(),
             commentInteractions: new Map(),

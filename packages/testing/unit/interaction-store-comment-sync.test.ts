@@ -79,12 +79,13 @@ const seedComment = (
   commentId: string,
   likeCount: number,
   isLiked: boolean
-): void =>
+): void => {
   useInteractionStore.setState({
     commentInteractions: new Map([
       [commentId, { commentId, likeCount, replyCount: 0, isLiked }],
     ]),
   });
+};
 
 beforeEach(() => {
   storage.clear();
@@ -188,5 +189,65 @@ describe('interactionStore comment like sync on loadComments', () => {
       .commentInteractions.get('comment-1');
     expect(entry?.likeCount).toBe(10);
     expect(entry?.isLiked).toBe(true);
+  });
+
+  test('does not let a reload issued during a toggle overwrite the confirmed like', async () => {
+    // Deferred-response interleaving: the like starts, a comment reload
+    // is issued while it is in flight (so its payload predates the
+    // like), the like finishes and stores the confirmed state, then the
+    // reload resolves. The reload must not overwrite the confirmed
+    // mutation, or the next click would send POST again instead of DELETE.
+    const deferred = <T>(): {
+      promise: Promise<T>;
+      resolve: (value: T) => void;
+    } => {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    };
+
+    seedComment('comment-1', 9, false);
+    serverComments = [comment({ likeCount: 9, isLiked: false })];
+
+    const likeResponse = deferred<Response>();
+    const loadResponse = deferred<Response>();
+    mockFetch.mockImplementationOnce((url, init) => {
+      fetchCalls.push({ url: String(url), method: init?.method ?? 'GET' });
+      return likeResponse.promise;
+    });
+    mockFetch.mockImplementationOnce((url, init) => {
+      fetchCalls.push({ url: String(url), method: init?.method ?? 'GET' });
+      return loadResponse.promise;
+    });
+
+    const store = useInteractionStore.getState();
+    const likePromise = store.toggleCommentLike('comment-1');
+    const loadPromise = store.loadComments('post-1');
+
+    // Let both requests reach the mocked fetch before resolving either.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchCalls.map((c) => c.method)).toEqual(['POST', 'GET']);
+
+    likeResponse.resolve(
+      await json({ data: { likeCount: 10, isLiked: true } })
+    );
+    expect(await likePromise).toBe(true);
+
+    loadResponse.resolve(await json({ data: { comments: serverComments } }));
+    await loadPromise;
+
+    const entry = useInteractionStore
+      .getState()
+      .commentInteractions.get('comment-1');
+    expect(entry?.likeCount).toBe(10);
+    expect(entry?.isLiked).toBe(true);
+
+    // The next click must act on the confirmed state: DELETE, not POST.
+    await useInteractionStore.getState().toggleCommentLike('comment-1');
+    const likeCalls = fetchCalls.filter((c) => c.url.includes('/like'));
+    expect(likeCalls.at(-1)?.method).toBe('DELETE');
   });
 });
