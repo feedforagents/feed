@@ -18,6 +18,12 @@
  * The rotation below is driven through the real PerpDbAdapter write path
  * (the funding-style updateMarketStats call), and both public routes are
  * called for real. The only stub is the `server-only` marker package.
+ *
+ * Fixture ownership: each fixture row is inserted on its own with
+ * `.returning()`, and only IDs the database confirms as inserted are
+ * recorded as owned. Cleanup deletes exactly those IDs, so a failed or
+ * colliding setup can never delete a snapshot or market this suite never
+ * created. A random suffix does not establish ownership.
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
@@ -26,7 +32,7 @@ mock.module('server-only', () => ({}));
 
 import { PerpDbAdapter } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
-import { db, eq, markets, perpMarketSnapshots } from '@feed/db';
+import { db, eq, inArray, markets, perpMarketSnapshots } from '@feed/db';
 import { NextRequest } from 'next/server';
 
 type TickerPerp = {
@@ -43,7 +49,13 @@ const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
 const ROT = `F53ROT${suffix}`;
 const STEADY = `F53STD${suffix}`;
 const FRESH = `F53NEW${suffix}`;
-const ALL = [ROT, STEADY, FRESH];
+const ZERO = `F53ZERO${suffix}`;
+
+// Tickers / ids the database confirmed as inserted by this suite. Cleanup
+// deletes exactly these — never the pre-generated ids, which may belong to
+// nobody (or somebody else) when an insert fails.
+const ownedSnapshotTickers: string[] = [];
+const ownedMarketIds: string[] = [];
 
 const fundingRate = (ticker: string) => ({
   ticker,
@@ -52,14 +64,16 @@ const fundingRate = (ticker: string) => ({
   nextFundingTime: new Date().toISOString(),
 });
 
-async function insertSnapshot(values: {
+type SnapshotFixture = {
   ticker: string;
   currentPrice: number;
   price24hAgo: number | null;
   price24hAgoUpdatedAt: Date | null;
   changePercent24h: number;
-}) {
-  await db.insert(perpMarketSnapshots).values({
+};
+
+function snapshotValues(values: SnapshotFixture) {
+  return {
     ticker: values.ticker,
     organizationId: values.ticker,
     currentPrice: values.currentPrice,
@@ -75,7 +89,32 @@ async function insertSnapshot(values: {
     volume24h: 0,
     openInterest: 0,
     fundingRate: fundingRate(values.ticker),
-  });
+  };
+}
+
+// One INSERT per fixture with RETURNING: if a later insert fails, only the
+// tickers the database confirmed are owned (and cleaned); the failed
+// ticker never is.
+async function insertSnapshot(values: SnapshotFixture): Promise<string> {
+  const [row] = await db
+    .insert(perpMarketSnapshots)
+    .values(snapshotValues(values))
+    .returning({ ticker: perpMarketSnapshots.ticker });
+  if (!row) throw new Error('Fixture insert returned no row');
+  ownedSnapshotTickers.push(row.ticker);
+  return row.ticker;
+}
+
+async function cleanupOwnedSnapshots(): Promise<void> {
+  if (ownedSnapshotTickers.length === 0) return;
+  await db
+    .delete(perpMarketSnapshots)
+    .where(inArray(perpMarketSnapshots.ticker, ownedSnapshotTickers));
+}
+
+async function cleanupOwnedMarkets(): Promise<void> {
+  if (ownedMarketIds.length === 0) return;
+  await db.delete(markets).where(inArray(markets.id, ownedMarketIds));
 }
 
 async function fetchTickerPerps(): Promise<TickerPerp[]> {
@@ -136,14 +175,18 @@ beforeAll(async () => {
     price24hAgoUpdatedAt: null,
     changePercent24h: 0,
   });
+  // Reference present, stored change 0%: a real 0%, not "no reference".
+  await insertSnapshot({
+    ticker: ZERO,
+    currentPrice: 100,
+    price24hAgo: 100,
+    price24hAgoUpdatedAt: now,
+    changePercent24h: 0,
+  });
 });
 
 afterAll(async () => {
-  for (const ticker of ALL) {
-    await db
-      .delete(perpMarketSnapshots)
-      .where(eq(perpMarketSnapshots.ticker, ticker));
-  }
+  await cleanupOwnedSnapshots();
 });
 
 describe('GET /api/ticker perps 24h change', () => {
@@ -186,26 +229,111 @@ describe('GET /api/ticker perps 24h change', () => {
     const tickerPerps = await fetchTickerPerps();
     expect(byTicker(tickerPerps, FRESH)?.changePercent24h).toBeNull();
   });
+
+  it('shows a stored 0% change (reference present) instead of null', async () => {
+    const tickerPerps = await fetchTickerPerps();
+    const listed = await fetchListedMarkets();
+
+    // Control: the reference exists and the stored change is a real 0% —
+    // both surfaces must show 0, not null.
+    expect(byTicker(listed, ZERO)?.changePercent24h).toBe(0);
+    expect(byTicker(tickerPerps, ZERO)?.changePercent24h).toBe(0);
+  });
+
+  // Runs last: it exercises the suite cleanup, which removes the fixtures,
+  // so no later test may depend on them.
+  it('a failed colliding setup leaves an unrelated snapshot untouched', async () => {
+    // Stand-in for a pre-existing snapshot this suite never owned.
+    const bystanderTicker = `F53BY${suffix}`;
+    const collidingTicker = `F53COL${suffix}`;
+    const now = new Date();
+    await db.insert(perpMarketSnapshots).values(
+      snapshotValues({
+        ticker: bystanderTicker,
+        currentPrice: 200,
+        price24hAgo: 100,
+        price24hAgoUpdatedAt: now,
+        changePercent24h: 100,
+      })
+    );
+
+    try {
+      // Bulk setup colliding on the bystander's ticker (the primary key):
+      // the whole INSERT fails, so neither row is created and neither
+      // ticker becomes owned.
+      // (try/catch rather than expect().rejects: a Drizzle query builder
+      // is a thenable, not a Promise, and bun's .rejects rejects it.)
+      let insertThrew = false;
+      try {
+        await db.insert(perpMarketSnapshots).values([
+          snapshotValues({
+            ticker: bystanderTicker,
+            currentPrice: 200,
+            price24hAgo: 100,
+            price24hAgoUpdatedAt: now,
+            changePercent24h: 100,
+          }),
+          snapshotValues({
+            ticker: collidingTicker,
+            currentPrice: 200,
+            price24hAgo: 100,
+            price24hAgoUpdatedAt: now,
+            changePercent24h: 100,
+          }),
+        ]);
+      } catch {
+        insertThrew = true;
+      }
+      expect(insertThrew).toBe(true);
+
+      // Run the exact cleanup afterAll uses: it must not touch the
+      // bystander, and the failed colliding ticker must not exist either.
+      await cleanupOwnedSnapshots();
+      const [bystander] = await db
+        .select({ ticker: perpMarketSnapshots.ticker })
+        .from(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, bystanderTicker))
+        .limit(1);
+      expect(bystander?.ticker).toBe(bystanderTicker);
+      const [colliding] = await db
+        .select({ ticker: perpMarketSnapshots.ticker })
+        .from(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, collidingTicker))
+        .limit(1);
+      expect(colliding).toBeUndefined();
+    } finally {
+      // The bystander is this test's own stand-in: remove it explicitly,
+      // never through the suite's owned-tickers cleanup.
+      await db
+        .delete(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, bystanderTicker));
+    }
+  });
 });
 
 describe('GET /api/ticker predictions yesPercent', () => {
   const marketId = `f53-pred-${suffix}`;
 
   beforeAll(async () => {
-    await db.insert(markets).values({
-      id: marketId,
-      question: 'F53 ticker prediction fixture?',
-      yesShares: '200',
-      noShares: '800',
-      liquidity: '1000',
-      resolved: false,
-      endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      updatedAt: new Date(),
-    });
+    const [row] = await db
+      .insert(markets)
+      .values({
+        id: marketId,
+        question: 'F53 ticker prediction fixture?',
+        yesShares: '200',
+        noShares: '800',
+        liquidity: '1000',
+        resolved: false,
+        endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        updatedAt: new Date(),
+      })
+      .returning({ id: markets.id });
+    if (!row) throw new Error('Fixture insert returned no row');
+    ownedMarketIds.push(row.id);
   });
 
   afterAll(async () => {
-    await db.delete(markets).where(eq(markets.id, marketId));
+    await cleanupOwnedMarkets();
   });
 
   it('matches the canonical CPMM price for the same pool', async () => {
