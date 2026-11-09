@@ -90,7 +90,9 @@ export const GET = withErrorHandling(async function GET(
     return NextResponse.json({ error: 'Market not found' }, { status: 404 });
   }
 
-  // Get the most recent 1000 positions for volume analysis (public data):
+  // Get the most recent 1000 positions for the price-history and
+  // largest-position views (public data). The totals below are computed
+  // over every position row, not this sample:
   const positions = await db.position.findMany({
     where: {
       marketId: market.id,
@@ -165,10 +167,19 @@ export const GET = withErrorHandling(async function GET(
       ? PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes')
       : 0.5;
 
-  // Calculate total volume from positions:
-  const totalVolume = positions.reduce((sum, p) => {
-    return sum + Number(p.shares) * Number(p.avgPrice);
-  }, 0);
+  // Calculate total volume and position count from ALL positions.
+  // The recent-1000 sample above would understate both totals on any
+  // market with more than 1000 positions; the admin trading stats sum
+  // the same expression over every row.
+  const [totalPositions, volumeRows] = await Promise.all([
+    db.position.count({ where: { marketId: market.id } }),
+    db.$queryRaw<{ totalVolume: string }>`
+      SELECT COALESCE(SUM(shares::numeric * "avgPrice"::numeric), 0) as "totalVolume"
+      FROM "Position"
+      WHERE "marketId" = ${market.id}
+    `,
+  ]);
+  const totalVolume = Number(volumeRows[0]?.totalVolume ?? 0);
 
   // Simple momentum (price away from 0.5):
   const priceMomentum = currentYesPrice - 0.5;
@@ -202,7 +213,7 @@ export const GET = withErrorHandling(async function GET(
 
     // Market dynamics (PUBLIC):
     totalVolume: Number(totalVolume.toFixed(2)),
-    totalPositions: positions.length,
+    totalPositions,
 
     // Momentum indicators (PUBLIC):
     momentum:
