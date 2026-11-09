@@ -20,7 +20,7 @@ import {
 } from '@/lib/auth/steward-exchange';
 import {
   type AgentEntryView,
-  agentSetupPrompt,
+  agentSetupPromptForEntry,
 } from '@/lib/onboarding/agent-entry';
 
 /**
@@ -111,14 +111,15 @@ export function LoginModal({
   }, [isOpen, dialogId]);
   const { stewardAuth, onLoginSuccess } = useStewardAuthContext();
   const { authenticated } = useAuth();
-  const [view, setView] = useState<AgentEntryView>(initialView);
+  const [requestedView, setView] = useState<AgentEntryView>(initialView);
   const [copied, setCopied] = useState(false);
-  const prompt = agentSetupPrompt(
+  const prompt = agentSetupPromptForEntry(
     process.env.NEXT_PUBLIC_APP_URL ??
       (process.env.NODE_ENV !== 'production'
         ? 'http://localhost:3000'
         : undefined)
   );
+  const view: AgentEntryView = prompt === null ? 'signin' : requestedView;
   const signInPane = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (isOpen && view === 'agent' && !signInOnly)
@@ -338,13 +339,14 @@ export function LoginModal({
             <textarea
               aria-label="Feed agent setup prompt"
               readOnly
-              value={prompt}
+              value={prompt ?? ''}
               rows={4}
               className="w-full resize-none rounded-md border bg-muted p-3 text-sm"
               onFocus={(event) => event.currentTarget.select()}
             />
             <Button
               onClick={async () => {
+                if (prompt === null) return;
                 try {
                   await navigator.clipboard.writeText(prompt);
                   setCopied(true);
@@ -384,7 +386,13 @@ export function LoginModal({
           </div>
         ) : (
           <div ref={signInPane} className="flex flex-col gap-3 pt-1">
-            {!signInOnly && (
+            {prompt === null && (
+              <p role="status" className="text-muted-foreground text-sm">
+                Agent setup is unavailable at this address. You can still sign
+                in.
+              </p>
+            )}
+            {!signInOnly && prompt !== null && (
               <Button
                 variant="ghost"
                 onClick={() => {
