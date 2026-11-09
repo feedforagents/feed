@@ -70,6 +70,7 @@ export class FeedOAuthService {
       id: clientId,
       name: input.client_name,
       redirectUris: input.redirect_uris,
+      grantTypes: input.grant_types,
     });
     return {
       ...input,
@@ -87,6 +88,8 @@ export class FeedOAuthService {
       .from(clients)
       .where(eq(clients.id, data.client_id))
       .limit(1);
+    if (client && !client.grantTypes.includes('authorization_code'))
+      throw new OAuthError('unauthorized_client');
     if (
       !client ||
       !client.redirectUris.some((uri) =>
@@ -315,6 +318,18 @@ export class FeedOAuthService {
         grant.expiresAt <= now
       )
         return null;
+      const [client] = await tx
+        .select()
+        .from(clients)
+        .where(eq(clients.id, grant.clientId))
+        .limit(1);
+      if (
+        !client ||
+        !client.grantTypes.includes(
+          isRefresh ? 'refresh_token' : 'authorization_code'
+        )
+      )
+        return null;
       if (token.consumedAt) {
         if (isRefresh) {
           await tx
@@ -361,7 +376,9 @@ export class FeedOAuthService {
       return {
         token_type: 'Bearer',
         access_token: access,
-        refresh_token: refresh,
+        ...(client.grantTypes.includes('refresh_token')
+          ? { refresh_token: refresh }
+          : {}),
         expires_in: Math.floor(
           (Math.min(now.getTime() + ACCESS_MS, grant.expiresAt.getTime()) -
             now.getTime()) /

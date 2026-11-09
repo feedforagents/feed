@@ -25,7 +25,8 @@ export function parseConnectReturn(
     saved.expiresAt <= now
   )
     return null;
-  return /^\/connect\?request=[a-zA-Z0-9_-]{16,128}$/.test(saved.path)
+  return /^\/connect\?request=[a-zA-Z0-9_-]{16,128}$/.test(saved.path) ||
+    /^\/link\?user_code=[A-Z2-9-]{8,9}$/.test(saved.path)
     ? saved.path
     : null;
 }
@@ -55,4 +56,11 @@ export function consumeConnectReturn(): string | null {
   );
   clearConnectReturn();
   return path;
+}
+
+export function saveDeviceReturn(userCode: string): void {
+  const path = `/link?user_code=${userCode.toUpperCase()}`;
+  const value = JSON.stringify({ path, expiresAt: Date.now() + 600_000 });
+  if (!parseConnectReturn(value)) return;
+  writeStorageItem('localStorage', CONNECT_RETURN_KEY, value);
 }

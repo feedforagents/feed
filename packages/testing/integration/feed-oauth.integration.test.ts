@@ -139,7 +139,12 @@ run('Feed MCP OAuth with a real database', () => {
       redirect_uri: callback,
       resource: `${origin}/mcp`,
     });
-    return { approval, result };
+    if (!result.refresh_token)
+      throw new Error('Expected a refresh-capable client');
+    return {
+      approval,
+      result: { ...result, refresh_token: result.refresh_token },
+    };
   }
 
   test('PKCE redemption authenticates the same account, stores only hashes, and cannot replay the code', async () => {

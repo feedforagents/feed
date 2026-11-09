@@ -43,6 +43,13 @@
       "when": 1794259832453,
       "tag": "0005_mcp_oauth_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794261406023,
+      "tag": "0006_mcp_device_authorization",
+      "breakpoints": true
     }
   ]
 }

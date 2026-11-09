@@ -5,6 +5,7 @@ export function GET() {
   const { origin } = oauthService();
   return oauthResponse({
     issuer: origin,
+    device_authorization_endpoint: `${origin}/oauth/device/authorization`,
     authorization_endpoint: `${origin}/oauth/authorize`,
     token_endpoint: `${origin}/oauth/token`,
     registration_endpoint: `${origin}/oauth/register`,

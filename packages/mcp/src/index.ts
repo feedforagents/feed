@@ -25,6 +25,7 @@
 export * from './auth';
 export * from './handlers';
 export * from './oauth/contracts';
+export * from './oauth/device';
 export * from './oauth/service';
 export * from './oauth/transport';
 export * from './server';

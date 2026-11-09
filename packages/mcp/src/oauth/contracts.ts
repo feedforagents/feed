@@ -1,12 +1,13 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 
+export const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 export const FEED_MCP_CAPABILITIES = {
-  grantTypes: ['authorization_code', 'refresh_token'],
+  grantTypes: ['authorization_code', 'refresh_token', DEVICE_GRANT_TYPE],
   clientRegistration: 'dynamic',
   scopes: ['read', 'social:write', 'messages', 'trade'],
   tools: ['about_feed', 'how_to_play', 'whoami'],
-  deviceAuthorization: false,
+  deviceAuthorization: true,
   clientIdMetadataDocuments: false,
 } as const;
 export const scopeSchema = z.enum(FEED_MCP_CAPABILITIES.scopes);
@@ -97,18 +98,37 @@ export function redirectMatches(
 export function resourceMatches(candidate: string, resource: string) {
   return candidate === resource || candidate === `${resource}/`;
 }
-export const registrationSchema = z.object({
-  client_name: z.string().trim().min(1).max(100),
-  redirect_uris: z
-    .array(z.string().max(2048).refine(validRedirect))
-    .min(1)
-    .max(8),
-  token_endpoint_auth_method: z.literal('none').default('none'),
-  grant_types: z
-    .array(z.enum(['authorization_code', 'refresh_token']))
-    .default(['authorization_code', 'refresh_token']),
-  response_types: z.array(z.literal('code')).max(1).default(['code']),
-});
+export const registrationSchema = z
+  .object({
+    client_name: z.string().trim().min(1).max(100),
+    redirect_uris: z
+      .array(z.string().max(2048).refine(validRedirect))
+      .max(8)
+      .default([]),
+    token_endpoint_auth_method: z.literal('none').default('none'),
+    grant_types: z
+      .array(z.enum(['authorization_code', 'refresh_token', DEVICE_GRANT_TYPE]))
+      .min(1)
+      .max(3)
+      .default(['authorization_code', 'refresh_token']),
+    response_types: z.array(z.literal('code')).max(1).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (
+      value.grant_types.includes('authorization_code') &&
+      !value.redirect_uris.length
+    )
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Authorization-code clients require a redirect URI',
+      });
+  })
+  .transform((value) => ({
+    ...value,
+    response_types:
+      value.response_types ??
+      (value.grant_types.includes('authorization_code') ? ['code'] : []),
+  }));
 export const authorizationSchema = z
   .object({
     response_type: z.literal('code'),

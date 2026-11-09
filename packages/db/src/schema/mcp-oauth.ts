@@ -1,9 +1,14 @@
+import { sql } from 'drizzle-orm';
 import { index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { users } from './users';
 
 export const mcpOAuthClients = pgTable('McpOAuthClient', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  grantTypes: text('grantTypes')
+    .array()
+    .notNull()
+    .default(sql`ARRAY['authorization_code', 'refresh_token']::text[]`),
   redirectUris: text('redirectUris').array().notNull(),
   createdAt: timestamp('createdAt', { mode: 'date', withTimezone: true })
     .notNull()
@@ -101,4 +106,41 @@ export const mcpOAuthRateLimits = pgTable(
     }).notNull(),
   },
   (t) => [index('McpOAuthRateLimit_expiresAt_idx').on(t.expiresAt)]
+);
+
+export const mcpOAuthDevices = pgTable(
+  'McpOAuthDevice',
+  {
+    hash: text('hash').primaryKey(),
+    userCodeHash: text('userCodeHash').notNull().unique(),
+    clientId: text('clientId')
+      .notNull()
+      .references(() => mcpOAuthClients.id),
+    scopes: text('scopes').array().notNull(),
+    resource: text('resource').notNull(),
+    status: text('status', {
+      enum: ['pending', 'approved', 'denied', 'consumed'],
+    })
+      .notNull()
+      .default('pending'),
+    interval: integer('interval').notNull().default(5),
+    pollCount: integer('pollCount').notNull().default(0),
+    lastPolledAt: timestamp('lastPolledAt', {
+      mode: 'date',
+      withTimezone: true,
+    }),
+    userId: text('userId').references(() => users.id, { onDelete: 'cascade' }),
+    browserHash: text('browserHash'),
+    grantId: text('grantId').references(() => mcpOAuthGrants.id, {
+      onDelete: 'cascade',
+    }),
+    expiresAt: timestamp('expiresAt', {
+      mode: 'date',
+      withTimezone: true,
+    }).notNull(),
+    createdAt: timestamp('createdAt', { mode: 'date', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index('McpOAuthDevice_expiresAt_idx').on(table.expiresAt)]
 );

@@ -106,9 +106,24 @@ export function requestRateKey(request: NextRequest) {
   return request.headers.get('cf-connecting-ip') ?? 'direct';
 }
 
-async function boundedBody(request: NextRequest) {
+export async function boundedBody(request: NextRequest, timeoutMs = 5000) {
   if (!request.body) return '';
   const reader = request.body.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      // Cancellation is best-effort after a bounded read has already timed out.
+      void reader.cancel().catch(() => undefined);
+      reject(new OAuthError('invalid_request', 408));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([readBounded(reader), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+async function readBounded(reader: ReadableStreamDefaultReader<Uint8Array>) {
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   try {

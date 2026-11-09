@@ -145,9 +145,13 @@ export function OnboardingProvider({
       return true;
     }
 
-    const approvalReturn = getSafeReturnTo().startsWith('/connect?request=');
+    const safeReturnTo = getSafeReturnTo();
+    const approvalReturn =
+      safeReturnTo.startsWith('/connect?request=') ||
+      safeReturnTo.startsWith('/link?user_code=');
     if (
       pathname === '/connect' ||
+      pathname === '/link' ||
       (pathname === '/onboarding' && approvalReturn)
     ) {
       return false;
