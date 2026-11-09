@@ -353,7 +353,13 @@ export const GET = withErrorHandling(
       );
     }
 
-    const userIds = (chat.participants || []).map((p) => p.userId);
+    // Only current participants are listed: a member moved out of the
+    // chat (e.g. a tier demotion) keeps an isActive=false row, and this
+    // route's own access check above already treats that as "not a
+    // participant" — the returned list must apply the same rule.
+    const userIds = (chat.participants || [])
+      .filter((p) => p.isActive)
+      .map((p) => p.userId);
     const participants = await asUser(user, async (db) => {
       return db.user.findMany({
         where: {
