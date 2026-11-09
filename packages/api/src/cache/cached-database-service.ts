@@ -514,6 +514,31 @@ class CachedDatabaseService {
   }
 
   /**
+   * Invalidate only the exact balance-dependent cache keys for a user
+   *
+   * @description Balance-scoped invalidation for the wallet callback.
+   * WalletService awaits this on every debit and credit, so it is three
+   * exact key deletes and no pattern scans: the balance entry the display
+   * path reads, the user entry (whose row carries the balance), and the
+   * owner's profile-stats entry, which the profile screen renders next to
+   * the balance. Following-feed and follows entries are unrelated to a
+   * balance change and are left alone — use invalidateUserCache for flows
+   * that genuinely need the broad invalidation (e.g. identifier changes).
+   */
+  async invalidateUserBalanceCache(userId: string) {
+    logger.info(
+      'Invalidating user balance cache',
+      { userId },
+      'CachedDatabaseService'
+    );
+    await Promise.all([
+      invalidateCache(userId, { namespace: CACHE_KEYS.USER_BALANCE }),
+      invalidateCache(userId, { namespace: CACHE_KEYS.USER }),
+      invalidateCache(userId, { namespace: 'user:profile:stats' }),
+    ]);
+  }
+
+  /**
    * Invalidate cache for user
    */
   async invalidateUserCache(userId: string) {
@@ -660,6 +685,14 @@ export const cachedDb = new CachedDatabaseService();
 // user/balance entries; without this registration the callback stayed null
 // and the balance display path served the pre-mutation balance until the
 // 30 s TTL expired.
+//
+// The callback is balance-scoped on purpose: it deletes only the exact
+// balance-dependent owner keys. The broad invalidateUserCache also scans
+// `posts:following:<userId>:*` and the global `user:follows:*` namespace,
+// which a wallet mutation has no business evicting — WalletService awaits
+// this callback on every debit and credit, so those scans would run on
+// every trade. Follow/feed invalidation belongs to the follow and post
+// flows, not to the wallet.
 WalletService.setCacheInvalidationCallback((userId) =>
-  cachedDb.invalidateUserCache(userId)
+  cachedDb.invalidateUserBalanceCache(userId)
 );

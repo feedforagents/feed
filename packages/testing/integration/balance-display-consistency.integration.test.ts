@@ -13,7 +13,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test';
-import { cachedDb } from '@feed/api';
+import { CACHE_KEYS, cachedDb, getCache, setCache } from '@feed/api';
 import { balanceTransactions, db, eq, inArray, users } from '@feed/db';
 import { WalletService } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
@@ -48,6 +48,12 @@ afterAll(async () => {
     .delete(balanceTransactions)
     .where(inArray(balanceTransactions.userId, testUserIds));
   await db.delete(users).where(inArray(users.id, testUserIds));
+  // Clear the fixture's owned cached keys (balance/user/profile entries
+  // warmed by the tests, plus any following-feed entries) so no test
+  // user's stale cache survives the run.
+  await Promise.all(
+    testUserIds.map((userId) => cachedDb.invalidateUserCache(userId))
+  );
 });
 
 describe('balance display path vs wallet ledger', () => {
@@ -94,6 +100,48 @@ describe('balance display path vs wallet ledger', () => {
     expect(ledger.balance).toBe(777);
     // Second read is served from the cache and still agrees.
     expect(await cachedBalance(userId)).toBe(777);
+  });
+
+  it('control: a wallet mutation leaves unrelated follow/feed cache entries alone', async () => {
+    const userId = await createTestUser('1000');
+    const authorId = await createTestUser('1000');
+
+    // Warm the owner's following-feed cache, as the feed view does.
+    // getPostsForFollowing caches under `<userId>:100:offset:0` in the
+    // posts:following namespace (default limit 100, no cursor).
+    const followingKey = `${userId}:100:offset:0`;
+    await cachedDb.getPostsForFollowing(userId, [authorId]);
+    expect(
+      await getCache(followingKey, {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+      })
+    ).not.toBeNull();
+
+    // Sentinel in the global follows namespace: nothing writes here, so
+    // only a pattern scan could remove it.
+    await setCache('sentinel', 'keep-me', { namespace: 'user:follows' });
+
+    // The mutation path every trade/settlement uses.
+    await WalletService.credit(
+      userId,
+      250,
+      'pred_resolve',
+      'Prediction market settlement payout'
+    );
+
+    // The balance display still refreshes: the new callback invalidates
+    // the exact balance keys.
+    expect(await cachedBalance(userId)).toBe(1250);
+
+    // ...but the unrelated entries survive: no pattern scan ran.
+    expect(
+      await getCache(followingKey, {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+      })
+    ).not.toBeNull();
+    expect(
+      await getCache('sentinel', { namespace: 'user:follows' })
+    ).toBe('keep-me');
   });
 
   it('guard: explicit cache invalidation still refreshes the display path', async () => {
