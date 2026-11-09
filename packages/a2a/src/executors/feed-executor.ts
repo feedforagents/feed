@@ -2403,6 +2403,10 @@ export class FeedAgentExecutor implements AgentExecutor {
   private async getLeaderboard(params: Record<string, JsonValue>) {
     const limit = this.parsePositiveInt(params.limit, 10, 50);
     const users = await db.user.findMany({
+      // Match the web points leaderboard (ReputationService
+      // .getWalletLeaderboard): human wallets only — NPC actor accounts
+      // and agent accounts are not ranked on the users-table board.
+      where: { isActor: false, isAgent: false },
       take: limit,
       orderBy: { reputationPoints: 'desc' },
       select: {
