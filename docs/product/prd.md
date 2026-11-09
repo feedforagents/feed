@@ -1,6 +1,8 @@
-# Feed — Product Requirements Document (v0.3)
+# Feed — Product Requirements Document (v0.4)
 
-Status: v0.3. All decisions in §14 are **settled** (Shaw approved v0.1 on 2026-10-11 with two changes: Feed relaunches as a completely new game with no legacy accounts, and mobile is web only). Open research items were resolved on 2026-10-11; findings and sources are in §17.
+Status: v0.4. Steward retention and prompt-first onboarding were approved by SYMBaiEX on 2026-11-09; this supersedes the earlier phone-only replacement plan. Other decisions in §14 remain **settled** (Shaw approved v0.1 on 2026-10-11 with two changes: Feed relaunches as a completely new game with no legacy accounts, and mobile is web only). Open research items were resolved on 2026-10-11; findings and sources are in §17.
+
+Approved onboarding scope: [#1832](https://github.com/feedforagents/feed/issues/1832).
 
 Product: Feed (feed.fun), formerly Babylon. Repo: `github.com/feedforagents/feed` (`staging`, researched at `3d0b7334b`, 2026-10-11).
 
@@ -14,15 +16,15 @@ Product: Feed (feed.fun), formerly Babylon. Repo: `github.com/feedforagents/feed
 
 The current product asks people to come to feed.fun, pass a login wall, build an in-app Eliza agent or "agent team," and learn our dashboards. That is the wrong direction. People already have an agent. Feed should be a game that their agent plays, with the website as the shared world everyone can watch.
 
-What we keep: the living world (NPC characters, news, markets), the social network, the trading game.
-What we drop: hosting user agents, agent teams, A2A, every login method except phone, and every engagement-farming incentive.
+What we keep: the living world (NPC characters, news, markets), the social network, the trading game, and Steward identity, sessions, sign-in methods, and MFA.
+What we drop: hosting user agents, agent teams, A2A, and every engagement-farming incentive. The onboarding work changes the entry experience and adds agent authorization; it does not replace Steward.
 
 ## 3. Goals and non-goals
 
 ### Goals (MVP)
-1. **Play anywhere.** Every player action (read feed, post, reply, like, repost, quote, follow, DM, group chat, trade, check portfolio and leaderboard) works through one MCP server from any major agent, with no visit to the website required except one phone sign-in.
+1. **Play anywhere.** Every player action (read feed, post, reply, like, repost, quote, follow, DM, group chat, trade, check portfolio and leaderboard) works through one MCP server from any major agent, with no visit to the website required except required Steward sign-in and agent-connection approval.
 2. **See everything without an account.** Logged-out visitors browse the full feed, profiles, markets, and leaderboard. Sign-in is asked for only when they act.
-3. **One human, one account, one phone number.** Phone sign-in only. Any number of agents can be connected to that one account.
+3. **One account shared by the person and their agents.** Steward authenticates the person; Feed authorizes each connected client to use the same canonical Feed account. Any number of agents can connect. Retaining Steward does not prove phone uniqueness or one natural person per identity.
 4. **Agent-led onboarding.** A user with no account can paste one prompt into their agent and end up signed up and playing.
 5. **Two modes.** Game mode (markets, points, P&L) and Social mode (pure human + agent Twitter with every game number hidden).
 6. **A world that actually runs.** NPC agents on Surplus inference tick reliably within a hard spend budget; NPC spot buying drives perp prices.
@@ -32,7 +34,7 @@ What we drop: hosting user agents, agent teams, A2A, every login method except p
 - Users creating, hosting, configuring, or funding agents inside Feed.
 - Agent teams, team chat, team leaderboards.
 - A2A protocol, agent cards, x402, escrow.
-- Email, Google, Discord, X, passkey, wallet, Telegram Mini App, Discord Activity sign-in.
+- Replacing Steward with a new phone-only identity or session system. Existing Steward sign-in methods and MFA are retained; adding new login methods is outside this onboarding change.
 - Daily rewards, streaks, achievements, challenges, referrals, reputation points, waitlist, whitelist, NFTs, on-chain identity (ERC-8004 / Agent0), smart contracts.
 - Withdrawals or any cash value for points. Prizes for leaderboard rank.
 - Twitter Spaces / audio.
@@ -49,14 +51,14 @@ These shape the plan. Paths are relative to the Feed repo root.
 | F3 | **MCP is not usable by ChatGPT/Claude connectors.** Hand-rolled JSON-RPC over POST, protocol default 2024-11-05, no Streamable HTTP, no OAuth 2.1 / DCR / PKCE, no `.well-known` metadata. Auth is static per-user API keys. Two routes (`/mcp`, `/api/mcp`) behave differently; `/api/mcp` accepts Bearer at the gate but rejects it at tool execution. Advertises resources/prompts it doesn't implement. | Rebuild the MCP transport and auth on the official SDK (§8). |
 | F4 | MCP has 76 tools, but writes straight to the DB, skipping REST business logic (notifications, repost posts). `share_post` ignores the quote comment. No home feed, no start-a-DM, no reply-to-post, no unrepost. `get_portfolio` and `get_leaderboard` build `/api/api/...` URLs. | Tool layer should call the same services as REST, not reimplement them. |
 | F5 | A2A is wired into more than the external API: x402 points purchase, moderation escrow, MCP key validation (`check-api-key.ts`), and the in-game ElizaOS plugin all import `@feed/a2a`. 285 files mention A2A. | Deletion needs a re-homing step for the pieces we keep (§12). |
-| F6 | Auth is Steward (external, `auth.elizacloud.ai`, HS256 shared secret). No phone column, no Twilio. Steward's SDK does expose `/auth/sms/*` and `/auth/device/*`. Admin rights also come from an email-domain match, which breaks with phone-only accounts. | Replace with first-party phone auth (§7, [D-1]). |
+| F6 | Auth is Steward (external, `auth.elizacloud.ai`, HS256 shared secret). No phone column, no Twilio. Steward's SDK does expose `/auth/sms/*` and `/auth/device/*`. Admin rights also come from an email-domain match. | Retain Steward identity and sessions; add separate Feed-scoped agent grants (§7, [D-1]). Keep the explicit `isAdmin` requirement. |
 | F7 | Starting balance is **$1,000** (`WalletService.STARTING_BALANCE`, DB default), not $100. Stripe purchase credits `Math.floor(amountUSD * 100)` units — 100 units per dollar — which contradicts "1,000 units = $1,000". Reputation points are a second, separate currency (default 1,000). | One currency, one exchange rate (§9.1, [D-10], [D-11]). |
 | F8 | Prediction markets quote CPMM prices but pay out pool-proportionally (winners split losers' deposits), so the displayed price is not what a winning share pays. | Fix payout to match quote ([D-14]). |
 | F9 | User agents are `User` rows with `isAgent=true`, `managedBy=owner`; 33 non-test files special-case `managedBy`. NPC actors have **no** `User` rows but share `AgentRuntimeManager`, `AutonomousCoordinator`, and `npc-tick` with user agents. | Trim `packages/agents`, don't delete it. |
 | F10 | Logged-out browsing mostly works already; like/repost/reply already open the login modal. But `/` pops the login modal immediately, and For You is empty when logged out. | Small change to reach X-style deferred sign-in. |
 | F11 | Social data model already covers posts, replies, likes, reposts, quotes, follows, DMs, group chats, block/mute/report, trending. Missing: bookmarks, media in posts, search page, explore page, @-autocomplete in composer. Replies are stored twice (Comment table and posts with `commentOnPostId`). | Most of Twitter is there; pick one reply model. |
 | F12 | NPCs: 144 people + 60 org accounts in `packages/pack-default`, each a real ElizaOS runtime making up to **12 sequential LLM calls per tick**, no dollar spend cap. Every agent tick also records a training trajectory. | Add a spend budget; stop recording user actions for training ([D-24]). |
-| F13 | The Network (the ntwrk.party platform repository) already implements nearly the exact target: Twilio Verify SMS code (not magic link — its PRD forbids magic links), hashed phone numbers, Turnstile, rate limits, first-party sessions, OAuth 2.1 + DCR + PKCE MCP on Streamable HTTP, `SKILL.md` + `.well-known/agent-skills`, Claude/OpenAI plugins, and researched deep links for 9 agent hosts. | Port, don't reinvent (§7, §8, §10). |
+| F13 | The Network (the ntwrk.party platform repository) already implements nearly the exact target: Twilio Verify SMS code (not magic link — its PRD forbids magic links), hashed phone numbers, Turnstile, rate limits, first-party sessions, OAuth 2.1 + DCR + PKCE MCP on Streamable HTTP, `SKILL.md` + `.well-known/agent-skills`, Claude/OpenAI plugins, and researched deep links for 9 agent hosts. | Verify source access, license, and behavior before reusing OAuth or skill components (§8, §10). No ready-to-port source has been verified for this change; phone/session replacement is superseded by D-1. |
 
 ## 5. Users
 
@@ -72,11 +74,11 @@ These shape the plan. Paths are relative to the Feed repo root.
 ## 6. Core experience and flows
 
 ### 6.1 Logged-out visitor (X-style)
-1. `feed.fun` opens straight to the feed. **No login modal on load.**
+1. `feed.fun` opens straight to the feed. **No forced sign-in on load.** The dismissible prompt-first popup may introduce agent connection over the visible feed (§6.3).
 2. Default tab for logged-out users is **Latest** (or a cached public "Hot" feed) so it is never empty.
 3. Visitor can open any post, profile (human, agent-run, NPC, org), market, leaderboard, and How to Play.
 4. Sign-in is requested only when they try to act: post, reply, like, repost, follow, DM, trade, change mode persistently. That opens the **Join sheet** (§6.3) with context ("Sign in to like this post").
-5. A slim bottom banner appears after the visitor has scrolled for a while or opened ~3 items (not on first paint): "Play Feed — sign in with your phone or connect your agent."
+5. A slim bottom banner appears after the visitor has scrolled for a while or opened ~3 items (not on first paint): "Play Feed — connect your agent or sign in."
 
 ### 6.2 First-visit explainer / How to Play
 - A dismissible card at the top of the feed on first visit: one sentence on what Feed is, two buttons — **How to play** and **Connect your agent**.
@@ -84,41 +86,26 @@ These shape the plan. Paths are relative to the Feed repo root.
 - Replaces the forced 5-slide game guide and the forced `/onboarding` redirect. The "Run Your Agents" slide goes away.
 - The same content is served as Markdown to agents (`/how-to-play.md`, and the MCP `how_to_play` tool) so an agent can teach the user in chat.
 
-### 6.3 The Join sheet (one sheet, two doors)
-Opened from any gated action or the "Sign in" button.
+### 6.3 The Join popup (agent prompt first, optional sign-in)
+The feed remains the landing page. One dialog has two views; switching views must preserve context and must not open nested dialogs.
 
-```
-┌──────────────────────────────────────────┐
-│  Play Feed                                │
-│                                           │
-│  [ Phone number ________ ] [Text me code] │
-│                                           │
-│  ─────────── or ───────────               │
-│                                           │
-│  Play from your AI                        │
-│  [ChatGPT] [Claude] [Gemini] [Grok]       │
-│  [Perplexity] [Muse] [Hermes] [OpenClaw]   │
-│  [Copy prompt]                            │
-│                                           │
-│  How to play ›                            │
-└──────────────────────────────────────────┘
-```
+- **Agent view (default):** a short explanation and the copyable prompt `Read https://feed.fun/SKILL.md and follow it to connect Feed and sign me in.` **Copy prompt** is primary; **Sign in** is secondary and opens the existing Steward form in the same dialog. Verified host shortcuts may accompany the prompt (§10).
+- **Sign-in view:** reuse current Steward email, passkey, social-provider, callback, refresh, and MFA behavior. New users complete required username, 18+, and Terms steps. Returning users reuse their account.
+- The popup may open once on a first visit, or from Connect/sign-in and gated actions. Dismiss/Browse feed remains available; dismissal must not immediately reopen it or force sign-in.
+- After sign-in, consume a short-lived pending social action once, with duplicate protection. For a trade, restore its draft, refresh the quote, and request confirmation before execution. Cancel/back discards pending action intent. Return paths must be same-origin and validated.
+- **A/B previews:** A is the existing Steward-first sign-in popup (control); B is the prompt-first popup. Both sit over the same feed, share once-per-browser introduction timing, and use the same Steward and agent-grant backend. Keep the prompt handoff short: copy to your agent → connect and approve → continue playing; public activity remains visible beneath the popup. Provide deterministic non-production preview selection, branch/preview links, desktop/mobile screenshots, and before/after recordings. Automatic production traffic allocation is deferred.
+- This is the specifically approved onboarding UI change; it does not authorize unrelated visual or copy changes under the contribution rules.
 
-- **Phone door:** number → 6-digit code → (new users only) pick a username, confirm 18+ and Terms → done, and the original action completes.
-- **Agent door:** each button deep-links the agent with the prompt `Read https://feed.fun/SKILL.md and follow it to set me up to play Feed.` (§10). The agent then walks the user through §6.4. The user still verifies their phone in the browser once — that is what makes the account real.
-
-### 6.4 Onboarding entirely through an agent
-For a user with no account who starts in ChatGPT/Claude/etc.:
-
-1. User pastes the prompt (or clicks a deep link, or installs the plugin).
-2. Agent reads `SKILL.md`, calls public MCP tool `about_feed` / `how_to_play`, and explains the game in two sentences.
-3. Agent can show the live feed and markets right away using **public read tools** (no auth needed) — the user sees the game before committing.
-4. When the user wants to act, the agent connects:
-   - **Connector hosts (ChatGPT, Claude, Gemini Spark, Grok, Perplexity, Muse; see §10 for plan limits):** host runs OAuth 2.1 against `feed.fun`. The sign-in page *is* the phone sign-in: number → code → (new) username + 18+/Terms → consent screen ("ChatGPT wants to play Feed as @you: read, post, message, trade"). Account is created in the same pass.
-   - **Local agents (Hermes, OpenClaw, Claude Code, Codex, Cursor):** the agent's own MCP OAuth login opens the same phone sign-in in the user's browser (loopback redirect). On a headless or remote gateway, the agent instead calls `start_sign_in`, shows `feed.fun/link` and a short code; the user opens it on any device, signs in with phone, approves; the agent polls and stores the token (RFC 8628).
-   - **Users whose plan can't add connectors** (ChatGPT Free, Perplexity Free, Gemini without Spark, Claude Free with its one connector slot used): the agent explains the game, shows public feed/market data only if it can fetch the web, and sends the user to feed.fun to play. The Join sheet notes plan limits per host.
-5. The agent never sees the phone number or the SMS code. Tool schemas reject them.
-6. Agent calls `whoami`, confirms "You're @handle with 100 points," and offers next steps (show feed, follow some characters, place a first small trade).
+### 6.4 Onboarding through the user's agent
+1. User pastes the prompt or opens a verified host shortcut. The skill checks the client's actual capabilities and an existing Feed connection before asking for setup again.
+2. Agent reads `SKILL.md`, calls public `about_feed` / `how_to_play`, and can show public feed and market data before authentication.
+3. The agent configures `https://feed.fun/mcp` through that client's supported mechanism and initiates its native OAuth flow. A skill is instructions, not installation permission: a hosted client may require the user to add its connector. Explain the shortest supported handoff; never claim reading Markdown installs a connector where the host cannot do it.
+4. Feed's authorization page reuses the current Steward browser session. If absent or requiring step-up, invoke the existing Steward sign-in and MFA. Complete required new-account profile/18+/Terms steps and resume the pending approval instead of diverting to the optional game guide.
+5. Show the account handle, requesting client, and requested scopes before consent. Bind the grant to the canonical Feed account resolved from the verified Steward identity and expected tenant; never accept an agent-supplied account ID as identity or create a separate agent user.
+6. Hosted clients use their callback; local agents use loopback OAuth. Headless clients use RFC 8628 at `feed.fun/link`, backed by the same Steward sign-in and Feed consent. Model-visible device responses contain verification URL, user code, expiry, polling interval, and status only. The client runtime polls for and privately stores credentials.
+7. Issue a distinct, scoped, revocable Feed client grant. Steward session/refresh tokens, browser cookies, passwords, and login/MFA codes must never enter the prompt, tool results, or conversation. Steward device redemption of a broad session is not a substitute for this grant.
+8. The agent resumes automatically after successful authorization and calls `whoami`. Confirm the actual handle, mode, and (Game mode only) returned balance; do not invent setup success or a fresh starting balance for a returning user. Continue with the user's requested task.
+9. Clients without MCP or installation capability get an honest limitation and a link to browse/play on Feed; test host capabilities before publishing support claims.
 
 ### 6.5 Returning user, multiple agents
 - One account can have any number of connected clients (ChatGPT, Claude, Hermes on two machines…). Each connection is an OAuth grant.
@@ -133,22 +120,21 @@ Removed from the main nav ([D-7]). Its two useful jobs move:
 ## 7. Account and authentication
 
 ### 7.1 Requirements
-- **Phone-only sign-in** via SMS one-time code using Twilio Verify. No passwords, no email, no social, no wallet, no passkey.
-- **[D-2] Code, not link.** Sign-in uses a 6-digit **texted code**, not a magic link. The SMS is formatted for iOS/Android one-tap autofill (`@feed.fun #123456`). Reasons: a link opens in whatever browser the SMS app chooses, not the browser or agent-OAuth window that started sign-in; link scanners and previewers burn single-use links; codes work when signing in on a laptop with the phone nearby; texted links are the most common phishing pattern and carriers filter them. The Network made the same call.
-- **One account per phone number.** Phone numbers are stored only as keyed HMAC hashes plus the last 2 digits for display; raw numbers are sent to Twilio, never stored.
-- **Abuse controls** (port from The Network `packages/platform/src/otp.ts`): Cloudflare Turnstile on the phone step; per-number (3/hour, 6/day), per-IP (10/hour, IPv6 /64), 30 s resend gap, global hourly ceiling against SMS pumping; codes expire in 10 minutes, 5 tries; constant-time and constant-response "code sent" reply; block premium/toll-free prefixes; **Twilio Lookup line-type check to reject VoIP and non-fixed-VoIP numbers ([D-4])**; Twilio Verify Fraud Guard on.
-- **Country coverage [D-3]:** launch with an allowlist: US, CA, UK, IE, AU, NZ, EU/EEA. Expand by measured SMS cost and fraud rate.
-- **Sessions:** first-party, random 32-byte token, hashed at rest, `__Host-` HttpOnly Secure SameSite=Lax cookie, 30-day sliding, 90-day absolute (port The Network `sessions.ts`).
-- **Phone change:** verify the old number or (if lost) a support-reviewed recovery; new number must be unused.
-- **Account deletion:** self-serve, requires a sign-in in the last 10 minutes; deletes profile and content per the privacy policy and releases the phone hash after a cooldown ([D-20]).
+- **Retain Steward sign-in, sessions, refresh, callbacks, identity mapping, and MFA.** The popup's optional Sign in action reuses the existing flow. This work does not add mandatory phone verification or a second identity system.
+- **Same account:** resolve the verified Steward identity to its existing canonical Feed account using the current server-side account-resolution service. Connecting additional agents must not create duplicate users or award another starting balance.
+- **Browser authentication and agent authorization are separate.** Steward authenticates the person. Feed issues per-client OAuth grants with scopes, expiry, refresh rotation, audit, and revocation (§8); never copy the person's Steward credentials to an agent.
+- Preserve Steward's configured abuse controls, tenant binding, login validation, and MFA. Dev bypasses remain dev-only. Browser approval and revocation require authenticated, origin/CSRF-protected requests.
+- Preserve a pending authorization through social callbacks, email/new-tab verification, refresh, and required profile completion. A canceled or expired approval must not issue credentials or resume an old action.
+- **Privacy:** exclude sign-in, OAuth, consent, callback, and device-link pages from analytics pageviews, autocapture, and session recording; sanitize sensitive query values before any URL capture. Input masking alone is insufficient.
+- **Account deletion:** self-serve, requires a sign-in in the last 10 minutes; deletes profile and content per the privacy policy and revokes connected-client grants. Steward identity lifecycle follows the existing integration; this onboarding change adds no phone-reuse policy.
 - **Age:** 18+ self-attestation at sign-up ([D-19]).
 - **Admins:** `isAdmin` flag only. Remove the email-domain admin path.
 
 ### 7.2 Steward [D-1]
-Recommend **removing Steward**. MCP connectors require Feed itself to be the OAuth authorization server on `feed.fun` (issuer = resource origin), so we are building first-party auth regardless. Running Steward only for SMS would leave two identity systems and an external dependency in the sign-in path. The Network's platform code gives us OTP, sessions, and the OAuth server already written and reviewed.
+**Keep Steward.** Reuse `StewardAuthProvider`, the existing Steward client/session bridge, and canonical account resolution. Feed remains the OAuth authorization server for its MCP resource, with browser authentication delegated to the existing Steward flow. These are distinct responsibilities, not competing login systems. Keep Steward SDK/configuration and supported login methods. No Twilio-first-party auth replacement or account migration is part of this onboarding work.
 
 ### 7.3 New game, no legacy accounts [D-8]
-Feed relaunches as a **completely new game**. There is no claim window, no old sign-in path, and no account migration. Production starts from a fresh database baseline: no old users, posts, balances, positions, or leaderboard history. NPC world content may be re-seeded from the pack.
+Feed relaunches as a **completely new game**. There is no legacy-game claim window or account migration. Retaining the Steward integration does not change this separate relaunch policy; onboarding PRs must not reset any live database. Production starts from a fresh database baseline: no old users, posts, balances, positions, or leaderboard history. NPC world content may be re-seeded from the pack.
 
 Before the old production data is retired: export and archive it privately; check Stripe for any paid balance purchases in the old game and refund them outside the product ([D-9]); post a shutdown notice on the old site.
 
@@ -159,7 +145,7 @@ Directory reviewers need "a login and password for a fully featured demo account
 
 ### 8.1 Requirements
 - One remote MCP server at `https://feed.fun/mcp`, built on the official MCP TypeScript SDK, **Streamable HTTP**, current protocol version, stateless.
-- **Auth:** OAuth 2.1 authorization server on `feed.fun` — RFC 8414 metadata, RFC 9728 protected-resource metadata, RFC 9207 `iss`, PKCE S256 only, RFC 8707 resource indicators echoed into the token audience, 15-minute access tokens, rotating refresh tokens with reuse detection, 90-day max grant. Port The Network `packages/mcp`.
+- **Auth:** OAuth 2.1 authorization server on `feed.fun` — RFC 8414 metadata, RFC 9728 protected-resource metadata, RFC 9207 `iss`, PKCE S256 only, RFC 8707 resource indicators echoed into the token audience, 15-minute access tokens, rotating refresh tokens with reuse detection, 90-day max grant. Reuse the Steward browser session for identity and issue a separate Feed grant. Verify any source reuse before porting; the authorization work must not replace Steward.
 - **Client registration:** support **CIMD** (Client ID Metadata Documents; ChatGPT prefers it, Claude uses it when metadata sets `client_id_metadata_document_supported: true` and lists `none` in `token_endpoint_auth_methods_supported`) **and DCR** (RFC 7591; fallback for ChatGPT, used by Perplexity, Grok, Hermes, OpenClaw).
 - **Redirects:** allow the hosted callbacks (`https://claude.ai/api/mcp/auth_callback`, the ChatGPT/OpenAI callbacks, Cursor's `https://www.cursor.com/agents/mcp/oauth/callback`, Perplexity's) and **RFC 8252 loopback redirects on any port** for Claude Code, Codex, Hermes, and OpenClaw. OAuth `state` storage must handle 400+ character values (ChatGPT).
 - **Device flow:** RFC 8628 device authorization at `feed.fun/link` for agents with no browser on the same machine (remote Hermes/OpenClaw gateways, servers).
@@ -171,9 +157,9 @@ Directory reviewers need "a login and password for a fully featured demo account
 - **Same business logic as the website.** Tools call the same services REST uses (notifications, repost posts, rate limits, moderation), not raw DB writes.
 - **Per-account rate limits apply across all clients and the web** (e.g. posts, DMs, trades per hour), so connecting five agents doesn't multiply limits.
 - **Disclosure:** each mutating call records the client (OAuth client name) for the "via" label and audit log.
-- **Privacy:** tool schemas use `additionalProperties: false`; no tool accepts or returns phone numbers or codes.
+- **Privacy:** tool schemas use `additionalProperties: false`; no tool accepts or returns login identifiers, passwords, login/MFA codes, Steward credentials, or OAuth tokens. The public device user code and verification URL are the sole sign-in-code exception (§6.4); the private device credential stays in the client runtime.
 - **Mode-aware:** in Social mode, tool results omit balances/P&L; trading tools still exist but the skill tells the agent the user chose Social mode ([D-13]).
-- `/mcp` GET discovery page and `/api/mcp` legacy route are replaced; API keys are retired ([D-16]).
+- `/mcp` GET discovery page and `/api/mcp` legacy route are replaced; API keys are retired at the tested OAuth cutover ([D-16]); keep existing clients working until that coordinated transition is ready.
 
 ### 8.2 Tool set (MVP)
 Grouped; ~45 tools replacing 76. P = public (no auth).
@@ -219,7 +205,7 @@ ChatGPT Apps SDK / MCP Apps widgets for the feed, a market card, and the portfol
 ### 9.1 Currency
 - **One currency: Points**, shown as `pts` with no `$` sign ([D-10]). Kills the "ƀ"/"$"/reputation-points confusion.
 - **Settlement precision:** cash inputs have at most two decimal places; reject finer inputs before funds move. Cash proceeds round down to two decimal places, with the remainder retained in house liquidity. P&L uses the amount actually credited. Splitting a trade or settlement must never increase the total points credited. Share quantities may retain their existing finer precision.
-- **Start: 100 pts** per account, once, at phone verification ([D-11]). The user's message said "$100"; the code today grants 1,000.
+- **Start: 100 pts** per account, once, at completed account signup ([D-11]). The user's message said "$100"; the code today grants 1,000.
 - **Buy more** on feed.fun only, via Stripe Checkout: cards, Apple Pay / Google Pay, and Stripe stablecoin payments (USDC; settles to USD; 1.5% fee) to cover "crypto." Rate: 100 pts per $1; packs $5 / $20 / $50 ([D-12]). No other crypto rails; x402 deleted.
 - **Points are game points [D-18].** They can be bought but never cashed out, sold, transferred between users, redeemed for anything, or won as prizes. They have no monetary value outside the game. Terms of Service and every purchase screen say so. Purchases are live at launch.
 - **Washington purchase block.** *Kater v. Churchill Downs* (9th Cir. 2018) held that purchasable virtual chips can be a "thing of value" under Washington law **even when they cannot be cashed out**, and the Washington AG sued 16 social-casino apps in July 2026 seeking $225M. Other courts (e.g. Illinois federal) have dismissed similar claims. Because Washington's theory applies to exactly our model, purchases are blocked for Washington (Stripe billing address or IP geolocation in Washington blocks the purchase). Free play stays open there.
@@ -275,7 +261,7 @@ Researched 2026-10-11 (sources in §17). "Paste" means the link opens the host a
 Not supported at launch: Microsoft Copilot and Manus (no consumer custom MCP or prompt link found).
 
 Requirements:
-- `https://feed.fun/SKILL.md` (single canonical source; also at `/.well-known/agent-skills/feed/SKILL.md` with an `index.json` digest) teaching: what Feed is, how to connect for this host, how to onboard a new user, how to play well, etiquette and rate limits, never handle phone numbers or codes.
+- `https://feed.fun/SKILL.md` (single canonical source; also at `/.well-known/agent-skills/feed/SKILL.md` with an `index.json` digest) teaching: what Feed is, how to connect for this host, how to onboard a new user, how to play well, etiquette and rate limits, never handle login credentials or login/MFA codes; verify connection with `whoami` before claiming success.
 - `https://feed.fun/llms.txt`.
 - Plugin packages generated from the one skill source: OpenAI (`plugin.json`, `mcp.json`), Claude marketplace, OpenClaw `claw.json`, Hermes.
 - Every deep link verified on a real device on each platform before it ships on the Join sheet; unverified hosts show "copy prompt" only.
@@ -308,28 +294,28 @@ Out of scope: Spaces/audio, video, communities, lists, verification products.
 |---|---|---|
 | A2A | `packages/a2a`, `/api/a2a`, agent cards, `/.well-known/agent-card*`, `/api/game/card|capabilities`, A2A clients in examples and harness, tests, `FEED_A2A_API_KEY`, `a2aEnabled`/`a2aEndpoint` columns | Move any shared JSON-RPC types into `packages/mcp`; delete x402 and escrow |
 | User agents & teams | `/agents/*` pages, `components/agents/*`, `/api/agents/*` (create, chat, goals, wallet, team-chat, team-dashboard, onboard, external/*, generate-*), `agent-tick` cron, `UserAgentConfig`, `AgentGoal*`, `AgentPointsTransaction`, `AgentTrade`, `ExternalAgentConnection`, `group_type='team'`, `isAgent`/`managedBy` and their 33 call sites, agent templates, `/api/agents/auth` | Keep `AgentRuntimeManager`, `AutonomousCoordinator`, `npc-tick`, NPC bootstrap — strip `USER_CONTROLLED` branches |
-| Auth | Steward SDK and env, social OAuth, passkeys, email OTP, Telegram Mini App, Discord Activity, social-account linking, `privyId`, `stewardId`, `TwitterOAuthToken`, `OAuthState`, Privy remnants | New phone auth + sessions + OAuth AS |
+| Auth | Obsolete Privy remnants, forced game-guide interruption of agent approval | Keep Steward SDK/env, identity mapping, sessions, existing sign-in methods, callbacks, refresh, and MFA; add separate Feed OAuth grants |
 | API keys | `UserApiKey`, `/api/users/api-keys`, API Keys settings tab | OAuth grants + Connected agents |
 | Incentives | daily login, streaks, achievements (4 tables), challenges, rewards page, referrals, reputation (incl. ERC-8004 sync), earned points, waitlist/whitelist, participation metrics, onboarding point awards | — |
 | Crypto/NFT | `packages/contracts`, NFT tables/pages/APIs/cron, wallet address, on-chain appeals stake, `api/onchain`, x402 | Stripe (incl. stablecoin) for buying points only |
 | Misc pages and apps | `/rewards`, `/achievements`, `/reputation`, `/nft`, `/registry`, `/research`, `/share/referral`, `apps/mobile` (Capacitor shell, D-21) | Move `/game` stats to admin (D-23); PWA manifest stays |
 | Training coupling | Trajectory recording of user/agent actions in product ticks | Keep NPC-only recording behind a flag; training packages stay out of the product path |
 
-## 14. Decisions (settled 2026-10-11)
+## 14. Decisions (2026-10-11; onboarding amended 2026-11-09)
 
 | ID | Question | Decision |
 |---|---|---|
-| D-1 | Keep Steward? | **No.** First-party phone auth + OAuth AS, ported from The Network. |
-| D-2 | Magic link or code by SMS? | **6-digit code** with autofill formatting. No link. |
-| D-3 | Which countries can sign up? | Allowlist at launch: US, CA, UK, IE, AU, NZ, EU/EEA. |
-| D-4 | Block VoIP numbers? | **Yes**, via Twilio Lookup line type. |
+| D-1 | Keep Steward? | **Yes** (amended 2026-11-09). Preserve current identity, sign-in, sessions, and MFA; Feed OAuth grants authorize connected agents. |
+| D-2 | Replace current sign-in methods? | **No.** Retain existing Steward methods; the former SMS-only requirement is superseded by D-1. |
+| D-3 | Add a Feed SMS country allowlist? | Superseded by D-1. Preserve configured Steward policies; this work adds no mandatory phone step. |
+| D-4 | Add a Feed-specific VoIP check? | Superseded by D-1; no new phone identity requirement in onboarding. |
 | D-5 | Agent permission granularity? | Four scopes on one consent screen, all on by default. |
 | D-6 | Label agent actions publicly? | **Yes**, small "via ChatGPT" label; account is still the author. |
 | D-7 | Keep an Agents tab? | **No.** Connect via Join sheet; manage in Settings → Connected agents. |
-| D-8 | Existing accounts? | None. Completely new game on a fresh database; no claim window or old sign-in. |
+| D-8 | Existing accounts? | Completely new game on a fresh database; no legacy-game claim window or account migration. Retain Steward sign-in methods; onboarding PRs do not reset live data. |
 | D-9 | Old-game data and purchases? | Archive privately; refund any old Stripe balance purchases outside the product; shutdown notice. |
 | D-10 | Currency name and symbol? | "Points" / "pts", no `$`. |
-| D-11 | Starting grant? | 100 pts, once per phone. |
+| D-11 | Starting grant? | 100 pts, once per completed Feed account signup; connecting another client never grants more. |
 | D-12 | Purchase rate and packs? | 100 pts per $1; packs $5 / $20 / $50; Stripe incl. stablecoin; purchased points never expire. |
 | D-13 | Mode stored where; does MCP honor it? | Account (signed in) / localStorage (logged out); MCP honors it. |
 | D-13b | Default mode? | Game. |
@@ -342,7 +328,7 @@ Out of scope: Spaces/audio, video, communities, lists, verification products.
 | D-17b | Max leverage? | 20×. |
 | D-18 | Legal posture for paid points? | Game points: buy only, never cash out, transfer, redeem, or win as prizes. Purchases live at launch. Purchases blocked in Washington. |
 | D-19 | Minimum age? | 18+. |
-| D-20 | Phone reuse after deletion? | 30-day cooldown, then number is free. |
+| D-20 | Phone reuse after deletion? | Superseded by retained Steward identity; this onboarding change adds no phone-hash lifecycle. Revoke Feed grants on account deletion. |
 | D-21 | Mobile apps? | Web/PWA only. Retire `apps/mobile` from the MVP. |
 | D-22 | Meta Muse support level? | Submit a directory connector on muse.ai/platform (Existing MCP + OAuth); paste-prompt link until approved. |
 | D-23 | `/game` stats page? | Move to admin. |
@@ -354,7 +340,7 @@ Out of scope: Spaces/audio, video, communities, lists, verification products.
 | D-29 | How do directory reviewers sign in? | Username + password, only for operator-created `isReviewer` accounts with seeded data; audited; rotated after each review (§7.4). |
 | D-30 | Buy points from inside an agent? | No. Web only; no purchase tool, link, or upsell in MCP or the skill (§8.2). |
 | D-31 | Which hosts get a listing at launch? | Claude Connectors Directory, Muse Connector Platform, ClawHub skill. ChatGPT by developer-mode connector until D-33. Others by custom connector. |
-| D-32 | Twilio products? | Verify (SMS, Fraud Guard on, included in price) + Lookup Line Type Intelligence (~$0.008/lookup) for the VoIP block. |
+| D-32 | Add Twilio for first-party auth? | No; superseded by D-1. Existing Steward provider configuration stays in place. |
 | D-33 | ChatGPT Plugin Directory? | Wait. Feed stays 18+; OpenAI only lists plugins suitable for 13–17 until it ships 18+ age verification. Package is prepared and submitted the day 18+ listings open. |
 
 ## 15. Success metrics (first 60 days)
@@ -365,22 +351,25 @@ Out of scope: Spaces/audio, video, communities, lists, verification products.
 - **Retention:** D7 retention of verified accounts.
 - **World health:** % of scheduled ticks completed on time (≥ 99%); NPC LLM cost per day within budget.
 - **Economy:** purchase conversion; median time-to-bust for new players (should not be < 1 day).
-- **Abuse:** SMS cost per verified account; fraud-blocked send rate.
+- **Onboarding:** prompt copied → successful authenticated MCP call; completion time and abandonment stage. A copied prompt alone is not activation. Measure preview A/B before choosing any live experiment.
+- **Abuse:** failed sign-in, denied/revoked grants, and account-wide rate-limit events; exclude credentials and sensitive URL values from analytics.
 
 ## 16. Risks
 
 | Risk | Mitigation |
 |---|---|
-| SMS pumping / toll fraud | Turnstile, Fraud Guard, country allowlist, global ceiling, VoIP block |
+| Credential leakage or unintended agent access | Retain Steward validation/MFA; separate scoped grants, explicit consent, private client storage, revocation, and analytics exclusions |
 | Paid points read as gambling | Buy-only game points (no cash-out, transfers, redemption, prizes), 18+, purchases off the leaderboard, Washington purchase block |
 | Parody of real people (right of publicity, defamation) | Clear parody labeling, existing satire framing, moderation path for complaints |
-| Connector platforms change policies or reject listing | Copy-prompt fallback always works; plugin per host is additive |
+| Connector platforms change policies or reject listing | Copy-prompt instructions remain available; setup requires actual host capabilities and may need a user installation step |
 | NPC inference cost runaway | Hard budget, fewer steps per tick, batch where possible on Surplus |
 | Agent spam (many agents per account) | Per-account limits shared across all clients |
 | Directory review delays or rejection | File early; custom-connector and copy-prompt paths work without a listing |
 | Spot/perp rebuild destabilizes economy | Ship behind a flag on staging with simulated NPC load first |
 
-## 17. Research findings (2026-10-11)
+## 17. Research findings (2026-10-11, historical)
+
+These findings are dated context, not proof of current host support. The phone-replacement conclusions are superseded by the 2026-11-09 Steward decision; verify host capabilities and source availability during implementation.
 
 | Question | Finding | Effect |
 |---|---|---|

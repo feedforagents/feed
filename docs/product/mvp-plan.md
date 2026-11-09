@@ -1,6 +1,8 @@
-# Feed — MVP Plan (v0.3)
+# Feed — MVP Plan (v0.4)
 
-Companion to [prd.md](prd.md) (v0.3, decisions settled). Phases are ordered by dependency; phases 2–5 can partly overlap once phase 1 lands. Each phase ends with exit criteria proved by end-to-end runs against the real workflow (not new unit tests).
+Companion to [prd.md](prd.md) (v0.4, onboarding amended 2026-11-09). Phases are ordered by dependency; phases 2–5 can partly overlap once phase 1 lands. Each phase ends with exit criteria proved by end-to-end runs against the real workflow (not new unit tests).
+
+Approved onboarding scope: [#1832](https://github.com/feedforagents/feed/issues/1832).
 
 Decision IDs (D-n) refer to PRD §14. If a decision changes, the affected phase is noted.
 
@@ -32,40 +34,37 @@ Order matters because of cross-imports (PRD F5, F9).
 
 **Exit:** typecheck, lint, existing required tests, and build pass; game ticks still healthy on staging; web E2E of feed, post, reply, like, repost, follow, DM, group chat, prediction trade, perp trade passes with a test account. Net line count reported.
 
-## Phase 2 — Phone accounts (replaces Steward)
+## Phase 2 — Retain Steward and preserve approval continuity
 
-Depends on: D-1, D-2, D-3, D-4, D-19, D-29, D-32.
+Depends on: amended D-1 through D-4, D-19, D-29, D-32. SYMBaiEX approved retained Steward and prompt-first entry on 2026-11-09. This replaces the former phone-account rebuild; it does not authorize a database reset or new identity migration.
 
-1. Port The Network platform pieces: `otp.ts` (Twilio Verify), `phone.ts` (parsing, country allowlist, premium/toll-free block), `sessions.ts`, hashed phone storage, Turnstile, rate limits, boot-config assertions.
-2. Add Twilio Lookup line-type check (VoIP block).
-3. Schema: `phoneHash` (unique), `phoneLast2`, `phoneVerifiedAt`, `ageConfirmedAt`, `uiMode`; drop `stewardId`, `privyId`, email and social columns after migration window.
-4. New `authenticate()` in `packages/api/src/auth-middleware.ts` reading the first-party session; delete Steward verification, dev bypass headers stay dev-only.
-5. Sign-up: phone → code → username (+18+/Terms) → grant 100 pts (D-11).
-6. Account settings: change phone, delete account (recent sign-in), sign out everywhere.
-7. Reviewer sign-in: username + password only for operator-created, seeded `isReviewer` accounts (D-29).
-8. Fresh database baseline for the new game (D-8); no user migration. Remove Steward SDK, social OAuth, passkeys, email OTP, Telegram Mini App, Discord Activity, account linking; admin via `isAdmin` only.
+1. Keep existing Steward sign-in methods, SDK/configuration, sessions, refresh, callbacks, and MFA. Reuse canonical server account resolution and expected tenant validation for browser approval.
+2. Preserve pending Feed authorization through login, email/new-tab verification, callback, refresh, and required username/18+/Terms steps; optional game-guide onboarding must not intercept it.
+3. Keep account signup idempotent and the 100-pt starting grant once per account. Additional clients reuse that account and receive no new signup balance.
+4. Exclude sign-in/OAuth/consent/callback/device-link pages from analytics pageviews, autocapture, and recording; sanitize sensitive URL values before capture. Preserve existing login security and dev-only bypass boundaries.
+5. Keep reviewer access requirements (D-29); verify compatibility with the retained Steward integration. No ordinary-user credential bypass.
 
-**Exit:** E2E on staging with a real Twilio number: new sign-up, return sign-in, wrong code, expired code, rate-limited resend, VoIP number rejected, blocked country rejected, reviewer password sign-in (and refusal for a non-reviewer account), phone change, account deletion. SMS cost per verified account recorded.
+**Exit:** real Steward E2E for new and returning users, all supported sign-in methods and required MFA, invalid/expired/canceled login, refresh/logout, same-account reuse, concurrent signup, and approval continuity. Verify no credentials or auth query values in analytics. Unavailable providers remain explicit coverage gaps, not passing results.
 
 ## Phase 3 — MCP v2 + OAuth
 
-Depends on: phase 2 sessions; D-5, D-13, D-16.
+Depends on: phase 2 retained Steward integration and approval continuity; D-5, D-13, D-16.
 
-1. OAuth 2.1 authorization server on `feed.fun`: metadata (RFC 8414, 9728, 9207), CIMD + DCR (RFC 7591), PKCE, resource indicators (normalized), hosted + loopback redirects, 401 `WWW-Authenticate` and `_meta["mcp/www_authenticate"]` challenges, token rotation, consent screen, `/oauth/consents` (= Settings → Connected agents), audit log. Port The Network `packages/mcp`.
-2. Device authorization grant (RFC 8628) with `feed.fun/link`.
-3. Rebuild `packages/mcp` on the official SDK, Streamable HTTP, at `/mcp`; delete `/api/mcp`, the static GET manifest, and `UserApiKey`.
+1. OAuth 2.1 authorization server on `feed.fun`: metadata (RFC 8414, 9728, 9207), CIMD + DCR (RFC 7591), PKCE, resource indicators (normalized), hosted + loopback redirects, 401 `WWW-Authenticate` and `_meta["mcp/www_authenticate"]` challenges, token rotation, consent screen, `/oauth/consents` (= Settings → Connected agents), audit log. Browser identity comes from Steward; issue separate Feed-scoped grants. Verify source/license/behavior before any reuse of The Network code; availability is unproven.
+2. Device authorization grant (RFC 8628) with `feed.fun/link`, using Steward sign-in plus Feed consent. Client runtime privately polls/stores credentials; model-visible tools return only verification link/user code/timing/status.
+3. Rebuild `packages/mcp` on the official SDK, Streamable HTTP, at `/mcp`; retire `/api/mcp`, the static GET manifest, and `UserApiKey` only at the coordinated, tested cutover. Do not break existing clients while the replacement is being validated.
 4. Implement the PRD §8.2 tool set by calling the same services as REST (fixes F4 bugs by construction), with directory-required titles and annotations. Public tools work without a token. No purchase tool (D-30).
 5. Shared per-account rate limits across web and all clients; record client name on every mutation for the "via" label (D-6).
 6. `SKILL.md`, `/.well-known/agent-skills/`, `llms.txt`, `how-to-play.md` generated from one source.
 
-**Exit:** real-host E2E: add the connector in ChatGPT (developer mode) and Claude, sign up a brand-new phone through the OAuth page, then from chat: read home feed, post, reply, quote, repost, like, follow, DM a user, create a group, buy and sell a prediction, open and close a perp, read portfolio and leaderboard. Same run with Hermes via loopback OAuth and with a headless OpenClaw gateway via device flow. Revoke a grant and confirm the next call fails.
+**Exit:** real-host E2E: add the connector in ChatGPT (developer mode) and Claude, sign in or create an account through the existing Steward flow on the OAuth page and approve the named client, then from chat: read home feed, post, reply, quote, repost, like, follow, DM a user, create a group, buy and sell a prediction, open and close a perp, read portfolio and leaderboard. Same run with Hermes via loopback OAuth and with a headless OpenClaw gateway via device flow. Verify the web and agent report the same account. Test consent denial, scope failures, PKCE/callback/resource binding, refresh reuse, device expiry/polling, and revoke a grant to confirm the next call fails.
 
 ## Phase 4 — Agent hosts and deep links
 
 Depends on: phase 3; D-22, D-31.
 
 1. Generate plugins from the one skill source: OpenAI (`plugin.json`, `mcp.json`), Claude marketplace, OpenClaw `claw.json`, Hermes skill.
-2. Deep links for ChatGPT, Claude, Gemini, Grok, Perplexity, Muse, Hermes, OpenClaw, Cursor; verify each on iOS, Android, and desktop; unverified → copy-prompt only.
+2. Skill setup detects actual host capabilities, reuses existing connections, and never promises silent connector installation where user setup is required. Confirm completion with authenticated `whoami`. Deep links for ChatGPT, Claude, Gemini, Grok, Perplexity, Muse, Hermes, OpenClaw, Cursor; verify each on iOS, Android, and desktop; unverified → copy-prompt only.
 3. Submit listings (D-31): Claude Connectors Directory (connector + plugin bundle), Muse Connector Platform, ClawHub skill. Start early: review takes days to weeks.
 4. Prepare the ChatGPT Plugin Directory package (verified org, domain token, 5+3 test cases, reviewer login, demo video) and hold it until OpenAI accepts 18+ plugins (D-33).
 
@@ -75,15 +74,16 @@ Depends on: phase 3; D-22, D-31.
 
 Depends on: phase 2; D-7, D-13, D-13b, D-13c.
 
-1. Remove the load-time login modal; logged-out default tab = Latest; delayed bottom banner.
-2. Join sheet (phone door + agent door) wired to every gated action, completing the original action after sign-in.
+1. Keep the public feed as landing, logged-out default Latest, with dismissible prompt-first introduction and delayed bottom banner. Browsing never requires sign-in.
+2. One Join dialog: Copy prompt primary, optional Sign in switching to the existing Steward form; dismiss/Browse feed always available. Wire gated actions with one-shot, short-lived continuation. Deduplicate social actions; refresh trade draft/quote and confirm before execution. Cancel/back discards action intent.
+   Preview A = current Steward-first popup; B = prompt-first popup, both over the same feed/backend. Provide deterministic preview selection, branch/preview links, screenshots, and before/after mobile/desktop recordings. No automatic production traffic split in this work. This is the specifically approved onboarding UI scope.
 3. Navigation: Home, Explore/Search, Markets*, Chats, Notifications, Profile, Leaderboard* (*hidden in Social mode). Remove Agents, Wallet (balance moves to profile/portfolio), Points, Rewards.
 4. Game/Social mode toggle (header + Settings), applied to the ~20 surfaces listed in research (PRD §11).
 5. `/how-to-play` page and first-visit explainer card; remove forced `/onboarding` redirect and old game guide.
 6. Settings → Connected agents (grants, last used, activity, revoke); "via" labels on posts, replies, DMs, trades.
 7. Social gaps: single reply model, search page, explore, composer @-autocomplete.
 
-**Exit:** desktop + mobile review, keyboard and 200% zoom, WCAG AA, zero console errors; recorded walkthrough of logged-out browse → gated action → phone sign-up → action completes; mode toggle walkthrough showing every hidden surface.
+**Exit:** desktop + mobile review, keyboard and 200% zoom, WCAG AA, zero console errors; recorded walkthrough of logged-out browse → gated action → existing Steward sign-in → social action completes once (trade returns to refreshed confirmation); recorded agent prompt → supported MCP setup → Steward/Feed consent → authenticated `whoami`; mode toggle walkthrough showing every hidden surface.
 
 ## Phase 6 — Economy and markets
 
@@ -113,8 +113,8 @@ Depends on: D-9 through D-15b, D-17, D-17b, D-18.
 |---|---|---|
 | 0 | S | Mostly config and verification |
 | 1 | L | Wide but mechanical; biggest diff |
-| 2 | M | Port from The Network |
-| 3 | M–L | Port OAuth/MCP; tool set rewrite on services |
+| 2 | S–M | Retain Steward; approval continuity and privacy |
+| 3 | M–L | Feed OAuth grants over Steward identity; SDK and shared services |
 | 4 | M | Device testing dominates |
 | 5 | M | UI |
 | 6 | L | Spot/perp rebuild is the riskiest item |
