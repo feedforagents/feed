@@ -17,13 +17,23 @@ describe('agent onboarding entry', () => {
     expect(agentEntryView('unexpected', true)).toBe('agent');
   });
   test('prompt connects to configured preview origin, never a supplied request Host', () => {
-    expect(agentSetupPrompt('https://preview.feed.fun/path')).toContain(
+    expect(agentSetupPrompt('https://preview.feed.fun')).toContain(
       'https://preview.feed.fun/SKILL.md'
     );
     expect(agentSetupPrompt('http://localhost:3100')).toContain(
       'http://localhost:3100/SKILL.md'
     );
     expect(agentSetupPrompt()).toContain('https://feed.fun/SKILL.md');
+    expect(agentSetupPrompt('http://[::1]:3100')).toContain(
+      'http://[::1]:3100/SKILL.md'
+    );
+    for (const invalid of [
+      'https://feed.fun/path',
+      'https://feed.fun?code=secret',
+      'https://feed.fun#fragment',
+      '',
+    ])
+      expect(() => agentSetupPrompt(invalid)).toThrow();
     expect(() => agentSetupPrompt('http://remote.example')).toThrow();
     expect(() => agentSetupPrompt('/relative')).toThrow();
     expect(() => agentSetupPrompt('javascript:alert(1)')).toThrow();
