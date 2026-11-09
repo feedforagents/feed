@@ -21,10 +21,12 @@ import { accountConnections } from '../../../apps/web/src/lib/auth/connected-age
 const databaseUrl = process.env.DATABASE_URL;
 const allowed = databaseUrl ? new URL(databaseUrl) : null;
 const safeDatabase =
-  allowed?.hostname === '127.0.0.1' &&
-  allowed.port === '55461' &&
-  allowed.pathname === '/feed_onboarding_connections_test' &&
-  process.env.NODE_ENV !== 'production';
+  !!allowed &&
+  ['127.0.0.1', 'localhost', '[::1]'].includes(allowed.hostname) &&
+  /^\/(?:test_db|feed_pr\d+|feed_onboarding_[a-z0-9_]+)$/.test(
+    allowed.pathname
+  ) &&
+  ['test', 'development'].includes(process.env.NODE_ENV ?? '');
 const run = describe.skipIf(!safeDatabase);
 const ownerA = `connections-A-${randomUUID()}`;
 const ownerB = `connections-B-${randomUUID()}`;
