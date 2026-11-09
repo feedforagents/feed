@@ -7,6 +7,8 @@ import { NextRequest } from 'next/server';
 type Row = Record<string, unknown>;
 
 let storedUser: Row = {};
+let primaryReads = 0;
+let replicaReads = 0;
 const updatePayloads: Row[] = [];
 
 function selectChain() {
@@ -19,7 +21,10 @@ function selectChain() {
 }
 
 const fakeDb = {
-  select: () => selectChain(),
+  select: () => {
+    replicaReads++;
+    return selectChain();
+  },
   update: () => ({
     set: (payload: Row) => {
       updatePayloads.push(payload);
@@ -33,7 +38,16 @@ const fakeDb = {
 };
 
 const actualDb = await import('@feed/db');
-mock.module('@feed/db', () => ({ ...actualDb, db: fakeDb }));
+mock.module('@feed/db', () => ({
+  ...actualDb,
+  db: fakeDb,
+  dbWrite: {
+    select: () => {
+      primaryReads++;
+      return selectChain();
+    },
+  },
+}));
 
 const actualApi = await import('@feed/api');
 mock.module('@feed/api', () => ({
@@ -85,6 +99,8 @@ describe('GET /api/users/me admin promotion', () => {
   beforeEach(() => {
     process.env.ADMIN_EMAIL_DOMAIN = 'admin.example';
     updatePayloads.length = 0;
+    primaryReads = 0;
+    replicaReads = 0;
   });
 
   afterAll(() => {
@@ -129,6 +145,8 @@ describe('GET /api/users/me admin promotion', () => {
       expect(body.user.tosAcceptedAt).toBe(timestamp?.toISOString() ?? null);
     }
     expect(updatePayloads).toHaveLength(0);
+    expect(primaryReads).toBe(2);
+    expect(replicaReads).toBe(0);
   });
 
   test('existing admins are left untouched', async () => {

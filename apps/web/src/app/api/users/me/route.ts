@@ -135,7 +135,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db, eq, or, sql, users } from '@feed/db';
+import { db, dbWrite, eq, or, sql, users } from '@feed/db';
 import { logger, toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { getOptionalProfileStats } from '@/lib/users/profile-stats';
@@ -368,7 +368,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // Phase 2: Look up by primary key (fastest, works for both Steward and legacy Privy users).
   // auth-middleware already resolved the correct Feed user ID into authUser.dbUserId
   // via ensureUserFromSteward / email-bridge / fast-path, so we trust it directly.
-  let [dbUser] = await db
+  let [dbUser] = await dbWrite
     .select(userSelectFields)
     .from(users)
     .where(eq(users.id, canonicalUserId))
@@ -378,7 +378,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // find them by privyId in case canonicalUserId resolved to the Steward UUID
   // rather than the Feed snowflake on an older session.
   if (!dbUser) {
-    [dbUser] = await db
+    [dbUser] = await dbWrite
       .select(userSelectFields)
       .from(users)
       .where(eq(users.privyId, privyId))
@@ -491,7 +491,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       .returning(userSelectFields);
 
     if (!newUser) {
-      const [concurrentUser] = await db
+      const [concurrentUser] = await dbWrite
         .select(userSelectFields)
         .from(users)
         .where(or(eq(users.privyId, privyId), eq(users.id, canonicalUserId)))
