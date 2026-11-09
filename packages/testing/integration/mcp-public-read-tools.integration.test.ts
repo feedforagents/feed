@@ -2,8 +2,10 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { cachedDb, getPublicProfile } from '@feed/api';
 import {
+  closeDatabase,
   dbWrite as db,
   eq,
+  getDatabaseClientState,
   inArray,
   mcpOAuthClients,
   mcpOAuthRequests,
@@ -255,6 +257,38 @@ describe('public post and profile MCP tools', () => {
       (await call('get_profile', { identifier: author, userId: viewer }))
         .isError
     ).toBe(true);
+  });
+  test('verified viewer mode reads primary while public profile reads use the configured replica', async () => {
+    const originalReplicaUrl = process.env.DATABASE_READ_REPLICA_URL;
+    const primaryUrl = process.env.DATABASE_URL;
+    if (!primaryUrl) throw new Error('Isolated test database URL is required');
+    await cachedDb.invalidateUserIdentifierCaches({ id: author });
+    await db
+      .update(users)
+      .set({ uiMode: 'social' })
+      .where(eq(users.id, viewer));
+    try {
+      // Both clients use our isolated DB: this proves routing, not replica lag.
+      process.env.DATABASE_READ_REPLICA_URL = primaryUrl;
+      await closeDatabase();
+      expect(getDatabaseClientState().hasPrimaryClient).toBe(false);
+      const profile = await getPublicProfile(author, viewer);
+      expect(profile).not.toBeNull();
+      expect(getDatabaseClientState().hasReadReplicaClient).toBe(true);
+      expect(getDatabaseClientState().hasPrimaryClient).toBe(true);
+      expect(profile).not.toHaveProperty('points');
+      expect(profile).not.toHaveProperty('lifetimePnL');
+      expect(profile).not.toHaveProperty('currency');
+    } finally {
+      if (originalReplicaUrl === undefined)
+        delete process.env.DATABASE_READ_REPLICA_URL;
+      else process.env.DATABASE_READ_REPLICA_URL = originalReplicaUrl;
+      await closeDatabase();
+      await db
+        .update(users)
+        .set({ uiMode: 'game' })
+        .where(eq(users.id, viewer));
+    }
   });
   test('Social mode omits public profile game values', async () => {
     await db

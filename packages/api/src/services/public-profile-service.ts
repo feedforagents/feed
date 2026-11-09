@@ -1,4 +1,4 @@
-import { db, eq, users } from '@feed/db';
+import { dbWrite, eq, users } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger, toISO, toISOOrNull } from '@feed/shared';
 import { cachedDb } from '../cache';
@@ -123,8 +123,9 @@ export async function getPublicProfile(identifier: string, viewerId?: string) {
   const { user, excluded } = await findVisibleUser(identifier, viewerId);
   if (excluded) return null;
   const account = async (profile: NonNullable<typeof user>) => {
+    // A just-updated viewer preference must not be read from a lagging replica.
     const [viewer] = viewerId
-      ? await db
+      ? await dbWrite
           .select({ mode: users.uiMode })
           .from(users)
           .where(eq(users.id, viewerId))
