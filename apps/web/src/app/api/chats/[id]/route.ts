@@ -74,6 +74,7 @@ import {
   lt,
   messageReactions,
   messages,
+  or,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -91,6 +92,12 @@ const ChatHistoryQuerySchema = z
       .datetime({ offset: true })
       .transform((value) => new Date(value))
       .optional(),
+    /**
+     * Message ID of the newest message the caller already has. Together
+     * with `after` it pins the sync position to a (createdAt, id) pair so
+     * messages that share the `after` millisecond are not skipped.
+     */
+    afterId: z.string().min(1).max(128).optional(),
     limit: z
       .string()
       .regex(/^\d+$/, 'limit must be a positive integer')
@@ -100,6 +107,9 @@ const ChatHistoryQuerySchema = z
   })
   .refine((q) => !(q.cursor && q.after), {
     message: 'cursor and after are mutually exclusive',
+  })
+  .refine((q) => !q.afterId || !!q.after, {
+    message: 'afterId requires after',
   });
 
 /**
@@ -115,9 +125,10 @@ export const GET = withErrorHandling(
 
     // Validate query parameters
     const { searchParams } = new URL(request.url);
-    const { cursor, after, limit } = ChatHistoryQuerySchema.parse({
+    const { cursor, after, afterId, limit } = ChatHistoryQuerySchema.parse({
       cursor: searchParams.get('cursor') ?? undefined,
       after: searchParams.get('after') ?? undefined,
+      afterId: searchParams.get('afterId') ?? undefined,
       limit: searchParams.get('limit') ?? undefined,
     });
     const effectiveLimit = limit;
@@ -175,15 +186,58 @@ export const GET = withErrorHandling(
       // 3. Neither: fetch latest messages (DESC order, initial load)
       let messagesList;
       if (after) {
-        // Incremental sync: only messages after the given timestamp
-        messagesList = await db
-          .select()
-          .from(messages)
-          .where(
-            and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
-          )
-          .orderBy(asc(messages.createdAt))
-          .limit(effectiveLimit);
+        // Incremental sync: only messages after the given position.
+        // With `afterId`, the position is the anchor message's
+        // (createdAt, id) pair, not the timestamp alone: createdAt is a
+        // millisecond timestamp, so bursts of messages routinely share
+        // it. Resuming with `createdAt > after` alone skips every
+        // not-yet-synced message that shares the watermark millisecond —
+        // they fall on the wrong side of the strict bound on this page
+        // and on every later sync, because the watermark only moves
+        // forward. The (createdAt, id) keyset walks through the shared
+        // millisecond instead. Without `afterId`, keep the legacy
+        // timestamp-only behavior.
+        if (afterId) {
+          const [anchorMessage] = await db
+            .select({ createdAt: messages.createdAt, id: messages.id })
+            .from(messages)
+            .where(and(eq(messages.id, afterId), eq(messages.chatId, chatId)))
+            .limit(1);
+
+          if (!anchorMessage) {
+            throw new BusinessLogicError(
+              'Invalid pagination cursor',
+              'INVALID_CURSOR'
+            );
+          }
+
+          messagesList = await db
+            .select()
+            .from(messages)
+            .where(
+              and(
+                eq(messages.chatId, chatId),
+                or(
+                  gt(messages.createdAt, anchorMessage.createdAt),
+                  and(
+                    eq(messages.createdAt, anchorMessage.createdAt),
+                    gt(messages.id, anchorMessage.id)
+                  )
+                )
+              )
+            )
+            .orderBy(asc(messages.createdAt), asc(messages.id))
+            .limit(effectiveLimit);
+        } else {
+          messagesList = await db
+            .select()
+            .from(messages)
+            .where(
+              and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
+            )
+            .orderBy(asc(messages.createdAt))
+            .limit(effectiveLimit);
+        }
       } else if (cursor) {
         // Load older messages: get cursor's timestamp, then fetch before it.
         // The cursor must belong to this chat; an unknown cursor is an error

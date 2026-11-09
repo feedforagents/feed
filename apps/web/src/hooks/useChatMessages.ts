@@ -545,12 +545,16 @@ export function useChatMessages(chatId: string | null) {
         const token = await getSafeAccessToken();
         if (!token) return;
 
-        // Paginate until all missed messages are fetched
+        // Paginate until all missed messages are fetched. The position is
+        // the (createdAt, id) pair of the newest held message: advancing
+        // the timestamp alone would skip missed messages that share its
+        // millisecond, so the id travels with it as `afterId`.
         let afterTimestamp = lastMessage.createdAt;
+        let afterId = lastMessage.id;
         const MAX_SYNC_PAGES = 10; // Safety cap to avoid infinite loops
         for (let page = 0; page < MAX_SYNC_PAGES; page++) {
           const response = await fetch(
-            `/api/chats/${targetChatId}?after=${encodeURIComponent(afterTimestamp)}&limit=${CHAT_PAGE_SIZE}`,
+            `/api/chats/${targetChatId}?after=${encodeURIComponent(afterTimestamp)}&afterId=${encodeURIComponent(afterId)}&limit=${CHAT_PAGE_SIZE}`,
             { headers: { Authorization: `Bearer ${token}` } }
           );
           if (!response.ok) return;
@@ -580,6 +584,7 @@ export function useChatMessages(chatId: string | null) {
           const lastNew = newMessages.at(-1);
           if (!lastNew) break;
           afterTimestamp = lastNew.createdAt;
+          afterId = lastNew.id;
         }
       } catch (error) {
         logger.warn(
