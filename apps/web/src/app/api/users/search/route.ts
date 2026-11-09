@@ -13,7 +13,8 @@
  * - Excludes NPCs/actors by default
  * - Excludes agents by default (use includeAgents=true to include)
  * - Excludes banned users
- * - Limits to 20 results (performance)
+ * - Limits to 20 results per window (performance); pass offset to page
+ *   through the remaining matches
  * - Alphabetically sorted results
  *
  * **Search Behavior:**
@@ -54,6 +55,14 @@
  *           type: boolean
  *         description: Include AI agents in results (default false)
  *         example: false
+ *       - in: query
+ *         name: offset
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 0
+ *         description: Skip this many ranked matches before the 20-result window (default 0)
+ *         example: 20
  *     responses:
  *       200:
  *         description: Search results
@@ -138,6 +147,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
   const includeAgents = searchParams.get('includeAgents') === 'true';
+  // Results are ranked in tiers (exact, prefix, substring) and returned in
+  // windows of 20. offset selects the window so callers can page past the
+  // first 20 matches; without it, matches ranked below the first window —
+  // e.g. namesakes whose usernames sort late — could never be listed.
+  const offsetParam = Number.parseInt(searchParams.get('offset') ?? '', 10);
+  const offset =
+    Number.isFinite(offsetParam) && offsetParam > 0 ? offsetParam : 0;
+  const pageSize = 20;
+  const windowEnd = offset + pageSize;
 
   if (!query || query.trim().length < 2) {
     const res = successResponse({ users: [] });
@@ -220,7 +238,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         : [];
 
     const seenIds = new Set(exactMatches.map((entry) => entry.id));
-    const remainingAfterExact = 20 - exactMatches.length;
+    const remainingAfterExact = windowEnd - exactMatches.length;
 
     const prefixMatches =
       remainingAfterExact > 0
@@ -259,7 +277,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
     prefixMatches.forEach((entry) => seenIds.add(entry.id));
     const remainingAfterPrefix =
-      20 - exactMatches.length - prefixMatches.length;
+      windowEnd - exactMatches.length - prefixMatches.length;
 
     const fallbackMatches =
       remainingAfterPrefix > 0
@@ -296,7 +314,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           })
         : [];
 
-    return [...exactMatches, ...prefixMatches, ...fallbackMatches];
+    return [...exactMatches, ...prefixMatches, ...fallbackMatches].slice(
+      offset,
+      offset + pageSize
+    );
   });
 
   logger.info(
