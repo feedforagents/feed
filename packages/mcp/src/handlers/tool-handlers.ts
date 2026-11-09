@@ -63,6 +63,7 @@ import {
   isNull,
   lte,
   markets,
+  notExists,
   perpMarketSnapshots,
   posts,
   postTags,
@@ -87,6 +88,7 @@ import {
   logger,
   retryIfRetryable,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 
 function buildWalletPort(): WalletPort {
   return {
@@ -1562,7 +1564,18 @@ export async function executeGetPostsByTag(
       and(
         eq(postTags.tagId, tag.id),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, now)
+        lte(posts.timestamp, now),
+        // Exclude test authors in SQL before paginating, so pages
+        // are full — the canonical post query's rule
+        // (DatabaseService.getRecentPosts): 'test-' ids and
+        // isTest-flagged accounts never appear in post lists.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
