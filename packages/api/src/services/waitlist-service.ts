@@ -335,10 +335,28 @@ export class WaitlistService {
           or(
             // Primary sort: More invite points = better position
             gt(users.invitePoints, user.invitePoints),
-            // Tie-breaker: If same invite points, earlier signup wins
+            // The leaderboard list breaks invite ties by reputation
+            // points (getTopWaitlistUsers), so the rank counter must use
+            // the same key or the two surfaces swap tied users' ranks.
             and(
               eq(users.invitePoints, user.invitePoints),
+              gt(users.reputationPoints, user.reputationPoints)
+            ),
+            // Tie-breaker: If same invite and reputation points, earlier
+            // signup wins
+            and(
+              eq(users.invitePoints, user.invitePoints),
+              eq(users.reputationPoints, user.reputationPoints),
               lt(users.waitlistJoinedAt, userJoinedAt)
+            ),
+            // Final tiebreaker: the list's id order, so an exact tie on
+            // points and signup time still ranks the same on both
+            // surfaces instead of sharing one position rank.
+            and(
+              eq(users.invitePoints, user.invitePoints),
+              eq(users.reputationPoints, user.reputationPoints),
+              eq(users.waitlistJoinedAt, userJoinedAt),
+              lt(users.id, userId)
             )
           )
         )
@@ -501,18 +519,23 @@ export class WaitlistService {
     const safeLimit = Math.min(Math.max(1, limit), 100);
     const safeOffset = Math.max(0, offset);
 
-    // Build orderBy based on pointsType
+    // Build orderBy based on pointsType. The id column is the final
+    // tiebreaker so the order is total: without it, rows tied on every
+    // points column and join time can repeat or vanish between offset
+    // pages, and no rank counter can agree with the list.
     const orderByColumns =
       pointsType === 'total'
         ? [
             desc(users.reputationPoints),
             desc(users.invitePoints),
             asc(users.waitlistJoinedAt),
+            asc(users.id),
           ]
         : [
             desc(users.invitePoints),
             desc(users.reputationPoints),
             asc(users.waitlistJoinedAt),
+            asc(users.id),
           ];
 
     const usersResult = await db
