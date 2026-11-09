@@ -842,7 +842,12 @@ export const GET = withErrorHandling(
               count: count(),
             })
             .from(comments)
-            .where(inArray(comments.postId, originalPostIds))
+            .where(
+              and(
+                inArray(comments.postId, originalPostIds),
+                isNull(comments.deletedAt)
+              )
+            )
             .groupBy(comments.postId),
           db
             .select({
