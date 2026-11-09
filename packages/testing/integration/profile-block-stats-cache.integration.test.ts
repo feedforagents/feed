@@ -23,7 +23,7 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { and, db, eq, follows, inArray, or, userBlocks, users } from '@feed/db';
+import { and, db, eq, follows, inArray, userBlocks, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 
@@ -41,9 +41,77 @@ type ProfileBody = {
   data?: { user?: { id: string; stats: ProfileStats | null } | null };
 };
 
+type UserInsert = typeof users.$inferInsert;
+type FollowInsert = typeof follows.$inferInsert;
+
+/**
+ * Tracks only rows whose INSERT ... RETURNING succeeded. Cleanup deletes
+ * exactly those rows by ID, so a setup that fails partway (for example on
+ * an ID collision with a pre-existing row) can never delete data this
+ * fixture did not create.
+ */
+class OwnedFixtures {
+  readonly userIds: string[] = [];
+  readonly followIds: string[] = [];
+  readonly blockIds: string[] = [];
+
+  async insertUser(values: UserInsert): Promise<string> {
+    const [row] = await db
+      .insert(users)
+      .values(values)
+      .returning({ id: users.id });
+    if (!row) throw new Error('user insert returned no row');
+    this.userIds.push(row.id);
+    return row.id;
+  }
+
+  async insertFollow(values: FollowInsert): Promise<string> {
+    const [row] = await db
+      .insert(follows)
+      .values(values)
+      .returning({ id: follows.id });
+    if (!row) throw new Error('follow insert returned no row');
+    this.followIds.push(row.id);
+    return row.id;
+  }
+
+  /**
+   * The block row is created by the API under test, not by an INSERT
+   * here. Recover its ID only under the successfully acquired
+   * caller/target pair, so cleanup removes exactly that row.
+   */
+  async trackBlock(blockerId: string, blockedId: string): Promise<void> {
+    const [row] = await db
+      .select({ id: userBlocks.id })
+      .from(userBlocks)
+      .where(
+        and(
+          eq(userBlocks.blockerId, blockerId),
+          eq(userBlocks.blockedId, blockedId)
+        )
+      );
+    if (row) this.blockIds.push(row.id);
+  }
+
+  async cleanup(): Promise<void> {
+    if (this.followIds.length > 0) {
+      await db.delete(follows).where(inArray(follows.id, this.followIds));
+    }
+    if (this.blockIds.length > 0) {
+      await db.delete(userBlocks).where(inArray(userBlocks.id, this.blockIds));
+    }
+    if (this.userIds.length > 0) {
+      await db.delete(users).where(inArray(users.id, this.userIds));
+    }
+    this.userIds.length = 0;
+    this.followIds.length = 0;
+    this.blockIds.length = 0;
+  }
+}
+
+const fixtures = new OwnedFixtures();
 let blockerId: string;
 let targetId: string;
-const ownedUsers: string[] = [];
 
 let blockPOST: typeof import('../../../apps/web/src/app/api/users/[userId]/block/route').POST;
 let profileGET: typeof import('../../../apps/web/src/app/api/users/[userId]/profile/route').GET;
@@ -104,63 +172,38 @@ beforeAll(async () => {
     '../../../apps/web/src/app/api/users/[userId]/followers/route'
   ));
 
-  [blockerId, targetId] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-  ownedUsers.push(blockerId, targetId);
-
   const now = new Date();
-  await db.insert(users).values([
-    {
-      id: blockerId,
-      username: `f76a-${blockerId}`,
-      displayName: 'Block Stats Blocker',
-      updatedAt: now,
-    },
-    {
-      id: targetId,
-      username: `f76b-${targetId}`,
-      displayName: 'Block Stats Target',
-      updatedAt: now,
-    },
-  ]);
+  const newBlockerId = await generateSnowflakeId();
+  blockerId = await fixtures.insertUser({
+    id: newBlockerId,
+    username: `f76a-${newBlockerId}`,
+    displayName: 'Block Stats Blocker',
+    updatedAt: now,
+  });
+  const newTargetId = await generateSnowflakeId();
+  targetId = await fixtures.insertUser({
+    id: newTargetId,
+    username: `f76b-${newTargetId}`,
+    displayName: 'Block Stats Target',
+    updatedAt: now,
+  });
 
   // Mutual follows, seeded directly: the follow route is not under test
   // here (it already invalidates), the block route's cache behaviour is.
-  await db.insert(follows).values([
-    {
-      id: await generateSnowflakeId(),
-      followerId: blockerId,
-      followingId: targetId,
-    },
-    {
-      id: await generateSnowflakeId(),
-      followerId: targetId,
-      followingId: blockerId,
-    },
-  ]);
+  await fixtures.insertFollow({
+    id: await generateSnowflakeId(),
+    followerId: blockerId,
+    followingId: targetId,
+  });
+  await fixtures.insertFollow({
+    id: await generateSnowflakeId(),
+    followerId: targetId,
+    followingId: blockerId,
+  });
 });
 
 afterAll(async () => {
-  if (ownedUsers.length === 0) return;
-  await db
-    .delete(follows)
-    .where(
-      or(
-        inArray(follows.followerId, ownedUsers),
-        inArray(follows.followingId, ownedUsers)
-      )
-    );
-  await db
-    .delete(userBlocks)
-    .where(
-      or(
-        inArray(userBlocks.blockerId, ownedUsers),
-        inArray(userBlocks.blockedId, ownedUsers)
-      )
-    );
-  await db.delete(users).where(inArray(users.id, ownedUsers));
+  await fixtures.cleanup();
 });
 
 describe('profile header counts after a block', () => {
@@ -190,6 +233,10 @@ describe('profile header counts after a block', () => {
     });
     expect(response.status).toBe(200);
 
+    // Register the API-created block row under the owned pair so
+    // teardown removes exactly that row.
+    await fixtures.trackBlock(blockerId, targetId);
+
     // The block really removed both follow rows, and the (uncached)
     // followers list already agrees.
     expect(await followRow(blockerId, targetId)).toBeNull();
@@ -204,5 +251,91 @@ describe('profile header counts after a block', () => {
     const blockerAfter = await readProfileStats(blockerId);
     expect(blockerAfter.followers).toBe(0);
     expect(blockerAfter.following).toBe(0);
+  });
+});
+
+describe('fixture ownership', () => {
+  it('cleanup after failed setup never deletes rows the fixture did not create', async () => {
+    const victim = new OwnedFixtures();
+    const attempt = new OwnedFixtures();
+    try {
+      const now = new Date();
+      const victimBlockerRaw = await generateSnowflakeId();
+      const victimBlockerId = await victim.insertUser({
+        id: victimBlockerRaw,
+        username: `f76v1-${victimBlockerRaw}`,
+        displayName: 'Pre-existing blocker',
+        updatedAt: now,
+      });
+      const victimTargetRaw = await generateSnowflakeId();
+      const victimTargetId = await victim.insertUser({
+        id: victimTargetRaw,
+        username: `f76v2-${victimTargetRaw}`,
+        displayName: 'Pre-existing target',
+        updatedAt: now,
+      });
+      const victimFollowId = await victim.insertFollow({
+        id: await generateSnowflakeId(),
+        followerId: victimBlockerId,
+        followingId: victimTargetId,
+      });
+
+      // A user INSERT that collides with the pre-existing user fails and
+      // registers no ownership.
+      let userCollisionFailed = false;
+      try {
+        await attempt.insertUser({
+          id: victimBlockerId,
+          username: `f76c-${victimBlockerId}`,
+          displayName: 'Collision attempt',
+          updatedAt: now,
+        });
+      } catch {
+        userCollisionFailed = true;
+      }
+      expect(userCollisionFailed).toBe(true);
+      expect(attempt.userIds).toEqual([]);
+
+      // Partial setup: the user insert succeeds, then the follow INSERT
+      // collides with the pre-existing follow and registers nothing.
+      const attemptUserRaw = await generateSnowflakeId();
+      const attemptUserId = await attempt.insertUser({
+        id: attemptUserRaw,
+        username: `f76p-${attemptUserRaw}`,
+        displayName: 'Partial setup',
+        updatedAt: now,
+      });
+      let followCollisionFailed = false;
+      try {
+        await attempt.insertFollow({
+          id: victimFollowId,
+          followerId: attemptUserId,
+          followingId: victimTargetId,
+        });
+      } catch {
+        followCollisionFailed = true;
+      }
+      expect(followCollisionFailed).toBe(true);
+      expect(attempt.followIds).toEqual([]);
+
+      await attempt.cleanup();
+
+      // The pre-existing rows survive the failed setup's cleanup
+      // untouched, and the one acquired row is removed.
+      const [survivingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, victimBlockerId));
+      expect(survivingUser?.displayName).toBe('Pre-existing blocker');
+      expect(await followRow(victimBlockerId, victimTargetId)).not.toBeNull();
+      const [removedUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, attemptUserId));
+      expect(removedUser).toBeUndefined();
+    } finally {
+      await attempt.cleanup();
+      await victim.cleanup();
+    }
   });
 });
