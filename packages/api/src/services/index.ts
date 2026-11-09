@@ -37,6 +37,8 @@ export * from './notification-service';
 export * from './org-coordination-service';
 export * from './participation-service';
 export * from './points-service';
+export * from './public-post-service';
+export * from './public-profile-service';
 export * from './referral-service';
 export * from './reputation-service';
 // Resource-Level Locks (question, market, NPC)

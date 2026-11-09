@@ -4,6 +4,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { z } from 'zod';
 import { type FeedAgentContext, type FeedScope, OAuthError } from './contracts';
 import { getPlayerActionScope, registerPlayerActions } from './player-actions';
+import { registerPublicReadTools } from './public-read-tools';
 import type { FeedOAuthService } from './service';
 
 export interface FeedMcpContent {
@@ -109,6 +110,7 @@ export async function serveFeedMcp(
     }
   );
   registerPlayerActions(server, context, service);
+  registerPublicReadTools(server, context, request.headers);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
