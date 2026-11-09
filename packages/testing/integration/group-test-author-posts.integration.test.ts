@@ -88,26 +88,28 @@ beforeAll(async () => {
     deletedPostId,
     futurePostId,
     gammaNormalPostId,
-  ] = await Promise.all(
-    Array.from({ length: 14 }, () => generateSnowflakeId())
-  );
+  ] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ]);
   testPrefixedAuthorId = `test-f1-${suffix}`;
   gammaTestPostIds = [
     `f1-gamma-test-1-${suffix}`,
     `f1-gamma-test-2-${suffix}`,
     `f1-gamma-test-3-${suffix}`,
   ];
-  allPostIds.push(
-    normalPostId,
-    actorPostId,
-    testFlaggedPostId,
-    testPrefixedPostId,
-    deletedPostId,
-    futurePostId,
-    gammaNormalPostId,
-    ...gammaTestPostIds
-  );
-  allUserIds.push(normalAuthorId, testFlaggedAuthorId);
   clientIp = `2001:db8:77f1:0:${BigInt(suffix)
     .toString(16)
     .padStart(16, '0')
@@ -227,6 +229,20 @@ beforeAll(async () => {
       createdAt: past,
     })),
   ]);
+
+  // Track cleanup ownership only after the inserts succeed, so a failed
+  // setup cannot register rows it never created.
+  allPostIds.push(
+    normalPostId,
+    actorPostId,
+    testFlaggedPostId,
+    testPrefixedPostId,
+    deletedPostId,
+    futurePostId,
+    gammaNormalPostId,
+    ...gammaTestPostIds
+  );
+  allUserIds.push(normalAuthorId, testFlaggedAuthorId);
 
   const relIds = await Promise.all(
     Array.from({ length: 11 }, () => generateSnowflakeId())
