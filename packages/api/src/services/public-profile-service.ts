@@ -56,7 +56,9 @@ async function findVisibleUser(identifier: string, viewerId?: string) {
   const user = await findUserByIdentifier(identifier);
   return {
     user,
-    excluded: user ? !(await canViewerReadAuthor(viewerId, user.id)) : false,
+    excluded: user
+      ? !(await canViewerReadAuthor(viewerId, user.id, user.isTest))
+      : false,
   };
 }
 

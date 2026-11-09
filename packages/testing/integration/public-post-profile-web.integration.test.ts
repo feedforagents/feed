@@ -44,6 +44,7 @@ describe('public web post/profile viewer moderation', () => {
       ids.map((id) => ({
         id,
         stewardId: id,
+        isTest: false,
         username: `public_${id}`,
         displayName: 'Public read test',
         bio: 'A public biography',
@@ -168,6 +169,67 @@ describe('public web post/profile viewer moderation', () => {
       .update(posts)
       .set({ deletedAt: null, timestamp: new Date(Date.now() - 60_000) })
       .where(eq(posts.id, postId));
+  });
+  test('test authors stay excluded from root posts, profiles and embedded originals for anonymous and verified reads', async () => {
+    for (const kind of ['flag', 'prefix'] as const) {
+      const suffix = await generateSnowflakeId();
+      const excludedAuthor = kind === 'prefix' ? `test-${suffix}` : suffix;
+      ids.push(excludedAuthor);
+      await db.insert(users).values({
+        id: excludedAuthor,
+        username: `excluded_${suffix}`,
+        displayName: 'Excluded test author',
+        bio: 'Excluded test biography',
+        isTest: kind === 'flag',
+        updatedAt: new Date(),
+      });
+      const originalId = await generateSnowflakeId();
+      const visibleQuoteId = await generateSnowflakeId();
+      await db.insert(posts).values([
+        {
+          id: originalId,
+          authorId: excludedAuthor,
+          content: 'Excluded test original',
+          timestamp: new Date(Date.now() - 60_000),
+        },
+        {
+          id: visibleQuoteId,
+          authorId: quoteAuthor,
+          content: 'Ordinary public commentary',
+          originalPostId: originalId,
+          timestamp: new Date(Date.now() - 30_000),
+        },
+      ]);
+      for (const authenticated of [false, true]) {
+        expect(
+          (await get(`/api/posts/${originalId}`, authenticated)).status
+        ).toBe(404);
+        const profile = await get(
+          `/api/users/${excludedAuthor}/profile`,
+          authenticated
+        );
+        expect(profile.status).toBe(200);
+        expect(JSON.stringify(await profile.json())).not.toContain(
+          'Excluded test biography'
+        );
+        const quote = await get(`/api/posts/${visibleQuoteId}`, authenticated);
+        expect(quote.status).toBe(200);
+        const body = JSON.stringify(await quote.json());
+        expect(body).toContain('Ordinary public commentary');
+        expect(body).not.toContain('Excluded test original');
+        expect(body).not.toContain('originalPost');
+        expect((await get(`/api/posts/${postId}`, authenticated)).status).toBe(
+          200
+        );
+        expect(
+          JSON.stringify(
+            await (
+              await get(`/api/users/${author}/profile`, authenticated)
+            ).json()
+          )
+        ).toContain('A public biography');
+      }
+    }
   });
   test('web success DTO and private viewer caching remain compatible', async () => {
     await clearModeration();

@@ -109,6 +109,7 @@ describe('public post and profile MCP tools', () => {
       ids.map((id) => ({
         id,
         stewardId: id,
+        isTest: false,
         username: `read_${id}`,
         displayName: 'Readable profile',
         bio: 'Public biography only',
@@ -163,6 +164,65 @@ describe('public post and profile MCP tools', () => {
       'email',
     ])
       expect(text).not.toContain(forbidden);
+  });
+  test('test authors are excluded from root posts, profiles and nested originals for every viewer', async () => {
+    const accessToken = await token();
+    for (const kind of ['flag', 'prefix'] as const) {
+      const suffix = await generateSnowflakeId();
+      const excludedAuthor = kind === 'prefix' ? `test-${suffix}` : suffix;
+      ids.push(excludedAuthor);
+      await db.insert(users).values({
+        id: excludedAuthor,
+        username: `excluded_${suffix}`,
+        displayName: 'Excluded test author',
+        bio: 'Excluded test biography',
+        isTest: kind === 'flag',
+        updatedAt: new Date(),
+      });
+      const originalId = await generateSnowflakeId();
+      const quoteId = await generateSnowflakeId();
+      await db.insert(posts).values([
+        {
+          id: originalId,
+          authorId: excludedAuthor,
+          content: 'Excluded test original',
+          timestamp: new Date(Date.now() - 60_000),
+        },
+        {
+          id: quoteId,
+          authorId: author,
+          content: 'Ordinary public commentary',
+          originalPostId: originalId,
+          timestamp: new Date(Date.now() - 30_000),
+        },
+      ]);
+      for (const credential of [undefined, accessToken]) {
+        expect(
+          (await call('get_post', { postId: originalId }, credential)).isError
+        ).toBe(true);
+        expect(
+          (
+            await call(
+              'get_profile',
+              { identifier: excludedAuthor },
+              credential
+            )
+          ).isError
+        ).toBe(true);
+        const quote = await call('get_post', { postId: quoteId }, credential);
+        expect(quote.isError).not.toBe(true);
+        expect(quote.content[0]?.text).toContain('Ordinary public commentary');
+        expect(quote.content[0]?.text).not.toContain('Excluded test original');
+        expect(quote.content[0]?.text).not.toContain('originalPost');
+        expect(
+          (await call('get_post', { postId }, credential)).isError
+        ).not.toBe(true);
+        expect(
+          (await call('get_profile', { identifier: author }, credential))
+            .isError
+        ).not.toBe(true);
+      }
+    }
   });
   test('MCP profile projection skips unused legacy web stats', async () => {
     const stats = spyOn(cachedDb, 'getUserProfileStats');

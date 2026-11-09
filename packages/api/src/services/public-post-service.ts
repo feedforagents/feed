@@ -42,7 +42,24 @@ export async function getPublicPost(postId: string, viewerId?: string) {
     throw new NotFoundError('Post', postId);
   }
 
-  if (!(await canViewerReadAuthor(viewerId, post.authorId))) {
+  const [authorUser] = await db
+    .select({
+      displayName: users.displayName,
+      username: users.username,
+      profileImageUrl: users.profileImageUrl,
+      isTest: users.isTest,
+    })
+    .from(users)
+    .where(eq(users.id, post.authorId))
+    .limit(1);
+
+  if (
+    !(await canViewerReadAuthor(
+      viewerId,
+      post.authorId,
+      authorUser?.isTest ?? false
+    ))
+  ) {
     throw new NotFoundError('Post', postId);
   }
 
@@ -120,20 +137,11 @@ export async function getPublicPost(postId: string, viewerId?: string) {
       authorProfileImageUrl =
         org.imageUrl || `/images/organizations/${org.id}.jpg`;
     } else {
-      const [usr] = await db
-        .select({
-          displayName: users.displayName,
-          username: users.username,
-          profileImageUrl: users.profileImageUrl,
-        })
-        .from(users)
-        .where(eq(users.id, post.authorId))
-        .limit(1);
-
-      if (usr) {
-        authorName = usr.displayName || usr.username || post.authorId;
-        authorUsername = usr.username || null;
-        authorProfileImageUrl = usr.profileImageUrl || null;
+      if (authorUser) {
+        authorName =
+          authorUser.displayName || authorUser.username || post.authorId;
+        authorUsername = authorUser.username || null;
+        authorProfileImageUrl = authorUser.profileImageUrl || null;
       }
     }
   }
@@ -168,16 +176,12 @@ export async function getPublicPost(postId: string, viewerId?: string) {
       )
       .limit(1);
 
-    if (
-      originalPost &&
-      (await canViewerReadAuthor(viewerId, originalPost.authorId))
-    ) {
-      const isQuote = post.content && post.content.length > 0;
-
-      // Get original post author
+    if (originalPost) {
+      // Resolve the original author once for visibility and the public DTO.
       const [originalUser] = await db
         .select({
           id: users.id,
+          isTest: users.isTest,
           username: users.username,
           displayName: users.displayName,
           profileImageUrl: users.profileImageUrl,
@@ -186,50 +190,59 @@ export async function getPublicPost(postId: string, viewerId?: string) {
         .where(eq(users.id, originalPost.authorId))
         .limit(1);
 
-      const originalActor = !originalUser
-        ? StaticDataRegistry.getActor(originalPost.authorId)
-        : null;
-
-      const originalOrg =
-        !originalUser && !originalActor
-          ? StaticDataRegistry.getOrganization(originalPost.authorId)
+      if (
+        await canViewerReadAuthor(
+          viewerId,
+          originalPost.authorId,
+          originalUser?.isTest ?? false
+        )
+      ) {
+        const isQuote = post.content && post.content.length > 0;
+        const originalActor = !originalUser
+          ? StaticDataRegistry.getActor(originalPost.authorId)
           : null;
 
-      const originalAuthor = originalUser || originalActor || originalOrg;
+        const originalOrg =
+          !originalUser && !originalActor
+            ? StaticDataRegistry.getOrganization(originalPost.authorId)
+            : null;
 
-      if (originalAuthor) {
-        const authorName =
-          originalUser?.displayName ??
-          originalActor?.name ??
-          originalOrg?.name ??
-          originalPost.authorId;
-        const authorUsername =
-          originalUser?.username ??
-          originalActor?.username ??
-          originalOrg?.id ??
-          originalPost.authorId;
-        const authorProfileImageUrl =
-          originalUser?.profileImageUrl ??
-          originalActor?.profileImageUrl ??
-          originalOrg?.imageUrl ??
-          null;
-        repostMetadata = {
-          isRepost: true,
-          isQuote,
-          quoteComment: isQuote ? post.content : null,
-          originalPostId: originalPost.id,
-          originalPost: {
-            id: originalPost.id,
-            content: originalPost.content,
-            authorId: originalPost.authorId,
-            authorName,
-            authorUsername,
-            authorProfileImageUrl,
-            timestamp:
-              originalPost.timestamp?.toISOString?.() ||
-              new Date().toISOString(),
-          },
-        };
+        const originalAuthor = originalUser || originalActor || originalOrg;
+
+        if (originalAuthor) {
+          const authorName =
+            originalUser?.displayName ??
+            originalActor?.name ??
+            originalOrg?.name ??
+            originalPost.authorId;
+          const authorUsername =
+            originalUser?.username ??
+            originalActor?.username ??
+            originalOrg?.id ??
+            originalPost.authorId;
+          const authorProfileImageUrl =
+            originalUser?.profileImageUrl ??
+            originalActor?.profileImageUrl ??
+            originalOrg?.imageUrl ??
+            null;
+          repostMetadata = {
+            isRepost: true,
+            isQuote,
+            quoteComment: isQuote ? post.content : null,
+            originalPostId: originalPost.id,
+            originalPost: {
+              id: originalPost.id,
+              content: originalPost.content,
+              authorId: originalPost.authorId,
+              authorName,
+              authorUsername,
+              authorProfileImageUrl,
+              timestamp:
+                originalPost.timestamp?.toISOString?.() ||
+                new Date().toISOString(),
+            },
+          };
+        }
       }
     }
   }
