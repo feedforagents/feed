@@ -11,6 +11,7 @@ import { PageContainer } from '@/components/shared/PageContainer';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { useLoginModal } from '@/hooks/useLoginModal';
+import { safeReturnTo } from '@/lib/auth/safe-return-to';
 
 export default function OnboardingPage() {
   const router = useRouter();
@@ -33,7 +34,12 @@ export default function OnboardingPage() {
     // loadingProfile is already false but isReadyToShow hasn't been set yet.
     if (!flow.isOnboardingResolved) return;
     if (flow.shouldShowOnboarding) return;
-    router.replace('/feed');
+    router.replace(
+      safeReturnTo(
+        new URLSearchParams(window.location.search).get('returnTo'),
+        '/feed'
+      )
+    );
   }, [ready, authenticated, loadingProfile, profileFetchStatus, flow, router]);
 
   if (!ready || !authenticated) {

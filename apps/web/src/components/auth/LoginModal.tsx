@@ -1,7 +1,7 @@
 'use client';
 
 import { logger } from '@feed/shared';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
 import { Button } from '@/components/ui/button';
 import {
@@ -18,6 +18,10 @@ import {
   type StewardLoginResult,
   stewardExchangeSchema,
 } from '@/lib/auth/steward-exchange';
+import {
+  type AgentEntryView,
+  agentSetupPrompt,
+} from '@/lib/onboarding/agent-entry';
 
 /**
  * Steward-backed login modal.
@@ -35,6 +39,10 @@ interface LoginModalProps {
   onClose: () => void;
   title?: string;
   message?: string;
+  initialView?: AgentEntryView;
+  signInOnly?: boolean;
+  reauthenticate?: boolean;
+  onSignedIn?: () => void;
 }
 
 export function LoginModal({
@@ -42,9 +50,84 @@ export function LoginModal({
   onClose,
   title,
   message,
+  initialView = 'agent',
+  signInOnly = false,
+  reauthenticate = false,
+  onSignedIn,
 }: LoginModalProps) {
+  const dialogId = useId();
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (!isOpen) return;
+    const previousFocus = document.activeElement;
+    const dialog = document.getElementById(dialogId);
+    const controls = () =>
+      Array.from(
+        dialog?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]'
+        ) ?? []
+      );
+    (controls()[0] ?? dialog)?.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeRef.current();
+      } else if (event.key === 'Tab') {
+        const items = controls();
+        const first = items[0];
+        const last = items.at(-1);
+        if (!first || !last) {
+          event.preventDefault();
+          dialog?.focus();
+          return;
+        }
+        if (
+          event.shiftKey &&
+          (document.activeElement === first ||
+            !dialog?.contains(document.activeElement))
+        ) {
+          event.preventDefault();
+          last.focus();
+        } else if (
+          !event.shiftKey &&
+          (document.activeElement === last ||
+            !dialog?.contains(document.activeElement))
+        ) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', keydown);
+    return () => {
+      document.removeEventListener('keydown', keydown);
+      if (
+        previousFocus instanceof HTMLElement &&
+        document.contains(previousFocus)
+      )
+        previousFocus.focus();
+    };
+  }, [isOpen, dialogId]);
   const { stewardAuth, onLoginSuccess } = useStewardAuthContext();
   const { authenticated } = useAuth();
+  const [view, setView] = useState<AgentEntryView>(initialView);
+  const [copied, setCopied] = useState(false);
+  const prompt = agentSetupPrompt(
+    process.env.NEXT_PUBLIC_APP_URL ??
+      (process.env.NODE_ENV !== 'production'
+        ? 'http://localhost:3000'
+        : undefined)
+  );
+  const signInPane = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (isOpen && view === 'agent' && !signInOnly)
+      document.getElementById(dialogId)?.querySelector('textarea')?.focus();
+    if (isOpen && view === 'signin')
+      signInPane.current
+        ?.querySelector<HTMLInputElement>('input[type=email]')
+        ?.focus();
+  }, [isOpen, view, dialogId, signInOnly]);
   const [email, setEmail] = useState('');
   const [step, setStep] = useState<Step>('idle');
   const [errorMsg, setErrorMsg] = useState('');
@@ -63,23 +146,27 @@ export function LoginModal({
         return;
       }
       await onLoginSuccess(result.token, result.refreshToken);
+      onSignedIn?.();
+      onClose();
     },
-    [onLoginSuccess]
+    [onLoginSuccess, onClose, onSignedIn]
   );
 
   useEffect(() => {
-    if (authenticated && isOpen) onClose();
-  }, [authenticated, isOpen, onClose]);
+    if (authenticated && isOpen && !reauthenticate) onClose();
+  }, [authenticated, isOpen, onClose, reauthenticate]);
 
   useEffect(() => {
     if (!isOpen) {
+      setView(signInOnly ? 'signin' : initialView);
+      setCopied(false);
       setStep('idle');
       setEmail('');
       setErrorMsg('');
       setVerificationCode('');
       setMfa(null);
     }
-  }, [isOpen]);
+  }, [isOpen, initialView, signInOnly]);
 
   const handleEmailLogin = useCallback(async () => {
     const trimmed = email.trim();
@@ -93,7 +180,7 @@ export function LoginModal({
       const result = await stewardAuth.signInWithEmail(trimmed);
       if (result.ok) {
         setStep('email-sent');
-        logger.info('Magic link sent', { email: trimmed }, 'LoginModal');
+        logger.info('Magic link sent', {}, 'LoginModal');
       } else {
         setErrorMsg('Failed to send magic link. Please try again.');
         setStep('error');
@@ -117,7 +204,7 @@ export function LoginModal({
     try {
       const result = await stewardAuth.signInWithPasskey(trimmed);
       await completeLogin(result);
-      logger.info('Passkey login successful', { email: trimmed }, 'LoginModal');
+      logger.info('Passkey login successful', {}, 'LoginModal');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Passkey login failed';
       logger.warn('Passkey login failed', { error: msg }, 'LoginModal');
@@ -215,175 +302,259 @@ export function LoginModal({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="p-8 sm:max-w-sm">
+      <DialogContent
+        className="ph-no-capture p-8 sm:max-w-sm"
+        data-private
+        data-feed-auth-open
+        id={dialogId}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`${dialogId}-title`}
+        aria-describedby={`${dialogId}-description`}
+        tabIndex={-1}
+      >
         <DialogHeader>
-          <DialogTitle className="text-center text-xl">
-            {title ?? 'Sign in to Feed'}
+          <DialogTitle id={`${dialogId}-title`} className="text-center text-xl">
+            {view === 'agent' && !signInOnly
+              ? 'Connect your agent'
+              : (title ?? 'Sign in to Feed')}
           </DialogTitle>
-          {message && (
-            <DialogDescription className="text-center">
-              {message}
+          {(view === 'signin' || signInOnly) && (
+            <DialogDescription
+              id={`${dialogId}-description`}
+              className="text-center"
+            >
+              {message ?? 'Use your existing Feed sign-in.'}
             </DialogDescription>
           )}
         </DialogHeader>
 
-        <div className="flex flex-col gap-3 pt-1">
-          {step === 'mfa' && mfa ? (
-            <div className="flex flex-col gap-3">
-              <p className="text-sm">
-                Complete your account's additional verification.
-              </p>
-              <Input
-                aria-label="Verification or recovery code"
-                autoComplete="one-time-code"
-                value={verificationCode}
-                onChange={(event) => setVerificationCode(event.target.value)}
-                disabled={verifying}
-              />
-              <Button
-                onClick={() => void verifyMfa()}
-                disabled={
-                  verifying ||
-                  (mfa.type !== 'passkey' && !verificationCode.trim())
+        {view === 'agent' && !signInOnly ? (
+          <div className="flex flex-col gap-4 pt-1">
+            <DialogDescription id={`${dialogId}-description`}>
+              Give your agent this prompt to connect Feed and play from your own
+              account.
+            </DialogDescription>
+            <textarea
+              aria-label="Feed agent setup prompt"
+              readOnly
+              value={prompt}
+              rows={4}
+              className="w-full resize-none rounded-md border bg-muted p-3 text-sm"
+              onFocus={(event) => event.currentTarget.select()}
+            />
+            <Button
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(prompt);
+                  setCopied(true);
+                  setErrorMsg('');
+                } catch {
+                  setErrorMsg('Select and copy the prompt above.');
                 }
-              >
-                {mfa.type === 'passkey' ? 'Verify with passkey' : 'Verify code'}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => void verifyMfa(true)}
-                disabled={verifying || !verificationCode.trim()}
-              >
-                Use recovery code
-              </Button>
-            </div>
-          ) : step === 'email-sent' ? (
-            <div className="rounded-xl border bg-muted/50 p-5 text-center">
-              <div className="mb-2 text-2xl">📬</div>
-              <p className="font-semibold">Check your inbox</p>
-              <p className="mt-1 text-muted-foreground text-sm">
-                Enter the six-digit code sent to <strong>{email}</strong>.
+              }}
+            >
+              {copied ? 'Prompt copied' : 'Copy prompt'}
+            </Button>
+            <p role="status" className="sr-only">
+              {copied ? 'Prompt copied to clipboard' : ''}
+            </p>
+            <ol className="list-inside list-decimal space-y-1 text-muted-foreground text-sm">
+              <li>Paste it into your agent.</li>
+              <li>Connect and approve access.</li>
+              <li>Continue playing.</li>
+            </ol>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setView('signin');
+                setErrorMsg('');
+              }}
+            >
+              Sign in
+            </Button>
+            <Button variant="ghost" onClick={onClose}>
+              Browse feed
+            </Button>
+            {errorMsg && (
+              <p role="alert" className="text-destructive text-sm">
+                {errorMsg}
               </p>
-              <Input
-                className="mt-3"
-                aria-label="Email verification code"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                maxLength={6}
-                value={verificationCode}
-                onChange={(event) => setVerificationCode(event.target.value)}
-                disabled={verifying}
-              />
+            )}
+          </div>
+        ) : (
+          <div ref={signInPane} className="flex flex-col gap-3 pt-1">
+            {!signInOnly && (
               <Button
-                className="mt-3 w-full"
-                onClick={() => void verifyEmailCode()}
-                disabled={verifying || !/^\d{6}$/.test(verificationCode)}
+                variant="ghost"
+                onClick={() => {
+                  setView('agent');
+                  setErrorMsg('');
+                }}
               >
-                Verify email
+                Connect your agent instead
               </Button>
-              <p className="mt-1 text-muted-foreground text-xs">
-                No email? Check spam or{' '}
-                <button
-                  className="text-primary underline-offset-4 hover:underline"
-                  onClick={() => setStep('idle')}
-                  type="button"
-                >
-                  try again
-                </button>
-                .
-              </p>
-            </div>
-          ) : (
-            <>
-              {/* OAuth buttons — always enabled */}
-              <div className="flex flex-col gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => handleOAuth('google')}
-                  disabled={step === 'loading'}
-                  className="w-full gap-2"
-                >
-                  <GoogleIcon />
-                  Continue with Google
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => handleOAuth('discord')}
-                  disabled={step === 'loading'}
-                  className="w-full gap-2"
-                >
-                  <DiscordIcon />
-                  Continue with Discord
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => handleOAuth('twitter')}
-                  disabled={step === 'loading'}
-                  className="w-full gap-2"
-                >
-                  <XIcon />
-                  Continue with X
-                </Button>
-              </div>
-
-              <div className="relative flex items-center gap-3">
-                <div className="flex-1 border-t" />
-                <span className="text-muted-foreground text-xs">
-                  or use email
-                </span>
-                <div className="flex-1 border-t" />
-              </div>
-
-              {/* Email + Passkey */}
-              <div className="flex flex-col gap-2">
+            )}
+            {step === 'mfa' && mfa ? (
+              <div className="flex flex-col gap-3">
+                <p className="text-sm">
+                  Complete your account's additional verification.
+                </p>
                 <Input
-                  type="email"
-                  placeholder="you@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void handleEmailLogin();
-                  }}
-                  disabled={step === 'loading'}
-                  autoComplete="email"
-                  className="h-10"
+                  aria-label="Verification or recovery code"
+                  autoComplete="one-time-code"
+                  value={verificationCode}
+                  onChange={(event) => setVerificationCode(event.target.value)}
+                  disabled={verifying}
                 />
-                <div className="flex gap-2">
-                  <Button
-                    onClick={() => void handleEmailLogin()}
-                    disabled={step === 'loading' || !email.trim()}
-                    className="flex-1"
-                    size="sm"
+                <Button
+                  onClick={() => void verifyMfa()}
+                  disabled={
+                    verifying ||
+                    (mfa.type !== 'passkey' && !verificationCode.trim())
+                  }
+                >
+                  {mfa.type === 'passkey'
+                    ? 'Verify with passkey'
+                    : 'Verify code'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => void verifyMfa(true)}
+                  disabled={verifying || !verificationCode.trim()}
+                >
+                  Use recovery code
+                </Button>
+              </div>
+            ) : step === 'email-sent' ? (
+              <div className="rounded-xl border bg-muted/50 p-5 text-center">
+                <div className="mb-2 text-2xl">📬</div>
+                <p className="font-semibold">Check your inbox</p>
+                <p className="mt-1 text-muted-foreground text-sm">
+                  Enter the six-digit code sent to <strong>{email}</strong>.
+                </p>
+                <Input
+                  className="mt-3"
+                  aria-label="Email verification code"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={verificationCode}
+                  onChange={(event) => setVerificationCode(event.target.value)}
+                  disabled={verifying}
+                />
+                <Button
+                  className="mt-3 w-full"
+                  onClick={() => void verifyEmailCode()}
+                  disabled={verifying || !/^\d{6}$/.test(verificationCode)}
+                >
+                  Verify email
+                </Button>
+                <p className="mt-1 text-muted-foreground text-xs">
+                  No email? Check spam or{' '}
+                  <button
+                    className="text-primary underline-offset-4 hover:underline"
+                    onClick={() => setStep('idle')}
+                    type="button"
                   >
-                    {step === 'loading' ? (
-                      <span className="flex items-center gap-2">
-                        <LoadingSpinner />
-                        Sending…
-                      </span>
-                    ) : (
-                      'Send code'
-                    )}
+                    try again
+                  </button>
+                  .
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* OAuth buttons — always enabled */}
+                <div className="flex flex-col gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => handleOAuth('google')}
+                    disabled={step === 'loading'}
+                    className="w-full gap-2"
+                  >
+                    <GoogleIcon />
+                    Continue with Google
                   </Button>
                   <Button
                     variant="outline"
-                    onClick={() => void handlePasskeyLogin()}
-                    disabled={step === 'loading' || !email.trim()}
-                    className="flex-1"
-                    size="sm"
-                    title="Sign in with a passkey (biometric / hardware key)"
+                    onClick={() => handleOAuth('discord')}
+                    disabled={step === 'loading'}
+                    className="w-full gap-2"
                   >
-                    🔑 Passkey
+                    <DiscordIcon />
+                    Continue with Discord
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => handleOAuth('twitter')}
+                    disabled={step === 'loading'}
+                    className="w-full gap-2"
+                  >
+                    <XIcon />
+                    Continue with X
                   </Button>
                 </div>
-              </div>
-            </>
-          )}
-          {errorMsg && (
-            <p role="alert" className="text-center text-destructive text-xs">
-              {errorMsg}
-            </p>
-          )}
-        </div>
+
+                <div className="relative flex items-center gap-3">
+                  <div className="flex-1 border-t" />
+                  <span className="text-muted-foreground text-xs">
+                    or use email
+                  </span>
+                  <div className="flex-1 border-t" />
+                </div>
+
+                {/* Email + Passkey */}
+                <div className="flex flex-col gap-2">
+                  <Input
+                    type="email"
+                    aria-label="Email address"
+                    placeholder="you@example.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void handleEmailLogin();
+                    }}
+                    disabled={step === 'loading'}
+                    autoComplete="email"
+                    className="h-10"
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => void handleEmailLogin()}
+                      disabled={step === 'loading' || !email.trim()}
+                      className="flex-1"
+                      size="sm"
+                    >
+                      {step === 'loading' ? (
+                        <span className="flex items-center gap-2">
+                          <LoadingSpinner />
+                          Sending…
+                        </span>
+                      ) : (
+                        'Send code'
+                      )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => void handlePasskeyLogin()}
+                      disabled={step === 'loading' || !email.trim()}
+                      className="flex-1"
+                      size="sm"
+                      title="Sign in with a passkey (biometric / hardware key)"
+                    >
+                      🔑 Passkey
+                    </Button>
+                  </div>
+                </div>
+              </>
+            )}
+            {errorMsg && (
+              <p role="alert" className="text-center text-destructive text-xs">
+                {errorMsg}
+              </p>
+            )}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );

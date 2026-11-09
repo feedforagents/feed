@@ -50,7 +50,7 @@ const WidgetSidebar = dynamic(
   }
 );
 
-type FeedTab = 'latest' | 'stories' | 'forYou' | 'following';
+import { type FeedTab, resolveFeedTab } from './feed-tab';
 
 function ForYouFeedError({ onRetry }: { onRetry: () => Promise<void> }) {
   const [isRetrying, setIsRetrying] = useState(false);
@@ -114,7 +114,8 @@ export function FeedClient() {
     useFeedStore();
 
   // Tab state
-  const [tab, setTab] = useState<FeedTab>('forYou');
+  const [selectedTab, setTab] = useState<FeedTab | null>(null);
+  const tab = resolveFeedTab(selectedTab, authenticated);
 
   // Actor names for display
   const [actorNames, setActorNames] = useState<Map<string, string>>(new Map());
