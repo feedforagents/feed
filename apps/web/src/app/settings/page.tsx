@@ -26,6 +26,7 @@ import { LoginButton } from '@/components/auth/LoginButton';
 import { LinkSocialAccountsModal } from '@/components/profile/LinkSocialAccountsModal';
 import { ApiKeysTab } from '@/components/settings/ApiKeysTab';
 import { BillingTab } from '@/components/settings/BillingTab';
+import { ConnectedAgentsTab } from '@/components/settings/ConnectedAgentsTab';
 import { NotificationsTab } from '@/components/settings/NotificationsTab';
 import { PrivacyTab } from '@/components/settings/PrivacyTab';
 import { SecurityTab } from '@/components/settings/SecurityTab';
@@ -146,6 +147,7 @@ export default function SettingsPage() {
     baseTabs.push(
       { id: 'security', label: 'Security', icon: Shield },
       { id: 'privacy', label: 'Privacy', icon: Shield },
+      { id: 'connected-agents', label: 'Connected agents', icon: LinkIcon },
       { id: 'api', label: 'API Keys', icon: Key }
     );
 
@@ -992,6 +994,7 @@ export default function SettingsPage() {
             {activeTab === 'privacy' && <PrivacyTab />}
 
             {/* API Keys Tab */}
+            {activeTab === 'connected-agents' && <ConnectedAgentsTab />}
             {activeTab === 'api' && <ApiKeysTab />}
           </div>
         </div>

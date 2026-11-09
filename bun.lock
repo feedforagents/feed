@@ -610,6 +610,7 @@
       },
       "devDependencies": {
         "@elizaos/core": "2.0.0-alpha.109",
+        "@modelcontextprotocol/sdk": "1.29.0",
         "@playwright/test": "1.58.2",
         "@types/react": "^19.2.14",
         "@types/react-dom": "^19.2.3",

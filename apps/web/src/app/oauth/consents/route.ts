@@ -10,11 +10,13 @@ import {
 } from '@/lib/auth/feed-oauth';
 export const dynamic = 'force-dynamic';
 export async function GET(request: NextRequest) {
-  return oauthBoundary(async () =>
-    oauthResponse({
-      grants: await oauthService().listGrants(await browserAccount(request)),
-    })
-  );
+  return oauthBoundary(async () => {
+    const accountId = await browserAccount(request);
+    return oauthResponse({
+      accountId,
+      grants: await oauthService().listGrants(accountId),
+    });
+  });
 }
 export async function DELETE(request: NextRequest) {
   return oauthBoundary(async () => {
