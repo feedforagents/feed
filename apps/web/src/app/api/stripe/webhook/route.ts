@@ -41,7 +41,11 @@
  * - charge.refunded: Reverse funded balance (Phase 2)
  */
 
-import { TradingBalanceFundingService, withErrorHandling } from '@feed/api';
+import {
+  TradingBalanceFundingService,
+  usdToBalanceUnits,
+  withErrorHandling,
+} from '@feed/api';
 import { and, balanceTransactions, db, eq } from '@feed/db';
 import { logger } from '@feed/shared';
 import { NextResponse } from 'next/server';
@@ -870,8 +874,10 @@ async function handleChargeRefunded(
     0
   );
 
-  // Calculate total refunded balance units based on cumulative USD
-  const totalRefundedPoints = Math.floor(totalRefundedUSD * 100);
+  // Calculate total refunded balance units based on cumulative USD. Use the
+  // same one-unit-per-cent conversion that credited the purchase: flooring
+  // here would take back one unit too few (113 / 100 * 100 === 112.99...).
+  const totalRefundedPoints = usdToBalanceUnits(totalRefundedUSD);
 
   // Incremental = total cumulative - already processed
   const incrementalPointsToDeduct = totalRefundedPoints - alreadyDeductedPoints;
