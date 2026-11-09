@@ -25,6 +25,7 @@ import {
   actorState,
   db,
   eq,
+  inArray,
   perpPositions,
   poolPositions,
   pools,
@@ -61,6 +62,19 @@ let predictionPositionId: string;
 let perpPositionId: string;
 let closedPerpPositionId: string;
 let closedPoolPositionId: string;
+
+// Ownership ledger: only rows this file actually inserted — proven by each
+// INSERT's RETURNING clause — may be deleted in afterAll. Setup allocates
+// every id before the first INSERT, so without this a failed setup (e.g. a
+// collision with a pre-existing row) would still let afterAll wipe rows this
+// file never owned.
+const owned = {
+  user: false,
+  actorState: false,
+  pool: false,
+  poolPositionIds: [] as string[],
+  perpPositionIds: [] as string[],
+};
 
 async function fetchPortfolio() {
   const request = new NextRequest(
@@ -99,119 +113,222 @@ beforeAll(async () => {
   const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60_000);
   const oneHourAgo = new Date(now.getTime() - 60 * 60_000);
 
-  await db.insert(users).values({
-    id: actorId,
-    username: `f42npc-${actorId}`,
-    displayName: 'F42 Portfolio NPC',
-    isActor: true,
-    updatedAt: now,
-  });
+  // Collision control: refuse to run — and therefore to clean anything up —
+  // if any fixture id already exists, so pre-existing data is never
+  // overwritten by setup or deleted by teardown. The poolPositions check
+  // also covers perpPositionId, which the mirror-guard test later reuses
+  // as a legacy pool-mirror id.
+  const [
+    existingUsers,
+    existingActorStates,
+    existingPools,
+    existingPoolPositions,
+    existingPerpPositions,
+  ] = await Promise.all([
+    db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, actorId))
+      .limit(1),
+    db
+      .select({ id: actorState.id })
+      .from(actorState)
+      .where(eq(actorState.id, actorId))
+      .limit(1),
+    db
+      .select({ id: pools.id })
+      .from(pools)
+      .where(eq(pools.id, actorId))
+      .limit(1),
+    db
+      .select({ id: poolPositions.id })
+      .from(poolPositions)
+      .where(
+        inArray(poolPositions.id, [
+          predictionPositionId,
+          closedPoolPositionId,
+          perpPositionId,
+        ])
+      )
+      .limit(1),
+    db
+      .select({ id: perpPositions.id })
+      .from(perpPositions)
+      .where(
+        inArray(perpPositions.id, [perpPositionId, closedPerpPositionId])
+      )
+      .limit(1),
+  ]);
+  if (
+    existingUsers.length > 0 ||
+    existingActorStates.length > 0 ||
+    existingPools.length > 0 ||
+    existingPoolPositions.length > 0 ||
+    existingPerpPositions.length > 0
+  ) {
+    throw new Error(
+      `fixture collision for actor ${actorId}: fixture ids already exist; refusing to overwrite pre-existing data`
+    );
+  }
 
-  await db.insert(actorState).values({
-    id: actorId,
-    tradingBalance: '10000',
-    reputationPoints: 1000,
-    hasPool: true,
-    updatedAt: now,
-  });
+  const insertedUser = await db
+    .insert(users)
+    .values({
+      id: actorId,
+      username: `f42npc-${actorId}`,
+      displayName: 'F42 Portfolio NPC',
+      isActor: true,
+      updatedAt: now,
+    })
+    .returning({ id: users.id });
+  owned.user = insertedUser.length > 0;
 
-  await db.insert(pools).values({
-    id: actorId,
-    npcActorId: actorId,
-    name: 'F42 Portfolio Pool',
-    totalValue: '10000',
-    totalDeposits: '10000',
-    availableBalance: '10000',
-    lifetimePnL: '0',
-    performanceFeeRate: 0.05,
-    totalFeesCollected: '0',
-    isActive: true,
-    status: 'ACTIVE',
-    updatedAt: now,
-  });
+  const insertedActorState = await db
+    .insert(actorState)
+    .values({
+      id: actorId,
+      tradingBalance: '10000',
+      reputationPoints: 1000,
+      hasPool: true,
+      updatedAt: now,
+    })
+    .returning({ id: actorState.id });
+  owned.actorState = insertedActorState.length > 0;
+
+  const insertedPool = await db
+    .insert(pools)
+    .values({
+      id: actorId,
+      npcActorId: actorId,
+      name: 'F42 Portfolio Pool',
+      totalValue: '10000',
+      totalDeposits: '10000',
+      availableBalance: '10000',
+      lifetimePnL: '0',
+      performanceFeeRate: 0.05,
+      totalFeesCollected: '0',
+      isActive: true,
+      status: 'ACTIVE',
+      updatedAt: now,
+    })
+    .returning({ id: pools.id });
+  owned.pool = insertedPool.length > 0;
 
   // One open prediction position (mirrored into PoolPosition by the NPC
   // trade executor), unrealized +40.
-  await db.insert(poolPositions).values({
-    id: predictionPositionId,
-    poolId: actorId,
-    marketType: 'prediction',
-    marketId: 'f42-market-1',
-    side: 'YES',
-    size: 200,
-    entryPrice: 0.5,
-    currentPrice: 0.6,
-    unrealizedPnL: 40,
-    openedAt: twoHoursAgo,
-    closedAt: null,
-    updatedAt: now,
-  });
+  const insertedPrediction = await db
+    .insert(poolPositions)
+    .values({
+      id: predictionPositionId,
+      poolId: actorId,
+      marketType: 'prediction',
+      marketId: 'f42-market-1',
+      side: 'YES',
+      size: 200,
+      entryPrice: 0.5,
+      currentPrice: 0.6,
+      unrealizedPnL: 40,
+      openedAt: twoHoursAgo,
+      closedAt: null,
+      updatedAt: now,
+    })
+    .returning({ id: poolPositions.id });
+  owned.poolPositionIds.push(...insertedPrediction.map((row) => row.id));
 
   // One open perp position. NPC perp trades are written only to
   // PerpPosition (userId = actor id); there is no PoolPosition row.
-  await db.insert(perpPositions).values({
-    id: perpPositionId,
-    userId: actorId,
-    ticker: 'NVDAI',
-    organizationId: 'f42-org',
-    side: 'long',
-    size: 5000,
-    leverage: 5,
-    entryPrice: 100,
-    currentPrice: 110,
-    liquidationPrice: 80,
-    unrealizedPnL: 500,
-    unrealizedPnLPercent: 10,
-    fundingPaid: 0,
-    openedAt: oneHourAgo,
-    lastUpdated: now,
-    closedAt: null,
-  });
+  const insertedPerp = await db
+    .insert(perpPositions)
+    .values({
+      id: perpPositionId,
+      userId: actorId,
+      ticker: 'NVDAI',
+      organizationId: 'f42-org',
+      side: 'long',
+      size: 5000,
+      leverage: 5,
+      entryPrice: 100,
+      currentPrice: 110,
+      liquidationPrice: 80,
+      unrealizedPnL: 500,
+      unrealizedPnLPercent: 10,
+      fundingPaid: 0,
+      openedAt: oneHourAgo,
+      lastUpdated: now,
+      closedAt: null,
+    })
+    .returning({ id: perpPositions.id });
+  owned.perpPositionIds.push(...insertedPerp.map((row) => row.id));
 
   // Guards: closed positions feed realizedPnL but must not be listed.
-  await db.insert(perpPositions).values({
-    id: closedPerpPositionId,
-    userId: actorId,
-    ticker: 'NVDAI',
-    organizationId: 'f42-org',
-    side: 'long',
-    size: 3000,
-    leverage: 5,
-    entryPrice: 90,
-    currentPrice: 95,
-    liquidationPrice: 70,
-    unrealizedPnL: 0,
-    unrealizedPnLPercent: 0,
-    fundingPaid: 0,
-    openedAt: twoHoursAgo,
-    lastUpdated: now,
-    closedAt: oneHourAgo,
-    realizedPnL: 250,
-  });
+  const insertedClosedPerp = await db
+    .insert(perpPositions)
+    .values({
+      id: closedPerpPositionId,
+      userId: actorId,
+      ticker: 'NVDAI',
+      organizationId: 'f42-org',
+      side: 'long',
+      size: 3000,
+      leverage: 5,
+      entryPrice: 90,
+      currentPrice: 95,
+      liquidationPrice: 70,
+      unrealizedPnL: 0,
+      unrealizedPnLPercent: 0,
+      fundingPaid: 0,
+      openedAt: twoHoursAgo,
+      lastUpdated: now,
+      closedAt: oneHourAgo,
+      realizedPnL: 250,
+    })
+    .returning({ id: perpPositions.id });
+  owned.perpPositionIds.push(...insertedClosedPerp.map((row) => row.id));
 
-  await db.insert(poolPositions).values({
-    id: closedPoolPositionId,
-    poolId: actorId,
-    marketType: 'prediction',
-    marketId: 'f42-market-2',
-    side: 'NO',
-    size: 100,
-    entryPrice: 0.4,
-    currentPrice: 0.4,
-    unrealizedPnL: 0,
-    openedAt: twoHoursAgo,
-    closedAt: oneHourAgo,
-    realizedPnL: -30,
-    updatedAt: now,
-  });
+  const insertedClosedPool = await db
+    .insert(poolPositions)
+    .values({
+      id: closedPoolPositionId,
+      poolId: actorId,
+      marketType: 'prediction',
+      marketId: 'f42-market-2',
+      side: 'NO',
+      size: 100,
+      entryPrice: 0.4,
+      currentPrice: 0.4,
+      unrealizedPnL: 0,
+      openedAt: twoHoursAgo,
+      closedAt: oneHourAgo,
+      realizedPnL: -30,
+      updatedAt: now,
+    })
+    .returning({ id: poolPositions.id });
+  owned.poolPositionIds.push(...insertedClosedPool.map((row) => row.id));
 });
 
 afterAll(async () => {
-  await db.delete(poolPositions).where(eq(poolPositions.poolId, actorId));
-  await db.delete(perpPositions).where(eq(perpPositions.userId, actorId));
-  await db.delete(pools).where(eq(pools.id, actorId));
-  await db.delete(actorState).where(eq(actorState.id, actorId));
-  await db.delete(users).where(eq(users.id, actorId));
+  // Delete only rows this file proved it inserted (RETURNING ids above),
+  // positions before their owner rows, so a partial setup failure leaves
+  // pre-existing data untouched.
+  if (owned.poolPositionIds.length > 0) {
+    await db
+      .delete(poolPositions)
+      .where(inArray(poolPositions.id, owned.poolPositionIds));
+  }
+  if (owned.perpPositionIds.length > 0) {
+    await db
+      .delete(perpPositions)
+      .where(inArray(perpPositions.id, owned.perpPositionIds));
+  }
+  if (owned.pool) {
+    await db.delete(pools).where(eq(pools.id, actorId));
+  }
+  if (owned.actorState) {
+    await db.delete(actorState).where(eq(actorState.id, actorId));
+  }
+  if (owned.user) {
+    await db.delete(users).where(eq(users.id, actorId));
+  }
 });
 
 describe('NPC portfolio detail: listed positions match the aggregates', () => {
@@ -251,23 +368,29 @@ describe('NPC portfolio detail: listed positions match the aggregates', () => {
   it('lists a legacy pool-mirrored perp only once (dedupe guard)', async () => {
     // Legacy rows duplicated a PerpPosition into PoolPosition under the
     // same id; the metrics skip the pool copy, and so must the list.
-    await db.insert(poolPositions).values({
-      id: perpPositionId,
-      poolId: actorId,
-      marketType: 'perp',
-      ticker: 'NVDAI',
-      marketId: null,
-      side: 'long',
-      size: 5000,
-      entryPrice: 100,
-      currentPrice: 110,
-      unrealizedPnL: 500,
-      leverage: 5,
-      openedAt: new Date(Date.now() - 60 * 60_000),
-      closedAt: null,
-      updatedAt: new Date(),
-    });
+    // Same ownership discipline as setup: delete the mirror row only if
+    // this test's own insert returned it, never a pre-existing row.
+    let insertedMirror: Array<{ id: string }> = [];
     try {
+      insertedMirror = await db
+        .insert(poolPositions)
+        .values({
+          id: perpPositionId,
+          poolId: actorId,
+          marketType: 'perp',
+          ticker: 'NVDAI',
+          marketId: null,
+          side: 'long',
+          size: 5000,
+          entryPrice: 100,
+          currentPrice: 110,
+          unrealizedPnL: 500,
+          leverage: 5,
+          openedAt: new Date(Date.now() - 60 * 60_000),
+          closedAt: null,
+          updatedAt: new Date(),
+        })
+        .returning({ id: poolPositions.id });
       const { body } = await fetchPortfolio();
       const res = body as PortfolioResponse;
       expect(res.positions).toHaveLength(res.portfolio.positionCount);
@@ -275,9 +398,11 @@ describe('NPC portfolio detail: listed positions match the aggregates', () => {
         1
       );
     } finally {
-      await db
-        .delete(poolPositions)
-        .where(eq(poolPositions.id, perpPositionId));
+      if (insertedMirror.length > 0) {
+        await db
+          .delete(poolPositions)
+          .where(eq(poolPositions.id, perpPositionId));
+      }
     }
   });
 
