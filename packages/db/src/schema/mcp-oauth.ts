@@ -64,6 +64,8 @@ export const mcpOAuthTokens = pgTable(
   {
     hash: text('hash').primaryKey(),
     kind: text('kind').notNull(),
+    // NULL preserves grants issued before per-token scope snapshots existed.
+    scopes: text('scopes').array(),
     grantId: text('grantId')
       .notNull()
       .references(() => mcpOAuthGrants.id, { onDelete: 'cascade' }),

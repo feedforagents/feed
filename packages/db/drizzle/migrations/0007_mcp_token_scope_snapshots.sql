@@ -1,0 +1,1 @@
+ALTER TABLE "McpOAuthToken" ADD COLUMN "scopes" text[];
