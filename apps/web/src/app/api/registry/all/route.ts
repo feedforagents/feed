@@ -134,6 +134,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         take: 100,
       });
 
+      // The list above is capped at the newest 100, but the directory
+      // totals are counts of registered entities (the sibling
+      // GET /api/registry counts its total the same way) — count the
+      // full matching population, not the capped page.
+      const total = await db.user.count({ where });
+
       // Get performance metrics for all users
       const userIds = users.map((u) => u.id);
       const metricsResults = await db.agentPerformanceMetrics.findMany({
@@ -166,7 +172,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         ),
       ]);
 
-      return users.map((user, index) => {
+      const mappedUsers = users.map((user, index) => {
         const metrics = metricsMap.get(user.id);
         const compositeScore = metrics?.reputationScore ?? 0;
         const averageFeedbackScore = metrics?.averageFeedbackScore ?? 0;
@@ -202,6 +208,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           },
         };
       });
+
+      return { users: mappedUsers, total };
     };
 
     return await asPublic(dbOperation);
@@ -222,6 +230,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             a.role?.toLowerCase().includes(searchLower)
         );
       }
+
+      // The list below is cut to the top 100 by reputation, but the
+      // directory total counts every registered actor matching the
+      // search — capture the full matching population before the cut.
+      const total = actors.length;
 
       // Get dynamic state for all actors
       const actorStates = await db.actorState.findMany();
@@ -262,7 +275,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           ),
         ]);
 
-      return actors.map((actor, index) => {
+      const mappedActors = actors.map((actor, index) => {
         const state = stateMap.get(actor.id);
         return {
           type: 'actor',
@@ -287,6 +300,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           },
         };
       });
+
+      return { actors: mappedActors, total };
     };
 
     return await asPublic(dbOperation);
@@ -301,19 +316,27 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // Fetch based on entity type
   // Note: When searching for 'users', we also include static actors (AI NPCs)
   // since they are no longer in the database but should appear in user searches
-  let users: Awaited<ReturnType<typeof fetchUsers>> = [];
-  let actors: Awaited<ReturnType<typeof fetchActors>> = [];
+  let users: Awaited<ReturnType<typeof fetchUsers>>['users'] = [];
+  let usersTotal = 0;
+  let actors: Awaited<ReturnType<typeof fetchActors>>['actors'] = [];
+  let actorsTotal = 0;
   let agents: Awaited<ReturnType<typeof fetchAgents>> = [];
   let apps: Awaited<ReturnType<typeof fetchApps>> = [];
 
   if (!entityType || entityType === 'all' || entityType === 'users') {
-    users = await fetchUsers();
+    const usersResult = await fetchUsers();
+    users = usersResult.users;
+    usersTotal = usersResult.total;
     // Also fetch actors when searching for users - AI NPCs should appear in user searches
-    actors = await fetchActors();
+    const actorsResult = await fetchActors();
+    actors = actorsResult.actors;
+    actorsTotal = actorsResult.total;
   }
   if (entityType === 'actors') {
     // Only fetch actors when explicitly requested
-    actors = await fetchActors();
+    const actorsResult = await fetchActors();
+    actors = actorsResult.actors;
+    actorsTotal = actorsResult.total;
   }
   if (!entityType || entityType === 'all' || entityType === 'agents') {
     agents = await fetchAgents().catch((error) => {
@@ -342,11 +365,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     agents,
     apps,
     totals: {
-      users: users.length,
-      actors: actors.length,
+      users: usersTotal,
+      actors: actorsTotal,
       agents: agents.length,
       apps: apps.length,
-      total: users.length + actors.length + agents.length + apps.length,
+      total: usersTotal + actorsTotal + agents.length + apps.length,
     },
   };
 
