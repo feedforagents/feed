@@ -14,10 +14,19 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { comments, db, eq, inArray, posts, sql, users } from '@feed/db';
+import {
+  comments,
+  db,
+  eq,
+  inArray,
+  posts,
+  userBlocks,
+  userMutes,
+  users,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
-import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
+import { createStewardTestToken } from './helpers/steward-auth';
 
 type CommentDetailResponse = {
   comment: {
@@ -30,17 +39,100 @@ type CommentDetailResponse = {
   post: { id: string } | null;
 };
 
-const STEWARD_SECRET = 'test-steward-secret-for-integration';
-process.env.STEWARD_JWT_SECRET = STEWARD_SECRET;
+type UserInsert = typeof users.$inferInsert;
+type PostInsert = typeof posts.$inferInsert;
+type CommentInsert = typeof comments.$inferInsert;
+type UserBlockInsert = typeof userBlocks.$inferInsert;
+type UserMuteInsert = typeof userMutes.$inferInsert;
 
-async function viewerAuthHeaders(): Promise<Record<string, string>> {
-  const token = await new SignJWT({ userId: 'f75-steward-viewer' })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuer('steward')
-    .setExpirationTime('1h')
-    .sign(new TextEncoder().encode(STEWARD_SECRET));
-  return { authorization: `Bearer ${token}` };
+/**
+ * Tracks only rows whose INSERT ... RETURNING succeeded. Cleanup deletes
+ * exactly those rows by ID, so a setup that fails partway (for example on
+ * an ID collision with a pre-existing row) can never delete data this
+ * fixture did not create.
+ */
+class OwnedFixtures {
+  readonly userIds: string[] = [];
+  readonly postIds: string[] = [];
+  readonly commentIds: string[] = [];
+  readonly blockIds: string[] = [];
+  readonly muteIds: string[] = [];
+
+  async insertUser(values: UserInsert): Promise<string> {
+    const [row] = await db
+      .insert(users)
+      .values(values)
+      .returning({ id: users.id });
+    if (!row) throw new Error('user insert returned no row');
+    this.userIds.push(row.id);
+    return row.id;
+  }
+
+  async insertPost(values: PostInsert): Promise<string> {
+    const [row] = await db
+      .insert(posts)
+      .values(values)
+      .returning({ id: posts.id });
+    if (!row) throw new Error('post insert returned no row');
+    this.postIds.push(row.id);
+    return row.id;
+  }
+
+  async insertComment(values: CommentInsert): Promise<string> {
+    const [row] = await db
+      .insert(comments)
+      .values(values)
+      .returning({ id: comments.id });
+    if (!row) throw new Error('comment insert returned no row');
+    this.commentIds.push(row.id);
+    return row.id;
+  }
+
+  async insertBlock(values: UserBlockInsert): Promise<string> {
+    const [row] = await db
+      .insert(userBlocks)
+      .values(values)
+      .returning({ id: userBlocks.id });
+    if (!row) throw new Error('block insert returned no row');
+    this.blockIds.push(row.id);
+    return row.id;
+  }
+
+  async insertMute(values: UserMuteInsert): Promise<string> {
+    const [row] = await db
+      .insert(userMutes)
+      .values(values)
+      .returning({ id: userMutes.id });
+    if (!row) throw new Error('mute insert returned no row');
+    this.muteIds.push(row.id);
+    return row.id;
+  }
+
+  async cleanup(): Promise<void> {
+    if (this.blockIds.length > 0) {
+      await db.delete(userBlocks).where(inArray(userBlocks.id, this.blockIds));
+    }
+    if (this.muteIds.length > 0) {
+      await db.delete(userMutes).where(inArray(userMutes.id, this.muteIds));
+    }
+    if (this.commentIds.length > 0) {
+      await db.delete(comments).where(inArray(comments.id, this.commentIds));
+    }
+    if (this.postIds.length > 0) {
+      await db.delete(posts).where(inArray(posts.id, this.postIds));
+    }
+    if (this.userIds.length > 0) {
+      await db.delete(users).where(inArray(users.id, this.userIds));
+    }
+    this.userIds.length = 0;
+    this.postIds.length = 0;
+    this.commentIds.length = 0;
+    this.blockIds.length = 0;
+    this.muteIds.length = 0;
+  }
 }
+
+const fixtures = new OwnedFixtures();
 
 let postAuthor: string;
 let viewer: string;
@@ -54,13 +146,15 @@ let replyNormalId: string;
 let replyBlockedId: string;
 let replyMutedId: string;
 let replyBlockerId: string;
-let childOfBlockedId: string;
-let childOfNormalId: string;
 let childCommentId: string;
-const allUserIds: string[] = [];
-const allCommentIds: string[] = [];
+let stewardId: string;
+let token: string;
 
 let GET: typeof import('../../../apps/web/src/app/api/comments/[id]/route').GET;
+
+function viewerAuthHeaders(): Record<string, string> {
+  return { authorization: `Bearer ${token}` };
+}
 
 async function fetchComment(id: string, headers?: Record<string, string>) {
   const request = new NextRequest(`http://localhost/api/comments/${id}`, {
@@ -79,91 +173,60 @@ async function fetchComment(id: string, headers?: Record<string, string>) {
 beforeAll(async () => {
   ({ GET } = await import('../../../apps/web/src/app/api/comments/[id]/route'));
 
-  [
-    postAuthor,
-    viewer,
-    normal,
-    blocked,
-    muted,
-    blocker,
-    postId,
-    mainCommentId,
-    replyNormalId,
-    replyBlockedId,
-    replyMutedId,
-    replyBlockerId,
-    childOfBlockedId,
-    childOfNormalId,
-    childCommentId,
-  ] = await Promise.all(
-    Array.from({ length: 15 }, () => generateSnowflakeId())
-  );
-  allUserIds.push(postAuthor, viewer, normal, blocked, muted, blocker);
-  allCommentIds.push(
-    mainCommentId,
-    replyNormalId,
-    replyBlockedId,
-    replyMutedId,
-    replyBlockerId,
-    childOfBlockedId,
-    childOfNormalId,
-    childCommentId
-  );
-
   const now = new Date();
   const at = (seconds: number) => new Date(now.getTime() + seconds * 1000);
   const earlier = new Date(now.getTime() - 3_600_000);
 
-  await db.insert(users).values([
-    {
-      id: postAuthor,
-      username: `test-f75-p-${postAuthor}`,
-      displayName: 'F75 Post Author',
+  async function insertFixtureUser(
+    prefix: string,
+    displayName: string
+  ): Promise<string> {
+    const id = await generateSnowflakeId();
+    return fixtures.insertUser({
+      id,
+      username: `test-f75-${prefix}-${id}`,
+      displayName,
       updatedAt: now,
-    },
-    {
-      id: viewer,
-      username: `test-f75-v-${viewer}`,
-      displayName: 'F75 Viewer',
-      updatedAt: now,
-    },
-    {
-      id: normal,
-      username: `test-f75-n-${normal}`,
-      displayName: 'F75 Normal',
-      updatedAt: now,
-    },
-    {
-      id: blocked,
-      username: `test-f75-b-${blocked}`,
-      displayName: 'F75 Blocked',
-      updatedAt: now,
-    },
-    {
-      id: muted,
-      username: `test-f75-m-${muted}`,
-      displayName: 'F75 Muted',
-      updatedAt: now,
-    },
-    {
-      id: blocker,
-      username: `test-f75-r-${blocker}`,
-      displayName: 'F75 Blocker',
-      updatedAt: now,
-    },
-  ]);
-  await db
-    .update(users)
-    .set({ stewardId: 'f75-steward-viewer' })
-    .where(eq(users.id, viewer));
+    });
+  }
 
-  await db.insert(posts).values({
-    id: postId,
+  postAuthor = await insertFixtureUser('p', 'F75 Post Author');
+  viewer = await insertFixtureUser('v', 'F75 Viewer');
+  // The Steward subject is unique per run: the fixed 'f75-steward-viewer'
+  // identity could collide with a concurrent run of this file.
+  stewardId = `f75-comment-detail-${viewer}`;
+  await db.update(users).set({ stewardId }).where(eq(users.id, viewer));
+  normal = await insertFixtureUser('n', 'F75 Normal');
+  blocked = await insertFixtureUser('b', 'F75 Blocked');
+  muted = await insertFixtureUser('m', 'F75 Muted');
+  blocker = await insertFixtureUser('r', 'F75 Blocker');
+
+  postId = await fixtures.insertPost({
+    id: await generateSnowflakeId(),
     content: 'f75 fixture post',
     authorId: postAuthor,
     timestamp: earlier,
     createdAt: earlier,
   });
+
+  async function insertFixtureComment(
+    authorId: string,
+    parentCommentId: string | null,
+    content: string,
+    seconds: number
+  ): Promise<string> {
+    const id = await generateSnowflakeId();
+    return fixtures.insertComment({
+      id,
+      content,
+      postId,
+      authorId,
+      parentCommentId,
+      createdAt: at(seconds),
+      updatedAt: at(seconds),
+      deletedAt: null,
+    });
+  }
 
   // Thread under the post:
   //   main (normal)
@@ -174,113 +237,82 @@ beforeAll(async () => {
   //   ├─ replyMuted (muted author)
   //   └─ replyBlocker (author who blocked the viewer)
   //   childComment (normal) hangs under replyBlocked, for the parent chain.
-  await db.insert(comments).values([
-    {
-      id: mainCommentId,
-      content: 'f75 main comment',
-      postId,
-      authorId: normal,
-      parentCommentId: null,
-      createdAt: at(0),
-      updatedAt: at(0),
-      deletedAt: null,
-    },
-    {
-      id: replyNormalId,
-      content: 'f75 reply by normal author',
-      postId,
-      authorId: normal,
-      parentCommentId: mainCommentId,
-      createdAt: at(10),
-      updatedAt: at(10),
-      deletedAt: null,
-    },
-    {
-      id: replyBlockedId,
-      content: 'f75 reply by blocked author',
-      postId,
-      authorId: blocked,
-      parentCommentId: mainCommentId,
-      createdAt: at(20),
-      updatedAt: at(20),
-      deletedAt: null,
-    },
-    {
-      id: replyMutedId,
-      content: 'f75 reply by muted author',
-      postId,
-      authorId: muted,
-      parentCommentId: mainCommentId,
-      createdAt: at(30),
-      updatedAt: at(30),
-      deletedAt: null,
-    },
-    {
-      id: replyBlockerId,
-      content: 'f75 reply by blocking author',
-      postId,
-      authorId: blocker,
-      parentCommentId: mainCommentId,
-      createdAt: at(40),
-      updatedAt: at(40),
-      deletedAt: null,
-    },
-    {
-      id: childOfBlockedId,
-      content: 'f75 visible reply under blocked root',
-      postId,
-      authorId: normal,
-      parentCommentId: replyBlockedId,
-      createdAt: at(50),
-      updatedAt: at(50),
-      deletedAt: null,
-    },
-    {
-      id: childOfNormalId,
-      content: 'f75 blocked reply under normal root',
-      postId,
-      authorId: blocked,
-      parentCommentId: replyNormalId,
-      createdAt: at(60),
-      updatedAt: at(60),
-      deletedAt: null,
-    },
-    {
-      id: childCommentId,
-      content: 'f75 child of blocked reply',
-      postId,
-      authorId: normal,
-      parentCommentId: replyBlockedId,
-      createdAt: at(70),
-      updatedAt: at(70),
-      deletedAt: null,
-    },
-  ]);
+  mainCommentId = await insertFixtureComment(
+    normal,
+    null,
+    'f75 main comment',
+    0
+  );
+  replyNormalId = await insertFixtureComment(
+    normal,
+    mainCommentId,
+    'f75 reply by normal author',
+    10
+  );
+  replyBlockedId = await insertFixtureComment(
+    blocked,
+    mainCommentId,
+    'f75 reply by blocked author',
+    20
+  );
+  replyMutedId = await insertFixtureComment(
+    muted,
+    mainCommentId,
+    'f75 reply by muted author',
+    30
+  );
+  replyBlockerId = await insertFixtureComment(
+    blocker,
+    mainCommentId,
+    'f75 reply by blocking author',
+    40
+  );
+  // These two nested replies shape the reply counts but their ids are
+  // never asserted directly; the fixture tracker still owns their rows.
+  await insertFixtureComment(
+    normal,
+    replyBlockedId,
+    'f75 visible reply under blocked root',
+    50
+  );
+  await insertFixtureComment(
+    blocked,
+    replyNormalId,
+    'f75 blocked reply under normal root',
+    60
+  );
+  childCommentId = await insertFixtureComment(
+    normal,
+    replyBlockedId,
+    'f75 child of blocked reply',
+    70
+  );
 
-  const [blockRowA, blockRowB, muteRow] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-  await db.execute(sql`
-    INSERT INTO "UserBlock" (id, "blockerId", "blockedId")
-    VALUES (${blockRowA}, ${viewer}, ${blocked}),
-           (${blockRowB}, ${blocker}, ${viewer})
-  `);
-  await db.execute(sql`
-    INSERT INTO "UserMute" (id, "muterId", "mutedId")
-    VALUES (${muteRow}, ${viewer}, ${muted})
-  `);
+  await fixtures.insertBlock({
+    id: await generateSnowflakeId(),
+    blockerId: viewer,
+    blockedId: blocked,
+  });
+  await fixtures.insertBlock({
+    id: await generateSnowflakeId(),
+    blockerId: blocker,
+    blockedId: viewer,
+  });
+  await fixtures.insertMute({
+    id: await generateSnowflakeId(),
+    muterId: viewer,
+    mutedId: muted,
+  });
+
+  // The token is signed with the configured shared secret through the
+  // shared helper. This file must not replace
+  // process.env.STEWARD_JWT_SECRET: the test server and later suites in
+  // the same process sign and verify with the configured value.
+  token = await createStewardTestToken(stewardId);
 });
 
 afterAll(async () => {
-  await db.execute(
-    sql`DELETE FROM "UserBlock" WHERE "blockerId" = ${viewer} OR "blockedId" = ${viewer}`
-  );
-  await db.execute(sql`DELETE FROM "UserMute" WHERE "muterId" = ${viewer}`);
-  await db.delete(comments).where(inArray(comments.id, allCommentIds));
-  await db.delete(posts).where(eq(posts.id, postId));
-  await db.delete(users).where(inArray(users.id, allUserIds));
+  await fixtures.cleanup();
 });
 
 describe('GET /api/comments/[id] viewer moderation', () => {
@@ -303,7 +335,7 @@ describe('GET /api/comments/[id] viewer moderation', () => {
   it('hides blocked, muted and blocking authors from the signed-in viewer', async () => {
     const { status, body } = await fetchComment(
       mainCommentId,
-      await viewerAuthHeaders()
+      viewerAuthHeaders()
     );
     expect(status).toBe(200);
     const detail = body as CommentDetailResponse;
@@ -324,7 +356,7 @@ describe('GET /api/comments/[id] viewer moderation', () => {
   it('does not leak an excluded author through the parent chain', async () => {
     const { status, body } = await fetchComment(
       childCommentId,
-      await viewerAuthHeaders()
+      viewerAuthHeaders()
     );
     expect(status).toBe(200);
     const detail = body as CommentDetailResponse;
@@ -336,5 +368,119 @@ describe('GET /api/comments/[id] viewer moderation', () => {
     expect(JSON.stringify(detail.parentChain)).not.toContain(
       'by blocked author'
     );
+  });
+});
+
+describe('fixture ownership', () => {
+  it('cleanup after failed setup never deletes rows the fixture did not create', async () => {
+    const victim = new OwnedFixtures();
+    const attempt = new OwnedFixtures();
+    try {
+      const victimUserId = await generateSnowflakeId();
+      await victim.insertUser({
+        id: victimUserId,
+        username: `test-f75-victim-${victimUserId}`,
+        displayName: 'Pre-existing user',
+        updatedAt: new Date(),
+      });
+      const victimCommentId = await generateSnowflakeId();
+      await victim.insertComment({
+        id: victimCommentId,
+        content: 'f75 pre-existing comment',
+        postId,
+        authorId: victimUserId,
+        parentCommentId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        deletedAt: null,
+      });
+      const victimBlockId = await generateSnowflakeId();
+      await victim.insertBlock({
+        id: victimBlockId,
+        blockerId: victimUserId,
+        blockedId: normal,
+      });
+
+      // A user INSERT that collides with the pre-existing user fails and
+      // registers no ownership.
+      let userCollisionFailed = false;
+      try {
+        await attempt.insertUser({
+          id: victimUserId,
+          username: `test-f75-collision-${victimUserId}`,
+          displayName: 'Collision attempt',
+          updatedAt: new Date(),
+        });
+      } catch {
+        userCollisionFailed = true;
+      }
+      expect(userCollisionFailed).toBe(true);
+      expect(attempt.userIds).toEqual([]);
+
+      // Partial setup: the user insert succeeds, then the comment INSERT
+      // collides with the pre-existing comment and registers nothing, and
+      // a block INSERT colliding with the pre-existing block does the same.
+      const attemptUserId = await generateSnowflakeId();
+      await attempt.insertUser({
+        id: attemptUserId,
+        username: `test-f75-attempt-${attemptUserId}`,
+        displayName: 'Partial setup',
+        updatedAt: new Date(),
+      });
+      let commentCollisionFailed = false;
+      try {
+        await attempt.insertComment({
+          id: victimCommentId,
+          content: 'f75 colliding comment',
+          postId,
+          authorId: attemptUserId,
+          parentCommentId: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          deletedAt: null,
+        });
+      } catch {
+        commentCollisionFailed = true;
+      }
+      expect(commentCollisionFailed).toBe(true);
+      expect(attempt.commentIds).toEqual([]);
+      let blockCollisionFailed = false;
+      try {
+        await attempt.insertBlock({
+          id: victimBlockId,
+          blockerId: attemptUserId,
+          blockedId: normal,
+        });
+      } catch {
+        blockCollisionFailed = true;
+      }
+      expect(blockCollisionFailed).toBe(true);
+      expect(attempt.blockIds).toEqual([]);
+
+      await attempt.cleanup();
+
+      // The pre-existing rows survive the failed setup's cleanup untouched.
+      const [survivingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, victimUserId));
+      expect(survivingUser).toBeDefined();
+      expect(survivingUser?.displayName).toBe('Pre-existing user');
+      const [survivingComment] = await db
+        .select()
+        .from(comments)
+        .where(eq(comments.id, victimCommentId));
+      expect(survivingComment).toBeDefined();
+      expect(survivingComment?.authorId).toBe(victimUserId);
+      const [survivingBlock] = await db
+        .select()
+        .from(userBlocks)
+        .where(eq(userBlocks.id, victimBlockId));
+      expect(survivingBlock).toBeDefined();
+      expect(survivingBlock?.blockerId).toBe(victimUserId);
+    } finally {
+      await attempt.cleanup();
+      await victim.cleanup();
+    }
   });
 });
