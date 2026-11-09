@@ -66,6 +66,58 @@ export interface RebalanceAction {
   reason: string;
 }
 
+/**
+ * Capital at risk for a position, used as the denominator for the
+ * stop-loss / profit-take thresholds (percentages of invested capital).
+ * Perp size is notional, so the capital at risk is the margin
+ * (size / leverage); prediction size is already the cost basis. A perp
+ * loss measured against notional would never reach the threshold: at 5x
+ * a -25% margin loss is only -5% of notional, so the position would bleed
+ * to liquidation instead of being stop-lossed.
+ */
+function getPositionCapitalBasis(position: {
+  marketType: string;
+  size: number;
+  leverage?: number | null;
+}): number {
+  if (position.marketType === 'perp') {
+    return getPositionExposure(position.size, position.leverage);
+  }
+  return Math.abs(position.size);
+}
+
+/**
+ * Map a live perp position row (perpPositions table) to a
+ * PortfolioPosition. Live perp positions are not mirrored into
+ * poolPositions, so the risk finders must read them from here.
+ */
+function mapPerpPositionToPortfolioPosition(
+  poolId: string,
+  position: {
+    id: string;
+    ticker: string;
+    side: string;
+    size: number | string;
+    entryPrice: number | string;
+    currentPrice: number | string;
+    unrealizedPnL: number | string;
+    leverage: number | null;
+  }
+): PortfolioPosition {
+  return {
+    id: position.id,
+    poolId,
+    marketType: 'perp',
+    ticker: position.ticker ?? undefined,
+    side: position.side,
+    size: Number(position.size),
+    entryPrice: Number(position.entryPrice),
+    currentPrice: Number(position.currentPrice),
+    unrealizedPnL: Number(position.unrealizedPnL),
+    leverage: position.leverage ?? undefined,
+  };
+}
+
 export class NPCInvestmentManager {
   /**
    * Get portfolio metrics for an NPC pool
@@ -367,7 +419,7 @@ export class NPCInvestmentManager {
           marketId: position.marketId,
           side: position.side,
           targetSize: 0,
-          reason: `Profit-taking triggered: +${position.unrealizedPnL.toFixed(2)} profit (${((position.unrealizedPnL / position.size) * 100).toFixed(1)}%)`,
+          reason: `Profit-taking triggered: +${position.unrealizedPnL.toFixed(2)} profit (${((position.unrealizedPnL / getPositionCapitalBasis(position)) * 100).toFixed(1)}%)`,
         });
       }
     }
@@ -701,13 +753,60 @@ export class NPCInvestmentManager {
       (p) => p.closedAt === null && (p.leverage ?? 0) > 1
     );
 
-    for (const position of leveragedPositions) {
+    // Live perp positions live in perpPositions, not poolPositions: a
+    // leveraged perp was never de-risked. Include open perp positions,
+    // deduped against legacy pool mirrors by id, and keep the highest
+    // leverage candidates across both sources.
+    const perpPositionsResult = await db
+      .select()
+      .from(perpPositions)
+      .where(
+        and(eq(perpPositions.userId, poolId), isNull(perpPositions.closedAt))
+      )
+      .orderBy(desc(perpPositions.leverage))
+      .limit(positionsToClose);
+    const seenPositionIds = new Set(leveragedPositions.map((p) => p.id));
+    const leveragedPerpPositions = perpPositionsResult.filter(
+      (p) =>
+        p.closedAt === null &&
+        (p.leverage ?? 0) > 1 &&
+        !seenPositionIds.has(p.id)
+    );
+
+    const candidates: Array<{
+      id: string;
+      marketType: 'perp' | 'prediction';
+      ticker?: string;
+      marketId?: string;
+      side: string;
+      leverage: number;
+    }> = [
+      ...leveragedPositions.map((p) => ({
+        id: p.id,
+        marketType: p.marketType as 'perp' | 'prediction',
+        ticker: p.ticker || undefined,
+        marketId: p.marketId || undefined,
+        side: p.side,
+        leverage: p.leverage ?? 0,
+      })),
+      ...leveragedPerpPositions.map((p) => ({
+        id: p.id,
+        marketType: 'perp' as const,
+        ticker: p.ticker || undefined,
+        marketId: undefined,
+        side: p.side,
+        leverage: p.leverage ?? 0,
+      })),
+    ];
+    candidates.sort((a, b) => b.leverage - a.leverage);
+
+    for (const position of candidates.slice(0, positionsToClose)) {
       actions.push({
         type: 'close',
         positionId: position.id,
-        marketType: position.marketType as 'perp' | 'prediction',
-        ticker: position.ticker || undefined,
-        marketId: position.marketId || undefined,
+        marketType: position.marketType,
+        ticker: position.ticker,
+        marketId: position.marketId,
         side: position.side,
         targetSize: 0,
         reason: `De-risking: high leverage (${position.leverage}x)`,
@@ -738,10 +837,14 @@ export class NPCInvestmentManager {
       const unrealizedPnL = Number.parseFloat(
         position.unrealizedPnL?.toString() || '0'
       );
-      const size = Number.parseFloat(position.size?.toString() || '0');
+      const capitalBasis = getPositionCapitalBasis({
+        marketType: position.marketType,
+        size: Number.parseFloat(position.size?.toString() || '0'),
+        leverage: position.leverage ?? undefined,
+      });
 
-      if (size > 0) {
-        const lossPercentage = unrealizedPnL / size;
+      if (capitalBasis > 0) {
+        const lossPercentage = unrealizedPnL / capitalBasis;
 
         if (lossPercentage < -threshold) {
           // Map database PoolPosition to PortfolioPosition interface
@@ -764,6 +867,37 @@ export class NPCInvestmentManager {
           };
           lossyPositions.push(portfolioPosition);
         }
+      }
+    }
+
+    // Live perp positions live in perpPositions, not poolPositions: a
+    // losing perp never reached this finder, so no stop-loss action was
+    // ever raised for it. Include them, deduped against legacy pool
+    // mirrors by id, with the loss measured against margin.
+    const openPerpPositions = await db
+      .select()
+      .from(perpPositions)
+      .where(
+        and(eq(perpPositions.userId, poolId), isNull(perpPositions.closedAt))
+      );
+    const seenPositionIds = new Set(openPositions.map((p) => p.id));
+    for (const position of openPerpPositions) {
+      if (position.closedAt !== null || seenPositionIds.has(position.id)) {
+        continue;
+      }
+      const unrealizedPnL = Number.parseFloat(
+        position.unrealizedPnL?.toString() || '0'
+      );
+      const capitalBasis = getPositionCapitalBasis({
+        marketType: 'perp',
+        size: Number.parseFloat(position.size?.toString() || '0'),
+        leverage: position.leverage ?? undefined,
+      });
+      if (capitalBasis <= 0) continue;
+      if (unrealizedPnL / capitalBasis < -threshold) {
+        lossyPositions.push(
+          mapPerpPositionToPortfolioPosition(poolId, position)
+        );
       }
     }
 
@@ -791,10 +925,14 @@ export class NPCInvestmentManager {
       const unrealizedPnL = Number.parseFloat(
         position.unrealizedPnL?.toString() || '0'
       );
-      const size = Number.parseFloat(position.size?.toString() || '0');
+      const capitalBasis = getPositionCapitalBasis({
+        marketType: position.marketType,
+        size: Number.parseFloat(position.size?.toString() || '0'),
+        leverage: position.leverage ?? undefined,
+      });
 
-      if (size > 0) {
-        const profitPercentage = unrealizedPnL / size;
+      if (capitalBasis > 0) {
+        const profitPercentage = unrealizedPnL / capitalBasis;
 
         if (profitPercentage > threshold) {
           // Map database PoolPosition to PortfolioPosition interface
@@ -817,6 +955,37 @@ export class NPCInvestmentManager {
           };
           profitablePositions.push(portfolioPosition);
         }
+      }
+    }
+
+    // Live perp positions live in perpPositions, not poolPositions: a
+    // profitable perp never reached this finder, so no profit-taking
+    // action was ever raised for it. Include them, deduped against
+    // legacy pool mirrors by id, with the profit measured against margin.
+    const openPerpPositions = await db
+      .select()
+      .from(perpPositions)
+      .where(
+        and(eq(perpPositions.userId, poolId), isNull(perpPositions.closedAt))
+      );
+    const seenPositionIds = new Set(openPositions.map((p) => p.id));
+    for (const position of openPerpPositions) {
+      if (position.closedAt !== null || seenPositionIds.has(position.id)) {
+        continue;
+      }
+      const unrealizedPnL = Number.parseFloat(
+        position.unrealizedPnL?.toString() || '0'
+      );
+      const capitalBasis = getPositionCapitalBasis({
+        marketType: 'perp',
+        size: Number.parseFloat(position.size?.toString() || '0'),
+        leverage: position.leverage ?? undefined,
+      });
+      if (capitalBasis <= 0) continue;
+      if (unrealizedPnL / capitalBasis > threshold) {
+        profitablePositions.push(
+          mapPerpPositionToPortfolioPosition(poolId, position)
+        );
       }
     }
 
