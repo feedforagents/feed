@@ -3625,17 +3625,36 @@ export class FeedAgentExecutor implements AgentExecutor {
       select: { targetUserId: true },
     });
 
-    const favoritedUserIds = favorites.map((f) => f.targetUserId);
+    // Favorites never bypass the viewer's block/mute policy: drop
+    // favorited authors the viewer blocked or muted, and authors who
+    // blocked the viewer (the web favorites feed's rule, via the shared
+    // @feed/db moderation sets).
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(userId),
+      getMutedUserIds(userId),
+      getBlockedByUserIds(userId),
+    ]);
+    const excludedAuthorIds = new Set([
+      ...blockedIds,
+      ...mutedIds,
+      ...blockedByIds,
+    ]);
+    const favoritedUserIds = favorites
+      .map((f) => f.targetUserId)
+      .filter((id) => !excludedAuthorIds.has(id));
 
     if (favoritedUserIds.length === 0) {
       return { posts: [] };
     }
 
-    // Get posts from favorited users
+    // Get posts from favorited users. Only posts up to the current time:
+    // future-dated posts are scheduled and must not be exposed early
+    // (the web favorites feed applies the same timestamp bound).
     const posts = await db.post.findMany({
       where: {
         authorId: { in: favoritedUserIds },
         deletedAt: null,
+        timestamp: { lte: new Date() },
         type: 'post',
       },
       take: limit,
