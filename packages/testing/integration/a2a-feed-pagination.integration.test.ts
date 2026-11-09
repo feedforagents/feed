@@ -69,7 +69,14 @@ beforeAll(async () => {
   }
 
   // 200 posts sharing exactly one timestamp — one multi-row insert.
-  const tieValues = [];
+  const tieValues: Array<{
+    id: string;
+    content: string;
+    authorId: string;
+    timestamp: Date;
+    createdAt: Date;
+    deletedAt: null;
+  }> = [];
   for (let i = 0; i < 200; i++) {
     const id = await generateSnowflakeId();
     fixtureIds.push(id);
