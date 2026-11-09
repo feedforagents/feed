@@ -72,7 +72,6 @@ async function insertUser(
     isAgent?: boolean;
   } = {}
 ) {
-  allUserIds.push(id);
   await db.insert(users).values({
     id,
     username: `f12${label}-${id.replace(/[^a-zA-Z0-9]/g, '').slice(-12)}`,
@@ -83,6 +82,8 @@ async function insertUser(
     isAgent: flags.isAgent ?? false,
     updatedAt: new Date(),
   });
+  // Record cleanup ownership only after the insert succeeds.
+  allUserIds.push(id);
 }
 
 async function insertMembership(
@@ -158,11 +159,22 @@ beforeAll(async () => {
     inviteOwnerId,
     inviteTestId,
     inviteBannedId,
-  ] = await Promise.all(
-    Array.from({ length: 13 }, () => generateSnowflakeId())
-  );
+  ] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ]);
   testPrefixedId = `test-f12-${await generateSnowflakeId()}`;
-  allGroupIds.push(groupId, inviteGroupId);
 
   await insertUser(viewerId, 'viewer');
   await insertUser(normalAId, 'normala');
@@ -198,6 +210,9 @@ beforeAll(async () => {
       updatedAt: now,
     },
   ]);
+
+  // Record group cleanup ownership only after the groups insert succeeds.
+  allGroupIds.push(groupId, inviteGroupId);
 
   await insertMembership(groupId, viewerId, 'owner');
   await insertMembership(groupId, normalAId, 'member');
