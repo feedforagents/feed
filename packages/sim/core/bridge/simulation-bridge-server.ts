@@ -672,15 +672,29 @@ Bun.serve({
               }
               break;
             }
-            case 'buy':
-            case 'sell': {
+            case 'buy': {
               const amt = amountOrError;
               if (amt > npc.balance) {
                 success = false;
                 error = 'Insufficient balance';
               } else {
+                // A buy opens a stake (like open_long): no PnL is realized
+                // until the matching sell, so a later sell cannot settle
+                // proceeds for a position that was never opened.
                 npc.balance -= amt;
+                npc.openExposure += exposureUnits(amt);
+              }
+              break;
+            }
+            case 'sell': {
+              const amt = amountOrError;
+              const sellExposure = exposureUnits(amt);
+              if (sellExposure > npc.openExposure) {
+                success = false;
+                error = 'Insufficient open position';
+              } else {
                 pnl = (random() - 0.45) * amt * 0.3;
+                npc.openExposure -= sellExposure;
                 npc.balance += amt + pnl;
               }
               break;
