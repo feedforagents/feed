@@ -27,7 +27,15 @@ import {
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import type { WalletPort } from '@feed/core/markets/shared';
-import { asUser, db, getRawDrizzle, sql } from '@feed/db';
+import {
+  asUser,
+  db,
+  getBlockedByUserIds,
+  getBlockedUserIds,
+  getMutedUserIds,
+  getRawDrizzle,
+  sql,
+} from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
@@ -538,7 +546,7 @@ export class FeedAgentExecutor implements AgentExecutor {
       case 'social.share_post':
         return this.sharePost(command.params, context);
       case 'social.get_comments':
-        return this.getComments(command.params);
+        return this.getComments(command.params, context);
       case 'social.create_comment':
         return this.createComment(command.params, context);
       case 'social.delete_comment':
@@ -946,15 +954,41 @@ export class FeedAgentExecutor implements AgentExecutor {
   }
 
   private async getComments(
-    params: Record<string, JsonValue>
+    params: Record<string, JsonValue>,
+    context?: RequestContext
   ): Promise<ExecutorOperationResult> {
     const postId = String(params.postId ?? '');
     if (!postId) throw new Error('postId is required');
 
     const limit = this.parsePositiveInt(params.limit, 50, 100);
 
+    // Apply the viewer's moderation policy, as the web comment list does
+    // (GET /api/posts/[id]/comments): comments by authors the viewer
+    // blocked or muted — or who blocked the viewer — are not returned.
+    // The filter lives in the query, before the limit, so hidden rows
+    // cannot consume page slots. Anonymous reads have no viewer identity
+    // and stay unfiltered, matching the web list.
+    const viewerId = context?.contextId?.trim() ?? '';
+    let excludedAuthorIds: string[] = [];
+    if (viewerId) {
+      const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+        getBlockedUserIds(viewerId),
+        getMutedUserIds(viewerId),
+        getBlockedByUserIds(viewerId),
+      ]);
+      excludedAuthorIds = [
+        ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+      ];
+    }
+
     const comments = await db.comment.findMany({
-      where: { postId, deletedAt: null },
+      where: {
+        postId,
+        deletedAt: null,
+        ...(excludedAuthorIds.length > 0
+          ? { authorId: { notIn: excludedAuthorIds } }
+          : {}),
+      },
       orderBy: { createdAt: 'asc' },
       take: limit,
       select: {

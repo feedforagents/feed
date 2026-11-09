@@ -1419,15 +1419,32 @@ export async function executeSharePost(
 
 /**
  * Execute get_comments tool
+ *
+ * Applies the viewer's moderation policy, as the web comment list does
+ * (GET /api/posts/[id]/comments): comments by authors the viewer blocked
+ * or muted — or who blocked the viewer — are not returned. The filter
+ * lives in the query, before the limit, so hidden rows cannot consume
+ * page slots.
  */
 export async function executeGetComments(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetCommentsArgs
 ): Promise<GetCommentsResult> {
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
   const commentsList = await db.comment.findMany({
     where: {
       postId: args.postId,
       deletedAt: null,
+      ...(excludedAuthorIds.length > 0
+        ? { authorId: { notIn: excludedAuthorIds } }
+        : {}),
     },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 50,
