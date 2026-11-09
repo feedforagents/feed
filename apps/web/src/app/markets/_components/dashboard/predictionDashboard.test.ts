@@ -71,6 +71,23 @@ describe('predictionDashboard', () => {
     ).toEqual(['a', 'b']);
   });
 
+  it('sorts by traded volume, not pool share balances', () => {
+    // The idle market holds the deeper pool but never traded; the traded
+    // market's pool is smaller while its ledger volume is real. Volume
+    // sort must follow the traded volume (positions ledger), so the
+    // traded market wins descending order despite its smaller pool.
+    const items = [
+      market('idle', { yesShares: 10000, noShares: 10000, volume: 0 }),
+      market('traded', { yesShares: 2200, noShares: 2200, volume: 499.5 }),
+    ];
+    expect(
+      sortPredictionMarkets(items, 'volume', true).map((m) => m.id)
+    ).toEqual(['traded', 'idle']);
+    expect(
+      sortPredictionMarkets(items, 'volume', false).map((m) => m.id)
+    ).toEqual(['idle', 'traded']);
+  });
+
   it('formats invalid dates as unavailable instead of NaN', () => {
     expect(formatTimeLeft('not-a-date')).toBe('--');
     expect(formatTimeLeft(null)).toBe('--');

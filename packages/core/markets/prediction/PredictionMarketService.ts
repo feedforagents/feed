@@ -149,6 +149,29 @@ export class PredictionMarketService {
     return (await this.listMarkets()).length;
   }
 
+  /**
+   * Traded volume per market — Σ shares × avgPrice over the market's
+   * positions, the definition the market dynamics route reports as
+   * totalVolume. Falls back to summing listPositionsForMarket for
+   * adapters that do not implement the aggregate query.
+   */
+  async getTradedVolumeByMarket(
+    marketIds: string[]
+  ): Promise<Map<string, number>> {
+    if (this.db.getTradedVolumeByMarket) {
+      return this.db.getTradedVolumeByMarket(marketIds);
+    }
+    const volumeByMarket = new Map<string, number>();
+    for (const marketId of marketIds) {
+      const marketPositions = await this.db.listPositionsForMarket(marketId);
+      volumeByMarket.set(
+        marketId,
+        marketPositions.reduce((sum, p) => sum + p.shares * p.avgPrice, 0)
+      );
+    }
+    return volumeByMarket;
+  }
+
   async listUserPositions(userId: string): Promise<PredictionPositionRecord[]> {
     if (this.db.listUserPositions) {
       return this.db.listUserPositions(userId);

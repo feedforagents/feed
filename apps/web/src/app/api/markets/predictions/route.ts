@@ -154,6 +154,29 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const marketMap = new Map(markets.map((m) => [m.id, m]));
 
+  // Traded volume per market, from the positions ledger — the same
+  // definition the market dynamics route reports as totalVolume (sum of
+  // shares × avgPrice over the market's positions). The list views print
+  // this as "Vol" and sort by it; the pool balances (yesShares +
+  // noShares) are not volume — a freshly seeded, never-traded market
+  // would otherwise display its seed liquidity as volume and outrank
+  // markets with real trades. A volume failure must not take down the
+  // public list, so fall back to an empty map (volume 0).
+  let volumeByMarket = new Map<string, number>();
+  try {
+    volumeByMarket = await service.getTradedVolumeByMarket(
+      markets.map((m) => m.id)
+    );
+  } catch (error) {
+    logger.error(
+      'Failed to fetch prediction market volumes; returning markets with zero volume',
+      {
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'GET /api/markets/predictions'
+    );
+  }
+
   const userPositionsMap = new Map<string, PredictionUserPositionSnapshot[]>();
   if (userId && authUser?.userId === userId) {
     try {
@@ -222,6 +245,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       createdDate: toISOOrNull(m.createdAt),
       yesShares,
       noShares,
+      volume: volumeByMarket.get(m.id) ?? 0,
       yesProbability: yesProb,
       noProbability: noProb,
       liquidity: m.liquidity,

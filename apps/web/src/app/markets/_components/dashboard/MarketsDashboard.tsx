@@ -446,7 +446,7 @@ const PredictionsTable = memo(function PredictionsTable({
         {markets.map((m) => {
           const yesProbability = getYesProbability(m);
           const yesPct = yesProbability === null ? null : yesProbability * 100;
-          const vol = Number(m.yesShares ?? 0) + Number(m.noShares ?? 0);
+          const vol = Number(m.volume ?? 0);
           return (
             <tr
               key={m.id}

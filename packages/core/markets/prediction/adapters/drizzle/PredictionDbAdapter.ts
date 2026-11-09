@@ -381,6 +381,25 @@ export class PredictionDbAdapter implements PredictionDbPort {
     return rows.map(mapPosition);
   }
 
+  async getTradedVolumeByMarket(
+    marketIds: string[]
+  ): Promise<Map<string, number>> {
+    const volumeByMarket = new Map<string, number>();
+    if (marketIds.length === 0) return volumeByMarket;
+    const rows = await this.client
+      .select({
+        marketId: positions.marketId,
+        volume: sql<string>`sum(${positions.shares} * ${positions.avgPrice})`,
+      })
+      .from(positions)
+      .where(inArray(positions.marketId, marketIds))
+      .groupBy(positions.marketId);
+    for (const row of rows) {
+      volumeByMarket.set(row.marketId, Number(row.volume ?? 0));
+    }
+    return volumeByMarket;
+  }
+
   async insertPriceSnapshot(
     snapshot: PredictionPriceSnapshotRecord
   ): Promise<void> {
