@@ -113,6 +113,27 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
           });
         });
 
+        // Traded volume per market, from the positions ledger — the same
+        // definition the market dynamics route reports as totalVolume
+        // (sum of shares × avgPrice over the market's positions). The pool
+        // balances are not volume: a freshly seeded, never-traded market
+        // would otherwise display its seed liquidity as "Vol".
+        const allPositions = await asPublic(async (database) => {
+          return await database.position.findMany({
+            where: {
+              marketId: { in: marketIds },
+            },
+          });
+        });
+        const volumeMap = new Map<string, number>();
+        for (const pos of allPositions) {
+          volumeMap.set(
+            pos.marketId,
+            (volumeMap.get(pos.marketId) ?? 0) +
+              Number(pos.shares) * Number(pos.avgPrice)
+          );
+        }
+
         // Calculate price changes based on position activity
         const priceChangeMap = new Map<string, number>();
 
@@ -177,7 +198,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
                 question: q.text,
                 yesPrice,
                 noPrice,
-                volume: totalShares,
+                volume: volumeMap.get(String(q.id)) ?? 0,
                 endDate: q.resolutionDate,
                 changePercent24h:
                   changePercent24h !== undefined ? changePercent24h : undefined,
@@ -261,6 +282,27 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     });
   });
 
+  // Traded volume per market, from the positions ledger — the same
+  // definition the market dynamics route reports as totalVolume
+  // (sum of shares × avgPrice over the market's positions). The pool
+  // balances are not volume: a freshly seeded, never-traded market
+  // would otherwise display its seed liquidity as "Vol".
+  const allPositions = await asUser(authUser, async (database) => {
+    return await database.position.findMany({
+      where: {
+        marketId: { in: marketIds },
+      },
+    });
+  });
+  const volumeMap = new Map<string, number>();
+  for (const pos of allPositions) {
+    volumeMap.set(
+      pos.marketId,
+      (volumeMap.get(pos.marketId) ?? 0) +
+        Number(pos.shares) * Number(pos.avgPrice)
+    );
+  }
+
   // Calculate price changes based on position activity
   const priceChangeMap = new Map<string, number>();
 
@@ -324,7 +366,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
         question: q.text,
         yesPrice,
         noPrice,
-        volume: totalShares,
+        volume: volumeMap.get(String(q.id)) ?? 0,
         endDate: q.resolutionDate,
         changePercent24h:
           changePercent24h !== undefined ? changePercent24h : undefined,
