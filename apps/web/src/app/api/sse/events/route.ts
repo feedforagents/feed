@@ -116,6 +116,63 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   );
   const lastIds = new Map<string, string>();
 
+  // Snapshot every cursor before returning the response: native EventSource
+  // OPEN means new publications must already be retained for this subscriber.
+  // Initialize lastIds with current stream positions to avoid race conditions.
+  // Without this, XREAD with '$' misses messages added between connection and first read.
+  // We get the latest entry ID from each stream and start reading from there.
+  for (const streamKey of streamKeys) {
+    const channelName = keyToChannel.get(streamKey);
+    const cursorFromClient = channelName ? cursors[channelName] : undefined;
+
+    // If client provided a cursor, use it (reconnection scenario)
+    if (cursorFromClient) {
+      lastIds.set(streamKey, cursorFromClient);
+      continue;
+    }
+
+    // Otherwise, get the current last entry ID from the stream
+    // This ensures we don't miss messages added right before we start reading
+    try {
+      const info = (await redis.xinfo('STREAM', streamKey)) as unknown[];
+      // xinfo returns an array like ['length', 5, 'radix-tree-keys', 1, ..., 'last-entry', ['id', 'field', 'value'], ...]
+      // or ['length', 5, ..., 'last-generated-id', '123-0', ...]
+      // Find 'last-generated-id' in the array
+      for (let i = 0; i < info.length - 1; i++) {
+        if (
+          info[i] === 'last-generated-id' &&
+          typeof info[i + 1] === 'string'
+        ) {
+          lastIds.set(streamKey, info[i + 1] as string);
+          break;
+        }
+      }
+    } catch (err) {
+      // Distinguish stream-not-found (expected) from other errors (unexpected)
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isStreamNotFound =
+        errMsg.includes('no such key') || errMsg.includes('ERR no such key');
+      if (isStreamNotFound) {
+        // This stream has no history yet. Keep a fixed cursor so events
+        // arriving while another channel is read are not skipped by '$'.
+        lastIds.set(streamKey, '0-0');
+        logger.debug('Stream does not exist yet', { streamKey }, 'SSE');
+      } else {
+        logger.warn(
+          'Unexpected error getting stream info',
+          { streamKey, error: errMsg },
+          'SSE'
+        );
+      }
+    }
+  }
+
+  logger.debug(
+    'SSE initialized lastIds',
+    { streamKeys, lastIds: Object.fromEntries(lastIds) },
+    'SSE'
+  );
+
   const stream = new ReadableStream({
     start: async (controller) => {
       connections.add({
@@ -153,59 +210,6 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
             channels: allowedChannels,
             timestamp: Date.now(),
           })}\n\n`
-      );
-
-      // Initialize lastIds with current stream positions to avoid race conditions.
-      // Without this, XREAD with '$' misses messages added between connection and first read.
-      // We get the latest entry ID from each stream and start reading from there.
-      for (const streamKey of streamKeys) {
-        const channelName = keyToChannel.get(streamKey);
-        const cursorFromClient = channelName ? cursors[channelName] : undefined;
-
-        // If client provided a cursor, use it (reconnection scenario)
-        if (cursorFromClient) {
-          lastIds.set(streamKey, cursorFromClient);
-          continue;
-        }
-
-        // Otherwise, get the current last entry ID from the stream
-        // This ensures we don't miss messages added right before we start reading
-        try {
-          const info = (await redis.xinfo('STREAM', streamKey)) as unknown[];
-          // xinfo returns an array like ['length', 5, 'radix-tree-keys', 1, ..., 'last-entry', ['id', 'field', 'value'], ...]
-          // or ['length', 5, ..., 'last-generated-id', '123-0', ...]
-          // Find 'last-generated-id' in the array
-          for (let i = 0; i < info.length - 1; i++) {
-            if (
-              info[i] === 'last-generated-id' &&
-              typeof info[i + 1] === 'string'
-            ) {
-              lastIds.set(streamKey, info[i + 1] as string);
-              break;
-            }
-          }
-        } catch (err) {
-          // Distinguish stream-not-found (expected) from other errors (unexpected)
-          const errMsg = err instanceof Error ? err.message : String(err);
-          const isStreamNotFound =
-            errMsg.includes('no such key') ||
-            errMsg.includes('ERR no such key');
-          if (isStreamNotFound) {
-            logger.debug('Stream does not exist yet', { streamKey }, 'SSE');
-          } else {
-            logger.warn(
-              'Unexpected error getting stream info',
-              { streamKey, error: errMsg },
-              'SSE'
-            );
-          }
-        }
-      }
-
-      logger.debug(
-        'SSE initialized lastIds',
-        { streamKeys, lastIds: Object.fromEntries(lastIds) },
-        'SSE'
       );
 
       const abortListener = () => {
