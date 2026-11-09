@@ -16,14 +16,14 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { db, favorites, inArray, posts, users } from '@feed/db';
+import { db, eq, favorites, inArray, posts, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { executeGetFavoritePosts } from '../../mcp/src/handlers/tool-handlers';
 
 let agentUserId: string;
 let normalAuthorId: string;
 let flaggedAuthorId: string;
-const prefixedAuthorId = 'test-f98-author';
+let prefixedAuthorId: string;
 
 const HOUR = 3_600_000;
 let normalPost1: string;
@@ -33,13 +33,19 @@ let prefixedPost: string;
 let deletedPost: string;
 let futurePost: string;
 
-const allPostIds: string[] = [];
-const allUserIds: string[] = [];
+type OwnedRows = {
+  postIds: string[];
+  userIds: string[];
+  favoriteIds: string[];
+};
+const owned: OwnedRows = { postIds: [], userIds: [], favoriteIds: [] };
+const allPostIds = owned.postIds;
 
 async function insertUser(
   id: string,
   username: string,
-  opts: { isTest?: boolean } = {}
+  opts: { isTest?: boolean } = {},
+  acquired: OwnedRows = owned
 ) {
   await db.insert(users).values({
     id,
@@ -49,7 +55,7 @@ async function insertUser(
     isActor: false,
     updatedAt: new Date(),
   });
-  allUserIds.push(id);
+  acquired.userIds.push(id);
 }
 
 async function insertPost(
@@ -57,7 +63,8 @@ async function insertPost(
   authorId: string,
   content: string,
   timestamp: Date,
-  deletedAt: Date | null = null
+  deletedAt: Date | null = null,
+  acquired: OwnedRows = owned
 ) {
   await db.insert(posts).values({
     id,
@@ -65,9 +72,59 @@ async function insertPost(
     content,
     timestamp,
     deletedAt,
-    updatedAt: new Date(),
   });
-  allPostIds.push(id);
+  acquired.postIds.push(id);
+}
+
+async function insertFavorite(
+  userId: string,
+  targetUserId: string,
+  acquired: OwnedRows = owned,
+  id?: string
+) {
+  const [row] = await db
+    .insert(favorites)
+    .values({
+      id: id ?? (await generateSnowflakeId()),
+      userId,
+      targetUserId,
+    })
+    .returning({ id: favorites.id });
+  if (!row) throw new Error('Favorite insert returned no ownership');
+  acquired.favoriteIds.push(row.id);
+  return row.id;
+}
+
+async function cleanup(acquired: OwnedRows) {
+  if (acquired.favoriteIds.length > 0) {
+    await db
+      .delete(favorites)
+      .where(inArray(favorites.id, acquired.favoriteIds));
+    expect(
+      await db
+        .select({ id: favorites.id })
+        .from(favorites)
+        .where(inArray(favorites.id, acquired.favoriteIds))
+    ).toHaveLength(0);
+  }
+  if (acquired.postIds.length > 0) {
+    await db.delete(posts).where(inArray(posts.id, acquired.postIds));
+    expect(
+      await db
+        .select({ id: posts.id })
+        .from(posts)
+        .where(inArray(posts.id, acquired.postIds))
+    ).toHaveLength(0);
+  }
+  if (acquired.userIds.length > 0) {
+    await db.delete(users).where(inArray(users.id, acquired.userIds));
+    expect(
+      await db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, acquired.userIds))
+    ).toHaveLength(0);
+  }
 }
 
 async function fetchFavoritePosts(limit = 20) {
@@ -79,6 +136,8 @@ async function fetchFavoritePosts(limit = 20) {
 }
 
 beforeAll(async () => {
+  const suffix = await generateSnowflakeId();
+  prefixedAuthorId = `test-f98-author-${suffix}`;
   agentUserId = await generateSnowflakeId();
   normalAuthorId = await generateSnowflakeId();
   flaggedAuthorId = await generateSnowflakeId();
@@ -89,12 +148,21 @@ beforeAll(async () => {
     prefixedPost,
     deletedPost,
     futurePost,
-  ] = await Promise.all(Array.from({ length: 6 }, () => generateSnowflakeId()));
+  ] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ]);
 
-  await insertUser(agentUserId, 'f98-agent');
-  await insertUser(normalAuthorId, 'f98-normal-author');
-  await insertUser(flaggedAuthorId, 'f98-flagged-author', { isTest: true });
-  await insertUser(prefixedAuthorId, 'f98-prefixed-author');
+  await insertUser(agentUserId, `f98-agent-${suffix}`);
+  await insertUser(normalAuthorId, `f98-normal-author-${suffix}`);
+  await insertUser(flaggedAuthorId, `f98-flagged-author-${suffix}`, {
+    isTest: true,
+  });
+  await insertUser(prefixedAuthorId, `f98-prefixed-author-${suffix}`);
 
   const now = Date.now();
   await insertPost(
@@ -140,19 +208,11 @@ beforeAll(async () => {
     flaggedAuthorId,
     prefixedAuthorId,
   ]) {
-    await db.insert(favorites).values({
-      id: await generateSnowflakeId(),
-      userId: agentUserId,
-      targetUserId,
-    });
+    await insertFavorite(agentUserId, targetUserId);
   }
 });
 
-afterAll(async () => {
-  await db.delete(favorites).where(inArray(favorites.userId, allUserIds));
-  await db.delete(posts).where(inArray(posts.id, allPostIds));
-  await db.delete(users).where(inArray(users.id, allUserIds));
-});
+afterAll(() => cleanup(owned));
 
 describe('MCP get_favorite_posts test-author exclusion', () => {
   it('premise: the agent favorited all three authors and their posts exist', async () => {
@@ -181,4 +241,88 @@ describe('MCP get_favorite_posts test-author exclusion', () => {
     const page = await fetchFavoritePosts(2);
     expect(page.map((p) => p.id)).toEqual([normalPost2, normalPost1]);
   });
+
+  for (const partialSetup of [false, true]) {
+    it(`preserves pre-existing rows after ${partialSetup ? 'partial setup' : 'insert collisions'}`, async () => {
+      const existing: OwnedRows = { postIds: [], userIds: [], favoriteIds: [] };
+      const attempted: OwnedRows = {
+        postIds: [],
+        userIds: [],
+        favoriteIds: [],
+      };
+      try {
+        const [userId, authorId, postId] = await Promise.all([
+          generateSnowflakeId(),
+          generateSnowflakeId(),
+          generateSnowflakeId(),
+        ]);
+        await insertUser(userId, `f98-control-${userId}`, {}, existing);
+        await insertUser(authorId, `f98-control-${authorId}`, {}, existing);
+        await insertPost(
+          postId,
+          authorId,
+          'retained control',
+          new Date(),
+          null,
+          existing
+        );
+        const favoriteId = await insertFavorite(userId, authorId, existing);
+        const readExisting = async () => ({
+          users: await db
+            .select()
+            .from(users)
+            .where(inArray(users.id, existing.userIds))
+            .orderBy(users.id),
+          posts: await db.select().from(posts).where(eq(posts.id, postId)),
+          favorites: await db
+            .select()
+            .from(favorites)
+            .where(eq(favorites.id, favoriteId)),
+        });
+        const before = await readExisting();
+        if (partialSetup) {
+          const partialUserId = await generateSnowflakeId();
+          await insertUser(
+            partialUserId,
+            `f98-partial-${partialUserId}`,
+            {},
+            attempted
+          );
+          await insertPost(
+            await generateSnowflakeId(),
+            partialUserId,
+            'partial setup',
+            new Date(),
+            null,
+            attempted
+          );
+          await expect(
+            insertFavorite(partialUserId, authorId, attempted, favoriteId)
+          ).rejects.toMatchObject({ cause: { code: '23505' } });
+        } else {
+          await expect(
+            insertUser(userId, `f98-control-${userId}`, {}, attempted)
+          ).rejects.toMatchObject({ cause: { code: '23505' } });
+          await expect(
+            insertPost(
+              postId,
+              authorId,
+              'collision',
+              new Date(),
+              null,
+              attempted
+            )
+          ).rejects.toMatchObject({ cause: { code: '23505' } });
+          await expect(
+            insertFavorite(userId, authorId, attempted, favoriteId)
+          ).rejects.toMatchObject({ cause: { code: '23505' } });
+        }
+        await cleanup(attempted);
+        expect(await readExisting()).toEqual(before);
+      } finally {
+        await cleanup(attempted);
+        await cleanup(existing);
+      }
+    });
+  }
 });
