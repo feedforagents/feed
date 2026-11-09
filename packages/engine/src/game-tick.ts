@@ -541,7 +541,8 @@ export async function executeGameTick(
       const narrativeStats = await processNarrativeArcs(
         currentActiveQuestions,
         dayNumberForTimestamp(timestamp) ?? 1,
-        llmClient
+        llmClient,
+        { gameStartedAt, now: timestamp }
       );
       result.narrativeArcs = narrativeStats;
       if (
@@ -2472,7 +2473,8 @@ export async function simulateMarketVolatility(options?: {
 async function processNarrativeArcs(
   activeQuestions: Array<{ id: string }>,
   dayNumber: number,
-  llmClient: FeedLLMClient
+  llmClient: FeedLLMClient,
+  clock: { gameStartedAt: Date | null; now: Date }
 ): Promise<{
   arcsProcessed: number;
   transitioned: number;
@@ -2514,7 +2516,7 @@ async function processNarrativeArcs(
       }
 
       // Process the arc tick, passing LLM client for article generation
-      const result = await processArcTick(arcId, dayNumber, llmClient);
+      const result = await processArcTick(arcId, dayNumber, llmClient, clock);
       arcsProcessed++;
 
       if (result.transitioned) {

@@ -77,14 +77,18 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  and,
   comments,
   count,
   db,
   eq,
+  followStatuses,
   follows,
+  not,
   positions,
   reactions,
   sql,
+  userActorFollows,
   users,
 } from '@feed/db';
 import { logger, toISO, UsernameParamSchema } from '@feed/shared';
@@ -148,7 +152,9 @@ export const GET = withErrorHandling(
       [commentCount],
       [reactionCount],
       [followerCount],
+      [npcFollowerCount],
       [followingCount],
+      [actorFollowingCount],
     ] = await Promise.all([
       db
         .select({ count: count() })
@@ -166,10 +172,30 @@ export const GET = withErrorHandling(
         .select({ count: count() })
         .from(follows)
         .where(eq(follows.followingId, dbUser.id)),
+      // NPC followers live in FollowStatus (written by the engine when an
+      // NPC follows this user). The followers list includes them with this
+      // same filter, so the profile count must include them too.
+      db
+        .select({ count: count() })
+        .from(followStatuses)
+        .where(
+          and(
+            eq(followStatuses.userId, dbUser.id),
+            eq(followStatuses.isActive, true),
+            not(eq(followStatuses.followReason, 'user_followed'))
+          )
+        ),
       db
         .select({ count: count() })
         .from(follows)
         .where(eq(follows.followerId, dbUser.id)),
+      // Actor follows live in their own table; the by-id profile stats
+      // (CachedDatabaseService.getUserProfileStats) and the following list
+      // both add them to the following total.
+      db
+        .select({ count: count() })
+        .from(userActorFollows)
+        .where(eq(userActorFollows.userId, dbUser.id)),
     ]);
 
     logger.info(
@@ -210,8 +236,12 @@ export const GET = withErrorHandling(
           positions: Number(positionCount?.count || 0),
           comments: Number(commentCount?.count || 0),
           reactions: Number(reactionCount?.count || 0),
-          followers: Number(followerCount?.count || 0),
-          following: Number(followingCount?.count || 0),
+          followers:
+            Number(followerCount?.count || 0) +
+            Number(npcFollowerCount?.count || 0),
+          following:
+            Number(followingCount?.count || 0) +
+            Number(actorFollowingCount?.count || 0),
         },
       },
     });

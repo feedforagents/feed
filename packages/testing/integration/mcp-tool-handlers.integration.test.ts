@@ -5,8 +5,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, spyOn } from 'bun:test';
+import assert from 'node:assert/strict';
 import {
   and,
+  closeDatabase,
   db,
   eq,
   favorites,
@@ -16,12 +18,14 @@ import {
   positions,
   posts,
   reactions,
+  userBlocks,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import * as notificationService from '../../api/src/services/notification-service';
 import {
   executeGetFavoritePosts,
+  executeGetMarketPrices,
   executeGetMarkets,
   executeGetPositions,
   executeGetUnreadCount,
@@ -32,6 +36,12 @@ import {
 
 const userIds: string[] = [];
 const likePostIds: string[] = [];
+const marketIds: string[] = [];
+const blockIds: string[] = [];
+const privateWalletAddress = `0x${Array.from(
+  crypto.getRandomValues(new Uint8Array(20)),
+  (value) => value.toString(16).padStart(2, '0')
+).join('')}`;
 let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
@@ -39,19 +49,33 @@ let postId: string;
 let marketId: string;
 let activePositionId: string;
 
+async function acquireUsers(
+  values: Array<typeof users.$inferInsert>,
+  ownership = userIds
+) {
+  const inserted = await db
+    .insert(users)
+    .values(values)
+    .returning({ id: users.id });
+  ownership.push(...inserted.map((row) => row.id));
+  return inserted;
+}
+
 async function createUser(
   overrides: Partial<typeof users.$inferInsert> = {}
 ): Promise<string> {
-  const id = await generateSnowflakeId();
-  await db.insert(users).values({
-    id,
-    username: `mcp_${id.slice(-10)}`,
-    isActor: false,
-    updatedAt: new Date(),
-    ...overrides,
-  });
-  userIds.push(id);
-  return id;
+  const id = crypto.randomUUID();
+  const inserted = await acquireUsers([
+    {
+      id,
+      username: `mcp_${id.slice(-10)}`,
+      isActor: false,
+      updatedAt: new Date(),
+      ...overrides,
+    },
+  ]);
+  if (!inserted[0]) throw new Error('User fixture insert returned no row');
+  return inserted[0].id;
 }
 
 async function createLikePost(
@@ -59,15 +83,19 @@ async function createLikePost(
   overrides: Partial<typeof posts.$inferInsert> = {}
 ): Promise<string> {
   const id = await generateSnowflakeId();
-  await db.insert(posts).values({
-    id,
-    content: 'post to like',
-    authorId,
-    timestamp: new Date(Date.now() - 60_000),
-    ...overrides,
-  });
-  likePostIds.push(id);
-  return id;
+  const inserted = await db
+    .insert(posts)
+    .values({
+      id,
+      content: 'post to like',
+      authorId,
+      timestamp: new Date(Date.now() - 60_000),
+      ...overrides,
+    })
+    .returning({ id: posts.id });
+  if (!inserted[0]) throw new Error('Post fixture insert returned no row');
+  likePostIds.push(inserted[0].id);
+  return inserted[0].id;
 }
 
 async function authorNotifications(postIdToCheck: string) {
@@ -103,13 +131,10 @@ describe('MCP tool handlers', () => {
     otherUserId = await createUser();
     privateUserId = await createUser({
       showWalletPublic: false,
-      walletAddress: '0x00000000000000000000000000000000000000aa',
+      walletAddress: privateWalletAddress,
     });
-    postId = await generateSnowflakeId();
-    await db.insert(posts).values({
-      id: postId,
+    postId = await createLikePost(otherUserId, {
       content: 'favorite post',
-      authorId: otherUserId,
     });
     await db.insert(favorites).values({
       id: await generateSnowflakeId(),
@@ -117,15 +142,19 @@ describe('MCP tool handlers', () => {
       targetUserId: otherUserId,
     });
     marketId = await generateSnowflakeId();
-    await db.insert(markets).values({
-      id: marketId,
-      question: 'Will the MCP list only open positions?',
-      yesShares: '500',
-      noShares: '500',
-      liquidity: '1000',
-      endDate: new Date(Date.now() + 86_400_000),
-      updatedAt: new Date(),
-    });
+    const insertedMarket = await db
+      .insert(markets)
+      .values({
+        id: marketId,
+        question: 'Will the MCP list only open positions?',
+        yesShares: '500',
+        noShares: '500',
+        liquidity: '1000',
+        endDate: new Date(Date.now() + 86_400_000),
+        updatedAt: new Date(),
+      })
+      .returning({ id: markets.id });
+    marketIds.push(...insertedMarket.map((row) => row.id));
     activePositionId = await generateSnowflakeId();
     const positionRow = (id: string, side: boolean, status: string) => ({
       id,
@@ -163,16 +192,79 @@ describe('MCP tool handlers', () => {
   });
 
   afterAll(async () => {
-    await db
-      .delete(notifications)
-      .where(inArray(notifications.userId, userIds));
-    await db.delete(reactions).where(inArray(reactions.userId, userIds));
-    await db.delete(favorites).where(inArray(favorites.userId, userIds));
-    await db.delete(positions).where(inArray(positions.userId, userIds));
-    await db.delete(markets).where(eq(markets.id, marketId));
-    await db.delete(posts).where(eq(posts.id, postId));
-    await db.delete(posts).where(inArray(posts.id, likePostIds));
-    await db.delete(users).where(inArray(users.id, userIds));
+    try {
+      await db
+        .delete(notifications)
+        .where(inArray(notifications.userId, userIds));
+      await db.delete(reactions).where(inArray(reactions.userId, userIds));
+      await db.delete(favorites).where(inArray(favorites.userId, userIds));
+      await db.delete(positions).where(inArray(positions.userId, userIds));
+      await db.delete(markets).where(inArray(markets.id, marketIds));
+      await db.delete(posts).where(inArray(posts.id, likePostIds));
+      await db.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
+      await db.delete(users).where(inArray(users.id, userIds));
+      for (const [table, ids] of [
+        [users, userIds],
+        [posts, likePostIds],
+        [markets, marketIds],
+        [userBlocks, blockIds],
+      ] as const) {
+        if (ids.length)
+          expect(
+            await db
+              .select({ id: table.id })
+              .from(table)
+              .where(inArray(table.id, ids))
+          ).toHaveLength(0);
+      }
+      expect(
+        await db
+          .select({ id: reactions.id })
+          .from(reactions)
+          .where(inArray(reactions.userId, userIds))
+      ).toHaveLength(0);
+      expect(
+        await db
+          .select({ id: notifications.id })
+          .from(notifications)
+          .where(inArray(notifications.userId, userIds))
+      ).toHaveLength(0);
+    } finally {
+      await closeDatabase();
+    }
+  });
+
+  it('does not acquire fixture ownership after an atomic setup collision', async () => {
+    const freshId = crypto.randomUUID();
+    const pending: string[] = [];
+    await assert.rejects(
+      acquireUsers(
+        [
+          { id: freshId, updatedAt: new Date() },
+          { id: agentUserId, updatedAt: new Date() },
+        ],
+        pending
+      ),
+      (error: Error) => {
+        const cause = 'cause' in error ? error.cause : error;
+        return (
+          typeof cause === 'object' &&
+          cause !== null &&
+          'code' in cause &&
+          cause.code === '23505'
+        );
+      }
+    );
+    expect(pending).toHaveLength(0);
+    expect(
+      await db.select({ id: users.id }).from(users).where(eq(users.id, freshId))
+    ).toHaveLength(0);
+    expect(
+      await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, agentUserId))
+    ).toHaveLength(1);
   });
 
   it('counts real unread notifications and reports rows actually marked', async () => {
@@ -206,15 +298,42 @@ describe('MCP tool handlers', () => {
       { agentId: 'agent', userId: privateUserId },
       { userId: privateUserId }
     );
-    expect(own.walletAddress).toBe(
-      '0x00000000000000000000000000000000000000aa'
-    );
+    expect(own.walletAddress).toBe(privateWalletAddress);
   });
 
   it('rejects perpetuals on get_markets instead of returning an empty list', async () => {
     await expect(
       executeGetMarkets({ type: 'perpetuals' }, agent())
     ).rejects.toThrow('get_perpetuals');
+  });
+
+  it.each([
+    { yesShares: '9000', noShares: '1000', yesPrice: 0.1, noPrice: 0.9 },
+    { yesShares: '1000', noShares: '9000', yesPrice: 0.9, noPrice: 0.1 },
+    { yesShares: '0', noShares: '0', yesPrice: 0.5, noPrice: 0.5 },
+  ])('quotes CPMM prices for $yesShares/$noShares reserves', async (pool) => {
+    const id = await generateSnowflakeId();
+    const inserted = await db
+      .insert(markets)
+      .values({
+        id,
+        question: 'MCP price consistency',
+        yesShares: pool.yesShares,
+        noShares: pool.noShares,
+        liquidity: '10000',
+        endDate: new Date(Date.now() + 86_400_000),
+        updatedAt: new Date(),
+      })
+      .returning({ id: markets.id });
+    marketIds.push(...inserted.map((row) => row.id));
+
+    expect(
+      await executeGetMarketPrices(agent(), { marketId: id })
+    ).toMatchObject({
+      marketId: id,
+      yesPrice: pool.yesPrice,
+      noPrice: pool.noPrice,
+    });
   });
 
   it('lists only open prediction positions on get_positions', async () => {
@@ -282,6 +401,7 @@ describe('MCP tool handlers', () => {
       executeLikePost(agent(), { postId: deletedPostId })
     ).rejects.toThrow('deleted');
     expect(await likeReactions(deletedPostId, agentUserId)).toHaveLength(0);
+    expect(await authorNotifications(deletedPostId)).toHaveLength(0);
   });
 
   it('rejects a like on an unknown post', async () => {
@@ -291,7 +411,46 @@ describe('MCP tool handlers', () => {
       executeLikePost(agent(), { postId: unknownPostId })
     ).rejects.toThrow('not found');
     expect(await likeReactions(unknownPostId, agentUserId)).toHaveLength(0);
+    expect(await authorNotifications(unknownPostId)).toHaveLength(0);
   });
+
+  it('rejects a future post without creating a reaction or notification', async () => {
+    const futurePostId = await createLikePost(otherUserId, {
+      timestamp: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    await expect(
+      executeLikePost(agent(), { postId: futurePostId })
+    ).rejects.toThrow('not found');
+    expect(await likeReactions(futurePostId, agentUserId)).toHaveLength(0);
+    expect(await authorNotifications(futurePostId)).toHaveLength(0);
+  });
+
+  for (const direction of [
+    'author-blocks-liker',
+    'liker-blocks-author',
+  ] as const) {
+    it(`retains notification block policy: ${direction}`, async () => {
+      const authorId = await createUser();
+      const likerId = await createUser();
+      const targetPostId = await createLikePost(authorId);
+      const inserted = await db
+        .insert(userBlocks)
+        .values({
+          id: crypto.randomUUID(),
+          blockerId: direction === 'author-blocks-liker' ? authorId : likerId,
+          blockedId: direction === 'author-blocks-liker' ? likerId : authorId,
+        })
+        .returning({ id: userBlocks.id });
+      blockIds.push(...inserted.map((row) => row.id));
+      const result = await executeLikePost(
+        { agentId: likerId, userId: likerId },
+        { postId: targetPostId }
+      );
+      expect(result).toEqual({ success: true, liked: true });
+      expect(await likeReactions(targetPostId, likerId)).toHaveLength(1);
+      expect(await authorNotifications(targetPostId)).toHaveLength(0);
+    });
+  }
 
   it('still reports the committed like when the author notification fails', async () => {
     const notify = spyOn(notificationService, 'notifyReactionOnPost');

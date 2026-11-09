@@ -116,6 +116,7 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  acquireUserBlockPairLock,
   and,
   db,
   eq,
@@ -201,6 +202,13 @@ export const POST = withErrorHandling(
       // failure cannot leave a block with surviving follow edges.
       const blockId = await generateSnowflakeId();
       const block = await withTransaction(async (tx) => {
+        // Same pair lock the follow route takes: a follow serialized ahead
+        // of this block re-checks block state inside its transaction, and
+        // a block serialized ahead of a follow deletes the follow this
+        // transaction creates the block for — either order leaves no
+        // follow behind once the block commits.
+        await acquireUserBlockPairLock(tx, authUser.userId, targetUserId);
+
         const [created] = await tx
           .insert(userBlocks)
           .values({

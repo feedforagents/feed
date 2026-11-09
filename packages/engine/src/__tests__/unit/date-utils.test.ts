@@ -10,6 +10,7 @@ import {
   extractDayFromPost,
   extractDayFromTimestamp,
   getGameDayNumber,
+  getGameHourOfDay,
   getTodayDateString,
   toDateString,
   toSafeDayNumber,
@@ -127,6 +128,49 @@ describe('Date Utilities', () => {
     test('clamps to day 1 for timestamps before startedAt', () => {
       const timestamp = new Date('2024-12-31T12:00:00Z');
       expect(getGameDayNumber(startedAt, timestamp)).toBe(1);
+    });
+  });
+
+  describe('getGameHourOfDay', () => {
+    test('counts hours from game start, including a non-midnight start', () => {
+      const startedAt = new Date('2026-11-06T15:00:00.000Z');
+      expect(
+        getGameHourOfDay(
+          startedAt,
+          new Date(startedAt.getTime() + 90 * 60 * 1000)
+        )
+      ).toBe(1);
+      expect(
+        getGameHourOfDay(
+          startedAt,
+          new Date(startedAt.getTime() + (8 * 60 + 30) * 60 * 1000)
+        )
+      ).toBe(8);
+    });
+
+    test('agrees with getGameDayNumber at day boundaries', () => {
+      const startedAt = new Date('2026-11-06T15:17:00.000Z');
+      const justBeforeNextDay = new Date(
+        startedAt.getTime() + 24 * 60 * 60 * 1000 - 1
+      );
+      const nextDay = new Date(startedAt.getTime() + 24 * 60 * 60 * 1000);
+      expect(getGameDayNumber(startedAt, justBeforeNextDay)).toBe(1);
+      expect(getGameHourOfDay(startedAt, justBeforeNextDay)).toBe(23);
+      expect(getGameDayNumber(startedAt, nextDay)).toBe(2);
+      expect(getGameHourOfDay(startedAt, nextDay)).toBe(0);
+    });
+
+    test('clamps to hour 0 before the game starts', () => {
+      const startedAt = new Date('2026-11-06T15:00:00.000Z');
+      expect(
+        getGameHourOfDay(startedAt, new Date(startedAt.getTime() - 60_000))
+      ).toBe(0);
+    });
+
+    test('rejects invalid dates', () => {
+      expect(() =>
+        getGameHourOfDay(new Date('nope'), new Date('2026-11-06T15:00:00Z'))
+      ).toThrow(RangeError);
     });
   });
 
