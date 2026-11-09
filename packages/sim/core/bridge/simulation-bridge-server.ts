@@ -539,11 +539,9 @@ Bun.serve({
         state.seed = seed;
         state.syntheticMarkets = body.syntheticMarkets === true;
         random = createRng(seed);
-        // A fresh run must not serve the previous run's trajectories: a
-        // client polling from the start would ingest stale run-1 data into
-        // run 2. /reset clears these two; /init must do the same.
+        // Clear run data without reusing IDs: polling cursors and existing
+        // SSE subscriptions survive /init within the same server epoch.
         trajectoryBuffer.length = 0;
-        trajectorySeq = 0;
 
         return Response.json(
           {
