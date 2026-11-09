@@ -34,7 +34,15 @@ import {
   PredictionDbAdapter,
   PredictionMarketService,
 } from '@feed/core/markets/prediction';
-import { db, eq, markets, positions, users } from '@feed/db';
+import {
+  db,
+  eq,
+  inArray,
+  markets,
+  positions,
+  predictionPriceHistories,
+  users,
+} from '@feed/db';
 import { FEE_CONFIG } from '@feed/engine/config/fees';
 import { generateSnowflakeId } from '@feed/shared';
 import { calculatePredictionBuyQuote } from '../../../apps/web/src/components/markets/predictionBuyQuote';
@@ -126,20 +134,46 @@ async function totalShares(userId: string, marketId: string) {
 
 afterAll(async () => {
   for (const marketId of testMarketIds) {
-    await db
-      .delete(positions)
-      .where(eq(positions.marketId, marketId))
-      .catch(() => {});
-    await db
-      .delete(markets)
-      .where(eq(markets.id, marketId))
-      .catch(() => {});
+    // A market is acquired only after its insert succeeds. Collect at teardown
+    // so snapshots from a buy that later fails an assertion are included too.
+    const snapshots = await db
+      .select({ id: predictionPriceHistories.id })
+      .from(predictionPriceHistories)
+      .where(eq(predictionPriceHistories.marketId, marketId));
+    if (snapshots.length > 0) {
+      await db.delete(predictionPriceHistories).where(
+        inArray(
+          predictionPriceHistories.id,
+          snapshots.map(({ id }) => id)
+        )
+      );
+    }
+    expect(
+      await db
+        .select({ id: predictionPriceHistories.id })
+        .from(predictionPriceHistories)
+        .where(eq(predictionPriceHistories.marketId, marketId))
+    ).toHaveLength(0);
+    await db.delete(positions).where(eq(positions.marketId, marketId));
+    expect(
+      await db
+        .select({ id: positions.id })
+        .from(positions)
+        .where(eq(positions.marketId, marketId))
+    ).toHaveLength(0);
+    await db.delete(markets).where(eq(markets.id, marketId));
+    expect(
+      await db
+        .select({ id: markets.id })
+        .from(markets)
+        .where(eq(markets.id, marketId))
+    ).toHaveLength(0);
   }
   for (const userId of testUserIds) {
-    await db
-      .delete(users)
-      .where(eq(users.id, userId))
-      .catch(() => {});
+    await db.delete(users).where(eq(users.id, userId));
+    expect(
+      await db.select({ id: users.id }).from(users).where(eq(users.id, userId))
+    ).toHaveLength(0);
   }
 });
 
