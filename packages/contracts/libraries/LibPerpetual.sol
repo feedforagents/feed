@@ -42,7 +42,7 @@ library LibPerpetual {
         uint256 entryPrice; // Average entry price
         uint256 lastFundingIndex; // Last funding index when position was updated
         uint256 unrealizedPnl; // Cached unrealized PnL
-        uint256 realizedPnl; // Realized PnL from closed positions
+        int256 realizedPnl; // Realized PnL from closed positions (signed: losses are negative)
     }
 
     /// @notice Order for perpetual market

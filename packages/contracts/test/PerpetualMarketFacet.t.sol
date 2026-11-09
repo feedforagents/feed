@@ -27,7 +27,7 @@ contract PerpetualMarketFacetTest is Test {
 
     event PerpetualMarketCreated(bytes32 indexed marketId, string symbol, address indexed indexOracle);
     event PositionOpened(bytes32 indexed marketId, address indexed trader, LibPerpetual.Side side, uint256 size, uint256 collateral, uint256 entryPrice);
-    event PositionClosed(bytes32 indexed marketId, address indexed trader, uint256 pnl);
+    event PositionClosed(bytes32 indexed marketId, address indexed trader, int256 pnl);
     event PositionLiquidated(bytes32 indexed marketId, address indexed trader, address indexed liquidator, uint256 liquidationFee);
     event FundingRateUpdated(bytes32 indexed marketId, uint256 fundingRate);
 
@@ -330,6 +330,51 @@ contract PerpetualMarketFacetTest is Test {
 
         // Balance should be less than initial (collateral - loss - fees)
         assertLt(balanceAfter, balanceBefore);
+    }
+
+    function testClosePositionLosingRealizedPnlIsNegative() public {
+        // Create market and open long position
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            10,
+            500,
+            1000,
+            250,
+            10,
+            20
+        );
+
+        // Entry at $50,000
+        mockOraclePrice(50000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.LONG,
+            1e18,
+            5000 ether,
+            51000e8
+        );
+
+        // Price decreases to $45,000: 1 BTC long loses 5000 ether
+        mockOraclePrice(45000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).closePosition(marketId, 40000e8);
+
+        (
+            ,
+            ,
+            ,
+            ,
+            ,
+            ,
+            int256 realizedPnl
+        ) = PerpetualMarketFacet(address(diamond)).getPosition(alice, marketId);
+
+        // A -5000 ether loss is recorded as the signed value -5000 ether.
+        assertEq(realizedPnl, -5000 ether);
     }
 
     function testLiquidation() public {
