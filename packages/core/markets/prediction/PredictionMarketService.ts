@@ -588,6 +588,10 @@ export class PredictionMarketService {
       type: 'prediction_resolution',
       marketId,
       winningSide,
+      // Consumers (chart history hook, terminal live state) read the final
+      // prices off this event, mirroring the snapshot recorded above.
+      yesPrice: winningSide === 'yes' ? 1 : 0,
+      noPrice: winningSide === 'no' ? 1 : 0,
       yesShares: market.yesShares,
       noShares: market.noShares,
       liquidity: newLiquidity,
