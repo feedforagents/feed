@@ -67,6 +67,10 @@ export function FollowListModal({
   const [totalCount, setTotalCount] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when a later page fails: loaded rows stay, the sentinel hides so a
+  // transient failure is not retried in a loop, and the user retries
+  // deliberately. Only the first-page `error` shows the full-screen retry.
+  const [pageError, setPageError] = useState<string | null>(null);
   const [followingStatus, setFollowingStatus] = useState<
     Record<string, boolean>
   >({});
@@ -156,6 +160,7 @@ export function FollowListModal({
 
     setIsLoading(true);
     setError(null);
+    setPageError(null);
     pageRef.current = 1;
     hasMoreRef.current = false;
     loadingMoreRef.current = false;
@@ -205,6 +210,8 @@ export function FollowListModal({
     }
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
+    // A fresh attempt clears the previous page failure.
+    setPageError(null);
 
     try {
       const {
@@ -223,10 +230,12 @@ export function FollowListModal({
       });
       setFollowingStatus((prev) => ({ ...prev, ...buildStatusMap(list) }));
     } catch {
-      // Keep the rows already shown; stop auto-loading further pages so a
-      // failing request is not retried in a loop by the sentinel.
+      // Keep the rows already shown and keep the failed page retryable:
+      // hide the sentinel so a transient failure is not retried in a loop
+      // by the observer, but leave hasMoreRef true so a deliberate retry
+      // can request the same page again.
       if (session === sessionRef.current) {
-        hasMoreRef.current = false;
+        setPageError('Failed to load more. Please try again.');
         setHasMore(false);
       }
     } finally {
@@ -236,6 +245,14 @@ export function FollowListModal({
       }
     }
   }, [fetchPage, buildStatusMap]);
+
+  // Deliberate retry for the failed page, from the same open modal.
+  // loadMore re-requests pageRef.current + 1, which is still the failed
+  // page because the catch above never advanced pageRef.
+  const retryLoadMore = useCallback(() => {
+    setPageError(null);
+    void loadMore();
+  }, [loadMore]);
 
   // Load the next page when the end of the loaded list scrolls into view
   useEffect(() => {
@@ -263,9 +280,23 @@ export function FollowListModal({
     };
   }, []);
 
+  // Load the first page once per opened list. fetchList is re-created
+  // whenever auth state settles (getAccessToken / buildStatusMap change
+  // identity on every profile refetch), so an effect on [fetchList]
+  // refetched page 1 in a loop while signed in and the list never settled:
+  // 41 page-1 requests in one open modal, count never shown. Depend on the
+  // stable inputs instead and always call the latest fetchList. A flip of
+  // `authenticated` still refetches once, so follow buttons are correct
+  // once the viewer is known.
+  const fetchListRef = useRef(fetchList);
+  fetchListRef.current = fetchList;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: userId, type and authenticated intentionally re-trigger the walk when the opened list or the viewer changes, even though the effect body reads them only through the ref
   useEffect(() => {
-    fetchList();
-  }, [fetchList]);
+    if (isOpen) {
+      void fetchListRef.current();
+    }
+  }, [isOpen, userId, type, authenticated]);
 
   // Handle body scroll lock
   useEffect(() => {
@@ -348,6 +379,28 @@ export function FollowListModal({
             detail: { type: isCurrentlyFollowing ? 'unfollow' : 'follow' },
           })
         );
+        // An unfollow on the viewer's own Following list shrinks the roster
+        // the API slices by offset, so the loaded walk is stale: the
+        // unfollowed row stays in the list and the next page would skip a
+        // row. Restart the walk when more pages may exist; otherwise drop
+        // the row locally and adjust the total.
+        if (
+          isCurrentlyFollowing &&
+          type === 'following' &&
+          userId === user.id
+        ) {
+          const morePagesMayExist =
+            hasMoreRef.current ||
+            (totalCount !== null && totalCount > users.length);
+          if (morePagesMayExist) {
+            void fetchList();
+          } else {
+            setUsers((prev) => prev.filter((u) => u.id !== targetUserId));
+            setTotalCount((prev) =>
+              prev === null ? prev : Math.max(0, prev - 1)
+            );
+          }
+        }
       }
     } catch {
       // Revert optimistic update on network error
@@ -517,6 +570,20 @@ export function FollowListModal({
                   {isLoadingMore && (
                     <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
                   )}
+                </div>
+              )}
+              {/* Later-page failure: keep the loaded rows and offer a
+                  deliberate retry for the failed page, without closing
+                  and reopening the modal. */}
+              {pageError && !isLoadingMore && (
+                <div className="flex flex-col items-center justify-center py-4 text-center">
+                  <p className="text-muted-foreground text-sm">{pageError}</p>
+                  <button
+                    onClick={retryLoadMore}
+                    className="mt-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground transition-colors hover:bg-primary/90"
+                  >
+                    Try again
+                  </button>
                 </div>
               )}
             </div>
