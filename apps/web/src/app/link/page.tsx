@@ -275,7 +275,7 @@ function DeviceLinkContent() {
             ))}
           </fieldset>
           <p className="text-sm">
-            You can revoke this connection in Connected agents.
+            This agent will receive only the permissions you select.
           </p>
           <div className="flex gap-3">
             <Button
