@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { PredictionPricing } from '@feed/core/markets/prediction/client';
 
-import { buildPredictionSeedHistory } from '../../../../apps/web/src/hooks/usePredictionHistory';
+import { buildPredictionSeedHistory } from '../../../../apps/web/src/lib/prediction-history-seed';
 
 /**
  * The chart seed for a prediction market carries the market's live pool
