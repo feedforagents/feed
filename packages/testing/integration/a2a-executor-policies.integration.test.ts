@@ -17,6 +17,7 @@ import {
   groups,
   inArray,
   posts,
+  userBlocks,
   users,
 } from '@feed/db';
 import { generateSnowflakeId, type JsonValue } from '@feed/shared';
@@ -24,6 +25,11 @@ import { generateSnowflakeId, type JsonValue } from '@feed/shared';
 const createdUsers: string[] = [];
 const createdPosts: string[] = [];
 let userId: string;
+let blockedByUserId: string;
+let blockerOfUserId: string;
+let blockedByPostId: string;
+let blockerOfPostId: string;
+let cleanCommentPostId: string;
 let liveFeedPostId: string;
 let deletedFeedPostId: string;
 let groupId: string;
@@ -65,6 +71,49 @@ describe('FeedAgentExecutor policies', () => {
     ]);
     createdPosts.push(liveFeedPostId, deletedFeedPostId);
 
+    // Users and posts for the social.create_comment block check: one post
+    // author blocked by the executor user, one who blocked the executor
+    // user, and one with no block either way.
+    for (const slot of ['blockedBy', 'blockerOf', 'clean'] as const) {
+      const id = await generateSnowflakeId();
+      await db.insert(users).values({
+        id,
+        username: `exec_comment_${slot}_${id.slice(-10)}`,
+        isActor: false,
+        updatedAt: new Date(),
+      });
+      createdUsers.push(id);
+      const slotPostId = await generateSnowflakeId();
+      await db.insert(posts).values({
+        id: slotPostId,
+        content: `${slot} post`,
+        authorId: id,
+        timestamp: new Date(future),
+      });
+      createdPosts.push(slotPostId);
+      if (slot === 'blockedBy') {
+        blockedByUserId = id;
+        blockedByPostId = slotPostId;
+      }
+      if (slot === 'blockerOf') {
+        blockerOfUserId = id;
+        blockerOfPostId = slotPostId;
+      }
+      if (slot === 'clean') cleanCommentPostId = slotPostId;
+    }
+    await db.insert(userBlocks).values([
+      {
+        id: await generateSnowflakeId(),
+        blockerId: userId,
+        blockedId: blockedByUserId,
+      },
+      {
+        id: await generateSnowflakeId(),
+        blockerId: blockerOfUserId,
+        blockedId: userId,
+      },
+    ]);
+
     groupId = await generateSnowflakeId();
     chatId = await generateSnowflakeId();
     await db.insert(groups).values({
@@ -96,6 +145,12 @@ describe('FeedAgentExecutor policies', () => {
 
   afterAll(async () => {
     await db.delete(comments).where(inArray(comments.postId, createdPosts));
+    await db
+      .delete(userBlocks)
+      .where(inArray(userBlocks.blockerId, createdUsers));
+    await db
+      .delete(userBlocks)
+      .where(inArray(userBlocks.blockedId, createdUsers));
     await db.delete(posts).where(inArray(posts.id, createdPosts));
     await db
       .delete(chatParticipants)
@@ -131,6 +186,38 @@ describe('FeedAgentExecutor policies', () => {
         content: '\u0001\u0002\u0003',
       })
     ).rejects.toThrow('content cannot be empty');
+  });
+
+  it('rejects social.create_comment in either block direction', async () => {
+    await expect(
+      run('social.create_comment', {
+        postId: blockedByPostId,
+        content: 'hello',
+      })
+    ).rejects.toThrow('Cannot comment on this post');
+    await expect(
+      run('social.create_comment', {
+        postId: blockerOfPostId,
+        content: 'hello',
+      })
+    ).rejects.toThrow('Cannot comment on this post');
+
+    const blockedRows = await db
+      .select({ id: comments.id })
+      .from(comments)
+      .where(inArray(comments.postId, [blockedByPostId, blockerOfPostId]));
+    expect(blockedRows).toHaveLength(0);
+
+    const ok = (await run('social.create_comment', {
+      postId: cleanCommentPostId,
+      content: 'hello',
+    })) as { success: boolean };
+    expect(ok.success).toBe(true);
+    const cleanRows = await db
+      .select({ id: comments.id })
+      .from(comments)
+      .where(eq(comments.postId, cleanCommentPostId));
+    expect(cleanRows).toHaveLength(1);
   });
 
   it('validates profile updates with the shared schema', async () => {

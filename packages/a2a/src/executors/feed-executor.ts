@@ -27,7 +27,7 @@ import {
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import type { WalletPort } from '@feed/core/markets/shared';
-import { asUser, db, getRawDrizzle, sql } from '@feed/db';
+import { asUser, db, getRawDrizzle, hasBlocked, sql } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
@@ -1015,6 +1015,17 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     if (!post) {
       throw new Error('Post not found');
+    }
+
+    // The web post comments route rejects comments when either side blocked
+    // the other; the agent tool must enforce the same rule, or a blocked
+    // user can keep commenting on the blocker's posts through the A2A tool.
+    const [authorBlockedMe, iBlockedAuthor] = await Promise.all([
+      hasBlocked(post.authorId, userId),
+      hasBlocked(userId, post.authorId),
+    ]);
+    if (authorBlockedMe || iBlockedAuthor) {
+      throw new Error('Cannot comment on this post');
     }
 
     const commentId = await generateSnowflakeId();

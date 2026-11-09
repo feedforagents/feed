@@ -6,6 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import {
+  comments,
   db,
   eq,
   favorites,
@@ -14,10 +15,12 @@ import {
   notifications,
   positions,
   posts,
+  userBlocks,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import {
+  executeCreateComment,
   executeGetFavoritePosts,
   executeGetMarkets,
   executeGetPositions,
@@ -27,6 +30,8 @@ import {
 } from '../../mcp/src/handlers/tool-handlers';
 
 const userIds: string[] = [];
+const blockIds: string[] = [];
+const commentTestPostIds: string[] = [];
 let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
@@ -122,6 +127,11 @@ describe('MCP tool handlers', () => {
       .where(inArray(notifications.userId, userIds));
     await db.delete(favorites).where(inArray(favorites.userId, userIds));
     await db.delete(positions).where(inArray(positions.userId, userIds));
+    await db
+      .delete(comments)
+      .where(inArray(comments.postId, commentTestPostIds));
+    await db.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
+    await db.delete(posts).where(inArray(posts.id, commentTestPostIds));
     await db.delete(markets).where(eq(markets.id, marketId));
     await db.delete(posts).where(eq(posts.id, postId));
     await db.delete(users).where(inArray(users.id, userIds));
@@ -180,5 +190,59 @@ describe('MCP tool handlers', () => {
       side: 'YES',
       question: 'Will the MCP list only open positions?',
     });
+  });
+
+  for (const direction of [
+    'author-blocks-commenter',
+    'commenter-blocks-author',
+  ] as const) {
+    it(`rejects create_comment when a block stands: ${direction}`, async () => {
+      const authorId = await createUser();
+      const targetPostId = await generateSnowflakeId();
+      commentTestPostIds.push(targetPostId);
+      await db.insert(posts).values({
+        id: targetPostId,
+        content: 'blocked post',
+        authorId,
+      });
+      const inserted = await db
+        .insert(userBlocks)
+        .values({
+          id: crypto.randomUUID(),
+          blockerId:
+            direction === 'author-blocks-commenter' ? authorId : agentUserId,
+          blockedId:
+            direction === 'author-blocks-commenter' ? agentUserId : authorId,
+        })
+        .returning({ id: userBlocks.id });
+      blockIds.push(...inserted.map((row) => row.id));
+      await expect(
+        executeCreateComment(agent(), {
+          postId: targetPostId,
+          content: 'hello',
+        })
+      ).rejects.toThrow('Cannot comment on this post');
+      expect(
+        await db
+          .select({ id: comments.id })
+          .from(comments)
+          .where(eq(comments.postId, targetPostId))
+      ).toHaveLength(0);
+    });
+  }
+
+  it('comments on a live post via create_comment when no block stands', async () => {
+    const result = await executeCreateComment(agent(), {
+      postId,
+      content: 'hello',
+    });
+    expect(result.success).toBe(true);
+    expect(result.commentId).toBeTruthy();
+    expect(
+      await db
+        .select({ id: comments.id })
+        .from(comments)
+        .where(eq(comments.postId, postId))
+    ).toHaveLength(1);
   });
 });

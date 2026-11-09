@@ -1467,6 +1467,24 @@ export async function executeCreateComment(
   agent: AuthenticatedAgent,
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
+  // The web post comments route rejects comments when either side blocked
+  // the other; the agent tool must enforce the same rule, or a blocked user
+  // can keep commenting on the blocker's posts through the MCP tool. A
+  // missing post has no author to check a block against, so it falls
+  // through to the create below (unknown-post rejection is separate work).
+  const post = await db.post.findFirst({
+    where: { id: args.postId },
+  });
+  if (post) {
+    const [authorBlockedMe, iBlockedAuthor] = await Promise.all([
+      hasBlocked(post.authorId, agent.userId),
+      hasBlocked(agent.userId, post.authorId),
+    ]);
+    if (authorBlockedMe || iBlockedAuthor) {
+      throw new Error('Cannot comment on this post');
+    }
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {
