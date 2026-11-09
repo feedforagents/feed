@@ -879,7 +879,13 @@ export class PerpMarketService {
       const proportionalFunding = position.fundingPaid * closePercentage;
       const realizedPnL = pnl - proportionalFunding;
       const marginPaid = closeSize / position.leverage;
-      const grossSettlement = marginPaid + realizedPnL;
+      // A close cannot lose more than the leg's margin: the settlement
+      // below is already floored at 0, but the uncapped realizedPnL above
+      // was stored/returned while recordPnL booked only -marginPaid, so
+      // the two records of the same close disagreed past the margin.
+      // Cap here, matching the liquidation cap (Math.max(..., -marginLoss)).
+      const cappedRealizedPnL = Math.max(realizedPnL, -marginPaid);
+      const grossSettlement = marginPaid + cappedRealizedPnL;
       const fee = this.calculateFee(closeSize);
       const netSettlement = Math.max(0, grossSettlement - fee);
       const now = this.deps.clock?.now() ?? new Date();
@@ -888,7 +894,7 @@ export class PerpMarketService {
         await tx.closePosition(position.id, {
           currentPrice: exitPrice,
           closedAt: now,
-          realizedPnL: (position.realizedPnL ?? 0) + realizedPnL,
+          realizedPnL: (position.realizedPnL ?? 0) + cappedRealizedPnL,
           unrealizedPnL: 0,
           unrealizedPnLPercent: 0,
         });
@@ -907,7 +913,7 @@ export class PerpMarketService {
           currentPrice: exitPrice,
           // Keep the row's realized PnL in step with what has been settled,
           // so the final close and the position views report lifetime PnL.
-          realizedPnL: (position.realizedPnL ?? 0) + realizedPnL,
+          realizedPnL: (position.realizedPnL ?? 0) + cappedRealizedPnL,
           unrealizedPnL: remainingPnl,
           unrealizedPnLPercent: remainingPnlPercent,
           lastUpdated: now,
@@ -932,7 +938,7 @@ export class PerpMarketService {
         now,
         position,
         requestedExitPrice,
-        realizedPnL,
+        realizedPnL: cappedRealizedPnL,
         remainingSize,
       };
     });
