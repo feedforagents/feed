@@ -8,6 +8,7 @@ import { PositionDetailModal } from '@/components/profile/PositionDetailModal';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { useWidgetRefresh } from '@/contexts/WidgetRefreshContext';
 import { useAuth } from '@/hooks/useAuth';
+import { predictionPositionPnLPercent } from '@/lib/markets/position-pnl';
 import { getWalletTabHref } from '@/lib/wallet-tabs';
 import { useWidgetCacheStore } from '@/stores/widgetCacheStore';
 
@@ -290,10 +291,7 @@ export function PositionsPreviewPanel() {
               }
 
               const pred = item.data as PredictionPosition;
-              const pnlPct =
-                pred.avgPrice > 0
-                  ? ((pred.currentPrice - pred.avgPrice) / pred.avgPrice) * 100
-                  : 0;
+              const pnlPct = predictionPositionPnLPercent(pred);
               return (
                 <button
                   key={`pred-${pred.id}`}

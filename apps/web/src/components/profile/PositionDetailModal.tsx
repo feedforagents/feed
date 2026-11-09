@@ -28,6 +28,7 @@ import { FollowButton } from '@/components/interactions';
 import { useAuth } from '@/hooks/useAuth';
 import { usePredictionTrading } from '@/hooks/usePredictionTrading';
 import { formatPrice } from '@/lib/market-formatters';
+import { predictionPositionPnLPercent } from '@/lib/markets/position-pnl';
 import { usePerpMarketsStore } from '@/stores/perpMarketsStore';
 
 /**
@@ -487,18 +488,15 @@ export function PositionDetailModal({
                       <div
                         className={cn(
                           'font-bold text-lg',
-                          (data as PredictionPosition).currentPrice -
-                            (data as PredictionPosition).avgPrice >=
-                            0
+                          (data as PredictionPosition).unrealizedPnL >= 0
                             ? 'text-green-600'
                             : 'text-red-600'
                         )}
                       >
                         {formatPercent(
-                          (((data as PredictionPosition).currentPrice -
-                            (data as PredictionPosition).avgPrice) /
-                            (data as PredictionPosition).avgPrice) *
-                            100
+                          predictionPositionPnLPercent(
+                            data as PredictionPosition
+                          )
                         )}
                       </div>
                     </div>
