@@ -29,7 +29,7 @@ import {
   ROLE_PERMISSIONS,
   users,
 } from '@feed/db';
-import { logger } from '@feed/shared';
+import { logger, shouldAutoPromoteToAdmin } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import type { AuthenticatedUser } from './auth-middleware';
 import { authenticate } from './auth-middleware';
@@ -77,11 +77,12 @@ export async function getAdminRole(
     return { role, permissions };
   }
 
-  // Get user data for isAdmin check
+  // Get user data for isAdmin and verified-email checks
   const [user] = await db
     .select({
       isAdmin: users.isAdmin,
       email: users.email,
+      emailVerified: users.emailVerified,
     })
     .from(users)
     .where(eq(users.id, userId))
@@ -92,18 +93,17 @@ export async function getAdminRole(
     return { role: 'ADMIN', permissions: ROLE_PERMISSIONS.ADMIN };
   }
 
-  // Check admin email domain using the DB email (Steward verifies email ownership)
-  const adminDomain = process.env.ADMIN_EMAIL_DOMAIN?.trim();
-  if (adminDomain && user?.email) {
-    const emailDomain = user.email.split('@')[1]?.toLowerCase();
-    if (emailDomain && emailDomain === adminDomain.toLowerCase()) {
-      logger.info(
-        'Auto-promoting user to ADMIN via verified email domain',
-        { userId, emailDomain },
-        'getAdminRole'
-      );
-      return { role: 'ADMIN', permissions: ROLE_PERMISSIONS.ADMIN };
-    }
+  // Domain promotion matches GET /api/users/me and shouldAutoPromoteToAdmin.
+  // A stored address is not a verified claim: Steward session email is written
+  // with emailVerified left false. split('@')[1] is also the wrong domain for
+  // an address such as user@admin.example@other.test.
+  if (shouldAutoPromoteToAdmin(user?.email, user?.emailVerified === true)) {
+    logger.info(
+      'Auto-promoting user to ADMIN via verified email domain',
+      { userId },
+      'getAdminRole'
+    );
+    return { role: 'ADMIN', permissions: ROLE_PERMISSIONS.ADMIN };
   }
 
   return { role: null, permissions: [] };
@@ -215,7 +215,7 @@ export async function requireAdmin(
     throw new AuthorizationError('User is banned', 'admin', 'access');
   }
 
-  // Get admin role (checks both adminRoles table, isAdmin flag, and Privy email domain)
+  // Role row, legacy isAdmin flag, or a verified ADMIN_EMAIL_DOMAIN address.
   const { role, permissions } = await getAdminRole(user.userId, user.privyId);
 
   if (!role) {

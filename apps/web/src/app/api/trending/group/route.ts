@@ -78,6 +78,7 @@ import {
   eq,
   inArray,
   isNull,
+  lte,
   posts,
   postTags,
   reactions,
@@ -182,7 +183,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   }
 
   // Get posts that have any of these tags
-  // Filter out deleted posts to match what users can actually see
+  // Filter out deleted and future-dated posts to match what users can
+  // actually see (same rule as getPostsByTag for the single-tag page)
+  const now = new Date();
   const postTagRelations =
     authUser && authUser.userId
       ? await asUser(authUser, async (db) => {
@@ -206,7 +209,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .from(postTags)
             .innerJoin(posts, eq(postTags.postId, posts.id))
             .where(
-              and(inArray(postTags.tagId, tagIds), isNull(posts.deletedAt))
+              and(
+                inArray(postTags.tagId, tagIds),
+                isNull(posts.deletedAt),
+                lte(posts.timestamp, now)
+              )
             )
             .orderBy(desc(postTags.createdAt))
             .limit(limit * 2); // Get more to deduplicate
@@ -232,7 +239,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .from(postTags)
             .innerJoin(posts, eq(postTags.postId, posts.id))
             .where(
-              and(inArray(postTags.tagId, tagIds), isNull(posts.deletedAt))
+              and(
+                inArray(postTags.tagId, tagIds),
+                isNull(posts.deletedAt),
+                lte(posts.timestamp, now)
+              )
             )
             .orderBy(desc(postTags.createdAt))
             .limit(limit * 2);

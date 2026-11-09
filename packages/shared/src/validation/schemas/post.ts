@@ -70,7 +70,7 @@ export const LikeSchema = z.object({
  * Share post schema (postId comes from route params)
  */
 export const SharePostSchema = z.object({
-  comment: createTrimmedStringSchema(undefined, 500).optional(),
+  comment: createTrimmedStringSchema(undefined, 280).optional(),
 });
 
 /**
