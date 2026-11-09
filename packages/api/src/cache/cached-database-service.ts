@@ -21,6 +21,7 @@ import {
   db,
   desc,
   eq,
+  followStatuses,
   follows,
   getDbInstance,
   inArray,
@@ -28,6 +29,7 @@ import {
   lt,
   lte,
   markets,
+  not,
   type Post,
   positions,
   posts,
@@ -293,6 +295,7 @@ class CachedDatabaseService {
         // Execute all count queries in parallel for minimum latency
         const [
           followersResult,
+          npcFollowersResult,
           followingResult,
           actorFollowsResult,
           positionsResult,
@@ -305,6 +308,21 @@ class CachedDatabaseService {
             .select({ count: count() })
             .from(follows)
             .where(eq(follows.followingId, userId)),
+
+          // Count NPC followers (FollowStatus rows the engine writes when
+          // an NPC follows this user). The followers list merges these rows
+          // in with the same filter, so the profile count must include them
+          // or it disagrees with the list on the same profile screen.
+          db
+            .select({ count: count() })
+            .from(followStatuses)
+            .where(
+              and(
+                eq(followStatuses.userId, userId),
+                eq(followStatuses.isActive, true),
+                not(eq(followStatuses.followReason, 'user_followed'))
+              )
+            ),
 
           // Count following (users this user follows)
           db
@@ -343,7 +361,9 @@ class CachedDatabaseService {
             .where(eq(posts.authorId, userId)),
         ]);
 
-        const followers = Number(followersResult[0]?.count ?? 0);
+        const followers =
+          Number(followersResult[0]?.count ?? 0) +
+          Number(npcFollowersResult[0]?.count ?? 0);
         const following = Number(followingResult[0]?.count ?? 0);
         const actorFollows = Number(actorFollowsResult[0]?.count ?? 0);
 
