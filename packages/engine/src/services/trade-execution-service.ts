@@ -66,7 +66,10 @@ import {
   StaticDataRegistry,
   type StaticOrganization,
 } from './static-data-registry';
-import { invalidateAfterPredictionTrade } from './trade-cache-invalidation';
+import {
+  createPerpTradesCachePort,
+  invalidateAfterPredictionTrade,
+} from './trade-cache-invalidation';
 
 type PredictionTradeBroadcast = {
   type: 'prediction_trade';
@@ -519,6 +522,7 @@ export class TradeExecutionService {
       }),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -1088,6 +1092,7 @@ export class TradeExecutionService {
       }),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,

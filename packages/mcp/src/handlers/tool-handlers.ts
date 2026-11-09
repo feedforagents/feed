@@ -44,8 +44,10 @@ import {
   logAdminModify,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
+  sharePost,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
+import { PredictionPricing } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   and,
@@ -68,6 +70,7 @@ import {
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -299,6 +302,7 @@ async function checkMcpRateLimit(
     | 'close_position'
     | 'transfer'
     | 'post'
+    | 'share_post'
 ): Promise<void> {
   const configMap: Record<
     string,
@@ -310,6 +314,7 @@ async function checkMcpRateLimit(
     close_position: RATE_LIMIT_CONFIGS.CLOSE_POSITION,
     transfer: RATE_LIMIT_CONFIGS.DEFAULT, // Use default for transfers
     post: RATE_LIMIT_CONFIGS.CREATE_POST,
+    share_post: RATE_LIMIT_CONFIGS.SHARE_POST,
   };
   const config = configMap[operation];
   if (!config) return;
@@ -640,6 +645,7 @@ function buildPerpService() {
     settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: buildWalletPort(),
+    cache: createPerpTradesCachePort(),
     priceImpact: createPerpPriceImpactPort(),
     fees: {
       tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
@@ -1149,14 +1155,12 @@ export async function executeGetMarketPrices(
   if (!market) {
     throw new Error('Market not found');
   }
-  const totalShares = Number(market.yesShares) + Number(market.noShares);
-  const yesPrice =
-    totalShares > 0 ? Number(market.yesShares) / totalShares : 0.5;
-  const noPrice = totalShares > 0 ? Number(market.noShares) / totalShares : 0.5;
+  const yesShares = Number(market.yesShares);
+  const noShares = Number(market.noShares);
   return {
     marketId: market.id,
-    yesPrice,
-    noPrice,
+    yesPrice: PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes'),
+    noPrice: PredictionPricing.getCurrentPrice(yesShares, noShares, 'no'),
     timestamp: new Date().toISOString(),
   };
 }
@@ -1400,21 +1404,20 @@ export async function executeUnlikePost(
 }
 
 /**
- * Execute share_post tool
+ * Execute share_post tool (canonical sharePost, same as the web share route)
  */
 export async function executeSharePost(
   agent: AuthenticatedAgent,
   args: SharePostArgs
 ): Promise<SharePostResult> {
-  const shareId = await generateSnowflakeId();
-  await db.share.create({
-    data: {
-      id: shareId,
-      userId: agent.userId,
-      postId: args.postId,
-    },
-  });
-  return { success: true, shareId };
+  await checkMcpRateLimit(agent.userId, 'share_post');
+  const result = await sharePost(agent.userId, args.postId, args.comment);
+  return {
+    success: true,
+    shareId: result.shareId,
+    repostId: result.repostId,
+    shareCount: result.shareCount,
+  };
 }
 
 /**

@@ -55,7 +55,7 @@ interface NPCState {
   archetype: string;
   balance: number;
   /** Amount staked in open long/short positions; closes draw down this. */
-  openExposure: number;
+  openExposure: bigint;
 }
 
 interface SimulationState {
@@ -117,6 +117,23 @@ const SUPPORTED_ACTIONS = new Set([
   'wait',
   'hold',
 ]);
+
+/**
+ * Exact internal units for an amount already validated as finite and positive.
+ * Every finite Number's canonical decimal has at most 324 fractional places
+ * (Number.MIN_VALUE is 5e-324); this adds no amount rounding or minimum stake.
+ */
+function exposureUnits(amount: number): bigint {
+  const [mantissa, exponent = '0'] = amount.toString().split('e');
+  if (!mantissa) throw new RangeError('Invalid exposure amount');
+  const dot = mantissa.indexOf('.');
+  const decimals = dot < 0 ? 0 : mantissa.length - dot - 1;
+  const scale = 324 + Number(exponent) - decimals;
+  if (!Number.isInteger(scale) || scale < 0) {
+    throw new RangeError('Invalid finite exposure scale');
+  }
+  return BigInt(mantissa.replace('.', '')) * 10n ** BigInt(scale);
+}
 
 /** Validate an optional trade amount: defaults to 100, must be finite and > 0. */
 function resolveAmount(amount: unknown): number | string {
@@ -533,7 +550,7 @@ Bun.serve({
             npcId,
             archetype: archetypeMap[npcId] ?? 'trader',
             balance: 10_000,
-            openExposure: 0,
+            openExposure: 0n,
           });
         }
 
@@ -620,7 +637,7 @@ Bun.serve({
                 error = 'Insufficient balance';
               } else {
                 npc.balance -= amount;
-                npc.openExposure += amount;
+                npc.openExposure += exposureUnits(amount);
               }
               break;
             }
@@ -641,12 +658,13 @@ Bun.serve({
             case 'close_short':
             case 'close_position': {
               const closeAmount = amountOrError;
-              if (closeAmount > npc.openExposure) {
+              const closeExposure = exposureUnits(closeAmount);
+              if (closeExposure > npc.openExposure) {
                 success = false;
                 error = 'Insufficient open position';
               } else {
                 pnl = (random() - 0.4) * closeAmount * 0.2;
-                npc.openExposure -= closeAmount;
+                npc.openExposure -= closeExposure;
                 npc.balance += closeAmount + pnl;
               }
               break;
