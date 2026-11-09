@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 
 const databaseUrl = new URL(process.env.DATABASE_URL ?? '');
 assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(databaseUrl.hostname));
-assert.match(databaseUrl.pathname, /^\/feed_test_f153$/);
+assert.match(databaseUrl.pathname, /^\/(test_db|feed_pr\d+)$/);
 assert.equal(process.env.DATABASE_READ_REPLICA_URL, '');
 assert.equal(process.env.NODE_ENV, 'test');
 assert.equal(process.env.FEED_DISABLE_REDIS, '1');
