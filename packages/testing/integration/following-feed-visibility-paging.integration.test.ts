@@ -38,7 +38,26 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { db, eq, follows, inArray, posts, userMutes, users } from '@feed/db';
+import {
+  CACHE_KEYS,
+  getCache,
+  invalidateCache,
+  invalidateCachePattern,
+  resetRateLimit,
+} from '@feed/api';
+import {
+  and,
+  db,
+  eq,
+  follows,
+  inArray,
+  posts,
+  userActorFollows,
+  userBlocks,
+  userMutes,
+  users,
+} from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
 import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
@@ -58,22 +77,167 @@ let mutedId: string;
 let token: string;
 const visibleIds: string[] = []; // normal author's posts, newest first
 const hiddenIds: string[] = []; // must never appear on any page
-const allPostIds: string[] = [];
-const allUserIds: string[] = [];
+const mutedPostIds: string[] = [];
+type OwnedRows = { postIds: string[]; userIds: string[] };
+const owned: OwnedRows = { postIds: [], userIds: [] };
+const allPostIds = owned.postIds;
+let clientIp: string;
+
+async function signToken(userId: string) {
+  const secret =
+    process.env.STEWARD_JWT_SECRET ?? 'dev-jwt-secret-change-in-prod';
+  return new SignJWT({ userId: `f102-${userId}` })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuer('steward')
+    .setIssuedAt()
+    .setExpirationTime('5m')
+    .sign(new TextEncoder().encode(secret));
+}
+
+async function createViewer(scope = owned) {
+  const userId = await generateSnowflakeId();
+  await insertOwnedUsers(
+    [
+      {
+        id: userId,
+        username: `f102-${userId}`,
+        displayName: 'Following control',
+        stewardId: `f102-${userId}`,
+        updatedAt: new Date(),
+      },
+    ],
+    scope
+  );
+  return { userId, token: await signToken(userId) };
+}
+
+async function follow(viewer: string, author: string) {
+  await db.insert(follows).values({
+    id: await generateSnowflakeId(),
+    followerId: viewer,
+    followingId: author,
+    createdAt: new Date(),
+  });
+}
+
+async function moderate(
+  kind: 'mute' | 'block',
+  caller: { token: string },
+  target: string,
+  action: 'mute' | 'unmute' | 'block' | 'unblock'
+) {
+  const route =
+    kind === 'mute'
+      ? await import('../../../apps/web/src/app/api/users/[userId]/mute/route')
+      : await import(
+          '../../../apps/web/src/app/api/users/[userId]/block/route'
+        );
+  const response = await route.POST(
+    new NextRequest(`http://localhost/api/users/${target}/${kind}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${caller.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ action }),
+    }),
+    { params: Promise.resolve({ userId: target }) }
+  );
+  expect(response.status).toBe(200);
+}
+
+async function insertOwnedUsers(
+  values: (typeof users.$inferInsert)[],
+  scope = owned
+) {
+  const rows = await db
+    .insert(users)
+    .values(values)
+    .returning({ id: users.id });
+  scope.userIds.push(...rows.map(({ id }) => id));
+}
+
+async function insertOwnedPost(
+  value: typeof posts.$inferInsert,
+  scope = owned
+) {
+  const [row] = await db
+    .insert(posts)
+    .values(value)
+    .returning({ id: posts.id });
+  if (!row) throw new Error('Post insert returned no ownership');
+  scope.postIds.push(row.id);
+  return row.id;
+}
+
+async function cleanup(scope: OwnedRows) {
+  if (scope.userIds.length > 0) {
+    // Owner-wide relation cleanup is guarded by successful User ownership.
+    await db.delete(userMutes).where(inArray(userMutes.muterId, scope.userIds));
+    await db
+      .delete(userBlocks)
+      .where(inArray(userBlocks.blockerId, scope.userIds));
+    await db.delete(follows).where(inArray(follows.followerId, scope.userIds));
+    await db
+      .delete(userActorFollows)
+      .where(inArray(userActorFollows.userId, scope.userIds));
+    for (const id of scope.userIds) {
+      await invalidateCache(`follows:${id}`, { namespace: 'user:follows' });
+      await invalidateCachePattern(`${id}:*`, {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+      });
+      await invalidateCachePattern(`${id}:*`, {
+        namespace: CACHE_KEYS.POSTS_BY_ACTOR,
+      });
+      await resetRateLimit(id, 'public_read_authed');
+    }
+  }
+  if (scope.postIds.length > 0) {
+    await db.delete(posts).where(inArray(posts.id, scope.postIds));
+    expect(
+      await db
+        .select({ id: posts.id })
+        .from(posts)
+        .where(inArray(posts.id, scope.postIds))
+    ).toHaveLength(0);
+  }
+  if (scope.userIds.length > 0) {
+    await db.delete(users).where(inArray(users.id, scope.userIds));
+    expect(
+      await db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, scope.userIds))
+    ).toHaveLength(0);
+  }
+  if (scope === owned && scope.userIds.includes(viewerId) && clientIp) {
+    await resetRateLimit(clientIp, 'public_read');
+  }
+}
 
 let GET: (request: NextRequest) => Promise<Response>;
 const routePath = '../../../apps/web/src/app/api/posts/route';
 
-async function fetchFollowingPage(limit: number, cursor?: string) {
+async function fetchFollowingPage(
+  limit: number,
+  cursor?: string,
+  caller = { userId: viewerId, token },
+  requestedUserId = caller.userId,
+  actorId?: string
+) {
   const params = new URLSearchParams({
     following: 'true',
-    userId: viewerId,
+    userId: requestedUserId,
     limit: String(limit),
   });
   if (cursor !== undefined) params.set('cursor', cursor);
+  if (actorId) params.set('actorId', actorId);
   const request = new NextRequest(
     new Request(`http://localhost/api/posts?${params.toString()}`, {
-      headers: { authorization: `Bearer ${token}` },
+      headers: {
+        ...(caller.token ? { authorization: `Bearer ${caller.token}` } : {}),
+        'x-forwarded-for': clientIp,
+      },
     })
   );
   const response = await GET(request);
@@ -105,6 +269,13 @@ async function traverseFollowingFeed(limit: number): Promise<string[]> {
   return seen;
 }
 
+async function followingIds(caller = { userId: viewerId, token }, limit = 2) {
+  const { status, body } = await fetchFollowingPage(limit, undefined, caller);
+  expect(status).toBe(200);
+  expect(body.source).toBe('following');
+  return body.posts.map(({ id }) => id);
+}
+
 beforeAll(async () => {
   ({ GET } = await import(routePath));
 
@@ -113,22 +284,14 @@ beforeAll(async () => {
   prefixedId = `test-f102-${await generateSnowflakeId()}`;
   flaggedId = await generateSnowflakeId();
   mutedId = await generateSnowflakeId();
-  allUserIds.push(viewerId, normalId, prefixedId, flaggedId, mutedId);
 
-  const secret =
-    process.env.STEWARD_JWT_SECRET ?? 'dev-jwt-secret-change-in-prod';
-  token = await new SignJWT({ userId: `f102-${viewerId}` })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuer('steward')
-    .setIssuedAt()
-    .setExpirationTime('5m')
-    .sign(new TextEncoder().encode(secret));
+  token = await signToken(viewerId);
 
   const now = Date.now();
   const at = (minAgo: number) => new Date(now - minAgo * 60_000);
   const stamp = new Date(now);
 
-  await db.insert(users).values([
+  await insertOwnedUsers([
     {
       id: viewerId,
       username: `f102v-${viewerId}`,
@@ -165,6 +328,7 @@ beforeAll(async () => {
       updatedAt: stamp,
     },
   ]);
+  clientIp = `2001:db8:${viewerId.slice(-8, -4)}:${viewerId.slice(-4)}::f102`;
 
   await db.insert(follows).values(
     await Promise.all(
@@ -204,10 +368,7 @@ beforeAll(async () => {
   ];
   for (const def of defs) {
     const id = await generateSnowflakeId();
-    allPostIds.push(id);
-    if (def.visible) visibleIds.push(id);
-    else hiddenIds.push(id);
-    await db.insert(posts).values({
+    await insertOwnedPost({
       id,
       content: `following visibility fixture ${id}`,
       authorId: def.author,
@@ -216,15 +377,13 @@ beforeAll(async () => {
       createdAt: at(def.minAgo),
       deletedAt: def.deleted ? at(1) : null,
     });
+    if (def.visible) visibleIds.push(id);
+    else hiddenIds.push(id);
+    if (def.author === mutedId) mutedPostIds.push(id);
   }
 });
 
-afterAll(async () => {
-  await db.delete(userMutes).where(eq(userMutes.muterId, viewerId));
-  await db.delete(follows).where(eq(follows.followerId, viewerId));
-  await db.delete(posts).where(inArray(posts.id, allPostIds));
-  await db.delete(users).where(inArray(users.id, allUserIds));
-});
+afterAll(() => cleanup(owned));
 
 describe('GET /api/posts?following=true author exclusions', () => {
   it('shows only the normal author on a full page: no test-prefixed, flagged, muted, future or deleted posts', async () => {
@@ -257,5 +416,206 @@ describe('GET /api/posts?following=true author exclusions', () => {
     expect(ids).not.toContain(allPostIds[5]!); // future
     expect(ids).not.toContain(allPostIds[6]!); // deleted
     expect(ids).not.toContain(allPostIds[0]!); // muted newest
+  });
+
+  it('changes a warm page on actual unmute/mute requests without changing another viewer', async () => {
+    const observer = await createViewer();
+    await follow(observer.userId, normalId);
+    await follow(observer.userId, mutedId);
+    expect(await followingIds()).toEqual(visibleIds.slice(0, 2));
+    expect(await followingIds(observer)).toEqual(mutedPostIds.slice(0, 2));
+    try {
+      await moderate('mute', { token }, mutedId, 'unmute');
+      expect(await followingIds()).toEqual(mutedPostIds.slice(0, 2));
+      await moderate('mute', { token }, mutedId, 'mute');
+      expect(await followingIds()).toEqual(visibleIds.slice(0, 2));
+      expect(await followingIds(observer)).toEqual(mutedPostIds.slice(0, 2));
+    } finally {
+      const rows = await db
+        .select({ id: userMutes.id })
+        .from(userMutes)
+        .where(
+          and(eq(userMutes.muterId, viewerId), eq(userMutes.mutedId, mutedId))
+        );
+      if (rows.length === 0) await moderate('mute', { token }, mutedId, 'mute');
+    }
+  });
+
+  for (const reverse of [false, true]) {
+    it(`fills a warm page after an actual ${reverse ? 'reverse' : 'outgoing'} block`, async () => {
+      const reader = await createViewer();
+      const author = await createViewer();
+      const fallback = await createViewer();
+      const observer = await createViewer();
+      for (const caller of [reader, observer]) {
+        await follow(caller.userId, author.userId);
+        await follow(caller.userId, fallback.userId);
+      }
+      const ids: string[] = [];
+      const now = Date.now();
+      for (const [index, authorId] of [
+        author.userId,
+        author.userId,
+        fallback.userId,
+        fallback.userId,
+      ].entries()) {
+        ids.push(
+          await insertOwnedPost({
+            id: await generateSnowflakeId(),
+            authorId,
+            content: 'block transition fixture',
+            timestamp: new Date(now - (index + 1) * 60_000),
+            type: 'post',
+          })
+        );
+      }
+      expect(await followingIds(reader)).toEqual(ids.slice(0, 2));
+      expect(await followingIds(observer)).toEqual(ids.slice(0, 2));
+      await moderate(
+        'block',
+        reverse ? author : reader,
+        reverse ? reader.userId : author.userId,
+        'block'
+      );
+      expect(await followingIds(reader)).toEqual(ids.slice(2));
+      expect(await followingIds(observer)).toEqual(ids.slice(0, 2));
+    });
+  }
+
+  it('keeps a real registry NPC and handles empty and all-excluded follow sets', async () => {
+    const actor = StaticDataRegistry.getAllActors().find(
+      (item) => !item.isTest && !item.id.startsWith('test-')
+    );
+    if (!actor) throw new Error('No retained registry NPC is available');
+    const npcViewer = await createViewer();
+    await db.insert(userActorFollows).values({
+      id: await generateSnowflakeId(),
+      userId: npcViewer.userId,
+      actorId: actor.id,
+    });
+    const npcPost = await insertOwnedPost({
+      id: await generateSnowflakeId(),
+      authorId: actor.id,
+      content: 'retained NPC following control',
+      timestamp: new Date(Date.now() - 1000),
+      type: 'post',
+    });
+    expect(await followingIds(npcViewer)).toEqual([npcPost]);
+    const empty = await createViewer();
+    expect(await followingIds(empty)).toEqual([]);
+    const excluded = await createViewer();
+    await follow(excluded.userId, prefixedId);
+    await follow(excluded.userId, flaggedId);
+    expect(await followingIds(excluded)).toEqual([]);
+  });
+
+  it('keeps the existing public fallback for missing/invalid credentials and a mismatched viewer', async () => {
+    const other = await createViewer();
+    for (const caller of [
+      { userId: viewerId, token: '' },
+      { userId: viewerId, token: 'invalid-token' },
+      other,
+    ]) {
+      // An owned author scopes the public fallback's cache, avoiding shared
+      // global-feed keys. This asserts the existing fallback, not a new 401.
+      const { status, body } = await fetchFollowingPage(
+        2,
+        undefined,
+        caller,
+        viewerId,
+        normalId
+      );
+      expect(status).toBe(200);
+      expect(body.source).not.toBe('following');
+    }
+  });
+
+  it('preserves a colliding sentinel and its cache after partial setup cleanup', async () => {
+    const existing: OwnedRows = { postIds: [], userIds: [] };
+    const attempted: OwnedRows = { postIds: [], userIds: [] };
+    try {
+      const sentinel = await createViewer(existing);
+      const postId = await insertOwnedPost(
+        {
+          id: await generateSnowflakeId(),
+          authorId: sentinel.userId,
+          content: 'collision sentinel',
+          timestamp: new Date(Date.now() - 1000),
+          type: 'post',
+        },
+        existing
+      );
+      await follow(sentinel.userId, normalId);
+      await db.insert(userMutes).values({
+        id: await generateSnowflakeId(),
+        muterId: sentinel.userId,
+        mutedId,
+      });
+      expect(await followingIds(sentinel)).toEqual(visibleIds.slice(0, 2));
+      const cacheKey = `${sentinel.userId}:2:offset:0:excl:${mutedId}`;
+      const cached = await getCache<Array<{ id: string }>>(cacheKey, {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+      });
+      expect(cached).not.toBeNull();
+      const readSentinel = async () => ({
+        users: await db
+          .select()
+          .from(users)
+          .where(eq(users.id, sentinel.userId)),
+        posts: await db.select().from(posts).where(eq(posts.id, postId)),
+        follows: await db
+          .select()
+          .from(follows)
+          .where(eq(follows.followerId, sentinel.userId)),
+        mutes: await db
+          .select()
+          .from(userMutes)
+          .where(eq(userMutes.muterId, sentinel.userId)),
+      });
+      const before = await readSentinel();
+      await expect(
+        insertOwnedUsers(
+          [
+            {
+              id: sentinel.userId,
+              username: `collision-${sentinel.userId}`,
+              updatedAt: new Date(),
+            },
+          ],
+          attempted
+        )
+      ).rejects.toMatchObject({ cause: { code: '23505' } });
+      const partial = await createViewer(attempted);
+      await insertOwnedPost(
+        {
+          id: await generateSnowflakeId(),
+          authorId: partial.userId,
+          content: 'partial fixture',
+          timestamp: new Date(),
+        },
+        attempted
+      );
+      await expect(
+        insertOwnedPost(
+          {
+            id: postId,
+            authorId: partial.userId,
+            content: 'collision',
+            timestamp: new Date(),
+          },
+          attempted
+        )
+      ).rejects.toMatchObject({ cause: { code: '23505' } });
+      await cleanup(attempted);
+      expect(await readSentinel()).toEqual(before);
+      expect(
+        await getCache<Array<{ id: string }>>(cacheKey, {
+          namespace: CACHE_KEYS.POSTS_FOLLOWING,
+        })
+      ).toEqual(cached);
+    } finally {
+      await cleanup(attempted);
+      await cleanup(existing);
+    }
   });
 });
