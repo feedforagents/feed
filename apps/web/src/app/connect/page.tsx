@@ -21,7 +21,11 @@ const scopeLabels = {
 const scopeSchema = z.enum(['read', 'social:write', 'messages', 'trade']);
 const approvalSchema = z.object({
   requestId: z.string(),
-  client: z.object({ name: z.string(), origin: z.string().url() }),
+  client: z.object({
+    name: z.string(),
+    origin: z.string().url(),
+    metadataOrigin: z.string().url().optional(),
+  }),
   account: z.object({ handle: z.string() }),
   scopes: z.array(scopeSchema),
   expiresAt: z.string(),
@@ -199,9 +203,23 @@ function ConnectContent() {
             <strong>{approval.client.name}</strong> wants to use Feed as{' '}
             <strong>@{approval.account.handle}</strong>.
           </p>
-          <p className="break-all text-muted-foreground text-sm">
-            Connects to {approval.client.origin}
+          <p className="text-sm">
+            The app supplies its name. Check the destinations before approving.
           </p>
+          {approval.client.metadataOrigin && (
+            <p className="break-all text-sm">
+              Client metadata: <strong>{approval.client.metadataOrigin}</strong>
+            </p>
+          )}
+          <p className="break-all text-sm">
+            Callback destination: <strong>{approval.client.origin}</strong>
+          </p>
+          {approval.client.origin.startsWith('http:') && (
+            <p className="text-sm">
+              This callback returns to a local app on your device. Approve only
+              a connection you started there.
+            </p>
+          )}
           <fieldset disabled={pending} className="space-y-3">
             <legend className="mb-3 font-medium">
               Choose what this agent can do

@@ -24,6 +24,7 @@
 
 export * from './auth';
 export * from './handlers';
+export * from './oauth/cimd';
 export * from './oauth/contracts';
 export * from './oauth/device';
 export * from './oauth/service';

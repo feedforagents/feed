@@ -2,9 +2,11 @@ import { FEED_MCP_CAPABILITIES } from '@feed/mcp';
 import { oauthResponse, oauthService } from '@/lib/auth/feed-oauth';
 export const dynamic = 'force-dynamic';
 export function GET() {
-  const { origin } = oauthService();
+  const service = oauthService();
+  const { origin } = service;
   return oauthResponse({
     issuer: origin,
+    client_id_metadata_document_supported: service.cimdEnabled,
     device_authorization_endpoint: `${origin}/oauth/device/authorization`,
     authorization_endpoint: `${origin}/oauth/authorize`,
     token_endpoint: `${origin}/oauth/token`,

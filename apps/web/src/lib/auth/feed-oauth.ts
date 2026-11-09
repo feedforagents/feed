@@ -1,5 +1,10 @@
 import { authenticateWithDbUser, isAuthenticationError } from '@feed/api';
-import { FeedOAuthService, OAuthError, opaque } from '@feed/mcp';
+import {
+  FeedOAuthService,
+  OAuthError,
+  opaque,
+  parseCimdOrigins,
+} from '@feed/mcp';
 import { errors as joseErrors, jwtVerify } from 'jose';
 import { NextRequest } from 'next/server';
 import { getStewardJwtSecret } from './steward-server';
@@ -9,7 +14,11 @@ export function oauthService() {
   const origin = process.env.NEXT_PUBLIC_APP_URL;
   if (!origin)
     throw new Error('NEXT_PUBLIC_APP_URL is required for Feed OAuth');
-  return new FeedOAuthService(origin);
+  return new FeedOAuthService(origin, {
+    allowedOrigins: parseCimdOrigins(
+      process.env.FEED_OAUTH_CIMD_ALLOWED_ORIGINS
+    ),
+  });
 }
 export function oauthResponse(body: object, status = 200) {
   return Response.json(body, {

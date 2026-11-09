@@ -17,7 +17,7 @@ export async function POST(request: NextRequest) {
       await service.limit('device-poll:global', 10000);
       await service.limit(`device-poll-ip:${requestRateKey(request)}`, 1000);
       await service.limit(`device-poll-client:${body.client_id ?? ''}`, 1000);
-      const result = await new FeedDeviceService(service.origin).poll(body);
+      const result = await new FeedDeviceService(service).poll(body);
       return oauthResponse(result, 'error' in result ? 400 : 200);
     }
     await service.limit(`token:${requestRateKey(request)}`, 300);

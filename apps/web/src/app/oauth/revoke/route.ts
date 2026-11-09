@@ -1,4 +1,4 @@
-import { OAuthError } from '@feed/mcp';
+import { clientIdSchema, OAuthError } from '@feed/mcp';
 import type { NextRequest } from 'next/server';
 import {
   formParameters,
@@ -12,14 +12,10 @@ export async function POST(request: NextRequest) {
     const service = oauthService();
     await service.limit(`revoke:${requestRateKey(request)}`, 120);
     const input = await formParameters(request);
-    if (
-      !input.token ||
-      input.token.length > 200 ||
-      !input.client_id ||
-      input.client_id.length > 100
-    )
+    const clientId = clientIdSchema.safeParse(input.client_id);
+    if (!input.token || input.token.length > 200 || !clientId.success)
       throw new OAuthError('invalid_request');
-    await service.revokeToken(input.token, input.client_id);
+    await service.revokeToken(input.token, clientId.data);
     return oauthResponse({});
   });
 }

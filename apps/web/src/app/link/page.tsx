@@ -22,7 +22,10 @@ const scopeLabels = {
 };
 const approvalSchema = z.object({
   userCode: z.string(),
-  client: z.object({ name: z.string() }),
+  client: z.object({
+    name: z.string(),
+    metadataOrigin: z.string().url().optional(),
+  }),
   account: z.object({ handle: z.string() }),
   scopes: z.array(scopeSchema),
   expiresAt: z.string().datetime(),
@@ -252,6 +255,11 @@ function DeviceLinkContent() {
             The app supplies its name. Check that this is the agent and code you
             intended to connect.
           </p>
+          {approval.client.metadataOrigin && (
+            <p className="break-all text-sm">
+              Client metadata: <strong>{approval.client.metadataOrigin}</strong>
+            </p>
+          )}
           <p>
             Code: <strong>{userCode}</strong>
           </p>

@@ -28,7 +28,7 @@ export const GET = withErrorHandling(async (request: NextRequest) =>
     const service = oauthService();
     let response: NextResponse;
     try {
-      const info = await new FeedDeviceService(service.origin).info(
+      const info = await new FeedDeviceService(service).info(
         request.nextUrl.searchParams.get('user_code') ?? '',
         binding,
         userId
@@ -69,7 +69,7 @@ export const POST = withErrorHandling(async (request: NextRequest) =>
     if (!parsed.success) throw new OAuthError('invalid_request');
     const { userCode, action, scopes } = parsed.data;
     return oauthResponse(
-      await new FeedDeviceService(oauthService().origin).approve(
+      await new FeedDeviceService(oauthService()).approve(
         userCode,
         browserBinding(request),
         userId,

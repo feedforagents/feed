@@ -21,7 +21,8 @@
     "@feed/a2a": "workspace:*",
     "@feed/core": "workspace:*",
     "@feed/engine": "workspace:*",
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "ipaddr.js": "2.5.0"
   },
   "peerDependencies": {
     "@feed/db": "workspace:*",

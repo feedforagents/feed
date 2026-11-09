@@ -16,6 +16,7 @@ import {
 } from '@feed/db';
 import { z } from 'zod';
 import {
+  clientIdSchema,
   DEVICE_GRANT_TYPE,
   type FeedScope,
   hash,
@@ -31,7 +32,7 @@ const GRANT_MS = 90 * 24 * 60 * 60_000;
 const ALPHABET = 'BCDFGHJKLMNPQRSTVWXZ23456789';
 export const deviceRequestSchema = z
   .object({
-    client_id: z.string().max(100),
+    client_id: clientIdSchema,
     resource: z.string().max(2048),
     scope: z.string().max(200).default('read social:write messages trade'),
   })
@@ -48,7 +49,7 @@ export const deviceApprovalSchema = z
 export const deviceTokenSchema = z
   .object({
     grant_type: z.literal(DEVICE_GRANT_TYPE),
-    client_id: z.string().max(100),
+    client_id: clientIdSchema,
     device_code: z.string().regex(/^fmcpd_[A-Za-z0-9_-]{43}$/),
     resource: z.string().max(2048).optional(),
   })
@@ -74,8 +75,9 @@ function userCode() {
 
 export class FeedDeviceService {
   readonly oauth: FeedOAuthService;
-  constructor(origin: string) {
-    this.oauth = new FeedOAuthService(origin);
+  constructor(origin: string | FeedOAuthService) {
+    this.oauth =
+      typeof origin === 'string' ? new FeedOAuthService(origin) : origin;
   }
 
   async start(input: Record<string, string>) {
@@ -84,11 +86,7 @@ export class FeedDeviceService {
     const data = parsed.data;
     if (!resourceMatches(data.resource, this.oauth.resource))
       throw new OAuthError('invalid_target');
-    const [client] = await dbWrite
-      .select()
-      .from(clients)
-      .where(eq(clients.id, data.client_id))
-      .limit(1);
+    const client = await this.oauth.resolveClient(data.client_id);
     if (!client || !client.grantTypes.includes(DEVICE_GRANT_TYPE))
       throw new OAuthError('unauthorized_client');
     const scopes = parseScopes(data.scope);
@@ -105,6 +103,7 @@ export class FeedDeviceService {
           userCodeHash: hash(normalizeUserCode(publicCode)),
           clientId: client.id,
           scopes,
+          refreshAllowed: client.grantTypes.includes('refresh_token'),
           resource: this.oauth.resource,
           expiresAt: new Date(Date.now() + EXPIRY_MS),
         })
@@ -197,7 +196,12 @@ export class FeedDeviceService {
       throw new OAuthError('profile_incomplete', 403);
     return {
       userCode: normalizeUserCode(publicCode),
-      client: { name: client.name },
+      client: {
+        name: client.name,
+        ...(client.id.startsWith('https://')
+          ? { metadataOrigin: new URL(client.id).origin }
+          : {}),
+      },
       account: { handle: user.username },
       scopes: device.scopes,
       expiresAt: device.expiresAt.toISOString(),
@@ -247,6 +251,7 @@ export class FeedDeviceService {
         userId,
         clientId: device.clientId,
         scopes,
+        refreshAllowed: device.refreshAllowed,
         resource: this.oauth.resource,
         expiresAt: new Date(Date.now() + GRANT_MS),
       });
@@ -347,7 +352,7 @@ export class FeedDeviceService {
         grantId: grant.id,
         expiresAt: accessExpiry,
       });
-      if (client.grantTypes.includes('refresh_token'))
+      if (grant.refreshAllowed && client.grantTypes.includes('refresh_token'))
         await tx.insert(tokens).values({
           hash: hash(refresh),
           kind: 'refresh',
@@ -362,7 +367,7 @@ export class FeedDeviceService {
       return {
         token_type: 'Bearer',
         access_token: access,
-        ...(client.grantTypes.includes('refresh_token')
+        ...(grant.refreshAllowed && client.grantTypes.includes('refresh_token')
           ? { refresh_token: refresh }
           : {}),
         expires_in: Math.floor((accessExpiry.getTime() - now.getTime()) / 1000),

@@ -57,6 +57,13 @@
       "when": 1794263689123,
       "tag": "0007_mcp_token_scope_snapshots",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794264239817,
+      "tag": "0008_mcp_cimd_client_metadata",
+      "breakpoints": true
     }
   ]
 }

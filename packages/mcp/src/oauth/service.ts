@@ -16,8 +16,15 @@ import {
 } from '@feed/db';
 import { z } from 'zod';
 import {
+  type CimdPolicy,
+  cimdUrl,
+  fetchCimdMetadata,
+  parseCimdOrigins,
+} from './cimd';
+import {
   appOrigin,
   authorizationSchema,
+  clientIdSchema,
   type FeedAgentContext,
   type FeedScope,
   hash,
@@ -35,9 +42,14 @@ const GRANT_MS = 90 * 24 * 60 * 60_000;
 export class FeedOAuthService {
   readonly origin: string;
   readonly resource: string;
-  constructor(origin: string) {
+  readonly cimd: CimdPolicy;
+  constructor(origin: string, cimd: CimdPolicy = { allowedOrigins: [] }) {
     this.origin = appOrigin(origin);
     this.resource = `${this.origin}/mcp`;
+    this.cimd = {
+      ...cimd,
+      allowedOrigins: parseCimdOrigins(cimd.allowedOrigins.join(',')),
+    };
   }
 
   async limit(key: string, maximum: number) {
@@ -79,15 +91,51 @@ export class FeedOAuthService {
     };
   }
 
+  get cimdEnabled() {
+    return this.cimd.allowedOrigins.length > 0;
+  }
+
+  async resolveClient(clientId: string) {
+    if (!clientIdSchema.safeParse(clientId).success)
+      throw new OAuthError('invalid_client');
+    const metadataUrl = clientId.startsWith('https://')
+      ? cimdUrl(clientId, this.cimd.allowedOrigins)
+      : null;
+    const [cached] = await dbWrite
+      .select()
+      .from(clients)
+      .where(eq(clients.id, clientId))
+      .limit(1);
+    if (
+      !metadataUrl ||
+      (cached?.metadataExpiresAt && cached.metadataExpiresAt > new Date())
+    )
+      return cached;
+    await this.limit('cimd-fetch:global', 2000);
+    await this.limit(`cimd-fetch-origin:${metadataUrl.origin}`, 1000);
+    const metadata = await fetchCimdMetadata(clientId, this.cimd);
+    // These are validated operational registration fields, not a stored raw
+    // response. Without reusable freshness we fetch again at next authorization.
+    const values = {
+      name: metadata.client_name,
+      redirectUris: metadata.redirect_uris,
+      grantTypes: metadata.grant_types,
+      metadataExpiresAt: metadata.metadataExpiresAt,
+    };
+    const [client] = await dbWrite
+      .insert(clients)
+      .values({ id: clientId, ...values })
+      .onConflictDoUpdate({ target: clients.id, set: values })
+      .returning();
+    if (!client) throw new OAuthError('invalid_client_metadata');
+    return client;
+  }
+
   async authorize(input: Record<string, string>, browser: string) {
     const parsed = authorizationSchema.safeParse(input);
     if (!parsed.success) throw new OAuthError('invalid_request');
     const data = parsed.data;
-    const [client] = await dbWrite
-      .select()
-      .from(clients)
-      .where(eq(clients.id, data.client_id))
-      .limit(1);
+    const client = await this.resolveClient(data.client_id);
     if (client && !client.grantTypes.includes('authorization_code'))
       throw new OAuthError('unauthorized_client');
     if (
@@ -107,6 +155,7 @@ export class FeedOAuthService {
       state: data.state,
       challenge: data.code_challenge,
       scopes: parseScopes(data.scope),
+      refreshAllowed: client.grantTypes.includes('refresh_token'),
       resource: this.resource,
       browserHash: hash(browser),
       expiresAt: new Date(Date.now() + 10 * 60_000),
@@ -183,6 +232,9 @@ export class FeedOAuthService {
       client: {
         name: client.name,
         origin: new URL(request.redirectUri).origin,
+        ...(client.id.startsWith('https://')
+          ? { metadataOrigin: new URL(client.id).origin }
+          : {}),
       },
       account: { handle: user.username },
       scopes: request.scopes,
@@ -244,6 +296,7 @@ export class FeedOAuthService {
         userId,
         clientId: request.clientId,
         scopes,
+        refreshAllowed: request.refreshAllowed,
         resource: this.resource,
         expiresAt: new Date(Date.now() + GRANT_MS),
       });
@@ -272,7 +325,7 @@ export class FeedOAuthService {
     const parsed = z
       .object({
         grant_type: z.enum(['authorization_code', 'refresh_token']),
-        client_id: z.string().max(100),
+        client_id: clientIdSchema,
         resource: z.string().max(2048).optional(),
         scope: z.string().max(200).optional(),
         code: z.string().max(200).optional(),
@@ -325,13 +378,6 @@ export class FeedOAuthService {
         .from(clients)
         .where(eq(clients.id, grant.clientId))
         .limit(1);
-      if (
-        !client ||
-        !client.grantTypes.includes(
-          isRefresh ? 'refresh_token' : 'authorization_code'
-        )
-      )
-        return null;
       if (token.consumedAt) {
         if (isRefresh) {
           await tx
@@ -348,6 +394,14 @@ export class FeedOAuthService {
         }
         return null;
       }
+      if (
+        !client ||
+        !client.grantTypes.includes(
+          isRefresh ? 'refresh_token' : 'authorization_code'
+        )
+      )
+        return null;
+      if (isRefresh && !grant.refreshAllowed) return null;
       if (
         token.expiresAt <= now ||
         (!isRefresh &&
@@ -385,7 +439,7 @@ export class FeedOAuthService {
             Math.min(now.getTime() + ACCESS_MS, grant.expiresAt.getTime())
           ),
         },
-        ...(client.grantTypes.includes('refresh_token')
+        ...(grant.refreshAllowed && client.grantTypes.includes('refresh_token')
           ? [
               {
                 hash: hash(refresh),
@@ -400,7 +454,7 @@ export class FeedOAuthService {
       return {
         token_type: 'Bearer',
         access_token: access,
-        ...(client.grantTypes.includes('refresh_token')
+        ...(grant.refreshAllowed && client.grantTypes.includes('refresh_token')
           ? { refresh_token: refresh }
           : {}),
         expires_in: Math.floor(

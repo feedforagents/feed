@@ -14,8 +14,6 @@ export async function POST(request: NextRequest) {
     await service.limit(`device-start-ip:${requestRateKey(request)}`, 20);
     const body = await formParameters(request);
     await service.limit(`device-start-client:${body.client_id ?? ''}`, 60);
-    return oauthResponse(
-      await new FeedDeviceService(service.origin).start(body)
-    );
+    return oauthResponse(await new FeedDeviceService(service).start(body));
   });
 }

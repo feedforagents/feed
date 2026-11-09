@@ -1,10 +1,21 @@
 import { sql } from 'drizzle-orm';
-import { index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+} from 'drizzle-orm/pg-core';
 import { users } from './users';
 
 export const mcpOAuthClients = pgTable('McpOAuthClient', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  metadataExpiresAt: timestamp('metadataExpiresAt', {
+    mode: 'date',
+    withTimezone: true,
+  }),
   grantTypes: text('grantTypes')
     .array()
     .notNull()
@@ -26,6 +37,7 @@ export const mcpOAuthGrants = pgTable(
       .notNull()
       .references(() => mcpOAuthClients.id),
     scopes: text('scopes').array().notNull(),
+    refreshAllowed: boolean('refreshAllowed').notNull().default(true),
     resource: text('resource').notNull(),
     expiresAt: timestamp('expiresAt', {
       mode: 'date',
@@ -50,6 +62,7 @@ export const mcpOAuthRequests = pgTable('McpOAuthRequest', {
   state: text('state').notNull(),
   challenge: text('challenge').notNull(),
   scopes: text('scopes').array().notNull(),
+  refreshAllowed: boolean('refreshAllowed').notNull().default(true),
   resource: text('resource').notNull(),
   browserHash: text('browserHash').notNull(),
   expiresAt: timestamp('expiresAt', {
@@ -119,6 +132,7 @@ export const mcpOAuthDevices = pgTable(
       .notNull()
       .references(() => mcpOAuthClients.id),
     scopes: text('scopes').array().notNull(),
+    refreshAllowed: boolean('refreshAllowed').notNull().default(true),
     resource: text('resource').notNull(),
     status: text('status', {
       enum: ['pending', 'approved', 'denied', 'consumed'],
