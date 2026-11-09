@@ -343,6 +343,21 @@ export class PerpDbAdapter implements PerpDbPort {
         setFields.low24h = updates.low24h ?? rotation.resetPrice;
         setFields.volume24h = updates.volume24h ?? 0;
       }
+      // When this write rotates the 24h reference, the caller's change
+      // values were computed against the previous window's reference (read
+      // before the rotation). Recompute them against the reference this
+      // write installs so the stored row stays self-consistent:
+      // change24h = currentPrice - price24hAgo.
+      if (
+        rotation.price24hAgo !== undefined &&
+        updates.currentPrice !== undefined
+      ) {
+        const reference = Number(rotation.price24hAgo);
+        const change = updates.currentPrice - reference;
+        setFields.change24h = change;
+        setFields.changePercent24h =
+          reference === 0 ? 0 : (change / reference) * 100;
+      }
 
       await client
         .update(perpMarketSnapshots)
