@@ -181,22 +181,32 @@ function requestId(body: unknown): string | number | null {
 async function readBody(request: Request): Promise<unknown> {
   if (!request.body) throw new OAuthError('invalid_request');
   const reader = request.body.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      // Reject first: canceling closes pending reads, which must not turn a
+      // timed-out but otherwise valid JSON prefix into an accepted request.
+      reject(new OAuthError('invalid_request', 408));
+      void reader.cancel().catch(() => undefined);
+    }, 5000);
+  });
   const decoder = new TextDecoder();
   let text = '';
   let bytes = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([reader.read(), deadline]);
       if (done) break;
       bytes += value.byteLength;
       if (bytes > 16_384) {
-        await reader.cancel();
+        void reader.cancel().catch(() => undefined);
         throw new OAuthError('invalid_request');
       }
       text += decoder.decode(value, { stream: true });
     }
     text += decoder.decode();
   } finally {
+    if (timer) clearTimeout(timer);
     reader.releaseLock();
   }
   try {
