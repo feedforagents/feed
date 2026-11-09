@@ -53,7 +53,11 @@ mock.module('@feed/core/markets/perps', () => ({
   },
 }));
 
+let mockBalance = 10_000;
+
 mock.module('@feed/engine', () => ({
+  createPerpSettlement: () => ({}),
+  createPerpTradesCachePort: () => ({}),
   createPerpPriceImpactPort: () => ({}),
   createUserWalletAdapter: () => ({}),
   FEE_CONFIG: {
@@ -62,7 +66,7 @@ mock.module('@feed/engine', () => ({
     REFERRER_SHARE: 0.5,
     MIN_FEE_AMOUNT: 0.01,
   },
-  WalletService: { getBalance: async () => ({ balance: 10_000 }) },
+  WalletService: { getBalance: async () => ({ balance: mockBalance }) },
 }));
 
 mock.module('../../../../../services/AgentPnLService', () => ({
@@ -82,6 +86,72 @@ const stateWith = (actionParams: Record<string, unknown>) =>
 describe('OPEN_PERP', () => {
   beforeEach(() => {
     openPositionMock.mockClear();
+    mockBalance = 10_000;
+  });
+
+  test('rejects an open the balance covers only before the trading fee', async () => {
+    // Balance equals the collateral, but the service also debits the fee
+    // (max(100 x 1 x 0.1%, $0.01) = $0.10), so the pre-check must reject
+    // here instead of letting the service fail with a generic error.
+    mockBalance = 100;
+    const result = await openPerpAction.handler(
+      runtime,
+      message,
+      stateWith({ ticker: 'ABC', side: 'LONG', amount: 100, leverage: 1 })
+    );
+    expect(result?.success).toBe(false);
+    expect(result?.error).toBe('Insufficient balance');
+    expect(result?.text).toContain('100.10');
+    expect(openPositionMock).not.toHaveBeenCalled();
+  });
+
+  test('rejects a leveraged open the balance covers only before the fee', async () => {
+    // 10x leverage on $100 collateral: fee is max(1000 x 0.1%, $0.01) = $1.
+    mockBalance = 100.5;
+    const result = await openPerpAction.handler(
+      runtime,
+      message,
+      stateWith({ ticker: 'ABC', side: 'LONG', amount: 100, leverage: 10 })
+    );
+    expect(result?.success).toBe(false);
+    expect(result?.error).toBe('Insufficient balance');
+    expect(result?.text).toContain('101.00');
+    expect(openPositionMock).not.toHaveBeenCalled();
+  });
+
+  test('opens when the balance covers collateral plus the trading fee', async () => {
+    mockBalance = 100.1;
+    const result = await openPerpAction.handler(
+      runtime,
+      message,
+      stateWith({ ticker: 'ABC', side: 'LONG', amount: 100, leverage: 1 })
+    );
+    expect(result?.success).toBe(true);
+    expect(openPositionMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('accepts the exact balance after rounding the service fee down', async () => {
+    mockBalance = 100.11;
+    const result = await openPerpAction.handler(
+      runtime,
+      message,
+      stateWith({ ticker: 'ABC', side: 'LONG', amount: 100.01, leverage: 1 })
+    );
+    expect(result?.success).toBe(true);
+    expect(openPositionMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('reports the same rounded-up fee the service charges', async () => {
+    mockBalance = 105.1;
+    const result = await openPerpAction.handler(
+      runtime,
+      message,
+      stateWith({ ticker: 'ABC', side: 'LONG', amount: 105, leverage: 1 })
+    );
+    expect(result?.success).toBe(false);
+    expect(result?.values?.required).toBe(105.11);
+    expect(result?.text).toContain('$0.11 fee');
+    expect(openPositionMock).not.toHaveBeenCalled();
   });
 
   test('treats amount as collateral and opens notional = amount x leverage', async () => {
