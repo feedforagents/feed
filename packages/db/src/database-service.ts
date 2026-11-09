@@ -25,6 +25,8 @@ import {
   lte,
   notExists,
   notLike,
+  or,
+  type SQL,
   sql,
 } from 'drizzle-orm';
 import { db } from './db';
@@ -34,6 +36,7 @@ import type {
   OrganizationStateRow,
   Question,
 } from './model-types';
+import { decodePostCursor } from './post-cursor';
 import {
   actorState,
   games,
@@ -45,6 +48,45 @@ import {
   users,
   worldEvents,
 } from './schema';
+
+/**
+ * Keyset conditions for posts ordered by (timestamp DESC, id DESC).
+ *
+ * With an id cursor, the anchor post's stored timestamp is read as text so its
+ * full (microsecond) precision is compared, and the plain `timestamp <=` bound
+ * keeps the timestamp index usable. Legacy timestamp-only cursors, and id
+ * cursors whose anchor is missing, deleted or future-dated, keep the previous
+ * `timestamp <` behavior.
+ */
+export async function postCursorConditions(rawCursor: string): Promise<SQL[]> {
+  const cursor = decodePostCursor(rawCursor);
+  if (cursor.id) {
+    // Only a post the feed can show may anchor a page; a deleted or
+    // future-dated id falls back to the cursor's own timestamp.
+    const [anchor] = await db
+      .select({ timestamp: sql<string>`${posts.timestamp}::text` })
+      .from(posts)
+      .where(
+        and(
+          eq(posts.id, cursor.id),
+          isNull(posts.deletedAt),
+          lte(posts.timestamp, new Date())
+        )
+      )
+      .limit(1);
+    if (anchor) {
+      const anchorTimestamp = sql`${anchor.timestamp}::timestamp`;
+      const conditions: SQL[] = [sql`${posts.timestamp} <= ${anchorTimestamp}`];
+      const pastAnchor = or(
+        sql`${posts.timestamp} < ${anchorTimestamp}`,
+        lt(posts.id, cursor.id)
+      );
+      if (pastAnchor) conditions.push(pastAnchor);
+      return conditions;
+    }
+  }
+  return [lt(posts.timestamp, new Date(cursor.timestamp))];
+}
 
 /**
  * FeedPost type representing a post in the feed.
@@ -340,11 +382,9 @@ class DatabaseService {
     const conditions = [isNull(posts.deletedAt)];
 
     if (cursor) {
-      conditions.push(lt(posts.timestamp, new Date(cursor)));
-      conditions.push(lte(posts.timestamp, now));
-    } else {
-      conditions.push(lte(posts.timestamp, now));
+      conditions.push(...(await postCursorConditions(cursor)));
     }
+    conditions.push(lte(posts.timestamp, now));
 
     // Exclude test authors in SQL before paginating, so pages are full
     // (fetching 2x then filtering underfilled pages with many test posts).
@@ -363,7 +403,7 @@ class DatabaseService {
       .select()
       .from(posts)
       .where(and(...conditions))
-      .orderBy(desc(posts.timestamp))
+      .orderBy(desc(posts.timestamp), desc(posts.id))
       .limit(limit)
       .offset(cursor ? 0 : offset);
 
@@ -428,11 +468,9 @@ class DatabaseService {
     const conditions = [eq(posts.authorId, authorId), isNull(posts.deletedAt)];
 
     if (cursor) {
-      conditions.push(lt(posts.timestamp, new Date(cursor)));
-      conditions.push(lte(posts.timestamp, now));
-    } else {
-      conditions.push(lte(posts.timestamp, now));
+      conditions.push(...(await postCursorConditions(cursor)));
     }
+    conditions.push(lte(posts.timestamp, now));
 
     const result = await db
       .select()
@@ -440,7 +478,7 @@ class DatabaseService {
       .where(and(...conditions))
       .limit(limit)
       .offset(cursor ? 0 : offset)
-      .orderBy(desc(posts.timestamp));
+      .orderBy(desc(posts.timestamp), desc(posts.id));
 
     logger.info('DatabaseService.getPostsByActor completed', {
       authorId,

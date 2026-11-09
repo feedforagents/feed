@@ -340,10 +340,9 @@ export async function getAgentGroupChats(
     const teamGroupIds = new Set(teamGroups.map((g) => g.id));
 
     // Use DB-side aggregate count instead of loading all participant rows.
-    // Only active participant rows count: leaving or being kicked keeps the
-    // row with isActive: false, and every other chat surface (A2A chat list,
-    // resolveGroupChatByName, GET /api/groups) treats inactive rows as
-    // "no longer a member".
+    // Membership paths can retain rows with isActive: false (MCP leave does;
+    // HTTP member removal deletes the participant). Inactive rows must not
+    // grant group context or inflate active member counts.
     const rawDb = getRawDrizzle();
     const agentParticipation = rawDb
       .select({ chatId: chatParticipants.chatId })
