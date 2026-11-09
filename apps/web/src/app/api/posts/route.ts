@@ -680,13 +680,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ...blockedByIds,
     ]);
 
-    // Get posts from followed users/actors with caching
+    // Get posts from followed users/actors with caching. The viewer's
+    // moderation exclusions go into the page query itself, so hidden
+    // authors cannot spend the limit and strand visible posts behind
+    // them; the in-memory filter below stays as a second guard.
     const postsResult = await cachedDb.getPostsForFollowing(
       userId,
       allFollowedIds,
       limit,
       // This branch still pages by timestamp only; accept either cursor format.
-      cursor === undefined ? undefined : decodePostCursor(cursor).timestamp
+      cursor === undefined ? undefined : decodePostCursor(cursor).timestamp,
+      [...excludedUserIds]
     );
 
     // Filter out posts from blocked/muted users
