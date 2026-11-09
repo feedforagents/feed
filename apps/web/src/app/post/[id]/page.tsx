@@ -10,6 +10,7 @@ import { FeedCommentSection } from '@/components/feed/FeedCommentSection';
 import { PostCard } from '@/components/posts/PostCard';
 import { PageContainer } from '@/components/shared/PageContainer';
 import { Skeleton } from '@/components/shared/Skeleton';
+import { usePendingIntent } from '@/hooks/usePendingIntent';
 import { useInteractionStore } from '@/stores/interactionStore';
 import { apiUrl } from '@/utils/api-url';
 
@@ -98,9 +99,20 @@ interface PostResponse {
 export default function PostPage({ params }: PostPageProps) {
   const { id: postId } = use(params);
   const router = useRouter();
+  const pending = usePendingIntent();
   const [isCommentModalOpen, setIsCommentModalOpen] = useState(false);
 
   // Function to open comment modal when comment button is clicked
+  useEffect(() => {
+    if (
+      pending.phase === 'review' &&
+      pending.intent?.action.kind === 'reply' &&
+      pending.intent.action.postId === postId &&
+      !pending.intent.action.parentCommentId
+    )
+      setIsCommentModalOpen(true);
+  }, [pending.phase, pending.intent, postId]);
+
   const handleCommentClick = () => {
     setIsCommentModalOpen(true);
   };

@@ -10,6 +10,7 @@ import { useBodyScrollLock } from '@/hooks/useBodyScrollLock';
 import { usePerpOpenPreview } from '@/hooks/usePerpOpenPreview';
 import { usePerpTrade } from '@/hooks/usePerpTrade';
 import { useMarketTracking } from '@/hooks/usePostHog';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import {
   getPerpRebalanceInfo,
   shouldApplyPerpBalanceGate,
@@ -206,7 +207,14 @@ export function PerpTradingModal({
 
   const handleSubmit = async () => {
     if (!authenticated) {
-      login?.();
+      savePendingIntent({
+        kind: 'perp',
+        ticker: market.ticker,
+        side,
+        size,
+        leverage,
+      });
+      login();
       return;
     }
 

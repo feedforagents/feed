@@ -40,6 +40,8 @@ interface BaseTradeDetails {
  */
 interface OpenPerpDetails extends BaseTradeDetails {
   type: 'open-perp';
+  operation?: 'add' | 'reduce' | 'close' | 'flip';
+  operationDescription?: string;
   ticker: string;
   side: 'long' | 'short';
   size: number;
@@ -162,6 +164,8 @@ export function TradeConfirmationDialog({
   const getTitle = () => {
     switch (tradeDetails.type) {
       case 'open-perp':
+        if (tradeDetails.operation)
+          return `Confirm ${{ add: 'Add to Position', reduce: 'Reduce Position', close: 'Close Position', flip: 'Flip Position' }[tradeDetails.operation]}`;
         return `Confirm ${tradeDetails.side === 'long' ? 'Long' : 'Short'} Position`;
       case 'close-perp':
         return 'Confirm Close Position';
@@ -175,6 +179,8 @@ export function TradeConfirmationDialog({
   const getDescription = () => {
     switch (tradeDetails.type) {
       case 'open-perp':
+        if (tradeDetails.operationDescription)
+          return tradeDetails.operationDescription;
         return `You're about to open a ${tradeDetails.leverage}x ${tradeDetails.side} position on $${tradeDetails.ticker}`;
       case 'close-perp':
         return `You're about to close your ${tradeDetails.leverage}x ${tradeDetails.side} position on $${tradeDetails.ticker}`;
@@ -234,7 +240,9 @@ export function TradeConfirmationDialog({
               <span className="font-medium">{tradeDetails.leverage}x</span>
             </div>
             <div className="flex justify-between text-sm">
-              <span className="text-muted-foreground">Entry Price</span>
+              <span className="text-muted-foreground">
+                {tradeDetails.operation ? 'Execution Price' : 'Entry Price'}
+              </span>
               <span className="font-medium">
                 {formatPrice(tradeDetails.entryPrice)}
               </span>
@@ -251,40 +259,45 @@ export function TradeConfirmationDialog({
                 {formatPrice(tradeDetails.estimatedFee)}
               </span>
             </div>
-            <div className="border-border border-t pt-3">
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Liquidation Price</span>
-                <span className="font-bold text-red-600">
-                  {formatPrice(tradeDetails.liquidationPrice)}
-                </span>
-              </div>
-              <div className="mt-1 flex justify-between text-xs">
-                <span className="text-muted-foreground">
-                  Distance to Liquidation
-                </span>
-                <span
-                  className={cn(
-                    'font-medium',
-                    tradeDetails.liquidationDistance > 5
-                      ? 'text-green-600'
-                      : tradeDetails.liquidationDistance > 2
-                        ? 'text-yellow-600'
-                        : 'text-red-600'
-                  )}
-                >
-                  {tradeDetails.liquidationDistance.toFixed(2)}%
-                </span>
-              </div>
-            </div>
-            {tradeDetails.liquidationDistance < 5 && (
-              <div className="mt-2 flex items-start gap-2 rounded-lg bg-yellow-500/15 p-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-yellow-500" />
-                <p className="font-medium text-xs text-yellow-600">
-                  Warning: High leverage increases liquidation risk. Consider
-                  lowering your leverage or position size.
-                </p>
+            {!tradeDetails.operation && (
+              <div className="border-border border-t pt-3">
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">
+                    Liquidation Price
+                  </span>
+                  <span className="font-bold text-red-600">
+                    {formatPrice(tradeDetails.liquidationPrice)}
+                  </span>
+                </div>
+                <div className="mt-1 flex justify-between text-xs">
+                  <span className="text-muted-foreground">
+                    Distance to Liquidation
+                  </span>
+                  <span
+                    className={cn(
+                      'font-medium',
+                      tradeDetails.liquidationDistance > 5
+                        ? 'text-green-600'
+                        : tradeDetails.liquidationDistance > 2
+                          ? 'text-yellow-600'
+                          : 'text-red-600'
+                    )}
+                  >
+                    {tradeDetails.liquidationDistance.toFixed(2)}%
+                  </span>
+                </div>
               </div>
             )}
+            {!tradeDetails.operation &&
+              tradeDetails.liquidationDistance < 5 && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg bg-yellow-500/15 p-3">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-yellow-500" />
+                  <p className="font-medium text-xs text-yellow-600">
+                    Warning: High leverage increases liquidation risk. Consider
+                    lowering your leverage or position size.
+                  </p>
+                </div>
+              )}
           </div>
         );
 

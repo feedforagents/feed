@@ -4,9 +4,12 @@ import type { LikeButtonProps } from '@feed/shared';
 import { cn } from '@feed/shared';
 import { Frown, Heart, Laugh } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { useAuth } from '@/hooks/useAuth';
+import { usePendingIntent } from '@/hooks/usePendingIntent';
 import { useSocialTracking } from '@/hooks/usePostHog';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import { useInteractionStore } from '@/stores/interactionStore';
 
 /**
@@ -120,7 +123,10 @@ export function LikeButton({
   className,
   onLikeChange,
 }: LikeButtonProps & { initialReactionType?: ReactionType }) {
-  const { authenticated, login } = useAuth();
+  const { authenticated, login, user } = useAuth();
+  const { session } = useStewardAuthContext();
+  const completed = usePendingIntent((state) => state.completed);
+  const appliedCompletion = useRef<typeof completed>(null);
   // Ensure size is properly typed for index access
   const sizeKey: 'sm' | 'md' | 'lg' = size;
   const [currentReaction, setCurrentReaction] =
@@ -150,6 +156,34 @@ export function LikeButton({
   const likeCount = storeData?.likeCount ?? initialCount;
   const isLoading = loadingStates.get(targetId) ?? false;
 
+  useEffect(() => {
+    if (completed === appliedCompletion.current) return;
+    if (
+      completed?.action.kind !== 'like' ||
+      completed.action.targetId !== targetId ||
+      completed.action.targetType !== targetType ||
+      completed.accountId !== user?.id ||
+      completed.sessionId !== (session?.userId ?? session?.address)
+    )
+      return;
+    appliedCompletion.current = completed;
+    useInteractionStore
+      .getState()
+      .confirmDesiredLike(
+        targetId,
+        targetType,
+        completed.likeCount ?? likeCount
+      );
+  }, [
+    completed,
+    targetId,
+    targetType,
+    user?.id,
+    session?.userId,
+    session?.address,
+    likeCount,
+  ]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -161,9 +195,11 @@ export function LikeButton({
 
   const handleClick = async () => {
     if (!authenticated) {
+      savePendingIntent({ kind: 'like', targetId, targetType, desired: true });
       login();
       return;
     }
+    usePendingIntent.getState().clearCompleted();
     // Trigger animation
     setIsAnimating(true);
     setTimeout(() => setIsAnimating(false), 300);
@@ -183,6 +219,7 @@ export function LikeButton({
 
   const handleReactionSelect = async (reactionType: ReactionType) => {
     if (!authenticated) {
+      savePendingIntent({ kind: 'like', targetId, targetType, desired: true });
       login();
       return;
     }

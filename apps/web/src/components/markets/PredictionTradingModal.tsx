@@ -20,6 +20,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useBodyScrollLock } from '@/hooks/useBodyScrollLock';
 import { useMarketTracking } from '@/hooks/usePostHog';
 import { usePredictionTrading } from '@/hooks/usePredictionTrading';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import {
   invalidateUserPositions,
   usePredictionPositions,
@@ -74,7 +75,7 @@ export function PredictionTradingModal({
   onSuccess,
   defaultSide = 'YES',
 }: PredictionTradingModalProps) {
-  const { user, authenticated } = useAuth();
+  const { user, authenticated, login } = useAuth();
   const { buyPrediction, sellPrediction } = usePredictionTrading();
   const { trackMarketView, trackTrade } = useMarketTracking();
   const [side, setSide] = useState<'yes' | 'no'>(
@@ -207,6 +208,18 @@ export function PredictionTradingModal({
     side === 'yes' ? 'text-blue-600' : 'text-foreground';
 
   const handleSubmit = async () => {
+    if (!authenticated) {
+      savePendingIntent({
+        kind: 'prediction',
+        marketId: String(question.id),
+        side,
+        mode,
+        amount,
+        shares: sellShares,
+      });
+      login();
+      return;
+    }
     if (!user) return;
 
     if (amountNum < 1) {
@@ -260,6 +273,18 @@ export function PredictionTradingModal({
   };
 
   const handleSell = async () => {
+    if (!authenticated) {
+      savePendingIntent({
+        kind: 'prediction',
+        marketId: String(question.id),
+        side,
+        mode,
+        amount,
+        shares: sellShares,
+      });
+      login();
+      return;
+    }
     if (!user || !userPosition) return;
 
     setLoading(true);

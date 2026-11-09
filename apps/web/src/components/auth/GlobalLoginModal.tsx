@@ -12,6 +12,7 @@ import {
 import { isPrivateAnalyticsPath } from '@/lib/posthog/privacy';
 import { readStorageItem, writeStorageItem } from '@/utils/browser-storage';
 import { LoginModal } from './LoginModal';
+import { PendingIntentContinuation } from './PendingIntentContinuation';
 
 /**
  * Global login modal content component.
@@ -81,19 +82,23 @@ function GlobalLoginModalContent() {
 
   const pageOwnsAuthentication = isPrivateAnalyticsPath(pathname);
   useEffect(() => {
-    if (pageOwnsAuthentication && (isOpen || queuedModal)) closeLoginModal();
+    if (pageOwnsAuthentication && (isOpen || queuedModal))
+      closeLoginModal('authenticated');
   }, [pageOwnsAuthentication, isOpen, queuedModal, closeLoginModal]);
 
-  if (pageOwnsAuthentication) return null;
+  if (pageOwnsAuthentication) return <PendingIntentContinuation />;
 
   return (
-    <LoginModal
-      initialView={initialView}
-      isOpen={isOpen}
-      onClose={closeLoginModal}
-      title={title}
-      message={message}
-    />
+    <>
+      <PendingIntentContinuation />
+      <LoginModal
+        initialView={initialView}
+        isOpen={isOpen}
+        onClose={closeLoginModal}
+        title={title}
+        message={message}
+      />
+    </>
   );
 }
 

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { cancelPendingIntent } from '@/lib/onboarding/pending-intent';
 
 /**
  * State interface for the login modal store.
@@ -33,7 +34,7 @@ interface LoginModalState {
   /** Clear any queued login modal request */
   consumeQueuedLoginModal: () => void;
   /** Function to close the login modal */
-  closeLoginModal: () => void;
+  closeLoginModal: (reason?: 'cancel' | 'authenticated') => void;
 }
 
 /**
@@ -83,12 +84,14 @@ export const useLoginModal = create<LoginModalState>((set) => ({
     set({
       queuedModal: undefined,
     }),
-  closeLoginModal: () =>
+  closeLoginModal: (reason = 'cancel') => {
+    if (reason === 'cancel') cancelPendingIntent();
     set({
       isOpen: false,
       queuedModal: undefined,
       context: undefined,
       title: undefined,
       message: undefined,
-    }),
+    });
+  },
 }));

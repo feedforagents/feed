@@ -3,9 +3,13 @@
 import type { CommentInputProps } from '@feed/shared';
 import { cn } from '@feed/shared';
 import { Send, X } from 'lucide-react';
+import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
+import { usePendingIntent } from '@/hooks/usePendingIntent';
 import { useSocialTracking } from '@/hooks/usePostHog';
+import { useRestoredIntentGuard } from '@/hooks/useRestoredIntentGuard';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import { useInteractionStore } from '@/stores/interactionStore';
 
 /**
@@ -52,7 +56,47 @@ export function CommentInput({
   );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { authenticated, login } = useAuth();
+  const { authenticated, login, user } = useAuth();
+  const pathname = usePathname();
+  const { intent, phase, clear, reviewAccountId, sessionId } =
+    usePendingIntent();
+  const restoredGuard = useRestoredIntentGuard(() => {
+    setContent('');
+    setIsFocused(false);
+  });
+  useEffect(() => {
+    if (
+      pathname !== `/post/${encodeURIComponent(postId)}` ||
+      reviewAccountId !== user?.id ||
+      !sessionId ||
+      phase !== 'review' ||
+      intent?.action.kind !== 'reply' ||
+      intent.action.postId !== postId ||
+      intent.action.parentCommentId !== parentCommentId
+    )
+      return;
+    if (usePendingIntent.getState().intent?.id !== intent.id) return;
+    restoredGuard.arm({
+      sessionId,
+      ownerId: reviewAccountId,
+      expiresAt: intent.expiresAt,
+    });
+    setContent(intent.action.content);
+    setIsFocused(true);
+    textareaRef.current?.focus();
+    clear();
+  }, [
+    intent,
+    phase,
+    postId,
+    parentCommentId,
+    clear,
+    pathname,
+    reviewAccountId,
+    sessionId,
+    user?.id,
+    restoredGuard.arm,
+  ]);
   const { trackPostComment } = useSocialTracking();
   const { addComment } = useInteractionStore();
 
@@ -73,6 +117,7 @@ export function CommentInput({
 
   const handleSubmit = async () => {
     if (!authenticated) {
+      savePendingIntent({ kind: 'reply', postId, parentCommentId, content });
       login();
       return;
     }
@@ -127,11 +172,13 @@ export function CommentInput({
     // Cancel on Escape
     if (e.key === 'Escape' && onCancel) {
       e.preventDefault();
+      restoredGuard.disarm();
       onCancel();
     }
   };
 
   const handleCancel = () => {
+    restoredGuard.disarm();
     setContent('');
     setIsFocused(false);
     if (onCancel) {

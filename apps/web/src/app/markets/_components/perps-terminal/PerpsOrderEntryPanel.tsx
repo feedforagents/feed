@@ -3,7 +3,7 @@
 import { FEE_CONFIG } from '@feed/engine/config/fees';
 import { cn, FEED_POINTS_SYMBOL } from '@feed/shared';
 import { Wallet } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
   type OpenPerpDetails,
@@ -11,14 +11,20 @@ import {
 } from '@/components/markets/TradeConfirmationDialog';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { useAuth } from '@/hooks/useAuth';
+import { usePendingIntent } from '@/hooks/usePendingIntent';
 import { usePerpOpenPreview } from '@/hooks/usePerpOpenPreview';
 import { usePerpTrade } from '@/hooks/usePerpTrade';
+import { useRestoredIntentGuard } from '@/hooks/useRestoredIntentGuard';
 import { formatBalance, formatPrice } from '@/lib/market-formatters';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import {
   getPerpRebalanceInfo,
   shouldApplyPerpBalanceGate,
 } from '@/lib/perps/rebalance';
-import { invalidatePerpMarketsCache } from '@/stores/perpMarketsStore';
+import {
+  invalidatePerpMarketsCache,
+  usePerpMarketsStore,
+} from '@/stores/perpMarketsStore';
 import {
   invalidateUserPositions,
   usePerpPositions,
@@ -46,21 +52,88 @@ export function PerpsOrderEntryPanel({
   const {
     balance,
     loading: balanceLoading,
+    error: balanceError,
     refresh: refreshWalletBalance,
   } = useWalletBalance(userId);
   const {
     positions: perpPositions,
     loading: positionsLoading,
+    error: positionsError,
     refresh: refreshUserPositions,
   } = usePerpPositions(userId);
-
-  const { openPosition } = usePerpTrade({ getAccessToken });
 
   const [side, setSide] = useState<'long' | 'short'>(initialSide ?? 'long');
   const [size, setSize] = useState('100');
   const [leverage, setLeverage] = useState(10);
   const [submitting, setSubmitting] = useState(false);
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
+  const [restored, setRestored] = useState(false);
+  const [restorationReady, setRestorationReady] = useState(false);
+  const restoredOwner = useRef<string | null>(null);
+  const confirmationQuote = useRef<string | null>(null);
+  const pending = usePendingIntent();
+  const restoredGuard = useRestoredIntentGuard(() => {
+    setConfirmDialogOpen(false);
+    setRestored(false);
+    setRestorationReady(false);
+    setSize('100');
+    confirmationQuote.current = null;
+  });
+  const getTradeToken = useCallback(async () => {
+    const token = await getAccessToken();
+    if (restored && !restoredGuard.isCurrent())
+      throw new Error('Your account or draft changed. Review the order again.');
+    return token;
+  }, [getAccessToken, restored, restoredGuard.isCurrent]);
+  const { openPosition } = usePerpTrade({ getAccessToken: getTradeToken });
+  useEffect(() => {
+    if (
+      pending.phase !== 'review' ||
+      !pending.sessionId ||
+      !pending.reviewAccountId ||
+      pending.reviewAccountId !== userId ||
+      pending.intent?.action.kind !== 'perp' ||
+      pending.intent.action.ticker !== market?.ticker
+    )
+      return;
+    if (usePendingIntent.getState().intent?.id !== pending.intent.id) return;
+    const action = pending.intent.action;
+    restoredGuard.arm({
+      sessionId: pending.sessionId,
+      ownerId: pending.reviewAccountId,
+      expiresAt: pending.intent.expiresAt,
+    });
+    pending.clear();
+    setSide(action.side);
+    setSize(action.size);
+    setLeverage(action.leverage);
+    setRestored(true);
+    restoredOwner.current = userId;
+    setRestorationReady(false);
+    setConfirmDialogOpen(false);
+    void Promise.all([
+      refreshWalletBalance(),
+      refreshUserPositions(),
+      usePerpMarketsStore.getState().fetchMarkets(true),
+    ]).then(() => {
+      if (restoredOwner.current === userId) setRestorationReady(true);
+    });
+  }, [
+    pending,
+    restoredGuard.arm,
+    market?.ticker,
+    userId,
+    refreshWalletBalance,
+    refreshUserPositions,
+  ]);
+  useEffect(() => {
+    if (userId !== restoredOwner.current) {
+      setConfirmDialogOpen(false);
+      setRestored(false);
+      setRestorationReady(false);
+      confirmationQuote.current = null;
+    }
+  }, [userId]);
 
   useEffect(() => {
     if (!initialSide) return;
@@ -196,9 +269,26 @@ export function PerpsOrderEntryPanel({
     return `PLACE ${side.toUpperCase()} ORDER`;
   }, [authenticated, rebalanceInfo, side, submitting]);
 
+  const currentQuote = JSON.stringify([
+    userId,
+    market?.ticker,
+    side,
+    sizeNum,
+    clampedLeverage,
+    openPreview,
+    balance,
+    perpPositions,
+  ]);
   const handleSubmit = () => {
     if (!market) return;
     if (!authenticated) {
+      savePendingIntent({
+        kind: 'perp',
+        ticker: market.ticker,
+        side,
+        size,
+        leverage: clampedLeverage,
+      });
       login();
       return;
     }
@@ -217,18 +307,54 @@ export function PerpsOrderEntryPanel({
       return;
     }
 
-    if (rebalanceInfo) {
+    if (
+      restored &&
+      (!restoredGuard.valid ||
+        !restorationReady ||
+        restoredOwner.current !== userId ||
+        balanceError ||
+        positionsError ||
+        usePerpMarketsStore.getState().error ||
+        previewLoading ||
+        !openPreview ||
+        balanceLoading ||
+        positionsLoading)
+    ) {
+      toast.info('Wait for a fresh quote, balance and positions.');
+      return;
+    }
+    if (rebalanceInfo && !restored) {
       void handleConfirmOpen();
       return;
     }
 
+    confirmationQuote.current = currentQuote;
     setConfirmDialogOpen(true);
   };
 
   const handleConfirmOpen = useCallback(async () => {
     if (!market) return;
     if (sizeNum <= 0) return;
+    if (
+      restored &&
+      (!restoredGuard.valid ||
+        !restorationReady ||
+        confirmationQuote.current !== currentQuote ||
+        restoredOwner.current !== userId ||
+        balanceError ||
+        positionsError ||
+        usePerpMarketsStore.getState().error ||
+        !openPreview ||
+        previewLoading ||
+        balanceLoading ||
+        positionsLoading)
+    ) {
+      setConfirmDialogOpen(false);
+      toast.error('Quote changed. Review the order again.');
+      return;
+    }
 
+    if (restored) confirmationQuote.current = null;
     setSubmitting(true);
     setConfirmDialogOpen(false);
 
@@ -245,6 +371,10 @@ export function PerpsOrderEntryPanel({
       }
     );
 
+    if (committed && restored) {
+      restoredGuard.disarm();
+      setRestored(false);
+    }
     if (!committed) {
       setSubmitting(false);
       return;
@@ -294,6 +424,18 @@ export function PerpsOrderEntryPanel({
     existingPosition?.side,
     refreshUserPositions,
     refreshWalletBalance,
+    restoredGuard.disarm,
+    restoredGuard.valid,
+    restored,
+    restorationReady,
+    currentQuote,
+    userId,
+    balanceError,
+    positionsError,
+    openPreview,
+    previewLoading,
+    balanceLoading,
+    positionsLoading,
   ]);
 
   const liquidationPrice = useMemo(() => {
@@ -595,17 +737,30 @@ export function PerpsOrderEntryPanel({
       {/* Confirmation dialog */}
       <TradeConfirmationDialog
         open={confirmDialogOpen}
-        onOpenChange={setConfirmDialogOpen}
+        onOpenChange={(open) => {
+          setConfirmDialogOpen(open);
+          if (!open) {
+            restoredGuard.disarm();
+            setRestored(false);
+          }
+        }}
         onConfirm={handleConfirmOpen}
         isSubmitting={submitting}
         tradeDetails={
-          market && !rebalanceInfo
+          market && (!rebalanceInfo || restored)
             ? ({
                 type: 'open-perp',
+                operation: restored ? rebalanceInfo?.type : undefined,
+                operationDescription: restored
+                  ? rebalanceInfo?.description
+                  : undefined,
                 ticker: market.ticker,
                 side,
                 size: sizeNum,
-                leverage: clampedLeverage,
+                leverage:
+                  restored && openPreview
+                    ? openPreview.leverage
+                    : clampedLeverage,
                 entryPrice: estimatedExecutionPrice,
                 margin: baseMargin,
                 estimatedFee,

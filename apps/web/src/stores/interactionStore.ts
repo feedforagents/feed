@@ -60,6 +60,11 @@ interface InteractionStoreState {
 }
 
 interface InteractionStoreActions {
+  confirmDesiredLike: (
+    targetId: string,
+    targetType: 'post' | 'comment',
+    likeCount: number
+  ) => void;
   // Like actions — resolve true when the server committed the toggle
   toggleLike: (postId: string) => Promise<boolean>;
   toggleCommentLike: (commentId: string) => Promise<boolean>;
@@ -221,6 +226,11 @@ export const useInteractionStore = create<InteractionStore>()(
       };
 
       return {
+        confirmDesiredLike: (targetId, targetType, likeCount) => {
+          if (targetType === 'post')
+            patchPost(targetId, { isLiked: true, likeCount });
+          else patchComment(targetId, { isLiked: true, likeCount });
+        },
         // Initial state
         postInteractions: new Map(),
         commentInteractions: new Map(),

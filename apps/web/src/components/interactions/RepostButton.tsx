@@ -3,11 +3,15 @@
 import type { FeedPost, RepostButtonProps } from '@feed/shared';
 import { cn } from '@feed/shared';
 import { Repeat2, X } from 'lucide-react';
-import { useState } from 'react';
+import { usePathname } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { Avatar } from '@/components/shared/Avatar';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { useAuth } from '@/hooks/useAuth';
+import { usePendingIntent } from '@/hooks/usePendingIntent';
+import { useRestoredIntentGuard } from '@/hooks/useRestoredIntentGuard';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import { useFeedStore } from '@/stores/feedStore';
 import { useInteractionStore } from '@/stores/interactionStore';
 
@@ -71,6 +75,7 @@ export function RepostButton({
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [isAnimating, setIsAnimating] = useState(false);
   const [quoteComment, setQuoteComment] = useState('');
+  const [resumed, setResumed] = useState(false);
 
   const { toggleShare, postInteractions, loadingStates } =
     useInteractionStore();
@@ -82,10 +87,56 @@ export function RepostButton({
   const count = storeData?.shareCount ?? shareCount;
   const isLoading = loadingStates.get(`share-${postId}`) ?? false;
 
-  const { authenticated, login } = useAuth();
+  const { authenticated, login, user } = useAuth();
+  const pathname = usePathname();
+
+  const { intent, phase, clear, reviewAccountId, sessionId } =
+    usePendingIntent();
+  const restoredGuard = useRestoredIntentGuard(() => {
+    setShowConfirmation(false);
+    setQuoteComment('');
+    setResumed(false);
+  });
+  useEffect(() => {
+    if (
+      pathname !== `/post/${encodeURIComponent(postId)}` ||
+      reviewAccountId !== user?.id ||
+      !sessionId ||
+      phase !== 'review' ||
+      intent?.action.kind !== 'repost' ||
+      intent.action.postId !== postId
+    )
+      return;
+    if (usePendingIntent.getState().intent?.id !== intent.id) return;
+    restoredGuard.arm({
+      sessionId,
+      ownerId: reviewAccountId,
+      expiresAt: intent.expiresAt,
+    });
+    clear();
+    if (isShared) {
+      toast.info('You have already reposted this post.');
+      return;
+    }
+    setQuoteComment('');
+    setResumed(true);
+    setShowConfirmation(true);
+  }, [
+    intent,
+    phase,
+    postId,
+    isShared,
+    clear,
+    pathname,
+    reviewAccountId,
+    sessionId,
+    user?.id,
+    restoredGuard.arm,
+  ]);
 
   const handleClick = () => {
     if (!authenticated) {
+      savePendingIntent({ kind: 'repost', postId });
       login();
       return;
     }
@@ -100,11 +151,19 @@ export function RepostButton({
   };
 
   const handleShare = async () => {
+    if (resumed && (!restoredGuard.valid || isShared)) {
+      restoredGuard.disarm();
+      setShowConfirmation(false);
+      toast.info('You have already reposted this post.');
+      return;
+    }
+    setResumed(false);
     const willBeShared = !isShared;
     const commentToSend = quoteComment.trim() || undefined;
     const isQuote = !!commentToSend;
 
     // Close confirmation modal
+    restoredGuard.disarm();
     setShowConfirmation(false);
 
     // Trigger animation
@@ -215,6 +274,7 @@ export function RepostButton({
           <div
             className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm"
             onClick={() => {
+              restoredGuard.disarm();
               setShowConfirmation(false);
               setQuoteComment('');
             }}
@@ -228,6 +288,7 @@ export function RepostButton({
                 <button
                   type="button"
                   onClick={() => {
+                    restoredGuard.disarm();
                     setShowConfirmation(false);
                     setQuoteComment('');
                   }}
@@ -354,6 +415,7 @@ export function RepostButton({
                   <button
                     type="button"
                     onClick={() => {
+                      restoredGuard.disarm();
                       setShowConfirmation(false);
                       setQuoteComment('');
                     }}

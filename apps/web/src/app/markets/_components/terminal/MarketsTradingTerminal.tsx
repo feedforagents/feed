@@ -47,6 +47,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useAuth } from '@/hooks/useAuth';
+import { usePendingIntent } from '@/hooks/usePendingIntent';
 import { usePerpHistory } from '@/hooks/usePerpHistory';
 import { usePortfolioPnL } from '@/hooks/usePortfolioPnL';
 import { usePredictionHistory } from '@/hooks/usePredictionHistory';
@@ -55,7 +56,9 @@ import type {
   PredictionTradeSSE,
 } from '@/hooks/usePredictionMarketStream';
 import { usePredictionMarketStream } from '@/hooks/usePredictionMarketStream';
+import { useRestoredIntentGuard } from '@/hooks/useRestoredIntentGuard';
 import { formatBalance } from '@/lib/market-formatters';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import {
   type MarketKey,
   serializeMarketKey,
@@ -560,6 +563,7 @@ export function MarketsTradingTerminal({
     markets: predictionMarkets,
     loading: predictionLoading,
     error: predictionError,
+    refetch: refetchPredictionMarkets,
   } = usePredictionMarkets(userId ?? undefined);
   usePredictionMarketsPolling(30_000, userId ?? undefined);
   const perpCatalogLoaded = usePerpMarketsStore(
@@ -574,6 +578,7 @@ export function MarketsTradingTerminal({
   const {
     balance,
     loading: balanceLoading,
+    error: walletBalanceError,
     refresh: refreshWalletBalance,
   } = useWalletBalance(userId);
 
@@ -581,6 +586,8 @@ export function MarketsTradingTerminal({
     usePerpPositions(userId);
   const {
     positions: predictionPositions,
+    loading: predictionPositionsLoading,
+    error: predictionPositionsError,
     refresh: refreshPredictionPositions,
   } = usePredictionPositions(userId);
   const {
@@ -619,6 +626,19 @@ export function MarketsTradingTerminal({
   const [predictionSubmitting, setPredictionSubmitting] = useState(false);
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
   const [predictionDetailsOpen, setPredictionDetailsOpen] = useState(false);
+  const pending = usePendingIntent();
+  const [restoredPrediction, setRestoredPrediction] = useState(false);
+  const [restorationReady, setRestorationReady] = useState(false);
+  const restoredOwner = useRef<string | null>(null);
+  const predictionConfirmationQuote = useRef<string | null>(null);
+  const restoredGuard = useRestoredIntentGuard(() => {
+    setConfirmDialogOpen(false);
+    setRestoredPrediction(false);
+    setRestorationReady(false);
+    setPredictionAmount('10');
+    setPredictionSellShares('');
+    predictionConfirmationQuote.current = null;
+  });
 
   const [perpTimeRange, setPerpTimeRange] = useState<MarketTimeRange>('1D');
   const [predictionTimeRange, setPredictionTimeRange] =
@@ -1217,7 +1237,7 @@ export function MarketsTradingTerminal({
   // Consolidated sell mode effect - handles both mode switching and side switching
   // to prevent cascading state updates from separate effects
   useEffect(() => {
-    if (predictionTradeMode !== 'sell') return;
+    if (predictionTradeMode !== 'sell' || restoredPrediction) return;
 
     // If can't sell at all, switch to buy mode
     if (!canSellPrediction) {
@@ -1243,6 +1263,7 @@ export function MarketsTradingTerminal({
       }
     }
   }, [
+    restoredPrediction,
     canSellPrediction,
     predictionSide,
     predictionTradeMode,
@@ -1347,9 +1368,96 @@ export function MarketsTradingTerminal({
   }, [predictionBuyCalculation]);
   const expectedProfit = expectedPayout - predictionAmountNum;
 
+  useEffect(() => {
+    if (
+      pending.phase !== 'review' ||
+      !pending.sessionId ||
+      !pending.reviewAccountId ||
+      pending.reviewAccountId !== userId ||
+      pending.intent?.action.kind !== 'prediction' ||
+      pending.intent.action.marketId !== selectedPredictionId
+    )
+      return;
+    if (usePendingIntent.getState().intent?.id !== pending.intent.id) return;
+    const action = pending.intent.action;
+    restoredGuard.arm({
+      sessionId: pending.sessionId,
+      ownerId: pending.reviewAccountId,
+      expiresAt: pending.intent.expiresAt,
+    });
+    pending.clear();
+    restoredOwner.current = userId;
+    setRestoredPrediction(true);
+    setRestorationReady(false);
+    setConfirmDialogOpen(false);
+    setPredictionSide(action.side);
+    setPredictionTradeMode(action.mode);
+    setPredictionAmount(action.amount);
+    setPredictionSellShares(action.shares);
+    void Promise.all([
+      refetchPredictionMarkets(),
+      refreshPredictionPositions(),
+      refreshWalletBalance(),
+    ]).then(() => {
+      if (restoredOwner.current === userId) setRestorationReady(true);
+    });
+  }, [
+    pending,
+    restoredGuard.arm,
+    userId,
+    selectedPredictionId,
+    refetchPredictionMarkets,
+    refreshPredictionPositions,
+    refreshWalletBalance,
+  ]);
+  useEffect(() => {
+    if (userId !== restoredOwner.current) {
+      setConfirmDialogOpen(false);
+      setRestoredPrediction(false);
+      setRestorationReady(false);
+      predictionConfirmationQuote.current = null;
+    }
+  }, [userId]);
+  const predictionQuote = JSON.stringify([
+    userId,
+    selectedPredictionId,
+    predictionSide,
+    predictionTradeMode,
+    predictionAmount,
+    predictionSellShares,
+    predictionState,
+    predictionBuyCalculation,
+    predictionSellCalculation,
+    balance,
+    selectedPredictionPositions,
+  ]);
   const handlePredictionSubmit = () => {
     if (!authenticated) {
+      if (selectedPredictionId)
+        savePendingIntent({
+          kind: 'prediction',
+          marketId: selectedPredictionId,
+          side: predictionSide,
+          mode: predictionTradeMode,
+          amount: predictionAmount,
+          shares: predictionSellShares,
+        });
       login();
+      return;
+    }
+    if (
+      restoredPrediction &&
+      (!restoredGuard.valid ||
+        !restorationReady ||
+        restoredOwner.current !== userId ||
+        predictionLoading ||
+        predictionError ||
+        walletBalanceError ||
+        predictionPositionsLoading ||
+        predictionPositionsError ||
+        balanceLoading)
+    ) {
+      toast.info('Wait for your current market, balance and positions.');
       return;
     }
     if (!predictionState) return;
@@ -1380,10 +1488,28 @@ export function MarketsTradingTerminal({
         return;
       }
     }
+    predictionConfirmationQuote.current = predictionQuote;
     setConfirmDialogOpen(true);
   };
 
   const handleConfirmPredictionTrade = async () => {
+    if (
+      restoredPrediction &&
+      (!restoredGuard.valid ||
+        !restorationReady ||
+        predictionConfirmationQuote.current !== predictionQuote ||
+        restoredOwner.current !== userId ||
+        predictionLoading ||
+        predictionError ||
+        walletBalanceError ||
+        predictionPositionsLoading ||
+        predictionPositionsError ||
+        balanceLoading)
+    ) {
+      setConfirmDialogOpen(false);
+      toast.error('Quote changed. Review your trade again.');
+      return;
+    }
     if (!predictionState) return;
     if (predictionTradeMode === 'buy' && !predictionBuyCalculation) {
       toast.error('Invalid buy amount.');
@@ -1404,11 +1530,16 @@ export function MarketsTradingTerminal({
       }
     }
 
+    if (restoredPrediction) predictionConfirmationQuote.current = null;
     setPredictionSubmitting(true);
     setConfirmDialogOpen(false);
 
     try {
       const token = await getAccessToken();
+      if (restoredPrediction && !restoredGuard.isCurrent()) {
+        toast.error('Your account or draft changed. Review the trade again.');
+        return;
+      }
       if (!token) {
         toast.error('Authentication required. Please log in.');
         return;
@@ -2875,7 +3006,13 @@ export function MarketsTradingTerminal({
 
       <TradeConfirmationDialog
         open={confirmDialogOpen}
-        onOpenChange={setConfirmDialogOpen}
+        onOpenChange={(open) => {
+          setConfirmDialogOpen(open);
+          if (!open) {
+            restoredGuard.disarm();
+            setRestoredPrediction(false);
+          }
+        }}
         onConfirm={handleConfirmPredictionTrade}
         isSubmitting={predictionSubmitting}
         tradeDetails={

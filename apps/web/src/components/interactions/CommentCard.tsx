@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ModerationMenu } from '@/components/moderation/ModerationMenu';
 import { formatTimeAgo } from '@/components/posts/CommentPreview';
@@ -23,7 +23,9 @@ import {
 } from '@/components/shared/VerifiedBadge';
 import { useAuth } from '@/hooks/useAuth';
 import { useMenuPosition } from '@/hooks/useMenuPosition';
+import { usePendingIntent } from '@/hooks/usePendingIntent';
 import { MAX_REPLY_COUNT } from '@/lib/constants';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import { CommentInput } from './CommentInput';
 import { LikeButton } from './LikeButton';
 
@@ -107,8 +109,24 @@ export function CommentCard({
   const isOwnComment = user?.id === comment.userId;
   const authorIsNPC = isNpcIdentifier(comment.userId);
 
+  const pending = usePendingIntent();
+  useEffect(() => {
+    if (
+      pending.phase === 'review' &&
+      pending.intent?.action.kind === 'reply' &&
+      pending.intent.action.parentCommentId === comment.id
+    )
+      setIsReplying(true);
+  }, [pending.phase, pending.intent, comment.id]);
+
   const handleReply = () => {
     if (!authenticated) {
+      savePendingIntent({
+        kind: 'reply',
+        postId,
+        parentCommentId: comment.id,
+        content: '',
+      });
       login();
       return;
     }

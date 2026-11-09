@@ -36,7 +36,7 @@ type Step = 'idle' | 'email-sent' | 'loading' | 'error' | 'mfa';
 
 interface LoginModalProps {
   isOpen: boolean;
-  onClose: () => void;
+  onClose: (reason?: 'cancel' | 'authenticated') => void;
   title?: string;
   message?: string;
   initialView?: AgentEntryView;
@@ -148,13 +148,13 @@ export function LoginModal({
       }
       await onLoginSuccess(result.token, result.refreshToken);
       onSignedIn?.();
-      onClose();
+      onClose('authenticated');
     },
     [onLoginSuccess, onClose, onSignedIn]
   );
 
   useEffect(() => {
-    if (authenticated && isOpen && !reauthenticate) onClose();
+    if (authenticated && isOpen && !reauthenticate) onClose('authenticated');
   }, [authenticated, isOpen, onClose, reauthenticate]);
 
   useEffect(() => {
@@ -375,7 +375,7 @@ export function LoginModal({
             >
               Sign in
             </Button>
-            <Button variant="ghost" onClick={onClose}>
+            <Button variant="ghost" onClick={() => onClose()}>
               Browse feed
             </Button>
             {errorMsg && (

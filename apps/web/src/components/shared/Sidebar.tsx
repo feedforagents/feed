@@ -27,6 +27,10 @@ import { useAuth } from '@/hooks/useAuth';
 import { usePostHog } from '@/hooks/usePostHog';
 import { useUnreadMessages } from '@/hooks/useUnreadMessages';
 import { useUnreadNotifications } from '@/hooks/useUnreadNotifications';
+import {
+  pendingActionSchema,
+  savePendingIntent,
+} from '@/lib/onboarding/pending-intent';
 import { getUserDisplayName } from '@/lib/user-display';
 
 /**
@@ -307,7 +311,14 @@ function SidebarContent() {
                 <button
                   key={item.name}
                   type="button"
-                  onClick={login}
+                  onClick={() => {
+                    const action = pendingActionSchema.safeParse({
+                      kind: 'navigate',
+                      href: item.href,
+                    });
+                    if (action.success) savePendingIntent(action.data);
+                    login();
+                  }}
                   className={cn(sharedClassName, 'w-full')}
                   title={item.name}
                 >

@@ -2,12 +2,15 @@
 
 import { cn, logger } from '@feed/shared';
 import { Minus, Plus, UserMinus, UserPlus } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { useAuth } from '@/hooks/useAuth';
+import { usePendingIntent } from '@/hooks/usePendingIntent';
 import { useSocialTracking } from '@/hooks/usePostHog';
 import { getAuthToken } from '@/lib/auth';
+import { savePendingIntent } from '@/lib/onboarding/pending-intent';
 import { apiUrl } from '@/utils/api-url';
 
 /**
@@ -48,14 +51,18 @@ export function FollowButton({
   onFollowChange,
   onFollowerCountChange,
 }: FollowButtonProps) {
-  const { authenticated, user } = useAuth();
+  const { authenticated, user, login } = useAuth();
   const [isFollowing, setIsFollowing] = useState(initialFollowing ?? false);
   const [isLoading, setIsLoading] = useState(false);
   const [isChecking, setIsChecking] = useState(initialFollowing === undefined);
+  const completed = usePendingIntent((state) => state.completed);
+  const { session } = useStewardAuthContext();
+  const requestGeneration = useRef(0);
   const { trackFollow } = useSocialTracking();
 
   // Check follow status on mount
   useEffect(() => {
+    const generation = ++requestGeneration.current;
     if (initialFollowing !== undefined) {
       setIsFollowing(initialFollowing);
       setIsChecking(false);
@@ -99,8 +106,10 @@ export function FollowButton({
         }
       );
 
+      if (generation !== requestGeneration.current) return;
       if (response.ok) {
         const data = await response.json();
+        if (generation !== requestGeneration.current) return;
         setIsFollowing(data.isFollowing || false);
       } else {
         // If check fails, assume not following (don't show error)
@@ -112,12 +121,29 @@ export function FollowButton({
     checkFollowStatus();
   }, [authenticated, initialFollowing, user, userId]);
 
+  useEffect(() => {
+    if (
+      completed?.action.kind === 'follow' &&
+      completed.action.targetId === userId &&
+      completed.accountId === user?.id &&
+      completed.sessionId === (session?.userId ?? session?.address)
+    ) {
+      ++requestGeneration.current;
+      setIsFollowing(true);
+      setIsChecking(false);
+      return;
+    }
+  }, [completed, userId, user?.id, session?.userId, session?.address]);
+
   const handleFollow = async () => {
     if (!authenticated || !user) {
-      toast.error('Please sign in to follow users');
+      savePendingIntent({ kind: 'follow', targetId: userId, desired: true });
+      login();
       return;
     }
 
+    ++requestGeneration.current;
+    usePendingIntent.getState().clearCompleted();
     // Check if viewing own profile (userId could be username or user ID)
     const isOwnProfile =
       user.id === userId ||
@@ -212,7 +238,7 @@ export function FollowButton({
         user.username.slice(1) === userId));
 
   // Don't show for own profile or when not authenticated
-  if (isOwnProfile || !authenticated) {
+  if (isOwnProfile) {
     return null;
   }
 
