@@ -22,6 +22,7 @@ import {
 import { generateSnowflakeId } from '@feed/shared';
 import {
   executeGetFavoritePosts,
+  executeGetMarketPrices,
   executeGetMarkets,
   executeGetPositions,
   executeGetUnreadCount,
@@ -31,6 +32,11 @@ import {
 } from '../../mcp/src/handlers/tool-handlers';
 
 const userIds: string[] = [];
+const marketIds: string[] = [];
+const postIds: string[] = [];
+const commentIds: string[] = [];
+const favoriteIds: string[] = [];
+const positionIds: string[] = [];
 let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
@@ -41,18 +47,24 @@ let liveCommentId: string;
 let deletedCommentId: string;
 
 async function createUser(
-  overrides: Partial<typeof users.$inferInsert> = {}
+  overrides: Partial<typeof users.$inferInsert> = {},
+  ownership = userIds
 ): Promise<string> {
   const id = await generateSnowflakeId();
-  await db.insert(users).values({
-    id,
-    username: `mcp_${id.slice(-10)}`,
-    isActor: false,
-    updatedAt: new Date(),
-    ...overrides,
-  });
-  userIds.push(id);
-  return id;
+  const inserted = await db
+    .insert(users)
+    .values({
+      id,
+      username: `mcp_${id.slice(-10)}`,
+      isActor: false,
+      updatedAt: new Date(),
+      ...overrides,
+    })
+    .returning({ id: users.id });
+  ownership.push(...inserted.map((row) => row.id));
+  const owned = inserted[0];
+  if (!owned) throw new Error('User fixture insert returned no row');
+  return owned.id;
 }
 
 describe('MCP tool handlers', () => {
@@ -66,45 +78,61 @@ describe('MCP tool handlers', () => {
       walletAddress: '0x00000000000000000000000000000000000000aa',
     });
     postId = await generateSnowflakeId();
-    await db.insert(posts).values({
-      id: postId,
-      content: 'favorite post',
-      authorId: otherUserId,
-    });
-    await db.insert(favorites).values({
-      id: await generateSnowflakeId(),
-      userId: agentUserId,
-      targetUserId: otherUserId,
-    });
+    const insertedPosts = await db
+      .insert(posts)
+      .values({
+        id: postId,
+        content: 'favorite post',
+        authorId: otherUserId,
+      })
+      .returning({ id: posts.id });
+    postIds.push(...insertedPosts.map((row) => row.id));
+    const insertedFavorites = await db
+      .insert(favorites)
+      .values({
+        id: await generateSnowflakeId(),
+        userId: agentUserId,
+        targetUserId: otherUserId,
+      })
+      .returning({ id: favorites.id });
+    favoriteIds.push(...insertedFavorites.map((row) => row.id));
     liveCommentId = await generateSnowflakeId();
     deletedCommentId = await generateSnowflakeId();
-    await db.insert(comments).values([
-      {
-        id: liveCommentId,
-        content: 'live comment',
-        postId,
-        authorId: otherUserId,
-        updatedAt: new Date(),
-      },
-      {
-        id: deletedCommentId,
-        content: 'moderated comment',
-        postId,
-        authorId: otherUserId,
-        updatedAt: new Date(),
-        deletedAt: new Date(),
-      },
-    ]);
+    const insertedComments = await db
+      .insert(comments)
+      .values([
+        {
+          id: liveCommentId,
+          content: 'live comment',
+          postId,
+          authorId: otherUserId,
+          updatedAt: new Date(),
+        },
+        {
+          id: deletedCommentId,
+          content: 'moderated comment',
+          postId,
+          authorId: otherUserId,
+          updatedAt: new Date(),
+          deletedAt: new Date(),
+        },
+      ])
+      .returning({ id: comments.id });
+    commentIds.push(...insertedComments.map((row) => row.id));
     marketId = await generateSnowflakeId();
-    await db.insert(markets).values({
-      id: marketId,
-      question: 'Will the MCP list only open positions?',
-      yesShares: '500',
-      noShares: '500',
-      liquidity: '1000',
-      endDate: new Date(Date.now() + 86_400_000),
-      updatedAt: new Date(),
-    });
+    const insertedMarkets = await db
+      .insert(markets)
+      .values({
+        id: marketId,
+        question: 'Will the MCP list only open positions?',
+        yesShares: '500',
+        noShares: '500',
+        liquidity: '1000',
+        endDate: new Date(Date.now() + 86_400_000),
+        updatedAt: new Date(),
+      })
+      .returning({ id: markets.id });
+    marketIds.push(...insertedMarkets.map((row) => row.id));
     activePositionId = await generateSnowflakeId();
     const positionRow = (id: string, side: boolean, status: string) => ({
       id,
@@ -116,13 +144,15 @@ describe('MCP tool handlers', () => {
       status,
       updatedAt: new Date(),
     });
-    await db
+    const insertedPositions = await db
       .insert(positions)
       .values([
         positionRow(activePositionId, true, 'active'),
         positionRow(await generateSnowflakeId(), false, 'closed'),
         positionRow(await generateSnowflakeId(), true, 'resolved'),
-      ]);
+      ])
+      .returning({ id: positions.id });
+    positionIds.push(...insertedPositions.map((row) => row.id));
     await db.insert(notifications).values([
       {
         id: await generateSnowflakeId(),
@@ -145,16 +175,12 @@ describe('MCP tool handlers', () => {
     await db
       .delete(notifications)
       .where(inArray(notifications.userId, userIds));
-    await db
-      .delete(reactions)
-      .where(inArray(reactions.commentId, [liveCommentId, deletedCommentId]));
-    await db
-      .delete(comments)
-      .where(inArray(comments.id, [liveCommentId, deletedCommentId]));
-    await db.delete(favorites).where(inArray(favorites.userId, userIds));
-    await db.delete(positions).where(inArray(positions.userId, userIds));
-    await db.delete(markets).where(eq(markets.id, marketId));
-    await db.delete(posts).where(eq(posts.id, postId));
+    await db.delete(reactions).where(inArray(reactions.userId, userIds));
+    await db.delete(comments).where(inArray(comments.id, commentIds));
+    await db.delete(favorites).where(inArray(favorites.id, favoriteIds));
+    await db.delete(positions).where(inArray(positions.id, positionIds));
+    await db.delete(markets).where(inArray(markets.id, marketIds));
+    await db.delete(posts).where(inArray(posts.id, postIds));
     await db.delete(users).where(inArray(users.id, userIds));
   });
 
@@ -198,6 +224,35 @@ describe('MCP tool handlers', () => {
     await expect(
       executeGetMarkets({ type: 'perpetuals' }, agent())
     ).rejects.toThrow('get_perpetuals');
+  });
+
+  it.each([
+    { yesShares: '9000', noShares: '1000', yesPrice: 0.1, noPrice: 0.9 },
+    { yesShares: '1000', noShares: '9000', yesPrice: 0.9, noPrice: 0.1 },
+    { yesShares: '0', noShares: '0', yesPrice: 0.5, noPrice: 0.5 },
+  ])('quotes CPMM prices for $yesShares/$noShares reserves', async (pool) => {
+    const id = await generateSnowflakeId();
+    const inserted = await db
+      .insert(markets)
+      .values({
+        id,
+        question: 'MCP price consistency',
+        yesShares: pool.yesShares,
+        noShares: pool.noShares,
+        liquidity: '10000',
+        endDate: new Date(Date.now() + 86_400_000),
+        updatedAt: new Date(),
+      })
+      .returning({ id: markets.id });
+    marketIds.push(...inserted.map((row) => row.id));
+
+    expect(
+      await executeGetMarketPrices(agent(), { marketId: id })
+    ).toMatchObject({
+      marketId: id,
+      yesPrice: pool.yesPrice,
+      noPrice: pool.noPrice,
+    });
   });
 
   it('lists only open prediction positions on get_positions', async () => {
@@ -292,5 +347,30 @@ describe('MCP tool handlers', () => {
       .from(reactions)
       .where(eq(reactions.commentId, deletedCommentId));
     expect(liked).toHaveLength(0);
+  });
+
+  it('does not acquire cleanup ownership when user setup fails', async () => {
+    const partial: string[] = [];
+    const failed: string[] = [];
+    let partialId = '';
+    try {
+      partialId = await createUser({}, partial);
+      await expect(createUser({ id: agentUserId }, failed)).rejects.toThrow();
+      expect(partial).toEqual([partialId]);
+      expect(failed).toEqual([]);
+      await db.delete(users).where(inArray(users.id, failed));
+      const existing = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, agentUserId));
+      expect(existing).toHaveLength(1);
+    } finally {
+      await db.delete(users).where(inArray(users.id, partial));
+    }
+    const remaining = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, partialId));
+    expect(remaining).toHaveLength(0);
   });
 });

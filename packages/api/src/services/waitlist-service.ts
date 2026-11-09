@@ -205,7 +205,11 @@ export class WaitlistService {
             userId
           );
 
-          if (referralResult.success && !referralResult.alreadyAwarded) {
+          if (
+            referralResult.success &&
+            !referralResult.alreadyAwarded &&
+            referralResult.reputationAwarded > 0
+          ) {
             referrerRewarded = true;
             logger.info(
               `Rewarded referrer ${referrer.id} with ${referralResult.reputationAwarded} reputation via referral system`,
