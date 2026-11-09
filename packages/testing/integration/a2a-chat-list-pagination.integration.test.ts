@@ -67,11 +67,33 @@ async function getChats(
   userId: string,
   params: Record<string, number>
 ): Promise<ChatsResult> {
-  return (await FeedAgentExecutor.executeDirectly(
+  const raw: unknown = await FeedAgentExecutor.executeDirectly(
     'messaging.get_chats',
     params,
     userId
-  )) as ChatsResult;
+  );
+  if (
+    typeof raw !== 'object' ||
+    raw === null ||
+    !Array.isArray((raw as { chats?: unknown }).chats)
+  ) {
+    throw new Error('messaging.get_chats returned an unexpected shape');
+  }
+  const chats = (raw as { chats: Array<{ id?: unknown }> }).chats;
+  return {
+    chats: chats.map((chat) => {
+      if (
+        typeof chat !== 'object' ||
+        chat === null ||
+        typeof chat.id !== 'string'
+      ) {
+        throw new Error(
+          'messaging.get_chats returned a chat without a string id'
+        );
+      }
+      return { id: chat.id };
+    }),
+  };
 }
 
 async function walkAllChats(
