@@ -16,6 +16,12 @@ const token = `s117${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
 const ownedIds: string[] = [];
 const ids = new Map<string, string>();
 
+function fixtureId(label: string): string {
+  const id = ids.get(label);
+  if (id === undefined) throw new Error(`fixture ${label} was not acquired`);
+  return id;
+}
+
 async function createUser(
   label: string,
   overrides: Partial<typeof users.$inferInsert>
@@ -31,7 +37,7 @@ async function createUser(
   return inserted[0].id;
 }
 
-const agent = () => ({ agentId: 'agent', userId: ids.get('caller')! });
+const agent = () => ({ agentId: 'agent', userId: fixtureId('caller') });
 
 async function search(query: string, limit = 50): Promise<string[]> {
   const result = await executeSearchUsers(agent(), { query, limit });
@@ -105,48 +111,54 @@ beforeAll(async () => {
 afterAll(async () => {
   if (ownedIds.length) {
     await db.delete(users).where(inArray(users.id, ownedIds));
+    expect(
+      await db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, ownedIds))
+    ).toHaveLength(0);
   }
 });
 
 describe('MCP search_users moderation parity', () => {
   it('excludes banned users matched by username or display name', async () => {
     const found = await search(token);
-    expect(found).not.toContain(ids.get('bannedName'));
-    expect(found).not.toContain(ids.get('bannedDisplay'));
+    expect(found).not.toContain(fixtureId('bannedName'));
+    expect(found).not.toContain(fixtureId('bannedDisplay'));
   });
 
   it('excludes test users matched by username or display name', async () => {
     const found = await search(token);
-    expect(found).not.toContain(ids.get('testName'));
-    expect(found).not.toContain(ids.get('testDisplay'));
+    expect(found).not.toContain(fixtureId('testName'));
+    expect(found).not.toContain(fixtureId('testDisplay'));
   });
 
   it('excludes test accounts identified by the test- id prefix alone', async () => {
     const found = await search(token);
-    expect(found).not.toContain(ids.get('prefixOnly'));
+    expect(found).not.toContain(fixtureId('prefixOnly'));
   });
 
   it('retains real users, agents and actors', async () => {
     const found = await search(token);
-    expect(found).toContain(ids.get('normalName'));
-    expect(found).toContain(ids.get('normalDisplay'));
-    expect(found).toContain(ids.get('agentUser'));
-    expect(found).toContain(ids.get('actorUser'));
+    expect(found).toContain(fixtureId('normalName'));
+    expect(found).toContain(fixtureId('normalDisplay'));
+    expect(found).toContain(fixtureId('agentUser'));
+    expect(found).toContain(fixtureId('actorUser'));
   });
 
   it('fills a small limit with eligible users only', async () => {
     const found = await search(token, 3);
     expect(found).toHaveLength(3);
-    expect(found).not.toContain(ids.get('bannedName'));
-    expect(found).not.toContain(ids.get('bannedDisplay'));
-    expect(found).not.toContain(ids.get('testName'));
-    expect(found).not.toContain(ids.get('testDisplay'));
+    expect(found).not.toContain(fixtureId('bannedName'));
+    expect(found).not.toContain(fixtureId('bannedDisplay'));
+    expect(found).not.toContain(fixtureId('testName'));
+    expect(found).not.toContain(fixtureId('testDisplay'));
   });
 
   it('keeps case-insensitive matching on both fields', async () => {
     const found = await search(token.toUpperCase());
-    expect(found).toContain(ids.get('normalName'));
-    expect(found).toContain(ids.get('normalDisplay'));
+    expect(found).toContain(fixtureId('normalName'));
+    expect(found).toContain(fixtureId('normalDisplay'));
   });
 
   it('returns no invented users for an unmatched query', async () => {
