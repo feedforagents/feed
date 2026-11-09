@@ -29,7 +29,18 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { db, inArray, posts, reactions, users } from '@feed/db';
+import { invalidateCache, narrativeEnrichmentKey } from '@feed/api';
+import {
+  and,
+  count,
+  db,
+  eq,
+  inArray,
+  notifications,
+  posts,
+  reactions,
+  users,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
@@ -45,6 +56,35 @@ type ForYouResponse = {
 type PostDetailResponse = {
   data: { id: string; isLiked: boolean; likeCount: number };
 };
+
+// Ownership is acquired only from rows an insert actually created
+// (RETURNING), so a failed setup insert never puts an unowned id into
+// cleanup. Cleanup below deletes exactly these ids — never the
+// pre-generated ids, which may belong to nobody (or somebody else)
+// when an insert fails.
+let ownedUserIds: string[] = [];
+let ownedPostIds: string[] = [];
+let ownedReactionIds: string[] = [];
+
+/**
+ * Narrow a post-detail body to the successful shape. The handler returns
+ * either that shape or an error body (or nothing at all), and neither
+ * optional chaining nor an expected HTTP status narrows the union, so
+ * reading `.data` off the raw union is a type error.
+ */
+function isPostDetailResponse(
+  body: PostDetailResponse | { error?: unknown } | null
+): body is PostDetailResponse {
+  return (
+    body !== null &&
+    typeof body === 'object' &&
+    'data' in body &&
+    typeof body.data === 'object' &&
+    body.data !== null &&
+    'isLiked' in body.data &&
+    'likeCount' in body.data
+  );
+}
 
 let authorA: string;
 let viewerA: string;
@@ -151,69 +191,140 @@ beforeAll(async () => {
   const now = new Date();
   const earlier = new Date(now.getTime() - 60_000);
 
-  await db.insert(users).values([
-    {
-      id: authorA,
-      username: `f50a-author-${authorA}`,
-      displayName: 'F50 Author A',
-      updatedAt: now,
-    },
-    {
-      id: viewerA,
-      username: `f50a-viewer-${viewerA}`,
-      displayName: 'F50 Viewer A',
-      stewardId: `f50a-${viewerA}`,
-      updatedAt: now,
-    },
-    {
-      id: authorB,
-      username: `f50b-author-${authorB}`,
-      displayName: 'F50 Author B',
-      updatedAt: now,
-    },
-    {
-      id: viewerB,
-      username: `f50b-viewer-${viewerB}`,
-      displayName: 'F50 Viewer B',
-      stewardId: `f50b-${viewerB}`,
-      updatedAt: now,
-    },
-  ]);
+  const createdUsers = await db
+    .insert(users)
+    .values([
+      {
+        id: authorA,
+        username: `f50a-author-${authorA}`,
+        displayName: 'F50 Author A',
+        updatedAt: now,
+      },
+      {
+        id: viewerA,
+        username: `f50a-viewer-${viewerA}`,
+        displayName: 'F50 Viewer A',
+        stewardId: `f50a-${viewerA}`,
+        updatedAt: now,
+      },
+      {
+        id: authorB,
+        username: `f50b-author-${authorB}`,
+        displayName: 'F50 Author B',
+        updatedAt: now,
+      },
+      {
+        id: viewerB,
+        username: `f50b-viewer-${viewerB}`,
+        displayName: 'F50 Viewer B',
+        stewardId: `f50b-${viewerB}`,
+        updatedAt: now,
+      },
+    ])
+    .returning({ id: users.id });
+  ownedUserIds = createdUsers.map((row) => row.id);
 
-  await db.insert(posts).values([
-    {
-      id: postA,
-      content: 'f50 fixture post for the like direction',
-      authorId: authorA,
-      timestamp: earlier,
-      createdAt: earlier,
-    },
-    {
-      id: postB,
-      content: 'f50 fixture post for the unlike direction',
-      authorId: authorB,
-      timestamp: earlier,
-      createdAt: earlier,
-    },
-  ]);
+  const createdPosts = await db
+    .insert(posts)
+    .values([
+      {
+        id: postA,
+        content: 'f50 fixture post for the like direction',
+        authorId: authorA,
+        timestamp: earlier,
+        createdAt: earlier,
+      },
+      {
+        id: postB,
+        content: 'f50 fixture post for the unlike direction',
+        authorId: authorB,
+        timestamp: earlier,
+        createdAt: earlier,
+      },
+    ])
+    .returning({ id: posts.id });
+  ownedPostIds = createdPosts.map((row) => row.id);
 
   // Scenario B starts already-liked, recorded directly in the reaction
   // table (the same row the like route would have written).
-  await db.insert(reactions).values({
-    id: await generateSnowflakeId(),
-    postId: postB,
-    userId: viewerB,
-    type: 'like',
-    createdAt: earlier,
-  });
+  const createdReactions = await db
+    .insert(reactions)
+    .values({
+      id: await generateSnowflakeId(),
+      postId: postB,
+      userId: viewerB,
+      type: 'like',
+      createdAt: earlier,
+    })
+    .returning({ id: reactions.id });
+  ownedReactionIds = createdReactions.map((row) => row.id);
 });
 
 afterAll(async () => {
-  await db.delete(reactions).where(inArray(reactions.postId, [postA, postB]));
-  await db.delete(posts).where(inArray(posts.id, [postA, postB]));
-  await db
-    .delete(users)
-    .where(inArray(users.id, [authorA, viewerA, authorB, viewerB]));
+  // Delete only rows this suite owns. The like route also writes an
+  // author notification for the liked post (no cascading FK), so remove
+  // notifications the owned viewers left on the owned posts too.
+  if (ownedReactionIds.length > 0) {
+    await db.delete(reactions).where(inArray(reactions.id, ownedReactionIds));
+  }
+  if (ownedPostIds.length > 0) {
+    await db.delete(reactions).where(inArray(reactions.postId, ownedPostIds));
+    await db
+      .delete(notifications)
+      .where(
+        and(
+          inArray(notifications.userId, ownedUserIds),
+          inArray(notifications.actorId, ownedUserIds),
+          inArray(notifications.postId, ownedPostIds)
+        )
+      );
+    await db.delete(posts).where(inArray(posts.id, ownedPostIds));
+  }
+  if (ownedUserIds.length > 0) {
+    await db.delete(users).where(inArray(users.id, ownedUserIds));
+  }
+
+  // Clean only the cache keys this suite warmed for its own viewers —
+  // exact keys, never a shared flush.
+  for (const viewerId of [viewerA, viewerB]) {
+    await Promise.all([
+      invalidateCache(`feed:for-you:enrichment:${viewerId}`, {
+        namespace: 'feed',
+      }).catch(() => undefined),
+      invalidateCache(`feed:for-you:ranked:v2:${viewerId}`).catch(
+        () => undefined
+      ),
+      invalidateCache(narrativeEnrichmentKey(viewerId), {
+        namespace: 'feed',
+      }).catch(() => undefined),
+    ]);
+  }
+
+  // Prove zero owned residuals once side effects have settled.
+  if (ownedPostIds.length > 0) {
+    const [leftoverReactions] = await db
+      .select({ count: count() })
+      .from(reactions)
+      .where(inArray(reactions.postId, ownedPostIds));
+    expect(Number(leftoverReactions?.count ?? 0)).toBe(0);
+    const [leftoverNotifications] = await db
+      .select({ count: count() })
+      .from(notifications)
+      .where(inArray(notifications.postId, ownedPostIds));
+    expect(Number(leftoverNotifications?.count ?? 0)).toBe(0);
+    const [leftoverPosts] = await db
+      .select({ count: count() })
+      .from(posts)
+      .where(inArray(posts.id, ownedPostIds));
+    expect(Number(leftoverPosts?.count ?? 0)).toBe(0);
+  }
+  if (ownedUserIds.length > 0) {
+    const [leftoverUsers] = await db
+      .select({ count: count() })
+      .from(users)
+      .where(inArray(users.id, ownedUserIds));
+    expect(Number(leftoverUsers?.count ?? 0)).toBe(0);
+  }
 });
 
 describe('For You viewer like state', () => {
@@ -232,8 +343,11 @@ describe('For You viewer like state', () => {
     // Control: the post detail route already reflects the like.
     const detail = await fetchPostDetail(tokenA, postA);
     expect(detail.status).toBe(200);
-    expect(detail.body?.data?.isLiked).toBe(true);
-    expect(detail.body?.data?.likeCount).toBe(1);
+    if (!isPostDetailResponse(detail.body)) {
+      throw new Error('Post detail did not return a successful body');
+    }
+    expect(detail.body.data.isLiked).toBe(true);
+    expect(detail.body.data.likeCount).toBe(1);
 
     // The For You tab must show the same state right away.
     const after = await fetchForYou(tokenA);
@@ -257,8 +371,11 @@ describe('For You viewer like state', () => {
     // Control: the post detail route already reflects the unlike.
     const detail = await fetchPostDetail(tokenB, postB);
     expect(detail.status).toBe(200);
-    expect(detail.body?.data?.isLiked).toBe(false);
-    expect(detail.body?.data?.likeCount).toBe(0);
+    if (!isPostDetailResponse(detail.body)) {
+      throw new Error('Post detail did not return a successful body');
+    }
+    expect(detail.body.data.isLiked).toBe(false);
+    expect(detail.body.data.likeCount).toBe(0);
 
     // The For You tab must show the same state right away.
     const after = await fetchForYou(tokenB);
@@ -266,5 +383,26 @@ describe('For You viewer like state', () => {
     const afterPost = findStoryPost(after.body as ForYouResponse, postB);
     expect(afterPost).toBeDefined();
     expect(afterPost?.isLiked).toBe(false);
+  });
+
+  it('does not take ownership of rows a failed setup insert did not create', async () => {
+    // A duplicate primary key must fail, and the failed insert must not
+    // expand the owned set: cleanup must never delete a row it did not
+    // create, even when setup partially fails.
+    const ownedBefore = ownedUserIds.length;
+    await expect(
+      db.insert(users).values({
+        id: authorA,
+        username: `f50a-author-${authorA}`,
+        displayName: 'Duplicate F50 Author A',
+        updatedAt: new Date(),
+      })
+    ).rejects.toThrow();
+    expect(ownedUserIds).toHaveLength(ownedBefore);
+    const [rows] = await db
+      .select({ count: count() })
+      .from(users)
+      .where(eq(users.id, authorA));
+    expect(Number(rows?.count ?? 0)).toBe(1);
   });
 });
