@@ -116,6 +116,12 @@ export interface PredictionDbPort {
   ): Promise<PredictionPositionRecord>;
   deletePosition(positionId: string): Promise<void>;
   listPositionsForMarket(marketId: string): Promise<PredictionPositionRecord[]>;
+  /**
+   * Traded volume per market: the sum over each market's positions of
+   * shares × avgPrice — the definition the market dynamics route reports
+   * as totalVolume. Pool share balances are not volume.
+   */
+  getTradedVolumeByMarket?(marketIds: string[]): Promise<Map<string, number>>;
   insertPriceSnapshot(snapshot: PredictionPriceSnapshotRecord): Promise<void>;
 }
 

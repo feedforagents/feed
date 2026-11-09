@@ -34,8 +34,13 @@ export function formatTimeLeft(
   return `${mins}m`;
 }
 
-function shareTotal(market: PredictionMarket): number {
-  return Number(market.yesShares ?? 0) + Number(market.noShares ?? 0);
+/**
+ * Traded volume from the positions ledger, as reported by the list API.
+ * Pool share balances (yesShares + noShares) are not volume: a seeded,
+ * never-traded market would outrank markets with real trades.
+ */
+function tradedVolume(market: PredictionMarket): number {
+  return Number(market.volume ?? 0);
 }
 
 /**
@@ -73,7 +78,7 @@ export function sortPredictionMarkets(
         );
         break;
       case 'volume':
-        byKey = dir * (shareTotal(a) - shareTotal(b));
+        byKey = dir * (tradedVolume(a) - tradedVolume(b));
         break;
       case 'timeLeft':
         byKey = compareNullable(
