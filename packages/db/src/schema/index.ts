@@ -14,6 +14,7 @@ export * from './agents';
 // Enums
 export * from './enums';
 export * from './markets';
+export * from './mcp-oauth';
 export * from './messaging';
 export * from './misc';
 export * from './narrative';

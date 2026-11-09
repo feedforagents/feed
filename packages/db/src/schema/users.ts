@@ -1,7 +1,8 @@
 import type { GameOnboardingStep } from '@feed/shared';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   decimal,
   doublePrecision,
   index,
@@ -94,6 +95,9 @@ export const users = pgTable(
     id: text('id').primaryKey(),
     walletAddress: text('walletAddress').unique(),
     username: text('username').unique(),
+    uiMode: text('uiMode', { enum: ['game', 'social'] })
+      .notNull()
+      .default('game'),
     displayName: text('displayName'),
     bio: text('bio'),
     profileImageUrl: text('profileImageUrl'),
@@ -294,6 +298,7 @@ export const users = pgTable(
     totalDailyLogins: integer('totalDailyLogins').notNull().default(0),
   },
   (table) => [
+    check('User_uiMode_check', sql`${table.uiMode} IN ('game', 'social')`),
     index('User_displayName_idx').on(table.displayName),
     index('User_earnedPoints_idx').on(table.earnedPoints),
     index('User_invitePoints_idx').on(table.invitePoints),
