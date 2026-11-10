@@ -264,7 +264,9 @@ function ConnectContent() {
       <LoginModal
         isOpen={loginOpen}
         onClose={() => setLoginOpen(false)}
+        onDismiss={clearConnectReturn}
         onSignedIn={() => {
+          clearConnectReturn();
           setReauthenticate(false);
           setRevision((value) => value + 1);
         }}

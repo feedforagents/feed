@@ -1,4 +1,4 @@
-import { db, eq, hasBlocked, hasMuted, users } from '@feed/db';
+import { hasBlocked, hasMuted } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 
 /** Test authors are excluded from public reads. Verified viewers additionally
@@ -6,23 +6,14 @@ import { StaticDataRegistry } from '@feed/engine';
 export async function canViewerReadAuthor(
   viewerId: string | undefined,
   authorId: string,
-  resolvedIsTest?: boolean
+  resolvedIsTest: boolean
 ): Promise<boolean> {
   if (
     authorId.startsWith('test-') ||
     StaticDataRegistry.getActor(authorId)?.isTest
   )
     return false;
-  const isTest =
-    resolvedIsTest ??
-    (
-      await db
-        .select({ isTest: users.isTest })
-        .from(users)
-        .where(eq(users.id, authorId))
-        .limit(1)
-    )[0]?.isTest;
-  if (isTest) return false;
+  if (resolvedIsTest) return false;
   if (!viewerId) return true;
   const excluded = await Promise.all([
     hasBlocked(viewerId, authorId),

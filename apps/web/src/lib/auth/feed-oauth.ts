@@ -1,5 +1,10 @@
 import { authenticateWithDbUser, isAuthenticationError } from '@feed/api';
-import { FeedOAuthService, OAuthError, opaque } from '@feed/mcp';
+import {
+  FeedOAuthService,
+  OAuthError,
+  opaque,
+  readBoundedBody,
+} from '@feed/mcp';
 import { errors as joseErrors, jwtVerify } from 'jose';
 import { NextRequest } from 'next/server';
 import { getStewardJwtSecret } from './steward-server';
@@ -89,15 +94,13 @@ export async function formParameters(request: NextRequest) {
       ?.startsWith('application/x-www-form-urlencoded')
   )
     throw new OAuthError('invalid_request');
-  const text = await boundedBody(request);
-  if (text.length > 16_384) throw new OAuthError('invalid_request');
+  const text = await readBoundedBody(request);
   return singleParameters(new URLSearchParams(text));
 }
 export async function jsonObject(
   request: NextRequest
 ): Promise<Record<string, unknown>> {
-  const text = await boundedBody(request);
-  if (text.length > 16_384) throw new OAuthError('invalid_request');
+  const text = await readBoundedBody(request);
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -112,40 +115,4 @@ export function requestRateKey(request: NextRequest) {
   // Use the existing trusted edge address when available; an untrusted caller
   // cannot evade the global bucket merely by inventing a forwarded address.
   return request.headers.get('cf-connecting-ip') ?? 'direct';
-}
-
-async function boundedBody(request: NextRequest) {
-  if (!request.body) return '';
-  const reader = request.body.getReader();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new OAuthError('invalid_request', 408));
-      void reader.cancel().catch(() => undefined);
-    }, 5000);
-  });
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const { value, done } = await Promise.race([reader.read(), deadline]);
-      if (done) break;
-      bytes += value.byteLength;
-      if (bytes > 16_384) {
-        void reader.cancel().catch(() => undefined);
-        throw new OAuthError('invalid_request');
-      }
-      chunks.push(value);
-    }
-  } finally {
-    if (timer) clearTimeout(timer);
-    reader.releaseLock();
-  }
-  const joined = new Uint8Array(bytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(joined);
 }

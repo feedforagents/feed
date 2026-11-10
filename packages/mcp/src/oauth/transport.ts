@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
 import { type FeedAgentContext, OAuthError } from './contracts';
+import { readBoundedBody } from './request-body';
 import type { FeedOAuthService } from './service';
 import { registerUsefulTools } from './useful-tools';
 
@@ -170,33 +171,7 @@ function requestId(body: unknown): string | number | null {
 }
 async function readBody(request: Request): Promise<unknown> {
   if (!request.body) throw new OAuthError('invalid_request');
-  const reader = request.body.getReader();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new OAuthError('invalid_request', 408));
-      void reader.cancel().catch(() => undefined);
-    }, 5000);
-  });
-  const decoder = new TextDecoder();
-  let text = '';
-  let bytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await Promise.race([reader.read(), deadline]);
-      if (done) break;
-      bytes += value.byteLength;
-      if (bytes > 16_384) {
-        void reader.cancel().catch(() => undefined);
-        throw new OAuthError('invalid_request');
-      }
-      text += decoder.decode(value, { stream: true });
-    }
-    text += decoder.decode();
-  } finally {
-    if (timer) clearTimeout(timer);
-    reader.releaseLock();
-  }
+  const text = await readBoundedBody(request);
   try {
     return JSON.parse(text);
   } catch {

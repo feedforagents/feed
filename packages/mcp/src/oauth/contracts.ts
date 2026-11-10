@@ -3,18 +3,7 @@ import { z } from 'zod';
 
 export const FEED_MCP_CAPABILITIES = {
   grantTypes: ['authorization_code', 'refresh_token'],
-  clientRegistration: 'dynamic',
   scopes: ['read', 'social:write'],
-  tools: [
-    'about_feed',
-    'how_to_play',
-    'get_home_feed',
-    'whoami',
-    'create_post',
-    'get_post',
-  ],
-  deviceAuthorization: false,
-  clientIdMetadataDocuments: false,
 } as const;
 export const scopeSchema = z.enum(FEED_MCP_CAPABILITIES.scopes);
 export type FeedScope = z.infer<typeof scopeSchema>;

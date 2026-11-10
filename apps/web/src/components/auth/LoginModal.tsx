@@ -37,6 +37,7 @@ type Step = 'idle' | 'email-sent' | 'loading' | 'error' | 'mfa';
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onDismiss?: () => void;
   title?: string;
   message?: string;
   initialView?: AgentEntryView;
@@ -48,6 +49,7 @@ interface LoginModalProps {
 export function LoginModal({
   isOpen,
   onClose,
+  onDismiss,
   title,
   message,
   initialView = 'agent',
@@ -55,9 +57,13 @@ export function LoginModal({
   reauthenticate = false,
   onSignedIn,
 }: LoginModalProps) {
+  const dismiss = () => {
+    onDismiss?.();
+    onClose();
+  };
   const dialogId = useId();
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
+  const closeRef = useRef(dismiss);
+  closeRef.current = dismiss;
   useEffect(() => {
     if (!isOpen) return;
     const previousFocus = document.activeElement;
@@ -300,7 +306,7 @@ export function LoginModal({
     <Dialog
       open={isOpen}
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (!open) dismiss();
       }}
     >
       <DialogContent
@@ -375,7 +381,7 @@ export function LoginModal({
             >
               Sign in
             </Button>
-            <Button variant="ghost" onClick={onClose}>
+            <Button variant="ghost" onClick={dismiss}>
               Browse feed
             </Button>
             {errorMsg && (

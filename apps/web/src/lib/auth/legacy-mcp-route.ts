@@ -162,27 +162,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Validate and type the request
-  if (
-    typeof body !== 'object' ||
-    body === null ||
-    !('jsonrpc' in body) ||
-    !('method' in body) ||
-    !('id' in body)
-  ) {
-    return NextResponse.json(
-      {
-        jsonrpc: '2.0',
-        id: null,
-        error: {
-          code: -32600,
-          message: 'Invalid Request',
-        },
-      },
-      { status: 400 }
-    );
-  }
-
   const jsonRpcRequest = body as unknown as JsonRpcRequest;
 
   if (jsonRpcRequest.jsonrpc !== '2.0') {
