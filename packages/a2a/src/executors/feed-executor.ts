@@ -1977,12 +1977,7 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     const messages = await db.message.findMany({
       where: { chatId },
-      // Total order (createdAt, id): createdAt is a millisecond
-      // timestamp, so bursts of messages routinely share it, and offset
-      // paging over the ties alone repeats some messages and skips
-      // others between pages. The id tiebreaker makes every page
-      // boundary exact.
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      orderBy: { createdAt: 'desc' },
       take: limit,
       skip: offset,
       select: {
