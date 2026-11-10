@@ -972,12 +972,27 @@ export async function executeQueryFeed(
     relatedQuestion = question.questionNumber;
   }
 
+  // The viewer's moderation policy applies to the feed exactly as it
+  // does on the website (PRD §8.1: tools share the website's business
+  // logic, moderation included): authors the viewer blocked or muted,
+  // and authors who blocked the viewer, are excluded — the same sets
+  // executeSearchAgents loads for its list.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = [...blockedIds, ...mutedIds, ...blockedByIds];
+
   const now = new Date();
   const posts = await db.post.findMany({
     where: {
       deletedAt: null,
       timestamp: { lte: now }, // No future posts
       ...(relatedQuestion !== undefined && { relatedQuestion }),
+      ...(excludedAuthorIds.length > 0 && {
+        authorId: { notIn: excludedAuthorIds },
+      }),
     },
     orderBy: { timestamp: 'desc' },
     take: args.limit || 20,
