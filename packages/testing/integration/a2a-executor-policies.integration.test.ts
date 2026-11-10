@@ -16,18 +16,57 @@ import {
   groupMembers,
   groups,
   inArray,
+  messages,
   posts,
+  userBlocks,
   users,
 } from '@feed/db';
 import { generateSnowflakeId, type JsonValue } from '@feed/shared';
 
 const createdUsers: string[] = [];
 const createdPosts: string[] = [];
+const createdChats: string[] = [];
+const createdBlocks: string[] = [];
+const createdMessages: string[] = [];
 let userId: string;
+let dmRecipientId: string;
+let npcUserId: string;
 let liveFeedPostId: string;
 let deletedFeedPostId: string;
 let groupId: string;
 let chatId: string;
+let dmChatId: string;
+let npcDmChatId: string;
+let dmGroupChatId: string;
+
+async function makeDmChat(
+  isGroup: boolean,
+  members: string[]
+): Promise<string> {
+  const id = await generateSnowflakeId();
+  await db.insert(chats).values({
+    id,
+    isGroup,
+    updatedAt: new Date(),
+  });
+  createdChats.push(id);
+  for (const memberId of members) {
+    await db.insert(chatParticipants).values({
+      id: await generateSnowflakeId(),
+      chatId: id,
+      userId: memberId,
+    });
+  }
+  return id;
+}
+
+function sendAs(senderId: string, targetChatId: string) {
+  return FeedAgentExecutor.executeDirectly(
+    'messaging.send_message',
+    { chatId: targetChatId, content: 'hello' } as Record<string, JsonValue>,
+    senderId
+  );
+}
 
 function run(operation: string, params: Record<string, JsonValue> = {}) {
   return FeedAgentExecutor.executeDirectly(operation, params, userId);
@@ -92,17 +131,42 @@ describe('FeedAgentExecutor policies', () => {
       chatId,
       userId,
     });
+
+    // DM fixtures for the send_message policy tests below.
+    dmRecipientId = await generateSnowflakeId();
+    npcUserId = await generateSnowflakeId();
+    for (const [id, isActor] of [
+      [dmRecipientId, false],
+      [npcUserId, true],
+    ] as const) {
+      await db.insert(users).values({
+        id,
+        username: `exec_dm_${id.slice(-10)}`,
+        isActor,
+        updatedAt: new Date(),
+      });
+      createdUsers.push(id);
+    }
+    dmChatId = await makeDmChat(false, [userId, dmRecipientId]);
+    npcDmChatId = await makeDmChat(false, [userId, npcUserId]);
+    dmGroupChatId = await makeDmChat(true, [userId, dmRecipientId]);
   });
 
   afterAll(async () => {
     await db.delete(comments).where(inArray(comments.postId, createdPosts));
     await db.delete(posts).where(inArray(posts.id, createdPosts));
+    await db.delete(messages).where(inArray(messages.id, createdMessages));
     await db
       .delete(chatParticipants)
       .where(eq(chatParticipants.chatId, chatId));
     await db.delete(chats).where(eq(chats.id, chatId));
     await db.delete(groupMembers).where(eq(groupMembers.groupId, groupId));
     await db.delete(groups).where(eq(groups.id, groupId));
+    await db
+      .delete(chatParticipants)
+      .where(inArray(chatParticipants.chatId, createdChats));
+    await db.delete(chats).where(inArray(chats.id, createdChats));
+    await db.delete(userBlocks).where(inArray(userBlocks.id, createdBlocks));
     await db.delete(users).where(inArray(users.id, createdUsers));
   });
 
@@ -145,6 +209,53 @@ describe('FeedAgentExecutor policies', () => {
       displayName: '  Exec Tester  ',
     })) as { user: { displayName: string } };
     expect(ok.user.displayName).toBe('Exec Tester');
+  });
+
+  it('rejects a DM when the recipient blocked the sender', async () => {
+    const blockId = await generateSnowflakeId();
+    await db.insert(userBlocks).values({
+      id: blockId,
+      blockerId: dmRecipientId,
+      blockedId: userId,
+    });
+    createdBlocks.push(blockId);
+    await expect(sendAs(userId, dmChatId)).rejects.toThrow(
+      'Cannot send messages to this user'
+    );
+    await db.delete(userBlocks).where(eq(userBlocks.id, blockId));
+  });
+
+  it('rejects a DM when the sender blocked the recipient', async () => {
+    const blockId = await generateSnowflakeId();
+    await db.insert(userBlocks).values({
+      id: blockId,
+      blockerId: userId,
+      blockedId: dmRecipientId,
+    });
+    createdBlocks.push(blockId);
+    await expect(sendAs(userId, dmChatId)).rejects.toThrow(
+      'Cannot send messages to this user'
+    );
+    await db.delete(userBlocks).where(eq(userBlocks.id, blockId));
+  });
+
+  it('rejects a DM to an NPC actor', async () => {
+    await expect(sendAs(userId, npcDmChatId)).rejects.toThrow(
+      'Cannot send direct messages to NPC actors'
+    );
+  });
+
+  it('still allows an unblocked DM and group messages', async () => {
+    const dm = (await sendAs(userId, dmChatId)) as {
+      message: { id: string };
+    };
+    createdMessages.push(dm.message.id);
+    expect(dm.message.id).toBeTruthy();
+    const group = (await sendAs(userId, dmGroupChatId)) as {
+      message: { id: string };
+    };
+    createdMessages.push(group.message.id);
+    expect(group.message.id).toBeTruthy();
   });
 
   it('leaving a group chat also deactivates group membership', async () => {

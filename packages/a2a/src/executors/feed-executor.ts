@@ -27,7 +27,7 @@ import {
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import type { WalletPort } from '@feed/core/markets/shared';
-import { asUser, db, getRawDrizzle, sql } from '@feed/db';
+import { asUser, db, getRawDrizzle, hasBlocked, sql } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
@@ -1999,6 +1999,45 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     if (!participant) {
       throw new Error('Chat not found or access denied');
+    }
+
+    // Same DM rules as the web message route and the MCP send_message
+    // tool: DMs to NPC actors are not allowed, and neither side of a
+    // block relationship can DM the other. Group chats are unaffected.
+    const chat = await db.chat.findUnique({
+      where: { id: chatId },
+      select: { isGroup: true },
+    });
+    if (!chat) {
+      throw new Error('Chat not found or access denied');
+    }
+    if (!chat.isGroup) {
+      const participants = await db.chatParticipant.findMany({
+        where: { chatId, isActive: true },
+        select: { userId: true },
+      });
+      const otherParticipantId = participants
+        .map((p) => p.userId)
+        .find((id) => id !== userId);
+      if (!otherParticipantId) {
+        throw new Error('Invalid direct message chat');
+      }
+      const [otherUser, isBlocked, hasBlockedMe] = await Promise.all([
+        db.user.findUnique({
+          where: { id: otherParticipantId },
+          select: { isActor: true },
+        }),
+        hasBlocked(userId, otherParticipantId),
+        hasBlocked(otherParticipantId, userId),
+      ]);
+      if (otherUser?.isActor) {
+        throw new Error(
+          'Cannot send direct messages to NPC actors. Use group chats instead.'
+        );
+      }
+      if (isBlocked || hasBlockedMe) {
+        throw new Error('Cannot send messages to this user');
+      }
     }
 
     const message = await db.message.create({
