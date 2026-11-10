@@ -346,8 +346,13 @@ export const GET = withErrorHandling(
     // Build threaded structure
     const threadedComments = buildCommentTree(commentsWithData);
 
-    // Get total comment count (including replies)
-    const totalComments = commentsResult.length;
+    // Total is the number of comments this response actually returns.
+    // Replies whose parent is not visible (e.g. soft-deleted by
+    // moderation) are omitted from the tree with their parent, so the
+    // raw row count would promise comments that are not in the list.
+    const countTreeNodes = (items: CommentTreeItem[]): number =>
+      items.reduce((sum, item) => sum + 1 + countTreeNodes(item.replies), 0);
+    const totalComments = countTreeNodes(threadedComments);
 
     logger.info(
       'Comments fetched successfully',
