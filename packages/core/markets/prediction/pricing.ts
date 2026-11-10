@@ -206,7 +206,16 @@ export class PredictionPricing {
     totalAmount: number,
     feeRate: number
   ): ShareCalculationWithFees {
-    const fee = totalAmount * feeRate;
+    // Charge the canonical cent-rounded fee, exactly as FeeService
+    // records and splits it (integer cents, one rounded fee): the raw
+    // `totalAmount * feeRate` disagrees with the ledger on every trade
+    // whose fee is not already a whole cent (e.g. $0.001 charged on a $1
+    // buy is recorded as $0, $0.005 on a $5 buy as $0.01), so
+    // users.totalFeesPaid, tradingFees and the stability-fund diversion
+    // under/over-record the fee actually taken from the trader. This
+    // mirrors PerpMarketService.calculateFee, which charges the same
+    // canonical rounded fee for the same reason.
+    const fee = Math.round(totalAmount * feeRate * 100) / 100;
     const netAmount = totalAmount - fee;
     const base = this.calculateBuy(
       currentYesShares,
@@ -237,7 +246,10 @@ export class PredictionPricing {
       sharesToSell
     );
     const gross = base.totalCost;
-    const fee = gross * feeRate;
+    // Canonical cent-rounded fee, matching FeeService.calculateFee and
+    // calculateBuyWithFees above: the ledger records the rounded fee, so
+    // the sell must charge it too.
+    const fee = Math.round(gross * feeRate * 100) / 100;
     const rawProceeds = gross - fee;
     const netProceeds = floorPoints(rawProceeds);
     const roundingRemainder = rawProceeds - netProceeds;
