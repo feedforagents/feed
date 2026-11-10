@@ -2,12 +2,11 @@
  * Daily Login Rewards API
  *
  * GET  - Returns current streak info
- * POST - Claims daily reward (idempotent)
+ * POST - Retired: daily login rewards pay no points (PRD §9.1, MVP Phase 1)
  */
 
 import {
   authenticateWithDbUser,
-  checkProgress,
   DailyLoginService,
   successResponse,
   withErrorHandling,
@@ -15,6 +14,10 @@ import {
 import { toISOOrNull } from '@feed/shared';
 
 import type { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
+
+const DAILY_LOGIN_REWARDS_RETIRED_ERROR =
+  'Daily login rewards are no longer supported. Points come only from the starting grant, purchases and trading.';
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const { dbUserId } = await authenticateWithDbUser(request);
@@ -25,9 +28,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   });
 });
 
-export const POST = withErrorHandling(async (request: NextRequest) => {
-  const { dbUserId } = await authenticateWithDbUser(request);
-  const result = await DailyLoginService.claimDailyReward(dbUserId);
-  void checkProgress(dbUserId, { type: 'daily_login', streak: result.streak });
-  return successResponse(result);
+export const POST = withErrorHandling(async (_request: NextRequest) => {
+  return NextResponse.json(
+    {
+      error: DAILY_LOGIN_REWARDS_RETIRED_ERROR,
+      code: 'DAILY_LOGIN_REWARDS_RETIRED',
+    },
+    { status: 410 }
+  );
 });
