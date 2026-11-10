@@ -23,6 +23,8 @@ test('post cache moderation, audit failure and fixture ownership in a private pr
         NODE_ENV: 'test',
         BUN_ENV: 'test',
         CI: 'false',
+        STEWARD_JWT_SECRET:
+          process.env.STEWARD_JWT_SECRET || 'dev-jwt-secret-change-in-prod',
         DATABASE_URL: process.env.DATABASE_URL,
         DIRECT_DATABASE_URL: process.env.DATABASE_URL,
         DATABASE_READ_REPLICA_URL: '',

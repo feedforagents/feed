@@ -128,7 +128,11 @@ async function token(id: string) {
     .setIssuer('steward')
     .setIssuedAt()
     .setExpirationTime('5m')
-    .sign(new TextEncoder().encode('dev-jwt-secret-change-in-prod'));
+    .sign(
+      new TextEncoder().encode(
+        process.env.STEWARD_JWT_SECRET || 'dev-jwt-secret-change-in-prod'
+      )
+    );
 }
 
 const [authorA, authorB, admin, viewer] = await Promise.all([
