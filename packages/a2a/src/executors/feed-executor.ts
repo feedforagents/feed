@@ -377,6 +377,9 @@ function buildTradingFeeOutbox(): TradingFeeOutboxPort {
         tradeAmount: String(params.amount),
         tradeId: params.positionId,
         marketId: params.relatedId,
+        // Carry the leg's key so the drain replays under it; see the
+        // web adapter (apps/web/src/lib/services/trading-fee-outbox.ts).
+        idempotencyKey: params.operationId ?? null,
         lastError: params.lastError ?? null,
       });
     },

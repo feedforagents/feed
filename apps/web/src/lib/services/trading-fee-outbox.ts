@@ -28,6 +28,7 @@ export async function enqueueFailedTradingFee(params: {
   type: string;
   relatedId: string;
   positionId: string;
+  operationId?: string;
   lastError?: string;
 }): Promise<void> {
   const id = await generateSnowflakeId();
@@ -38,6 +39,7 @@ export async function enqueueFailedTradingFee(params: {
     tradeAmount: String(params.amount),
     tradeId: params.positionId,
     marketId: params.relatedId,
+    idempotencyKey: params.operationId ?? null,
     lastError: params.lastError ?? null,
   });
 }
@@ -90,13 +92,19 @@ export async function drainTradingFeeOutboxBatch(): Promise<{
           .returning({ id: tradingFeeOutbox.id });
         if (!claimedRow) return false;
 
+        // Replay under the row's stored key when it has one: the fee
+        // may already have committed inline while every retry observed
+        // an error, so an unkeyed drain would insert a second row and
+        // double-count totals and the fund diversion. Rows enqueued
+        // without a key (older callers) drain unkeyed, as before.
         await FeeService.processTradingFee(
           row.userId,
           row.tradeType as FeeType,
           Number(row.tradeAmount),
           row.tradeId ?? undefined,
           row.marketId ?? undefined,
-          tx
+          tx,
+          row.idempotencyKey ?? undefined
         );
         return true;
       });

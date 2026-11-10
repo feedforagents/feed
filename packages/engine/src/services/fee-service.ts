@@ -268,7 +268,11 @@ export class FeeService {
         platformFee: new Decimal(platformReceived).toString(),
         referrerFee: new Decimal(referrerPaid).toString(),
         referrerId,
-        idempotencyKey: operationId ?? null,
+        // Only touch the column when a key is given: callers without
+        // one must keep working against a schema where the migration
+        // has not landed yet (schema-before-app rollout). Keyed calls
+        // require the migrated schema.
+        ...(operationId ? { idempotencyKey: operationId } : {}),
       });
 
       // Atomic increment: concurrent fees for the same trader must not lose

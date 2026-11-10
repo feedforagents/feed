@@ -114,13 +114,20 @@ export const tradingFees = pgTable(
     index('TradingFee_userId_createdAt_idx').on(table.userId, table.createdAt),
     uniqueIndex('TradingFee_idempotencyKey_idx')
       .on(table.idempotencyKey)
-      .where(sql`${table.idempotencyKey} IS NOT NULL`),
+      .where(sql`${table.idempotencyKey} IS NOT NULL`)
+      .concurrently(),
   ]
 );
 
 /**
  * Durable queue for trading fee processing when inline FeeProcessor retries are exhausted.
  * Rows are removed in the same DB transaction as FeeService.processTradingFee to avoid double charges.
+ *
+ * `idempotencyKey` carries the leg's operation id from the inline attempts
+ * into the drain: a fee that committed inline but was observed as an error
+ * on every retry is enqueued under the same key, so the drain replays the
+ * recorded fee instead of inserting a second row. Null for rows enqueued
+ * without a key (older callers); those rows are not deduplicated.
  */
 export const tradingFeeOutbox = pgTable(
   'TradingFeeOutbox',
@@ -132,6 +139,8 @@ export const tradingFeeOutbox = pgTable(
     tradeAmount: decimal('tradeAmount', { precision: 24, scale: 8 }).notNull(),
     tradeId: text('tradeId'),
     marketId: text('marketId'),
+    /** Idempotency key of the fee operation this row retries, if any. */
+    idempotencyKey: text('idempotencyKey'),
     lastError: text('lastError'),
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
   },

@@ -102,6 +102,7 @@ class RecordingOutbox {
     type: string;
     relatedId: string;
     positionId: string;
+    operationId?: string;
   }> = [];
 
   async enqueue(params: {
@@ -110,6 +111,7 @@ class RecordingOutbox {
     type: string;
     relatedId: string;
     positionId: string;
+    operationId?: string;
     lastError?: string;
   }): Promise<void> {
     this.calls.push({ ...params });
@@ -123,6 +125,7 @@ class ThrowingOutbox extends RecordingOutbox {
     type: string;
     relatedId: string;
     positionId: string;
+    operationId?: string;
     lastError?: string;
   }): Promise<void> {
     throw new Error('injected outbox failure');
@@ -411,6 +414,9 @@ describe('perp open fee failure (post-commit bookkeeping)', () => {
       relatedId: 'ABC',
       positionId: result.positionId,
     });
+    // The queued intent carries the leg's key so the drain replays
+    // under it instead of charging a second fee.
+    expect(outbox.calls[0]?.operationId).toBe(feeProcessor.operationIds[0]);
   });
 
   it('a transient fee failure recovers inline without touching the outbox', async () => {

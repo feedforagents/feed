@@ -39,6 +39,14 @@ export interface TradingFeeOutboxPort {
     type: string;
     relatedId: string;
     positionId: string;
+    /**
+     * Idempotency key of the fee operation this row retries (the same
+     * key the inline attempts used). The drain passes it back to
+     * FeeService, so a fee that already committed inline but was
+     * observed as an error on every retry is replayed, not charged a
+     * second time. Omit only when no key exists for the operation.
+     */
+    operationId?: string;
     lastError?: string;
   }): Promise<void>;
 }

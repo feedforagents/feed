@@ -158,11 +158,15 @@ export class PerpMarketService {
    * One `operationId` is generated per invocation (per fee leg) and reused
    * across the retries, so a retry after an ambiguous post-commit error
    * replays the recorded fee instead of inserting a second row and
-   * incrementing totals and the stability fund again. Each leg gets its
-   * own id, so a legitimate repeat leg (same position, type and amount)
-   * still charges. If fee processing AND outbox enqueue both fail, this
-   * helper logs and returns success — it does NOT guarantee durable intent
-   * for that failure; the fee then needs manual reconciliation.
+   * incrementing totals and the stability fund again. The same key is
+   * carried into the outbox when the retries exhaust, so the drain
+   * replays under it too: a fee that committed while every retry
+   * observed an error must not become an unkeyed second charge.
+   * Each leg gets its own id, so a legitimate repeat leg (same position,
+   * type and amount) still charges. If fee processing AND outbox enqueue
+   * both fail, this helper logs and returns success — it does NOT
+   * guarantee durable intent for that failure; the fee then needs
+   * manual reconciliation.
    */
   private async processFeeWithRetry(
     params: {
@@ -220,12 +224,17 @@ export class PerpMarketService {
     const outbox = this.deps.tradingFeeOutbox;
     if (outbox) {
       try {
+        // Carry the leg's operationId into the outbox: the fee may
+        // already have committed while every retry observed an error
+        // (e.g. the replay lookup itself failed), so the drain must
+        // replay under the same key instead of inserting unkeyed.
         await outbox.enqueue({
           userId: params.userId,
           amount: params.amount,
           type: params.type,
           relatedId: params.relatedId,
           positionId: params.positionId,
+          operationId,
           lastError: lastError?.message,
         });
       } catch (enqueueErr) {

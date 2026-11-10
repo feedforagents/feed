@@ -25,10 +25,13 @@
  * The idempotent-recovery block below covers the remaining failure mode:
  * a fee write that commits but is observed as an error. Each fee leg
  * carries one `operationId`, reused across its retries, so the retry
- * replays the recorded fee instead of inserting a second row. The tests
- * fault-inject at the fee boundary only (real FeeService, real Postgres,
- * following perp-open-fee-durability.integration.test.ts): the first
- * attempt runs the real settlement and then reports failure.
+ * replays the recorded fee instead of inserting a second row. The same
+ * key is carried into the outbox when the retries exhaust, so the drain
+ * replays under it too — the exhaustion and drain-replay cases below
+ * cover that handoff. The tests fault-inject at the fee boundary only
+ * (real FeeService, real Postgres, following
+ * perp-open-fee-durability.integration.test.ts): the first attempt runs
+ * the real settlement and then reports failure.
  */
 
 import { afterAll, describe, expect, it } from 'bun:test';
@@ -183,6 +186,17 @@ function sum(rows: { feeAmount: string }[]): number {
   return rows.reduce((total, row) => total + Number(row.feeAmount), 0);
 }
 
+/**
+ * Narrow an optional service-reported balance to a real finite number
+ * before comparing it: a missing balance must fail the test, never be
+ * cast or defaulted to zero.
+ */
+function assertFiniteNumber(value: unknown): asserts value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`expected a finite number, got ${String(value)}`);
+  }
+}
+
 function sumReferrer(rows: { referrerFee: string }[]): number {
   return rows.reduce((total, row) => total + Number(row.referrerFee), 0);
 }
@@ -226,12 +240,35 @@ async function expectDrainChangesNothingFor(traderId: string) {
   expect(afterSecond.balance).toBe(before.balance);
 }
 
-/** Run one cleanup section; a failure must not abort the remaining ones. */
+/**
+ * Cleanup failures collected across sections. A failed section must
+ * not abort the remaining ones, must not be swallowed by a warning,
+ * and must not be hidden by clearing the registries: the identities
+ * stay registered until a readback confirms they are gone, and the
+ * aggregate failure is thrown from afterAll so the run fails
+ * truthfully instead of reporting a green file with leaked rows.
+ */
+const cleanupFailures: string[] = [];
+
+/** Run one cleanup section; a failure is recorded, never swallowed. */
 async function attempt(label: string, fn: () => Promise<void>) {
   try {
     await fn();
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    cleanupFailures.push(`${label}: ${message}`);
     console.warn(`[fee-accounting cleanup] ${label} failed`, err);
+  }
+}
+
+/** Fail the section when the readback still finds owned rows. */
+async function expectGone(
+  label: string,
+  remaining: () => Promise<Array<unknown>>
+) {
+  const leftovers = await remaining();
+  if (leftovers.length > 0) {
+    throw new Error(`${leftovers.length} ${label} rows remain after cleanup`);
   }
 }
 
@@ -239,19 +276,23 @@ afterAll(async () => {
   // Reverse only this file's own stability-fund contribution, computed
   // from its own fee rows before they are deleted: 30% of the platform
   // fee on each row. (The fund balance is a shared global; restoring an
-  // absolute value would erase other tests' contributions.)
+  // absolute value would erase other tests' contributions.) The
+  // aggregate sits inside the attempt boundary like every other
+  // section, so a failure here cannot prevent the remaining cleanup.
   let ownDiversion = 0;
-  if (createdUserIds.length) {
-    const [agg] = await db
-      .select({
-        platformTotal: sql<string>`COALESCE(SUM(${tradingFees.platformFee}::numeric), 0)`,
-      })
-      .from(tradingFees)
-      .where(inArray(tradingFees.userId, createdUserIds));
-    ownDiversion =
-      Number(agg?.platformTotal ?? 0) *
-      STABILITY_FUND_CONFIG.PLATFORM_FEE_DIVERSION_RATE;
-  }
+  await attempt('own fund contribution', async () => {
+    if (createdUserIds.length) {
+      const [agg] = await db
+        .select({
+          platformTotal: sql<string>`COALESCE(SUM(${tradingFees.platformFee}::numeric), 0)`,
+        })
+        .from(tradingFees)
+        .where(inArray(tradingFees.userId, createdUserIds));
+      ownDiversion =
+        Number(agg?.platformTotal ?? 0) *
+        STABILITY_FUND_CONFIG.PLATFORM_FEE_DIVERSION_RATE;
+    }
+  });
   if (ownDiversion > 0) {
     await attempt('stability fund reversal', async () => {
       await db
@@ -271,6 +312,18 @@ afterAll(async () => {
       await db
         .delete(perpMarketSnapshots)
         .where(inArray(perpMarketSnapshots.ticker, createdTickers));
+      await expectGone('perp position', async () =>
+        db
+          .select({ id: perpPositions.id })
+          .from(perpPositions)
+          .where(inArray(perpPositions.ticker, createdTickers))
+      );
+      await expectGone('perp snapshot', async () =>
+        db
+          .select({ ticker: perpMarketSnapshots.ticker })
+          .from(perpMarketSnapshots)
+          .where(inArray(perpMarketSnapshots.ticker, createdTickers))
+      );
     }
   });
   await attempt('perp org state', async () => {
@@ -278,6 +331,12 @@ afterAll(async () => {
       await db
         .delete(organizationState)
         .where(inArray(organizationState.id, createdOrgIds));
+      await expectGone('perp org', async () =>
+        db
+          .select({ id: organizationState.id })
+          .from(organizationState)
+          .where(inArray(organizationState.id, createdOrgIds))
+      );
     }
   });
   await attempt('prediction markets', async () => {
@@ -286,6 +345,12 @@ afterAll(async () => {
         .delete(positions)
         .where(inArray(positions.marketId, createdMarketIds));
       await db.delete(markets).where(inArray(markets.id, createdMarketIds));
+      await expectGone('prediction market', async () =>
+        db
+          .select({ id: markets.id })
+          .from(markets)
+          .where(inArray(markets.id, createdMarketIds))
+      );
     }
   });
   await attempt('fee rows and outbox rows', async () => {
@@ -299,13 +364,38 @@ afterAll(async () => {
       await db
         .delete(balanceTransactions)
         .where(inArray(balanceTransactions.userId, createdUserIds));
+      await expectGone('fee row', async () =>
+        db
+          .select({ id: tradingFees.id })
+          .from(tradingFees)
+          .where(inArray(tradingFees.userId, createdUserIds))
+      );
+      await expectGone('outbox row', async () =>
+        db
+          .select({ id: tradingFeeOutbox.id })
+          .from(tradingFeeOutbox)
+          .where(inArray(tradingFeeOutbox.userId, createdUserIds))
+      );
     }
   });
   await attempt('users', async () => {
     if (createdUserIds.length) {
       await db.delete(users).where(inArray(users.id, createdUserIds));
+      await expectGone('user', async () =>
+        db
+          .select({ id: users.id })
+          .from(users)
+          .where(inArray(users.id, createdUserIds))
+      );
     }
   });
+  if (cleanupFailures.length > 0) {
+    // Retain every registered identity: none is confirmed deleted
+    // while any section failed, so a re-run can still find them.
+    throw new Error(
+      `fee-accounting cleanup failed: ${cleanupFailures.join('; ')}`
+    );
+  }
   createdUserIds.length = 0;
   createdMarketIds.length = 0;
   createdTickers.length = 0;
@@ -474,7 +564,18 @@ describe('A2A fee accounting against real Postgres', () => {
 });
 
 describe('perp fee idempotent recovery against real Postgres', () => {
-  type FaultState = { faultOnce: boolean; attempts: number };
+  type FaultState = {
+    faultOnce: boolean;
+    /**
+     * Fault every attempt: the fee commits, but each retry observes an
+     * error, so the helper exhausts and enqueues instead of recovering
+     * inline — the handoff the drain must then replay under the key.
+     */
+    faultAlways?: boolean;
+    attempts: number;
+    /** operationId seen on each fee attempt, in order. */
+    operationIds: string[];
+  };
 
   /**
    * Real PerpMarketService (real Postgres, wallet, settlement, outbox)
@@ -497,6 +598,7 @@ describe('perp fee idempotent recovery against real Postgres', () => {
         operationId?: string;
       }): Promise<{ feeCharged: number; referrerPaid?: number }> {
         state.attempts += 1;
+        if (params.operationId) state.operationIds.push(params.operationId);
         const result = await FeeService.processTradingFee(
           params.userId,
           params.type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
@@ -506,7 +608,7 @@ describe('perp fee idempotent recovery against real Postgres', () => {
           undefined,
           params.operationId
         );
-        if (state.faultOnce) {
+        if (state.faultAlways || state.faultOnce) {
           state.faultOnce = false;
           throw new Error('injected post-commit fee failure');
         }
@@ -541,7 +643,11 @@ describe('perp fee idempotent recovery against real Postgres', () => {
   it('add legs: a post-commit error recovers to one fee, and a legitimate repeat add charges again', async () => {
     const traderId = await createUser();
     const ticker = await createPerpMarket();
-    const state: FaultState = { faultOnce: false, attempts: 0 };
+    const state: FaultState = {
+      faultOnce: false,
+      attempts: 0,
+      operationIds: [],
+    };
     const service = buildFaultableService(state);
 
     const opened = await service.openPosition({
@@ -614,7 +720,11 @@ describe('perp fee idempotent recovery against real Postgres', () => {
   it('equal-size opposite close: a post-commit error recovers to one close fee', async () => {
     const traderId = await createUser();
     const ticker = await createPerpMarket();
-    const state: FaultState = { faultOnce: false, attempts: 0 };
+    const state: FaultState = {
+      faultOnce: false,
+      attempts: 0,
+      operationIds: [],
+    };
     const service = buildFaultableService(state);
 
     const opened = await service.openPosition({
@@ -653,6 +763,7 @@ describe('perp fee idempotent recovery against real Postgres', () => {
     // is cent-rounded while the wallet moved by the full-precision figure,
     // so the balance is asserted exactly against the service-reported
     // balance and to the cent against the reported settlement fields.
+    assertFiniteNumber(closed.balance);
     expect(after.balance).toBe(closed.balance);
     expect(after.balance).toBeCloseTo(
       before.balance +
@@ -669,7 +780,11 @@ describe('perp fee idempotent recovery against real Postgres', () => {
   it('flip: a post-commit error on one leg recovers both legs to one fee each', async () => {
     const traderId = await createUser();
     const ticker = await createPerpMarket();
-    const state: FaultState = { faultOnce: false, attempts: 0 };
+    const state: FaultState = {
+      faultOnce: false,
+      attempts: 0,
+      operationIds: [],
+    };
     const service = buildFaultableService(state);
 
     const opened = await service.openPosition({
@@ -714,6 +829,7 @@ describe('perp fee idempotent recovery against real Postgres', () => {
     // cent-rounded while the wallet moved by the full-precision figure,
     // so the balance is asserted exactly against the service-reported
     // balance and to the cent against the reported fields.
+    assertFiniteNumber(flipped.balance);
     expect(after.balance).toBe(flipped.balance);
     expect(after.balance).toBeCloseTo(
       before.balance +
@@ -728,5 +844,138 @@ describe('perp fee idempotent recovery against real Postgres', () => {
     expect(positions[0]?.side).toBe('short');
     expect(Number(positions[0]?.size)).toBe(100);
     await expectDrainChangesNothingFor(traderId);
+  });
+
+  it('exhaustion: a fee that commits but fails every retry is queued under its key and drains exactly once', async () => {
+    const traderId = await createUser();
+    const ticker = await createPerpMarket();
+    const state: FaultState = {
+      faultOnce: false,
+      faultAlways: true,
+      attempts: 0,
+      operationIds: [],
+    };
+    const service = buildFaultableService(state);
+
+    const before = await readTraderState(traderId);
+    const opened = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 200,
+      leverage: 1,
+    });
+    expect(opened.positionId).toBeTruthy();
+    expect(opened.feePaid).toBeCloseTo(0.2, 10);
+    // All three inline attempts ran the real settlement (the first one
+    // committed) and then observed the injected error.
+    expect(state.attempts).toBe(3);
+    expect(new Set(state.operationIds)).toHaveLength(1);
+
+    // Exactly one fee row: the retries replayed under the same key.
+    const openRows = await tradeTypeRows(traderId, 'perp_open');
+    expect(openRows).toHaveLength(1);
+    expect(sum(openRows)).toBeCloseTo(0.2, 10);
+    const afterOpen = await readTraderState(traderId);
+    expect(afterOpen.totalFeesPaid - before.totalFeesPaid).toBeCloseTo(0.2, 10);
+    expect(afterOpen.fund - before.fund).toBeCloseTo(0.06, 6);
+    // Margin 200 + fee 0.20 debited even though the fee recording
+    // faulted on every attempt.
+    expect(afterOpen.balance).toBeCloseTo(before.balance - 200 - 0.2, 6);
+
+    // The exhausted intent is queued — under the SAME key, so the drain
+    // replays it instead of charging a second fee.
+    const queued = await db
+      .select()
+      .from(tradingFeeOutbox)
+      .where(eq(tradingFeeOutbox.userId, traderId));
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.idempotencyKey).toBe(state.operationIds[0]);
+
+    // Two concurrent drains still settle the intent exactly once.
+    const [first, second] = await Promise.all([
+      drainTradingFeeOutboxBatch(),
+      drainTradingFeeOutboxBatch(),
+    ]);
+    expect(first.processed + second.processed).toBe(1);
+    expect(first.failed + second.failed).toBe(0);
+    const third = await drainTradingFeeOutboxBatch();
+    expect(third.processed).toBe(0);
+
+    const afterDrain = await readTraderState(traderId);
+    expect(await tradeTypeRows(traderId, 'perp_open')).toHaveLength(1);
+    expect(afterDrain.totalFeesPaid).toBe(afterOpen.totalFeesPaid);
+    expect(afterDrain.fund).toBe(afterOpen.fund);
+    expect(afterDrain.balance).toBe(afterOpen.balance);
+  });
+
+  it('drain replay: an outbox row whose key already settled does not charge again', async () => {
+    const traderId = await createUser();
+    const ticker = await createPerpMarket();
+    const state: FaultState = {
+      faultOnce: false,
+      attempts: 0,
+      operationIds: [],
+    };
+    const service = buildFaultableService(state);
+
+    const opened = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 200,
+      leverage: 1,
+    });
+    expect(opened.positionId).toBeTruthy();
+    const before = await readTraderState(traderId);
+
+    // One post-commit error on the add leg: the retry replays, so
+    // exactly one add fee row exists under the leg's key.
+    state.faultOnce = true;
+    const attemptsBeforeAdd = state.attempts;
+    const added = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 100,
+      leverage: 1,
+    });
+    expect(added.feePaid).toBeCloseTo(0.1, 10);
+    expect(state.attempts - attemptsBeforeAdd).toBe(2);
+    const addKeys = state.operationIds.slice(attemptsBeforeAdd);
+    expect(new Set(addKeys)).toHaveLength(1);
+    const key = addKeys[0];
+    expect(key).toBeTruthy();
+    const addRows = await tradeTypeRows(traderId, 'perp_add_to_position');
+    expect(addRows).toHaveLength(1);
+    expect(sum(addRows)).toBeCloseTo(0.1, 10);
+    const afterAdd = await readTraderState(traderId);
+    expect(afterAdd.totalFeesPaid - before.totalFeesPaid).toBeCloseTo(0.1, 10);
+
+    // Simulate the both-fail handoff: the fee committed, but the replay
+    // lookup also failed on every retry, so the intent was enqueued
+    // under the same key. The drain must replay it, not charge again.
+    await db.insert(tradingFeeOutbox).values({
+      id: await generateSnowflakeId(),
+      userId: traderId,
+      tradeType: 'perp_add_to_position',
+      tradeAmount: '100',
+      tradeId: opened.positionId,
+      marketId: ticker,
+      idempotencyKey: key,
+      lastError: 'simulated both-fail enqueue',
+    });
+    const drained = await drainTradingFeeOutboxBatch();
+    expect(drained.processed).toBe(1);
+    expect(drained.failed).toBe(0);
+    const afterDrain = await readTraderState(traderId);
+    expect(await tradeTypeRows(traderId, 'perp_add_to_position')).toHaveLength(
+      1
+    );
+    expect(afterDrain.totalFeesPaid).toBe(afterAdd.totalFeesPaid);
+    expect(afterDrain.fund).toBe(afterAdd.fund);
+    expect(afterDrain.balance).toBe(afterAdd.balance);
+    const again = await drainTradingFeeOutboxBatch();
+    expect(again.processed).toBe(0);
   });
 });

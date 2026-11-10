@@ -14101,6 +14101,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "idempotencyKey": {
+          "name": "idempotencyKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -14305,7 +14311,7 @@
           ],
           "isUnique": true,
           "where": "\"TradingFee\".\"idempotencyKey\" IS NOT NULL",
-          "concurrently": false,
+          "concurrently": true,
           "method": "btree",
           "with": {}
         }

@@ -1,0 +1,28 @@
+-- Manual migration step for 0005 (NOT run by `drizzle-kit migrate`).
+--
+-- Creates the partial unique index backing FeeService's idempotent
+-- replay. Run OUTSIDE a transaction, BEFORE deploying the app that
+-- writes idempotencyKey — CREATE INDEX CONCURRENTLY cannot run inside
+-- a transaction block, and Drizzle runs every journaled migration
+-- inside one transaction, so this step must never be added to the
+-- journal (AGENTS.md, "Production database (scale and locks)" / DDL).
+--
+-- Rollout order (schema before app):
+--   1. `bun run db:migrate`   (0005: both idempotencyKey columns)
+--   2. psql "$DIRECT_DATABASE_URL" -v ON_ERROR_STOP=1 -f <this file>
+--   3. Verify: \d "TradingFee" shows the column + unique index, and
+--      SELECT indexdef FROM pg_indexes WHERE indexname =
+--      'TradingFee_idempotencyKey_idx' contains CONCURRENTLY.
+--   4. Deploy the app.
+--
+-- The statement is idempotent (IF NOT EXISTS): safe to re-run if a
+-- previous run was interrupted. CONCURRENTLY takes only a SHARE UPDATE
+-- EXCLUSIVE lock, so concurrent fee inserts/updates are not blocked;
+-- on a populated table the build scans the table instead of locking
+-- it. If the build fails midway it leaves an INVALID index behind —
+-- drop it (DROP INDEX CONCURRENTLY IF EXISTS
+-- "TradingFee_idempotencyKey_idx") and re-run this file.
+--
+-- Rollback: DROP INDEX CONCURRENTLY IF EXISTS
+-- "TradingFee_idempotencyKey_idx".
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "TradingFee_idempotencyKey_idx" ON "TradingFee" USING btree ("idempotencyKey") WHERE "TradingFee"."idempotencyKey" IS NOT NULL;

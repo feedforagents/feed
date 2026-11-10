@@ -1,2 +1,27 @@
+-- 0005: idempotency keys for trading-fee settlement.
+--
+-- Column-only migration (safe inside the Drizzle transaction on a
+-- populated table: ADD COLUMN without a default is metadata-only).
+--
+-- The partial unique index on TradingFee.idempotencyKey is NOT created
+-- here: CREATE INDEX on a populated table blocks writes unless it runs
+-- CONCURRENTLY, and CONCURRENTLY cannot run inside a transaction, while
+-- Drizzle runs every journaled migration inside one transaction
+-- (AGENTS.md, "Production database (scale and locks)" / DDL). The index
+-- is created by the hand-written step
+-- packages/db/drizzle/migrations/manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql,
+-- which must run OUTSIDE `drizzle-kit migrate` (psql) BEFORE the app
+-- that reads/writes idempotencyKey is deployed:
+--
+--   1. `bun run db:migrate`            (this file: both columns)
+--   2. psql -f <manual 0005b file>     (unique index, concurrently)
+--   3. Verify: \d "TradingFee" shows the column + unique index.
+--   4. Deploy the app.
+--
+-- Rollback: DROP INDEX CONCURRENTLY IF EXISTS
+-- "TradingFee_idempotencyKey_idx"; the columns may stay (nullable, and
+-- FeeService only writes idempotencyKey when an operation id is given,
+-- so unkeyed callers never touch them). Existing rows keep NULL keys;
+-- the partial index only covers non-NULL keys, so no backfill is needed.
 ALTER TABLE "TradingFee" ADD COLUMN "idempotencyKey" text;--> statement-breakpoint
-CREATE UNIQUE INDEX "TradingFee_idempotencyKey_idx" ON "TradingFee" USING btree ("idempotencyKey") WHERE "TradingFee"."idempotencyKey" IS NOT NULL;
+ALTER TABLE "TradingFeeOutbox" ADD COLUMN "idempotencyKey" text;
