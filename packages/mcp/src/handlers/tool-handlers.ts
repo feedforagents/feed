@@ -2983,6 +2983,17 @@ export async function executeReportPost(
   agent: AuthenticatedAgent,
   args: ReportPostArgs
 ): Promise<ReportPostResult> {
+  // reports.reportedPostId has no foreign key, so an unchecked report
+  // would become an orphan row in the moderation queue. The web report
+  // route (POST /api/moderation/reports) looks the post up first and
+  // answers 404 when it does not exist; do the same here.
+  const post = await db.post.findUnique({
+    where: { id: args.postId },
+    select: { id: true },
+  });
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
   const reportId = await generateSnowflakeId();
   await db.report.create({
     data: {
