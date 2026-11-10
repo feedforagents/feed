@@ -8,10 +8,12 @@
  * convert back the same way. 113 / 100 * 100 === 112.99999999999999 in
  * floating point, so flooring that product leaves one unit with the user.
  *
- * The webhook route runs unmodified: the event is signed with a synthetic
- * webhook secret and verified by the route's own constructWebhookEvent. The
- * only stub is the `server-only` marker package (an empty module), as in the
- * other route-level integration tests.
+ * The webhook route handler and the database are real. Two modules are
+ * stubbed: the `server-only` marker package (an empty module), and
+ * constructWebhookEvent, which is replaced by a hand-written v1 HMAC check
+ * (see below). This test therefore proves the refund and ledger behavior.
+ * It does not prove the real Stripe signature-verification boundary, and it
+ * is not a live payment end-to-end test: no real payment is made.
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
