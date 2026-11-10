@@ -18,6 +18,7 @@ import type {
   PredictionSellInput,
   PredictionServiceDeps,
   PredictionSide,
+  PredictionTradeRecord,
   PredictionTradeResult,
 } from './types';
 
@@ -149,6 +150,19 @@ export class PredictionMarketService {
     return (await this.listMarkets()).length;
   }
 
+  /**
+   * Traded volume per market — the all-time sum of shares × trade price
+   * over the market's PredictionTrade ledger rows (buys and sells both
+   * add). There is deliberately no positions-based fallback: a sell
+   * reduces position shares, so summing positions would report a
+   * bought-then-fully-sold market as zero volume.
+   */
+  async getTradedVolumeByMarket(
+    marketIds: string[]
+  ): Promise<Map<string, number>> {
+    return this.db.getTradedVolumeByMarket(marketIds);
+  }
+
   async listUserPositions(userId: string): Promise<PredictionPositionRecord[]> {
     if (this.db.listUserPositions) {
       return this.db.listUserPositions(userId);
@@ -273,6 +287,20 @@ export class PredictionMarketService {
       liquidity: newLiquidity,
       eventType: 'trade',
       source: tradeSource,
+    });
+
+    // Append to the volume ledger: shares × avgPrice (fee-excluded, the
+    // same value as calc.totalCost). The ledger is the volume source of
+    // truth — positions mutate on sell, so only an append-only record
+    // survives a full close.
+    await this.recordTrade({
+      marketId,
+      userId,
+      side,
+      action: 'buy',
+      shares: calc.sharesBought,
+      price: calc.avgPrice,
+      amount: calc.totalCost,
     });
 
     await this.emitTrade({
@@ -440,6 +468,20 @@ export class PredictionMarketService {
       liquidity: newLiquidity,
       eventType: 'trade',
       source: tradeSource,
+    });
+
+    // Append to the volume ledger: shares × avgPrice (gross proceeds,
+    // the same value as calc.totalCost). A sell adds to volume exactly
+    // like a buy — selling out of a position must not erase the volume
+    // the trades already created.
+    await this.recordTrade({
+      marketId,
+      userId,
+      side,
+      action: 'sell',
+      shares,
+      price: calc.avgPrice,
+      amount: calc.totalCost,
     });
 
     await this.emitTrade({
@@ -787,6 +829,11 @@ export class PredictionMarketService {
       ...snapshot,
       createdAt: snapshot.createdAt ?? this.now(),
     });
+  }
+
+  private async recordTrade(trade: PredictionTradeRecord) {
+    if (!this.db.recordTrade) return;
+    await this.db.recordTrade(trade);
   }
 
   private async emitTrade(payload: Record<string, unknown>) {

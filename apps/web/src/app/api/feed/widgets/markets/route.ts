@@ -45,7 +45,8 @@ import {
   optionalAuth,
   withErrorHandling,
 } from '@feed/api';
-import { asPublic, asUser, getDbInstance } from '@feed/db';
+import { asPublic, asUser, getDbInstance, predictionTrades } from '@feed/db';
+import { inArray, sql } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
@@ -101,25 +102,28 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
           });
         });
 
-        // Traded volume per market, from the positions ledger — the same
-        // definition the market dynamics route reports as totalVolume
-        // (sum of shares × avgPrice over the market's positions). The pool
-        // balances are not volume: a freshly seeded, never-traded market
-        // would otherwise display its seed liquidity as "Vol".
-        const allPositions = await asPublic(async (database) => {
-          return await database.position.findMany({
-            where: {
-              marketId: { in: marketIds },
-            },
-          });
+        // Traded volume per market, from the append-only trade ledger —
+        // the all-time sum of amount (shares × trade price) over each
+        // market's PredictionTrade rows, the same aggregate the markets
+        // list route reports as volume. Positions cannot measure this:
+        // a sell reduces position shares (to zero on a full close), so a
+        // completed buy/sell roundtrip would read as zero volume. The
+        // pool balances are not volume either: a freshly seeded,
+        // never-traded market would otherwise display its seed
+        // liquidity as "Vol".
+        const volumeRows = await asPublic(async (database) => {
+          return await database
+            .select({
+              marketId: predictionTrades.marketId,
+              volume: sql<string>`sum(${predictionTrades.amount})`,
+            })
+            .from(predictionTrades)
+            .where(inArray(predictionTrades.marketId, marketIds))
+            .groupBy(predictionTrades.marketId);
         });
         const volumeMap = new Map<string, number>();
-        for (const pos of allPositions) {
-          volumeMap.set(
-            pos.marketId,
-            (volumeMap.get(pos.marketId) ?? 0) +
-              Number(pos.shares) * Number(pos.avgPrice)
-          );
+        for (const row of volumeRows) {
+          volumeMap.set(row.marketId, Number(row.volume ?? 0));
         }
 
         // Calculate price changes based on position activity
@@ -269,25 +273,27 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     });
   });
 
-  // Traded volume per market, from the positions ledger — the same
-  // definition the market dynamics route reports as totalVolume
-  // (sum of shares × avgPrice over the market's positions). The pool
-  // balances are not volume: a freshly seeded, never-traded market
-  // would otherwise display its seed liquidity as "Vol".
-  const allPositions = await asUser(authUser, async (database) => {
-    return await database.position.findMany({
-      where: {
-        marketId: { in: marketIds },
-      },
-    });
+  // Traded volume per market, from the append-only trade ledger — the
+  // all-time sum of amount (shares × trade price) over each market's
+  // PredictionTrade rows, the same aggregate the markets list route
+  // reports as volume. Positions cannot measure this: a sell reduces
+  // position shares (to zero on a full close), so a completed buy/sell
+  // roundtrip would read as zero volume. The pool balances are not
+  // volume either: a freshly seeded, never-traded market would
+  // otherwise display its seed liquidity as "Vol".
+  const volumeRows = await asUser(authUser, async (database) => {
+    return await database
+      .select({
+        marketId: predictionTrades.marketId,
+        volume: sql<string>`sum(${predictionTrades.amount})`,
+      })
+      .from(predictionTrades)
+      .where(inArray(predictionTrades.marketId, marketIds))
+      .groupBy(predictionTrades.marketId);
   });
   const volumeMap = new Map<string, number>();
-  for (const pos of allPositions) {
-    volumeMap.set(
-      pos.marketId,
-      (volumeMap.get(pos.marketId) ?? 0) +
-        Number(pos.shares) * Number(pos.avgPrice)
-    );
+  for (const row of volumeRows) {
+    volumeMap.set(row.marketId, Number(row.volume ?? 0));
   }
 
   // Calculate price changes based on position activity
