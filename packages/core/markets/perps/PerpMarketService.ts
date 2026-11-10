@@ -961,7 +961,12 @@ export class PerpMarketService {
     const balanceResult = await this.deps.wallet.getBalance(input.userId);
 
     // Fee bookkeeping: retries + optional outbox (see processFeeWithRetry).
-    void this.processFeeWithRetry(
+    // Awaited — not fire-and-forget — so the fee intent is durable (settled
+    // inline or persisted to the outbox) before success is reported: the
+    // A2A path has no waitUntil/after to finish a detached promise if the
+    // invocation ends first. processFeeWithRetry never throws (failures are
+    // logged, then enqueued), so awaiting it cannot fail the committed trade.
+    await this.processFeeWithRetry(
       {
         userId: input.userId,
         amount: settlement.closeSize,
@@ -970,9 +975,7 @@ export class PerpMarketService {
         positionId: settlement.position.id,
       },
       { ticker: settlement.position.ticker }
-    ).catch(() => {
-      // Error already logged in processFeeWithRetry; catch to prevent unhandled rejection
-    });
+    );
 
     // Apply market-level post-close impact after settlement to keep the close
     // path fail-safe (position is already settled if this step fails).
@@ -1718,8 +1721,10 @@ export class PerpMarketService {
       );
 
     // Process fees outside transaction to avoid holding locks during external work.
-    // Uses retry logic for reliability.
-    void this.processFeeWithRetry(
+    // Uses retry logic for reliability. Awaited — not fire-and-forget — so
+    // the fee intent is durable (settled inline or persisted to the outbox)
+    // before success is reported (see openPosition).
+    await this.processFeeWithRetry(
       {
         userId: input.userId,
         amount: addedSize,
@@ -1728,9 +1733,7 @@ export class PerpMarketService {
         positionId: result.positionId,
       },
       { ticker: result.ticker }
-    ).catch(() => {
-      // Error already logged in processFeeWithRetry; catch to prevent unhandled rejection
-    });
+    );
 
     // Get balance after transaction commits
     const balance = (await this.deps.wallet.getBalance(input.userId)).balance;
@@ -2087,7 +2090,9 @@ export class PerpMarketService {
         );
 
       // Fee bookkeeping for close + open legs (retries + optional outbox).
-      void Promise.all([
+      // Awaited — not fire-and-forget — so both legs' fee intents are
+      // durable before success is reported (see openPosition).
+      await Promise.all([
         this.processFeeWithRetry(
           {
             userId: input.userId,
@@ -2108,9 +2113,7 @@ export class PerpMarketService {
           },
           { ticker: existing.ticker }
         ),
-      ]).catch(() => {
-        // Errors logged inside processFeeWithRetry; avoid unhandled rejection
-      });
+      ]);
 
       // Get balance after transaction commits
       const balance = (await this.deps.wallet.getBalance(input.userId)).balance;

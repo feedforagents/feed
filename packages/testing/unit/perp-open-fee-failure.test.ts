@@ -7,9 +7,11 @@
  * settlement transaction had committed, so a fee-ledger error surfaced as
  * an exception while the 200-notional position and the cash debit were
  * already committed — and an agent retry would open a second position.
- * The open path awaits `processFeeWithRetry` (+ outbox) — unlike close /
- * add-to-position / flip, which stay fire-and-forget — so the fee intent is
- * durable (settled inline or persisted to the outbox) before `openPosition`
+ * The fresh-open path was fixed first; the follow-up review found the same
+ * boundary on close / add-to-position / reduce / flip, which fired the fee
+ * call and returned success before the fee intent was durable. All paths
+ * now await `processFeeWithRetry` (+ outbox), so the fee intent is durable
+ * (settled inline or persisted to the outbox) before the operation
  * resolves: the A2A request path has no waitUntil/after to finish a detached
  * promise if the serverless invocation ends first. `processFeeWithRetry`
  * never throws, so awaiting it cannot fail the committed trade.
@@ -221,10 +223,55 @@ class InMemoryPerpDb implements PerpDbPort {
     return { ...record };
   }
 
-  async updateOpenPosition(): Promise<void> {}
+  async updateOpenPosition(
+    positionId: string,
+    updates: Partial<
+      Pick<
+        PerpPositionRecord,
+        | 'currentPrice'
+        | 'unrealizedPnL'
+        | 'unrealizedPnLPercent'
+        | 'fundingPaid'
+        | 'liquidationPrice'
+        | 'lastUpdated'
+        | 'size'
+        | 'entryPrice'
+      >
+    >
+  ): Promise<void> {
+    const pos = this.positions.get(positionId);
+    if (!pos || pos.closedAt) return;
+    this.positions.set(positionId, {
+      ...pos,
+      ...updates,
+      lastUpdated: updates.lastUpdated ?? new Date(),
+    });
+  }
 
-  async closePosition(): Promise<boolean> {
-    return false;
+  async closePosition(
+    positionId: string,
+    updates: Partial<
+      Pick<
+        PerpPositionRecord,
+        | 'currentPrice'
+        | 'closedAt'
+        | 'realizedPnL'
+        | 'unrealizedPnL'
+        | 'unrealizedPnLPercent'
+      >
+    >
+  ): Promise<boolean> {
+    const pos = this.positions.get(positionId);
+    if (!pos || pos.closedAt) return false;
+    this.positions.set(positionId, {
+      ...pos,
+      closedAt: updates.closedAt ?? new Date(),
+      currentPrice: updates.currentPrice ?? pos.currentPrice,
+      realizedPnL: updates.realizedPnL ?? pos.realizedPnL,
+      unrealizedPnL: updates.unrealizedPnL ?? 0,
+      unrealizedPnLPercent: updates.unrealizedPnLPercent ?? 0,
+    });
+    return true;
   }
 
   async applyMarketDeltas(
@@ -382,5 +429,268 @@ describe('perp open fee failure (post-commit bookkeeping)', () => {
     // Awaited inline: all three attempts complete before openPosition
     // resolves, so no waitFor is needed.
     expect(feeProcessor.calls).toHaveLength(3);
+  });
+});
+
+describe('perp close/add/reduce/flip fee failure (post-commit bookkeeping)', () => {
+  let db: InMemoryPerpDb;
+  let wallet: InMemoryWallet;
+
+  const baseMarket: PerpMarketRecord = {
+    ticker: 'ABC',
+    organizationId: 'org-abc',
+    name: 'ABC Corp',
+    currentPrice: 100,
+    change24h: 0,
+    changePercent24h: 0,
+    high24h: 100,
+    low24h: 100,
+    volume24h: 0,
+    openInterest: 0,
+    fundingRate: {
+      ticker: 'ABC',
+      rate: 0,
+      nextFundingTime: new Date().toISOString(),
+      predictedRate: 0,
+    },
+    maxLeverage: 100,
+    minOrderSize: 10,
+    markPrice: 100,
+    indexPrice: 100,
+  };
+
+  beforeEach(() => {
+    db = new InMemoryPerpDb([baseMarket]);
+    wallet = new InMemoryWallet(10_000);
+  });
+
+  function buildService(
+    feeProcessor: ThrowingFeeProcessor | FlakyFeeProcessor,
+    outbox: RecordingOutbox | ThrowingOutbox
+  ) {
+    return new PerpMarketService({
+      settlement: {
+        run: async (_userId, operation) =>
+          db.transaction((tx) => operation(tx, wallet)),
+      },
+      db,
+      wallet,
+      fees: feeConfig,
+      feeProcessor,
+      tradingFeeOutbox: outbox,
+    });
+  }
+
+  /** Open LONG 200 at 2x with a fee processor that settles inline. */
+  async function openLong200(): Promise<string> {
+    const service = buildService(
+      new FlakyFeeProcessor(0),
+      new RecordingOutbox()
+    );
+    const result = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 200,
+      leverage: 2,
+    });
+    expect(result.positionId).toBeTruthy();
+    return result.positionId;
+  }
+
+  it('explicit close still succeeds and the close fee intent is durable at return time', async () => {
+    const positionId = await openLong200();
+    const feeProcessor = new ThrowingFeeProcessor();
+    const outbox = new RecordingOutbox();
+    const service = buildService(feeProcessor, outbox);
+
+    // Pre-fix this resolved with zero outbox rows: the fee call was
+    // fire-and-forget, so the intent only appeared after later retries
+    // while the process stayed alive.
+    const result = await service.closePosition({
+      userId: 'u1',
+      positionId,
+      percentage: 1,
+    });
+
+    expect(result.fullyClosed).toBe(true);
+    expect(result.feePaid).toBeCloseTo(0.2, 10);
+    const positions = await db.getOpenPositionsByUser('u1');
+    expect(positions).toHaveLength(0);
+    // The close fills at the synthetic execution price (below spot for a
+    // long sell), so realised PnL is negative; assert the balance from the
+    // reported settlement fields, mirroring PerpMarketService.test.ts:
+    // 9899.80 + (margin 100 + realised PnL - fee 0.20).
+    const balance = await wallet.getBalance('u1');
+    expect(balance.balance).toBeCloseTo(
+      9899.8 +
+        (result.marginPaid ?? 0) +
+        (result.realizedPnL ?? 0) -
+        result.feePaid,
+      6
+    );
+
+    expect(outbox.calls).toHaveLength(1);
+    expect(feeProcessor.calls).toHaveLength(3);
+    expect(feeProcessor.calls[0]).toEqual({
+      amount: 200,
+      type: 'perp_close',
+    });
+    expect(outbox.calls[0]).toMatchObject({
+      userId: 'u1',
+      amount: 200,
+      type: 'perp_close',
+      relatedId: 'ABC',
+      positionId,
+    });
+  });
+
+  it('add-to-position still succeeds and the add fee intent is durable at return time', async () => {
+    const positionId = await openLong200();
+    const feeProcessor = new ThrowingFeeProcessor();
+    const outbox = new RecordingOutbox();
+    const service = buildService(feeProcessor, outbox);
+
+    const result = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'long',
+      size: 100,
+      leverage: 2,
+    });
+
+    expect(result.positionId).toBe(positionId);
+    expect(result.size).toBe(300);
+    expect(result.feePaid).toBeCloseTo(0.1, 10);
+    const positions = await db.getOpenPositionsByUser('u1');
+    expect(positions).toHaveLength(1);
+    expect(positions[0]?.size).toBe(300);
+    // Added margin 50 + fee 0.10 debited: 9899.80 - 50.10.
+    const balance = await wallet.getBalance('u1');
+    expect(balance.balance).toBeCloseTo(9849.7, 6);
+
+    expect(outbox.calls).toHaveLength(1);
+    expect(feeProcessor.calls).toHaveLength(3);
+    expect(feeProcessor.calls[0]).toEqual({
+      amount: 100,
+      type: 'perp_add_to_position',
+    });
+    expect(outbox.calls[0]).toMatchObject({
+      userId: 'u1',
+      amount: 100,
+      type: 'perp_add_to_position',
+      relatedId: 'ABC',
+      positionId,
+    });
+  });
+
+  it('reduce still succeeds and the close fee intent is durable at return time', async () => {
+    const positionId = await openLong200();
+    const feeProcessor = new ThrowingFeeProcessor();
+    const outbox = new RecordingOutbox();
+    const service = buildService(feeProcessor, outbox);
+
+    // Opposite-side short 100 against long 200 is a partial close.
+    const result = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 100,
+      leverage: 2,
+    });
+
+    expect(result.rebalanceType).toBe('reduce');
+    expect(result.remainingSize).toBe(100);
+    const positions = await db.getOpenPositionsByUser('u1');
+    expect(positions).toHaveLength(1);
+    expect(positions[0]?.size).toBe(100);
+    // Half the margin back plus the partial close's realised PnL (negative:
+    // synthetic exit fill below spot) less the fee, from the reported
+    // settlement fields: 9899.80 + (50 + realised PnL - 0.10).
+    const balance = await wallet.getBalance('u1');
+    expect(balance.balance).toBeCloseTo(
+      9899.8 +
+        (result.marginPaid ?? 0) +
+        (result.realizedPnL ?? 0) -
+        result.feePaid,
+      6
+    );
+
+    expect(outbox.calls).toHaveLength(1);
+    expect(feeProcessor.calls).toHaveLength(3);
+    expect(feeProcessor.calls[0]).toEqual({
+      amount: 100,
+      type: 'perp_close',
+    });
+    expect(outbox.calls[0]).toMatchObject({
+      userId: 'u1',
+      amount: 100,
+      type: 'perp_close',
+      relatedId: 'ABC',
+      positionId,
+    });
+  });
+
+  it('flip still succeeds and both legs fee intents are durable at return time', async () => {
+    const positionId = await openLong200();
+    const feeProcessor = new ThrowingFeeProcessor();
+    const outbox = new RecordingOutbox();
+    const service = buildService(feeProcessor, outbox);
+
+    // Opposite-side short 300 against long 200 flips to short 100.
+    const result = await service.openPosition({
+      userId: 'u1',
+      ticker: 'ABC',
+      side: 'short',
+      size: 300,
+      leverage: 2,
+    });
+
+    expect(result.rebalanceType).toBe('flip');
+    expect(result.side).toBe('short');
+    expect(result.size).toBe(100);
+    const positions = await db.getOpenPositionsByUser('u1');
+    expect(positions).toHaveLength(1);
+    expect(positions[0]?.side).toBe('short');
+    expect(positions[0]?.size).toBe(100);
+    // One net wallet movement: close settlement (margin 100 + realised PnL
+    // - close fee) minus the flip leg's cost (new margin + open fee). Both
+    // fees are in result.feePaid and the new margin in result.marginPaid:
+    // 9899.80 + 100 + realised PnL - total fees - new margin.
+    const balance = await wallet.getBalance('u1');
+    expect(balance.balance).toBeCloseTo(
+      9899.8 +
+        100 +
+        (result.realizedPnL ?? 0) -
+        result.feePaid -
+        (result.marginPaid ?? 0),
+      6
+    );
+
+    // Both legs run concurrently, so assert the set, not the order.
+    expect(outbox.calls).toHaveLength(2);
+    expect(feeProcessor.calls).toHaveLength(6);
+    const feeTypes = feeProcessor.calls.map((c) => c.type).sort();
+    expect(feeTypes).toEqual([
+      'perp_close',
+      'perp_close',
+      'perp_close',
+      'perp_flip_position',
+      'perp_flip_position',
+      'perp_flip_position',
+    ]);
+    const outboxByType = new Map(outbox.calls.map((c) => [c.type, c]));
+    expect(outboxByType.get('perp_close')).toMatchObject({
+      userId: 'u1',
+      amount: 200,
+      relatedId: 'ABC',
+      positionId,
+    });
+    expect(outboxByType.get('perp_flip_position')).toMatchObject({
+      userId: 'u1',
+      amount: 100,
+      relatedId: 'ABC',
+      positionId: result.positionId,
+    });
   });
 });
