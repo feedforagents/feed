@@ -83,7 +83,6 @@ mock.module('@/lib/posthog/server', () => ({
 const _actualStripeServer = await import('@/lib/stripe/server');
 mock.module('@/lib/stripe/server', () => ({
   ..._actualStripeServer,
-  calculatePointsFromUSD: (amountUSD: number) => Math.floor(amountUSD * 100),
   getBaseUrl: mockGetBaseUrl,
   POINTS_CONFIG: {
     ..._actualStripeServer.POINTS_CONFIG,

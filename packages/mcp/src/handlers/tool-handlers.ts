@@ -39,9 +39,13 @@ import {
 } from '@feed/a2a';
 import {
   acceptGroupInvite,
+  BusinessLogicError,
   checkRateLimitAsync,
   declineGroupInvite,
   logAdminModify,
+  NotFoundError,
+  notifyReactionOnComment,
+  notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
   sharePost,
@@ -65,6 +69,9 @@ import {
   markets,
   perpMarketSnapshots,
   posts,
+  postTags,
+  questions,
+  timeframedMarkets,
   users,
 } from '@feed/db';
 import {
@@ -1358,12 +1365,34 @@ export async function executeDeletePost(
 }
 
 /**
- * Execute like_post tool
+ * Execute like_post tool (same rules as the web like route: the post must
+ * exist, be published and not deleted; a fresh like notifies the author).
  */
 export async function executeLikePost(
   agent: AuthenticatedAgent,
   args: LikePostArgs
 ): Promise<LikePostResult> {
+  const now = new Date();
+  const [post] = await db
+    .select({
+      id: posts.id,
+      authorId: posts.authorId,
+      deletedAt: posts.deletedAt,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(eq(posts.id, args.postId))
+    .limit(1);
+
+  // Unknown or not-yet-published posts cannot be liked (and are never
+  // created from the ID).
+  if (!post || post.timestamp > now) {
+    throw new NotFoundError('Post', args.postId);
+  }
+  if (post.deletedAt) {
+    throw new BusinessLogicError('Cannot like deleted post', 'POST_DELETED');
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       postId: args.postId,
@@ -1382,6 +1411,30 @@ export async function executeLikePost(
       type: 'like',
     },
   });
+
+  // The like has committed. A notification outage must not tell the caller
+  // that the like failed and invite an unsuccessful retry.
+  if (post.authorId && post.authorId !== agent.userId) {
+    try {
+      await notifyReactionOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        'like'
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed like',
+        {
+          postId: args.postId,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return { success: true, liked: true };
 }
 
@@ -1511,12 +1564,35 @@ export async function executeDeleteComment(
 }
 
 /**
- * Execute like_comment tool
+ * Execute like_comment tool (same rules as the web comment like route: the
+ * comment must exist and not be soft-deleted; a fresh like notifies the
+ * comment author).
  */
 export async function executeLikeComment(
   agent: AuthenticatedAgent,
   args: LikeCommentArgs
 ): Promise<LikeCommentResult> {
+  const comment = await db.comment.findFirst({
+    where: { id: args.commentId },
+  });
+
+  // Unknown comments cannot be liked (and are never created from the ID:
+  // reactions.commentId has no foreign key, so an unchecked like would
+  // become an orphan row).
+  if (!comment) {
+    throw new NotFoundError('Comment', args.commentId);
+  }
+
+  // Soft-deleted (moderated) comments are hidden everywhere, so they cannot
+  // collect new likes — the web comment like route applies the same rule
+  // (COMMENT_DELETED), as does the A2A likeComment executor.
+  if (comment.deletedAt) {
+    throw new BusinessLogicError(
+      'Cannot like deleted comment',
+      'COMMENT_DELETED'
+    );
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       commentId: args.commentId,
@@ -1533,6 +1609,30 @@ export async function executeLikeComment(
         type: 'like',
       },
     });
+
+    // The like has committed. A notification outage must not tell the
+    // caller that the like failed and invite an unsuccessful retry.
+    if (comment.authorId && comment.authorId !== agent.userId) {
+      try {
+        await notifyReactionOnComment(
+          comment.authorId,
+          agent.userId,
+          args.commentId,
+          comment.postId,
+          'like'
+        );
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed comment like',
+          {
+            commentId: args.commentId,
+            userId: agent.userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'MCP'
+        );
+      }
+    }
   }
   return { success: true };
 }
@@ -1550,22 +1650,25 @@ export async function executeGetPostsByTag(
   if (!tag) {
     return { posts: [] };
   }
-  const postTagsList = await db.postTag.findMany({
-    where: { tagId: tag.id },
-    take: args.limit || 20,
-    skip: args.offset || 0,
-    orderBy: { createdAt: 'desc' },
-  });
-  const postIds = postTagsList.map((pt) => pt.postId);
-  const postsList = await db.post.findMany({
-    where: {
-      id: { in: postIds },
-      deletedAt: null,
-    },
-    orderBy: { timestamp: 'desc' },
-  });
+  // Select the page after publication eligibility, so newer hidden
+  // memberships cannot consume its slots. Tagged articles remain supported.
+  const now = new Date();
+  const rows = await db
+    .select({ post: posts })
+    .from(postTags)
+    .innerJoin(posts, eq(postTags.postId, posts.id))
+    .where(
+      and(
+        eq(postTags.tagId, tag.id),
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now)
+      )
+    )
+    .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
+    .offset(args.offset || 0)
+    .limit(args.limit || 20);
   return {
-    posts: postsList.map((p) => ({
+    posts: rows.map(({ post: p }) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
@@ -2483,17 +2586,52 @@ export async function executeResolveMarket(
 
   const winningSide = args.resolution ? 'yes' : 'no';
 
+  // Mirror the admin web route: settlement, question, and timeframed
+  // updates commit together. The trending widget and the new-markets feed
+  // list a market while its question is 'active', so resolving only the
+  // market row would leave a settled market displayed as live there.
+  const resolvedAt = new Date();
   await withPredictionSettlement(
     args.marketId,
     { system: 'mcp_admin_resolve' },
-    (service) =>
-      service.resolve({
+    async (service, tx: import('@feed/db').Transaction) => {
+      // The outer check can become stale while another resolver holds the
+      // settlement lock. Preserve rejection before changing lifecycle rows.
+      const [current] = await tx
+        .select({ resolved: markets.resolved })
+        .from(markets)
+        .where(eq(markets.id, args.marketId))
+        .limit(1);
+      if (!current) throw new Error('Market not found');
+      if (current.resolved) throw new Error('Market already resolved');
+      await service.resolve({
         marketId: args.marketId,
         winningSide,
+        resolvedAt,
         resolutionDescription:
           args.reason ||
           `Resolved by admin as ${args.resolution ? 'YES' : 'NO'}`,
-      }),
+      });
+      await tx
+        .update(questions)
+        .set({
+          status: 'resolved',
+          resolvedOutcome: args.resolution,
+          resolutionReviewedAt: resolvedAt,
+          resolutionReviewedBy: agent.userId,
+          updatedAt: resolvedAt,
+        })
+        .where(eq(questions.id, args.marketId));
+      await tx
+        .update(timeframedMarkets)
+        .set({
+          isActive: false,
+          isResolved: true,
+          resolvedAt,
+          updatedAt: resolvedAt,
+        })
+        .where(eq(timeframedMarkets.questionId, args.marketId));
+    },
     predictionServiceOptions(args.marketId)
   );
 

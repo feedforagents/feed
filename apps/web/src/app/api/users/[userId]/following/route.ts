@@ -330,6 +330,25 @@ export const GET = withErrorHandling(
     const offset = (page - 1) * limit;
     const pageItems = followingList.slice(offset, offset + limit);
 
+    if (targetActor && authUser?.userId && pageItems.length > 0) {
+      const viewerRelations = await db
+        .select({ actorId: userActorFollows.actorId })
+        .from(userActorFollows)
+        .where(
+          and(
+            eq(userActorFollows.userId, authUser.userId),
+            inArray(
+              userActorFollows.actorId,
+              pageItems.map((item) => item.id)
+            )
+          )
+        );
+      const viewerActorIds = new Set(viewerRelations.map((row) => row.actorId));
+      for (const item of pageItems) {
+        item.viewerFollows = viewerActorIds.has(item.id);
+      }
+    }
+
     return successResponse({
       following: pageItems,
       count: total,
