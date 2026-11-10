@@ -29,8 +29,18 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { comments, db, eq, inArray, posts, users } from '@feed/db';
+import {
+  comments,
+  db,
+  eq,
+  inArray,
+  posts,
+  userBlocks,
+  userMutes,
+  users,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
+import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
 
 type CommentNode = {
@@ -54,6 +64,21 @@ let postId: string;
 let parentCommentId: string;
 const allCommentIds: string[] = [];
 
+// Signed-viewer regression (maintainer follow-up on #1698): the viewer
+// blocks one author, mutes another, and is blocked by a third. Their
+// comments — and the replies under them — must be invisible to the viewer
+// in both the list and the detail count, while an anonymous read still
+// sees them. A second fixture post keeps this case independent of the
+// hide flow above.
+let viewerId: string;
+let blockedAuthorId: string;
+let mutedAuthorId: string;
+let blockerAuthorId: string;
+let viewerPostId: string;
+let token: string;
+const viewerBlockIds: string[] = [];
+const viewerMuteIds: string[] = [];
+
 let getPost: (
   request: NextRequest,
   context: { params: Promise<{ id: string }> }
@@ -70,12 +95,15 @@ function flattenIds(nodes: CommentNode[]): string[] {
   return nodes.flatMap((node) => [node.id, ...flattenIds(node.replies)]);
 }
 
-async function fetchPostCommentCount() {
+async function fetchPostCommentCount(
+  targetPostId: string = postId,
+  headers: Record<string, string> = {}
+) {
   const request = new NextRequest(
-    new Request(`http://localhost/api/posts/${postId}`)
+    new Request(`http://localhost/api/posts/${targetPostId}`, { headers })
   );
   const response = await getPost(request, {
-    params: Promise.resolve({ id: postId }),
+    params: Promise.resolve({ id: targetPostId }),
   });
   const body = (await response.json().catch(() => null)) as
     | PostResponse
@@ -84,18 +112,31 @@ async function fetchPostCommentCount() {
   return { status: response.status, body };
 }
 
-async function fetchDeliveredCommentIds() {
+async function fetchDeliveredCommentIds(
+  targetPostId: string = postId,
+  headers: Record<string, string> = {}
+) {
   const request = new NextRequest(
-    new Request(`http://localhost/api/posts/${postId}/comments`)
+    new Request(`http://localhost/api/posts/${targetPostId}/comments`, {
+      headers,
+    })
   );
   const response = await getComments(request, {
-    params: Promise.resolve({ id: postId }),
+    params: Promise.resolve({ id: targetPostId }),
   });
   const body = (await response.json().catch(() => null)) as
     | CommentsResponse
     | { error?: unknown }
     | null;
   return { status: response.status, body };
+}
+
+// The signed-viewer case uses a short-lived synthetic steward JWT (the
+// same pattern as the following-feed count test): the public routes resolve
+// the viewer through optionalAuth, which only accepts real steward JWTs —
+// the `steward:test:` bearer works for required-auth routes only.
+function signedViewerHeaders() {
+  return { authorization: `Bearer ${token}` };
 }
 
 beforeAll(async () => {
@@ -216,12 +257,244 @@ beforeAll(async () => {
       deletedAt: now,
     },
   ]);
+
+  // Signed-viewer fixture on its own post: one visible top-level comment
+  // with a reply, one top-level comment each from a blocked, a muted, and
+  // a blocking author (each with a visible-author reply underneath, so the
+  // hidden-parent subtree rule is exercised through moderation too), and
+  // one moderation-hidden top-level comment with a reply.
+  [viewerId, blockedAuthorId, mutedAuthorId, blockerAuthorId, viewerPostId] =
+    await Promise.all([
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+    ]);
+  const [
+    viewerVisibleTopId,
+    viewerVisibleReplyId,
+    viewerBlockedTopId,
+    viewerBlockedReplyId,
+    viewerMutedTopId,
+    viewerMutedReplyId,
+    viewerBlockerTopId,
+    viewerBlockerReplyId,
+    viewerHiddenTopId,
+    viewerHiddenReplyId,
+  ] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ]);
+  allCommentIds.push(
+    viewerVisibleTopId,
+    viewerVisibleReplyId,
+    viewerBlockedTopId,
+    viewerBlockedReplyId,
+    viewerMutedTopId,
+    viewerMutedReplyId,
+    viewerBlockerTopId,
+    viewerBlockerReplyId,
+    viewerHiddenTopId,
+    viewerHiddenReplyId
+  );
+
+  // Short-lived synthetic steward JWT for the viewer, signed with the
+  // same secret the route verifies (dev fallback matches the verifier's).
+  // The viewer row carries this steward id so optionalAuth resolves it to
+  // the viewer.
+  const viewerStewardId = `g22-detail-${viewerId}`;
+  const secret =
+    process.env.STEWARD_JWT_SECRET ?? 'dev-jwt-secret-change-in-prod';
+  token = await new SignJWT({ userId: viewerStewardId })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuer('steward')
+    .setIssuedAt()
+    .setExpirationTime('1m')
+    .sign(new TextEncoder().encode(secret));
+
+  await db.insert(users).values([
+    {
+      id: viewerId,
+      username: `g22v-${viewerId}`,
+      displayName: 'Post Detail Viewer',
+      stewardId: viewerStewardId,
+      updatedAt: now,
+    },
+    {
+      id: blockedAuthorId,
+      username: `g22b-${blockedAuthorId}`,
+      displayName: 'Blocked Comment Author',
+      updatedAt: now,
+    },
+    {
+      id: mutedAuthorId,
+      username: `g22m-${mutedAuthorId}`,
+      displayName: 'Muted Comment Author',
+      updatedAt: now,
+    },
+    {
+      id: blockerAuthorId,
+      username: `g22k-${blockerAuthorId}`,
+      displayName: 'Blocking Comment Author',
+      updatedAt: now,
+    },
+  ]);
+
+  await db.insert(posts).values({
+    id: viewerPostId,
+    content: 'fixture post for signed-viewer post detail comment count',
+    authorId,
+    timestamp: earlier,
+    createdAt: earlier,
+  });
+
+  await db.insert(comments).values([
+    {
+      id: viewerVisibleTopId,
+      content: 'visible top-level comment for the viewer',
+      postId: viewerPostId,
+      authorId: commenterId,
+      parentCommentId: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: viewerVisibleReplyId,
+      content: 'visible reply for the viewer',
+      postId: viewerPostId,
+      authorId: authorId,
+      parentCommentId: viewerVisibleTopId,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: viewerBlockedTopId,
+      content: 'top-level comment by the blocked author',
+      postId: viewerPostId,
+      authorId: blockedAuthorId,
+      parentCommentId: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: viewerBlockedReplyId,
+      content: 'reply under the blocked author comment',
+      postId: viewerPostId,
+      authorId: authorId,
+      parentCommentId: viewerBlockedTopId,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: viewerMutedTopId,
+      content: 'top-level comment by the muted author',
+      postId: viewerPostId,
+      authorId: mutedAuthorId,
+      parentCommentId: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: viewerMutedReplyId,
+      content: 'reply under the muted author comment',
+      postId: viewerPostId,
+      authorId: commenterId,
+      parentCommentId: viewerMutedTopId,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: viewerBlockerTopId,
+      content: 'top-level comment by the author who blocked the viewer',
+      postId: viewerPostId,
+      authorId: blockerAuthorId,
+      parentCommentId: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: viewerBlockerReplyId,
+      content: 'reply under the blocking author comment',
+      postId: viewerPostId,
+      authorId: authorId,
+      parentCommentId: viewerBlockerTopId,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+    {
+      id: viewerHiddenTopId,
+      content: 'moderation-hidden top-level comment',
+      postId: viewerPostId,
+      authorId: commenterId,
+      parentCommentId: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: now,
+    },
+    {
+      id: viewerHiddenReplyId,
+      content: 'reply under the moderation-hidden comment',
+      postId: viewerPostId,
+      authorId: authorId,
+      parentCommentId: viewerHiddenTopId,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    },
+  ]);
+
+  const [viewerBlockId, viewerBlockerBlockId, viewerMuteId] = await Promise.all(
+    [generateSnowflakeId(), generateSnowflakeId(), generateSnowflakeId()]
+  );
+  viewerBlockIds.push(viewerBlockId, viewerBlockerBlockId);
+  viewerMuteIds.push(viewerMuteId);
+  await db.insert(userBlocks).values([
+    { id: viewerBlockId, blockerId: viewerId, blockedId: blockedAuthorId },
+    {
+      id: viewerBlockerBlockId,
+      blockerId: blockerAuthorId,
+      blockedId: viewerId,
+    },
+  ]);
+  await db
+    .insert(userMutes)
+    .values({ id: viewerMuteId, muterId: viewerId, mutedId: mutedAuthorId });
 });
 
 afterAll(async () => {
   await db.delete(comments).where(inArray(comments.id, allCommentIds));
-  await db.delete(posts).where(eq(posts.id, postId));
-  await db.delete(users).where(inArray(users.id, [authorId, commenterId]));
+  await db.delete(userBlocks).where(inArray(userBlocks.id, viewerBlockIds));
+  await db.delete(userMutes).where(inArray(userMutes.id, viewerMuteIds));
+  await db.delete(posts).where(inArray(posts.id, [postId, viewerPostId]));
+  await db
+    .delete(users)
+    .where(
+      inArray(users.id, [
+        authorId,
+        commenterId,
+        viewerId,
+        blockedAuthorId,
+        mutedAuthorId,
+        blockerAuthorId,
+      ])
+    );
 });
 
 describe('GET /api/posts/[id] commentCount', () => {
@@ -258,5 +531,51 @@ describe('GET /api/posts/[id] commentCount', () => {
     // The header count must promise only what the list below it shows.
     expect((body as PostResponse).data.commentCount).toBe(2);
     expect((body as PostResponse).data.commentCount).toBe(delivered.length);
+  });
+
+  it('signed viewer: detail count matches the list total with blocked/muted authors and a hidden parent', async () => {
+    // Anonymous control first: the blocked, muted, and blocking authors'
+    // top-level comments and their replies are all visible without a
+    // viewer (6), plus the visible pair (2). The moderation-hidden parent
+    // and its reply are excluded for everyone.
+    const anonList = await fetchDeliveredCommentIds(viewerPostId);
+    expect(anonList.status).toBe(200);
+    const anonDelivered = flattenIds(
+      (anonList.body as CommentsResponse).data.comments
+    );
+    expect(anonDelivered).toHaveLength(8);
+    expect((anonList.body as CommentsResponse).data.total).toBe(8);
+    const anonDetail = await fetchPostCommentCount(viewerPostId);
+    expect(anonDetail.status).toBe(200);
+    expect((anonDetail.body as PostResponse).data.commentCount).toBe(8);
+
+    // Signed as the viewer: only the visible pair remains. The blocked,
+    // muted, and blocking authors' comments go with their replies, and
+    // the moderation-hidden parent takes its reply with it.
+    const signedList = await fetchDeliveredCommentIds(
+      viewerPostId,
+      signedViewerHeaders()
+    );
+    expect(signedList.status).toBe(200);
+    const signedDelivered = flattenIds(
+      (signedList.body as CommentsResponse).data.comments
+    );
+    expect(signedDelivered).toHaveLength(2);
+    expect((signedList.body as CommentsResponse).data.total).toBe(2);
+
+    const signedDetail = await fetchPostCommentCount(
+      viewerPostId,
+      signedViewerHeaders()
+    );
+    expect(signedDetail.status).toBe(200);
+    // The header count must match the list total for the same viewer, and
+    // must actually apply the viewer filter (not read as anonymous).
+    expect((signedDetail.body as PostResponse).data.commentCount).toBe(2);
+    expect((signedDetail.body as PostResponse).data.commentCount).toBe(
+      signedDelivered.length
+    );
+    expect((signedDetail.body as PostResponse).data.commentCount).toBeLessThan(
+      (anonDetail.body as PostResponse).data.commentCount
+    );
   });
 });
