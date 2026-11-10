@@ -2,13 +2,17 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import assert from 'node:assert/strict';
 import {
+  and,
   chatParticipants,
   chats,
+  count,
   db,
+  eq,
   groupMembers,
   groups,
   inArray,
   messages,
+  pointsTransactions,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
@@ -28,7 +32,11 @@ const tokens = new Map<string, string>();
 let viewer = '';
 let member1 = '';
 let member2 = '';
+let leaver = '';
+let outsider = '';
 let directGroupChatId = '';
+let leftGroupChatId = '';
+let emptyGroupChatId = '';
 let backedGroupChatId = '';
 const dmChatIds: string[] = [];
 const tiedGroupChatIds: string[] = [];
@@ -53,36 +61,73 @@ function signed(id: string) {
   return { authorization: `Bearer ${token}` };
 }
 
+type ChatListEntry = {
+  id: string;
+  name: string;
+  isGroup: boolean;
+  lastMessage: {
+    id: string;
+    content: string;
+    senderId: string;
+  } | null;
+  messageCount?: number;
+  participants?: number;
+};
+
 async function getList(id: string) {
   const res = await fetch(`${baseUrl}/api/chats`, { headers: signed(id) });
   assert.equal(res.status, 200);
-  return (await res.json()) as {
-    groupChats: Array<{ id: string }>;
-    directChats: Array<{ id: string }>;
+  const body = (await res.json()) as {
+    groupChats: ChatListEntry[];
+    directChats: ChatListEntry[];
     total: number;
   };
+  assert.equal(body.total, body.groupChats.length + body.directChats.length);
+  return body;
+}
+
+async function postDirectGroup(
+  name: string,
+  participantIds: string[]
+): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/chats`, {
+    method: 'POST',
+    headers: { ...signed(viewer), 'content-type': 'application/json' },
+    body: JSON.stringify({ name, isGroup: true, participantIds }),
+  });
+  assert.equal(res.status, 201);
+  const body = (await res.json()) as { chat: { id: string } };
+  owned.chats.add(body.chat.id);
+  return body.chat.id;
+}
+
+/**
+ * Delete the reputation ledger rows derived from fixture activity.
+ * awardReputationInTx writes a PointsTransaction for the chat creator with
+ * no cascading FK to User, so teardown must remove these rows explicitly,
+ * before the owned users themselves are deleted. Keyed strictly by the
+ * user IDs this fixture successfully created.
+ */
+async function deleteOwnedLedgerRows(userIds: string[]) {
+  if (!userIds.length) return;
+  await db
+    .delete(pointsTransactions)
+    .where(inArray(pointsTransactions.userId, userIds));
 }
 
 beforeAll(async () => {
   viewer = await makeUser('viewer');
   member1 = await makeUser('member1');
   member2 = await makeUser('member2');
+  leaver = await makeUser('leaver');
+  outsider = await makeUser('outsider');
 
   // A: direct group chat created through the public POST /api/chats endpoint
   // (chatParticipants-based, no Group row, chats.groupId stays null).
-  const postRes = await fetch(`${baseUrl}/api/chats`, {
-    method: 'POST',
-    headers: { ...signed(viewer), 'content-type': 'application/json' },
-    body: JSON.stringify({
-      name: 'F134 direct group',
-      isGroup: true,
-      participantIds: [member1, member2],
-    }),
-  });
-  assert.equal(postRes.status, 201);
-  const postBody = (await postRes.json()) as { chat: { id: string } };
-  directGroupChatId = postBody.chat.id;
-  owned.chats.add(directGroupChatId);
+  directGroupChatId = await postDirectGroup('F134 direct group', [
+    member1,
+    member2,
+  ]);
   await db.insert(messages).values({
     id: await generateSnowflakeId(),
     chatId: directGroupChatId,
@@ -90,6 +135,22 @@ beforeAll(async () => {
     content: 'hello from a direct group chat',
     createdAt: new Date('2026-03-01T00:00:00Z'),
   });
+
+  // A-left: a second direct group chat whose invited participant has left
+  // (the leave flow retains the participant row with isActive = false).
+  leftGroupChatId = await postDirectGroup('F134 left group', [leaver, member2]);
+  await db
+    .update(chatParticipants)
+    .set({ isActive: false })
+    .where(
+      and(
+        eq(chatParticipants.chatId, leftGroupChatId),
+        eq(chatParticipants.userId, leaver)
+      )
+    );
+
+  // A-empty: a direct group chat with no messages yet.
+  emptyGroupChatId = await postDirectGroup('F134 empty group', [member1]);
 
   // B: group-backed chat (Group + GroupMember + chats.groupId), the shape
   // produced by /api/groups, A2A create_group and MCP create_group.
@@ -199,6 +260,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Derived reputation ledger rows first: they reference the owned users
+  // and survive user deletion because there is no cascading FK.
+  await deleteOwnedLedgerRows([...owned.users]);
   if (owned.chats.size) {
     const ids = [...owned.chats];
     await db.delete(messages).where(inArray(messages.chatId, ids));
@@ -214,6 +278,21 @@ afterAll(async () => {
   }
   if (owned.users.size)
     await db.delete(users).where(inArray(users.id, [...owned.users]));
+
+  // Cleanup evidence: nothing this fixture owned may remain behind.
+  if (owned.users.size) {
+    const ids = [...owned.users];
+    const [ledgerLeft] = await db
+      .select({ value: count() })
+      .from(pointsTransactions)
+      .where(inArray(pointsTransactions.userId, ids));
+    assert.equal(ledgerLeft?.value ?? 0, 0);
+    const [usersLeft] = await db
+      .select({ value: count() })
+      .from(users)
+      .where(inArray(users.id, ids));
+    assert.equal(usersLeft?.value ?? 0, 0);
+  }
 });
 
 test('A1: a group chat created via POST /api/chats appears in the creator chat list', async () => {
@@ -224,6 +303,26 @@ test('A1: a group chat created via POST /api/chats appears in the creator chat l
 test('A2: the same direct group chat appears in an invited participant chat list', async () => {
   const list = await getList(member1);
   expect(list.groupChats.map((c) => c.id)).toContain(directGroupChatId);
+});
+
+test('A3: the direct group entry carries the preview and message count of its only message', async () => {
+  const list = await getList(viewer);
+  const entry = list.groupChats.find((c) => c.id === directGroupChatId);
+  assert.ok(entry);
+  expect(entry.isGroup).toBe(true);
+  expect(entry.name).toBe('F134 direct group');
+  expect(entry.messageCount).toBe(1);
+  expect(entry.lastMessage?.content).toBe('hello from a direct group chat');
+  expect(entry.lastMessage?.senderId).toBe(member1);
+});
+
+test('A4: an empty direct group chat is listed with a null preview and a zero count', async () => {
+  const list = await getList(viewer);
+  const entry = list.groupChats.find((c) => c.id === emptyGroupChatId);
+  assert.ok(entry);
+  expect(entry.isGroup).toBe(true);
+  expect(entry.lastMessage).toBeNull();
+  expect(entry.messageCount).toBe(0);
 });
 
 test('B1: a group-backed chat appears in the chat list (control)', async () => {
@@ -247,4 +346,92 @@ test('D1: all 25 group chats with tied membership lastMessageAt are listed exact
     .filter((id) => tiedGroupChatIds.includes(id));
   expect(listed.sort()).toEqual([...tiedGroupChatIds].sort());
   expect(new Set(listed).size).toBe(listed.length);
+});
+
+test('N1: a participant who left a direct group chat no longer sees it, active members still do', async () => {
+  const leaverList = await getList(leaver);
+  expect(leaverList.groupChats.map((c) => c.id)).not.toContain(leftGroupChatId);
+  const viewerList = await getList(viewer);
+  expect(viewerList.groupChats.map((c) => c.id)).toContain(leftGroupChatId);
+});
+
+test('N2: an unrelated user sees none of the fixture group chats', async () => {
+  const list = await getList(outsider);
+  const ids = list.groupChats.map((c) => c.id);
+  expect(ids).not.toContain(directGroupChatId);
+  expect(ids).not.toContain(leftGroupChatId);
+  expect(ids).not.toContain(emptyGroupChatId);
+  expect(ids).not.toContain(backedGroupChatId);
+});
+
+test('N3: missing or invalid credentials are rejected', async () => {
+  const missing = await fetch(`${baseUrl}/api/chats`);
+  expect(missing.status).toBe(401);
+  const invalid = await fetch(`${baseUrl}/api/chats`, {
+    headers: { authorization: 'Bearer not-a-real-token' },
+  });
+  expect(invalid.status).toBe(401);
+});
+
+test('E1: creating a direct group chat writes a reputation ledger row for the creator', async () => {
+  const rows = await db
+    .select({ id: pointsTransactions.id })
+    .from(pointsTransactions)
+    .where(
+      and(
+        eq(pointsTransactions.userId, viewer),
+        eq(pointsTransactions.reason, 'private_channel_create')
+      )
+    );
+  expect(rows.length).toBeGreaterThanOrEqual(1);
+});
+
+test('F1: ledger cleanup removes owned rows and preserves foreign rows', async () => {
+  // A foreign user this fixture did not create (collision control): its
+  // ledger row must survive a cleanup scoped to fixture-owned users.
+  const foreignId = await generateSnowflakeId();
+  await db.insert(users).values({
+    id: foreignId,
+    username: `f134-foreign-${foreignId}`,
+    displayName: `F134 foreign ${foreignId}`,
+    stewardId: `f134-steward-foreign-${foreignId}`,
+    updatedAt: new Date(),
+  });
+  await db.insert(pointsTransactions).values({
+    id: await generateSnowflakeId(),
+    userId: foreignId,
+    amount: 1,
+    pointsBefore: 0,
+    pointsAfter: 1,
+    reason: 'private_channel_create',
+  });
+  const tempId = await makeUser('temp');
+  await db.insert(pointsTransactions).values({
+    id: await generateSnowflakeId(),
+    userId: tempId,
+    amount: 1,
+    pointsBefore: 0,
+    pointsAfter: 1,
+    reason: 'private_channel_create',
+  });
+
+  await deleteOwnedLedgerRows([tempId]);
+
+  const tempLeft = await db
+    .select({ id: pointsTransactions.id })
+    .from(pointsTransactions)
+    .where(eq(pointsTransactions.userId, tempId));
+  expect(tempLeft.length).toBe(0);
+  const foreignLeft = await db
+    .select({ id: pointsTransactions.id })
+    .from(pointsTransactions)
+    .where(eq(pointsTransactions.userId, foreignId));
+  expect(foreignLeft.length).toBe(1);
+
+  // The foreign rows were created by this file, so the file owns their
+  // final removal once the control assertions are done.
+  await db
+    .delete(pointsTransactions)
+    .where(eq(pointsTransactions.userId, foreignId));
+  await db.delete(users).where(eq(users.id, foreignId));
 });
