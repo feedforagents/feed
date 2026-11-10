@@ -1,106 +1,52 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  generateSkillsMarkdown,
-  parseAgentCardSkills,
-  parseExecutorOperations,
-  parseMCPTools,
-} from './generate-skills-md';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { FEED_HOW_TO_PLAY } from '../packages/shared/src/feed-onboarding';
+import { buildArtifacts, validateOrigin } from './generate-skills-md';
 
-describe('generate-skills-md', () => {
-  test('parseAgentCardSkills', async () => {
-    const mockContent = `
-    skills: [
-      {
-        id: 'test-skill',
-        name: 'Test Skill',
-        description: 
-        'This is a test skill description',
-        tags: ['test', 'skill'],
-        examples: [
-          'Example 1',
-          'Example 2'
-        ],
-        inputModes: [],
-      }
-    ],
-    `;
-
-    const result = parseAgentCardSkills(mockContent);
-    expect(result).toHaveLength(1);
-    expect(result[0]?.id).toBe('test-skill');
-    expect(result[0]?.name).toBe('Test Skill');
-    expect(result[0]?.description).toBe('This is a test skill description');
-    expect(result[0]?.tags).toEqual(['test', 'skill']);
-    expect(result[0]?.examples).toEqual(['Example 1', 'Example 2']);
-  });
-
-  test('parseExecutorOperations', async () => {
-    const mockContent = `
-    switch (operation) {
-      case 'test.operation1':
-        return handleOp1();
-      case 'test.operation2':
-        return handleOp2();
-      case 'default':
-        return handleDefault();
+const root = join(import.meta.dir, '..');
+const skill = readFileSync(join(root, 'skills/feed/SKILL.md'), 'utf8');
+const guide = FEED_HOW_TO_PLAY;
+describe('canonical agent artifacts', () => {
+  test('published skill aliases and digest match canonical source', () => {
+    const files = buildArtifacts(skill, guide);
+    expect(files.get('apps/web/public/SKILL.md')).toBe(skill);
+    expect(files.get('docs/skills.md')).toBe(skill);
+    expect(
+      files.get('apps/web/public/.well-known/agent-skills/feed/SKILL.md')
+    ).toBe(skill);
+    expect(
+      files.get('apps/web/public/.well-known/agent-skills/index.json')
+    ).toContain(createHash('sha256').update(skill).digest('hex'));
+    for (const [path, content] of files) {
+      const actual = readFileSync(join(root, path), 'utf8');
+      if (path.endsWith('.json'))
+        expect(JSON.parse(actual)).toEqual(JSON.parse(content));
+      else expect(actual).toBe(content);
     }
-    `;
-
-    const result = parseExecutorOperations(mockContent);
-    expect(result).toHaveLength(2);
-    expect(result).toContain('test.operation1');
-    expect(result).toContain('test.operation2');
-    expect(result).not.toContain('default');
   });
-
-  test('parseMCPTools', async () => {
-    const mockContent = `
-    return [
-      {
-        name: 'tool1',
-        description: 'Tool 1 description'
-      },
-      {
-        name: 'tool2',
-        description: 
-        'Tool 2 multiline description'
-      }
-    ];
-    `;
-
-    const result = parseMCPTools(mockContent);
-    expect(result).toHaveLength(2);
-    expect(result[0]?.name).toBe('tool1');
-    expect(result[0]?.description).toBe('Tool 1 description');
-    expect(result[1]?.name).toBe('tool2');
-    expect(result[1]?.description).toBe('Tool 2 multiline description');
-  });
-
-  test('generateSkillsMarkdown', async () => {
-    const skills = [
-      {
-        id: 'test-skill',
-        name: 'Test Skill',
-        description: 'Skill description',
-        tags: ['test'],
-        examples: ['Example'],
-      },
-    ];
-    const operations = ['test.operation1', 'test.operation2'];
-    const byPrefix = new Map([
-      ['test', ['test.operation1', 'test.operation2']],
-    ]);
-    const mcpTools = [{ name: 'tool1', description: 'Tool 1 description' }];
-
-    const markdown = generateSkillsMarkdown(
-      skills,
-      operations,
-      byPrefix,
-      mcpTools
+  test('preview origin applies to discovery and MCP config without production redirects', () => {
+    const files = buildArtifacts(skill, guide, 'http://localhost:3100');
+    expect(files.get('apps/web/public/SKILL.md')).toContain(
+      'http://localhost:3100'
     );
-    expect(markdown).toContain('# Feed Agent Skills');
-    expect(markdown).toContain('Test Skill');
-    expect(markdown).toContain('test.operation1');
-    expect(markdown).toContain('tool1');
+    expect(files.get('apps/web/public/SKILL.md')).not.toContain('feed.fun');
+    expect(files.get('skills/feed/.mcp.json')).toContain(
+      'http://localhost:3100/mcp'
+    );
+    expect(files.get('apps/web/public/llms.txt')).not.toContain(
+      'https://feed.fun'
+    );
+  });
+  test('rejects unsafe origins before generating artifacts', () => {
+    for (const origin of [
+      'http://feed.fun',
+      'https://user:secret@feed.fun',
+      'https://feed.fun/path',
+      'https://feed.fun/?token=x',
+      'https://feed.fun/#token',
+    ])
+      expect(() => validateOrigin(origin)).toThrow();
   });
 });

@@ -228,6 +228,18 @@ export {
 } from './redis';
 // Services
 export * from './services';
+export {
+  type CreateFeedPostOptions,
+  createFeedPost,
+  FeedPostCreationError,
+} from './services/feed-post-service';
+// Shared website/MCP post operations.
+export {
+  getPostsFeed,
+  type PostsFeedInput,
+  toFeedISOString,
+} from './services/feed-read-service';
+export { getPublicPost } from './services/public-post-service';
 // SSE Event Broadcasting
 export {
   type AgentActivityEvent,
