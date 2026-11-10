@@ -17,6 +17,7 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  and,
   balanceTransactions,
   comments,
   db,
@@ -24,6 +25,7 @@ import {
   eq,
   inArray,
   markets,
+  ne,
   pointsTransactions,
   posts,
 } from '@feed/db';
@@ -145,7 +147,10 @@ export const GET = withErrorHandling(
         'perp_liquidation',
       ];
 
-      const userTrades = await db
+      // Filter to trade types in SQL and fetch one row past the window,
+      // so non-trade balance rows (deposits, funding, fees) cannot eat
+      // the window and hasMore can see a (limit + 1)th trade.
+      const filteredTrades = await db
         .select({
           id: balanceTransactions.id,
           type: balanceTransactions.type,
@@ -155,14 +160,14 @@ export const GET = withErrorHandling(
           createdAt: balanceTransactions.createdAt,
         })
         .from(balanceTransactions)
-        .where(eq(balanceTransactions.userId, canonicalUserId))
+        .where(
+          and(
+            eq(balanceTransactions.userId, canonicalUserId),
+            inArray(balanceTransactions.type, tradeTypes)
+          )
+        )
         .orderBy(desc(balanceTransactions.createdAt))
-        .limit(limit * 2); // Fetch more to filter
-
-      // Filter to only trade types
-      const filteredTrades = userTrades.filter((t) =>
-        tradeTypes.includes(t.type)
-      );
+        .limit(limit + 1);
 
       // Get market info for trades that have relatedId (marketId)
       const marketIds = [
@@ -186,7 +191,7 @@ export const GET = withErrorHandling(
         marketsMap = new Map(marketData.map((m) => [m.id, m.question]));
       }
 
-      for (const trade of filteredTrades.slice(0, limit)) {
+      for (const trade of filteredTrades) {
         activities.push({
           type: 'trade',
           id: trade.id,
@@ -206,6 +211,10 @@ export const GET = withErrorHandling(
 
     // Fetch points transactions if requested (excluding trading_pnl since we show trades separately)
     if (type === 'all' || type === 'points') {
+      // Exclude trading_pnl in SQL (trades are shown from
+      // balanceTransactions) and fetch one row past the window, so
+      // trading_pnl rows cannot eat the window and hasMore can see a
+      // (limit + 1)th points activity.
       const transactions = await db
         .select({
           id: pointsTransactions.id,
@@ -217,14 +226,16 @@ export const GET = withErrorHandling(
           createdAt: pointsTransactions.createdAt,
         })
         .from(pointsTransactions)
-        .where(eq(pointsTransactions.userId, canonicalUserId))
+        .where(
+          and(
+            eq(pointsTransactions.userId, canonicalUserId),
+            ne(pointsTransactions.reason, 'trading_pnl')
+          )
+        )
         .orderBy(desc(pointsTransactions.createdAt))
-        .limit(limit);
+        .limit(limit + 1);
 
       for (const tx of transactions) {
-        // Skip trading_pnl since we show trades from balanceTransactions
-        if (tx.reason === 'trading_pnl') continue;
-
         activities.push({
           type: 'points',
           id: tx.id,
@@ -251,7 +262,7 @@ export const GET = withErrorHandling(
         .from(posts)
         .where(eq(posts.authorId, canonicalUserId))
         .orderBy(desc(posts.createdAt))
-        .limit(limit);
+        .limit(limit + 1);
 
       for (const post of userPosts) {
         activities.push({
@@ -279,7 +290,7 @@ export const GET = withErrorHandling(
         .from(comments)
         .where(eq(comments.authorId, canonicalUserId))
         .orderBy(desc(comments.createdAt))
-        .limit(limit);
+        .limit(limit + 1);
 
       for (const comment of userComments) {
         activities.push({

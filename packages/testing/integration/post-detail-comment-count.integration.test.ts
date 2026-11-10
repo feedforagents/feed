@@ -1,4 +1,5 @@
 /**
+ * PRD §§6.1/12 and MVP Phase 5 preserve public posts and moderation.
  * GET /api/posts/[id] against a real database: the `commentCount` in the
  * response is the number shown at the top of the post detail screen, and it
  * must equal the number of comments the comment list for the same post
@@ -40,8 +41,8 @@ import {
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
-import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
+import { createStewardTestToken } from './helpers/steward-auth';
 
 type CommentNode = {
   id: string;
@@ -58,11 +59,22 @@ type CommentsResponse = {
   data: { comments: CommentNode[]; total: number };
 };
 
+function ownership() {
+  return {
+    users: new Set<string>(),
+    posts: new Set<string>(),
+    comments: new Set<string>(),
+    blocks: new Set<string>(),
+    mutes: new Set<string>(),
+  };
+}
+type Ownership = ReturnType<typeof ownership>;
+const owned = ownership();
+
 let authorId: string;
 let commenterId: string;
 let postId: string;
 let parentCommentId: string;
-const allCommentIds: string[] = [];
 
 // Signed-viewer regression (maintainer follow-up on #1698): the viewer
 // blocks one author, mutes another, and is blocked by a third. Their
@@ -76,8 +88,6 @@ let mutedAuthorId: string;
 let blockerAuthorId: string;
 let viewerPostId: string;
 let token: string;
-const viewerBlockIds: string[] = [];
-const viewerMuteIds: string[] = [];
 
 let getPost: (
   request: NextRequest,
@@ -139,6 +149,83 @@ function signedViewerHeaders() {
   return { authorization: `Bearer ${token}` };
 }
 
+async function cleanup(receipts: Ownership) {
+  // Delete only successful INSERT identities, children before their parents.
+  // A failed table must not prevent the remaining owned cleanup attempts.
+  const actions = [
+    {
+      ids: receipts.comments,
+      remove: () =>
+        db
+          .delete(comments)
+          .where(inArray(comments.id, [...receipts.comments]))
+          .returning({ id: comments.id }),
+    },
+    {
+      ids: receipts.blocks,
+      remove: () =>
+        db
+          .delete(userBlocks)
+          .where(inArray(userBlocks.id, [...receipts.blocks]))
+          .returning({ id: userBlocks.id }),
+    },
+    {
+      ids: receipts.mutes,
+      remove: () =>
+        db
+          .delete(userMutes)
+          .where(inArray(userMutes.id, [...receipts.mutes]))
+          .returning({ id: userMutes.id }),
+    },
+    {
+      ids: receipts.posts,
+      remove: () =>
+        db
+          .delete(posts)
+          .where(inArray(posts.id, [...receipts.posts]))
+          .returning({ id: posts.id }),
+    },
+    {
+      ids: receipts.users,
+      remove: () =>
+        db
+          .delete(users)
+          .where(inArray(users.id, [...receipts.users]))
+          .returning({ id: users.id }),
+    },
+  ];
+  const failures: Error[] = [];
+  for (const { ids, remove } of actions) {
+    if (ids.size === 0) continue;
+    try {
+      for (const row of await remove()) ids.delete(row.id);
+    } catch (error) {
+      failures.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  if (Object.values(receipts).some((ids) => ids.size > 0))
+    failures.push(
+      new Error('Owned comment-count identities remain after cleanup')
+    );
+  if (failures.length)
+    throw new AggregateError(failures, 'Owned comment-count cleanup failed');
+}
+
+async function collisionUser(id: string, tag: string, registry: Set<string>) {
+  const inserted = await db
+    .insert(users)
+    .values({
+      id,
+      username: `g22-${tag}-${id}`,
+      displayName: 'Comment Count Cleanup Fixture',
+      isTest: true,
+      updatedAt: new Date(),
+    })
+    .returning({ id: users.id });
+  for (const row of inserted) registry.add(row.id);
+  expect(inserted).toEqual([{ id }]);
+}
+
 beforeAll(async () => {
   ({ GET: getPost } = await import(postRoutePath));
   ({ GET: getComments } = await import(commentsRoutePath));
@@ -157,14 +244,6 @@ beforeAll(async () => {
       generateSnowflakeId(),
       generateSnowflakeId(),
     ]);
-  allCommentIds.push(
-    parentCommentId,
-    childId,
-    grandchildId,
-    visibleTopId,
-    visibleReplyId,
-    deletedReplyId
-  );
 
   const now = new Date();
   const earlier = new Date(now.getTime() - 60_000);
@@ -172,91 +251,103 @@ beforeAll(async () => {
   // top-level comment (equal-timestamp axis).
   const sharedTs = new Date(now.getTime() - 30_000);
 
-  await db.insert(users).values([
-    {
-      id: authorId,
-      username: `g22a-${authorId}`,
-      displayName: 'Post Detail Author',
-      updatedAt: now,
-    },
-    {
-      id: commenterId,
-      username: `g22c-${commenterId}`,
-      displayName: 'Post Detail Commenter',
-      updatedAt: now,
-    },
-  ]);
+  const insertedUsers = await db
+    .insert(users)
+    .values([
+      {
+        id: authorId,
+        username: `g22a-${authorId}`,
+        displayName: 'Post Detail Author',
+        updatedAt: now,
+      },
+      {
+        id: commenterId,
+        username: `g22c-${commenterId}`,
+        displayName: 'Post Detail Commenter',
+        updatedAt: now,
+      },
+    ])
+    .returning({ id: users.id });
+  for (const row of insertedUsers) owned.users.add(row.id);
 
-  await db.insert(posts).values({
-    id: postId,
-    content: 'fixture post for post detail comment count',
-    authorId,
-    timestamp: earlier,
-    createdAt: earlier,
-  });
+  const insertedPost = await db
+    .insert(posts)
+    .values({
+      id: postId,
+      content: 'fixture post for post detail comment count',
+      authorId,
+      timestamp: earlier,
+      createdAt: earlier,
+    })
+    .returning({ id: posts.id });
+  for (const row of insertedPost) owned.posts.add(row.id);
 
-  await db.insert(comments).values([
-    {
-      id: parentCommentId,
-      content: 'parent comment that moderation will hide',
-      postId,
-      authorId: commenterId,
-      parentCommentId: null,
-      createdAt: sharedTs,
-      updatedAt: sharedTs,
-      deletedAt: null,
-    },
-    {
-      id: childId,
-      content: 'reply under the soon-to-be-hidden parent',
-      postId,
-      authorId: authorId,
-      parentCommentId,
-      createdAt: sharedTs,
-      updatedAt: sharedTs,
-      deletedAt: null,
-    },
-    {
-      id: grandchildId,
-      content: 'nested reply under the hidden parent subtree',
-      postId,
-      authorId: commenterId,
-      parentCommentId: childId,
-      createdAt: sharedTs,
-      updatedAt: sharedTs,
-      deletedAt: null,
-    },
-    {
-      id: visibleTopId,
-      content: 'visible top-level comment',
-      postId,
-      authorId: commenterId,
-      parentCommentId: null,
-      createdAt: sharedTs,
-      updatedAt: sharedTs,
-      deletedAt: null,
-    },
-    {
-      id: visibleReplyId,
-      content: 'visible reply',
-      postId,
-      authorId: authorId,
-      parentCommentId: visibleTopId,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: deletedReplyId,
-      content: 'reply that is itself soft-deleted (control)',
-      postId,
-      authorId: authorId,
-      parentCommentId: visibleTopId,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: now,
-    },
-  ]);
+  const insertedComments = await db
+    .insert(comments)
+    .values([
+      {
+        id: parentCommentId,
+        content: 'parent comment that moderation will hide',
+        postId,
+        authorId: commenterId,
+        parentCommentId: null,
+        createdAt: sharedTs,
+        updatedAt: sharedTs,
+        deletedAt: null,
+      },
+      {
+        id: childId,
+        content: 'reply under the soon-to-be-hidden parent',
+        postId,
+        authorId: authorId,
+        parentCommentId,
+        createdAt: sharedTs,
+        updatedAt: sharedTs,
+        deletedAt: null,
+      },
+      {
+        id: grandchildId,
+        content: 'nested reply under the hidden parent subtree',
+        postId,
+        authorId: commenterId,
+        parentCommentId: childId,
+        createdAt: sharedTs,
+        updatedAt: sharedTs,
+        deletedAt: null,
+      },
+      {
+        id: visibleTopId,
+        content: 'visible top-level comment',
+        postId,
+        authorId: commenterId,
+        parentCommentId: null,
+        createdAt: sharedTs,
+        updatedAt: sharedTs,
+        deletedAt: null,
+      },
+      {
+        id: visibleReplyId,
+        content: 'visible reply',
+        postId,
+        authorId: authorId,
+        parentCommentId: visibleTopId,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: deletedReplyId,
+        content: 'reply that is itself soft-deleted (control)',
+        postId,
+        authorId: authorId,
+        parentCommentId: visibleTopId,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: now,
+      },
+    ])
+    .returning({ id: comments.id });
+  for (const row of insertedComments) owned.comments.add(row.id);
 
   // Signed-viewer fixture on its own post: one visible top-level comment
   // with a reply, one top-level comment each from a blocked, a muted, and
@@ -294,208 +385,185 @@ beforeAll(async () => {
     generateSnowflakeId(),
     generateSnowflakeId(),
   ]);
-  allCommentIds.push(
-    viewerVisibleTopId,
-    viewerVisibleReplyId,
-    viewerBlockedTopId,
-    viewerBlockedReplyId,
-    viewerMutedTopId,
-    viewerMutedReplyId,
-    viewerBlockerTopId,
-    viewerBlockerReplyId,
-    viewerHiddenTopId,
-    viewerHiddenReplyId
-  );
 
-  // Short-lived synthetic steward JWT for the viewer, signed with the
-  // same secret the route verifies (dev fallback matches the verifier's).
-  // The viewer row carries this steward id so optionalAuth resolves it to
-  // the viewer.
   const viewerStewardId = `g22-detail-${viewerId}`;
-  const secret =
-    process.env.STEWARD_JWT_SECRET ?? 'dev-jwt-secret-change-in-prod';
-  token = await new SignJWT({ userId: viewerStewardId })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuer('steward')
-    .setIssuedAt()
-    .setExpirationTime('1m')
-    .sign(new TextEncoder().encode(secret));
 
-  await db.insert(users).values([
-    {
-      id: viewerId,
-      username: `g22v-${viewerId}`,
-      displayName: 'Post Detail Viewer',
-      stewardId: viewerStewardId,
-      updatedAt: now,
-    },
-    {
-      id: blockedAuthorId,
-      username: `g22b-${blockedAuthorId}`,
-      displayName: 'Blocked Comment Author',
-      updatedAt: now,
-    },
-    {
-      id: mutedAuthorId,
-      username: `g22m-${mutedAuthorId}`,
-      displayName: 'Muted Comment Author',
-      updatedAt: now,
-    },
-    {
-      id: blockerAuthorId,
-      username: `g22k-${blockerAuthorId}`,
-      displayName: 'Blocking Comment Author',
-      updatedAt: now,
-    },
-  ]);
+  const insertedViewerUsers = await db
+    .insert(users)
+    .values([
+      {
+        id: viewerId,
+        username: `g22v-${viewerId}`,
+        displayName: 'Post Detail Viewer',
+        stewardId: viewerStewardId,
+        updatedAt: now,
+      },
+      {
+        id: blockedAuthorId,
+        username: `g22b-${blockedAuthorId}`,
+        displayName: 'Blocked Comment Author',
+        updatedAt: now,
+      },
+      {
+        id: mutedAuthorId,
+        username: `g22m-${mutedAuthorId}`,
+        displayName: 'Muted Comment Author',
+        updatedAt: now,
+      },
+      {
+        id: blockerAuthorId,
+        username: `g22k-${blockerAuthorId}`,
+        displayName: 'Blocking Comment Author',
+        updatedAt: now,
+      },
+    ])
+    .returning({ id: users.id });
+  for (const row of insertedViewerUsers) owned.users.add(row.id);
+  // Register the viewer before signing or any later setup await can fail.
+  token = await createStewardTestToken(viewerStewardId);
 
-  await db.insert(posts).values({
-    id: viewerPostId,
-    content: 'fixture post for signed-viewer post detail comment count',
-    authorId,
-    timestamp: earlier,
-    createdAt: earlier,
-  });
+  const insertedViewerPost = await db
+    .insert(posts)
+    .values({
+      id: viewerPostId,
+      content: 'fixture post for signed-viewer post detail comment count',
+      authorId,
+      timestamp: earlier,
+      createdAt: earlier,
+    })
+    .returning({ id: posts.id });
+  for (const row of insertedViewerPost) owned.posts.add(row.id);
 
-  await db.insert(comments).values([
-    {
-      id: viewerVisibleTopId,
-      content: 'visible top-level comment for the viewer',
-      postId: viewerPostId,
-      authorId: commenterId,
-      parentCommentId: null,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: viewerVisibleReplyId,
-      content: 'visible reply for the viewer',
-      postId: viewerPostId,
-      authorId: authorId,
-      parentCommentId: viewerVisibleTopId,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: viewerBlockedTopId,
-      content: 'top-level comment by the blocked author',
-      postId: viewerPostId,
-      authorId: blockedAuthorId,
-      parentCommentId: null,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: viewerBlockedReplyId,
-      content: 'reply under the blocked author comment',
-      postId: viewerPostId,
-      authorId: authorId,
-      parentCommentId: viewerBlockedTopId,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: viewerMutedTopId,
-      content: 'top-level comment by the muted author',
-      postId: viewerPostId,
-      authorId: mutedAuthorId,
-      parentCommentId: null,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: viewerMutedReplyId,
-      content: 'reply under the muted author comment',
-      postId: viewerPostId,
-      authorId: commenterId,
-      parentCommentId: viewerMutedTopId,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: viewerBlockerTopId,
-      content: 'top-level comment by the author who blocked the viewer',
-      postId: viewerPostId,
-      authorId: blockerAuthorId,
-      parentCommentId: null,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: viewerBlockerReplyId,
-      content: 'reply under the blocking author comment',
-      postId: viewerPostId,
-      authorId: authorId,
-      parentCommentId: viewerBlockerTopId,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-    {
-      id: viewerHiddenTopId,
-      content: 'moderation-hidden top-level comment',
-      postId: viewerPostId,
-      authorId: commenterId,
-      parentCommentId: null,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: now,
-    },
-    {
-      id: viewerHiddenReplyId,
-      content: 'reply under the moderation-hidden comment',
-      postId: viewerPostId,
-      authorId: authorId,
-      parentCommentId: viewerHiddenTopId,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    },
-  ]);
+  const insertedViewerComments = await db
+    .insert(comments)
+    .values([
+      {
+        id: viewerVisibleTopId,
+        content: 'visible top-level comment for the viewer',
+        postId: viewerPostId,
+        authorId: commenterId,
+        parentCommentId: null,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: viewerVisibleReplyId,
+        content: 'visible reply for the viewer',
+        postId: viewerPostId,
+        authorId: authorId,
+        parentCommentId: viewerVisibleTopId,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: viewerBlockedTopId,
+        content: 'top-level comment by the blocked author',
+        postId: viewerPostId,
+        authorId: blockedAuthorId,
+        parentCommentId: null,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: viewerBlockedReplyId,
+        content: 'reply under the blocked author comment',
+        postId: viewerPostId,
+        authorId: authorId,
+        parentCommentId: viewerBlockedTopId,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: viewerMutedTopId,
+        content: 'top-level comment by the muted author',
+        postId: viewerPostId,
+        authorId: mutedAuthorId,
+        parentCommentId: null,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: viewerMutedReplyId,
+        content: 'reply under the muted author comment',
+        postId: viewerPostId,
+        authorId: commenterId,
+        parentCommentId: viewerMutedTopId,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: viewerBlockerTopId,
+        content: 'top-level comment by the author who blocked the viewer',
+        postId: viewerPostId,
+        authorId: blockerAuthorId,
+        parentCommentId: null,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: viewerBlockerReplyId,
+        content: 'reply under the blocking author comment',
+        postId: viewerPostId,
+        authorId: authorId,
+        parentCommentId: viewerBlockerTopId,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+      {
+        id: viewerHiddenTopId,
+        content: 'moderation-hidden top-level comment',
+        postId: viewerPostId,
+        authorId: commenterId,
+        parentCommentId: null,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: now,
+      },
+      {
+        id: viewerHiddenReplyId,
+        content: 'reply under the moderation-hidden comment',
+        postId: viewerPostId,
+        authorId: authorId,
+        parentCommentId: viewerHiddenTopId,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+    ])
+    .returning({ id: comments.id });
+  for (const row of insertedViewerComments) owned.comments.add(row.id);
 
   const [viewerBlockId, viewerBlockerBlockId, viewerMuteId] = await Promise.all(
     [generateSnowflakeId(), generateSnowflakeId(), generateSnowflakeId()]
   );
-  viewerBlockIds.push(viewerBlockId, viewerBlockerBlockId);
-  viewerMuteIds.push(viewerMuteId);
-  await db.insert(userBlocks).values([
-    { id: viewerBlockId, blockerId: viewerId, blockedId: blockedAuthorId },
-    {
-      id: viewerBlockerBlockId,
-      blockerId: blockerAuthorId,
-      blockedId: viewerId,
-    },
-  ]);
-  await db
+  const insertedBlocks = await db
+    .insert(userBlocks)
+    .values([
+      { id: viewerBlockId, blockerId: viewerId, blockedId: blockedAuthorId },
+      {
+        id: viewerBlockerBlockId,
+        blockerId: blockerAuthorId,
+        blockedId: viewerId,
+      },
+    ])
+    .returning({ id: userBlocks.id });
+  for (const row of insertedBlocks) owned.blocks.add(row.id);
+  const insertedMutes = await db
     .insert(userMutes)
-    .values({ id: viewerMuteId, muterId: viewerId, mutedId: mutedAuthorId });
+    .values({ id: viewerMuteId, muterId: viewerId, mutedId: mutedAuthorId })
+    .returning({ id: userMutes.id });
+  for (const row of insertedMutes) owned.mutes.add(row.id);
 });
 
-afterAll(async () => {
-  await db.delete(comments).where(inArray(comments.id, allCommentIds));
-  await db.delete(userBlocks).where(inArray(userBlocks.id, viewerBlockIds));
-  await db.delete(userMutes).where(inArray(userMutes.id, viewerMuteIds));
-  await db.delete(posts).where(inArray(posts.id, [postId, viewerPostId]));
-  await db
-    .delete(users)
-    .where(
-      inArray(users.id, [
-        authorId,
-        commenterId,
-        viewerId,
-        blockedAuthorId,
-        mutedAuthorId,
-        blockerAuthorId,
-      ])
-    );
-});
+afterAll(async () => cleanup(owned));
 
 describe('GET /api/posts/[id] commentCount', () => {
   it('commentCount equals the number of comments the list delivers', async () => {
@@ -577,5 +645,54 @@ describe('GET /api/posts/[id] commentCount', () => {
     expect((signedDetail.body as PostResponse).data.commentCount).toBeLessThan(
       (anonDetail.body as PostResponse).data.commentCount
     );
+  });
+
+  it('partial setup cleanup preserves an independently inserted collision user', async () => {
+    const partial = ownership();
+    const control = ownership();
+    const controlId = await generateSnowflakeId();
+    const partialId = await generateSnowflakeId();
+    try {
+      await collisionUser(controlId, 'survivor', control.users);
+      const [before] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, controlId));
+      expect(before?.id).toBe(controlId);
+      await collisionUser(partialId, 'partial', partial.users);
+      await expect(
+        collisionUser(controlId, 'collision', partial.users)
+      ).rejects.toMatchObject({ cause: { code: '23505' } });
+      expect([...partial.users]).toEqual([partialId]);
+      await cleanup(partial);
+      expect(
+        await db.select().from(users).where(eq(users.id, partialId))
+      ).toEqual([]);
+      const [after] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, controlId));
+      expect(after).toEqual(before);
+      await cleanup(partial); // Repeating successful cleanup is harmless.
+    } finally {
+      const results = await Promise.allSettled([
+        cleanup(partial),
+        cleanup(control),
+      ]);
+      const failures = results.flatMap((result) =>
+        result.status === 'rejected'
+          ? [
+              result.reason instanceof Error
+                ? result.reason
+                : new Error(String(result.reason)),
+            ]
+          : []
+      );
+      if (failures.length)
+        throw new AggregateError(
+          failures,
+          'Partial comment-count cleanup failed'
+        );
+    }
   });
 });
