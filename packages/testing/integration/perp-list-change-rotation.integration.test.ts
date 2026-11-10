@@ -76,6 +76,9 @@ async function seedMarket(input: {
     .insert(perpMarketSnapshots)
     .values(snapshotValues(ticker, input.price24hAgoUpdatedAt))
     .returning({ ticker: perpMarketSnapshots.ticker });
+  if (!inserted) {
+    throw new Error(`seedMarket: insert returned no row for ${ticker}`);
+  }
   ownedTickers.push(inserted.ticker);
   return inserted.ticker;
 }
