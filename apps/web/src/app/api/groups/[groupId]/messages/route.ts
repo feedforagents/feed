@@ -11,7 +11,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asUser } from '@feed/db';
+import { and, asUser, desc, eq, messages, sql } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -75,43 +75,51 @@ export const GET = withErrorHandling(
 
       // The cursor must be a message in this group's chat; an unknown cursor
       // is an error rather than silently restarting from the latest page.
-      const cursorMessage = cursor
-        ? await db.message.findFirst({
-            where: { id: cursor, chatId: groupChat.id },
-            select: { createdAt: true },
-          })
-        : null;
+      // Keep the stored timestamp's full PostgreSQL precision: the Date
+      // decoder would discard microseconds before the next comparison.
+      // The unique ID breaks ties, so a page boundary inside a shared
+      // timestamp resumes exactly instead of dropping the tied messages.
+      const [cursorMessage] = cursor
+        ? await db
+            .select({
+              createdAt: sql<string>`${messages.createdAt}::text`,
+              id: messages.id,
+            })
+            .from(messages)
+            .where(
+              and(eq(messages.id, cursor), eq(messages.chatId, groupChat.id))
+            )
+            .limit(1)
+        : [];
 
       if (cursor && !cursorMessage) {
         throw new ApiError('Invalid cursor', 400);
       }
 
-      const messages = await db.message.findMany({
-        where: {
-          chatId: groupChat.id,
-          ...(cursorMessage
-            ? {
-                createdAt: {
-                  lt: cursorMessage.createdAt,
-                },
-              }
-            : {}),
-        },
-        orderBy: {
-          createdAt: 'desc',
-        },
-        take: limit + 1,
-        select: {
-          id: true,
-          content: true,
-          createdAt: true,
-          senderId: true,
-          type: true,
-        },
-      });
+      const messageRows = await db
+        .select({
+          id: messages.id,
+          content: messages.content,
+          createdAt: messages.createdAt,
+          senderId: messages.senderId,
+          type: messages.type,
+        })
+        .from(messages)
+        .where(
+          cursorMessage
+            ? and(
+                eq(messages.chatId, groupChat.id),
+                sql`(${messages.createdAt}, ${messages.id}) < (${cursorMessage.createdAt}::text::timestamp without time zone, ${cursorMessage.id}::text)`
+              )
+            : eq(messages.chatId, groupChat.id)
+        )
+        .orderBy(desc(messages.createdAt), desc(messages.id))
+        .limit(limit + 1);
 
-      const hasMore = messages.length > limit;
-      const visibleMessages = hasMore ? messages.slice(0, limit) : messages;
+      const hasMore = messageRows.length > limit;
+      const visibleMessages = hasMore
+        ? messageRows.slice(0, limit)
+        : messageRows;
 
       const senderIds = Array.from(
         new Set(
