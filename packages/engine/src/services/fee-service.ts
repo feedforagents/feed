@@ -268,11 +268,14 @@ export class FeeService {
         platformFee: new Decimal(platformReceived).toString(),
         referrerFee: new Decimal(referrerPaid).toString(),
         referrerId,
-        // Only touch the column when a key is given: callers without
-        // one must keep working against a schema where the migration
-        // has not landed yet (schema-before-app rollout). Keyed calls
-        // require the migrated schema.
-        ...(operationId ? { idempotencyKey: operationId } : {}),
+        // Both idempotencyKey columns and the verified unique index
+        // (migration 0005 + manual 0005b) are prerequisites for every
+        // application instance: the locked drizzle-orm (0.44.7) insert
+        // builder emits every TradingFee column — checked with
+        // toSQL() — so even an unkeyed call references this column
+        // (as DEFAULT) and fails on a schema without it. There is no
+        // old-schema compatibility.
+        idempotencyKey: operationId ?? null,
       });
 
       // Atomic increment: concurrent fees for the same trader must not lose

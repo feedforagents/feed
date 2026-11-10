@@ -304,20 +304,31 @@ afterAll(async () => {
         .where(eq(gameConfigs.key, STABILITY_FUND_CONFIG.FUND_BALANCE_KEY));
     });
   }
-  await attempt('perp positions/snapshots', async () => {
+  // Each DELETE/readback pair gets its own attempt boundary: a failed
+  // positions DELETE must not skip the snapshots DELETE, and a failed
+  // fee DELETE must not skip the outbox/ledger DELETEs or their
+  // readbacks. Child-first order is preserved (positions before
+  // snapshots, fees before outbox before ledger, prediction positions
+  // before markets), and the registries are cleared at the end only
+  // when no section failed.
+  await attempt('perp positions', async () => {
     if (createdTickers.length) {
       await db
         .delete(perpPositions)
         .where(inArray(perpPositions.ticker, createdTickers));
-      await db
-        .delete(perpMarketSnapshots)
-        .where(inArray(perpMarketSnapshots.ticker, createdTickers));
       await expectGone('perp position', async () =>
         db
           .select({ id: perpPositions.id })
           .from(perpPositions)
           .where(inArray(perpPositions.ticker, createdTickers))
       );
+    }
+  });
+  await attempt('perp snapshots', async () => {
+    if (createdTickers.length) {
+      await db
+        .delete(perpMarketSnapshots)
+        .where(inArray(perpMarketSnapshots.ticker, createdTickers));
       await expectGone('perp snapshot', async () =>
         db
           .select({ ticker: perpMarketSnapshots.ticker })
@@ -339,11 +350,21 @@ afterAll(async () => {
       );
     }
   });
-  await attempt('prediction markets', async () => {
+  await attempt('prediction positions', async () => {
     if (createdMarketIds.length) {
       await db
         .delete(positions)
         .where(inArray(positions.marketId, createdMarketIds));
+      await expectGone('prediction position', async () =>
+        db
+          .select({ id: positions.id })
+          .from(positions)
+          .where(inArray(positions.marketId, createdMarketIds))
+      );
+    }
+  });
+  await attempt('prediction markets', async () => {
+    if (createdMarketIds.length) {
       await db.delete(markets).where(inArray(markets.id, createdMarketIds));
       await expectGone('prediction market', async () =>
         db
@@ -353,28 +374,42 @@ afterAll(async () => {
       );
     }
   });
-  await attempt('fee rows and outbox rows', async () => {
+  await attempt('fee rows', async () => {
     if (createdUserIds.length) {
       await db
         .delete(tradingFees)
         .where(inArray(tradingFees.userId, createdUserIds));
-      await db
-        .delete(tradingFeeOutbox)
-        .where(inArray(tradingFeeOutbox.userId, createdUserIds));
-      await db
-        .delete(balanceTransactions)
-        .where(inArray(balanceTransactions.userId, createdUserIds));
       await expectGone('fee row', async () =>
         db
           .select({ id: tradingFees.id })
           .from(tradingFees)
           .where(inArray(tradingFees.userId, createdUserIds))
       );
+    }
+  });
+  await attempt('outbox rows', async () => {
+    if (createdUserIds.length) {
+      await db
+        .delete(tradingFeeOutbox)
+        .where(inArray(tradingFeeOutbox.userId, createdUserIds));
       await expectGone('outbox row', async () =>
         db
           .select({ id: tradingFeeOutbox.id })
           .from(tradingFeeOutbox)
           .where(inArray(tradingFeeOutbox.userId, createdUserIds))
+      );
+    }
+  });
+  await attempt('ledger rows', async () => {
+    if (createdUserIds.length) {
+      await db
+        .delete(balanceTransactions)
+        .where(inArray(balanceTransactions.userId, createdUserIds));
+      await expectGone('ledger row', async () =>
+        db
+          .select({ id: balanceTransactions.id })
+          .from(balanceTransactions)
+          .where(inArray(balanceTransactions.userId, createdUserIds))
       );
     }
   });

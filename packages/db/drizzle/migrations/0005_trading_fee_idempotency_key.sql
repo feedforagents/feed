@@ -14,14 +14,19 @@
 -- that reads/writes idempotencyKey is deployed:
 --
 --   1. `bun run db:migrate`            (this file: both columns)
---   2. psql -f <manual 0005b file>     (unique index, concurrently)
---   3. Verify: \d "TradingFee" shows the column + unique index.
---   4. Deploy the app.
+--   2. psql -f <manual 0005b file>     (unique index, concurrently;
+--      the step self-verifies the index and aborts on any failed
+--      check — do not deploy if it fails)
+--   3. Deploy the app.
 --
 -- Rollback: DROP INDEX CONCURRENTLY IF EXISTS
--- "TradingFee_idempotencyKey_idx"; the columns may stay (nullable, and
--- FeeService only writes idempotencyKey when an operation id is given,
--- so unkeyed callers never touch them). Existing rows keep NULL keys;
--- the partial index only covers non-NULL keys, so no backfill is needed.
+-- "TradingFee_idempotencyKey_idx"; the columns may stay (nullable).
+-- The migrated schema — both columns plus the verified unique
+-- index — is a prerequisite for every new application instance:
+-- FeeService's insert builder (locked drizzle-orm 0.44.7, checked
+-- with toSQL()) emits every TradingFee column, so even an unkeyed
+-- call references idempotencyKey (as DEFAULT) and fails on a schema
+-- without it. Existing rows keep NULL keys; the partial index only
+-- covers non-NULL keys, so no backfill is needed.
 ALTER TABLE "TradingFee" ADD COLUMN "idempotencyKey" text;--> statement-breakpoint
 ALTER TABLE "TradingFeeOutbox" ADD COLUMN "idempotencyKey" text;
