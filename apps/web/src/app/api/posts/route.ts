@@ -766,10 +766,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
     // Create maps for quick lookup
     const reactionMap = new Map(
-      reactionCounts.map((r) => [r.postId, Number(r.count)])
+      reactionCounts.map((r) => [r.postId, Number(r.count)] as const)
     );
     const commentMap = new Map(
-      commentCounts.map((c) => [c.postId, Number(c.count)])
+      commentCounts.map((c) => [c.postId, Number(c.count)] as const)
     );
 
     // Fetch original posts for reposts in the following feed.

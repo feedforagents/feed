@@ -68,6 +68,7 @@ import {
   addPublicReadHeaders,
   authenticate,
   BusinessLogicError,
+  cachedDb,
   NotFoundError,
   publicRateLimit,
   successResponse,
@@ -409,6 +410,11 @@ export const DELETE = withErrorHandling(
       .update(posts)
       .set({ deletedAt: new Date() })
       .where(eq(posts.id, postId));
+
+    // A deleted post must leave the cached feed/profile lists at once;
+    // post creation and sharing invalidate the same caches.
+    await cachedDb.invalidatePostsCache();
+    await cachedDb.invalidateActorPostsCache(post.authorId);
 
     logger.info(
       'Post soft deleted',
