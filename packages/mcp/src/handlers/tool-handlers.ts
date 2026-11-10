@@ -2919,6 +2919,16 @@ export async function executeMuteUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot mute yourself');
   }
+  // Match POST /api/users/[userId]/mute: the target must exist. UserMute
+  // has no foreign key, so an unchecked mute of an unknown ID would leave
+  // a phantom row in the caller's mute list.
+  const targetUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!targetUser) {
+    throw new Error(`User ${args.userId} not found`);
+  }
   const existing = await db.userMute.findFirst({
     where: {
       muterId: agent.userId,
