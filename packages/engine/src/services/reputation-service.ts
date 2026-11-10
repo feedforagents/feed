@@ -9,7 +9,7 @@
  * propagation handled by the ReputationBridge in @feed/agents.
  */
 
-import { db, eq, inArray, positions, sql, users } from '@feed/db';
+import { and, db, eq, gt, inArray, positions, sql, users } from '@feed/db';
 import { logger } from '@feed/shared';
 
 // =============================================================================
@@ -72,6 +72,10 @@ export class ReputationService {
   ): Promise<ReputationUpdate[]> {
     const results: ReputationUpdate[] = [];
 
+    // Only holders at resolution earn or lose reputation. resolve() marks
+    // every position for the market `resolved`, including rows the user
+    // fully sold out of (shares 0); sweeping those would award +10 / -5 to
+    // users who held nothing when the market resolved.
     const positionsData = await db
       .select({
         id: positions.id,
@@ -80,7 +84,12 @@ export class ReputationService {
         shares: positions.shares,
       })
       .from(positions)
-      .where(eq(positions.marketId, resolution.marketId));
+      .where(
+        and(
+          eq(positions.marketId, resolution.marketId),
+          gt(positions.shares, 0)
+        )
+      );
 
     if (positionsData.length === 0) {
       logger.info(
