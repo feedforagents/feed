@@ -26,7 +26,7 @@ const fees = {
   minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
 };
 
-const tickers: string[] = [];
+const ownedTickers: string[] = [];
 
 function makeService() {
   return new PerpMarketService({
@@ -37,17 +37,13 @@ function makeService() {
   });
 }
 
-async function seedMarket(input: {
-  price24hAgoUpdatedAt: Date;
-}): Promise<string> {
-  const ticker = `F143${Date.now().toString(36).toUpperCase()}${tickers.length}`;
-  tickers.push(ticker);
-  await db.insert(perpMarketSnapshots).values({
+function snapshotValues(ticker: string, price24hAgoUpdatedAt: Date) {
+  return {
     ticker,
     organizationId: `org-${ticker.toLowerCase()}`,
     currentPrice: 120,
     price24hAgo: 100,
-    price24hAgoUpdatedAt: input.price24hAgoUpdatedAt,
+    price24hAgoUpdatedAt,
     metrics24hResetAt: new Date(),
     change24h: 20,
     changePercent24h: 20,
@@ -61,8 +57,27 @@ async function seedMarket(input: {
       nextFundingTime: new Date().toISOString(),
       predictedRate: 0,
     },
-  });
-  return ticker;
+  };
+}
+
+async function seedMarket(input: {
+  price24hAgoUpdatedAt: Date;
+  ticker?: string;
+}): Promise<string> {
+  const ticker =
+    input.ticker ??
+    `F143${Date.now().toString(36).toUpperCase()}${ownedTickers.length}`;
+  // Ownership is registered only from the row the insert actually
+  // created (the RETURNING result). If the insert fails — e.g. the
+  // timestamp-derived ticker collides with a pre-existing row — nothing
+  // is registered, so cleanup can never delete a row this fixture does
+  // not own.
+  const [inserted] = await db
+    .insert(perpMarketSnapshots)
+    .values(snapshotValues(ticker, input.price24hAgoUpdatedAt))
+    .returning({ ticker: perpMarketSnapshots.ticker });
+  ownedTickers.push(inserted.ticker);
+  return inserted.ticker;
 }
 
 async function readRow(ticker: string) {
@@ -73,13 +88,17 @@ async function readRow(ticker: string) {
   return row;
 }
 
-afterAll(async () => {
-  for (const ticker of tickers) {
+async function cleanupOwnedTickers() {
+  // No catch-all: a failed delete of an owned row must surface as a
+  // test failure, not be silently swallowed.
+  for (const ticker of ownedTickers.splice(0)) {
     await db
       .delete(perpMarketSnapshots)
       .where(eq(perpMarketSnapshots.ticker, ticker));
   }
-});
+}
+
+afterAll(cleanupOwnedTickers);
 
 describe('perp list 24h change across reference rotation', () => {
   it('measures the rotation-write change from the reference that write installs', async () => {
@@ -130,5 +149,41 @@ describe('perp list 24h change across reference rotation', () => {
     expect(Number(row?.price24hAgo)).toBe(100);
     expect(Number(row?.change24h)).toBe(21);
     expect(Number(row?.changePercent24h)).toBeCloseTo(21, 6);
+  });
+
+  it('registers ownership only for successful inserts, so cleanup cannot delete a pre-existing row on a ticker collision', async () => {
+    // An owned row, seeded through the fixture.
+    const ownedTicker = await seedMarket({
+      price24hAgoUpdatedAt: new Date(),
+    });
+
+    // A pre-existing row this fixture does not own (e.g. left behind by
+    // another run), occupying a ticker a later seed tries to reuse.
+    const foreignTicker = `F143X${Date.now().toString(36).toUpperCase()}`;
+    await db
+      .insert(perpMarketSnapshots)
+      .values(snapshotValues(foreignTicker, new Date()));
+    try {
+      // The colliding insert fails, so it must register no ownership.
+      await expect(
+        seedMarket({
+          ticker: foreignTicker,
+          price24hAgoUpdatedAt: new Date(),
+        })
+      ).rejects.toThrow();
+
+      await cleanupOwnedTickers();
+
+      // The owned row is cleaned up...
+      expect(await readRow(ownedTicker)).toBeUndefined();
+      // ...but the pre-existing row survives cleanup untouched.
+      const foreign = await readRow(foreignTicker);
+      expect(foreign).toBeDefined();
+      expect(Number(foreign?.currentPrice)).toBe(120);
+    } finally {
+      await db
+        .delete(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, foreignTicker));
+    }
   });
 });
