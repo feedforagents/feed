@@ -38,6 +38,7 @@ import {
   organizationState,
   perpMarketSnapshots,
   perpPositions,
+  pointsTransactions,
   positions,
   predictionPriceHistories,
   tradingFeeOutbox,
@@ -66,6 +67,8 @@ const TRADE_TYPES = [
 type TradesResponse = {
   trades: Array<{
     type: string;
+    id: string;
+    market?: { id: string } | null;
     transactionType?: string;
     amount?: string;
   }>;
@@ -172,6 +175,23 @@ class HistoryFixture {
         .where(eq(balanceTransactions.userId, userId));
       await db.delete(positions).where(eq(positions.userId, userId));
       await db.delete(perpPositions).where(eq(perpPositions.userId, userId));
+      const points = await db
+        .select({ id: pointsTransactions.id })
+        .from(pointsTransactions)
+        .where(eq(pointsTransactions.userId, userId));
+      if (points.length)
+        await db.delete(pointsTransactions).where(
+          inArray(
+            pointsTransactions.id,
+            points.map((row) => row.id)
+          )
+        );
+      expect(
+        await db
+          .select({ id: pointsTransactions.id })
+          .from(pointsTransactions)
+          .where(eq(pointsTransactions.userId, userId))
+      ).toHaveLength(0);
       await db.delete(users).where(eq(users.id, userId));
     }
     if (this.marketIds.length > 0) {
@@ -376,6 +396,41 @@ describe('user trade history covers every recorded trade event', () => {
       );
     }
     expect(balanceItems.length).toBe(ledger.length);
+    // The conflict resolution must preserve staging's merged pagination,
+    // while adding settlement/refund context to that shared service.
+    for (const item of balanceItems) {
+      const row = ledger.find((row) => row.id === item.id);
+      expect(row).toBeDefined();
+      if (
+        row &&
+        ['pred_buy', 'pred_sell', 'pred_resolve', 'pred_cancel'].includes(
+          row.type
+        )
+      ) {
+        if (row.relatedId === null)
+          throw new Error('Prediction ledger is missing its market link');
+        expect(item.market?.id).toBe(row.relatedId);
+      }
+    }
+    const walked: string[] = [];
+    for (let offset = 0; offset <= data.total; offset += 3) {
+      const pageResponse = await GET(
+        new NextRequest(
+          `http://localhost/api/trades?userId=${userId}&limit=3&offset=${offset}`
+        )
+      );
+      expect(pageResponse.status).toBe(200);
+      const pageBody = (await pageResponse.json()) as {
+        data?: TradesResponse;
+      } & TradesResponse;
+      const page = pageBody.data ?? pageBody;
+      expect(page.total).toBe(data.total);
+      expect(page.trades.map((t) => `${t.type}:${t.id}`)).toEqual(
+        data.trades.slice(offset, offset + 3).map((t) => `${t.type}:${t.id}`)
+      );
+      walked.push(...page.trades.map((t) => `${t.type}:${t.id}`));
+    }
+    expect(walked).toEqual(data.trades.map((t) => `${t.type}:${t.id}`));
   });
 
   it('does not acquire existing users, ledgers, markets, organizations or snapshots on collision', async () => {

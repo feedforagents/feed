@@ -29,7 +29,7 @@
  *         name: cursor
  *         schema:
  *           type: string
- *         description: Cursor for pagination (timestamp)
+ *         description: Cursor returned by the previous page. Legacy timestamp-only cursors are also accepted.
  *       - in: query
  *         name: actorId
  *         schema:
@@ -253,7 +253,9 @@ import {
   comments,
   count,
   db,
+  decodePostCursor,
   desc,
+  encodePostCursor,
   eq,
   follows,
   getBlockedByUserIds,
@@ -261,8 +263,8 @@ import {
   getMutedUserIds,
   inArray,
   isNull,
-  lt,
   lte,
+  postCursorConditions,
   posts,
   reactions,
   sql,
@@ -683,7 +685,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       userId,
       allFollowedIds,
       limit,
-      cursor
+      // This branch still pages by timestamp only; accept either cursor format.
+      cursor === undefined ? undefined : decodePostCursor(cursor).timestamp
     );
 
     // Filter out posts from blocked/muted users
@@ -892,7 +895,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     const conditions = [eq(posts.type, type), isNull(posts.deletedAt)];
 
     if (cursor) {
-      conditions.push(lt(posts.timestamp, new Date(cursor)));
+      conditions.push(...(await postCursorConditions(cursor)));
     }
     conditions.push(lte(posts.timestamp, now)); // No future posts
 
@@ -900,7 +903,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       .select()
       .from(posts)
       .where(and(...conditions))
-      .orderBy(desc(posts.timestamp))
+      .orderBy(desc(posts.timestamp), desc(posts.id))
       .limit(limit);
 
     logger.info(
@@ -1332,11 +1335,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     'GET /api/posts'
   );
 
-  // Calculate next cursor (timestamp of last post for keyset pagination)
-  const nextCursor =
-    formattedPosts.length > 0
-      ? formattedPosts[formattedPosts.length - 1]?.timestamp
-      : null;
+  // Next keyset cursor: last post's timestamp and id, so posts sharing that
+  // timestamp are not skipped on the next page.
+  const lastPost = formattedPosts[formattedPosts.length - 1];
+  const nextCursor = lastPost
+    ? encodePostCursor(lastPost.timestamp, lastPost.id)
+    : null;
 
   const response = NextResponse.json({
     success: true,
