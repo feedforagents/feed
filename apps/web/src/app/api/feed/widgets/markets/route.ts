@@ -48,6 +48,7 @@ import {
 import { PredictionPricing } from '@feed/core/markets/prediction';
 import {
   and,
+  asc,
   asPublic,
   asUser,
   desc,
@@ -104,23 +105,29 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
         // would read as a move in the wrong direction).
         const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         const historyRows = await asPublic(async (database) => {
-          return await database.predictionPriceHistories.findMany({
-            where: and(
-              inArray(predictionPriceHistories.marketId, marketIds),
-              lte(predictionPriceHistories.createdAt, twentyFourHoursAgo)
-            ),
-            orderBy: [desc(predictionPriceHistories.createdAt)],
-          });
+          return await database
+            .selectDistinctOn([predictionPriceHistories.marketId], {
+              marketId: predictionPriceHistories.marketId,
+              yesPrice: predictionPriceHistories.yesPrice,
+            })
+            .from(predictionPriceHistories)
+            .where(
+              and(
+                inArray(predictionPriceHistories.marketId, marketIds),
+                lte(predictionPriceHistories.createdAt, twentyFourHoursAgo)
+              )
+            )
+            .orderBy(
+              asc(predictionPriceHistories.marketId),
+              desc(predictionPriceHistories.createdAt),
+              desc(predictionPriceHistories.id)
+            );
         });
 
         const priceChangeMap = new Map<string, number>();
-        const baselineSeen = new Set<string>();
 
         for (const row of historyRows) {
-          // Rows arrive newest-first, so the first row per market is
-          // the latest snapshot at or before 24h ago.
-          if (baselineSeen.has(row.marketId)) continue;
-          baselineSeen.add(row.marketId);
+          // SQL returns one deterministic baseline per market.
           const market = marketMap.get(row.marketId);
           if (!market) continue;
           const baselineYesPrice = Number(row.yesPrice);
@@ -239,23 +246,29 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   // wrong direction).
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const historyRows = await asUser(authUser, async (database) => {
-    return await database.predictionPriceHistories.findMany({
-      where: and(
-        inArray(predictionPriceHistories.marketId, marketIds),
-        lte(predictionPriceHistories.createdAt, twentyFourHoursAgo)
-      ),
-      orderBy: [desc(predictionPriceHistories.createdAt)],
-    });
+    return await database
+      .selectDistinctOn([predictionPriceHistories.marketId], {
+        marketId: predictionPriceHistories.marketId,
+        yesPrice: predictionPriceHistories.yesPrice,
+      })
+      .from(predictionPriceHistories)
+      .where(
+        and(
+          inArray(predictionPriceHistories.marketId, marketIds),
+          lte(predictionPriceHistories.createdAt, twentyFourHoursAgo)
+        )
+      )
+      .orderBy(
+        asc(predictionPriceHistories.marketId),
+        desc(predictionPriceHistories.createdAt),
+        desc(predictionPriceHistories.id)
+      );
   });
 
   const priceChangeMap = new Map<string, number>();
-  const baselineSeen = new Set<string>();
 
   for (const row of historyRows) {
-    // Rows arrive newest-first, so the first row per market is the
-    // latest snapshot at or before 24h ago.
-    if (baselineSeen.has(row.marketId)) continue;
-    baselineSeen.add(row.marketId);
+    // SQL returns one deterministic baseline per market.
     const market = marketMap.get(row.marketId);
     if (!market) continue;
     const baselineYesPrice = Number(row.yesPrice);

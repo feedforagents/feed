@@ -47,11 +47,13 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
+import { CACHE_KEYS, invalidateCache, isRedisAvailable } from '@feed/api';
 import {
   PredictionDbAdapter,
   PredictionMarketService,
 } from '@feed/core/markets/prediction';
 import {
+  closeDatabase,
   db,
   eq,
   inArray,
@@ -59,9 +61,13 @@ import {
   positions,
   predictionPriceHistories,
   questions,
+  sql,
   users,
 } from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
+import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
+import { z } from 'zod';
 
 type WidgetMarket = {
   id: string;
@@ -79,8 +85,9 @@ let widgetGET: typeof import('../../../apps/web/src/app/api/feed/widgets/markets
 let detailGET: typeof import('../../../apps/web/src/app/api/markets/predictions/[id]/route').GET;
 
 const suffix = crypto.randomUUID().slice(0, 8);
-const userId = `f43-wmp-user-${suffix}`;
+const userId = await generateSnowflakeId();
 const skewedId = `f43-wmp-skewed-${suffix}`;
+const historyLoadId = `f43-wmp-history-load-${suffix}`;
 const evenId = `f43-wmp-even-${suffix}`;
 const tradedBuyId = `f43-wmp-traded-buy-${suffix}`;
 const tradedSellId = `f43-wmp-traded-sell-${suffix}`;
@@ -89,12 +96,16 @@ let questionNumber = 1_900_000_000 + Math.floor(Math.random() * 100_000_000);
 // Rows this file owns, recorded from each insert's RETURNING clause.
 // Teardown deletes only these — never the preallocated ids as such.
 const ownedQuestionIds: string[] = [];
+const ownedMarketIds: string[] = [];
 let ownedUserId: string | null = null;
 
-async function fetchWidget() {
+async function fetchWidget(token?: string) {
   const response = await widgetGET(
-    new NextRequest('http://localhost/api/feed/widgets/markets')
+    new NextRequest('http://localhost/api/feed/widgets/markets', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
   );
+  expect(response.status).toBe(200);
   return (await response.json()) as WidgetResponse;
 }
 
@@ -110,6 +121,9 @@ async function createMarket(
   id: string,
   initialYesProbability: number
 ): Promise<void> {
+  expect(
+    await db.select({ id: markets.id }).from(markets).where(eq(markets.id, id))
+  ).toEqual([]);
   const [question] = await db
     .insert(questions)
     .values({
@@ -123,14 +137,19 @@ async function createMarket(
       status: 'active',
       updatedAt: new Date(),
     })
-    .returning({ id: questions.id });
+    .returning({
+      id: questions.id,
+      text: questions.text,
+      resolutionDate: questions.resolutionDate,
+    });
   if (!question) throw new Error(`question insert failed for ${id}`);
   ownedQuestionIds.push(question.id);
-  await new PredictionDbAdapter().createMarketFromQuestion(
+  const market = await new PredictionDbAdapter().createMarketFromQuestion(
     { ...question, status: 'active' as const },
     10000,
     { initialYesProbability }
   );
+  ownedMarketIds.push(market.id);
 }
 
 /**
@@ -175,6 +194,7 @@ beforeAll(async () => {
     .values({
       id: userId,
       username: `f43wmp-${suffix}`,
+      stewardId: `f43-${userId}`,
       displayName: 'Widget Price Fixture User',
       updatedAt: new Date(),
     })
@@ -195,6 +215,42 @@ beforeAll(async () => {
   await seedBaselineHistory('buy', tradedBuyId, 0.5);
   await createMarket(tradedSellId, 0.5);
   await seedBaselineHistory('sell', tradedSellId, 0.5);
+
+  await createMarket(historyLoadId, 0.8);
+  // Thousands of real persisted snapshots, plus a same-timestamp tie whose
+  // lexicographically greatest ID has a different baseline price.
+  const oldTime = new Date(Date.now() - 30 * 86400000);
+  for (let start = 0; start < 4000; start += 500) {
+    await db.insert(predictionPriceHistories).values(
+      Array.from({ length: 500 }, (_, i) => ({
+        id: `f43-old-${suffix}-${start + i}`,
+        marketId: historyLoadId,
+        yesPrice: 0.1,
+        noPrice: 0.9,
+        yesShares: '5000',
+        noShares: '5000',
+        liquidity: '10000',
+        eventType: 'trade',
+        source: 'system',
+        createdAt: oldTime,
+      }))
+    );
+  }
+  const tieTime = new Date(Date.now() - 26 * 3600_000);
+  await db.insert(predictionPriceHistories).values(
+    ['a', 'z'].map((label) => ({
+      id: `f43-tie-${suffix}-${label}`,
+      marketId: historyLoadId,
+      yesPrice: label === 'z' ? 0.4 : 0.2,
+      noPrice: label === 'z' ? 0.6 : 0.8,
+      yesShares: '5000',
+      noShares: '5000',
+      liquidity: '10000',
+      eventType: 'trade',
+      source: 'system',
+      createdAt: tieTime,
+    }))
+  );
 
   const service = new PredictionMarketService({
     db: new PredictionDbAdapter(),
@@ -232,26 +288,26 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  expect(isRedisAvailable()).toBe(false);
+  await invalidateCache('markets-widget-v3', { namespace: CACHE_KEYS.WIDGET });
   // Delete only owned rows, in dependency order. The real trades also
   // wrote PredictionPriceHistory rows (no cascading FK), so history for
   // owned markets goes first. Any failure throws — cleanup is never
   // swallowed — and the zero-check below proves nothing is left behind.
   await db
     .delete(predictionPriceHistories)
-    .where(inArray(predictionPriceHistories.marketId, ownedQuestionIds));
-  await db
-    .delete(positions)
-    .where(inArray(positions.marketId, ownedQuestionIds));
+    .where(inArray(predictionPriceHistories.marketId, ownedMarketIds));
+  await db.delete(positions).where(inArray(positions.marketId, ownedMarketIds));
   const deletedMarkets = await db
     .delete(markets)
-    .where(inArray(markets.id, ownedQuestionIds))
+    .where(inArray(markets.id, ownedMarketIds))
     .returning({ id: markets.id });
-  expect(deletedMarkets.length).toBe(ownedQuestionIds.length);
+
   const deletedQuestions = await db
     .delete(questions)
     .where(inArray(questions.id, ownedQuestionIds))
     .returning({ id: questions.id });
-  expect(deletedQuestions.length).toBe(ownedQuestionIds.length);
+
   if (ownedUserId) {
     const deletedUsers = await db
       .delete(users)
@@ -260,20 +316,23 @@ afterAll(async () => {
     expect(deletedUsers.length).toBe(1);
   }
 
+  expect(deletedMarkets.length).toBe(ownedMarketIds.length);
+  expect(deletedQuestions.length).toBe(ownedQuestionIds.length);
+
   const leftoverHistory = await db
     .select({ id: predictionPriceHistories.id })
     .from(predictionPriceHistories)
-    .where(inArray(predictionPriceHistories.marketId, ownedQuestionIds));
+    .where(inArray(predictionPriceHistories.marketId, ownedMarketIds));
   expect(leftoverHistory).toHaveLength(0);
   const leftoverPositions = await db
     .select({ id: positions.id })
     .from(positions)
-    .where(inArray(positions.marketId, ownedQuestionIds));
+    .where(inArray(positions.marketId, ownedMarketIds));
   expect(leftoverPositions).toHaveLength(0);
   const leftoverMarkets = await db
     .select({ id: markets.id })
     .from(markets)
-    .where(inArray(markets.id, ownedQuestionIds));
+    .where(inArray(markets.id, ownedMarketIds));
   expect(leftoverMarkets).toHaveLength(0);
   const leftoverQuestions = await db
     .select({ id: questions.id })
@@ -287,6 +346,7 @@ afterAll(async () => {
       .where(eq(users.id, ownedUserId));
     expect(leftoverUsers).toHaveLength(0);
   }
+  await closeDatabase();
 });
 
 describe('markets widget prices', () => {
@@ -360,19 +420,76 @@ describe('markets widget prices', () => {
     );
   });
 
+  it('selects one deterministic baseline for large/tied history on public cold/warm and authenticated reads', async () => {
+    expect(isRedisAvailable()).toBe(false);
+    await invalidateCache('markets-widget-v3', {
+      namespace: CACHE_KEYS.WIDGET,
+    });
+    const token = await new SignJWT({ userId: `f43-${userId}` })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuer('steward')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(
+        new TextEncoder().encode(
+          process.env.STEWARD_JWT_SECRET || 'dev-jwt-secret-change-in-prod'
+        )
+      );
+    for (const credential of [undefined, undefined, token]) {
+      const response = await fetchWidget(credential);
+      const row = response.markets.find((m) => m.id === historyLoadId);
+      expect(row?.yesPrice).toBeCloseTo(0.8, 10);
+      expect(row?.changePercent24h).toBeCloseTo(100, 6);
+    }
+    const oldPlanRows =
+      await db.execute(sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+      SELECT * FROM "PredictionPriceHistory"
+      WHERE "marketId" = ${historyLoadId} AND "createdAt" <= ${new Date(Date.now() - 86400000).toISOString()}::timestamp
+      ORDER BY "createdAt" DESC`);
+    const planRows =
+      await db.execute(sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+      SELECT DISTINCT ON ("marketId") "marketId", "yesPrice" FROM "PredictionPriceHistory"
+      WHERE "marketId" = ${historyLoadId} AND "createdAt" <= ${new Date(Date.now() - 86400000).toISOString()}::timestamp
+      ORDER BY "marketId", "createdAt" DESC, "id" DESC`);
+    const planSchema = z.array(
+      z.object({
+        'QUERY PLAN': z.array(
+          z
+            .object({
+              Plan: z.object({ 'Actual Rows': z.number() }).passthrough(),
+              'Execution Time': z.number(),
+            })
+            .passthrough()
+        ),
+      })
+    );
+    const plan = planSchema.parse(planRows);
+    const oldPlan = planSchema.parse(oldPlanRows);
+    expect(oldPlan[0]?.['QUERY PLAN'][0]?.Plan['Actual Rows']).toBe(4002);
+    console.log(
+      'WIDGET_OLD_BASELINE_PLAN',
+      JSON.stringify(oldPlan[0]?.['QUERY PLAN'][0])
+    );
+    const result = plan[0]?.['QUERY PLAN'][0];
+    expect(result?.Plan['Actual Rows']).toBe(1);
+    console.log('WIDGET_BASELINE_PLAN', JSON.stringify(result));
+  });
+
   it('setup collision: a second insert under an owned id rejects', async () => {
     await expect(
-      db.insert(questions).values({
-        id: skewedId,
-        questionNumber: questionNumber++,
-        text: 'Widget price fixture collision',
-        scenarioId: 1,
-        outcome: false,
-        rank: 1,
-        resolutionDate: new Date(Date.now() + 7 * 86400000),
-        status: 'active',
-        updatedAt: new Date(),
-      })
+      (async () => {
+        await db.insert(questions).values({
+          id: skewedId,
+          questionNumber: questionNumber++,
+          text: 'Widget price fixture collision',
+          scenarioId: 1,
+          outcome: false,
+          rank: 1,
+          resolutionDate: new Date(Date.now() + 7 * 86400000),
+          status: 'active',
+          updatedAt: new Date(),
+        });
+      })()
     ).rejects.toThrow();
     // The original fixture row is untouched by the rejected insert.
     const rows = await db
