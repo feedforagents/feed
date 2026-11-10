@@ -36,6 +36,13 @@
       "when": 1793818723317,
       "tag": "0004_leverage_cap_20",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794288449192,
+      "tag": "0005_remarkable_dorian_gray",
+      "breakpoints": true
     }
   ]
 }

@@ -3,6 +3,7 @@ import {
   markets,
   positions,
   predictionPriceHistories,
+  predictionTrades,
   questions,
   type Transaction,
 } from '@feed/db';
@@ -16,12 +17,14 @@ import type {
   PredictionPositionRecord,
   PredictionPriceSnapshotRecord,
   PredictionSide,
+  PredictionTradeRecord,
   QuestionRecord,
 } from '../../types';
 
 type NewMarket = InferInsertModel<typeof markets>;
 type NewPosition = InferInsertModel<typeof positions>;
 type NewHistory = InferInsertModel<typeof predictionPriceHistories>;
+type NewTrade = InferInsertModel<typeof predictionTrades>;
 
 const toSideBool = (side: PredictionSide) => side === 'yes';
 const fromSideBool = (side: boolean): PredictionSide => (side ? 'yes' : 'no');
@@ -381,6 +384,13 @@ export class PredictionDbAdapter implements PredictionDbPort {
     return rows.map(mapPosition);
   }
 
+  /**
+   * WHY the trade ledger, not positions: a sell reduces position shares
+   * (to zero on a full close), so summing positions reports the volume of
+   * a bought-then-fully-sold market as zero. The ledger is append-only —
+   * every buy and sell adds its shares × trade price — so the all-time
+   * sum survives sells.
+   */
   async getTradedVolumeByMarket(
     marketIds: string[]
   ): Promise<Map<string, number>> {
@@ -388,16 +398,31 @@ export class PredictionDbAdapter implements PredictionDbPort {
     if (marketIds.length === 0) return volumeByMarket;
     const rows = await this.client
       .select({
-        marketId: positions.marketId,
-        volume: sql<string>`sum(${positions.shares} * ${positions.avgPrice})`,
+        marketId: predictionTrades.marketId,
+        volume: sql<string>`sum(${predictionTrades.amount})`,
       })
-      .from(positions)
-      .where(inArray(positions.marketId, marketIds))
-      .groupBy(positions.marketId);
+      .from(predictionTrades)
+      .where(inArray(predictionTrades.marketId, marketIds))
+      .groupBy(predictionTrades.marketId);
     for (const row of rows) {
       volumeByMarket.set(row.marketId, Number(row.volume ?? 0));
     }
     return volumeByMarket;
+  }
+
+  async recordTrade(trade: PredictionTradeRecord): Promise<void> {
+    const row: NewTrade = {
+      id: trade.id ?? (await generateSnowflakeId()),
+      marketId: trade.marketId,
+      userId: trade.userId,
+      side: toSideBool(trade.side),
+      action: trade.action,
+      shares: String(trade.shares),
+      price: String(trade.price),
+      amount: String(trade.amount),
+      createdAt: trade.createdAt ?? new Date(),
+    };
+    await this.client.insert(predictionTrades).values(row);
   }
 
   async insertPriceSnapshot(

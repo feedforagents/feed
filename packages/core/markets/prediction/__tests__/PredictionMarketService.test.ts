@@ -14,6 +14,7 @@ import type {
   PredictionPositionRecord,
   PredictionPriceSnapshotRecord,
   PredictionSide,
+  PredictionTradeRecord,
 } from '../types';
 
 const feeConfig = {
@@ -75,6 +76,7 @@ class InMemoryDb implements PredictionDbPort {
   markets = new Map<string, PredictionMarketRecord>();
   positions = new Map<string, PredictionPositionRecord>();
   snapshots: PredictionPriceSnapshotRecord[] = [];
+  trades: PredictionTradeRecord[] = [];
   idCounter = 1;
 
   constructor(initialMarket?: PredictionMarketRecord) {
@@ -188,6 +190,24 @@ class InMemoryDb implements PredictionDbPort {
     snapshot: PredictionPriceSnapshotRecord
   ): Promise<void> {
     this.snapshots.push({ ...snapshot });
+  }
+
+  async getTradedVolumeByMarket(
+    marketIds: string[]
+  ): Promise<Map<string, number>> {
+    const volumeByMarket = new Map<string, number>();
+    for (const trade of this.trades) {
+      if (!marketIds.includes(trade.marketId)) continue;
+      volumeByMarket.set(
+        trade.marketId,
+        (volumeByMarket.get(trade.marketId) ?? 0) + trade.amount
+      );
+    }
+    return volumeByMarket;
+  }
+
+  async recordTrade(trade: PredictionTradeRecord): Promise<void> {
+    this.trades.push({ ...trade });
   }
 }
 
