@@ -69,6 +69,25 @@ export interface PredictionPriceSnapshotRecord {
   createdAt?: Date;
 }
 
+/**
+ * One executed prediction-market trade, append-only. `price` is the
+ * per-share execution price (fee-excluded) and `amount` is shares × price.
+ * Buys and sells both append a row, so the all-time traded volume of a
+ * market is the sum of `amount` over its rows — a full sell leaves the
+ * volume intact, unlike the positions table, whose shares drop to zero.
+ */
+export interface PredictionTradeRecord {
+  id?: string;
+  marketId: string;
+  userId: string;
+  side: PredictionSide;
+  action: 'buy' | 'sell';
+  shares: number;
+  price: number;
+  amount: number;
+  createdAt?: Date;
+}
+
 // DB port (to be implemented by adapter)
 export interface PredictionDbPort {
   getMarketById(id: string): Promise<PredictionMarketRecord | null>;
@@ -116,6 +135,16 @@ export interface PredictionDbPort {
   ): Promise<PredictionPositionRecord>;
   deletePosition(positionId: string): Promise<void>;
   listPositionsForMarket(marketId: string): Promise<PredictionPositionRecord[]>;
+  /**
+   * Traded volume per market: the all-time sum of `amount` (shares × trade
+   * price) over the market's PredictionTrade rows — buys and sells both
+   * count. A market with no recorded trades reports 0. Pool share balances
+   * are not volume, and neither is the current positions total: a sell
+   * reduces position shares, so positions cannot reconstruct volume.
+   */
+  getTradedVolumeByMarket(marketIds: string[]): Promise<Map<string, number>>;
+  /** Append one executed trade to the volume ledger. */
+  recordTrade(trade: PredictionTradeRecord): Promise<void>;
   insertPriceSnapshot(snapshot: PredictionPriceSnapshotRecord): Promise<void>;
 }
 

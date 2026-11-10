@@ -1,5 +1,5 @@
 {
-  "id": "f9bec424-9b98-4bbe-b092-1e01b193538e",
+  "id": "34fdb75f-38d5-4d43-a89f-cf536b11a6a2",
   "prevId": "18348956-c3b2-4b65-aaca-c549ce8152d7",
   "version": "7",
   "dialect": "postgresql",
@@ -4416,6 +4416,111 @@
       "indexes": {
         "PredictionPriceHistory_marketId_createdAt_idx": {
           "name": "PredictionPriceHistory_marketId_createdAt_idx",
+          "columns": [
+            {
+              "expression": "marketId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.PredictionTrade": {
+      "name": "PredictionTrade",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "marketId": {
+          "name": "marketId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "side": {
+          "name": "side",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "action": {
+          "name": "action",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shares": {
+          "name": "shares",
+          "type": "numeric(18, 6)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "price": {
+          "name": "price",
+          "type": "numeric(18, 6)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "amount": {
+          "name": "amount",
+          "type": "numeric(18, 2)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "PredictionTrade_marketId_idx": {
+          "name": "PredictionTrade_marketId_idx",
+          "columns": [
+            {
+              "expression": "marketId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PredictionTrade_marketId_createdAt_idx": {
+          "name": "PredictionTrade_marketId_createdAt_idx",
           "columns": [
             {
               "expression": "marketId",
@@ -14101,12 +14206,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "idempotencyKey": {
-          "name": "idempotencyKey",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -14212,12 +14311,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "idempotencyKey": {
-          "name": "idempotencyKey",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "createdAt": {
           "name": "createdAt",
           "type": "timestamp",
@@ -14296,22 +14389,6 @@
           ],
           "isUnique": false,
           "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "TradingFee_idempotencyKey_idx": {
-          "name": "TradingFee_idempotencyKey_idx",
-          "columns": [
-            {
-              "expression": "idempotencyKey",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"TradingFee\".\"idempotencyKey\" IS NOT NULL",
-          "concurrently": true,
           "method": "btree",
           "with": {}
         }
