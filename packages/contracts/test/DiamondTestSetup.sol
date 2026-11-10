@@ -82,7 +82,7 @@ contract DiamondTestSetup is Test {
 
         // Add PredictionMarketFacet
         IDiamondCut.FacetCut[] memory marketCut = new IDiamondCut.FacetCut[](1);
-        bytes4[] memory marketSelectors = new bytes4[](14);
+        bytes4[] memory marketSelectors = new bytes4[](16);
         marketSelectors[0] = PredictionMarketFacet.createMarket.selector;
         marketSelectors[1] = PredictionMarketFacet.calculateCost.selector;
         marketSelectors[2] = PredictionMarketFacet.calculateCostWithFee.selector;
@@ -97,6 +97,8 @@ contract DiamondTestSetup is Test {
         marketSelectors[11] = PredictionMarketFacet.getMarket.selector;
         marketSelectors[12] = PredictionMarketFacet.getMarketShares.selector;
         marketSelectors[13] = PredictionMarketFacet.getPosition.selector;
+        marketSelectors[14] = PredictionMarketFacet.setPredictionFeeRecipient.selector;
+        marketSelectors[15] = PredictionMarketFacet.getPredictionFeeRecipient.selector;
 
         marketCut[0] = IDiamondCut.FacetCut({
             facetAddress: address(predictionMarketFacet),
@@ -179,7 +181,7 @@ contract DiamondTestSetup is Test {
 
     function _addPerpetualMarketFacet() internal {
         IDiamondCut.FacetCut[] memory cut = new IDiamondCut.FacetCut[](1);
-        bytes4[] memory selectors = new bytes4[](10);
+        bytes4[] memory selectors = new bytes4[](12);
         selectors[0] = PerpetualMarketFacet.createPerpetualMarket.selector;
         selectors[1] = PerpetualMarketFacet.openPosition.selector;
         selectors[2] = PerpetualMarketFacet.closePosition.selector;
@@ -190,6 +192,8 @@ contract DiamondTestSetup is Test {
         selectors[7] = PerpetualMarketFacet.getLiquidationPrice.selector;
         selectors[8] = PerpetualMarketFacet.getMarkPrice.selector;
         selectors[9] = PerpetualMarketFacet.getFundingRate.selector;
+        selectors[10] = PerpetualMarketFacet.setPerpFeeRecipient.selector;
+        selectors[11] = PerpetualMarketFacet.getPerpFeeRecipient.selector;
 
         cut[0] = IDiamondCut.FacetCut({
             facetAddress: address(perpetualMarketFacet),

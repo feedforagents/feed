@@ -124,7 +124,7 @@ contract DeployFeed is Script {
         // 4. Add PredictionMarketFacet
         console.log("\n4. Adding PredictionMarketFacet...");
         IDiamondCut.FacetCut[] memory marketCut = new IDiamondCut.FacetCut[](1);
-        bytes4[] memory marketSelectors = new bytes4[](14);
+        bytes4[] memory marketSelectors = new bytes4[](16);
         marketSelectors[0] = PredictionMarketFacet.createMarket.selector;
         marketSelectors[1] = PredictionMarketFacet.calculateCost.selector;
         marketSelectors[2] = PredictionMarketFacet.calculateCostWithFee.selector;
@@ -139,6 +139,8 @@ contract DeployFeed is Script {
         marketSelectors[11] = PredictionMarketFacet.getMarket.selector;
         marketSelectors[12] = PredictionMarketFacet.getMarketShares.selector;
         marketSelectors[13] = PredictionMarketFacet.getPosition.selector;
+        marketSelectors[14] = PredictionMarketFacet.setPredictionFeeRecipient.selector;
+        marketSelectors[15] = PredictionMarketFacet.getPredictionFeeRecipient.selector;
 
         marketCut[0] = IDiamondCut.FacetCut({
             facetAddress: address(predictionMarketFacet),
@@ -233,7 +235,7 @@ contract DeployFeed is Script {
         });
 
         // PerpetualMarketFacet selectors
-        bytes4[] memory perpetualSelectors = new bytes4[](10);
+        bytes4[] memory perpetualSelectors = new bytes4[](12);
         perpetualSelectors[0] = PerpetualMarketFacet.createPerpetualMarket.selector;
         perpetualSelectors[1] = PerpetualMarketFacet.openPosition.selector;
         perpetualSelectors[2] = PerpetualMarketFacet.closePosition.selector;
@@ -244,6 +246,8 @@ contract DeployFeed is Script {
         perpetualSelectors[7] = PerpetualMarketFacet.getLiquidationPrice.selector;
         perpetualSelectors[8] = PerpetualMarketFacet.getMarkPrice.selector;
         perpetualSelectors[9] = PerpetualMarketFacet.getFundingRate.selector;
+        perpetualSelectors[10] = PerpetualMarketFacet.setPerpFeeRecipient.selector;
+        perpetualSelectors[11] = PerpetualMarketFacet.getPerpFeeRecipient.selector;
 
         newFacetsCut[1] = IDiamondCut.FacetCut({
             facetAddress: address(perpetualMarketFacet),
