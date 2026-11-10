@@ -1,0 +1,2 @@
+# Drizzle schema snapshots are generated migration metadata.
+packages/db/drizzle/migrations/meta/*_snapshot.json linguist-generated=true
