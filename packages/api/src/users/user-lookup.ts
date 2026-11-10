@@ -348,7 +348,9 @@ export async function findTargetByIdentifier(
   if (user) {
     return {
       user,
-      actor: null,
+      actor: user.isActor
+        ? (StaticDataRegistry.getActor(user.id) ?? null)
+        : null,
       targetId: user.id,
       isActor: user.isActor,
     };

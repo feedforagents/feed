@@ -88,13 +88,13 @@ export class PredictionDbAdapter implements PredictionDbPort {
   }
 
   /**
-   * WHY this predicate: Both count and list must agree on the same
-   * predicate so pagination metadata (total) matches the returned rows.
-   * The trading list contains exactly the markets a buy can still succeed
-   * on: resolved/cancelled markets are historical, not actionable, and a
-   * market whose endDate has passed is closed to buys too — the buy path
-   * rejects it with 'Market expired' (assertMarketActiveForBuy). Position
-   * exits are unaffected: sells go through getMarketById, not this list.
+   * Count and list share the unresolved/deadline predicate shape. Each query
+   * captures its own clock and snapshot, so a deadline crossing or concurrent
+   * write can still change the result between calls. This is not full buy
+   * eligibility: liquidity, funding and other checks remain on the buy path.
+   * Equality matches assertMarketActiveForBuy, which rejects now > endDate.
+   * Position exits use direct market lookup rather than this discovery list;
+   * existing route caches can retain results from an earlier database fetch.
    */
   private openMarketPredicate() {
     return and(eq(markets.resolved, false), gte(markets.endDate, new Date()));
@@ -110,8 +110,8 @@ export class PredictionDbAdapter implements PredictionDbPort {
 
   /**
    * WHY orderBy createdAt DESC: Newest markets first — matches user expectation
-   * that recent questions appear at the top. Provides stable pagination when
-   * new markets aren't being created during the request.
+   * that recent questions appear at the top. Equal timestamps have no explicit
+   * tie-breaker; separate requests are not an atomic pagination snapshot.
    */
   async listMarkets(options?: {
     limit?: number;
