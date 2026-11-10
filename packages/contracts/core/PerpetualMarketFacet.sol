@@ -31,6 +31,7 @@ contract PerpetualMarketFacet is ReentrancyGuard {
     event PositionLiquidated(bytes32 indexed marketId, address indexed trader, address indexed liquidator, uint256 liquidationFee);
     event FundingPaid(bytes32 indexed marketId, address indexed trader, int256 fundingPayment);
     event FundingRateUpdated(bytes32 indexed marketId, uint256 fundingRate);
+    event InsuranceFundSet(address indexed insuranceFund);
     event OrderCreated(bytes32 indexed orderId, bytes32 indexed marketId, address indexed trader, LibPerpetual.Side side, uint256 size, uint256 price);
     event OrderFilled(bytes32 indexed orderId, uint256 fillPrice);
     event OrderCancelled(bytes32 indexed orderId);
@@ -299,6 +300,23 @@ contract PerpetualMarketFacet is ReentrancyGuard {
 
         market.lastFundingTime = block.timestamp;
         emit FundingRateUpdated(_marketId, market.fundingRate);
+    }
+
+    /// @notice Set the insurance fund address (diamond owner only)
+    /// @dev Liquidations send remaining collateral to this address. Without
+    /// it set, the remainder is credited to no one and stays locked inside
+    /// the diamond, so the fund must be configured before liquidations run.
+    /// @param _insuranceFund Address that receives remaining collateral on liquidation
+    function setInsuranceFund(address _insuranceFund) external {
+        LibDiamond.enforceIsContractOwner();
+        require(_insuranceFund != address(0), "Invalid insurance fund");
+        LibPerpetual.perpetualStorage().insuranceFund = _insuranceFund;
+        emit InsuranceFundSet(_insuranceFund);
+    }
+
+    /// @notice Get the insurance fund address
+    function getInsuranceFund() external view returns (address) {
+        return LibPerpetual.perpetualStorage().insuranceFund;
     }
 
     /// @notice Get current mark price from oracle with staleness check
