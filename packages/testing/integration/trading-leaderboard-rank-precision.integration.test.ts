@@ -137,8 +137,27 @@ describe('Trading leaderboard rank precision', () => {
   });
 
   test('my-rank agrees with the list order for tied users', async () => {
+    // Self-owned fixtures: an exact-tie group (identical netProfit AND
+    // identical createdAt), created by this test rather than inherited
+    // from the traversal test above, so the assertions below run — and
+    // mean the same thing — when this test executes on its own.
+    const tieCreatedAt = new Date('2026-02-20T00:00:00.000Z');
+    const ownIds: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      ownIds.push(
+        await createUser({
+          prefix: 'f133-myrank-tie',
+          lifetimePnL: '5151.75',
+          createdAt: tieCreatedAt,
+        })
+      );
+    }
+    // Precondition: the board under assertion is this test's own
+    // non-empty fixture set.
+    expect(ownIds.length).toBe(8);
+
     const scan = await fullScanIds();
-    for (const id of fixtureIds) {
+    for (const id of ownIds) {
       const scanIndex = scan.indexOf(id);
       expect(scanIndex).toBeGreaterThanOrEqual(0);
       const position = await TradingLeaderboardService.getUserPosition(
