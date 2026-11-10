@@ -16,6 +16,15 @@ export interface FeeProcessor {
     type: string;
     relatedId?: string;
     positionId?: string;
+    /**
+     * Idempotency key for this one fee operation (one leg of one trade).
+     * The caller generates a fresh key per operation and reuses it across
+     * retries, so a retry after an ambiguous post-commit error replays the
+     * recorded fee instead of charging twice; a legitimate repeat leg gets
+     * a new key and still charges. A (position, type) pair alone cannot
+     * tell the two apart.
+     */
+    operationId?: string;
   }) => Promise<{ feeCharged: number; referrerPaid?: number }>;
 }
 

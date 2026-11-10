@@ -1,4 +1,4 @@
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
   decimal,
@@ -8,6 +8,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import type { JsonValue } from '../types';
 import { users } from './users';
@@ -91,6 +92,16 @@ export const tradingFees = pgTable(
     platformFee: decimal('platformFee', { precision: 18, scale: 2 }).notNull(),
     referrerFee: decimal('referrerFee', { precision: 18, scale: 2 }).notNull(),
     referrerId: text('referrerId'),
+    /**
+     * Idempotency key for one fee-settlement operation (one leg of one
+     * trade). The perp fee helper generates one key per invocation and
+     * reuses it across its retries, so a retry after an ambiguous
+     * (post-commit) error replays the recorded fee instead of inserting
+     * a second row. A legitimate repeat leg gets a fresh key, so it
+     * still charges. Null for callers that do not pass an operation id
+     * (older surfaces); those rows are not deduplicated.
+     */
+    idempotencyKey: text('idempotencyKey'),
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
   },
   (table) => [
@@ -101,6 +112,9 @@ export const tradingFees = pgTable(
     ),
     index('TradingFee_tradeType_idx').on(table.tradeType),
     index('TradingFee_userId_createdAt_idx').on(table.userId, table.createdAt),
+    uniqueIndex('TradingFee_idempotencyKey_idx')
+      .on(table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
   ]
 );
 

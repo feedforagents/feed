@@ -173,6 +173,13 @@ export class FeeService {
    * @param {string} [tradeId] - Optional trade ID for reference
    * @param {string} [marketId] - Optional market ID for reference
    * @param {TransactionContext} [existingTx] - Optional existing transaction/client to reuse (avoids nested transactions)
+   * @param {string} [operationId] - Optional idempotency key for one fee
+   *   operation (one leg of one trade). When given, a row already recorded
+   *   under this key is returned as-is instead of inserting a second fee
+   *   row, crediting totals, or diverting to the fund again — so a retry
+   *   after an ambiguous post-commit error cannot duplicate accounting.
+   *   Callers must generate a fresh key per operation: a (position, type)
+   *   pair alone cannot tell a retry from a legitimate repeat leg.
    * @returns {Promise<FeeDistributionResult>} Fee distribution result
    *
    * @example
@@ -192,7 +199,8 @@ export class FeeService {
     tradeAmount: number,
     tradeId?: string,
     marketId?: string,
-    existingTx?: TransactionContext
+    existingTx?: TransactionContext,
+    operationId?: string
   ): Promise<FeeDistributionResult> {
     const feeCalc = FeeService.calculateFee(tradeAmount);
 
@@ -221,6 +229,29 @@ export class FeeService {
     const processFee = async (
       tx: TransactionContext
     ): Promise<FeeDistributionResult & { stabilityFundDiversion: number }> => {
+      // Idempotent replay: a retry of the same operation (same key) after
+      // an ambiguous post-commit error returns the recorded fee without
+      // inserting, crediting totals, or diverting to the fund again. The
+      // partial unique index on idempotencyKey is the backstop: if a
+      // concurrent duplicate slips past this check, its insert fails and
+      // the caller's retry lands here instead of duplicating accounting.
+      if (operationId) {
+        const [existing] = await tx
+          .select()
+          .from(tradingFees)
+          .where(eq(tradingFees.idempotencyKey, operationId))
+          .limit(1);
+        if (existing) {
+          return {
+            feeCharged: Number(existing.feeAmount),
+            referrerPaid: Number(existing.referrerFee),
+            platformReceived: Number(existing.platformFee),
+            referrerId: existing.referrerId,
+            stabilityFundDiversion: 0,
+          };
+        }
+      }
+
       // Do not credit another user. PRD §9.6 removes the referral fee share,
       // and D-18 says points cannot be transferred between users.
       const referrerPaid = 0;
@@ -237,6 +268,7 @@ export class FeeService {
         platformFee: new Decimal(platformReceived).toString(),
         referrerFee: new Decimal(referrerPaid).toString(),
         referrerId,
+        idempotencyKey: operationId ?? null,
       });
 
       // Atomic increment: concurrent fees for the same trader must not lose

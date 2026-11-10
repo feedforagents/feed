@@ -16,6 +16,12 @@
  * promise if the serverless invocation ends first. `processFeeWithRetry`
  * never throws, so awaiting it cannot fail the committed trade.
  *
+ * Round 3 adds the operation identity: each fee leg is charged under one
+ * `operationId`, reused across that leg's retries and fresh for the next
+ * leg, so the real FeeService can replay a retry of the same operation
+ * instead of inserting a second fee row. A (position, type) pair alone
+ * cannot tell a retry from a legitimate repeat leg.
+ *
  * Mirrors the in-memory fakes in perp-open-fee-consistency.test.ts so the
  * test runs without Postgres.
  */
@@ -38,6 +44,8 @@ const feeConfig = {
 
 class ThrowingFeeProcessor {
   calls: Array<{ amount: number; type: string }> = [];
+  /** One entry per fee attempt, in call order. */
+  operationIds: Array<string | undefined> = [];
 
   async processTradingFee(params: {
     userId: string;
@@ -45,8 +53,10 @@ class ThrowingFeeProcessor {
     type: string;
     relatedId?: string;
     positionId?: string;
+    operationId?: string;
   }): Promise<{ feeCharged: number; referrerPaid?: number }> {
     this.calls.push({ amount: params.amount, type: params.type });
+    this.operationIds.push(params.operationId);
     throw new Error('injected fee ledger failure');
   }
 }
@@ -54,6 +64,7 @@ class ThrowingFeeProcessor {
 /** Fails `failTimes` attempts, then settles like the real FeeService. */
 class FlakyFeeProcessor {
   calls = 0;
+  operationIds: Array<string | undefined> = [];
   constructor(private failTimes: number) {}
 
   async processTradingFee(_params: {
@@ -62,13 +73,26 @@ class FlakyFeeProcessor {
     type: string;
     relatedId?: string;
     positionId?: string;
+    operationId?: string;
   }): Promise<{ feeCharged: number; referrerPaid?: number }> {
     this.calls += 1;
+    this.operationIds.push(_params.operationId);
     if (this.calls <= this.failTimes) {
       throw new Error('injected fee ledger failure');
     }
     return { feeCharged: 0.2, referrerPaid: 0 };
   }
+}
+
+/** Each fee leg retries under one operation id; distinct legs differ. */
+function expectOperationIds(
+  processor: ThrowingFeeProcessor | FlakyFeeProcessor,
+  expectedLegs: number
+) {
+  const ids = processor.operationIds;
+  expect(ids.length).toBeGreaterThan(0);
+  for (const id of ids) expect(id).toBeTruthy();
+  expect(new Set(ids)).toHaveLength(expectedLegs);
 }
 
 class RecordingOutbox {
@@ -375,6 +399,7 @@ describe('perp open fee failure (post-commit bookkeeping)', () => {
     // while the process stays alive, not durability at resolve time.
     expect(outbox.calls).toHaveLength(1);
     expect(feeProcessor.calls).toHaveLength(3);
+    expectOperationIds(feeProcessor, 1);
     expect(feeProcessor.calls[0]).toEqual({
       amount: 200,
       type: 'perp_open',
@@ -532,6 +557,7 @@ describe('perp close/add/reduce/flip fee failure (post-commit bookkeeping)', () 
 
     expect(outbox.calls).toHaveLength(1);
     expect(feeProcessor.calls).toHaveLength(3);
+    expectOperationIds(feeProcessor, 1);
     expect(feeProcessor.calls[0]).toEqual({
       amount: 200,
       type: 'perp_close',
@@ -571,6 +597,7 @@ describe('perp close/add/reduce/flip fee failure (post-commit bookkeeping)', () 
 
     expect(outbox.calls).toHaveLength(1);
     expect(feeProcessor.calls).toHaveLength(3);
+    expectOperationIds(feeProcessor, 1);
     expect(feeProcessor.calls[0]).toEqual({
       amount: 100,
       type: 'perp_add_to_position',
@@ -618,6 +645,7 @@ describe('perp close/add/reduce/flip fee failure (post-commit bookkeeping)', () 
 
     expect(outbox.calls).toHaveLength(1);
     expect(feeProcessor.calls).toHaveLength(3);
+    expectOperationIds(feeProcessor, 1);
     expect(feeProcessor.calls[0]).toEqual({
       amount: 100,
       type: 'perp_close',
@@ -670,6 +698,19 @@ describe('perp close/add/reduce/flip fee failure (post-commit bookkeeping)', () 
     // Both legs run concurrently, so assert the set, not the order.
     expect(outbox.calls).toHaveLength(2);
     expect(feeProcessor.calls).toHaveLength(6);
+    // Two legs, two operation ids, one per leg: all three retries of the
+    // close leg share one id, all three of the flip leg share the other.
+    expectOperationIds(feeProcessor, 2);
+    const idsByType = new Map<string, Set<string>>();
+    feeProcessor.calls.forEach((call, index) => {
+      const id = feeProcessor.operationIds[index];
+      expect(id).toBeTruthy();
+      const set = idsByType.get(call.type) ?? new Set<string>();
+      set.add(id as string);
+      idsByType.set(call.type, set);
+    });
+    expect(idsByType.get('perp_close')?.size).toBe(1);
+    expect(idsByType.get('perp_flip_position')?.size).toBe(1);
     const feeTypes = feeProcessor.calls.map((c) => c.type).sort();
     expect(feeTypes).toEqual([
       'perp_close',

@@ -13,28 +13,58 @@
  *   recorded fee rows == charged fee (result.fee.amount)
  *   trader totalFeesPaid delta == charged fee
  *   referrer credit == FEE_CONFIG.REFERRER_SHARE * charged fee
- * (the referrer share is the current canonical config; #1585 proposes
- * removing it, but until it merges the wired processor must pay what
- * every other surface pays.)
+ * (#1585 merged, so the referrer share is 0: the platform keeps the fee.)
+ *
+ * Fee rows are asserted immediately when an action returns — never polled
+ * for. Every fee path awaits `processFeeWithRetry`, so the fee is settled
+ * inline (or the intent is in the outbox) before success is reported; a
+ * poll would only prove eventual recovery while the process stays alive.
+ * After asserting, each test drains the outbox once and verifies a second
+ * drain changes nothing for its trader.
+ *
+ * The idempotent-recovery block below covers the remaining failure mode:
+ * a fee write that commits but is observed as an error. Each fee leg
+ * carries one `operationId`, reused across its retries, so the retry
+ * replays the recorded fee instead of inserting a second row. The tests
+ * fault-inject at the fee boundary only (real FeeService, real Postgres,
+ * following perp-open-fee-durability.integration.test.ts): the first
+ * attempt runs the real settlement and then reports failure.
  */
 
 import { afterAll, describe, expect, it } from 'bun:test';
 import { FeedAgentExecutor } from '@feed/a2a';
+import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
+  and,
   balanceTransactions,
   db,
   eq,
+  gameConfigs,
   inArray,
+  isNull,
   markets,
   organizationState,
   perpMarketSnapshots,
   perpPositions,
   positions,
+  sql,
+  tradingFeeOutbox,
   tradingFees,
   users,
 } from '@feed/db';
-import { FEE_CONFIG } from '@feed/engine';
+import {
+  createPerpSettlement,
+  createUserWalletAdapter,
+  FEE_CONFIG,
+  FeeRedistributionService,
+  FeeService,
+  STABILITY_FUND_CONFIG,
+} from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
+import {
+  createTradingFeeOutboxAdapter,
+  drainTradingFeeOutboxBatch,
+} from '../../../apps/web/src/lib/services/trading-fee-outbox';
 
 const createdUserIds: string[] = [];
 const createdMarketIds: string[] = [];
@@ -82,6 +112,9 @@ async function createPerpMarket(): Promise<string> {
     basePrice: 100,
     updatedAt: now,
   });
+  // Register each successful insert before the next one can fail, so a
+  // mid-setup failure still cleans up what already landed.
+  createdOrgIds.push(orgId);
   await db.insert(perpMarketSnapshots).values({
     ticker,
     organizationId: orgId,
@@ -89,6 +122,8 @@ async function createPerpMarket(): Promise<string> {
     currentPrice: 100,
     high24h: 100,
     low24h: 100,
+    openInterest: 0,
+    volume24h: 0,
     fundingRate: {
       ticker,
       rate: 0,
@@ -97,7 +132,6 @@ async function createPerpMarket(): Promise<string> {
     },
   });
   createdTickers.push(ticker);
-  createdOrgIds.push(orgId);
   return ticker;
 }
 
@@ -124,6 +158,27 @@ async function readFeeState(
   };
 }
 
+type TraderState = {
+  balance: number;
+  totalFeesPaid: number;
+  fund: number;
+};
+
+async function readTraderState(traderId: string): Promise<TraderState> {
+  const [user] = await db
+    .select({
+      virtualBalance: users.virtualBalance,
+      totalFeesPaid: users.totalFeesPaid,
+    })
+    .from(users)
+    .where(eq(users.id, traderId));
+  return {
+    balance: Number(user?.virtualBalance ?? 0),
+    totalFeesPaid: Number(user?.totalFeesPaid ?? 0),
+    fund: await FeeRedistributionService.getFundBalance(),
+  };
+}
+
 function sum(rows: { feeAmount: string }[]): number {
   return rows.reduce((total, row) => total + Number(row.feeAmount), 0);
 }
@@ -140,54 +195,118 @@ async function tradeTypeRows(traderId: string, tradeType: string) {
   return rows.filter((row) => row.tradeType === tradeType);
 }
 
-// Perp close settles its fee via fire-and-forget `processFeeWithRetry`
-// (existing PerpMarketService behavior on every surface, not A2A-specific),
-// so the row can land just after closePosition returns. Poll briefly
-// instead of asserting on a race.
-async function waitForFeeRows(
-  traderId: string,
-  tradeType: string,
-  timeoutMs = 5000
-) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const rows = await tradeTypeRows(traderId, tradeType);
-    if (rows.length > 0) return rows;
-    if (Date.now() >= deadline) return rows;
-    await Bun.sleep(100);
+/**
+ * The outbox drain must change nothing for a trader whose fees settled
+ * inline: run it once, then again, and verify fee rows, totals and
+ * balance are identical after both runs.
+ */
+async function expectDrainChangesNothingFor(traderId: string) {
+  const before = await readTraderState(traderId);
+  const rowsBefore = await db
+    .select()
+    .from(tradingFees)
+    .where(eq(tradingFees.userId, traderId));
+  await drainTradingFeeOutboxBatch();
+  const afterFirst = await readTraderState(traderId);
+  const rowsAfterFirst = await db
+    .select()
+    .from(tradingFees)
+    .where(eq(tradingFees.userId, traderId));
+  await drainTradingFeeOutboxBatch();
+  const afterSecond = await readTraderState(traderId);
+  const rowsAfterSecond = await db
+    .select()
+    .from(tradingFees)
+    .where(eq(tradingFees.userId, traderId));
+  expect(rowsAfterFirst).toHaveLength(rowsBefore.length);
+  expect(rowsAfterSecond).toHaveLength(rowsBefore.length);
+  expect(afterFirst.totalFeesPaid).toBe(before.totalFeesPaid);
+  expect(afterSecond.totalFeesPaid).toBe(before.totalFeesPaid);
+  expect(afterFirst.balance).toBe(before.balance);
+  expect(afterSecond.balance).toBe(before.balance);
+}
+
+/** Run one cleanup section; a failure must not abort the remaining ones. */
+async function attempt(label: string, fn: () => Promise<void>) {
+  try {
+    await fn();
+  } catch (err) {
+    console.warn(`[fee-accounting cleanup] ${label} failed`, err);
   }
 }
 
 afterAll(async () => {
-  if (createdTickers.length) {
-    await db
-      .delete(perpPositions)
-      .where(inArray(perpPositions.ticker, createdTickers));
-    await db
-      .delete(perpMarketSnapshots)
-      .where(inArray(perpMarketSnapshots.ticker, createdTickers));
-  }
-  if (createdOrgIds.length) {
-    await db
-      .delete(organizationState)
-      .where(inArray(organizationState.id, createdOrgIds));
-  }
-  if (createdMarketIds.length) {
-    await db
-      .delete(positions)
-      .where(inArray(positions.marketId, createdMarketIds));
-    await db.delete(markets).where(inArray(markets.id, createdMarketIds));
-  }
+  // Reverse only this file's own stability-fund contribution, computed
+  // from its own fee rows before they are deleted: 30% of the platform
+  // fee on each row. (The fund balance is a shared global; restoring an
+  // absolute value would erase other tests' contributions.)
+  let ownDiversion = 0;
   if (createdUserIds.length) {
-    await db
-      .delete(tradingFees)
+    const [agg] = await db
+      .select({
+        platformTotal: sql<string>`COALESCE(SUM(${tradingFees.platformFee}::numeric), 0)`,
+      })
+      .from(tradingFees)
       .where(inArray(tradingFees.userId, createdUserIds));
-    await db
-      .delete(balanceTransactions)
-      .where(inArray(balanceTransactions.userId, createdUserIds));
-    await db.delete(users).where(inArray(users.id, createdUserIds));
-    createdUserIds.length = 0;
+    ownDiversion =
+      Number(agg?.platformTotal ?? 0) *
+      STABILITY_FUND_CONFIG.PLATFORM_FEE_DIVERSION_RATE;
   }
+  if (ownDiversion > 0) {
+    await attempt('stability fund reversal', async () => {
+      await db
+        .update(gameConfigs)
+        .set({
+          value: sql`to_json(COALESCE((${gameConfigs.value} #>> '{}')::numeric, 0) - ${ownDiversion})`,
+          updatedAt: new Date(),
+        })
+        .where(eq(gameConfigs.key, STABILITY_FUND_CONFIG.FUND_BALANCE_KEY));
+    });
+  }
+  await attempt('perp positions/snapshots', async () => {
+    if (createdTickers.length) {
+      await db
+        .delete(perpPositions)
+        .where(inArray(perpPositions.ticker, createdTickers));
+      await db
+        .delete(perpMarketSnapshots)
+        .where(inArray(perpMarketSnapshots.ticker, createdTickers));
+    }
+  });
+  await attempt('perp org state', async () => {
+    if (createdOrgIds.length) {
+      await db
+        .delete(organizationState)
+        .where(inArray(organizationState.id, createdOrgIds));
+    }
+  });
+  await attempt('prediction markets', async () => {
+    if (createdMarketIds.length) {
+      await db
+        .delete(positions)
+        .where(inArray(positions.marketId, createdMarketIds));
+      await db.delete(markets).where(inArray(markets.id, createdMarketIds));
+    }
+  });
+  await attempt('fee rows and outbox rows', async () => {
+    if (createdUserIds.length) {
+      await db
+        .delete(tradingFees)
+        .where(inArray(tradingFees.userId, createdUserIds));
+      await db
+        .delete(tradingFeeOutbox)
+        .where(inArray(tradingFeeOutbox.userId, createdUserIds));
+      await db
+        .delete(balanceTransactions)
+        .where(inArray(balanceTransactions.userId, createdUserIds));
+    }
+  });
+  await attempt('users', async () => {
+    if (createdUserIds.length) {
+      await db.delete(users).where(inArray(users.id, createdUserIds));
+    }
+  });
+  createdUserIds.length = 0;
   createdMarketIds.length = 0;
   createdTickers.length = 0;
   createdOrgIds.length = 0;
@@ -214,7 +333,7 @@ describe('A2A fee accounting against real Postgres', () => {
     expect(Number.isFinite(charged)).toBe(true);
     expect(charged).toBeGreaterThan(0);
 
-    const rows = await waitForFeeRows(traderId, 'pred_buy');
+    const rows = await tradeTypeRows(traderId, 'pred_buy');
     const after = await readFeeState(traderId, referrerId);
     expect(sum(rows)).toBe(charged);
     expect(after.totalFeesPaid - before.totalFeesPaid).toBe(charged);
@@ -224,6 +343,7 @@ describe('A2A fee accounting against real Postgres', () => {
     expect(after.referrerEarned - before.referrerEarned).toBe(
       Number((charged * FEE_CONFIG.REFERRER_SHARE).toFixed(2))
     );
+    await expectDrainChangesNothingFor(traderId);
   });
 
   it('prediction sell: charged fee is fully recorded', async () => {
@@ -263,7 +383,7 @@ describe('A2A fee accounting against real Postgres', () => {
     expect(Number.isFinite(charged)).toBe(true);
     expect(charged).toBeGreaterThan(0);
 
-    const rows = await waitForFeeRows(traderId, 'pred_sell');
+    const rows = await tradeTypeRows(traderId, 'pred_sell');
     const after = await readFeeState(traderId, referrerId);
     expect(sum(rows)).toBe(charged);
     expect(after.totalFeesPaid - before.totalFeesPaid).toBe(charged);
@@ -273,6 +393,7 @@ describe('A2A fee accounting against real Postgres', () => {
     expect(after.referrerEarned - before.referrerEarned).toBe(
       Number((charged * FEE_CONFIG.REFERRER_SHARE).toFixed(2))
     );
+    await expectDrainChangesNothingFor(traderId);
   });
 
   it('perp open 1000: charged fee is fully recorded', async () => {
@@ -295,7 +416,7 @@ describe('A2A fee accounting against real Postgres', () => {
     expect(Number.isFinite(charged)).toBe(true);
     expect(charged).toBeGreaterThan(0);
 
-    const rows = await waitForFeeRows(traderId, 'perp_open');
+    const rows = await tradeTypeRows(traderId, 'perp_open');
     const after = await readFeeState(traderId, referrerId);
     expect(sum(rows)).toBe(charged);
     expect(after.totalFeesPaid - before.totalFeesPaid).toBe(charged);
@@ -305,6 +426,7 @@ describe('A2A fee accounting against real Postgres', () => {
     expect(after.referrerEarned - before.referrerEarned).toBe(
       Number((charged * FEE_CONFIG.REFERRER_SHARE).toFixed(2))
     );
+    await expectDrainChangesNothingFor(traderId);
   });
 
   it('perp close: charged fee is fully recorded', async () => {
@@ -337,7 +459,7 @@ describe('A2A fee accounting against real Postgres', () => {
     expect(Number.isFinite(charged)).toBe(true);
     expect(charged).toBeGreaterThan(0);
 
-    const rows = await waitForFeeRows(traderId, 'perp_close');
+    const rows = await tradeTypeRows(traderId, 'perp_close');
     const after = await readFeeState(traderId, referrerId);
     expect(sum(rows)).toBe(charged);
     expect(after.totalFeesPaid - before.totalFeesPaid).toBe(charged);
@@ -347,5 +469,264 @@ describe('A2A fee accounting against real Postgres', () => {
     expect(after.referrerEarned - before.referrerEarned).toBe(
       Number((charged * FEE_CONFIG.REFERRER_SHARE).toFixed(2))
     );
+    await expectDrainChangesNothingFor(traderId);
+  });
+});
+
+describe('perp fee idempotent recovery against real Postgres', () => {
+  type FaultState = { faultOnce: boolean; attempts: number };
+
+  /**
+   * Real PerpMarketService (real Postgres, wallet, settlement, outbox)
+   * with the real FeeService behind a fault-injecting wrapper. The
+   * wrapper forwards the leg's `operationId`, so a retry replays the
+   * same operation. When armed, the first attempt runs the real fee
+   * settlement to completion and then reports failure — the post-commit
+   * error a caller observes when the write committed but the response
+   * was lost. The service's retry must then recover without duplicating
+   * the fee, the totals, or the fund diversion.
+   */
+  function buildFaultableService(state: FaultState) {
+    const feeProcessor = {
+      async processTradingFee(params: {
+        userId: string;
+        amount: number;
+        type: string;
+        relatedId?: string;
+        positionId?: string;
+        operationId?: string;
+      }): Promise<{ feeCharged: number; referrerPaid?: number }> {
+        state.attempts += 1;
+        const result = await FeeService.processTradingFee(
+          params.userId,
+          params.type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
+          params.amount,
+          params.positionId,
+          params.relatedId,
+          undefined,
+          params.operationId
+        );
+        if (state.faultOnce) {
+          state.faultOnce = false;
+          throw new Error('injected post-commit fee failure');
+        }
+        return result;
+      },
+    };
+    return new PerpMarketService({
+      settlement: createPerpSettlement(),
+      db: new PerpDbAdapter(),
+      wallet: createUserWalletAdapter(),
+      fees: {
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+      },
+      feeProcessor,
+      tradingFeeOutbox: createTradingFeeOutboxAdapter(),
+    });
+  }
+
+  async function openPositions(traderId: string) {
+    // Closed rows stay in the table with closedAt set; open means no close.
+    return db
+      .select()
+      .from(perpPositions)
+      .where(
+        and(eq(perpPositions.userId, traderId), isNull(perpPositions.closedAt))
+      );
+  }
+
+  it('add legs: a post-commit error recovers to one fee, and a legitimate repeat add charges again', async () => {
+    const traderId = await createUser();
+    const ticker = await createPerpMarket();
+    const state: FaultState = { faultOnce: false, attempts: 0 };
+    const service = buildFaultableService(state);
+
+    const opened = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 200,
+      leverage: 1,
+    });
+    expect(opened.positionId).toBeTruthy();
+    expect(opened.feePaid).toBeCloseTo(0.2, 10);
+    const before = await readTraderState(traderId);
+
+    // First add: the fee write commits, then the caller observes an error.
+    // The retry replays the same operation: exactly one add fee.
+    state.faultOnce = true;
+    const attemptsBeforeAdd = state.attempts;
+    const added = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 100,
+      leverage: 1,
+    });
+    expect(added.size).toBe(300);
+    expect(added.feePaid).toBeCloseTo(0.1, 10);
+    expect(state.attempts - attemptsBeforeAdd).toBe(2);
+
+    const addRows = await tradeTypeRows(traderId, 'perp_add_to_position');
+    expect(addRows).toHaveLength(1);
+    expect(sum(addRows)).toBeCloseTo(0.1, 10);
+    const afterFirst = await readTraderState(traderId);
+    expect(afterFirst.totalFeesPaid - before.totalFeesPaid).toBeCloseTo(
+      0.1,
+      10
+    );
+    // Fund diversion is 30% of the platform fee (referrer share is 0).
+    expect(afterFirst.fund - before.fund).toBeCloseTo(0.03, 6);
+    // Added margin 100 + fee 0.10 debited.
+    expect(afterFirst.balance).toBeCloseTo(before.balance - 100 - 0.1, 6);
+    const positions = await openPositions(traderId);
+    expect(positions).toHaveLength(1);
+    expect(Number(positions[0]?.size)).toBe(300);
+    await expectDrainChangesNothingFor(traderId);
+
+    // Legitimate repeat leg: same position, type and amount — a
+    // (position, type) key alone could not tell this from the retry, but
+    // the fresh operation id means it must charge again.
+    const addedAgain = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 100,
+      leverage: 1,
+    });
+    expect(addedAgain.size).toBe(400);
+    const addRows2 = await tradeTypeRows(traderId, 'perp_add_to_position');
+    expect(addRows2).toHaveLength(2);
+    expect(sum(addRows2)).toBeCloseTo(0.2, 10);
+    const afterSecond = await readTraderState(traderId);
+    expect(afterSecond.totalFeesPaid - before.totalFeesPaid).toBeCloseTo(
+      0.2,
+      10
+    );
+    expect(afterSecond.fund - before.fund).toBeCloseTo(0.06, 6);
+    expect(afterSecond.balance).toBeCloseTo(before.balance - 200 - 0.2, 6);
+    await expectDrainChangesNothingFor(traderId);
+  });
+
+  it('equal-size opposite close: a post-commit error recovers to one close fee', async () => {
+    const traderId = await createUser();
+    const ticker = await createPerpMarket();
+    const state: FaultState = { faultOnce: false, attempts: 0 };
+    const service = buildFaultableService(state);
+
+    const opened = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 200,
+      leverage: 1,
+    });
+    expect(opened.positionId).toBeTruthy();
+    const before = await readTraderState(traderId);
+
+    // Opposite-side short 200 against long 200 closes the position in
+    // full (reduceOrFlipPosition delegates to closePosition).
+    state.faultOnce = true;
+    const attemptsBeforeClose = state.attempts;
+    const closed = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'short',
+      size: 200,
+      leverage: 1,
+    });
+    expect(closed.rebalanceType).toBe('close');
+    expect(closed.feePaid).toBeCloseTo(0.2, 10);
+    expect(state.attempts - attemptsBeforeClose).toBe(2);
+
+    const closeRows = await tradeTypeRows(traderId, 'perp_close');
+    expect(closeRows).toHaveLength(1);
+    expect(sum(closeRows)).toBeCloseTo(0.2, 10);
+    const after = await readTraderState(traderId);
+    expect(after.totalFeesPaid - before.totalFeesPaid).toBeCloseTo(0.2, 10);
+    expect(after.fund - before.fund).toBeCloseTo(0.06, 6);
+    // The close fills at the synthetic execution price (below spot for a
+    // long sell), so realised PnL is negative. The reported realised PnL
+    // is cent-rounded while the wallet moved by the full-precision figure,
+    // so the balance is asserted exactly against the service-reported
+    // balance and to the cent against the reported settlement fields.
+    expect(after.balance).toBe(closed.balance);
+    expect(after.balance).toBeCloseTo(
+      before.balance +
+        (closed.marginPaid ?? 0) +
+        (closed.realizedPnL ?? 0) -
+        closed.feePaid,
+      2
+    );
+    const positions = await openPositions(traderId);
+    expect(positions).toHaveLength(0);
+    await expectDrainChangesNothingFor(traderId);
+  });
+
+  it('flip: a post-commit error on one leg recovers both legs to one fee each', async () => {
+    const traderId = await createUser();
+    const ticker = await createPerpMarket();
+    const state: FaultState = { faultOnce: false, attempts: 0 };
+    const service = buildFaultableService(state);
+
+    const opened = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 200,
+      leverage: 1,
+    });
+    expect(opened.positionId).toBeTruthy();
+    const before = await readTraderState(traderId);
+
+    // Opposite-side short 300 against long 200 flips to short 100. The
+    // two legs run concurrently; exactly one of them observes the
+    // post-commit error and retries, so three fee attempts in total.
+    state.faultOnce = true;
+    const attemptsBeforeFlip = state.attempts;
+    const flipped = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'short',
+      size: 300,
+      leverage: 1,
+    });
+    expect(flipped.rebalanceType).toBe('flip');
+    expect(flipped.side).toBe('short');
+    expect(flipped.size).toBe(100);
+    expect(flipped.feePaid).toBeCloseTo(0.3, 10);
+    expect(state.attempts - attemptsBeforeFlip).toBe(3);
+
+    const closeRows = await tradeTypeRows(traderId, 'perp_close');
+    expect(closeRows).toHaveLength(1);
+    expect(sum(closeRows)).toBeCloseTo(0.2, 10);
+    const flipRows = await tradeTypeRows(traderId, 'perp_flip_position');
+    expect(flipRows).toHaveLength(1);
+    expect(sum(flipRows)).toBeCloseTo(0.1, 10);
+    const after = await readTraderState(traderId);
+    expect(after.totalFeesPaid - before.totalFeesPaid).toBeCloseTo(0.3, 10);
+    expect(after.fund - before.fund).toBeCloseTo(0.09, 6);
+    // Close leg returns margin 200 + realised PnL - close fee; flip leg
+    // costs new margin 100 + flip fee. The reported realised PnL is
+    // cent-rounded while the wallet moved by the full-precision figure,
+    // so the balance is asserted exactly against the service-reported
+    // balance and to the cent against the reported fields.
+    expect(after.balance).toBe(flipped.balance);
+    expect(after.balance).toBeCloseTo(
+      before.balance +
+        200 +
+        (flipped.realizedPnL ?? 0) -
+        flipped.feePaid -
+        (flipped.marginPaid ?? 0),
+      2
+    );
+    const positions = await openPositions(traderId);
+    expect(positions).toHaveLength(1);
+    expect(positions[0]?.side).toBe('short');
+    expect(Number(positions[0]?.size)).toBe(100);
+    await expectDrainChangesNothingFor(traderId);
   });
 });

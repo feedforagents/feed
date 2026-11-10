@@ -1,0 +1,2 @@
+ALTER TABLE "TradingFee" ADD COLUMN "idempotencyKey" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "TradingFee_idempotencyKey_idx" ON "TradingFee" USING btree ("idempotencyKey") WHERE "TradingFee"."idempotencyKey" IS NOT NULL;

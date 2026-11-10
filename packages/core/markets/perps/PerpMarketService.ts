@@ -154,6 +154,15 @@ export class PerpMarketService {
    * Process trading fee with exponential backoff retries.
    * After exhaustion, persists to `tradingFeeOutbox` when configured; cron drains via
    * `FeeService.processTradingFee` and deletes the row in the same DB transaction.
+   *
+   * One `operationId` is generated per invocation (per fee leg) and reused
+   * across the retries, so a retry after an ambiguous post-commit error
+   * replays the recorded fee instead of inserting a second row and
+   * incrementing totals and the stability fund again. Each leg gets its
+   * own id, so a legitimate repeat leg (same position, type and amount)
+   * still charges. If fee processing AND outbox enqueue both fail, this
+   * helper logs and returns success — it does NOT guarantee durable intent
+   * for that failure; the fee then needs manual reconciliation.
    */
   private async processFeeWithRetry(
     params: {
@@ -167,10 +176,14 @@ export class PerpMarketService {
   ): Promise<void> {
     if (!this.deps.feeProcessor) return;
 
+    const operationId = crypto.randomUUID();
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= FEE_PROCESSING_MAX_RETRIES; attempt++) {
       try {
-        await this.deps.feeProcessor.processTradingFee(params);
+        await this.deps.feeProcessor.processTradingFee({
+          ...params,
+          operationId,
+        });
         return;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
