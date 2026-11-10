@@ -44,6 +44,7 @@ import {
   declineGroupInvite,
   logAdminModify,
   NotFoundError,
+  notifyFollow,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -1760,7 +1761,8 @@ export async function executeUpdateProfile(
 }
 
 /**
- * Execute follow_user tool
+ * Execute follow_user tool (same rules as the web follow route: a fresh
+ * follow notifies the followed user; a repeat follow is a no-op).
  */
 export async function executeFollowUser(
   agent: AuthenticatedAgent,
@@ -1785,6 +1787,24 @@ export async function executeFollowUser(
       followingId: args.userId,
     },
   });
+
+  // The follow has committed. A notification outage must not tell the caller
+  // that the follow failed and invite an unsuccessful retry. The
+  // notification service itself skips follows across a block.
+  try {
+    await notifyFollow(args.userId, agent.userId);
+  } catch (error) {
+    logger.warn(
+      'Failed to notify user of committed follow',
+      {
+        userId: args.userId,
+        followerId: agent.userId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'MCP'
+    );
+  }
+
   return { success: true };
 }
 
