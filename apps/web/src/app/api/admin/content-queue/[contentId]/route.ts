@@ -168,11 +168,6 @@ export const POST = withErrorHandling(
             );
         });
 
-        // A hidden post must leave the cached feed/profile lists at once;
-        // post creation and sharing invalidate the same caches.
-        await cachedDb.invalidatePostsCache();
-        await cachedDb.invalidateActorPostsCache(existingPost.authorId);
-
         await logAdminModify({
           adminId: admin.userId,
           resourceType: 'post',
@@ -188,6 +183,10 @@ export const POST = withErrorHandling(
           userAgent,
           metadata: { action: 'hide' },
         });
+
+        // Audit the committed hide before fallible cache I/O.
+        await cachedDb.invalidatePostsCache();
+        await cachedDb.invalidateActorPostsCache(existingPost.authorId);
       }
     } else if (contentType === 'comment') {
       // Handle comment moderation

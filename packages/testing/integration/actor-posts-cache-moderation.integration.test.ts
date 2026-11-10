@@ -1,177 +1,49 @@
-/**
- * Actor profile post list (GET /api/posts?actorId=...) against a real
- * database and a real Redis cache: a post the author deletes, or an admin
- * hides through the moderation content queue, must disappear from the
- * author's profile list immediately. Sibling mutations (create, share)
- * invalidate the posts:actor cache; the profile list is served from that
- * cache with a 180s TTL.
- */
+/** PRD §12 / MVP Phases 1/5: deletion/hiding refreshes retained post lists. */
+import { test } from 'bun:test';
+import assert from 'node:assert/strict';
+import { resolve } from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-import { db, inArray, posts, users } from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
-
-// The route modules import the `server-only` marker package, which throws
-// outside a Server Component; stub it like the sibling route suites do.
-// The cache layer only initializes Redis outside NODE_ENV=test, so flip to
-// development before the route modules load (the dev auth bypass and every
-// code path exercised here behave the same in both modes).
-mock.module('server-only', () => ({}));
-
-let authorA: string;
-let authorB: string;
-let adminId: string;
-const userIds: string[] = [];
-const postIds: string[] = [];
-
-let aOld: string;
-let aMid: string;
-let aNew: string;
-let bOld: string;
-let bNew: string;
-let aFuture: string;
-let aDeleted: string;
-
-type PostsResponse = { posts?: Array<{ id: string }> };
-
-let listGET: typeof import('../../../apps/web/src/app/api/posts/route').GET;
-let postDELETE: typeof import('../../../apps/web/src/app/api/posts/[id]/route').DELETE;
-let queuePOST: typeof import('../../../apps/web/src/app/api/admin/content-queue/[contentId]/route').POST;
-
-async function fetchActorPostIds(actorId: string): Promise<string[]> {
-  const request = new NextRequest(
-    new Request(`http://localhost/api/posts?actorId=${actorId}&limit=100`)
+test('post cache moderation, audit failure and fixture ownership in a private process', () => {
+  const before = process.env.NODE_ENV;
+  const child = Bun.spawnSync(
+    [
+      process.execPath,
+      '--no-env-file',
+      resolve(
+        import.meta.dir,
+        'helpers/actor-posts-cache-moderation-fixture.ts'
+      ),
+    ],
+    {
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        TZ: 'UTC',
+        NODE_ENV: 'test',
+        BUN_ENV: 'test',
+        CI: 'false',
+        DATABASE_URL: process.env.DATABASE_URL,
+        DIRECT_DATABASE_URL: process.env.DATABASE_URL,
+        DATABASE_READ_REPLICA_URL: '',
+        DATABASE_POOL_MAX: '1',
+        FEED_DISABLE_REDIS: '1',
+        REDIS_URL: '',
+        ALLOW_TEST_PRIVY_DID_AUTH: 'false',
+      },
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 25_000,
+      killSignal: 'SIGKILL',
+    }
   );
-  const response = await listGET(request);
-  const body = (await response
-    .json()
-    .catch(() => null)) as PostsResponse | null;
-  return (body?.posts ?? []).map((p) => p.id);
-}
-
-beforeAll(async () => {
-  process.env.NODE_ENV = 'development';
-  const { ensureRedisReady, isRedisAvailable } = await import('@feed/api');
-  ({ GET: listGET } = await import(
-    '../../../apps/web/src/app/api/posts/route'
-  ));
-  await ensureRedisReady();
-  if (!isRedisAvailable()) {
-    throw new Error('Redis must be available for the cache freshness suite');
+  const stdout = new TextDecoder().decode(child.stdout);
+  const stderr = new TextDecoder().decode(child.stderr);
+  assert.equal(process.env.NODE_ENV, before);
+  assert.ok(child.success, `${stdout}\n${stderr}`);
+  assert.ok(stdout.includes('POST_CACHE_MODERATION_OK cases=6'), stdout);
+  for (const line of stdout.split('\n')) {
+    if (line.startsWith('POST_CACHE_CASE_OK ')) console.log(line);
   }
-  ({ DELETE: postDELETE } = await import(
-    '../../../apps/web/src/app/api/posts/[id]/route'
-  ));
-  ({ POST: queuePOST } = await import(
-    '../../../apps/web/src/app/api/admin/content-queue/[contentId]/route'
-  ));
-
-  [authorA, authorB, adminId] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-  userIds.push(authorA, authorB, adminId);
-  await db.insert(users).values([
-    {
-      id: authorA,
-      username: `f118a_${authorA.slice(-10)}`,
-      isActor: false,
-      updatedAt: new Date(),
-    },
-    {
-      id: authorB,
-      username: `f118b_${authorB.slice(-10)}`,
-      isActor: false,
-      updatedAt: new Date(),
-    },
-    {
-      id: adminId,
-      username: `f118adm_${adminId.slice(-10)}`,
-      isActor: false,
-      isAdmin: true,
-      updatedAt: new Date(),
-    },
-  ]);
-
-  [aOld, aMid, aNew, bOld, bNew, aFuture, aDeleted] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-  postIds.push(aOld, aMid, aNew, bOld, bNew, aFuture, aDeleted);
-
-  const now = Date.now();
-  const insert = (
-    id: string,
-    authorId: string,
-    offsetMs: number,
-    deletedAt: Date | null = null
-  ) =>
-    db.insert(posts).values({
-      id,
-      content: `f118 post ${id}`,
-      authorId,
-      timestamp: new Date(now + offsetMs),
-      deletedAt,
-    });
-
-  await insert(aOld, authorA, -180_000);
-  await insert(aMid, authorA, -120_000);
-  await insert(aNew, authorA, -60_000);
-  await insert(aFuture, authorA, 3_600_000);
-  await insert(aDeleted, authorA, -30_000, new Date());
-  await insert(bOld, authorB, -120_000);
-  await insert(bNew, authorB, -60_000);
-});
-
-afterAll(async () => {
-  await db.delete(posts).where(inArray(posts.id, postIds));
-  await db.delete(users).where(inArray(users.id, userIds));
-});
-
-describe('actor profile post list moderation freshness (real database + cache)', () => {
-  it('serves the visible posts newest first (guard)', async () => {
-    const ids = await fetchActorPostIds(authorA);
-    expect(ids).toEqual([aNew, aMid, aOld]);
-  });
-
-  it('removes an author-deleted post from the profile list at once', async () => {
-    const request = new NextRequest(
-      new Request(`http://localhost/api/posts/${aMid}`, { method: 'DELETE' }),
-      { headers: { 'x-dev-user-id': authorA } }
-    );
-    const response = await postDELETE(request, {
-      params: Promise.resolve({ id: aMid }),
-    });
-    expect(response.status).toBe(200);
-
-    const ids = await fetchActorPostIds(authorA);
-    expect(ids).toEqual([aNew, aOld]);
-  });
-
-  it('removes an admin-hidden post from the profile list at once', async () => {
-    const warm = await fetchActorPostIds(authorB);
-    expect(warm).toEqual([bNew, bOld]);
-
-    const request = new NextRequest(
-      new Request(`http://localhost/api/admin/content-queue/${bOld}`, {
-        method: 'POST',
-        headers: { 'x-dev-user-id': adminId },
-        body: JSON.stringify({ action: 'hide', contentType: 'post' }),
-      })
-    );
-    const response = await queuePOST(request, {
-      params: Promise.resolve({ contentId: bOld }),
-    });
-    expect(response.status).toBe(200);
-
-    const ids = await fetchActorPostIds(authorB);
-    expect(ids).toEqual([bNew]);
-  });
-});
+}, 30_000);
