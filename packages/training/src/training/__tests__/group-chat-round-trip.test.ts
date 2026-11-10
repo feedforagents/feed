@@ -6,8 +6,14 @@
  */
 
 import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test';
+import { tmpdir } from 'node:os';
 import * as fs from 'fs';
 import * as path from 'path';
+
+const TEST_STORAGE_ROOT = fs.mkdtempSync(
+  path.join(tmpdir(), 'feed-group-chat-round-trip-test-')
+);
+const TEST_STORAGE_STAT = fs.lstatSync(TEST_STORAGE_ROOT);
 
 // Mock ONLY external dependencies - not the code under test
 mock.module('@feed/db', () => ({
@@ -22,14 +28,14 @@ mock.module('@feed/db', () => ({
   llmCallLogs: {},
   rewardJudgments: { trajectoryId: 'trajectoryId' },
   isSimulationMode: () => true,
-  getJsonStoragePath: () => null,
+  getJsonStoragePath: () => TEST_STORAGE_ROOT,
 }));
 
 // Import the REAL class after mocking db
 import { TrajectoryRecorder } from '../TrajectoryRecorder';
 import type { Action, EnvironmentState } from '../types';
 
-const TEST_OUTPUT_DIR = './training-data-output/trajectories';
+const TEST_OUTPUT_DIR = path.join(TEST_STORAGE_ROOT, 'trajectories');
 
 describe('Group Chat Round-Trip', () => {
   let recorder: TrajectoryRecorder;
@@ -102,10 +108,16 @@ describe('Group Chat Round-Trip', () => {
   });
 
   afterAll(() => {
-    // Cleanup
-    if (outputFilePath && fs.existsSync(outputFilePath)) {
-      fs.unlinkSync(outputFilePath);
+    const current = fs.lstatSync(TEST_STORAGE_ROOT);
+    if (
+      current.isSymbolicLink() ||
+      !current.isDirectory() ||
+      current.ino !== TEST_STORAGE_STAT.ino ||
+      current.dev !== TEST_STORAGE_STAT.dev
+    ) {
+      throw new Error('Test storage changed; refusing cleanup');
     }
+    fs.rmSync(TEST_STORAGE_ROOT, { recursive: true });
   });
 
   test('output file exists and has correct archetype', () => {
