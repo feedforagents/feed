@@ -2193,7 +2193,7 @@ export class FeedAgentExecutor implements AgentExecutor {
   ) {
     const userId = requireContextAccountId({}, context);
     const unreadCount = await db.notification.count({
-      where: { userId, read: false, chatId: { not: null } },
+      where: { userId, read: false },
     });
     return { unreadCount };
   }

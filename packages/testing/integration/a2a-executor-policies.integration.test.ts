@@ -16,6 +16,7 @@ import {
   groupMembers,
   groups,
   inArray,
+  notifications,
   posts,
   users,
 } from '@feed/db';
@@ -23,6 +24,7 @@ import { generateSnowflakeId, type JsonValue } from '@feed/shared';
 
 const createdUsers: string[] = [];
 const createdPosts: string[] = [];
+const createdNotifications: string[] = [];
 let userId: string;
 let liveFeedPostId: string;
 let deletedFeedPostId: string;
@@ -92,11 +94,37 @@ describe('FeedAgentExecutor policies', () => {
       chatId,
       userId,
     });
+
+    // One chat notification and one system notification for the
+    // get_unread_count test below.
+    const chatNotifId = await generateSnowflakeId();
+    const systemNotifId = await generateSnowflakeId();
+    await db.insert(notifications).values([
+      {
+        id: chatNotifId,
+        userId,
+        type: 'message',
+        title: 'chat',
+        message: 'chat notification',
+        chatId: await generateSnowflakeId(),
+      },
+      {
+        id: systemNotifId,
+        userId,
+        type: 'system',
+        title: 'system',
+        message: 'system notification',
+      },
+    ]);
+    createdNotifications.push(chatNotifId, systemNotifId);
   });
 
   afterAll(async () => {
     await db.delete(comments).where(inArray(comments.postId, createdPosts));
     await db.delete(posts).where(inArray(posts.id, createdPosts));
+    await db
+      .delete(notifications)
+      .where(inArray(notifications.id, createdNotifications));
     await db
       .delete(chatParticipants)
       .where(eq(chatParticipants.chatId, chatId));
@@ -145,6 +173,13 @@ describe('FeedAgentExecutor policies', () => {
       displayName: '  Exec Tester  ',
     })) as { user: { displayName: string } };
     expect(ok.user.displayName).toBe('Exec Tester');
+  });
+
+  it('counts all unread notifications, not only chat ones', async () => {
+    const result = (await run('messaging.get_unread_count', {})) as {
+      unreadCount: number;
+    };
+    expect(result.unreadCount).toBe(2);
   });
 
   it('leaving a group chat also deactivates group membership', async () => {
