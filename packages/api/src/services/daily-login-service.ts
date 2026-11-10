@@ -2,7 +2,7 @@
  * Daily Login Service
  *
  * Reads daily login streak history (BAB-88). Claiming a daily reward is retired:
- * PRD §9.1 allows no free refills and MVP Phase 0 deletes daily login rewards,
+ * PRD §9.1 allows no free refills and MVP Phase 1 deletes daily login rewards,
  * so nothing here credits points and nothing advertises a future reward.
  * The reward fields stay in the response shape for existing clients, always
  * retired: nextReward 0, canClaim false, no next milestone.

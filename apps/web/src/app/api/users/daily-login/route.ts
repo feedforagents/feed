@@ -2,7 +2,7 @@
  * Daily Login Rewards API
  *
  * GET  - Returns current streak info
- * POST - Retired: daily login rewards pay no points (PRD §9.1, MVP Phase 0)
+ * POST - Retired: daily login rewards pay no points (PRD §9.1, MVP Phase 1)
  */
 
 import {

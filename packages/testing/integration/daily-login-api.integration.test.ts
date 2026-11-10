@@ -22,6 +22,7 @@ import { DailyLoginService } from '@feed/api';
 import { balanceTransactions, db, eq, sql, users } from '@feed/db';
 import { generateSnowflakeId, POINTS } from '@feed/shared';
 import { waitForEndpointAvailability } from './helpers';
+import { createStewardTestToken } from './helpers/steward-auth';
 
 setDefaultTimeout(30000);
 
@@ -78,22 +79,27 @@ async function createTestUser(): Promise<string> {
   const id = await generateSnowflakeId();
   const privyId = `test-privy-${id}`;
 
-  await db.insert(users).values({
-    id,
-    privyId,
-    username: `test-daily-login-${id}`,
-    displayName: 'Test User',
-    profileComplete: true,
-    isActor: false,
-    isAgent: false,
-    dailyLoginStreak: 0,
-    longestStreak: 0,
-    totalDailyLogins: 0,
-    lastDailyLogin: null,
-    updatedAt: new Date(),
-  });
+  const [inserted] = await db
+    .insert(users)
+    .values({
+      id,
+      privyId,
+      stewardId: privyId,
+      username: `test-daily-login-${id}`,
+      displayName: 'Test User',
+      profileComplete: true,
+      isActor: false,
+      isAgent: false,
+      dailyLoginStreak: 0,
+      longestStreak: 0,
+      totalDailyLogins: 0,
+      lastDailyLogin: null,
+      updatedAt: new Date(),
+    })
+    .returning({ id: users.id });
 
-  return id;
+  if (!inserted) throw new Error('Daily-login fixture insert returned no user');
+  return inserted.id;
 }
 
 async function deleteTestUser(userId: string): Promise<void> {
@@ -510,6 +516,49 @@ describe('Daily Login - Authenticated HTTP (rewards retired)', () => {
   // tests fail, so an unexecuted assertion can never report as a pass.
   const accounts: { id: string; streak: number }[] = [];
 
+  async function createOwnedAccount(
+    ownership: { id: string; streak: number }[],
+    streak: number
+  ) {
+    const id = await createTestUser();
+    const account = { id, streak };
+    ownership.push(account);
+    if (streak > 0) {
+      await setUserStreak(id, streak, new Date(Date.now() - 25 * 3600000));
+    }
+    return account;
+  }
+
+  async function cleanupAccounts(ownership: { id: string }[]) {
+    const failures: Error[] = [];
+    for (const { id } of ownership) {
+      for (const remove of [
+        async () => {
+          await db
+            .delete(balanceTransactions)
+            .where(eq(balanceTransactions.userId, id));
+        },
+        () => deleteTestUser(id),
+      ]) {
+        try {
+          await remove();
+        } catch (error) {
+          failures.push(
+            error instanceof Error
+              ? error
+              : new Error('Owned daily-login fixture cleanup failed')
+          );
+        }
+      }
+    }
+    if (failures.length) {
+      throw new AggregateError(
+        failures,
+        'Owned daily-login account cleanup incomplete'
+      );
+    }
+  }
+
   beforeAll(async () => {
     serverAvailable = await checkServerHealth();
     dbAvailable = await checkDatabaseHealth();
@@ -517,21 +566,12 @@ describe('Daily Login - Authenticated HTTP (rewards retired)', () => {
     // A new account and an existing 3-day streak claimed 25 hours ago (the
     // state where the old GET advertised a claimable 125-point reward).
     for (const streak of [0, 3]) {
-      const id = await createTestUser();
-      if (streak > 0) {
-        await setUserStreak(id, streak, new Date(Date.now() - 25 * 3600000));
-      }
-      accounts.push({ id, streak });
+      await createOwnedAccount(accounts, streak);
     }
   });
 
   afterAll(async () => {
-    for (const { id } of accounts) {
-      await db
-        .delete(balanceTransactions)
-        .where(eq(balanceTransactions.userId, id));
-      await deleteTestUser(id);
-    }
+    await cleanupAccounts(accounts);
   });
 
   async function ledgerRows(userId: string) {
@@ -547,11 +587,43 @@ describe('Daily Login - Authenticated HTTP (rewards retired)', () => {
     expect(accounts).toHaveLength(2);
   });
 
+  test('failed second-account setup cleans owned inserts and preserves a control', async () => {
+    const failedAccounts: { id: string; streak: number }[] = [];
+    const controls: { id: string; streak: number }[] = [];
+    try {
+      const control = await createOwnedAccount(controls, 0);
+      const controlBefore = await getUserStreak(control.id);
+      const controlLedgerBefore = await ledgerRows(control.id);
+      expect(controlBefore).toBeDefined();
+
+      await createOwnedAccount(failedAccounts, 0);
+      // PostgreSQL's integer column rejects this update after the INSERT.
+      await expect(
+        createOwnedAccount(failedAccounts, 2 ** 31)
+      ).rejects.toMatchObject({ cause: { code: '22003' } });
+      expect(failedAccounts).toHaveLength(2);
+      for (const { id } of failedAccounts) {
+        expect(await getUserStreak(id)).toBeDefined();
+      }
+
+      await cleanupAccounts(failedAccounts);
+      for (const { id } of failedAccounts) {
+        expect(await getUserStreak(id)).toBeUndefined();
+        expect(await ledgerRows(id)).toHaveLength(0);
+      }
+      expect(await getUserStreak(control.id)).toEqual(controlBefore);
+      expect(await ledgerRows(control.id)).toEqual(controlLedgerBefore);
+    } finally {
+      await cleanupAccounts([...failedAccounts, ...controls]);
+    }
+  });
+
   test('GET advertises no claimable or future reward', async () => {
     expect(accounts).toHaveLength(2);
     for (const { id, streak } of accounts) {
+      const token = await createStewardTestToken(`test-privy-${id}`);
       const res = await fetch(`${BASE_URL}/api/users/daily-login`, {
-        headers: { Authorization: `Bearer steward:test:${id}` },
+        headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(10000),
       });
       expect(res.status).toBe(200);
@@ -571,11 +643,14 @@ describe('Daily Login - Authenticated HTTP (rewards retired)', () => {
     for (const { id } of accounts) {
       const before = await getUserStreak(id);
       const ledgerBefore = await ledgerRows(id);
+      const headers = {
+        Authorization: `Bearer ${await createStewardTestToken(`test-privy-${id}`)}`,
+      };
 
       const post = () =>
         fetch(`${BASE_URL}/api/users/daily-login`, {
           method: 'POST',
-          headers: { Authorization: `Bearer steward:test:${id}` },
+          headers,
           signal: AbortSignal.timeout(10000),
         });
       const first = await post();

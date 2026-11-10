@@ -8,7 +8,7 @@ import type { AchievementFromApi } from './achievements-tab';
 import { formatCountdown } from './challenges-tab';
 import { useAnimatedCount } from './use-animated-count';
 
-/** Daily login history. Daily login rewards are retired (PRD §9.1, MVP Phase 0). */
+/** Daily login history. Daily login rewards are retired (PRD §9.1, MVP Phase 1). */
 interface StreakInfo {
   currentStreak: number;
   longestStreak: number;
