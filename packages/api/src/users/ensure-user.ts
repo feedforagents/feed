@@ -6,7 +6,7 @@
  * information.
  */
 
-import { db, eq, type User, users } from '@feed/db';
+import { db, dbWrite, eq, type User, users } from '@feed/db';
 import { generateSnowflakeId, resolveUserIdentifierKind } from '@feed/shared';
 import { sql } from 'drizzle-orm';
 import type { AuthenticatedUser } from '../auth-middleware';
@@ -334,7 +334,8 @@ export function getCanonicalUserId(
  */
 export async function ensureUserFromSteward(
   stewardUserId: string,
-  email?: string
+  email?: string,
+  primary = false
 ): Promise<{
   id: string;
   stewardId: string | null;
@@ -343,9 +344,10 @@ export async function ensureUserFromSteward(
   isAdmin: boolean;
   isAgent: boolean;
 }> {
+  const accountDb = primary ? dbWrite : db;
   // Try insert first — generate a new Feed snowflake ID for this user
   const newId = await generateSnowflakeId();
-  const inserted = await db
+  const inserted = await accountDb
     .insert(users)
     .values({
       id: newId,
@@ -367,7 +369,7 @@ export async function ensureUserFromSteward(
   if (inserted[0]) return inserted[0];
 
   // Concurrent insert already created this stewardId — read back
-  const [existing] = await db
+  const [existing] = await accountDb
     .select({
       id: users.id,
       stewardId: users.stewardId,
@@ -388,7 +390,10 @@ export async function ensureUserFromSteward(
 
   // Update email if we have one now and the existing record doesn't
   if (email && !existing.email) {
-    await db.update(users).set({ email }).where(eq(users.id, existing.id));
+    await accountDb
+      .update(users)
+      .set({ email })
+      .where(eq(users.id, existing.id));
     existing.email = email;
   }
 

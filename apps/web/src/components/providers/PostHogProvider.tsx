@@ -1,6 +1,6 @@
 'use client';
 
-import { usePathname, useSearchParams } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 /**
  * PostHog provider component for initializing PostHog analytics.
  *
@@ -10,18 +10,20 @@ import { usePathname, useSearchParams } from 'next/navigation';
  * Features:
  * - PostHog initialization
  * - Page view tracking
- * - URL parameter tracking
+ * - Authentication-route privacy and URL redaction
  * - Automatic navigation tracking
  *
  * @param props - PostHogProvider component props
  * @returns PostHog provider element
  */
 import { useEffect, useRef } from 'react';
+import { useLoginModal } from '@/hooks/useLoginModal';
 import { initPostHog, posthog } from '@/lib/posthog';
+import { isPrivateAnalyticsPath } from '@/lib/posthog/privacy';
 
 export function PostHogProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
+  const loginOpen = useLoginModal((state) => state.isOpen);
   const initialized = useRef(false);
 
   // Initialize PostHog once
@@ -32,26 +34,19 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Track page views
-  // Environment super properties are already registered during init (see client.ts),
-  // so they are automatically attached to every capture call including pageviews.
   useEffect(() => {
-    if (pathname) {
-      let url = window.origin + pathname;
-      if (searchParams && searchParams.toString()) {
-        url = url + `?${searchParams.toString()}`;
-      }
-
-      // Track pageview with PostHog
-      if (typeof window !== 'undefined' && posthog) {
-        posthog.capture('$pageview', {
-          $current_url: url,
-          $pathname: pathname,
-          $search_params: searchParams?.toString() || '',
-        });
-      }
+    const privatePage =
+      !pathname || isPrivateAnalyticsPath(pathname) || loginOpen;
+    posthog.set_config({ disable_session_recording: privatePage });
+    if (privatePage) {
+      posthog.stopSessionRecording();
+      return;
     }
-  }, [pathname, searchParams]);
+    posthog.capture('$pageview', {
+      $current_url: window.origin + pathname,
+      $pathname: pathname,
+    });
+  }, [pathname, loginOpen]);
 
   return <>{children}</>;
 }

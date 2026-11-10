@@ -1,0 +1,9 @@
+{
+  "skills": [
+    {
+      "name": "feed",
+      "url": "https://feed.fun/.well-known/agent-skills/feed/SKILL.md",
+      "sha256": "39d253ee759cfc61f00e8371d50cf1ad8d7b767e6f00b091f26b7fb9e7bad8e8"
+    }
+  ]
+}

@@ -14,7 +14,7 @@
  * Test DID:  steward:test:<userId> Bearer token (integration tests).
  */
 
-import { and, db, eq, isNull, users } from '@feed/db';
+import { and, db, dbWrite, eq, isNull, users } from '@feed/db';
 import { type AuthenticatedUser, logger } from '@feed/shared';
 import { errors as joseErrors, jwtVerify } from 'jose';
 import type { NextRequest } from 'next/server';
@@ -138,12 +138,14 @@ const USER_SELECT = {
 } as const;
 
 async function resolveUserFromStewardPayload(
-  payload: StewardJwtPayload
+  payload: StewardJwtPayload,
+  primary = false
 ): Promise<AuthenticatedUser> {
   const { userId: stewardUserId, email } = payload;
+  const accountDb = primary ? dbWrite : db;
 
   // 1. Fast path: already linked
-  const [byId] = await db
+  const [byId] = await accountDb
     .select(USER_SELECT)
     .from(users)
     .where(eq(users.stewardId, stewardUserId))
@@ -161,7 +163,7 @@ async function resolveUserFromStewardPayload(
     !email.endsWith(STEWARD_INTERNAL_EMAIL_SUFFIX);
 
   if (isRealEmail) {
-    const [byEmail] = await db
+    const [byEmail] = await accountDb
       .select(USER_SELECT)
       .from(users)
       .where(and(eq(users.email, email), isNull(users.stewardId)))
@@ -171,7 +173,7 @@ async function resolveUserFromStewardPayload(
       // Link only if still unlinked. Two Steward identities presenting the
       // same email can race here; only the one whose conditional UPDATE wins
       // is linked. The loser must not be authenticated as this user.
-      const [linked] = await db
+      const [linked] = await accountDb
         .update(users)
         .set({ stewardId: stewardUserId })
         .where(and(eq(users.id, byEmail.id), isNull(users.stewardId)))
@@ -182,7 +184,7 @@ async function resolveUserFromStewardPayload(
 
       // Lost the race. If the winner was this same Steward identity (e.g. a
       // concurrent request from the same login), use the linked row.
-      const [byIdAfterRace] = await db
+      const [byIdAfterRace] = await accountDb
         .select(USER_SELECT)
         .from(users)
         .where(eq(users.stewardId, stewardUserId))
@@ -196,10 +198,16 @@ async function resolveUserFromStewardPayload(
   }
 
   // 3. New user: first-ever login via Steward for this user
-  const newUser = await ensureUserFromSteward(
-    stewardUserId,
-    isRealEmail ? email : undefined
-  );
+  const newUser = primary
+    ? await ensureUserFromSteward(
+        stewardUserId,
+        isRealEmail ? email : undefined,
+        true
+      )
+    : await ensureUserFromSteward(
+        stewardUserId,
+        isRealEmail ? email : undefined
+      );
   return toAuthUser(newUser);
 }
 
@@ -226,7 +234,8 @@ function toAuthUser(dbUser: DbUserRow): AuthenticatedUser {
 // ─── authenticate ─────────────────────────────────────────────────────────────
 
 export async function authenticate(
-  request: NextRequest
+  request: NextRequest,
+  options?: { consistency: 'primary' }
 ): Promise<AuthenticatedUser> {
   // ── Dev bypass: x-dev-user-id header / cookie ──────────────────────────────
   if (process.env.NODE_ENV !== 'production') {
@@ -313,15 +322,19 @@ export async function authenticate(
 
   // ── Steward JWT verification ───────────────────────────────────────────────
   const payload = await verifyStewardToken(token);
-  return resolveUserFromStewardPayload(payload);
+  return resolveUserFromStewardPayload(
+    payload,
+    options?.consistency === 'primary'
+  );
 }
 
 // ─── authenticateWithDbUser ───────────────────────────────────────────────────
 
 export async function authenticateWithDbUser(
-  request: NextRequest
+  request: NextRequest,
+  options?: { consistency: 'primary' }
 ): Promise<AuthenticatedUser & { dbUserId: string }> {
-  const authUser = await authenticate(request);
+  const authUser = await authenticate(request, options);
   if (!authUser.dbUserId) {
     throw new AuthenticationError(
       'User profile not found. Please complete onboarding first.'

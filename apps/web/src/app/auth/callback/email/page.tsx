@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
+import { consumeConnectReturn } from '@/lib/auth/connect-return';
 
 /**
  * Email magic-link callback page.
@@ -55,7 +56,7 @@ export default function EmailCallbackPage() {
         }
         return onLoginSuccess(result.token, result.refreshToken);
       })
-      .then(() => window.location.assign('/'))
+      .then(() => window.location.assign(consumeConnectReturn() ?? '/'))
       .catch((err: Error) => {
         setError(err.message);
       });

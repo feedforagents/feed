@@ -11,6 +11,7 @@
 
 import { logger } from '@feed/shared';
 import posthog from 'posthog-js';
+import { isPrivateAnalyticsPath, redactAnalyticsUrls } from './privacy';
 
 export type PostHogClient = typeof posthog;
 
@@ -63,6 +64,19 @@ export function initPostHog(): PostHogClient | null {
       // Capture settings
       capture_pageview: false, // We'll handle this manually for better control
       capture_pageleave: true, // Track when users leave pages
+
+      // Recording starts only after the provider verifies this route is public.
+      disable_session_recording: true,
+      before_send: (event) => {
+        if (
+          !event ||
+          isPrivateAnalyticsPath(window.location.pathname) ||
+          document.querySelector('[data-feed-auth-open]')
+        )
+          return null;
+        redactAnalyticsUrls(event.properties);
+        return event;
+      },
 
       // Session recording
       session_recording: {

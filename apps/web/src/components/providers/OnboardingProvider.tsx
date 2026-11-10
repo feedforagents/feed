@@ -145,6 +145,14 @@ export function OnboardingProvider({
       return true;
     }
 
+    const approvalReturn = getSafeReturnTo().startsWith('/connect?request=');
+    if (
+      pathname === '/connect' ||
+      (pathname === '/onboarding' && approvalReturn)
+    ) {
+      return false;
+    }
+
     if (!guideDone) {
       return true;
     }
@@ -159,6 +167,7 @@ export function OnboardingProvider({
     replayGuide,
     needsOnboarding,
     guideDone,
+    pathname,
   ]);
 
   useEffect(() => {

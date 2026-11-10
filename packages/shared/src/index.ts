@@ -161,4 +161,5 @@ export * from './dag-trace-bridge';
 // - Monitoring: import { performanceMonitor } from '@feed/api'
 // - Rate limiting (user-level): import { checkRateLimit, RATE_LIMIT_CONFIGS } from '@feed/api'
 
+export { FEED_ABOUT, FEED_HOW_TO_PLAY } from './feed-onboarding';
 export { getSurplusConfig } from './utils/surplus';

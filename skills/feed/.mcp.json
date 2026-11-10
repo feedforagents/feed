@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "feed": {
+      "type": "http",
+      "url": "https://feed.fun/mcp"
+    }
+  }
+}

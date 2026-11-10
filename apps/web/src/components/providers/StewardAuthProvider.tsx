@@ -70,9 +70,11 @@ export function StewardAuthProvider({
 
   useEffect(() => {
     let active = true;
+    let synchronizedToken: string | null = null;
     const synchronize = async (next: StewardSession | null) => {
       if (!next) {
         if (active) {
+          synchronizedToken = null;
           setSession(null);
           setIsLoading(false);
         }
@@ -92,6 +94,7 @@ export function StewardAuthProvider({
           !stewardAuth.isLoginPending &&
           stewardAuth.getSession()?.token === next.token
         ) {
+          synchronizedToken = next.token;
           setSession(next);
         }
       } catch {
@@ -114,11 +117,28 @@ export function StewardAuthProvider({
       if (!active || document.visibilityState === 'hidden') return;
       const current = stewardAuth.getSession();
       if (!current) setSession(null);
+      if (
+        current &&
+        current.token !== synchronizedToken &&
+        !stewardAuth.isLoginPending
+      ) {
+        void synchronize(current);
+      }
       if (!stewardAuth.getRefreshToken()) return;
       if (!current || stewardAuth.isNearExpiry()) {
         void stewardAuth.refreshSession();
       }
     };
+    const onStorage = (event: StorageEvent) => {
+      if (
+        event.key === 'steward_session_token' ||
+        event.key === 'steward_refresh_token' ||
+        event.key === null
+      ) {
+        void synchronize(stewardAuth.getSession());
+      }
+    };
+    window.addEventListener('storage', onStorage);
     const timer = window.setInterval(checkRefresh, 30_000);
     window.addEventListener('focus', checkRefresh);
     document.addEventListener('visibilitychange', checkRefresh);
@@ -130,6 +150,7 @@ export function StewardAuthProvider({
       active = false;
       window.clearInterval(timer);
       window.removeEventListener('focus', checkRefresh);
+      window.removeEventListener('storage', onStorage);
       document.removeEventListener('visibilitychange', checkRefresh);
       unsubscribe();
     };
