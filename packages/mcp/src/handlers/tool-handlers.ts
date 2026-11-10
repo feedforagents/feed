@@ -55,6 +55,7 @@ import { PredictionPricing } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   and,
+  comments,
   db,
   desc,
   eq,
@@ -1302,16 +1303,81 @@ export async function executeGetTradeHistory(
 // ============================================================================
 
 /**
+ * Count the comments on a post that one viewer can actually see, applying
+ * the same rule as GET /api/posts/[id]/comments: soft-deleted comments are
+ * never counted, comments by authors the viewer blocked or muted — or who
+ * blocked the viewer — are excluded, and a reply whose parent is not
+ * visible is omitted with its parent.
+ */
+async function countCommentsVisibleToViewer(
+  postId: string,
+  viewerId: string
+): Promise<number> {
+  const [rows, blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    db
+      .select({
+        id: comments.id,
+        authorId: comments.authorId,
+        parentCommentId: comments.parentCommentId,
+      })
+      .from(comments)
+      .where(and(eq(comments.postId, postId), isNull(comments.deletedAt))),
+    getBlockedUserIds(viewerId),
+    getMutedUserIds(viewerId),
+    getBlockedByUserIds(viewerId),
+  ]);
+  const excludedAuthorIds = new Set([
+    ...blockedIds,
+    ...mutedIds,
+    ...blockedByIds,
+  ]);
+  const childrenByParent = new Map<string | null, string[]>();
+  for (const row of rows) {
+    if (excludedAuthorIds.has(row.authorId)) continue;
+    const siblings = childrenByParent.get(row.parentCommentId);
+    if (siblings) siblings.push(row.id);
+    else childrenByParent.set(row.parentCommentId, [row.id]);
+  }
+  let visibleCount = 0;
+  const visited = new Set<string>();
+  const stack = [...(childrenByParent.get(null) ?? [])];
+  while (stack.length > 0) {
+    const id = stack.pop();
+    if (id === undefined || visited.has(id)) continue;
+    visited.add(id);
+    visibleCount += 1;
+    stack.push(...(childrenByParent.get(id) ?? []));
+  }
+  return visibleCount;
+}
+
+/**
  * Execute get_post tool
  */
 export async function executeGetPost(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetPostArgs
 ): Promise<GetPostResult> {
   const apiBaseUrl = getAPIBaseUrl();
-  return safeFetchRequired<GetPostResult>(
+  const result = await safeFetchRequired<GetPostResult>(
     new URL(`${apiBaseUrl}/posts/${args.postId}`)
   );
+
+  // The proxied detail route is read anonymously, so its commentCount
+  // covers every live comment on the post. The website's comment list for
+  // this viewer applies the viewer's moderation policy (PRD §8.1: tools
+  // use the same business logic as the website, moderation included), so
+  // the count handed to the agent must be the number of comments this
+  // viewer can actually see — the total that list returns.
+  const data = result.data;
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const commentCount = await countCommentsVisibleToViewer(
+      args.postId,
+      agent.userId
+    );
+    return { ...result, data: { ...data, commentCount } };
+  }
+  return result;
 }
 
 /**
