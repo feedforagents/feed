@@ -527,4 +527,65 @@ contract LiquidityPoolFacetTest is Test {
         assertGt(reserveA, 0);
         assertGt(reserveB, 0);
     }
+
+    function test_SwapsKeepWorkingAsFeesAccumulate() public {
+        // 1% fee pool: swap fees stay in the reserves, so the constant
+        // product grows a little on every swap. Repeated ordinary swaps
+        // must not brick the pool once that growth passes the 1%
+        // invariant tolerance measured against the stale pre-swap k.
+        poolId = LiquidityPoolFacet(address(diamond)).createLiquidityPool(
+            marketId,
+            100,
+            8000
+        );
+
+        vm.prank(alice);
+        LiquidityPoolFacet(address(diamond)).addLiquidity(poolId, 20 ether);
+
+        (uint256 reserveA0, uint256 reserveB0) = LiquidityPoolFacet(address(diamond)).getReserves(poolId);
+        uint256 k0 = reserveA0 * reserveB0;
+
+        // Six 5-ether swaps: cumulative fee growth pushes k more than 1%
+        // above its pre-swap baseline, so a stale-baseline check reverts.
+        for (uint i = 0; i < 6; i++) {
+            vm.prank(bob);
+            LiquidityPoolFacet(address(diamond)).swap(poolId, 5 ether, 0, true);
+        }
+
+        (uint256 reserveA, uint256 reserveB) = LiquidityPoolFacet(address(diamond)).getReserves(poolId);
+        // Fee growth really happened: k is more than 1% above baseline,
+        // which is exactly the condition the old check rejected.
+        assertGt((reserveA * reserveB * 10000) / k0, 10100);
+    }
+
+    function test_AddLiquidityDoesNotMovePrice() public {
+        // Adding liquidity must be price-neutral: the deposit is split
+        // between the reserves in proportion to the reserves themselves.
+        poolId = LiquidityPoolFacet(address(diamond)).createLiquidityPool(
+            marketId,
+            30,
+            8000
+        );
+
+        vm.prank(alice);
+        LiquidityPoolFacet(address(diamond)).addLiquidity(poolId, 20 ether);
+
+        // Skew the reserves with a swap so reserveA + reserveB no longer
+        // equals totalLiquidity (swap fees stay in the reserves).
+        vm.prank(bob);
+        LiquidityPoolFacet(address(diamond)).swap(poolId, 5 ether, 0, true);
+
+        (uint256 reserveA0, uint256 reserveB0) = LiquidityPoolFacet(address(diamond)).getReserves(poolId);
+        uint256 priceBefore = (reserveB0 * 1e18) / reserveA0;
+
+        vm.prank(charlie);
+        LiquidityPoolFacet(address(diamond)).addLiquidity(poolId, 10 ether);
+
+        (uint256 reserveA1, uint256 reserveB1) = LiquidityPoolFacet(address(diamond)).getReserves(poolId);
+        uint256 priceAfter = (reserveB1 * 1e18) / reserveA1;
+
+        // A pure liquidity add must leave the reserve ratio (price)
+        // unchanged within rounding (0.1% tolerance).
+        assertApproxEqRel(priceAfter, priceBefore, 1e15);
+    }
 }

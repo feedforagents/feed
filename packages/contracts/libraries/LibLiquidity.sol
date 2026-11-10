@@ -209,6 +209,10 @@ library LibLiquidity {
     }
 
     /// @notice Validate reserves maintain constant product invariant
+    /// @dev Swap fees stay in the pool, so the product legitimately grows
+    /// above k on every swap (see testConstantProductInvariant, which
+    /// asserts newK >= k). Only a decrease beyond the tolerance signals
+    /// broken reserve math, so growth is allowed and shrinkage is rejected.
     function validateInvariant(
         uint256 reserveA,
         uint256 reserveB,
@@ -220,12 +224,10 @@ library LibLiquidity {
         
         uint256 currentK = reserveA * reserveB;
 
-        // Allow small tolerance for rounding errors
-        if (currentK >= k) {
-            return (currentK - k) * 10000 / k <= tolerance;
-        } else {
-            return (k - currentK) * 10000 / k <= tolerance;
-        }
+        // Fee growth is expected: the product only grows. Reject only a
+        // decrease beyond the tolerance (rounding errors).
+        if (currentK >= k) return true;
+        return (k - currentK) * 10000 / k <= tolerance;
     }
 
     /// @notice Calculate impermanent loss for LP position

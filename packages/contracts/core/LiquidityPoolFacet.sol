@@ -86,8 +86,13 @@ contract LiquidityPoolFacet is ReentrancyGuard {
             pool.reserveB = _amount / 2;
             pool.k = pool.reserveA * pool.reserveB;
         } else {
-            // Add proportionally to maintain price (use OLD totalLiquidity before update)
-            uint256 addToA = (_amount * pool.reserveA) / pool.totalLiquidity;
+            // Add proportionally to maintain price: split the deposit in
+            // proportion to the current reserves. Swap fees stay in the
+            // reserves, so reserveA + reserveB drifts above totalLiquidity;
+            // dividing by totalLiquidity would skew the split and move the
+            // price on a pure liquidity add.
+            uint256 reserveSum = pool.reserveA + pool.reserveB;
+            uint256 addToA = (_amount * pool.reserveA) / reserveSum;
             uint256 addToB = _amount - addToA;
 
             pool.reserveA += addToA;
@@ -203,6 +208,11 @@ contract LiquidityPoolFacet is ReentrancyGuard {
             LibLiquidity.validateInvariant(pool.reserveA, pool.reserveB, pool.k, 100),
             "Invariant violated"
         );
+
+        // Fees stay in the reserves, so the product grows on every swap.
+        // Advance the stored baseline so the next swap is checked against
+        // the current product instead of a stale pre-fee k.
+        pool.k = pool.reserveA * pool.reserveB;
 
         // Collect fees
         uint256 fee = (_amountIn * pool.feeRate) / 10000;
