@@ -1,6 +1,7 @@
 /**
  * Manual 0005b step: the partial unique index on
- * TradingFee.idempotencyKey and its self-verification (round 5 of #1586).
+ * TradingFee.idempotencyKey and its self-verification (round 5 of #1586;
+ * round 6 adds the composite-expression rejection).
  *
  * The verification reads pg_index directly because pg_indexes.indexdef
  * cannot prove CONCURRENTLY was used, and IF NOT EXISTS silently accepts
@@ -185,6 +186,32 @@ describe('trading fee idempotency index (manual 0005b)', () => {
     );
     try {
       await expect(runManualStep()).rejects.toThrow(/not unique/);
+    } finally {
+      // Restore the verified index whatever happened above.
+      await pg.unsafe(`DROP INDEX CONCURRENTLY IF EXISTS "${INDEX_NAME}"`);
+      await runManualStep();
+    }
+
+    const state = await readIndex();
+    expect(state?.indisunique).toBe(true);
+    expect(state?.indisvalid).toBe(true);
+  });
+
+  it('refuses a same-name composite expression index', async () => {
+    // A unique index on (idempotencyKey, lower(id)) with the right
+    // name and predicate: the key-column check reads through a
+    // pg_attribute join that drops the expression entry (indkey = 0),
+    // so without the indnkeyatts/indexprs guard it would be reported
+    // as exactly (idempotencyKey) and accepted — while duplicate
+    // operation keys still insert. The verification must raise.
+    await pg.unsafe(`DROP INDEX CONCURRENTLY IF EXISTS "${INDEX_NAME}"`);
+    await pg.unsafe(
+      `CREATE UNIQUE INDEX "${INDEX_NAME}" ON "TradingFee" USING btree ("idempotencyKey", lower("id")) WHERE "idempotencyKey" IS NOT NULL`
+    );
+    try {
+      await expect(runManualStep()).rejects.toThrow(
+        /composite or expression index/
+      );
     } finally {
       // Restore the verified index whatever happened above.
       await pg.unsafe(`DROP INDEX CONCURRENTLY IF EXISTS "${INDEX_NAME}"`);

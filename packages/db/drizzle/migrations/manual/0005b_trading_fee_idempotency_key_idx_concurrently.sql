@@ -28,9 +28,15 @@
 -- accepts an existing index of the same name without proving it is
 -- equivalent. So the check below reads pg_index directly: the index
 -- must exist on "TradingFee", cover exactly ("idempotencyKey"), be
--- unique, valid AND ready, and carry the partial predicate
--- ("idempotencyKey" IS NOT NULL). Any failed check raises, and the
--- operator must fix the index (see below) before deploying.
+-- unique, valid AND ready, carry the partial predicate
+-- ("idempotencyKey" IS NOT NULL), and have exactly one key attribute
+-- with no expression entries. The last check matters because the
+-- key-column read joins pg_attribute, which drops expression entries
+-- (indkey = 0): without it, a same-name unique index on
+-- (idempotencyKey, lower(id)) would be reported as exactly
+-- (idempotencyKey) even though it permits duplicate operation keys.
+-- Any failed check raises, and the operator must fix the index (see
+-- below) before deploying.
 --
 -- Interrupted build: if the build is cancelled or crashes midway it
 -- leaves an INVALID index behind. A re-run of this file does NOT fix
@@ -76,6 +82,15 @@ BEGIN
 
   IF NOT idx.indisready THEN
     RAISE EXCEPTION 'TradingFee_idempotencyKey_idx is not ready: re-run the 0005b build step before deploying';
+  END IF;
+
+  -- Reject composite or expression indexes before the column check
+  -- below: the pg_attribute join drops expression entries (indkey =
+  -- 0), so a same-name unique index on (idempotencyKey, lower(id))
+  -- would otherwise be reported as exactly (idempotencyKey) while
+  -- still permitting duplicate operation keys.
+  IF idx.indnkeyatts <> 1 OR idx.indexprs IS NOT NULL THEN
+    RAISE EXCEPTION 'TradingFee_idempotencyKey_idx is a composite or expression index (indnkeyatts=%, has expressions=%): drop it and re-run the 0005b build step before deploying', idx.indnkeyatts, idx.indexprs IS NOT NULL;
   END IF;
 
   SELECT array_agg(a.attname ORDER BY k.ord)
