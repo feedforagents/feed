@@ -8,7 +8,12 @@ const notificationsTable = {
   createdAt: 'notifications.createdAt',
   read: 'notifications.read',
   type: 'notifications.type',
+  postId: 'notifications.postId',
+  commentId: 'notifications.commentId',
 };
+
+const postsTable = { id: 'posts.id', deletedAt: 'posts.deletedAt' };
+const commentsTable = { id: 'comments.id', deletedAt: 'comments.deletedAt' };
 
 const usersTable = {
   id: 'users.id',
@@ -87,6 +92,10 @@ const mockDigestWhere = mock(() => ({ limit: mockDigestLimit }));
 
 const mockDbSelect = mock((shape?: unknown) => ({
   from: (table: unknown) => {
+    if (table === postsTable || table === commentsTable) {
+      return { where: (condition: unknown) => ({ table, condition }) };
+    }
+
     if (table === notificationsTable) {
       const isCountQuery =
         !!shape &&
@@ -150,6 +159,7 @@ mock.module('@feed/db', () => ({
   },
   desc: (value: unknown) => ({ op: 'desc', value }),
   eq: (left: unknown, right: unknown) => ({ op: 'eq', left, right }),
+  exists: (query: unknown) => ({ op: 'exists', query }),
   getBlockedByUserIds: mockGetBlockedByUserIds,
   getBlockedUserIds: mockGetBlockedUserIds,
   getMutedUserIds: mockGetMutedUserIds,
@@ -159,6 +169,8 @@ mock.module('@feed/db', () => ({
     values,
   }),
   notifications: notificationsTable,
+  posts: postsTable,
+  comments: commentsTable,
   users: usersTable,
 }));
 
