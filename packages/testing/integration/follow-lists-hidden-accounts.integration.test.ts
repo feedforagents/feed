@@ -36,11 +36,7 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import {
-  cachedDb,
-  findTargetByIdentifier,
-  findUserByIdentifier,
-} from '@feed/api';
+import { cachedDb, findTargetByIdentifier } from '@feed/api';
 import {
   db,
   eq,
@@ -139,9 +135,10 @@ async function insertUser(
 async function insertFollow(
   followerId: string,
   followingId: string,
-  createdAt: Date
+  createdAt: Date,
+  proposedId?: string
 ) {
-  const id = await generateSnowflakeId();
+  const id = proposedId ?? (await generateSnowflakeId());
   const [row] = await db
     .insert(follows)
     .values({ id, followerId, followingId, createdAt })
@@ -149,6 +146,13 @@ async function insertFollow(
   if (!row) throw new Error('follow insert returned no row');
   ownedFollowIds.push(row.id);
   return row.id;
+}
+
+async function cleanupOwnedFollows(startIndex = 0) {
+  const ids = ownedFollowIds.slice(startIndex);
+  if (ids.length === 0) return;
+  await db.delete(follows).where(inArray(follows.id, ids));
+  ownedFollowIds.splice(startIndex);
 }
 
 async function insertUserActorFollow(
@@ -259,33 +263,28 @@ beforeAll(async () => {
   await insertFollow(viewerId, normalA, at(5));
 
   // --- NPC target -------------------------------------------------------
-  // The previous fixture took StaticDataRegistry.getAllActors()[0] and
-  // assumed the followers route would take the actor branch for it.
-  // findTargetByIdentifier resolves a User row first, so in full-suite
-  // order a shared actor whose id or username also resolves as a user
-  // takes the user branch and the UserActorFollow edges are never read
-  // (the CI failure: expected [normalA], received []). Choose the target
-  // at runtime instead: the first registry actor that does not resolve
-  // as a user by id or by username right now, and record the resolution
-  // the route will see, through the same lookup the route uses.
+  // Use the route's actual resolution: game bootstrap creates isActor
+  // User rows for registry NPCs, and those still resolve to actors.
+  // Skip only candidates that do not resolve to this canonical actor.
   let chosenActorId: string | null = null;
   for (const actor of StaticDataRegistry.getAllActors()) {
-    const byId = await findUserByIdentifier(actor.id);
-    if (byId) continue;
-    if (actor.username) {
-      const byUsername = await findUserByIdentifier(actor.username);
-      if (byUsername) continue;
+    const resolution = await findTargetByIdentifier(actor.id);
+    if (
+      !resolution.isActor ||
+      resolution.actor?.id !== actor.id ||
+      resolution.targetId !== actor.id
+    ) {
+      continue;
     }
     chosenActorId = actor.id;
+    npcBranchWasActor = resolution.actor !== null;
+    npcCanonicalTargetId = resolution.targetId;
     break;
   }
   if (!chosenActorId) {
     throw new Error('no registry actor resolves cleanly as an actor target');
   }
   npcActorId = chosenActorId;
-  const resolution = await findTargetByIdentifier(npcActorId);
-  npcBranchWasActor = resolution.isActor;
-  npcCanonicalTargetId = resolution.targetId;
 
   // Baseline: the shared actor's follower total before this fixture adds
   // its edges. Existing relationships are preserved, never cleared.
@@ -316,9 +315,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (ownedFollowIds.length > 0) {
-    await db.delete(follows).where(inArray(follows.id, ownedFollowIds));
-  }
+  await cleanupOwnedFollows();
   if (ownedUserActorFollowIds.length > 0) {
     await db
       .delete(userActorFollows)
@@ -355,18 +352,32 @@ describe('profile follow lists hide test and banned accounts', () => {
     // The fixture must actually exercise the actor branch of the route.
     expect(npcBranchWasActor).toBe(true);
     expect(npcCanonicalTargetId).toBe(npcActorId);
-    const body = await callList('followers', npcActorId);
-    // Owned membership only: the shared actor may have other followers
-    // from other suites; of this fixture's three UserActorFollow edges,
-    // only the real account may appear.
+    // Shared followers may push the owned edge beyond the first page.
+    // Inspect every page, but compare only this fixture's membership.
     const fixtureIds = new Set([npcFollowerId, testFlagged, banned]);
-    const visibleOwned = (body.followers ?? [])
-      .filter((f) => !f.isActor && fixtureIds.has(f.id))
-      .map((f) => f.id);
+    const visibleOwned: string[] = [];
+    const limit = 100;
+    const firstPage = await callList('followers', npcActorId, {
+      page: 1,
+      limit,
+    });
+    const expectedCount = npcBaselineCount + 1;
+    expect(firstPage.count).toBe(expectedCount);
+    const pageCount = Math.max(1, Math.ceil(firstPage.count / limit));
+    for (let page = 1; page <= pageCount; page++) {
+      const body =
+        page === 1
+          ? firstPage
+          : await callList('followers', npcActorId, { page, limit });
+      expect(body.count).toBe(expectedCount);
+      expect(body.hasMore).toBe(page < pageCount);
+      visibleOwned.push(
+        ...(body.followers ?? [])
+          .filter((f) => !f.isActor && fixtureIds.has(f.id))
+          .map((f) => f.id)
+      );
+    }
     expect(visibleOwned).toEqual([npcFollowerId]);
-    // The route total must grow by exactly the one visible owned edge
-    // over the captured baseline.
-    expect(body.count).toBe(npcBaselineCount + 1);
   });
 
   it('hidden followers leading the sort do not underfill pages', async () => {
@@ -442,44 +453,41 @@ describe('profile follow lists hide test and banned accounts', () => {
       isBanned: false,
       updatedAt: new Date(),
     });
-    await db.insert(follows).values({
-      id: sentinelId,
-      followerId: sentinelFollower,
-      followingId: targetId,
-      createdAt: new Date(),
-    });
+    const controlStart = ownedFollowIds.length;
+    let sentinelCreated = false;
     try {
-      // A later setup step proposes the same ID and fails on the
-      // duplicate key. The failing helper records ownership only from a
-      // successful returning(), so it records nothing here.
-      let recorded: string | null = null;
-      try {
-        const [row] = await db
-          .insert(follows)
-          .values({
-            id: sentinelId,
-            followerId: normalA,
-            followingId: targetId,
-            createdAt: new Date(),
-          })
-          .returning({ id: follows.id });
-        recorded = row?.id ?? null;
-      } catch {
-        recorded = null;
-      }
-      expect(recorded).toBeNull();
-      // Simulate this run's teardown for that helper's records: nothing
-      // was recorded, so nothing is deleted for it. The collision row
-      // must survive.
-      const [survivor] = await db
+      await db.insert(follows).values({
+        id: sentinelId,
+        followerId: sentinelFollower,
+        followingId: targetId,
+        createdAt: new Date(),
+      });
+      sentinelCreated = true;
+      // A successful helper insert precedes a later primary-key collision.
+      // Use distinct endpoints so the proposed ID is the only conflict.
+      const earlierFollowId = await insertFollow(
+        sentinelFollower,
+        normalA,
+        new Date()
+      );
+      await expect(
+        insertFollow(sentinelFollower, normalB, new Date(), sentinelId)
+      ).rejects.toMatchObject({ cause: { code: '23505' } });
+
+      // Run the same cleanup as afterAll, limited to this control's IDs.
+      // The earlier owned edge is removed; the collision row survives.
+      await cleanupOwnedFollows(controlStart);
+      const survivors = await db
         .select({ id: follows.id })
         .from(follows)
-        .where(eq(follows.id, sentinelId));
-      expect(survivor?.id).toBe(sentinelId);
+        .where(inArray(follows.id, [sentinelId, earlierFollowId]));
+      expect(survivors.map((row) => row.id)).toEqual([sentinelId]);
     } finally {
-      // The sentinel rows are this test's own direct inserts; removing
-      // them here is the test's cleanup of its own rows.
-      await db.delete(follows).where(eq(follows.id, sentinelId));
+      await cleanupOwnedFollows(controlStart);
+      // Direct inserts belong to this control only after they succeed.
+      if (sentinelCreated) {
+        await db.delete(follows).where(eq(follows.id, sentinelId));
+      }
       await db.delete(users).where(eq(users.id, sentinelFollower));
     }
   });
