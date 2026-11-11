@@ -175,6 +175,102 @@ describe('SSEManager token recovery', () => {
     unsubscribe();
   });
 
+  it('includes a newly subscribed channel on an already open stream', async () => {
+    const fetchMock = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          token: 'token-1',
+          expiresAt: Date.now() + 60_000,
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const manager = SSEManager.getInstance({
+      reconnectDelay: 1,
+      maxReconnectDelay: 1,
+    });
+    manager.setAuthProvider(async () => 'privy-token');
+    manager.setAuthenticated(true);
+
+    const unsubscribeMarkets = manager.subscribe('markets', () => {});
+    await waitForAsyncWork();
+    expect(MockEventSource.instances).toHaveLength(1);
+    MockEventSource.instances[0]!.emitOpen();
+
+    const unsubscribeFeed = manager.subscribe('feed', () => {});
+    await waitForAsyncWork();
+
+    // The open socket was for markets only. A later subscriber must replace
+    // it, or feed events never arrive.
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[0]!.readyState).toBe(
+      MockEventSource.CLOSED
+    );
+    const channels = new URL(
+      MockEventSource.instances[1]!.url
+    ).searchParams.get('channels');
+    expect(channels?.split(',').sort()).toEqual(['feed', 'markets']);
+
+    // Re-subscribing a channel the open stream already carries must not
+    // open another connection.
+    MockEventSource.instances[1]!.emitOpen();
+    const unsubscribeMarketsAgain = manager.subscribe('markets', () => {});
+    await waitForAsyncWork();
+    expect(MockEventSource.instances).toHaveLength(2);
+
+    unsubscribeMarkets();
+    unsubscribeFeed();
+    unsubscribeMarketsAgain();
+  });
+
+  it('opens a fresh stream for a new channel after reconnect attempts are exhausted', async () => {
+    const fetchMock = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          token: 'token-1',
+          expiresAt: Date.now() + 60_000,
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const manager = SSEManager.getInstance({
+      reconnectDelay: 1,
+      maxReconnectDelay: 1,
+      maxReconnectAttempts: 1,
+    });
+    manager.setAuthProvider(async () => 'privy-token');
+    manager.setAuthenticated(true);
+
+    manager.subscribe('markets', () => {});
+    await waitForAsyncWork();
+    MockEventSource.instances.at(-1)!.emitError();
+    await waitForAsyncWork();
+    MockEventSource.instances.at(-1)!.emitError();
+    await waitForAsyncWork();
+
+    expect(manager.getConnectionState()).toBe('disconnected');
+    const givenUp = MockEventSource.instances.length;
+
+    manager.subscribe('feed', () => {});
+    await waitForAsyncWork();
+
+    expect(MockEventSource.instances.length).toBe(givenUp + 1);
+    const channels = new URL(
+      MockEventSource.instances.at(-1)!.url
+    ).searchParams.get('channels');
+    expect(channels?.split(',').sort()).toEqual(['feed', 'markets']);
+  });
+
   describe('pending token ownership', () => {
     const deferredTokenFetch = () => {
       const resolvers: Array<(r: Response) => void> = [];

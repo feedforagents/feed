@@ -89,12 +89,12 @@ import {
   actorFollows,
   and,
   db,
-  desc,
   eq,
   followStatuses,
   follows,
   inArray,
-  not,
+  type SQL,
+  sql,
   userActorFollows,
   users,
 } from '@feed/db';
@@ -117,6 +117,80 @@ interface FollowerResponse {
   tier?: string;
   /** True when the authenticated viewer follows this entry. */
   viewerFollows?: boolean;
+}
+
+/** One page row of the merged relation sources. */
+interface RelationRow {
+  src: number;
+  member_id: string;
+  followed_at: string;
+}
+
+function sqlList(values: string[]): SQL {
+  return sql.join(
+    values.map((v) => sql`${v}`),
+    sql`, `
+  );
+}
+
+/**
+ * Followers of an actor: registry actors (matched by id or lower-case
+ * username, as StaticDataRegistry.getActor does) and users with a User row.
+ * The human branch applies the hidden-tier membership every other
+ * discovery surface uses: not a test account (isTest flag or 'test-' id)
+ * and not banned. The predicate sits in the relation, before count and
+ * paging, so totals and pages measure the same membership.
+ */
+function actorTargetRelations(targetId: string): SQL {
+  const actors = StaticDataRegistry.getAllActors();
+  const ids = actors.map((a) => a.id);
+  const usernames = actors
+    .map((a) => a.username?.toLowerCase())
+    .filter((u): u is string => typeof u === 'string' && u.length > 0);
+  const registryMatch =
+    ids.length === 0
+      ? sql`false`
+      : usernames.length === 0
+        ? sql`${actorFollows.followerId} IN (${sqlList(ids)})`
+        : sql`(${actorFollows.followerId} IN (${sqlList(ids)}) OR lower(${actorFollows.followerId}) IN (${sqlList(usernames)}))`;
+  return sql`
+    SELECT 0 AS src, ${actorFollows.followerId} AS member_id,
+      ${actorFollows.createdAt} AS followed_at, ${actorFollows.id} AS rel_id
+    FROM ${actorFollows}
+    WHERE ${actorFollows.followingId} = ${targetId} AND ${registryMatch}
+    UNION ALL
+    SELECT 1, ${userActorFollows.userId}, ${userActorFollows.createdAt}, ${userActorFollows.id}
+    FROM ${userActorFollows}
+    INNER JOIN ${users} ON ${users.id} = ${userActorFollows.userId}
+    WHERE ${userActorFollows.actorId} = ${targetId}
+      AND ${users.isTest} = false
+      AND ${users.isBanned} = false
+      AND ${users.id} NOT LIKE 'test-%'
+  `;
+}
+
+/**
+ * Followers of a user: users with a User row (same hidden-tier membership
+ * as the actor target's human branch), and active NPC follows whose
+ * reason is not 'user_followed' (NULL reasons stay excluded, as before).
+ */
+function userTargetRelations(targetId: string): SQL {
+  return sql`
+    SELECT 0 AS src, ${follows.followerId} AS member_id,
+      ${follows.createdAt} AS followed_at, ${follows.id} AS rel_id
+    FROM ${follows}
+    INNER JOIN ${users} ON ${users.id} = ${follows.followerId}
+    WHERE ${follows.followingId} = ${targetId}
+      AND ${users.isTest} = false
+      AND ${users.isBanned} = false
+      AND ${users.id} NOT LIKE 'test-%'
+    UNION ALL
+    SELECT 1, ${followStatuses.npcId}, ${followStatuses.followedAt}, ${followStatuses.id}
+    FROM ${followStatuses}
+    WHERE ${followStatuses.userId} = ${targetId}
+      AND ${followStatuses.isActive} = true
+      AND NOT (${followStatuses.followReason} = 'user_followed')
+  `;
 }
 
 /**
@@ -143,148 +217,79 @@ export const GET = withErrorHandling(
     const { actor: targetActor, targetId } =
       await requireTargetByIdentifier(targetIdentifier);
 
-    let followersList: FollowerResponse[] = [];
-
-    if (targetActor) {
-      // Target is an NPC - get both actor followers and user followers
-      const actorFollowRelations = await db
-        .select({
-          id: actorFollows.id,
-          followerId: actorFollows.followerId,
-          createdAt: actorFollows.createdAt,
-        })
-        .from(actorFollows)
-        .where(eq(actorFollows.followingId, targetId))
-        .orderBy(desc(actorFollows.createdAt));
-
-      // Enrich with static actor data
-      const actorFollowersList = actorFollowRelations
-        .map((rel) => {
-          const followerActor = StaticDataRegistry.getActor(rel.followerId);
-          if (!followerActor) return null;
-          return {
-            id: rel.id,
-            followerId: rel.followerId,
-            createdAt: rel.createdAt,
-            followerName: followerActor.name,
-            followerUsername: followerActor.username,
-            followerTier: followerActor.tier,
-            followerProfileImageUrl: followerActor.profileImageUrl,
-            followerDescription: followerActor.description,
-          };
-        })
-        .filter((f): f is NonNullable<typeof f> => f !== null);
-
-      const userActorFollowersList = await db
-        .select({
-          id: userActorFollows.id,
-          userId: userActorFollows.userId,
-          createdAt: userActorFollows.createdAt,
-          userDisplayName: users.displayName,
-          userUsername: users.username,
-          userProfileImageUrl: users.profileImageUrl,
-          userBio: users.bio,
-        })
-        .from(userActorFollows)
-        .innerJoin(users, eq(userActorFollows.userId, users.id))
-        .where(eq(userActorFollows.actorId, targetId))
-        .orderBy(desc(userActorFollows.createdAt))
-        .limit(200);
-
-      followersList = [
-        ...actorFollowersList.map((f) => ({
-          id: f.followerId,
-          displayName: f.followerName,
-          username: f.followerUsername || null,
-          profileImageUrl: f.followerProfileImageUrl || null,
-          bio: f.followerDescription || '',
-          followedAt: toISO(f.createdAt),
-          isActor: true,
-          tier: f.followerTier || undefined,
-        })),
-        ...userActorFollowersList.map((f) => ({
-          id: f.userId,
-          displayName: f.userDisplayName || '',
-          username: f.userUsername || null,
-          profileImageUrl: f.userProfileImageUrl || null,
-          bio: f.userBio || '',
-          followedAt: toISO(f.createdAt),
-          isActor: false,
-        })),
-      ].sort(
-        (a, b) =>
-          new Date(b.followedAt).getTime() - new Date(a.followedAt).getTime()
-      );
-    } else {
-      // Target is a regular user
-      const userFollows = await db
-        .select({
-          id: follows.id,
-          followerId: follows.followerId,
-          createdAt: follows.createdAt,
-          followerDisplayName: users.displayName,
-          followerUsername: users.username,
-          followerProfileImageUrl: users.profileImageUrl,
-          followerBio: users.bio,
-        })
-        .from(follows)
-        .innerJoin(users, eq(follows.followerId, users.id))
-        .where(eq(follows.followingId, targetId))
-        .orderBy(desc(follows.createdAt));
-
-      const npcFollowersList = await db
-        .select()
-        .from(followStatuses)
-        .where(
-          and(
-            eq(followStatuses.userId, targetId),
-            eq(followStatuses.isActive, true),
-            not(eq(followStatuses.followReason, 'user_followed'))
-          )
-        )
-        .orderBy(desc(followStatuses.followedAt));
-
-      const npcIds = npcFollowersList.map((f) => f.npcId);
-      const actorMap = new Map(
-        npcIds
-          .map((id) => StaticDataRegistry.getActor(id))
-          .filter((a): a is NonNullable<typeof a> => a !== null)
-          .map((a) => [a.id, a])
-      );
-
-      followersList = [
-        ...userFollows.map((f) => ({
-          id: f.followerId,
-          displayName: f.followerDisplayName || '',
-          username: f.followerUsername || null,
-          profileImageUrl: f.followerProfileImageUrl || null,
-          bio: f.followerBio || '',
-          followedAt: toISO(f.createdAt),
-          isActor: false,
-        })),
-        ...npcFollowersList.map((f) => {
-          const actor = actorMap.get(f.npcId);
-          return {
-            id: f.npcId,
-            displayName: actor?.name || f.npcId,
-            username: actor?.username || null,
-            profileImageUrl: actor?.profileImageUrl || null,
-            bio: actor?.description || '',
-            followedAt: toISO(f.followedAt),
-            isActor: true,
-            tier: actor?.tier || undefined,
-          };
-        }),
-      ].sort(
-        (a, b) =>
-          new Date(b.followedAt).getTime() - new Date(a.followedAt).getTime()
-      );
-    }
-
-    // Apply pagination after merging/sorting all relation sources.
-    const total = followersList.length;
+    // Merge, order, count and page the relation rows in SQL; profiles are
+    // loaded afterwards for the returned page only. Ties keep the previous
+    // source order (actors before users for an actor target, users before
+    // NPCs for a user target) and then the relation id.
     const offset = (page - 1) * limit;
-    followersList = followersList.slice(offset, offset + limit);
+    const relations = targetActor
+      ? actorTargetRelations(targetId)
+      : userTargetRelations(targetId);
+    const [pageRows, countRows] = await Promise.all([
+      db.execute(sql`
+        SELECT src, member_id,
+          to_char(followed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS followed_at
+        FROM (${relations}) rel
+        ORDER BY rel.followed_at DESC, src ASC, rel_id DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `),
+      db.execute(sql`SELECT count(*)::int AS total FROM (${relations}) rel`),
+    ]);
+    const relationPage = pageRows as unknown as RelationRow[];
+    const total = Number(
+      (countRows as unknown as Array<{ total: number }>)[0]?.total ?? 0
+    );
+
+    // Human source is 1 for an actor target and 0 for a user target.
+    const humanSource = targetActor ? 1 : 0;
+    const humanIds = relationPage
+      .filter((r) => Number(r.src) === humanSource)
+      .map((r) => r.member_id);
+    const profiles =
+      humanIds.length > 0
+        ? await db
+            .select({
+              id: users.id,
+              displayName: users.displayName,
+              username: users.username,
+              profileImageUrl: users.profileImageUrl,
+              bio: users.bio,
+            })
+            .from(users)
+            .where(inArray(users.id, humanIds))
+        : [];
+    const profileById = new Map(profiles.map((p) => [p.id, p]));
+
+    const followersList: FollowerResponse[] = relationPage.map((r) => {
+      const followedAt = toISO(new Date(r.followed_at));
+      if (Number(r.src) === humanSource) {
+        const p = profileById.get(r.member_id);
+        return {
+          id: r.member_id,
+          displayName: p?.displayName || '',
+          username: p?.username || null,
+          profileImageUrl: p?.profileImageUrl || null,
+          bio: p?.bio || '',
+          followedAt,
+          isActor: false,
+        };
+      }
+      // Actor followers of an actor target are registry members (id or
+      // username) by the SQL filter; NPC followers of a user only use a
+      // registry entry with that exact id and otherwise fall back to npcId.
+      const found = StaticDataRegistry.getActor(r.member_id);
+      const actor = targetActor || found?.id === r.member_id ? found : null;
+      return {
+        id: r.member_id,
+        displayName: actor?.name || r.member_id,
+        username: actor?.username || null,
+        profileImageUrl: actor?.profileImageUrl || null,
+        bio: actor?.description || '',
+        followedAt,
+        isActor: true,
+        tier: actor?.tier || undefined,
+      };
+    });
 
     // Check if authenticated user follows each follower (for showing follow/unfollow button state)
     if (authUser?.userId) {

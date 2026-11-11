@@ -19,13 +19,13 @@ describe('FeeService.calculateFee', () => {
     expect(calc.referrerShare).toBe(0);
   });
 
-  it('splits an even fee evenly', () => {
+  it('keeps the trading fee with the platform and pays no referrer', () => {
     const calc = FeeService.calculateFee(1000);
     expect(calc).toEqual({
       feeAmount: 1,
       netAmount: 999,
-      platformShare: 0.5,
-      referrerShare: 0.5,
+      platformShare: 1,
+      referrerShare: 0,
     });
   });
 
