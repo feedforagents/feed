@@ -36,6 +36,7 @@ import {
   groupMembers,
   groups,
   gte,
+  hasBlocked,
   inArray,
   isNull,
   messages,
@@ -1244,13 +1245,32 @@ export async function executeDirectComment(
 
   // Verify post exists
   const [post] = await db
-    .select({ id: posts.id })
+    .select({
+      id: posts.id,
+      authorId: posts.authorId,
+      deletedAt: posts.deletedAt,
+    })
     .from(posts)
     .where(eq(posts.id, postId))
     .limit(1);
 
   if (!post) {
     return { success: false, error: `Post not found: ${postId}` };
+  }
+
+  // Same rules as the web comment route: soft-deleted posts take no new
+  // comments, and neither side of a block relationship with the post
+  // author can comment on the post.
+  if (post.deletedAt) {
+    return { success: false, error: 'Cannot comment on deleted post' };
+  }
+
+  const [authorBlockedAgent, agentBlockedAuthor] = await Promise.all([
+    hasBlocked(post.authorId, agentUserId),
+    hasBlocked(agentUserId, post.authorId),
+  ]);
+  if (authorBlockedAgent || agentBlockedAuthor) {
+    return { success: false, error: 'Cannot comment on this post' };
   }
 
   // DEDUPLICATION CHECK: Prevent duplicate comments
@@ -1280,14 +1300,16 @@ export async function executeDirectComment(
       };
     }
 
-    // Verify parent comment exists
+    // Verify parent comment exists and is not soft-deleted. A deleted
+    // parent reads as not found, the same rule the web comment route
+    // applies.
     const [parentComment] = await db
-      .select({ id: comments.id })
+      .select({ id: comments.id, deletedAt: comments.deletedAt })
       .from(comments)
       .where(eq(comments.id, parentCommentId))
       .limit(1);
 
-    if (!parentComment) {
+    if (!parentComment || parentComment.deletedAt) {
       return {
         success: false,
         error: `Parent comment not found: ${parentCommentId}`,
@@ -1736,6 +1758,17 @@ export async function executeDirectFollow(
       error:
         'FOLLOW supports users/agents only. NPC actors are not supported here',
     };
+  }
+
+  // Same rules as the web follow route: neither side of a block
+  // relationship can (re)create the follow edge. A block removes follows
+  // in both directions, so a direct follow must not recreate one.
+  const [targetBlockedAgent, agentBlockedTarget] = await Promise.all([
+    hasBlocked(cleanTargetUserId, agentUserId),
+    hasBlocked(agentUserId, cleanTargetUserId),
+  ]);
+  if (targetBlockedAgent || agentBlockedTarget) {
+    return { success: false, error: 'Cannot follow this user' };
   }
 
   logger.info(
