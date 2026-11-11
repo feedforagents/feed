@@ -856,10 +856,31 @@ export class FeedAgentExecutor implements AgentExecutor {
       where: { postId, type: 'like' },
     });
 
-    // Get comment count
-    const commentCount = await db.comment.count({
+    // Get comment count. Count only the comments a reader can actually
+    // reach: a comment whose parent is not visible (e.g. a parent
+    // soft-deleted by moderation or by its author) takes its whole
+    // subtree out of the tree, so the live replies under it are not
+    // counted — the same reachability rule the web post detail applies.
+    const commentRows = await db.comment.findMany({
       where: { postId, deletedAt: null },
+      select: { id: true, parentCommentId: true },
     });
+    const childrenByParent = new Map<string | null, string[]>();
+    for (const row of commentRows) {
+      const siblings = childrenByParent.get(row.parentCommentId);
+      if (siblings) siblings.push(row.id);
+      else childrenByParent.set(row.parentCommentId, [row.id]);
+    }
+    let commentCount = 0;
+    const stack = [...(childrenByParent.get(null) ?? [])];
+    const visited = new Set<string>();
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (id === undefined || visited.has(id)) continue;
+      visited.add(id);
+      commentCount += 1;
+      stack.push(...(childrenByParent.get(id) ?? []));
+    }
 
     return {
       post: {
