@@ -1132,51 +1132,80 @@ export class PerpMarketService {
         shouldLiquidate(markPrice, position.liquidationPrice, position.side)
       ) {
         try {
-          const outcome = await this.db.transaction(async (tx) => {
-            const current = await tx.lockOpenPositionById(position.id);
-            // Already closed concurrently (e.g. by the user): nothing to settle.
-            if (!current) return null;
-            if (
-              !shouldLiquidate(
+          // The position, market totals, P&L and any remaining equity commit
+          // in one transaction: a failed wallet write rolls the liquidation
+          // back, so the still-open position is settled on a later tick.
+          const outcome = await this.deps.settlement.run(
+            position.userId,
+            async (tx, wallet) => {
+              const current = await tx.lockOpenPositionById(position.id);
+              // Already closed concurrently (e.g. by the user): nothing to settle.
+              if (!current) return null;
+              if (
+                !shouldLiquidate(
+                  markPrice,
+                  current.liquidationPrice,
+                  current.side
+                )
+              ) {
+                return { liquidated: false as const, current };
+              }
+
+              // Remaining margin is what the liquidation takes: the current
+              // size, on top of whatever earlier partial closes already
+              // settled. Accrued funding settles like a close (realized PnL
+              // is the mark-price PnL less fundingPaid), with the loss capped
+              // at the margin, so an accrued rebate is returned as equity.
+              const marginLoss = current.size / current.leverage;
+              const { pnl } = calculateUnrealizedPnL(
+                current.entryPrice,
                 markPrice,
-                current.liquidationPrice,
-                current.side
-              )
-            ) {
-              return { liquidated: false as const, current };
-            }
-
-            // Remaining margin is what the liquidation takes: the current
-            // size, on top of whatever earlier partial closes already settled.
-            const marginLoss = current.size / current.leverage;
-            const closed = await tx.closePosition(current.id, {
-              currentPrice: newPrice,
-              closedAt: now,
-              realizedPnL: (current.realizedPnL ?? 0) - marginLoss,
-              unrealizedPnL: 0,
-              unrealizedPnLPercent: 0,
-            });
-            if (!closed) return null;
-
-            if (market) {
-              // OI decreases by the remaining notional (size), not leveraged
-              // exposure. Apply as a delta so multiple liquidations on one
-              // market accumulate.
-              await tx.applyMarketDeltas(current.ticker, {
-                openInterest: -current.size,
+                current.side,
+                current.size
+              );
+              const realizedPnL = Math.max(
+                pnl - current.fundingPaid,
+                -marginLoss
+              );
+              const equity = marginLoss + realizedPnL;
+              const closed = await tx.closePosition(current.id, {
+                currentPrice: newPrice,
+                closedAt: now,
+                realizedPnL: (current.realizedPnL ?? 0) + realizedPnL,
+                unrealizedPnL: 0,
+                unrealizedPnLPercent: 0,
               });
+              if (!closed) return null;
+
+              if (market) {
+                // OI decreases by the remaining notional (size), not leveraged
+                // exposure. Apply as a delta so multiple liquidations on one
+                // market accumulate.
+                await tx.applyMarketDeltas(current.ticker, {
+                  openInterest: -current.size,
+                });
+              }
+              if (equity > 0) {
+                await wallet.credit({
+                  userId: current.userId,
+                  amount: equity,
+                  reason: 'perp_liquidation',
+                  description: `Liquidation ${current.leverage}x ${current.side} ${current.ticker}`,
+                  relatedId: current.id,
+                });
+              }
+              await wallet.recordPnL({
+                userId: current.userId,
+                pnl: realizedPnL,
+                reason: 'perp_liquidation',
+                relatedId: current.id,
+              });
+              return { liquidated: true as const, current };
             }
-            return { liquidated: true as const, current, marginLoss };
-          });
+          );
 
           if (outcome === null) continue;
           if (outcome.liquidated) {
-            await this.deps.wallet.recordPnL({
-              userId: outcome.current.userId,
-              pnl: -outcome.marginLoss,
-              reason: 'perp_liquidation',
-              relatedId: outcome.current.id,
-            });
             summary.liquidations++;
             await this.invalidateCaches(outcome.current.ticker);
             continue;
