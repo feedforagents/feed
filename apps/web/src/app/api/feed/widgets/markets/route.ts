@@ -54,6 +54,18 @@ export const dynamic = 'force-dynamic';
 // Cache config (60 seconds)
 export const revalidate = 60;
 
+/**
+ * Filter active questions by their resolution date at fetch time, including
+ * equality. Anonymous snapshots retain the existing widget cache TTL. Buy
+ * eligibility also depends on the market's endDate, liquidity and funding.
+ */
+function isWidgetMarketOpen(
+  q: { status: string; resolutionDate: Date | string },
+  now: number
+): boolean {
+  return q.status === 'active' && new Date(q.resolutionDate).getTime() >= now;
+}
+
 export const GET = withErrorHandling(async function GET(request: NextRequest) {
   // Optional auth - markets are public but RLS still applies
   const authUser: AuthenticatedUser | null = await optionalAuth(request).catch(
@@ -145,10 +157,11 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
           }
         }
 
+        const membershipNow = Date.now();
         return (
           questions
-            // Don't filter out questions without markets - show all active questions
-            .filter((q) => q.status === 'active')
+            // Keep questions without market rows; filter before ranking.
+            .filter((q) => isWidgetMarketOpen(q, membershipNow))
             .map((q) => {
               const market = marketMap.get(String(q.id));
               const yesShares = market ? Number(market.yesShares) : 0;
@@ -292,9 +305,10 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     }
   }
 
+  const membershipNow = Date.now();
   const formattedMarkets = questions
-    // Don't filter out questions without markets - show all active questions
-    .filter((q) => q.status === 'active')
+    // Keep questions without market rows; filter before ranking.
+    .filter((q) => isWidgetMarketOpen(q, membershipNow))
     .map((q) => {
       const market = marketMap.get(String(q.id));
       const yesShares = market ? Number(market.yesShares) : 0;

@@ -8,7 +8,7 @@ import {
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import type { InferInsertModel } from 'drizzle-orm';
-import { and, count, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { PredictionPricing } from '../../pricing';
 import type {
   PredictionDbPort,
@@ -88,23 +88,30 @@ export class PredictionDbAdapter implements PredictionDbPort {
   }
 
   /**
-   * WHY resolved=false filter: Both count and list must agree on the same
-   * predicate so pagination metadata (total) matches the returned rows.
-   * Resolved/cancelled markets are excluded from the trading list — they're
-   * historical, not actionable.
+   * Count and list share the unresolved/deadline predicate shape. Each query
+   * captures its own clock and snapshot, so a deadline crossing or concurrent
+   * write can still change the result between calls. This is not full buy
+   * eligibility: liquidity, funding and other checks remain on the buy path.
+   * Equality matches assertMarketActiveForBuy, which rejects now > endDate.
+   * Position exits use direct market lookup rather than this discovery list;
+   * existing route caches can retain results from an earlier database fetch.
    */
+  private openMarketPredicate() {
+    return and(eq(markets.resolved, false), gte(markets.endDate, new Date()));
+  }
+
   async countUnresolvedMarkets(): Promise<number> {
     const [row] = await this.client
       .select({ c: count() })
       .from(markets)
-      .where(eq(markets.resolved, false));
+      .where(this.openMarketPredicate());
     return Number(row?.c ?? 0);
   }
 
   /**
    * WHY orderBy createdAt DESC: Newest markets first — matches user expectation
-   * that recent questions appear at the top. Provides stable pagination when
-   * new markets aren't being created during the request.
+   * that recent questions appear at the top. Equal timestamps have no explicit
+   * tie-breaker; separate requests are not an atomic pagination snapshot.
    */
   async listMarkets(options?: {
     limit?: number;
@@ -113,7 +120,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
     const base = this.client
       .select()
       .from(markets)
-      .where(eq(markets.resolved, false))
+      .where(this.openMarketPredicate())
       .orderBy(desc(markets.createdAt));
     const rows =
       options?.limit != null

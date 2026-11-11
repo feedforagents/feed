@@ -3,7 +3,7 @@
  *
  * @description
  * Search for users by username or display name with fuzzy matching.
- * Returns real users only by default (excludes NPCs, agents, banned users, and current user).
+ * Returns real users only by default (excludes NPCs, agents, banned users, test users, and current user).
  * Designed for user mention autocomplete, friend finding, and social discovery.
  *
  * **Features:**
@@ -13,6 +13,7 @@
  * - Excludes NPCs/actors by default
  * - Excludes agents by default (use includeAgents=true to include)
  * - Excludes banned users
+ * - Excludes test users (isTest flag or 'test-' id prefix)
  * - Limits to 20 results (performance)
  * - Alphabetically sorted results
  *
@@ -109,7 +110,7 @@
  */
 
 import {
-  addPublicReadHeaders,
+  addPrivateReadHeaders,
   authenticate,
   publicRateLimit,
   successResponse,
@@ -141,7 +142,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   if (!query || query.trim().length < 2) {
     const res = successResponse({ users: [] });
-    if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
+    if (rateLimitInfo) addPrivateReadHeaders(res, rateLimitInfo);
+    else res.headers.set('Cache-Control', 'private, no-store');
     return res;
   }
 
@@ -176,6 +178,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       {
         isBanned: false,
       },
+      // Test accounts are not real people: sibling discovery surfaces drop
+      // them before paginating (DatabaseService.getRecentPosts excludes
+      // authors with isTest set or an id starting with 'test-').
+      {
+        isTest: false,
+      },
+      {
+        NOT: {
+          id: {
+            startsWith: 'test-',
+          },
+        },
+      },
     ];
 
     const select = {
@@ -187,18 +202,39 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ...(includeAgents && { isAgent: true }),
     };
 
-    const exactMatches = await db.user.findMany({
-      where: {
-        AND: [
-          ...baseFilters,
-          {
-            username: searchTerm,
-          },
-        ],
-      },
-      select,
-      take: 5,
-    });
+    // The adapter has no case-insensitive equals, so find exact usernames with
+    // the same filters in SQL. The viewer id keeps the NOT IN list non-empty.
+    const exactIds = await db.$queryRaw<{ id: string }>`
+      SELECT id FROM "User"
+      WHERE lower(username) = lower(${rawSearchTerm})
+        AND id NOT IN ${[user.userId, ...excludedUserIds]}
+        AND "isActor" = false
+        AND (${includeAgents} OR "isAgent" = false)
+        AND "isBanned" = false
+        AND "isTest" = false
+        AND id NOT LIKE ${'test-%'}
+      ORDER BY username
+      LIMIT 20
+    `;
+
+    const exactMatches =
+      exactIds.length > 0
+        ? await db.user.findMany({
+            where: {
+              AND: [
+                ...baseFilters,
+                { id: { in: exactIds.map((row) => row.id) } },
+              ],
+            },
+            select,
+            take: 20,
+            orderBy: [
+              {
+                username: 'asc',
+              },
+            ],
+          })
+        : [];
 
     const seenIds = new Set(exactMatches.map((entry) => entry.id));
     const remainingAfterExact = 20 - exactMatches.length;
@@ -214,7 +250,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                   OR: [
                     {
                       username: {
-                        startsWith: searchTerm,
+                        startsWith: rawSearchTerm,
+                        mode: 'insensitive',
                       },
                     },
                     {
@@ -293,6 +330,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const res = successResponse({
     users,
   });
-  if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
+  if (rateLimitInfo) addPrivateReadHeaders(res, rateLimitInfo);
+  else res.headers.set('Cache-Control', 'private, no-store');
   return res;
 });
