@@ -405,6 +405,108 @@ describe('PredictionMarketService', () => {
     expect(result.netProceeds).toBeGreaterThan(0);
   });
 
+  it('should reject a sell that moves odds beyond the per-trade limit', async () => {
+    // A holder who accumulated gradually (each buy inside the 20ppt
+    // guard) can dump the whole position in one sell. Buys are guarded
+    // against single-trade odds swings; sells must be guarded the same
+    // way, or one dump crashes the odds from 50% to ~17%.
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 9000,
+      avgPrice: 0.5,
+      cashCostBasis: 4500,
+      status: 'active',
+      outcome: null,
+      pnl: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await expect(
+      service.sell({ userId: 'u1', marketId: 'm1', shares: 9000 })
+    ).rejects.toThrow(/move odds/);
+
+    // Rejected trade must leave market and position untouched.
+    const after = await db.getMarketById('m1');
+    expect(after?.yesShares).toBe(5000);
+    expect(after?.noShares).toBe(5000);
+    const pos = await db.getPosition('u1', 'm1', 'yes');
+    expect(pos?.shares).toBe(9000);
+    expect(pos?.status).toBe('active');
+  });
+
+  it('should reject a sell that pushes YES odds below the hard floor', async () => {
+    // Odds already near the floor (5%): a sell that shifts odds by less
+    // than the 20ppt per-trade limit can still push them below 2%.
+    const thinDb = new InMemoryDb({
+      id: 'm2',
+      question: 'Thin market?',
+      yesShares: 9500,
+      noShares: 500,
+      liquidity: 10_000,
+      endDate: new Date(Date.now() + 3600_000),
+      resolved: false,
+    });
+    const thinService = new PredictionMarketService({
+      db: thinDb,
+      wallet,
+      broadcast,
+      cache,
+      clock: { now: () => new Date() },
+      fees: feeConfig,
+      feeProcessor,
+    });
+    await thinDb.upsertPosition({
+      userId: 'u1',
+      marketId: 'm2',
+      side: 'yes',
+      shares: 6000,
+      avgPrice: 0.05,
+      cashCostBasis: 300,
+      status: 'active',
+      outcome: null,
+      pnl: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await expect(
+      thinService.sell({ userId: 'u1', marketId: 'm2', shares: 6000 })
+    ).rejects.toThrow(/YES odds/);
+
+    const after = await thinDb.getMarketById('m2');
+    expect(after?.yesShares).toBe(9500);
+    expect(after?.noShares).toBe(500);
+  });
+
+  it('should allow a sell that moves odds beyond the limit with maxOddsMove', async () => {
+    // Parity with buy: agent/NPC callers can opt into a larger move.
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 9000,
+      avgPrice: 0.5,
+      cashCostBasis: 4500,
+      status: 'active',
+      outcome: null,
+      pnl: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await service.sell({
+      userId: 'u1',
+      marketId: 'm1',
+      shares: 9000,
+      maxOddsMove: 1,
+    });
+    expect(result.positionClosed).toBe(true);
+    expect(result.market.yesPrice).toBeLessThan(0.2);
+  });
+
   it('should block sells on resolved markets with outcome', async () => {
     // First buy a position
     await service.buy({
