@@ -101,6 +101,8 @@ import {
   eq,
   follows,
   inArray,
+  like,
+  not,
   userActorFollows,
   users,
 } from '@feed/db';
@@ -209,7 +211,16 @@ export const GET = withErrorHandling(
         })
         .from(follows)
         .innerJoin(users, eq(follows.followingId, users.id))
-        .where(eq(follows.followerId, targetId))
+        .where(
+          and(
+            eq(follows.followerId, targetId),
+            // Hidden account tiers never appear on discovery surfaces
+            // (test accounts: isTest flag or 'test-' id; banned accounts).
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        )
         .orderBy(desc(follows.createdAt));
 
       // Get actors being followed (UserActorFollow model)
