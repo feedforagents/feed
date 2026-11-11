@@ -25,7 +25,10 @@ import {
   RATE_LIMIT_CONFIGS,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
-import { PredictionDbAdapter } from '@feed/core/markets/prediction';
+import {
+  calculatePredictionCashCostBasis,
+  PredictionDbAdapter,
+} from '@feed/core/markets/prediction';
 import type { WalletPort } from '@feed/core/markets/shared';
 import {
   and,
@@ -2658,7 +2661,25 @@ export class FeedAgentExecutor implements AgentExecutor {
 
       const avgPrice = requiredFinancialValue(p.avgPrice, 'avgPrice');
       const shares = requiredFinancialValue(p.shares, 'shares');
-      const unrealizedPnL = (currentPrice - avgPrice) * shares;
+      // Mark against the remaining GROSS cash paid, not net avgPrice:
+      // avgPrice is net of the entry fee, while the fee already left the
+      // wallet in cash and is not in lifetimePnL until the position
+      // closes. Subtracting net avgPrice would count the already-paid
+      // entry fee as profit — the same defect the engine portfolio path
+      // (calculatePortfolioPnL) already fixes with cashCostBasis.
+      const unrealizedPnL =
+        shares * currentPrice -
+        calculatePredictionCashCostBasis(
+          {
+            shares,
+            avgPrice,
+            cashCostBasis:
+              p.cashCostBasis == null
+                ? undefined
+                : requiredFinancialValue(p.cashCostBasis, 'cashCostBasis'),
+          },
+          FEE_CONFIG.TRADING_FEE_RATE
+        );
 
       return {
         id: p.id,
