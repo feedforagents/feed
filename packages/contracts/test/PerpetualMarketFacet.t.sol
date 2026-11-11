@@ -332,6 +332,67 @@ contract PerpetualMarketFacetTest is Test {
         assertLt(balanceAfter, balanceBefore);
     }
 
+    function testOpenPositionAboveMaxLeverageReverts() public {
+        // Market caps leverage at 5x, but the 10% initial margin alone allows 10x,
+        // so the leverage check is the binding cap here.
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            5, // 5x max leverage
+            500,
+            1000,
+            250,
+            10,
+            20
+        );
+
+        // Entry at $50,000
+        mockOraclePrice(50000e8);
+
+        // 1 BTC ($50,000 notional) on 8,474 ether collateral is 5.90x leverage:
+        // above the 5x cap, and above the 5,000 ether initial margin, so only
+        // the leverage check can reject it.
+        vm.expectRevert("Leverage too high");
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.LONG,
+            1e18,
+            8474 ether,
+            51000e8
+        );
+    }
+
+    function testOpenPositionAtMaxLeverageSucceeds() public {
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            5, // 5x max leverage
+            500,
+            1000,
+            250,
+            10,
+            20
+        );
+
+        mockOraclePrice(50000e8);
+
+        // Exactly 5x leverage: $50,000 notional on 10,000 ether collateral.
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.LONG,
+            1e18,
+            10000 ether,
+            51000e8
+        );
+
+        (, uint256 positionSize, uint256 positionCollateral, , , ,) = PerpetualMarketFacet(address(diamond))
+            .getPosition(alice, marketId);
+        assertEq(positionSize, 1e18);
+        assertEq(positionCollateral, 10000 ether);
+    }
+
     function testLiquidation() public {
         // Create market
         marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
