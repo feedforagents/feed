@@ -109,6 +109,27 @@ contract PredictionMarketTest is DiamondTestSetup {
         vm.stopPrank();
     }
 
+    /// @notice Selling after the market expiry must revert, like buying does.
+    /// buyShares already blocks trades at/after resolveAt; sellShares must
+    /// apply the same cutoff so holders cannot dump losing shares once the
+    /// outcome is knowable but before the oracle resolves.
+    function test_RevertWhen_SellSharesAfterExpiry() public {
+        bytes32 marketId = createBasicMarket();
+
+        // User1 buys shares first
+        vm.startPrank(user1);
+        market.deposit{value: 10 ether}();
+        market.buyShares(marketId, 0, 1 ether);
+        vm.stopPrank();
+
+        // Warp past resolveAt (30 days) without resolving the market
+        vm.warp(block.timestamp + 31 days);
+
+        vm.prank(user1);
+        vm.expectRevert("Market expired");
+        market.sellShares(marketId, 0, 0.5 ether);
+    }
+
     /// @notice Test market resolution
     function testResolveMarket() public {
         bytes32 marketId = createBasicMarket();

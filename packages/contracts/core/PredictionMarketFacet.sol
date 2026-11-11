@@ -164,6 +164,7 @@ contract PredictionMarketFacet is ReentrancyGuard {
 
         LibMarket.Market storage market = LibMarket.getMarket(_marketId);
         require(!market.resolved, "Market already resolved");
+        require(block.timestamp < market.resolveAt, "Market expired");
         require(_outcome < market.numOutcomes, "Invalid outcome");
 
         LibMarket.Position storage position = LibMarket.getPosition(msg.sender, _marketId);
