@@ -80,12 +80,16 @@ contract PerpetualMarketFacet is ReentrancyGuard {
     }
 
     /// @notice Open or increase a position
+    /// @param _limitPrice Slippage protection: the worst acceptable fill price.
+    /// For LONG positions this is the maximum acceptable entry price; for
+    /// SHORT positions it is the minimum acceptable entry price (a short
+    /// sells at the mark price, so a lower fill is the adverse direction).
     function openPosition(
         bytes32 _marketId,
         LibPerpetual.Side _side,
         uint256 _size,
         uint256 _collateral,
-        uint256 _maxPrice // Slippage protection
+        uint256 _limitPrice // Slippage protection
     ) external nonReentrant {
         require(_size > 0, "Size must be positive");
         require(_collateral > 0, "Collateral required");
@@ -95,7 +99,11 @@ contract PerpetualMarketFacet is ReentrancyGuard {
 
         // Get current mark price from oracle
         uint256 markPrice = _getMarkPrice(market.indexOracle);
-        require(markPrice <= _maxPrice, "Price slippage exceeded");
+        if (_side == LibPerpetual.Side.LONG) {
+            require(markPrice <= _limitPrice, "Price slippage exceeded");
+        } else {
+            require(markPrice >= _limitPrice, "Price slippage exceeded");
+        }
 
         // Calculate required margin
         // Mark price is in 8 decimals (from Chainlink), collateral is in 18 decimals
@@ -161,9 +169,13 @@ contract PerpetualMarketFacet is ReentrancyGuard {
     }
 
     /// @notice Close entire position
+    /// @param _limitPrice Slippage protection: the worst acceptable fill price.
+    /// For LONG positions this is the minimum acceptable exit price (a long
+    /// sells on close); for SHORT positions it is the maximum acceptable exit
+    /// price (a short buys back on close).
     function closePosition(
         bytes32 _marketId,
-        uint256 _minPrice // Slippage protection
+        uint256 _limitPrice // Slippage protection
     ) external nonReentrant {
         LibPerpetual.PerpetualMarket storage market = LibPerpetual.getMarket(_marketId);
         LibPerpetual.Position storage position = LibPerpetual.getPosition(msg.sender, _marketId);
@@ -173,7 +185,11 @@ contract PerpetualMarketFacet is ReentrancyGuard {
 
         // Get current mark price
         uint256 markPrice = _getMarkPrice(market.indexOracle);
-        require(markPrice >= _minPrice, "Price slippage exceeded");
+        if (position.side == LibPerpetual.Side.LONG) {
+            require(markPrice >= _limitPrice, "Price slippage exceeded");
+        } else {
+            require(markPrice <= _limitPrice, "Price slippage exceeded");
+        }
 
         // Calculate PnL for the closed portion
         int256 pnl = LibPerpetual.calculateUnrealizedPnl(position, markPrice);
