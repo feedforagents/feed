@@ -36,6 +36,7 @@ import {
   groupMembers,
   groups,
   gte,
+  hasBlocked,
   inArray,
   isNull,
   messages,
@@ -1425,10 +1426,18 @@ export async function executeDirectMessage(
 
     // Check if recipient exists
     const [recipient] = await db
-      .select({ id: users.id })
+      .select({ id: users.id, isActor: users.isActor })
       .from(users)
       .where(eq(users.id, recipientId))
       .limit(1);
+
+    if (recipient?.isActor) {
+      return {
+        success: false,
+        error:
+          'Cannot send direct messages to NPC actors. Use group chats instead.',
+      };
+    }
 
     if (!recipient) {
       // Try searching actorState for NPCs
@@ -1441,6 +1450,28 @@ export async function executeDirectMessage(
       if (!npc) {
         return { success: false, error: `Recipient not found: ${recipientId}` };
       }
+
+      // An actorState-only recipient is an NPC actor, not a user.
+      return {
+        success: false,
+        error:
+          'Cannot send direct messages to NPC actors. Use group chats instead.',
+      };
+    }
+
+    // Same DM rules as the web message route, MCP send_message and A2A
+    // messaging.send_message: neither side of a block relationship can DM
+    // the other. Checked before a new DM chat is created so a blocked send
+    // does not leave an auto-accepted DM chat behind.
+    const [blockedRecipient, blockedByRecipient] = await Promise.all([
+      hasBlocked(agentUserId, recipientId),
+      hasBlocked(recipientId, agentUserId),
+    ]);
+    if (blockedRecipient || blockedByRecipient) {
+      return {
+        success: false,
+        error: 'Cannot send messages to this user',
+      };
     }
 
     // Find existing DM chat using a single query with self-join
@@ -1588,6 +1619,61 @@ export async function executeDirectMessage(
         success: false,
         error: `Chat not found or agent is not a member: ${chatId}`,
       };
+    }
+
+    // Same DM rules as the web message route, MCP send_message and A2A
+    // messaging.send_message: DMs to NPC actors are not allowed, and
+    // neither side of a block relationship can DM the other. Group chats
+    // are unaffected. The recipientId path already enforces these rules
+    // before a DM chat is created, so this covers sends into an existing
+    // chat addressed by ID.
+    const [dmChat] = await db
+      .select({ isGroup: chats.isGroup })
+      .from(chats)
+      .where(eq(chats.id, chatId))
+      .limit(1);
+    if (dmChat && !dmChat.isGroup) {
+      const otherParticipants = await db
+        .select({ userId: chatParticipants.userId })
+        .from(chatParticipants)
+        .where(
+          and(
+            eq(chatParticipants.chatId, chatId),
+            eq(chatParticipants.isActive, true)
+          )
+        );
+      const otherParticipantId = otherParticipants
+        .map((p) => p.userId)
+        .find((id) => id !== agentUserId);
+      if (!otherParticipantId) {
+        return {
+          success: false,
+          error: 'Invalid direct message chat',
+        };
+      }
+      const [otherUser, isBlocked, hasBlockedMe] = await Promise.all([
+        db
+          .select({ isActor: users.isActor })
+          .from(users)
+          .where(eq(users.id, otherParticipantId))
+          .limit(1)
+          .then((rows) => rows[0]),
+        hasBlocked(agentUserId, otherParticipantId),
+        hasBlocked(otherParticipantId, agentUserId),
+      ]);
+      if (otherUser?.isActor) {
+        return {
+          success: false,
+          error:
+            'Cannot send direct messages to NPC actors. Use group chats instead.',
+        };
+      }
+      if (isBlocked || hasBlockedMe) {
+        return {
+          success: false,
+          error: 'Cannot send messages to this user',
+        };
+      }
     }
   }
 
