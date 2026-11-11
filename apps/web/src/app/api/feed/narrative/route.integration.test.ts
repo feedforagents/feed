@@ -184,6 +184,11 @@ const positionsMock = {
 
 mock.module('@feed/db', () => ({
   db: { select: mockDbSelect, execute: mockDbExecute },
+  // Viewer-moderation lookups (../_lib/viewer-moderation imports these from
+  // @feed/db): no moderation state in these fixtures.
+  getBlockedUserIds: () => Promise.resolve([]),
+  getBlockedByUserIds: () => Promise.resolve([]),
+  getMutedUserIds: () => Promise.resolve([]),
   and: (...args: unknown[]) => args,
   desc: (x: unknown) => x,
   eq: (a: unknown, b: unknown) => [a, b],
