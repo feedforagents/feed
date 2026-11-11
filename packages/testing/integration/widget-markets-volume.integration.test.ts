@@ -30,9 +30,17 @@
  * registered rows, including the derived PredictionTrade and
  * PredictionPriceHistory rows a real trade leaves behind, and reads back
  * zero remaining fixture rows.
+ *
+ * Backfill: one more market carries pre-migration history only as
+ * wallet-ledger rows (BalanceTransaction 'pred_buy' / 'pred_sell',
+ * no PredictionTrade rows). beforeAll runs the backfill INSERT from
+ * migration 0005 against those rows — twice, so the test also proves
+ * the insert is idempotent — and the widget must then report the
+ * ledger sum for that market.
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+import { readFile } from 'node:fs/promises';
 
 mock.module('server-only', () => ({}));
 
@@ -41,6 +49,7 @@ import {
   PredictionMarketService,
 } from '@feed/core/markets/prediction';
 import {
+  balanceTransactions,
   db,
   eq,
   inArray,
@@ -51,6 +60,7 @@ import {
   questions,
   users,
 } from '@feed/db';
+import { sql } from 'drizzle-orm';
 import { NextRequest } from 'next/server';
 
 type WidgetMarket = {
@@ -69,6 +79,7 @@ const idleId = `f112-wmv-idle-${suffix}`;
 const tradedId = `f112-wmv-traded-${suffix}`;
 const partialId = `f112-wmv-partial-${suffix}`;
 const closedId = `f112-wmv-closed-${suffix}`;
+const backfilledId = `f112-wmv-backfilled-${suffix}`;
 // Ownership is registered only from successful INSERT … RETURNING results.
 const ownedUserIds: string[] = [];
 const ownedQuestionIds: string[] = [];
@@ -145,6 +156,30 @@ async function sellYes(marketId: string, shares: number): Promise<void> {
   await service.sell({ marketId, userId, shares, positionId: position.id });
 }
 
+/**
+ * Run the backfill INSERT from migration 0005, exactly as the migration
+ * ships it (single source of truth — the test fails if the statement
+ * drifts from the file). The statement is idempotent
+ * (ON CONFLICT DO NOTHING on the 'backfill-<ledger id>' key).
+ */
+async function runBackfill(): Promise<void> {
+  const migration = await readFile(
+    new URL(
+      '../../db/drizzle/migrations/0005_remarkable_dorian_gray.sql',
+      import.meta.url
+    ),
+    'utf8'
+  );
+  const statement = migration
+    .split('--> statement-breakpoint')
+    .map((part) => part.trim())
+    .find((part) => part.includes('backfill-'));
+  if (!statement) {
+    throw new Error('backfill statement missing from 0005 migration');
+  }
+  await db.execute(sql.raw(statement));
+}
+
 beforeAll(async () => {
   ({ GET: widgetGET } = await import(
     '../../../apps/web/src/app/api/feed/widgets/markets/route'
@@ -170,6 +205,34 @@ beforeAll(async () => {
   await createMarket(partialId);
   // Full-close market: one buy, then the whole position sold.
   await createMarket(closedId);
+  // Backfilled market: pre-migration history exists only as wallet-ledger
+  // rows — a 1000 buy and a 250 sell, no PredictionTrade rows. The
+  // backfill must carry the 1250 ledger sum into the trade ledger.
+  await createMarket(backfilledId);
+  await db.insert(balanceTransactions).values([
+    {
+      id: `f112-wmv-bt-buy-${suffix}`,
+      userId,
+      type: 'pred_buy',
+      amount: '1000.00',
+      balanceBefore: '10000.00',
+      balanceAfter: '9000.00',
+      relatedId: backfilledId,
+      description: 'Buy YES in backfill fixture',
+    },
+    {
+      id: `f112-wmv-bt-sell-${suffix}`,
+      userId,
+      type: 'pred_sell',
+      amount: '250.00',
+      balanceBefore: '9000.00',
+      balanceAfter: '9250.00',
+      relatedId: backfilledId,
+      description: 'Sell YES in backfill fixture',
+    },
+  ]);
+  await runBackfill();
+  await runBackfill();
 
   service = new PredictionMarketService({
     db: new PredictionDbAdapter(),
@@ -210,6 +273,9 @@ afterAll(async () => {
     .delete(predictionPriceHistories)
     .where(inArray(predictionPriceHistories.marketId, ownedMarketIds));
   await db.delete(positions).where(inArray(positions.marketId, ownedMarketIds));
+  await db
+    .delete(balanceTransactions)
+    .where(inArray(balanceTransactions.relatedId, ownedMarketIds));
   await db.delete(markets).where(inArray(markets.id, ownedMarketIds));
   await db.delete(questions).where(inArray(questions.id, ownedQuestionIds));
   await db.delete(users).where(inArray(users.id, ownedUserIds));
@@ -219,6 +285,7 @@ afterAll(async () => {
     tradeRows,
     historyRows,
     positionRows,
+    ledgerRows,
     marketRows,
     questionRows,
     userRows,
@@ -235,6 +302,10 @@ afterAll(async () => {
       .select()
       .from(positions)
       .where(inArray(positions.marketId, ownedMarketIds)),
+    db
+      .select()
+      .from(balanceTransactions)
+      .where(inArray(balanceTransactions.relatedId, ownedMarketIds)),
     db.select().from(markets).where(inArray(markets.id, ownedMarketIds)),
     db.select().from(questions).where(inArray(questions.id, ownedQuestionIds)),
     db.select().from(users).where(inArray(users.id, ownedUserIds)),
@@ -242,6 +313,7 @@ afterAll(async () => {
   expect(tradeRows).toHaveLength(0);
   expect(historyRows).toHaveLength(0);
   expect(positionRows).toHaveLength(0);
+  expect(ledgerRows).toHaveLength(0);
   expect(marketRows).toHaveLength(0);
   expect(questionRows).toHaveLength(0);
   expect(userRows).toHaveLength(0);
@@ -263,6 +335,25 @@ describe('markets widget volume', () => {
     const expected = await ledgerVolume(tradedId);
     expect(expected).toBeGreaterThan(0);
     expect(row?.volume ?? -1).toBeCloseTo(expected, 6);
+  });
+
+  it('shows pre-migration wallet-ledger volume after the 0005 backfill', async () => {
+    // No real trade ever ran on this market: its only history is the two
+    // wallet-ledger rows the backfill carried into PredictionTrade.
+    const widget = await fetchWidget();
+    const row = widget.markets.find((m) => m.id === backfilledId);
+    expect(row).toBeDefined();
+    expect(row?.volume ?? -1).toBeCloseTo(1250, 6);
+    const rows = await db
+      .select()
+      .from(predictionTrades)
+      .where(eq(predictionTrades.marketId, backfilledId));
+    // The backfill ran twice in setup; the second run must not duplicate.
+    expect(rows).toHaveLength(2);
+    expect(rows.reduce((sum, r) => sum + Number(r.amount), 0)).toBeCloseTo(
+      1250,
+      6
+    );
   });
 
   it('keeps volume after a partial sell — the sell adds to the ledger', async () => {
