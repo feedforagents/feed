@@ -723,35 +723,38 @@ export const DELETE = withErrorHandling(
       );
     }
 
-    // Get reply count before deletion
-    const [replyCountResult] = await db
-      .select({ count: count() })
-      .from(comments)
-      .where(eq(comments.parentCommentId, commentId));
-    const repliesCount = Number(replyCountResult?.count ?? 0);
-
-    // Delete reactions on replies first
-    const replies = await db
-      .select({ id: comments.id })
-      .from(comments)
-      .where(eq(comments.parentCommentId, commentId));
-
-    const replyIds = replies.map((r) => r.id);
-
-    if (replyIds.length > 0) {
-      // Delete reactions on replies
-      for (const replyId of replyIds) {
-        await db.delete(reactions).where(eq(reactions.commentId, replyId));
+    // Collect every descendant reply, not only the direct ones: the
+    // cascade documented above removes the whole subtree. A descendant
+    // left behind would keep a parentCommentId pointing at a deleted
+    // comment while staying readable and reply-able through the flat
+    // read paths (MCP/A2A comment lists, the comment detail route).
+    const descendantIds: string[] = [];
+    const visited = new Set<string>([commentId]);
+    let frontier = [commentId];
+    while (frontier.length > 0) {
+      const children = await db
+        .select({ id: comments.id })
+        .from(comments)
+        .where(inArray(comments.parentCommentId, frontier));
+      frontier = [];
+      for (const child of children) {
+        if (visited.has(child.id)) continue;
+        visited.add(child.id);
+        descendantIds.push(child.id);
+        frontier.push(child.id);
       }
     }
+    const repliesCount = descendantIds.length;
 
-    // Delete replies
-    await db.delete(comments).where(eq(comments.parentCommentId, commentId));
+    // Delete reactions on the main comment and all of its replies
+    await db
+      .delete(reactions)
+      .where(inArray(reactions.commentId, [commentId, ...descendantIds]));
 
-    // Delete reactions on the main comment
-    await db.delete(reactions).where(eq(reactions.commentId, commentId));
-
-    // Delete the main comment
+    // Delete all replies, then the main comment
+    if (descendantIds.length > 0) {
+      await db.delete(comments).where(inArray(comments.id, descendantIds));
+    }
     await db.delete(comments).where(eq(comments.id, commentId));
 
     logger.info(
