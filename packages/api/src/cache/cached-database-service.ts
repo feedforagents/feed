@@ -363,11 +363,16 @@ class CachedDatabaseService {
             .from(positions)
             .where(eq(positions.userId, userId)),
 
-          // Count comments
+          // Count comments. The profile replies tab counts and delivers
+          // only non-deleted comments, so the header count applies the
+          // same membership, or a deleted reply keeps inflating the
+          // number after it has left every list on the profile screen.
           db
             .select({ count: count() })
             .from(comments)
-            .where(eq(comments.authorId, userId)),
+            .where(
+              and(eq(comments.authorId, userId), isNull(comments.deletedAt))
+            ),
 
           // Count reactions
           db
