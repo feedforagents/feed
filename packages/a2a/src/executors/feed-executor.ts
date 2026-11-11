@@ -35,6 +35,7 @@ import type {
 import {
   and,
   asUser,
+  buildNotificationTargetWhere,
   db,
   dbWrite,
   desc,
@@ -2408,8 +2409,13 @@ export class FeedAgentExecutor implements AgentExecutor {
           }
         : {};
 
+    // Match the web list's target visibility as well: a notification whose
+    // post or comment no longer exists (or is soft-deleted) is hidden there
+    // and excluded from its unread count, so it is excluded here too.
+    const targetWhere = await buildNotificationTargetWhere(userId);
+
     const notifications = await db.notification.findMany({
-      where: { userId, ...moderationFilter },
+      where: { userId, ...moderationFilter, ...targetWhere },
       orderBy: { createdAt: 'desc' },
       take: limit,
       select: {
@@ -2423,7 +2429,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     });
 
     const unreadCount = await db.notification.count({
-      where: { userId, read: false, ...moderationFilter },
+      where: { userId, read: false, ...moderationFilter, ...targetWhere },
     });
     return {
       unreadCount,
