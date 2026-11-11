@@ -45,8 +45,8 @@ import {
   optionalAuth,
   withErrorHandling,
 } from '@feed/api';
-import { asPublic, asUser, getDbInstance, predictionTrades } from '@feed/db';
-import { inArray, sql } from 'drizzle-orm';
+import { PredictionDbAdapter } from '@feed/core/markets/prediction';
+import { asPublic, asUser, getDbInstance } from '@feed/db';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
@@ -105,26 +105,19 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
         // Traded volume per market, from the append-only trade ledger —
         // the all-time sum of amount (shares × trade price) over each
         // market's PredictionTrade rows, the same aggregate the markets
-        // list route reports as volume. Positions cannot measure this:
-        // a sell reduces position shares (to zero on a full close), so a
-        // completed buy/sell roundtrip would read as zero volume. The
-        // pool balances are not volume either: a freshly seeded,
-        // never-traded market would otherwise display its seed
+        // list route reports as volume. Read it through the shared
+        // PredictionDbAdapter method so the two routes cannot drift
+        // apart when the definition changes. Positions cannot measure
+        // this: a sell reduces position shares (to zero on a full
+        // close), so a completed buy/sell roundtrip would read as zero
+        // volume. The pool balances are not volume either: a freshly
+        // seeded, never-traded market would otherwise display its seed
         // liquidity as "Vol".
-        const volumeRows = await asPublic(async (database) => {
-          return await database
-            .select({
-              marketId: predictionTrades.marketId,
-              volume: sql<string>`sum(${predictionTrades.amount})`,
-            })
-            .from(predictionTrades)
-            .where(inArray(predictionTrades.marketId, marketIds))
-            .groupBy(predictionTrades.marketId);
+        const volumeMap = await asPublic(async (database) => {
+          return new PredictionDbAdapter(database).getTradedVolumeByMarket(
+            marketIds
+          );
         });
-        const volumeMap = new Map<string, number>();
-        for (const row of volumeRows) {
-          volumeMap.set(row.marketId, Number(row.volume ?? 0));
-        }
 
         // Calculate price changes based on position activity
         const priceChangeMap = new Map<string, number>();
@@ -276,25 +269,16 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   // Traded volume per market, from the append-only trade ledger — the
   // all-time sum of amount (shares × trade price) over each market's
   // PredictionTrade rows, the same aggregate the markets list route
-  // reports as volume. Positions cannot measure this: a sell reduces
-  // position shares (to zero on a full close), so a completed buy/sell
+  // reports as volume. Read it through the shared PredictionDbAdapter
+  // method so the two routes cannot drift apart when the definition
+  // changes. Positions cannot measure this: a sell reduces position
+  // shares (to zero on a full close), so a completed buy/sell
   // roundtrip would read as zero volume. The pool balances are not
   // volume either: a freshly seeded, never-traded market would
   // otherwise display its seed liquidity as "Vol".
-  const volumeRows = await asUser(authUser, async (database) => {
-    return await database
-      .select({
-        marketId: predictionTrades.marketId,
-        volume: sql<string>`sum(${predictionTrades.amount})`,
-      })
-      .from(predictionTrades)
-      .where(inArray(predictionTrades.marketId, marketIds))
-      .groupBy(predictionTrades.marketId);
+  const volumeMap = await asUser(authUser, async (database) => {
+    return new PredictionDbAdapter(database).getTradedVolumeByMarket(marketIds);
   });
-  const volumeMap = new Map<string, number>();
-  for (const row of volumeRows) {
-    volumeMap.set(row.marketId, Number(row.volume ?? 0));
-  }
 
   // Calculate price changes based on position activity
   const priceChangeMap = new Map<string, number>();
