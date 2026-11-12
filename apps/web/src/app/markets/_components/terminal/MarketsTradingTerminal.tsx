@@ -906,7 +906,7 @@ export function MarketsTradingTerminal({
       const yesPct = computeYesPctFromShares(
         m as PredictionMarketTerminalState
       );
-      const vol = Number(m.yesShares ?? 0) + Number(m.noShares ?? 0);
+      const vol = Number(m.volume ?? 0);
       return {
         key: { kind: 'prediction', id: m.id.toString() },
         kind: 'prediction',

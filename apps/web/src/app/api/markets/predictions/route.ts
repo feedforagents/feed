@@ -154,6 +154,24 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const marketMap = new Map(markets.map((m) => [m.id, m]));
 
+  // Traded volume per market, from the append-only trade ledger — the
+  // all-time sum of shares × trade price over each market's recorded
+  // trades (buys and sells both add). The list views print this as "Vol"
+  // and sort by it; the pool balances (yesShares + noShares) are not
+  // volume — a freshly seeded, never-traded market would otherwise
+  // display its seed liquidity as volume and outrank markets with real
+  // trades.
+  //
+  // ERROR CONTRACT: a failed volume aggregate fails this request (500 via
+  // withErrorHandling) instead of falling back to zero. Volume is
+  // load-bearing — the list sorts by it — so a silent zero would
+  // misrank markets and print a false "no trades" for a market that did
+  // trade. A zero in a successful response means exactly one thing: the
+  // market has no recorded trades.
+  const volumeByMarket = await service.getTradedVolumeByMarket(
+    markets.map((m) => m.id)
+  );
+
   const userPositionsMap = new Map<string, PredictionUserPositionSnapshot[]>();
   if (userId && authUser?.userId === userId) {
     try {
@@ -222,6 +240,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       createdDate: toISOOrNull(m.createdAt),
       yesShares,
       noShares,
+      volume: volumeByMarket.get(m.id) ?? 0,
       yesProbability: yesProb,
       noProbability: noProb,
       liquidity: m.liquidity,

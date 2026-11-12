@@ -103,6 +103,8 @@ export interface PredictionMarket {
   yesProbability?: number;
   noProbability?: number;
   tradeCount?: number;
+  /** Traded volume from the trade ledger (all-time Σ shares × trade price). */
+  volume?: number;
   resolutionProofUrl?: string | null;
   resolutionDescription?: string | null;
 }
