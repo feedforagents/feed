@@ -79,6 +79,7 @@ import {
   inArray,
   isNull,
   lte,
+  notExists,
   posts,
   postTags,
   reactions,
@@ -88,6 +89,7 @@ import {
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger, toISO } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
@@ -184,7 +186,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Get posts that have any of these tags
   // Filter out deleted and future-dated posts to match what users can
-  // actually see (same rule as getPostsByTag for the single-tag page)
+  // actually see (same rule as getPostsByTag for the single-tag page).
+  // Test authors are excluded in SQL before the fetch window as well —
+  // the same rule every sibling post list applies (main feed, following
+  // feed, single-tag page): accounts flagged isTest in the users table
+  // and author ids starting with 'test-'. Filtering after the fetch
+  // would let test posts crowd real posts out of the deduplication
+  // window below. Authors with no user row (NPC actors, organizations)
+  // are not test authors and stay visible.
   const now = new Date();
   const postTagRelations =
     authUser && authUser.userId
@@ -212,7 +221,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               and(
                 inArray(postTags.tagId, tagIds),
                 isNull(posts.deletedAt),
-                lte(posts.timestamp, now)
+                lte(posts.timestamp, now),
+                notLike(posts.authorId, 'test-%'),
+                notExists(
+                  db
+                    .select({ id: users.id })
+                    .from(users)
+                    .where(
+                      and(eq(users.id, posts.authorId), eq(users.isTest, true))
+                    )
+                )
               )
             )
             .orderBy(desc(postTags.createdAt))
@@ -242,7 +260,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               and(
                 inArray(postTags.tagId, tagIds),
                 isNull(posts.deletedAt),
-                lte(posts.timestamp, now)
+                lte(posts.timestamp, now),
+                notLike(posts.authorId, 'test-%'),
+                notExists(
+                  db
+                    .select({ id: users.id })
+                    .from(users)
+                    .where(
+                      and(eq(users.id, posts.authorId), eq(users.isTest, true))
+                    )
+                )
               )
             )
             .orderBy(desc(postTags.createdAt))
