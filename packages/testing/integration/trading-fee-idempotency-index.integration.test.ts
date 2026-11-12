@@ -6,6 +6,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { isIPv4 } from 'node:net';
 import postgres from 'postgres';
 
 const databaseUrl =
@@ -124,34 +125,135 @@ async function relationOid(name: string): Promise<string | undefined> {
   return row?.oid ?? undefined;
 }
 
+interface BackendIdentity {
+  address: string;
+  role: string;
+  sessionRole: string;
+  port: number;
+}
+interface BackendRuntime {
+  ci: boolean;
+  githubActions: boolean;
+  serviceAddress: string | undefined;
+}
+function verifiedBackend(
+  identity: BackendIdentity,
+  databaseTarget: URL,
+  runtime: BackendRuntime
+): boolean {
+  if (['127.0.0.1', '::1'].includes(identity.address)) return true;
+  // A localhost-published Docker service reports its own container interface.
+  // Accept only the exact service IP inspected by this GitHub job, never a CIDR.
+  return (
+    runtime.ci &&
+    runtime.githubActions &&
+    databaseTarget.hostname === 'localhost' &&
+    databaseTarget.port === '5432' &&
+    databaseTarget.pathname === '/test_db' &&
+    databaseTarget.username === 'postgres' &&
+    identity.role === 'postgres' &&
+    identity.sessionRole === 'postgres' &&
+    identity.port === 5432 &&
+    !!runtime.serviceAddress &&
+    isIPv4(runtime.serviceAddress) &&
+    identity.address === runtime.serviceAddress
+  );
+}
+
+it('accepts only loopback or the exact job-owned CI PostgreSQL backend', () => {
+  const identity = {
+    address: '172.18.0.2',
+    role: 'postgres',
+    sessionRole: 'postgres',
+    port: 5432,
+  };
+  const ciTarget = new URL('postgresql://postgres@localhost:5432/test_db');
+  const runtime = {
+    ci: true,
+    githubActions: true,
+    serviceAddress: '172.18.0.2',
+  };
+  expect(verifiedBackend(identity, ciTarget, runtime)).toBe(true);
+  for (const denied of [
+    { ...runtime, serviceAddress: undefined },
+    { ...runtime, serviceAddress: '' },
+    { ...runtime, serviceAddress: '172.18.0.3' },
+    { ...runtime, serviceAddress: '172.18.0.999' },
+    { ...runtime, ci: false },
+    { ...runtime, githubActions: false },
+  ]) {
+    expect(verifiedBackend(identity, ciTarget, denied)).toBe(false);
+  }
+  for (const changed of [
+    { ...identity, role: 'other' },
+    { ...identity, sessionRole: 'other' },
+    { ...identity, port: 55685 },
+  ]) {
+    expect(verifiedBackend(changed, ciTarget, runtime)).toBe(false);
+  }
+  for (const changed of [
+    'postgresql://postgres@127.0.0.1:5432/test_db',
+    'postgresql://postgres@localhost:55685/test_db',
+    'postgresql://postgres@localhost:5432/feed_pr1586',
+    'postgresql://other@localhost:5432/test_db',
+  ]) {
+    expect(verifiedBackend(identity, new URL(changed), runtime)).toBe(false);
+  }
+  expect(
+    verifiedBackend(
+      { ...identity, address: '127.0.0.1', role: 'symbiex' },
+      new URL('postgresql://symbiex@127.0.0.1:55685/feed_pr1586'),
+      { ci: false, githubActions: false, serviceAddress: undefined }
+    )
+  ).toBe(true);
+});
+
 beforeAll(async () => {
   const [identity] = await pg<
     {
       database: string;
       address: string;
+      role: string;
+      sessionRole: string;
+      port: number;
       replica: boolean;
       tableOid: string | null;
       feeRows: number;
     }[]
   >`
     SELECT current_database() AS database, pg_catalog.host(inet_server_addr()) AS address,
+      current_user AS role, session_user AS "sessionRole", inet_server_port() AS port,
       pg_is_in_recovery() AS replica,
       pg_catalog.to_regclass('public."TradingFee"')::oid::text AS "tableOid",
       (SELECT count(*)::int FROM public."TradingFee") AS "feeRows"
   `;
-  if (
-    !identity ||
-    '/' + identity.database !== target.pathname ||
-    !['127.0.0.1', '::1'].includes(identity.address) ||
-    identity.replica ||
-    !identity.tableOid ||
-    identity.feeRows !== 0
-  ) {
+  if (!identity)
     throw new Error(
-      'Index DDL requires an empty fee table in the verified disposable primary'
+      'Index DDL disposable guard failed: connected; feeRows=unknown'
+    );
+  const checks = {
+    connected: !!identity,
+    database: !!identity && '/' + identity.database === target.pathname,
+    backend:
+      !!identity &&
+      verifiedBackend(identity, target, {
+        ci: process.env.CI === 'true',
+        githubActions: process.env.GITHUB_ACTIONS === 'true',
+        serviceAddress: process.env.FEED_TEST_POSTGRES_ADDRESS,
+      }),
+    primary: !!identity && !identity.replica,
+    publicTable: !!identity?.tableOid,
+    emptyFees: identity?.feeRows === 0,
+  };
+  const failedChecks = Object.entries(checks)
+    .filter(([, passed]) => !passed)
+    .map(([name]) => name);
+  if (failedChecks.length > 0) {
+    throw new Error(
+      `Index DDL disposable guard failed: ${failedChecks.join(', ')}; feeRows=${identity?.feeRows ?? 'unknown'}`
     );
   }
-  tableOid = identity.tableOid;
+  tableOid = identity.tableOid ?? undefined;
   const initial = await readIndex();
   if (initial && !healthy(initial))
     throw new Error('Refusing an unknown initial index; reconcile manually');

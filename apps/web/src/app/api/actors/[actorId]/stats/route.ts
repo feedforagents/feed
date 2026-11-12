@@ -80,7 +80,16 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db } from '@feed/db';
+import {
+  and,
+  count,
+  db,
+  eq,
+  like,
+  not,
+  userActorFollows,
+  users,
+} from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -131,12 +140,24 @@ export const GET = withErrorHandling(
       db.actorFollow.count({
         where: { followingId: actualActorId },
       }),
-      // Users following this actor (UserActorFollow)
-      db.userActorFollow.count({
-        where: {
-          actorId: actualActorId,
-        },
-      }),
+      // Users following this actor (UserActorFollow), counting only the
+      // visible membership: the actor followers list hides hidden account
+      // tiers (test accounts: isTest flag or 'test-' id; banned accounts),
+      // so the header count must use the same membership or the number
+      // and the list disagree on the same profile screen.
+      db
+        .select({ count: count() })
+        .from(userActorFollows)
+        .innerJoin(users, eq(userActorFollows.userId, users.id))
+        .where(
+          and(
+            eq(userActorFollows.actorId, actualActorId),
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        )
+        .then((rows) => Number(rows[0]?.count ?? 0)),
       // This actor following others (only NPC-to-NPC follows via ActorFollow)
       db.actorFollow.count({
         where: { followerId: actualActorId },
