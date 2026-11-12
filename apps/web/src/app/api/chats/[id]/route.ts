@@ -71,9 +71,9 @@ import {
   eq,
   gt,
   inArray,
-  lt,
   messageReactions,
   messages,
+  sql,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -173,7 +173,7 @@ export const GET = withErrorHandling(
       // 1. `after` (ISO timestamp): fetch messages NEWER than this time (ASC order, for sync)
       // 2. `cursor` (message ID): fetch messages OLDER than this cursor (DESC order, for load-more)
       // 3. Neither: fetch latest messages (DESC order, initial load)
-      let messagesList;
+      let messagesList: Array<typeof messages.$inferSelect>;
       if (after) {
         // Incremental sync: only messages after the given timestamp
         messagesList = await db
@@ -182,14 +182,18 @@ export const GET = withErrorHandling(
           .where(
             and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
           )
-          .orderBy(asc(messages.createdAt))
+          .orderBy(asc(messages.createdAt), asc(messages.id))
           .limit(effectiveLimit);
       } else if (cursor) {
-        // Load older messages: get cursor's timestamp, then fetch before it.
-        // The cursor must belong to this chat; an unknown cursor is an error
-        // rather than a silent reset to the latest page.
+        // Keep the stored timestamp's full PostgreSQL precision: the Date
+        // decoder would discard microseconds before the next comparison.
+        // Bind as text too, so the driver does not serialize it as a Date.
+        // The unique ID breaks ties, and the cursor must belong to this chat.
         const [cursorMessage] = await db
-          .select({ createdAt: messages.createdAt })
+          .select({
+            createdAt: sql<string>`${messages.createdAt}::text`,
+            id: messages.id,
+          })
           .from(messages)
           .where(and(eq(messages.id, cursor), eq(messages.chatId, chatId)))
           .limit(1);
@@ -207,18 +211,20 @@ export const GET = withErrorHandling(
           .where(
             and(
               eq(messages.chatId, chatId),
-              lt(messages.createdAt, cursorMessage.createdAt)
+              sql`(${messages.createdAt}, ${messages.id}) < (${cursorMessage.createdAt}::text::timestamp without time zone, ${cursorMessage.id}::text)`
             )
           )
-          .orderBy(desc(messages.createdAt))
+          .orderBy(desc(messages.createdAt), desc(messages.id))
           .limit(effectiveLimit + 1);
       } else {
-        // Initial load: latest messages
+        // Initial load: latest messages. Order by (createdAt, id) so the
+        // page boundary inside a shared timestamp is deterministic
+        // and the cursor walk above can resume from it exactly.
         messagesList = await db
           .select()
           .from(messages)
           .where(eq(messages.chatId, chatId))
-          .orderBy(desc(messages.createdAt))
+          .orderBy(desc(messages.createdAt), desc(messages.id))
           .limit(effectiveLimit + 1);
       }
 

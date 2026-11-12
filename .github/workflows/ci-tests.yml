@@ -27,7 +27,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install
@@ -45,7 +45,7 @@ jobs:
 
   test-all:
     name: Run All Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       HAS_PRIVY_E2E_SECRETS: ${{ (secrets.PRIVY_TEST_EMAIL != '' && secrets.PRIVY_TEST_PASSWORD != '' && (secrets.NEXT_PUBLIC_PRIVY_APP_ID != '' || secrets.PRIVY_APP_ID != '')) && 'true' || 'false' }}
@@ -75,7 +75,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install
@@ -87,10 +87,61 @@ jobs:
           rm -rf node_modules/.cache
           echo "✅ Cache cleanup complete"
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: nightly
+      - name: Install verified Foundry release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          gh --version
+          foundry_commit=7bff443b45b93efecfeae1779404d12a20f4c225
+          archive_sha=24bbfb4048979b41ba15f1ec351815561af104d59ecc059d31f4fa7412ac5276
+          download_dir=$(mktemp -d "$RUNNER_TEMP/feed-foundry-download.XXXXXX")
+          bin_dir=$(mktemp -d "$RUNNER_TEMP/feed-foundry-bin.XXXXXX")
+          trap 'rm -rf -- "$download_dir"' EXIT
+          archive="$download_dir/foundry_nightly_linux_amd64.tar.gz"
+          curl_options=(--proto '=https' --proto-redir '=https' --tlsv1.2
+            --fail --location --silent --show-error --retry 3 --retry-all-errors
+            --retry-delay 2 --retry-max-time 90 --connect-timeout 15 --max-time 120)
+          curl "${curl_options[@]}" --output "$archive" \
+            "https://github.com/foundry-rs/foundry/releases/download/nightly-$foundry_commit/foundry_nightly_linux_amd64.tar.gz"
+          printf '%s  %s\n' "$archive_sha" "$archive" | sha256sum --check --strict
+          for attempt in 1 2 3 4; do
+            if timeout 120s gh api --hostname github.com --method GET \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "repos/foundry-rs/foundry/attestations/sha256:$archive_sha" \
+              > "$download_dir/attestations.json"; then
+              break
+            fi
+            # gh prints its API error; the response body is public metadata only.
+            cat "$download_dir/attestations.json" >&2
+            if (( attempt == 4 )); then exit 1; fi
+            sleep 2
+          done
+          jq -ce '.attestations[].bundle' "$download_dir/attestations.json" \
+            > "$download_dir/bundles.jsonl"
+          verify=(timeout 120s gh attestation verify --bundle "$download_dir/bundles.jsonl"
+            --repo foundry-rs/foundry
+            --cert-identity 'https://github.com/foundry-rs/foundry/.github/workflows/release.yml@refs/heads/master'
+            --cert-oidc-issuer 'https://token.actions.githubusercontent.com'
+            --source-ref refs/heads/master --source-digest "$foundry_commit"
+            --predicate-type 'https://slsa.dev/provenance/v1')
+          # Verify the signed archive and exact source before extracting anything.
+          "${verify[@]}" "$archive"
+          tar --extract --gzip --file "$archive" --directory "$bin_dir" \
+            --no-same-owner --no-same-permissions forge cast anvil chisel solar
+          for binary in forge cast anvil chisel solar; do
+            [[ -f "$bin_dir/$binary" && ! -L "$bin_dir/$binary" ]]
+            chmod 600 "$bin_dir/$binary"
+          done
+          for binary in forge cast anvil chisel solar; do
+            "${verify[@]}" "$bin_dir/$binary"
+          done
+          chmod 700 "$bin_dir/"{forge,cast,anvil,chisel,solar}
+          printf '%s\n' "$bin_dir" >> "$GITHUB_PATH"
 
       - name: Start Anvil
         run: |
