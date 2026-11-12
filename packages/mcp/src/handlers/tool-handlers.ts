@@ -54,11 +54,13 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
+  acquireUserBlockPairLock,
   and,
   db,
   desc,
   eq,
   favorites,
+  follows,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
@@ -72,7 +74,9 @@ import {
   postTags,
   questions,
   timeframedMarkets,
+  userBlocks,
   users,
+  withTransaction,
 } from '@feed/db';
 import {
   createPerpPriceImpactPort,
@@ -2900,22 +2904,61 @@ export async function executeBlockUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot block yourself');
   }
-  const existing = await db.userBlock.findFirst({
-    where: {
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
+
+  // Share the website follow/block lock before reading any pair state. All
+  // validation and writes use this primary transaction, including retries.
+  await withTransaction(async (tx) => {
+    await acquireUserBlockPairLock(tx, agent.userId, args.userId);
+
+    const [targetUser] = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, args.userId))
+      .limit(1);
+    if (!targetUser) {
+      throw new Error(`User ${args.userId} not found`);
+    }
+
+    const [existing] = await tx
+      .select({ id: userBlocks.id })
+      .from(userBlocks)
+      .where(
+        and(
+          eq(userBlocks.blockerId, agent.userId),
+          eq(userBlocks.blockedId, args.userId)
+        )
+      )
+      .limit(1);
+    if (!existing) {
+      await tx.insert(userBlocks).values({
+        id: await generateSnowflakeId(),
+        blockerId: agent.userId,
+        blockedId: args.userId,
+      });
+    }
+
+    // An existing block must also sever leftover edges. Keep reciprocal
+    // deletes ordered, as in the submitted fix, within the same transaction.
+    const [firstUserId, secondUserId] = [agent.userId, args.userId].sort();
+    if (!firstUserId || !secondUserId) throw new Error('Missing block pair');
+    await tx
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followerId, firstUserId),
+          eq(follows.followingId, secondUserId)
+        )
+      );
+    await tx
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followerId, secondUserId),
+          eq(follows.followingId, firstUserId)
+        )
+      );
   });
-  if (existing) {
-    return { success: true };
-  }
-  await db.userBlock.create({
-    data: {
-      id: await generateSnowflakeId(),
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
-  });
+
   return { success: true };
 }
 
