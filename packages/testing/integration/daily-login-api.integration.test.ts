@@ -19,9 +19,10 @@ import {
   test,
 } from 'bun:test';
 import { DailyLoginService } from '@feed/api';
-import { db, eq, sql, users } from '@feed/db';
+import { balanceTransactions, db, eq, sql, users } from '@feed/db';
 import { generateSnowflakeId, POINTS } from '@feed/shared';
 import { waitForEndpointAvailability } from './helpers';
+import { createStewardTestToken } from './helpers/steward-auth';
 
 setDefaultTimeout(30000);
 
@@ -78,22 +79,27 @@ async function createTestUser(): Promise<string> {
   const id = await generateSnowflakeId();
   const privyId = `test-privy-${id}`;
 
-  await db.insert(users).values({
-    id,
-    privyId,
-    username: `test-daily-login-${id}`,
-    displayName: 'Test User',
-    profileComplete: true,
-    isActor: false,
-    isAgent: false,
-    dailyLoginStreak: 0,
-    longestStreak: 0,
-    totalDailyLogins: 0,
-    lastDailyLogin: null,
-    updatedAt: new Date(),
-  });
+  const [inserted] = await db
+    .insert(users)
+    .values({
+      id,
+      privyId,
+      stewardId: privyId,
+      username: `test-daily-login-${id}`,
+      displayName: 'Test User',
+      profileComplete: true,
+      isActor: false,
+      isAgent: false,
+      dailyLoginStreak: 0,
+      longestStreak: 0,
+      totalDailyLogins: 0,
+      lastDailyLogin: null,
+      updatedAt: new Date(),
+    })
+    .returning({ id: users.id });
 
-  return id;
+  if (!inserted) throw new Error('Daily-login fixture insert returned no user');
+  return inserted.id;
 }
 
 async function deleteTestUser(userId: string): Promise<void> {
@@ -173,14 +179,16 @@ describe('Daily Login - Integration Tests', () => {
       expect(res.status).toBe(401);
     });
 
-    test('POST without auth returns 401', async () => {
+    test('POST is retired and returns 410', async () => {
       if (skipIfNoServer()) return;
 
       const res = await fetch(`${BASE_URL}/api/users/daily-login`, {
         method: 'POST',
         signal: AbortSignal.timeout(10000),
       });
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(410);
+      const body = await res.json();
+      expect(body.code).toBe('DAILY_LOGIN_REWARDS_RETIRED');
     });
 
     test('invalid Bearer token is rejected', async () => {
@@ -370,9 +378,12 @@ describe('Daily Login - DailyLoginService Integration', () => {
 
       expect(info.currentStreak).toBe(0);
       expect(info.longestStreak).toBe(0);
-      expect(info.canClaim).toBe(true);
       expect(info.lastClaim).toBeNull();
-      expect(info.nextReward).toBe(POINTS.DAILY_LOGIN_DAY_1);
+      // Rewards are retired: nothing to claim, no future reward advertised.
+      expect(info.canClaim).toBe(false);
+      expect(info.nextReward).toBe(0);
+      expect(info.nextMilestone).toBe(0);
+      expect(info.daysUntilMilestone).toBe(0);
     });
 
     test('throws for invalid userId format', async () => {
@@ -405,243 +416,11 @@ describe('Daily Login - DailyLoginService Integration', () => {
       expect(info.currentStreak).toBe(0);
       // longestStreak is historical and should still be 50
       expect(info.longestStreak).toBe(50);
-      // Next milestone should be calculated from 0, not 50
-      expect(info.nextMilestone).toBe(7);
-      expect(info.daysUntilMilestone).toBe(7);
-      // Next reward should be for day 1 (since streak will reset)
-      expect(info.nextReward).toBe(POINTS.DAILY_LOGIN_DAY_1);
-      // Can claim (past grace period)
-      expect(info.canClaim).toBe(true);
-    });
-  });
-
-  describe('claimDailyReward - First Claim', () => {
-    test('first claim sets streak to 1 and awards points', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      // Reset user to clean state
-      await setUserStreak(serviceTestUserId, 0, null);
-      const beforeUser = await getUserStreak(serviceTestUserId);
-      const balanceBefore = Number(beforeUser!.virtualBalance);
-
-      const result =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-
-      expect(result.success).toBe(true);
-      expect(result.streak).toBe(1);
-      expect(result.reward).toBe(POINTS.DAILY_LOGIN_DAY_1);
-      expect(result.milestoneBonus).toBe(0);
-      expect(result.totalAwarded).toBe(POINTS.DAILY_LOGIN_DAY_1);
-      expect(result.streakReset).toBe(false);
-
-      // Verify database was updated
-      const afterUser = await getUserStreak(serviceTestUserId);
-      expect(afterUser!.dailyLoginStreak).toBe(1);
-      expect(afterUser!.lastDailyLogin).not.toBeNull();
-      expect(afterUser!.totalDailyLogins).toBe(1);
-      expect(Number(afterUser!.virtualBalance)).toBe(
-        balanceBefore + POINTS.DAILY_LOGIN_DAY_1
-      );
-    });
-  });
-
-  describe('claimDailyReward - Repeat Claim Prevention', () => {
-    test('claim within 24h fails with error', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      // Set lastDailyLogin to 1 hour ago
-      const oneHourAgo = new Date(Date.now() - 3600000);
-      await setUserStreak(serviceTestUserId, 5, oneHourAgo);
-
-      const result =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Cannot claim yet');
-      expect(result.streak).toBe(5); // Unchanged
-    });
-  });
-
-  describe('claimDailyReward - Concurrency', () => {
-    test('concurrent claims credit exactly once', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      await setUserStreak(serviceTestUserId, 0, null);
-      const before = await getUserStreak(serviceTestUserId);
-
-      const results = await Promise.all(
-        Array.from({ length: 5 }, () =>
-          DailyLoginService.claimDailyReward(serviceTestUserId!)
-        )
-      );
-      expect(results.filter((r) => r.success)).toHaveLength(1);
-
-      const after = await getUserStreak(serviceTestUserId);
-      expect(after!.totalDailyLogins).toBe(1);
-      expect(Number(after!.virtualBalance)).toBe(
-        Number(before!.virtualBalance) + POINTS.DAILY_LOGIN_DAY_1
-      );
-    });
-  });
-
-  describe('claimDailyReward - Grace Period', () => {
-    test('claim after 25h continues streak', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      // Set lastDailyLogin to 25 hours ago
-      const twentyFiveHoursAgo = new Date(Date.now() - 25 * 3600000);
-      await setUserStreak(serviceTestUserId, 5, twentyFiveHoursAgo);
-
-      const result =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-
-      expect(result.success).toBe(true);
-      expect(result.streak).toBe(6); // Incremented from 5
-      expect(result.streakReset).toBe(false);
-      expect(result.reward).toBe(POINTS.DAILY_LOGIN_DAY_6);
-    });
-  });
-
-  describe('claimDailyReward - Streak Reset', () => {
-    test('claim after 48h resets streak to 1', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      // Set lastDailyLogin to 48 hours ago (past grace period)
-      const fortyEightHoursAgo = new Date(Date.now() - 48 * 3600000);
-      await setUserStreak(serviceTestUserId, 50, fortyEightHoursAgo);
-
-      const result =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-
-      expect(result.success).toBe(true);
-      expect(result.streak).toBe(1); // Reset to 1
-      expect(result.streakReset).toBe(true);
-      expect(result.reward).toBe(POINTS.DAILY_LOGIN_DAY_1);
-    });
-  });
-
-  describe('claimDailyReward - Milestones', () => {
-    test('day 7 awards milestone bonus', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      // Set streak to 6, last claim 25h ago
-      const twentyFiveHoursAgo = new Date(Date.now() - 25 * 3600000);
-      await setUserStreak(serviceTestUserId, 6, twentyFiveHoursAgo);
-
-      const result =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-
-      expect(result.success).toBe(true);
-      expect(result.streak).toBe(7);
-      expect(result.reward).toBe(POINTS.DAILY_LOGIN_DAY_7);
-      expect(result.milestoneBonus).toBe(POINTS.DAILY_LOGIN_MILESTONE_7D);
-      expect(result.totalAwarded).toBe(
-        POINTS.DAILY_LOGIN_DAY_7 + POINTS.DAILY_LOGIN_MILESTONE_7D
-      );
-    });
-  });
-
-  describe('claimDailyReward - Longest Streak', () => {
-    test('longestStreak updates when current exceeds it', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      // Set current streak to 9, longest to 10
-      const twentyFiveHoursAgo = new Date(Date.now() - 25 * 3600000);
-      await db
-        .update(users)
-        .set({
-          dailyLoginStreak: 9,
-          longestStreak: 10,
-          lastDailyLogin: twentyFiveHoursAgo,
-          totalDailyLogins: 9,
-        })
-        .where(eq(users.id, serviceTestUserId));
-
-      const result =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-
-      expect(result.success).toBe(true);
-      expect(result.streak).toBe(10);
-
-      // longestStreak should stay at 10 (not decrease)
-      const user = await getUserStreak(serviceTestUserId);
-      expect(user!.longestStreak).toBe(10);
-    });
-
-    test('longestStreak increases when beaten', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      // Set current streak to 10, longest to 10
-      const twentyFiveHoursAgo = new Date(Date.now() - 25 * 3600000);
-      await db
-        .update(users)
-        .set({
-          dailyLoginStreak: 10,
-          longestStreak: 10,
-          lastDailyLogin: twentyFiveHoursAgo,
-          totalDailyLogins: 10,
-        })
-        .where(eq(users.id, serviceTestUserId));
-
-      const result =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-
-      expect(result.success).toBe(true);
-      expect(result.streak).toBe(11);
-
-      const user = await getUserStreak(serviceTestUserId);
-      expect(user!.longestStreak).toBe(11);
-    });
-  });
-
-  describe('claimDailyReward - Idempotency', () => {
-    test('rapid double-claim only awards once', async () => {
-      if (skipIfNoDb() || !serviceTestUserId) return;
-
-      // Reset to clean state
-      await setUserStreak(serviceTestUserId, 0, null);
-      const beforeUser = await getUserStreak(serviceTestUserId);
-      const balanceBefore = Number(beforeUser!.virtualBalance);
-
-      // First claim
-      const result1 =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-      expect(result1.success).toBe(true);
-      expect(result1.streak).toBe(1);
-
-      // Second claim immediately after (should fail)
-      const result2 =
-        await DailyLoginService.claimDailyReward(serviceTestUserId);
-      expect(result2.success).toBe(false);
-      expect(result2.error).toContain('Cannot claim yet');
-
-      // Verify only one reward was given
-      const afterUser = await getUserStreak(serviceTestUserId);
-      expect(afterUser!.dailyLoginStreak).toBe(1);
-      expect(Number(afterUser!.virtualBalance)).toBe(
-        balanceBefore + POINTS.DAILY_LOGIN_DAY_1
-      );
-    });
-  });
-
-  describe('claimDailyReward - Invalid User', () => {
-    test('returns error for invalid userId format', async () => {
-      if (skipIfNoDb()) return;
-
-      const result = await DailyLoginService.claimDailyReward('invalid-format');
-
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('Invalid userId format');
-    });
-
-    test('returns error for non-existent valid userId', async () => {
-      if (skipIfNoDb()) return;
-
-      const result =
-        await DailyLoginService.claimDailyReward('123456789012345678');
-
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('User not found');
+      // Rewards are retired: no milestone, no next reward, nothing to claim
+      expect(info.nextMilestone).toBe(0);
+      expect(info.daysUntilMilestone).toBe(0);
+      expect(info.nextReward).toBe(0);
+      expect(info.canClaim).toBe(false);
     });
   });
 });
@@ -723,9 +502,166 @@ describe('Daily Login - Error Handling', () => {
 
       const streakInfo = await DailyLoginService.getStreakInfo(tempUserId);
       expect(streakInfo.currentStreak).toBe(0);
-      expect(streakInfo.nextReward).toBe(POINTS.DAILY_LOGIN_DAY_1);
+      expect(streakInfo.nextReward).toBe(0);
     } finally {
       await deleteTestUser(tempUserId);
+    }
+  });
+});
+
+// ─── Authenticated HTTP: rewards retired ─────────────────────────────────────
+
+describe('Daily Login - Authenticated HTTP (rewards retired)', () => {
+  // No early-return skips here: if the server or database is missing these
+  // tests fail, so an unexecuted assertion can never report as a pass.
+  const accounts: { id: string; streak: number }[] = [];
+
+  async function createOwnedAccount(
+    ownership: { id: string; streak: number }[],
+    streak: number
+  ) {
+    const id = await createTestUser();
+    const account = { id, streak };
+    ownership.push(account);
+    if (streak > 0) {
+      await setUserStreak(id, streak, new Date(Date.now() - 25 * 3600000));
+    }
+    return account;
+  }
+
+  async function cleanupAccounts(ownership: { id: string }[]) {
+    const failures: Error[] = [];
+    for (const { id } of ownership) {
+      for (const remove of [
+        async () => {
+          await db
+            .delete(balanceTransactions)
+            .where(eq(balanceTransactions.userId, id));
+        },
+        () => deleteTestUser(id),
+      ]) {
+        try {
+          await remove();
+        } catch (error) {
+          failures.push(
+            error instanceof Error
+              ? error
+              : new Error('Owned daily-login fixture cleanup failed')
+          );
+        }
+      }
+    }
+    if (failures.length) {
+      throw new AggregateError(
+        failures,
+        'Owned daily-login account cleanup incomplete'
+      );
+    }
+  }
+
+  beforeAll(async () => {
+    serverAvailable = await checkServerHealth();
+    dbAvailable = await checkDatabaseHealth();
+    if (!dbAvailable) return;
+    // A new account and an existing 3-day streak claimed 25 hours ago (the
+    // state where the old GET advertised a claimable 125-point reward).
+    for (const streak of [0, 3]) {
+      await createOwnedAccount(accounts, streak);
+    }
+  });
+
+  afterAll(async () => {
+    await cleanupAccounts(accounts);
+  });
+
+  async function ledgerRows(userId: string) {
+    return db
+      .select({ id: balanceTransactions.id })
+      .from(balanceTransactions)
+      .where(eq(balanceTransactions.userId, userId));
+  }
+
+  test('server and database are available', () => {
+    expect(serverAvailable).toBe(true);
+    expect(dbAvailable).toBe(true);
+    expect(accounts).toHaveLength(2);
+  });
+
+  test('failed second-account setup cleans owned inserts and preserves a control', async () => {
+    const failedAccounts: { id: string; streak: number }[] = [];
+    const controls: { id: string; streak: number }[] = [];
+    try {
+      const control = await createOwnedAccount(controls, 0);
+      const controlBefore = await getUserStreak(control.id);
+      const controlLedgerBefore = await ledgerRows(control.id);
+      expect(controlBefore).toBeDefined();
+
+      await createOwnedAccount(failedAccounts, 0);
+      // PostgreSQL's integer column rejects this update after the INSERT.
+      await expect(
+        createOwnedAccount(failedAccounts, 2 ** 31)
+      ).rejects.toMatchObject({ cause: { code: '22003' } });
+      expect(failedAccounts).toHaveLength(2);
+      for (const { id } of failedAccounts) {
+        expect(await getUserStreak(id)).toBeDefined();
+      }
+
+      await cleanupAccounts(failedAccounts);
+      for (const { id } of failedAccounts) {
+        expect(await getUserStreak(id)).toBeUndefined();
+        expect(await ledgerRows(id)).toHaveLength(0);
+      }
+      expect(await getUserStreak(control.id)).toEqual(controlBefore);
+      expect(await ledgerRows(control.id)).toEqual(controlLedgerBefore);
+    } finally {
+      await cleanupAccounts([...failedAccounts, ...controls]);
+    }
+  });
+
+  test('GET advertises no claimable or future reward', async () => {
+    expect(accounts).toHaveLength(2);
+    for (const { id, streak } of accounts) {
+      const token = await createStewardTestToken(`test-privy-${id}`);
+      const res = await fetch(`${BASE_URL}/api/users/daily-login`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10000),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.canClaim).toBe(false);
+      expect(body.nextReward).toBe(0);
+      expect(body.nextMilestone).toBe(0);
+      expect(body.daysUntilMilestone).toBe(0);
+      // Historical counters are kept.
+      expect(body.currentStreak).toBe(streak);
+      expect(body.longestStreak).toBe(streak);
+    }
+  });
+
+  test('repeated and concurrent POSTs return 410 and change nothing', async () => {
+    expect(accounts).toHaveLength(2);
+    for (const { id } of accounts) {
+      const before = await getUserStreak(id);
+      const ledgerBefore = await ledgerRows(id);
+      const headers = {
+        Authorization: `Bearer ${await createStewardTestToken(`test-privy-${id}`)}`,
+      };
+
+      const post = () =>
+        fetch(`${BASE_URL}/api/users/daily-login`, {
+          method: 'POST',
+          headers,
+          signal: AbortSignal.timeout(10000),
+        });
+      const first = await post();
+      const repeats = await Promise.all(Array.from({ length: 5 }, post));
+      for (const res of [first, ...repeats]) {
+        expect(res.status).toBe(410);
+        expect((await res.json()).code).toBe('DAILY_LOGIN_REWARDS_RETIRED');
+      }
+
+      expect(await getUserStreak(id)).toEqual(before);
+      expect(await ledgerRows(id)).toEqual(ledgerBefore);
     }
   });
 });

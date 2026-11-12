@@ -29,6 +29,7 @@ const EXPECTED_POSTS = VISIBLE_POSTS;
 let targetId: string;
 let otherId: string;
 const postIds: string[] = [];
+const userIds: string[] = [];
 
 beforeAll(async () => {
   const runId = await generateSnowflakeId();
@@ -37,20 +38,24 @@ beforeAll(async () => {
   const now = new Date();
   const hourMs = 60 * 60 * 1000;
 
-  await db.insert(users).values([
-    {
-      id: targetId,
-      username: `tpp-${runId.slice(-12)}`,
-      displayName: 'Profile Post Count Fixture',
-      updatedAt: now,
-    },
-    {
-      id: otherId,
-      username: `tpp-${runId.slice(-12)}-other`,
-      displayName: 'Other Author Fixture',
-      updatedAt: now,
-    },
-  ]);
+  const createdUsers = await db
+    .insert(users)
+    .values([
+      {
+        id: targetId,
+        username: `tpp-${runId.slice(-12)}`,
+        displayName: 'Profile Post Count Fixture',
+        updatedAt: now,
+      },
+      {
+        id: otherId,
+        username: `tpp-${runId.slice(-12)}-other`,
+        displayName: 'Other Author Fixture',
+        updatedAt: now,
+      },
+    ])
+    .returning({ id: users.id });
+  userIds.push(...createdUsers.map((row) => row.id));
 
   const fixturePosts: Array<{
     id: string;
@@ -94,25 +99,32 @@ beforeAll(async () => {
     deletedAt: null,
   });
 
-  for (const p of fixturePosts) {
-    postIds.push(p.id);
-  }
-  await db.insert(posts).values(
-    fixturePosts.map((p) => ({
-      id: p.id,
-      content: `fixture ${p.id}`,
-      authorId: p.authorId,
-      timestamp: p.timestamp,
-      createdAt: p.timestamp,
-      deletedAt: p.deletedAt,
-    }))
-  );
+  const createdPosts = await db
+    .insert(posts)
+    .values(
+      fixturePosts.map((p) => ({
+        id: p.id,
+        content: `fixture ${p.id}`,
+        authorId: p.authorId,
+        timestamp: p.timestamp,
+        createdAt: p.timestamp,
+        deletedAt: p.deletedAt,
+      }))
+    )
+    .returning({ id: posts.id });
+  postIds.push(...createdPosts.map((row) => row.id));
 });
 
 afterAll(async () => {
-  await invalidateCache(targetId, { namespace: 'user:profile:stats' });
-  await db.delete(posts).where(inArray(posts.id, postIds));
-  await db.delete(users).where(inArray(users.id, [targetId, otherId]));
+  for (const userId of userIds) {
+    await invalidateCache(userId, { namespace: 'user:profile:stats' });
+  }
+  if (postIds.length > 0) {
+    await db.delete(posts).where(inArray(posts.id, postIds));
+  }
+  if (userIds.length > 0) {
+    await db.delete(users).where(inArray(users.id, userIds));
+  }
 });
 
 describe('profile post count vs profile post list', () => {

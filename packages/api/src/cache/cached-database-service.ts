@@ -26,6 +26,7 @@ import {
   getDbInstance,
   inArray,
   isNull,
+  like,
   lt,
   lte,
   markets,
@@ -303,11 +304,22 @@ class CachedDatabaseService {
           reactionsResult,
           postCountResult,
         ] = await Promise.all([
-          // Count followers (users following this user)
+          // Count followers (users following this user). The followers
+          // list hides test and banned accounts, so the count joins the
+          // follower's user row and applies the same membership, or the
+          // header number disagrees with the list on the same screen.
           db
             .select({ count: count() })
             .from(follows)
-            .where(eq(follows.followingId, userId)),
+            .innerJoin(users, eq(follows.followerId, users.id))
+            .where(
+              and(
+                eq(follows.followingId, userId),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            ),
 
           // Count NPC followers (FollowStatus rows the engine writes when
           // an NPC follows this user). The followers list merges these rows
@@ -324,11 +336,20 @@ class CachedDatabaseService {
               )
             ),
 
-          // Count following (users this user follows)
+          // Count following (users this user follows), with the same
+          // hidden-tier membership as the following list.
           db
             .select({ count: count() })
             .from(follows)
-            .where(eq(follows.followerId, userId)),
+            .innerJoin(users, eq(follows.followingId, users.id))
+            .where(
+              and(
+                eq(follows.followerId, userId),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            ),
 
           // Count actor follows
           db

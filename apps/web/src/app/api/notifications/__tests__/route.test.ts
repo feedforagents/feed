@@ -54,6 +54,7 @@ const dbModuleFactory = () => ({
   },
   desc: () => undefined,
   eq: () => undefined,
+  exists: () => undefined,
   getBlockedByUserIds: async () => [],
   getBlockedUserIds: async () => blocked,
   getMutedUserIds: async () => [],
@@ -62,6 +63,8 @@ const dbModuleFactory = () => ({
   notifications: {},
   notInArray: () => undefined,
   or: () => undefined,
+  comments: { id: 'commentId' },
+  posts: { id: 'postId' },
   users: {},
 });
 
