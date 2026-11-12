@@ -394,12 +394,73 @@ export async function runIsolatedSubMarketCases() {
     };
     for (const line of passes) console.info('[isolated child] ' + line);
     phase = 'drain-and-drop';
-    const actual = await identity(admin);
-    const current = await leaseRow(admin, database);
-    const [connections] = await admin.unsafe<{ count: number }[]>(
-      'SELECT count(*)::int AS count FROM pg_catalog.pg_stat_activity WHERE datid=$1::oid',
-      [lease.oid]
-    );
+    const drainStarted = performance.now();
+    const drainDeadline = drainStarted + 5000;
+    const observations: object[] = [];
+    let actual: Awaited<ReturnType<typeof identity>>;
+    let current: Awaited<ReturnType<typeof leaseRow>>;
+    let connections: { count: number } | undefined;
+    for (;;) {
+      actual = await identity(admin);
+      current = await leaseRow(admin, database);
+      [connections] = await admin.unsafe<{ count: number }[]>(
+        'SELECT count(*)::int AS count FROM pg_catalog.pg_stat_activity WHERE datid=$1::oid',
+        [lease.oid]
+      );
+      const clauses = {
+        startedMatches: actual.started === lease.started,
+        serverMatches: actual.server === lease.server,
+        portMatches: actual.port === lease.port,
+        roleMatches: actual.role === lease.role,
+        oidMatches: current?.oid === lease.oid,
+        ownerMatches: current?.owner === lease.owner,
+        nonceMatches: current?.nonce === nonce,
+        zeroConnections: connections?.count === 0,
+      };
+      observations.push({
+        observedAtUtc: new Date().toISOString(),
+        elapsedMilliseconds: performance.now() - drainStarted,
+        actual,
+        current: current ?? null,
+        connections: connections ?? null,
+        types: {
+          started: typeof actual.started,
+          server: typeof actual.server,
+          port: typeof actual.port,
+          role: typeof actual.role,
+          oid: typeof current?.oid,
+          owner: typeof current?.owner,
+          nonce: typeof current?.nonce,
+          connectionCount: typeof connections?.count,
+        },
+        clauses,
+      });
+      const unchangedLease =
+        clauses.startedMatches &&
+        clauses.serverMatches &&
+        clauses.portMatches &&
+        clauses.roleMatches &&
+        clauses.oidMatches &&
+        clauses.ownerMatches &&
+        clauses.nonceMatches;
+      const remaining = drainDeadline - performance.now();
+      if (
+        !unchangedLease ||
+        !connections ||
+        !Number.isInteger(connections.count) ||
+        connections.count <= 0 ||
+        remaining <= 0
+      ) {
+        persist(join(directory, 'drain-guard-observations.json'), {
+          lease,
+          maximumWaitMilliseconds: 5000,
+          observations,
+        });
+        break;
+      }
+      // Client socket close can precede the server backend leaving pg_stat_activity.
+      await Bun.sleep(Math.min(25, remaining));
+    }
     requireThat(
       actual.started === lease.started &&
         actual.server === lease.server &&
