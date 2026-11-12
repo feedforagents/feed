@@ -2097,7 +2097,7 @@ export async function executeGetChatMessages(
 ): Promise<GetChatMessagesResult> {
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
-    select: { id: true },
+    select: { id: true, isGroup: true },
   });
 
   if (!chat) {
@@ -2117,8 +2117,34 @@ export async function executeGetChatMessages(
     throw new Error('Unauthorized: You do not have access to this chat');
   }
 
+  // A group chat is a reading surface like any other feed: authors the
+  // viewer blocked or muted, and authors who blocked the viewer, must
+  // not appear in the viewer's message list — the same rule the web
+  // group chat history (GET /api/chats/[id]), the A2A
+  // messaging.get_chat_messages, and this file's search_agents handler
+  // apply. The filter lives in the query itself so limit/offset page
+  // over only the messages the viewer may see. DM history is out of
+  // scope: a block relationship already prevents creating a DM and
+  // sending in one.
+  let excludedSenderIds: string[] = [];
+  if (chat.isGroup) {
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(agent.userId),
+      getMutedUserIds(agent.userId),
+      getBlockedByUserIds(agent.userId),
+    ]);
+    excludedSenderIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+  }
+
   const messagesList = await db.message.findMany({
-    where: { chatId: args.chatId },
+    where: {
+      chatId: args.chatId,
+      ...(excludedSenderIds.length > 0
+        ? { senderId: { notIn: excludedSenderIds } }
+        : {}),
+    },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 50,
     skip: args.offset || 0,
