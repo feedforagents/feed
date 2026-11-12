@@ -513,6 +513,27 @@ export class PerpMarketService {
   }
 
   /**
+   * Size bounds a fresh open must clear. Mirrors the checks in
+   * openPosition so a preview never quotes an order the open flow
+   * would reject for size.
+   */
+  private assertFreshOpenSizeBounds(
+    market: PerpMarketRecord,
+    size: number
+  ): void {
+    const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
+    if (size < minOrderSize) {
+      throw new Error(`Order size below minimum (${minOrderSize})`);
+    }
+    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
+    if (size > maxPositionSize) {
+      throw new Error(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
+  }
+
+  /**
    * Preview the exact quote/execution engine used for opening a position.
    *
    * Convention:
@@ -535,6 +556,7 @@ export class PerpMarketService {
     if (input.leverage > maxLeverage) {
       throw new Error(`Invalid leverage (1-${maxLeverage})`);
     }
+    this.assertFreshOpenSizeBounds(market, input.size);
     return this.buildOpenExecutionPreview(market, input);
   }
 
@@ -562,15 +584,38 @@ export class PerpMarketService {
     );
 
     if (!existingPosition) {
+      this.assertFreshOpenSizeBounds(market, input.size);
       return this.buildOpenExecutionPreview(market, input);
     }
 
     this.assertOpenPositionIntegrity(existingPosition);
 
     if (existingPosition.side === input.side) {
+      // Same bounds as addToPosition: the added size must clear the
+      // minimum on its own, and the resulting total must stay under
+      // the market limit.
+      const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
+      if (input.size < minOrderSize) {
+        throw new Error(`Order size below minimum (${minOrderSize})`);
+      }
+      const maxPositionSize = this.calculateMaxPositionSize(
+        market.openInterest
+      );
+      if (existingPosition.size + input.size > maxPositionSize) {
+        throw new Error(
+          `Total position size would exceed market limit (${maxPositionSize.toLocaleString()})`
+        );
+      }
       return this.buildAddPreview(market, existingPosition, input);
     }
 
+    // Opposite side: the gross trade size must clear the minimum, like
+    // reduceOrFlipPosition requires. The flip leg's own minimum is
+    // already checked inside buildOppositeSidePreview.
+    const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
+    if (input.size < minOrderSize) {
+      throw new Error(`Order size below minimum (${minOrderSize})`);
+    }
     return this.buildOppositeSidePreview(market, existingPosition, input);
   }
 
