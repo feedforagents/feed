@@ -312,9 +312,12 @@ export class PerpMarketService {
         PERP_MARKET_CONFIG
       );
       const newEntryPrice = basis
-        ? (basis.previousSize * basis.previousEntryPrice +
-            tradeSize * avgFillPrice) /
-          (basis.previousSize + tradeSize)
+        ? blendEntryPrice(
+            basis.previousSize,
+            basis.previousEntryPrice,
+            tradeSize,
+            avgFillPrice
+          )
         : avgFillPrice;
       const entryDelta = newEntryPrice - preImpactEntry;
       const marketDelta = postImpactPrice - preImpactEntry;
@@ -1651,10 +1654,12 @@ export class PerpMarketService {
           });
           // Recalculate with fresh position data to handle concurrent updates
           const actualNewSize = freshPosition.size + addedSize;
-          const newEntryPrice =
-            (freshPosition.size * freshPosition.entryPrice +
-              addedSize * currentPrice) /
-            actualNewSize;
+          const newEntryPrice = blendEntryPrice(
+            freshPosition.size,
+            freshPosition.entryPrice,
+            addedSize,
+            currentPrice
+          );
 
           // Recalculate liquidation price with new entry
           const newLiquidationPrice = calculateLiquidationPrice(
@@ -2307,9 +2312,12 @@ export class PerpMarketService {
     const quoteImpactBps =
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
     const resultingSize = existing.size + addedSize;
-    const averagedEntryPrice =
-      (existing.size * existing.entryPrice + addedSize * executionPrice) /
-      resultingSize;
+    const averagedEntryPrice = blendEntryPrice(
+      existing.size,
+      existing.entryPrice,
+      addedSize,
+      executionPrice
+    );
     const liquidationPrice = calculateLiquidationPrice(
       averagedEntryPrice,
       existing.side,
@@ -2676,6 +2684,24 @@ export class PerpMarketService {
     const fundingPremium = annualFundingRate / periodsPerYear();
     return spotPrice * (1 + fundingPremium);
   }
+}
+
+/**
+ * Entry price of a position after adding `addedSize` filled at `fillPrice`.
+ * Size is notional, so a leg holds size / price units and PnL is
+ * size * (mark - entry) / entry. Only the size-weighted harmonic mean keeps
+ * the combined PnL equal to the sum of the two legs' PnL.
+ */
+function blendEntryPrice(
+  existingSize: number,
+  existingEntryPrice: number,
+  addedSize: number,
+  fillPrice: number
+): number {
+  return (
+    (existingSize + addedSize) /
+    (existingSize / existingEntryPrice + addedSize / fillPrice)
+  );
 }
 
 function calculateLiquidationPrice(

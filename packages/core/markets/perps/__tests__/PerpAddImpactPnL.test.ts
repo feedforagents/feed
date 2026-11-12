@@ -330,7 +330,7 @@ describe('add-to-position with price impact (BF-75)', () => {
       PERP_MARKET_CONFIG
     ).avgFillPrice;
     const expectedEntry =
-      (1000 * first.entryPrice + 1000 * incrementalFill) / 2000;
+      2000 / (1000 / first.entryPrice + 1000 / incrementalFill);
     expect(added.entryPrice).toBeCloseTo(expectedEntry, 6);
 
     const [pos] = await db.listOpenPositions();
