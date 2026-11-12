@@ -167,6 +167,32 @@ export const predictionPriceHistories = pgTable(
   ]
 );
 
+// PredictionTrade — append-only ledger of executed prediction-market trades.
+// Traded volume is the all-time sum of shares × trade price over this table
+// (buys and sells both add). Positions mutate on sell (shares drop to zero
+// on a full close), so the positions table cannot reconstruct traded volume.
+export const predictionTrades = pgTable(
+  'PredictionTrade',
+  {
+    id: text('id').primaryKey(),
+    marketId: text('marketId').notNull(),
+    userId: text('userId').notNull(),
+    side: boolean('side').notNull(),
+    action: text('action').notNull(),
+    shares: decimal('shares', { precision: 18, scale: 6 }).notNull(),
+    price: decimal('price', { precision: 18, scale: 6 }).notNull(),
+    amount: decimal('amount', { precision: 18, scale: 2 }).notNull(),
+    createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('PredictionTrade_marketId_idx').on(table.marketId),
+    index('PredictionTrade_marketId_createdAt_idx').on(
+      table.marketId,
+      table.createdAt
+    ),
+  ]
+);
+
 // Organization (companies)
 export const organizations = pgTable(
   'Organization',
@@ -292,6 +318,7 @@ export const perpPositions = pgTable(
 export const marketsRelations = relations(markets, ({ many }) => ({
   positions: many(positions),
   priceHistory: many(predictionPriceHistories),
+  trades: many(predictionTrades),
 }));
 
 export const questionsRelations = relations(questions, ({ many }) => ({
@@ -318,6 +345,16 @@ export const predictionPriceHistoriesRelations = relations(
   ({ one }) => ({
     market: one(markets, {
       fields: [predictionPriceHistories.marketId],
+      references: [markets.id],
+    }),
+  })
+);
+
+export const predictionTradesRelations = relations(
+  predictionTrades,
+  ({ one }) => ({
+    market: one(markets, {
+      fields: [predictionTrades.marketId],
       references: [markets.id],
     }),
   })

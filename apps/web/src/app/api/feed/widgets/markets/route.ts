@@ -45,6 +45,7 @@ import {
   optionalAuth,
   withErrorHandling,
 } from '@feed/api';
+import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import { asPublic, asUser, getDbInstance } from '@feed/db';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -113,6 +114,23 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
           });
         });
 
+        // Traded volume per market, from the append-only trade ledger —
+        // the all-time sum of amount (shares × trade price) over each
+        // market's PredictionTrade rows, the same aggregate the markets
+        // list route reports as volume. Read it through the shared
+        // PredictionDbAdapter method so the two routes cannot drift
+        // apart when the definition changes. Positions cannot measure
+        // this: a sell reduces position shares (to zero on a full
+        // close), so a completed buy/sell roundtrip would read as zero
+        // volume. The pool balances are not volume either: a freshly
+        // seeded, never-traded market would otherwise display its seed
+        // liquidity as "Vol".
+        const volumeMap = await asPublic(async (database) => {
+          return new PredictionDbAdapter(database).getTradedVolumeByMarket(
+            marketIds
+          );
+        });
+
         // Calculate price changes based on position activity
         const priceChangeMap = new Map<string, number>();
 
@@ -177,7 +195,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
                 question: q.text,
                 yesPrice,
                 noPrice,
-                volume: totalShares,
+                volume: volumeMap.get(String(q.id)) ?? 0,
                 endDate: q.resolutionDate,
                 changePercent24h:
                   changePercent24h !== undefined ? changePercent24h : undefined,
@@ -261,6 +279,20 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     });
   });
 
+  // Traded volume per market, from the append-only trade ledger — the
+  // all-time sum of amount (shares × trade price) over each market's
+  // PredictionTrade rows, the same aggregate the markets list route
+  // reports as volume. Read it through the shared PredictionDbAdapter
+  // method so the two routes cannot drift apart when the definition
+  // changes. Positions cannot measure this: a sell reduces position
+  // shares (to zero on a full close), so a completed buy/sell
+  // roundtrip would read as zero volume. The pool balances are not
+  // volume either: a freshly seeded, never-traded market would
+  // otherwise display its seed liquidity as "Vol".
+  const volumeMap = await asUser(authUser, async (database) => {
+    return new PredictionDbAdapter(database).getTradedVolumeByMarket(marketIds);
+  });
+
   // Calculate price changes based on position activity
   const priceChangeMap = new Map<string, number>();
 
@@ -324,7 +356,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
         question: q.text,
         yesPrice,
         noPrice,
-        volume: totalShares,
+        volume: volumeMap.get(String(q.id)) ?? 0,
         endDate: q.resolutionDate,
         changePercent24h:
           changePercent24h !== undefined ? changePercent24h : undefined,

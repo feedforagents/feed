@@ -73,6 +73,8 @@ function makeService(
     })) as PredictionDbPort['upsertPosition'],
     deletePosition: mock(async () => {}),
     listPositionsForMarket: mock(async () => []),
+    getTradedVolumeByMarket: mock(async () => new Map()),
+    recordTrade: mock(async () => {}),
     insertPriceSnapshot: mock(async () => {}),
   };
 
