@@ -145,7 +145,13 @@ describe('CPMM fee integration', () => {
       feeRate
     );
     const noFee = PredictionPricing.calculateSell(5000, 5000, 'yes', 100);
-    expect(result.fee).toBeCloseTo(noFee.totalCost * 0.01, 6);
+    // Canonical cent-rounded fee, matching FeeService.calculateFee: the
+    // ledger records round(gross * rate) to the cent, so the sell charges
+    // that fee rather than the raw gross * rate.
+    expect(result.fee).toBeCloseTo(
+      Math.round(noFee.totalCost * 0.01 * 100) / 100,
+      6
+    );
     expect(result.netProceeds).toBe(floorPoints(noFee.totalCost - result.fee));
     expect(result.roundingRemainder).toBeCloseTo(
       noFee.totalCost - result.fee - result.netProceeds!,
