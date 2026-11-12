@@ -237,132 +237,156 @@ test('fixture ownership control (partial setup / collision)', async () => {
   const foreignCreatedByChatId = `keep-foreign-createdby-${suffix}`;
   const collidingChatId = chatIdFor(controlUserId, 1);
 
-  // Foreign rows the suite must never touch.
-  await db.insert(users).values({
-    id: foreignUserId,
-    username: foreignUserId,
-    isAgent: true,
-    isTest: true,
-    updatedAt: new Date(),
-  });
-  await db.insert(chats).values({
-    id: foreignChatId,
-    name: 'Foreign chat',
-    isGroup: true,
-    createdBy: foreignUserId,
-    createdAt: new Date(baseTime),
-    updatedAt: new Date(baseTime),
-  });
-  await db.insert(chatParticipants).values({
-    id: `${foreignUserId}-participant-00`,
-    chatId: foreignChatId,
-    userId: foreignUserId,
-    joinedAt: new Date(baseTime),
-    isActive: true,
-  });
-  // Pre-existing membership of the control user in the foreign chat.
-  await db.insert(chatParticipants).values({
-    id: foreignMembershipId,
-    chatId: foreignChatId,
-    userId: controlUserId,
-    joinedAt: new Date(baseTime),
-    isActive: true,
-  });
-  // A chat the control user created outside this suite.
-  await db.insert(chats).values({
-    id: foreignCreatedByChatId,
-    name: 'Foreign chat created by control user',
-    isGroup: true,
-    createdBy: controlUserId,
-    createdAt: new Date(baseTime),
-    updatedAt: new Date(baseTime),
-  });
-  // A foreign chat squatting on the exact id the suite will propose for
-  // index 1, so that insert collides and setup stops partway.
-  await db.insert(chats).values({
-    id: collidingChatId,
-    name: 'Foreign colliding chat',
-    isGroup: true,
-    createdBy: foreignUserId,
-    createdAt: new Date(baseTime),
-    updatedAt: new Date(baseTime),
-  });
+  const foreignOwned: typeof owned = { users: [], chats: [], participants: [] };
 
-  // Partial setup: index 0 succeeds, index 1 collides, indices 2-4 succeed.
-  await seedUser(controlUserId);
-  await seedChatRow(controlUserId, 0, new Date(baseTime));
-  await expect(
-    seedChatRow(controlUserId, 1, new Date(baseTime + 60_000))
-  ).rejects.toThrow();
-  for (const i of [2, 3, 4]) {
-    await seedChatRow(controlUserId, i, new Date(baseTime + i * 60_000));
-  }
+  try {
+    // Foreign rows the suite must never touch.
+    const [foreignUserRow] = await db
+      .insert(users)
+      .values({
+        id: foreignUserId,
+        username: foreignUserId,
+        isAgent: true,
+        isTest: true,
+        updatedAt: new Date(),
+      })
+      .returning({ id: users.id });
+    if (foreignUserRow) foreignOwned.users.push(foreignUserRow.id);
+    const [foreignChatRow] = await db
+      .insert(chats)
+      .values({
+        id: foreignChatId,
+        name: 'Foreign chat',
+        isGroup: true,
+        createdBy: foreignUserId,
+        createdAt: new Date(baseTime),
+        updatedAt: new Date(baseTime),
+      })
+      .returning({ id: chats.id });
+    if (foreignChatRow) foreignOwned.chats.push(foreignChatRow.id);
+    const [foreignUserParticipantRow] = await db
+      .insert(chatParticipants)
+      .values({
+        id: `${foreignUserId}-participant-00`,
+        chatId: foreignChatId,
+        userId: foreignUserId,
+        joinedAt: new Date(baseTime),
+        isActive: true,
+      })
+      .returning({ id: chatParticipants.id });
+    if (foreignUserParticipantRow) {
+      foreignOwned.participants.push(foreignUserParticipantRow.id);
+    }
+    // Pre-existing membership of the control user in the foreign chat.
+    const [foreignMembershipRow] = await db
+      .insert(chatParticipants)
+      .values({
+        id: foreignMembershipId,
+        chatId: foreignChatId,
+        userId: controlUserId,
+        joinedAt: new Date(baseTime),
+        isActive: true,
+      })
+      .returning({ id: chatParticipants.id });
+    if (foreignMembershipRow) {
+      foreignOwned.participants.push(foreignMembershipRow.id);
+    }
+    // A chat the control user created outside this suite.
+    const [foreignCreatedByChatRow] = await db
+      .insert(chats)
+      .values({
+        id: foreignCreatedByChatId,
+        name: 'Foreign chat created by control user',
+        isGroup: true,
+        createdBy: controlUserId,
+        createdAt: new Date(baseTime),
+        updatedAt: new Date(baseTime),
+      })
+      .returning({ id: chats.id });
+    if (foreignCreatedByChatRow) {
+      foreignOwned.chats.push(foreignCreatedByChatRow.id);
+    }
+    // A foreign chat squatting on the exact id the suite will propose for
+    // index 1, so that insert collides and setup stops partway.
+    const [collidingChatRow] = await db
+      .insert(chats)
+      .values({
+        id: collidingChatId,
+        name: 'Foreign colliding chat',
+        isGroup: true,
+        createdBy: foreignUserId,
+        createdAt: new Date(baseTime),
+        updatedAt: new Date(baseTime),
+      })
+      .returning({ id: chats.id });
+    if (collidingChatRow) foreignOwned.chats.push(collidingChatRow.id);
 
-  await deleteOwnedRows(owned);
+    // Partial setup: index 0 succeeds, index 1 collides, indices 2-4 succeed.
+    await seedUser(controlUserId);
+    await seedChatRow(controlUserId, 0, new Date(baseTime));
+    await expect(
+      seedChatRow(controlUserId, 1, new Date(baseTime + 60_000))
+    ).rejects.toThrow();
+    for (const i of [2, 3, 4]) {
+      await seedChatRow(controlUserId, i, new Date(baseTime + i * 60_000));
+    }
 
-  // Owned rows are gone even though setup failed partway.
-  expect(
-    await db.select().from(users).where(eq(users.id, controlUserId))
-  ).toHaveLength(0);
-  for (const i of [0, 2, 3, 4]) {
+    await deleteOwnedRows(owned);
+
+    // Owned rows are gone even though setup failed partway.
     expect(
-      await db
-        .select()
-        .from(chats)
-        .where(eq(chats.id, chatIdFor(controlUserId, i)))
+      await db.select().from(users).where(eq(users.id, controlUserId))
     ).toHaveLength(0);
+    for (const i of [0, 2, 3, 4]) {
+      expect(
+        await db
+          .select()
+          .from(chats)
+          .where(eq(chats.id, chatIdFor(controlUserId, i)))
+      ).toHaveLength(0);
+      expect(
+        await db
+          .select()
+          .from(chatParticipants)
+          .where(eq(chatParticipants.id, participantIdFor(controlUserId, i)))
+      ).toHaveLength(0);
+    }
+
+    // Every foreign row survives unchanged.
+    expect(
+      await db.select().from(users).where(eq(users.id, foreignUserId))
+    ).toHaveLength(1);
+    const survivingChat = await db
+      .select()
+      .from(chats)
+      .where(eq(chats.id, foreignChatId));
+    expect(survivingChat).toHaveLength(1);
+    expect(survivingChat[0]?.createdBy).toBe(foreignUserId);
     expect(
       await db
         .select()
         .from(chatParticipants)
-        .where(eq(chatParticipants.id, participantIdFor(controlUserId, i)))
-    ).toHaveLength(0);
+        .where(eq(chatParticipants.id, `${foreignUserId}-participant-00`))
+    ).toHaveLength(1);
+    expect(
+      await db
+        .select()
+        .from(chatParticipants)
+        .where(eq(chatParticipants.id, foreignMembershipId))
+    ).toHaveLength(1);
+    const survivingCreatedByChat = await db
+      .select()
+      .from(chats)
+      .where(eq(chats.id, foreignCreatedByChatId));
+    expect(survivingCreatedByChat).toHaveLength(1);
+    expect(survivingCreatedByChat[0]?.createdBy).toBe(controlUserId);
+    const survivingCollidingChat = await db
+      .select()
+      .from(chats)
+      .where(eq(chats.id, collidingChatId));
+    expect(survivingCollidingChat).toHaveLength(1);
+    expect(survivingCollidingChat[0]?.createdBy).toBe(foreignUserId);
+  } finally {
+    await deleteOwnedRows(foreignOwned);
   }
-
-  // Every foreign row survives unchanged.
-  expect(
-    await db.select().from(users).where(eq(users.id, foreignUserId))
-  ).toHaveLength(1);
-  const survivingChat = await db
-    .select()
-    .from(chats)
-    .where(eq(chats.id, foreignChatId));
-  expect(survivingChat).toHaveLength(1);
-  expect(survivingChat[0]?.createdBy).toBe(foreignUserId);
-  expect(
-    await db
-      .select()
-      .from(chatParticipants)
-      .where(eq(chatParticipants.id, `${foreignUserId}-participant-00`))
-  ).toHaveLength(1);
-  expect(
-    await db
-      .select()
-      .from(chatParticipants)
-      .where(eq(chatParticipants.id, foreignMembershipId))
-  ).toHaveLength(1);
-  const survivingCreatedByChat = await db
-    .select()
-    .from(chats)
-    .where(eq(chats.id, foreignCreatedByChatId));
-  expect(survivingCreatedByChat).toHaveLength(1);
-  expect(survivingCreatedByChat[0]?.createdBy).toBe(controlUserId);
-  const survivingCollidingChat = await db
-    .select()
-    .from(chats)
-    .where(eq(chats.id, collidingChatId));
-  expect(survivingCollidingChat).toHaveLength(1);
-  expect(survivingCollidingChat[0]?.createdBy).toBe(foreignUserId);
-
-  // Clean up the foreign proof rows explicitly so the run leaves no residue.
-  await db
-    .delete(chatParticipants)
-    .where(eq(chatParticipants.id, foreignMembershipId));
-  await db
-    .delete(chatParticipants)
-    .where(eq(chatParticipants.id, `${foreignUserId}-participant-00`));
-  await db.delete(chats).where(eq(chats.id, collidingChatId));
-  await db.delete(chats).where(eq(chats.id, foreignCreatedByChatId));
-  await db.delete(chats).where(eq(chats.id, foreignChatId));
-  await db.delete(users).where(eq(users.id, foreignUserId));
 });
