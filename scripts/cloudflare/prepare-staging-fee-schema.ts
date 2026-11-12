@@ -142,6 +142,13 @@ if (import.meta.main) {
           error instanceof SchemaHold
             ? error.reason
             : 'unexpected_schema_failure',
+        migrationHistory:
+          error instanceof SchemaHold &&
+          ['unexpected_migration_count', 'migration_history_mismatch'].includes(
+            error.reason
+          )
+            ? error.migrationHistory
+            : undefined,
       })
     );
     process.exitCode = 1;

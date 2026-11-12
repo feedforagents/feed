@@ -5,6 +5,9 @@ import {
 } from './prepare-staging-fee-schema';
 import {
   endpoint,
+  MIGRATION_HISTORY_SAMPLE_LIMIT,
+  physicalFeeSchemaDiagnostics,
+  SchemaHold,
   verifyColumns,
   verifyEndpoints,
   verifyHistory,
@@ -18,6 +21,15 @@ const history = Array.from({ length: 6 }, (_, i) => ({
   hash: `hash${i}`,
   when: String(i + 1),
 }));
+function captureSchemaHold(run: () => void): SchemaHold {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof SchemaHold) return error;
+    throw error;
+  }
+  throw new Error('Expected a schema HOLD');
+}
 const columns = ['TradingFee', 'TradingFeeOutbox'].map((table) => ({
   table,
   type: 'text',
@@ -183,6 +195,132 @@ describe('staging fee schema release boundaries', () => {
         history
       )
     ).toThrow('migration_history_mismatch');
+  });
+  it('reports a bounded history sample without claiming its total count', () => {
+    const receipts = Array.from(
+      { length: MIGRATION_HISTORY_SAMPLE_LIMIT + 1 },
+      (_, i) => ({
+        hash: i.toString(16).padStart(64, '0'),
+        when: String(1_700_000_000_000 + i),
+      })
+    );
+    const expected = receipts.slice(0, 6);
+    for (const length of [
+      0,
+      4,
+      7,
+      MIGRATION_HISTORY_SAMPLE_LIMIT - 1,
+      MIGRATION_HISTORY_SAMPLE_LIMIT,
+      MIGRATION_HISTORY_SAMPLE_LIMIT + 1,
+    ]) {
+      const hold = captureSchemaHold(() =>
+        verifyHistory(receipts.slice(0, length), expected)
+      );
+      expect(hold.reason).toBe('unexpected_migration_count');
+      expect(hold.message).toBe('unexpected_migration_count');
+      expect(hold.migrationHistory).toEqual({
+        sampleLimit: MIGRATION_HISTORY_SAMPLE_LIMIT,
+        observedRows: length,
+        possiblyTruncated: length >= MIGRATION_HISTORY_SAMPLE_LIMIT,
+        rows: receipts.slice(
+          0,
+          Math.min(length, MIGRATION_HISTORY_SAMPLE_LIMIT)
+        ),
+      });
+    }
+  });
+  it('masks invalid history values and omits unrelated catalog fields', () => {
+    const receipts = Array.from({ length: 6 }, (_, i) => ({
+      hash: i.toString(16).padStart(64, '0'),
+      when: String(1_700_000_000_000 + i),
+    }));
+    const secret = 'postgresql://private-user:private-token@private.invalid/db';
+    const actual = receipts.map((row, i) =>
+      i === 2 ? { hash: secret, when: secret, password: secret } : row
+    );
+    const hold = captureSchemaHold(() => verifyHistory(actual, receipts));
+    expect(hold.reason).toBe('migration_history_mismatch');
+    expect(hold.migrationHistory).toEqual({
+      sampleLimit: MIGRATION_HISTORY_SAMPLE_LIMIT,
+      observedRows: 6,
+      possiblyTruncated: false,
+      rows: receipts.map((row, i) =>
+        i === 2 ? { hash: null, when: null } : row
+      ),
+    });
+    const serialized = JSON.stringify(hold.migrationHistory);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain('password');
+    for (const invalid of [
+      { hash: 'a'.repeat(63), when: '1e12' },
+      { hash: 'g'.repeat(64), when: '1.5' },
+      { hash: 'a'.repeat(65), when: '1'.repeat(20) },
+      { hash: `${'a'.repeat(64)}\n`, when: '123\n' },
+    ]) {
+      const malformed = captureSchemaHold(() =>
+        verifyHistory([invalid, ...receipts.slice(1)], receipts)
+      );
+      expect(malformed.migrationHistory?.rows[0]).toEqual({
+        hash: null,
+        when: null,
+      });
+    }
+    const invalidString = captureSchemaHold(() =>
+      verifyHistory([{ hash: null, when: '1' }], receipts)
+    );
+    expect(invalidString.reason).toBe('invalid_string');
+    expect(invalidString.migrationHistory).toBeUndefined();
+  });
+  it('reports only physical feature booleans without asserting release readiness', () => {
+    expect(physicalFeeSchemaDiagnostics(columns, index)).toEqual({
+      scope: 'app-catalog-physical-shape-only',
+      readyForApplication: false,
+      columnsMatch: true,
+      indexPresent: true,
+      indexShapeMatch: true,
+    });
+    expect(physicalFeeSchemaDiagnostics([], null)).toEqual({
+      scope: 'app-catalog-physical-shape-only',
+      readyForApplication: false,
+      columnsMatch: false,
+      indexPresent: false,
+      indexShapeMatch: false,
+    });
+    for (const malformed of [
+      undefined,
+      null,
+      [columns[0]],
+      [columns[0], columns[0]],
+      [columns[0], { ...columns[1], type: 'varchar' }],
+      [columns[0], { ...columns[1], notNull: true }],
+      [columns[0], { ...columns[1], hasDefault: true }],
+      [columns[0], { ...columns[1], dropped: true }],
+      [columns[0], { ...columns[1], table: 'User' }],
+    ]) {
+      expect(physicalFeeSchemaDiagnostics(malformed, index).columnsMatch).toBe(
+        false
+      );
+    }
+    const secret = 'postgresql://private-user:private-token@private.invalid/db';
+    const diagnostic = physicalFeeSchemaDiagnostics(
+      [
+        { ...columns[0], password: secret },
+        { ...columns[1], host: secret },
+      ],
+      { ...index, valid: false, password: secret, oid: secret }
+    );
+    expect(diagnostic.columnsMatch).toBe(true);
+    expect(diagnostic.indexPresent).toBe(true);
+    expect(diagnostic.indexShapeMatch).toBe(false);
+    expect(diagnostic.readyForApplication).toBe(false);
+    expect(JSON.stringify(diagnostic)).not.toContain(secret);
+    expect(Object.keys(diagnostic).sort()).toEqual([
+      'columnsMatch',
+      'indexPresent',
+      'indexShapeMatch',
+      'readyForApplication',
+      'scope',
+    ]);
   });
   it('refuses partial or manually pre-applied columns without a real receipt', () => {
     expect(verifyColumns([], 5)).toBe(false);
