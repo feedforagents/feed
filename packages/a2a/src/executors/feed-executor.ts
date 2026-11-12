@@ -39,9 +39,11 @@ import {
   getRawDrizzle,
   isNull,
   lte,
+  notExists,
   posts,
   postTags,
   sql,
+  users,
 } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
@@ -63,6 +65,7 @@ import {
   logger,
   UpdateUserSchema,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import {
   handleAppealBanWithEscrow,
@@ -2567,7 +2570,18 @@ export class FeedAgentExecutor implements AgentExecutor {
           eq(postTags.tagId, tag.id),
           isNull(posts.deletedAt),
           lte(posts.timestamp, now),
-          eq(posts.type, 'post')
+          eq(posts.type, 'post'),
+          // Exclude test authors in SQL before paginating, so pages
+          // are full — the canonical post query's rule
+          // (DatabaseService.getRecentPosts): 'test-' ids and
+          // isTest-flagged accounts never appear in post lists.
+          notLike(posts.authorId, 'test-%'),
+          notExists(
+            getRawDrizzle()
+              .select({ id: users.id })
+              .from(users)
+              .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+          )
         )
       )
       .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
