@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  verifyStagingAppRowAccess,
+  verifyStagingDeploymentContext,
+} from './prepare-staging-fee-schema';
+import {
   endpoint,
   verifyColumns,
   verifyEndpoints,
@@ -35,8 +39,116 @@ const index = {
   columns: ['idempotencyKey'],
   predicate: '("idempotencyKey" IS NOT NULL)',
 };
+const accessState = {
+  row: {
+    roleFlags: { superuser: false, bypassRls: false },
+    rowSecurity: ['TradingFee', 'TradingFeeOutbox'].map((table) => ({
+      table,
+      enabled: true,
+      forced: false,
+      effectiveOwner: true,
+    })),
+  },
+  historyLength: 6,
+  columnsReady: true,
+  indexReady: true,
+};
 
 describe('staging fee schema release boundaries', () => {
+  it('allows only catalog-proven app access without guessing RLS policies', () => {
+    expect(() => verifyStagingAppRowAccess(accessState)).not.toThrow();
+    expect(() =>
+      verifyStagingAppRowAccess({
+        ...accessState,
+        row: {
+          ...accessState.row,
+          rowSecurity: accessState.row.rowSecurity.map((row) => ({
+            ...row,
+            enabled: false,
+            forced: true,
+            effectiveOwner: false,
+          })),
+        },
+      })
+    ).not.toThrow();
+    for (const roleFlags of [
+      { superuser: true, bypassRls: false },
+      { superuser: false, bypassRls: true },
+    ]) {
+      expect(() =>
+        verifyStagingAppRowAccess({
+          ...accessState,
+          row: {
+            roleFlags,
+            rowSecurity: accessState.row.rowSecurity.map((row) => ({
+              ...row,
+              forced: true,
+              effectiveOwner: false,
+            })),
+          },
+        })
+      ).not.toThrow();
+    }
+  });
+  it('holds forced owners, non-owners and malformed app RLS metadata', () => {
+    const rows = accessState.row.rowSecurity;
+    for (const rowSecurity of [
+      rows.map((row) => ({ ...row, forced: true })),
+      rows.map((row) => ({ ...row, effectiveOwner: false })),
+      [],
+      rows.slice(0, 1),
+      [rows[0], rows[0]],
+      [rows[0], { ...rows[1], table: 'User' }],
+      rows.map((row) => ({ ...row, enabled: 'true' })),
+      rows.map((row) => ({ ...row, forced: undefined })),
+      rows.map((row) => ({ ...row, effectiveOwner: 'true' })),
+    ]) {
+      expect(() =>
+        verifyStagingAppRowAccess({
+          ...accessState,
+          row: { ...accessState.row, rowSecurity },
+        })
+      ).toThrow('unsupported_app_row_security');
+    }
+    for (const roleFlags of [
+      { superuser: 'true', bypassRls: false },
+      { superuser: false },
+    ]) {
+      expect(() =>
+        verifyStagingAppRowAccess({
+          ...accessState,
+          row: { ...accessState.row, roleFlags },
+        })
+      ).toThrow('unsupported_app_row_security');
+    }
+  });
+  it('permits only the selected exact staging deployment before database work', () => {
+    const sha = 'a'.repeat(40);
+    const env = {
+      GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_REPOSITORY: 'feedforagents/feed',
+      GITHUB_REF: 'refs/heads/staging',
+      GITHUB_SHA: sha,
+      TARGET: 'staging',
+      COMMIT_SHA: sha,
+    };
+    expect(verifyStagingDeploymentContext(env)).toBe(sha);
+    for (const changed of [
+      { GITHUB_EVENT_NAME: 'push' },
+      { GITHUB_REPOSITORY: 'contributor/feed' },
+      { GITHUB_REF: 'refs/heads/production' },
+      { TARGET: 'production' },
+      { GITHUB_SHA: 'b'.repeat(40) },
+      { COMMIT_SHA: 'short' },
+    ]) {
+      expect(() =>
+        verifyStagingDeploymentContext({ ...env, ...changed })
+      ).toThrow('workflow_target_mismatch');
+    }
+    expect(() =>
+      verifyStagingDeploymentContext({ ...env, COMMIT_SHA: '' })
+    ).toThrow('invalid_string');
+  });
   it('requires the actual app origin role and a distinct production database', () => {
     expect(() => verifyEndpoints(app, direct, app, production)).not.toThrow();
     expect(() =>

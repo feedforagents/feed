@@ -22,6 +22,7 @@ import {
   origin,
   requireCondition,
   SchemaHold,
+  sameDatabase,
   text,
   verifyColumns,
   verifyEndpoints,
@@ -63,7 +64,7 @@ async function jsonGet(url: string, token: string) {
     throw new SchemaHold('invalid_metadata');
   }
 }
-async function verifyCommit(expected: string) {
+export async function verifyCommit(expected: string) {
   const token = secret(process.env.GH_TOKEN);
   const current = await jsonGet(
     'https://api.github.com/repos/feedforagents/feed/git/ref/heads/staging',
@@ -71,7 +72,7 @@ async function verifyCommit(expected: string) {
   );
   requireCondition(object(current.object).sha === expected, 'staging_advanced');
 }
-async function verifyChecks(expected: string) {
+export async function verifyChecks(expected: string) {
   const result = await jsonGet(
     `https://api.github.com/repos/feedforagents/feed/commits/${expected}/check-runs?per_page=100`,
     secret(process.env.GH_TOKEN)
@@ -332,6 +333,134 @@ export function verifyMigrationDriver(connectionString: string, ca: string) {
   );
 }
 
+export type FeeSchemaState = ReturnType<typeof inspect>;
+export interface FeeSchemaDatabaseOptions {
+  app: Endpoint;
+  direct: Endpoint;
+  ca: string;
+  mode: 'inspect' | 'prepare';
+  beforeWrite: (state: FeeSchemaState) => Promise<void>;
+  onPhase?: (phase: string) => void;
+}
+function verifyDatabaseIdentity(app: FeeSchemaState, direct: FeeSchemaState) {
+  requireCondition(
+    app.row.database === direct.row.database &&
+      app.row.address === direct.row.address &&
+      app.row.port === direct.row.port &&
+      app.row.feeOid === direct.row.feeOid &&
+      app.row.outboxOid === direct.row.outboxOid,
+    'app_direct_server_mismatch'
+  );
+}
+function verifyDatabasePair(app: FeeSchemaState, direct: FeeSchemaState) {
+  verifyDatabaseIdentity(app, direct);
+  requireCondition(
+    app.historyLength === direct.historyLength,
+    'app_direct_server_mismatch'
+  );
+}
+
+// PRD 9.1/9.3, MVP Phase 6: database expansion must precede new fee writers.
+// Callers supply target authority: the metadata inspector verifies live bindings;
+// the deploy prerequisite trusts the existing protected staging database config.
+// This core has no Cloudflare or GitHub calls; owned local TLS tests use it too.
+export async function inspectOrPrepareFeeSchema({
+  app,
+  direct,
+  ca,
+  mode,
+  beforeWrite,
+  onPhase,
+}: FeeSchemaDatabaseOptions): Promise<FeeSchemaState> {
+  requireCondition(
+    ['inspect', 'prepare'].includes(mode),
+    'invalid_schema_mode'
+  );
+  requireCondition(
+    sameDatabase(app, direct),
+    'direct_origin_identity_mismatch'
+  );
+  const migrations = expectedMigrations();
+  onPhase?.('readonly_catalog');
+  let appState = inspect(app, ca, migrations);
+  const directState = inspect(direct, ca, migrations);
+  verifyDatabasePair(appState, directState);
+  requireCondition(
+    Object.values(object(appState.row.grants)).every((value) => value === true),
+    'app_role_grants_missing'
+  );
+  if (mode === 'prepare') {
+    requireCondition(
+      directState.row.canMigrate === true,
+      'migration_role_not_owner'
+    );
+    await beforeWrite(appState);
+    if (appState.historyLength === 5) {
+      onPhase?.('normal_column_migration');
+      const url = migrationUrl(direct, ca);
+      verifyMigrationDriver(url, ca);
+      const result = spawnSync('bun', ['run', 'db:migrate'], {
+        cwd: ROOT,
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.RUNNER_TEMP || tmpdir(),
+          NODE_ENV: 'production',
+          DIRECT_DATABASE_URL: url,
+          DATABASE_URL: url,
+          DATABASE_CA_CERT: readFileSync(ca, 'utf8'),
+          PGOPTIONS: pgEnvironment(direct, ca, true).PGOPTIONS,
+        },
+        encoding: 'utf8',
+        timeout: 930_000,
+        maxBuffer: 2_000_000,
+      });
+      requireCondition(
+        !result.error &&
+          result.status === 0 &&
+          !result.signal &&
+          result.stdout.includes("Using 'pg' driver"),
+        'normal_migration_failed'
+      );
+    }
+    const columns = inspect(app, ca, migrations);
+    verifyDatabaseIdentity(columns, directState);
+    requireCondition(
+      columns.columnsReady && columns.historyLength === 6,
+      'column_migration_not_verified'
+    );
+    await beforeWrite(columns);
+    onPhase?.('concurrent_index');
+    psql(
+      direct,
+      ca,
+      readFileSync(
+        join(
+          MIGRATIONS,
+          'manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql'
+        ),
+        'utf8'
+      ),
+      true
+    );
+    appState = inspect(app, ca, migrations);
+    verifyDatabaseIdentity(appState, directState);
+    requireCondition(
+      appState.columnsReady &&
+        appState.indexReady &&
+        appState.historyLength === 6,
+      'prepared_schema_not_verified'
+    );
+  }
+  if (mode === 'prepare') {
+    verifyDatabasePair(appState, inspect(direct, ca, migrations));
+  }
+  requireCondition(
+    Object.values(object(appState.row.grants)).every((value) => value === true),
+    'app_role_grants_missing'
+  );
+  return appState;
+}
+
 export async function main() {
   const sha = secret(process.env.EXPECTED_SHA);
   const mode = process.env.SCHEMA_MODE || 'inspect';
@@ -358,85 +487,16 @@ export async function main() {
   const ca = join(directory, 'database-ca.pem');
   try {
     writeFileSync(ca, secret(process.env.DATABASE_CA_CERT), { mode: 0o600 });
-    const migrations = expectedMigrations();
-    phase = 'readonly_catalog';
-    let appState = inspect(app, ca, migrations);
-    const directState = inspect(direct, ca, migrations);
-    requireCondition(
-      appState.row.database === directState.row.database &&
-        appState.row.address === directState.row.address &&
-        appState.row.port === directState.row.port &&
-        appState.row.feeOid === directState.row.feeOid &&
-        appState.row.outboxOid === directState.row.outboxOid &&
-        appState.historyLength === directState.historyLength,
-      'app_direct_server_mismatch'
-    );
-    requireCondition(
-      Object.values(object(appState.row.grants)).every(
-        (value) => value === true
-      ),
-      'app_role_grants_missing'
-    );
-    if (mode === 'prepare') {
-      requireCondition(
-        directState.row.canMigrate === true,
-        'migration_role_not_owner'
-      );
-      await verifyCommit(sha);
-      if (appState.historyLength === 5) {
-        phase = 'normal_column_migration';
-        const url = migrationUrl(direct, ca);
-        verifyMigrationDriver(url, ca);
-        const result = spawnSync('bun', ['run', 'db:migrate'], {
-          cwd: ROOT,
-          env: {
-            PATH: process.env.PATH,
-            HOME: process.env.RUNNER_TEMP,
-            NODE_ENV: 'production',
-            DIRECT_DATABASE_URL: url,
-            DATABASE_URL: url,
-            DATABASE_CA_CERT: secret(process.env.DATABASE_CA_CERT),
-            PGOPTIONS: pgEnvironment(direct, ca, true).PGOPTIONS,
-          },
-          encoding: 'utf8',
-          timeout: 930_000,
-          maxBuffer: 2_000_000,
-        });
-        requireCondition(
-          !result.error &&
-            result.status === 0 &&
-            !result.signal &&
-            result.stdout.includes("Using 'pg' driver"),
-          'normal_migration_failed'
-        );
-      }
-      const columns = inspect(app, ca, migrations);
-      requireCondition(
-        columns.columnsReady && columns.historyLength === 6,
-        'column_migration_not_verified'
-      );
-      await verifyCommit(sha);
-      phase = 'concurrent_index';
-      psql(
-        direct,
-        ca,
-        readFileSync(
-          join(
-            MIGRATIONS,
-            'manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql'
-          ),
-          'utf8'
-        ),
-        true
-      );
-      appState = inspect(app, ca, migrations);
-      requireCondition(
-        appState.columnsReady &&
-          appState.indexReady &&
-          appState.historyLength === 6,
-        'prepared_schema_not_verified'
-      );
-    }
+    const appState = await inspectOrPrepareFeeSchema({
+      app,
+      direct,
+      ca,
+      mode: mode as 'inspect' | 'prepare',
+      beforeWrite: () => verifyCommit(sha),
+      onPhase: (value) => {
+        phase = value;
+      },
+    });
     await verifyCommit(sha);
     phase = 'postverification';
     const finalLive = await liveOrigin('staging', STAGING_BINDING, sha);
