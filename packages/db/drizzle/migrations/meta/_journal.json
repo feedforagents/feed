@@ -36,6 +36,20 @@
       "when": 1793818723317,
       "tag": "0004_leverage_cap_20",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793980097274,
+      "tag": "0005_perp_funding_period",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794161819538,
+      "tag": "0006_perp_funding_period_accrual",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "PerpPosition" ADD COLUMN "lastFundingPeriodStart" timestamp;

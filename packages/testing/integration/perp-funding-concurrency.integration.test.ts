@@ -7,6 +7,7 @@ import {
   inArray,
   organizationState,
   perpMarketSnapshots,
+  perpPositionFundingAccruals,
   perpPositions,
   users,
 } from '@feed/db';
@@ -48,7 +49,34 @@ class FundingSnapshotDb extends PerpDbAdapter {
   }
 }
 
-async function fixture(longSize = 200, shortSize = 100, fundingPaid = 10) {
+class PartialFailureFundingDb extends FundingSnapshotDb {
+  private fundingWrites = 0;
+
+  protected override bindTransaction(
+    txClient: NonNullable<ConstructorParameters<typeof PerpDbAdapter>[0]>
+  ): PerpDbAdapter {
+    const inner = super.bindTransaction(txClient);
+    const originalUpdate = inner.updateOpenPosition.bind(inner);
+    const owner = this;
+    inner.updateOpenPosition = async (positionId, updates) => {
+      if (updates.fundingPaid !== undefined) {
+        owner.fundingWrites += 1;
+        if (owner.fundingWrites === 2) {
+          throw new Error('injected funding write failure');
+        }
+      }
+      return originalUpdate(positionId, updates);
+    };
+    return inner;
+  }
+}
+
+async function fixture(
+  longSize = 200,
+  shortSize = 100,
+  fundingPaid = 10,
+  Adapter: new (ticker: string) => FundingSnapshotDb = FundingSnapshotDb
+) {
   const userIds = [await generateSnowflakeId(), await generateSnowflakeId()];
   const positionIds = [
     await generateSnowflakeId(),
@@ -120,7 +148,7 @@ async function fixture(longSize = 200, shortSize = 100, fundingPaid = 10) {
       });
     }
   });
-  const adapter = new FundingSnapshotDb(ticker);
+  const adapter = new Adapter(ticker);
   const service = new PerpMarketService({
     db: adapter,
     wallet: createUserWalletAdapter(),
@@ -132,6 +160,16 @@ async function fixture(longSize = 200, shortSize = 100, fundingPaid = 10) {
 
 afterAll(async () => {
   if (owners.length) {
+    const positionRows = await dbWrite
+      .select({ id: perpPositions.id })
+      .from(perpPositions)
+      .where(inArray(perpPositions.userId, owners));
+    const positionIds = positionRows.map((row) => row.id);
+    if (positionIds.length) {
+      await dbWrite
+        .delete(perpPositionFundingAccruals)
+        .where(inArray(perpPositionFundingAccruals.positionId, positionIds));
+    }
     await dbWrite
       .delete(perpPositions)
       .where(inArray(perpPositions.userId, owners));
@@ -224,4 +262,161 @@ describe('funding sign on near-balanced books with real Postgres', () => {
       ).toEqual([1000 - 101 / 10, 1000 - 100 / 10]);
     });
   }
+});
+
+describe('funding is once per 8h period on real Postgres', () => {
+  function expectedPayment(size: number, sign: number): number {
+    const annualRate = 0.01 + (0.5 - 0.01) * (1 / 3) ** 3;
+    const periodRate = annualRate / ((365.25 * 24) / 8);
+    return sign * size * periodRate;
+  }
+
+  it('does not double-charge when two funding runs overlap', async () => {
+    const f = await fixture(200, 100, 0);
+    let listed = 0;
+    let release: () => void = () => {};
+    const bothListed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalList = f.adapter.listOpenPositions.bind(f.adapter);
+    f.adapter.listOpenPositions = async () => {
+      const rows = await originalList();
+      listed += 1;
+      if (listed >= 2) release();
+      else await bothListed;
+      return rows;
+    };
+    const other = new PerpMarketService({
+      db: f.adapter,
+      wallet: createUserWalletAdapter(),
+      settlement: createPerpSettlement(),
+      fees,
+    });
+
+    await Promise.all([
+      f.service.processFundingStep(),
+      other.processFundingStep(),
+    ]);
+
+    const positions = await originalList();
+    const long = positions.find((position) => position.side === 'long');
+    const short = positions.find((position) => position.side === 'short');
+    expect(long?.fundingPaid).toBeCloseTo(expectedPayment(200, 1), 8);
+    expect(short?.fundingPaid).toBeCloseTo(expectedPayment(100, -1), 8);
+  });
+
+  it('accrues both boundary periods when the older run finishes after the newer one', async () => {
+    // Reviewer reproduction: workers straddle the 08:00 UTC boundary and the
+    // older one is held until the newer one commits. Each period must accrue
+    // once, and a replay of either period must not charge again.
+    const olderAt = new Date('2026-11-08T07:59:59.999Z');
+    const newerAt = new Date('2026-11-08T08:00:00.001Z');
+    const olderPeriod = new Date('2026-11-08T00:00:00.000Z');
+    const newerPeriod = new Date('2026-11-08T08:00:00.000Z');
+    const f = await fixture(200, 100, 0);
+
+    let releaseOlder: () => void = () => {};
+    const olderMayContinue = new Promise<void>((resolve) => {
+      releaseOlder = resolve;
+    });
+    let markBarrier: () => void = () => {};
+    const olderAtBarrier = new Promise<void>((resolve) => {
+      markBarrier = resolve;
+    });
+    const olderDb = new FundingSnapshotDb(f.ticker);
+    const originalTransaction = olderDb.transaction.bind(olderDb);
+    let held = false;
+    olderDb.transaction = async (fn) => {
+      if (!held) {
+        held = true;
+        // Clock and open-interest rate are already snapshotted. Hold here,
+        // before the first position transaction takes a row lock.
+        markBarrier();
+        await olderMayContinue;
+      }
+      return originalTransaction(fn);
+    };
+    const older = new PerpMarketService({
+      db: olderDb,
+      wallet: createUserWalletAdapter(),
+      settlement: createPerpSettlement(),
+      fees,
+      clock: { now: () => olderAt },
+    });
+    const newer = new PerpMarketService({
+      db: new FundingSnapshotDb(f.ticker),
+      wallet: createUserWalletAdapter(),
+      settlement: createPerpSettlement(),
+      fees,
+      clock: { now: () => newerAt },
+    });
+
+    const olderRun = older.processFundingStep();
+    await olderAtBarrier;
+    await newer.processFundingStep();
+    releaseOlder();
+    await olderRun;
+
+    const positions = await f.adapter.listOpenPositions();
+    const long = positions.find((position) => position.side === 'long')!;
+    const short = positions.find((position) => position.side === 'short')!;
+    expect(long.fundingPaid).toBeCloseTo(expectedPayment(200, 1) * 2, 8);
+    expect(short.fundingPaid).toBeCloseTo(expectedPayment(100, -1) * 2, 8);
+
+    const accruals = await dbWrite
+      .select()
+      .from(perpPositionFundingAccruals)
+      .where(inArray(perpPositionFundingAccruals.positionId, f.positionIds));
+    expect(accruals).toHaveLength(4);
+    for (const positionId of f.positionIds) {
+      const starts = accruals
+        .filter((row) => row.positionId === positionId)
+        .map((row) => row.periodStart.toISOString())
+        .sort();
+      expect(starts).toEqual([
+        olderPeriod.toISOString(),
+        newerPeriod.toISOString(),
+      ]);
+    }
+
+    await older.processFundingStep();
+    await newer.processFundingStep();
+
+    const replayed = await f.adapter.listOpenPositions();
+    expect(
+      replayed.find((position) => position.side === 'long')!.fundingPaid
+    ).toBeCloseTo(long.fundingPaid, 8);
+    expect(
+      replayed.find((position) => position.side === 'short')!.fundingPaid
+    ).toBeCloseTo(short.fundingPaid, 8);
+    const accrualsAfterReplay = await dbWrite
+      .select()
+      .from(perpPositionFundingAccruals)
+      .where(inArray(perpPositionFundingAccruals.positionId, f.positionIds));
+    expect(accrualsAfterReplay).toHaveLength(4);
+  });
+
+  it('funds the position a failed write skipped, without charging the one that committed', async () => {
+    const f = await fixture(200, 100, 0, PartialFailureFundingDb);
+    await expect(f.service.processFundingStep()).rejects.toThrow(
+      'injected funding write failure'
+    );
+    const midway = await f.adapter.listOpenPositions();
+    expect(
+      midway.filter((position) => position.fundingPaid !== 0)
+    ).toHaveLength(1);
+    const committed = midway.find((position) => position.fundingPaid !== 0)!;
+
+    await f.service.processFundingStep();
+
+    const positions = await f.adapter.listOpenPositions();
+    const long = positions.find((position) => position.side === 'long')!;
+    const short = positions.find((position) => position.side === 'short')!;
+    expect(long.fundingPaid).toBeCloseTo(expectedPayment(200, 1), 8);
+    expect(short.fundingPaid).toBeCloseTo(expectedPayment(100, -1), 8);
+    const committedAfter = positions.find(
+      (position) => position.id === committed.id
+    )!;
+    expect(committedAfter.fundingPaid).toBeCloseTo(committed.fundingPaid, 8);
+  });
 });

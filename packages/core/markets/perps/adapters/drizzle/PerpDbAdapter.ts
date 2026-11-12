@@ -3,6 +3,7 @@ import {
   db as defaultDb,
   organizations,
   perpMarketSnapshots,
+  perpPositionFundingAccruals,
   perpPositions,
   type Transaction,
 } from '@feed/db';
@@ -161,6 +162,20 @@ export class PerpDbAdapter implements PerpDbPort {
       .limit(1)
       .for('update');
     return pos ? mapPosition(pos) : null;
+  }
+
+  async claimFundingPeriod(
+    positionId: string,
+    periodStart: Date
+  ): Promise<boolean> {
+    const inserted = await this.dbClient
+      .insert(perpPositionFundingAccruals)
+      .values({ positionId, periodStart })
+      .onConflictDoNothing()
+      .returning({
+        positionId: perpPositionFundingAccruals.positionId,
+      });
+    return inserted.length > 0;
   }
 
   async upsertPosition(
@@ -426,6 +441,14 @@ export class PerpDbAdapter implements PerpDbPort {
   }
 
   /**
+   * Adapter bound to an existing transaction. Subclasses override this when
+   * a test or caller needs the transactional port to keep their behavior.
+   */
+  protected bindTransaction(txClient: DrizzleClient): PerpDbAdapter {
+    return new PerpDbAdapter(txClient);
+  }
+
+  /**
    * Execute operations within a transaction for atomicity.
    * Creates a new PerpDbAdapter bound to the transaction context.
    */
@@ -436,8 +459,7 @@ export class PerpDbAdapter implements PerpDbPort {
     }
 
     return defaultDb.transaction(async (txClient) => {
-      const txAdapter = new PerpDbAdapter(txClient);
-      return fn(txAdapter);
+      return fn(this.bindTransaction(txClient));
     });
   }
 }

@@ -7,6 +7,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
 } from 'drizzle-orm/pg-core';
@@ -286,6 +287,23 @@ export const perpPositions = pgTable(
     index('PerpPosition_userId_closedAt_idx').on(table.userId, table.closedAt),
     index('PerpPosition_userId_openedAt_idx').on(table.userId, table.openedAt),
   ]
+);
+
+/**
+ * One row per open-position funding period (UTC 00:00, 08:00, 16:00).
+ * The primary key is the idempotency key: inserting the same pair again
+ * does nothing, and an earlier period can still be inserted after a later
+ * one. Written in the same transaction as that position's fundingPaid change.
+ */
+export const perpPositionFundingAccruals = pgTable(
+  'PerpPositionFundingAccrual',
+  {
+    positionId: text('positionId')
+      .notNull()
+      .references(() => perpPositions.id, { onDelete: 'cascade' }),
+    periodStart: timestamp('periodStart', { mode: 'date' }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.positionId, table.periodStart] })]
 );
 
 // Relations
