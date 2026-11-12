@@ -34,7 +34,16 @@ mock.module('server-only', () => ({}));
 
 import { PredictionDbAdapter } from '@feed/core/markets/prediction/adapters/drizzle/PredictionDbAdapter';
 import { PredictionMarketService } from '@feed/core/markets/prediction/PredictionMarketService';
-import { db, eq, markets, perpPositions, positions, users } from '@feed/db';
+import {
+  db,
+  eq,
+  inArray,
+  markets,
+  perpPositions,
+  positions,
+  predictionPriceHistories,
+  users,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 
@@ -76,23 +85,51 @@ let posSoldWin: string;
 let posSoldLoss: string;
 let perpOpen: string;
 let perpClosed: string;
-const marketIds: string[] = [];
+
+// Rows this suite owns. Each array is populated only from the RETURNING
+// result of a successful insert, never from the proposed ids: if an insert
+// fails or an id collides with a pre-existing row, teardown must not delete
+// a row this suite did not create. Price-history rows are keyed by market,
+// not by row id — the service generates their ids — so they are cleaned
+// by owned market id only, exactly the markets this suite created.
+const allUserIds: string[] = [];
+const allMarketIds: string[] = [];
+const allPositionIds: string[] = [];
+const allPerpPositionIds: string[] = [];
+
+// Delete only owned rows, children before parents, so a partial setup
+// (or a colliding id) can never wipe pre-existing rows. Idempotent: safe
+// to run again after a test already called it.
+async function cleanupOwned() {
+  await db.delete(positions).where(inArray(positions.id, allPositionIds));
+  await db
+    .delete(perpPositions)
+    .where(inArray(perpPositions.id, allPerpPositionIds));
+  await db
+    .delete(predictionPriceHistories)
+    .where(inArray(predictionPriceHistories.marketId, allMarketIds));
+  await db.delete(markets).where(inArray(markets.id, allMarketIds));
+  await db.delete(users).where(inArray(users.id, allUserIds));
+}
 
 async function insertMarket(resolved: boolean): Promise<string> {
   const id = await generateSnowflakeId();
-  marketIds.push(id);
-  await db.insert(markets).values({
-    id,
-    question: `Positions list test market ${id.slice(-6)}`,
-    yesShares: '500',
-    noShares: '500',
-    liquidity: '1000',
-    resolved,
-    resolution: resolved ? true : null,
-    endDate: new Date(Date.now() + 86_400_000),
-    updatedAt: new Date(),
-  });
-  return id;
+  const [row] = await db
+    .insert(markets)
+    .values({
+      id,
+      question: `Positions list test market ${id.slice(-6)}`,
+      yesShares: '500',
+      noShares: '500',
+      liquidity: '1000',
+      resolved,
+      resolution: resolved ? true : null,
+      endDate: new Date(Date.now() + 86_400_000),
+      updatedAt: new Date(),
+    })
+    .returning({ id: markets.id });
+  allMarketIds.push(row!.id);
+  return row!.id;
 }
 
 async function insertPosition(values: {
@@ -104,31 +141,39 @@ async function insertPosition(values: {
   resolvedAt?: Date | null;
 }): Promise<string> {
   const id = await generateSnowflakeId();
-  await db.insert(positions).values({
-    id,
-    userId,
-    marketId: values.marketId,
-    side: true,
-    shares: values.shares,
-    avgPrice: '0.5',
-    amount: '5',
-    status: values.status,
-    pnl: values.pnl,
-    outcome: values.outcome ?? null,
-    resolvedAt: values.resolvedAt ?? null,
-    updatedAt: new Date(),
-  });
-  return id;
+  const [row] = await db
+    .insert(positions)
+    .values({
+      id,
+      userId,
+      marketId: values.marketId,
+      side: true,
+      shares: values.shares,
+      avgPrice: '0.5',
+      amount: '5',
+      status: values.status,
+      pnl: values.pnl,
+      outcome: values.outcome ?? null,
+      resolvedAt: values.resolvedAt ?? null,
+      updatedAt: new Date(),
+    })
+    .returning({ id: positions.id });
+  allPositionIds.push(row!.id);
+  return row!.id;
 }
 
 describe('user positions list — closed prediction positions', () => {
   beforeAll(async () => {
     userId = await generateSnowflakeId();
-    await db.insert(users).values({
-      id: userId,
-      username: `poslist_${userId.slice(-10)}`,
-      updatedAt: new Date(),
-    });
+    const [createdUser] = await db
+      .insert(users)
+      .values({
+        id: userId,
+        username: `poslist_${userId.slice(-10)}`,
+        updatedAt: new Date(),
+      })
+      .returning({ id: users.id });
+    allUserIds.push(createdUser!.id);
 
     const openMarket = await insertMarket(false);
     const resolvedMarket = await insertMarket(true);
@@ -165,49 +210,52 @@ describe('user positions list — closed prediction positions', () => {
     });
 
     perpOpen = await generateSnowflakeId();
-    await db.insert(perpPositions).values({
-      id: perpOpen,
-      userId,
-      ticker: 'TESTOPEN',
-      organizationId: 'org-test',
-      side: 'long',
-      entryPrice: 100,
-      currentPrice: 110,
-      size: 50,
-      leverage: 2,
-      liquidationPrice: 50,
-      unrealizedPnL: 10,
-      unrealizedPnLPercent: 20,
-      lastUpdated: new Date(),
-      closedAt: null,
-    });
+    const [createdPerpOpen] = await db
+      .insert(perpPositions)
+      .values({
+        id: perpOpen,
+        userId,
+        ticker: 'TESTOPEN',
+        organizationId: 'org-test',
+        side: 'long',
+        entryPrice: 100,
+        currentPrice: 110,
+        size: 50,
+        leverage: 2,
+        liquidationPrice: 50,
+        unrealizedPnL: 10,
+        unrealizedPnLPercent: 20,
+        lastUpdated: new Date(),
+        closedAt: null,
+      })
+      .returning({ id: perpPositions.id });
+    allPerpPositionIds.push(createdPerpOpen!.id);
     perpClosed = await generateSnowflakeId();
-    await db.insert(perpPositions).values({
-      id: perpClosed,
-      userId,
-      ticker: 'TESTCLOSED',
-      organizationId: 'org-test',
-      side: 'long',
-      entryPrice: 100,
-      currentPrice: 120,
-      size: 50,
-      leverage: 2,
-      liquidationPrice: 50,
-      unrealizedPnL: 0,
-      unrealizedPnLPercent: 0,
-      realizedPnL: 20,
-      lastUpdated: new Date(),
-      closedAt: new Date(),
-    });
+    const [createdPerpClosed] = await db
+      .insert(perpPositions)
+      .values({
+        id: perpClosed,
+        userId,
+        ticker: 'TESTCLOSED',
+        organizationId: 'org-test',
+        side: 'long',
+        entryPrice: 100,
+        currentPrice: 120,
+        size: 50,
+        leverage: 2,
+        liquidationPrice: 50,
+        unrealizedPnL: 0,
+        unrealizedPnLPercent: 0,
+        realizedPnL: 20,
+        lastUpdated: new Date(),
+        closedAt: new Date(),
+      })
+      .returning({ id: perpPositions.id });
+    allPerpPositionIds.push(createdPerpClosed!.id);
   });
 
   afterAll(async () => {
-    await db.delete(positions).where(eq(positions.userId, userId));
-    await db.delete(perpPositions).where(eq(perpPositions.userId, userId));
-    for (const marketId of marketIds) {
-      await db.delete(markets).where(eq(markets.id, marketId));
-    }
-    await db.delete(users).where(eq(users.id, userId));
+    await cleanupOwned();
   });
 
   it('closed view lists positions closed by selling, not only resolved ones', async () => {
@@ -264,18 +312,21 @@ describe('user positions list — closed prediction positions', () => {
     });
 
     const marketId = await generateSnowflakeId();
-    marketIds.push(marketId);
-    await db.insert(markets).values({
-      id: marketId,
-      question: `Sell-through test market ${marketId.slice(-6)}`,
-      yesShares: '10000',
-      noShares: '10000',
-      liquidity: '20000',
-      resolved: false,
-      resolution: null,
-      endDate: new Date(Date.now() + 86_400_000),
-      updatedAt: new Date(),
-    });
+    const [createdMarket] = await db
+      .insert(markets)
+      .values({
+        id: marketId,
+        question: `Sell-through test market ${marketId.slice(-6)}`,
+        yesShares: '10000',
+        noShares: '10000',
+        liquidity: '20000',
+        resolved: false,
+        resolution: null,
+        endDate: new Date(Date.now() + 86_400_000),
+        updatedAt: new Date(),
+      })
+      .returning({ id: markets.id });
+    allMarketIds.push(createdMarket!.id);
 
     const bought = await service.buy({
       userId,
@@ -289,6 +340,9 @@ describe('user positions list — closed prediction positions', () => {
       shares: bought.shares,
     });
     expect(sold.positionClosed).toBe(true);
+    // The service owns this row's id; record it so teardown deletes the
+    // row it created and nothing else.
+    allPositionIds.push(bought.positionId);
 
     const [row] = await db
       .select()
@@ -300,5 +354,139 @@ describe('user positions list — closed prediction positions', () => {
     const body = await fetchSnapshot('status=closed&type=prediction');
     const ids = body.predictions.positions.map((p) => p.id);
     expect(ids).toContain(bought.positionId);
+  });
+
+  it('cleanup removes only rows this suite created', async () => {
+    // Pre-existing rows this suite did not create — including a price
+    // history row for a foreign market, the case a partial setup or an
+    // id collision would have wiped when teardown deleted by proposed
+    // ids or by user id. None of these ids are in the owned arrays, so
+    // the shared cleanup must leave every one of them untouched.
+    const sentinelUserId = await generateSnowflakeId();
+    const sentinelMarketId = await generateSnowflakeId();
+    const sentinelPositionId = await generateSnowflakeId();
+    const sentinelPerpId = await generateSnowflakeId();
+    const sentinelHistoryId = await generateSnowflakeId();
+    const now = new Date();
+    await db.insert(users).values({
+      id: sentinelUserId,
+      username: `poslist-sentinel-${sentinelUserId.slice(-10)}`,
+      updatedAt: now,
+    });
+    await db.insert(markets).values({
+      id: sentinelMarketId,
+      question: 'Sentinel market',
+      yesShares: '500',
+      noShares: '500',
+      liquidity: '1000',
+      resolved: false,
+      resolution: null,
+      endDate: new Date(Date.now() + 86_400_000),
+      updatedAt: now,
+    });
+    await db.insert(positions).values({
+      id: sentinelPositionId,
+      userId: sentinelUserId,
+      marketId: sentinelMarketId,
+      side: true,
+      shares: '10',
+      avgPrice: '0.5',
+      amount: '5',
+      status: 'active',
+      pnl: '0',
+      outcome: null,
+      resolvedAt: null,
+      updatedAt: now,
+    });
+    await db.insert(perpPositions).values({
+      id: sentinelPerpId,
+      userId: sentinelUserId,
+      ticker: 'TESTSENTINEL',
+      organizationId: 'org-test',
+      side: 'long',
+      entryPrice: 100,
+      currentPrice: 110,
+      size: 50,
+      leverage: 2,
+      liquidationPrice: 50,
+      unrealizedPnL: 10,
+      unrealizedPnLPercent: 20,
+      lastUpdated: now,
+      closedAt: null,
+    });
+    await db.insert(predictionPriceHistories).values({
+      id: sentinelHistoryId,
+      marketId: sentinelMarketId,
+      yesPrice: 0.5,
+      noPrice: 0.5,
+      yesShares: '500',
+      noShares: '500',
+      liquidity: '1000',
+      eventType: 'sentinel',
+      source: 'test',
+      createdAt: now,
+    });
+
+    await cleanupOwned();
+
+    // Owned rows are gone...
+    expect(
+      await db
+        .select()
+        .from(positions)
+        .where(inArray(positions.id, allPositionIds))
+    ).toEqual([]);
+    expect(
+      await db
+        .select()
+        .from(perpPositions)
+        .where(inArray(perpPositions.id, allPerpPositionIds))
+    ).toEqual([]);
+    expect(
+      await db
+        .select()
+        .from(predictionPriceHistories)
+        .where(inArray(predictionPriceHistories.marketId, allMarketIds))
+    ).toEqual([]);
+    expect(
+      await db.select().from(markets).where(inArray(markets.id, allMarketIds))
+    ).toEqual([]);
+    expect(
+      await db.select().from(users).where(inArray(users.id, allUserIds))
+    ).toEqual([]);
+    // ...but every pre-existing row survives.
+    expect(
+      await db.select().from(users).where(eq(users.id, sentinelUserId))
+    ).toHaveLength(1);
+    expect(
+      await db.select().from(markets).where(eq(markets.id, sentinelMarketId))
+    ).toHaveLength(1);
+    expect(
+      await db
+        .select()
+        .from(positions)
+        .where(eq(positions.id, sentinelPositionId))
+    ).toHaveLength(1);
+    expect(
+      await db
+        .select()
+        .from(perpPositions)
+        .where(eq(perpPositions.id, sentinelPerpId))
+    ).toHaveLength(1);
+    expect(
+      await db
+        .select()
+        .from(predictionPriceHistories)
+        .where(eq(predictionPriceHistories.id, sentinelHistoryId))
+    ).toHaveLength(1);
+
+    // Remove the sentinel rows this test itself created.
+    await db
+      .delete(predictionPriceHistories)
+      .where(eq(predictionPriceHistories.id, sentinelHistoryId));
+    await db.delete(positions).where(eq(positions.id, sentinelPositionId));
+    await db.delete(perpPositions).where(eq(perpPositions.id, sentinelPerpId));
+    await db.delete(markets).where(eq(markets.id, sentinelMarketId));
+    await db.delete(users).where(eq(users.id, sentinelUserId));
   });
 });
