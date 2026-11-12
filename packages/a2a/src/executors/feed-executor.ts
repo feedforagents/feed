@@ -1905,12 +1905,18 @@ export class FeedAgentExecutor implements AgentExecutor {
   ): Promise<ExecutorOperationResult> {
     const userId = requireContextAccountId({}, context);
     const limit = this.parsePositiveInt(params.limit, 20, 50);
+    const offset = this.parseNonNegativeInt(params.offset, 0);
 
-    // Get chats where user is a participant
+    // Get chats where user is a participant. The order carries chatId as a
+    // tiebreaker so it is total: memberships created in one batch share a
+    // joinedAt, and offset paging over ties alone could repeat or skip chats
+    // between pages. offset continues past the first `limit` rows — without
+    // it, chats beyond the window were unreachable.
     const chatParticipants = await db.chatParticipant.findMany({
       where: { userId, isActive: true },
       take: limit,
-      orderBy: { joinedAt: 'desc' },
+      skip: offset,
+      orderBy: [{ joinedAt: 'desc' }, { chatId: 'desc' }],
       select: {
         chatId: true,
         updatedAt: true,
@@ -1936,12 +1942,16 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (chats.length !== chatIds.length) {
       throw new Error('Chat membership references a missing chat');
     }
+    // The id lookup above does not preserve the participant query's order;
+    // restore it so the page is presented newest-join first as sorted.
+    const chatsById = new Map(chats.map((c) => [c.id, c]));
+    const orderedChats = chatIds.map((id) => chatsById.get(id)!);
     const members = await db.chatParticipant.findMany({
       where: { chatId: { in: chatIds }, isActive: true },
       select: { chatId: true, userId: true },
     });
     return {
-      chats: chats.map((c) => ({
+      chats: orderedChats.map((c) => ({
         id: c.id,
         name: c.name,
         isGroup: c.isGroup,
@@ -2554,6 +2564,19 @@ export class FeedAgentExecutor implements AgentExecutor {
       return fallback;
     }
     return Math.min(parsed, max);
+  }
+
+  private parseNonNegativeInt(value: unknown, fallback: number): number {
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string'
+          ? Number.parseInt(value, 10)
+          : Number.NaN;
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return fallback;
+    }
+    return Math.floor(parsed);
   }
 
   // Portfolio operations
