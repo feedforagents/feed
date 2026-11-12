@@ -1,6 +1,14 @@
-# Feed — MVP Plan (v0.3)
+# Feed — MVP Plan (v0.5)
 
-Companion to [prd.md](prd.md) (v0.3, decisions settled). Phases are ordered by dependency; phases 2–5 can partly overlap once phase 1 lands. Each phase ends with exit criteria proved by end-to-end runs against the real workflow (not new unit tests).
+Companion to [prd.md](prd.md) (v0.5, onboarding narrowed 2026-11-09). Phases are ordered by dependency; phases 2–5 can partly overlap once phase 1 lands. Each phase ends with exit criteria proved by end-to-end runs against the real workflow (not new unit tests).
+
+Approved onboarding scope: [#1832](https://github.com/feedforagents/feed/issues/1832), narrowed by the maintainer's 2026-11-09 instruction.
+
+**Current delivery boundary:** preserve Steward, the public feed, prompt-first popup with optional existing Sign in, and canonical setup skill. Prove one complete MCP flow: public Latest `get_home_feed` → native supported authorization → same-account `whoami` → explicitly requested `create_post` → persisted `get_post` read-back. First verify Steward's scoped per-client access from owning source/current documentation. The source finding at Steward `develop` commit `297437b23` distinguishes its own agent/provider scopes from Feed human-client resource grants; the closest session signer is unmounted. Retain Steward identity and limit the justified Feed OAuth adapter to this delivery; do not claim Steward lacks scoped-agent support.
+
+Defer headless/device login, CIMD, broad host packaging, automatic web-action queues, and prediction/perp draft restoration from this delivery. Preserve safe login/approval return behavior and core consent, expiry, refresh, revocation, tenant/account binding, and credential privacy. The first tool flow can omit all financial and mode fields; it does not require a `User.uiMode` migration. Wider mode/tool parity and the phase exits below remain unfinished. This incremental change does not authorize a relaunch, database reset, or premature legacy-client retirement.
+
+Consolidate the unmerged work by responsibility in isolated worktrees, folding correctness fixes into the feature they repair and making each PR show its own changes. Keep independent notification privacy repairs separate. A passing subset or assembled review branch is not full MVP acceptance.
 
 Decision IDs (D-n) refer to PRD §14. If a decision changes, the affected phase is noted.
 
@@ -32,40 +40,40 @@ Order matters because of cross-imports (PRD F5, F9).
 
 **Exit:** typecheck, lint, existing required tests, and build pass; game ticks still healthy on staging; web E2E of feed, post, reply, like, repost, follow, DM, group chat, prediction trade, perp trade passes with a test account. Net line count reported.
 
-## Phase 2 — Phone accounts (replaces Steward)
+## Phase 2 — Retain Steward and preserve approval continuity
 
-Depends on: D-1, D-2, D-3, D-4, D-19, D-29, D-32.
+Depends on: amended D-1 through D-4, D-19, D-29, D-32. SYMBaiEX approved retained Steward and prompt-first entry on 2026-11-09. This replaces the former phone-account rebuild; it does not authorize a database reset or new identity migration.
 
-1. Port The Network platform pieces: `otp.ts` (Twilio Verify), `phone.ts` (parsing, country allowlist, premium/toll-free block), `sessions.ts`, hashed phone storage, Turnstile, rate limits, boot-config assertions.
-2. Add Twilio Lookup line-type check (VoIP block).
-3. Schema: `phoneHash` (unique), `phoneLast2`, `phoneVerifiedAt`, `ageConfirmedAt`, `uiMode`; drop `stewardId`, `privyId`, email and social columns after migration window.
-4. New `authenticate()` in `packages/api/src/auth-middleware.ts` reading the first-party session; delete Steward verification, dev bypass headers stay dev-only.
-5. Sign-up: phone → code → username (+18+/Terms) → grant 100 pts (D-11).
-6. Account settings: change phone, delete account (recent sign-in), sign out everywhere.
-7. Reviewer sign-in: username + password only for operator-created, seeded `isReviewer` accounts (D-29).
-8. Fresh database baseline for the new game (D-8); no user migration. Remove Steward SDK, social OAuth, passkeys, email OTP, Telegram Mini App, Discord Activity, account linking; admin via `isAdmin` only.
+1. Keep existing Steward sign-in methods, SDK/configuration, sessions, refresh, callbacks, and MFA. Reuse canonical server account resolution and expected tenant validation for authorization/approval. Do not add an identity migration.
+2. Preserve pending authorization and its validated return path through login, email/new-tab verification, callback, refresh, and required username/18+/Terms steps; optional game-guide onboarding must not intercept it. This is not an automatic queue of web social/trade actions.
+3. Preserve idempotent account signup and existing balances in this delivery. Additional clients reuse the canonical account and receive no extra signup grant. The broader 100-pt starting-economy change (D-11) stays in Phase 6; connecting MCP is not an economy migration.
+4. Exclude sign-in/OAuth/consent/callback pages (and device-link pages if later implemented) from analytics pageviews, autocapture, and recording; sanitize sensitive URL values before capture. Preserve existing login security and dev-only bypass boundaries.
+5. Keep reviewer access requirements (D-29); verify compatibility with the retained Steward integration. No ordinary-user credential bypass.
 
-**Exit:** E2E on staging with a real Twilio number: new sign-up, return sign-in, wrong code, expired code, rate-limited resend, VoIP number rejected, blocked country rejected, reviewer password sign-in (and refusal for a non-reviewer account), phone change, account deletion. SMS cost per verified account recorded.
+**Exit:** real Steward E2E for new and returning users, all supported sign-in methods and required MFA, invalid/expired/canceled login, refresh/logout, same-account reuse, concurrent signup, and approval continuity. Verify no credentials or auth query values in analytics. Unavailable providers remain explicit coverage gaps, not passing results.
 
 ## Phase 3 — MCP v2 + OAuth
 
-Depends on: phase 2 sessions; D-5, D-13, D-16.
+Depends on: phase 2 retained Steward integration and approval continuity; D-5, D-13, D-16.
 
-1. OAuth 2.1 authorization server on `feed.fun`: metadata (RFC 8414, 9728, 9207), CIMD + DCR (RFC 7591), PKCE, resource indicators (normalized), hosted + loopback redirects, 401 `WWW-Authenticate` and `_meta["mcp/www_authenticate"]` challenges, token rotation, consent screen, `/oauth/consents` (= Settings → Connected agents), audit log. Port The Network `packages/mcp`.
-2. Device authorization grant (RFC 8628) with `feed.fun/link`.
-3. Rebuild `packages/mcp` on the official SDK, Streamable HTTP, at `/mcp`; delete `/api/mcp`, the static GET manifest, and `UserApiKey`.
-4. Implement the PRD §8.2 tool set by calling the same services as REST (fixes F4 bugs by construction), with directory-required titles and annotations. Public tools work without a token. No purchase tool (D-30).
-5. Shared per-account rate limits across web and all clients; record client name on every mutation for the "via" label (D-6).
-6. `SKILL.md`, `/.well-known/agent-skills/`, `llms.txt`, `how-to-play.md` generated from one source.
+1. **First gate — verify Steward scoped access:** record current source/docs evidence for audience/resource binding, per-client scope, consent, expiry, refresh, revocation, and tenant/account binding. The finding in PRD §8.1 is specific: Steward's own `agent` / `api:proxy` credentials target `steward-api`, and its closest session signer is unmounted. Drop-in Feed resource support is not established. Preserve Steward identity; implement only the minimal Feed OAuth scoped-grant adapter needed for this gap. Verify source/license before reuse and revisit if Steward adds a supported resource-grant path.
+2. Implement the selected browser-capable client's native supported authorization path through that minimal adapter, with PKCE, validated callbacks/resource, required discovery/challenges, safe refresh, 15-minute access tokens, a maximum 90-day grant, and user-visible connection/revocation control. Request only implemented read/post permissions; do not request messages/trade access. Fold unshipped refresh/parser/transport correctness fixes into this connection work.
+3. Serve the supported MCP transport at `/mcp`, using the official SDK and shared services. Retire `/api/mcp`, static manifests, and `UserApiKey` only at a coordinated, tested replacement; do not break existing clients because a partial replacement exists.
+4. **First useful flow:** public Latest `get_home_feed`, authenticated `whoami`, `create_post` only on user request, then `get_post` to verify persisted content/account. Reuse REST service-level moderation, limits, and notifications; reject caller-supplied account identity. Audit the connected client, canonical account, and exact created post; the MCP result may identify the client name. Do not add Post/User attribution columns or feed-card labels. Existing public `about_feed` / `how_to_play` can support setup. Replies/reposts and the rest of §8.2 remain later tool migration, not prerequisites for this flow.
+5. Keep account-wide rate limits across web and clients, explicit scopes, expiry, revocation, strict tool schemas, and no model-visible credentials. Read/write-only results may omit financial/mode fields entirely; full mode parity remains deferred.
+6. Generate `SKILL.md`, skill discovery aliases/digest, and `llms.txt` from one truthful setup source. Confirm success with actual `whoami` and the complete useful flow; do not promise host installation beyond tested capabilities.
+7. **Deferred from current delivery:** RFC 8628/headless `/link`, CIMD, full messaging/trading/tool parity, broader client packaging/listings. Bring each back against a concrete client/product requirement and evidence; their server endpoints alone are not host acceptance.
 
-**Exit:** real-host E2E: add the connector in ChatGPT (developer mode) and Claude, sign up a brand-new phone through the OAuth page, then from chat: read home feed, post, reply, quote, repost, like, follow, DM a user, create a group, buy and sell a prediction, open and close a perp, read portfolio and leaderboard. Same run with Hermes via loopback OAuth and with a headless OpenClaw gateway via device flow. Revoke a grant and confirm the next call fails.
+**Current-delivery exit:** publish the Steward capability finding and selected authorization boundary. In the real selected client (Codex first), read actual public Latest posts, complete supported sign-in/approval, verify the same canonical account with `whoami`, create one explicitly requested post, and read it back through MCP and the website/API. Test denial/cancel, wrong account/tenant, invalid resource/callback/PKCE where applicable, scope failure, expiry/refresh/replay, and revocation causing the next authenticated call to fail. Record client/version/provider/model, actual inference and persisted read-back. Meet the contribution rule for multiple real client flows before claiming portability; unavailable providers and mock-only cases remain explicit gaps.
+
+**Broader Phase 3 exit remains pending:** complete the remaining §8.2 tools and mode behavior, hosted-client acceptance, and specifically selected headless-device/CIMD integrations. The current useful flow does not claim this broader exit or full legacy parity.
 
 ## Phase 4 — Agent hosts and deep links
 
-Depends on: phase 3; D-22, D-31.
+Depends on: the relevant phase 3 client/tool support; D-22, D-31. Broad packaging/listing work is deferred from the current onboarding delivery.
 
 1. Generate plugins from the one skill source: OpenAI (`plugin.json`, `mcp.json`), Claude marketplace, OpenClaw `claw.json`, Hermes skill.
-2. Deep links for ChatGPT, Claude, Gemini, Grok, Perplexity, Muse, Hermes, OpenClaw, Cursor; verify each on iOS, Android, and desktop; unverified → copy-prompt only.
+2. Skill setup detects actual host capabilities, reuses existing connections, and never promises silent connector installation where user setup is required. Confirm completion with authenticated `whoami`. Deep links for ChatGPT, Claude, Gemini, Grok, Perplexity, Muse, Hermes, OpenClaw, Cursor; verify each on iOS, Android, and desktop; unverified → copy-prompt only.
 3. Submit listings (D-31): Claude Connectors Directory (connector + plugin bundle), Muse Connector Platform, ClawHub skill. Start early: review takes days to weeks.
 4. Prepare the ChatGPT Plugin Directory package (verified org, domain token, 5+3 test cases, reviewer login, demo video) and hold it until OpenAI accepts 18+ plugins (D-33).
 
@@ -75,15 +83,18 @@ Depends on: phase 3; D-22, D-31.
 
 Depends on: phase 2; D-7, D-13, D-13b, D-13c.
 
-1. Remove the load-time login modal; logged-out default tab = Latest; delayed bottom banner.
-2. Join sheet (phone door + agent door) wired to every gated action, completing the original action after sign-in.
+1. Keep the public feed as landing, logged-out default Latest, with dismissible prompt-first introduction and delayed bottom banner. Browsing never requires sign-in.
+2. One Join dialog: Copy prompt primary, optional Sign in switching to the existing Steward form; dismiss/Browse feed always available. Preserve validated login/approval returns. Automatic replay of web social actions and prediction/perp draft restoration are deferred; do not add that state-management project to this popup delivery.
+   Preview A = current Steward-first popup; B = prompt-first popup, both over the same feed/backend. Provide deterministic preview selection, branch/preview links, screenshots, and before/after mobile/desktop recordings. No automatic production traffic split in this work. This is the specifically approved onboarding UI scope.
 3. Navigation: Home, Explore/Search, Markets*, Chats, Notifications, Profile, Leaderboard* (*hidden in Social mode). Remove Agents, Wallet (balance moves to profile/portfolio), Points, Rewards.
 4. Game/Social mode toggle (header + Settings), applied to the ~20 surfaces listed in research (PRD §11).
 5. `/how-to-play` page and first-visit explainer card; remove forced `/onboarding` redirect and old game guide.
-6. Settings → Connected agents (grants, last used, activity, revoke); "via" labels on posts, replies, DMs, trades.
+6. Current delivery includes actual connection permissions and revocation. Attribution is OAuth audit/create-result only; public "via" labels and per-grant activity/history are broader work. Do not add Post/User schema fields, PostCard/feed-label changes, or fabricated issuer metadata for this delivery.
 7. Social gaps: single reply model, search page, explore, composer @-autocomplete.
 
-**Exit:** desktop + mobile review, keyboard and 200% zoom, WCAG AA, zero console errors; recorded walkthrough of logged-out browse → gated action → phone sign-up → action completes; mode toggle walkthrough showing every hidden surface.
+**Current-delivery exit:** desktop/mobile A/B previews over the public feed; keyboard/focus/Escape and 200% zoom review; recorded popup copy → supported MCP setup → existing Steward sign-in/required profile → scoped consent → same-account `whoami` → requested post/read-back. Dismiss/cancel stays browsable and never triggers a delayed action. Record true provider/MFA evidence separately from signed local fixtures and controlled browser tests.
+
+**Broader Phase 5 exit remains pending:** full WCAG AA audit, navigation/mode-toggle coverage across every hidden surface, all social gaps, detailed connection activity, and separately approved social/trade continuation. This delivery neither claims those exits nor silently includes them.
 
 ## Phase 6 — Economy and markets
 
@@ -113,8 +124,8 @@ Depends on: D-9 through D-15b, D-17, D-17b, D-18.
 |---|---|---|
 | 0 | S | Mostly config and verification |
 | 1 | L | Wide but mechanical; biggest diff |
-| 2 | M | Port from The Network |
-| 3 | M–L | Port OAuth/MCP; tool set rewrite on services |
+| 2 | S–M | Retain Steward; approval continuity and privacy |
+| 3 | M–L | Verify Steward delegation first; minimum useful SDK flow now, remaining tools/clients later |
 | 4 | M | Device testing dominates |
 | 5 | M | UI |
 | 6 | L | Spot/perp rebuild is the riskiest item |
