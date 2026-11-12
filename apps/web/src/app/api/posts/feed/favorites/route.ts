@@ -102,6 +102,7 @@ import {
   posts,
   reactions,
   shares,
+  users,
 } from '@feed/db';
 import { logger, PostFeedQuerySchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -155,9 +156,26 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
     // Favorites never bypass the viewer's block/mute policy.
     const excludedAuthorIds = await loadViewerExcludedAuthorIds(user.userId);
-    const favoritedUserIds = favList
+    const candidateIds = favList
       .map((f) => f.targetUserId)
       .filter((id) => !excludedAuthorIds.has(id));
+
+    // Test authors are excluded from every other feed — the main feed
+    // excludes them in SQL and the following feed filters them out up
+    // front — so their posts must not surface here either. Drop 'test-'
+    // ids and accounts flagged isTest before paginating, so the page
+    // and the total count only cover real authors.
+    const testUsers =
+      candidateIds.length > 0
+        ? await dbClient
+            .select({ id: users.id })
+            .from(users)
+            .where(and(inArray(users.id, candidateIds), eq(users.isTest, true)))
+        : [];
+    const testAuthorIds = new Set(testUsers.map((u) => u.id));
+    const favoritedUserIds = candidateIds.filter(
+      (id) => !id.startsWith('test-') && !testAuthorIds.has(id)
+    );
 
     // If no favorites, return empty array
     if (favoritedUserIds.length === 0) {
@@ -177,7 +195,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           lte(posts.timestamp, now)
         )
       )
-      .orderBy(desc(posts.createdAt))
+      // Order by id as a tiebreaker: posts can share a createdAt (it
+      // defaults to the transaction timestamp, and engine batch creation
+      // stamps posts from millisecond-precision Dates), and OFFSET paging
+      // over an under-determined order returns a different tie order per
+      // page — duplicating some tied posts and skipping others entirely.
+      .orderBy(desc(posts.createdAt), desc(posts.id))
       .offset(offset)
       .limit(limit + 1);
 

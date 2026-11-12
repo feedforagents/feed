@@ -39,13 +39,19 @@ import {
 } from '@feed/a2a';
 import {
   acceptGroupInvite,
+  BusinessLogicError,
   checkRateLimitAsync,
   declineGroupInvite,
   logAdminModify,
+  NotFoundError,
+  notifyReactionOnComment,
+  notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
+  sharePost,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
+import { PredictionPricing } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   and,
@@ -63,11 +69,15 @@ import {
   markets,
   perpMarketSnapshots,
   posts,
+  postTags,
+  questions,
+  timeframedMarkets,
   users,
 } from '@feed/db';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -299,6 +309,7 @@ async function checkMcpRateLimit(
     | 'close_position'
     | 'transfer'
     | 'post'
+    | 'share_post'
 ): Promise<void> {
   const configMap: Record<
     string,
@@ -310,6 +321,7 @@ async function checkMcpRateLimit(
     close_position: RATE_LIMIT_CONFIGS.CLOSE_POSITION,
     transfer: RATE_LIMIT_CONFIGS.DEFAULT, // Use default for transfers
     post: RATE_LIMIT_CONFIGS.CREATE_POST,
+    share_post: RATE_LIMIT_CONFIGS.SHARE_POST,
   };
   const config = configMap[operation];
   if (!config) return;
@@ -640,6 +652,7 @@ function buildPerpService() {
     settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: buildWalletPort(),
+    cache: createPerpTradesCachePort(),
     priceImpact: createPerpPriceImpactPort(),
     fees: {
       tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
@@ -1149,14 +1162,12 @@ export async function executeGetMarketPrices(
   if (!market) {
     throw new Error('Market not found');
   }
-  const totalShares = Number(market.yesShares) + Number(market.noShares);
-  const yesPrice =
-    totalShares > 0 ? Number(market.yesShares) / totalShares : 0.5;
-  const noPrice = totalShares > 0 ? Number(market.noShares) / totalShares : 0.5;
+  const yesShares = Number(market.yesShares);
+  const noShares = Number(market.noShares);
   return {
     marketId: market.id,
-    yesPrice,
-    noPrice,
+    yesPrice: PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes'),
+    noPrice: PredictionPricing.getCurrentPrice(yesShares, noShares, 'no'),
     timestamp: new Date().toISOString(),
   };
 }
@@ -1354,12 +1365,34 @@ export async function executeDeletePost(
 }
 
 /**
- * Execute like_post tool
+ * Execute like_post tool (same rules as the web like route: the post must
+ * exist, be published and not deleted; a fresh like notifies the author).
  */
 export async function executeLikePost(
   agent: AuthenticatedAgent,
   args: LikePostArgs
 ): Promise<LikePostResult> {
+  const now = new Date();
+  const [post] = await db
+    .select({
+      id: posts.id,
+      authorId: posts.authorId,
+      deletedAt: posts.deletedAt,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(eq(posts.id, args.postId))
+    .limit(1);
+
+  // Unknown or not-yet-published posts cannot be liked (and are never
+  // created from the ID).
+  if (!post || post.timestamp > now) {
+    throw new NotFoundError('Post', args.postId);
+  }
+  if (post.deletedAt) {
+    throw new BusinessLogicError('Cannot like deleted post', 'POST_DELETED');
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       postId: args.postId,
@@ -1378,6 +1411,30 @@ export async function executeLikePost(
       type: 'like',
     },
   });
+
+  // The like has committed. A notification outage must not tell the caller
+  // that the like failed and invite an unsuccessful retry.
+  if (post.authorId && post.authorId !== agent.userId) {
+    try {
+      await notifyReactionOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        'like'
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed like',
+        {
+          postId: args.postId,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return { success: true, liked: true };
 }
 
@@ -1400,21 +1457,20 @@ export async function executeUnlikePost(
 }
 
 /**
- * Execute share_post tool
+ * Execute share_post tool (canonical sharePost, same as the web share route)
  */
 export async function executeSharePost(
   agent: AuthenticatedAgent,
   args: SharePostArgs
 ): Promise<SharePostResult> {
-  const shareId = await generateSnowflakeId();
-  await db.share.create({
-    data: {
-      id: shareId,
-      userId: agent.userId,
-      postId: args.postId,
-    },
-  });
-  return { success: true, shareId };
+  await checkMcpRateLimit(agent.userId, 'share_post');
+  const result = await sharePost(agent.userId, args.postId, args.comment);
+  return {
+    success: true,
+    shareId: result.shareId,
+    repostId: result.repostId,
+    shareCount: result.shareCount,
+  };
 }
 
 /**
@@ -1508,12 +1564,35 @@ export async function executeDeleteComment(
 }
 
 /**
- * Execute like_comment tool
+ * Execute like_comment tool (same rules as the web comment like route: the
+ * comment must exist and not be soft-deleted; a fresh like notifies the
+ * comment author).
  */
 export async function executeLikeComment(
   agent: AuthenticatedAgent,
   args: LikeCommentArgs
 ): Promise<LikeCommentResult> {
+  const comment = await db.comment.findFirst({
+    where: { id: args.commentId },
+  });
+
+  // Unknown comments cannot be liked (and are never created from the ID:
+  // reactions.commentId has no foreign key, so an unchecked like would
+  // become an orphan row).
+  if (!comment) {
+    throw new NotFoundError('Comment', args.commentId);
+  }
+
+  // Soft-deleted (moderated) comments are hidden everywhere, so they cannot
+  // collect new likes — the web comment like route applies the same rule
+  // (COMMENT_DELETED), as does the A2A likeComment executor.
+  if (comment.deletedAt) {
+    throw new BusinessLogicError(
+      'Cannot like deleted comment',
+      'COMMENT_DELETED'
+    );
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       commentId: args.commentId,
@@ -1530,6 +1609,30 @@ export async function executeLikeComment(
         type: 'like',
       },
     });
+
+    // The like has committed. A notification outage must not tell the
+    // caller that the like failed and invite an unsuccessful retry.
+    if (comment.authorId && comment.authorId !== agent.userId) {
+      try {
+        await notifyReactionOnComment(
+          comment.authorId,
+          agent.userId,
+          args.commentId,
+          comment.postId,
+          'like'
+        );
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed comment like',
+          {
+            commentId: args.commentId,
+            userId: agent.userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'MCP'
+        );
+      }
+    }
   }
   return { success: true };
 }
@@ -1547,22 +1650,25 @@ export async function executeGetPostsByTag(
   if (!tag) {
     return { posts: [] };
   }
-  const postTagsList = await db.postTag.findMany({
-    where: { tagId: tag.id },
-    take: args.limit || 20,
-    skip: args.offset || 0,
-    orderBy: { createdAt: 'desc' },
-  });
-  const postIds = postTagsList.map((pt) => pt.postId);
-  const postsList = await db.post.findMany({
-    where: {
-      id: { in: postIds },
-      deletedAt: null,
-    },
-    orderBy: { timestamp: 'desc' },
-  });
+  // Select the page after publication eligibility, so newer hidden
+  // memberships cannot consume its slots. Tagged articles remain supported.
+  const now = new Date();
+  const rows = await db
+    .select({ post: posts })
+    .from(postTags)
+    .innerJoin(posts, eq(postTags.postId, posts.id))
+    .where(
+      and(
+        eq(postTags.tagId, tag.id),
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now)
+      )
+    )
+    .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
+    .offset(args.offset || 0)
+    .limit(args.limit || 20);
   return {
-    posts: postsList.map((p) => ({
+    posts: rows.map(({ post: p }) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
@@ -1991,7 +2097,7 @@ export async function executeGetChatMessages(
 ): Promise<GetChatMessagesResult> {
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
-    select: { id: true },
+    select: { id: true, isGroup: true },
   });
 
   if (!chat) {
@@ -2011,8 +2117,34 @@ export async function executeGetChatMessages(
     throw new Error('Unauthorized: You do not have access to this chat');
   }
 
+  // A group chat is a reading surface like any other feed: authors the
+  // viewer blocked or muted, and authors who blocked the viewer, must
+  // not appear in the viewer's message list — the same rule the web
+  // group chat history (GET /api/chats/[id]), the A2A
+  // messaging.get_chat_messages, and this file's search_agents handler
+  // apply. The filter lives in the query itself so limit/offset page
+  // over only the messages the viewer may see. DM history is out of
+  // scope: a block relationship already prevents creating a DM and
+  // sending in one.
+  let excludedSenderIds: string[] = [];
+  if (chat.isGroup) {
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(agent.userId),
+      getMutedUserIds(agent.userId),
+      getBlockedByUserIds(agent.userId),
+    ]);
+    excludedSenderIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+  }
+
   const messagesList = await db.message.findMany({
-    where: { chatId: args.chatId },
+    where: {
+      chatId: args.chatId,
+      ...(excludedSenderIds.length > 0
+        ? { senderId: { notIn: excludedSenderIds } }
+        : {}),
+    },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 50,
     skip: args.offset || 0,
@@ -2480,17 +2612,52 @@ export async function executeResolveMarket(
 
   const winningSide = args.resolution ? 'yes' : 'no';
 
+  // Mirror the admin web route: settlement, question, and timeframed
+  // updates commit together. The trending widget and the new-markets feed
+  // list a market while its question is 'active', so resolving only the
+  // market row would leave a settled market displayed as live there.
+  const resolvedAt = new Date();
   await withPredictionSettlement(
     args.marketId,
     { system: 'mcp_admin_resolve' },
-    (service) =>
-      service.resolve({
+    async (service, tx: import('@feed/db').Transaction) => {
+      // The outer check can become stale while another resolver holds the
+      // settlement lock. Preserve rejection before changing lifecycle rows.
+      const [current] = await tx
+        .select({ resolved: markets.resolved })
+        .from(markets)
+        .where(eq(markets.id, args.marketId))
+        .limit(1);
+      if (!current) throw new Error('Market not found');
+      if (current.resolved) throw new Error('Market already resolved');
+      await service.resolve({
         marketId: args.marketId,
         winningSide,
+        resolvedAt,
         resolutionDescription:
           args.reason ||
           `Resolved by admin as ${args.resolution ? 'YES' : 'NO'}`,
-      }),
+      });
+      await tx
+        .update(questions)
+        .set({
+          status: 'resolved',
+          resolvedOutcome: args.resolution,
+          resolutionReviewedAt: resolvedAt,
+          resolutionReviewedBy: agent.userId,
+          updatedAt: resolvedAt,
+        })
+        .where(eq(questions.id, args.marketId));
+      await tx
+        .update(timeframedMarkets)
+        .set({
+          isActive: false,
+          isResolved: true,
+          resolvedAt,
+          updatedAt: resolvedAt,
+        })
+        .where(eq(timeframedMarkets.questionId, args.marketId));
+    },
     predictionServiceOptions(args.marketId)
   );
 

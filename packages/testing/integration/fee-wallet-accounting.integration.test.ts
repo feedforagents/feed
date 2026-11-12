@@ -159,35 +159,34 @@ describe('FeeService accounting', () => {
     expect(await getFundBalance()).toBeCloseTo(0.3, 6);
   });
 
-  it('credits the referrer atomically and records a consistent ledger', async () => {
+  it('does not credit a referrer when a referred user pays a trading fee', async () => {
     const referrer = await createTestUser({ virtualBalance: '250.50' });
     const trader = await createTestUser({ referredBy: referrer });
 
     const result = await FeeService.processTradingFee(trader, 'pred_buy', 1000);
 
-    expect(result.referrerId).toBe(referrer);
-    expect(result.referrerPaid + result.platformReceived).toBe(
-      result.feeCharged
-    );
+    expect(result.feeCharged).toBe(1);
+    expect(result.referrerPaid).toBe(0);
+    expect(result.referrerId).toBeNull();
+    expect(result.platformReceived).toBe(1);
 
     const referrerRow = await getUser(referrer);
-    expect(Number(referrerRow.virtualBalance)).toBe(251);
-    expect(Number(referrerRow.totalFeesEarned)).toBe(0.5);
+    expect(Number(referrerRow.virtualBalance)).toBe(250.5);
+    expect(Number(referrerRow.totalFeesEarned ?? 0)).toBe(0);
 
-    const [ledger] = await db
+    const ledger = await db
       .select()
       .from(balanceTransactions)
       .where(eq(balanceTransactions.userId, referrer));
-    expect(Number(ledger?.balanceBefore)).toBe(250.5);
-    expect(Number(ledger?.balanceAfter)).toBe(251);
+    expect(ledger).toHaveLength(0);
 
     const [fee] = await db
       .select()
       .from(tradingFees)
       .where(eq(tradingFees.userId, trader));
-    expect(Number(fee?.platformFee) + Number(fee?.referrerFee)).toBe(
-      Number(fee?.feeAmount)
-    );
+    expect(Number(fee?.platformFee)).toBe(1);
+    expect(Number(fee?.referrerFee)).toBe(0);
+    expect(fee?.referrerId).toBeNull();
   });
 
   it('rolls back the fund credit together with the caller transaction', async () => {

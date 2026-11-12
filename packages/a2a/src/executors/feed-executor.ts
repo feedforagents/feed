@@ -27,11 +27,28 @@ import {
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import type { WalletPort } from '@feed/core/markets/shared';
-import { asUser, db, getRawDrizzle, sql } from '@feed/db';
+import {
+  and,
+  asUser,
+  db,
+  dbWrite,
+  desc,
+  eq,
+  getBlockedByUserIds,
+  getBlockedUserIds,
+  getMutedUserIds,
+  getRawDrizzle,
+  isNull,
+  lte,
+  posts,
+  postTags,
+  sql,
+} from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   type PredictionSettlementOptions,
   StaticDataRegistry,
@@ -1559,6 +1576,7 @@ export class FeedAgentExecutor implements AgentExecutor {
       settlement: createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: this.buildWalletPort(),
+      cache: createPerpTradesCachePort(),
       priceImpact: createPerpPriceImpactPort(),
       broadcast: {
         emit: async () => {
@@ -1566,10 +1584,10 @@ export class FeedAgentExecutor implements AgentExecutor {
         },
       },
       fees: {
-        tradingFeeRate: 0.01,
-        platformShare: 0.5,
-        referrerShare: 0.1,
-        minFeeAmount: 0,
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
     });
   }
@@ -1888,12 +1906,18 @@ export class FeedAgentExecutor implements AgentExecutor {
   ): Promise<ExecutorOperationResult> {
     const userId = requireContextAccountId({}, context);
     const limit = this.parsePositiveInt(params.limit, 20, 50);
+    const offset = this.parseNonNegativeInt(params.offset, 0);
 
-    // Get chats where user is a participant
+    // Get chats where user is a participant. The order carries chatId as a
+    // tiebreaker so it is total: memberships created in one batch share a
+    // joinedAt, and offset paging over ties alone could repeat or skip chats
+    // between pages. offset continues past the first `limit` rows — without
+    // it, chats beyond the window were unreachable.
     const chatParticipants = await db.chatParticipant.findMany({
       where: { userId, isActive: true },
       take: limit,
-      orderBy: { joinedAt: 'desc' },
+      skip: offset,
+      orderBy: [{ joinedAt: 'desc' }, { chatId: 'desc' }],
       select: {
         chatId: true,
         updatedAt: true,
@@ -1919,12 +1943,16 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (chats.length !== chatIds.length) {
       throw new Error('Chat membership references a missing chat');
     }
+    // The id lookup above does not preserve the participant query's order;
+    // restore it so the page is presented newest-join first as sorted.
+    const chatsById = new Map(chats.map((c) => [c.id, c]));
+    const orderedChats = chatIds.map((id) => chatsById.get(id)!);
     const members = await db.chatParticipant.findMany({
       where: { chatId: { in: chatIds }, isActive: true },
       select: { chatId: true, userId: true },
     });
     return {
-      chats: chats.map((c) => ({
+      chats: orderedChats.map((c) => ({
         id: c.id,
         name: c.name,
         isGroup: c.isGroup,
@@ -1958,8 +1986,43 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('Chat not found or access denied');
     }
 
+    const chat = await db.chat.findUnique({
+      where: { id: chatId },
+      select: { isGroup: true },
+    });
+
+    if (!chat) {
+      throw new Error('Chat not found or access denied');
+    }
+
+    // A group chat is a reading surface like any other feed: authors the
+    // viewer blocked or muted, and authors who blocked the viewer, must
+    // not appear in the viewer's message list — the same rule the web
+    // group chat history (GET /api/chats/[id]) and this executor's
+    // get_notifications apply at read time, so a block or mute placed
+    // later also hides earlier messages. The filter lives in the query
+    // itself so limit/offset page over only the messages the viewer may
+    // see. DM history is out of scope: a block relationship already
+    // prevents creating a DM and sending in one.
+    let excludedSenderIds: string[] = [];
+    if (chat.isGroup) {
+      const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+        getBlockedUserIds(userId),
+        getMutedUserIds(userId),
+        getBlockedByUserIds(userId),
+      ]);
+      excludedSenderIds = [
+        ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+      ];
+    }
+
     const messages = await db.message.findMany({
-      where: { chatId },
+      where: {
+        chatId,
+        ...(excludedSenderIds.length > 0
+          ? { senderId: { notIn: excludedSenderIds } }
+          : {}),
+      },
       orderBy: { createdAt: 'desc' },
       take: limit,
       skip: offset,
@@ -2053,11 +2116,11 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     if (!name) throw new Error('name is required');
 
-    // Only add members that exist and are not banned, mirroring the web
-    // group route (POST /api/groups). Unknown or banned IDs are skipped
-    // instead of becoming ghost members with chat access.
+    // Check eligibility on primary before writing memberships. A replica may
+    // still report a banned user as eligible or omit a newly created user.
+    // This does not change the existing direct-add policy of this operation.
     const otherMemberIds = memberIds.filter((id) => id !== userId);
-    const validMembers = await db.user.findMany({
+    const validMembers = await dbWrite.user.findMany({
       where: { id: { in: otherMemberIds }, isBanned: false },
       select: { id: true },
     });
@@ -2218,8 +2281,29 @@ export class FeedAgentExecutor implements AgentExecutor {
     const userId = requireContextAccountId({}, context);
     const limit = this.parsePositiveInt(params.limit, 20, 100);
 
+    // Match the web notification list (GET /api/notifications): actors the
+    // user has blocked or muted, and actors who have blocked the user, are
+    // excluded at read time. The filter has to live at read time — muting
+    // never stops notification creation, and a block placed later must hide
+    // notifications created before it. System notifications have a null
+    // actor and are always kept.
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(userId),
+      getMutedUserIds(userId),
+      getBlockedByUserIds(userId),
+    ]);
+    const excludedActorIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+    const moderationFilter =
+      excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {};
+
     const notifications = await db.notification.findMany({
-      where: { userId },
+      where: { userId, ...moderationFilter },
       orderBy: { createdAt: 'desc' },
       take: limit,
       select: {
@@ -2233,7 +2317,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     });
 
     const unreadCount = await db.notification.count({
-      where: { userId, read: false },
+      where: { userId, read: false, ...moderationFilter },
     });
     return {
       unreadCount,
@@ -2355,6 +2439,12 @@ export class FeedAgentExecutor implements AgentExecutor {
     const limit = this.parsePositiveInt(params.limit, 20, 50);
     const users = await db.user.findMany({
       where: {
+        // Match the web people search (GET /api/users/search): banned
+        // accounts are never returned, and test accounts are not real
+        // users — every user-facing surface hides them (feeds strip
+        // their posts, a test author's post list is empty).
+        isBanned: false,
+        isTest: false,
         OR: [
           { username: { contains: query, mode: 'insensitive' } },
           { displayName: { contains: query, mode: 'insensitive' } },
@@ -2385,6 +2475,10 @@ export class FeedAgentExecutor implements AgentExecutor {
   private async getLeaderboard(params: Record<string, JsonValue>) {
     const limit = this.parsePositiveInt(params.limit, 10, 50);
     const users = await db.user.findMany({
+      // Match the web points leaderboard (ReputationService
+      // .getWalletLeaderboard): human wallets only — NPC actor accounts
+      // and agent accounts are not ranked on the users-table board.
+      where: { isActor: false, isAgent: false },
       take: limit,
       orderBy: { reputationPoints: 'desc' },
       select: {
@@ -2467,32 +2561,35 @@ export class FeedAgentExecutor implements AgentExecutor {
       return { posts: [] };
     }
 
-    // Find posts with this tag via PostTag join table
-    const postTagEntries = await db.postTag.findMany({
-      where: { tagId: tag.id },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-    });
-
-    const postIds = postTagEntries.map((pt) => pt.postId);
-
-    if (postIds.length === 0) {
-      return { posts: [] };
-    }
-
-    // Fetch the actual posts
-    const posts = await db.post.findMany({
-      where: {
-        id: { in: postIds },
-        deletedAt: null,
-        type: 'post',
-      },
-      orderBy: { timestamp: 'desc' },
-    });
+    // Join memberships to posts so eligibility is applied BEFORE
+    // limit/offset: paginating the memberships first returns empty pages
+    // when the newest memberships point at future or deleted posts.
+    // Same joined pattern as getPostsByTag in
+    // packages/engine/src/services/tag-service.ts. Only posts up to the
+    // current time: future-dated posts are scheduled and must not be
+    // exposed early (the web tag surface applies the same timestamp
+    // bound). Ordering keeps the previous response order (newest post
+    // first, then membership time and a unique post ID to keep tied
+    // pages stable).
+    const now = new Date();
+    const rows = await getRawDrizzle()
+      .select({ post: posts })
+      .from(postTags)
+      .innerJoin(posts, eq(postTags.postId, posts.id))
+      .where(
+        and(
+          eq(postTags.tagId, tag.id),
+          isNull(posts.deletedAt),
+          lte(posts.timestamp, now),
+          eq(posts.type, 'post')
+        )
+      )
+      .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
+      .offset(offset)
+      .limit(limit);
 
     return {
-      posts: posts.map((p) => ({
+      posts: rows.map(({ post: p }) => ({
         id: p.id,
         content: p.content,
         authorId: p.authorId,
@@ -2516,6 +2613,19 @@ export class FeedAgentExecutor implements AgentExecutor {
       return fallback;
     }
     return Math.min(parsed, max);
+  }
+
+  private parseNonNegativeInt(value: unknown, fallback: number): number {
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string'
+          ? Number.parseInt(value, 10)
+          : Number.NaN;
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return fallback;
+    }
+    return Math.floor(parsed);
   }
 
   // Portfolio operations
@@ -2673,6 +2783,15 @@ export class FeedAgentExecutor implements AgentExecutor {
         throw new Error('Current perp price must be positive');
       if (position.side !== 'long' && position.side !== 'short')
         throw new Error(`Position ${position.id} has invalid side`);
+      // Accrued funding settles only at close (realizedPnL = pnl -
+      // fundingPaid in PerpMarketService), so the stored price-only
+      // unrealizedPnL overstates what the holder will realize by
+      // fundingPaid. Net it here, as calculatePerpPositionMarketValue does
+      // for the engine portfolio paths; a missing value (legacy row) is zero.
+      const fundingPaid =
+        position.fundingPaid == null
+          ? 0
+          : requiredFinancialValue(position.fundingPaid, 'fundingPaid');
       return {
         id: position.id,
         ticker: position.ticker,
@@ -2681,10 +2800,9 @@ export class FeedAgentExecutor implements AgentExecutor {
         entryPrice: requiredFinancialValue(position.entryPrice, 'entryPrice'),
         currentPrice,
         leverage: requiredFinancialValue(position.leverage, 'leverage'),
-        unrealizedPnL: requiredFinancialValue(
-          position.unrealizedPnL,
-          'unrealizedPnL'
-        ),
+        unrealizedPnL:
+          requiredFinancialValue(position.unrealizedPnL, 'unrealizedPnL') -
+          fundingPaid,
       };
     });
 
@@ -3585,17 +3703,36 @@ export class FeedAgentExecutor implements AgentExecutor {
       select: { targetUserId: true },
     });
 
-    const favoritedUserIds = favorites.map((f) => f.targetUserId);
+    // Favorites never bypass the viewer's block/mute policy: drop
+    // favorited authors the viewer blocked or muted, and authors who
+    // blocked the viewer (the web favorites feed's rule, via the shared
+    // @feed/db moderation sets).
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(userId),
+      getMutedUserIds(userId),
+      getBlockedByUserIds(userId),
+    ]);
+    const excludedAuthorIds = new Set([
+      ...blockedIds,
+      ...mutedIds,
+      ...blockedByIds,
+    ]);
+    const favoritedUserIds = favorites
+      .map((f) => f.targetUserId)
+      .filter((id) => !excludedAuthorIds.has(id));
 
     if (favoritedUserIds.length === 0) {
       return { posts: [] };
     }
 
-    // Get posts from favorited users
+    // Get posts from favorited users. Only posts up to the current time:
+    // future-dated posts are scheduled and must not be exposed early
+    // (the web favorites feed applies the same timestamp bound).
     const posts = await db.post.findMany({
       where: {
         authorId: { in: favoritedUserIds },
         deletedAt: null,
+        timestamp: { lte: new Date() },
         type: 'post',
       },
       take: limit,

@@ -1,4 +1,5 @@
 import { buildCapitalBaseContributionSql, db, sql } from '@feed/db';
+import { FEE_CONFIG } from '@feed/engine/config/fees';
 import { toISO } from '@feed/shared';
 
 export const TRADING_RETURN_CAPITAL_FLOOR = 1000;
@@ -24,6 +25,8 @@ export interface WalletTradingPerformanceRow {
   reputationPoints: string;
   balance: string;
   lifetimePnL: string;
+  unrealizedPnL: string;
+  netProfit: string;
   capitalBase: string;
   effectiveCapitalBase: string;
   tradingReturn: string;
@@ -64,12 +67,105 @@ export class TradingPerformanceService {
     `);
   }
 
+  /**
+   * Unrealized PnL per user, mirroring the canonical totalPnL definition of
+   * the engine's calculatePortfolioPnL
+   * (packages/engine/src/services/portfolio-pnl.ts): the stored unrealized
+   * PnL of open perp positions net of accrued funding, plus the mark-to-market PnL of
+   * prediction positions in unresolved markets. That function reads
+   * positions keyed by user id or privyId, so both CTEs aggregate position
+   * rows onto the owning user's id.
+   *
+   * The prediction leg marks a position at its CPMM probability price, but
+   * subtracts the remaining GROSS cash paid for it — not the net average
+   * entry cost. Position.avgPrice is net of the entry fee
+   * (calculateBuyWithFees strips the fee before pricing shares), while the
+   * fee already left the wallet in cash and is not in lifetimePnL until the
+   * position closes. Subtracting net avgPrice would therefore count the
+   * already-paid entry fee as profit. Use the persisted cashCostBasis so
+   * repeated partial exits retain the settlement's cent-rounded remainder.
+   * Only historical rows without that value use the net-cost gross-up
+   * estimate, matching the settlement service's legacy fallback.
+   *
+   * Keep this expression aligned with calculatePortfolioPnL and the
+   * settlement service's shared cash-cost-basis calculation.
+   */
+  private static perpUnrealizedCte() {
+    return sql.raw(`
+      SELECT
+        usr."id" AS "userId",
+        COALESCE(SUM(pp."unrealizedPnL"::numeric - COALESCE(pp."fundingPaid"::numeric, 0)), 0)::numeric AS "perpUnrealizedPnL"
+      FROM "PerpPosition" pp
+      JOIN "User" usr ON pp."userId" = usr."id" OR pp."userId" = usr."privyId"
+      WHERE pp."closedAt" IS NULL
+      GROUP BY usr."id"
+    `);
+  }
+
+  private static predictionUnrealizedCte() {
+    return sql.raw(`
+      SELECT
+        usr."id" AS "userId",
+        COALESCE(SUM(
+          p."shares" * (
+            CASE
+              WHEN (m."yesShares" + m."noShares") > 0 THEN
+                CASE WHEN p."side"
+                  THEN m."noShares" / (m."yesShares" + m."noShares")
+                  ELSE m."yesShares" / (m."yesShares" + m."noShares")
+                END
+              ELSE p."avgPrice"
+            END
+          )
+          - COALESCE(
+            p."cashCostBasis",
+            ROUND(
+              p."shares" * p."avgPrice"::numeric / (1 - ${FEE_CONFIG.TRADING_FEE_RATE}),
+              2
+            )
+          )
+        ), 0)::numeric AS "predictionUnrealizedPnL"
+      FROM "Position" p
+      JOIN "Market" m ON m."id" = p."marketId"
+      JOIN "User" usr ON p."userId" = usr."id" OR p."userId" = usr."privyId"
+      WHERE m."resolved" = false
+      GROUP BY usr."id"
+    `);
+  }
+
+  /**
+   * The D-15b rank key: net profit = lifetime (realized) PnL + unrealized
+   * PnL — cash-and-position equity less approved contributions. Purchases
+   * and the starting grant never enter this expression — they write balance
+   * transactions and the cash balance, neither of which the metric reads —
+   * so buying points cannot move a rank. The prediction leg subtracts the
+   * recorded remaining gross cash basis (see predictionUnrealizedCte), so the entry
+   * fee already paid in cash is not counted as profit. The query aliases
+   * pu/du must match the joins in each query that embeds this fragment.
+   */
+  private static netProfitExpression() {
+    return sql.raw(`(
+      u."lifetimePnL"::numeric
+      + COALESCE(pu."perpUnrealizedPnL", 0)::numeric
+      + COALESCE(du."predictionUnrealizedPnL", 0)::numeric
+    )`);
+  }
+
+  private static unrealizedExpression() {
+    return sql.raw(`(
+      COALESCE(pu."perpUnrealizedPnL", 0)::numeric
+      + COALESCE(du."predictionUnrealizedPnL", 0)::numeric
+    )`);
+  }
+
   static async getWalletLeaderboardRows(
     limit: number,
     offset: number
   ): Promise<WalletTradingPerformanceRow[]> {
     const result = await db.execute(sql`
-      WITH wallet_capital AS (${this.walletCapitalCte()})
+      WITH wallet_capital AS (${this.walletCapitalCte()}),
+      perp_unrealized AS (${this.perpUnrealizedCte()}),
+      prediction_unrealized AS (${this.predictionUnrealizedCte()})
       SELECT
         u."id",
         u."username",
@@ -78,6 +174,8 @@ export class TradingPerformanceService {
         u."reputationPoints"::numeric AS "reputationPoints",
         u."virtualBalance"::numeric AS "balance",
         u."lifetimePnL"::numeric AS "lifetimePnL",
+        ${this.unrealizedExpression()} AS "unrealizedPnL",
+        ${this.netProfitExpression()} AS "netProfit",
         COALESCE(wc."capitalBase", 0)::numeric AS "capitalBase",
         GREATEST(
           COALESCE(wc."capitalBase", 0)::numeric,
@@ -96,8 +194,10 @@ export class TradingPerformanceService {
         u."managedBy"
       FROM "User" u
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
+      LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
+      LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
       WHERE u."isActor" = false AND u."isAgent" = false
-      ORDER BY "tradingReturn" DESC, u."createdAt" ASC, u."id" ASC
+      ORDER BY "netProfit" DESC, u."createdAt" ASC, u."id" ASC
       LIMIT ${limit} OFFSET ${offset}
     `);
 
@@ -108,7 +208,9 @@ export class TradingPerformanceService {
     userId: string
   ): Promise<WalletTradingPerformanceRow | null> {
     const result = await db.execute(sql`
-      WITH wallet_capital AS (${this.walletCapitalCte()})
+      WITH wallet_capital AS (${this.walletCapitalCte()}),
+      perp_unrealized AS (${this.perpUnrealizedCte()}),
+      prediction_unrealized AS (${this.predictionUnrealizedCte()})
       SELECT
         u."id",
         u."username",
@@ -117,6 +219,8 @@ export class TradingPerformanceService {
         u."reputationPoints"::numeric AS "reputationPoints",
         u."virtualBalance"::numeric AS "balance",
         u."lifetimePnL"::numeric AS "lifetimePnL",
+        ${this.unrealizedExpression()} AS "unrealizedPnL",
+        ${this.netProfitExpression()} AS "netProfit",
         COALESCE(wc."capitalBase", 0)::numeric AS "capitalBase",
         GREATEST(
           COALESCE(wc."capitalBase", 0)::numeric,
@@ -135,6 +239,8 @@ export class TradingPerformanceService {
         u."managedBy"
       FROM "User" u
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
+      LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
+      LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
       WHERE u."isActor" = false AND u."isAgent" = false AND u."id" = ${userId}
       LIMIT 1
     `);
@@ -146,32 +252,28 @@ export class TradingPerformanceService {
   static async countWalletsAbove(entry: {
     id: string;
     createdAt: Date | string;
-    tradingReturn: string;
+    netProfit: string;
   }): Promise<number> {
     const createdAtISO = toISO(entry.createdAt);
     const result = await db.execute(sql`
-      WITH wallet_capital AS (${this.walletCapitalCte()}),
+      WITH perp_unrealized AS (${this.perpUnrealizedCte()}),
+      prediction_unrealized AS (${this.predictionUnrealizedCte()}),
       wallet_rows AS (
         SELECT
           u."id",
           u."createdAt",
-          (
-            u."lifetimePnL"::numeric /
-            GREATEST(
-              COALESCE(wc."capitalBase", 0)::numeric,
-              ${TRADING_RETURN_CAPITAL_FLOOR}
-            )
-          )::numeric AS "tradingReturn"
+          ${this.netProfitExpression()} AS "netProfit"
         FROM "User" u
-        LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
+        LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
+        LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
         WHERE u."isActor" = false AND u."isAgent" = false
       )
       SELECT COUNT(*)::int AS "count"
       FROM wallet_rows wr
       WHERE
-        wr."tradingReturn" > ${entry.tradingReturn}
+        wr."netProfit" > ${entry.netProfit}
         OR (
-          wr."tradingReturn" = ${entry.tradingReturn}
+          wr."netProfit" = ${entry.netProfit}
           AND (
             wr."createdAt" < ${createdAtISO}
             OR (
