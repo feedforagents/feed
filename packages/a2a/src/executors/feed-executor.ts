@@ -26,7 +26,11 @@ import {
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
-import type { WalletPort } from '@feed/core/markets/shared';
+import type {
+  FeeProcessor,
+  TradingFeeOutboxPort,
+  WalletPort,
+} from '@feed/core/markets/shared';
 import {
   and,
   asUser,
@@ -42,6 +46,7 @@ import {
   posts,
   postTags,
   sql,
+  tradingFeeOutbox,
 } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
@@ -49,6 +54,7 @@ import {
   createPerpSettlement,
   createPerpTradesCachePort,
   FEE_CONFIG,
+  FeeService,
   type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
@@ -318,6 +324,68 @@ function requireContextAccountId(
 }
 
 /** Matches CreatePostSchema / ContentValidator post limit. */
+/**
+ * Fee settlement wiring shared by the market services built below.
+ * Mirrors the adapter every other trading surface uses (web trade
+ * routes, MCP handlers, agent executors): the market services charge
+ * the trading fee in their trade math, and this processor is what
+ * records the fee, pays the referrer share, and updates the trader's
+ * lifetime fee total via FeeService. The tx-aware form matches MCP:
+ * inside withPredictionSettlement the processor runs in the same
+ * transaction as the trade.
+ */
+function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
+  return {
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
+      FeeService.processTradingFee(
+        userId,
+        type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
+        amount,
+        positionId,
+        relatedId,
+        tx,
+        operationId
+      ),
+  };
+}
+
+/**
+ * Durable queue for perp trading fees whose inline processing fails after
+ * retries. Mirrors the web adapter
+ * (apps/web/src/lib/services/trading-fee-outbox.ts): the cron drain claims
+ * each row (DELETE … RETURNING) in the same transaction that runs
+ * FeeService.processTradingFee, so a fee intent is never dropped silently
+ * and never charged twice. Wired into the A2A perp service so the
+ * post-commit recovery in PerpMarketService.openPosition actually exists
+ * on this surface.
+ */
+function buildTradingFeeOutbox(): TradingFeeOutboxPort {
+  return {
+    enqueue: async (params) => {
+      const id = await generateSnowflakeId();
+      await db.insert(tradingFeeOutbox).values({
+        id,
+        userId: params.userId,
+        tradeType: params.type,
+        tradeAmount: String(params.amount),
+        tradeId: params.positionId,
+        marketId: params.relatedId,
+        // Carry the leg's key so the drain replays under it; see the
+        // web adapter (apps/web/src/lib/services/trading-fee-outbox.ts).
+        idempotencyKey: params.operationId ?? null,
+        lastError: params.lastError ?? null,
+      });
+    },
+  };
+}
+
 const MAX_POST_CONTENT_LENGTH = 5000;
 /** Matches CreateCommentSchema (shared validation). */
 const MAX_COMMENT_LENGTH = 2000;
@@ -1567,6 +1635,7 @@ export class FeedAgentExecutor implements AgentExecutor {
         referrerShare: FEE_CONFIG.REFERRER_SHARE,
         minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
+      feeProcessor: (tx) => buildFeeProcessor(tx),
     };
   }
 
@@ -1588,6 +1657,8 @@ export class FeedAgentExecutor implements AgentExecutor {
         referrerShare: FEE_CONFIG.REFERRER_SHARE,
         minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
+      feeProcessor: buildFeeProcessor(),
+      tradingFeeOutbox: buildTradingFeeOutbox(),
     });
   }
 
