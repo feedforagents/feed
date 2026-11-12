@@ -349,16 +349,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     // Map chatId -> chat details
     const chatDetailsMap = new Map(filteredGroupChats.map((c) => [c.id, c]));
 
-    // The group chat history applies the viewer's moderation rule — authors
-    // the viewer blocked or muted, and authors who blocked the viewer,
-    // never appear in the message list (see the group branch of
-    // GET /api/chats/[id]). The preview below is built from the same
-    // messages, so it applies the same rule at the query level: the preview
-    // is the newest message the viewer may see, not the newest message
-    // overall. Loaded through this request's own handle so failures
-    // propagate instead of falling back to an unfiltered preview. DM
-    // previews are out of scope here, matching the history route: a block
-    // relationship already prevents creating a DM and sending in one.
+    // Group-list previews omit authors the viewer blocked or muted and
+    // authors who blocked the viewer. Apply this before choosing the newest
+    // preview through this request's handle so failures do not fall back to
+    // an unfiltered message. History-route parity and DM previews are outside
+    // this change; the existing DM query remains unchanged.
     const [blockedRows, mutedRows, blockedByRows] = await Promise.all([
       dbClient
         .select({ id: userBlocks.blockedId })
@@ -399,11 +394,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       groupChatMessages.map(({ chatId, messages }) => [chatId, messages])
     );
 
-    // Get DM chats the user participates in
+    // Agent leave actions retain inactive participant rows. Only active
+    // viewer memberships should contribute DMs to this list.
     const dmParticipantsList = await dbClient
       .select()
       .from(chatParticipants)
-      .where(eq(chatParticipants.userId, user.userId));
+      .where(
+        and(
+          eq(chatParticipants.userId, user.userId),
+          eq(chatParticipants.isActive, true)
+        )
+      );
 
     logger.info(
       'Found DM participants',
@@ -497,7 +498,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           (p) => p.userId !== user.userId
         );
         let chatName = chat.name || 'Direct Message';
-        let otherUserDetails = null;
+        let otherUserDetails: Pick<
+          typeof users.$inferSelect,
+          | 'id'
+          | 'displayName'
+          | 'username'
+          | 'profileImageUrl'
+          | 'isAgent'
+          | 'managedBy'
+        > | null = null;
 
         if (otherParticipant) {
           // Try to get user details (real users only, not actors)

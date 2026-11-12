@@ -61,7 +61,8 @@ export function extractDayFromPost(post: {
   return 0;
 }
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const MS_PER_HOUR = 60 * 60 * 1000;
+const MS_PER_DAY = 24 * MS_PER_HOUR;
 
 /**
  * Compute a game-relative day number (1-indexed) from a game start time.
@@ -94,6 +95,24 @@ export function getGameDayNumber(startedAt: Date, timestamp: Date): number {
   }
 
   return result;
+}
+
+/**
+ * Hour within the current game day, 0-23.
+ *
+ * Uses the same epoch as `getGameDayNumber`: hour 0 is `startedAt`, and each
+ * later game day starts 24 hours after that, not at local midnight. A
+ * timestamp before `startedAt` is hour 0 of the clamped day 1.
+ */
+export function getGameHourOfDay(startedAt: Date, timestamp: Date): number {
+  const elapsed = timestamp.getTime() - startedAt.getTime();
+  if (!Number.isFinite(elapsed)) {
+    throw new RangeError(
+      'getGameHourOfDay: startedAt and timestamp must be valid dates'
+    );
+  }
+  if (elapsed < 0) return 0;
+  return Math.floor(elapsed / MS_PER_HOUR) % 24;
 }
 
 /**

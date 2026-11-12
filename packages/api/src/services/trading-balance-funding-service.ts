@@ -70,6 +70,18 @@ const USER_NOT_FOUND: TradingBalanceFundingResult = {
   error: 'User not found',
 };
 
+/**
+ * Convert a USD amount to balance units (100 per dollar).
+ *
+ * Stripe amounts arrive as whole cents divided by 100, which are not exact in
+ * binary floating point (for example 1.13 * 100 === 112.99999999999999).
+ * Flooring that product would credit one unit less than the cents charged, so
+ * round to the nearest cent, matching how checkout computes the charge.
+ */
+export function usdToBalanceUnits(amountUSD: number): number {
+  return Math.round(amountUSD * 100);
+}
+
 export class TradingBalanceFundingService {
   /**
    * Economic baseline for portfolio PnL uses:
@@ -87,9 +99,16 @@ export class TradingBalanceFundingService {
     ]);
   }
 
+  /**
+   * The user's complete funding history, newest first.
+   *
+   * The settings Billing tab renders this array as the whole history,
+   * with no continuation. Its count badge and "Show all N transactions"
+   * button use the array length, so a cap silently hides older funding
+   * transactions while presenting the returned window as complete.
+   */
   static async getFundingHistory(
-    userId: string,
-    limit = 100
+    userId: string
   ): Promise<TradingBalanceFundingHistoryItem[]> {
     const transactions = await db
       .select({
@@ -109,8 +128,7 @@ export class TradingBalanceFundingService {
           inArray(balanceTransactions.type, [...FUNDING_TRANSACTION_TYPES])
         )
       )
-      .orderBy(desc(balanceTransactions.createdAt))
-      .limit(limit);
+      .orderBy(desc(balanceTransactions.createdAt));
 
     return transactions.map((transaction) => ({
       id: transaction.id,
@@ -265,7 +283,7 @@ export class TradingBalanceFundingService {
     paymentTxHash?: string,
     paymentProvider: 'crypto' | 'stripe' = 'crypto'
   ): Promise<TradingBalanceFundingResult> {
-    const balanceDelta = Math.floor(amountUSD * 100);
+    const balanceDelta = usdToBalanceUnits(amountUSD);
     const transactionType = `${paymentProvider}_purchase`;
     const relatedId = paymentTxHash || paymentRequestId;
 
@@ -383,7 +401,7 @@ export class TradingBalanceFundingService {
     amountUSD: number,
     stripeEventId: string
   ): Promise<TradingBalanceFundingResult> {
-    const requestedDeduction = Math.floor(amountUSD * 100);
+    const requestedDeduction = usdToBalanceUnits(amountUSD);
     const transactionType =
       reason === 'refund' ? 'stripe_refund' : 'stripe_dispute';
 
@@ -488,7 +506,7 @@ export class TradingBalanceFundingService {
     amountUSD: number,
     stripeEventId: string
   ): Promise<TradingBalanceFundingResult> {
-    const balanceDelta = Math.floor(amountUSD * 100);
+    const balanceDelta = usdToBalanceUnits(amountUSD);
 
     const result = await db.transaction(
       async (tx): Promise<TradingBalanceFundingResult> => {

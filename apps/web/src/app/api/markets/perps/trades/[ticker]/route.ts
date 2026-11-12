@@ -186,9 +186,13 @@ export const GET = withErrorHandling(
     };
 
     // Get perp positions for this ticker (try both the ticker and organizationId)
+    // Total order (openedAt, id): with a timestamp-only order, rows tied on
+    // the same millisecond are selected inconsistently between pages whose
+    // window sizes differ, so a tied trade can repeat on two pages or fall
+    // out of every page.
     const perpPositions = await db.perpPosition.findMany({
       where: positionWhere,
-      orderBy: { openedAt: 'desc' },
+      orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
       take: mergedWindowSize,
     });
 
@@ -222,7 +226,7 @@ export const GET = withErrorHandling(
     };
     const npcTrades = await db.npcTrade.findMany({
       where: npcWhere,
-      orderBy: { executedAt: 'desc' },
+      orderBy: [{ executedAt: 'desc' }, { id: 'desc' }],
       take: mergedWindowSize,
     });
     const totalNpcTrades = await db.npcTrade.count({ where: npcWhere });
@@ -303,7 +307,7 @@ export const GET = withErrorHandling(
           WHERE pp.ticker = ${perpTicker}
             OR pp."organizationId" = ${organization.id}
         )
-      ORDER BY bt."createdAt" DESC
+      ORDER BY bt."createdAt" DESC, bt."id" DESC
       LIMIT ${mergedWindowSize}
     `;
     const totalBalanceTransactionRows = await db.$queryRaw<{
@@ -382,9 +386,14 @@ export const GET = withErrorHandling(
         timestamp: new Date(tx.createdAt),
       })),
     ]
-      // Sort by timestamp descending, then apply pagination to the merged
-      // feed so each trade appears on exactly one page.
-      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+      // Sort by timestamp descending with the same id tiebreak the source
+      // queries use, then apply pagination to the merged feed so each trade
+      // appears on exactly one page.
+      .sort(
+        (a, b) =>
+          b.timestamp.getTime() - a.timestamp.getTime() ||
+          (a.id < b.id ? 1 : -1)
+      )
       .slice(queryParams.offset, queryParams.offset + queryParams.limit);
 
     const total = totalPositions + totalNpcTrades + totalBalanceTransactions;

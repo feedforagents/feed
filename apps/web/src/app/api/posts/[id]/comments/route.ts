@@ -111,6 +111,7 @@ import {
   PostIdParamSchema,
 } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 
 /**
  * Build threaded comment structure recursively
@@ -234,11 +235,29 @@ export const GET = withErrorHandling(
 
     // Get all visible comments for the post (including nested replies).
     // Soft-deleted (moderated) comments must never be returned.
-    const commentsResult = await db
+    let commentsResult = await db
       .select()
       .from(comments)
       .where(and(eq(comments.postId, postId), isNull(comments.deletedAt)))
       .orderBy(asc(comments.createdAt));
+
+    // Apply the viewer's moderation policy, as the post feeds, favorites
+    // feed, notifications and user search do: comments by authors the
+    // viewer blocked or muted — or who blocked the viewer — are not
+    // returned. Their replies go with them, matching the tree rule for
+    // comments whose parent is not visible. Anonymous reads have no
+    // moderation set and stay unfiltered. The exclusion set comes from the
+    // shared loadViewerExcludedAuthorIds definition, which the post detail
+    // count uses as well, so both numbers agree for the same viewer.
+    if (canonicalUserId && commentsResult.length > 0) {
+      const excludedAuthorIds =
+        await loadViewerExcludedAuthorIds(canonicalUserId);
+      if (excludedAuthorIds.size > 0) {
+        commentsResult = commentsResult.filter(
+          (comment) => !excludedAuthorIds.has(comment.authorId)
+        );
+      }
+    }
 
     // Get author IDs
     const authorIds = [...new Set(commentsResult.map((c) => c.authorId))];
@@ -319,8 +338,13 @@ export const GET = withErrorHandling(
     // Build threaded structure
     const threadedComments = buildCommentTree(commentsWithData);
 
-    // Get total comment count (including replies)
-    const totalComments = commentsResult.length;
+    // Total is the number of comments this response actually returns.
+    // Replies whose parent is not visible (e.g. soft-deleted by
+    // moderation) are omitted from the tree with their parent, so the
+    // raw row count would promise comments that are not in the list.
+    const countTreeNodes = (items: CommentTreeItem[]): number =>
+      items.reduce((sum, item) => sum + 1 + countTreeNodes(item.replies), 0);
+    const totalComments = countTreeNodes(threadedComments);
 
     logger.info(
       'Comments fetched successfully',

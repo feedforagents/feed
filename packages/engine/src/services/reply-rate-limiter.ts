@@ -4,11 +4,22 @@
  * Enforces a minimum 55-minute gap between a player's replies to the same
  * NPC; replies inside the 55–65 minute window extend the hourly streak.
  *
- * Note: canReply and recordReply are separate calls, so concurrent replies can
- * both pass the check (TODO: claim and insert in one transaction).
+ * canReply is a read-only pre-check. claimReply re-checks the limit and writes
+ * the reply and its interaction in one transaction under a per-(user, NPC)
+ * advisory lock, so concurrent replies cannot both pass the limit.
  */
 
-import { and, db, desc, eq, userInteractions } from '@feed/db';
+import {
+  and,
+  type DrizzleClient,
+  db,
+  dbWrite,
+  desc,
+  eq,
+  sql,
+  type Transaction,
+  userInteractions,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 
 export interface RateLimitResult {
@@ -20,6 +31,16 @@ export interface RateLimitResult {
   replyStreak?: number;
   expectedNextReply?: Date;
 }
+
+export interface ReplyWrite {
+  postId: string;
+  commentId: string;
+  qualityScore: number;
+}
+
+export type ReplyClaim<T extends ReplyWrite> =
+  | { allowed: true; rateLimit: RateLimitResult; reply: T }
+  | { allowed: false; rateLimit: RateLimitResult };
 
 export class ReplyRateLimiter {
   private static readonly MIN_REPLY_INTERVAL_MS = 55 * 60 * 1000; // 55 minutes
@@ -37,10 +58,11 @@ export class ReplyRateLimiter {
    */
   static async canReply(
     userId: string,
-    npcId: string
+    npcId: string,
+    executor: Transaction | DrizzleClient = db
   ): Promise<RateLimitResult> {
     // Get last interaction with this NPC
-    const [lastInteraction] = await db
+    const [lastInteraction] = await executor
       .select()
       .from(userInteractions)
       .where(
@@ -94,7 +116,11 @@ export class ReplyRateLimiter {
     }
 
     // Calculate streak (consecutive hourly replies)
-    const streak = await ReplyRateLimiter.calculateReplyStreak(userId, npcId);
+    const streak = await ReplyRateLimiter.calculateReplyStreak(
+      userId,
+      npcId,
+      executor
+    );
 
     // Too late - warn but allow (breaks consistency for following chance)
     if (timeSinceLastReply > ReplyRateLimiter.MAX_REPLY_INTERVAL_MS) {
@@ -119,9 +145,10 @@ export class ReplyRateLimiter {
    */
   private static async calculateReplyStreak(
     userId: string,
-    npcId: string
+    npcId: string,
+    executor: Transaction | DrizzleClient
   ): Promise<number> {
-    const interactions = await db
+    const interactions = await executor
       .select({
         timestamp: userInteractions.timestamp,
       })
@@ -158,23 +185,37 @@ export class ReplyRateLimiter {
   }
 
   /**
-   * Record a reply interaction
+   * Claim a reply slot and write the reply atomically.
+   *
+   * Serializes replies from one user to one NPC with a transaction-scoped
+   * advisory lock, re-checks the limit, then runs `writeReply` and records the
+   * interaction in the same transaction. If `writeReply` throws, nothing is
+   * recorded. `writeReply` must only do database writes on `tx`.
    */
-  static async recordReply(
+  static async claimReply<T extends ReplyWrite>(
     userId: string,
     npcId: string,
-    postId: string,
-    commentId: string,
-    qualityScore: number
-  ): Promise<void> {
-    await db.insert(userInteractions).values({
-      id: await generateSnowflakeId(),
-      userId,
-      npcId,
-      postId,
-      commentId,
-      qualityScore,
-      timestamp: new Date(),
+    writeReply: (tx: Transaction) => Promise<T>
+  ): Promise<ReplyClaim<T>> {
+    return dbWrite.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${`reply-rate:${userId}:${npcId}`}))`
+      );
+      const rateLimit = await ReplyRateLimiter.canReply(userId, npcId, tx);
+      if (!rateLimit.allowed) {
+        return { allowed: false, rateLimit };
+      }
+      const reply = await writeReply(tx);
+      await tx.insert(userInteractions).values({
+        id: await generateSnowflakeId(),
+        userId,
+        npcId,
+        postId: reply.postId,
+        commentId: reply.commentId,
+        qualityScore: reply.qualityScore,
+        timestamp: new Date(),
+      });
+      return { allowed: true, rateLimit, reply };
     });
   }
 }
