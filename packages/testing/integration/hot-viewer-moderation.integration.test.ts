@@ -64,6 +64,8 @@ function ownership() {
 }
 type Ownership = ReturnType<typeof ownership>;
 const owned = ownership();
+// Independent context must survive primary-fixture cleanup.
+const unrelated = ownership();
 let viewerId: string;
 let secondViewerId: string;
 let blockedAuthorId: string;
@@ -374,6 +376,34 @@ beforeAll(async () => {
     postIds[key] = await generateSnowflakeId();
   }
   const now = new Date();
+  const unrelatedUserId = await generateSnowflakeId();
+  await insertUsers(
+    [
+      {
+        id: unrelatedUserId,
+        username: `ghot-context-${unrelatedUserId}`,
+        displayName: 'Unrelated Hot context control',
+        isTest: false,
+        isBanned: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    unrelated
+  );
+  const unrelatedTime = new Date(now.getTime() - 10 * 60 * 1000);
+  await insertPosts(
+    [
+      {
+        id: await generateSnowflakeId(),
+        authorId: unrelatedUserId,
+        content: 'Unrelated low-score Hot context control',
+        timestamp: unrelatedTime,
+        createdAt: unrelatedTime,
+      },
+    ],
+    unrelated
+  );
   await insertUsers(
     [
       viewerId,
@@ -463,7 +493,23 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await cleanup(owned);
+  const results = await Promise.allSettled([cleanup(owned)]);
+  try {
+    results.push(...(await Promise.allSettled([expectUnrelatedRetained()])));
+  } finally {
+    results.push(...(await Promise.allSettled([cleanup(unrelated)])));
+  }
+  const failures = results.flatMap((result) =>
+    result.status === 'rejected'
+      ? [
+          result.reason instanceof Error
+            ? result.reason
+            : new Error('Hot fixture cleanup failed'),
+        ]
+      : []
+  );
+  if (failures.length)
+    throw new AggregateError(failures, 'Hot fixture cleanup incomplete');
 }, 120_000);
 
 async function fetchHot(
@@ -495,6 +541,36 @@ async function fetchHot(
 const visibleIds = () =>
   [postIds.visible1, postIds.visible2, postIds.visible3].sort();
 const allIds = () => Object.values(postIds).sort();
+// Keep multiplicity: duplicate owned IDs must fail the exact expectations.
+const ownedIds = (page: HotResponse['posts']) =>
+  page
+    .filter((post) => owned.posts.has(post.id))
+    .map((post) => post.id)
+    .sort();
+
+async function expectUnrelatedRetained() {
+  for (const row of unrelated.users.values()) {
+    expect(await db.select().from(users).where(eq(users.id, row.id))).toEqual([
+      row,
+    ]);
+  }
+  for (const row of unrelated.posts.values()) {
+    expect(await db.select().from(posts).where(eq(posts.id, row.id))).toEqual([
+      row,
+    ]);
+  }
+}
+async function expectUnrelatedVisible(page: HotResponse['posts']) {
+  const control = [...unrelated.posts.values()];
+  expect(control).toHaveLength(1);
+  const row = control[0]!;
+  expect(
+    page
+      .filter((post) => post.id === row.id)
+      .map((post) => ({ id: post.id, authorId: post.authorId }))
+  ).toEqual([{ id: row.id, authorId: row.authorId }]);
+  await expectUnrelatedRetained();
+}
 
 describe('GET /api/feed/hot viewer moderation over HTTP', () => {
   it('hides both block directions, mute and repost originals before filling a visible page', async () => {
@@ -515,14 +591,15 @@ describe('GET /api/feed/hot viewer moderation over HTTP', () => {
       expect(top).toHaveLength(3);
       expect(top.some((post) => post.authorId === blockedAuthorId)).toBe(true);
       const all = await fetchHot(100, null, malformed);
-      expect(all.map((post) => post.id).sort()).toEqual(allIds());
+      expect(ownedIds(all)).toEqual(allIds());
+      await expectUnrelatedVisible(all);
     }
   });
 
   it('keeps two viewers independent and observes a new mute on the next request', async () => {
-    expect(
-      (await fetchHot(100, secondViewerId)).map((post) => post.id).sort()
-    ).toEqual(allIds());
+    const beforeMute = await fetchHot(100, secondViewerId);
+    expect(ownedIds(beforeMute)).toEqual(allIds());
+    await expectUnrelatedVisible(beforeMute);
     await insertMutes([
       {
         id: await generateSnowflakeId(),
@@ -536,15 +613,15 @@ describe('GET /api/feed/hot viewer moderation over HTTP', () => {
       postIds.blocker,
       ...visibleIds(),
     ].sort();
-    expect(
-      (await fetchHot(100, secondViewerId)).map((post) => post.id).sort()
-    ).toEqual(secondExpected);
+    const afterMute = await fetchHot(100, secondViewerId);
+    expect(ownedIds(afterMute)).toEqual(secondExpected);
+    await expectUnrelatedVisible(afterMute);
     expect((await fetchHot(3, viewerId)).map((post) => post.id).sort()).toEqual(
       visibleIds()
     );
-    expect((await fetchHot(100, null)).map((post) => post.id).sort()).toEqual(
-      allIds()
-    );
+    const publicAfterMute = await fetchHot(100, null);
+    expect(ownedIds(publicAfterMute)).toEqual(allIds());
+    await expectUnrelatedVisible(publicAfterMute);
   });
 });
 
