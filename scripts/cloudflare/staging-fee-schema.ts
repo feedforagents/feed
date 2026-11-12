@@ -17,9 +17,11 @@ import {
   type Endpoint,
   endpoint,
   list,
+  MIGRATION_HISTORY_SAMPLE_LIMIT,
   type Migration,
   object,
   origin,
+  physicalFeeSchemaDiagnostics,
   requireCondition,
   SchemaHold,
   sameDatabase,
@@ -248,7 +250,7 @@ SELECT json_build_object(
     FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
     WHERE c.oid IN (pg_catalog.to_regclass('public."TradingFee"'),pg_catalog.to_regclass('public."TradingFeeOutbox"')) AND a.attname='idempotencyKey' AND a.attnum>0),'[]'::json),
   'index',(SELECT json_build_object('targetMatches',ix.indrelid=pg_catalog.to_regclass('public."TradingFee"'),'oid',i.oid::text,'kind',i.relkind,'method',am.amname,'unique',ix.indisunique,'valid',ix.indisvalid,'ready',ix.indisready,'live',ix.indislive,'keys',ix.indnkeyatts,'attributes',ix.indnatts,'noExpressions',ix.indexprs IS NULL,'predicate',pg_catalog.pg_get_expr(ix.indpred,ix.indrelid),'columns',ARRAY(SELECT a.attname::text FROM unnest(ix.indkey) WITH ORDINALITY k(attnum,ord) LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=ix.indrelid AND a.attnum=k.attnum ORDER BY k.ord)) FROM pg_catalog.pg_class i JOIN pg_catalog.pg_index ix ON ix.indexrelid=i.oid JOIN pg_catalog.pg_am am ON am.oid=i.relam WHERE i.oid=pg_catalog.to_regclass('public."TradingFee_idempotencyKey_idx"')),
-  'history',(SELECT json_agg(json_build_object('hash',h.hash,'when',h.created_at::text) ORDER BY h.id) FROM (SELECT id,hash,created_at FROM drizzle.__drizzle_migrations ORDER BY id LIMIT 7) h),
+  'history',(SELECT json_agg(json_build_object('hash',h.hash,'when',h.created_at::text) ORDER BY h.id) FROM (SELECT id,hash,created_at FROM drizzle.__drizzle_migrations ORDER BY id LIMIT ${MIGRATION_HISTORY_SAMPLE_LIMIT}) h),
   'grants',json_build_object('schema',has_schema_privilege(current_user,'public','USAGE'),'feeSelect',has_table_privilege(current_user,'public."TradingFee"','SELECT'),'feeInsert',has_table_privilege(current_user,'public."TradingFee"','INSERT'),'outboxSelect',has_table_privilege(current_user,'public."TradingFeeOutbox"','SELECT'),'outboxInsert',has_table_privilege(current_user,'public."TradingFeeOutbox"','INSERT'),'outboxUpdate',has_table_privilege(current_user,'public."TradingFeeOutbox"','UPDATE'),'outboxDelete',has_table_privilege(current_user,'public."TradingFeeOutbox"','DELETE')),
   'roleFlags',(SELECT json_build_object('superuser',rolsuper,'bypassRls',rolbypassrls) FROM pg_catalog.pg_roles WHERE rolname=current_user),
   'rowSecurity',(SELECT json_agg(json_build_object('table',c.relname,'enabled',c.relrowsecurity,'forced',c.relforcerowsecurity,'effectiveOwner',pg_has_role(current_user,c.relowner,'USAGE'))) FROM pg_catalog.pg_class c WHERE c.oid IN (pg_catalog.to_regclass('public."TradingFee"'),pg_catalog.to_regclass('public."TradingFeeOutbox"'))),
@@ -269,7 +271,18 @@ function inspect(target: Endpoint, ca: string, migrations: Migration[]) {
   text(row.feeOid);
   text(row.outboxOid);
   text(row.address);
-  const historyLength = verifyHistory(row.history, migrations);
+  let historyLength: number;
+  try {
+    historyLength = verifyHistory(row.history, migrations);
+  } catch (error) {
+    if (error instanceof SchemaHold && error.migrationHistory) {
+      error.migrationHistory.physicalFeature = physicalFeeSchemaDiagnostics(
+        row.columns,
+        row.index
+      );
+    }
+    throw error;
+  }
   const columnsReady = verifyColumns(row.columns, historyLength);
   const indexReady = verifyIndex(row.index);
   requireCondition(

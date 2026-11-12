@@ -1,15 +1,34 @@
 import { createHash } from 'node:crypto';
 
+export const MIGRATION_HISTORY_SAMPLE_LIMIT = 256;
+export interface PhysicalFeeSchemaDiagnostics {
+  scope: 'app-catalog-physical-shape-only';
+  readyForApplication: false;
+  columnsMatch: boolean;
+  indexPresent: boolean;
+  indexShapeMatch: boolean;
+}
+export interface MigrationHistoryDiagnostics {
+  sampleLimit: typeof MIGRATION_HISTORY_SAMPLE_LIMIT;
+  observedRows: number;
+  possiblyTruncated: boolean;
+  rows: { hash: string | null; when: string | null }[];
+  physicalFeature?: PhysicalFeeSchemaDiagnostics;
+}
 export class SchemaHold extends Error {
-  constructor(readonly reason: string) {
+  constructor(
+    readonly reason: string,
+    readonly migrationHistory?: MigrationHistoryDiagnostics
+  ) {
     super(reason);
   }
 }
 export function requireCondition(
   value: boolean,
-  reason: string
+  reason: string,
+  migrationHistory?: MigrationHistoryDiagnostics
 ): asserts value {
-  if (!value) throw new SchemaHold(reason);
+  if (!value) throw new SchemaHold(reason, migrationHistory);
 }
 export function object(value: unknown): Record<string, unknown> {
   requireCondition(
@@ -127,16 +146,34 @@ export function verifyHistory(value: unknown, expected: Migration[]): number {
     const row = object(item);
     return { hash: text(row.hash), when: text(row.when) };
   });
+  // This is the bounded existing catalog sample, not a total count.
+  const migrationHistory: MigrationHistoryDiagnostics = {
+    sampleLimit: MIGRATION_HISTORY_SAMPLE_LIMIT,
+    observedRows: actual.length,
+    possiblyTruncated: actual.length >= MIGRATION_HISTORY_SAMPLE_LIMIT,
+    rows: actual.slice(0, MIGRATION_HISTORY_SAMPLE_LIMIT).map((row) => ({
+      hash:
+        row.hash.length === 64 && /^[a-f0-9]{64}$/i.test(row.hash)
+          ? row.hash
+          : null,
+      when:
+        row.when === row.when.trim() && /^-?\d{1,19}$/.test(row.when)
+          ? row.when
+          : null,
+    })),
+  };
   requireCondition(
     expected.length === 6 && [5, 6].includes(actual.length),
-    'unexpected_migration_count'
+    'unexpected_migration_count',
+    migrationHistory
   );
   requireCondition(
     actual.every(
       (row, i) =>
         row.hash === expected[i]?.hash && row.when === expected[i]?.when
     ),
-    'migration_history_mismatch'
+    'migration_history_mismatch',
+    migrationHistory
   );
   return actual.length;
 }
@@ -186,4 +223,47 @@ export function verifyIndex(value: unknown): boolean {
     'incorrect_fee_index'
   );
   return true;
+}
+
+// Diagnostic-only physical shape; this proves no history, identity or RLS access.
+export function physicalFeeSchemaDiagnostics(
+  columns: unknown,
+  index: unknown
+): PhysicalFeeSchemaDiagnostics {
+  const columnsMatch =
+    Array.isArray(columns) &&
+    columns.length === 2 &&
+    ['TradingFee', 'TradingFeeOutbox'].every(
+      (table) =>
+        columns.filter((column: unknown) => {
+          if (
+            typeof column !== 'object' ||
+            column === null ||
+            Array.isArray(column)
+          ) {
+            return false;
+          }
+          const row = column as Record<string, unknown>;
+          return (
+            row.table === table &&
+            row.type === 'text' &&
+            row.notNull === false &&
+            row.hasDefault === false &&
+            row.dropped === false
+          );
+        }).length === 1
+    );
+  let indexShapeMatch = false;
+  try {
+    indexShapeMatch = verifyIndex(index);
+  } catch (error) {
+    if (!(error instanceof SchemaHold)) throw error;
+  }
+  return {
+    scope: 'app-catalog-physical-shape-only',
+    readyForApplication: false,
+    columnsMatch,
+    indexPresent: index !== null && index !== undefined,
+    indexShapeMatch,
+  };
 }
