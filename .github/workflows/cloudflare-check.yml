@@ -48,3 +48,26 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/feed_test
       - run: bun run typecheck:cloudflare
       - run: bun run build:cloudflare staging
+
+  surplus-embedding-diagnostic:
+    name: Surplus embedding diagnostic
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Make one authenticated embedding request
+        env:
+          SURPLUS_API_KEY: ${{ secrets.SURPLUS_API_KEY }}
+          SURPLUS_BASE_URL: https://api.surplusintelligence.ai/v1
+          SURPLUS_EMBEDDING_MODEL: venice-embed-1
+        run: bun scripts/ci/surplus-embedding-diagnostic.ts
