@@ -87,6 +87,7 @@ import {
   BusinessLogicError,
   cachedDb,
   checkProfileUpdateRateLimit,
+  invalidateCachePattern,
   isReferralCodeAvailableForUser,
   logProfileUpdate,
   notifyProfileComplete,
@@ -301,6 +302,17 @@ export const POST = withErrorHandling(
           username: isUsernameChanging ? currentUser!.username : undefined,
         }
       );
+
+      // Leaderboard pages are cached whole (shared Redis pages in the
+      // 'leaderboard-personal' namespace) with each row's displayName and
+      // profileImageUrl baked in, and nothing else invalidates them when a
+      // profile changes. The leaderboard route computes the requester's own
+      // position fresh, so without this a cached page keeps showing the old
+      // identity next to the fresh one in the same response. Drop the cached
+      // pages so the next read regenerates them from the updated row.
+      await invalidateCachePattern('*', {
+        namespace: 'leaderboard-personal',
+      });
     }
 
     // Award reputation for profile milestones.
