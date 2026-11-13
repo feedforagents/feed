@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import {
   calculateRawPriceFromHoldings,
   calculateTradeImpact,
+  floorPoints,
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
 import type { WalletPort } from '../../shared/common';
@@ -352,20 +353,23 @@ describe('PerpMarketService', () => {
     expect(m.openInterest).toBeCloseTo(0, 4);
     expect(m.volume24h).toBeCloseTo(200, 4); // open + close size
 
+    // PRD §9.1: the 10.10 open charge is already whole hundredths; the close
+    // proceeds settle rounded down to a hundredth.
+    const credited = floorPoints(
+      (close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid
+    );
     const balance = await wallet.getBalance('u1');
     const expectedBalance =
-      10_000 -
-      (open.marginPaid! + open.feePaid) +
-      ((close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid);
+      10_000 - (open.marginPaid! + open.feePaid) + credited;
     expect(balance.balance).toBeCloseTo(expectedBalance, 4);
 
     // PnL should include fees:
-    // - perp_open records -openFee
+    // - perp_open records -(charge - margin): the fee plus any charge rounding
     // - perp_close records (netSettlement - marginPaid) which includes close fee
     const pnls = wallet.getPnLs('u1');
     const totalPnL = pnls.reduce((sum, p) => sum + p.pnl, 0);
     expect(totalPnL).toBeCloseTo(
-      close.realizedPnL! - open.feePaid - close.feePaid,
+      credited - (close.marginPaid ?? 0) - open.feePaid,
       4
     );
   });
@@ -390,17 +394,18 @@ describe('PerpMarketService', () => {
       ((open.entryPrice - close.exitPrice!) / open.entryPrice) * 100;
     expect(close.realizedPnL).toBeCloseTo(expectedPnl, 4);
 
+    const credited = floorPoints(
+      (close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid
+    );
     const balance = await wallet.getBalance('u1');
     const expectedBalance =
-      10_000 -
-      (open.marginPaid! + open.feePaid) +
-      ((close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid);
+      10_000 - (open.marginPaid! + open.feePaid) + credited;
     expect(balance.balance).toBeCloseTo(expectedBalance, 4);
 
     const pnls = wallet.getPnLs('u1');
     const totalPnL = pnls.reduce((sum, p) => sum + p.pnl, 0);
     expect(totalPnL).toBeCloseTo(
-      close.realizedPnL! - open.feePaid - close.feePaid,
+      credited - (close.marginPaid ?? 0) - open.feePaid,
       4
     );
   });
