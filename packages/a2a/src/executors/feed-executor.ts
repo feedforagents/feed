@@ -3800,20 +3800,32 @@ export class FeedAgentExecutor implements AgentExecutor {
     // Favorites never bypass the viewer's block/mute policy: drop
     // favorited authors the viewer blocked or muted, and authors who
     // blocked the viewer (the web favorites feed's rule, via the shared
-    // @feed/db moderation sets).
-    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
-      getBlockedUserIds(userId),
-      getMutedUserIds(userId),
-      getBlockedByUserIds(userId),
-    ]);
+    // @feed/db moderation sets). Test authors are excluded from every
+    // post list (the canonical post query, DatabaseService.getRecentPosts,
+    // drops them in SQL, as do the web favorites feed and the MCP
+    // get_favorite_posts): drop 'test-' ids and isTest-flagged accounts
+    // here too, before the post query, so pages stay full.
+    const rawFavoritedIds = favorites.map((f) => f.targetUserId);
+    const [blockedIds, mutedIds, blockedByIds, testFlagged] = await Promise.all(
+      [
+        getBlockedUserIds(userId),
+        getMutedUserIds(userId),
+        getBlockedByUserIds(userId),
+        db.user.findMany({
+          where: { id: { in: rawFavoritedIds }, isTest: true },
+          select: { id: true },
+        }),
+      ]
+    );
     const excludedAuthorIds = new Set([
       ...blockedIds,
       ...mutedIds,
       ...blockedByIds,
+      ...testFlagged.map((u) => u.id),
     ]);
-    const favoritedUserIds = favorites
-      .map((f) => f.targetUserId)
-      .filter((id) => !excludedAuthorIds.has(id));
+    const favoritedUserIds = rawFavoritedIds.filter(
+      (id) => !id.startsWith('test-') && !excludedAuthorIds.has(id)
+    );
 
     if (favoritedUserIds.length === 0) {
       return { posts: [] };
