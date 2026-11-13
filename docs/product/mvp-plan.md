@@ -32,6 +32,8 @@ Order matters because of cross-imports (PRD F5, F9).
 
 **Exit:** typecheck, lint, existing required tests, and build pass; game ticks still healthy on staging; web E2E of feed, post, reply, like, repost, follow, DM, group chat, prediction trade, perp trade passes with a test account. Net line count reported.
 
+**Approved staging-only exception:** The exception in PRD §9.1 and Phase 6 may defer Farcaster/NFT schema removals solely for the guarded additive financial upgrade. Retention does not satisfy this phase's removal or exit criteria; production and relaunch requirements remain unchanged.
+
 ## Phase 2 — Phone accounts (replaces Steward)
 
 Depends on: D-1, D-2, D-3, D-4, D-19, D-29, D-32.
@@ -95,6 +97,8 @@ Depends on: D-9 through D-15b, D-17, D-17b, D-18.
    Enforce PRD §9.1 settlement precision: reject cash inputs finer than two decimals, round cash proceeds down, retain remainders in house liquidity, and calculate P&L from settled credits. Verify real persisted balances and ledgers for fractional inputs, split sells, resolution and cancellation; splitting operations must not create points.
 4. **Spot/index/perp rebuild** (PRD §9.3): spot CPMM pools per ticker, NPC-only spot trading action, persisted index price, mark = index + bounded premium, funding from mark–index, liquidation on mark, remove random-walk price source and duplicate price stores, leverage cap 20×. Run on staging with NPC load for ≥ 72 h; check perps track spot, funding sign is correct, no runaway prices.
 5. Profit leaderboard (all time / month) excluding purchases; separate Characters board.
+
+**Approved — existing staging schema only.** Under the PRD §9.1 staging exception, the exact original baseline may receive only original additive migrations `0003`–`0005` through the normal migrator, with genuine `[0000, 0003, 0004, 0005]` receipts and all specified guards. Acceptance requires local nonempty-data retention, rollback, postflight shape and rerun proof, plus the existing required tests and build. Retained Farcaster/NFT data is preserved; this does not complete Phase 1 removals or Phase 6. Future cleanup needs a separate reviewed migration. Phase 7's fresh production database and D-8 remain unchanged.
 
 **Exit:** 72 h staging soak with charts of index vs mark per ticker; a test purchase end-to-end in Stripe test mode, and a refused purchase with a Washington billing address; a prediction market resolves and pays exactly 1 pt per winning share; leaderboard unaffected by a purchase.
 

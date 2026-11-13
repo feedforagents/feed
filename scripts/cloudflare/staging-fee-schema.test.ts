@@ -1,13 +1,32 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import {
   verifyStagingAppRowAccess,
   verifyStagingDeploymentContext,
 } from './prepare-staging-fee-schema';
+import { materializeBaselineAdditiveMigrations } from './staging-fee-migration-subset';
 import {
+  BASELINE_ADDITIVE_MIGRATIONS,
+  BASELINE_ADDITIVE_TABLES,
+  digest,
   endpoint,
   MIGRATION_HISTORY_SAMPLE_LIMIT,
   physicalFeeSchemaDiagnostics,
   SchemaHold,
+  STAGING_ORIGINAL_MIGRATIONS,
+  verifyAdditiveColumns,
+  verifyAdditiveTargets,
   verifyColumns,
   verifyEndpoints,
   verifyHistory,
@@ -30,6 +49,66 @@ function captureSchemaHold(run: () => void): SchemaHold {
   }
   throw new Error('Expected a schema HOLD');
 }
+const sourceRoot = resolve(import.meta.dir, '../..');
+function withMigrationSource(
+  run: (root: string, output: string) => void
+): void {
+  const directory = mkdtempSync(join(tmpdir(), 'feed-additive-source-test-'));
+  const root = join(directory, 'source');
+  const migrations = join(root, 'packages/db/drizzle/migrations');
+  const output = join(directory, 'output');
+  try {
+    mkdirSync(join(migrations, 'meta'), { recursive: true, mode: 0o700 });
+    mkdirSync(output, { mode: 0o700 });
+    for (const pin of STAGING_ORIGINAL_MIGRATIONS) {
+      copyFileSync(
+        join(sourceRoot, 'packages/db/drizzle/migrations', `${pin.tag}.sql`),
+        join(migrations, `${pin.tag}.sql`)
+      );
+    }
+    copyFileSync(
+      join(sourceRoot, 'packages/db/drizzle/migrations/meta/_journal.json'),
+      join(migrations, 'meta/_journal.json')
+    );
+    run(root, output);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+const originalHistory = STAGING_ORIGINAL_MIGRATIONS.map(({ hash, when }) => ({
+  hash,
+  when,
+}));
+const additiveHistory = BASELINE_ADDITIVE_MIGRATIONS.map(({ hash, when }) => ({
+  hash,
+  when,
+}));
+const additiveTargets = BASELINE_ADDITIVE_TABLES.map((table, i) => ({
+  table,
+  oid: String(100 + i),
+  schema: 'public',
+  kind: 'r',
+  resolvesPublic: true,
+  canMigrate: true,
+}));
+const costBasis = {
+  table: 'Position',
+  column: 'cashCostBasis',
+  type: 'numeric(18,2)',
+  notNull: false,
+  hasDefault: false,
+  defaultExpression: null,
+  dropped: false,
+};
+const leverage = {
+  table: 'PerpMarketSnapshot',
+  column: 'maxLeverage',
+  type: 'integer',
+  notNull: true,
+  hasDefault: true,
+  defaultExpression: '20',
+  dropped: false,
+};
 const columns = ['TradingFee', 'TradingFeeOutbox'].map((table) => ({
   table,
   type: 'text',
@@ -195,6 +274,240 @@ describe('staging fee schema release boundaries', () => {
         history
       )
     ).toThrow('migration_history_mismatch');
+  });
+  it('opts into only the pinned original baseline and completed additive lineage', () => {
+    expect(
+      verifyHistory(originalHistory.slice(0, 1), originalHistory, true)
+    ).toBe(1);
+    expect(verifyHistory(additiveHistory, originalHistory, true)).toBe(4);
+    for (const actual of [originalHistory.slice(0, 1), additiveHistory]) {
+      expect(() => verifyHistory(actual, originalHistory)).toThrow(
+        'unexpected_migration_count'
+      );
+    }
+    for (const length of [2, 3]) {
+      expect(() =>
+        verifyHistory(originalHistory.slice(0, length), originalHistory, true)
+      ).toThrow('unexpected_migration_count');
+    }
+    for (const actual of [
+      [{ ...originalHistory[0], hash: 'rewritten' }],
+      [{ ...originalHistory[0], when: '1' }],
+      [
+        additiveHistory[0],
+        additiveHistory[2],
+        additiveHistory[1],
+        additiveHistory[3],
+      ],
+      [
+        additiveHistory[0],
+        additiveHistory[1],
+        additiveHistory[1],
+        additiveHistory[3],
+      ],
+      [
+        originalHistory[0],
+        originalHistory[1],
+        originalHistory[2],
+        originalHistory[5],
+      ],
+    ]) {
+      expect(() => verifyHistory(actual, originalHistory, true)).toThrow(
+        'migration_history_mismatch'
+      );
+    }
+    const changedSkippedSource = originalHistory.map((row, i) =>
+      i === 2 ? { ...row, hash: 'changed' } : row
+    );
+    expect(() =>
+      verifyHistory(additiveHistory, changedSkippedSource, true)
+    ).toThrow('unsupported_additive_source');
+    expect(
+      verifyHistory(originalHistory.slice(0, 5), originalHistory, true)
+    ).toBe(5);
+    expect(verifyHistory(originalHistory, originalHistory, true)).toBe(6);
+  });
+  it('requires four distinct ordinary public targets with exact name resolution and ownership', () => {
+    expect(Object.keys(verifyAdditiveTargets(additiveTargets, true))).toEqual([
+      ...BASELINE_ADDITIVE_TABLES,
+    ]);
+    expect(() =>
+      verifyAdditiveTargets(
+        additiveTargets.map((row) => ({ ...row, canMigrate: false }))
+      )
+    ).not.toThrow();
+    for (const table of BASELINE_ADDITIVE_TABLES) {
+      expect(() =>
+        verifyAdditiveTargets(
+          additiveTargets.map((row) =>
+            row.table === table ? { ...row, canMigrate: false } : row
+          ),
+          true
+        )
+      ).toThrow('migration_role_not_owner');
+    }
+    for (const patch of [
+      { schema: 'pg_catalog' },
+      { kind: 'v' },
+      { kind: 'p' },
+      { kind: 'f' },
+      { resolvesPublic: false },
+      { canMigrate: 'true' },
+      { oid: '0' },
+      { oid: '100\n' },
+      { oid: '4294967296' },
+    ]) {
+      expect(() =>
+        verifyAdditiveTargets([
+          { ...additiveTargets[0], ...patch },
+          ...additiveTargets.slice(1),
+        ])
+      ).toThrow('incorrect_additive_targets');
+    }
+    expect(() => verifyAdditiveTargets(additiveTargets.slice(1))).toThrow(
+      'incorrect_additive_targets'
+    );
+    expect(() =>
+      verifyAdditiveTargets([
+        additiveTargets[0],
+        additiveTargets[0],
+        ...additiveTargets.slice(2),
+      ])
+    ).toThrow('incorrect_additive_targets');
+    expect(() =>
+      verifyAdditiveTargets(
+        additiveTargets.map((row, i) =>
+          i === 1 ? { ...row, oid: additiveTargets[0]!.oid } : row
+        )
+      )
+    ).toThrow('incorrect_additive_targets');
+  });
+  it('refuses unreceipted or wrong additive columns and verifies completed physical shapes', () => {
+    expect(() =>
+      verifyAdditiveColumns([{ ...leverage, defaultExpression: '100' }], 1)
+    ).not.toThrow();
+    expect(() => verifyAdditiveColumns([leverage], 1)).not.toThrow();
+    expect(() => verifyAdditiveColumns([costBasis, leverage], 4)).not.toThrow();
+    expect(() => verifyAdditiveColumns([costBasis, leverage], 1)).toThrow(
+      'unsupported_additive_columns'
+    );
+    expect(() => verifyAdditiveColumns([leverage], 4)).toThrow(
+      'unsupported_additive_columns'
+    );
+    expect(() =>
+      verifyAdditiveColumns([costBasis, costBasis, leverage], 4)
+    ).toThrow('unsupported_additive_columns');
+    for (const patch of [
+      { type: 'numeric(19,2)' },
+      { notNull: true },
+      { hasDefault: true },
+      { defaultExpression: '0' },
+      { dropped: true },
+    ]) {
+      expect(() =>
+        verifyAdditiveColumns([{ ...costBasis, ...patch }, leverage], 4)
+      ).toThrow('incorrect_cost_basis_column');
+    }
+    for (const patch of [
+      { type: 'bigint' },
+      { notNull: false },
+      { hasDefault: false },
+      { defaultExpression: '100' },
+      { dropped: true },
+    ]) {
+      expect(() =>
+        verifyAdditiveColumns([costBasis, { ...leverage, ...patch }], 4)
+      ).toThrow('incorrect_leverage_column');
+    }
+    expect(verifyColumns([], 1, true)).toBe(false);
+    expect(() => verifyColumns(columns, 1, true)).toThrow(
+      'unreceipted_fee_columns'
+    );
+    expect(verifyColumns(columns, 4, true)).toBe(true);
+    expect(() => verifyColumns(columns.slice(0, 1), 4, true)).toThrow(
+      'receipted_fee_columns_missing'
+    );
+  });
+  it('materializes only byte-exact original additive SQL and an out-only normal CLI config', () => {
+    withMigrationSource((root, output) => {
+      const config = materializeBaselineAdditiveMigrations(root, output);
+      const directory = join(output, 'migrations');
+      expect(readdirSync(directory).sort()).toEqual(
+        [
+          ...BASELINE_ADDITIVE_MIGRATIONS.map((pin) => `${pin.tag}.sql`),
+          'meta',
+        ].sort()
+      );
+      const journal = JSON.parse(
+        readFileSync(join(directory, 'meta/_journal.json'), 'utf8')
+      ) as { entries: { idx: number; tag: string; when: number }[] };
+      expect(journal.entries.map((entry) => entry.idx)).toEqual([0, 3, 4, 5]);
+      expect(journal.entries.map((entry) => String(entry.when))).toEqual(
+        BASELINE_ADDITIVE_MIGRATIONS.map((pin) => pin.when)
+      );
+      for (const pin of BASELINE_ADDITIVE_MIGRATIONS) {
+        const copy = join(directory, `${pin.tag}.sql`);
+        expect(digest(readFileSync(copy, 'utf8'))).toBe(pin.hash);
+        expect(
+          readFileSync(copy).equals(
+            readFileSync(
+              join(root, 'packages/db/drizzle/migrations', `${pin.tag}.sql`)
+            )
+          )
+        ).toBe(true);
+        expect(statSync(copy).mode & 0o777).toBe(0o600);
+      }
+      expect(config.startsWith('/')).toBe(false);
+      const text = readFileSync(resolve(root, config), 'utf8');
+      expect(text).toContain(
+        `require(${JSON.stringify(join(root, 'packages/db/drizzle.config.cjs'))})`
+      );
+      expect(text).toContain('module.exports = { ...config, out: ');
+      expect(text).not.toContain('dbCredentials');
+      expect(text).not.toContain('INSERT');
+      expect(statSync(directory).mode & 0o777).toBe(0o700);
+    });
+  });
+  it('holds before materialization for edited selected or skipped originals and extra migration files', () => {
+    for (const pin of STAGING_ORIGINAL_MIGRATIONS) {
+      withMigrationSource((root, output) => {
+        const file = join(
+          root,
+          'packages/db/drizzle/migrations',
+          `${pin.tag}.sql`
+        );
+        writeFileSync(file, readFileSync(file, 'utf8') + '\n-- edited');
+        expect(() =>
+          materializeBaselineAdditiveMigrations(root, output)
+        ).toThrow('unsupported_additive_source');
+        expect(readdirSync(output)).toEqual([]);
+      });
+    }
+    withMigrationSource((root, output) => {
+      writeFileSync(
+        join(root, 'packages/db/drizzle/migrations/0006_unreviewed.sql'),
+        'SELECT 1;'
+      );
+      expect(() => materializeBaselineAdditiveMigrations(root, output)).toThrow(
+        'unsupported_additive_source'
+      );
+      expect(readdirSync(output)).toEqual([]);
+    });
+    withMigrationSource((root, output) => {
+      const file = join(
+        root,
+        'packages/db/drizzle/migrations/meta/_journal.json'
+      );
+      const journal = JSON.parse(readFileSync(file, 'utf8')) as {
+        entries: { when: number }[];
+      };
+      journal.entries[3]!.when++;
+      writeFileSync(file, JSON.stringify(journal));
+      expect(() => materializeBaselineAdditiveMigrations(root, output)).toThrow(
+        'unsupported_additive_source'
+      );
+      expect(readdirSync(output)).toEqual([]);
+    });
   });
   it('reports a bounded history sample without claiming its total count', () => {
     const receipts = Array.from(
