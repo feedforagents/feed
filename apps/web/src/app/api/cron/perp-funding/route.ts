@@ -79,3 +79,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   return successResponse({ success: true });
 });
+
+// The Cloudflare cron Worker (workers/cron) sends GET, as for every other job.
+export const GET = POST;
