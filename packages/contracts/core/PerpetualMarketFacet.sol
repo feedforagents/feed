@@ -97,12 +97,17 @@ contract PerpetualMarketFacet is ReentrancyGuard {
         uint256 markPrice = _getMarkPrice(market.indexOracle);
         require(markPrice <= _maxPrice, "Price slippage exceeded");
 
-        // Calculate required margin
-        // Mark price is in 8 decimals (from Chainlink), collateral is in 18 decimals
-        // leverage = (size * price / 1e8) / collateral
-        uint256 leverage = (_size * markPrice) / (_collateral * 1e8);
-        require(leverage <= market.maxLeverage, "Leverage too high");
+        // Calculate required leverage without division: leverage is
+        // (size * price) / (collateral * 1e8). Integer division truncates,
+        // so a 5.9x position reads as 5x and passes a 5x cap. Compare
+        // cross-multiplied instead, so any leverage above the cap reverts.
+        // Mark price is in 8 decimals (from Chainlink), collateral is in 18 decimals.
+        require(
+            _size * markPrice <= _collateral * 1e8 * market.maxLeverage,
+            "Leverage too high"
+        );
 
+        // Calculate required margin
         // requiredMargin = (size * price * initialMarginRate) / (10000 * 1e8)
         // For 1 BTC at $50k with 10% margin: (1e18 * 5e12 * 1000) / (10000 * 1e8) = 5000 ether
         uint256 requiredMargin = (_size * markPrice * market.initialMarginRate) / (10000 * 1e8);
