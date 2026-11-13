@@ -464,6 +464,8 @@ describe('MCP leave_chat group owner policy', () => {
     });
     let web: Promise<Response> | undefined;
     let a2a: Promise<Response> | undefined;
+    let phase = 'web-member-lock';
+    let primaryFailure: Error | undefined;
     try {
       web = fetch(
         new URL(`/api/chats/${fixture.chatId}/participants/me`, base),
@@ -506,13 +508,15 @@ describe('MCP leave_chat group owner policy', () => {
           },
         }),
       });
+      phase = 'a2a-first-lock';
       const first = await waitForFirstLeaveLock(
         memberHeld.holderPid,
         participantHeld.holderPid,
         webPid
       );
       await participantHeld.release();
-      if (first.holderPid === participantHeld.holderPid) {
+      if (first.target === 'ChatParticipant') {
+        phase = 'participant-first-member-lock';
         await waitForBlockedLeave({
           holderPid: memberHeld.holderPid,
           queryIncludes: 'update "GroupMember"',
@@ -520,6 +524,7 @@ describe('MCP leave_chat group owner policy', () => {
         });
       }
       await memberHeld.release();
+      phase = 'http-responses';
       const [webResult, a2aResult] = await Promise.all([web, a2a]);
       const a2aPayload = z
         .object({
@@ -540,10 +545,17 @@ describe('MCP leave_chat group owner policy', () => {
       console.log(
         'LEAVE_LOCK_ORDER_PROOF',
         JSON.stringify({
-          firstA2AWait:
-            first.holderPid === memberHeld.holderPid
-              ? 'GroupMember'
-              : 'ChatParticipant',
+          firstA2AWait: first.target,
+          observedAt: first.observedAt,
+          a2aWaiterPid: first.pid,
+          webWaiterPid: webPid,
+          directBlockerPid: first.blockerPid,
+          viaEarlierWebWaiter: first.blockerPid === webPid,
+          webBlockedByOwnedMember: first.webBlockedByMember,
+          ownedBarrierPid:
+            first.target === 'GroupMember'
+              ? memberHeld.holderPid
+              : participantHeld.holderPid,
           webStatus: webResult.status,
           a2aStatus: a2aResult.status,
           a2aTaskState: a2aPayload.result.status.state,
@@ -556,13 +568,14 @@ describe('MCP leave_chat group owner policy', () => {
           .map((part) => part.text)
           .join(' ')
       ).toContain('Chat not found or already left');
+      phase = 'owned-effect-validation';
       await acceptLeave(
         fixture,
         fixture.membershipId,
         fixture.participantId,
         true
       );
-      expect(first.holderPid).toBe(memberHeld.holderPid);
+      expect(first.target).toBe('GroupMember');
       expect(first.query.toLowerCase()).toContain('for update');
       const [member] = await control.unsafe<
         { active: boolean; role: string }[]
@@ -570,11 +583,28 @@ describe('MCP leave_chat group owner policy', () => {
         fixture.membershipId,
       ]);
       expect(member).toEqual({ active: false, role: 'member' });
+    } catch (error) {
+      primaryFailure =
+        error instanceof Error ? error : new Error(String(error));
+      console.log(
+        'LEAVE_LOCK_ORDER_HOLD',
+        JSON.stringify({ phase, errorClass: primaryFailure.name })
+      );
+      throw primaryFailure;
     } finally {
       await participantHeld.release();
       await memberHeld.release();
       await Promise.allSettled([...(web ? [web] : []), ...(a2a ? [a2a] : [])]);
-      await fixture.cleanup();
+      try {
+        await fixture.cleanup();
+      } catch (cleanupError) {
+        if (primaryFailure)
+          throw new AggregateError(
+            [primaryFailure, cleanupError],
+            `Leave overlap failed during ${phase}; fixture retained`
+          );
+        throw cleanupError;
+      }
     }
   });
 });
@@ -978,19 +1008,49 @@ async function waitForFirstLeaveLock(
   const deadline = Date.now() + 8_000;
   while (Date.now() < deadline) {
     const rows = await control<
-      { pid: number; query: string; holderPid: number }[]
+      {
+        pid: number;
+        query: string;
+        blockerPid: number;
+        webBlockedByMember: boolean;
+      }[]
     >`
-      SELECT a.pid,a.query,blocker AS "holderPid" FROM pg_stat_activity a,
+      SELECT a.pid,a.query,blocker AS "blockerPid",
+        EXISTS (
+          SELECT 1 FROM pg_stat_activity web
+          WHERE web.pid=${webPid} AND web.datname=current_database() AND web.usename=current_user
+            AND web.query LIKE '%update "GroupMember"%'
+            AND ${memberHolder}=ANY(pg_blocking_pids(web.pid))
+        ) AS "webBlockedByMember"
+      FROM pg_stat_activity a,
         LATERAL unnest(pg_blocking_pids(a.pid)) blocker
       WHERE a.datname=current_database() AND a.usename=current_user AND a.pid<>${webPid}
-        AND blocker IN (${memberHolder},${participantHolder})
+        AND blocker IN (${memberHolder},${participantHolder},${webPid})
     `;
-    const row = rows.find(
-      (item) =>
-        item.query.includes('"GroupMember"') ||
-        item.query.includes('"ChatParticipant"')
-    );
-    if (row) return row;
+    for (const row of rows) {
+      if (
+        row.query.includes('"GroupMember"') &&
+        (row.blockerPid === memberHolder ||
+          (row.blockerPid === webPid && row.webBlockedByMember))
+      ) {
+        // pg_blocking_pids can name an earlier waiter (soft block), so
+        // validate both edges instead of treating the web PID as the holder.
+        return {
+          ...row,
+          target: 'GroupMember' as const,
+          observedAt: new Date().toISOString(),
+        };
+      }
+      if (
+        row.query.includes('"ChatParticipant"') &&
+        row.blockerPid === participantHolder
+      )
+        return {
+          ...row,
+          target: 'ChatParticipant' as const,
+          observedAt: new Date().toISOString(),
+        };
+    }
     await Bun.sleep(25);
   }
   throw new Error('Actual A2A leave did not reach either owned row lock');
