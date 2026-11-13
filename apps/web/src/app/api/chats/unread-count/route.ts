@@ -53,7 +53,12 @@
  */
 
 import { authenticate, successResponse, withErrorHandling } from '@feed/api';
-import { asUser } from '@feed/db';
+import {
+  asUser,
+  getBlockedByUserIds,
+  getBlockedUserIds,
+  getMutedUserIds,
+} from '@feed/db';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -77,6 +82,21 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       },
     });
 
+    // Match the notification list (GET /api/notifications): actors the
+    // user has blocked or muted, and actors who have blocked the user, are
+    // excluded at read time. The filter has to live at read time — muting
+    // never stops notification creation, and a block placed later must
+    // hide notifications created before it. System notifications have a
+    // null actor and are always kept.
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(user.userId),
+      getMutedUserIds(user.userId),
+      getBlockedByUserIds(user.userId),
+    ]);
+    const excludedActorIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+
     const unreadMessageCount = await db.notification.count({
       where: {
         userId: user.userId,
@@ -84,6 +104,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         chatId: {
           not: null,
         },
+        ...(excludedActorIds.length > 0
+          ? {
+              OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+            }
+          : {}),
       },
     });
 
