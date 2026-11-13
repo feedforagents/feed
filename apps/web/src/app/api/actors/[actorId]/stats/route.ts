@@ -123,6 +123,17 @@ export const GET = withErrorHandling(
         ) ?? null;
     }
 
+    // Organization profiles are keyed by organization ID, but their social
+    // graph lives on the organization's shadow actor (`org-<id>`). Resolve
+    // the organization ID to that actor so the header counts agree with the
+    // follow lists for every organization.
+    if (!actor) {
+      const organization = StaticDataRegistry.getOrganization(actorId);
+      if (organization) {
+        actor = StaticDataRegistry.getActor(`org-${organization.id}`);
+      }
+    }
+
     if (!actor) {
       throw new BusinessLogicError(`Actor ${actorId} not found`, 'NOT_FOUND');
     }

@@ -150,12 +150,24 @@ export const GET = withErrorHandling(
     });
 
     // Find target (user or actor) - throws NotFoundError if neither exists
-    const { actor: targetActor, targetId } =
-      await requireTargetByIdentifier(targetIdentifier);
+    const {
+      actor: targetActor,
+      isActor,
+      targetId,
+    } = await requireTargetByIdentifier(targetIdentifier);
+
+    // NPC targets resolve to their users-table row first (game bootstrap
+    // creates one for every actor, with the actor id as the user id), so the
+    // lookup returns `actor: null` for them even though they are actors.
+    // Treat an isActor target that exists in the static registry as an actor
+    // target, or the actor branch below is unreachable for every real NPC
+    // and their ActorFollow relations never surface in this list.
+    const actorTarget =
+      targetActor ?? (isActor ? StaticDataRegistry.getActor(targetId) : null);
 
     let followingList: FollowingResponse[] = [];
 
-    if (targetActor) {
+    if (actorTarget) {
       // Target is an NPC - get actors they follow
       const actorFollowRelations = await db
         .select({

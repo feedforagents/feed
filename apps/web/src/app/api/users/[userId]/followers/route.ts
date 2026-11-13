@@ -214,15 +214,27 @@ export const GET = withErrorHandling(
     });
 
     // Find target (user or actor) - throws NotFoundError if neither exists
-    const { actor: targetActor, targetId } =
-      await requireTargetByIdentifier(targetIdentifier);
+    const {
+      actor: targetActor,
+      isActor,
+      targetId,
+    } = await requireTargetByIdentifier(targetIdentifier);
+
+    // NPC targets resolve to their users-table row first (game bootstrap
+    // creates one for every actor, with the actor id as the user id), so the
+    // lookup returns `actor: null` for them even though they are actors.
+    // Treat an isActor target that exists in the static registry as an actor
+    // target, or the actor branch below is unreachable for every real NPC
+    // and their ActorFollow relations never surface in this list.
+    const actorTarget =
+      targetActor ?? (isActor ? StaticDataRegistry.getActor(targetId) : null);
 
     // Merge, order, count and page the relation rows in SQL; profiles are
     // loaded afterwards for the returned page only. Ties keep the previous
     // source order (actors before users for an actor target, users before
     // NPCs for a user target) and then the relation id.
     const offset = (page - 1) * limit;
-    const relations = targetActor
+    const relations = actorTarget
       ? actorTargetRelations(targetId)
       : userTargetRelations(targetId);
     const [pageRows, countRows] = await Promise.all([
@@ -241,7 +253,7 @@ export const GET = withErrorHandling(
     );
 
     // Human source is 1 for an actor target and 0 for a user target.
-    const humanSource = targetActor ? 1 : 0;
+    const humanSource = actorTarget ? 1 : 0;
     const humanIds = relationPage
       .filter((r) => Number(r.src) === humanSource)
       .map((r) => r.member_id);
@@ -278,7 +290,7 @@ export const GET = withErrorHandling(
       // username) by the SQL filter; NPC followers of a user only use a
       // registry entry with that exact id and otherwise fall back to npcId.
       const found = StaticDataRegistry.getActor(r.member_id);
-      const actor = targetActor || found?.id === r.member_id ? found : null;
+      const actor = actorTarget || found?.id === r.member_id ? found : null;
       return {
         id: r.member_id,
         displayName: actor?.name || r.member_id,
