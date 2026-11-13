@@ -50,6 +50,10 @@ import { StaticDataRegistry } from '@feed/engine';
 import type { ArcStateType, NarrativePost, NarrativeStory } from '@feed/shared';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import {
+  filterStoriesForViewer,
+  loadViewerExcludedAuthorIds,
+} from '../_lib/viewer-moderation';
 import { compareFeedStories } from '../feed-cursor';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
 import {
@@ -859,6 +863,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         'NarrativeFeedAPI'
       );
     }
+  }
+
+  // The story snapshot above is a shared global cache: apply this viewer's
+  // block/mute policy per request, the same way the stories and For You
+  // surfaces do. This stays outside the enrichment try/catch so a moderation
+  // lookup failure propagates instead of serving the unfiltered snapshot.
+  if (user?.userId) {
+    finalStories = filterStoriesForViewer(
+      finalStories,
+      await loadViewerExcludedAuthorIds(user.userId)
+    );
   }
 
   const response = successResponse({
