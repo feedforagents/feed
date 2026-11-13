@@ -161,6 +161,7 @@ class InMemoryDb implements PredictionDbPort {
       side: position.side,
       shares: position.shares,
       avgPrice: position.avgPrice,
+      cashCostBasis: position.cashCostBasis,
       status: position.status ?? 'active',
       outcome: position.outcome ?? null,
       pnl: position.pnl,
@@ -756,6 +757,99 @@ describe('PredictionMarketService', () => {
     });
     const credited = (await skewedWallet.getBalance('u1')).balance - preBalance;
     expect(credited).toBeCloseTo(floorPoints(pos!.shares), 8);
+  });
+
+  it('resolve skips closed and cancelled positions without overwriting their state or settling them again', async () => {
+    const buyResult = await service.buy({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      amount: 100,
+    });
+    const sellResult = await service.sell({
+      userId: 'u1',
+      marketId: 'm1',
+      shares: buyResult.shares,
+    });
+    expect(sellResult.positionClosed).toBe(true);
+
+    const closedBefore = await db.getPosition('u1', 'm1', 'yes');
+    expect(closedBefore?.status).toBe('closed');
+    const u1BalanceBeforeResolve = (await wallet.getBalance('u1')).balance;
+    const u1PnlCountBeforeResolve = wallet.pnls.filter(
+      (p) => p.userId === 'u1'
+    ).length;
+
+    await db.upsertPosition({
+      id: 'pos-cancelled',
+      userId: 'u-cancelled',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 50,
+      avgPrice: 0.5,
+      cashCostBasis: 25,
+      status: 'cancelled',
+      outcome: null,
+      pnl: 0,
+      resolvedAt: null,
+    });
+    const cancelledBalanceBefore = (await wallet.getBalance('u-cancelled'))
+      .balance;
+
+    await service.buy({
+      userId: 'u2',
+      marketId: 'm1',
+      side: 'yes',
+      amount: 100,
+    });
+    const activeBefore = await db.getPosition('u2', 'm1', 'yes');
+    const u2BalanceBeforeResolve = (await wallet.getBalance('u2')).balance;
+
+    await service.resolve({
+      marketId: 'm1',
+      winningSide: 'yes',
+      resolutionDescription: 'Active positions only',
+    });
+
+    const closedAfter = await db.getPosition('u1', 'm1', 'yes');
+    expect(closedAfter?.status).toBe('closed');
+    expect(closedAfter?.outcome).toBeNull();
+    expect(closedAfter?.resolvedAt).toBeNull();
+    expect(closedAfter?.pnl).toBe(closedBefore?.pnl);
+    expect((await wallet.getBalance('u1')).balance).toBe(
+      u1BalanceBeforeResolve
+    );
+    expect(wallet.pnls.filter((p) => p.userId === 'u1')).toHaveLength(
+      u1PnlCountBeforeResolve
+    );
+
+    const cancelledAfter = await db.getPosition('u-cancelled', 'm1', 'yes');
+    expect(cancelledAfter?.status).toBe('cancelled');
+    expect(cancelledAfter?.outcome).toBeNull();
+    expect(cancelledAfter?.resolvedAt).toBeNull();
+    expect(cancelledAfter?.pnl).toBe(0);
+    expect((await wallet.getBalance('u-cancelled')).balance).toBe(
+      cancelledBalanceBefore
+    );
+    expect(wallet.pnls.filter((p) => p.userId === 'u-cancelled')).toHaveLength(
+      0
+    );
+
+    const activeAfter = await db.getPosition('u2', 'm1', 'yes');
+    expect(activeAfter?.status).toBe('resolved');
+    expect(activeAfter?.outcome).toBe(true);
+    const expectedActivePayout = floorPoints(activeBefore!.shares);
+    expect(
+      (await wallet.getBalance('u2')).balance - u2BalanceBeforeResolve
+    ).toBeCloseTo(expectedActivePayout, 8);
+
+    const resolutionEvent = broadcast.events.find(
+      (e) => e.payload.type === 'prediction_resolution'
+    );
+    expect(resolutionEvent?.payload.totalPayout).toBeCloseTo(
+      expectedActivePayout,
+      8
+    );
   });
 
   it('pricing getCurrentPrice returns 0.5 when total is zero for display', () => {
