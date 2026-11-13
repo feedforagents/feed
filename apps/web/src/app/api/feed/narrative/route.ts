@@ -526,8 +526,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           (questionNumber !== null ? `Story #${questionNumber}` : 'General');
         const arcState = meta?.arcState ?? null;
 
-        // Skip resolved questions — no remaining tension
-        if (meta?.status === 'resolved') continue;
+        // Skip closed questions — resolved or admin-voided (cancelled)
+        // questions have no remaining tension
+        if (meta?.status === 'resolved' || meta?.status === 'cancelled')
+          continue;
         // Skip questions whose deadline has passed even if status hasn't updated yet
         if (meta?.resolutionDate && meta.resolutionDate <= now) continue;
 
