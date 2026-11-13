@@ -74,6 +74,7 @@ import {
   posts,
   postTags,
   questions,
+  sql,
   timeframedMarkets,
   userBlocks,
   users,
@@ -1816,32 +1817,37 @@ export async function executeGetFollowers(
   _agent: AuthenticatedAgent,
   args: GetFollowersArgs
 ): Promise<GetFollowersResult> {
-  const followersList = await db.follow.findMany({
-    where: { followingId: args.userId },
-    take: args.limit || 50,
-    orderBy: { createdAt: 'desc' },
-  });
-  const followerIds = followersList.map((f) => f.followerId);
-  const usersList = await db.user.findMany({
-    where: { id: { in: followerIds } },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      profileImageUrl: true,
-    },
-  });
-  const usersMap = new Map(usersList.map((u) => [u.id, u]));
+  // Same population as the website follow lists: the follower must be a
+  // real user who is not a test account (isTest flag or 'test-' id) and
+  // not banned. Joining users applies that filter before the limit, so
+  // excluded or dangling follow rows cannot consume page slots or
+  // surface as null-username entries.
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      profileImageUrl: users.profileImageUrl,
+    })
+    .from(follows)
+    .innerJoin(users, eq(users.id, follows.followerId))
+    .where(
+      and(
+        eq(follows.followingId, args.userId),
+        eq(users.isTest, false),
+        eq(users.isBanned, false),
+        sql`${users.id} NOT LIKE 'test-%'`
+      )
+    )
+    .orderBy(desc(follows.createdAt), desc(follows.id))
+    .limit(args.limit || 50);
   return {
-    followers: followersList.map((f) => {
-      const user = usersMap.get(f.followerId);
-      return {
-        id: f.followerId,
-        username: user?.username || null,
-        displayName: user?.displayName || null,
-        profileImageUrl: user?.profileImageUrl || null,
-      };
-    }),
+    followers: rows.map((user) => ({
+      id: user.id,
+      username: user.username || null,
+      displayName: user.displayName || null,
+      profileImageUrl: user.profileImageUrl || null,
+    })),
   };
 }
 
@@ -1852,32 +1858,34 @@ export async function executeGetFollowing(
   _agent: AuthenticatedAgent,
   args: GetFollowingArgs
 ): Promise<GetFollowingResult> {
-  const followingList = await db.follow.findMany({
-    where: { followerId: args.userId },
-    take: args.limit || 50,
-    orderBy: { createdAt: 'desc' },
-  });
-  const followingIds = followingList.map((f) => f.followingId);
-  const usersList = await db.user.findMany({
-    where: { id: { in: followingIds } },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      profileImageUrl: true,
-    },
-  });
-  const usersMap = new Map(usersList.map((u) => [u.id, u]));
+  // Same population as the website follow lists, mirrored on the
+  // followed side: see executeGetFollowers.
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      profileImageUrl: users.profileImageUrl,
+    })
+    .from(follows)
+    .innerJoin(users, eq(users.id, follows.followingId))
+    .where(
+      and(
+        eq(follows.followerId, args.userId),
+        eq(users.isTest, false),
+        eq(users.isBanned, false),
+        sql`${users.id} NOT LIKE 'test-%'`
+      )
+    )
+    .orderBy(desc(follows.createdAt), desc(follows.id))
+    .limit(args.limit || 50);
   return {
-    following: followingList.map((f) => {
-      const user = usersMap.get(f.followingId);
-      return {
-        id: f.followingId,
-        username: user?.username || null,
-        displayName: user?.displayName || null,
-        profileImageUrl: user?.profileImageUrl || null,
-      };
-    }),
+    following: rows.map((user) => ({
+      id: user.id,
+      username: user.username || null,
+      displayName: user.displayName || null,
+      profileImageUrl: user.profileImageUrl || null,
+    })),
   };
 }
 
