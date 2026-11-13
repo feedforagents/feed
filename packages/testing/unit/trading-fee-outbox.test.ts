@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { FeeService } from '../../engine/src/services/fee-service';
 
 type Row = {
   id: string;
@@ -7,12 +8,18 @@ type Row = {
   tradeAmount: string;
   tradeId: string | null;
   marketId: string | null;
+  idempotencyKey?: string | null;
 };
 
 let pendingRows: Row[] = [];
 /** IDs still present in the table (claimable). */
 let claimable = new Set<string>();
-const processTradingFee = mock(async () => undefined);
+const processTradingFee = mock(
+  async (...args: Parameters<typeof FeeService.processTradingFee>) => {
+    void args;
+    return undefined;
+  }
+);
 
 const tx = {
   delete: () => ({
@@ -40,28 +47,32 @@ mock.module('@feed/db', () => ({
   withTransaction: async <T>(fn: (t: typeof tx) => Promise<T>) => fn(tx),
 }));
 
-mock.module('@feed/engine', () => ({
-  FeeService: { processTradingFee },
-  isValidFeeType: (type: string) => type === 'perp_open',
-}));
-
 const { drainTradingFeeOutboxBatch } = await import(
-  '../../../apps/web/src/lib/services/trading-fee-outbox'
+  '../../engine/src/services/trading-fee-outbox'
 );
 
-const row = (id: string): Row => ({
+const row = (id: string, idempotencyKey: string | null = null): Row => ({
   id,
   userId: 'user-1',
   tradeType: 'perp_open',
   tradeAmount: '100',
   tradeId: 'pos-1',
   marketId: 'BTC',
+  idempotencyKey,
 });
+
+const originalProcessTradingFee = FeeService.processTradingFee;
 
 beforeEach(() => {
   processTradingFee.mockClear();
+  // @ts-expect-error test stub replaces the static method
+  FeeService.processTradingFee = processTradingFee;
   pendingRows = [];
   claimable = new Set();
+});
+
+afterEach(() => {
+  FeeService.processTradingFee = originalProcessTradingFee;
 });
 
 describe('drainTradingFeeOutboxBatch', () => {
@@ -73,6 +84,43 @@ describe('drainTradingFeeOutboxBatch', () => {
 
     expect(result).toEqual({ examined: 2, processed: 2, failed: 0 });
     expect(processTradingFee).toHaveBeenCalledTimes(2);
+  });
+
+  test('forwards the stored key so an already-settled fee replays instead of charging again', async () => {
+    pendingRows = [{ ...row('a'), idempotencyKey: 'op-key-1' }];
+    claimable = new Set(['a']);
+
+    const result = await drainTradingFeeOutboxBatch();
+
+    expect(result).toEqual({ examined: 1, processed: 1, failed: 0 });
+    expect(processTradingFee).toHaveBeenCalledTimes(1);
+    expect(processTradingFee).toHaveBeenCalledWith(
+      'user-1',
+      'perp_open',
+      100,
+      'pos-1',
+      'BTC',
+      expect.anything(),
+      'op-key-1'
+    );
+  });
+
+  test('drains keyless rows unkeyed, as before', async () => {
+    pendingRows = [row('a')];
+    claimable = new Set(['a']);
+
+    const result = await drainTradingFeeOutboxBatch();
+
+    expect(result).toEqual({ examined: 1, processed: 1, failed: 0 });
+    expect(processTradingFee).toHaveBeenCalledWith(
+      'user-1',
+      'perp_open',
+      100,
+      'pos-1',
+      'BTC',
+      expect.anything(),
+      undefined
+    );
   });
 
   test('never charges a row another drain already claimed', async () => {
@@ -97,5 +145,16 @@ describe('drainTradingFeeOutboxBatch', () => {
 
     expect(first.processed + second.processed).toBe(2);
     expect(processTradingFee).toHaveBeenCalledTimes(2);
+  });
+
+  test('replays the stored idempotency key so a retried fee is not charged twice', async () => {
+    pendingRows = [row('a', 'key-1')];
+    claimable = new Set(['a']);
+
+    const result = await drainTradingFeeOutboxBatch();
+
+    expect(result).toEqual({ examined: 1, processed: 1, failed: 0 });
+    expect(processTradingFee).toHaveBeenCalledTimes(1);
+    expect(processTradingFee.mock.calls[0]?.[6]).toBe('key-1');
   });
 });

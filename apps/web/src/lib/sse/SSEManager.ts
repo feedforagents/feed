@@ -432,11 +432,13 @@ export class SSEManager {
       this.pendingChannelReconnect = true;
     }
 
-    // Trigger connection if needed
-    if (!this.eventSource || previousSize !== this.requestedChannels.size) {
-      void this.ensureConnection();
+    // Trigger connection if needed. A socket opened for a smaller set is not
+    // updated in place: replace it, including after reconnect attempts are
+    // exhausted, or the new channel never receives events.
+    const channelSetChanged = previousSize !== this.requestedChannels.size;
+    if (!this.eventSource || channelSetChanged) {
+      void this.ensureConnection(channelSetChanged);
     } else if (!this.connectedChannels.has(channel)) {
-      // New channel added to existing connection, force reconnect
       void this.ensureConnection(true);
     }
 
@@ -666,7 +668,8 @@ export class SSEManager {
       return;
     }
 
-    // Already in sync
+    // In sync means this socket already carries every requested channel.
+    // An open socket with a stale set must fall through and be replaced.
     if (!forceReconnect && this.channelsInSync()) {
       this.notifyConnectionState('connected', null);
       return;
@@ -702,12 +705,6 @@ export class SSEManager {
         undefined,
         'SSEManager'
       );
-      return;
-    }
-
-    // Already connected and valid
-    if (!forceReconnect && this.eventSource?.readyState === EventSource.OPEN) {
-      logger.debug('SSE already connected', undefined, 'SSEManager');
       return;
     }
 

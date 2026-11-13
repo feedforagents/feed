@@ -25,11 +25,11 @@ export function floorPoints(value: number): number {
  * to whole cents, in decimal arithmetic. Execution, previews and the fee
  * ledger all charge/record this same value, so the books always agree.
  *
- * Rounding the fee up (never to nearest or down) is what makes the fee
- * partition-safe: a trade split into legs settles no more in total than
- * the same trade executed whole (each leg's settled amount floors, and
- * per-leg ceiling fees sum to at least the whole trade's fee), so
- * splitting can never increase the points a trader is credited.
+ * Prediction sales settle gross proceeds before charging this fee. The
+ * partition invariant concerns total points credited to the trader, not
+ * total fees: per-leg settlement dust can reduce the combined settled fee
+ * base, so split fees can be lower even when trader credit does not rise.
+ * Callers must account for settlement dust separately from recorded fees.
  *
  * Returns 0 for non-positive amounts or rates.
  */

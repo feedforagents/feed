@@ -151,6 +151,39 @@ describe('prediction fee charged vs fee ledger (canonical settled fee)', () => {
     }
   });
 
+  it('sell: lower split fees do not imply extra trader credit', () => {
+    // Settlement dust makes fee totals non-monotonic. The supported
+    // invariant compares actual net credits, not fees in isolation.
+    const firstShares = 20.03204008016032;
+    const whole = PredictionPricing.calculateSellWithFees(
+      5000,
+      5000,
+      'yes',
+      firstShares + 0.01,
+      RATE
+    );
+    const first = PredictionPricing.calculateSellWithFees(
+      5000,
+      5000,
+      'yes',
+      firstShares,
+      RATE
+    );
+    const last = PredictionPricing.calculateSellWithFees(
+      first.newYesShares,
+      first.newNoShares,
+      'yes',
+      0.01,
+      RATE
+    );
+    expect(whole.fee).toBe(0.02);
+    expect(first.fee + last.fee).toBe(0.01);
+    expect(whole.netProceeds).toBe(9.99);
+    expect(
+      Number(((first.netProceeds ?? 0) + (last.netProceeds ?? 0)).toFixed(2))
+    ).toBe(9.99);
+  });
+
   it('buy: splitting never receives more shares than the whole buy', () => {
     // The buy-side counterpart: a 5 pt buy split into legs received
     // 9.995 shares vs 9.975 whole under the rounded fee, because each

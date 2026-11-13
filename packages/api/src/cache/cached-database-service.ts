@@ -21,13 +21,16 @@ import {
   db,
   desc,
   eq,
+  followStatuses,
   follows,
   getDbInstance,
   inArray,
   isNull,
+  like,
   lt,
   lte,
   markets,
+  not,
   type Post,
   positions,
   posts,
@@ -293,6 +296,7 @@ class CachedDatabaseService {
         // Execute all count queries in parallel for minimum latency
         const [
           followersResult,
+          npcFollowersResult,
           followingResult,
           actorFollowsResult,
           positionsResult,
@@ -300,17 +304,52 @@ class CachedDatabaseService {
           reactionsResult,
           postCountResult,
         ] = await Promise.all([
-          // Count followers (users following this user)
+          // Count followers (users following this user). The followers
+          // list hides test and banned accounts, so the count joins the
+          // follower's user row and applies the same membership, or the
+          // header number disagrees with the list on the same screen.
           db
             .select({ count: count() })
             .from(follows)
-            .where(eq(follows.followingId, userId)),
+            .innerJoin(users, eq(follows.followerId, users.id))
+            .where(
+              and(
+                eq(follows.followingId, userId),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            ),
 
-          // Count following (users this user follows)
+          // Count NPC followers (FollowStatus rows the engine writes when
+          // an NPC follows this user). The followers list merges these rows
+          // in with the same filter, so the profile count must include them
+          // or it disagrees with the list on the same profile screen.
+          db
+            .select({ count: count() })
+            .from(followStatuses)
+            .where(
+              and(
+                eq(followStatuses.userId, userId),
+                eq(followStatuses.isActive, true),
+                not(eq(followStatuses.followReason, 'user_followed'))
+              )
+            ),
+
+          // Count following (users this user follows), with the same
+          // hidden-tier membership as the following list.
           db
             .select({ count: count() })
             .from(follows)
-            .where(eq(follows.followerId, userId)),
+            .innerJoin(users, eq(follows.followingId, users.id))
+            .where(
+              and(
+                eq(follows.followerId, userId),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            ),
 
           // Count actor follows
           db
@@ -336,14 +375,26 @@ class CachedDatabaseService {
             .from(reactions)
             .where(eq(reactions.userId, userId)),
 
-          // Count posts
+          // Count posts the profile list can show: not soft-deleted and
+          // already published. getPostsByActor applies the same two
+          // filters and the actor stats route counts actor posts the
+          // same way, so the header number agrees with the list on the
+          // same profile screen and never hints at a scheduled post.
           db
             .select({ count: count() })
             .from(posts)
-            .where(eq(posts.authorId, userId)),
+            .where(
+              and(
+                eq(posts.authorId, userId),
+                isNull(posts.deletedAt),
+                lte(posts.timestamp, new Date())
+              )
+            ),
         ]);
 
-        const followers = Number(followersResult[0]?.count ?? 0);
+        const followers =
+          Number(followersResult[0]?.count ?? 0) +
+          Number(npcFollowersResult[0]?.count ?? 0);
         const following = Number(followingResult[0]?.count ?? 0);
         const actorFollows = Number(actorFollowsResult[0]?.count ?? 0);
 

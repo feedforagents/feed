@@ -47,7 +47,9 @@ export {
   withQuestionLock,
 } from './resource-locks';
 export * from './sentry-webhook-inbox-service';
+export * from './share-service';
 export * from './system-status-service';
+export * from './trades-feed-service';
 export * from './trading-balance-funding-service';
 export * from './trading-leaderboard-service';
 export * from './trading-performance-service';

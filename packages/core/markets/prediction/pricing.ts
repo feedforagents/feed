@@ -204,9 +204,10 @@ export class PredictionPricing {
    * records and splits (FeeService.calculateFee): the fee on the
    * cent-settled amount, rounded UP to whole cents
    * (`canonicalTradingFee` in @feed/shared, PRD §9.1). Settling the amount
-   * to cents first and ceiling the fee is what keeps the fee
-   * partition-safe — a split trade never settles more, nor pays less total
-   * fee, than the same trade executed whole. A nearest-cent rounded fee
+   * to cents first keeps settlement dust out of the wallet. The required
+   * invariant is no extra total trader credit from splitting; total split
+   * fees need not be monotonic because each leg settles separately.
+   * A nearest-cent rounded fee
    * fails that invariant: small legs round down to a zero fee, so split
    * sells/buys beat whole ones. PerpMarketService.calculateFee charges
    * this same canonical fee (#1611); prediction charges align with it
