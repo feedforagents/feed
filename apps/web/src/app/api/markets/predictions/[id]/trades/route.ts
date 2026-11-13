@@ -8,7 +8,18 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db, eq, inArray, markets, sql, users } from '@feed/db';
+import {
+  and,
+  balanceTransactions,
+  count,
+  db,
+  eq,
+  inArray,
+  markets,
+  npcTrades,
+  sql,
+  users,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -187,9 +198,39 @@ export const GET = withErrorHandling(
       };
     });
 
+    // Total must be the full merged trade count, not a page-derived
+    // lower bound: the market detail route reports this same quantity as
+    // tradeCount (user pred_buy/pred_sell balance transactions + NPC
+    // trades), and the perps trades sibling returns its full count too.
+    // Count with the same predicates as the union above so `total`
+    // agrees on every page.
+    const [balanceTradeCountRows, npcTradeCountRows] = await Promise.all([
+      db
+        .select({ count: count() })
+        .from(balanceTransactions)
+        .where(
+          and(
+            eq(balanceTransactions.relatedId, marketId),
+            inArray(balanceTransactions.type, ['pred_buy', 'pred_sell'])
+          )
+        ),
+      db
+        .select({ count: count() })
+        .from(npcTrades)
+        .where(
+          and(
+            eq(npcTrades.marketType, 'prediction'),
+            eq(npcTrades.marketId, marketId)
+          )
+        ),
+    ]);
+    const total =
+      Number(balanceTradeCountRows[0]?.count ?? 0) +
+      Number(npcTradeCountRows[0]?.count ?? 0);
+
     const result = {
       trades,
-      total: queryParams.offset + trades.length + (hasMore ? 1 : 0),
+      total,
       hasMore,
       marketId: market.id,
       question: market.question,
