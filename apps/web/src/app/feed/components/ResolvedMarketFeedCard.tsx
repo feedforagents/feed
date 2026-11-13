@@ -3,20 +3,11 @@
 import { cn } from '@feed/shared';
 import Link from 'next/link';
 import type { NarrativeStory } from '@/app/feed/types/narrative';
+import { computePercentages } from './feed-card-percentages';
 
 interface ResolvedMarketFeedCardProps {
   story: NarrativeStory;
   onOpenMarket?: () => void;
-}
-
-function computePercentages(
-  yesShares: number,
-  noShares: number
-): { yesPercent: number; noPercent: number } {
-  const total = yesShares + noShares;
-  if (total === 0) return { yesPercent: 50, noPercent: 50 };
-  const yesPercent = Math.round((yesShares / total) * 100);
-  return { yesPercent, noPercent: 100 - yesPercent };
 }
 
 /**
