@@ -291,20 +291,22 @@ test('fuzzy commit: first fee attempt writes then throws, retry charges exactly 
     expect(recorded[0]!.tradeType).toBe('perp_open');
     expect(recorded[0]!.idempotencyKey).toBe(`perp_open:${result.positionId}`);
     expect(Number(recorded[0]!.feeAmount)).toBe(1);
+    expect(Number(recorded[0]!.referrerFee)).toBe(0);
+    expect(recorded[0]!.referrerId).toBeNull();
     const [owner] = await db.select().from(users).where(eq(users.id, userId));
     expect(Number(owner!.totalFeesPaid)).toBe(1);
     const [referrer] = await db
       .select()
       .from(users)
       .where(eq(users.id, referrerId));
-    expect(Number(referrer!.totalFeesEarned)).toBe(0.5);
+    expect(Number(referrer!.totalFeesEarned)).toBe(0);
     const referralTx = await db
       .select()
       .from(balanceTransactions)
       .where(eq(balanceTransactions.userId, referrerId));
     expect(
       referralTx.filter((r) => r.type === 'referral_fee_earned')
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     const queued = await db
       .select()
       .from(tradingFeeOutbox)
