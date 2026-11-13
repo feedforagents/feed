@@ -4,9 +4,10 @@
  * never above the computed proceeds, and the persisted ledger matches the
  * balance change. Margin is size / leverage, so most opens and closes compute
  * sub-hundredth amounts that the numeric(18,2) balance would otherwise round to
- * the nearest hundredth, sometimes in the trader's favor.
+ * the nearest hundredth, sometimes in the trader's favor. The P&L booked over
+ * a round trip must equal the balance change, including that rounding.
  */
-import { test } from 'bun:test';
+import { spyOn, test } from 'bun:test';
 import assert from 'node:assert/strict';
 import {
   and,
@@ -20,6 +21,7 @@ import {
   stockPrices,
   users,
 } from '@feed/db';
+import { WalletService } from '@feed/engine';
 import { floorPoints, isPointsAmount } from '@feed/shared';
 import { createPerpMarketService } from '../../../apps/web/src/app/api/markets/perps/_adapters';
 
@@ -54,12 +56,22 @@ async function ledger(uid: string, type: string) {
     );
 }
 
+/**
+ * `bookedPnL` returns the exact sum of the P&L deltas booked for the fixture
+ * user. The calls still reach the database; the sum is read from them because
+ * the lifetimePnL column rounds each write to a hundredth.
+ */
 async function withFixture(
   label: string,
-  run: (uid: string, ticker: string) => Promise<void>
+  run: (uid: string, ticker: string, bookedPnL: () => number) => Promise<void>
 ): Promise<void> {
   const uid = `perp-cash-${label}-${crypto.randomUUID()}`;
   const ticker = `PCASH${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  const recordPnL = spyOn(WalletService, 'recordPnL');
+  const bookedPnL = () =>
+    recordPnL.mock.calls
+      .filter(([userId]) => userId === uid)
+      .reduce((sum, [, pnl]) => sum + pnl, 0);
   try {
     await db.insert(users).values({
       id: uid,
@@ -90,8 +102,9 @@ async function withFixture(
         predictedRate: 0,
       },
     });
-    await run(uid, ticker);
+    await run(uid, ticker, bookedPnL);
   } finally {
+    recordPnL.mockRestore();
     await db
       .delete(pointsTransactions)
       .where(eq(pointsTransactions.userId, uid));
@@ -114,6 +127,21 @@ async function balanceOf(uid: string): Promise<number> {
   return Number(user.virtualBalance);
 }
 
+async function lifetimePnLOf(uid: string): Promise<number> {
+  const [user] = await db.select().from(users).where(eq(users.id, uid));
+  assert.ok(user);
+  return Number(user.lifetimePnL);
+}
+
+const hundredths = (value: number) => Math.round(value * 100) / 100;
+
+function assertBooked(booked: number, balanceChange: number, label: string) {
+  assert.ok(
+    Math.abs(booked - balanceChange) < 1e-9,
+    `${label} booked P&L ${booked} for a balance change of ${balanceChange}`
+  );
+}
+
 const roundTrips = [
   { size: 10, leverage: 3, exit: 101.37 },
   { size: 100, leverage: 3, exit: 98.61 },
@@ -126,7 +154,7 @@ for (const { size, leverage, exit } of roundTrips) {
     test(`${side} ${size}@${leverage}x open charges and close credits settle to hundredths in the house's favor`, async () => {
       await withFixture(
         `rt-${side}-${size}-${leverage}`,
-        async (uid, ticker) => {
+        async (uid, ticker, bookedPnL) => {
           const service = createPerpMarketService({ withPriceImpact: true });
 
           const opened = await service.openPosition({
@@ -169,7 +197,12 @@ for (const { size, leverage, exit } of roundTrips) {
           assert.equal(credited, floorPoints(proceeds));
           assert.equal(
             await balanceOf(uid),
-            Math.round((STARTING_BALANCE - charged + credited) * 100) / 100
+            hundredths(STARTING_BALANCE - charged + credited)
+          );
+          assertBooked(bookedPnL(), credited - charged, 'round trip');
+          assert.equal(
+            await lifetimePnLOf(uid),
+            hundredths(credited - charged)
           );
         }
       );
@@ -178,7 +211,7 @@ for (const { size, leverage, exit } of roundTrips) {
 }
 
 test('splitting a close into partial closes never credits more than the proceeds of each leg', async () => {
-  await withFixture('split', async (uid, ticker) => {
+  await withFixture('split', async (uid, ticker, bookedPnL) => {
     const service = createPerpMarketService({ withPriceImpact: true });
     const opened = await service.openPosition({
       userId: uid,
@@ -215,5 +248,37 @@ test('splitting a close into partial closes never credits more than the proceeds
     for (const row of rows) {
       assert.ok(isPointsAmount(Number(row.amount)));
     }
+    assertBooked(
+      bookedPnL(),
+      (await balanceOf(uid)) - STARTING_BALANCE,
+      'split round trip'
+    );
+  });
+});
+
+test('adding to and flipping a position books the rounding of every opening charge', async () => {
+  await withFixture('add-flip', async (uid, ticker, bookedPnL) => {
+    const service = createPerpMarketService({ withPriceImpact: true });
+    const trade = (side: 'long' | 'short', size: number) =>
+      service.openPosition({ userId: uid, ticker, side, size, leverage: 3 });
+
+    await trade('long', 10);
+    const added = await trade('long', 11);
+    assert.equal(added.rebalanceType, 'add');
+    await setPrice(ticker, 101.37);
+    const flipped = await trade('short', 35);
+    assert.equal(flipped.rebalanceType, 'flip');
+    await setPrice(ticker, 99.17);
+    const closed = await service.closePosition({
+      userId: uid,
+      positionId: flipped.positionId,
+    });
+    assert.equal(closed.fullyClosed, true);
+
+    assertBooked(
+      bookedPnL(),
+      (await balanceOf(uid)) - STARTING_BALANCE,
+      'open, add, flip and close'
+    );
   });
 });

@@ -130,6 +130,16 @@ function settlePerpProceeds(
     : proceeds.toDecimalPlaces(2, Decimal.ROUND_FLOOR).toNumber();
 }
 
+/**
+ * P&L realized when a leg opens: everything charged beyond the margin the
+ * position carries, so the fee plus the rounding up of the charge. A close
+ * books its proceeds minus that same margin, so a round trip books exactly the
+ * balance change. Booking only the fee would leave the rounding out of P&L.
+ */
+function openLegPnL(totalCost: number, marginRequired: number): number {
+  return new Decimal(marginRequired).minus(totalCost).toNumber();
+}
+
 const DEFAULT_MIN_ORDER_SIZE = 10;
 const MIN_MAX_POSITION_SIZE = 10_000;
 const OPEN_INTEREST_LIMIT_RATIO = 0.1;
@@ -759,7 +769,7 @@ export class PerpMarketService {
 
         await wallet.recordPnL({
           userId: input.userId,
-          pnl: -fee,
+          pnl: openLegPnL(totalCost, marginRequired),
           reason: 'perp_open',
           relatedId: position.id,
         });
@@ -1735,7 +1745,7 @@ export class PerpMarketService {
 
           await wallet.recordPnL({
             userId: input.userId,
-            pnl: -fee,
+            pnl: openLegPnL(totalCost, marginRequired),
             reason: 'perp_add_to_position',
             relatedId: existing.id,
           });
@@ -2108,9 +2118,10 @@ export class PerpMarketService {
 
             // Net realized PnL for the flip operation:
             // - Close leg: settlement minus returned margin (includes any fee actually collected)
-            // - Open leg: fee is realized immediately
+            // - Open leg: fee and charge rounding are realized immediately
             const netClosePnL = netSettlement - closeMarginPaid;
-            const netFlipPnL = netClosePnL - openFee;
+            const netFlipPnL =
+              netClosePnL + openLegPnL(totalCost, marginRequired);
             await wallet.recordPnL({
               userId: input.userId,
               pnl: netFlipPnL,

@@ -364,7 +364,7 @@ describe('PerpMarketService', () => {
     expect(balance.balance).toBeCloseTo(expectedBalance, 4);
 
     // PnL should include fees:
-    // - perp_open records -openFee
+    // - perp_open records -(charge - margin): the fee plus any charge rounding
     // - perp_close records (netSettlement - marginPaid) which includes close fee
     const pnls = wallet.getPnLs('u1');
     const totalPnL = pnls.reduce((sum, p) => sum + p.pnl, 0);
