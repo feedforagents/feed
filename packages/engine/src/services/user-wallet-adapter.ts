@@ -40,7 +40,14 @@ export function createUserWalletAdapter(
         afterCommit
       ),
     recordPnL: async ({ userId, pnl, reason, relatedId }) => {
-      await WalletService.recordPnL(userId, pnl, reason, relatedId, dbClient);
+      await WalletService.recordPnL(
+        userId,
+        pnl,
+        reason,
+        relatedId,
+        dbClient,
+        afterCommit
+      );
     },
     getBalance: (userId: string) => WalletService.getBalance(userId, dbClient),
   };

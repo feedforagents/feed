@@ -392,13 +392,18 @@ export class WalletService {
    * Pass `tx` when the caller already holds a transaction that mutated this
    * user (e.g. a wallet debit/credit) — opening a second transaction against
    * the same locked row would block on the caller's own lock.
+   *
+   * lifetimePnL is part of the cached balance row, so this drops that cache
+   * exactly like debit/credit do: deferred to `afterCommit` when the caller
+   * schedules post-commit effects, otherwise after the mutation returns.
    */
   static async recordPnL(
     userId: string,
     pnl: number,
     tradeType: string,
     relatedId?: string,
-    tx?: Transaction | DrizzleClient
+    tx?: Transaction | DrizzleClient,
+    afterCommit?: AfterCommitScheduler
   ): Promise<{
     previousLifetimePnL: number;
     newLifetimePnL: number;
@@ -458,7 +463,10 @@ export class WalletService {
       };
     };
 
-    return tx ? apply(tx) : withTransaction(apply);
+    const result = tx ? apply(tx) : withTransaction(apply);
+    if (afterCommit) afterCommit(() => WalletService.invalidateCache(userId));
+    else await WalletService.invalidateCache(userId);
+    return result;
   }
 
   /**
