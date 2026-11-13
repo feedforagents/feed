@@ -137,11 +137,61 @@ export function verifyEndpoints(
     'staging_equals_production'
   );
 }
+// Approved staging-only lineage. These are original file hashes/timestamps,
+// not receipts for the deliberately deferred 0001/0002 removals.
+export const STAGING_ORIGINAL_MIGRATIONS = [
+  {
+    index: 0,
+    tag: '0000_fresh_baseline',
+    hash: '69975b14b733c8134362897a91ef4d94ae945c6778776c6c11906281709c59c0',
+    when: '1791752210564',
+  },
+  {
+    index: 1,
+    tag: '0001_remove_farcaster',
+    hash: '2dcec6ddeac6edc27531fad767f613d9f15050a68d0e7051036e174e68c5d618',
+    when: '1791754582384',
+  },
+  {
+    index: 2,
+    tag: '0002_remove_collectible_nfts',
+    hash: '58624cfb049611990db828c68afc0ed24aa289b68cbb20e7f5fc0ba7341b836d',
+    when: '1791756357957',
+  },
+  {
+    index: 3,
+    tag: '0003_prediction_cash_cost_basis',
+    hash: '9a6e966b25944817cc02cf2505e6d226d4e825332c50b5451bbc2a7c11ca1ea3',
+    when: '1793815597156',
+  },
+  {
+    index: 4,
+    tag: '0004_leverage_cap_20',
+    hash: '7239f1c02196404bc8b2d3242d760f8a3cc4fe0031d5c5e12c1ce4011a7cebc9',
+    when: '1793818723317',
+  },
+  {
+    index: 5,
+    tag: '0005_trading_fee_idempotency_key',
+    hash: '48f477940d238aaa5b8dbef8463a222cadb065292cb6ca3393b2e1238b73b583',
+    when: '1794307141641',
+  },
+] as const;
+export const BASELINE_ADDITIVE_MIGRATIONS = [
+  STAGING_ORIGINAL_MIGRATIONS[0],
+  STAGING_ORIGINAL_MIGRATIONS[3],
+  STAGING_ORIGINAL_MIGRATIONS[4],
+  STAGING_ORIGINAL_MIGRATIONS[5],
+] as const;
 export interface Migration {
   hash: string;
   when: string;
 }
-export function verifyHistory(value: unknown, expected: Migration[]): number {
+export function verifyHistory(
+  value: unknown,
+  expected: Migration[],
+  allowStagingBaselineAdditive = false
+): number {
   const actual = list(value).map((item) => {
     const row = object(item);
     return { hash: text(row.hash), when: text(row.when) };
@@ -162,24 +212,56 @@ export function verifyHistory(value: unknown, expected: Migration[]): number {
           : null,
     })),
   };
+  const additive =
+    allowStagingBaselineAdditive && [1, 4].includes(actual.length);
   requireCondition(
-    expected.length === 6 && [5, 6].includes(actual.length),
+    expected.length === 6 && ([5, 6].includes(actual.length) || additive),
     'unexpected_migration_count',
     migrationHistory
   );
-  requireCondition(
-    actual.every(
-      (row, i) =>
-        row.hash === expected[i]?.hash && row.when === expected[i]?.when
-    ),
-    'migration_history_mismatch',
-    migrationHistory
-  );
+  if (additive) {
+    requireCondition(
+      STAGING_ORIGINAL_MIGRATIONS.every(
+        (pin) =>
+          expected[pin.index]?.hash === pin.hash &&
+          expected[pin.index]?.when === pin.when
+      ),
+      'unsupported_additive_source'
+    );
+    const selected =
+      actual.length === 1
+        ? BASELINE_ADDITIVE_MIGRATIONS.slice(0, 1)
+        : BASELINE_ADDITIVE_MIGRATIONS;
+    requireCondition(
+      actual.every(
+        (row, i) =>
+          row.hash === selected[i]?.hash && row.when === selected[i]?.when
+      ),
+      'migration_history_mismatch',
+      migrationHistory
+    );
+  } else {
+    requireCondition(
+      actual.every(
+        (row, i) =>
+          row.hash === expected[i]?.hash && row.when === expected[i]?.when
+      ),
+      'migration_history_mismatch',
+      migrationHistory
+    );
+  }
   return actual.length;
 }
-export function verifyColumns(value: unknown, historyLength: number): boolean {
+export function verifyColumns(
+  value: unknown,
+  historyLength: number,
+  allowStagingBaselineAdditive = false
+): boolean {
   const columns = list(value);
-  if (historyLength === 5) {
+  if (
+    historyLength === 5 ||
+    (allowStagingBaselineAdditive && historyLength === 1)
+  ) {
     requireCondition(columns.length === 0, 'unreceipted_fee_columns');
     return false;
   }
@@ -223,6 +305,97 @@ export function verifyIndex(value: unknown): boolean {
     'incorrect_fee_index'
   );
   return true;
+}
+
+export const BASELINE_ADDITIVE_TABLES = [
+  'PerpMarketSnapshot',
+  'Position',
+  'TradingFee',
+  'TradingFeeOutbox',
+] as const;
+
+export function verifyAdditiveTargets(
+  value: unknown,
+  requireOwnership = false
+): Record<string, string> {
+  const rows = list(value).map(object);
+  requireCondition(
+    rows.length === 4 &&
+      JSON.stringify(rows.map((row) => row.table).sort()) ===
+        JSON.stringify(BASELINE_ADDITIVE_TABLES),
+    'incorrect_additive_targets'
+  );
+  const targets: Record<string, string> = {};
+  for (const table of BASELINE_ADDITIVE_TABLES) {
+    const row = rows.find((row) => row.table === table);
+    requireCondition(row !== undefined, 'incorrect_additive_targets');
+    const oid = text(row.oid);
+    requireCondition(
+      oid === oid.trim() &&
+        /^[1-9]\d{0,9}$/.test(oid) &&
+        Number(oid) <= 4_294_967_295 &&
+        row.schema === 'public' &&
+        row.kind === 'r' &&
+        row.resolvesPublic === true &&
+        typeof row.canMigrate === 'boolean',
+      'incorrect_additive_targets'
+    );
+    requireCondition(
+      !requireOwnership || row.canMigrate === true,
+      'migration_role_not_owner'
+    );
+    targets[table] = oid;
+  }
+  requireCondition(
+    new Set(Object.values(targets)).size === 4,
+    'incorrect_additive_targets'
+  );
+  return targets;
+}
+
+export function verifyAdditiveColumns(
+  value: unknown,
+  historyLength: number
+): void {
+  requireCondition(
+    [1, 4].includes(historyLength),
+    'unexpected_additive_history'
+  );
+  const rows = list(value).map(object);
+  const basis = rows.filter(
+    (row) => row.table === 'Position' && row.column === 'cashCostBasis'
+  );
+  const leverage = rows.filter(
+    (row) => row.table === 'PerpMarketSnapshot' && row.column === 'maxLeverage'
+  );
+  requireCondition(
+    basis.length === (historyLength === 1 ? 0 : 1) &&
+      leverage.length === 1 &&
+      rows.length === basis.length + leverage.length,
+    'unsupported_additive_columns'
+  );
+  const limit = leverage[0];
+  requireCondition(
+    limit?.type === 'integer' &&
+      limit.notNull === true &&
+      limit.hasDefault === true &&
+      limit.dropped === false &&
+      (historyLength === 1
+        ? ['100', '20'].includes(text(limit.defaultExpression))
+        : limit.defaultExpression === '20'),
+    'incorrect_leverage_column'
+  );
+  if (historyLength === 4) {
+    const cost = basis[0];
+    requireCondition(
+      cost?.type === 'numeric(18,2)' &&
+        cost.notNull === false &&
+        cost.hasDefault === false &&
+        cost.defaultExpression === null &&
+        cost.dropped === false,
+      'incorrect_cost_basis_column'
+    );
+  }
 }
 
 // Diagnostic-only physical shape; this proves no history, identity or RLS access.

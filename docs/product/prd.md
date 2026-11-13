@@ -227,6 +227,12 @@ ChatGPT Apps SDK / MCP Apps widgets for the feed, a market card, and the portfol
 - **Going broke:** a player at 0 pts with no open positions can keep playing socially and can buy more. No free refills ([D-15]).
 - Remove `reputationPoints`, `earnedPoints`, `invitePoints`, `bonusPoints`, all `pointsAwardedFor*` flags.
 
+**Approved — staging-only schema compatibility.** The maintainer approved this bounded staging maintenance exception on 2026-11-12. To restore accounting in §9.1 and retained perps in §9.3 without deleting existing staging data, only a staging database with the exact original `0000_fresh_baseline` receipt may use the original additive migrations `0003_prediction_cash_cost_basis`, `0004_leverage_cap_20`, and `0005_trading_fee_idempotency_key` through the normal pinned migrator. Its genuine resulting history is `[0000, 0003, 0004, 0005]`; no receipts may be invented, adopted or rewritten for skipped `0001`/`0002` removals.
+
+This path must fail closed on unsupported history or physical state. Preserve APP/DIRECT primary identity, ordinary public-table/OID and migration ownership checks, forced SQL target resolution, TLS, grants/RLS, lock limits, current-commit/required-check guards, and the verified concurrent index before application upload. Local evidence must prove genuine receipts, unchanged nonempty retained data, transaction rollback, postflight physical shapes and safe reruns; existing required quality gates remain mandatory.
+
+This is only a staging maintenance exception to Phase 1's removal order: preserve retired Farcaster/NFT data, do not claim those removals or any MVP phase complete, and require a separate reviewed migration for future cleanup. It does not change the production fresh-baseline/new-game requirements in §7.3 (D-8) or the relaunch plan.
+
 ### 9.2 Prediction markets
 - Keep the existing market lifecycle (10 rolling slots from 15 minutes to 3 days, LLM-decided hidden outcome, insider/deceiver NPCs, increasing signal over time, proof article at resolution).
 - **Fix payout to match quotes ([D-14]):** a winning share redeems for exactly 1 pt; CPMM price = cost per share. Market liquidity is seeded by the house (virtual).
