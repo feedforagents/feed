@@ -297,15 +297,19 @@ beforeAll(async () => {
 
 async function messagingSnapshot() {
   const userIds = [...owned.User.keys()];
+  const userList = sql.join(
+    userIds.map((userId) => sql`${userId}`),
+    sql`, `
+  );
   const rows = await db.execute<{ table: string; canonical: string }>(sql`
     SELECT 'Chat' AS "table", to_jsonb(c)::text AS canonical FROM "Chat" c
-      WHERE c.id IN (SELECT p."chatId" FROM "ChatParticipant" p WHERE p."userId" = ANY(${userIds}::text[]))
+      WHERE c.id IN (SELECT p."chatId" FROM "ChatParticipant" p WHERE p."userId" IN (${userList}))
     UNION ALL SELECT 'ChatParticipant', to_jsonb(p)::text FROM "ChatParticipant" p
-      WHERE p."userId" = ANY(${userIds}::text[])
+      WHERE p."userId" IN (${userList})
     UNION ALL SELECT 'DMAcceptance', to_jsonb(a)::text FROM "DMAcceptance" a
-      WHERE a."userId" = ANY(${userIds}::text[]) OR a."otherUserId" = ANY(${userIds}::text[])
+      WHERE a."userId" IN (${userList}) OR a."otherUserId" IN (${userList})
     UNION ALL SELECT 'Message', to_jsonb(m)::text FROM "Message" m
-      WHERE m."senderId" = ANY(${userIds}::text[])
+      WHERE m."senderId" IN (${userList})
     ORDER BY "table", canonical
   `);
   return Array.from(rows);
