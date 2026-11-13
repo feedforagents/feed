@@ -2212,7 +2212,7 @@ export class FeedAgentExecutor implements AgentExecutor {
         memberId,
         chatParticipantId: await generateSnowflakeId(),
         groupMemberId: await generateSnowflakeId(),
-        role: memberId === userId ? 'admin' : 'member',
+        role: memberId === userId ? 'owner' : 'member',
       }))
     );
 
