@@ -55,11 +55,22 @@ const PREDICTION_FEE_CASES = [
   'prediction fee partition invariance (real DB) > dust proceeds settle to zero with no fee; a one-cent settled sell nets zero after its fee',
   'prediction fee partition invariance (real DB) > atomic fixture collisions preserve existing rows and leave no partial setup',
 ];
+const NPC_TRADE_FILE =
+  'packages/testing/integration/prediction-detail-trade-count.integration.test.ts';
+const NPC_TRADE_CASES = [
+  'prediction market detail tradeCount (all NPC execution paths) > counts an autonomous-loop NPC buy (executeDirectTrade)',
+  'prediction market detail tradeCount (all NPC execution paths) > counts an autonomous-loop NPC sell (executeDirectTrade)',
+  'prediction market detail tradeCount (all NPC execution paths) > counts a TradeExecutionService NPC buy exactly once (control)',
+  'prediction market detail tradeCount (all NPC execution paths) > lists every executed trade in the market trades feed',
+  'prediction market detail tradeCount (all NPC execution paths) > a failed sell creates no phantom mirror or wallet change',
+  'prediction market detail tradeCount (all NPC execution paths) > invalidates a same-process feed cached while its mirror insert waits',
+];
 type Suite =
   | 'sub-market'
   | 'prediction-remainder'
   | 'plugin-perp-fee'
-  | 'prediction-fee';
+  | 'prediction-fee'
+  | 'npc-trade-count';
 type Lease = {
   database: string;
   oid: string;
@@ -241,6 +252,13 @@ export async function verifyPredictionFeeChildLease() {
   );
 }
 
+export async function verifyNpcTradeCountChildLease() {
+  await verifyChildLease(
+    process.env.FEED_NPC_TRADE_COUNT_CHILD,
+    process.env.FEED_NPC_TRADE_COUNT_LEASE_FILE
+  );
+}
+
 async function run(
   args: string[],
   env: NodeJS.ProcessEnv,
@@ -344,8 +362,26 @@ async function run(
 
 export async function startPredictionRemainderServer() {
   await verifyPredictionRemainderChildLease();
+  return startOwnedPredictionServer(
+    process.env.FEED_PREDICTION_REMAINDER_LEASE_FILE!,
+    true
+  );
+}
+
+export async function startNpcTradeCountServer() {
+  await verifyNpcTradeCountChildLease();
+  return startOwnedPredictionServer(
+    process.env.FEED_NPC_TRADE_COUNT_LEASE_FILE!,
+    false
+  );
+}
+
+async function startOwnedPredictionServer(
+  leaseFile: string,
+  testAuth: boolean
+) {
   const env = process.env;
-  const directory = dirname(env.FEED_PREDICTION_REMAINDER_LEASE_FILE!);
+  const directory = dirname(leaseFile);
   const app = join(ROOT, 'apps/web');
   const buildIdPath = join(app, '.next/BUILD_ID');
   const buildId = readFileSync(buildIdPath, 'utf8').trim();
@@ -368,8 +404,8 @@ export async function startPredictionRemainderServer() {
   const url = `http://127.0.0.1:${port}`;
   const runtimeEnv = {
     ...env,
-    ALLOW_TEST_PRIVY_DID_AUTH: 'true',
-    DISABLE_RATE_LIMITING: 'true',
+    ALLOW_TEST_PRIVY_DID_AUTH: testAuth ? 'true' : 'false',
+    DISABLE_RATE_LIMITING: testAuth ? 'true' : 'false',
     PORT: String(port),
     FEED_API_URL: url,
     TEST_API_URL: url,
@@ -519,38 +555,51 @@ export async function runIsolatedPredictionFeeCases() {
   await runIsolatedCases('prediction-fee');
 }
 
+export async function runIsolatedNpcTradeCountCases() {
+  await runIsolatedCases('npc-trade-count');
+}
+
 async function runIsolatedCases(suite: Suite) {
+  const npc = suite === 'npc-trade-count';
   const fee = suite === 'prediction-fee';
   const prediction = suite === 'prediction-remainder';
   const plugin = suite === 'plugin-perp-fee';
-  const file = fee
-    ? PREDICTION_FEE_FILE
-    : plugin
-      ? PLUGIN_PERP_FILE
-      : prediction
-        ? PREDICTION_FILE
-        : FILE;
-  const cases = fee
-    ? PREDICTION_FEE_CASES
-    : plugin
-      ? PLUGIN_PERP_CASES
-      : prediction
-        ? PREDICTION_CASES
-        : CASES;
-  const marker = fee
-    ? 'FEED_PREDICTION_FEE_CHILD'
-    : plugin
-      ? 'FEED_PLUGIN_PERP_FEE_CHILD'
-      : prediction
-        ? 'FEED_PREDICTION_REMAINDER_CHILD'
-        : 'FEED_SUB_MARKET_CHILD';
-  const leaseVariable = fee
-    ? 'FEED_PREDICTION_FEE_LEASE_FILE'
-    : plugin
-      ? 'FEED_PLUGIN_PERP_FEE_LEASE_FILE'
-      : prediction
-        ? 'FEED_PREDICTION_REMAINDER_LEASE_FILE'
-        : 'FEED_SUB_MARKET_LEASE_FILE';
+  const file = npc
+    ? NPC_TRADE_FILE
+    : fee
+      ? PREDICTION_FEE_FILE
+      : plugin
+        ? PLUGIN_PERP_FILE
+        : prediction
+          ? PREDICTION_FILE
+          : FILE;
+  const cases = npc
+    ? NPC_TRADE_CASES
+    : fee
+      ? PREDICTION_FEE_CASES
+      : plugin
+        ? PLUGIN_PERP_CASES
+        : prediction
+          ? PREDICTION_CASES
+          : CASES;
+  const marker = npc
+    ? 'FEED_NPC_TRADE_COUNT_CHILD'
+    : fee
+      ? 'FEED_PREDICTION_FEE_CHILD'
+      : plugin
+        ? 'FEED_PLUGIN_PERP_FEE_CHILD'
+        : prediction
+          ? 'FEED_PREDICTION_REMAINDER_CHILD'
+          : 'FEED_SUB_MARKET_CHILD';
+  const leaseVariable = npc
+    ? 'FEED_NPC_TRADE_COUNT_LEASE_FILE'
+    : fee
+      ? 'FEED_PREDICTION_FEE_LEASE_FILE'
+      : plugin
+        ? 'FEED_PLUGIN_PERP_FEE_LEASE_FILE'
+        : prediction
+          ? 'FEED_PREDICTION_REMAINDER_LEASE_FILE'
+          : 'FEED_SUB_MARKET_LEASE_FILE';
   requireThat(
     !process.env.FEED_SUB_MARKET_CHILD &&
       !process.env.FEED_SUB_MARKET_LEASE_FILE &&
@@ -559,7 +608,9 @@ async function runIsolatedCases(suite: Suite) {
       !process.env.FEED_PLUGIN_PERP_FEE_CHILD &&
       !process.env.FEED_PLUGIN_PERP_FEE_LEASE_FILE &&
       !process.env.FEED_PREDICTION_FEE_CHILD &&
-      !process.env.FEED_PREDICTION_FEE_LEASE_FILE,
+      !process.env.FEED_PREDICTION_FEE_LEASE_FILE &&
+      !process.env.FEED_NPC_TRADE_COUNT_CHILD &&
+      !process.env.FEED_NPC_TRADE_COUNT_LEASE_FILE,
     'Parent cannot reuse a child marker'
   );
   const source = localUrl(process.env.DATABASE_URL);
@@ -573,13 +624,15 @@ async function runIsolatedCases(suite: Suite) {
   const directory = mkdtempSync(
     join(
       tmpdir(),
-      fee
-        ? 'feed-prediction-fee-'
-        : plugin
-          ? 'feed-plugin-perp-fee-'
-          : prediction
-            ? 'feed-prediction-remainder-'
-            : 'feed-sub-market-'
+      npc
+        ? 'feed-npc-trade-count-'
+        : fee
+          ? 'feed-prediction-fee-'
+          : plugin
+            ? 'feed-plugin-perp-fee-'
+            : prediction
+              ? 'feed-prediction-remainder-'
+              : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -655,7 +708,7 @@ async function runIsolatedCases(suite: Suite) {
       join(directory, 'migrate.log'),
       60000
     );
-    if (prediction || plugin || fee) {
+    if (prediction || plugin || fee || npc) {
       phase = 'manual-idempotency-index';
       const actual = await identity(admin);
       const current = await leaseRow(admin, database);
@@ -707,13 +760,15 @@ async function runIsolatedCases(suite: Suite) {
         'psql'
       );
     }
-    phase = fee
-      ? 'seven-prediction-fee-child-cases'
-      : plugin
-        ? 'six-child-cases'
-        : prediction
-          ? 'ten-child-cases'
-          : 'four-child-cases';
+    phase = npc
+      ? 'six-npc-trade-count-child-cases'
+      : fee
+        ? 'seven-prediction-fee-child-cases'
+        : plugin
+          ? 'six-child-cases'
+          : prediction
+            ? 'ten-child-cases'
+            : 'four-child-cases';
     const output = await run(
       ['test', file, '--timeout', '30000'],
       env,
@@ -727,7 +782,7 @@ async function runIsolatedCases(suite: Suite) {
       lines.find((line) =>
         new RegExp(
           '^\\(pass\\) ' +
-            (prediction || plugin || fee
+            (prediction || plugin || fee || npc
               ? ''
               : 'sub-market transactional creation > ') +
             escape(name) +
@@ -741,13 +796,15 @@ async function runIsolatedCases(suite: Suite) {
         /^\s*0 fail\r?$/m.test(output) &&
         !/^\s*[1-9]\d* skip\r?$/m.test(output) &&
         output.includes('Ran ' + cases.length + ' tests across 1 file.'),
-      fee
-        ? 'All seven real prediction fee cases must pass without skips'
-        : plugin
-          ? 'All six real perp fee cases must pass without skips'
-          : prediction
-            ? 'All ten real HTTP cases must pass without skips'
-            : 'All four original cases must pass without skips'
+      npc
+        ? 'All six NPC history cases must pass without skips'
+        : fee
+          ? 'All seven real prediction fee cases must pass without skips'
+          : plugin
+            ? 'All six real perp fee cases must pass without skips'
+            : prediction
+              ? 'All ten real HTTP cases must pass without skips'
+              : 'All four original cases must pass without skips'
     );
     childProof = {
       pass: cases.length,
@@ -843,13 +900,15 @@ async function runIsolatedCases(suite: Suite) {
     );
     passed = true;
     persist(resultPath, {
-      status: fee
-        ? 'PASS_ISOLATED_SEVEN_PREDICTION_FEE_CASES'
-        : plugin
-          ? 'PASS_ISOLATED_SIX_PLUGIN_PERP_FEE_CASES'
-          : prediction
-            ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
-            : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
+      status: npc
+        ? 'PASS_ISOLATED_SIX_NPC_TRADE_COUNT_CASES'
+        : fee
+          ? 'PASS_ISOLATED_SEVEN_PREDICTION_FEE_CASES'
+          : plugin
+            ? 'PASS_ISOLATED_SIX_PLUGIN_PERP_FEE_CASES'
+            : prediction
+              ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
+              : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
       lease,
       childProof,
       databaseDropped: true,
@@ -857,13 +916,15 @@ async function runIsolatedCases(suite: Suite) {
       parentEnvironmentUnchanged: true,
     });
     console.info(
-      (fee
-        ? 'ISOLATED_PREDICTION_FEE_RESULT '
-        : plugin
-          ? 'ISOLATED_PLUGIN_PERP_FEE_RESULT '
-          : prediction
-            ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
-            : 'ISOLATED_SUB_MARKET_RESULT ') +
+      (npc
+        ? 'ISOLATED_NPC_TRADE_COUNT_RESULT '
+        : fee
+          ? 'ISOLATED_PREDICTION_FEE_RESULT '
+          : plugin
+            ? 'ISOLATED_PLUGIN_PERP_FEE_RESULT '
+            : prediction
+              ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
+              : 'ISOLATED_SUB_MARKET_RESULT ') +
         JSON.stringify({
           pass: cases.length,
           skip: 0,
@@ -876,13 +937,15 @@ async function runIsolatedCases(suite: Suite) {
   } finally {
     if (!passed) {
       persist(resultPath, {
-        status: fee
-          ? 'HOLD_ISOLATED_PREDICTION_FEE_CASES'
-          : plugin
-            ? 'HOLD_ISOLATED_PLUGIN_PERP_FEE_CASES'
-            : prediction
-              ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
-              : 'HOLD_ISOLATED_SUB_MARKET_CASES',
+        status: npc
+          ? 'HOLD_ISOLATED_NPC_TRADE_COUNT_CASES'
+          : fee
+            ? 'HOLD_ISOLATED_PREDICTION_FEE_CASES'
+            : plugin
+              ? 'HOLD_ISOLATED_PLUGIN_PERP_FEE_CASES'
+              : prediction
+                ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
+                : 'HOLD_ISOLATED_SUB_MARKET_CASES',
         phase,
         lease,
         childProof,
@@ -895,13 +958,15 @@ async function runIsolatedCases(suite: Suite) {
         noAutomaticRetryOrSharedCleanup: true,
       });
       console.error(
-        (fee
-          ? 'ISOLATED_PREDICTION_FEE_HOLD '
-          : plugin
-            ? 'ISOLATED_PLUGIN_PERP_FEE_HOLD '
-            : prediction
-              ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
-              : 'ISOLATED_SUB_MARKET_HOLD ') +
+        (npc
+          ? 'ISOLATED_NPC_TRADE_COUNT_HOLD '
+          : fee
+            ? 'ISOLATED_PREDICTION_FEE_HOLD '
+            : plugin
+              ? 'ISOLATED_PLUGIN_PERP_FEE_HOLD '
+              : prediction
+                ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
+                : 'ISOLATED_SUB_MARKET_HOLD ') +
           JSON.stringify({ phase, result: resultPath })
       );
     }
