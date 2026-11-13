@@ -14,7 +14,9 @@ import { apiUrl } from '@/utils/api-url';
  * FollowListModal component for displaying followers or following lists.
  *
  * Shows a scrollable list of users with their avatars, names, and follow/unfollow
- * buttons. Displays up to 100 users per list.
+ * buttons. Loads one page of 100 users at a time and keeps loading further
+ * pages as the user scrolls, so every follower/following account is reachable
+ * and the header shows the API's total relation count.
  *
  * @param props - FollowListModal component props
  * @returns Follow list modal element or null if not open
@@ -61,7 +63,14 @@ export function FollowListModal({
   const { authenticated, user, getAccessToken } = useAuth();
   const [users, setUsers] = useState<FollowUser[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [totalCount, setTotalCount] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when a later page fails: loaded rows stay, the sentinel hides so a
+  // transient failure is not retried in a loop, and the user retries
+  // deliberately. Only the first-page `error` shows the full-screen retry.
+  const [pageError, setPageError] = useState<string | null>(null);
   const [followingStatus, setFollowingStatus] = useState<
     Record<string, boolean>
   >({});
@@ -71,11 +80,71 @@ export function FollowListModal({
 
   // AbortController ref for cancelling pending requests
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Pagination state that callbacks/observers read without re-binding
+  const pageRef = useRef(1);
+  const hasMoreRef = useRef(false);
+  const loadingMoreRef = useRef(false);
+  // Incremented on every fresh load so stale page fetches cannot append
+  const sessionRef = useRef(0);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   const displayTitle =
     title || (type === 'followers' ? 'Followers' : 'Following');
 
-  // Fetch the list when modal opens
+  // Initialize following status for a page of users
+  // viewerFollows indicates if the current user follows each person in the list
+  const buildStatusMap = useCallback(
+    (list: FollowUser[]) => {
+      const statusMap: Record<string, boolean> = {};
+      if (authenticated && user) {
+        for (const u of list) {
+          if (type === 'following' && userId === user.id) {
+            // Viewing own following list - current user follows everyone in this list
+            statusMap[u.id] = true;
+          } else {
+            // Viewing followers or someone else's following list
+            statusMap[u.id] = u.viewerFollows || false;
+          }
+        }
+      }
+      return statusMap;
+    },
+    [authenticated, user, type, userId]
+  );
+
+  const fetchPage = useCallback(
+    async (page: number, signal: AbortSignal) => {
+      const token = await getAccessToken();
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch(
+        apiUrl(
+          `/api/users/${encodeURIComponent(userId)}/${type}?page=${page}&limit=100`
+        ),
+        { headers, signal }
+      );
+      if (!response.ok) {
+        throw new Error('Failed to load list');
+      }
+      const data = await response.json();
+      const list: FollowUser[] =
+        (type === 'followers' ? data.followers : data.following) || [];
+      return {
+        list,
+        count: typeof data.count === 'number' ? data.count : list.length,
+        hasMore: Boolean(data.hasMore),
+      };
+    },
+    [getAccessToken, type, userId]
+  );
+
+  // Fetch the first page when the modal opens
   const fetchList = useCallback(async () => {
     if (!isOpen || !userId) return;
 
@@ -87,63 +156,120 @@ export function FollowListModal({
     // Create new AbortController for this request
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
+    const session = ++sessionRef.current;
 
     setIsLoading(true);
     setError(null);
+    setPageError(null);
+    pageRef.current = 1;
+    hasMoreRef.current = false;
+    loadingMoreRef.current = false;
+    setIsLoadingMore(false);
+    setHasMore(false);
+    setTotalCount(null);
 
     try {
-      const token = await getAccessToken();
-      const headers: HeadersInit = {
-        'Content-Type': 'application/json',
-      };
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      const response = await fetch(
-        apiUrl(
-          `/api/users/${encodeURIComponent(userId)}/${type}?page=1&limit=100`
-        ),
-        { headers, signal: abortController.signal }
-      );
-
-      if (!response.ok) {
-        setError('Failed to load list');
-        setIsLoading(false);
-        return;
-      }
-
-      const data = await response.json();
-      const list = type === 'followers' ? data.followers : data.following;
-      setUsers(list || []);
-
-      // Initialize following status for each user
-      // isFollowedByCurrentUser indicates if the current user follows each person in the list
-      if (authenticated && user) {
-        const statusMap: Record<string, boolean> = {};
-        for (const u of list || []) {
-          if (type === 'following' && userId === user.id) {
-            // Viewing own following list - current user follows everyone in this list
-            statusMap[u.id] = true;
-          } else {
-            // Viewing followers or someone else's following list
-            // viewerFollows indicates if the current user follows this person
-            statusMap[u.id] = u.viewerFollows || false;
-          }
-        }
-        setFollowingStatus(statusMap);
-      }
-
+      const {
+        list,
+        count,
+        hasMore: more,
+      } = await fetchPage(1, abortController.signal);
+      if (session !== sessionRef.current) return;
+      setUsers(list);
+      setTotalCount(count);
+      hasMoreRef.current = more;
+      setHasMore(more);
+      setFollowingStatus(buildStatusMap(list));
       setIsLoading(false);
     } catch (err) {
       // Ignore abort errors - they're expected when cancelling requests
       if (err instanceof Error && err.name === 'AbortError') {
         return;
       }
-      setError('Network error. Please try again.');
+      if (session !== sessionRef.current) return;
+      setError(
+        err instanceof Error && err.message === 'Failed to load list'
+          ? 'Failed to load list'
+          : 'Network error. Please try again.'
+      );
       setIsLoading(false);
     }
-  }, [isOpen, userId, type, authenticated, user, getAccessToken]);
+  }, [isOpen, userId, fetchPage, buildStatusMap]);
+
+  // Fetch and append the next page (triggered by the scroll sentinel)
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current || !hasMoreRef.current) return;
+    loadingMoreRef.current = true;
+    setIsLoadingMore(true);
+    const session = sessionRef.current;
+    const nextPage = pageRef.current + 1;
+
+    // Cancel any pending request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+    // A fresh attempt clears the previous page failure.
+    setPageError(null);
+
+    try {
+      const {
+        list,
+        count,
+        hasMore: more,
+      } = await fetchPage(nextPage, abortController.signal);
+      if (session !== sessionRef.current) return;
+      pageRef.current = nextPage;
+      hasMoreRef.current = more;
+      setHasMore(more);
+      setTotalCount(count);
+      setUsers((prev) => {
+        const seen = new Set(prev.map((u) => u.id));
+        return [...prev, ...list.filter((u) => !seen.has(u.id))];
+      });
+      setFollowingStatus((prev) => ({ ...prev, ...buildStatusMap(list) }));
+    } catch {
+      // Keep the rows already shown and keep the failed page retryable:
+      // hide the sentinel so a transient failure is not retried in a loop
+      // by the observer, but leave hasMoreRef true so a deliberate retry
+      // can request the same page again.
+      if (session === sessionRef.current) {
+        setPageError('Failed to load more. Please try again.');
+        setHasMore(false);
+      }
+    } finally {
+      if (session === sessionRef.current) {
+        loadingMoreRef.current = false;
+        setIsLoadingMore(false);
+      }
+    }
+  }, [fetchPage, buildStatusMap]);
+
+  // Deliberate retry for the failed page, from the same open modal.
+  // loadMore re-requests pageRef.current + 1, which is still the failed
+  // page because the catch above never advanced pageRef.
+  const retryLoadMore = useCallback(() => {
+    setPageError(null);
+    void loadMore();
+  }, [loadMore]);
+
+  // Load the next page when the end of the loaded list scrolls into view
+  useEffect(() => {
+    if (!loadMoreRef.current || !hasMore || isLoadingMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadMore();
+        }
+      },
+      { root: scrollContainerRef.current, threshold: 0.1 }
+    );
+
+    observer.observe(loadMoreRef.current);
+    return () => observer.disconnect();
+  }, [hasMore, isLoadingMore, loadMore]);
 
   // Cleanup abort controller on unmount
   useEffect(() => {
@@ -154,9 +280,23 @@ export function FollowListModal({
     };
   }, []);
 
+  // Load the first page once per opened list. fetchList is re-created
+  // whenever auth state settles (getAccessToken / buildStatusMap change
+  // identity on every profile refetch), so an effect on [fetchList]
+  // refetched page 1 in a loop while signed in and the list never settled:
+  // 41 page-1 requests in one open modal, count never shown. Depend on the
+  // stable inputs instead and always call the latest fetchList. A flip of
+  // `authenticated` still refetches once, so follow buttons are correct
+  // once the viewer is known.
+  const fetchListRef = useRef(fetchList);
+  fetchListRef.current = fetchList;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: userId, type and authenticated intentionally re-trigger the walk when the opened list or the viewer changes, even though the effect body reads them only through the ref
   useEffect(() => {
-    fetchList();
-  }, [fetchList]);
+    if (isOpen) {
+      void fetchListRef.current();
+    }
+  }, [isOpen, userId, type, authenticated]);
 
   // Handle body scroll lock
   useEffect(() => {
@@ -239,6 +379,28 @@ export function FollowListModal({
             detail: { type: isCurrentlyFollowing ? 'unfollow' : 'follow' },
           })
         );
+        // An unfollow on the viewer's own Following list shrinks the roster
+        // the API slices by offset, so the loaded walk is stale: the
+        // unfollowed row stays in the list and the next page would skip a
+        // row. Restart the walk when more pages may exist; otherwise drop
+        // the row locally and adjust the total.
+        if (
+          isCurrentlyFollowing &&
+          type === 'following' &&
+          userId === user.id
+        ) {
+          const morePagesMayExist =
+            hasMoreRef.current ||
+            (totalCount !== null && totalCount > users.length);
+          if (morePagesMayExist) {
+            void fetchList();
+          } else {
+            setUsers((prev) => prev.filter((u) => u.id !== targetUserId));
+            setTotalCount((prev) =>
+              prev === null ? prev : Math.max(0, prev - 1)
+            );
+          }
+        }
       }
     } catch {
       // Revert optimistic update on network error
@@ -279,7 +441,7 @@ export function FollowListModal({
             </h2>
             {!isLoading && (
               <span className="text-muted-foreground text-sm">
-                ({users.length})
+                ({totalCount ?? users.length})
               </span>
             )}
           </div>
@@ -293,7 +455,10 @@ export function FollowListModal({
         </div>
 
         {/* Content */}
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div
+          ref={scrollContainerRef}
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -396,6 +561,31 @@ export function FollowListModal({
                   </div>
                 );
               })}
+              {/* Scroll sentinel: intersecting it loads the next page */}
+              {hasMore && (
+                <div
+                  ref={loadMoreRef}
+                  className="flex items-center justify-center py-4"
+                >
+                  {isLoadingMore && (
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  )}
+                </div>
+              )}
+              {/* Later-page failure: keep the loaded rows and offer a
+                  deliberate retry for the failed page, without closing
+                  and reopening the modal. */}
+              {pageError && !isLoadingMore && (
+                <div className="flex flex-col items-center justify-center py-4 text-center">
+                  <p className="text-muted-foreground text-sm">{pageError}</p>
+                  <button
+                    onClick={retryLoadMore}
+                    className="mt-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground transition-colors hover:bg-primary/90"
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
