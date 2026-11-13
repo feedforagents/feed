@@ -1943,6 +1943,15 @@ export async function executeSearchAgents(
           : []),
         { OR: [{ isAgent: true }, { isActor: true }] },
         { isBanned: false },
+        // Test accounts are not real agents or NPCs — every user-facing
+        // surface hides them (the A2A people lookup states the rule
+        // verbatim). A test account carries the isTest flag or a 'test-'
+        // id prefix: NPC User rows are bootstrapped from pack actors
+        // without copying the flag, so both axes are required. The
+        // exclusions run before the limit so hidden accounts cannot
+        // occupy result slots.
+        { isTest: false },
+        { NOT: { id: { startsWith: 'test-' } } },
       ],
     },
     select: {
