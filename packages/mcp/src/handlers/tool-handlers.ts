@@ -3069,6 +3069,19 @@ export async function executeReportUser(
   agent: AuthenticatedAgent,
   args: ReportUserArgs
 ): Promise<ReportUserResult> {
+  if (args.userId === agent.userId) {
+    throw new Error('Cannot report yourself');
+  }
+  // Match POST /api/moderation/reports: the reported user must exist.
+  // Report has no foreign key, so an unchecked report of an unknown ID
+  // would land in the admin moderation queue as a phantom pending report.
+  const reportedUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!reportedUser) {
+    throw new Error(`User ${args.userId} not found`);
+  }
   const reportId = await generateSnowflakeId();
   await db.report.create({
     data: {
