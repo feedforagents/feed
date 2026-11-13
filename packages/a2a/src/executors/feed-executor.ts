@@ -22,6 +22,8 @@ import {
   acceptGroupInvite,
   checkRateLimitAsync,
   declineGroupInvite,
+  notifyReactionOnComment,
+  notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
@@ -863,11 +865,17 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     // Check if post exists
     const post = await db.post.findFirst({
-      where: { id: postId, deletedAt: null },
+      where: { id: postId },
     });
 
-    if (!post) {
+    // Unknown or not-yet-published posts cannot be liked (same rule as the
+    // web like route and the MCP like_post tool).
+    const now = new Date();
+    if (!post || post.timestamp > now) {
       throw new Error('Post not found');
+    }
+    if (post.deletedAt) {
+      throw new Error('Cannot like deleted post');
     }
 
     // Prefer request context identity when present (prevents params-based impersonation),
@@ -896,6 +904,24 @@ export class FeedAgentExecutor implements AgentExecutor {
         type: 'like',
       },
     });
+
+    // The like has committed. A notification outage must not tell the caller
+    // that the like failed and invite an unsuccessful retry.
+    if (post.authorId && post.authorId !== userId) {
+      try {
+        await notifyReactionOnPost(post.authorId, userId, postId, 'like');
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed like',
+          {
+            postId,
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'A2A'
+        );
+      }
+    }
 
     return { success: true, message: 'Post liked' };
   }
@@ -1197,6 +1223,30 @@ export class FeedAgentExecutor implements AgentExecutor {
         type: 'like',
       },
     });
+
+    // The like has committed. A notification outage must not tell the caller
+    // that the like failed and invite an unsuccessful retry.
+    if (comment.authorId && comment.authorId !== userId) {
+      try {
+        await notifyReactionOnComment(
+          comment.authorId,
+          userId,
+          commentId,
+          comment.postId,
+          'like'
+        );
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed comment like',
+          {
+            commentId,
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'A2A'
+        );
+      }
+    }
 
     return { success: true, message: 'Comment liked' };
   }
