@@ -225,7 +225,7 @@ contract PerpetualMarketFacetTest is Test {
 
         uint256 size = 1e18;
         uint256 collateral = 5000 ether; // Collateral for ~10x leverage
-        uint256 maxPrice = 51000e8; // 8 decimals
+        uint256 minPrice = 49000e8; // 8 decimals: minimum acceptable short entry
 
         vm.prank(alice);
         PerpetualMarketFacet(address(diamond)).openPosition(
@@ -233,7 +233,7 @@ contract PerpetualMarketFacetTest is Test {
             LibPerpetual.Side.SHORT,
             size,
             collateral,
-            maxPrice
+            minPrice
         );
 
         (
@@ -411,7 +411,7 @@ contract PerpetualMarketFacetTest is Test {
             LibPerpetual.Side.SHORT,
             2e18,
             10000 ether,
-            51000e8
+            49000e8 // minimum acceptable short entry price
         );
 
         // Advance time by 1 hour
@@ -426,6 +426,136 @@ contract PerpetualMarketFacetTest is Test {
 
         // Funding rate should be positive (longs pay shorts)
         assertGt(fundingRate, 0);
+    }
+
+    function test_RevertWhen_ShortOpenBelowLimitPrice() public {
+        // A short sells at the mark price, so a higher fill is better and a
+        // lower fill is worse. The limit price for a short is therefore the
+        // MINIMUM acceptable entry price: fills below it must revert.
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            10,
+            500,
+            1000,
+            250,
+            10,
+            20
+        );
+
+        // Price crashes to $40,000, below the trader's $49,000 floor.
+        mockOraclePrice(40000e8);
+
+        vm.prank(alice);
+        vm.expectRevert("Price slippage exceeded");
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.SHORT,
+            1e18,
+            5000 ether,
+            49000e8 // minimum acceptable short entry price
+        );
+    }
+
+    function test_ShortOpenAboveLimitPriceSucceeds() public {
+        // The mirror case: a short fill ABOVE the trader's floor is a good
+        // fill and must execute, not revert.
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            10,
+            500,
+            1000,
+            250,
+            10,
+            20
+        );
+
+        // Price rises to $55,000, above the trader's $49,000 floor.
+        mockOraclePrice(55000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.SHORT,
+            1e18,
+            5500 ether,
+            49000e8 // minimum acceptable short entry price
+        );
+
+        (, uint256 positionSize, , uint256 entryPrice, , ,) = PerpetualMarketFacet(address(diamond))
+            .getPosition(alice, marketId);
+        assertEq(positionSize, 1e18);
+        assertEq(entryPrice, 55000e8);
+    }
+
+    function test_RevertWhen_ShortCloseAboveLimitPrice() public {
+        // Closing a short buys the asset back, so a higher fill is worse.
+        // The limit price for a short close is the MAXIMUM acceptable exit
+        // price: fills above it must revert.
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            10,
+            500,
+            1000,
+            250,
+            10,
+            20
+        );
+
+        mockOraclePrice(50000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.SHORT,
+            1e18,
+            5000 ether,
+            50000e8 // equals the entry price, so it passes both the old and the new open check
+        );
+
+        // Price spikes to $60,000, above the trader's $51,000 ceiling.
+        mockOraclePrice(60000e8);
+
+        vm.prank(alice);
+        vm.expectRevert("Price slippage exceeded");
+        PerpetualMarketFacet(address(diamond)).closePosition(marketId, 51000e8);
+    }
+
+    function test_ShortCloseBelowLimitPriceSucceeds() public {
+        // The mirror case: a short close BELOW the trader's ceiling is a
+        // good fill and must execute, not revert.
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            10,
+            500,
+            1000,
+            250,
+            10,
+            20
+        );
+
+        mockOraclePrice(50000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.SHORT,
+            1e18,
+            5000 ether,
+            50000e8 // equals the entry price, so it passes both the old and the new open check
+        );
+
+        // Price drops to $45,000, below the trader's $51,000 ceiling.
+        mockOraclePrice(45000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).closePosition(marketId, 51000e8);
+
+        (, uint256 positionSize, , , , ,) = PerpetualMarketFacet(address(diamond)).getPosition(alice, marketId);
+        assertEq(positionSize, 0);
     }
 
     function test_RevertWhen_OpenPositionWithExcessiveLeverage() public {
