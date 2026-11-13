@@ -38,8 +38,13 @@ export async function getTradesFeed(params: {
     inArray(balanceTransactionsTable.type, [
       'pred_buy',
       'pred_sell',
+      'pred_resolve',
+      'pred_cancel',
       'perp_open',
       'perp_close',
+      'perp_partial_close',
+      'perp_add_to_position',
+      'perp_flip_position',
       'perp_liquidation',
     ]),
     eq(usersTable.isActor, false),
@@ -206,13 +211,15 @@ export async function getTradesFeed(params: {
   });
   const perpUsersMap = new Map(perpUsers.map((u) => [u.id, u]));
 
-  // Fetch prediction markets for pred_buy/pred_sell balance transactions and NPC prediction trades
+  // Fetch market context for prediction trades, settlements/refunds and NPC trades
   const predictionMarketIds = [
     ...new Set([
       ...balanceTransactions
         .filter(
           (tx) =>
-            (tx.type === 'pred_buy' || tx.type === 'pred_sell') && tx.relatedId
+            ['pred_buy', 'pred_sell', 'pred_resolve', 'pred_cancel'].includes(
+              tx.type
+            ) && tx.relatedId
         )
         .map((tx) => tx.relatedId as string),
       ...npcTrades
@@ -243,7 +250,12 @@ export async function getTradesFeed(params: {
         return !user?.isActor; // Exclude NPC actors
       })
       .map((tx) => {
-        const isPrediction = tx.type === 'pred_buy' || tx.type === 'pred_sell';
+        const isPrediction = [
+          'pred_buy',
+          'pred_sell',
+          'pred_resolve',
+          'pred_cancel',
+        ].includes(tx.type);
         const market =
           isPrediction && tx.relatedId
             ? (predictionMarketsMap.get(tx.relatedId) ?? null)
