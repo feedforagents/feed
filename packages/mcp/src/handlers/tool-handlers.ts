@@ -56,6 +56,7 @@ import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   acquireUserBlockPairLock,
   and,
+  buildNotificationTargetWhere,
   db,
   desc,
   eq,
@@ -2413,8 +2414,12 @@ export async function executeGetUnreadCount(
   agent: AuthenticatedAgent,
   _args: GetUnreadCountArgs
 ): Promise<GetUnreadCountResult> {
+  // Match the web notification list's target visibility: a notification
+  // whose post or comment no longer exists (or is soft-deleted) is hidden
+  // there and excluded from its unread count, so it is excluded here too.
+  const targetWhere = await buildNotificationTargetWhere(agent.userId);
   const unreadCount = await db.notification.count({
-    where: { userId: agent.userId, read: false },
+    where: { userId: agent.userId, read: false, ...targetWhere },
   });
   return { unreadCount };
 }
@@ -2430,8 +2435,12 @@ export async function executeGetNotifications(
   agent: AuthenticatedAgent,
   args: GetNotificationsArgs
 ): Promise<GetNotificationsResult> {
+  // Same target visibility as the web notification list (see
+  // executeGetUnreadCount): dead targets are excluded in the query, before
+  // the limit is taken.
+  const targetWhere = await buildNotificationTargetWhere(agent.userId);
   const notificationsList = await db.notification.findMany({
-    where: { userId: agent.userId },
+    where: { userId: agent.userId, ...targetWhere },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 100,
   });

@@ -143,6 +143,8 @@ export {
 } from './helpers';
 // Re-export moderation filters
 export * from './moderation/filters';
+// Re-export notification target visibility
+export * from './notification-target-visibility';
 export {
   decodePostCursor,
   encodePostCursor,
