@@ -79,14 +79,17 @@
 
 import { authenticate, successResponse, withErrorHandling } from '@feed/api';
 import {
+  and,
   db,
   eq,
   feedbacks,
   followStatuses,
   groupInvites,
   groupMembers,
+  isNotNull,
   or,
   poolDeposits,
+  posts,
   referrals,
   shareActions,
   tradingFees,
@@ -202,6 +205,16 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
     // Delete pool deposits
     await tx.delete(poolDeposits).where(eq(poolDeposits.userId, userId));
+
+    // Delete the user's repost posts (pure reposts and quote posts).
+    // A repost post's life is tied to its share — unsharing a post
+    // deletes the repost post together with the share row — and Post
+    // has no foreign keys, so no cascade reaches these rows. Without
+    // this they stay publicly readable, attributed to the deleted
+    // account, after the account is gone.
+    await tx
+      .delete(posts)
+      .where(and(eq(posts.authorId, userId), isNotNull(posts.originalPostId)));
 
     // Finally, delete the user (this will cascade to most other tables)
     await tx.delete(users).where(eq(users.id, userId));
