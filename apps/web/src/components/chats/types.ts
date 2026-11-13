@@ -77,6 +77,12 @@ export interface ChatDetails {
     isGroup: boolean;
     createdAt: string;
     updatedAt: string;
+    /**
+     * Current member count (active participant rows). The participants
+     * array is a name-resolution list that also keeps departed members,
+     * so its length is not the roster size.
+     */
+    memberCount?: number;
     otherUser?: {
       id: string;
       displayName: string | null;
