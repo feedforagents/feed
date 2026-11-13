@@ -342,7 +342,7 @@ export async function startPredictionRemainderServer() {
   const proc = spawn(
     process.execPath,
     [next, 'start', app, '--hostname', '127.0.0.1', '--port', String(port)],
-    { cwd: ROOT, env: runtimeEnv, stdio: ['ignore', 'pipe', 'pipe'] }
+    { cwd: app, env: runtimeEnv, stdio: ['ignore', 'pipe', 'pipe'] }
   );
   let closed = false,
     output = '',
@@ -590,6 +590,9 @@ async function runIsolatedCases(suite: Suite) {
       );
       // psql executes this unchanged manual file outside a transaction. Its
       // own catalog checks reject any missing, invalid or wrong-shape index.
+      const manualEnv: NodeJS.ProcessEnv = { ...env };
+      delete manualEnv.PGSERVICE;
+      delete manualEnv.PGSERVICEFILE;
       await run(
         [
           '-X',
@@ -603,15 +606,13 @@ async function runIsolatedCases(suite: Suite) {
           ),
         ],
         {
-          ...env,
+          ...manualEnv,
           PGHOST: child.hostname.replace(/^\[|\]$/g, ''),
           PGPORT: child.port || '5432',
           PGUSER: decodeURIComponent(child.username),
           PGPASSWORD: decodeURIComponent(child.password),
           PGDATABASE: database,
           PGHOSTADDR: '',
-          PGSERVICE: '',
-          PGSERVICEFILE: '',
           PGPASSFILE: '/dev/null',
           PGSSLMODE: 'disable',
           PGSSLROOTCERT: '',
