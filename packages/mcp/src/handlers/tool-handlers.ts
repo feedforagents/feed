@@ -2250,9 +2250,28 @@ export async function executeCreateGroup(
   const groupId = await generateSnowflakeId();
 
   // Deduplicate memberIds and exclude the owner (agent.userId)
-  const uniqueMemberIds = [...new Set(args.memberIds)].filter(
+  const requestedMemberIds = [...new Set(args.memberIds)].filter(
     (id) => id !== agent.userId
   );
+
+  // Only members that exist and are not banned can join (the web group
+  // creation route applies the same rule: "Verify users exist and are not
+  // banned"). ChatParticipant and GroupMember have no foreign key to User,
+  // so an unchecked ID would become a permanent orphan membership row.
+  let uniqueMemberIds = requestedMemberIds;
+  if (requestedMemberIds.length > 0) {
+    const validMembers = await db.user.findMany({
+      where: {
+        id: { in: requestedMemberIds },
+        isBanned: false,
+      },
+      select: { id: true },
+    });
+    const validMemberIdSet = new Set(validMembers.map((u) => u.id));
+    uniqueMemberIds = requestedMemberIds.filter((id) =>
+      validMemberIdSet.has(id)
+    );
+  }
 
   // Create Group
   await db.group.create({
