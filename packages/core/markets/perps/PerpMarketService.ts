@@ -1,6 +1,8 @@
 import {
   ConflictError,
   calculateTradeImpact,
+  canonicalTradingFee,
+  floorPoints,
   getInitialReserves,
   logger,
   PERP_MARKET_CONFIG,
@@ -907,7 +909,10 @@ export class PerpMarketService {
       const cappedRealizedPnL = Math.max(realizedPnL, -marginPaid);
       const grossSettlement = marginPaid + cappedRealizedPnL;
       const fee = this.calculateFee(closeSize);
-      const netSettlement = Math.max(0, grossSettlement - fee);
+      const netSettlement =
+        closeSize >= 0 && closeSize < 0.01
+          ? floorPoints(Math.max(0, grossSettlement - fee))
+          : Math.max(0, grossSettlement - fee);
       const now = this.deps.clock?.now() ?? new Date();
 
       if (isFullClose) {
@@ -1438,12 +1443,17 @@ export class PerpMarketService {
   }
 
   private calculateFee(notional: number): number {
-    // FeeService records and splits the fee in integer cents (one
-    // canonical rounded fee), so charge that same cent-rounded amount:
-    // an unrounded charge would disagree with the fee ledger, the
-    // platform/referrer split and users.totalFeesPaid.
-    const fee =
-      Math.round(notional * this.deps.fees.tradingFeeRate * 100) / 100;
+    // A legacy full close can be below the new-order minimum. Its zero
+    // cent-settled fee base must not be turned into a fee by the min clamp.
+    // Keep custom minimums unchanged for every positive settled base.
+    if (notional >= 0 && notional < 0.01) return 0;
+    // FeeService records and splits the one canonical fee (PRD §9.1):
+    // the fee on the cent-settled notional, rounded UP to whole cents.
+    // Charge that same amount — any other rounding would disagree with
+    // the fee ledger, the platform/referrer split and
+    // users.totalFeesPaid. Settlement dust and fee totals are accounted
+    // separately; fee monotonicity across split trades is not promised.
+    const fee = canonicalTradingFee(notional, this.deps.fees.tradingFeeRate);
     return Math.max(fee, this.deps.fees.minFeeAmount);
   }
 
@@ -1997,7 +2007,10 @@ export class PerpMarketService {
             // and the liquidation cap (Math.max(..., -marginLoss)).
             const cappedRealizedPnL = Math.max(realizedPnL, -closeMarginPaid);
             const grossSettlement = closeMarginPaid + cappedRealizedPnL;
-            const netSettlement = Math.max(0, grossSettlement - closeFee);
+            const netSettlement =
+              position.size >= 0 && position.size < 0.01
+                ? floorPoints(Math.max(0, grossSettlement - closeFee))
+                : Math.max(0, grossSettlement - closeFee);
 
             await tx.closePosition(position.id, {
               currentPrice: exitPrice,
@@ -2517,7 +2530,10 @@ export class PerpMarketService {
     const closeFee = this.calculateFee(existing.size);
     const realizedPnL = closePnl - existing.fundingPaid;
     const grossSettlement = closeMarginPaid + realizedPnL;
-    const estimatedCloseSettlement = Math.max(0, grossSettlement - closeFee);
+    const estimatedCloseSettlement =
+      existing.size >= 0 && existing.size < 0.01
+        ? floorPoints(Math.max(0, grossSettlement - closeFee))
+        : Math.max(0, grossSettlement - closeFee);
     const marginRequired = inverseSize / effectiveLeverage;
     const openFee = this.calculateFee(inverseSize);
     const openCost = marginRequired + openFee;
@@ -2599,7 +2615,10 @@ export class PerpMarketService {
     const closeMarginPaid = closeSize / existing.leverage;
     const closeFee = this.calculateFee(closeSize);
     const grossSettlement = closeMarginPaid + realizedPnL;
-    const estimatedCloseSettlement = Math.max(0, grossSettlement - closeFee);
+    const estimatedCloseSettlement =
+      closeSize >= 0 && closeSize < 0.01
+        ? floorPoints(Math.max(0, grossSettlement - closeFee))
+        : Math.max(0, grossSettlement - closeFee);
     const quotedPrice =
       existing.side === 'long'
         ? closeExecution.bidPrice

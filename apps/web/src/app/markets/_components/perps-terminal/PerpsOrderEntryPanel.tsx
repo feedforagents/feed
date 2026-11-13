@@ -1,7 +1,7 @@
 'use client';
 
 import { FEE_CONFIG } from '@feed/engine/config/fees';
-import { cn, FEED_POINTS_SYMBOL } from '@feed/shared';
+import { canonicalTradingFee, cn, FEED_POINTS_SYMBOL } from '@feed/shared';
 import { Wallet } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -166,10 +166,20 @@ export function PerpsOrderEntryPanel({
     (requiresAdditionalCapital && sizeNum > 0
       ? sizeNum / capitalCheckLeverage
       : 0);
+  const feeForNotional = (notional: number) =>
+    notional >= 0 && notional < 0.01
+      ? 0
+      : Math.max(
+          canonicalTradingFee(notional, FEE_CONFIG.TRADING_FEE_RATE),
+          FEE_CONFIG.MIN_FEE_AMOUNT
+        );
   const estimatedFee =
     openPreview?.estimatedFee ??
     (requiresAdditionalCapital && sizeNum > 0
-      ? sizeNum * FEE_CONFIG.TRADING_FEE_RATE
+      ? rebalanceInfo?.type === 'flip' && existingPosition
+        ? feeForNotional(existingPosition.size) +
+          feeForNotional(rebalanceInfo.newSize)
+        : feeForNotional(sizeNum)
       : 0);
   const totalRequired =
     openPreview?.totalRequired ??

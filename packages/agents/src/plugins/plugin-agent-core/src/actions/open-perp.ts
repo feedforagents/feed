@@ -22,6 +22,7 @@ import {
   FEE_CONFIG,
   WalletService,
 } from '@feed/engine';
+import { canonicalTradingFee } from '@feed/shared';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
 import { logger } from '../../../../shared/logger';
 
@@ -152,10 +153,13 @@ export const openPerpAction: Action = {
     // (PerpMarketService.calculateFee), so the pre-check must cover the fee
     // too — otherwise a balance equal to `amount` passes here and the open
     // then fails inside the service with a generic InsufficientFunds error.
-    const fee = Math.max(
-      Math.round(notionalSize * FEE_CONFIG.TRADING_FEE_RATE * 100) / 100,
-      FEE_CONFIG.MIN_FEE_AMOUNT
-    );
+    const fee =
+      notionalSize < 0.01
+        ? 0
+        : Math.max(
+            canonicalTradingFee(notionalSize, FEE_CONFIG.TRADING_FEE_RATE),
+            FEE_CONFIG.MIN_FEE_AMOUNT
+          );
     const totalCost = amount + fee;
 
     try {

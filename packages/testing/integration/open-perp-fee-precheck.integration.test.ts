@@ -201,8 +201,8 @@ describe('OPEN_PERP fee-aware balance pre-check (real DB)', () => {
     const balance = await WalletService.getBalance(fundedUserId);
     expect(balance.balance).toBeCloseTo(99.9, 2);
   });
-  it('opens with exactly the rounded-down fee-inclusive balance', async () => {
-    const userId = await createTestUser('100.11');
+  it('opens with exactly the canonical fee-inclusive balance', async () => {
+    const userId = await createTestUser('100.12');
     const result = await runOpenPerp(userId, 100.01, 1);
     expect(result?.success).toBe(true);
     const positions = await db
