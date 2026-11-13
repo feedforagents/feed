@@ -14,6 +14,8 @@ export type PredictionSide = 'yes' | 'no';
 export interface QuestionRecord {
   id: string;
   questionNumber?: number;
+  /** Scenario group the question belongs to (questions.scenarioId). */
+  scenarioId?: number;
   text: string;
   status: 'active' | 'resolved' | 'cancelled';
   resolutionDate: Date;
@@ -24,6 +26,12 @@ export interface QuestionRecord {
 export interface PredictionMarketRecord {
   id: string;
   question: string;
+  /**
+   * Scenario of the market's question. A market is created from exactly one
+   * question (same id), so this is that question's scenarioId; absent only
+   * when no question row is linked.
+   */
+  scenario?: number;
   description?: string | null;
   gameId?: string | null;
   dayNumber?: number | null;
