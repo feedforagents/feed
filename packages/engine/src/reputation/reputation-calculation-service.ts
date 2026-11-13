@@ -468,13 +468,24 @@ export async function recalculateReputation(
     return null;
   }
 
+  // `averageIntelScore` defaults to 50 in the schema and is only updated
+  // when intel feedback arrives, so a user with no intel feedback still
+  // carries the placeholder 50. Passing it through would drag the feedback
+  // component toward 50; fall back to the general feedback score instead,
+  // which is what `calculateReputationScore` does when no intel score is
+  // given (its `intelScore = averageFeedbackScore` default).
+  const intelScore =
+    (metrics.intelFeedbackCount ?? 0) > 0
+      ? metrics.averageIntelScore
+      : metrics.averageFeedbackScore;
+
   // Calculate composite reputation
   const reputationScore = calculateReputationScore(
     metrics.normalizedPnL,
     metrics.averageFeedbackScore,
     metrics.gamesPlayed,
     metrics.winRate ?? 0,
-    metrics.averageIntelScore ?? metrics.averageFeedbackScore
+    intelScore
   );
 
   // Determine trust level
