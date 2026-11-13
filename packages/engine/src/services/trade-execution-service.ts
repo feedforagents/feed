@@ -98,6 +98,8 @@ type PredictionResolutionBroadcast = {
   version?: string;
   marketId: string;
   winningSide: 'yes' | 'no';
+  yesPrice: number;
+  noPrice: number;
   yesShares: number;
   noShares: number;
   liquidity?: number;
