@@ -505,7 +505,13 @@ export async function getPostsByTag(
       .from(postTags)
       .innerJoin(posts, eq(postTags.postId, posts.id))
       .where(eligible)
-      .orderBy(desc(postTags.createdAt))
+      // Total order: memberships created in one batch share a
+      // createdAt, and a single-column sort lets each offset page
+      // order that tied block differently, repeating some posts and
+      // skipping others permanently. The unique post id breaks ties
+      // so pages are stable (same rule as the A2A/MCP posts-by-tag
+      // surfaces).
+      .orderBy(desc(postTags.createdAt), desc(posts.id))
       .offset(offset)
       .limit(limit),
     db
