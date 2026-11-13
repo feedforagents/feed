@@ -1,9 +1,6 @@
 'use client';
 
-import {
-  calculateExpectedPayout,
-  PredictionPricing,
-} from '@feed/core/markets/prediction/client';
+import { calculateExpectedPayout } from '@feed/core/markets/prediction/client';
 import type { PerpPositionFromAPI, PredictionPosition } from '@feed/shared';
 import {
   cn,
@@ -25,6 +22,7 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { FollowButton } from '@/components/interactions';
+import { calculatePredictionBuyQuote } from '@/components/markets/predictionBuyQuote';
 import { useAuth } from '@/hooks/useAuth';
 import { usePredictionTrading } from '@/hooks/usePredictionTrading';
 import { formatPrice } from '@/lib/market-formatters';
@@ -310,14 +308,16 @@ export function PositionDetailModal({
     return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
   };
 
-  // Calculate prediction trade preview
+  // Calculate prediction trade preview. The quote must match execution,
+  // which charges the trading fee before the CPMM swap, so use the
+  // fee-aware quote (same computation as the markets terminal).
   const getPredictionCalculation = () => {
     if (!predictionMarket || type !== 'prediction') return null;
     const yesShares = predictionMarket.yesShares || 500;
     const noShares = predictionMarket.noShares || 500;
     const amountNum = parseFloat(amount) || 0;
     if (amountNum <= 0) return null;
-    return PredictionPricing.calculateBuy(
+    return calculatePredictionBuyQuote(
       yesShares,
       noShares,
       side as 'yes' | 'no',
@@ -744,6 +744,12 @@ export function PositionDetailModal({
                         </span>
                         <span className="font-bold text-foreground">
                           {legacyPredictionCalc.sharesBought.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Fee</span>
+                        <span className="font-bold text-foreground">
+                          {formatPrice(legacyPredictionCalc.fee)}
                         </span>
                       </div>
                       <div className="flex justify-between text-sm">
