@@ -1,12 +1,20 @@
 /**
- * Dedicated process/database lease for the four global sub-market-cap cases.
+ * Dedicated process/database leases for fixed integration suites.
  * The caller's database may contain real cron output; never reset or edit it.
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  createWriteStream,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { createRequire } from 'node:module';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import postgres from 'postgres';
 
 const ROOT = resolve(import.meta.dir, '../../../..');
@@ -18,6 +26,25 @@ const CASES = [
   'rechecks an expired parent after waiting for the cap lock',
   'rolls back question and prediction market if the final insert fails',
 ];
+const PREDICTION_FILE =
+  'packages/testing/integration/prediction-share-remainder.integration.test.ts';
+const PREDICTION_CASES = ['yes', 'no'].flatMap((side) =>
+  ['cent', 'above', 'dust', 'whole', 'loser'].map(
+    (scenario) =>
+      `${side} ${scenario} funded remainder sells and settles through real HTTP`
+  )
+);
+const PLUGIN_PERP_FILE =
+  'packages/testing/integration/perp-open-fee-durability.integration.test.ts';
+const PLUGIN_PERP_CASES = [
+  'long: transient fee failure has completed or queued fee work before open returns',
+  'long: persistent fee failure has completed or queued fee work before open returns',
+  'short: transient fee failure has completed or queued fee work before open returns',
+  'short: persistent fee failure has completed or queued fee work before open returns',
+  'plugin OPEN and CLOSE return with actual keyed fee accounting and no referral payment',
+  'plugin OPEN and CLOSE return success with their own durable fee intents during an outage',
+];
+type Suite = 'sub-market' | 'prediction-remainder' | 'plugin-perp-fee';
 type Lease = {
   database: string;
   oid: string;
@@ -124,9 +151,10 @@ function persist(path: string, value: object) {
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
 }
 
-export async function verifySubMarketChildLease() {
-  const nonce = process.env.FEED_SUB_MARKET_CHILD;
-  const path = process.env.FEED_SUB_MARKET_LEASE_FILE;
+async function verifyChildLease(
+  nonce: string | undefined,
+  path: string | undefined
+) {
   requireThat(
     !!nonce && /^[a-f0-9-]{36}$/.test(nonce) && !!path,
     'Verified child lease required'
@@ -170,13 +198,35 @@ export async function verifySubMarketChildLease() {
   }
 }
 
+export async function verifySubMarketChildLease() {
+  await verifyChildLease(
+    process.env.FEED_SUB_MARKET_CHILD,
+    process.env.FEED_SUB_MARKET_LEASE_FILE
+  );
+}
+
+export async function verifyPredictionRemainderChildLease() {
+  await verifyChildLease(
+    process.env.FEED_PREDICTION_REMAINDER_CHILD,
+    process.env.FEED_PREDICTION_REMAINDER_LEASE_FILE
+  );
+}
+
+export async function verifyPluginPerpFeeChildLease() {
+  await verifyChildLease(
+    process.env.FEED_PLUGIN_PERP_FEE_CHILD,
+    process.env.FEED_PLUGIN_PERP_FEE_LEASE_FILE
+  );
+}
+
 async function run(
   args: string[],
   env: NodeJS.ProcessEnv,
   log: string,
-  timeout: number
+  timeout: number,
+  executable = process.execPath
 ) {
-  const proc = spawn(process.execPath, args, {
+  const proc = spawn(executable, args, {
     cwd: ROOT,
     env,
     detached: true,
@@ -270,10 +320,203 @@ async function run(
   }
 }
 
+export async function startPredictionRemainderServer() {
+  await verifyPredictionRemainderChildLease();
+  const env = process.env;
+  const directory = dirname(env.FEED_PREDICTION_REMAINDER_LEASE_FILE!);
+  const app = join(ROOT, 'apps/web');
+  const buildIdPath = join(app, '.next/BUILD_ID');
+  const buildId = readFileSync(buildIdPath, 'utf8').trim();
+  requireThat(buildId.length > 0, 'An existing production build is required');
+  const port = await new Promise<number>((done, reject) => {
+    const reservation = createServer();
+    reservation.once('error', reject);
+    reservation.listen(0, '127.0.0.1', () => {
+      const address = reservation.address();
+      if (!address || typeof address === 'string') {
+        reservation.close();
+        reject(new Error('Loopback port reservation failed'));
+        return;
+      }
+      reservation.close((error) =>
+        error ? reject(error) : done(address.port)
+      );
+    });
+  });
+  const url = `http://127.0.0.1:${port}`;
+  const runtimeEnv = {
+    ...env,
+    PORT: String(port),
+    FEED_API_URL: url,
+    TEST_API_URL: url,
+    TEST_BASE_URL: url,
+  };
+  const next = createRequire(join(app, 'package.json')).resolve(
+    'next/dist/bin/next'
+  );
+  const log = join(directory, 'server.log');
+  const sink = createWriteStream(log, { flags: 'wx', mode: 0o600 });
+  const proc = spawn(
+    process.execPath,
+    [next, 'start', app, '--hostname', '127.0.0.1', '--port', String(port)],
+    { cwd: app, env: runtimeEnv, stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  let closed = false,
+    output = '',
+    size = 0,
+    failure: Error | undefined;
+  const exited = new Promise<void>((done) =>
+    proc.once('close', () => {
+      closed = true;
+      done();
+    })
+  );
+  proc.once('error', (error) => {
+    failure = error;
+  });
+  sink.once('error', (error) => {
+    failure = error;
+  });
+  const capture = (part: Buffer) => {
+    size += part.length;
+    if (size > 4 * 1024 * 1024) {
+      failure = new Error('Owned server log exceeded its bound');
+      return;
+    }
+    output += part.toString('utf8');
+    sink.write(part);
+  };
+  proc.stdout.on('data', capture);
+  proc.stderr.on('data', capture);
+  const stop = async () => {
+    let forced = false,
+      requestedStop = false;
+    if (!closed) {
+      requestedStop = proc.kill('SIGTERM');
+      await Promise.race([exited, Bun.sleep(5000)]);
+      if (!closed) {
+        forced = true;
+        proc.kill('SIGKILL');
+        await Promise.race([exited, Bun.sleep(3000)]);
+      }
+    }
+    await new Promise<void>((done) => sink.end(done));
+    const buildIdUnchanged =
+      readFileSync(buildIdPath, 'utf8').trim() === buildId;
+    const normalExit =
+      proc.exitCode === 0 ||
+      proc.exitCode === 143 ||
+      proc.signalCode === 'SIGTERM';
+    persist(join(directory, 'server-stopped.json'), {
+      pid: proc.pid,
+      childProcessGroup: process.pid,
+      url,
+      buildId,
+      forced,
+      serverExited: closed,
+      exitCode: proc.exitCode,
+      signalCode: proc.signalCode,
+      requestedStop,
+      normalExit,
+      failureClass: failure?.name ?? null,
+      buildIdUnchanged,
+    });
+    // This server inherits the leased child's group. The parent run() also
+    // requires the entire group to be absent before it can retire the database.
+    requireThat(
+      closed &&
+        requestedStop &&
+        normalExit &&
+        !forced &&
+        !failure &&
+        buildIdUnchanged,
+      'Owned server did not drain normally or build changed; retain database'
+    );
+  };
+  try {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      requireThat(
+        !closed && !failure,
+        'Owned production server exited; retained log: ' + log
+      );
+      if (output.includes(url) && output.includes('Ready in')) {
+        try {
+          const response = await fetch(url + '/api/health', {
+            redirect: 'error',
+            signal: AbortSignal.timeout(2000),
+          });
+          await response.body?.cancel();
+          if (response.status === 200) {
+            persist(join(directory, 'server-ready.json'), {
+              pid: proc.pid,
+              childProcessGroup: process.pid,
+              url,
+              buildId,
+              app,
+              log,
+              database: new URL(env.DATABASE_URL!).pathname.slice(1),
+              healthStatus: 200,
+            });
+            return { url, stop };
+          }
+        } catch (error) {
+          if (
+            !(error instanceof TypeError) &&
+            !(error instanceof DOMException && error.name === 'TimeoutError')
+          )
+            throw error;
+        }
+      }
+      await Bun.sleep(25);
+    }
+    throw new Error(
+      'Owned production server did not become healthy; retained log: ' + log
+    );
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+}
+
 export async function runIsolatedSubMarketCases() {
+  await runIsolatedCases('sub-market');
+}
+
+export async function runIsolatedPredictionRemainderCases() {
+  await runIsolatedCases('prediction-remainder');
+}
+
+export async function runIsolatedPluginPerpFeeCases() {
+  await runIsolatedCases('plugin-perp-fee');
+}
+
+async function runIsolatedCases(suite: Suite) {
+  const prediction = suite === 'prediction-remainder';
+  const plugin = suite === 'plugin-perp-fee';
+  const file = plugin ? PLUGIN_PERP_FILE : prediction ? PREDICTION_FILE : FILE;
+  const cases = plugin
+    ? PLUGIN_PERP_CASES
+    : prediction
+      ? PREDICTION_CASES
+      : CASES;
+  const marker = plugin
+    ? 'FEED_PLUGIN_PERP_FEE_CHILD'
+    : prediction
+      ? 'FEED_PREDICTION_REMAINDER_CHILD'
+      : 'FEED_SUB_MARKET_CHILD';
+  const leaseVariable = plugin
+    ? 'FEED_PLUGIN_PERP_FEE_LEASE_FILE'
+    : prediction
+      ? 'FEED_PREDICTION_REMAINDER_LEASE_FILE'
+      : 'FEED_SUB_MARKET_LEASE_FILE';
   requireThat(
     !process.env.FEED_SUB_MARKET_CHILD &&
-      !process.env.FEED_SUB_MARKET_LEASE_FILE,
+      !process.env.FEED_SUB_MARKET_LEASE_FILE &&
+      !process.env.FEED_PREDICTION_REMAINDER_CHILD &&
+      !process.env.FEED_PREDICTION_REMAINDER_LEASE_FILE &&
+      !process.env.FEED_PLUGIN_PERP_FEE_CHILD &&
+      !process.env.FEED_PLUGIN_PERP_FEE_LEASE_FILE,
     'Parent cannot reuse a child marker'
   );
   const source = localUrl(process.env.DATABASE_URL);
@@ -284,7 +527,16 @@ export async function runIsolatedSubMarketCases() {
     'One local primary URL required'
   );
   const admin = client(source.href);
-  const directory = mkdtempSync(join(tmpdir(), 'feed-sub-market-'));
+  const directory = mkdtempSync(
+    join(
+      tmpdir(),
+      plugin
+        ? 'feed-plugin-perp-fee-'
+        : prediction
+          ? 'feed-prediction-remainder-'
+          : 'feed-sub-market-'
+    )
+  );
   const manifest = join(directory, 'lease.json');
   const resultPath = join(directory, 'result.json');
   const nonce = randomUUID();
@@ -347,8 +599,8 @@ export async function runIsolatedSubMarketCases() {
       DATABASE_POOL_MAX: '5',
       NODE_ENV: 'test',
       BUN_ENV: 'test',
-      FEED_SUB_MARKET_CHILD: nonce,
-      FEED_SUB_MARKET_LEASE_FILE: manifest,
+      [marker]: nonce,
+      [leaseVariable]: manifest,
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
     };
     phase = 'migrate';
@@ -358,9 +610,65 @@ export async function runIsolatedSubMarketCases() {
       join(directory, 'migrate.log'),
       60000
     );
-    phase = 'four-child-cases';
+    if (prediction || plugin) {
+      phase = 'manual-idempotency-index';
+      const actual = await identity(admin);
+      const current = await leaseRow(admin, database);
+      requireThat(
+        actual.started === lease.started &&
+          actual.server === lease.server &&
+          actual.port === lease.port &&
+          actual.role === lease.role &&
+          current?.oid === lease.oid &&
+          current.owner === lease.owner &&
+          current.nonce === nonce,
+        'Created database lease changed before index setup'
+      );
+      // psql executes this unchanged manual file outside a transaction. Its
+      // own catalog checks reject any missing, invalid or wrong-shape index.
+      const manualEnv: NodeJS.ProcessEnv = { ...env };
+      delete manualEnv.PGSERVICE;
+      delete manualEnv.PGSERVICEFILE;
+      await run(
+        [
+          '-X',
+          '--no-password',
+          '-v',
+          'ON_ERROR_STOP=1',
+          '-f',
+          join(
+            ROOT,
+            'packages/db/drizzle/migrations/manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql'
+          ),
+        ],
+        {
+          ...manualEnv,
+          PGHOST: child.hostname.replace(/^\[|\]$/g, ''),
+          PGPORT: child.port || '5432',
+          PGUSER: decodeURIComponent(child.username),
+          PGPASSWORD: decodeURIComponent(child.password),
+          PGDATABASE: database,
+          PGHOSTADDR: '',
+          PGPASSFILE: '/dev/null',
+          PGSSLMODE: 'disable',
+          PGSSLROOTCERT: '',
+          PGSSLCERT: '',
+          PGSSLKEY: '',
+          PGOPTIONS:
+            '-c statement_timeout=10000 -c lock_timeout=1000 -c search_path=pg_catalog,public',
+        },
+        join(directory, 'manual-index.log'),
+        60000,
+        'psql'
+      );
+    }
+    phase = plugin
+      ? 'six-child-cases'
+      : prediction
+        ? 'ten-child-cases'
+        : 'four-child-cases';
     const output = await run(
-      ['test', FILE, '--timeout', '30000'],
+      ['test', file, '--timeout', '30000'],
       env,
       join(directory, 'child.log'),
       120000
@@ -368,10 +676,13 @@ export async function runIsolatedSubMarketCases() {
     const escape = (text: string) =>
       text.replace(/[$.*+?^{}()|[\]\\]/g, '\\$&');
     const lines = output.split('\n');
-    const passes = CASES.map((name) =>
+    const passes = cases.map((name) =>
       lines.find((line) =>
         new RegExp(
-          '^\\(pass\\) sub-market transactional creation > ' +
+          '^\\(pass\\) ' +
+            (prediction || plugin
+              ? ''
+              : 'sub-market transactional creation > ') +
             escape(name) +
             '(?: \\[|\\r?$)'
         ).test(line)
@@ -379,17 +690,21 @@ export async function runIsolatedSubMarketCases() {
     );
     requireThat(
       passes.every((line) => !!line) &&
-        /^\s*4 pass\r?$/m.test(output) &&
+        new RegExp('^\\s*' + cases.length + ' pass\\r?$', 'm').test(output) &&
         /^\s*0 fail\r?$/m.test(output) &&
         !/^\s*[1-9]\d* skip\r?$/m.test(output) &&
-        /Ran 4 tests across 1 file\./.test(output),
-      'All four original cases must pass without skips'
+        output.includes('Ran ' + cases.length + ' tests across 1 file.'),
+      plugin
+        ? 'All six real perp fee cases must pass without skips'
+        : prediction
+          ? 'All ten real HTTP cases must pass without skips'
+          : 'All four original cases must pass without skips'
     );
     childProof = {
-      pass: 4,
+      pass: cases.length,
       skip: 0,
       fail: 0,
-      cases: CASES,
+      cases,
       childLog: join(directory, 'child.log'),
     };
     for (const line of passes) console.info('[isolated child] ' + line);
@@ -479,7 +794,11 @@ export async function runIsolatedSubMarketCases() {
     );
     passed = true;
     persist(resultPath, {
-      status: 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
+      status: plugin
+        ? 'PASS_ISOLATED_SIX_PLUGIN_PERP_FEE_CASES'
+        : prediction
+          ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
+          : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
       lease,
       childProof,
       databaseDropped: true,
@@ -487,9 +806,13 @@ export async function runIsolatedSubMarketCases() {
       parentEnvironmentUnchanged: true,
     });
     console.info(
-      'ISOLATED_SUB_MARKET_RESULT ' +
+      (plugin
+        ? 'ISOLATED_PLUGIN_PERP_FEE_RESULT '
+        : prediction
+          ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
+          : 'ISOLATED_SUB_MARKET_RESULT ') +
         JSON.stringify({
-          pass: 4,
+          pass: cases.length,
           skip: 0,
           fail: 0,
           database,
@@ -500,7 +823,11 @@ export async function runIsolatedSubMarketCases() {
   } finally {
     if (!passed) {
       persist(resultPath, {
-        status: 'HOLD_ISOLATED_SUB_MARKET_CASES',
+        status: plugin
+          ? 'HOLD_ISOLATED_PLUGIN_PERP_FEE_CASES'
+          : prediction
+            ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
+            : 'HOLD_ISOLATED_SUB_MARKET_CASES',
         phase,
         lease,
         childProof,
@@ -513,7 +840,11 @@ export async function runIsolatedSubMarketCases() {
         noAutomaticRetryOrSharedCleanup: true,
       });
       console.error(
-        'ISOLATED_SUB_MARKET_HOLD ' +
+        (plugin
+          ? 'ISOLATED_PLUGIN_PERP_FEE_HOLD '
+          : prediction
+            ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
+            : 'ISOLATED_SUB_MARKET_HOLD ') +
           JSON.stringify({ phase, result: resultPath })
       );
     }
