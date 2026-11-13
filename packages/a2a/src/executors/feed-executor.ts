@@ -42,6 +42,7 @@ import {
   getBlockedUserIds,
   getMutedUserIds,
   getRawDrizzle,
+  groupMembers,
   isNull,
   lte,
   posts,
@@ -2298,11 +2299,10 @@ export class FeedAgentExecutor implements AgentExecutor {
     // Leave the chat and, for group chats, the group membership too (same
     // rules as DELETE /api/chats/[id]/participants/me), atomically.
     await asUser(userId, async (tx) => {
-      const updated = await tx.chatParticipant.updateMany({
+      const participant = await tx.chatParticipant.findFirst({
         where: { chatId, userId, isActive: true },
-        data: { isActive: false },
       });
-      if (updated.count === 0) {
+      if (!participant) {
         throw new Error('Chat not found or already left');
       }
 
@@ -2310,25 +2310,48 @@ export class FeedAgentExecutor implements AgentExecutor {
         where: { id: chatId },
         select: { groupId: true },
       });
-      if (!chat?.groupId) return;
-
-      const membership = await tx.groupMember.findFirst({
-        where: { groupId: chat.groupId, userId, isActive: true },
-      });
-      if (!membership) return;
-      if (membership.role === 'owner') {
-        throw new Error(
-          'Group owners cannot leave. Transfer ownership or delete the group.'
-        );
+      if (chat?.groupId) {
+        // All leave writers take the member lock before the participant lock.
+        // Decide ownership only after waiting for a concurrent promotion.
+        const [membership] = await tx
+          .select({
+            id: groupMembers.id,
+            role: groupMembers.role,
+            isActive: groupMembers.isActive,
+          })
+          .from(groupMembers)
+          .where(
+            and(
+              eq(groupMembers.groupId, chat.groupId),
+              eq(groupMembers.userId, userId)
+            )
+          )
+          .limit(1)
+          .for('update');
+        if (membership?.isActive && membership.role === 'owner') {
+          throw new Error(
+            'Group owners cannot leave. Transfer ownership or delete the group.'
+          );
+        }
+        if (membership?.isActive) {
+          await tx.groupMember.update({
+            where: { id: membership.id },
+            data: {
+              isActive: false,
+              kickedAt: new Date(),
+              kickReason: 'User left',
+            },
+          });
+        }
       }
-      await tx.groupMember.update({
-        where: { id: membership.id },
-        data: {
-          isActive: false,
-          kickedAt: new Date(),
-          kickReason: 'User left',
-        },
+
+      const updated = await tx.chatParticipant.updateMany({
+        where: { chatId, userId, isActive: true },
+        data: { isActive: false },
       });
+      if (updated.count === 0) {
+        throw new Error('Chat not found or already left');
+      }
     });
 
     return { success: true, message: 'Left chat' };
