@@ -106,12 +106,27 @@ const sdkFetch: typeof fetch = Object.assign(
   { preconnect: fetch.preconnect }
 );
 
-beforeAll(async () => {
-  const url = new URL(process.env.DATABASE_URL || '');
+function assertDisposableDatabase(url: URL, ci: boolean) {
+  assert.ok(['postgres:', 'postgresql:'].includes(url.protocol));
   assert.ok(['127.0.0.1', 'localhost'].includes(url.hostname));
-  assert.match(url.pathname, /^\/feed_pr\d+$/);
   assert.equal(url.search, '');
   assert.equal(url.hash, '');
+  const port = url.port || '5432';
+  assert.ok(
+    (port === '55685' &&
+      url.username === 'symbiex' &&
+      /^\/feed_pr\d+$/.test(url.pathname)) ||
+      (ci &&
+        port === '5432' &&
+        url.username === 'postgres' &&
+        url.pathname === '/test_db'),
+    'Disposable local fixture or documented CI database required'
+  );
+}
+
+beforeAll(async () => {
+  const url = new URL(process.env.DATABASE_URL || '');
+  assertDisposableDatabase(url, process.env.CI === 'true');
   assert.equal(process.env.DIRECT_DATABASE_URL, process.env.DATABASE_URL);
   assert.ok(!process.env.DATABASE_READ_REPLICA_URL?.trim());
   assert.ok(
