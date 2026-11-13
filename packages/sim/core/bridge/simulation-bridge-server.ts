@@ -645,9 +645,7 @@ Bun.serve({
               break;
             }
             case 'buy_yes':
-            case 'buy_no':
-            case 'sell_yes':
-            case 'sell_no': {
+            case 'buy_no': {
               const amount = amountOrError;
               if (amount > npc.balance) {
                 success = false;
@@ -659,7 +657,13 @@ Bun.serve({
             }
             case 'close_long':
             case 'close_short':
-            case 'close_position': {
+            case 'close_position':
+            // Sells exit a prediction position, like the close legs: the
+            // principal comes back plus the simulated PnL. Treating them
+            // as entries debited the balance a second time, so every sell
+            // lost the full amount instead of realizing a round trip.
+            case 'sell_yes':
+            case 'sell_no': {
               const closeAmount = amountOrError;
               const closeExposure = exposureUnits(closeAmount);
               if (closeExposure > npc.openExposure) {
