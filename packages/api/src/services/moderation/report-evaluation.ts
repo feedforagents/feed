@@ -20,6 +20,7 @@ import {
   reports,
   users,
 } from '@feed/db';
+import { findDMChat } from '@feed/engine';
 import { logger } from '@feed/shared';
 import { z } from 'zod';
 import { callClaudeDirect } from '../claude-service';
@@ -165,9 +166,12 @@ export async function evaluateReport(
 }
 
 /**
- * Collect all relevant context for a report
+ * Collect all relevant context for a report.
+ *
+ * Exported for integration tests (report-evaluation-actor-dm); the
+ * evaluation entry point remains evaluateReport.
  */
-async function collectReportContext(
+export async function collectReportContext(
   reportId: string
 ): Promise<ReportContext | null> {
   const [report] = await db
@@ -225,9 +229,17 @@ async function collectReportContext(
   const reporterId = report.reporterId;
   const reportedId = report.reportedUserId;
 
-  // Find DM chat between reporter and reported
+  // Find DM chat between reporter and reported. Resolve the real chat
+  // through its participants: actor/NPC DMs are created by
+  // getOrCreateDMChat with a Snowflake id, while legacy human-human DMs
+  // use `dm-<sorted ids>`. Assuming the legacy id misses every actor DM,
+  // so the evaluator saw zero chat messages for exactly the reports
+  // (e.g. DM scam pitches) where the chat is the key evidence. Fall back
+  // to the legacy id when no participant row exists (e.g. a departed
+  // participant), so old messages under that id are still found.
   const sortedIds = [reporterId, reportedId].sort();
-  const chatId = `dm-${sortedIds.join('-')}`;
+  const chatId =
+    (await findDMChat(reporterId, reportedId)) ?? `dm-${sortedIds.join('-')}`;
 
   const chatMessages = await db
     .select({
