@@ -357,11 +357,18 @@ class CachedDatabaseService {
             .from(userActorFollows)
             .where(eq(userActorFollows.userId, userId)),
 
-          // Count positions
+          // Count open positions. The profile route documents this
+          // number as the number of open positions, and the profile's
+          // positions list counts open prediction positions as exactly
+          // the 'active' ones — closed and resolved positions belong
+          // to its closed view — so the header applies the same filter
+          // or it keeps counting positions after they end.
           db
             .select({ count: count() })
             .from(positions)
-            .where(eq(positions.userId, userId)),
+            .where(
+              and(eq(positions.userId, userId), eq(positions.status, 'active'))
+            ),
 
           // Count comments
           db
