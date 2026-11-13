@@ -30,9 +30,10 @@ const POSITION_SHARE_SCALE = 6;
 
 /**
  * Maximum absolute odds shift (in probability units, 0–1) allowed in a single
- * buy trade. A value of 0.20 means one trade cannot move YES odds by more than
- * 20 percentage points (e.g. 50% → 70% is the maximum). Callers can override
- * per-trade via PredictionBuyInput.maxOddsMove for larger NPC/agent positions.
+ * buy or sell trade. A value of 0.20 means one trade cannot move YES odds by
+ * more than 20 percentage points (e.g. 50% → 70% is the maximum). Callers can
+ * override per-trade via PredictionBuyInput.maxOddsMove /
+ * PredictionSellInput.maxOddsMove for larger NPC/agent positions.
  */
 const MAX_ODDS_MOVE_PER_TRADE = 0.2;
 
@@ -389,6 +390,32 @@ export class PredictionMarketService {
       shares,
       this.deps.fees.tradingFeeRate
     );
+
+    // Price impact guard: same limits as buy. Without this, a holder who
+    // accumulated gradually (each buy inside the per-trade limit) can dump
+    // the whole position in one sell, crash the odds, and buy back at the
+    // distorted price. Sells move odds just as far as buys do.
+    const currentTotal = market.yesShares + market.noShares;
+    const currentYesOdds =
+      currentTotal > 0 ? market.noShares / currentTotal : 0.5;
+    const oddsShift = Math.abs(calc.newYesPrice - currentYesOdds);
+    const maxAllowed = input.maxOddsMove ?? MAX_ODDS_MOVE_PER_TRADE;
+
+    if (oddsShift > maxAllowed) {
+      throw new BadRequestError(
+        `Trade would move odds by ${(oddsShift * 100).toFixed(1)}ppt (max ${(maxAllowed * 100).toFixed(0)}ppt). Reduce trade size or split into smaller orders.`
+      );
+    }
+
+    // Hard floor/ceiling: reject any trade that pushes odds to extreme values.
+    if (
+      calc.newYesPrice < ODDS_HARD_FLOOR ||
+      calc.newYesPrice > ODDS_HARD_CEILING
+    ) {
+      throw new BadRequestError(
+        `Trade would push YES odds to ${(calc.newYesPrice * 100).toFixed(1)}% — market is too thin for this trade size.`
+      );
+    }
 
     const newLiquidity =
       market.liquidity - (calc.totalCost - (calc.roundingRemainder ?? 0));

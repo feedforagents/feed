@@ -138,6 +138,12 @@ export interface PredictionSellInput {
   marketId: string;
   shares: number;
   positionId?: string;
+  /**
+   * Maximum allowed absolute odds shift in this single trade (0–1 scale).
+   * Defaults to MAX_ODDS_MOVE_PER_TRADE (0.20 = 20 ppt), same as buys.
+   * NPC/agent callers may pass a higher value (e.g. 0.30) for larger positions.
+   */
+  maxOddsMove?: number;
 }
 
 export interface PredictionResolveInput {
