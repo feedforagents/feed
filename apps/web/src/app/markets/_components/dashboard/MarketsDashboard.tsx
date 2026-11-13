@@ -2,7 +2,7 @@
 
 import { cn, FEED_POINTS_SYMBOL } from '@feed/shared';
 import { ArrowUpDown, Search, TrendingDown, TrendingUp } from 'lucide-react';
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { Skeleton } from '@/components/shared/Skeleton';
 import type { MarketKey } from '@/stores/marketWatchlistStore';
 import type { PerpMarket, PredictionMarket } from '@/types/markets';
@@ -29,6 +29,8 @@ function formatCompact(n: number): string {
 }
 
 interface MarketsDashboardProps {
+  /** Search term the user arrived with (e.g. a cashtag link's `?search=`). */
+  initialSearchQuery?: string;
   perpMarkets: PerpMarket[];
   predictionMarkets: PredictionMarket[];
   perpLoading: boolean;
@@ -39,6 +41,7 @@ interface MarketsDashboardProps {
 }
 
 export const MarketsDashboard = memo(function MarketsDashboard({
+  initialSearchQuery,
   perpMarkets,
   predictionMarkets,
   perpLoading,
@@ -48,7 +51,12 @@ export const MarketsDashboard = memo(function MarketsDashboard({
   onSelectMarket,
 }: MarketsDashboardProps) {
   const [tab, setTab] = useState<DashboardTab>('perps');
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(() => initialSearchQuery ?? '');
+  // Re-seed when the arrival search changes (another cashtag navigation
+  // while this page is already mounted); local typing is left alone.
+  useEffect(() => {
+    if (initialSearchQuery !== undefined) setQuery(initialSearchQuery);
+  }, [initialSearchQuery]);
   const [perpSort, setPerpSort] = useState<PerpSort>('volume');
   const [perpSortDesc, setPerpSortDesc] = useState(true);
   const [predSort, setPredSort] = useState<PredictionSort>('volume');
