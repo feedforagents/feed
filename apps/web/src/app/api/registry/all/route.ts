@@ -96,6 +96,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const { searchParams } = new URL(request.url);
   const entityType = searchParams.get('type'); // 'users' | 'actors' | 'agents' | 'apps' | 'all'
   const search = searchParams.get('search') || '';
+  const autocomplete = searchParams.get('autocomplete') === 'true';
 
   // The on-chain filter was removed; reject it instead of silently returning
   // unfiltered results as if they were on-chain verified.
@@ -113,6 +114,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const fetchUsers = async () => {
     const dbOperation = async (db: DrizzleClient) => {
       const conditions: Record<string, unknown>[] = [];
+
+      // Eligibility precedes the bounded window. Default registry/admin
+      // requests still include every membership kind.
+      if (autocomplete) {
+        conditions.push(
+          { isActor: false },
+          { isBanned: false },
+          { isTest: false },
+          { NOT: { id: { startsWith: 'test-' } } }
+        );
+      }
 
       if (search) {
         conditions.push({
@@ -180,6 +192,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           bio: user.bio,
           imageUrl: user.profileImageUrl,
           isActor: user.isActor,
+          isTest: user.isTest,
           isBanned: user.isBanned,
           isScammer: user.isScammer,
           isCSAM: user.isCSAM,
