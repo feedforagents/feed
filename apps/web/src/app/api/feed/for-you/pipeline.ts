@@ -11,10 +11,12 @@ import {
   inArray,
   isNotNull,
   isNull,
+  like,
   lt,
   lte,
   markets,
   not,
+  notExists,
   positions,
   posts,
   questions,
@@ -361,6 +363,25 @@ function pickLeadPosts(
     .slice(0, 1);
 }
 
+/**
+ * The test-author exclusion every sibling feed applies
+ * (DatabaseService.getRecentPosts excludes test authors in SQL, the
+ * stories pipeline does the same, and the following feed filters out
+ * test users): a post is hidden when its author's user row has
+ * isTest = true or its author id starts with 'test-'. Built fresh per query.
+ */
+function excludeTestAuthors() {
+  return and(
+    not(like(posts.authorId, 'test-%')),
+    notExists(
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+    )
+  );
+}
+
 async function loadBaseCandidates(): Promise<BaseForYouResult> {
   const now = new Date();
   const cutoff = new Date(now.getTime() - FEED_POST_WINDOW_MS);
@@ -384,6 +405,7 @@ async function loadBaseCandidates(): Promise<BaseForYouResult> {
     .where(
       and(
         isNull(posts.deletedAt),
+        excludeTestAuthors(),
         gte(posts.timestamp, cutoff),
         lte(posts.timestamp, now),
         isNull(posts.commentOnPostId),
