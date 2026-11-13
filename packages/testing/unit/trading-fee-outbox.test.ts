@@ -7,6 +7,7 @@ type Row = {
   tradeAmount: string;
   tradeId: string | null;
   marketId: string | null;
+  idempotencyKey?: string | null;
 };
 
 let pendingRows: Row[] = [];
@@ -73,6 +74,43 @@ describe('drainTradingFeeOutboxBatch', () => {
 
     expect(result).toEqual({ examined: 2, processed: 2, failed: 0 });
     expect(processTradingFee).toHaveBeenCalledTimes(2);
+  });
+
+  test('forwards the stored key so an already-settled fee replays instead of charging again', async () => {
+    pendingRows = [{ ...row('a'), idempotencyKey: 'op-key-1' }];
+    claimable = new Set(['a']);
+
+    const result = await drainTradingFeeOutboxBatch();
+
+    expect(result).toEqual({ examined: 1, processed: 1, failed: 0 });
+    expect(processTradingFee).toHaveBeenCalledTimes(1);
+    expect(processTradingFee).toHaveBeenCalledWith(
+      'user-1',
+      'perp_open',
+      100,
+      'pos-1',
+      'BTC',
+      expect.anything(),
+      'op-key-1'
+    );
+  });
+
+  test('drains keyless rows unkeyed, as before', async () => {
+    pendingRows = [row('a')];
+    claimable = new Set(['a']);
+
+    const result = await drainTradingFeeOutboxBatch();
+
+    expect(result).toEqual({ examined: 1, processed: 1, failed: 0 });
+    expect(processTradingFee).toHaveBeenCalledWith(
+      'user-1',
+      'perp_open',
+      100,
+      'pos-1',
+      'BTC',
+      expect.anything(),
+      undefined
+    );
   });
 
   test('never charges a row another drain already claimed', async () => {
