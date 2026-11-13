@@ -2,36 +2,20 @@ import { logger } from '@feed/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { usePredictionMarketStream } from '@/hooks/usePredictionMarketStream';
+import {
+  buildPredictionSeedHistory,
+  type PredictionHistoryPoint,
+  type SeedSnapshot,
+} from '@/lib/prediction-history-seed';
 import type { MarketTimeRange } from '@/types/markets';
 import { apiUrl } from '@/utils/api-url';
 
-/**
- * Represents a single point in prediction market price history.
- */
-export interface PredictionHistoryPoint {
-  /** Timestamp in milliseconds */
-  time: number;
-  /** Current YES outcome price (0-1) */
-  yesPrice: number;
-  /** Current NO outcome price (0-1) */
-  noPrice: number;
-  /** Trading volume since last point */
-  volume: number;
-  /** Total liquidity in the market */
-  liquidity: number;
-}
-
-/**
- * Seed data for initializing history when API data is unavailable.
- */
-interface SeedSnapshot {
-  /** Initial YES shares */
-  yesShares?: number;
-  /** Initial NO shares */
-  noShares?: number;
-  /** Initial liquidity */
-  liquidity?: number;
-}
+export type { PredictionHistoryPoint, SeedSnapshot };
+// Re-exported from the framework-free seed module so existing import
+// sites keep working; unit tests import the builder from the lib module
+// directly to avoid pulling the hook's stream/auth/provider graph into
+// the testing TypeScript program.
+export { buildPredictionSeedHistory };
 
 /**
  * Options for configuring prediction history loading.
@@ -101,27 +85,7 @@ export function usePredictionHistory(
     const seed = seedRef.current;
     if (!marketId || !seed) return;
     if (history.length > 0) return;
-    const yesShares = seed.yesShares ?? 0;
-    const noShares = seed.noShares ?? 0;
-    const totalShares = yesShares + noShares;
-    const yesPrice = totalShares === 0 ? 0.5 : yesShares / totalShares;
-    const now = Date.now();
-    setHistory([
-      {
-        time: now - 60_000,
-        yesPrice,
-        noPrice: 1 - yesPrice,
-        volume: 0,
-        liquidity: seed.liquidity ?? 0,
-      },
-      {
-        time: now,
-        yesPrice,
-        noPrice: 1 - yesPrice,
-        volume: 0,
-        liquidity: seed.liquidity ?? 0,
-      },
-    ]);
+    setHistory(buildPredictionSeedHistory(seed));
   }, [marketId, seedSignature, history.length]);
 
   /**
@@ -163,27 +127,7 @@ export function usePredictionHistory(
   const fallbackFromSeed = useCallback(() => {
     const seed = seedRef.current;
     if (!seed) return [];
-    const yesShares = seed.yesShares ?? 0;
-    const noShares = seed.noShares ?? 0;
-    const totalShares = yesShares + noShares;
-    const yesPrice = totalShares === 0 ? 0.5 : yesShares / totalShares;
-    const now = Date.now();
-    return [
-      {
-        time: now - 60_000,
-        yesPrice,
-        noPrice: 1 - yesPrice,
-        volume: 0,
-        liquidity: seed.liquidity ?? 0,
-      },
-      {
-        time: now,
-        yesPrice,
-        noPrice: 1 - yesPrice,
-        volume: 0,
-        liquidity: seed.liquidity ?? 0,
-      },
-    ];
+    return buildPredictionSeedHistory(seed);
   }, []);
 
   /**
