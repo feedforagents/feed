@@ -16,8 +16,10 @@ import { PullToRefreshIndicator } from '@/components/shared/PullToRefreshIndicat
 import { useAuth } from '@/hooks/useAuth';
 import { useLoginModal } from '@/hooks/useLoginModal';
 import { usePullToRefresh } from '@/hooks/usePullToRefresh';
-import { safeReturnTo } from '@/lib/auth/safe-return-to';
-import { getNotificationPresentation } from '@/lib/notifications/presentation';
+import {
+  getNotificationHref,
+  getNotificationPresentation,
+} from '@/lib/notifications/presentation';
 
 const WidgetSidebar = nextDynamic(
   () =>
@@ -334,85 +336,6 @@ export default function NotificationsPage() {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
-  const getNotificationLink = (notification: Notification) => {
-    if (
-      notification.type === 'market_resolved' &&
-      typeof notification.data?.deepLink === 'string'
-    ) {
-      // Only follow same-origin paths; reject absolute/scheme URLs.
-      const deepLink = safeReturnTo(notification.data.deepLink);
-      if (deepLink !== '/') return deepLink;
-    }
-
-    if (
-      notification.type === 'hourly_summary' ||
-      notification.type === 'daily_summary' ||
-      notification.type === 'weekly_summary'
-    ) {
-      return '/notifications';
-    }
-
-    // DM or group chat message - go to the specific chat if chatId is available
-    if (notification.chatId) {
-      return `/chats?chat=${encodeURIComponent(notification.chatId)}`;
-    }
-
-    // Group chat invite - go to chat
-    if (
-      notification.type === 'system' &&
-      notification.message.includes('invited you to')
-    ) {
-      // Extract chat ID from the message or notification data
-      // For now, go to chats page where they can see their invitations
-      return '/chats';
-    }
-
-    // DM or group chat message without chatId (legacy notifications) - go to chats page
-    if (
-      notification.type === 'system' &&
-      (notification.message.includes('Message') ||
-        notification.message.includes('message'))
-    ) {
-      return '/chats';
-    }
-
-    // Profile completion - go to settings
-    if (
-      notification.type === 'system' &&
-      notification.message.includes('profile')
-    ) {
-      return '/settings';
-    }
-
-    // Follow notification - go to the follower's profile
-    if (notification.type === 'follow' && notification.actorId) {
-      return `/profile/${encodeURIComponent(notification.actorId)}`;
-    }
-
-    // Comment or reaction on post - go to the post detail page
-    if (
-      (notification.type === 'comment' ||
-        notification.type === 'reaction' ||
-        notification.type === 'reply') &&
-      notification.postId
-    ) {
-      return `/post/${encodeURIComponent(notification.postId)}`;
-    }
-
-    // Share notification - go to the post
-    if (notification.type === 'share' && notification.postId) {
-      return `/post/${encodeURIComponent(notification.postId)}`;
-    }
-
-    // Mention - go to the post if available
-    if (notification.type === 'mention' && notification.postId) {
-      return `/post/${encodeURIComponent(notification.postId)}`;
-    }
-
-    // Default: go to feed
-    return '/feed';
-  };
-
   if (!authenticated) {
     return null;
   }
@@ -507,7 +430,7 @@ export default function NotificationsPage() {
                     return (
                       <Link
                         key={notification.id}
-                        href={getNotificationLink(notification)}
+                        href={getNotificationHref(notification)}
                         onClick={() => void markAsRead(notification.id)}
                         data-notification-id={notification.id}
                         className={cn(
