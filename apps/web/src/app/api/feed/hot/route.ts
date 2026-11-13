@@ -91,6 +91,7 @@ import {
   inArray,
   isNull,
   lte,
+  notExists,
   posts,
   reactions,
   shares,
@@ -98,6 +99,7 @@ import {
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger, toISO } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { loadViewerExcludedAuthorIds } from '../_lib/viewer-moderation';
@@ -298,7 +300,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             lte(posts.timestamp, now),
             // Exclude comments/replies - only top-level posts
             isNull(posts.commentOnPostId),
-            isNull(posts.parentCommentId)
+            isNull(posts.parentCommentId),
+            // Test authors are excluded in SQL before the candidate window,
+            // the same rule every sibling post list applies (main feed,
+            // following feed, single-tag page, grouped trending): accounts
+            // flagged isTest in the users table and author ids starting with
+            // 'test-'. Filtering after the fetch would let test posts crowd
+            // real posts out of the MAX_CANDIDATE_POSTS window and out of the
+            // public /feed/rss output this route also serves. Authors with no
+            // user row (NPC actors, organizations) are not test authors and
+            // stay visible.
+            notLike(posts.authorId, 'test-%'),
+            notExists(
+              db
+                .select({ id: users.id })
+                .from(users)
+                .where(
+                  and(eq(users.id, posts.authorId), eq(users.isTest, true))
+                )
+            )
           )
         )
         .orderBy(desc(posts.timestamp))
