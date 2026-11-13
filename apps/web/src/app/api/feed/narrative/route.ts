@@ -501,6 +501,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const stories: NarrativeStory[] = [];
 
       for (const [storyKey, storyPosts] of storyPostMap) {
+        // General posts are emitted below as standalone cards; grouping them
+        // into a "General" mega-story as well duplicated every one of them.
+        if (storyKey === GENERAL_STORY_KEY) continue;
+
         // Sort posts newest first within each story
         storyPosts.sort(
           (a, b) =>
