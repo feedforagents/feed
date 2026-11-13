@@ -846,6 +846,21 @@ export async function executeGetPositions(
     skip: args.offset,
   });
 
+  // Open perpetual positions are open positions too: the same server opens
+  // and closes them (open_position / close_position), the A2A
+  // portfolio.get_positions returns them next to prediction positions, and
+  // the web wallet lists them in the same view. A marketId filter names a
+  // prediction market, so it narrows the result to prediction positions.
+  const perpPositionsRaw = args.marketId
+    ? []
+    : await db.perpPosition.findMany({
+        where: {
+          userId: agent.userId,
+          closedAt: null,
+        },
+        orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
+      });
+
   // Get markets separately
   const marketIds = positionsRaw
     .map((p) => p.marketId)
@@ -868,6 +883,17 @@ export async function executeGetPositions(
       side: p.side ? 'YES' : 'NO',
       shares: p.shares.toString(),
       avgPrice: p.avgPrice.toString(),
+    })),
+    perpPositions: perpPositionsRaw.map((p) => ({
+      id: p.id,
+      ticker: p.ticker,
+      side: resolvePerpSide(p.side),
+      size: p.size.toString(),
+      entryPrice: p.entryPrice.toString(),
+      currentPrice: p.currentPrice.toString(),
+      leverage: p.leverage,
+      unrealizedPnL: p.unrealizedPnL.toString(),
+      fundingPaid: p.fundingPaid.toString(),
     })),
   };
 }

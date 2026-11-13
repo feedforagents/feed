@@ -628,6 +628,17 @@ export interface GetPositionsResult {
     shares: string;
     avgPrice: string;
   }>;
+  perpPositions: Array<{
+    id: string;
+    ticker: string;
+    side: 'LONG' | 'SHORT';
+    size: string;
+    entryPrice: string;
+    currentPrice: string;
+    leverage: number;
+    unrealizedPnL: string;
+    fundingPaid: string;
+  }>;
 }
 
 export interface ClosePositionResult extends StringRecord<JsonValue> {
