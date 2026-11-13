@@ -5,6 +5,13 @@
  * transaction that runs `FeeService.processTradingFee`, so concurrent drains
  * cannot both charge a row and a crash after charging cannot leave a stale
  * row that would double-charge on retry.
+ *
+ * Idempotency: every fee leg carries one `operationId`, generated once per
+ * invocation by the perp fee helper and reused across its retries. The key
+ * is carried into the outbox when the retries exhaust, and the drain replays
+ * under it, so an ambiguous commit (fee committed, caller only saw an
+ * error) never charges twice: `FeeService.processTradingFee` returns the
+ * already-recorded fee when the key exists.
  */
 
 import type { TradingFeeOutboxPort } from '@feed/core/markets/shared';
@@ -16,9 +23,10 @@ import {
   tradingFeeOutbox,
   withTransaction,
 } from '@feed/db';
-import { FeeService, type FeeType, isValidFeeType } from '@feed/engine';
 import { generateSnowflakeId, logger } from '@feed/shared';
 import { asc } from 'drizzle-orm';
+import { type FeeType, isValidFeeType } from '../config/fees';
+import { FeeService } from './fee-service';
 
 const DRAIN_BATCH_SIZE = 50;
 

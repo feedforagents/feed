@@ -5,6 +5,7 @@
  * the platform fee. Referral fee shares are not paid.
  */
 
+import type { FeeProcessor } from '@feed/core/markets/shared';
 import {
   and,
   count,
@@ -497,4 +498,36 @@ export class FeeService {
       totalTrades: result?.count || 0,
     };
   }
+}
+
+/**
+ * Shared FeeProcessor adapter for market services.
+ *
+ * @description Single place for the FeeProcessor-to-FeeService mapping,
+ * including the string-to-FeeType narrowing that market services pass as
+ * plain strings. It is intentionally non-transactional: no transaction
+ * argument is passed, matching callers that use a non-transactional wallet
+ * adapter. It changes no fee rate and no fee split; those remain owned by
+ * FeeService and FEE_CONFIG.
+ */
+export function createTradingFeeProcessor(): FeeProcessor {
+  return {
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
+      FeeService.processTradingFee(
+        userId,
+        type as FeeType,
+        amount,
+        positionId,
+        relatedId,
+        undefined,
+        operationId
+      ),
+  };
 }

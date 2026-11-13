@@ -359,8 +359,8 @@ function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
 
 /**
  * Durable queue for perp trading fees whose inline processing fails after
- * retries. Mirrors the web adapter
- * (apps/web/src/lib/services/trading-fee-outbox.ts): the cron drain claims
+ * retries. Mirrors the engine outbox service
+ * (packages/engine/src/services/trading-fee-outbox.ts): the cron drain claims
  * each row (DELETE … RETURNING) in the same transaction that runs
  * FeeService.processTradingFee, so a fee intent is never dropped silently
  * and never charged twice. Wired into the A2A perp service so the
@@ -379,7 +379,7 @@ function buildTradingFeeOutbox(): TradingFeeOutboxPort {
         tradeId: params.positionId,
         marketId: params.relatedId,
         // Carry the leg's key so the drain replays under it; see the
-        // web adapter (apps/web/src/lib/services/trading-fee-outbox.ts).
+        // engine outbox service (packages/engine/src/services/trading-fee-outbox.ts).
         idempotencyKey: params.operationId ?? null,
         lastError: params.lastError ?? null,
       });

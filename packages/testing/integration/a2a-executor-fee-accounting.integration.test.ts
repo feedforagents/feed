@@ -67,7 +67,7 @@ import { generateSnowflakeId } from '@feed/shared';
 import {
   createTradingFeeOutboxAdapter,
   drainTradingFeeOutboxBatch,
-} from '../../../apps/web/src/lib/services/trading-fee-outbox';
+} from '../../engine/src/services/trading-fee-outbox';
 
 const createdUserIds: string[] = [];
 const createdMarketIds: string[] = [];
