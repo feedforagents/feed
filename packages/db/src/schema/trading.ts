@@ -1,4 +1,4 @@
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
   decimal,
@@ -93,17 +93,13 @@ export const tradingFees = pgTable(
     referrerFee: decimal('referrerFee', { precision: 18, scale: 2 }).notNull(),
     referrerId: text('referrerId'),
     /**
-     * Idempotency key for this fee intent, generated once at the trade call
-     * site. Nullable for rows written before the key existed; unique when
-     * present so a retried fee can never insert a second row for the same
-     * intent. Postgres treats NULLs as distinct, so legacy rows are
-     * unaffected.
-     *
-     * The unique index below is NOT created by migration 0005: TradingFee
-     * is a populated table, so the index is built concurrently, outside
-     * any transaction, by scripts/apply-trading-fee-idempotency-index.ts
-     * after 0005 runs. The index definition matches this declaration, so
-     * drizzle-kit generate/check stay in sync.
+     * Idempotency key for one fee-settlement operation (one leg of one
+     * trade). The perp fee helper generates one key per invocation and
+     * reuses it across its retries, so a retry after an ambiguous
+     * (post-commit) error replays the recorded fee instead of inserting
+     * a second row. A legitimate repeat leg gets a fresh key, so it
+     * still charges. Null for callers that do not pass an operation id
+     * (older surfaces); those rows are not deduplicated.
      */
     idempotencyKey: text('idempotencyKey'),
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
@@ -116,13 +112,22 @@ export const tradingFees = pgTable(
     ),
     index('TradingFee_tradeType_idx').on(table.tradeType),
     index('TradingFee_userId_createdAt_idx').on(table.userId, table.createdAt),
-    uniqueIndex('TradingFee_idempotencyKey_idx').on(table.idempotencyKey),
+    uniqueIndex('TradingFee_idempotencyKey_idx')
+      .on(table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`)
+      .concurrently(),
   ]
 );
 
 /**
  * Durable queue for trading fee processing when inline FeeProcessor retries are exhausted.
  * Rows are removed in the same DB transaction as FeeService.processTradingFee to avoid double charges.
+ *
+ * `idempotencyKey` carries the leg's operation id from the inline attempts
+ * into the drain: a fee that committed inline but was observed as an error
+ * on every retry is enqueued under the same key, so the drain replays the
+ * recorded fee instead of inserting a second row. Null for rows enqueued
+ * without a key (older callers); those rows are not deduplicated.
  */
 export const tradingFeeOutbox = pgTable(
   'TradingFeeOutbox',
@@ -134,14 +139,9 @@ export const tradingFeeOutbox = pgTable(
     tradeAmount: decimal('tradeAmount', { precision: 24, scale: 8 }).notNull(),
     tradeId: text('tradeId'),
     marketId: text('marketId'),
-    lastError: text('lastError'),
-    /**
-     * Same idempotency key the inline attempts used. Unique when present so
-     * a retried enqueue can never queue the same fee intent twice; the drain
-     * replays with this key, so a fee the drain already recorded is returned
-     * instead of charged again.
-     */
+    /** Idempotency key of the fee operation this row retries, if any. */
     idempotencyKey: text('idempotencyKey'),
+    lastError: text('lastError'),
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
   },
   (table) => [
@@ -150,7 +150,6 @@ export const tradingFeeOutbox = pgTable(
       table.userId,
       table.createdAt
     ),
-    uniqueIndex('TradingFeeOutbox_idempotencyKey_idx').on(table.idempotencyKey),
   ]
 );
 

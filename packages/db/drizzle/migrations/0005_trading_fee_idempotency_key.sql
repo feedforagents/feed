@@ -1,0 +1,32 @@
+-- 0005: idempotency keys for trading-fee settlement.
+--
+-- Column-only migration (safe inside the Drizzle transaction on a
+-- populated table: ADD COLUMN without a default is metadata-only).
+--
+-- The partial unique index on TradingFee.idempotencyKey is NOT created
+-- here: CREATE INDEX on a populated table blocks writes unless it runs
+-- CONCURRENTLY, and CONCURRENTLY cannot run inside a transaction, while
+-- Drizzle runs every journaled migration inside one transaction
+-- (AGENTS.md, "Production database (scale and locks)" / DDL). The index
+-- is created by the hand-written step
+-- packages/db/drizzle/migrations/manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql,
+-- which must run OUTSIDE `drizzle-kit migrate` (psql) BEFORE the app
+-- that reads/writes idempotencyKey is deployed:
+--
+--   1. `bun run db:migrate`            (this file: both columns)
+--   2. psql -f <manual 0005b file>     (unique index, concurrently;
+--      the step self-verifies the index and aborts on any failed
+--      check — do not deploy if it fails)
+--   3. Deploy the app.
+--
+-- Rollback: DROP INDEX CONCURRENTLY IF EXISTS
+-- "TradingFee_idempotencyKey_idx"; the columns may stay (nullable).
+-- The migrated schema — both columns plus the verified unique
+-- index — is a prerequisite for every new application instance:
+-- FeeService's insert builder (locked drizzle-orm 0.44.7, checked
+-- with toSQL()) emits every TradingFee column, so even an unkeyed
+-- call references idempotencyKey (as DEFAULT) and fails on a schema
+-- without it. Existing rows keep NULL keys; the partial index only
+-- covers non-NULL keys, so no backfill is needed.
+ALTER TABLE "TradingFee" ADD COLUMN "idempotencyKey" text;--> statement-breakpoint
+ALTER TABLE "TradingFeeOutbox" ADD COLUMN "idempotencyKey" text;

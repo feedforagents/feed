@@ -28,7 +28,7 @@ describe('createTradingFeeProcessor', () => {
         type: 'perp_open',
         relatedId: 'rel-1',
         positionId: 'pos-1',
-        idempotencyKey: 'key-1',
+        operationId: 'key-1',
       });
       expect(processTradingFeeMock).toHaveBeenCalledWith(
         'user-1',

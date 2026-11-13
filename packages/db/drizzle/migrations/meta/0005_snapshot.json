@@ -1,5 +1,5 @@
 {
-  "id": "64318f95-d722-4a04-aadb-d8f085ac991a",
+  "id": "f9bec424-9b98-4bbe-b092-1e01b193538e",
   "prevId": "18348956-c3b2-4b65-aaca-c549ce8152d7",
   "version": "7",
   "dialect": "postgresql",
@@ -14095,18 +14095,18 @@
           "primaryKey": false,
           "notNull": false
         },
-        "idempotencyKey": {
-          "name": "idempotencyKey",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "createdAt": {
           "name": "createdAt",
           "type": "timestamp",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "idempotencyKey": {
+          "name": "idempotencyKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -14142,21 +14142,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "TradingFeeOutbox_idempotencyKey_idx": {
-          "name": "TradingFeeOutbox_idempotencyKey_idx",
-          "columns": [
-            {
-              "expression": "idempotencyKey",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -14325,7 +14310,8 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "where": "\"TradingFee\".\"idempotencyKey\" IS NOT NULL",
+          "concurrently": true,
           "method": "btree",
           "with": {}
         }

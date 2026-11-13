@@ -106,7 +106,7 @@ export function createFeeProcessorAdapter(): FeeProcessor {
       type,
       relatedId,
       positionId,
-      idempotencyKey,
+      operationId,
     }) =>
       FeeService.processTradingFee(
         userId,
@@ -115,7 +115,7 @@ export function createFeeProcessorAdapter(): FeeProcessor {
         positionId,
         relatedId,
         undefined,
-        idempotencyKey
+        operationId
       ),
   };
 }

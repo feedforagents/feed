@@ -174,7 +174,13 @@ export class FeeService {
    * @param {string} [tradeId] - Optional trade ID for reference
    * @param {string} [marketId] - Optional market ID for reference
    * @param {TransactionContext} [existingTx] - Optional existing transaction/client to reuse (avoids nested transactions)
-   * @param {string} [idempotencyKey] - Optional idempotency key for this fee intent, generated once at the trade call site. When provided, a retry that arrives after the fee row already committed returns the stored result instead of charging again.
+   * @param {string} [operationId] - Optional idempotency key for one fee
+   *   operation (one leg of one trade). When given, a row already recorded
+   *   under this key is returned as-is instead of inserting a second fee
+   *   row, crediting totals, or diverting to the fund again — so a retry
+   *   after an ambiguous post-commit error cannot duplicate accounting.
+   *   Callers must generate a fresh key per operation: a (position, type)
+   *   pair alone cannot tell a retry from a legitimate repeat leg.
    * @returns {Promise<FeeDistributionResult>} Fee distribution result
    *
    * @example
@@ -195,7 +201,7 @@ export class FeeService {
     tradeId?: string,
     marketId?: string,
     existingTx?: TransactionContext,
-    idempotencyKey?: string
+    operationId?: string
   ): Promise<FeeDistributionResult> {
     const feeCalc = FeeService.calculateFee(tradeAmount);
 
@@ -224,28 +230,19 @@ export class FeeService {
     const processFee = async (
       tx: TransactionContext
     ): Promise<FeeDistributionResult & { stabilityFundDiversion: number }> => {
-      // Idempotency: an ambiguous commit (fee row committed, caller only saw
-      // an error) must not charge twice. The key is checked inside the same
-      // transaction that would write the fee, so a retry returns the stored
-      // result without writing a row, touching totalFeesPaid, or diverting
-      // to the stability fund again.
-      if (idempotencyKey) {
+      // Idempotent replay: a retry of the same operation (same key) after
+      // an ambiguous post-commit error returns the recorded fee without
+      // inserting, crediting totals, or diverting to the fund again. The
+      // partial unique index on idempotencyKey is the backstop: if a
+      // concurrent duplicate slips past this check, its insert fails and
+      // the caller's retry lands here instead of duplicating accounting.
+      if (operationId) {
         const [existing] = await tx
-          .select({
-            feeAmount: tradingFees.feeAmount,
-            platformFee: tradingFees.platformFee,
-            referrerFee: tradingFees.referrerFee,
-            referrerId: tradingFees.referrerId,
-          })
+          .select()
           .from(tradingFees)
-          .where(eq(tradingFees.idempotencyKey, idempotencyKey))
+          .where(eq(tradingFees.idempotencyKey, operationId))
           .limit(1);
         if (existing) {
-          logger.info(
-            'Trading fee already recorded for idempotency key — returning stored result',
-            { userId, tradeType, idempotencyKey },
-            'FeeService'
-          );
           return {
             feeCharged: Number(existing.feeAmount),
             referrerPaid: Number(existing.referrerFee),
@@ -272,7 +269,14 @@ export class FeeService {
         platformFee: new Decimal(platformReceived).toString(),
         referrerFee: new Decimal(referrerPaid).toString(),
         referrerId,
-        idempotencyKey: idempotencyKey ?? null,
+        // Both idempotencyKey columns and the verified unique index
+        // (migration 0005 + manual 0005b) are prerequisites for every
+        // application instance: the locked drizzle-orm (0.44.7) insert
+        // builder emits every TradingFee column — checked with
+        // toSQL() — so even an unkeyed call references this column
+        // (as DEFAULT) and fails on a schema without it. There is no
+        // old-schema compatibility.
+        idempotencyKey: operationId ?? null,
       });
 
       // Atomic increment: concurrent fees for the same trader must not lose
@@ -514,7 +518,7 @@ export function createTradingFeeProcessor(): FeeProcessor {
       type,
       relatedId,
       positionId,
-      idempotencyKey,
+      operationId,
     }) =>
       FeeService.processTradingFee(
         userId,
@@ -523,7 +527,7 @@ export function createTradingFeeProcessor(): FeeProcessor {
         positionId,
         relatedId,
         undefined,
-        idempotencyKey
+        operationId
       ),
   };
 }

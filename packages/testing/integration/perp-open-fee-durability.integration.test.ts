@@ -227,6 +227,7 @@ test('fuzzy commit: first fee attempt writes then throws, retry charges exactly 
   const referrerId = await generateSnowflakeId();
   const ticker = `FEEFUZZ${userId}`;
   let attempts = 0;
+  let seenOperationId: string | null = null;
   try {
     await db.insert(users).values({
       id: referrerId,
@@ -258,6 +259,7 @@ test('fuzzy commit: first fee attempt writes then throws, retry charges exactly 
       feeProcessor: {
         processTradingFee: async (params) => {
           attempts++;
+          if (params.operationId) seenOperationId = params.operationId;
           // Ambiguous commit: the fee row really commits, then the caller
           // only sees an error. The retry must find the stored row.
           const result = await FeeService.processTradingFee(
@@ -267,7 +269,7 @@ test('fuzzy commit: first fee attempt writes then throws, retry charges exactly 
             params.positionId,
             params.relatedId,
             undefined,
-            params.idempotencyKey
+            params.operationId
           );
           if (attempts === 1) throw new Error('connection reset after commit');
           return result;
@@ -289,7 +291,8 @@ test('fuzzy commit: first fee attempt writes then throws, retry charges exactly 
       .where(eq(tradingFees.userId, userId));
     expect(recorded).toHaveLength(1);
     expect(recorded[0]!.tradeType).toBe('perp_open');
-    expect(recorded[0]!.idempotencyKey).toBe(`perp_open:${result.positionId}`);
+    expect(seenOperationId).toBeString();
+    expect(recorded[0]!.idempotencyKey).toBe(seenOperationId);
     expect(Number(recorded[0]!.feeAmount)).toBe(1);
     expect(Number(recorded[0]!.referrerFee)).toBe(0);
     expect(recorded[0]!.referrerId).toBeNull();
@@ -361,7 +364,8 @@ test('persistent fee failure: open succeeds, drain writes exactly one fee row', 
       .where(eq(tradingFeeOutbox.userId, userId));
     expect(queued).toHaveLength(1);
     expect(queued[0]!.tradeType).toBe('perp_open');
-    expect(queued[0]!.idempotencyKey).toBe(`perp_open:${result.positionId}`);
+    const queuedKey = queued[0]!.idempotencyKey;
+    expect(queuedKey).toBeString();
 
     const drained = await drainTradingFeeOutboxBatch();
     expect(drained).toEqual({ examined: 1, processed: 1, failed: 0 });
@@ -370,6 +374,7 @@ test('persistent fee failure: open succeeds, drain writes exactly one fee row', 
       .from(tradingFees)
       .where(eq(tradingFees.userId, userId));
     expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.idempotencyKey).toBe(queuedKey);
     expect(Number(recorded[0]!.feeAmount)).toBe(1);
     const [owner] = await db.select().from(users).where(eq(users.id, userId));
     expect(Number(owner!.totalFeesPaid)).toBe(1);
@@ -576,7 +581,8 @@ test('plugin openPerpAction with failing fees succeeds and the same fee intent r
       .from(tradingFeeOutbox)
       .where(eq(tradingFeeOutbox.userId, userId));
     expect(queued).toHaveLength(1);
-    expect(queued[0]!.idempotencyKey).toBe(`perp_open:${positionId}`);
+    const operationId = queued[0]!.idempotencyKey;
+    expect(operationId).toBeString();
     // The open's margin was debited exactly once.
     const debits = await db
       .select()
@@ -596,7 +602,7 @@ test('plugin openPerpAction with failing fees succeeds and the same fee intent r
       type: 'perp_open',
       relatedId: ticker,
       positionId: positionId!,
-      idempotencyKey: `perp_open:${positionId}`,
+      operationId: operationId ?? undefined,
     });
     expect(retry.feeCharged).toBe(0.5);
     const recorded = await db

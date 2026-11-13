@@ -26,11 +26,16 @@ import {
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
-import type { WalletPort } from '@feed/core/markets/shared';
+import type {
+  FeeProcessor,
+  TradingFeeOutboxPort,
+  WalletPort,
+} from '@feed/core/markets/shared';
 import {
   and,
   asUser,
   db,
+  dbWrite,
   desc,
   eq,
   getBlockedByUserIds,
@@ -42,6 +47,7 @@ import {
   posts,
   postTags,
   sql,
+  tradingFeeOutbox,
 } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
@@ -49,6 +55,7 @@ import {
   createPerpSettlement,
   createPerpTradesCachePort,
   FEE_CONFIG,
+  FeeService,
   type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
@@ -318,6 +325,68 @@ function requireContextAccountId(
 }
 
 /** Matches CreatePostSchema / ContentValidator post limit. */
+/**
+ * Fee settlement wiring shared by the market services built below.
+ * Mirrors the adapter every other trading surface uses (web trade
+ * routes, MCP handlers, agent executors): the market services charge
+ * the trading fee in their trade math, and this processor is what
+ * records the fee, pays the referrer share, and updates the trader's
+ * lifetime fee total via FeeService. The tx-aware form matches MCP:
+ * inside withPredictionSettlement the processor runs in the same
+ * transaction as the trade.
+ */
+function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
+  return {
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
+      FeeService.processTradingFee(
+        userId,
+        type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
+        amount,
+        positionId,
+        relatedId,
+        tx,
+        operationId
+      ),
+  };
+}
+
+/**
+ * Durable queue for perp trading fees whose inline processing fails after
+ * retries. Mirrors the engine outbox service
+ * (packages/engine/src/services/trading-fee-outbox.ts): the cron drain claims
+ * each row (DELETE … RETURNING) in the same transaction that runs
+ * FeeService.processTradingFee, so a fee intent is never dropped silently
+ * and never charged twice. Wired into the A2A perp service so the
+ * post-commit recovery in PerpMarketService.openPosition actually exists
+ * on this surface.
+ */
+function buildTradingFeeOutbox(): TradingFeeOutboxPort {
+  return {
+    enqueue: async (params) => {
+      const id = await generateSnowflakeId();
+      await db.insert(tradingFeeOutbox).values({
+        id,
+        userId: params.userId,
+        tradeType: params.type,
+        tradeAmount: String(params.amount),
+        tradeId: params.positionId,
+        marketId: params.relatedId,
+        // Carry the leg's key so the drain replays under it; see the
+        // engine outbox service (packages/engine/src/services/trading-fee-outbox.ts).
+        idempotencyKey: params.operationId ?? null,
+        lastError: params.lastError ?? null,
+      });
+    },
+  };
+}
+
 const MAX_POST_CONTENT_LENGTH = 5000;
 /** Matches CreateCommentSchema (shared validation). */
 const MAX_COMMENT_LENGTH = 2000;
@@ -1567,6 +1636,7 @@ export class FeedAgentExecutor implements AgentExecutor {
         referrerShare: FEE_CONFIG.REFERRER_SHARE,
         minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
+      feeProcessor: (tx) => buildFeeProcessor(tx),
     };
   }
 
@@ -1588,6 +1658,8 @@ export class FeedAgentExecutor implements AgentExecutor {
         referrerShare: FEE_CONFIG.REFERRER_SHARE,
         minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
+      feeProcessor: buildFeeProcessor(),
+      tradingFeeOutbox: buildTradingFeeOutbox(),
     });
   }
 
@@ -1905,12 +1977,18 @@ export class FeedAgentExecutor implements AgentExecutor {
   ): Promise<ExecutorOperationResult> {
     const userId = requireContextAccountId({}, context);
     const limit = this.parsePositiveInt(params.limit, 20, 50);
+    const offset = this.parseNonNegativeInt(params.offset, 0);
 
-    // Get chats where user is a participant
+    // Get chats where user is a participant. The order carries chatId as a
+    // tiebreaker so it is total: memberships created in one batch share a
+    // joinedAt, and offset paging over ties alone could repeat or skip chats
+    // between pages. offset continues past the first `limit` rows — without
+    // it, chats beyond the window were unreachable.
     const chatParticipants = await db.chatParticipant.findMany({
       where: { userId, isActive: true },
       take: limit,
-      orderBy: { joinedAt: 'desc' },
+      skip: offset,
+      orderBy: [{ joinedAt: 'desc' }, { chatId: 'desc' }],
       select: {
         chatId: true,
         updatedAt: true,
@@ -1936,12 +2014,16 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (chats.length !== chatIds.length) {
       throw new Error('Chat membership references a missing chat');
     }
+    // The id lookup above does not preserve the participant query's order;
+    // restore it so the page is presented newest-join first as sorted.
+    const chatsById = new Map(chats.map((c) => [c.id, c]));
+    const orderedChats = chatIds.map((id) => chatsById.get(id)!);
     const members = await db.chatParticipant.findMany({
       where: { chatId: { in: chatIds }, isActive: true },
       select: { chatId: true, userId: true },
     });
     return {
-      chats: chats.map((c) => ({
+      chats: orderedChats.map((c) => ({
         id: c.id,
         name: c.name,
         isGroup: c.isGroup,
@@ -1975,8 +2057,43 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('Chat not found or access denied');
     }
 
+    const chat = await db.chat.findUnique({
+      where: { id: chatId },
+      select: { isGroup: true },
+    });
+
+    if (!chat) {
+      throw new Error('Chat not found or access denied');
+    }
+
+    // A group chat is a reading surface like any other feed: authors the
+    // viewer blocked or muted, and authors who blocked the viewer, must
+    // not appear in the viewer's message list — the same rule the web
+    // group chat history (GET /api/chats/[id]) and this executor's
+    // get_notifications apply at read time, so a block or mute placed
+    // later also hides earlier messages. The filter lives in the query
+    // itself so limit/offset page over only the messages the viewer may
+    // see. DM history is out of scope: a block relationship already
+    // prevents creating a DM and sending in one.
+    let excludedSenderIds: string[] = [];
+    if (chat.isGroup) {
+      const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+        getBlockedUserIds(userId),
+        getMutedUserIds(userId),
+        getBlockedByUserIds(userId),
+      ]);
+      excludedSenderIds = [
+        ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+      ];
+    }
+
     const messages = await db.message.findMany({
-      where: { chatId },
+      where: {
+        chatId,
+        ...(excludedSenderIds.length > 0
+          ? { senderId: { notIn: excludedSenderIds } }
+          : {}),
+      },
       orderBy: { createdAt: 'desc' },
       take: limit,
       skip: offset,
@@ -2070,10 +2187,23 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     if (!name) throw new Error('name is required');
 
+    // Check eligibility on primary before writing memberships. A replica may
+    // still report a banned user as eligible or omit a newly created user.
+    // This does not change the existing direct-add policy of this operation.
+    const otherMemberIds = memberIds.filter((id) => id !== userId);
+    const validMembers = await dbWrite.user.findMany({
+      where: { id: { in: otherMemberIds }, isBanned: false },
+      select: { id: true },
+    });
+    const validMemberIds = new Set(validMembers.map((m) => m.id));
+    const addableMemberIds = otherMemberIds.filter((id) =>
+      validMemberIds.has(id)
+    );
+
     // Generate all IDs before transaction
     const groupId = await generateSnowflakeId();
     const chatId = await generateSnowflakeId();
-    const allMembers = [userId, ...memberIds.filter((id) => id !== userId)];
+    const allMembers = [userId, ...addableMemberIds];
 
     // Pre-generate IDs for all participants and members
     const memberData = await Promise.all(
@@ -2554,6 +2684,19 @@ export class FeedAgentExecutor implements AgentExecutor {
       return fallback;
     }
     return Math.min(parsed, max);
+  }
+
+  private parseNonNegativeInt(value: unknown, fallback: number): number {
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string'
+          ? Number.parseInt(value, 10)
+          : Number.NaN;
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return fallback;
+    }
+    return Math.floor(parsed);
   }
 
   // Portfolio operations

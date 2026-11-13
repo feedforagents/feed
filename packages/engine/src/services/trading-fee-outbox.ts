@@ -6,12 +6,12 @@
  * cannot both charge a row and a crash after charging cannot leave a stale
  * row that would double-charge on retry.
  *
- * Idempotency: every fee intent carries an `idempotencyKey` generated once
- * at the trade call site. Retries and the outbox drain all reuse that key,
- * and `FeeService.processTradingFee` returns the already-recorded fee when
- * the key exists, so an ambiguous commit (fee committed, caller only saw
- * an error) never charges twice. The outbox insert is
- * on-conflict-do-nothing on the key for the same reason.
+ * Idempotency: every fee leg carries one `operationId`, generated once per
+ * invocation by the perp fee helper and reused across its retries. The key
+ * is carried into the outbox when the retries exhaust, and the drain replays
+ * under it, so an ambiguous commit (fee committed, caller only saw an
+ * error) never charges twice: `FeeService.processTradingFee` returns the
+ * already-recorded fee when the key exists.
  */
 
 import type { TradingFeeOutboxPort } from '@feed/core/markets/shared';
@@ -36,23 +36,20 @@ export async function enqueueFailedTradingFee(params: {
   type: string;
   relatedId: string;
   positionId: string;
+  operationId?: string;
   lastError?: string;
-  idempotencyKey?: string;
 }): Promise<void> {
   const id = await generateSnowflakeId();
-  await db
-    .insert(tradingFeeOutbox)
-    .values({
-      id,
-      userId: params.userId,
-      tradeType: params.type,
-      tradeAmount: String(params.amount),
-      tradeId: params.positionId,
-      marketId: params.relatedId,
-      lastError: params.lastError ?? null,
-      idempotencyKey: params.idempotencyKey ?? null,
-    })
-    .onConflictDoNothing({ target: tradingFeeOutbox.idempotencyKey });
+  await db.insert(tradingFeeOutbox).values({
+    id,
+    userId: params.userId,
+    tradeType: params.type,
+    tradeAmount: String(params.amount),
+    tradeId: params.positionId,
+    marketId: params.relatedId,
+    idempotencyKey: params.operationId ?? null,
+    lastError: params.lastError ?? null,
+  });
 }
 
 export function createTradingFeeOutboxAdapter(): TradingFeeOutboxPort {
@@ -103,6 +100,11 @@ export async function drainTradingFeeOutboxBatch(): Promise<{
           .returning({ id: tradingFeeOutbox.id });
         if (!claimedRow) return false;
 
+        // Replay under the row's stored key when it has one: the fee
+        // may already have committed inline while every retry observed
+        // an error, so an unkeyed drain would insert a second row and
+        // double-count totals and the fund diversion. Rows enqueued
+        // without a key (older callers) drain unkeyed, as before.
         await FeeService.processTradingFee(
           row.userId,
           row.tradeType as FeeType,

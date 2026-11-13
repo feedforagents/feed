@@ -109,9 +109,9 @@ export class PredictionDbAdapter implements PredictionDbPort {
   }
 
   /**
-   * WHY orderBy createdAt DESC: Newest markets first — matches user expectation
-   * that recent questions appear at the top. Equal timestamps have no explicit
-   * tie-breaker; separate requests are not an atomic pagination snapshot.
+   * WHY createdAt DESC, id DESC: Newest markets first, with a unique tiebreaker
+   * so stable rows cannot move between offset pages when timestamps tie.
+   * Separate requests are not an atomic snapshot of concurrent changes.
    */
   async listMarkets(options?: {
     limit?: number;
@@ -121,7 +121,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
       .select()
       .from(markets)
       .where(this.openMarketPredicate())
-      .orderBy(desc(markets.createdAt));
+      .orderBy(desc(markets.createdAt), desc(markets.id));
     const rows =
       options?.limit != null
         ? await base.limit(options.limit).offset(options.offset ?? 0)

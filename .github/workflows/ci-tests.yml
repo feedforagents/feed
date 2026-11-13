@@ -45,7 +45,7 @@ jobs:
 
   test-all:
     name: Run All Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       HAS_PRIVY_E2E_SECRETS: ${{ (secrets.PRIVY_TEST_EMAIL != '' && secrets.PRIVY_TEST_PASSWORD != '' && (secrets.NEXT_PUBLIC_PRIVY_APP_ID != '' || secrets.PRIVY_APP_ID != '')) && 'true' || 'false' }}
@@ -234,11 +234,29 @@ jobs:
       - name: Run Integration Tests
         timeout-minutes: 10
         run: |
+          set -euo pipefail
+          # Bind the destructive index fixture to this job's exact local service.
+          [[ "$POSTGRES_SERVICE_CONTAINER_ID" =~ ^[a-f0-9]{64}$ ]]
+          inspected_id=$(docker inspect --type container --format '{{.Id}}' "$POSTGRES_SERVICE_CONTAINER_ID")
+          [[ "$inspected_id" == "$POSTGRES_SERVICE_CONTAINER_ID" ]]
+          backend_addresses=$(docker inspect --type container \
+            --format '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' \
+            "$POSTGRES_SERVICE_CONTAINER_ID")
+          FEED_TEST_POSTGRES_ADDRESS=$(printf '%s' "$backend_addresses" | bun -e '
+            import { isIPv4 } from "node:net";
+            const addresses = (await Bun.stdin.text()).trim().split(/\s+/);
+            if (addresses.length !== 1 || !isIPv4(addresses[0])) {
+              throw new Error("Expected one IPv4 address for the job PostgreSQL service");
+            }
+            console.log(addresses[0]);
+          ')
+          export FEED_TEST_POSTGRES_ADDRESS
           echo "🧪 Running integration tests..."
           bun test packages/testing/integration/ \
             --preload ./packages/testing/integration/preload.ts \
             --timeout 30000
         env:
+          POSTGRES_SERVICE_CONTAINER_ID: ${{ job.services.postgres.id }}
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
           DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
           TEST_API_URL: http://localhost:3000

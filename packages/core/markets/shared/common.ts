@@ -17,12 +17,14 @@ export interface FeeProcessor {
     relatedId?: string;
     positionId?: string;
     /**
-     * Idempotency key for this fee intent, generated once at the trade call
-     * site. Retries and the outbox drain reuse the same key so an ambiguous
-     * commit (fee already recorded, caller only saw an error) never charges
-     * twice. Callers that do not pass one get no dedup protection.
+     * Idempotency key for this one fee operation (one leg of one trade).
+     * The caller generates a fresh key per operation and reuses it across
+     * retries, so a retry after an ambiguous post-commit error replays the
+     * recorded fee instead of charging twice; a legitimate repeat leg gets
+     * a new key and still charges. A (position, type) pair alone cannot
+     * tell the two apart.
      */
-    idempotencyKey?: string;
+    operationId?: string;
   }) => Promise<{ feeCharged: number; referrerPaid?: number }>;
 }
 
@@ -37,9 +39,15 @@ export interface TradingFeeOutboxPort {
     type: string;
     relatedId: string;
     positionId: string;
+    /**
+     * Idempotency key of the fee operation this row retries (the same
+     * key the inline attempts used). The drain passes it back to
+     * FeeService, so a fee that already committed inline but was
+     * observed as an error on every retry is replayed, not charged a
+     * second time. Omit only when no key exists for the operation.
+     */
+    operationId?: string;
     lastError?: string;
-    /** Same key the inline attempts used; the drain replays with it. */
-    idempotencyKey?: string;
   }): Promise<void>;
 }
 
