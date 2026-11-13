@@ -84,6 +84,8 @@ import {
   count,
   eq,
   gte,
+  isNull,
+  lte,
   posts,
   sql,
   sum,
@@ -136,7 +138,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             gte(userActivityLogs.activityDate, sevenDaysAgo)
           )
         ),
-      db.select({ count: count() }).from(posts),
+      // Platform total counts only posts a reader can actually reach.
+      // Soft-deleted (moderated) posts and scheduled posts whose timestamp
+      // has not arrived are invisible everywhere else — GET
+      // /api/embed/post/[id] 404s on both — so counting them here would
+      // report content the product does not show. Author eligibility
+      // (test accounts) is not applied: this is a platform-wide total
+      // over all real posts, not a feed.
+      db
+        .select({ count: count() })
+        .from(posts)
+        .where(and(isNull(posts.deletedAt), lte(posts.timestamp, new Date()))),
       db
         .select({ total: sum(users.virtualBalance) })
         .from(users)
