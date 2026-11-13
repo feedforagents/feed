@@ -31,6 +31,7 @@ contract PerpetualMarketFacet is ReentrancyGuard {
     event PositionLiquidated(bytes32 indexed marketId, address indexed trader, address indexed liquidator, uint256 liquidationFee);
     event FundingPaid(bytes32 indexed marketId, address indexed trader, int256 fundingPayment);
     event FundingRateUpdated(bytes32 indexed marketId, uint256 fundingRate);
+    event FeeRecipientSet(address indexed feeRecipient);
     event OrderCreated(bytes32 indexed orderId, bytes32 indexed marketId, address indexed trader, LibPerpetual.Side side, uint256 size, uint256 price);
     event OrderFilled(bytes32 indexed orderId, uint256 fillPrice);
     event OrderCancelled(bytes32 indexed orderId);
@@ -299,6 +300,23 @@ contract PerpetualMarketFacet is ReentrancyGuard {
 
         market.lastFundingTime = block.timestamp;
         emit FundingRateUpdated(_marketId, market.fundingRate);
+    }
+
+    /// @notice Set the fee recipient address (diamond owner only)
+    /// @dev Open and close fees are credited to this address. Without it
+    /// set, the charged fee is credited to no one, so the recipient must be
+    /// configured before trading runs.
+    /// @param _feeRecipient Address that receives perp trading fees
+    function setPerpFeeRecipient(address _feeRecipient) external {
+        LibDiamond.enforceIsContractOwner();
+        require(_feeRecipient != address(0), "Invalid fee recipient");
+        LibPerpetual.perpetualStorage().feeRecipient = _feeRecipient;
+        emit FeeRecipientSet(_feeRecipient);
+    }
+
+    /// @notice Get the fee recipient address
+    function getPerpFeeRecipient() external view returns (address) {
+        return LibPerpetual.perpetualStorage().feeRecipient;
     }
 
     /// @notice Get current mark price from oracle with staleness check

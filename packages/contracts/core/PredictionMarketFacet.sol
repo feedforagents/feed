@@ -4,6 +4,7 @@ pragma solidity ^0.8.27;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {UD60x18, ud, intoUint256, exp, ln} from "@prb/math/src/UD60x18.sol";
 import {LibMarket} from "../libraries/LibMarket.sol";
+import {LibDiamond} from "../libraries/LibDiamond.sol";
 
 /// @title PredictionMarketFacet
 /// @notice Facet for prediction market operations
@@ -19,6 +20,7 @@ contract PredictionMarketFacet is ReentrancyGuard {
     event PositionClaimed(bytes32 indexed marketId, address indexed claimer, uint256 payout);
     event Deposited(address indexed user, uint256 amount);
     event Withdrawn(address indexed user, uint256 amount);
+    event FeeRecipientSet(address indexed feeRecipient);
 
     /// @notice Create a new prediction market
     /// @param _question The market question
@@ -169,8 +171,8 @@ contract PredictionMarketFacet is ReentrancyGuard {
         LibMarket.Position storage position = LibMarket.getPosition(msg.sender, _marketId);
         require(position.shares[_outcome] >= _numShares, "Insufficient shares");
 
-        // Calculate payout (negative cost)
-        uint256 payout = calculateSellPayout(_marketId, _outcome, _numShares);
+        // Calculate payout (negative cost) and the fee taken from it
+        (uint256 payout, uint256 fee) = _calculateSellPayoutWithFee(_marketId, _outcome, _numShares);
 
         // Update position
         position.shares[_outcome] -= _numShares;
@@ -181,7 +183,32 @@ contract PredictionMarketFacet is ReentrancyGuard {
         // Add to balance
         LibMarket.addBalance(msg.sender, payout);
 
+        // Distribute the sell fee to the recipient (buyShares does the
+        // same for buy fees; without this the deducted fee is credited to
+        // no one)
+        LibMarket.MarketStorage storage ms = LibMarket.marketStorage();
+        if (fee > 0 && ms.feeRecipient != address(0)) {
+            LibMarket.addBalance(ms.feeRecipient, fee);
+        }
+
         emit SharesSold(_marketId, msg.sender, _outcome, _numShares, payout);
+    }
+
+    /// @notice Set the fee recipient address (diamond owner only)
+    /// @dev Buy and sell fees are credited to this address. Without it set,
+    /// the charged fee is credited to no one, so the recipient must be
+    /// configured before trading runs.
+    /// @param _feeRecipient Address that receives prediction-market trading fees
+    function setPredictionFeeRecipient(address _feeRecipient) external {
+        LibDiamond.enforceIsContractOwner();
+        require(_feeRecipient != address(0), "Invalid fee recipient");
+        LibMarket.marketStorage().feeRecipient = _feeRecipient;
+        emit FeeRecipientSet(_feeRecipient);
+    }
+
+    /// @notice Get the fee recipient address
+    function getPredictionFeeRecipient() external view returns (address) {
+        return LibMarket.marketStorage().feeRecipient;
     }
 
     /// @notice Calculate payout for selling shares
@@ -190,6 +217,17 @@ contract PredictionMarketFacet is ReentrancyGuard {
         uint8 _outcome,
         uint256 _numShares
     ) public view returns (uint256 payout) {
+        (payout, ) = _calculateSellPayoutWithFee(_marketId, _outcome, _numShares);
+    }
+
+    /// @notice Calculate payout and fee for selling shares
+    /// @return payout Net payout after the fee is deducted
+    /// @return fee Fee deducted from the gross payout
+    function _calculateSellPayoutWithFee(
+        bytes32 _marketId,
+        uint8 _outcome,
+        uint256 _numShares
+    ) internal view returns (uint256 payout, uint256 fee) {
         LibMarket.Market storage market = LibMarket.getMarket(_marketId);
         uint256 b = market.liquidity;
 
@@ -202,7 +240,7 @@ contract PredictionMarketFacet is ReentrancyGuard {
 
         // Payout is difference (minus fee)
         payout = currentCost - newCost;
-        uint256 fee = (payout * market.feeRate) / 10000;
+        fee = (payout * market.feeRate) / 10000;
         payout -= fee;
     }
 

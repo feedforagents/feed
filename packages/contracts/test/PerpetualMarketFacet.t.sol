@@ -83,7 +83,7 @@ contract PerpetualMarketFacetTest is Test {
         IDiamondCut.FacetCut[] memory cuts = new IDiamondCut.FacetCut[](1);
 
         // PerpetualMarketFacet
-        bytes4[] memory perpetualSelectors = new bytes4[](10);
+        bytes4[] memory perpetualSelectors = new bytes4[](12);
         perpetualSelectors[0] = PerpetualMarketFacet.createPerpetualMarket.selector;
         perpetualSelectors[1] = PerpetualMarketFacet.openPosition.selector;
         perpetualSelectors[2] = PerpetualMarketFacet.closePosition.selector;
@@ -94,6 +94,8 @@ contract PerpetualMarketFacetTest is Test {
         perpetualSelectors[7] = PerpetualMarketFacet.getMarkPrice.selector;
         perpetualSelectors[8] = PerpetualMarketFacet.getFundingRate.selector;
         perpetualSelectors[9] = PerpetualMarketFacet.getLiquidationPrice.selector;
+        perpetualSelectors[10] = PerpetualMarketFacet.setPerpFeeRecipient.selector;
+        perpetualSelectors[11] = PerpetualMarketFacet.getPerpFeeRecipient.selector;
         cuts[0] = IDiamondCut.FacetCut({
             facetAddress: address(perpetualFacet),
             action: IDiamondCut.FacetCutAction.Add,
@@ -515,5 +517,99 @@ contract PerpetualMarketFacetTest is Test {
         vm.prank(bob);
         vm.expectRevert("Position not liquidatable");
         PerpetualMarketFacet(address(diamond)).liquidatePosition(marketId, alice);
+    }
+
+    /// @notice Perp open fees reach the configured fee recipient
+    /// @dev Before the fix there was no way to configure a recipient:
+    /// PerpetualStorage.feeRecipient was read but never written, so every
+    /// charged fee was credited to no one.
+    function testOpenPositionFeeReachesFeeRecipient() public {
+        address recipient = address(0x9);
+        PerpetualMarketFacet(address(diamond)).setPerpFeeRecipient(recipient);
+        assertEq(
+            PerpetualMarketFacet(address(diamond)).getPerpFeeRecipient(),
+            recipient,
+            "Recipient should be stored"
+        );
+
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            10,
+            500,
+            1000,
+            250,
+            10,
+            20 // 0.2% taker fee
+        );
+
+        mockOraclePrice(50000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.LONG,
+            1e18,
+            5000 ether,
+            51000e8
+        );
+
+        // fee = (1e18 * 50000e8 * 20) / (10000 * 1e8) = 100 ether
+        assertEq(
+            PredictionMarketFacet(address(diamond)).getBalance(recipient),
+            100 ether,
+            "Open fee must reach the fee recipient"
+        );
+    }
+
+    /// @notice Perp close fees reach the configured fee recipient
+    function testClosePositionFeeReachesFeeRecipient() public {
+        address recipient = address(0x9);
+        PerpetualMarketFacet(address(diamond)).setPerpFeeRecipient(recipient);
+
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            10,
+            500,
+            1000,
+            250,
+            10,
+            20 // 0.2% taker fee
+        );
+
+        mockOraclePrice(50000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.LONG,
+            1e18,
+            5000 ether,
+            51000e8
+        );
+
+        // Close at the same price: no PnL, same 100 ether close fee
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).closePosition(marketId, 40000e8);
+
+        assertEq(
+            PredictionMarketFacet(address(diamond)).getBalance(recipient),
+            200 ether,
+            "Open plus close fees must reach the fee recipient"
+        );
+    }
+
+    /// @notice Only the diamond owner can set the fee recipient
+    function testSetFeeRecipientRevertsForNonOwner() public {
+        vm.prank(alice);
+        vm.expectRevert("LibDiamond: Must be contract owner");
+        PerpetualMarketFacet(address(diamond)).setPerpFeeRecipient(address(0x9));
+    }
+
+    /// @notice The fee recipient cannot be the zero address
+    function testSetFeeRecipientRevertsForZeroAddress() public {
+        vm.expectRevert("Invalid fee recipient");
+        PerpetualMarketFacet(address(diamond)).setPerpFeeRecipient(address(0));
     }
 }

@@ -109,6 +109,75 @@ contract PredictionMarketTest is DiamondTestSetup {
         vm.stopPrank();
     }
 
+    /// @notice Buy fees reach the configured fee recipient
+    /// @dev Before the fix there was no way to configure a recipient:
+    /// PerpetualStorage/MarketStorage feeRecipient was read but never
+    /// written, so every charged fee was credited to no one.
+    function testBuySharesFeeReachesFeeRecipient() public {
+        bytes32 marketId = createBasicMarket();
+        address recipient = user2;
+
+        market.setPredictionFeeRecipient(recipient);
+        assertEq(market.getPredictionFeeRecipient(), recipient, "Recipient should be stored");
+
+        vm.startPrank(user1);
+        market.deposit{value: 10 ether}();
+        (uint256 totalCost, uint256 fee) = market.calculateCostWithFee(marketId, 0, 1 ether);
+        assertGt(fee, 0, "Buy must charge a fee");
+        market.buyShares(marketId, 0, 1 ether);
+        vm.stopPrank();
+
+        assertEq(market.getBalance(recipient), fee, "Buy fee must reach the fee recipient");
+        assertEq(market.getBalance(user1), 10 ether - totalCost, "Buyer pays base cost plus fee");
+    }
+
+    /// @notice Sell fees reach the configured fee recipient
+    /// @dev The sell fee is deducted from the payout; before the fix it was
+    /// credited to no one even though buy fees had a recipient path.
+    function testSellSharesFeeReachesFeeRecipient() public {
+        bytes32 marketId = createBasicMarket();
+        address recipient = user2;
+
+        market.setPredictionFeeRecipient(recipient);
+
+        vm.startPrank(user1);
+        market.deposit{value: 10 ether}();
+        market.buyShares(marketId, 0, 1 ether);
+        uint256 recipientAfterBuy = market.getBalance(recipient);
+
+        uint256 payout = market.calculateSellPayout(marketId, 0, 0.5 ether);
+        // payout = gross - gross * 100 / 10000 (1% fee), so the gross is
+        // payout * 10000 / 9900 within 1 wei of integer division; the fee
+        // is gross - payout.
+        uint256 fee = (payout * 10000) / 9900 - payout;
+        assertGt(fee, 0, "Sell must charge a fee");
+
+        uint256 balanceBeforeSell = market.getBalance(user1);
+        market.sellShares(marketId, 0, 0.5 ether);
+        vm.stopPrank();
+
+        assertEq(market.getBalance(user1), balanceBeforeSell + payout, "Seller keeps the net payout");
+        assertApproxEqAbs(
+            market.getBalance(recipient),
+            recipientAfterBuy + fee,
+            10,
+            "Sell fee must reach the fee recipient"
+        );
+    }
+
+    /// @notice Only the diamond owner can set the fee recipient
+    function testSetFeeRecipientRevertsForNonOwner() public {
+        vm.prank(user1);
+        vm.expectRevert("LibDiamond: Must be contract owner");
+        market.setPredictionFeeRecipient(user2);
+    }
+
+    /// @notice The fee recipient cannot be the zero address
+    function testSetFeeRecipientRevertsForZeroAddress() public {
+        vm.expectRevert("Invalid fee recipient");
+        market.setPredictionFeeRecipient(address(0));
+    }
+
     /// @notice Test market resolution
     function testResolveMarket() public {
         bytes32 marketId = createBasicMarket();
