@@ -46,6 +46,7 @@ import {
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 import { GET } from '../../../apps/web/src/app/api/posts/feed/favorites/route';
+import { fixtureRowJson } from './helpers/fixture-row-json';
 import { createStewardTestToken } from './helpers/steward-auth';
 
 let viewerId: string;
@@ -157,7 +158,7 @@ async function cleanup(receipt: Ownership) {
     await db.delete(users).where(
       and(
         eq(users.id, row.id),
-        sql`to_jsonb(${users}) = to_jsonb(jsonb_populate_record(NULL::"User", ${JSON.stringify(row)}::jsonb))`,
+        sql`to_jsonb(${users}) = to_jsonb(jsonb_populate_record(NULL::"User", ${fixtureRowJson('User', row)}::jsonb))`,
         sql`NOT EXISTS (SELECT 1 FROM ${posts} WHERE ${posts.authorId} = ${row.id})`,
         sql`NOT EXISTS (SELECT 1 FROM ${favorites} WHERE ${favorites.userId} = ${row.id} OR ${favorites.targetUserId} = ${row.id})`,
         // Baseline User FKs can cascade-delete foreign rows or null their
