@@ -44,6 +44,7 @@ import {
   declineGroupInvite,
   logAdminModify,
   NotFoundError,
+  notifyCommentOnPost,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -1522,12 +1523,41 @@ export async function executeGetComments(
 }
 
 /**
- * Execute create_comment tool
+ * Execute create_comment tool (same rules as the web comments route: the
+ * post must exist, be published and not deleted; a fresh comment notifies
+ * the post author).
  */
 export async function executeCreateComment(
   agent: AuthenticatedAgent,
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
+  const now = new Date();
+  const [post] = await db
+    .select({
+      id: posts.id,
+      authorId: posts.authorId,
+      deletedAt: posts.deletedAt,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(eq(posts.id, args.postId))
+    .limit(1);
+
+  // Unknown or not-yet-published posts cannot be commented on (and are
+  // never created from the ID: an unchecked comment would become an
+  // orphan row pointing at a post that does not exist).
+  if (!post || post.timestamp > now) {
+    throw new NotFoundError('Post', args.postId);
+  }
+  // Soft-deleted posts are hidden everywhere, so they cannot collect new
+  // comments — the web comments route applies the same rule.
+  if (post.deletedAt) {
+    throw new BusinessLogicError(
+      'Cannot comment on deleted post',
+      'POST_DELETED'
+    );
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {
@@ -1538,6 +1568,31 @@ export async function executeCreateComment(
       updatedAt: new Date(),
     },
   });
+
+  // The comment has committed. A notification outage must not tell the
+  // caller that the comment failed and invite an unsuccessful retry.
+  if (post.authorId && post.authorId !== agent.userId) {
+    try {
+      await notifyCommentOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        comment.id
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed comment',
+        {
+          postId: args.postId,
+          commentId: comment.id,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return {
     success: true,
     commentId: comment.id,
