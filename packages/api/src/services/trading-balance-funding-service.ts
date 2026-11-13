@@ -500,11 +500,24 @@ export class TradingBalanceFundingService {
     return result;
   }
 
+  /**
+   * Re-credit the points withheld by a dispute the merchant won.
+   *
+   * Only the points the dispute actually deducted come back:
+   * `reversePurchaseFunding` clamps the deduction at the user's balance, so
+   * the full dispute amount can exceed the withheld points. Crediting the
+   * full amount would mint points the user never lost. The matching
+   * `stripe_dispute` reversal row (linked by `paymentIntentId`) records the
+   * real figure as `balanceUnitsDeducted`; when it cannot be found (legacy
+   * rows, or a caller that does not pass the payment intent) the full amount
+   * is credited, preserving the previous behaviour.
+   */
   static async creditDisputeWon(
     userId: string,
     disputeId: string,
     amountUSD: number,
-    stripeEventId: string
+    stripeEventId: string,
+    paymentIntentId?: string
   ): Promise<TradingBalanceFundingResult> {
     const balanceDelta = usdToBalanceUnits(amountUSD);
 
@@ -544,14 +557,71 @@ export class TradingBalanceFundingService {
           };
         }
 
-        const balanceAfter = balanceBefore + balanceDelta;
+        // Restore only what the dispute actually withheld. The reversal row
+        // for this dispute records the clamped deduction; without it the
+        // full dispute amount would be credited even when the user had
+        // already spent most of it.
+        let creditAmount = balanceDelta;
+        let matchedReversalId: string | undefined;
+        if (paymentIntentId) {
+          const reversals = await tx
+            .select({
+              id: balanceTransactions.id,
+              amount: balanceTransactions.amount,
+              description: balanceTransactions.description,
+            })
+            .from(balanceTransactions)
+            .where(
+              and(
+                eq(balanceTransactions.userId, userId),
+                eq(balanceTransactions.type, 'stripe_dispute')
+              )
+            )
+            .orderBy(desc(balanceTransactions.createdAt));
+          const match = reversals.find((row) => {
+            try {
+              return (
+                JSON.parse(row.description ?? '{}').originalPaymentIntentId ===
+                paymentIntentId
+              );
+            } catch {
+              return false;
+            }
+          });
+          if (match) {
+            matchedReversalId = match.id;
+            let deducted: number | undefined;
+            try {
+              const parsed = JSON.parse(match.description ?? '{}');
+              if (Number.isFinite(parsed.balanceUnitsDeducted)) {
+                deducted = Number(parsed.balanceUnitsDeducted);
+              }
+            } catch {
+              // Fall through to the ledger amount below.
+            }
+            if (deducted === undefined) {
+              deducted = -Number(match.amount);
+            }
+            if (Number.isFinite(deducted) && deducted >= 0) {
+              creditAmount = Math.min(balanceDelta, deducted);
+            }
+          } else {
+            logger.warn(
+              'No matching dispute reversal found for won dispute; crediting full amount',
+              { userId, stripeEventId, disputeId, paymentIntentId },
+              'TradingBalanceFundingService'
+            );
+          }
+        }
+
+        const balanceAfter = balanceBefore + creditAmount;
         const transactionId = await generateSnowflakeId();
 
         await tx
           .update(users)
           .set({
-            virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${balanceDelta}`,
-            totalWithdrawn: sql`GREATEST(0, COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) - ${balanceDelta})`,
+            virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${creditAmount}`,
+            totalWithdrawn: sql`GREATEST(0, COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) - ${creditAmount})`,
           })
           .where(eq(users.id, userId));
 
@@ -559,21 +629,23 @@ export class TradingBalanceFundingService {
           id: transactionId,
           userId,
           type: 'stripe_dispute_won',
-          amount: String(balanceDelta),
+          amount: String(creditAmount),
           balanceBefore: String(balanceBefore),
           balanceAfter: String(balanceAfter),
           relatedId: stripeEventId,
           description: JSON.stringify({
             amountUSD,
-            balanceUnitsCredited: balanceDelta,
+            balanceUnitsRequested: balanceDelta,
+            balanceUnitsCredited: creditAmount,
             disputeId,
+            reversalTransactionId: matchedReversalId ?? null,
             creditedAt: new Date().toISOString(),
           }),
         });
 
         return {
           success: true,
-          balanceDelta,
+          balanceDelta: creditAmount,
           newBalance: balanceAfter,
           transactionId,
         };
