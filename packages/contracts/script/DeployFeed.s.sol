@@ -233,7 +233,7 @@ contract DeployFeed is Script {
         });
 
         // PerpetualMarketFacet selectors
-        bytes4[] memory perpetualSelectors = new bytes4[](10);
+        bytes4[] memory perpetualSelectors = new bytes4[](12);
         perpetualSelectors[0] = PerpetualMarketFacet.createPerpetualMarket.selector;
         perpetualSelectors[1] = PerpetualMarketFacet.openPosition.selector;
         perpetualSelectors[2] = PerpetualMarketFacet.closePosition.selector;
@@ -244,6 +244,8 @@ contract DeployFeed is Script {
         perpetualSelectors[7] = PerpetualMarketFacet.getLiquidationPrice.selector;
         perpetualSelectors[8] = PerpetualMarketFacet.getMarkPrice.selector;
         perpetualSelectors[9] = PerpetualMarketFacet.getFundingRate.selector;
+        perpetualSelectors[10] = PerpetualMarketFacet.setInsuranceFund.selector;
+        perpetualSelectors[11] = PerpetualMarketFacet.getInsuranceFund.selector;
 
         newFacetsCut[1] = IDiamondCut.FacetCut({
             facetAddress: address(perpetualMarketFacet),

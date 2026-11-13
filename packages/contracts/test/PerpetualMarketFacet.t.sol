@@ -83,7 +83,7 @@ contract PerpetualMarketFacetTest is Test {
         IDiamondCut.FacetCut[] memory cuts = new IDiamondCut.FacetCut[](1);
 
         // PerpetualMarketFacet
-        bytes4[] memory perpetualSelectors = new bytes4[](10);
+        bytes4[] memory perpetualSelectors = new bytes4[](12);
         perpetualSelectors[0] = PerpetualMarketFacet.createPerpetualMarket.selector;
         perpetualSelectors[1] = PerpetualMarketFacet.openPosition.selector;
         perpetualSelectors[2] = PerpetualMarketFacet.closePosition.selector;
@@ -94,6 +94,8 @@ contract PerpetualMarketFacetTest is Test {
         perpetualSelectors[7] = PerpetualMarketFacet.getMarkPrice.selector;
         perpetualSelectors[8] = PerpetualMarketFacet.getFundingRate.selector;
         perpetualSelectors[9] = PerpetualMarketFacet.getLiquidationPrice.selector;
+        perpetualSelectors[10] = PerpetualMarketFacet.setInsuranceFund.selector;
+        perpetualSelectors[11] = PerpetualMarketFacet.getInsuranceFund.selector;
         cuts[0] = IDiamondCut.FacetCut({
             facetAddress: address(perpetualFacet),
             action: IDiamondCut.FacetCutAction.Add,
@@ -377,6 +379,68 @@ contract PerpetualMarketFacetTest is Test {
         ) = PerpetualMarketFacet(address(diamond)).getPosition(alice, marketId);
 
         assertEq(positionSize, 0);
+    }
+
+    function testLiquidationRemainingCollateralReachesInsuranceFund() public {
+        // Create market
+        marketId = PerpetualMarketFacet(address(diamond)).createPerpetualMarket(
+            "BTC-PERP",
+            oracle,
+            10,
+            500, // 5% maintenance margin
+            1000,
+            250, // 2.5% liquidation fee
+            10,
+            20
+        );
+
+        // Entry at $50,000 with 10x leverage
+        mockOraclePrice(50000e8);
+
+        vm.prank(alice);
+        PerpetualMarketFacet(address(diamond)).openPosition(
+            marketId,
+            LibPerpetual.Side.LONG,
+            10e18, // 10 BTC
+            50000 ether, // Collateral for ~10x leverage
+            51000e8
+        );
+
+        // Price drops significantly to trigger liquidation
+        mockOraclePrice(47000e8); // ~6% loss, below maintenance margin
+
+        // Configure the insurance fund before the liquidation runs
+        address insuranceFund = address(0x9);
+        PerpetualMarketFacet(address(diamond)).setInsuranceFund(insuranceFund);
+        assertEq(PerpetualMarketFacet(address(diamond)).getInsuranceFund(), insuranceFund);
+
+        vm.prank(bob);
+        PerpetualMarketFacet(address(diamond)).liquidatePosition(marketId, alice);
+
+        // Liquidation fee = position value * 2.5%
+        // = 470000 ether * 250 / 10000 = 11750 ether goes to the liquidator
+        assertEq(
+            PredictionMarketFacet(address(diamond)).getBalance(bob),
+            20000 ether + 11750 ether
+        );
+
+        // Remaining collateral = 50000 - 11750 = 38250 ether must reach
+        // the insurance fund, not stay locked inside the diamond.
+        assertEq(
+            PredictionMarketFacet(address(diamond)).getBalance(insuranceFund),
+            38250 ether
+        );
+    }
+
+    function test_RevertWhen_SetInsuranceFundByNonOwner() public {
+        vm.prank(alice);
+        vm.expectRevert("LibDiamond: Must be contract owner");
+        PerpetualMarketFacet(address(diamond)).setInsuranceFund(address(0x9));
+    }
+
+    function test_RevertWhen_SetInsuranceFundToZeroAddress() public {
+        vm.expectRevert("Invalid insurance fund");
+        PerpetualMarketFacet(address(diamond)).setInsuranceFund(address(0));
     }
 
     function testFundingRateUpdate() public {
