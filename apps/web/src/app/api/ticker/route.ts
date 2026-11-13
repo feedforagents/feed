@@ -220,12 +220,24 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const service = createPerpMarketService();
       const markets = await service.getMarketsSnapshot();
       result.perps = markets.slice(0, limit).map((m): TickerPerpItem => {
+        // The snapshot's stored changePercent24h is the canonical 24h
+        // change — the value GET /api/markets/perps returns for the same
+        // market. The price tick writes it against the 24h reference
+        // price, and that reference later rotates to the current price
+        // inside unrelated stats writes (funding, quote refresh, trade
+        // deltas) that do not recompute it, so recomputing here from
+        // (currentPrice, price24hAgo) collapses to 0% after a rotation
+        // while every other surface keeps showing the stored change.
         // Preserve a real 0% change; null only when there is no reference.
         const reference = m.price24hAgo;
-        const changePercent24h: number | null =
-          reference != null && reference > 0
-            ? ((m.currentPrice - reference) / reference) * 100
-            : null;
+        let changePercent24h: number | null = null;
+        if (reference != null) {
+          changePercent24h = Number.isFinite(m.changePercent24h)
+            ? m.changePercent24h
+            : reference > 0
+              ? ((m.currentPrice - reference) / reference) * 100
+              : null;
+        }
         return {
           ticker: m.ticker,
           price: m.currentPrice,
