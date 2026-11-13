@@ -2413,8 +2413,31 @@ export async function executeGetUnreadCount(
   agent: AuthenticatedAgent,
   _args: GetUnreadCountArgs
 ): Promise<GetUnreadCountResult> {
+  // Match the notification read rule on the web and A2A surfaces: actors
+  // the user has blocked or muted, and actors who have blocked the user,
+  // are excluded at read time. The filter has to live at read time —
+  // muting never stops notification creation, and a block placed later
+  // must hide notifications created before it. System notifications have
+  // a null actor and are always kept.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedActorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const unreadCount = await db.notification.count({
-    where: { userId: agent.userId, read: false },
+    where: {
+      userId: agent.userId,
+      read: false,
+      ...(excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {}),
+    },
   });
   return { unreadCount };
 }
