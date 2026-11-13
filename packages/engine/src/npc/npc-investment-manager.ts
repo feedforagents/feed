@@ -251,10 +251,12 @@ export class NPCInvestmentManager {
     riskScore += leverageRisk * 0.4;
 
     // Factor 2: Concentration risk (30% weight)
+    // Concentration is the largest position's share of the portfolio, so
+    // measure it by invested value (margin for perps via getPositionExposure),
+    // not by unrealized PnL: a huge position with no PnL yet is still
+    // concentrated, and a small position with a large gain is not.
     const largestPosition = Math.max(
-      ...positions.map((pos) =>
-        Math.abs(Number.parseFloat(pos.unrealizedPnL?.toString() || '0'))
-      )
+      ...positions.map((pos) => getPositionExposure(pos.size, pos.leverage))
     );
     const concentrationRisk = Math.min(1, largestPosition / totalValue);
     riskScore += concentrationRisk * 0.3;
