@@ -91,6 +91,12 @@ const ChatHistoryQuerySchema = z
       .datetime({ offset: true })
       .transform((value) => new Date(value))
       .optional(),
+    /**
+     * Message ID of the newest message the caller already has. Together
+     * with `after` it pins the sync position to a (createdAt, id) pair so
+     * messages that share the `after` millisecond are not skipped.
+     */
+    afterId: z.string().min(1).max(128).optional(),
     limit: z
       .string()
       .regex(/^\d+$/, 'limit must be a positive integer')
@@ -100,6 +106,9 @@ const ChatHistoryQuerySchema = z
   })
   .refine((q) => !(q.cursor && q.after), {
     message: 'cursor and after are mutually exclusive',
+  })
+  .refine((q) => !q.afterId || !!q.after, {
+    message: 'afterId requires after',
   });
 
 /**
@@ -115,9 +124,10 @@ export const GET = withErrorHandling(
 
     // Validate query parameters
     const { searchParams } = new URL(request.url);
-    const { cursor, after, limit } = ChatHistoryQuerySchema.parse({
+    const { cursor, after, afterId, limit } = ChatHistoryQuerySchema.parse({
       cursor: searchParams.get('cursor') ?? undefined,
       after: searchParams.get('after') ?? undefined,
+      afterId: searchParams.get('afterId') ?? undefined,
       limit: searchParams.get('limit') ?? undefined,
     });
     const effectiveLimit = limit;
@@ -175,15 +185,48 @@ export const GET = withErrorHandling(
       // 3. Neither: fetch latest messages (DESC order, initial load)
       let messagesList: Array<typeof messages.$inferSelect>;
       if (after) {
-        // Incremental sync: only messages after the given timestamp
-        messagesList = await db
-          .select()
-          .from(messages)
-          .where(
-            and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
-          )
-          .orderBy(asc(messages.createdAt), asc(messages.id))
-          .limit(effectiveLimit);
+        // Resume from the stored (createdAt, id) pair. The browser's Date
+        // serialization loses microseconds; reusing it as the SQL anchor
+        // repeats earlier rows in that millisecond. Older clients without
+        // afterId retain the timestamp-only behavior.
+        if (afterId) {
+          const [anchorMessage] = await db
+            .select({
+              createdAt: sql<string>`${messages.createdAt}::text`,
+              id: messages.id,
+            })
+            .from(messages)
+            .where(and(eq(messages.id, afterId), eq(messages.chatId, chatId)))
+            .limit(1);
+
+          if (!anchorMessage) {
+            throw new BusinessLogicError(
+              'Invalid pagination cursor',
+              'INVALID_CURSOR'
+            );
+          }
+
+          messagesList = await db
+            .select()
+            .from(messages)
+            .where(
+              and(
+                eq(messages.chatId, chatId),
+                sql`(${messages.createdAt}, ${messages.id}) > (${anchorMessage.createdAt}::text::timestamp without time zone, ${anchorMessage.id}::text)`
+              )
+            )
+            .orderBy(asc(messages.createdAt), asc(messages.id))
+            .limit(effectiveLimit);
+        } else {
+          messagesList = await db
+            .select()
+            .from(messages)
+            .where(
+              and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
+            )
+            .orderBy(asc(messages.createdAt), asc(messages.id))
+            .limit(effectiveLimit);
+        }
       } else if (cursor) {
         // Keep the stored timestamp's full PostgreSQL precision: the Date
         // decoder would discard microseconds before the next comparison.
