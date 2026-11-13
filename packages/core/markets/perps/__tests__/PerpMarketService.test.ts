@@ -1022,15 +1022,48 @@ describe('PerpMarketService', () => {
       // fillPrice is what the added 100 filled at, not the blended entry.
       expect(result.fillPrice).toBeDefined();
       expect(result.fillPrice!).toBeGreaterThan(result.entryPrice);
-      // blend check: 100 @ initial + 100 @ fill = 200 @ entry
+      // blend check: 100 @ initial + 100 @ fill = 200 @ entry, where each
+      // leg holds size / price units.
       expect(
-        (initial.entryPrice * 100 + result.fillPrice! * 100) / 200
+        200 / (100 / initial.entryPrice + 100 / result.fillPrice!)
       ).toBeCloseTo(result.entryPrice, 8);
 
       // Verify position in DB
       const pos = await db.getPositionById(initial.positionId);
       expect(pos?.size).toBe(200);
       expect(pos?.entryPrice).toBeCloseTo(result.entryPrice, 4);
+    });
+
+    it('realizes the sum of both legs when closing an added position', async () => {
+      const initial = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 2,
+      });
+
+      // Average down: add the same size after a 20% drop.
+      await db.updateMarketStats('ABC', { currentPrice: 80 });
+      const added = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 2,
+      });
+
+      await db.updateMarketStats('ABC', { currentPrice: 90 });
+      const close = await service.closePosition({
+        userId: 'u3',
+        positionId: initial.positionId,
+      });
+
+      const exit = close.exitPrice!;
+      const legsPnl =
+        ((exit - initial.entryPrice) / initial.entryPrice) * 100 +
+        ((exit - added.fillPrice!) / added.fillPrice!) * 100;
+      expect(close.realizedPnL).toBeCloseTo(legsPnl, 6);
     });
 
     it('reduces position when opening opposite side with smaller size', async () => {
@@ -1505,7 +1538,7 @@ describe('PerpMarketService', () => {
         PERP_MARKET_CONFIG
       ).avgFillPrice;
       const expectedEntry =
-        (1000 * first.entryPrice + 1000 * incrementalFill) / 2000;
+        2000 / (1000 / first.entryPrice + 1000 / incrementalFill);
 
       expect(incrementalFill).not.toBeCloseTo(first.entryPrice, 6);
       expect(added.entryPrice).toBeCloseTo(expectedEntry, 6);
