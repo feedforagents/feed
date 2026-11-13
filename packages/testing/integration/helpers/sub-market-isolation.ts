@@ -329,6 +329,8 @@ export async function startPredictionRemainderServer() {
   const url = `http://127.0.0.1:${port}`;
   const runtimeEnv = {
     ...env,
+    ALLOW_TEST_PRIVY_DID_AUTH: 'true',
+    DISABLE_RATE_LIMITING: 'true',
     PORT: String(port),
     FEED_API_URL: url,
     TEST_API_URL: url,
