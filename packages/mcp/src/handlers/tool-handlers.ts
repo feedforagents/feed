@@ -64,6 +64,7 @@ import {
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
+  groupMembers,
   hasBlocked,
   inArray,
   isNull,
@@ -2327,44 +2328,82 @@ export async function executeCreateGroup(
 }
 
 /**
- * Execute leave_chat tool
- * Chat.groupId → Group.id relationship
+ * Execute leave_chat tool.
+ *
+ * Chat.groupId → Group.id. The owner decision and both writes commit
+ * together on the primary. GroupMember is locked before ChatParticipant,
+ * matching DELETE /api/chats/[id]/participants/me (member update, then
+ * participant removal). Taking the participant lock first deadlocks with
+ * that route (PostgreSQL 40P01).
  */
 export async function executeLeaveChat(
   agent: AuthenticatedAgent,
   args: LeaveChatArgs
 ): Promise<LeaveChatResult> {
-  // Mark chat participant as inactive
-  await db.chatParticipant.updateMany({
-    where: {
-      chatId: args.chatId,
-      userId: agent.userId,
-    },
-    data: { isActive: false },
-  });
-
-  // Find the chat to get its groupId
-  const chat = await db.chat.findUnique({
-    where: { id: args.chatId },
-    select: { groupId: true },
-  });
-
-  // Also update GroupMember if there's an associated group
-  if (chat?.groupId) {
-    await db.groupMember.updateMany({
-      where: {
-        groupId: chat.groupId,
-        userId: agent.userId,
-      },
-      data: {
-        isActive: false,
-        kickedAt: new Date(),
-        kickReason: 'User left',
-      },
+  // $transaction is a primary write. Reads stay inside it so a replica
+  // cannot serve a stale role.
+  return db.$transaction(async (tx) => {
+    const chat = await tx.chat.findUnique({
+      where: { id: args.chatId },
+      select: { groupId: true },
     });
-  }
 
-  return { success: true };
+    // A missing chat, or a chat the caller never joined, has no participant
+    // row. Refuse that before any write so the tool does not report success
+    // after updating zero rows.
+    const participant = await tx.chatParticipant.findFirst({
+      where: { chatId: args.chatId, userId: agent.userId },
+    });
+    if (!participant) {
+      throw new Error('You are not a member of this chat.');
+    }
+
+    if (chat?.groupId) {
+      // Hold this row for the rest of the transaction, then read its role.
+      // A promotion to owner that commits while this waits is visible here.
+      const [membership] = await tx
+        .select({
+          id: groupMembers.id,
+          role: groupMembers.role,
+          isActive: groupMembers.isActive,
+        })
+        .from(groupMembers)
+        .where(
+          and(
+            eq(groupMembers.groupId, chat.groupId),
+            eq(groupMembers.userId, agent.userId)
+          )
+        )
+        .limit(1)
+        .for('update');
+
+      if (membership?.isActive && membership.role === 'owner') {
+        throw new Error(
+          'Group owners cannot leave. Transfer ownership or delete the group.'
+        );
+      }
+
+      // Same row the lock just read. An inactive row, including an inactive
+      // owner, is left alone.
+      if (membership?.isActive) {
+        await tx.groupMember.update({
+          where: { id: membership.id },
+          data: {
+            isActive: false,
+            kickedAt: new Date(),
+            kickReason: 'User left',
+          },
+        });
+      }
+    }
+
+    await tx.chatParticipant.update({
+      where: { id: participant.id },
+      data: { isActive: false },
+    });
+
+    return { success: true };
+  });
 }
 
 /**
