@@ -118,6 +118,38 @@ describe('market-simulation-profiles', () => {
     expect(Math.abs(lowOiMove)).toBeGreaterThan(Math.abs(highOiMove));
   });
 
+  it('keeps volatilityLevel at its neutral level 1 with zero shocks', () => {
+    // rng() === 0.5 => sampleShock() === 0 and no regime shift, so every
+    // field should hold its mean-reversion target: drift 0, sentiment 0,
+    // volatilityLevel 1 (its default / neutral value). Previously the level
+    // decayed as `level * 0.9`, pinning it at the 0.65 clamp floor and
+    // permanently damping simulated volatility by ~35%.
+    let state = getDefaultGlobalMarketSimulationState();
+    for (let i = 0; i < 20; i++) {
+      state = evolveGlobalMarketSimulationState(state, () => 0.5);
+    }
+    expect(state.marketDrift).toBe(0);
+    expect(state.riskSentiment).toBe(0);
+    expect(state.volatilityLevel).toBeCloseTo(1, 6);
+  });
+
+  it('mean-reverts volatilityLevel to ~1 over many random ticks', () => {
+    let seed = 12345;
+    const rng = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    let state = getDefaultGlobalMarketSimulationState();
+    let sum = 0;
+    const ticks = 500;
+    for (let i = 0; i < ticks; i++) {
+      state = evolveGlobalMarketSimulationState(state, rng);
+      sum += state.volatilityLevel;
+    }
+    // Previously the long-run mean was ~0.65 (the clamp floor).
+    expect(sum / ticks).toBeGreaterThan(0.9);
+  });
+
   it('uses latent price carried from prior ticks', () => {
     const profile = buildMarketSimulationProfile({
       organizationId: 'openagi',

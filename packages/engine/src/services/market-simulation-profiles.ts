@@ -134,8 +134,13 @@ export function evolveGlobalMarketSimulationState(
       -1,
       1
     ),
+    // Mean-revert toward the neutral level 1 (the default), not toward 0:
+    // decaying the absolute value would pin the level at the 0.65 floor
+    // after a few ticks and permanently damp simulated volatility by ~35%.
     volatilityLevel: clamp(
-      state.volatilityLevel * (regimeShift ? 0.7 : 0.9) + volatilityShock,
+      1 +
+        (state.volatilityLevel - 1) * (regimeShift ? 0.7 : 0.9) +
+        volatilityShock,
       0.65,
       1.85
     ),
