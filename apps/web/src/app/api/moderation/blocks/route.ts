@@ -67,14 +67,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     offset: searchParams.get('offset') || '0',
   });
 
-  const [blocks, total] = await Promise.all([
-    db.userBlock.findMany({
-      where: { blockerId: authUser.userId },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-      include: {
-        blocked: {
+  const allBlocks = await db.userBlock.findMany({
+    where: { blockerId: authUser.userId },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  // Block rows can outlive the blocked user: the UserBlock table has no
+  // foreign key to User and account deletion removes the user row
+  // without removing blocks that point at it. Such orphaned blocks must
+  // not count toward the total or consume a pagination slot, so resolve
+  // targets first and page over the blocks whose user still exists.
+  // (Resolving through a separate lookup also avoids the
+  // include-with-select read, which fails for these relations.)
+  const blockedUsers =
+    allBlocks.length === 0
+      ? []
+      : await db.user.findMany({
+          where: {
+            id: { in: allBlocks.map((block) => block.blockedId) },
+          },
           select: {
             id: true,
             username: true,
@@ -82,13 +93,18 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             profileImageUrl: true,
             isActor: true,
           },
-        },
-      },
-    }),
-    db.userBlock.count({
-      where: { blockerId: authUser.userId },
-    }),
-  ]);
+        });
+  const userMap = new Map(
+    blockedUsers.map((blockedUser) => [blockedUser.id, blockedUser])
+  );
+
+  const visibleBlocks = allBlocks.filter((block) =>
+    userMap.has(block.blockedId)
+  );
+  const total = visibleBlocks.length;
+  const blocks = visibleBlocks
+    .slice(offset, offset + limit)
+    .map((block) => ({ ...block, blocked: userMap.get(block.blockedId) }));
 
   return successResponse({
     blocks,
