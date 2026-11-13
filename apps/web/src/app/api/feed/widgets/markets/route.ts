@@ -45,13 +45,25 @@ import {
   optionalAuth,
   withErrorHandling,
 } from '@feed/api';
-import { asPublic, asUser, getDbInstance } from '@feed/db';
+import { PredictionPricing } from '@feed/core/markets/prediction';
+import {
+  and,
+  asc,
+  asPublic,
+  asUser,
+  desc,
+  getDbInstance,
+  inArray,
+  lte,
+  predictionPriceHistories,
+} from '@feed/db';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
 // Disable static generation for this route - it requires database access
 export const dynamic = 'force-dynamic';
-// Cache config (60 seconds)
+// Next.js segment revalidation (60s). The widget's own application cache
+// is separate: DEFAULT_TTLS.WIDGET (300s, five minutes).
 export const revalidate = 60;
 
 /**
@@ -75,7 +87,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   // For unauthenticated users, use cached widget data
   if (!authUser || !authUser.userId) {
     const formattedMarkets = await getCacheOrFetch(
-      'markets-widget-v2', // v2 to invalidate old cache without price changes
+      'markets-widget-v3', // v3 to invalidate v2 cache (24h change now reads price history)
       async () => {
         const questions = await getDbInstance().getActiveQuestions();
 
@@ -97,64 +109,50 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
         const marketMap = new Map(markets.map((m) => [m.id, m]));
 
-        // Get recent positions to calculate price changes
+        // 24h change from the canonical recorded price history: the
+        // latest snapshot at or before 24h ago is the baseline. A
+        // market with no snapshot that old reports no change — the
+        // past pool is never reconstructed from positions, because
+        // held shares are not the inverse pool delta (a real YES buy
+        // would read as a move in the wrong direction).
         const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const recentPositions = await asPublic(async (database) => {
-          return await database.position.findMany({
-            where: {
-              marketId: { in: marketIds },
-              createdAt: {
-                gte: twentyFourHoursAgo,
-              },
-            },
-            orderBy: {
-              createdAt: 'asc',
-            },
-          });
+        const historyRows = await asPublic(async (database) => {
+          return await database
+            .selectDistinctOn([predictionPriceHistories.marketId], {
+              marketId: predictionPriceHistories.marketId,
+              yesPrice: predictionPriceHistories.yesPrice,
+            })
+            .from(predictionPriceHistories)
+            .where(
+              and(
+                inArray(predictionPriceHistories.marketId, marketIds),
+                lte(predictionPriceHistories.createdAt, twentyFourHoursAgo)
+              )
+            )
+            .orderBy(
+              asc(predictionPriceHistories.marketId),
+              desc(predictionPriceHistories.createdAt),
+              desc(predictionPriceHistories.id)
+            );
         });
 
-        // Calculate price changes based on position activity
         const priceChangeMap = new Map<string, number>();
 
-        for (const marketId of marketIds) {
-          const marketPositions = recentPositions.filter(
-            (p) => p.marketId === marketId
+        for (const row of historyRows) {
+          // SQL returns one deterministic baseline per market.
+          const market = marketMap.get(row.marketId);
+          if (!market) continue;
+          const baselineYesPrice = Number(row.yesPrice);
+          if (!(baselineYesPrice > 0)) continue;
+          const currentYesPrice = PredictionPricing.getCurrentPrice(
+            Number(market.yesShares),
+            Number(market.noShares),
+            'yes'
           );
-          if (marketPositions.length > 0) {
-            // Calculate initial and final prices from positions
-            const market = marketMap.get(marketId);
-            if (market) {
-              const currentYesShares = Number(market.yesShares);
-              const currentNoShares = Number(market.noShares);
-              const currentTotal = currentYesShares + currentNoShares;
-
-              if (currentTotal > 0) {
-                // Estimate 24h ago price by subtracting recent position changes
-                let pastYesShares = currentYesShares;
-                let pastNoShares = currentNoShares;
-
-                marketPositions.forEach((pos) => {
-                  const shares = Number(pos.shares);
-                  if (pos.side) {
-                    pastYesShares -= shares;
-                  } else {
-                    pastNoShares -= shares;
-                  }
-                });
-
-                const pastTotal = pastYesShares + pastNoShares;
-                if (pastTotal > 0) {
-                  const pastYesPrice = pastYesShares / pastTotal;
-                  const currentYesPrice = currentYesShares / currentTotal;
-                  const priceChange = currentYesPrice - pastYesPrice;
-                  const changePercent =
-                    pastYesPrice > 0 ? (priceChange / pastYesPrice) * 100 : 0;
-
-                  priceChangeMap.set(marketId, changePercent);
-                }
-              }
-            }
-          }
+          priceChangeMap.set(
+            row.marketId,
+            ((currentYesPrice - baselineYesPrice) / baselineYesPrice) * 100
+          );
         }
 
         const membershipNow = Date.now();
@@ -168,8 +166,16 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
               const noShares = market ? Number(market.noShares) : 0;
               const totalShares = yesShares + noShares;
 
-              const yesPrice = totalShares > 0 ? yesShares / totalShares : 0.5;
-              const noPrice = totalShares > 0 ? noShares / totalShares : 0.5;
+              const yesPrice = PredictionPricing.getCurrentPrice(
+                yesShares,
+                noShares,
+                'yes'
+              );
+              const noPrice = PredictionPricing.getCurrentPrice(
+                yesShares,
+                noShares,
+                'no'
+              );
               const changePercent24h = priceChangeMap.get(String(q.id));
 
               return {
@@ -245,64 +251,50 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   const marketMap = new Map(markets.map((m) => [m.id, m]));
 
-  // Get recent positions to calculate price changes
+  // 24h change from the canonical recorded price history: the latest
+  // snapshot at or before 24h ago is the baseline. A market with no
+  // snapshot that old reports no change — the past pool is never
+  // reconstructed from positions, because held shares are not the
+  // inverse pool delta (a real YES buy would read as a move in the
+  // wrong direction).
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const recentPositions = await asUser(authUser, async (database) => {
-    return await database.position.findMany({
-      where: {
-        marketId: { in: marketIds },
-        createdAt: {
-          gte: twentyFourHoursAgo,
-        },
-      },
-      orderBy: {
-        createdAt: 'asc',
-      },
-    });
+  const historyRows = await asUser(authUser, async (database) => {
+    return await database
+      .selectDistinctOn([predictionPriceHistories.marketId], {
+        marketId: predictionPriceHistories.marketId,
+        yesPrice: predictionPriceHistories.yesPrice,
+      })
+      .from(predictionPriceHistories)
+      .where(
+        and(
+          inArray(predictionPriceHistories.marketId, marketIds),
+          lte(predictionPriceHistories.createdAt, twentyFourHoursAgo)
+        )
+      )
+      .orderBy(
+        asc(predictionPriceHistories.marketId),
+        desc(predictionPriceHistories.createdAt),
+        desc(predictionPriceHistories.id)
+      );
   });
 
-  // Calculate price changes based on position activity
   const priceChangeMap = new Map<string, number>();
 
-  for (const marketId of marketIds) {
-    const marketPositions = recentPositions.filter(
-      (p) => p.marketId === marketId
+  for (const row of historyRows) {
+    // SQL returns one deterministic baseline per market.
+    const market = marketMap.get(row.marketId);
+    if (!market) continue;
+    const baselineYesPrice = Number(row.yesPrice);
+    if (!(baselineYesPrice > 0)) continue;
+    const currentYesPrice = PredictionPricing.getCurrentPrice(
+      Number(market.yesShares),
+      Number(market.noShares),
+      'yes'
     );
-    if (marketPositions.length > 0) {
-      // Calculate initial and final prices from positions
-      const market = marketMap.get(marketId);
-      if (market) {
-        const currentYesShares = Number(market.yesShares);
-        const currentNoShares = Number(market.noShares);
-        const currentTotal = currentYesShares + currentNoShares;
-
-        if (currentTotal > 0) {
-          // Estimate 24h ago price by subtracting recent position changes
-          let pastYesShares = currentYesShares;
-          let pastNoShares = currentNoShares;
-
-          marketPositions.forEach((pos) => {
-            const shares = Number(pos.shares);
-            if (pos.side) {
-              pastYesShares -= shares;
-            } else {
-              pastNoShares -= shares;
-            }
-          });
-
-          const pastTotal = pastYesShares + pastNoShares;
-          if (pastTotal > 0) {
-            const pastYesPrice = pastYesShares / pastTotal;
-            const currentYesPrice = currentYesShares / currentTotal;
-            const priceChange = currentYesPrice - pastYesPrice;
-            const changePercent =
-              pastYesPrice > 0 ? (priceChange / pastYesPrice) * 100 : 0;
-
-            priceChangeMap.set(marketId, changePercent);
-          }
-        }
-      }
-    }
+    priceChangeMap.set(
+      row.marketId,
+      ((currentYesPrice - baselineYesPrice) / baselineYesPrice) * 100
+    );
   }
 
   const membershipNow = Date.now();
@@ -315,8 +307,16 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
       const noShares = market ? Number(market.noShares) : 0;
       const totalShares = yesShares + noShares;
 
-      const yesPrice = totalShares > 0 ? yesShares / totalShares : 0.5;
-      const noPrice = totalShares > 0 ? noShares / totalShares : 0.5;
+      const yesPrice = PredictionPricing.getCurrentPrice(
+        yesShares,
+        noShares,
+        'yes'
+      );
+      const noPrice = PredictionPricing.getCurrentPrice(
+        yesShares,
+        noShares,
+        'no'
+      );
       const changePercent24h = priceChangeMap.get(String(q.id));
 
       return {
