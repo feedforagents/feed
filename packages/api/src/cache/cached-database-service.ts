@@ -31,6 +31,7 @@ import {
   lte,
   markets,
   not,
+  or,
   type Post,
   positions,
   posts,
@@ -50,6 +51,29 @@ import {
   invalidateCache,
   invalidateCachePattern,
 } from './cache-service';
+
+/**
+ * Following-feed keyset cursor: `<ISO timestamp>_<post id>`.
+ *
+ * A timestamp alone cannot resume a page whose last post shares its
+ * timestamp with the next posts, so the cursor also carries the last
+ * post id. A bare ISO timestamp (the previous format) is still accepted
+ * and keeps its legacy meaning: strictly older than the timestamp.
+ */
+function decodeFollowingCursor(raw: string): {
+  timestamp: string;
+  id?: string;
+} {
+  // ISO timestamps never contain the separator; ids may.
+  const at = raw.indexOf('_');
+  if (at > 0 && at < raw.length - 1) {
+    const timestamp = raw.slice(0, at);
+    if (!Number.isNaN(new Date(timestamp).getTime())) {
+      return { timestamp, id: raw.slice(at + 1) };
+    }
+  }
+  return { timestamp: raw };
+}
 
 /**
  * Cached Database Service Class
@@ -164,18 +188,36 @@ class CachedDatabaseService {
         ];
 
         if (cursor) {
-          conditions.push(lt(posts.timestamp, new Date(cursor)));
+          const decoded = decodeFollowingCursor(cursor);
+          const cursorDate = new Date(decoded.timestamp);
+          if (decoded.id !== undefined) {
+            // Keyset resume: everything strictly after the cursor post
+            // in the (timestamp desc, id desc) order. A timestamp-only
+            // condition would drop every remaining post that shares the
+            // cursor post's timestamp.
+            conditions.push(
+              or(
+                lt(posts.timestamp, cursorDate),
+                and(eq(posts.timestamp, cursorDate), lt(posts.id, decoded.id))
+              )!
+            );
+          } else {
+            conditions.push(lt(posts.timestamp, cursorDate));
+          }
           conditions.push(lte(posts.timestamp, now));
         } else {
           conditions.push(lte(posts.timestamp, now));
         }
 
-        // Query posts from database (only from non-test users)
+        // Query posts from database (only from non-test users). The id
+        // tiebreaker makes the order total: posts can share a timestamp
+        // (it defaults to the transaction timestamp, and batch creation
+        // stamps one value onto many rows).
         const result = await db
           .select()
           .from(posts)
           .where(and(...conditions))
-          .orderBy(desc(posts.timestamp))
+          .orderBy(desc(posts.timestamp), desc(posts.id))
           .limit(limit)
           .offset(cursor ? 0 : offset);
 
