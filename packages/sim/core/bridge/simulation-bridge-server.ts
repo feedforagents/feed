@@ -36,9 +36,11 @@
  */
 
 import {
+  and,
   db,
   desc,
   eq,
+  isNull,
   perpPositions,
   positions as positionsTable,
   questions,
@@ -201,15 +203,22 @@ async function getPredictionMarketsData() {
 }
 
 async function getPositionsForUser(npcId: string) {
+  // Only current holdings: a closed perp keeps its size on the row (closedAt
+  // set), and a resolved prediction position keeps its shares, so returning
+  // every row would tell trainers the NPC still holds positions it exited.
   const predPositions = await db
     .select()
     .from(positionsTable)
-    .where(eq(positionsTable.userId, npcId));
+    .where(
+      and(eq(positionsTable.userId, npcId), eq(positionsTable.status, 'active'))
+    );
 
   const perpPos = await db
     .select()
     .from(perpPositions)
-    .where(eq(perpPositions.userId, npcId));
+    .where(
+      and(eq(perpPositions.userId, npcId), isNull(perpPositions.closedAt))
+    );
 
   return [
     ...predPositions.map((p) => ({
