@@ -991,6 +991,7 @@ export class MarketContextService {
           entryPrice: perpPositions.entryPrice,
           currentPrice: perpPositions.currentPrice,
           size: perpPositions.size,
+          leverage: perpPositions.leverage,
           unrealizedPnL: perpPositions.unrealizedPnL,
           openedAt: perpPositions.openedAt,
         })
@@ -1010,6 +1011,7 @@ export class MarketContextService {
           entryPrice: poolPositions.entryPrice,
           currentPrice: poolPositions.currentPrice,
           size: poolPositions.size,
+          leverage: poolPositions.leverage,
           unrealizedPnL: poolPositions.unrealizedPnL,
           openedAt: poolPositions.openedAt,
         })
@@ -1085,6 +1087,7 @@ export class MarketContextService {
           `position ${position.id} size`,
           0
         ),
+        leverage: position.leverage ?? undefined,
         unrealizedPnL: requiredFinancialNumber(
           position.unrealizedPnL,
           `position ${position.id} unrealizedPnL`
@@ -1115,6 +1118,7 @@ export class MarketContextService {
           `position ${position.id} size`,
           0
         ),
+        leverage: position.leverage ?? undefined,
         unrealizedPnL: requiredFinancialNumber(
           position.unrealizedPnL,
           `position ${position.id} unrealizedPnL`
