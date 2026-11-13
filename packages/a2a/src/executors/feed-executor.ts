@@ -2536,9 +2536,12 @@ export class FeedAgentExecutor implements AgentExecutor {
         // Match the web people search (GET /api/users/search): banned
         // accounts are never returned, and test accounts are not real
         // users — every user-facing surface hides them (feeds strip
-        // their posts, a test author's post list is empty).
+        // their posts, a test author's post list is empty). A test
+        // account carries the isTest flag or a 'test-' id prefix — the
+        // membership rule the feed surfaces use.
         isBanned: false,
         isTest: false,
+        NOT: { id: { startsWith: 'test-' } },
         OR: [
           { username: { contains: query, mode: 'insensitive' } },
           { displayName: { contains: query, mode: 'insensitive' } },
