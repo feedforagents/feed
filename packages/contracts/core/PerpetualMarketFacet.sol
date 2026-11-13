@@ -27,7 +27,7 @@ contract PerpetualMarketFacet is ReentrancyGuard {
     
     event PerpetualMarketCreated(bytes32 indexed marketId, string symbol, address indexed indexOracle);
     event PositionOpened(bytes32 indexed marketId, address indexed trader, LibPerpetual.Side side, uint256 size, uint256 collateral, uint256 entryPrice);
-    event PositionClosed(bytes32 indexed marketId, address indexed trader, uint256 pnl);
+    event PositionClosed(bytes32 indexed marketId, address indexed trader, int256 pnl);
     event PositionLiquidated(bytes32 indexed marketId, address indexed trader, address indexed liquidator, uint256 liquidationFee);
     event FundingPaid(bytes32 indexed marketId, address indexed trader, int256 fundingPayment);
     event FundingRateUpdated(bytes32 indexed marketId, uint256 fundingRate);
@@ -189,7 +189,7 @@ contract PerpetualMarketFacet is ReentrancyGuard {
         // Update position
         position.size -= _size;
         position.collateral -= collateralReturned;
-        position.realizedPnl = uint256(int256(position.realizedPnl) + closedPnl);
+        position.realizedPnl = position.realizedPnl + closedPnl;
 
         // Update market totals
         if (side == LibPerpetual.Side.LONG) {
@@ -358,7 +358,7 @@ contract PerpetualMarketFacet is ReentrancyGuard {
             uint256 entryPrice,
             int256 unrealizedPnl,
             uint256 lastFundingIndex,
-            uint256 realizedPnl
+            int256 realizedPnl
         )
     {
         LibPerpetual.Position storage position = LibPerpetual.getPosition(_user, _marketId);
