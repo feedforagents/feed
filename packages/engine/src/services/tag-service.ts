@@ -542,7 +542,12 @@ export async function getTagStatistics(
 > {
   const last24Hours = new Date(windowEnd.getTime() - 24 * 60 * 60 * 1000);
 
-  // Query postTags within time window, then filter out deleted posts
+  // Query postTags within time window, then keep only posts a viewer can
+  // actually see on the tag page, so the stored trending postCount agrees
+  // with the tag page: not soft-deleted, already published (post timestamp
+  // not after the window end), and not written by a test author — the same
+  // test-author rule as the main feed and getPostsByTag (accounts flagged
+  // isTest in the users table and ids starting with 'test-').
   const allPostTags = await db.query.postTags.findMany({
     where: (pt, { and: andOp, gte: whereGte, lte: whereLte }) =>
       andOp(
@@ -556,8 +561,36 @@ export async function getTagStatistics(
     orderBy: asc(postTags.createdAt),
   });
 
-  // Filter out postTags where the post is deleted
-  const postTagsList = allPostTags.filter((pt) => !pt.post.deletedAt);
+  type PostTagInWindow = (typeof allPostTags)[number];
+
+  const publishedPostTags = allPostTags.filter(
+    (pt: PostTagInWindow) =>
+      !pt.post.deletedAt && pt.post.timestamp <= windowEnd
+  );
+
+  const candidateAuthorIds = [
+    ...new Set(
+      publishedPostTags.map((pt: PostTagInWindow) => pt.post.authorId)
+    ),
+  ];
+  const testAuthorRows =
+    candidateAuthorIds.length > 0
+      ? await db
+          .select({ id: users.id })
+          .from(users)
+          .where(
+            and(eq(users.isTest, true), inArray(users.id, candidateAuthorIds))
+          )
+      : [];
+  const testAuthorIds = new Set(
+    testAuthorRows.map((row: { id: string }) => row.id)
+  );
+
+  const postTagsList = publishedPostTags.filter(
+    (pt: PostTagInWindow) =>
+      !pt.post.authorId.startsWith('test-') &&
+      !testAuthorIds.has(pt.post.authorId)
+  );
 
   const tagStats = new Map<
     string,
