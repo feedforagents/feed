@@ -127,6 +127,14 @@ export const GET = withErrorHandling(
         ) ?? null;
     }
 
+    // Match the follow-list read fallback for organization profile IDs.
+    if (!actor) {
+      const organization = StaticDataRegistry.getOrganization(actorId);
+      if (organization) {
+        actor = StaticDataRegistry.getActor(`org-${organization.id}`);
+      }
+    }
+
     if (!actor) {
       throw new BusinessLogicError(`Actor ${actorId} not found`, 'NOT_FOUND');
     }
