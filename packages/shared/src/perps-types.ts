@@ -164,6 +164,31 @@ export function calculateUnrealizedPnL(
 }
 
 /**
+ * Displayed unrealized PnL for a position: the mark-to-market PnL less
+ * accrued funding paid (plus funding received, when negative).
+ *
+ * Accrued funding is already-settled cash: closePosition settles realized
+ * PnL as mark PnL less fundingPaid (PRD §9.3), so a displayed PnL that
+ * ignores it overstates what the holder will realize by exactly
+ * fundingPaid. The A2A portfolio view and the engine portfolio valuation
+ * already net funding this way (see the a2a-positions-funding integration
+ * test); the web close dialog must show the same number, because it is
+ * the confirmation the user acts on. pnlPercent is recomputed from the
+ * netted PnL so the two displayed numbers agree with each other.
+ */
+export function calculateNetUnrealizedPnL(
+  entryPrice: number,
+  currentPrice: number,
+  side: 'long' | 'short',
+  size: number,
+  fundingPaid: number
+): { pnl: number; pnlPercent: number } {
+  const { pnl } = calculateUnrealizedPnL(entryPrice, currentPrice, side, size);
+  const netPnl = pnl - fundingPaid;
+  return { pnl: netPnl, pnlPercent: (netPnl / size) * 100 };
+}
+
+/**
  * Calculate funding payment for a single 8-hour period
  * Funding is paid every 8 hours based on the funding rate
  *

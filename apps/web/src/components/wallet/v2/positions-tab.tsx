@@ -2,7 +2,7 @@
 
 import type { UserPredictionPosition } from '@feed/shared';
 import {
-  calculateUnrealizedPnL,
+  calculateNetUnrealizedPnL,
   cn,
   formatCurrency,
   logger,
@@ -170,11 +170,12 @@ export function PositionsTab({ userId }: PositionsTabProps) {
       perpPositions.map((position) => {
         const livePrice = livePrices.get(position.ticker)?.price;
         const currentPrice = livePrice ?? position.currentPrice;
-        const { pnl, pnlPercent } = calculateUnrealizedPnL(
+        const { pnl, pnlPercent } = calculateNetUnrealizedPnL(
           position.entryPrice,
           currentPrice,
           position.side,
-          position.size
+          position.size,
+          position.fundingPaid
         );
         return { position, currentPrice, pnl, pnlPercent };
       }),
