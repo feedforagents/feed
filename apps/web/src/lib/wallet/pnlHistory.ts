@@ -246,10 +246,14 @@ export async function loadCurrentUserPnlMetrics(
     positionUserIds,
     PNL_METRIC_QUERY_BATCH_SIZE
   )) {
+    // Open perp unrealized PnL is net of accrued funding: funding settles
+    // at close (realizedPnL = pnl - fundingPaid), so the stored price-only
+    // unrealizedPnL overstates equity by fundingPaid while the position is
+    // open. Mirrors calculatePortfolioPnL and the trading leaderboard.
     const perpUnrealizedRows = await db
       .select({
         userId: perpPositions.userId,
-        unrealizedPnL: sql<number>`COALESCE(SUM(${perpPositions.unrealizedPnL}), 0)`,
+        unrealizedPnL: sql<number>`COALESCE(SUM(${perpPositions.unrealizedPnL} - COALESCE(${perpPositions.fundingPaid}, 0)), 0)`,
       })
       .from(perpPositions)
       .where(
