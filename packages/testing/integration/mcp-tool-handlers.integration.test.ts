@@ -705,15 +705,15 @@ describe('MCP tool handlers', () => {
       .from(users)
       .where(eq(users.id, agentUserId));
 
-    for (const args of [
+    const invalidArgs: Record<string, string>[] = [
       { username: 'no spaces allowed' },
       { username: 'ab' },
       { displayName: 'x'.repeat(101) },
       { profileImageUrl: 'javascript:alert(1)' },
-    ]) {
-      await expect(
-        executeTool('update_profile', args, agent())
-      ).rejects.toThrow();
+    ];
+    for (const args of invalidArgs) {
+      // assert.rejects fails cleanly if the call resolves; bun's expect().rejects hangs instead.
+      await assert.rejects(executeTool('update_profile', args, agent()));
     }
     const [afterRejected] = await db
       .select({
