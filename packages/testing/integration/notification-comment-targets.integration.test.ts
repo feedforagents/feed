@@ -664,6 +664,9 @@ describe('notification comment targets fixture ownership', () => {
       ]);
       expect(fixture.notificationIds).toHaveLength(1);
       const [createdId] = fixture.notificationIds;
+      if (!createdId) {
+        throw new Error('expected notification id was not recorded');
+      }
       expect(createdId).not.toBe(foreignNotificationId);
 
       // Cleanup refuses while the foreign notification references the
