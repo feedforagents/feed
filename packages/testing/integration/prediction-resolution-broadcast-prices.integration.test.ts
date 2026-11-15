@@ -111,36 +111,49 @@ afterAll(async () => {
   // status 'resolved'. Position.marketId/userId have no cascading foreign
   // keys, so deleting markets/users would orphan those rows. Delete
   // positions through the owned market/user IDs (this also covers partial
-  // setup, e.g. a buy that succeeded before the test failed). Every
-  // deletion is attempted even if an earlier one fails, and any failure
-  // is surfaced instead of swallowed.
+  // setup, e.g. a buy that succeeded before the test failed).
+  //
+  // Child cleanup gates parent deletion for each owned fixture: if a
+  // Position delete fails (e.g. the row is locked), the parent market/user
+  // — and any remaining child rows — are kept together instead of leaving
+  // an orphaned Position behind. Independent fixtures are still attempted
+  // and their errors aggregated. Every failure is surfaced instead of
+  // swallowed.
   const failures: string[] = [];
-  const attempt = async (label: string, fn: () => Promise<unknown>) => {
+  const attempt = async (
+    label: string,
+    fn: () => Promise<unknown>
+  ): Promise<boolean> => {
     try {
       await fn();
+      return true;
     } catch (error) {
       failures.push(
         `${label}: ${error instanceof Error ? error.message : String(error)}`
       );
+      return false;
     }
   };
   for (const id of marketIds) {
-    await attempt(`positions for market ${id}`, () =>
+    const positionsOk = await attempt(`positions for market ${id}`, () =>
       db.delete(positions).where(eq(positions.marketId, id))
     );
-    await attempt(`price history for market ${id}`, () =>
+    if (!positionsOk) continue;
+    const historyOk = await attempt(`price history for market ${id}`, () =>
       db
         .delete(predictionPriceHistories)
         .where(eq(predictionPriceHistories.marketId, id))
     );
+    if (!historyOk) continue;
     await attempt(`market ${id}`, () =>
       db.delete(markets).where(eq(markets.id, id))
     );
   }
   for (const id of userIds) {
-    await attempt(`positions for user ${id}`, () =>
+    const positionsOk = await attempt(`positions for user ${id}`, () =>
       db.delete(positions).where(eq(positions.userId, id))
     );
+    if (!positionsOk) continue;
     await attempt(`user ${id}`, () => db.delete(users).where(eq(users.id, id)));
   }
   if (failures.length > 0) {
