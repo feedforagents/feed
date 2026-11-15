@@ -37,7 +37,6 @@ import {
   eq,
   inArray,
   notifications,
-  or,
   posts,
   shares,
   users,
@@ -49,7 +48,16 @@ let authorId: string;
 let sharerId: string;
 let controlSharerId: string;
 let postId: string;
+// Only IDs published here may be deleted by afterAll. A generated ID is
+// not ownership: a failed insert may have collided with an existing row, so
+// each list is filled only from a successful INSERT RETURNING receipt (for
+// fixtures) or from a successful share operation's own response/read-back
+// (for shares, repost posts and notifications).
 const ownedUserIds: string[] = [];
+const ownedPostIds: string[] = [];
+const ownedShareIds: string[] = [];
+const ownedRepostIds: string[] = [];
+const ownedNotificationIds: string[] = [];
 
 let sharePOST: typeof import('../../../apps/web/src/app/api/posts/[id]/share/route').POST;
 let shareDELETE: typeof import('../../../apps/web/src/app/api/posts/[id]/share/route').DELETE;
@@ -70,8 +78,30 @@ function req(url: string, userId: string, method = 'GET', body?: unknown) {
   );
 }
 
+async function shareNotificationIds(actorId: string) {
+  const rows = await db
+    .select({ id: notifications.id })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, authorId),
+        eq(notifications.type, 'share'),
+        eq(notifications.actorId, actorId),
+        eq(notifications.postId, postId)
+      )
+    );
+  return rows.map((row) => row.id);
+}
+
 async function share(userId: string, method: 'POST' | 'DELETE' = 'POST') {
   const handler = method === 'POST' ? sharePOST : shareDELETE;
+  // Share notifications are deduped by (recipient, type, actor, post), so a
+  // re-share may create none: only rows that appear around this call were
+  // created by it.
+  const beforeNotificationIds =
+    method === 'POST'
+      ? new Set(await shareNotificationIds(userId))
+      : new Set<string>();
   const response = await handler(
     req(
       `http://localhost/api/posts/${postId}/share`,
@@ -81,6 +111,36 @@ async function share(userId: string, method: 'POST' | 'DELETE' = 'POST') {
     ),
     { params: Promise.resolve({ id: postId }) }
   );
+  if (method === 'POST' && response.status === 201) {
+    const body = (await response
+      .clone()
+      .json()
+      .catch(() => null)) as {
+      data?: { repostPost?: { id?: string } };
+    } | null;
+    const repostId = body?.data?.repostPost?.id;
+    if (repostId && !ownedRepostIds.includes(repostId)) {
+      ownedRepostIds.push(repostId);
+    }
+    // 201 plus the unique (userId, postId) constraint proves this row was
+    // created by this call: a pre-existing share would have been a 400.
+    const [createdShare] = await db
+      .select({ id: shares.id })
+      .from(shares)
+      .where(and(eq(shares.userId, userId), eq(shares.postId, postId)))
+      .limit(1);
+    if (createdShare && !ownedShareIds.includes(createdShare.id)) {
+      ownedShareIds.push(createdShare.id);
+    }
+    for (const id of await shareNotificationIds(userId)) {
+      if (
+        !beforeNotificationIds.has(id) &&
+        !ownedNotificationIds.includes(id)
+      ) {
+        ownedNotificationIds.push(id);
+      }
+    }
+  }
   return response.status;
 }
 
@@ -134,55 +194,77 @@ beforeAll(async () => {
     generateSnowflakeId(),
     generateSnowflakeId(),
   ]);
-  ownedUserIds.push(authorId, sharerId, controlSharerId);
 
   const now = new Date();
   const past = new Date(now.getTime() - 10 * 60_000);
 
   // privyId = own id so ensureUserForAuth resolves the fixture row
   // directly instead of provisioning a fresh account.
-  await db.insert(users).values([
-    {
-      id: authorId,
-      privyId: authorId,
-      username: `f171-author-${authorId}`,
-      displayName: 'F171 Author',
-      updatedAt: now,
-    },
-    {
-      id: sharerId,
-      privyId: sharerId,
-      username: `f171-sharer-${sharerId}`,
-      displayName: 'F171 Sharer',
-      updatedAt: now,
-    },
-    {
-      id: controlSharerId,
-      privyId: controlSharerId,
-      username: `f171-control-${controlSharerId}`,
-      displayName: 'F171 Control Sharer',
-      updatedAt: now,
-    },
-  ]);
+  // Publish ownership only after the INSERT succeeds: if this batch
+  // collides with a pre-existing row, nothing is registered for cleanup.
+  const insertedUsers = await db
+    .insert(users)
+    .values([
+      {
+        id: authorId,
+        privyId: authorId,
+        username: `f171-author-${authorId}`,
+        displayName: 'F171 Author',
+        updatedAt: now,
+      },
+      {
+        id: sharerId,
+        privyId: sharerId,
+        username: `f171-sharer-${sharerId}`,
+        displayName: 'F171 Sharer',
+        updatedAt: now,
+      },
+      {
+        id: controlSharerId,
+        privyId: controlSharerId,
+        username: `f171-control-${controlSharerId}`,
+        displayName: 'F171 Control Sharer',
+        updatedAt: now,
+      },
+    ])
+    .returning({ id: users.id });
+  ownedUserIds.push(...insertedUsers.map((row) => row.id));
 
-  await db.insert(posts).values({
-    id: postId,
-    content: 'Fixture post for share-count deletion test',
-    authorId,
-    timestamp: past,
-    createdAt: past,
-  });
+  const [insertedPost] = await db
+    .insert(posts)
+    .values({
+      id: postId,
+      content: 'Fixture post for share-count deletion test',
+      authorId,
+      timestamp: past,
+      createdAt: past,
+    })
+    .returning({ id: posts.id });
+  if (!insertedPost) {
+    throw new Error('Fixture post was not created');
+  }
+  ownedPostIds.push(insertedPost.id);
 });
 
 afterAll(async () => {
-  await db
-    .delete(notifications)
-    .where(eq(notifications.postId, postId))
-    .catch(() => {});
-  await db.delete(shares).where(eq(shares.postId, postId));
-  await db
-    .delete(posts)
-    .where(or(eq(posts.id, postId), eq(posts.originalPostId, postId)));
+  // Delete only rows this file created, by their exact acquired IDs. Never
+  // select by postId or originalPostId: those predicates also match foreign
+  // shares, notifications and reposts of the fixture post.
+  if (ownedNotificationIds.length > 0) {
+    await db
+      .delete(notifications)
+      .where(inArray(notifications.id, ownedNotificationIds))
+      .catch(() => {});
+  }
+  if (ownedShareIds.length > 0) {
+    await db.delete(shares).where(inArray(shares.id, ownedShareIds));
+  }
+  if (ownedRepostIds.length > 0) {
+    await db.delete(posts).where(inArray(posts.id, ownedRepostIds));
+  }
+  if (ownedPostIds.length > 0) {
+    await db.delete(posts).where(inArray(posts.id, ownedPostIds));
+  }
   if (ownedUserIds.length > 0) {
     await db.delete(users).where(inArray(users.id, ownedUserIds));
   }
