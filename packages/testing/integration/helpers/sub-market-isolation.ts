@@ -70,13 +70,23 @@ const MARKETS_REVIEW_FILE =
 const MARKETS_REVIEW_CASES = [
   'markets-tick manual resolution review > funded reviews stay held across ticks until approval; rejection postpones payment',
 ];
+const BALANCE_DISPLAY_FILE =
+  'packages/testing/integration/balance-display-consistency.integration.test.ts';
+const BALANCE_DISPLAY_CASES = [
+  'balance display path vs wallet ledger > a settlement-style credit is visible on the cached display path immediately',
+  'balance display path vs wallet ledger > a buy-style debit is visible on the cached display path immediately',
+  'balance display path vs wallet ledger > guard: an untouched user reads the same balance on both paths',
+  'balance display path vs wallet ledger > guard: explicit cache invalidation still refreshes the display path',
+  'balance display path vs wallet ledger > control: a wallet mutation leaves unrelated follow/feed cache entries alone',
+];
 type Suite =
   | 'sub-market'
   | 'prediction-remainder'
   | 'plugin-perp-fee'
   | 'prediction-fee'
   | 'npc-trade-count'
-  | 'markets-review';
+  | 'markets-review'
+  | 'balance-display';
 type Lease = {
   database: string;
   oid: string;
@@ -269,6 +279,13 @@ export async function verifyMarketsReviewChildLease() {
   await verifyChildLease(
     process.env.FEED_MARKETS_REVIEW_CHILD,
     process.env.FEED_MARKETS_REVIEW_LEASE_FILE
+  );
+}
+
+export async function verifyBalanceDisplayChildLease() {
+  await verifyChildLease(
+    process.env.FEED_BALANCE_DISPLAY_CHILD,
+    process.env.FEED_BALANCE_DISPLAY_LEASE_FILE
   );
 }
 
@@ -576,56 +593,69 @@ export async function runIsolatedMarketsReviewCases() {
   await runIsolatedCases('markets-review');
 }
 
+export async function runIsolatedBalanceDisplayCases() {
+  await runIsolatedCases('balance-display');
+}
+
 async function runIsolatedCases(suite: Suite) {
+  const balance = suite === 'balance-display';
   const review = suite === 'markets-review';
   const npc = suite === 'npc-trade-count';
   const fee = suite === 'prediction-fee';
   const prediction = suite === 'prediction-remainder';
   const plugin = suite === 'plugin-perp-fee';
-  const file = review
-    ? MARKETS_REVIEW_FILE
-    : npc
-      ? NPC_TRADE_FILE
-      : fee
-        ? PREDICTION_FEE_FILE
-        : plugin
-          ? PLUGIN_PERP_FILE
-          : prediction
-            ? PREDICTION_FILE
-            : FILE;
-  const cases = review
-    ? MARKETS_REVIEW_CASES
-    : npc
-      ? NPC_TRADE_CASES
-      : fee
-        ? PREDICTION_FEE_CASES
-        : plugin
-          ? PLUGIN_PERP_CASES
-          : prediction
-            ? PREDICTION_CASES
-            : CASES;
-  const marker = review
-    ? 'FEED_MARKETS_REVIEW_CHILD'
-    : npc
-      ? 'FEED_NPC_TRADE_COUNT_CHILD'
-      : fee
-        ? 'FEED_PREDICTION_FEE_CHILD'
-        : plugin
-          ? 'FEED_PLUGIN_PERP_FEE_CHILD'
-          : prediction
-            ? 'FEED_PREDICTION_REMAINDER_CHILD'
-            : 'FEED_SUB_MARKET_CHILD';
-  const leaseVariable = review
-    ? 'FEED_MARKETS_REVIEW_LEASE_FILE'
-    : npc
-      ? 'FEED_NPC_TRADE_COUNT_LEASE_FILE'
-      : fee
-        ? 'FEED_PREDICTION_FEE_LEASE_FILE'
-        : plugin
-          ? 'FEED_PLUGIN_PERP_FEE_LEASE_FILE'
-          : prediction
-            ? 'FEED_PREDICTION_REMAINDER_LEASE_FILE'
-            : 'FEED_SUB_MARKET_LEASE_FILE';
+  const file = balance
+    ? BALANCE_DISPLAY_FILE
+    : review
+      ? MARKETS_REVIEW_FILE
+      : npc
+        ? NPC_TRADE_FILE
+        : fee
+          ? PREDICTION_FEE_FILE
+          : plugin
+            ? PLUGIN_PERP_FILE
+            : prediction
+              ? PREDICTION_FILE
+              : FILE;
+  const cases = balance
+    ? BALANCE_DISPLAY_CASES
+    : review
+      ? MARKETS_REVIEW_CASES
+      : npc
+        ? NPC_TRADE_CASES
+        : fee
+          ? PREDICTION_FEE_CASES
+          : plugin
+            ? PLUGIN_PERP_CASES
+            : prediction
+              ? PREDICTION_CASES
+              : CASES;
+  const marker = balance
+    ? 'FEED_BALANCE_DISPLAY_CHILD'
+    : review
+      ? 'FEED_MARKETS_REVIEW_CHILD'
+      : npc
+        ? 'FEED_NPC_TRADE_COUNT_CHILD'
+        : fee
+          ? 'FEED_PREDICTION_FEE_CHILD'
+          : plugin
+            ? 'FEED_PLUGIN_PERP_FEE_CHILD'
+            : prediction
+              ? 'FEED_PREDICTION_REMAINDER_CHILD'
+              : 'FEED_SUB_MARKET_CHILD';
+  const leaseVariable = balance
+    ? 'FEED_BALANCE_DISPLAY_LEASE_FILE'
+    : review
+      ? 'FEED_MARKETS_REVIEW_LEASE_FILE'
+      : npc
+        ? 'FEED_NPC_TRADE_COUNT_LEASE_FILE'
+        : fee
+          ? 'FEED_PREDICTION_FEE_LEASE_FILE'
+          : plugin
+            ? 'FEED_PLUGIN_PERP_FEE_LEASE_FILE'
+            : prediction
+              ? 'FEED_PREDICTION_REMAINDER_LEASE_FILE'
+              : 'FEED_SUB_MARKET_LEASE_FILE';
   requireThat(
     !process.env.FEED_SUB_MARKET_CHILD &&
       !process.env.FEED_SUB_MARKET_LEASE_FILE &&
@@ -638,7 +668,9 @@ async function runIsolatedCases(suite: Suite) {
       !process.env.FEED_NPC_TRADE_COUNT_CHILD &&
       !process.env.FEED_NPC_TRADE_COUNT_LEASE_FILE &&
       !process.env.FEED_MARKETS_REVIEW_CHILD &&
-      !process.env.FEED_MARKETS_REVIEW_LEASE_FILE,
+      !process.env.FEED_MARKETS_REVIEW_LEASE_FILE &&
+      !process.env.FEED_BALANCE_DISPLAY_CHILD &&
+      !process.env.FEED_BALANCE_DISPLAY_LEASE_FILE,
     'Parent cannot reuse a child marker'
   );
   const source = localUrl(process.env.DATABASE_URL);
@@ -652,17 +684,19 @@ async function runIsolatedCases(suite: Suite) {
   const directory = mkdtempSync(
     join(
       tmpdir(),
-      review
-        ? 'feed-markets-review-'
-        : npc
-          ? 'feed-npc-trade-count-'
-          : fee
-            ? 'feed-prediction-fee-'
-            : plugin
-              ? 'feed-plugin-perp-fee-'
-              : prediction
-                ? 'feed-prediction-remainder-'
-                : 'feed-sub-market-'
+      balance
+        ? 'feed-balance-display-'
+        : review
+          ? 'feed-markets-review-'
+          : npc
+            ? 'feed-npc-trade-count-'
+            : fee
+              ? 'feed-prediction-fee-'
+              : plugin
+                ? 'feed-plugin-perp-fee-'
+                : prediction
+                  ? 'feed-prediction-remainder-'
+                  : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -732,6 +766,7 @@ async function runIsolatedCases(suite: Suite) {
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
       // Fresh process memory only; never read or invalidate a shared cron cache.
       ...(review ? { FEED_DISABLE_REDIS: '1' } : {}),
+      ...(balance ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
     };
     phase = 'migrate';
     await run(
@@ -740,7 +775,7 @@ async function runIsolatedCases(suite: Suite) {
       join(directory, 'migrate.log'),
       60000
     );
-    if (prediction || plugin || fee || npc || review) {
+    if (prediction || plugin || fee || npc || review || balance) {
       phase = 'manual-idempotency-index';
       const actual = await identity(admin);
       const current = await leaseRow(admin, database);
@@ -792,17 +827,19 @@ async function runIsolatedCases(suite: Suite) {
         'psql'
       );
     }
-    phase = review
-      ? 'one-markets-review-child-case'
-      : npc
-        ? 'six-npc-trade-count-child-cases'
-        : fee
-          ? 'seven-prediction-fee-child-cases'
-          : plugin
-            ? 'six-child-cases'
-            : prediction
-              ? 'ten-child-cases'
-              : 'four-child-cases';
+    phase = balance
+      ? 'five-balance-display-child-cases'
+      : review
+        ? 'one-markets-review-child-case'
+        : npc
+          ? 'six-npc-trade-count-child-cases'
+          : fee
+            ? 'seven-prediction-fee-child-cases'
+            : plugin
+              ? 'six-child-cases'
+              : prediction
+                ? 'ten-child-cases'
+                : 'four-child-cases';
     const output = await run(
       ['test', file, '--timeout', '30000'],
       env,
@@ -816,7 +853,7 @@ async function runIsolatedCases(suite: Suite) {
       lines.find((line) =>
         new RegExp(
           '^\\(pass\\) ' +
-            (prediction || plugin || fee || npc || review
+            (prediction || plugin || fee || npc || review || balance
               ? ''
               : 'sub-market transactional creation > ') +
             escape(name) +
@@ -834,17 +871,19 @@ async function runIsolatedCases(suite: Suite) {
             cases.length +
             (review ? ' test across 1 file.' : ' tests across 1 file.')
         ),
-      review
-        ? 'The real manual-review hold case must pass without skips'
-        : npc
-          ? 'All six NPC history cases must pass without skips'
-          : fee
-            ? 'All seven real prediction fee cases must pass without skips'
-            : plugin
-              ? 'All six real perp fee cases must pass without skips'
-              : prediction
-                ? 'All ten real HTTP cases must pass without skips'
-                : 'All four original cases must pass without skips'
+      balance
+        ? 'All five balance display cases must pass without skips'
+        : review
+          ? 'The real manual-review hold case must pass without skips'
+          : npc
+            ? 'All six NPC history cases must pass without skips'
+            : fee
+              ? 'All seven real prediction fee cases must pass without skips'
+              : plugin
+                ? 'All six real perp fee cases must pass without skips'
+                : prediction
+                  ? 'All ten real HTTP cases must pass without skips'
+                  : 'All four original cases must pass without skips'
     );
     childProof = {
       pass: cases.length,
@@ -940,17 +979,19 @@ async function runIsolatedCases(suite: Suite) {
     );
     passed = true;
     persist(resultPath, {
-      status: review
-        ? 'PASS_ISOLATED_MARKETS_REVIEW_CASE'
-        : npc
-          ? 'PASS_ISOLATED_SIX_NPC_TRADE_COUNT_CASES'
-          : fee
-            ? 'PASS_ISOLATED_SEVEN_PREDICTION_FEE_CASES'
-            : plugin
-              ? 'PASS_ISOLATED_SIX_PLUGIN_PERP_FEE_CASES'
-              : prediction
-                ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
-                : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
+      status: balance
+        ? 'PASS_ISOLATED_FIVE_BALANCE_DISPLAY_CASES'
+        : review
+          ? 'PASS_ISOLATED_MARKETS_REVIEW_CASE'
+          : npc
+            ? 'PASS_ISOLATED_SIX_NPC_TRADE_COUNT_CASES'
+            : fee
+              ? 'PASS_ISOLATED_SEVEN_PREDICTION_FEE_CASES'
+              : plugin
+                ? 'PASS_ISOLATED_SIX_PLUGIN_PERP_FEE_CASES'
+                : prediction
+                  ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
+                  : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
       lease,
       childProof,
       databaseDropped: true,
@@ -958,17 +999,19 @@ async function runIsolatedCases(suite: Suite) {
       parentEnvironmentUnchanged: true,
     });
     console.info(
-      (review
-        ? 'ISOLATED_MARKETS_REVIEW_RESULT '
-        : npc
-          ? 'ISOLATED_NPC_TRADE_COUNT_RESULT '
-          : fee
-            ? 'ISOLATED_PREDICTION_FEE_RESULT '
-            : plugin
-              ? 'ISOLATED_PLUGIN_PERP_FEE_RESULT '
-              : prediction
-                ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
-                : 'ISOLATED_SUB_MARKET_RESULT ') +
+      (balance
+        ? 'ISOLATED_BALANCE_DISPLAY_RESULT '
+        : review
+          ? 'ISOLATED_MARKETS_REVIEW_RESULT '
+          : npc
+            ? 'ISOLATED_NPC_TRADE_COUNT_RESULT '
+            : fee
+              ? 'ISOLATED_PREDICTION_FEE_RESULT '
+              : plugin
+                ? 'ISOLATED_PLUGIN_PERP_FEE_RESULT '
+                : prediction
+                  ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
+                  : 'ISOLATED_SUB_MARKET_RESULT ') +
         JSON.stringify({
           pass: cases.length,
           skip: 0,
@@ -981,17 +1024,19 @@ async function runIsolatedCases(suite: Suite) {
   } finally {
     if (!passed) {
       persist(resultPath, {
-        status: review
-          ? 'HOLD_ISOLATED_MARKETS_REVIEW_CASE'
-          : npc
-            ? 'HOLD_ISOLATED_NPC_TRADE_COUNT_CASES'
-            : fee
-              ? 'HOLD_ISOLATED_PREDICTION_FEE_CASES'
-              : plugin
-                ? 'HOLD_ISOLATED_PLUGIN_PERP_FEE_CASES'
-                : prediction
-                  ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
-                  : 'HOLD_ISOLATED_SUB_MARKET_CASES',
+        status: balance
+          ? 'HOLD_ISOLATED_BALANCE_DISPLAY_CASES'
+          : review
+            ? 'HOLD_ISOLATED_MARKETS_REVIEW_CASE'
+            : npc
+              ? 'HOLD_ISOLATED_NPC_TRADE_COUNT_CASES'
+              : fee
+                ? 'HOLD_ISOLATED_PREDICTION_FEE_CASES'
+                : plugin
+                  ? 'HOLD_ISOLATED_PLUGIN_PERP_FEE_CASES'
+                  : prediction
+                    ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
+                    : 'HOLD_ISOLATED_SUB_MARKET_CASES',
         phase,
         lease,
         childProof,
@@ -1004,17 +1049,19 @@ async function runIsolatedCases(suite: Suite) {
         noAutomaticRetryOrSharedCleanup: true,
       });
       console.error(
-        (review
-          ? 'ISOLATED_MARKETS_REVIEW_HOLD '
-          : npc
-            ? 'ISOLATED_NPC_TRADE_COUNT_HOLD '
-            : fee
-              ? 'ISOLATED_PREDICTION_FEE_HOLD '
-              : plugin
-                ? 'ISOLATED_PLUGIN_PERP_FEE_HOLD '
-                : prediction
-                  ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
-                  : 'ISOLATED_SUB_MARKET_HOLD ') +
+        (balance
+          ? 'ISOLATED_BALANCE_DISPLAY_HOLD '
+          : review
+            ? 'ISOLATED_MARKETS_REVIEW_HOLD '
+            : npc
+              ? 'ISOLATED_NPC_TRADE_COUNT_HOLD '
+              : fee
+                ? 'ISOLATED_PREDICTION_FEE_HOLD '
+                : plugin
+                  ? 'ISOLATED_PLUGIN_PERP_FEE_HOLD '
+                  : prediction
+                    ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
+                    : 'ISOLATED_SUB_MARKET_HOLD ') +
           JSON.stringify({ phase, result: resultPath })
       );
     }
