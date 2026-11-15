@@ -12,7 +12,7 @@
  * with the ledger read (`WalletService.getBalance`).
  */
 
-import { afterAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import {
   CACHE_KEYS,
   cachedDb,
@@ -27,13 +27,26 @@ import { generateSnowflakeId } from '@feed/shared';
 
 const testUserIds: string[] = [];
 
-// Sentinel keys in the global `user:follows` namespace, written by the
-// control test. Both carry a fresh snowflake suffix, so this run never
-// overwrites an entry another run or user wrote. `runSentinelKey` is owned
-// by this run and teardown deletes exactly that key; `foreignSentinelKey`
-// simulates another user's entry and must survive teardown.
+// Sentinel keys in the global `user:follows` namespace. Both carry a fresh
+// snowflake suffix, so this run never overwrites an entry another run or
+// user wrote. `runSentinelKey` is owned by this run (written by the control
+// test) and teardown deletes exactly that key; `foreignSentinelKey`
+// simulates another user's entry, is installed by beforeAll before any test
+// phase runs, and must survive teardown.
 let runSentinelKey: string | undefined;
 let foreignSentinelKey: string | undefined;
+
+// Install the foreign sentinel before every phase the isolation claim
+// covers: the guard, the mutation paths and teardown. Its survival then
+// proves the whole fixture lifecycle leaves unrelated entries alone —
+// not just the phases after the last broad invalidation.
+beforeAll(async () => {
+  const foreignUserId = await generateSnowflakeId();
+  foreignSentinelKey = `sentinel:${foreignUserId}`;
+  await setCache(foreignSentinelKey, 'foreign-keep-me', {
+    namespace: 'user:follows',
+  });
+});
 
 async function createTestUser(balance: string): Promise<string> {
   const userId = await generateSnowflakeId();
@@ -148,14 +161,17 @@ describe('balance display path vs wallet ledger', () => {
       .update(users)
       .set({ virtualBalance: '900' })
       .where(eq(users.id, userId));
-    await cachedDb.invalidateUserCache(userId);
+    // Balance-scoped only: the broad invalidateUserCache pattern-scans the
+    // global `user:follows` namespace, which would evict unrelated entries
+    // mid-suite. The display path only needs its own exact keys cleared.
+    await cachedDb.invalidateUserBalanceCache(userId);
 
     expect(await cachedBalance(userId)).toBe(900);
   });
 
-  // Runs last: the guard above calls the broad invalidateUserCache, which
-  // pattern-scans the global `user:follows` namespace, so the sentinels
-  // below must be written after it.
+  // The control test runs last so its sentinels are checked after the
+  // mutation path; the foreign sentinel was installed by beforeAll, so it
+  // also covers the guard and earlier mutation phases above.
   it('control: a wallet mutation leaves unrelated follow/feed cache entries alone', async () => {
     const userId = await createTestUser('1000');
     const authorId = await createTestUser('1000');
@@ -171,16 +187,16 @@ describe('balance display path vs wallet ledger', () => {
       })
     ).not.toBeNull();
 
-    // Run-specific sentinels in the global follows namespace: the suffix
+    // Run-specific sentinel in the global follows namespace: the suffix
     // is a fresh snowflake id, so this run never overwrites an entry
-    // another run or user wrote. Only a pattern scan could remove them.
+    // another run or user wrote. Only a pattern scan could remove it.
+    // The foreign sentinel was installed by beforeAll and is asserted
+    // below; it is not re-created here.
     runSentinelKey = `sentinel:${userId}`;
-    const foreignUserId = await generateSnowflakeId();
-    foreignSentinelKey = `sentinel:${foreignUserId}`;
     await setCache(runSentinelKey, 'keep-me', { namespace: 'user:follows' });
-    await setCache(foreignSentinelKey, 'foreign-keep-me', {
-      namespace: 'user:follows',
-    });
+    if (!foreignSentinelKey) {
+      throw new Error('foreign sentinel was not installed by beforeAll');
+    }
 
     // The mutation path every trade/settlement uses.
     await WalletService.credit(
