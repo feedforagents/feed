@@ -27,7 +27,7 @@ import {
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
-import type { NextRequest } from 'next/server';
+import { NextRequest } from 'next/server';
 import { GET } from '@/app/api/markets/predictions/[id]/history/route';
 
 const userIds: string[] = [];
@@ -85,9 +85,22 @@ async function makeMarket(): Promise<string> {
 }
 
 async function getLastHistoryPoint(marketId: string) {
-  const req = new Request(
-    `http://localhost/api/markets/predictions/${marketId}/history`
-  ) as unknown as NextRequest;
+  // Isolate this fixture from other public reads while exercising the
+  // real limiter: one documentation-range IP per market, so the request
+  // is keyed by IP (60/min) instead of falling into the shared anonymous
+  // bucket (30/min) that earlier suites exhaust before this file runs.
+  // Same pattern as group-future-posts / perp-preview-limit-order.
+  const clientIp = `2001:db8:1657:0:${BigInt(marketId)
+    .toString(16)
+    .padStart(16, '0')
+    .match(/.{4}/g)!
+    .join(':')}`;
+  const req = new NextRequest(
+    new Request(
+      `http://localhost/api/markets/predictions/${marketId}/history`,
+      { headers: { 'x-forwarded-for': clientIp } }
+    )
+  );
   const res = (await GET(req, {
     params: Promise.resolve({ id: marketId }),
   })) as Response;
