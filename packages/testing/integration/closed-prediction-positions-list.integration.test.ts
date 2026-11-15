@@ -18,6 +18,10 @@
  * These tests drive the real route handler. One test also drives the
  * real PredictionMarketService buy -> sell-all flow against the real
  * database so the sell-closed row is produced by the service itself.
+ * Another test feeds the real status=all/type=all route payload through
+ * fetchClosedPositionsSnapshot — the exact selector the wallet tab's
+ * Closed Positions section mounts — so a row the endpoint returns is
+ * proven to survive the consumer too.
  *
  * The only stub is the `server-only` marker package; the route, the
  * snapshot builder, the trading service, and the database run for real.
@@ -46,6 +50,7 @@ import {
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
+import { fetchClosedPositionsSnapshot } from '../../../apps/web/src/components/wallet/v2/closed-positions-pages';
 
 const { GET } = await import(
   '../../../apps/web/src/app/api/markets/positions/[userId]/route'
@@ -78,6 +83,26 @@ async function fetchSnapshot(query: string): Promise<SnapshotBody> {
   return (await response.json()) as SnapshotBody;
 }
 
+// No-op wallet, fixed balance, zero fees: this proves persisted
+// position-state mapping, not real cash/fee settlement.
+function makePredictionService(): PredictionMarketService {
+  return new PredictionMarketService({
+    db: new PredictionDbAdapter(),
+    wallet: {
+      debit: async () => {},
+      credit: async () => {},
+      recordPnL: async () => {},
+      getBalance: async () => ({ balance: 100000 }),
+    },
+    fees: {
+      tradingFeeRate: 0,
+      platformShare: 0,
+      referrerShare: 0,
+      minFeeAmount: 0,
+    },
+  });
+}
+
 let userId: string;
 let posOpen: string;
 let posResolved: string;
@@ -85,6 +110,9 @@ let posSoldWin: string;
 let posSoldLoss: string;
 let perpOpen: string;
 let perpClosed: string;
+// Position created by the real trading service in the sell-through test,
+// so the mounted-flow test can assert on the exact row the service wrote.
+let serviceSoldPositionId = '';
 
 // Rows this suite owns. Each array is populated only from the RETURNING
 // result of a successful insert, never from the proposed ids: if an insert
@@ -295,21 +323,7 @@ describe('user positions list — closed prediction positions', () => {
   });
 
   it('a position sold through the real trading service appears in the closed view', async () => {
-    const service = new PredictionMarketService({
-      db: new PredictionDbAdapter(),
-      wallet: {
-        debit: async () => {},
-        credit: async () => {},
-        recordPnL: async () => {},
-        getBalance: async () => ({ balance: 100000 }),
-      },
-      fees: {
-        tradingFeeRate: 0,
-        platformShare: 0,
-        referrerShare: 0,
-        minFeeAmount: 0,
-      },
-    });
+    const service = makePredictionService();
 
     const marketId = await generateSnowflakeId();
     const [createdMarket] = await db
@@ -334,15 +348,17 @@ describe('user positions list — closed prediction positions', () => {
       side: 'yes',
       amount: 100,
     });
+    // Record the created row before any later step can fail: a rejected
+    // sell (or a failed assertion below) must not leave the row outside
+    // cleanup — cleanupOwned deletes positions only by this ledger.
+    allPositionIds.push(bought.positionId);
+    serviceSoldPositionId = bought.positionId;
     const sold = await service.sell({
       userId,
       marketId,
       shares: bought.shares,
     });
     expect(sold.positionClosed).toBe(true);
-    // The service owns this row's id; record it so teardown deletes the
-    // row it created and nothing else.
-    allPositionIds.push(bought.positionId);
 
     const [row] = await db
       .select()
@@ -354,6 +370,76 @@ describe('user positions list — closed prediction positions', () => {
     const body = await fetchSnapshot('status=closed&type=prediction');
     const ids = body.predictions.positions.map((p) => p.id);
     expect(ids).toContain(bought.positionId);
+  });
+
+  it('the mounted Closed Positions flow keeps the sell-closed row', async () => {
+    // The wallet tab fetches status=all&type=all and selects closed
+    // history through fetchClosedPositionsSnapshot — drive that exact
+    // path with the real route payload, including the row the real
+    // trading service just closed by selling.
+    const body = await fetchSnapshot('status=all&type=all');
+    const result = await fetchClosedPositionsSnapshot(async () => body);
+    const ids = result.predictions.map((p) => p.id);
+    expect(ids).toContain(posSoldWin);
+    expect(ids).toContain(posSoldLoss);
+    expect(ids).toContain(posResolved);
+    expect(ids).toContain(serviceSoldPositionId);
+    expect(ids).not.toContain(posOpen);
+  });
+
+  it('a failed sell still leaves the bought position owned for cleanup', async () => {
+    const service = makePredictionService();
+    const marketId = await generateSnowflakeId();
+    const [createdMarket] = await db
+      .insert(markets)
+      .values({
+        id: marketId,
+        question: `Sell-failure test market ${marketId.slice(-6)}`,
+        yesShares: '10000',
+        noShares: '10000',
+        liquidity: '20000',
+        resolved: false,
+        resolution: null,
+        endDate: new Date(Date.now() + 86_400_000),
+        updatedAt: new Date(),
+      })
+      .returning({ id: markets.id });
+    allMarketIds.push(createdMarket!.id);
+
+    const bought = await service.buy({
+      userId,
+      marketId,
+      side: 'yes',
+      amount: 100,
+    });
+    // Owned before the failing step below, not after it.
+    allPositionIds.push(bought.positionId);
+
+    // Selling more shares than held rejects before writing anything.
+    await expect(
+      service.sell({ userId, marketId, shares: bought.shares + 1 })
+    ).rejects.toThrow('Insufficient shares');
+    expect(allPositionIds).toContain(bought.positionId);
+    const [row] = await db
+      .select()
+      .from(positions)
+      .where(eq(positions.id, bought.positionId));
+    expect(row?.status).toBe('active');
+    // The database stores shares as numeric(?, 6): the persisted value
+    // is the bought amount rounded to six decimals.
+    expect(Number(row?.shares)).toBeCloseTo(bought.shares, 6);
+
+    // The shared cleanup must actually remove the row the failed sell
+    // left behind — this is the failure path the old ordering missed.
+    // (Runs before the dedicated cleanup test below, which re-asserts
+    // the same owned-row absence; afterAll cleanup stays idempotent.)
+    await cleanupOwned();
+    expect(
+      await db
+        .select()
+        .from(positions)
+        .where(eq(positions.id, bought.positionId))
+    ).toEqual([]);
   });
 
   it('cleanup removes only rows this suite created', async () => {
