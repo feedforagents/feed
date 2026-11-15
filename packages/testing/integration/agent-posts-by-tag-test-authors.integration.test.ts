@@ -17,7 +17,18 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { FeedAgentExecutor } from '@feed/a2a';
-import { db, eq, inArray, posts, postTags, tags, users } from '@feed/db';
+import {
+  and,
+  db,
+  eq,
+  gameOnboarding,
+  inArray,
+  notInArray,
+  posts,
+  postTags,
+  tags,
+  users,
+} from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { generateSnowflakeId, type JsonValue } from '@feed/shared';
 import { executeGetPostsByTag } from '../../mcp/src/handlers/tool-handlers';
@@ -76,42 +87,97 @@ async function insertTag(id: string, name: string, scope = owned) {
 }
 
 async function cleanup(scope: OwnedRows) {
-  if (scope.postTagIds.length > 0) {
-    await db.delete(postTags).where(inArray(postTags.id, scope.postTagIds));
-    expect(
-      await db
-        .select({ id: postTags.id })
-        .from(postTags)
-        .where(inArray(postTags.id, scope.postTagIds))
-    ).toHaveLength(0);
-  }
-  if (scope.postIds.length > 0) {
-    await db.delete(posts).where(inArray(posts.id, scope.postIds));
-    expect(
-      await db
-        .select({ id: posts.id })
-        .from(posts)
-        .where(inArray(posts.id, scope.postIds))
-    ).toHaveLength(0);
-  }
-  if (scope.tagIds.length > 0) {
-    await db.delete(tags).where(inArray(tags.id, scope.tagIds));
-    expect(
-      await db
+  await db.transaction(async (tx) => {
+    // Guards run BEFORE any deletion, under locks, so a refusal rolls
+    // the whole cleanup back instead of committing a partial deletion.
+    // PostTag has no physical FK, so a foreign link to an owned Tag
+    // would be orphaned; GameOnboarding cascades off an owned User.
+    for (const tagId of scope.tagIds) {
+      await tx
         .select({ id: tags.id })
         .from(tags)
-        .where(inArray(tags.id, scope.tagIds))
-    ).toHaveLength(0);
-  }
-  if (scope.userIds.length > 0) {
-    await db.delete(users).where(inArray(users.id, scope.userIds));
-    expect(
-      await db
+        .where(eq(tags.id, tagId))
+        .for('update');
+      const foreignLinkCondition =
+        scope.postTagIds.length > 0
+          ? and(
+              eq(postTags.tagId, tagId),
+              notInArray(postTags.id, scope.postTagIds)
+            )
+          : eq(postTags.tagId, tagId);
+      const [foreignLink] = await tx
+        .select({ id: postTags.id })
+        .from(postTags)
+        .where(foreignLinkCondition)
+        .limit(1);
+      if (foreignLink) {
+        throw new Error(
+          `cleanup refused: foreign PostTag references owned tag ${tagId}`
+        );
+      }
+    }
+    for (const userId of scope.userIds) {
+      await tx
         .select({ id: users.id })
         .from(users)
-        .where(inArray(users.id, scope.userIds))
-    ).toHaveLength(0);
-  }
+        .where(eq(users.id, userId))
+        .for('update');
+      const [onboarding] = await tx
+        .select({ id: gameOnboarding.id })
+        .from(gameOnboarding)
+        .where(eq(gameOnboarding.userId, userId))
+        .limit(1);
+      if (onboarding) {
+        throw new Error(
+          `cleanup refused: foreign GameOnboarding references owned user ${userId}`
+        );
+      }
+    }
+    // Only now, with every guard passed, delete the owned rows
+    // child-first, and verify the deletions inside the same transaction.
+    if (scope.postTagIds.length > 0) {
+      await tx.delete(postTags).where(inArray(postTags.id, scope.postTagIds));
+      expect(
+        await tx
+          .select({ id: postTags.id })
+          .from(postTags)
+          .where(inArray(postTags.id, scope.postTagIds))
+      ).toHaveLength(0);
+    }
+    if (scope.postIds.length > 0) {
+      await tx.delete(posts).where(inArray(posts.id, scope.postIds));
+      expect(
+        await tx
+          .select({ id: posts.id })
+          .from(posts)
+          .where(inArray(posts.id, scope.postIds))
+      ).toHaveLength(0);
+    }
+    if (scope.tagIds.length > 0) {
+      await tx.delete(tags).where(inArray(tags.id, scope.tagIds));
+      expect(
+        await tx
+          .select({ id: tags.id })
+          .from(tags)
+          .where(inArray(tags.id, scope.tagIds))
+      ).toHaveLength(0);
+    }
+    if (scope.userIds.length > 0) {
+      await tx.delete(users).where(inArray(users.id, scope.userIds));
+      expect(
+        await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(inArray(users.id, scope.userIds))
+      ).toHaveLength(0);
+    }
+  });
+  // A refused cleanup throws above, so the scope is cleared only on
+  // success; a refused scope stays intact for a later retry.
+  scope.postTagIds.length = 0;
+  scope.postIds.length = 0;
+  scope.tagIds.length = 0;
+  scope.userIds.length = 0;
 }
 
 async function insertTaggedPost(
@@ -335,5 +401,78 @@ describe('agent posts-by-tag test-author exclusion', () => {
       await cleanup(attempted);
       await cleanup(existing);
     }
+  });
+
+  it('cleanup refuses when a foreign child references an owned parent', async () => {
+    const foreign: OwnedRows = {
+      userIds: [],
+      tagIds: [],
+      postIds: [],
+      postTagIds: [],
+    };
+    const foreignUser = `f109-foreign-${await generateSnowflakeId()}`;
+    await insertUser(foreignUser, false, foreign);
+    // A foreign PostTag pointing at the owned main tag: deleting the
+    // tag would orphan it (PostTag has no FK).
+    await insertTaggedPost(foreignUser, 1, {}, foreign);
+    // A foreign GameOnboarding on an owned user: deleting the user
+    // would silently remove it via ON DELETE CASCADE.
+    const [onboarding] = await db
+      .insert(gameOnboarding)
+      .values({ id: await generateSnowflakeId(), userId: AUTHOR_MAIN })
+      .returning({ id: gameOnboarding.id });
+    if (!onboarding) throw new Error('GameOnboarding insert returned no row');
+    const readAll = async () => ({
+      users: await db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, [...owned.userIds, foreignUser])),
+      tags: await db
+        .select({ id: tags.id })
+        .from(tags)
+        .where(inArray(tags.id, owned.tagIds)),
+      posts: await db
+        .select({ id: posts.id })
+        .from(posts)
+        .where(inArray(posts.id, [...owned.postIds, ...foreign.postIds])),
+      links: await db
+        .select({ id: postTags.id })
+        .from(postTags)
+        .where(
+          inArray(postTags.id, [...owned.postTagIds, ...foreign.postTagIds])
+        ),
+      onboarding: await db
+        .select({ id: gameOnboarding.id })
+        .from(gameOnboarding)
+        .where(eq(gameOnboarding.id, onboarding.id)),
+    });
+    const before = await readAll();
+    await expect(cleanup(owned)).rejects.toThrow(
+      'cleanup refused: foreign PostTag'
+    );
+    expect(await readAll()).toEqual(before);
+    // Remove only the foreign link side; the onboarding guard must
+    // still refuse on its own.
+    await db.delete(postTags).where(inArray(postTags.id, foreign.postTagIds));
+    await db.delete(posts).where(inArray(posts.id, foreign.postIds));
+    await db.delete(users).where(eq(users.id, foreignUser));
+    await expect(cleanup(owned)).rejects.toThrow(
+      'cleanup refused: foreign GameOnboarding'
+    );
+    expect(await readAll()).toEqual({
+      ...before,
+      users: before.users.filter((user) => owned.userIds.includes(user.id)),
+      posts: before.posts.filter((post) => owned.postIds.includes(post.id)),
+      links: before.links.filter((link) => owned.postTagIds.includes(link.id)),
+    });
+    await db.delete(gameOnboarding).where(eq(gameOnboarding.id, onboarding.id));
+    // The owned fixture itself survives the refused cleanups.
+    expect(await readAll()).toEqual({
+      users: before.users.filter((user) => owned.userIds.includes(user.id)),
+      tags: before.tags,
+      posts: before.posts.filter((post) => owned.postIds.includes(post.id)),
+      links: before.links.filter((link) => owned.postTagIds.includes(link.id)),
+      onboarding: [],
+    });
   });
 });
