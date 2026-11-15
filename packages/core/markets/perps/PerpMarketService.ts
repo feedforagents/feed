@@ -112,18 +112,22 @@ function settlePerpCharge(size: number, leverage: number, fee: number): number {
     .toNumber();
 }
 
+// An inexact intermediate sum rounds toward negative infinity, so no step
+// before the floor can raise a credit.
+const ProceedsDecimal = Decimal.clone({
+  precision: 40,
+  rounding: Decimal.ROUND_FLOOR,
+});
+
 function settlePerpProceeds(
   marginPaid: number,
   realizedPnL: number,
   fee: number
 ): number {
-  // realizedPnL comes from binary price arithmetic, so a break-even close can
-  // arrive as 49.99999999997. Drop representation noise far below a hundredth
-  // before rounding down, so noise alone cannot cost the trader a hundredth.
-  const proceeds = new Decimal(marginPaid)
-    .plus(realizedPnL)
-    .minus(fee)
-    .toDecimalPlaces(8, Decimal.ROUND_HALF_UP);
+  // The floorPoints rule for every close size, with no tolerance before the
+  // floor: a tail below a hundredth is never rounded up, because a real tail
+  // cannot be told apart from binary noise.
+  const proceeds = new ProceedsDecimal(marginPaid).plus(realizedPnL).minus(fee);
   return proceeds.isNegative()
     ? 0
     : proceeds.toDecimalPlaces(2, Decimal.ROUND_FLOOR).toNumber();
