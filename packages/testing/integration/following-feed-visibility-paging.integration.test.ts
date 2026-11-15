@@ -47,15 +47,19 @@ import {
 } from '@feed/api';
 import {
   and,
+  comments,
   db,
   eq,
   follows,
+  gameOnboarding,
   inArray,
   posts,
   userActorFollows,
   userBlocks,
   userMutes,
+  userPnLSnapshots,
   users,
+  whitelist,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
@@ -171,16 +175,88 @@ async function insertOwnedPost(
 }
 
 async function cleanup(scope: OwnedRows) {
+  // One guarded transaction: lock the owned parents and refuse on any
+  // foreign dependant before deleting anything, so a refusal rolls the
+  // whole cleanup back instead of committing a partial deletion.
+  // Cache/rate-limit side effects stay outside the transaction: no
+  // network calls inside db.transaction().
+  await db.transaction(async (tx) => {
+    for (const postId of scope.postIds) {
+      await tx
+        .select({ id: posts.id })
+        .from(posts)
+        .where(eq(posts.id, postId))
+        .for('update');
+      // This fixture owns no comments: any comment on an owned post is
+      // foreign, and deleting the post would orphan it (no physical FK).
+      const [foreignComment] = await tx
+        .select({ id: comments.id })
+        .from(comments)
+        .where(eq(comments.postId, postId))
+        .limit(1);
+      if (foreignComment) {
+        throw new Error(
+          `cleanup refused: foreign comment on owned post ${postId}`
+        );
+      }
+    }
+    for (const userId of scope.userIds) {
+      await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, userId))
+        .for('update');
+      // Any of these rows is owned by a separate flow: deleting the user
+      // would silently remove it via ON DELETE CASCADE.
+      const [onboarding, snapshots, whitelistRows] = await Promise.all([
+        tx
+          .select({ id: gameOnboarding.id })
+          .from(gameOnboarding)
+          .where(eq(gameOnboarding.userId, userId))
+          .limit(1),
+        tx
+          .select({ id: userPnLSnapshots.id })
+          .from(userPnLSnapshots)
+          .where(eq(userPnLSnapshots.userId, userId))
+          .limit(1),
+        tx
+          .select({ id: whitelist.id })
+          .from(whitelist)
+          .where(eq(whitelist.userId, userId))
+          .limit(1),
+      ]);
+      if (
+        onboarding.length > 0 ||
+        snapshots.length > 0 ||
+        whitelistRows.length > 0
+      ) {
+        throw new Error(
+          `cleanup refused: foreign row references user ${userId}`
+        );
+      }
+    }
+    if (scope.userIds.length > 0) {
+      await tx
+        .delete(userMutes)
+        .where(inArray(userMutes.muterId, scope.userIds));
+      await tx
+        .delete(userBlocks)
+        .where(inArray(userBlocks.blockerId, scope.userIds));
+      await tx
+        .delete(follows)
+        .where(inArray(follows.followerId, scope.userIds));
+      await tx
+        .delete(userActorFollows)
+        .where(inArray(userActorFollows.userId, scope.userIds));
+    }
+    if (scope.postIds.length > 0) {
+      await tx.delete(posts).where(inArray(posts.id, scope.postIds));
+    }
+    if (scope.userIds.length > 0) {
+      await tx.delete(users).where(inArray(users.id, scope.userIds));
+    }
+  });
   if (scope.userIds.length > 0) {
-    // Owner-wide relation cleanup is guarded by successful User ownership.
-    await db.delete(userMutes).where(inArray(userMutes.muterId, scope.userIds));
-    await db
-      .delete(userBlocks)
-      .where(inArray(userBlocks.blockerId, scope.userIds));
-    await db.delete(follows).where(inArray(follows.followerId, scope.userIds));
-    await db
-      .delete(userActorFollows)
-      .where(inArray(userActorFollows.userId, scope.userIds));
     for (const id of scope.userIds) {
       await invalidateCache(`follows:${id}`, { namespace: 'user:follows' });
       await invalidateCachePattern(`${id}:*`, {
@@ -193,7 +269,6 @@ async function cleanup(scope: OwnedRows) {
     }
   }
   if (scope.postIds.length > 0) {
-    await db.delete(posts).where(inArray(posts.id, scope.postIds));
     expect(
       await db
         .select({ id: posts.id })
@@ -202,7 +277,6 @@ async function cleanup(scope: OwnedRows) {
     ).toHaveLength(0);
   }
   if (scope.userIds.length > 0) {
-    await db.delete(users).where(inArray(users.id, scope.userIds));
     expect(
       await db
         .select({ id: users.id })
@@ -616,6 +690,50 @@ describe('GET /api/posts?following=true author exclusions', () => {
     } finally {
       await cleanup(attempted);
       await cleanup(existing);
+    }
+  });
+
+  it('refuses cleanup when a separately acquired onboarding row references an owned user', async () => {
+    const scope: OwnedRows = { postIds: [], userIds: [] };
+    try {
+      const user = await createViewer(scope);
+      const postId = await insertOwnedPost(
+        {
+          id: await generateSnowflakeId(),
+          authorId: user.userId,
+          content: 'refusal control',
+          timestamp: new Date(),
+        },
+        scope
+      );
+      // A GameOnboarding row acquired by a separate flow for the same
+      // user: deleting the user would silently remove it via
+      // ON DELETE CASCADE, so the guarded cleanup must refuse instead.
+      await db.insert(gameOnboarding).values({
+        id: await generateSnowflakeId(),
+        userId: user.userId,
+      });
+      await expect(cleanup(scope)).rejects.toThrow('cleanup refused');
+      expect(
+        await db.select().from(users).where(eq(users.id, user.userId))
+      ).toHaveLength(1);
+      expect(
+        await db.select().from(posts).where(eq(posts.id, postId))
+      ).toHaveLength(1);
+      expect(
+        await db
+          .select()
+          .from(gameOnboarding)
+          .where(eq(gameOnboarding.userId, user.userId))
+      ).toHaveLength(1);
+    } finally {
+      // Remove the foreign row directly, then the guarded cleanup can run.
+      if (scope.userIds[0]) {
+        await db
+          .delete(gameOnboarding)
+          .where(eq(gameOnboarding.userId, scope.userIds[0]));
+      }
+      await cleanup(scope);
     }
   });
 });
