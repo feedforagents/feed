@@ -31,12 +31,14 @@ mock.module('server-only', () => ({}));
 
 import {
   and,
+  count,
   db,
   eq,
   inArray,
   notifications,
   posts,
   reactions,
+  sql,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
@@ -46,7 +48,10 @@ let authorId: string;
 let likerId: string;
 let controlLikerId: string;
 let postId: string;
+// Only ids returned by a successful INSERT RETURNING are registered here.
+// A failed setup must not leave an id behind for teardown to delete.
 const ownedUserIds: string[] = [];
+const ownedPostIds: string[] = [];
 
 let likePOST: typeof import('../../../apps/web/src/app/api/posts/[id]/like/route').POST;
 let likeDELETE: typeof import('../../../apps/web/src/app/api/posts/[id]/like/route').DELETE;
@@ -111,7 +116,52 @@ async function likeRowsBy(userId: string) {
     );
 }
 
+/**
+ * Disposable-target guard (same rule as
+ * trading-and-questions.integration.test.ts): the configured database must
+ * be a local test/verification database, and the live connection must point
+ * at it. Fixture teardown deletes rows, so it must never run against a
+ * shared or production database.
+ */
+function assertDisposableDatabaseUrl(value: string | undefined, label: string) {
+  if (!value) throw new Error(`${label} is required for integration tests`);
+  const url = new URL(value);
+  const databaseName = decodeURIComponent(url.pathname.slice(1));
+  if (
+    !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) ||
+    !/(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName)
+  ) {
+    throw new Error(
+      `${label} must point to a local test or verification database`
+    );
+  }
+  return databaseName;
+}
+
+async function assertDisposableDatabaseTarget() {
+  const databaseName = assertDisposableDatabaseUrl(
+    process.env.DATABASE_URL,
+    'DATABASE_URL'
+  );
+  for (const label of [
+    'DIRECT_DATABASE_URL',
+    'DATABASE_READ_REPLICA_URL',
+  ] as const) {
+    if (
+      process.env[label] &&
+      assertDisposableDatabaseUrl(process.env[label], label) !== databaseName
+    ) {
+      throw new Error(`${label} must point to the same disposable database`);
+    }
+  }
+  const [connected] = await db.execute(sql`SELECT current_database() AS name`);
+  if (connected?.name !== databaseName)
+    throw new Error('Connected database does not match DATABASE_URL');
+}
+
 beforeAll(async () => {
+  await assertDisposableDatabaseTarget();
+
   ({ POST: likePOST, DELETE: likeDELETE } = await import(
     '../../../apps/web/src/app/api/posts/[id]/like/route'
   ));
@@ -131,53 +181,96 @@ beforeAll(async () => {
     generateSnowflakeId(),
     generateSnowflakeId(),
   ]);
-  ownedUserIds.push(authorId, likerId, controlLikerId);
 
   const now = new Date();
   const past = new Date(now.getTime() - 10 * 60_000);
 
   // privyId = own id so ensureUserForAuth resolves the fixture row
   // directly instead of provisioning a fresh account.
-  await db.insert(users).values([
-    {
-      id: authorId,
-      privyId: authorId,
-      username: `f166-author-${authorId}`,
-      displayName: 'F166 Author',
-      updatedAt: now,
-    },
-    {
-      id: likerId,
-      privyId: likerId,
-      username: `f166-liker-${likerId}`,
-      displayName: 'F166 Liker',
-      updatedAt: now,
-    },
-    {
-      id: controlLikerId,
-      privyId: controlLikerId,
-      username: `f166-control-${controlLikerId}`,
-      displayName: 'F166 Control Liker',
-      updatedAt: now,
-    },
-  ]);
+  // Register cleanup ids only from the INSERT RETURNING receipts: if an
+  // insert fails (e.g. a primary-key collision), no id is registered and
+  // teardown deletes nothing.
+  const insertedUsers = await db
+    .insert(users)
+    .values([
+      {
+        id: authorId,
+        privyId: authorId,
+        username: `f166-author-${authorId}`,
+        displayName: 'F166 Author',
+        updatedAt: now,
+      },
+      {
+        id: likerId,
+        privyId: likerId,
+        username: `f166-liker-${likerId}`,
+        displayName: 'F166 Liker',
+        updatedAt: now,
+      },
+      {
+        id: controlLikerId,
+        privyId: controlLikerId,
+        username: `f166-control-${controlLikerId}`,
+        displayName: 'F166 Control Liker',
+        updatedAt: now,
+      },
+    ])
+    .returning({ id: users.id });
+  ownedUserIds.push(...insertedUsers.map((row) => row.id));
 
-  await db.insert(posts).values({
-    id: postId,
-    content: 'Fixture post for like-count deletion test',
-    authorId,
-    timestamp: past,
-    createdAt: past,
-  });
+  const [insertedPost] = await db
+    .insert(posts)
+    .values({
+      id: postId,
+      content: 'Fixture post for like-count deletion test',
+      authorId,
+      timestamp: past,
+      createdAt: past,
+    })
+    .returning({ id: posts.id });
+  if (insertedPost) ownedPostIds.push(insertedPost.id);
 });
 
+/**
+ * Teardown deletes only rows this fixture acquired (INSERT RETURNING
+ * receipts): reactions and notifications made by owned users on the owned
+ * post, then the owned post and users. It never deletes all rows for a post
+ * id. If a row outside the owned set still references the post, teardown
+ * refuses to delete the post instead of deleting around it.
+ */
 afterAll(async () => {
-  await db
-    .delete(notifications)
-    .where(eq(notifications.postId, postId))
-    .catch(() => {});
-  await db.delete(reactions).where(eq(reactions.postId, postId));
-  await db.delete(posts).where(eq(posts.id, postId));
+  if (ownedPostIds.length > 0 && ownedUserIds.length > 0) {
+    await db
+      .delete(notifications)
+      .where(
+        and(
+          inArray(notifications.postId, ownedPostIds),
+          inArray(notifications.userId, ownedUserIds)
+        )
+      )
+      .catch(() => {});
+    await db
+      .delete(reactions)
+      .where(
+        and(
+          inArray(reactions.postId, ownedPostIds),
+          inArray(reactions.userId, ownedUserIds)
+        )
+      );
+    const [leftoverReactions] = await db
+      .select({ n: count() })
+      .from(reactions)
+      .where(inArray(reactions.postId, ownedPostIds));
+    const [leftoverNotifications] = await db
+      .select({ n: count() })
+      .from(notifications)
+      .where(inArray(notifications.postId, ownedPostIds));
+    if ((leftoverReactions?.n ?? 0) > 0 || (leftoverNotifications?.n ?? 0) > 0)
+      throw new Error(
+        'Refusing to delete the fixture post: rows outside the owned set still reference it'
+      );
+    await db.delete(posts).where(inArray(posts.id, ownedPostIds));
+  }
   if (ownedUserIds.length > 0) {
     await db.delete(users).where(inArray(users.id, ownedUserIds));
   }
