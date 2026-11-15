@@ -23,9 +23,17 @@
  * Ownership: fixture ids are registered only from successful INSERT …
  * RETURNING results, and teardown deletes only registered rows — a
  * colliding setup insert registers nothing and can never delete a
- * pre-existing row. Teardown refuses when a foreign child sits under an
- * owned parent, so a separately owned Position or ArcState can never be
- * erased or cascade-deleted. The list fetch uses ?limit=100 (the paginated path)
+ * pre-existing row. Child receipts come only from operation effects:
+ * buy/sell return the position id they upserted, and trade/history ids
+ * are recorded as the before/after delta of one operation — a
+ * parent-wide scan never grants deletion ownership, so a row another
+ * owner added under a market before the next sync is never adopted.
+ * Teardown refuses when a foreign child sits under an owned parent, so
+ * a separately owned Position or ArcState can never be erased or
+ * cascade-deleted, and foreign User/Question FK children (onboarding,
+ * PnL snapshots, whitelist, admin roles, arc plans, timeframed
+ * markets) are refused rather than cascade-deleted with the parent.
+ * The list fetch uses ?limit=100 (the paginated path)
  * so every observation bypasses the 12 s list cache and reads fresh data.
  */
 
@@ -38,16 +46,22 @@ import {
   PredictionMarketService,
 } from '@feed/core/markets/prediction';
 import {
+  adminRoles,
   arcStates,
   db,
   eq,
+  gameOnboarding,
   inArray,
   markets,
   positions,
   predictionPriceHistories,
   predictionTrades,
+  questionArcPlans,
   questions,
+  timeframedMarkets,
+  userPnLSnapshots,
   users,
+  whitelist,
 } from '@feed/db';
 import { NextRequest } from 'next/server';
 
@@ -104,9 +118,14 @@ const ownedTradeIds = new Set<string>();
 const ownedHistoryIds = new Set<string>();
 const ownedPositionIds = new Set<string>();
 
-/** Record every child row a trade just created under one fixture market. */
-async function syncChildReceipts(marketId: string): Promise<void> {
-  const [trades, histories, positionRows] = await Promise.all([
+/** Ids of the trade-ledger and price-history rows under one market. */
+type TradeHistoryIds = {
+  trades: Set<string>;
+  histories: Set<string>;
+};
+
+async function listTradeHistoryIds(marketId: string): Promise<TradeHistoryIds> {
+  const [trades, histories] = await Promise.all([
     db
       .select({ id: predictionTrades.id })
       .from(predictionTrades)
@@ -115,22 +134,57 @@ async function syncChildReceipts(marketId: string): Promise<void> {
       .select({ id: predictionPriceHistories.id })
       .from(predictionPriceHistories)
       .where(eq(predictionPriceHistories.marketId, marketId)),
-    db
-      .select({ id: positions.id })
-      .from(positions)
-      .where(eq(positions.marketId, marketId)),
   ]);
-  for (const row of trades) ownedTradeIds.add(row.id);
-  for (const row of histories) ownedHistoryIds.add(row.id);
-  for (const row of positionRows) ownedPositionIds.add(row.id);
+  return {
+    trades: new Set(trades.map((row) => row.id)),
+    histories: new Set(histories.map((row) => row.id)),
+  };
+}
+
+/**
+ * Record only the trade/history rows an operation created: ids present
+ * after the operation that were absent before it. A parent-wide scan
+ * would adopt a row another owner added under the market in between,
+ * so the before-set is the attribution boundary — a row that predates
+ * the operation is never granted deletion ownership. buy/sell return no
+ * trade or history id, so the before/after delta is the only
+ * attributable record for these two tables.
+ */
+async function recordTradeHistory(
+  marketId: string,
+  before: TradeHistoryIds
+): Promise<void> {
+  const after = await listTradeHistoryIds(marketId);
+  for (const id of after.trades)
+    if (!before.trades.has(id)) ownedTradeIds.add(id);
+  for (const id of after.histories)
+    if (!before.histories.has(id)) ownedHistoryIds.add(id);
+}
+
+/**
+ * Run one buy/sell and register exactly the rows it created: the
+ * position id comes from the operation's own return value, and the
+ * trade/history ids from the before/after delta. Nothing is ever
+ * collected by scanning the market afterwards.
+ */
+async function tradeAndRecord(
+  marketId: string,
+  trade: () => Promise<{ positionId: string }>
+): Promise<void> {
+  const before = await listTradeHistoryIds(marketId);
+  const result = await trade();
+  ownedPositionIds.add(result.positionId);
+  await recordTradeHistory(marketId, before);
 }
 
 /**
  * Delete only attributable receipts, child-first, in one transaction.
  * Any child row under an owned parent that this run did not create — a
- * separately owned Position, or an ArcState that the baseline
- * ON DELETE CASCADE FK would erase when its Question is deleted — refuses
- * the whole cleanup, so nothing is deleted at all.
+ * separately owned Position, an ArcState that the baseline
+ * ON DELETE CASCADE FK would erase when its Question is deleted, or a
+ * foreign User/Question FK child (onboarding, PnL snapshot, whitelist,
+ * admin role, arc plan, timeframed market) that would cascade with the
+ * parent — refuses the whole cleanup, so nothing is deleted at all.
  */
 async function cleanupOwnedFixtures(): Promise<void> {
   await db.transaction(async (tx) => {
@@ -155,13 +209,57 @@ async function cleanupOwnedFixtures(): Promise<void> {
             .from(positions)
             .where(inArray(positions.marketId, ownedMarketIds))
         : [];
-    // This run never creates ArcStates, so any row here is foreign.
+    // This run never creates ArcStates, arc plans, timeframed markets,
+    // onboarding rows, PnL snapshots, whitelist entries or admin roles,
+    // so any row here is foreign.
     const arcStateRows =
       ownedQuestionIds.length > 0
         ? await tx
             .select({ id: arcStates.id })
             .from(arcStates)
             .where(inArray(arcStates.questionId, ownedQuestionIds))
+        : [];
+    const arcPlanRows =
+      ownedQuestionIds.length > 0
+        ? await tx
+            .select({ id: questionArcPlans.id })
+            .from(questionArcPlans)
+            .where(inArray(questionArcPlans.questionId, ownedQuestionIds))
+        : [];
+    const timeframedRows =
+      ownedQuestionIds.length > 0
+        ? await tx
+            .select({ id: timeframedMarkets.id })
+            .from(timeframedMarkets)
+            .where(inArray(timeframedMarkets.questionId, ownedQuestionIds))
+        : [];
+    const onboardingRows =
+      ownedUserIds.length > 0
+        ? await tx
+            .select({ id: gameOnboarding.id })
+            .from(gameOnboarding)
+            .where(inArray(gameOnboarding.userId, ownedUserIds))
+        : [];
+    const pnlRows =
+      ownedUserIds.length > 0
+        ? await tx
+            .select({ id: userPnLSnapshots.id })
+            .from(userPnLSnapshots)
+            .where(inArray(userPnLSnapshots.userId, ownedUserIds))
+        : [];
+    const whitelistRows =
+      ownedUserIds.length > 0
+        ? await tx
+            .select({ id: whitelist.id })
+            .from(whitelist)
+            .where(inArray(whitelist.userId, ownedUserIds))
+        : [];
+    const adminRoleRows =
+      ownedUserIds.length > 0
+        ? await tx
+            .select({ id: adminRoles.id })
+            .from(adminRoles)
+            .where(inArray(adminRoles.userId, ownedUserIds))
         : [];
     const foreign = [
       ...tradeRows
@@ -174,6 +272,12 @@ async function cleanupOwnedFixtures(): Promise<void> {
         .filter((row) => !ownedPositionIds.has(row.id))
         .map((row) => `Position ${row.id}`),
       ...arcStateRows.map((row) => `ArcState ${row.id}`),
+      ...arcPlanRows.map((row) => `QuestionArcPlan ${row.id}`),
+      ...timeframedRows.map((row) => `TimeframedMarket ${row.id}`),
+      ...onboardingRows.map((row) => `GameOnboarding ${row.id}`),
+      ...pnlRows.map((row) => `UserPnLSnapshot ${row.id}`),
+      ...whitelistRows.map((row) => `Whitelist ${row.id}`),
+      ...adminRoleRows.map((row) => `AdminRole ${row.id}`),
     ];
     if (foreign.length > 0) {
       throw new Error(
@@ -244,13 +348,17 @@ async function createMarket(id: string, liquidity: number): Promise<void> {
     .returning();
   if (!question) throw new Error(`question insert failed for ${id}`);
   ownedQuestionIds.push(question.id);
+  // The market id is the fresh question id, so the before-set is empty
+  // unless another owner guessed it; the delta still only adopts rows
+  // this creation made.
+  const before = await listTradeHistoryIds(id);
   const market = await new PredictionDbAdapter().createMarketFromQuestion(
     { ...question, status: 'active' as const },
     liquidity,
     { initialYesProbability: 0.5 }
   );
   ownedMarketIds.push(market.id);
-  await syncChildReceipts(market.id);
+  await recordTradeHistory(market.id, before);
 }
 
 beforeAll(async () => {
@@ -295,13 +403,14 @@ beforeAll(async () => {
       minFeeAmount: 0.01,
     },
   });
-  await service.buy({
-    marketId: tradedId,
-    userId,
-    amount: 500,
-    side: 'yes',
-  });
-  await syncChildReceipts(tradedId);
+  await tradeAndRecord(tradedId, () =>
+    service.buy({
+      marketId: tradedId,
+      userId,
+      amount: 500,
+      side: 'yes',
+    })
+  );
 });
 
 afterAll(async () => {
@@ -376,13 +485,14 @@ describe('markets list volume', () => {
   });
 
   it('keeps volume after a partial sell', async () => {
-    await service.buy({
-      marketId: soldId,
-      userId,
-      amount: 500,
-      side: 'yes',
-    });
-    await syncChildReceipts(soldId);
+    await tradeAndRecord(soldId, () =>
+      service.buy({
+        marketId: soldId,
+        userId,
+        amount: 500,
+        side: 'yes',
+      })
+    );
     const afterBuy = await ledgerVolume(soldId);
     expect(afterBuy).toBeGreaterThan(0);
     const bought = await positionShares(soldId);
@@ -394,13 +504,14 @@ describe('markets list volume', () => {
       'yes'
     );
     expect(position).not.toBeNull();
-    await service.sell({
-      marketId: soldId,
-      userId,
-      shares: bought / 2,
-      positionId: position?.id,
-    });
-    await syncChildReceipts(soldId);
+    await tradeAndRecord(soldId, () =>
+      service.sell({
+        marketId: soldId,
+        userId,
+        shares: bought / 2,
+        positionId: position?.id,
+      })
+    );
 
     // A sell ADDS volume: the ledger holds the buy plus the sell.
     const afterSell = await ledgerVolume(soldId);
@@ -426,13 +537,14 @@ describe('markets list volume', () => {
       'yes'
     );
     expect(position).not.toBeNull();
-    await service.sell({
-      marketId: soldId,
-      userId,
-      shares: remaining,
-      positionId: position?.id,
-    });
-    await syncChildReceipts(soldId);
+    await tradeAndRecord(soldId, () =>
+      service.sell({
+        marketId: soldId,
+        userId,
+        shares: remaining,
+        positionId: position?.id,
+      })
+    );
 
     // The closing sell adds volume too, while the position is now empty.
     // The old positions-based definition reported zero here.
@@ -614,6 +726,151 @@ describe('fixture ownership', () => {
       await db.delete(positions).where(eq(positions.id, foreignPositionId));
       await db.delete(arcStates).where(eq(arcStates.id, foreignArcStateId));
       await db.delete(users).where(eq(users.id, foreignUserId));
+    }
+  });
+
+  it('refuses cleanup when a foreign Position is added before the next sync', async () => {
+    const foreignUserId = `f138-mlv-foreign3-user-${suffix}`;
+    const foreignPositionId = `f138-mlv-foreign3-pos-${suffix}`;
+
+    const [foreignUser] = await db
+      .insert(users)
+      .values({
+        id: foreignUserId,
+        username: `f138foreign3-${suffix}`,
+        displayName: 'Foreign Fixture User 3',
+        updatedAt: new Date(),
+      })
+      .returning();
+    expect(foreignUser?.id).toBe(foreignUserId);
+    // Another owner adds a Position on this run's traded market BEFORE the
+    // next synchronization — the reviewed path: a parent-wide scan would
+    // adopt this row and the final exact-ID delete would remove it.
+    const [foreignPosition] = await db
+      .insert(positions)
+      .values({
+        id: foreignPositionId,
+        userId: foreignUserId,
+        marketId: tradedId,
+        side: true,
+        shares: '1',
+        avgPrice: '0.5',
+        updatedAt: new Date(),
+      })
+      .returning();
+    expect(foreignPosition?.id).toBe(foreignPositionId);
+
+    try {
+      // A real operation on the traded market, followed by the next sync.
+      const position = await new PredictionDbAdapter().getPosition(
+        userId,
+        tradedId,
+        'yes'
+      );
+      expect(position).not.toBeNull();
+      const ownShares = Number(position?.shares ?? 0);
+      expect(ownShares).toBeGreaterThan(0);
+      await tradeAndRecord(tradedId, () =>
+        service.sell({
+          marketId: tradedId,
+          userId,
+          shares: ownShares / 2,
+          positionId: position?.id,
+        })
+      );
+
+      let refused = false;
+      try {
+        await cleanupOwnedFixtures();
+      } catch (error) {
+        refused =
+          error instanceof Error && /cleanup refused/.test(error.message);
+      }
+      expect(refused).toBe(true);
+
+      // Nothing was deleted: the foreign row survives, and so do the
+      // owned rows the adopted cleanup would have removed.
+      const [positionAfter] = await db
+        .select()
+        .from(positions)
+        .where(eq(positions.id, foreignPositionId));
+      expect(positionAfter?.id).toBe(foreignPositionId);
+      const ownedTrades = await db
+        .select()
+        .from(predictionTrades)
+        .where(inArray(predictionTrades.id, [...ownedTradeIds]));
+      expect(ownedTrades.length).toBeGreaterThan(0);
+      const [ownedMarketAfter] = await db
+        .select()
+        .from(markets)
+        .where(eq(markets.id, tradedId));
+      expect(ownedMarketAfter?.id).toBe(tradedId);
+    } finally {
+      await db.delete(positions).where(eq(positions.id, foreignPositionId));
+      await db.delete(users).where(eq(users.id, foreignUserId));
+    }
+  });
+
+  it('refuses cleanup when a foreign User/Question FK child sits under an owned parent', async () => {
+    const foreignOnboardingId = `f138-mlv-foreign4-onb-${suffix}`;
+    const foreignArcPlanId = `f138-mlv-foreign4-arcplan-${suffix}`;
+
+    // Rows another owner holds against this run's own user/question.
+    // This run never creates onboarding, PnL, whitelist, admin-role,
+    // arc-plan or timeframed rows, so any such row is foreign — and
+    // deleting the parent would cascade-erase it.
+    const [foreignOnboarding] = await db
+      .insert(gameOnboarding)
+      .values({ id: foreignOnboardingId, userId })
+      .returning();
+    expect(foreignOnboarding?.id).toBe(foreignOnboardingId);
+    const [foreignArcPlan] = await db
+      .insert(questionArcPlans)
+      .values({
+        id: foreignArcPlanId,
+        questionId: tradedId,
+        uncertaintyPeakDay: 1,
+        clarityOnsetDay: 2,
+        verificationDay: 3,
+        phaseRatios: { early: 1, middle: 1, late: 1, climax: 1 },
+      })
+      .returning();
+    expect(foreignArcPlan?.id).toBe(foreignArcPlanId);
+
+    try {
+      let refused = false;
+      try {
+        await cleanupOwnedFixtures();
+      } catch (error) {
+        refused =
+          error instanceof Error && /cleanup refused/.test(error.message);
+      }
+      expect(refused).toBe(true);
+
+      // Nothing was deleted: the foreign rows survive, and so does the
+      // owned user the cascade would have removed them with.
+      const [onboardingAfter] = await db
+        .select()
+        .from(gameOnboarding)
+        .where(eq(gameOnboarding.id, foreignOnboardingId));
+      expect(onboardingAfter?.id).toBe(foreignOnboardingId);
+      const [arcPlanAfter] = await db
+        .select()
+        .from(questionArcPlans)
+        .where(eq(questionArcPlans.id, foreignArcPlanId));
+      expect(arcPlanAfter?.id).toBe(foreignArcPlanId);
+      const [ownedUserAfter] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, userId));
+      expect(ownedUserAfter?.id).toBe(userId);
+    } finally {
+      await db
+        .delete(gameOnboarding)
+        .where(eq(gameOnboarding.id, foreignOnboardingId));
+      await db
+        .delete(questionArcPlans)
+        .where(eq(questionArcPlans.id, foreignArcPlanId));
     }
   });
 });
