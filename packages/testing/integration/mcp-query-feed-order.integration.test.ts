@@ -19,8 +19,11 @@
  *
  * Isolation: all fixture posts carry one run-owned question number,
  * so the questionId window (an existing filter) contains exactly
- * this fixture; the order assertions run against that window with no
- * filtering, as well as against the plain feed filtered to owned IDs.
+ * this fixture; the order assertions run against that window only.
+ * The plain-feed cases used to assert the same order after filtering
+ * a global limit window to owned IDs, but one newer eligible post
+ * consumes a limit slot and breaks them on a populated feed, so they
+ * were removed — the window cases assert the identical order.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
@@ -215,20 +218,6 @@ describe('MCP query_feed total order', () => {
     ...[...tieIds].sort().reverse(),
     olderPostId,
   ];
-
-  it('returns distinct timestamps newest-first and a tied block in id-descending order', async () => {
-    const ids = (await feedIds({ limit: 50 })).filter((id) =>
-      owned.posts.includes(id)
-    );
-    expect(ids).toEqual(expectedOrder());
-  });
-
-  it('the limit cut keeps the id-descending head of a tied block', async () => {
-    const ids = (await feedIds({ limit: 11 })).filter((id) =>
-      owned.posts.includes(id)
-    );
-    expect(ids).toEqual(expectedOrder().slice(0, 11));
-  });
 
   it('returns exactly the fixture, in total order, inside the question window', async () => {
     const ids = await feedIds({ limit: 50, questionId });
