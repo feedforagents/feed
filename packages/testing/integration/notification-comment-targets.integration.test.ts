@@ -13,14 +13,18 @@
  *
  * Fixture ownership: every ID is registered only from a successful
  * INSERT ... RETURNING, and cleanup deletes exactly those owned rows.
- * Notifications are tracked by the IDs the creator calls actually made,
- * never by recipient. A user is deleted only when nothing references it
- * that this fixture does not own — an unowned notification, or a
- * GameOnboarding / UserPnLSnapshot / Whitelist row that would vanish
- * through ON DELETE CASCADE. A setup that fails partway (for example on
- * an ID collision with a pre-existing post or comment) therefore cannot
- * delete data the fixture did not create; the ownership describe below
- * proves that.
+ * Notifications are matched to the exact inputs the creator calls were
+ * given (type, actor, comment/post/chat) — never adopted because they
+ * appeared during a time window. A cleanup that finds any row it does
+ * not own refuses entirely and deletes nothing, so a partial setup or a
+ * concurrent foreign row can never orphan or erase another owner's data.
+ * A user is deleted only when nothing references it that this fixture
+ * does not own — an unowned notification, or a GameOnboarding /
+ * UserPnLSnapshot / Whitelist row that would vanish through
+ * ON DELETE CASCADE. A setup that fails partway (for example on an ID
+ * collision with a pre-existing post or comment) therefore cannot delete
+ * data the fixture did not create; the ownership describe below proves
+ * that.
  *
  * Requires DATABASE_URL pointing at a disposable database with schema applied.
  */
@@ -123,44 +127,126 @@ async function insertComment(
   return row.id;
 }
 
-async function recordCreatedNotifications(
+// A notification this fixture's creator calls made, identified by the
+// exact inputs passed to the creator — not by appearing in a time
+// window. Every id in the tuple is a fresh snowflake this fixture
+// generated (post, comment, chat), so no other owner can produce the
+// same tuple; a row created by someone else between the reads is never
+// adopted. The notify* wrappers return void — createNotification's id
+// never reaches the caller — so the tuple is the attributable receipt
+// available to this fixture.
+interface ExpectedNotification {
+  type: string;
+  actorId: string;
+  commentId?: string | null;
+  postId?: string | null;
+  chatId?: string | null;
+}
+
+function matchesExpected(
+  row: {
+    type: string;
+    actorId: string | null;
+    commentId: string | null;
+    postId: string | null;
+    chatId: string | null;
+  },
+  expected: ExpectedNotification
+): boolean {
+  return (
+    row.type === expected.type &&
+    row.actorId === expected.actorId &&
+    (row.commentId ?? null) === (expected.commentId ?? null) &&
+    (row.postId ?? null) === (expected.postId ?? null) &&
+    (row.chatId ?? null) === (expected.chatId ?? null)
+  );
+}
+
+async function recordExpectedNotifications(
   registry: FixtureRegistry,
   userId: string,
-  beforeIds: Set<string>
+  expected: ExpectedNotification[]
 ): Promise<void> {
   const rows = await db
-    .select({ id: notifications.id })
+    .select({
+      id: notifications.id,
+      type: notifications.type,
+      actorId: notifications.actorId,
+      commentId: notifications.commentId,
+      postId: notifications.postId,
+      chatId: notifications.chatId,
+    })
     .from(notifications)
     .where(eq(notifications.userId, userId));
-  for (const row of rows) {
-    if (!beforeIds.has(row.id)) registry.notificationIds.push(row.id);
+  for (const wanted of expected) {
+    const match = rows.find(
+      (row) =>
+        matchesExpected(row, wanted) &&
+        !registry.notificationIds.includes(row.id)
+    );
+    if (match) registry.notificationIds.push(match.id);
   }
 }
 
 async function cleanupRegistry(registry: FixtureRegistry): Promise<void> {
-  const deletableUserIds: string[] = [];
   await db.transaction(async (tx) => {
-    // Notifications: only the rows this fixture's creator calls made.
-    if (registry.notificationIds.length > 0) {
-      await tx
-        .delete(notifications)
-        .where(inArray(notifications.id, registry.notificationIds));
-    }
-    if (registry.commentIds.length > 0) {
-      await tx
-        .delete(comments)
-        .where(inArray(comments.id, registry.commentIds));
-    }
+    // Refusal checks run BEFORE any deletion, under locks, so a refusal
+    // rolls the whole cleanup back instead of committing a partial
+    // deletion. Comment.postId / parentCommentId have no physical FK, so
+    // the Post/Comment logical references need explicit guards.
     if (registry.postId) {
-      await tx.delete(posts).where(eq(posts.id, registry.postId));
+      // Lock the owned post, then refuse when a comment this fixture
+      // does not own hangs under it — deleting the post would orphan it.
+      await tx
+        .select({ id: posts.id })
+        .from(posts)
+        .where(eq(posts.id, registry.postId))
+        .for('update');
+      const foreignCommentCondition =
+        registry.commentIds.length > 0
+          ? and(
+              eq(comments.postId, registry.postId),
+              notInArray(comments.id, registry.commentIds)
+            )
+          : eq(comments.postId, registry.postId);
+      const [foreignComment] = await tx
+        .select({ id: comments.id })
+        .from(comments)
+        .where(foreignCommentCondition)
+        .limit(1);
+      if (foreignComment) {
+        throw new Error(
+          `cleanup refused: foreign comment on owned post ${registry.postId}`
+        );
+      }
+      // A foreign reply to an owned comment would be orphaned the same
+      // way when the owned comment is deleted.
+      if (registry.commentIds.length > 0) {
+        const [foreignReply] = await tx
+          .select({ id: comments.id })
+          .from(comments)
+          .where(
+            and(
+              inArray(comments.parentCommentId, registry.commentIds),
+              notInArray(comments.id, registry.commentIds)
+            )
+          )
+          .limit(1);
+        if (foreignReply) {
+          throw new Error('cleanup refused: foreign reply to owned comment');
+        }
+      }
     }
-    // Users: refuse any user that still has a reference this fixture
-    // does not own. Deleting such a user would remove the other owner's
-    // notification outright, or its GameOnboarding / UserPnLSnapshot /
-    // Whitelist row through ON DELETE CASCADE. The check runs inside
-    // the same transaction as the deletes, so the decision and the
-    // deletion cannot drift apart.
+    // Users: lock the parent row before checking its references, so a
+    // concurrent insert cannot slip in between the check and the delete.
+    // Any foreign reference refuses the whole cleanup.
+    const deletableUserIds: string[] = [];
     for (const userId of registry.userIds) {
+      await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, userId))
+        .for('update');
       const unownedNotificationCondition =
         registry.notificationIds.length > 0
           ? and(
@@ -192,26 +278,42 @@ async function cleanupRegistry(registry: FixtureRegistry): Promise<void> {
             .limit(1),
         ]);
       if (
-        unownedNotifications.length === 0 &&
-        onboarding.length === 0 &&
-        snapshots.length === 0 &&
-        whitelistRows.length === 0
+        unownedNotifications.length > 0 ||
+        onboarding.length > 0 ||
+        snapshots.length > 0 ||
+        whitelistRows.length > 0
       ) {
-        deletableUserIds.push(userId);
+        throw new Error(
+          `cleanup refused: foreign row references user ${userId}`
+        );
       }
+      deletableUserIds.push(userId);
+    }
+    // Only now, with every guard passed, delete the owned rows.
+    // Notifications: only the rows this fixture's creator calls made.
+    if (registry.notificationIds.length > 0) {
+      await tx
+        .delete(notifications)
+        .where(inArray(notifications.id, registry.notificationIds));
+    }
+    if (registry.commentIds.length > 0) {
+      await tx
+        .delete(comments)
+        .where(inArray(comments.id, registry.commentIds));
+    }
+    if (registry.postId) {
+      await tx.delete(posts).where(eq(posts.id, registry.postId));
     }
     if (deletableUserIds.length > 0) {
       await tx.delete(users).where(inArray(users.id, deletableUserIds));
     }
   });
+  // A refused cleanup throws above, so the registry is cleared only on
+  // success; a refused registry stays intact for a later retry.
   registry.commentIds.length = 0;
   registry.notificationIds.length = 0;
   registry.postId = null;
-  // Refused users stay registered: the rows blocking them may be removed
-  // by their owner later, and a follow-up cleanup must still be able to
-  // delete them. Clearing them here would leak the user row.
-  const deletedUserIds = new Set(deletableUserIds);
-  registry.userIds = registry.userIds.filter((id) => !deletedUserIds.has(id));
+  registry.userIds = [];
 }
 
 describe('notification comment targets', () => {
@@ -244,15 +346,6 @@ describe('notification comment targets', () => {
     reactedComment = await insertComment(fixtures, postId, recipient);
     chatId = await generateSnowflakeId();
 
-    const notificationIdsBefore = new Set(
-      (
-        await db
-          .select({ id: notifications.id })
-          .from(notifications)
-          .where(eq(notifications.userId, recipient))
-      ).map((row) => row.id)
-    );
-
     // Post reaction first: its dedupe check has no commentId condition, so
     // creating it after the comment reaction would suppress it.
     await notifyReactionOnPost(recipient, actor, postId);
@@ -269,11 +362,23 @@ describe('notification comment targets', () => {
     await notifyFollow(recipient, actor);
     await notifyDMMessage(recipient, actor, chatId, 'hello there');
 
-    await recordCreatedNotifications(
-      fixtures,
-      recipient,
-      notificationIdsBefore
-    );
+    // Adopt only the rows these exact creator calls made, by tuple —
+    // never any other notification that happens to exist for the
+    // recipient.
+    await recordExpectedNotifications(fixtures, recipient, [
+      { type: 'reaction', actorId: actor, postId, commentId: null },
+      { type: 'comment', actorId: actor, postId, commentId: commentOnPost },
+      { type: 'reply', actorId: actor, postId, commentId: parentComment },
+      { type: 'mention', actorId: actor, postId, commentId: mentionComment },
+      {
+        type: 'reaction',
+        actorId: actor,
+        postId,
+        commentId: reactedComment,
+      },
+      { type: 'follow', actorId: actor },
+      { type: 'system', actorId: actor, chatId },
+    ]);
 
     const [actorRow] = await db
       .select({
@@ -462,7 +567,16 @@ describe('notification comment targets fixture ownership', () => {
         actorId
       );
 
-      await cleanupRegistry(fixture);
+      // Cleanup refuses the whole fixture: nothing is deleted — not the
+      // user, not the foreign rows, and not the fixture post the foreign
+      // comment hangs under.
+      let cleanupRefused = false;
+      try {
+        await cleanupRegistry(fixture);
+      } catch {
+        cleanupRefused = true;
+      }
+      expect(cleanupRefused).toBe(true);
 
       // The user survives because cleanup refuses it, so the cascade
       // children survive with it; the separately owned notification and
@@ -482,11 +596,22 @@ describe('notification comment targets fixture ownership', () => {
         .from(gameOnboarding)
         .where(eq(gameOnboarding.id, separateOnboardingId));
       expect(survivingOnboarding).toBeDefined();
+      // The complete foreign tuple survives, including its parent Post:
+      // the comment is not orphaned by a deleted post.
       const [survivingComment] = await db
         .select()
         .from(comments)
         .where(eq(comments.id, separateCommentId));
       expect(survivingComment).toBeDefined();
+      expect(survivingComment?.postId).toBe(fixturePostId);
+      expect(survivingComment?.authorId).toBe(actorId);
+      expect(survivingComment?.content).toBe('comment');
+      const [survivingPost] = await db
+        .select()
+        .from(posts)
+        .where(eq(posts.id, fixturePostId));
+      expect(survivingPost).toBeDefined();
+      expect(survivingPost?.authorId).toBe(userId);
     } finally {
       // Remove the separately owned rows first; only then may the
       // fixture user be cleaned up.
@@ -501,6 +626,71 @@ describe('notification comment targets fixture ownership', () => {
           .where(eq(gameOnboarding.id, separateOnboardingId));
       }
       await cleanupRegistry(outsider);
+      await cleanupRegistry(fixture);
+    }
+  });
+
+  it('adopts only the notifications its own creator calls made', async () => {
+    const fixture = newRegistry();
+    let foreignNotificationId: string | null = null;
+    try {
+      const userId = await insertUser(fixture);
+      const actorId = await insertUser(fixture);
+      const postId = await insertPost(fixture, userId);
+      const commentId = await insertComment(fixture, postId, actorId);
+
+      // A separately owned notification for the same recipient, created
+      // after the fixture's own rows exist: the old before/after diff
+      // would adopt it; tuple matching must not.
+      const [foreign] = await db
+        .insert(notifications)
+        .values({
+          id: await generateSnowflakeId(),
+          userId,
+          type: 'follow',
+          actorId,
+          title: 'foreign',
+          message: 'separately owned notification',
+        })
+        .returning({ id: notifications.id });
+      if (!foreign) {
+        throw new Error('foreign notification insert returned no row');
+      }
+      foreignNotificationId = foreign.id;
+
+      await notifyCommentOnPost(userId, actorId, postId, commentId);
+      await recordExpectedNotifications(fixture, userId, [
+        { type: 'comment', actorId, postId, commentId },
+      ]);
+      expect(fixture.notificationIds).toHaveLength(1);
+      const [createdId] = fixture.notificationIds;
+      expect(createdId).not.toBe(foreignNotificationId);
+
+      // Cleanup refuses while the foreign notification references the
+      // user, and the refused cleanup deletes nothing.
+      let cleanupRefused = false;
+      try {
+        await cleanupRegistry(fixture);
+      } catch {
+        cleanupRefused = true;
+      }
+      expect(cleanupRefused).toBe(true);
+      const [createdStillThere] = await db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.id, createdId));
+      expect(createdStillThere).toBeDefined();
+      const [foreignStillThere] = await db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.id, foreignNotificationId));
+      expect(foreignStillThere).toBeDefined();
+    } finally {
+      if (foreignNotificationId) {
+        await db
+          .delete(notifications)
+          .where(eq(notifications.id, foreignNotificationId));
+      }
       await cleanupRegistry(fixture);
     }
   });
