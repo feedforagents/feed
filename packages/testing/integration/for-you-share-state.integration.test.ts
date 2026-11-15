@@ -170,7 +170,11 @@ async function callSharePost(token: string, postId: string) {
     data?: {
       isShared: boolean;
       shareCount: number;
-      repostPost?: { id: string } | null;
+      repostPost?: {
+        id: string;
+        authorId: string;
+        originalPostId: string;
+      } | null;
     };
   } | null;
   return { status: response.status, body };
@@ -378,15 +382,22 @@ describe('For You viewer share state', () => {
     expect(before?.isShared).toBe(false);
 
     const shared = await callSharePost(tokenA, postA);
+
+    // Take ownership of the repost the real route just created before
+    // any business assertion: afterAll cleanup only deletes ids in
+    // ownedPostIds, so an assertion failure below must not strand it.
+    const createdRepost = shared.body?.data?.repostPost;
+    if (createdRepost?.id) ownedPostIds.push(createdRepost.id);
+
+    // The repost must belong to this fixture: the viewer authored it
+    // and the shared post is its original.
+    expect(createdRepost?.id).toBeDefined();
+    expect(createdRepost?.authorId).toBe(viewerA);
+    expect(createdRepost?.originalPostId).toBe(postA);
+
     expect(shared.status).toBe(201);
     expect(shared.body?.data?.isShared).toBe(true);
     expect(shared.body?.data?.shareCount).toBe(1);
-
-    // Take ownership of the repost the real route just created so
-    // cleanup removes it (the seeded-posts list alone would miss it).
-    const createdRepostId = shared.body?.data?.repostPost?.id;
-    expect(createdRepostId).toBeDefined();
-    if (createdRepostId) ownedPostIds.push(createdRepostId);
 
     // Control: the post detail route already reflects the share.
     const detail = await fetchPostDetail(tokenA, postA);
@@ -441,13 +452,15 @@ describe('For You viewer share state', () => {
     // create, even when setup partially fails.
     const ownedBefore = ownedUserIds.length;
     await expect(
-      db.insert(users).values({
-        id: authorA,
-        username: `f54a-author-${authorA}`,
-        displayName: 'Duplicate F54 Author A',
-        updatedAt: new Date(),
-      })
-    ).rejects.toThrow();
+      (async () => {
+        await db.insert(users).values({
+          id: authorA,
+          username: `f54a-author-${authorA}`,
+          displayName: 'Duplicate F54 Author A',
+          updatedAt: new Date(),
+        });
+      })()
+    ).rejects.toThrow(/duplicate key value violates unique constraint/);
     expect(ownedUserIds).toHaveLength(ownedBefore);
     const [rows] = await db
       .select({ count: count() })
