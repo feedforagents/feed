@@ -13,12 +13,27 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test';
-import { CACHE_KEYS, cachedDb, getCache, setCache } from '@feed/api';
+import {
+  CACHE_KEYS,
+  cachedDb,
+  getCache,
+  invalidateCache,
+  invalidateCachePattern,
+  setCache,
+} from '@feed/api';
 import { balanceTransactions, db, eq, inArray, users } from '@feed/db';
 import { WalletService } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
 
 const testUserIds: string[] = [];
+
+// Sentinel keys in the global `user:follows` namespace, written by the
+// control test. Both carry a fresh snowflake suffix, so this run never
+// overwrites an entry another run or user wrote. `runSentinelKey` is owned
+// by this run and teardown deletes exactly that key; `foreignSentinelKey`
+// simulates another user's entry and must survive teardown.
+let runSentinelKey: string | undefined;
+let foreignSentinelKey: string | undefined;
 
 async function createTestUser(balance: string): Promise<string> {
   const userId = await generateSnowflakeId();
@@ -48,12 +63,34 @@ afterAll(async () => {
     .delete(balanceTransactions)
     .where(inArray(balanceTransactions.userId, testUserIds));
   await db.delete(users).where(inArray(users.id, testUserIds));
-  // Clear the fixture's owned cached keys (balance/user/profile entries
-  // warmed by the tests, plus any following-feed entries) so no test
-  // user's stale cache survives the run.
-  await Promise.all(
-    testUserIds.map((userId) => cachedDb.invalidateUserCache(userId))
-  );
+  // Clear only the fixture's own cached keys: the exact balance/user/
+  // profile keys (via the balance-scoped invalidator) plus this run's
+  // following-feed entries. Never call the broad invalidateUserCache
+  // here — it pattern-scans the global `user:follows` namespace and
+  // would evict other users' follow cache entries.
+  await Promise.all([
+    ...testUserIds.map((userId) => cachedDb.invalidateUserBalanceCache(userId)),
+    ...testUserIds.map((userId) =>
+      invalidateCachePattern(`${userId}:*`, {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+      })
+    ),
+    ...(runSentinelKey
+      ? [invalidateCache(runSentinelKey, { namespace: 'user:follows' })]
+      : []),
+  ]);
+  // The foreign sentinel simulates another user's follow-cache entry: it
+  // must survive this file's teardown, while this run's own sentinel is gone.
+  if (foreignSentinelKey) {
+    expect(
+      await getCache<string>(foreignSentinelKey, { namespace: 'user:follows' })
+    ).toBe('foreign-keep-me');
+  }
+  if (runSentinelKey) {
+    expect(
+      await getCache<string>(runSentinelKey, { namespace: 'user:follows' })
+    ).toBeNull();
+  }
 });
 
 describe('balance display path vs wallet ledger', () => {
@@ -102,6 +139,23 @@ describe('balance display path vs wallet ledger', () => {
     expect(await cachedBalance(userId)).toBe(777);
   });
 
+  it('guard: explicit cache invalidation still refreshes the display path', async () => {
+    const userId = await createTestUser('500');
+
+    expect(await cachedBalance(userId)).toBe(500);
+
+    await db
+      .update(users)
+      .set({ virtualBalance: '900' })
+      .where(eq(users.id, userId));
+    await cachedDb.invalidateUserCache(userId);
+
+    expect(await cachedBalance(userId)).toBe(900);
+  });
+
+  // Runs last: the guard above calls the broad invalidateUserCache, which
+  // pattern-scans the global `user:follows` namespace, so the sentinels
+  // below must be written after it.
   it('control: a wallet mutation leaves unrelated follow/feed cache entries alone', async () => {
     const userId = await createTestUser('1000');
     const authorId = await createTestUser('1000');
@@ -117,9 +171,16 @@ describe('balance display path vs wallet ledger', () => {
       })
     ).not.toBeNull();
 
-    // Sentinel in the global follows namespace: nothing writes here, so
-    // only a pattern scan could remove it.
-    await setCache('sentinel', 'keep-me', { namespace: 'user:follows' });
+    // Run-specific sentinels in the global follows namespace: the suffix
+    // is a fresh snowflake id, so this run never overwrites an entry
+    // another run or user wrote. Only a pattern scan could remove them.
+    runSentinelKey = `sentinel:${userId}`;
+    const foreignUserId = await generateSnowflakeId();
+    foreignSentinelKey = `sentinel:${foreignUserId}`;
+    await setCache(runSentinelKey, 'keep-me', { namespace: 'user:follows' });
+    await setCache(foreignSentinelKey, 'foreign-keep-me', {
+      namespace: 'user:follows',
+    });
 
     // The mutation path every trade/settlement uses.
     await WalletService.credit(
@@ -140,21 +201,10 @@ describe('balance display path vs wallet ledger', () => {
       })
     ).not.toBeNull();
     expect(
-      await getCache('sentinel', { namespace: 'user:follows' })
+      await getCache<string>(runSentinelKey, { namespace: 'user:follows' })
     ).toBe('keep-me');
-  });
-
-  it('guard: explicit cache invalidation still refreshes the display path', async () => {
-    const userId = await createTestUser('500');
-
-    expect(await cachedBalance(userId)).toBe(500);
-
-    await db
-      .update(users)
-      .set({ virtualBalance: '900' })
-      .where(eq(users.id, userId));
-    await cachedDb.invalidateUserCache(userId);
-
-    expect(await cachedBalance(userId)).toBe(900);
+    expect(
+      await getCache<string>(foreignSentinelKey, { namespace: 'user:follows' })
+    ).toBe('foreign-keep-me');
   });
 });
