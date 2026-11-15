@@ -832,10 +832,17 @@ export class FeedAgentExecutor implements AgentExecutor {
 
   private async getFeed(params: Record<string, JsonValue>) {
     const limit = this.parsePositiveInt(params.limit, 20, 100);
+    const offset = this.parseNonNegativeInt(params.offset, 0);
+    if (!Number.isSafeInteger(offset)) {
+      throw new Error('offset must be a safe non-negative integer');
+    }
+    // A total order keeps offset pages stable across equal timestamps when
+    // the feed is unchanged. Concurrent inserts or deletes can shift pages.
     const posts = await db.post.findMany({
       where: { deletedAt: null },
       take: limit,
-      orderBy: { timestamp: 'desc' },
+      skip: offset,
+      orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
       select: {
         id: true,
         content: true,
