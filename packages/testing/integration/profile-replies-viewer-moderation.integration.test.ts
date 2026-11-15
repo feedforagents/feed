@@ -18,10 +18,31 @@
  * listed; anonymous reads have no moderation set and stay unfiltered.
  * The route handler is exercised unmodified; the viewer is a real Steward
  * JWT principal (publicRateLimit/optionalAuth accept nothing else).
+ * Fixture rows are owned only from a committed INSERT ... RETURNING, and
+ * cleanup deletes exactly those ids, refusing when a foreign row still
+ * references an owned parent.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { comments, db, inArray, posts, sql, users } from '@feed/db';
+import { randomUUID } from 'node:crypto';
+import {
+  and,
+  comments,
+  db,
+  eq,
+  gameOnboarding,
+  inArray,
+  notInArray,
+  or,
+  posts,
+  sql,
+  userBlocks,
+  userMutes,
+  userPnLSnapshots,
+  users,
+  whitelist,
+  whitelistConfig,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
@@ -39,12 +60,56 @@ type RepliesResponse = {
   items: ReplyItem[];
 };
 
+// Run-scoped Steward principal: a fixed steward id would let parallel or
+// retained runs fight over the same viewer row.
+const RUN_ID = randomUUID().slice(0, 8);
+const STEWARD_ID = `f148-steward-viewer-${RUN_ID}`;
 const STEWARD_SECRET = 'f148-steward-secret';
 process.env.STEWARD_JWT_SECRET =
   process.env.STEWARD_JWT_SECRET || STEWARD_SECRET;
 
+// Destructive fixtures run only against an explicitly owned disposable
+// database: loopback host and a test database name.
+function ownedDatabaseUrl(value: string | undefined, label: string): string {
+  if (!value) throw new Error(`${label} is required for integration tests`);
+  const url = new URL(value);
+  const databaseName = decodeURIComponent(url.pathname.slice(1));
+  if (
+    !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) ||
+    (!/^(test_db|feed_pr\d+)$/i.test(databaseName) &&
+      !/(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName))
+  ) {
+    throw new Error(`${label} must point to a local disposable test database`);
+  }
+  return databaseName;
+}
+const DATABASE_NAME = ownedDatabaseUrl(
+  process.env.DATABASE_URL,
+  'DATABASE_URL'
+);
+if (process.env.DIRECT_DATABASE_URL) {
+  const directName = ownedDatabaseUrl(
+    process.env.DIRECT_DATABASE_URL,
+    'DIRECT_DATABASE_URL'
+  );
+  if (directName !== DATABASE_NAME)
+    throw new Error(
+      'DIRECT_DATABASE_URL must point to the same disposable database'
+    );
+}
+
+// Ownership is published only from a committed INSERT ... RETURNING: ids
+// are recorded after the insert succeeds, never before. Cleanup deletes
+// exactly these ids and refuses when a foreign row still references an
+// owned parent.
+const ownedUsers = new Set<string>();
+const ownedPosts = new Set<string>();
+const ownedComments = new Set<string>();
+const ownedBlocks = new Set<string>();
+const ownedMutes = new Set<string>();
+
 async function viewerAuthHeaders(): Promise<Record<string, string>> {
-  const token = await new SignJWT({ userId: 'f148-steward-viewer' })
+  const token = await new SignJWT({ userId: STEWARD_ID })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuer('steward')
     .setExpirationTime('1h')
@@ -74,10 +139,6 @@ let rPcNormal: string;
 let rPcBlocked: string;
 let rPcMuted: string;
 let rPcBlocker: string;
-const allUserIds: string[] = [];
-const allPostIds: string[] = [];
-const allCommentIds: string[] = [];
-
 let GET: typeof import('../../../apps/web/src/app/api/users/[userId]/posts/route').GET;
 
 async function fetchReplies(headers?: Record<string, string>) {
@@ -102,6 +163,10 @@ function item(body: RepliesResponse | { error?: unknown } | null, id: string) {
 }
 
 beforeAll(async () => {
+  const [connected] = await db.execute(sql`SELECT current_database() AS name`);
+  if (connected?.name !== DATABASE_NAME)
+    throw new Error('Connected database does not match DATABASE_URL');
+
   ({ GET } = await import(
     '../../../apps/web/src/app/api/users/[userId]/posts/route'
   ));
@@ -132,131 +197,140 @@ beforeAll(async () => {
   ] = await Promise.all(
     Array.from({ length: 22 }, () => generateSnowflakeId())
   );
-  allUserIds.push(owner, viewer, normal, blocked, muted, blocker);
-  allPostIds.push(postNormal, postBlocked, postMuted, postBlocker);
 
   const now = new Date();
   const at = (seconds: number) => new Date(now.getTime() + seconds * 1000);
   const earlier = new Date(now.getTime() - 3_600_000);
 
-  await db.insert(users).values([
-    {
-      id: owner,
-      username: `f148-o-${owner}`,
-      displayName: 'F148 Owner',
-      updatedAt: now,
-    },
-    {
-      id: viewer,
-      username: `f148-v-${viewer}`,
-      displayName: 'F148 Viewer',
-      updatedAt: now,
-    },
-    {
-      id: normal,
-      username: `f148-n-${normal}`,
-      displayName: 'F148 Normal',
-      updatedAt: now,
-    },
-    {
-      id: blocked,
-      username: `f148-b-${blocked}`,
-      displayName: 'F148 Blocked',
-      updatedAt: now,
-    },
-    {
-      id: muted,
-      username: `f148-m-${muted}`,
-      displayName: 'F148 Muted',
-      updatedAt: now,
-    },
-    {
-      id: blocker,
-      username: `f148-r-${blocker}`,
-      displayName: 'F148 Blocker',
-      updatedAt: now,
-    },
-  ]);
+  const insertedUsers = await db
+    .insert(users)
+    .values([
+      {
+        id: owner,
+        username: `f148-o-${owner}`,
+        displayName: 'F148 Owner',
+        updatedAt: now,
+      },
+      {
+        id: viewer,
+        username: `f148-v-${viewer}`,
+        displayName: 'F148 Viewer',
+        updatedAt: now,
+      },
+      {
+        id: normal,
+        username: `f148-n-${normal}`,
+        displayName: 'F148 Normal',
+        updatedAt: now,
+      },
+      {
+        id: blocked,
+        username: `f148-b-${blocked}`,
+        displayName: 'F148 Blocked',
+        updatedAt: now,
+      },
+      {
+        id: muted,
+        username: `f148-m-${muted}`,
+        displayName: 'F148 Muted',
+        updatedAt: now,
+      },
+      {
+        id: blocker,
+        username: `f148-r-${blocker}`,
+        displayName: 'F148 Blocker',
+        updatedAt: now,
+      },
+    ])
+    .returning({ id: users.id });
+  for (const row of insertedUsers) ownedUsers.add(row.id);
   await db
     .update(users)
-    .set({ stewardId: 'f148-steward-viewer' })
+    .set({ stewardId: STEWARD_ID })
     .where(sql`${users.id} = ${viewer}`);
 
-  await db.insert(posts).values([
-    {
-      id: postNormal,
-      content: 'f148 post by normal author',
-      authorId: normal,
-      timestamp: earlier,
-      createdAt: earlier,
-    },
-    {
-      id: postBlocked,
-      content: 'f148 post by blocked author',
-      authorId: blocked,
-      timestamp: earlier,
-      createdAt: earlier,
-    },
-    {
-      id: postMuted,
-      content: 'f148 post by muted author',
-      authorId: muted,
-      timestamp: earlier,
-      createdAt: earlier,
-    },
-    {
-      id: postBlocker,
-      content: 'f148 post by blocking author',
-      authorId: blocker,
-      timestamp: earlier,
-      createdAt: earlier,
-    },
-  ]);
+  const insertedPosts = await db
+    .insert(posts)
+    .values([
+      {
+        id: postNormal,
+        content: 'f148 post by normal author',
+        authorId: normal,
+        timestamp: earlier,
+        createdAt: earlier,
+      },
+      {
+        id: postBlocked,
+        content: 'f148 post by blocked author',
+        authorId: blocked,
+        timestamp: earlier,
+        createdAt: earlier,
+      },
+      {
+        id: postMuted,
+        content: 'f148 post by muted author',
+        authorId: muted,
+        timestamp: earlier,
+        createdAt: earlier,
+      },
+      {
+        id: postBlocker,
+        content: 'f148 post by blocking author',
+        authorId: blocker,
+        timestamp: earlier,
+        createdAt: earlier,
+      },
+    ])
+    .returning({ id: posts.id });
+  for (const row of insertedPosts) ownedPosts.add(row.id);
 
   // Parent comments on the normal post, one per author class.
-  await db.insert(comments).values([
-    {
-      id: pcNormal,
-      content: 'f148 parent comment by normal author',
-      postId: postNormal,
-      authorId: normal,
-      parentCommentId: null,
-      createdAt: at(-500),
-      updatedAt: at(-500),
-      deletedAt: null,
-    },
-    {
-      id: pcBlocked,
-      content: 'f148 parent comment by blocked author',
-      postId: postNormal,
-      authorId: blocked,
-      parentCommentId: null,
-      createdAt: at(-490),
-      updatedAt: at(-490),
-      deletedAt: null,
-    },
-    {
-      id: pcMuted,
-      content: 'f148 parent comment by muted author',
-      postId: postNormal,
-      authorId: muted,
-      parentCommentId: null,
-      createdAt: at(-480),
-      updatedAt: at(-480),
-      deletedAt: null,
-    },
-    {
-      id: pcBlocker,
-      content: 'f148 parent comment by blocking author',
-      postId: postNormal,
-      authorId: blocker,
-      parentCommentId: null,
-      createdAt: at(-470),
-      updatedAt: at(-470),
-      deletedAt: null,
-    },
-  ]);
-  allCommentIds.push(pcNormal, pcBlocked, pcMuted, pcBlocker);
+  const insertedParents = await db
+    .insert(comments)
+    .values([
+      {
+        id: pcNormal,
+        content: 'f148 parent comment by normal author',
+        postId: postNormal,
+        authorId: normal,
+        parentCommentId: null,
+        createdAt: at(-500),
+        updatedAt: at(-500),
+        deletedAt: null,
+      },
+      {
+        id: pcBlocked,
+        content: 'f148 parent comment by blocked author',
+        postId: postNormal,
+        authorId: blocked,
+        parentCommentId: null,
+        createdAt: at(-490),
+        updatedAt: at(-490),
+        deletedAt: null,
+      },
+      {
+        id: pcMuted,
+        content: 'f148 parent comment by muted author',
+        postId: postNormal,
+        authorId: muted,
+        parentCommentId: null,
+        createdAt: at(-480),
+        updatedAt: at(-480),
+        deletedAt: null,
+      },
+      {
+        id: pcBlocker,
+        content: 'f148 parent comment by blocking author',
+        postId: postNormal,
+        authorId: blocker,
+        parentCommentId: null,
+        createdAt: at(-470),
+        updatedAt: at(-470),
+        deletedAt: null,
+      },
+    ])
+    .returning({ id: comments.id });
+  for (const row of insertedParents) ownedComments.add(row.id);
 
   // The profile owner's replies: one per parent-post author class, one per
   // parent-comment author class, plus one soft-deleted reply (control).
@@ -327,29 +401,32 @@ beforeAll(async () => {
     },
   ];
   const deletedReplyId = await generateSnowflakeId();
-  allCommentIds.push(...replyRows.map((row) => row.id), deletedReplyId);
-  await db.insert(comments).values([
-    ...replyRows.map((row) => ({
-      id: row.id,
-      content: row.content,
-      postId: row.postId,
-      authorId: owner,
-      parentCommentId: row.parentCommentId,
-      createdAt: row.createdAt,
-      updatedAt: row.createdAt,
-      deletedAt: row.deletedAt,
-    })),
-    {
-      id: deletedReplyId,
-      content: 'f148 deleted reply by owner',
-      postId: postNormal,
-      authorId: owner,
-      parentCommentId: null,
-      createdAt: at(-180),
-      updatedAt: at(-180),
-      deletedAt: now,
-    },
-  ]);
+  const insertedReplies = await db
+    .insert(comments)
+    .values([
+      ...replyRows.map((row) => ({
+        id: row.id,
+        content: row.content,
+        postId: row.postId,
+        authorId: owner,
+        parentCommentId: row.parentCommentId,
+        createdAt: row.createdAt,
+        updatedAt: row.createdAt,
+        deletedAt: row.deletedAt,
+      })),
+      {
+        id: deletedReplyId,
+        content: 'f148 deleted reply by owner',
+        postId: postNormal,
+        authorId: owner,
+        parentCommentId: null,
+        createdAt: at(-180),
+        updatedAt: at(-180),
+        deletedAt: now,
+      },
+    ])
+    .returning({ id: comments.id });
+  for (const row of insertedReplies) ownedComments.add(row.id);
 
   // Children of the reply on the normal post: one visible to everyone, one
   // by the blocked author (counted for anonymous, never for the viewer),
@@ -359,81 +436,225 @@ beforeAll(async () => {
     generateSnowflakeId(),
     generateSnowflakeId(),
   ]);
-  allCommentIds.push(childNormal, childBlocked, childDeleted);
-  await db.insert(comments).values([
-    {
-      id: childNormal,
-      content: 'f148 child by normal author',
-      postId: postNormal,
-      authorId: normal,
-      parentCommentId: rPostNormal,
-      createdAt: at(-90),
-      updatedAt: at(-90),
-      deletedAt: null,
-    },
-    {
-      id: childBlocked,
-      content: 'f148 child by blocked author',
-      postId: postNormal,
-      authorId: blocked,
-      parentCommentId: rPostNormal,
-      createdAt: at(-80),
-      updatedAt: at(-80),
-      deletedAt: null,
-    },
-    {
-      id: childDeleted,
-      content: 'f148 deleted child',
-      postId: postNormal,
-      authorId: normal,
-      parentCommentId: rPostNormal,
-      createdAt: at(-70),
-      updatedAt: at(-70),
-      deletedAt: now,
-    },
-  ]);
+  const insertedChildren = await db
+    .insert(comments)
+    .values([
+      {
+        id: childNormal,
+        content: 'f148 child by normal author',
+        postId: postNormal,
+        authorId: normal,
+        parentCommentId: rPostNormal,
+        createdAt: at(-90),
+        updatedAt: at(-90),
+        deletedAt: null,
+      },
+      {
+        id: childBlocked,
+        content: 'f148 child by blocked author',
+        postId: postNormal,
+        authorId: blocked,
+        parentCommentId: rPostNormal,
+        createdAt: at(-80),
+        updatedAt: at(-80),
+        deletedAt: null,
+      },
+      {
+        id: childDeleted,
+        content: 'f148 deleted child',
+        postId: postNormal,
+        authorId: normal,
+        parentCommentId: rPostNormal,
+        createdAt: at(-70),
+        updatedAt: at(-70),
+        deletedAt: now,
+      },
+    ])
+    .returning({ id: comments.id });
+  for (const row of insertedChildren) ownedComments.add(row.id);
 
   const [blockRowA, blockRowB, muteRow] = await Promise.all([
     generateSnowflakeId(),
     generateSnowflakeId(),
     generateSnowflakeId(),
   ]);
-  await db.execute(sql`
-    INSERT INTO "UserBlock" (id, "blockerId", "blockedId")
-    VALUES (${blockRowA}, ${viewer}, ${blocked}),
-           (${blockRowB}, ${blocker}, ${viewer})
-  `);
-  await db.execute(sql`
-    INSERT INTO "UserMute" (id, "muterId", "mutedId")
-    VALUES (${muteRow}, ${viewer}, ${muted})
-  `);
+  const insertedBlocks = await db
+    .insert(userBlocks)
+    .values([
+      { id: blockRowA, blockerId: viewer, blockedId: blocked },
+      { id: blockRowB, blockerId: blocker, blockedId: viewer },
+    ])
+    .returning({ id: userBlocks.id });
+  for (const row of insertedBlocks) ownedBlocks.add(row.id);
+  const insertedMutes = await db
+    .insert(userMutes)
+    .values([{ id: muteRow, muterId: viewer, mutedId: muted }])
+    .returning({ id: userMutes.id });
+  for (const row of insertedMutes) ownedMutes.add(row.id);
 });
 
+async function cleanupOwned(): Promise<void> {
+  if (
+    ownedUsers.size === 0 &&
+    ownedPosts.size === 0 &&
+    ownedComments.size === 0 &&
+    ownedBlocks.size === 0 &&
+    ownedMutes.size === 0
+  )
+    return;
+  await db.transaction(async (tx) => {
+    const userIds = [...ownedUsers];
+    const postIds = [...ownedPosts];
+    const commentIds = [...ownedComments];
+    const blockIds = [...ownedBlocks];
+    const muteIds = [...ownedMutes];
+    if (userIds.length > 0) {
+      await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, userIds))
+        .for('update');
+    }
+    const foreign: string[] = [];
+    if (userIds.length > 0) {
+      // Physical destructive paths: deleting an owned user cascades these
+      // rows away (GameOnboarding/UserPnLSnapshot/Whitelist) or nulls the
+      // reference (Whitelist.grantedBy, WhitelistConfig.updatedBy) —
+      // baseline migration 0000, constraints ..._User_id_fk.
+      const [onboarding, snapshots, whitelistRows, grantedRows, configRows] =
+        await Promise.all([
+          tx
+            .select({ id: gameOnboarding.id })
+            .from(gameOnboarding)
+            .where(inArray(gameOnboarding.userId, userIds))
+            .limit(1),
+          tx
+            .select({ id: userPnLSnapshots.id })
+            .from(userPnLSnapshots)
+            .where(inArray(userPnLSnapshots.userId, userIds))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id })
+            .from(whitelist)
+            .where(inArray(whitelist.userId, userIds))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id })
+            .from(whitelist)
+            .where(inArray(whitelist.grantedBy, userIds))
+            .limit(1),
+          tx
+            .select({ id: whitelistConfig.id })
+            .from(whitelistConfig)
+            .where(inArray(whitelistConfig.updatedBy, userIds))
+            .limit(1),
+        ]);
+      if (onboarding.length > 0) foreign.push('GameOnboarding');
+      if (snapshots.length > 0) foreign.push('UserPnLSnapshot');
+      if (whitelistRows.length > 0) foreign.push('Whitelist');
+      if (grantedRows.length > 0) foreign.push('Whitelist.grantedBy');
+      if (configRows.length > 0) foreign.push('WhitelistConfig.updatedBy');
+    }
+    // Logical foreign children: rows that reference an owned parent or
+    // author but were never acquired by this run. Deleting the parent
+    // would erase or orphan them, so refuse instead.
+    if (postIds.length > 0 || commentIds.length > 0 || userIds.length > 0) {
+      const rows = await tx
+        .select({ id: comments.id })
+        .from(comments)
+        .where(
+          and(
+            or(
+              ...(postIds.length > 0
+                ? [inArray(comments.postId, postIds)]
+                : []),
+              ...(commentIds.length > 0
+                ? [inArray(comments.parentCommentId, commentIds)]
+                : []),
+              ...(userIds.length > 0
+                ? [inArray(comments.authorId, userIds)]
+                : [])
+            ),
+            ...(commentIds.length > 0
+              ? [notInArray(comments.id, commentIds)]
+              : [])
+          )
+        )
+        .limit(1);
+      if (rows.length > 0) foreign.push('Comment');
+    }
+    if (userIds.length > 0 || commentIds.length > 0) {
+      const rows = await tx
+        .select({ id: posts.id })
+        .from(posts)
+        .where(
+          and(
+            or(
+              ...(userIds.length > 0 ? [inArray(posts.authorId, userIds)] : []),
+              ...(commentIds.length > 0
+                ? [inArray(posts.parentCommentId, commentIds)]
+                : [])
+            ),
+            ...(postIds.length > 0 ? [notInArray(posts.id, postIds)] : [])
+          )
+        )
+        .limit(1);
+      if (rows.length > 0) foreign.push('Post');
+    }
+    if (userIds.length > 0) {
+      const [foreignBlocks, foreignMutes] = await Promise.all([
+        tx
+          .select({ id: userBlocks.id })
+          .from(userBlocks)
+          .where(
+            and(
+              or(
+                inArray(userBlocks.blockerId, userIds),
+                inArray(userBlocks.blockedId, userIds)
+              ),
+              ...(blockIds.length > 0
+                ? [notInArray(userBlocks.id, blockIds)]
+                : [])
+            )
+          )
+          .limit(1),
+        tx
+          .select({ id: userMutes.id })
+          .from(userMutes)
+          .where(
+            and(
+              or(
+                inArray(userMutes.muterId, userIds),
+                inArray(userMutes.mutedId, userIds)
+              ),
+              ...(muteIds.length > 0 ? [notInArray(userMutes.id, muteIds)] : [])
+            )
+          )
+          .limit(1),
+      ]);
+      if (foreignBlocks.length > 0) foreign.push('UserBlock');
+      if (foreignMutes.length > 0) foreign.push('UserMute');
+    }
+    if (foreign.length > 0)
+      throw new Error(
+        `cleanup refused: foreign ${foreign.join(', ')} rows still reference owned fixture rows`
+      );
+    // Child-first deletes, exactly the acquired ids.
+    if (blockIds.length > 0)
+      await tx.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
+    if (muteIds.length > 0)
+      await tx.delete(userMutes).where(inArray(userMutes.id, muteIds));
+    if (commentIds.length > 0)
+      await tx.delete(comments).where(inArray(comments.id, commentIds));
+    if (postIds.length > 0)
+      await tx.delete(posts).where(inArray(posts.id, postIds));
+    if (userIds.length > 0)
+      await tx.delete(users).where(inArray(users.id, userIds));
+  });
+}
+
 afterAll(async () => {
-  await db.execute(sql`
-    DELETE FROM "UserBlock" WHERE "blockerId" IN (${sql.join(
-      allUserIds.map((id) => sql`${id}`),
-      sql`, `
-    )}) OR "blockedId" IN (${sql.join(
-      allUserIds.map((id) => sql`${id}`),
-      sql`, `
-    )})
-  `);
-  await db.execute(sql`
-    DELETE FROM "UserMute" WHERE "muterId" IN (${sql.join(
-      allUserIds.map((id) => sql`${id}`),
-      sql`, `
-    )}) OR "mutedId" IN (${sql.join(
-      allUserIds.map((id) => sql`${id}`),
-      sql`, `
-    )})
-  `);
-  if (allCommentIds.length > 0)
-    await db.delete(comments).where(inArray(comments.id, allCommentIds));
-  if (allPostIds.length > 0)
-    await db.delete(posts).where(inArray(posts.id, allPostIds));
-  if (allUserIds.length > 0)
-    await db.delete(users).where(inArray(users.id, allUserIds));
+  await cleanupOwned();
 });
 
 describe('profile replies viewer moderation', () => {
@@ -492,5 +713,82 @@ describe('profile replies viewer moderation', () => {
     // author's (the blocked author's is never counted, the deleted one
     // is counted for nobody).
     expect(item(res, rPostNormal).replyCount).toBe(1);
+  });
+
+  it('a rejected batch insert registers no ownership and preserves foreign rows', async () => {
+    // A pre-existing user plus a relationship attached to it: neither is
+    // owned by this run, so a failed setup must leave both untouched.
+    // The relationship uses two throwaway users, never the fixture viewer,
+    // so it cannot change the viewer's moderation set.
+    const canaryId = await generateSnowflakeId();
+    const bystanderId = await generateSnowflakeId();
+    const freshId = await generateSnowflakeId();
+    const canaryBlockId = await generateSnowflakeId();
+    try {
+      await db.insert(users).values([
+        {
+          id: canaryId,
+          username: `f148-canary-${canaryId}`,
+          displayName: 'F148 Canary',
+          updatedAt: new Date(),
+        },
+        {
+          id: bystanderId,
+          username: `f148-bystander-${bystanderId}`,
+          displayName: 'F148 Bystander',
+          updatedAt: new Date(),
+        },
+      ]);
+      await db
+        .insert(userBlocks)
+        .values([
+          { id: canaryBlockId, blockerId: canaryId, blockedId: bystanderId },
+        ]);
+      let failure: unknown;
+      try {
+        await db.insert(users).values([
+          {
+            id: canaryId,
+            username: `f148-collide-${canaryId}`,
+            displayName: 'F148 Collide',
+            updatedAt: new Date(),
+          },
+          {
+            id: freshId,
+            username: `f148-fresh-${freshId}`,
+            displayName: 'F148 Fresh',
+            updatedAt: new Date(),
+          },
+        ]);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeDefined();
+      // The actual PostgreSQL constraint cause, not just "something threw":
+      // drizzle wraps the driver error, so the code lives on .cause.
+      expect((failure as { cause?: { code?: unknown } }).cause?.code).toBe(
+        '23505'
+      );
+      expect(ownedUsers.has(canaryId)).toBe(false);
+      expect(ownedUsers.has(freshId)).toBe(false);
+      const [canaryStillThere] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, canaryId));
+      expect(canaryStillThere?.id).toBe(canaryId);
+      const [freshStillThere] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, freshId));
+      expect(freshStillThere).toBeUndefined();
+      const [blockStillThere] = await db
+        .select({ id: userBlocks.id })
+        .from(userBlocks)
+        .where(eq(userBlocks.id, canaryBlockId));
+      expect(blockStillThere?.id).toBe(canaryBlockId);
+    } finally {
+      await db.delete(userBlocks).where(eq(userBlocks.id, canaryBlockId));
+      await db.delete(users).where(inArray(users.id, [canaryId, bystanderId]));
+    }
   });
 });
