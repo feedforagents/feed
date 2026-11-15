@@ -16,7 +16,18 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { db, eq, favorites, inArray, posts, users } from '@feed/db';
+import {
+  db,
+  eq,
+  favorites,
+  gameOnboarding,
+  inArray,
+  posts,
+  userPnLSnapshots,
+  users,
+  whitelist,
+  whitelistConfig,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { executeGetFavoritePosts } from '../../mcp/src/handlers/tool-handlers';
 
@@ -95,36 +106,93 @@ async function insertFavorite(
   return row.id;
 }
 
+/**
+ * The five destructive FK paths off users.id: three ON DELETE CASCADE
+ * (GameOnboarding.userId, UserPnLSnapshot.userId, Whitelist.userId) and
+ * two ON DELETE SET NULL (Whitelist.grantedBy, WhitelistConfig.updatedBy).
+ * Deleting a fixture user while any of them references it would silently
+ * destroy or null another owner's row, so cleanup refuses instead of
+ * deleting. The check, the row lock, and the delete run in one short
+ * transaction so the decision and the deletion cannot drift apart.
+ */
 async function cleanup(acquired: OwnedRows) {
-  if (acquired.favoriteIds.length > 0) {
-    await db
-      .delete(favorites)
-      .where(inArray(favorites.id, acquired.favoriteIds));
-    expect(
-      await db
-        .select({ id: favorites.id })
-        .from(favorites)
-        .where(inArray(favorites.id, acquired.favoriteIds))
-    ).toHaveLength(0);
-  }
-  if (acquired.postIds.length > 0) {
-    await db.delete(posts).where(inArray(posts.id, acquired.postIds));
-    expect(
-      await db
-        .select({ id: posts.id })
-        .from(posts)
-        .where(inArray(posts.id, acquired.postIds))
-    ).toHaveLength(0);
-  }
-  if (acquired.userIds.length > 0) {
-    await db.delete(users).where(inArray(users.id, acquired.userIds));
-    expect(
-      await db
+  await db.transaction(async (tx) => {
+    if (acquired.userIds.length > 0) {
+      await tx
         .select({ id: users.id })
         .from(users)
         .where(inArray(users.id, acquired.userIds))
-    ).toHaveLength(0);
-  }
+        .for('update');
+      const [onboarding, snapshots, whitelistRows, grantedRows, configRows] =
+        await Promise.all([
+          tx
+            .select({ id: gameOnboarding.id })
+            .from(gameOnboarding)
+            .where(inArray(gameOnboarding.userId, acquired.userIds))
+            .limit(1),
+          tx
+            .select({ id: userPnLSnapshots.id })
+            .from(userPnLSnapshots)
+            .where(inArray(userPnLSnapshots.userId, acquired.userIds))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id })
+            .from(whitelist)
+            .where(inArray(whitelist.userId, acquired.userIds))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id })
+            .from(whitelist)
+            .where(inArray(whitelist.grantedBy, acquired.userIds))
+            .limit(1),
+          tx
+            .select({ id: whitelistConfig.id })
+            .from(whitelistConfig)
+            .where(inArray(whitelistConfig.updatedBy, acquired.userIds))
+            .limit(1),
+        ]);
+      if (
+        onboarding.length > 0 ||
+        snapshots.length > 0 ||
+        whitelistRows.length > 0 ||
+        grantedRows.length > 0 ||
+        configRows.length > 0
+      ) {
+        throw new Error(
+          'cleanup refused: a foreign row still references an owned user'
+        );
+      }
+    }
+    if (acquired.favoriteIds.length > 0) {
+      await tx
+        .delete(favorites)
+        .where(inArray(favorites.id, acquired.favoriteIds));
+      expect(
+        await tx
+          .select({ id: favorites.id })
+          .from(favorites)
+          .where(inArray(favorites.id, acquired.favoriteIds))
+      ).toHaveLength(0);
+    }
+    if (acquired.postIds.length > 0) {
+      await tx.delete(posts).where(inArray(posts.id, acquired.postIds));
+      expect(
+        await tx
+          .select({ id: posts.id })
+          .from(posts)
+          .where(inArray(posts.id, acquired.postIds))
+      ).toHaveLength(0);
+    }
+    if (acquired.userIds.length > 0) {
+      await tx.delete(users).where(inArray(users.id, acquired.userIds));
+      expect(
+        await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(inArray(users.id, acquired.userIds))
+      ).toHaveLength(0);
+    }
+  });
 }
 
 async function fetchFavoritePosts(limit = 20) {
@@ -325,4 +393,42 @@ describe('MCP get_favorite_posts test-author exclusion', () => {
       }
     });
   }
+
+  it('refuses cleanup while a foreign onboarding row references an owned user', async () => {
+    const foreign: OwnedRows = { postIds: [], userIds: [], favoriteIds: [] };
+    const foreignUserId = await generateSnowflakeId();
+    const onboardingId = await generateSnowflakeId();
+    await insertUser(
+      foreignUserId,
+      `f98-foreign-${foreignUserId}`,
+      {},
+      foreign
+    );
+    await db
+      .insert(gameOnboarding)
+      .values({ id: onboardingId, userId: foreignUserId });
+    try {
+      await expect(cleanup(foreign)).rejects.toThrow(
+        'cleanup refused: a foreign row still references an owned user'
+      );
+      // Nothing was deleted: the foreign onboarding row and its user survive.
+      expect(
+        await db
+          .select({ id: gameOnboarding.id })
+          .from(gameOnboarding)
+          .where(eq(gameOnboarding.id, onboardingId))
+      ).toHaveLength(1);
+      expect(
+        await db
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.id, foreignUserId))
+      ).toHaveLength(1);
+    } finally {
+      await db
+        .delete(gameOnboarding)
+        .where(eq(gameOnboarding.id, onboardingId));
+      await cleanup(foreign);
+    }
+  });
 });
