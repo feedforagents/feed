@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+import { resolve } from 'node:path';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
-  and,
   balanceTransactions,
   db,
   eq,
@@ -19,12 +19,14 @@ import {
   FEE_CONFIG,
 } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
+import { sql } from 'drizzle-orm';
 import { NextRequest } from 'next/server';
 
 // This Next.js build guard has no database/runtime behavior.
 mock.module('server-only', () => ({}));
-const { getHourBoundary, loadUserPnlHistory, snapshotAllUserPnlMetrics } =
-  await import('../../../apps/web/src/lib/wallet/pnlHistory');
+const { loadUserPnlHistory } = await import(
+  '../../../apps/web/src/lib/wallet/pnlHistory'
+);
 const { calculatePortfolioPnL } = await import(
   '@feed/engine/services/portfolio-pnl'
 );
@@ -501,6 +503,152 @@ async function readMetricsViaHttp(userId: string): Promise<PnlMetrics> {
   return payload.metrics as PnlMetrics;
 }
 
+const repoRoot = resolve(import.meta.dir, '../../..');
+const isolatedSnapshotHelper = resolve(
+  import.meta.dir,
+  'helpers/pnl-snapshot-isolated-run.ts'
+);
+
+/**
+ * A database URL is disposable only on loopback with a test-like name —
+ * the same guard other integration suites use before touching a database.
+ */
+function assertDisposableDatabaseUrl(
+  value: string | undefined,
+  label: string
+): string {
+  if (!value) throw new Error(`${label} is required for integration tests`);
+  const url = new URL(value);
+  const databaseName = decodeURIComponent(url.pathname.slice(1));
+  if (
+    !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) ||
+    !/(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName)
+  ) {
+    throw new Error(
+      `${label} must point to a local test or verification database`
+    );
+  }
+  return databaseName;
+}
+
+async function runSpawned(
+  argv: string[],
+  options: { cwd?: string; env?: Record<string, string | undefined> },
+  label: string
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn(argv, {
+    cwd: options.cwd,
+    env: options.env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const timeout = setTimeout(() => child.kill(), 120_000);
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    if (code !== 0) {
+      throw new Error(
+        `${label} failed (exit ${code})\n--- stdout ---\n${stdout.slice(-4000)}\n--- stderr ---\n${stderr.slice(-4000)}`
+      );
+    }
+    return { code, stdout, stderr };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Run the global snapshot producer in an exclusively owned fresh
+ * database/process: create a disposable database on the same server,
+ * migrate it, spawn the isolated run with the singleton DB handle
+ * configured to that database when the child process starts, then drop
+ * the whole database. Every row the producer writes disappears with the
+ * database, so this never classifies unrelated rows by a before/after
+ * diff and never deletes rows outside this fixture — not even when an
+ * assertion fails, because the drop runs in `finally`.
+ */
+async function runSnapshotProducerInIsolatedDb(params: {
+  ownerId: string;
+  ownerLifetimePnL: number;
+  expectedOwnerCurrentPnL: number;
+  snapshotAt: Date;
+}): Promise<void> {
+  const sharedUrl = process.env.DATABASE_URL;
+  assertDisposableDatabaseUrl(sharedUrl, 'DATABASE_URL');
+  const shared = new URL(sharedUrl as string);
+  const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+  const freshDbName = `feed_test_1774r_${suffix}`;
+  const freshUrl = new URL(shared);
+  freshUrl.pathname = `/${freshDbName}`;
+  const freshUrlString = freshUrl.toString();
+
+  await db.execute(sql.raw(`CREATE DATABASE "${freshDbName}"`));
+  try {
+    const migrateEnv = {
+      ...process.env,
+      DATABASE_URL: freshUrlString,
+      DIRECT_DATABASE_URL: freshUrlString,
+    };
+    await runSpawned(
+      [
+        'node',
+        'node_modules/drizzle-kit/bin.cjs',
+        'migrate',
+        '--config=packages/db/drizzle.config.cjs',
+      ],
+      { cwd: repoRoot, env: migrateEnv },
+      `migrating isolated database ${freshDbName}`
+    );
+
+    const bystanderWithRowId = await generateSnowflakeId();
+    const bystanderWithoutRowId = await generateSnowflakeId();
+    const runInput = {
+      ownerId: params.ownerId,
+      ownerLifetimePnL: String(params.ownerLifetimePnL),
+      expectedOwnerCurrentPnL: params.expectedOwnerCurrentPnL,
+      bystanderWithRowId,
+      bystanderWithRowLifetimePnL: '42',
+      bystanderWithoutRowId,
+      bystanderWithoutRowLifetimePnL: '33',
+      snapshotAt: params.snapshotAt.toISOString(),
+    };
+    const childEnv = {
+      ...process.env,
+      NODE_ENV: 'test',
+      BUN_ENV: 'test',
+      DATABASE_URL: freshUrlString,
+      DIRECT_DATABASE_URL: freshUrlString,
+      DISABLE_RATE_LIMITING: 'true',
+      TZ: 'UTC',
+      PNL_SNAPSHOT_RUN_JSON: JSON.stringify(runInput),
+    };
+    const { stdout } = await runSpawned(
+      [process.execPath, 'test', isolatedSnapshotHelper],
+      { env: childEnv },
+      'isolated snapshot producer run'
+    );
+    const summary = stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('{"ok":true'));
+    if (!summary) {
+      throw new Error(
+        `isolated snapshot producer run printed no JSON summary\n--- stdout ---\n${stdout.slice(-4000)}`
+      );
+    }
+  } finally {
+    await db.execute(
+      sql.raw(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${freshDbName}'`
+      )
+    );
+    await db.execute(sql.raw(`DROP DATABASE IF EXISTS "${freshDbName}"`));
+  }
+}
+
 async function runSettlementCase(params: {
   accrueFunding: boolean;
   ownerSide: 'long' | 'short';
@@ -669,126 +817,21 @@ async function runSettlementCase(params: {
 
     // The persisted hourly snapshot carries the same post-close metrics.
     // snapshotAllUserPnlMetrics is a global producer: on a shared database
-    // it also writes current-hour rows for unrelated eligible users, and
-    // this fixture only owns its own users. There is no scoped producer,
-    // and the db handle is a process singleton bound to DATABASE_URL, so
-    // this portion cannot be pointed at a separate fresh database on its
-    // own. Instead the run proves unrelated snapshot data is unchanged
-    // net of the call: record every current-hour row first, seed one
-    // bystander with a pre-existing row and one without, run the real
-    // producer, then remove exactly the rows it created for users outside
-    // this fixture and verify the pre-existing rows are untouched.
-    const snapshotAt = new Date();
-    const hourBoundary = getHourBoundary(snapshotAt);
-    const bystanderWithRowId = await generateSnowflakeId();
-    const bystanderWithoutRowId = await generateSnowflakeId();
-    for (const [id, lifetimePnL] of [
-      [bystanderWithRowId, '42'],
-      [bystanderWithoutRowId, '33'],
-    ] as const) {
-      await fixtures.insertUser({
-        id,
-        username: `pnl-flow-bystander-${id}`,
-        virtualBalance: '100000',
-        totalDeposited: '100000',
-        lifetimePnL,
-        updatedAt: new Date(),
-      });
-    }
-    await db.insert(userPnLSnapshots).values({
-      id: `${bystanderWithRowId}:${hourBoundary.toISOString()}:pnl`,
-      userId: bystanderWithRowId,
-      snapshotAt: hourBoundary,
-      lifetimePnL: 42,
-      unrealizedPnL: 0,
-      currentPnL: 42,
+    // it also writes current-hour rows for unrelated eligible users, so
+    // running it here would write — and then need to clean up — rows this
+    // fixture does not own. Instead the producer runs in an exclusively
+    // owned fresh database in a child process (see
+    // runSnapshotProducerInIsolatedDb): the child seeds only the owner and
+    // two bystanders, proves the producer reaches the bystander without a
+    // row and leaves the bystander's pre-existing row alone, and the
+    // parent drops the whole database afterwards. No before/after diff
+    // over unrelated users, and no deletion of outside rows.
+    await runSnapshotProducerInIsolatedDb({
+      ownerId,
+      ownerLifetimePnL: after.lifetimePnL,
+      expectedOwnerCurrentPnL: after.currentPnL,
+      snapshotAt: new Date(),
     });
-    const snapshotRowsBefore = await db
-      .select()
-      .from(userPnLSnapshots)
-      .where(eq(userPnLSnapshots.snapshotAt, hourBoundary));
-    const beforeByUserId = new Map(
-      snapshotRowsBefore.map((row) => [
-        row.userId,
-        {
-          lifetimePnL: row.lifetimePnL,
-          unrealizedPnL: row.unrealizedPnL,
-          currentPnL: row.currentPnL,
-        },
-      ])
-    );
-
-    await snapshotAllUserPnlMetrics(snapshotAt);
-    const [snapshotRow] = await db
-      .select()
-      .from(userPnLSnapshots)
-      .where(eq(userPnLSnapshots.userId, ownerId));
-    expect(snapshotRow).toBeDefined();
-    expect(Number(snapshotRow?.currentPnL)).toBeCloseTo(after.currentPnL, 8);
-    expect(Number(snapshotRow?.unrealizedPnL)).toBe(0);
-
-    // The global producer really reaches unrelated users: the bystander
-    // without a pre-existing row gains one, while the bystander's
-    // pre-existing row is left alone by the on-conflict-do-nothing insert.
-    const [bystanderCreatedRow] = await db
-      .select()
-      .from(userPnLSnapshots)
-      .where(eq(userPnLSnapshots.userId, bystanderWithoutRowId));
-    expect(bystanderCreatedRow).toBeDefined();
-    const [bystanderKeptRow] = await db
-      .select()
-      .from(userPnLSnapshots)
-      .where(eq(userPnLSnapshots.userId, bystanderWithRowId));
-    expect(bystanderKeptRow).toBeDefined();
-    expect(Number(bystanderKeptRow?.currentPnL)).toBe(42);
-    expect(Number(bystanderKeptRow?.unrealizedPnL)).toBe(0);
-
-    // Remove exactly the rows the producer created for users outside this
-    // fixture; pre-existing rows are never touched.
-    const ownedUserIds = new Set([
-      ...fixtures.userIds,
-      ...readerFixtures.userIds,
-    ]);
-    const rowsAfterProducer = await db
-      .select()
-      .from(userPnLSnapshots)
-      .where(eq(userPnLSnapshots.snapshotAt, hourBoundary));
-    const createdOutsideIds = rowsAfterProducer
-      .map((row) => row.userId)
-      .filter(
-        (userId) => !ownedUserIds.has(userId) && !beforeByUserId.has(userId)
-      );
-    if (createdOutsideIds.length > 0) {
-      await db
-        .delete(userPnLSnapshots)
-        .where(
-          and(
-            eq(userPnLSnapshots.snapshotAt, hourBoundary),
-            inArray(userPnLSnapshots.userId, createdOutsideIds)
-          )
-        );
-    }
-
-    // Unrelated snapshot data is unchanged net of the run.
-    const rowsFinal = await db
-      .select()
-      .from(userPnLSnapshots)
-      .where(eq(userPnLSnapshots.snapshotAt, hourBoundary));
-    const finalByUserId = new Map(rowsFinal.map((row) => [row.userId, row]));
-    for (const [userId, before] of beforeByUserId) {
-      const finalRow = finalByUserId.get(userId);
-      expect(finalRow).toBeDefined();
-      expect(Number(finalRow?.lifetimePnL)).toBe(Number(before.lifetimePnL));
-      expect(Number(finalRow?.unrealizedPnL)).toBe(
-        Number(before.unrealizedPnL)
-      );
-      expect(Number(finalRow?.currentPnL)).toBe(Number(before.currentPnL));
-    }
-    for (const row of rowsFinal) {
-      expect(
-        ownedUserIds.has(row.userId) || beforeByUserId.has(row.userId)
-      ).toBe(true);
-    }
   } finally {
     await fixtures.cleanup();
   }
@@ -801,7 +844,7 @@ describe('wallet P&L across a real funding accrual and settlement', () => {
       ownerSide: 'long',
       partialClose: true,
     });
-  });
+  }, 120_000);
 
   it('receives a funding rebate: full close settles funding exactly once', async () => {
     await runSettlementCase({
@@ -809,7 +852,7 @@ describe('wallet P&L across a real funding accrual and settlement', () => {
       ownerSide: 'short',
       partialClose: false,
     });
-  });
+  }, 120_000);
 
   it('zero funding: full close moves P&L only by price P&L and the fee', async () => {
     await runSettlementCase({
@@ -817,5 +860,5 @@ describe('wallet P&L across a real funding accrual and settlement', () => {
       ownerSide: 'long',
       partialClose: false,
     });
-  });
+  }, 120_000);
 });
