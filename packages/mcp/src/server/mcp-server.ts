@@ -125,21 +125,23 @@ export function getAvailableTools(): MCPTool[] {
     },
     {
       name: 'get_positions',
-      description: 'Get all open positions',
+      description:
+        'Get open prediction and perpetual positions. Pagination applies only to predictions; open perpetual positions are returned in full.',
       inputSchema: {
         type: 'object',
         properties: {
           marketId: {
             type: 'string',
-            description: 'Filter by specific market ID',
+            description:
+              'Filter by prediction market ID; omits perpetual positions',
           },
           limit: {
             type: 'number',
-            description: 'Limit number of results',
+            description: 'Limit prediction results only (default: all)',
           },
           offset: {
             type: 'number',
-            description: 'Pagination offset',
+            description: 'Prediction pagination offset only',
           },
         },
       },
