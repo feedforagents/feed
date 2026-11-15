@@ -26,12 +26,14 @@ import {
   getDbInstance,
   inArray,
   isNull,
-  lt,
+  like,
   lte,
   markets,
   not,
   type Post,
+  type PostFeedVisibilityOptions,
   positions,
+  postCursorConditions,
   posts,
   reactions,
   tags,
@@ -49,6 +51,31 @@ import {
   invalidateCache,
   invalidateCachePattern,
 } from './cache-service';
+
+/** Keep cursor text and viewer policy in separate, unambiguous key fields. */
+function postFeedCacheKey(
+  limit: number,
+  cursorOrOffset: string | number | undefined,
+  visibility: PostFeedVisibilityOptions | undefined,
+  authorId?: string
+): string {
+  const isCursor = typeof cursorOrOffset === 'string';
+  if (!visibility) {
+    const prefix = authorId === undefined ? '' : `${authorId}:`;
+    return isCursor
+      ? `${prefix}${limit}:cursor:${cursorOrOffset}`
+      : `${prefix}${limit}:offset:${cursorOrOffset || 0}`;
+  }
+  return JSON.stringify([
+    'post-visibility-v1',
+    authorId ?? null,
+    limit,
+    isCursor ? 'cursor' : 'offset',
+    cursorOrOffset ?? 0,
+    [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
+    visibility.excludeDeadReposts === true,
+  ]);
+}
 
 /**
  * Cached Database Service Class
@@ -71,16 +98,14 @@ class CachedDatabaseService {
    */
   async getRecentPosts(
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    visibility?: PostFeedVisibilityOptions
   ): Promise<Post[]> {
-    const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${limit}:cursor:${cursorOrOffset}`
-      : `${limit}:offset:${cursorOrOffset || 0}`;
+    const cacheKey = postFeedCacheKey(limit, cursorOrOffset, visibility);
 
     return getCacheOrFetch(
       cacheKey,
-      () => getDbInstance().getRecentPosts(limit, cursorOrOffset),
+      () => getDbInstance().getRecentPosts(limit, cursorOrOffset, visibility),
       {
         namespace: CACHE_KEYS.POSTS_LIST,
         ttl: DEFAULT_TTLS.POSTS_LIST,
@@ -94,16 +119,25 @@ class CachedDatabaseService {
   async getPostsByActor(
     authorId: string,
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    visibility?: PostFeedVisibilityOptions
   ): Promise<Post[]> {
-    const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${authorId}:${limit}:cursor:${cursorOrOffset}`
-      : `${authorId}:${limit}:offset:${cursorOrOffset || 0}`;
+    const cacheKey = postFeedCacheKey(
+      limit,
+      cursorOrOffset,
+      visibility,
+      authorId
+    );
 
     return getCacheOrFetch(
       cacheKey,
-      () => getDbInstance().getPostsByActor(authorId, limit, cursorOrOffset),
+      () =>
+        getDbInstance().getPostsByActor(
+          authorId,
+          limit,
+          cursorOrOffset,
+          visibility
+        ),
       {
         namespace: CACHE_KEYS.POSTS_BY_ACTOR,
         ttl: DEFAULT_TTLS.POSTS_BY_ACTOR,
@@ -163,18 +197,21 @@ class CachedDatabaseService {
         ];
 
         if (cursor) {
-          conditions.push(lt(posts.timestamp, new Date(cursor)));
+          conditions.push(...(await postCursorConditions(cursor)));
           conditions.push(lte(posts.timestamp, now));
         } else {
           conditions.push(lte(posts.timestamp, now));
         }
 
-        // Query posts from database (only from non-test users)
+        // Query posts from database (only from non-test users). The id
+        // tiebreaker makes the order total: posts can share a timestamp
+        // (it defaults to the transaction timestamp, and batch creation
+        // stamps one value onto many rows).
         const result = await db
           .select()
           .from(posts)
           .where(and(...conditions))
-          .orderBy(desc(posts.timestamp))
+          .orderBy(desc(posts.timestamp), desc(posts.id))
           .limit(limit)
           .offset(cursor ? 0 : offset);
 
@@ -303,11 +340,22 @@ class CachedDatabaseService {
           reactionsResult,
           postCountResult,
         ] = await Promise.all([
-          // Count followers (users following this user)
+          // Count followers (users following this user). The followers
+          // list hides test and banned accounts, so the count joins the
+          // follower's user row and applies the same membership, or the
+          // header number disagrees with the list on the same screen.
           db
             .select({ count: count() })
             .from(follows)
-            .where(eq(follows.followingId, userId)),
+            .innerJoin(users, eq(follows.followerId, users.id))
+            .where(
+              and(
+                eq(follows.followingId, userId),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            ),
 
           // Count NPC followers (FollowStatus rows the engine writes when
           // an NPC follows this user). The followers list merges these rows
@@ -324,11 +372,20 @@ class CachedDatabaseService {
               )
             ),
 
-          // Count following (users this user follows)
+          // Count following (users this user follows), with the same
+          // hidden-tier membership as the following list.
           db
             .select({ count: count() })
             .from(follows)
-            .where(eq(follows.followerId, userId)),
+            .innerJoin(users, eq(follows.followingId, users.id))
+            .where(
+              and(
+                eq(follows.followerId, userId),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            ),
 
           // Count actor follows
           db
@@ -354,11 +411,21 @@ class CachedDatabaseService {
             .from(reactions)
             .where(eq(reactions.userId, userId)),
 
-          // Count posts
+          // Count posts the profile list can show: not soft-deleted and
+          // already published. getPostsByActor applies the same two
+          // filters and the actor stats route counts actor posts the
+          // same way, so the header number agrees with the list on the
+          // same profile screen and never hints at a scheduled post.
           db
             .select({ count: count() })
             .from(posts)
-            .where(eq(posts.authorId, userId)),
+            .where(
+              and(
+                eq(posts.authorId, userId),
+                isNull(posts.deletedAt),
+                lte(posts.timestamp, new Date())
+              )
+            ),
         ]);
 
         const followers =

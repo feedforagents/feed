@@ -1,0 +1,54 @@
+name: Inspect or prepare staging fee schema
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed staging commit (full SHA)
+        required: true
+        type: string
+      mode:
+        description: Inspect only, or explicitly prepare the reviewed schema
+        type: choice
+        required: true
+        default: inspect
+        options: [inspect, prepare]
+
+permissions:
+  contents: read
+  checks: read
+
+concurrency:
+  group: database-migrations-staging
+  cancel-in-progress: false
+
+jobs:
+  schema:
+    if: github.repository == 'feedforagents/feed' && github.ref == 'refs/heads/staging'
+    environment: cloudflare-staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Test schema release guards
+        run: bun test scripts/cloudflare/staging-fee-schema.test.ts
+      - name: Check migration journal
+        run: bun scripts/cloudflare/check-migration-history.ts
+      - name: Verify exact staging target and fee schema
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SCHEMA_MODE: ${{ inputs.mode }}
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          STAGING_DIRECT_DATABASE_URL: ${{ secrets.STAGING_DIRECT_DATABASE_URL }}
+          DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
+        run: bun scripts/cloudflare/staging-fee-schema.ts

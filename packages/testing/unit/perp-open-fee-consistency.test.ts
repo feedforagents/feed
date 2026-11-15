@@ -10,9 +10,11 @@
  * preview shows the same number as estimatedFee), while FeeService
  * records and splits its own calculateFee() result into tradingFees,
  * users.totalFeesPaid, the platform/referrer shares and the stability
- * fund. FeeService works in integer cents ("one canonical rounded fee so
- * platform + referrer always equals the total"); the perp service must
- * charge that same canonical fee, or the books disagree with the debit.
+ * fund. FeeService works in integer cents from the one canonical fee
+ * (PRD §9.1: the fee on the cent-settled amount, rounded UP to whole
+ * cents, so platform + referrer always equals the total); the perp
+ * service must charge that same canonical fee, or the books disagree
+ * with the debit.
  */
 import { beforeEach, describe, expect, it } from 'bun:test';
 import {
@@ -390,7 +392,7 @@ describe('perp open fee consistency (charged vs recorded)', () => {
 
   it('charges the recorded fee on a $15 open at 5x leverage', async () => {
     const result = await openAndCheck(15, 5);
-    // Canonical fee: round(15 * 0.1%) = round(1.5 cents) = 2 cents.
+    // Canonical fee: ceil(15 * 0.1%) = ceil(1.5 cents) = 2 cents.
     expect(result.feePaid).toBeCloseTo(0.02, 10);
   });
 
@@ -399,9 +401,12 @@ describe('perp open fee consistency (charged vs recorded)', () => {
     expect(result.feePaid).toBeCloseTo(0.03, 10);
   });
 
-  it('charges the recorded fee on a $14 open (rounding goes down)', async () => {
+  it('charges the recorded fee on a $14 open (fee rounds up)', async () => {
     const result = await openAndCheck(14, 1);
-    expect(result.feePaid).toBeCloseTo(0.01, 10);
+    // Canonical fee: ceil(14 * 0.1%) = ceil(1.4 cents) = 2 cents. The
+    // ceiling is the partition-safe rule (PRD §9.1): a round-to-nearest
+    // fee let split trades pay less total fee than the whole trade.
+    expect(result.feePaid).toBeCloseTo(0.02, 10);
   });
 
   it('still agrees on a round $100 open (control)', async () => {

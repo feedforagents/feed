@@ -131,7 +131,11 @@ export {
 import { DatabaseService, getDbInstance } from './database-service';
 
 export type { FeedPost } from './database-service';
-export { postCursorConditions } from './database-service';
+export {
+  type PostFeedVisibilityOptions,
+  postCursorConditions,
+  postFeedVisibilityConditions,
+} from './database-service';
 // Re-export query helpers
 export {
   $connect,
