@@ -25,6 +25,7 @@ import { executeCreateComment } from '../../mcp/src/handlers/tool-handlers';
 
 const userIds: string[] = [];
 const postIds: string[] = [];
+const commentIds: string[] = [];
 const blockIds: string[] = [];
 
 async function createUser(): Promise<string> {
@@ -77,11 +78,33 @@ async function notificationsFor(postId: string) {
 
 describe('MCP create_comment', () => {
   afterAll(async () => {
-    await db
-      .delete(notifications)
-      .where(inArray(notifications.userId, userIds));
-    await db.delete(comments).where(inArray(comments.postId, postIds));
+    // Narrow cleanup: only rows this file's own inserts acquired — the
+    // comments it landed (by id) and the notifications those comments
+    // produced (by commentId). Never sweep by recipient or post.
+    if (commentIds.length) {
+      await db
+        .delete(notifications)
+        .where(inArray(notifications.commentId, commentIds));
+      await db.delete(comments).where(inArray(comments.id, commentIds));
+    }
     await db.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
+    // Foreign-child refusal: fail loudly if any child row still
+    // references the owned parents instead of sweeping it away with
+    // the parent delete.
+    if (postIds.length) {
+      expect(
+        await db
+          .select({ id: notifications.id })
+          .from(notifications)
+          .where(inArray(notifications.postId, postIds))
+      ).toHaveLength(0);
+      expect(
+        await db
+          .select({ id: comments.id })
+          .from(comments)
+          .where(inArray(comments.postId, postIds))
+      ).toHaveLength(0);
+    }
     await db.delete(posts).where(inArray(posts.id, postIds));
     await db.delete(users).where(inArray(users.id, userIds));
   });
@@ -95,6 +118,7 @@ describe('MCP create_comment', () => {
       { agentId: 'agent', userId: agentUserId },
       { postId, content: 'nice post' }
     );
+    commentIds.push(result.commentId);
 
     expect(result.success).toBe(true);
     expect(await commentsOn(postId)).toHaveLength(1);
@@ -117,6 +141,7 @@ describe('MCP create_comment', () => {
       { agentId: 'agent', userId: agentUserId },
       { postId, content: 'note to self' }
     );
+    commentIds.push(result.commentId);
 
     expect(result.success).toBe(true);
     expect(await commentsOn(postId)).toHaveLength(1);
@@ -141,6 +166,7 @@ describe('MCP create_comment', () => {
       { agentId: 'agent', userId: agentUserId },
       { postId, content: 'blocked hello' }
     );
+    commentIds.push(result.commentId);
 
     expect(result.success).toBe(true);
     expect(await commentsOn(postId)).toHaveLength(1);
@@ -203,6 +229,7 @@ describe('MCP create_comment', () => {
         { agentId: 'agent', userId: agentUserId },
         { postId, content: 'committed anyway' }
       );
+      commentIds.push(result.commentId);
 
       expect(result.success).toBe(true);
       expect(await commentsOn(postId)).toHaveLength(1);

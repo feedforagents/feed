@@ -57,6 +57,7 @@ import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   and,
   db,
+  dbWrite,
   desc,
   eq,
   favorites,
@@ -1527,16 +1528,12 @@ export async function executeCreateComment(
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
   const now = new Date();
-  const [post] = await db
-    .select({
-      id: posts.id,
-      authorId: posts.authorId,
-      deletedAt: posts.deletedAt,
-      timestamp: posts.timestamp,
-    })
-    .from(posts)
-    .where(eq(posts.id, args.postId))
-    .limit(1);
+  // Read-your-own-write: the validity lookup must hit the primary. A
+  // replica read can reject an immediate comment on a newly committed
+  // post while the replica lags (or still show a just-deleted post).
+  const post = await dbWrite.post.findFirst({
+    where: { id: args.postId },
+  });
 
   // Unknown or not-yet-published posts cannot be commented on (and are
   // never created from the ID: an unchecked comment would become an
