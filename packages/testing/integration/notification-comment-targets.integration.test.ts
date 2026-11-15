@@ -13,9 +13,14 @@
  *
  * Fixture ownership: every ID is registered only from a successful
  * INSERT ... RETURNING, and cleanup deletes exactly those owned rows.
- * A setup that fails partway (for example on an ID collision with a
- * pre-existing post or comment) therefore cannot delete data the fixture
- * did not create; the ownership describe below proves that.
+ * Notifications are tracked by the IDs the creator calls actually made,
+ * never by recipient. A user is deleted only when nothing references it
+ * that this fixture does not own — an unowned notification, or a
+ * GameOnboarding / UserPnLSnapshot / Whitelist row that would vanish
+ * through ON DELETE CASCADE. A setup that fails partway (for example on
+ * an ID collision with a pre-existing post or comment) therefore cannot
+ * delete data the fixture did not create; the ownership describe below
+ * proves that.
  *
  * Requires DATABASE_URL pointing at a disposable database with schema applied.
  */
@@ -31,13 +36,18 @@ import {
   notifyReplyToComment,
 } from '@feed/api';
 import {
+  and,
   comments,
   db,
   eq,
+  gameOnboarding,
   inArray,
+  notInArray,
   notifications,
   posts,
+  userPnLSnapshots,
   users,
+  whitelist,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { serializeNotificationForApi } from '../../../apps/web/src/app/api/notifications/route';
@@ -45,12 +55,13 @@ import { getNotificationHref } from '../../../apps/web/src/lib/notifications/pre
 
 interface FixtureRegistry {
   commentIds: string[];
+  notificationIds: string[];
   postId: string | null;
   userIds: string[];
 }
 
 function newRegistry(): FixtureRegistry {
-  return { commentIds: [], postId: null, userIds: [] };
+  return { commentIds: [], notificationIds: [], postId: null, userIds: [] };
 }
 
 async function insertUser(registry: FixtureRegistry): Promise<string> {
@@ -112,24 +123,95 @@ async function insertComment(
   return row.id;
 }
 
+async function recordCreatedNotifications(
+  registry: FixtureRegistry,
+  userId: string,
+  beforeIds: Set<string>
+): Promise<void> {
+  const rows = await db
+    .select({ id: notifications.id })
+    .from(notifications)
+    .where(eq(notifications.userId, userId));
+  for (const row of rows) {
+    if (!beforeIds.has(row.id)) registry.notificationIds.push(row.id);
+  }
+}
+
 async function cleanupRegistry(registry: FixtureRegistry): Promise<void> {
-  if (registry.userIds.length > 0) {
-    await db
-      .delete(notifications)
-      .where(inArray(notifications.userId, registry.userIds));
-  }
-  if (registry.commentIds.length > 0) {
-    await db.delete(comments).where(inArray(comments.id, registry.commentIds));
-  }
-  if (registry.postId) {
-    await db.delete(posts).where(eq(posts.id, registry.postId));
-  }
-  if (registry.userIds.length > 0) {
-    await db.delete(users).where(inArray(users.id, registry.userIds));
-  }
+  const deletableUserIds: string[] = [];
+  await db.transaction(async (tx) => {
+    // Notifications: only the rows this fixture's creator calls made.
+    if (registry.notificationIds.length > 0) {
+      await tx
+        .delete(notifications)
+        .where(inArray(notifications.id, registry.notificationIds));
+    }
+    if (registry.commentIds.length > 0) {
+      await tx
+        .delete(comments)
+        .where(inArray(comments.id, registry.commentIds));
+    }
+    if (registry.postId) {
+      await tx.delete(posts).where(eq(posts.id, registry.postId));
+    }
+    // Users: refuse any user that still has a reference this fixture
+    // does not own. Deleting such a user would remove the other owner's
+    // notification outright, or its GameOnboarding / UserPnLSnapshot /
+    // Whitelist row through ON DELETE CASCADE. The check runs inside
+    // the same transaction as the deletes, so the decision and the
+    // deletion cannot drift apart.
+    for (const userId of registry.userIds) {
+      const unownedNotificationCondition =
+        registry.notificationIds.length > 0
+          ? and(
+              eq(notifications.userId, userId),
+              notInArray(notifications.id, registry.notificationIds)
+            )
+          : eq(notifications.userId, userId);
+      const [unownedNotifications, onboarding, snapshots, whitelistRows] =
+        await Promise.all([
+          tx
+            .select({ id: notifications.id })
+            .from(notifications)
+            .where(unownedNotificationCondition)
+            .limit(1),
+          tx
+            .select({ id: gameOnboarding.id })
+            .from(gameOnboarding)
+            .where(eq(gameOnboarding.userId, userId))
+            .limit(1),
+          tx
+            .select({ id: userPnLSnapshots.id })
+            .from(userPnLSnapshots)
+            .where(eq(userPnLSnapshots.userId, userId))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id })
+            .from(whitelist)
+            .where(eq(whitelist.userId, userId))
+            .limit(1),
+        ]);
+      if (
+        unownedNotifications.length === 0 &&
+        onboarding.length === 0 &&
+        snapshots.length === 0 &&
+        whitelistRows.length === 0
+      ) {
+        deletableUserIds.push(userId);
+      }
+    }
+    if (deletableUserIds.length > 0) {
+      await tx.delete(users).where(inArray(users.id, deletableUserIds));
+    }
+  });
   registry.commentIds.length = 0;
+  registry.notificationIds.length = 0;
   registry.postId = null;
-  registry.userIds.length = 0;
+  // Refused users stay registered: the rows blocking them may be removed
+  // by their owner later, and a follow-up cleanup must still be able to
+  // delete them. Clearing them here would leak the user row.
+  const deletedUserIds = new Set(deletableUserIds);
+  registry.userIds = registry.userIds.filter((id) => !deletedUserIds.has(id));
 }
 
 describe('notification comment targets', () => {
@@ -162,6 +244,15 @@ describe('notification comment targets', () => {
     reactedComment = await insertComment(fixtures, postId, recipient);
     chatId = await generateSnowflakeId();
 
+    const notificationIdsBefore = new Set(
+      (
+        await db
+          .select({ id: notifications.id })
+          .from(notifications)
+          .where(eq(notifications.userId, recipient))
+      ).map((row) => row.id)
+    );
+
     // Post reaction first: its dedupe check has no commentId condition, so
     // creating it after the comment reaction would suppress it.
     await notifyReactionOnPost(recipient, actor, postId);
@@ -177,6 +268,12 @@ describe('notification comment targets', () => {
     await notifyReactionOnComment(recipient, actor, reactedComment, postId);
     await notifyFollow(recipient, actor);
     await notifyDMMessage(recipient, actor, chatId, 'hello there');
+
+    await recordCreatedNotifications(
+      fixtures,
+      recipient,
+      notificationIdsBefore
+    );
 
     const [actorRow] = await db
       .select({
@@ -316,6 +413,95 @@ describe('notification comment targets fixture ownership', () => {
     } finally {
       await cleanupRegistry(attempt);
       await cleanupRegistry(victim);
+    }
+  });
+
+  it('cleanup refuses a user with separately owned notification and onboarding rows', async () => {
+    const fixture = newRegistry();
+    const outsider = newRegistry();
+    let separateNotificationId: string | null = null;
+    let separateOnboardingId: string | null = null;
+    try {
+      const userId = await insertUser(fixture);
+      const actorId = await insertUser(outsider);
+      const fixturePostId = await insertPost(fixture, userId);
+
+      // Rows another owner created for the same user and post; none of
+      // them is registered in `fixture`, so cleanup must leave them —
+      // and the user they reference — untouched.
+      const [separateNotification] = await db
+        .insert(notifications)
+        .values({
+          id: await generateSnowflakeId(),
+          userId,
+          type: 'follow',
+          actorId,
+          title: 'separate',
+          message: 'separately owned notification',
+        })
+        .returning({ id: notifications.id });
+      if (!separateNotification)
+        throw new Error('separate notification insert returned no row');
+      separateNotificationId = separateNotification.id;
+
+      const [separateOnboarding] = await db
+        .insert(gameOnboarding)
+        .values({
+          id: await generateSnowflakeId(),
+          userId,
+          currentStep: 'welcome',
+        })
+        .returning({ id: gameOnboarding.id });
+      if (!separateOnboarding)
+        throw new Error('separate onboarding insert returned no row');
+      separateOnboardingId = separateOnboarding.id;
+
+      const separateCommentId = await insertComment(
+        outsider,
+        fixturePostId,
+        actorId
+      );
+
+      await cleanupRegistry(fixture);
+
+      // The user survives because cleanup refuses it, so the cascade
+      // children survive with it; the separately owned notification and
+      // the comment on the fixture post survive as well.
+      const [survivingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, userId));
+      expect(survivingUser).toBeDefined();
+      const [survivingNotification] = await db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.id, separateNotificationId));
+      expect(survivingNotification).toBeDefined();
+      const [survivingOnboarding] = await db
+        .select()
+        .from(gameOnboarding)
+        .where(eq(gameOnboarding.id, separateOnboardingId));
+      expect(survivingOnboarding).toBeDefined();
+      const [survivingComment] = await db
+        .select()
+        .from(comments)
+        .where(eq(comments.id, separateCommentId));
+      expect(survivingComment).toBeDefined();
+    } finally {
+      // Remove the separately owned rows first; only then may the
+      // fixture user be cleaned up.
+      if (separateNotificationId) {
+        await db
+          .delete(notifications)
+          .where(eq(notifications.id, separateNotificationId));
+      }
+      if (separateOnboardingId) {
+        await db
+          .delete(gameOnboarding)
+          .where(eq(gameOnboarding.id, separateOnboardingId));
+      }
+      await cleanupRegistry(outsider);
+      await cleanupRegistry(fixture);
     }
   });
 });
