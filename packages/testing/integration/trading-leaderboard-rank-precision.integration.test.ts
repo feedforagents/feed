@@ -17,10 +17,50 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { TradingLeaderboardService } from '@feed/api/services/trading-leaderboard-service';
 import { TradingPerformanceService } from '@feed/api/services/trading-performance-service';
-import { db, inArray, sql, users } from '@feed/db';
+import {
+  db,
+  eq,
+  gameOnboarding,
+  inArray,
+  sql,
+  userPnLSnapshots,
+  users,
+  whitelist,
+  whitelistConfig,
+} from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 
 setDefaultTimeout(60000);
+
+// Standalone execution must never inherit a remote or replica database.
+// Same strict guard as profile-trades-pagination: loopback host and an
+// owned database name (CI's test_db or a local feed_pr<N> database).
+function ownedDatabaseUrl(value: string | undefined) {
+  if (!value || !URL.canParse(value))
+    throw new Error('Owned local test database required');
+  const url = new URL(value);
+  if (
+    !['postgres:', 'postgresql:'].includes(url.protocol) ||
+    !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ||
+    !/^\/(test_db|feed_pr\d+)$/.test(url.pathname) ||
+    url.search ||
+    url.hash
+  )
+    throw new Error('Owned local test database required');
+  return url;
+}
+const primaryDatabase = ownedDatabaseUrl(process.env.DATABASE_URL);
+if (process.env.DIRECT_DATABASE_URL) {
+  const direct = ownedDatabaseUrl(process.env.DIRECT_DATABASE_URL);
+  if (
+    direct.hostname !== primaryDatabase.hostname ||
+    direct.port !== primaryDatabase.port ||
+    direct.pathname !== primaryDatabase.pathname
+  )
+    throw new Error('Direct test database must match the primary endpoint');
+}
+if (process.env.DATABASE_READ_REPLICA_URL)
+  throw new Error('Replica refused for owned fixture writes');
 
 const PAGE_SIZE = 7;
 const fixtureIds: string[] = [];
@@ -81,10 +121,69 @@ async function fullScanIds(): Promise<string[]> {
   return rows.map((row) => row.id);
 }
 
+/**
+ * The five destructive FK paths off users.id: three ON DELETE CASCADE
+ * (GameOnboarding.userId, UserPnLSnapshot.userId, Whitelist.userId) and
+ * two ON DELETE SET NULL (Whitelist.grantedBy, WhitelistConfig.updatedBy).
+ * Deleting a fixture user while any of them references it would silently
+ * destroy or null another owner's row, so cleanup refuses instead of
+ * deleting. The check, the row lock, and the delete run in one short
+ * transaction so the decision and the deletion cannot drift apart.
+ */
+async function cleanupOwnedUsers(): Promise<void> {
+  if (fixtureIds.length === 0) return;
+  await db.transaction(async (tx) => {
+    await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(inArray(users.id, fixtureIds))
+      .for('update');
+    const [onboarding, snapshots, whitelistRows, grantedRows, configRows] =
+      await Promise.all([
+        tx
+          .select({ id: gameOnboarding.id })
+          .from(gameOnboarding)
+          .where(inArray(gameOnboarding.userId, fixtureIds))
+          .limit(1),
+        tx
+          .select({ id: userPnLSnapshots.id })
+          .from(userPnLSnapshots)
+          .where(inArray(userPnLSnapshots.userId, fixtureIds))
+          .limit(1),
+        tx
+          .select({ id: whitelist.id })
+          .from(whitelist)
+          .where(inArray(whitelist.userId, fixtureIds))
+          .limit(1),
+        tx
+          .select({ id: whitelist.id })
+          .from(whitelist)
+          .where(inArray(whitelist.grantedBy, fixtureIds))
+          .limit(1),
+        tx
+          .select({ id: whitelistConfig.id })
+          .from(whitelistConfig)
+          .where(inArray(whitelistConfig.updatedBy, fixtureIds))
+          .limit(1),
+      ]);
+    if (
+      onboarding.length > 0 ||
+      snapshots.length > 0 ||
+      whitelistRows.length > 0 ||
+      grantedRows.length > 0 ||
+      configRows.length > 0
+    ) {
+      throw new Error(
+        'cleanup refused: a foreign row still references an owned user'
+      );
+    }
+    await tx.delete(users).where(inArray(users.id, fixtureIds));
+  });
+  fixtureIds.length = 0;
+}
+
 afterAll(async () => {
-  if (fixtureIds.length > 0) {
-    await db.delete(users).where(inArray(users.id, fixtureIds));
-  }
+  await cleanupOwnedUsers();
 });
 
 describe('Trading leaderboard rank precision', () => {
@@ -204,6 +303,41 @@ describe('Trading leaderboard rank precision', () => {
         PAGE_SIZE
       );
       expect(position?.rank).toBe(scanIndex + 1);
+    }
+  });
+});
+
+describe('fixture ownership', () => {
+  test('cleanup refuses a user with a separately owned onboarding row', async () => {
+    const victimId = await createUser({
+      prefix: 'f133-ownership-victim',
+      lifetimePnL: '100.00',
+      createdAt: new Date('2026-02-25T00:00:00.000Z'),
+    });
+    // A row another actor owns: deleting the fixture user would cascade
+    // it away.
+    const onboardingId = await generateSnowflakeId();
+    await db.insert(gameOnboarding).values({
+      id: onboardingId,
+      userId: victimId,
+    });
+    try {
+      await expect(cleanupOwnedUsers()).rejects.toThrow(/cleanup refused/);
+      const [survivingOnboarding] = await db
+        .select()
+        .from(gameOnboarding)
+        .where(eq(gameOnboarding.id, onboardingId));
+      expect(survivingOnboarding).toBeDefined();
+      const [survivingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, victimId));
+      expect(survivingUser).toBeDefined();
+    } finally {
+      // Remove only the foreign row so afterAll can proceed normally.
+      await db
+        .delete(gameOnboarding)
+        .where(eq(gameOnboarding.id, onboardingId));
     }
   });
 });
