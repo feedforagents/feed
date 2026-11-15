@@ -606,40 +606,65 @@ describe('fixture ownership', () => {
   it('cleanup sees a child that commits after cleanup starts, instead of deleting across it', async () => {
     const foreignOnboardingId = await generateSnowflakeId();
     const now = new Date();
-    let releaseInsert: (() => void) | undefined;
+    // Explicit insert-ready barrier: the insert transaction signals once
+    // its INSERT has landed and its release hook is installed. A fixed
+    // sleep cannot do this — on a slow DB the insert may not have
+    // installed the hook yet when the test releases it, and the optional
+    // release is then lost: the transaction waits on a promise nobody
+    // releases, and the `await concurrentInsert` below (and the drain in
+    // `finally`) hang. The defaults are no-ops, so `finally` can always
+    // release and drain, even if the insert failed before signalling.
+    let releaseInsert: () => void = () => {};
+    let resolveInsertReady: () => void = () => {};
+    let rejectInsertReady: (error: unknown) => void = () => {};
+    const insertReady = new Promise<void>((resolve, reject) => {
+      resolveInsertReady = resolve;
+      rejectInsertReady = reject;
+    });
     // A concurrent flow inserts a foreign GameOnboarding row in its own
     // transaction and holds it uncommitted. Its FK check takes a FOR KEY
     // SHARE lock on the owned user row, so cleanup's FOR UPDATE lock on
     // the same row waits until this transaction settles.
     const concurrentInsert = db.transaction(async (tx) => {
-      await tx.insert(gameOnboarding).values({
-        id: foreignOnboardingId,
-        userId: actorId,
-        currentStep: 'welcome',
-        state: {
-          completedSteps: [],
+      try {
+        await tx.insert(gameOnboarding).values({
+          id: foreignOnboardingId,
+          userId: actorId,
           currentStep: 'welcome',
-          startedAt: now.toISOString(),
-          completedAt: null,
-          rewards: [],
-        },
-        isComplete: false,
-        createdAt: now,
-        updatedAt: now,
-      });
+          state: {
+            completedSteps: [],
+            currentStep: 'welcome',
+            startedAt: now.toISOString(),
+            completedAt: null,
+            rewards: [],
+          },
+          isComplete: false,
+          createdAt: now,
+          updatedAt: now,
+        });
+      } catch (error) {
+        // Propagate an insertion failure to the test instead of leaving
+        // the barrier waiter hanging.
+        rejectInsertReady(error);
+        throw error;
+      }
       await new Promise<void>((resolve) => {
         releaseInsert = resolve;
+        resolveInsertReady();
       });
     });
     try {
-      // Let the insert land before cleanup starts, so cleanup must wait
-      // on the lock instead of racing ahead of it.
-      await sleep(300);
+      // Wait until the insert has landed and installed its release hook,
+      // so cleanup must wait on the lock instead of racing ahead of it.
+      await insertReady;
       const cleanupAttempt = cleanupOwnedFixtures();
       // Give cleanup time to reach the user-row lock, then let the child
-      // commit: cleanup's checks must see it and refuse.
+      // commit: cleanup's checks must see it and refuse. This sleep only
+      // decides whether the lock-wait path is exercised; the outcome is
+      // the same without it, because cleanup's FOR UPDATE cannot pass the
+      // lock until this transaction settles.
       await sleep(300);
-      releaseInsert?.();
+      releaseInsert();
       await concurrentInsert;
       let refusal: unknown;
       try {
@@ -668,11 +693,14 @@ describe('fixture ownership', () => {
         .where(inArray(perpPositions.id, owned.perpPositionIds));
       expect(survivingPerpPositions).toHaveLength(owned.perpPositionIds.length);
     } finally {
-      // Release the concurrent insert if the test failed before doing so,
-      // then remove the foreign row so the shared fixture's afterAll
-      // cleanup can proceed.
-      releaseInsert?.();
+      // Always release and drain the concurrent transaction, even if the
+      // test failed before the release point: otherwise the transaction
+      // waits on a promise nobody releases and this await hangs. The
+      // release is a no-op if the insert never installed its hook.
+      releaseInsert();
       await concurrentInsert.catch(() => {});
+      // Remove the foreign row so the shared fixture's afterAll cleanup
+      // can proceed.
       await db
         .delete(gameOnboarding)
         .where(eq(gameOnboarding.id, foreignOnboardingId));
