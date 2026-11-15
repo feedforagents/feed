@@ -27,7 +27,12 @@ mock.module('@feed/db', () => ({
 
 mock.module('@feed/core/markets/prediction', () => ({
   ...predictionCoreActual,
-  PredictionDbAdapter: class PredictionDbAdapter {},
+  PredictionDbAdapter: class PredictionDbAdapter {
+    // The route reads traded volume for every listed market; this
+    // fixture has no trades, so every market reports zero.
+    getTradedVolumeByMarket = async (marketIds: string[]) =>
+      new Map(marketIds.map((id) => [id, 0]));
+  },
   PredictionMarketService: class PredictionMarketService extends predictionCoreActual.PredictionMarketService {
     listMarkets = mockListMarkets;
     listUserPositions = mockListUserPositions;

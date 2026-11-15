@@ -91,6 +91,10 @@ mock.module('@feed/core/markets/prediction', () => ({
     listMarkets = async ({ offset }: { limit: number; offset: number }) =>
       pages[offset] ?? [];
     listUserPositions = async () => positions;
+    // The route reads traded volume for every listed market; this
+    // fixture has no trades, so every market reports zero.
+    getTradedVolumeByMarket = async (marketIds: string[]) =>
+      new Map(marketIds.map((id) => [id, 0]));
   },
   PredictionPricing: {
     getCurrentPrice: () => 0.5,
