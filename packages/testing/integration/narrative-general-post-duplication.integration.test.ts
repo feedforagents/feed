@@ -35,22 +35,26 @@
  *    route's own calculateStoryScore) instead of assuming the fixture
  *    posts are the only posts in the feed.
  * 3. The route caches the whole feed under 'feed:narrative:v2' in the
- *    'feed' namespace for 120s. The test invalidates exactly that owned
- *    key before setup, after setup, and after deleting its rows — never a
- *    shared or global flush. In the test process the cache service runs
- *    its in-memory backend (Redis initialisation is skipped when
- *    NODE_ENV=test, see packages/api/src/redis/client.ts), so the
- *    cold/hit/expiry checks below exercise the service's real code path.
- *    The 120s route TTL itself is honoured, not shortened: the hit test
- *    proves the feed stays cached inside the TTL, and expiry is proven
- *    on the same backend with a 1s TTL instead of waiting out 120s.
+ *    'feed' namespace for 120s. This test process NEVER invalidates that
+ *    key: it is a shared, process-global key, and deleting it could
+ *    remove another test's snapshot in the same process. The cold/hit
+ *    checks run in an owned child process instead (helpers/
+ *    narrative-cache-probe.ts via Bun.spawn), which has its own
+ *    in-memory cache instance — its invalidation cannot touch the
+ *    parent process. The 120s route TTL itself is honoured, not
+ *    shortened: the hit check proves the feed stays cached inside the
+ *    TTL, and expiry is proven on the same backend with a 1s TTL
+ *    instead of waiting out 120s. That 1s probe establishes backend
+ *    expiry behavior only, not natural expiry of the route's 120s
+ *    payload.
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+import { resolve } from 'node:path';
 
 mock.module('server-only', () => ({}));
 
-import { getCache, invalidateCache, setCache } from '@feed/api';
+import { getCache, setCache } from '@feed/api';
 import {
   and,
   comments,
@@ -83,8 +87,7 @@ type NarrativeResponse = {
   stories: NarrativeStoryShape[];
 };
 
-/** Route cache identity: route.ts 'feed:narrative:v2', namespace 'feed'. */
-const FEED_CACHE_KEY = 'feed:narrative:v2';
+/** Cache namespace for the run-scoped expiry probe below. */
 const FEED_CACHE_NAMESPACE = 'feed';
 
 const GENERAL_COUNT = 25;
@@ -94,8 +97,6 @@ const MIN_STANDALONE_SCORE = 0.05;
 /** Mirrors the route's candidate window and limit (route.ts:62-64). */
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 const MAX_CANDIDATE_POSTS = 500;
-/** Likes on the cache-hit probe post: enough to rank first if recomputed. */
-const PROBE_LIKES = 100;
 /** Attempts to allocate a question number before giving up. */
 const QUESTION_NUMBER_ATTEMPTS = 10;
 
@@ -138,10 +139,6 @@ async function fetchNarrative() {
     | null;
   const payload = body && 'stories' in body ? body : (body?.data ?? null);
   return { status: response.status, payload };
-}
-
-async function invalidateFeedCache() {
-  await invalidateCache(FEED_CACHE_KEY, { namespace: FEED_CACHE_NAMESPACE });
 }
 
 /** Delete exactly the rows in `o` (by id, per table) and forget them. */
@@ -292,9 +289,15 @@ async function setupFixtures(): Promise<void> {
 
 /**
  * The standalone set the route should emit, computed from live database
- * state: every recent general post (fixture or pre-existing), scored with
- * the route's own function, top 20, at or above the minimum score. The
- * test never assumes the fixture posts are the only posts in the feed.
+ * state — mirroring the route's own candidate window: the newest 500
+ * eligible posts of BOTH kinds first, and only then the general posts
+ * among them, scored with the route's own function, top 20, at or above
+ * the minimum score. Filtering to general posts BEFORE the limit would
+ * select a different population than production: on a populated feed,
+ * 499 newer question posts can fill the window, leaving production with
+ * no general candidates while a pre-filtered helper still expects the
+ * older general fixtures. The test never assumes the fixture posts are
+ * the only posts in the feed.
  */
 async function expectedStandalone(): Promise<{
   ids: Set<string>;
@@ -303,7 +306,11 @@ async function expectedStandalone(): Promise<{
   const now = new Date();
   const cutoff = new Date(now.getTime() - TWELVE_HOURS_MS);
   const candidates = await db
-    .select({ id: posts.id, timestamp: posts.timestamp })
+    .select({
+      id: posts.id,
+      timestamp: posts.timestamp,
+      relatedQuestion: posts.relatedQuestion,
+    })
     .from(posts)
     .where(
       and(
@@ -311,15 +318,17 @@ async function expectedStandalone(): Promise<{
         gte(posts.timestamp, cutoff),
         lte(posts.timestamp, now),
         isNull(posts.commentOnPostId),
-        isNull(posts.parentCommentId),
-        isNull(posts.relatedQuestion)
+        isNull(posts.parentCommentId)
       )
     )
     .orderBy(desc(posts.timestamp))
     .limit(MAX_CANDIDATE_POSTS);
-  if (candidates.length === 0) return { ids: new Set(), poolSize: 0 };
+  // Partition AFTER the window, exactly like the route: only the general
+  // posts that made the newest-500 cut can become standalone cards.
+  const general = candidates.filter((c) => c.relatedQuestion === null);
+  if (general.length === 0) return { ids: new Set(), poolSize: 0 };
 
-  const ids = candidates.map((c) => c.id);
+  const ids = general.map((c) => c.id);
   const [likeRows, commentRows, shareRows] = await Promise.all([
     db
       .select({ postId: reactions.postId, n: count() })
@@ -350,7 +359,7 @@ async function expectedStandalone(): Promise<{
   const commentCounts = byId(commentRows);
   const shareCounts = byId(shareRows);
 
-  const scored = candidates
+  const scored = general
     .map((c) => ({
       id: c.id,
       score: calculateStoryScore(
@@ -382,8 +391,6 @@ function countAppearances(stories: NarrativeStoryShape[]): Map<string, number> {
 beforeAll(async () => {
   ({ GET } = await import(routePath));
 
-  // Drop any stale payload for the exact owned key before reading the feed.
-  await invalidateFeedCache();
   try {
     await setupFixtures();
   } catch (error) {
@@ -391,16 +398,70 @@ beforeAll(async () => {
     await cleanupOwned(owned);
     throw error;
   }
-  // Fixtures are in; the next fetch must recompute instead of serving the
-  // pre-fixture payload cached above.
-  await invalidateFeedCache();
+  // No cache invalidation here: the first fetch in this process is cold
+  // (fresh process, empty in-memory cache) and computes from the database
+  // including the fixtures. The route's fixed key is never invalidated in
+  // this process; cold/hit checks run in an owned child process instead.
 });
 
 afterAll(async () => {
   await cleanupOwned(owned);
-  // Remove the fixture payload from the cache after deleting its rows.
-  await invalidateFeedCache();
 });
+
+/**
+ * Run one cache-probe scenario in an owned child process (helpers/
+ * narrative-cache-probe.ts) and return its JSON result. The child has
+ * its own in-memory cache instance, so its key invalidation cannot
+ * touch this process.
+ */
+async function runCacheProbe(
+  scenario: 'cache' | 'flood'
+): Promise<Record<string, unknown>> {
+  const helperPath = resolve(
+    import.meta.dir,
+    'helpers/narrative-cache-probe.ts'
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      helperPath,
+      scenario,
+      authorId,
+      String(questionNumber),
+      oneHourAgo.toISOString(),
+    ],
+    {
+      env: { ...process.env },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }
+  );
+  const timeout = setTimeout(() => child.kill(), 30000);
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    if (code !== 0) {
+      throw new Error(
+        `cache probe ${scenario} exited ${code}\nstdout: ${stdout}\nstderr: ${stderr}`
+      );
+    }
+    const line = stdout.split('\n').find((l) => l.startsWith('PROBE_RESULT '));
+    if (!line) {
+      throw new Error(
+        `cache probe ${scenario} printed no result\nstdout: ${stdout}\nstderr: ${stderr}`
+      );
+    }
+    return JSON.parse(line.slice('PROBE_RESULT '.length)) as Record<
+      string,
+      unknown
+    >;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 describe('GET /api/feed/narrative — general post composition', () => {
   it('emits each general post at most once, as a standalone card, capped at 20', async () => {
@@ -460,60 +521,32 @@ describe('GET /api/feed/narrative — general post composition', () => {
   });
 
   it('serves the cached feed inside the TTL and recomputes after the exact key is invalidated', async () => {
-    // A probe post that would rank first if the feed recomputed.
-    const probeId = await generateSnowflakeId();
-    const probeRows = await db
-      .insert(posts)
-      .values({
-        id: probeId,
-        content: 'f83 cache probe post',
-        authorId,
-        timestamp: oneHourAgo,
-        createdAt: oneHourAgo,
-        relatedQuestion: null,
-      })
-      .returning({ id: posts.id });
-    owned.postIds.push(probeRows[0]!.id);
-    const probeReactionValues: Array<{
-      id: string;
-      postId: string;
-      userId: string;
-      type: string;
-    }> = [];
-    for (let r = 0; r < PROBE_LIKES; r++) {
-      probeReactionValues.push({
-        id: await generateSnowflakeId(),
-        postId: probeId,
-        userId: await generateSnowflakeId(),
-        type: 'like',
-      });
-    }
-    const probeReactionRows = await db
-      .insert(reactions)
-      .values(probeReactionValues)
-      .returning({ id: reactions.id });
-    owned.reactionIds.push(...probeReactionRows.map((r) => r.id));
+    // The cold/hit sequence runs in an owned child process (its own
+    // in-memory cache instance): a probe post inserted after the child's
+    // first fetch stays invisible until the child invalidates the key,
+    // then appears exactly once as its own standalone card. This
+    // process never touches the route's fixed key.
+    const result = await runCacheProbe('cache');
+    expect(result).toEqual({
+      scenario: 'cache',
+      hitProbeAbsent: true,
+      coldProbeOnce: true,
+      coldProbePresent: true,
+    });
+  });
 
-    // Hit: no invalidation, so the cached payload must not contain the probe.
-    const cached = await fetchNarrative();
-    expect(cached.status).toBe(200);
-    expect(cached.payload).not.toBeNull();
-    const cachedIds = new Set(
-      cached.payload!.stories.flatMap((s) => s.posts.map((p) => p.id))
-    );
-    expect(cachedIds.has(probeId)).toBe(false);
-
-    // Cold again: invalidate exactly the owned key and the probe must appear.
-    await invalidateFeedCache();
-    const fresh = await fetchNarrative();
-    expect(fresh.status).toBe(200);
-    expect(fresh.payload).not.toBeNull();
-    const freshAppearances = countAppearances(fresh.payload!.stories);
-    expect(freshAppearances.get(probeId)).toBe(1);
-    const probeStory = fresh.payload!.stories.find(
-      (s) => s.storyKey === `post:${probeId}`
-    );
-    expect(probeStory).toBeDefined();
+  it('emits no general standalone cards when newer question posts fill the candidate window', async () => {
+    // The reviewer's concrete case: 499 question posts newer than the
+    // fixtures plus the owned question post fill the route's newest-500
+    // window, so production has no general candidates. Runs in the
+    // owned child process so its invalidation stays out of this process.
+    const result = await runCacheProbe('flood');
+    expect(result).toEqual({
+      scenario: 'flood',
+      routeStandalone: 0,
+      windowGeneral: 0,
+      questionStoryPresent: true,
+    });
   });
 
   it('the cache backend expires entries after their TTL', async () => {
