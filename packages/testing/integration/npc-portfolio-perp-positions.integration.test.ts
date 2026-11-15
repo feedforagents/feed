@@ -33,6 +33,7 @@ import {
   userPnLSnapshots,
   users,
   whitelist,
+  whitelistConfig,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
@@ -335,11 +336,14 @@ beforeAll(async () => {
  * pre-existing data untouched.
  *
  * GameOnboarding, UserPnLSnapshot and Whitelist all reference users.id
- * ON DELETE CASCADE. A row in one of those tables that this file did not
- * create may still reference the owned user — attached after setup by
- * another flow — and deleting the user would silently delete that foreign
- * row too. Refuse before deleting anything, so the foreign row and every
- * owned row survive unchanged.
+ * ON DELETE CASCADE. Whitelist.grantedBy and WhitelistConfig.updatedBy
+ * reference users.id ON DELETE SET NULL: deleting the user would silently
+ * null those columns on rows this file never owned. A row in any of those
+ * tables that this file did not create may still reference the owned user
+ * — attached after setup by another flow — and deleting the user would
+ * silently delete (or mutate) that foreign row too. Refuse before
+ * deleting anything, so the foreign row and every owned row survive
+ * unchanged.
  *
  * The check and the deletes run in one short transaction, and the owned
  * user row is locked (FOR UPDATE) before the checks. A concurrent child
@@ -360,30 +364,48 @@ async function cleanupOwnedFixtures(): Promise<void> {
         .limit(1)
         .for('update');
       if (lockedUser) {
-        const [foreignOnboarding, foreignSnapshot, foreignWhitelist] =
-          await Promise.all([
-            tx
-              .select({
-                id: gameOnboarding.id,
-                userId: gameOnboarding.userId,
-              })
-              .from(gameOnboarding)
-              .where(eq(gameOnboarding.userId, actorId))
-              .limit(1),
-            tx
-              .select({
-                id: userPnLSnapshots.id,
-                userId: userPnLSnapshots.userId,
-              })
-              .from(userPnLSnapshots)
-              .where(eq(userPnLSnapshots.userId, actorId))
-              .limit(1),
-            tx
-              .select({ id: whitelist.id, userId: whitelist.userId })
-              .from(whitelist)
-              .where(eq(whitelist.userId, actorId))
-              .limit(1),
-          ]);
+        const [
+          foreignOnboarding,
+          foreignSnapshot,
+          foreignWhitelist,
+          foreignWhitelistGranter,
+          foreignWhitelistConfigUpdater,
+        ] = await Promise.all([
+          tx
+            .select({
+              id: gameOnboarding.id,
+              userId: gameOnboarding.userId,
+            })
+            .from(gameOnboarding)
+            .where(eq(gameOnboarding.userId, actorId))
+            .limit(1),
+          tx
+            .select({
+              id: userPnLSnapshots.id,
+              userId: userPnLSnapshots.userId,
+            })
+            .from(userPnLSnapshots)
+            .where(eq(userPnLSnapshots.userId, actorId))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id, userId: whitelist.userId })
+            .from(whitelist)
+            .where(eq(whitelist.userId, actorId))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id, grantedBy: whitelist.grantedBy })
+            .from(whitelist)
+            .where(eq(whitelist.grantedBy, actorId))
+            .limit(1),
+          tx
+            .select({
+              id: whitelistConfig.id,
+              updatedBy: whitelistConfig.updatedBy,
+            })
+            .from(whitelistConfig)
+            .where(eq(whitelistConfig.updatedBy, actorId))
+            .limit(1),
+        ]);
         const foreign =
           foreignOnboarding[0] !== undefined
             ? { label: 'GameOnboarding', ...foreignOnboarding[0] }
@@ -391,7 +413,19 @@ async function cleanupOwnedFixtures(): Promise<void> {
               ? { label: 'UserPnLSnapshot', ...foreignSnapshot[0] }
               : foreignWhitelist[0] !== undefined
                 ? { label: 'Whitelist', ...foreignWhitelist[0] }
-                : null;
+                : foreignWhitelistGranter[0] !== undefined
+                  ? {
+                      label: 'Whitelist.grantedBy',
+                      id: foreignWhitelistGranter[0].id,
+                      userId: foreignWhitelistGranter[0].grantedBy,
+                    }
+                  : foreignWhitelistConfigUpdater[0] !== undefined
+                    ? {
+                        label: 'WhitelistConfig.updatedBy',
+                        id: foreignWhitelistConfigUpdater[0].id,
+                        userId: foreignWhitelistConfigUpdater[0].updatedBy,
+                      }
+                    : null;
         if (foreign) {
           throw new Error(
             `cleanup refused: ${foreign.label} ${foreign.id} still references owned user ${foreign.userId}`
@@ -520,30 +554,61 @@ describe('NPC portfolio detail: listed positions match the aggregates', () => {
 });
 
 describe('fixture ownership', () => {
+  // Exactness check for a GameOnboarding row this file inserted: every
+  // column of the live row must still match the committed receipt before
+  // the row may be deleted, so a row that another flow replaced or
+  // rewrote under the same id is never removed as if it were ours.
+  function isSameOnboardingRow(
+    a: typeof gameOnboarding.$inferSelect,
+    b: typeof gameOnboarding.$inferSelect
+  ): boolean {
+    return (
+      a.id === b.id &&
+      a.userId === b.userId &&
+      a.currentStep === b.currentStep &&
+      a.isComplete === b.isComplete &&
+      a.createdAt.getTime() === b.createdAt.getTime() &&
+      a.updatedAt.getTime() === b.updatedAt.getTime() &&
+      JSON.stringify(a.state) === JSON.stringify(b.state)
+    );
+  }
+
   it('cleanup refuses when a foreign cascading child references the owned user', async () => {
     const foreignOnboardingId = await generateSnowflakeId();
     const now = new Date();
+    // Committed receipt: set only after the insert commits and returns
+    // the complete physical row. A failed insert (e.g. a primary-key
+    // collision with a pre-existing row) leaves this unset, so the
+    // finally below performs no cleanup of the proposed id.
+    let committedForeignOnboarding: typeof gameOnboarding.$inferSelect | null =
+      null;
     try {
       // A GameOnboarding row created outside the fixture ledger,
       // referencing the owned fixture user. Its userId references users.id
       // ON DELETE CASCADE, so deleting the user would silently delete this
       // row too — the setup collision check cannot see this case, because
       // the row was inserted successfully after the fixture was set up.
-      await db.insert(gameOnboarding).values({
-        id: foreignOnboardingId,
-        userId: actorId,
-        currentStep: 'welcome',
-        state: {
-          completedSteps: [],
+      const [insertedForeignOnboarding] = await db
+        .insert(gameOnboarding)
+        .values({
+          id: foreignOnboardingId,
+          userId: actorId,
           currentStep: 'welcome',
-          startedAt: now.toISOString(),
-          completedAt: null,
-          rewards: [],
-        },
-        isComplete: false,
-        createdAt: now,
-        updatedAt: now,
-      });
+          state: {
+            completedSteps: [],
+            currentStep: 'welcome',
+            startedAt: now.toISOString(),
+            completedAt: null,
+            rewards: [],
+          },
+          isComplete: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      if (insertedForeignOnboarding) {
+        committedForeignOnboarding = insertedForeignOnboarding;
+      }
 
       // Cleanup must refuse instead of deleting the user (and the row
       // with it).
@@ -596,10 +661,28 @@ describe('fixture ownership', () => {
       expect(survivingPerpPositions).toHaveLength(owned.perpPositionIds.length);
     } finally {
       // Remove the foreign row so the shared fixture's afterAll cleanup
-      // can proceed.
-      await db
-        .delete(gameOnboarding)
-        .where(eq(gameOnboarding.id, foreignOnboardingId));
+      // can proceed — but only the row this test proved it inserted, and
+      // only while it is still exactly that row. A failed insert leaves
+      // the receipt unset, so a pre-existing row under the proposed id is
+      // never touched; a row rewritten under the id fails the exactness
+      // check and is left in place.
+      if (committedForeignOnboarding) {
+        const [currentForeignOnboarding] = await db
+          .select()
+          .from(gameOnboarding)
+          .where(eq(gameOnboarding.id, foreignOnboardingId));
+        if (
+          currentForeignOnboarding &&
+          isSameOnboardingRow(
+            currentForeignOnboarding,
+            committedForeignOnboarding
+          )
+        ) {
+          await db
+            .delete(gameOnboarding)
+            .where(eq(gameOnboarding.id, foreignOnboardingId));
+        }
+      }
     }
   });
 
