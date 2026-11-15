@@ -18,11 +18,14 @@ import {
   comments,
   db,
   eq,
+  gameOnboarding,
   inArray,
   posts,
   userBlocks,
   userMutes,
+  userPnLSnapshots,
   users,
+  whitelist,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
@@ -49,7 +52,10 @@ type UserMuteInsert = typeof userMutes.$inferInsert;
  * Tracks only rows whose INSERT ... RETURNING succeeded. Cleanup deletes
  * exactly those rows by ID, so a setup that fails partway (for example on
  * an ID collision with a pre-existing row) can never delete data this
- * fixture did not create.
+ * fixture did not create. Cleanup refuses outright while a row in a table
+ * that cascades on users.id (GameOnboarding, UserPnLSnapshot, Whitelist)
+ * still references an owned user, so a foreign child acquired after setup
+ * is never deleted with its parent.
  */
 class OwnedFixtures {
   readonly userIds: string[] = [];
@@ -109,6 +115,51 @@ class OwnedFixtures {
   }
 
   async cleanup(): Promise<void> {
+    if (this.userIds.length > 0) {
+      // GameOnboarding, UserPnLSnapshot and Whitelist all reference
+      // users.id ON DELETE CASCADE. A row in one of those tables that this
+      // fixture did not create may still reference an owned user, and
+      // deleting the user would silently delete that foreign row too.
+      // Refuse before deleting anything, so the foreign row and every
+      // owned row survive unchanged.
+      const [foreignOnboarding, foreignSnapshot, foreignWhitelist] =
+        await Promise.all([
+          db
+            .select({
+              id: gameOnboarding.id,
+              userId: gameOnboarding.userId,
+            })
+            .from(gameOnboarding)
+            .where(inArray(gameOnboarding.userId, this.userIds))
+            .limit(1),
+          db
+            .select({
+              id: userPnLSnapshots.id,
+              userId: userPnLSnapshots.userId,
+            })
+            .from(userPnLSnapshots)
+            .where(inArray(userPnLSnapshots.userId, this.userIds))
+            .limit(1),
+          db
+            .select({ id: whitelist.id, userId: whitelist.userId })
+            .from(whitelist)
+            .where(inArray(whitelist.userId, this.userIds))
+            .limit(1),
+        ]);
+      const foreign =
+        foreignOnboarding[0] !== undefined
+          ? { label: 'GameOnboarding', ...foreignOnboarding[0] }
+          : foreignSnapshot[0] !== undefined
+            ? { label: 'UserPnLSnapshot', ...foreignSnapshot[0] }
+            : foreignWhitelist[0] !== undefined
+              ? { label: 'Whitelist', ...foreignWhitelist[0] }
+              : null;
+      if (foreign) {
+        throw new Error(
+          `OwnedFixtures.cleanup refused: ${foreign.label} ${foreign.id} still references owned user ${foreign.userId}`
+        );
+      }
+    }
     if (this.blockIds.length > 0) {
       await db.delete(userBlocks).where(inArray(userBlocks.id, this.blockIds));
     }
@@ -481,6 +532,67 @@ describe('fixture ownership', () => {
     } finally {
       await attempt.cleanup();
       await victim.cleanup();
+    }
+  });
+
+  it('cleanup refuses when a foreign cascading child references an owned user', async () => {
+    const foreignOnboardingId = await generateSnowflakeId();
+    const now = new Date();
+    try {
+      // A GameOnboarding row created outside the fixture ledger, referencing
+      // the owned fixture user `normal`. Its userId references users.id
+      // ON DELETE CASCADE, so deleting the user would silently delete this
+      // row too — the collision test above cannot see this case, because
+      // the row was inserted successfully after the fixture was set up.
+      await db.insert(gameOnboarding).values({
+        id: foreignOnboardingId,
+        userId: normal,
+        currentStep: 'welcome',
+        state: {
+          completedSteps: [],
+          currentStep: 'welcome',
+          startedAt: now.toISOString(),
+          completedAt: null,
+          rewards: [],
+        },
+        isComplete: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Cleanup must refuse instead of deleting the user (and the row
+      // with it).
+      let refusal: unknown;
+      try {
+        await fixtures.cleanup();
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(Error);
+      expect((refusal as Error).message).toContain(
+        `GameOnboarding ${foreignOnboardingId} still references owned user ${normal}`
+      );
+
+      // The foreign row and the owned user row are both unchanged.
+      const [survivingOnboarding] = await db
+        .select()
+        .from(gameOnboarding)
+        .where(eq(gameOnboarding.id, foreignOnboardingId));
+      expect(survivingOnboarding).toBeDefined();
+      expect(survivingOnboarding?.userId).toBe(normal);
+      expect(survivingOnboarding?.currentStep).toBe('welcome');
+      const [survivingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, normal));
+      expect(survivingUser).toBeDefined();
+      expect(survivingUser?.displayName).toBe('F75 Normal');
+    } finally {
+      // Remove the foreign row so the shared fixture's afterAll cleanup
+      // can proceed.
+      await db
+        .delete(gameOnboarding)
+        .where(eq(gameOnboarding.id, foreignOnboardingId));
     }
   });
 });
