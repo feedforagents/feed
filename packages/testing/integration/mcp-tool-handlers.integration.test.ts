@@ -35,7 +35,9 @@ import {
   executeLikeComment,
   executeLikePost,
   executeMarkNotificationsRead,
+  executeTool,
 } from '../../mcp/src/handlers/tool-handlers';
+import type { UpdateProfileResult } from '../../mcp/src/types/mcp';
 
 const userIds: string[] = [];
 const likePostIds: string[] = [];
@@ -691,5 +693,43 @@ describe('MCP tool handlers', () => {
     expect(
       await db.select().from(comments).where(eq(comments.postId, deletedPostId))
     ).toHaveLength(0);
+  });
+
+  it('validates update_profile with the shared profile schema', async () => {
+    const [before] = await db
+      .select({
+        username: users.username,
+        displayName: users.displayName,
+        profileImageUrl: users.profileImageUrl,
+      })
+      .from(users)
+      .where(eq(users.id, agentUserId));
+
+    for (const args of [
+      { username: 'no spaces allowed' },
+      { username: 'ab' },
+      { displayName: 'x'.repeat(101) },
+      { profileImageUrl: 'javascript:alert(1)' },
+    ]) {
+      await expect(
+        executeTool('update_profile', args, agent())
+      ).rejects.toThrow();
+    }
+    const [afterRejected] = await db
+      .select({
+        username: users.username,
+        displayName: users.displayName,
+        profileImageUrl: users.profileImageUrl,
+      })
+      .from(users)
+      .where(eq(users.id, agentUserId));
+    expect(afterRejected).toEqual(before);
+
+    const ok = (await executeTool(
+      'update_profile',
+      { displayName: '  MCP Tester  ' },
+      agent()
+    )) as UpdateProfileResult;
+    expect(ok.profile.displayName).toBe('MCP Tester');
   });
 });
