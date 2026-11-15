@@ -391,13 +391,15 @@ describe('For You viewer like state', () => {
     // create, even when setup partially fails.
     const ownedBefore = ownedUserIds.length;
     await expect(
-      db.insert(users).values({
-        id: authorA,
-        username: `f50a-author-${authorA}`,
-        displayName: 'Duplicate F50 Author A',
-        updatedAt: new Date(),
-      })
-    ).rejects.toThrow();
+      (async () => {
+        await db.insert(users).values({
+          id: authorA,
+          username: `f50a-author-${authorA}`,
+          displayName: 'Duplicate F50 Author A',
+          updatedAt: new Date(),
+        });
+      })()
+    ).rejects.toThrow(/duplicate key value violates unique constraint/);
     expect(ownedUserIds).toHaveLength(ownedBefore);
     const [rows] = await db
       .select({ count: count() })
