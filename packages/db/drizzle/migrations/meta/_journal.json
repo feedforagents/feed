@@ -40,8 +40,15 @@
     {
       "idx": 5,
       "version": "7",
-      "when": 1794288449192,
-      "tag": "0005_remarkable_dorian_gray",
+      "when": 1794307141641,
+      "tag": "0005_trading_fee_idempotency_key",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794708164260,
+      "tag": "0006_remarkable_dorian_gray",
       "breakpoints": true
     }
   ]

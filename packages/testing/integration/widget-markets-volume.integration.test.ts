@@ -34,9 +34,11 @@
  * Backfill: one more market carries pre-migration history only as
  * wallet-ledger rows (BalanceTransaction 'pred_buy' / 'pred_sell',
  * no PredictionTrade rows). beforeAll runs the backfill INSERT from
- * migration 0005 against those rows — twice, so the test also proves
+ * migration 0006 against those rows — twice, so the test also proves
  * the insert is idempotent — and the widget must then report the
- * ledger sum for that market.
+ * ledger sum for that market. The backfill run is scoped to this
+ * fixture's market only, so it never creates PredictionTrade rows for
+ * unrelated ledger rows in the shared test database.
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
@@ -60,6 +62,7 @@ import {
   questions,
   users,
 } from '@feed/db';
+import { WalletService } from '@feed/engine/services/wallet-service';
 import { sql } from 'drizzle-orm';
 import { NextRequest } from 'next/server';
 
@@ -157,15 +160,19 @@ async function sellYes(marketId: string, shares: number): Promise<void> {
 }
 
 /**
- * Run the backfill INSERT from migration 0005, exactly as the migration
+ * Run the backfill INSERT from migration 0006, exactly as the migration
  * ships it (single source of truth — the test fails if the statement
  * drifts from the file). The statement is idempotent
  * (ON CONFLICT DO NOTHING on the 'backfill-<ledger id>' key).
+ * Scoped to this fixture's backfilled market only: the migration's
+ * unrestricted statement would otherwise mint 'backfill-' rows for
+ * every qualifying ledger row in the shared database, including live
+ * activity outside this fixture.
  */
 async function runBackfill(): Promise<void> {
   const migration = await readFile(
     new URL(
-      '../../db/drizzle/migrations/0005_remarkable_dorian_gray.sql',
+      '../../db/drizzle/migrations/0006_remarkable_dorian_gray.sql',
       import.meta.url
     ),
     'utf8'
@@ -175,9 +182,16 @@ async function runBackfill(): Promise<void> {
     .map((part) => part.trim())
     .find((part) => part.includes('backfill-'));
   if (!statement) {
-    throw new Error('backfill statement missing from 0005 migration');
+    throw new Error('backfill statement missing from 0006 migration');
   }
-  await db.execute(sql.raw(statement));
+  const scoped = statement.replace(
+    'AND bt."relatedId" IS NOT NULL',
+    `AND bt."relatedId" IS NOT NULL\n\tAND bt."relatedId" = '${backfilledId}'`
+  );
+  if (scoped === statement) {
+    throw new Error('backfill statement shape changed; cannot scope it');
+  }
+  await db.execute(sql.raw(scoped));
 }
 
 beforeAll(async () => {
@@ -191,6 +205,7 @@ beforeAll(async () => {
       id: userId,
       username: `f112wmv-${suffix}`,
       displayName: 'Widget Volume Fixture User',
+      virtualBalance: '10000.00',
       updatedAt: new Date(),
     })
     .returning();
@@ -208,29 +223,26 @@ beforeAll(async () => {
   // Backfilled market: pre-migration history exists only as wallet-ledger
   // rows — a 1000 buy and a 250 sell, no PredictionTrade rows. The
   // backfill must carry the 1250 ledger sum into the trade ledger.
+  // The rows are produced through the real WalletService, so they carry
+  // the real signed convention: the buy debit persists amount '-1000.00'
+  // (10000 -> 9000) and the sell credit persists '250.00' (9000 -> 9250).
+  // The backfill's ABS() is what turns that signed history into the
+  // positive 1250 turnover.
   await createMarket(backfilledId);
-  await db.insert(balanceTransactions).values([
-    {
-      id: `f112-wmv-bt-buy-${suffix}`,
-      userId,
-      type: 'pred_buy',
-      amount: '1000.00',
-      balanceBefore: '10000.00',
-      balanceAfter: '9000.00',
-      relatedId: backfilledId,
-      description: 'Buy YES in backfill fixture',
-    },
-    {
-      id: `f112-wmv-bt-sell-${suffix}`,
-      userId,
-      type: 'pred_sell',
-      amount: '250.00',
-      balanceBefore: '9000.00',
-      balanceAfter: '9250.00',
-      relatedId: backfilledId,
-      description: 'Sell YES in backfill fixture',
-    },
-  ]);
+  await WalletService.debit(
+    userId,
+    1000,
+    'pred_buy',
+    'Buy YES in backfill fixture',
+    backfilledId
+  );
+  await WalletService.credit(
+    userId,
+    250,
+    'pred_sell',
+    'Sell YES in backfill fixture',
+    backfilledId
+  );
   await runBackfill();
   await runBackfill();
 
@@ -337,7 +349,7 @@ describe('markets widget volume', () => {
     expect(row?.volume ?? -1).toBeCloseTo(expected, 6);
   });
 
-  it('shows pre-migration wallet-ledger volume after the 0005 backfill', async () => {
+  it('shows pre-migration wallet-ledger volume after the 0006 backfill', async () => {
     // No real trade ever ran on this market: its only history is the two
     // wallet-ledger rows the backfill carried into PredictionTrade.
     const widget = await fetchWidget();

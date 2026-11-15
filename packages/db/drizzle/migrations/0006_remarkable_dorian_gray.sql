@@ -18,6 +18,11 @@ CREATE INDEX "PredictionTrade_marketId_createdAt_idx" ON "PredictionTrade" USING
 -- WalletService.credit 'pred_sell' on sell) with the market id in
 -- relatedId. Without this backfill the widget reads Vol 0 for every
 -- market until new trades arrive, because the new table starts empty.
+-- The ledger is signed cash movement: a debit (buy) persists a NEGATIVE
+-- amount and a credit (sell) a POSITIVE amount, while live trades record
+-- positive turnover for both buys and sells — so the backfill takes
+-- ABS(amount) for shares and amount; a buy of 1000 followed by a sell
+-- of 250 backfills volume 1250, not -750.
 -- The backfill is approximate: the ledger records the settled cash
 -- amount (a buy is gross, fee included; a sell is net proceeds, fee
 -- excluded) while a live trade records shares x avgPrice, fee
@@ -39,9 +44,9 @@ SELECT
 		ELSE true
 	END,
 	CASE WHEN bt."type" = 'pred_buy' THEN 'buy' ELSE 'sell' END,
-	bt."amount",
+	ABS(bt."amount"),
 	1,
-	bt."amount",
+	ABS(bt."amount"),
 	bt."createdAt"
 FROM "BalanceTransaction" bt
 WHERE bt."type" IN ('pred_buy', 'pred_sell')
