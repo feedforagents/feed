@@ -65,6 +65,10 @@ let predictionPositionId: string;
 let perpPositionId: string;
 let closedPerpPositionId: string;
 let closedPoolPositionId: string;
+// One documentation-range IPv6 per fixture, so this file's requests do not
+// share CI's anonymous rate-limit bucket with unrelated route tests (the
+// limiter stays enabled — see the 429 note on fetchPortfolio).
+let clientIp: string;
 
 // Ownership ledger: only rows this file actually inserted — proven by each
 // INSERT's RETURNING clause — may be deleted in afterAll. Setup allocates
@@ -79,9 +83,18 @@ const owned = {
   perpPositionIds: [] as string[],
 };
 
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 async function fetchPortfolio() {
+  // Per-run client identity: without it every call in the whole CI run
+  // shares the anonymous bucket (30 requests/min), so the mirror and
+  // closed-position cases below hit a 429 whose error body has no
+  // `positions` to read. The limiter itself is left on.
   const request = new NextRequest(
-    new Request(`http://localhost/api/npc/${actorId}/portfolio`)
+    new Request(`http://localhost/api/npc/${actorId}/portfolio`, {
+      headers: { 'x-forwarded-for': clientIp },
+    })
   );
   const response = await GET(request, {
     params: Promise.resolve({ actorId }),
@@ -111,6 +124,15 @@ beforeAll(async () => {
     generateSnowflakeId(),
     generateSnowflakeId(),
   ]);
+
+  // Keep real rate limits enabled without sharing CI's anonymous bucket
+  // with unrelated route tests. Use one documentation-range IP per fixture.
+  // 1661 is unused by the sibling fixtures (1656, 1660).
+  clientIp = `2001:db8:1661:0:${BigInt(actorId)
+    .toString(16)
+    .padStart(16, '0')
+    .match(/.{4}/g)!
+    .join(':')}`;
 
   const now = new Date();
   const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60_000);
@@ -318,60 +340,85 @@ beforeAll(async () => {
  * another flow — and deleting the user would silently delete that foreign
  * row too. Refuse before deleting anything, so the foreign row and every
  * owned row survive unchanged.
+ *
+ * The check and the deletes run in one short transaction, and the owned
+ * user row is locked (FOR UPDATE) before the checks. A concurrent child
+ * insert takes a FOR KEY SHARE lock on the user row for its FK check, so
+ * it either commits before we lock (and our checks see it) or waits until
+ * we commit or roll back (and then fails the FK check, or proceeds after a
+ * refusal rollback). Either way it cannot slip in between our checks and
+ * the deletes. A refusal throws inside the transaction, so a partial
+ * cleanup is never committed.
  */
 async function cleanupOwnedFixtures(): Promise<void> {
-  if (owned.user) {
-    const [foreignOnboarding, foreignSnapshot, foreignWhitelist] =
-      await Promise.all([
-        db
-          .select({ id: gameOnboarding.id, userId: gameOnboarding.userId })
-          .from(gameOnboarding)
-          .where(eq(gameOnboarding.userId, actorId))
-          .limit(1),
-        db
-          .select({ id: userPnLSnapshots.id, userId: userPnLSnapshots.userId })
-          .from(userPnLSnapshots)
-          .where(eq(userPnLSnapshots.userId, actorId))
-          .limit(1),
-        db
-          .select({ id: whitelist.id, userId: whitelist.userId })
-          .from(whitelist)
-          .where(eq(whitelist.userId, actorId))
-          .limit(1),
-      ]);
-    const foreign =
-      foreignOnboarding[0] !== undefined
-        ? { label: 'GameOnboarding', ...foreignOnboarding[0] }
-        : foreignSnapshot[0] !== undefined
-          ? { label: 'UserPnLSnapshot', ...foreignSnapshot[0] }
-          : foreignWhitelist[0] !== undefined
-            ? { label: 'Whitelist', ...foreignWhitelist[0] }
-            : null;
-    if (foreign) {
-      throw new Error(
-        `cleanup refused: ${foreign.label} ${foreign.id} still references owned user ${foreign.userId}`
-      );
+  await db.transaction(async (tx) => {
+    if (owned.user) {
+      const [lockedUser] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, actorId))
+        .limit(1)
+        .for('update');
+      if (lockedUser) {
+        const [foreignOnboarding, foreignSnapshot, foreignWhitelist] =
+          await Promise.all([
+            tx
+              .select({
+                id: gameOnboarding.id,
+                userId: gameOnboarding.userId,
+              })
+              .from(gameOnboarding)
+              .where(eq(gameOnboarding.userId, actorId))
+              .limit(1),
+            tx
+              .select({
+                id: userPnLSnapshots.id,
+                userId: userPnLSnapshots.userId,
+              })
+              .from(userPnLSnapshots)
+              .where(eq(userPnLSnapshots.userId, actorId))
+              .limit(1),
+            tx
+              .select({ id: whitelist.id, userId: whitelist.userId })
+              .from(whitelist)
+              .where(eq(whitelist.userId, actorId))
+              .limit(1),
+          ]);
+        const foreign =
+          foreignOnboarding[0] !== undefined
+            ? { label: 'GameOnboarding', ...foreignOnboarding[0] }
+            : foreignSnapshot[0] !== undefined
+              ? { label: 'UserPnLSnapshot', ...foreignSnapshot[0] }
+              : foreignWhitelist[0] !== undefined
+                ? { label: 'Whitelist', ...foreignWhitelist[0] }
+                : null;
+        if (foreign) {
+          throw new Error(
+            `cleanup refused: ${foreign.label} ${foreign.id} still references owned user ${foreign.userId}`
+          );
+        }
+      }
     }
-  }
-  if (owned.poolPositionIds.length > 0) {
-    await db
-      .delete(poolPositions)
-      .where(inArray(poolPositions.id, owned.poolPositionIds));
-  }
-  if (owned.perpPositionIds.length > 0) {
-    await db
-      .delete(perpPositions)
-      .where(inArray(perpPositions.id, owned.perpPositionIds));
-  }
-  if (owned.pool) {
-    await db.delete(pools).where(eq(pools.id, actorId));
-  }
-  if (owned.actorState) {
-    await db.delete(actorState).where(eq(actorState.id, actorId));
-  }
-  if (owned.user) {
-    await db.delete(users).where(eq(users.id, actorId));
-  }
+    if (owned.poolPositionIds.length > 0) {
+      await tx
+        .delete(poolPositions)
+        .where(inArray(poolPositions.id, owned.poolPositionIds));
+    }
+    if (owned.perpPositionIds.length > 0) {
+      await tx
+        .delete(perpPositions)
+        .where(inArray(perpPositions.id, owned.perpPositionIds));
+    }
+    if (owned.pool) {
+      await tx.delete(pools).where(eq(pools.id, actorId));
+    }
+    if (owned.actorState) {
+      await tx.delete(actorState).where(eq(actorState.id, actorId));
+    }
+    if (owned.user) {
+      await tx.delete(users).where(eq(users.id, actorId));
+    }
+  });
 }
 
 afterAll(async () => {
@@ -399,7 +446,10 @@ describe('NPC portfolio detail: listed positions match the aggregates', () => {
   });
 
   it('shows the open perp position with its market fields', async () => {
-    const { body } = await fetchPortfolio();
+    const { status, body } = await fetchPortfolio();
+    // Assert the status before reading the DTO: a 429 error body has no
+    // `positions` to read.
+    expect(status).toBe(200);
     const res = body as PortfolioResponse;
     const perp = res.positions.find((p) => p.id === perpPositionId);
     expect(perp).toBeDefined();
@@ -438,7 +488,10 @@ describe('NPC portfolio detail: listed positions match the aggregates', () => {
           updatedAt: new Date(),
         })
         .returning({ id: poolPositions.id });
-      const { body } = await fetchPortfolio();
+      const { status, body } = await fetchPortfolio();
+      // Assert the status before reading the DTO: a 429 error body has no
+      // `positions` to read.
+      expect(status).toBe(200);
       const res = body as PortfolioResponse;
       expect(res.positions).toHaveLength(res.portfolio.positionCount);
       expect(res.positions.filter((p) => p.id === perpPositionId)).toHaveLength(
@@ -454,7 +507,10 @@ describe('NPC portfolio detail: listed positions match the aggregates', () => {
   });
 
   it('keeps closed positions out of the list (guards)', async () => {
-    const { body } = await fetchPortfolio();
+    const { status, body } = await fetchPortfolio();
+    // Assert the status before reading the DTO: a 429 error body has no
+    // `positions` to read.
+    expect(status).toBe(200);
     const res = body as PortfolioResponse;
     const ids = res.positions.map((p) => p.id);
     expect(ids).toContain(predictionPositionId);
@@ -516,9 +572,107 @@ describe('fixture ownership', () => {
         .where(eq(users.id, actorId));
       expect(survivingUser).toBeDefined();
       expect(survivingUser?.displayName).toBe('F42 Portfolio NPC');
+      // A refusal must roll back the whole cleanup, not just skip the
+      // user delete: the owned pool, actor state and positions survive too.
+      const [survivingPool] = await db
+        .select()
+        .from(pools)
+        .where(eq(pools.id, actorId));
+      expect(survivingPool).toBeDefined();
+      const [survivingActorState] = await db
+        .select()
+        .from(actorState)
+        .where(eq(actorState.id, actorId));
+      expect(survivingActorState).toBeDefined();
+      const survivingPoolPositions = await db
+        .select()
+        .from(poolPositions)
+        .where(inArray(poolPositions.id, owned.poolPositionIds));
+      expect(survivingPoolPositions).toHaveLength(owned.poolPositionIds.length);
+      const survivingPerpPositions = await db
+        .select()
+        .from(perpPositions)
+        .where(inArray(perpPositions.id, owned.perpPositionIds));
+      expect(survivingPerpPositions).toHaveLength(owned.perpPositionIds.length);
     } finally {
       // Remove the foreign row so the shared fixture's afterAll cleanup
       // can proceed.
+      await db
+        .delete(gameOnboarding)
+        .where(eq(gameOnboarding.id, foreignOnboardingId));
+    }
+  });
+
+  it('cleanup sees a child that commits after cleanup starts, instead of deleting across it', async () => {
+    const foreignOnboardingId = await generateSnowflakeId();
+    const now = new Date();
+    let releaseInsert: (() => void) | undefined;
+    // A concurrent flow inserts a foreign GameOnboarding row in its own
+    // transaction and holds it uncommitted. Its FK check takes a FOR KEY
+    // SHARE lock on the owned user row, so cleanup's FOR UPDATE lock on
+    // the same row waits until this transaction settles.
+    const concurrentInsert = db.transaction(async (tx) => {
+      await tx.insert(gameOnboarding).values({
+        id: foreignOnboardingId,
+        userId: actorId,
+        currentStep: 'welcome',
+        state: {
+          completedSteps: [],
+          currentStep: 'welcome',
+          startedAt: now.toISOString(),
+          completedAt: null,
+          rewards: [],
+        },
+        isComplete: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await new Promise<void>((resolve) => {
+        releaseInsert = resolve;
+      });
+    });
+    try {
+      // Let the insert land before cleanup starts, so cleanup must wait
+      // on the lock instead of racing ahead of it.
+      await sleep(300);
+      const cleanupAttempt = cleanupOwnedFixtures();
+      // Give cleanup time to reach the user-row lock, then let the child
+      // commit: cleanup's checks must see it and refuse.
+      await sleep(300);
+      releaseInsert?.();
+      await concurrentInsert;
+      let refusal: unknown;
+      try {
+        await cleanupAttempt;
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(Error);
+      expect((refusal as Error).message).toContain(
+        `GameOnboarding ${foreignOnboardingId} still references owned user ${actorId}`
+      );
+      // Nothing was deleted across the window: the owned rows all survive.
+      const [survivingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, actorId));
+      expect(survivingUser).toBeDefined();
+      const [survivingPool] = await db
+        .select()
+        .from(pools)
+        .where(eq(pools.id, actorId));
+      expect(survivingPool).toBeDefined();
+      const survivingPerpPositions = await db
+        .select()
+        .from(perpPositions)
+        .where(inArray(perpPositions.id, owned.perpPositionIds));
+      expect(survivingPerpPositions).toHaveLength(owned.perpPositionIds.length);
+    } finally {
+      // Release the concurrent insert if the test failed before doing so,
+      // then remove the foreign row so the shared fixture's afterAll
+      // cleanup can proceed.
+      releaseInsert?.();
+      await concurrentInsert.catch(() => {});
       await db
         .delete(gameOnboarding)
         .where(eq(gameOnboarding.id, foreignOnboardingId));
