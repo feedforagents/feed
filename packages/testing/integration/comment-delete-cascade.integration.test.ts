@@ -27,7 +27,7 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { comments, db, inArray, posts, reactions, users } from '@feed/db';
+import { comments, db, eq, inArray, posts, reactions, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 import { executeGetComments } from '../../mcp/src/handlers/tool-handlers';
@@ -96,6 +96,31 @@ async function callDelete(commentId: string, asUserId: string) {
   return { status: response.status, body };
 }
 
+type CreateReplyBody = { id?: string; error?: unknown } | null;
+
+async function callPostReply(
+  targetPostId: string,
+  parentCommentId: string,
+  asUserId: string,
+  content: string
+): Promise<{ status: number; body: CreateReplyBody }> {
+  const request = new NextRequest(
+    new Request(`http://localhost/api/posts/${targetPostId}/comments`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders(asUserId),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ content, parentCommentId }),
+    })
+  );
+  const response = await createComment(request, {
+    params: Promise.resolve({ id: targetPostId }),
+  });
+  const body = (await response.json().catch(() => null)) as CreateReplyBody;
+  return { status: response.status, body };
+}
+
 async function rowsByIds(table: 'comments' | 'reactions', ids: string[]) {
   if (table === 'comments') {
     return db
@@ -117,6 +142,24 @@ async function cleanup() {
   }
   if (owned.comments.size > 0) {
     await db.delete(comments).where(inArray(comments.id, [...owned.comments]));
+  }
+  // A reply created by a route under test is not necessarily registered
+  // in `owned` (a 201 under a thread the old route left behind, for
+  // example). Sweep anything still attached to an owned post before
+  // the post itself is removed, or the row survives with a postId and
+  // parentCommentId pointing at deleted rows.
+  if (owned.posts.size > 0) {
+    const attached = await db
+      .select({ id: comments.id })
+      .from(comments)
+      .where(inArray(comments.postId, [...owned.posts]));
+    if (attached.length > 0) {
+      const attachedIds = attached.map((row) => row.id);
+      await db
+        .delete(reactions)
+        .where(inArray(reactions.commentId, attachedIds));
+      await db.delete(comments).where(inArray(comments.id, attachedIds));
+    }
   }
   if (owned.posts.size > 0) {
     await db.delete(posts).where(inArray(posts.id, [...owned.posts]));
@@ -403,6 +446,90 @@ describe('DELETE /api/comments/[id] cascade', () => {
     const response = await createComment(request, {
       params: Promise.resolve({ id: postId }),
     });
+    // Capture a successful mutation result before the semantic
+    // assertion: on the old route this POST returns 201, and the new
+    // reply must be registered for cleanup before the status is
+    // judged, or it survives the fixture teardown as an orphan.
+    const createdBody = (await response.json().catch(() => null)) as {
+      id?: string;
+    } | null;
+    if (response.status === 201 && createdBody?.id) {
+      owned.comments.add(createdBody.id);
+    }
     expect(response.status).toBe(404);
+  });
+
+  it('does not let a reply inserted during deletion survive as an orphan', async () => {
+    // The delete route locks each row its walk visits and the reply
+    // route locks its parent before inserting, so the two serialize:
+    // either the reply commits first and the walk collects it, or the
+    // delete commits first and the reply fails with 404. Either way
+    // no reply may remain under a deleted comment. The pair runs a few
+    // times: the interleaving differs run to run, but the final state
+    // must be orphan-free every time.
+    for (let round = 0; round < 3; round++) {
+      const raceTopId = await generateSnowflakeId();
+      const raceReplyId = await generateSnowflakeId();
+      const inserted = await db
+        .insert(comments)
+        .values([
+          {
+            id: raceTopId,
+            content: `race top ${round}`,
+            postId,
+            authorId: threadAuthorId,
+            parentCommentId: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            deletedAt: null,
+          },
+          {
+            id: raceReplyId,
+            content: `race reply ${round}`,
+            postId,
+            authorId: replierId,
+            parentCommentId: raceTopId,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            deletedAt: null,
+          },
+        ])
+        .returning({ id: comments.id });
+      for (const row of inserted) owned.comments.add(row.id);
+
+      const [postResult, deleteResult] = await Promise.all([
+        callPostReply(
+          postId,
+          raceTopId,
+          replierId,
+          `race concurrent reply ${round} ${raceTopId}`
+        ),
+        callDelete(raceTopId, threadAuthorId),
+      ]);
+
+      expect(deleteResult.status).toBe(200);
+      expect([201, 404]).toContain(postResult.status);
+      let createdReplyId: string | undefined;
+      if (
+        postResult.status === 201 &&
+        postResult.body &&
+        typeof postResult.body.id === 'string'
+      ) {
+        createdReplyId = postResult.body.id;
+        owned.comments.add(createdReplyId);
+      }
+
+      const orphans = await db
+        .select({ id: comments.id })
+        .from(comments)
+        .where(eq(comments.parentCommentId, raceTopId));
+      expect(orphans).toHaveLength(0);
+      const survivingTop = await rowsByIds('comments', [raceTopId]);
+      expect(survivingTop).toHaveLength(0);
+      if (createdReplyId) {
+        const survivingReply = await rowsByIds('comments', [createdReplyId]);
+        expect(survivingReply).toHaveLength(0);
+      }
+    }
   });
 });

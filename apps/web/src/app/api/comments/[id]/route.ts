@@ -703,59 +703,79 @@ export const DELETE = withErrorHandling(
     const user = await authenticate(request);
     const { id: commentId } = IdParamSchema.parse(await context.params);
 
-    // Find comment
-    const [comment] = await db
-      .select()
-      .from(comments)
-      .where(eq(comments.id, commentId))
-      .limit(1);
-
-    if (!comment) {
-      throw new NotFoundError('Comment', commentId);
-    }
-
-    // Check if user is the author
-    if (comment.authorId !== user.userId) {
-      throw new AuthorizationError(
-        'You can only delete your own comments',
-        'comment',
-        'delete'
-      );
-    }
-
-    // Collect every descendant reply, not only the direct ones: the
-    // cascade documented above removes the whole subtree. A descendant
-    // left behind would keep a parentCommentId pointing at a deleted
-    // comment while staying readable and reply-able through the flat
-    // read paths (MCP/A2A comment lists, the comment detail route).
-    const descendantIds: string[] = [];
-    const visited = new Set<string>([commentId]);
-    let frontier = [commentId];
-    while (frontier.length > 0) {
-      const children = await db
-        .select({ id: comments.id })
+    // The whole subtree removal runs in one transaction, and every row
+    // the walk visits is locked (FOR UPDATE) as it is reached. The
+    // reply-creation route locks its parent row the same way before
+    // inserting, so the two routes serialize on the parent row: a reply
+    // that wins the lock commits before the walk reaches its parent
+    // and is collected, and a reply that loses the lock finds its
+    // parent gone and fails with 404. Without the shared lock, a reply
+    // inserted after the walk passed its parent would survive as an
+    // orphan. A failure anywhere inside the transaction rolls the
+    // subtree removal back instead of leaving a half-deleted thread.
+    const repliesCount = await db.transaction(async (tx) => {
+      // Lock the root first: the author check and the walk below both
+      // run inside this boundary.
+      const [comment] = await tx
+        .select()
         .from(comments)
-        .where(inArray(comments.parentCommentId, frontier));
-      frontier = [];
-      for (const child of children) {
-        if (visited.has(child.id)) continue;
-        visited.add(child.id);
-        descendantIds.push(child.id);
-        frontier.push(child.id);
+        .where(eq(comments.id, commentId))
+        .limit(1)
+        .for('update');
+
+      if (!comment) {
+        throw new NotFoundError('Comment', commentId);
       }
-    }
-    const repliesCount = descendantIds.length;
 
-    // Delete reactions on the main comment and all of its replies
-    await db
-      .delete(reactions)
-      .where(inArray(reactions.commentId, [commentId, ...descendantIds]));
+      // Check if user is the author
+      if (comment.authorId !== user.userId) {
+        throw new AuthorizationError(
+          'You can only delete your own comments',
+          'comment',
+          'delete'
+        );
+      }
 
-    // Delete all replies, then the main comment
-    if (descendantIds.length > 0) {
-      await db.delete(comments).where(inArray(comments.id, descendantIds));
-    }
-    await db.delete(comments).where(eq(comments.id, commentId));
+      // Collect every descendant reply, not only the direct ones: the
+      // cascade documented above removes the whole subtree. A descendant
+      // left behind would keep a parentCommentId pointing at a deleted
+      // comment while staying readable and reply-able through the flat
+      // read paths (MCP/A2A comment lists, the comment detail route).
+      const descendantIds: string[] = [];
+      const visited = new Set<string>([commentId]);
+      let frontier = [commentId];
+      while (frontier.length > 0) {
+        // Lock each level as it is reached: a concurrent reply insert
+        // must lock its parent first, so it either commits before this
+        // level is read (and is collected) or blocks until this
+        // transaction commits (and then finds its parent gone).
+        const children = await tx
+          .select({ id: comments.id })
+          .from(comments)
+          .where(inArray(comments.parentCommentId, frontier))
+          .for('update');
+        frontier = [];
+        for (const child of children) {
+          if (visited.has(child.id)) continue;
+          visited.add(child.id);
+          descendantIds.push(child.id);
+          frontier.push(child.id);
+        }
+      }
+
+      // Delete reactions on the main comment and all of its replies
+      await tx
+        .delete(reactions)
+        .where(inArray(reactions.commentId, [commentId, ...descendantIds]));
+
+      // Delete all replies, then the main comment
+      if (descendantIds.length > 0) {
+        await tx.delete(comments).where(inArray(comments.id, descendantIds));
+      }
+      await tx.delete(comments).where(eq(comments.id, commentId));
+
+      return descendantIds.length;
+    });
 
     logger.info(
       'Comment deleted successfully',
