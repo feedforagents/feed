@@ -17,6 +17,7 @@ import {
   comments,
   count,
   db,
+  dbWrite,
   desc,
   eq,
   follows,
@@ -441,13 +442,15 @@ export async function resolveUserByUsername(
   const clean = username.replace(/^@/, '').trim().toLowerCase();
   if (!clean) return null;
 
-  const [user] = await db
+  const results = await dbWrite
     .select({ id: users.id })
     .from(users)
-    .where(eq(users.username, clean))
-    .limit(1);
+    .where(sql`lower(${users.username}) = ${clean}`)
+    .limit(2);
 
-  return user?.id ?? null;
+  if (results.length > 1)
+    throw new Error(`Ambiguous username: ${clean}; use a user ID`);
+  return results[0]?.id ?? null;
 }
 
 /**

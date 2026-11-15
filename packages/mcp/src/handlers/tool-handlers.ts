@@ -54,25 +54,34 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
+  acquireUserBlockPairLock,
   and,
   db,
+  dbWrite,
   desc,
   eq,
   favorites,
+  follows,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
+  groupMembers,
   hasBlocked,
   inArray,
   isNull,
+  like,
   lte,
   markets,
+  not,
+  notExists,
   perpMarketSnapshots,
   posts,
   postTags,
   questions,
   timeframedMarkets,
+  userBlocks,
   users,
+  withTransaction,
 } from '@feed/db';
 import {
   createPerpPriceImpactPort,
@@ -841,6 +850,21 @@ export async function executeGetPositions(
     skip: args.offset,
   });
 
+  // Open perpetual positions are open positions too: the same server opens
+  // and closes them (open_position / close_position), the A2A
+  // portfolio.get_positions returns them next to prediction positions, and
+  // the web wallet lists them in the same view. A marketId filter names a
+  // prediction market, so it narrows the result to prediction positions.
+  const perpPositionsRaw = args.marketId
+    ? []
+    : await db.perpPosition.findMany({
+        where: {
+          userId: agent.userId,
+          closedAt: null,
+        },
+        orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
+      });
+
   // Get markets separately
   const marketIds = positionsRaw
     .map((p) => p.marketId)
@@ -863,6 +887,17 @@ export async function executeGetPositions(
       side: p.side ? 'YES' : 'NO',
       shares: p.shares.toString(),
       avgPrice: p.avgPrice.toString(),
+    })),
+    perpPositions: perpPositionsRaw.map((p) => ({
+      id: p.id,
+      ticker: p.ticker,
+      side: resolvePerpSide(p.side),
+      size: p.size.toString(),
+      entryPrice: p.entryPrice.toString(),
+      currentPrice: p.currentPrice.toString(),
+      leverage: p.leverage,
+      unrealizedPnL: p.unrealizedPnL.toString(),
+      fundingPaid: p.fundingPaid.toString(),
     })),
   };
 }
@@ -973,22 +1008,40 @@ export async function executeQueryFeed(
   }
 
   const now = new Date();
-  const posts = await db.post.findMany({
-    where: {
-      deletedAt: null,
-      timestamp: { lte: now }, // No future posts
-      ...(relatedQuestion !== undefined && { relatedQuestion }),
-    },
+  // Filter in SQL before the limit without requiring NPC authors to have Users.
+  const feedPosts = await db
+    .select({
+      id: posts.id,
+      content: posts.content,
+      authorId: posts.authorId,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(
+      and(
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now),
+        not(like(posts.authorId, 'test-%')),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        ),
+        relatedQuestion !== undefined
+          ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined
+      )
+    )
     // Total order, matching the web feed query
     // (DatabaseService.getRecentPosts orders by timestamp desc, id desc):
     // with timestamp alone, posts sharing one timestamp are cut by the
     // limit in storage order, so the head of a tied block is arbitrary.
-    orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
-    take: args.limit || 20,
-  });
+    .orderBy(desc(posts.timestamp), desc(posts.id))
+    .limit(args.limit || 20);
 
   return {
-    posts: posts.map((p) => ({
+    posts: feedPosts.map((p) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
@@ -1527,6 +1580,24 @@ export async function executeCreateComment(
   agent: AuthenticatedAgent,
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
+  const post = await dbWrite.post.findFirst({
+    where: { id: args.postId },
+  });
+
+  // Unknown posts cannot take comments (and are never created from the ID:
+  // comments.postId has no foreign key, so an unchecked comment would
+  // become an orphan row).
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
+  // Soft-deleted posts are hidden everywhere, so they cannot collect new
+  // comments — the web post comments route applies the same rule, as does
+  // the A2A createComment executor.
+  if (post.deletedAt) {
+    throw new NotFoundError('Post (deleted)', args.postId);
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {
@@ -2101,7 +2172,7 @@ export async function executeGetChatMessages(
 ): Promise<GetChatMessagesResult> {
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
-    select: { id: true },
+    select: { id: true, isGroup: true },
   });
 
   if (!chat) {
@@ -2121,8 +2192,34 @@ export async function executeGetChatMessages(
     throw new Error('Unauthorized: You do not have access to this chat');
   }
 
+  // A group chat is a reading surface like any other feed: authors the
+  // viewer blocked or muted, and authors who blocked the viewer, must
+  // not appear in the viewer's message list — the same rule the web
+  // group chat history (GET /api/chats/[id]), the A2A
+  // messaging.get_chat_messages, and this file's search_agents handler
+  // apply. The filter lives in the query itself so limit/offset page
+  // over only the messages the viewer may see. DM history is out of
+  // scope: a block relationship already prevents creating a DM and
+  // sending in one.
+  let excludedSenderIds: string[] = [];
+  if (chat.isGroup) {
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(agent.userId),
+      getMutedUserIds(agent.userId),
+      getBlockedByUserIds(agent.userId),
+    ]);
+    excludedSenderIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+  }
+
   const messagesList = await db.message.findMany({
-    where: { chatId: args.chatId },
+    where: {
+      chatId: args.chatId,
+      ...(excludedSenderIds.length > 0
+        ? { senderId: { notIn: excludedSenderIds } }
+        : {}),
+    },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 50,
     skip: args.offset || 0,
@@ -2301,44 +2398,82 @@ export async function executeCreateGroup(
 }
 
 /**
- * Execute leave_chat tool
- * Chat.groupId → Group.id relationship
+ * Execute leave_chat tool.
+ *
+ * Chat.groupId → Group.id. The owner decision and both writes commit
+ * together on the primary. GroupMember is locked before ChatParticipant,
+ * matching DELETE /api/chats/[id]/participants/me (member update, then
+ * participant removal). Taking the participant lock first deadlocks with
+ * that route (PostgreSQL 40P01).
  */
 export async function executeLeaveChat(
   agent: AuthenticatedAgent,
   args: LeaveChatArgs
 ): Promise<LeaveChatResult> {
-  // Mark chat participant as inactive
-  await db.chatParticipant.updateMany({
-    where: {
-      chatId: args.chatId,
-      userId: agent.userId,
-    },
-    data: { isActive: false },
-  });
-
-  // Find the chat to get its groupId
-  const chat = await db.chat.findUnique({
-    where: { id: args.chatId },
-    select: { groupId: true },
-  });
-
-  // Also update GroupMember if there's an associated group
-  if (chat?.groupId) {
-    await db.groupMember.updateMany({
-      where: {
-        groupId: chat.groupId,
-        userId: agent.userId,
-      },
-      data: {
-        isActive: false,
-        kickedAt: new Date(),
-        kickReason: 'User left',
-      },
+  // $transaction is a primary write. Reads stay inside it so a replica
+  // cannot serve a stale role.
+  return db.$transaction(async (tx) => {
+    const chat = await tx.chat.findUnique({
+      where: { id: args.chatId },
+      select: { groupId: true },
     });
-  }
 
-  return { success: true };
+    // A missing chat, or a chat the caller never joined, has no participant
+    // row. Refuse that before any write so the tool does not report success
+    // after updating zero rows.
+    const participant = await tx.chatParticipant.findFirst({
+      where: { chatId: args.chatId, userId: agent.userId },
+    });
+    if (!participant) {
+      throw new Error('You are not a member of this chat.');
+    }
+
+    if (chat?.groupId) {
+      // Hold this row for the rest of the transaction, then read its role.
+      // A promotion to owner that commits while this waits is visible here.
+      const [membership] = await tx
+        .select({
+          id: groupMembers.id,
+          role: groupMembers.role,
+          isActive: groupMembers.isActive,
+        })
+        .from(groupMembers)
+        .where(
+          and(
+            eq(groupMembers.groupId, chat.groupId),
+            eq(groupMembers.userId, agent.userId)
+          )
+        )
+        .limit(1)
+        .for('update');
+
+      if (membership?.isActive && membership.role === 'owner') {
+        throw new Error(
+          'Group owners cannot leave. Transfer ownership or delete the group.'
+        );
+      }
+
+      // Same row the lock just read. An inactive row, including an inactive
+      // owner, is left alone.
+      if (membership?.isActive) {
+        await tx.groupMember.update({
+          where: { id: membership.id },
+          data: {
+            isActive: false,
+            kickedAt: new Date(),
+            kickReason: 'User left',
+          },
+        });
+      }
+    }
+
+    await tx.chatParticipant.update({
+      where: { id: participant.id },
+      data: { isActive: false },
+    });
+
+    return { success: true };
+  });
 }
 
 /**
@@ -2878,22 +3013,61 @@ export async function executeBlockUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot block yourself');
   }
-  const existing = await db.userBlock.findFirst({
-    where: {
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
+
+  // Share the website follow/block lock before reading any pair state. All
+  // validation and writes use this primary transaction, including retries.
+  await withTransaction(async (tx) => {
+    await acquireUserBlockPairLock(tx, agent.userId, args.userId);
+
+    const [targetUser] = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, args.userId))
+      .limit(1);
+    if (!targetUser) {
+      throw new Error(`User ${args.userId} not found`);
+    }
+
+    const [existing] = await tx
+      .select({ id: userBlocks.id })
+      .from(userBlocks)
+      .where(
+        and(
+          eq(userBlocks.blockerId, agent.userId),
+          eq(userBlocks.blockedId, args.userId)
+        )
+      )
+      .limit(1);
+    if (!existing) {
+      await tx.insert(userBlocks).values({
+        id: await generateSnowflakeId(),
+        blockerId: agent.userId,
+        blockedId: args.userId,
+      });
+    }
+
+    // An existing block must also sever leftover edges. Keep reciprocal
+    // deletes ordered, as in the submitted fix, within the same transaction.
+    const [firstUserId, secondUserId] = [agent.userId, args.userId].sort();
+    if (!firstUserId || !secondUserId) throw new Error('Missing block pair');
+    await tx
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followerId, firstUserId),
+          eq(follows.followingId, secondUserId)
+        )
+      );
+    await tx
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followerId, secondUserId),
+          eq(follows.followingId, firstUserId)
+        )
+      );
   });
-  if (existing) {
-    return { success: true };
-  }
-  await db.userBlock.create({
-    data: {
-      id: await generateSnowflakeId(),
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
-  });
+
   return { success: true };
 }
 
