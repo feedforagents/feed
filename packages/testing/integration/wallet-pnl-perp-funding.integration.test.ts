@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
+  and,
   balanceTransactions,
   db,
   eq,
@@ -22,9 +23,8 @@ import { NextRequest } from 'next/server';
 
 // This Next.js build guard has no database/runtime behavior.
 mock.module('server-only', () => ({}));
-const { loadUserPnlHistory, snapshotAllUserPnlMetrics } = await import(
-  '../../../apps/web/src/lib/wallet/pnlHistory'
-);
+const { getHourBoundary, loadUserPnlHistory, snapshotAllUserPnlMetrics } =
+  await import('../../../apps/web/src/lib/wallet/pnlHistory');
 const { calculatePortfolioPnL } = await import(
   '@feed/engine/services/portfolio-pnl'
 );
@@ -57,17 +57,22 @@ const now = new Date('2026-11-03T12:30:00.000Z');
 
 type UserInsert = typeof users.$inferInsert;
 type PositionInsert = typeof perpPositions.$inferInsert;
+type OrganizationStateInsert = typeof organizationState.$inferInsert;
+type PerpMarketSnapshotInsert = typeof perpMarketSnapshots.$inferInsert;
 
 /**
  * Tracks only rows whose INSERT ... RETURNING succeeded. Cleanup deletes
  * exactly those rows by ID, so a setup that fails partway (for example on
  * an ID collision with a pre-existing row) can never delete data this
- * fixture did not create.
+ * fixture did not create. Market rows are tracked per table: acquiring the
+ * organizationState row never implies ownership of the snapshot row, or
+ * vice versa.
  */
 class OwnedFixtures {
   readonly userIds: string[] = [];
   readonly positionIds: string[] = [];
-  readonly tickers: string[] = [];
+  readonly organizationStateIds: string[] = [];
+  readonly marketSnapshotTickers: string[] = [];
 
   async insertUser(values: UserInsert): Promise<string> {
     const [row] = await db
@@ -89,6 +94,30 @@ class OwnedFixtures {
     return row.id;
   }
 
+  async insertOrganizationState(
+    values: OrganizationStateInsert
+  ): Promise<string> {
+    const [row] = await db
+      .insert(organizationState)
+      .values(values)
+      .returning({ id: organizationState.id });
+    if (!row) throw new Error('organizationState insert returned no row');
+    this.organizationStateIds.push(row.id);
+    return row.id;
+  }
+
+  async insertPerpMarketSnapshot(
+    values: PerpMarketSnapshotInsert
+  ): Promise<string> {
+    const [row] = await db
+      .insert(perpMarketSnapshots)
+      .values(values)
+      .returning({ ticker: perpMarketSnapshots.ticker });
+    if (!row) throw new Error('perpMarketSnapshot insert returned no row');
+    this.marketSnapshotTickers.push(row.ticker);
+    return row.ticker;
+  }
+
   async cleanup(): Promise<void> {
     if (this.userIds.length > 0) {
       await db
@@ -106,21 +135,72 @@ class OwnedFixtures {
         .delete(perpPositions)
         .where(inArray(perpPositions.id, this.positionIds));
     }
-    if (this.tickers.length > 0) {
+    if (this.marketSnapshotTickers.length > 0) {
       await db
         .delete(perpMarketSnapshots)
-        .where(inArray(perpMarketSnapshots.ticker, this.tickers));
+        .where(inArray(perpMarketSnapshots.ticker, this.marketSnapshotTickers));
+    }
+    if (this.organizationStateIds.length > 0) {
       await db
         .delete(organizationState)
-        .where(inArray(organizationState.id, this.tickers));
+        .where(inArray(organizationState.id, this.organizationStateIds));
     }
     if (this.userIds.length > 0) {
       await db.delete(users).where(inArray(users.id, this.userIds));
     }
     this.userIds.length = 0;
     this.positionIds.length = 0;
-    this.tickers.length = 0;
+    this.organizationStateIds.length = 0;
+    this.marketSnapshotTickers.length = 0;
   }
+}
+
+/** Market rows for one ticker, valued at the 100 base price. */
+function marketOrganizationStateValues(
+  ticker: string
+): OrganizationStateInsert {
+  return {
+    id: ticker,
+    currentPrice: 100,
+    basePrice: 100,
+    updatedAt: new Date(),
+  };
+}
+
+function marketSnapshotValues(ticker: string): PerpMarketSnapshotInsert {
+  return {
+    ticker,
+    organizationId: ticker,
+    currentPrice: 100,
+    markPrice: 100,
+    indexPrice: 100,
+    high24h: 100,
+    low24h: 100,
+    openInterest: 0,
+    volume24h: 0,
+    bidDepth: 1000000,
+    askDepth: 1000000,
+    fundingRate: {
+      ticker,
+      rate: 0,
+      predictedRate: 0,
+      nextFundingTime: new Date().toISOString(),
+    },
+  };
+}
+
+/**
+ * Insert both market rows for a ticker, registering ownership for each
+ * table only after that table's INSERT ... RETURNING succeeds. If the
+ * second insert fails, cleanup removes only the first row this call
+ * created — never a pre-existing row in the other table.
+ */
+async function insertMarketRows(
+  fixtures: OwnedFixtures,
+  ticker: string
+): Promise<void> {
+  await fixtures.insertOrganizationState(marketOrganizationStateValues(ticker));
+  await fixtures.insertPerpMarketSnapshot(marketSnapshotValues(ticker));
 }
 
 const readerFixtures = new OwnedFixtures();
@@ -300,6 +380,92 @@ describe('fixture ownership', () => {
   });
 });
 
+describe('market fixture ownership', () => {
+  it('cleanup after failed market setup never deletes pre-existing market rows', async () => {
+    const victim = new OwnedFixtures();
+    const attempt = new OwnedFixtures();
+    try {
+      const victimTicker = `PNLFLOWVICTIM${await generateSnowflakeId()}`;
+      await insertMarketRows(victim, victimTicker);
+
+      // Full collision: both market INSERTs fail on the pre-existing rows
+      // and register no ownership.
+      let orgStateCollisionFailed = false;
+      try {
+        await attempt.insertOrganizationState(
+          marketOrganizationStateValues(victimTicker)
+        );
+      } catch {
+        orgStateCollisionFailed = true;
+      }
+      expect(orgStateCollisionFailed).toBe(true);
+      expect(attempt.organizationStateIds).toEqual([]);
+      let snapshotCollisionFailed = false;
+      try {
+        await attempt.insertPerpMarketSnapshot(
+          marketSnapshotValues(victimTicker)
+        );
+      } catch {
+        snapshotCollisionFailed = true;
+      }
+      expect(snapshotCollisionFailed).toBe(true);
+      expect(attempt.marketSnapshotTickers).toEqual([]);
+
+      await attempt.cleanup();
+
+      const [survivingOrgState] = await db
+        .select()
+        .from(organizationState)
+        .where(eq(organizationState.id, victimTicker));
+      expect(survivingOrgState).toBeDefined();
+      const [survivingSnapshot] = await db
+        .select()
+        .from(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, victimTicker));
+      expect(survivingSnapshot).toBeDefined();
+
+      // Partial setup: the organizationState INSERT succeeds, then the
+      // snapshot INSERT collides with a pre-existing snapshot row. Cleanup
+      // removes only the row this attempt created.
+      const partialTicker = `PNLFLOWPARTIAL${await generateSnowflakeId()}`;
+      await victim.insertPerpMarketSnapshot(
+        marketSnapshotValues(partialTicker)
+      );
+      await attempt.insertOrganizationState(
+        marketOrganizationStateValues(partialTicker)
+      );
+      expect(attempt.organizationStateIds).toEqual([partialTicker]);
+      let partialSnapshotFailed = false;
+      try {
+        await attempt.insertPerpMarketSnapshot(
+          marketSnapshotValues(partialTicker)
+        );
+      } catch {
+        partialSnapshotFailed = true;
+      }
+      expect(partialSnapshotFailed).toBe(true);
+      expect(attempt.marketSnapshotTickers).toEqual([]);
+
+      await attempt.cleanup();
+
+      const [removedOrgState] = await db
+        .select()
+        .from(organizationState)
+        .where(eq(organizationState.id, partialTicker));
+      expect(removedOrgState).toBeUndefined();
+      const [survivingPartialSnapshot] = await db
+        .select()
+        .from(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, partialTicker));
+      expect(survivingPartialSnapshot).toBeDefined();
+      expect(survivingPartialSnapshot?.organizationId).toBe(partialTicker);
+    } finally {
+      await attempt.cleanup();
+      await victim.cleanup();
+    }
+  });
+});
+
 // Scope the real funding/price operations to each case's own market. Rows,
 // locks, wallet credits, funding calculations and close settlement all use
 // real PostgreSQL.
@@ -345,7 +511,7 @@ async function runSettlementCase(params: {
     const ownerId = await generateSnowflakeId();
     const otherId = await generateSnowflakeId();
     const ticker = `PNLFLOW${ownerId}`;
-    fixtures.tickers.push(ticker);
+    await insertMarketRows(fixtures, ticker);
     for (const [id, balance] of [
       [ownerId, '100000'],
       [otherId, '100000'],
@@ -359,31 +525,6 @@ async function runSettlementCase(params: {
         updatedAt: new Date(),
       });
     }
-    await db.insert(organizationState).values({
-      id: ticker,
-      currentPrice: 100,
-      basePrice: 100,
-      updatedAt: new Date(),
-    });
-    await db.insert(perpMarketSnapshots).values({
-      ticker,
-      organizationId: ticker,
-      currentPrice: 100,
-      markPrice: 100,
-      indexPrice: 100,
-      high24h: 100,
-      low24h: 100,
-      openInterest: 0,
-      volume24h: 0,
-      bidDepth: 1000000,
-      askDepth: 1000000,
-      fundingRate: {
-        ticker,
-        rate: 0,
-        predictedRate: 0,
-        nextFundingTime: new Date().toISOString(),
-      },
-    });
 
     const adapter = new OwnedMarketDb(ticker);
     const service = new PerpMarketService({
@@ -527,7 +668,57 @@ async function runSettlementCase(params: {
     expect(ledger.filter((row) => row.type === 'perp_close')).toHaveLength(1);
 
     // The persisted hourly snapshot carries the same post-close metrics.
-    await snapshotAllUserPnlMetrics(new Date());
+    // snapshotAllUserPnlMetrics is a global producer: on a shared database
+    // it also writes current-hour rows for unrelated eligible users, and
+    // this fixture only owns its own users. There is no scoped producer,
+    // and the db handle is a process singleton bound to DATABASE_URL, so
+    // this portion cannot be pointed at a separate fresh database on its
+    // own. Instead the run proves unrelated snapshot data is unchanged
+    // net of the call: record every current-hour row first, seed one
+    // bystander with a pre-existing row and one without, run the real
+    // producer, then remove exactly the rows it created for users outside
+    // this fixture and verify the pre-existing rows are untouched.
+    const snapshotAt = new Date();
+    const hourBoundary = getHourBoundary(snapshotAt);
+    const bystanderWithRowId = await generateSnowflakeId();
+    const bystanderWithoutRowId = await generateSnowflakeId();
+    for (const [id, lifetimePnL] of [
+      [bystanderWithRowId, '42'],
+      [bystanderWithoutRowId, '33'],
+    ] as const) {
+      await fixtures.insertUser({
+        id,
+        username: `pnl-flow-bystander-${id}`,
+        virtualBalance: '100000',
+        totalDeposited: '100000',
+        lifetimePnL,
+        updatedAt: new Date(),
+      });
+    }
+    await db.insert(userPnLSnapshots).values({
+      id: `${bystanderWithRowId}:${hourBoundary.toISOString()}:pnl`,
+      userId: bystanderWithRowId,
+      snapshotAt: hourBoundary,
+      lifetimePnL: 42,
+      unrealizedPnL: 0,
+      currentPnL: 42,
+    });
+    const snapshotRowsBefore = await db
+      .select()
+      .from(userPnLSnapshots)
+      .where(eq(userPnLSnapshots.snapshotAt, hourBoundary));
+    const beforeByUserId = new Map(
+      snapshotRowsBefore.map((row) => [
+        row.userId,
+        {
+          lifetimePnL: row.lifetimePnL,
+          unrealizedPnL: row.unrealizedPnL,
+          currentPnL: row.currentPnL,
+        },
+      ])
+    );
+
+    await snapshotAllUserPnlMetrics(snapshotAt);
     const [snapshotRow] = await db
       .select()
       .from(userPnLSnapshots)
@@ -535,6 +726,69 @@ async function runSettlementCase(params: {
     expect(snapshotRow).toBeDefined();
     expect(Number(snapshotRow?.currentPnL)).toBeCloseTo(after.currentPnL, 8);
     expect(Number(snapshotRow?.unrealizedPnL)).toBe(0);
+
+    // The global producer really reaches unrelated users: the bystander
+    // without a pre-existing row gains one, while the bystander's
+    // pre-existing row is left alone by the on-conflict-do-nothing insert.
+    const [bystanderCreatedRow] = await db
+      .select()
+      .from(userPnLSnapshots)
+      .where(eq(userPnLSnapshots.userId, bystanderWithoutRowId));
+    expect(bystanderCreatedRow).toBeDefined();
+    const [bystanderKeptRow] = await db
+      .select()
+      .from(userPnLSnapshots)
+      .where(eq(userPnLSnapshots.userId, bystanderWithRowId));
+    expect(bystanderKeptRow).toBeDefined();
+    expect(Number(bystanderKeptRow?.currentPnL)).toBe(42);
+    expect(Number(bystanderKeptRow?.unrealizedPnL)).toBe(0);
+
+    // Remove exactly the rows the producer created for users outside this
+    // fixture; pre-existing rows are never touched.
+    const ownedUserIds = new Set([
+      ...fixtures.userIds,
+      ...readerFixtures.userIds,
+    ]);
+    const rowsAfterProducer = await db
+      .select()
+      .from(userPnLSnapshots)
+      .where(eq(userPnLSnapshots.snapshotAt, hourBoundary));
+    const createdOutsideIds = rowsAfterProducer
+      .map((row) => row.userId)
+      .filter(
+        (userId) => !ownedUserIds.has(userId) && !beforeByUserId.has(userId)
+      );
+    if (createdOutsideIds.length > 0) {
+      await db
+        .delete(userPnLSnapshots)
+        .where(
+          and(
+            eq(userPnLSnapshots.snapshotAt, hourBoundary),
+            inArray(userPnLSnapshots.userId, createdOutsideIds)
+          )
+        );
+    }
+
+    // Unrelated snapshot data is unchanged net of the run.
+    const rowsFinal = await db
+      .select()
+      .from(userPnLSnapshots)
+      .where(eq(userPnLSnapshots.snapshotAt, hourBoundary));
+    const finalByUserId = new Map(rowsFinal.map((row) => [row.userId, row]));
+    for (const [userId, before] of beforeByUserId) {
+      const finalRow = finalByUserId.get(userId);
+      expect(finalRow).toBeDefined();
+      expect(Number(finalRow?.lifetimePnL)).toBe(Number(before.lifetimePnL));
+      expect(Number(finalRow?.unrealizedPnL)).toBe(
+        Number(before.unrealizedPnL)
+      );
+      expect(Number(finalRow?.currentPnL)).toBe(Number(before.currentPnL));
+    }
+    for (const row of rowsFinal) {
+      expect(
+        ownedUserIds.has(row.userId) || beforeByUserId.has(row.userId)
+      ).toBe(true);
+    }
   } finally {
     await fixtures.cleanup();
   }
