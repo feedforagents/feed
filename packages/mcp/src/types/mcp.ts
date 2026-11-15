@@ -221,9 +221,9 @@ export interface GetBalanceArgs {
 }
 
 export interface GetPositionsArgs {
-  marketId?: string; // Filter by specific market
-  limit?: number; // Limit number of results (default: all)
-  offset?: number; // Pagination offset
+  marketId?: string; // Prediction market filter; omits perpetual positions
+  limit?: number; // Prediction results only (default: all); open perps remain complete
+  offset?: number; // Prediction pagination offset only
 }
 
 export interface ClosePositionArgs {
@@ -627,6 +627,18 @@ export interface GetPositionsResult {
     side: 'YES' | 'NO';
     shares: string;
     avgPrice: string;
+  }>;
+  // Stored open-position snapshot, not a fresh quote or funding-adjusted P&L.
+  perpPositions: Array<{
+    id: string;
+    ticker: string;
+    side: 'LONG' | 'SHORT';
+    size: string;
+    entryPrice: string;
+    currentPrice: string;
+    leverage: number;
+    unrealizedPnL: string;
+    fundingPaid: string;
   }>;
 }
 

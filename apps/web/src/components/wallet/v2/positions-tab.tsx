@@ -27,6 +27,7 @@ import {
 } from '@/stores/userPositionsStore';
 import { invalidateWalletBalance } from '@/stores/walletBalanceStore';
 import type { DisplayPerpPosition } from '@/types/markets';
+import { fetchClosedPositionsSnapshot } from './closed-positions-pages';
 
 interface PositionsTabProps {
   userId: string;
@@ -76,7 +77,6 @@ interface ClosedPredictionPosition {
   createdAt: string | null;
 }
 
-const CLOSED_PAGE_SIZE = 50; // Fetch a generous batch; paginate client-side
 const CLOSED_DISPLAY_SIZE = 10; // Show 10 per page in the UI
 
 export function PositionsTab({ userId }: PositionsTabProps) {
@@ -97,62 +97,65 @@ export function PositionsTab({ userId }: PositionsTabProps) {
   const [pendingTrade, setPendingTrade] = useState<PendingTrade | null>(null);
 
   // Closed positions state
-  const [closedPerps, setClosedPerps] = useState<ClosedPerpPosition[]>([]);
-  const [closedPredictions, setClosedPredictions] = useState<
-    ClosedPredictionPosition[]
-  >([]);
-  const [closedLoading, setClosedLoading] = useState(false);
+  const [closedHistory, setClosedHistory] = useState<{
+    userId: string;
+    status: 'loading' | 'ready' | 'error';
+    perps: ClosedPerpPosition[];
+    predictions: ClosedPredictionPosition[];
+  }>({ userId, status: 'loading', perps: [], predictions: [] });
+  const [closedRetry, setClosedRetry] = useState(0);
+  const currentHistory = closedHistory.userId === userId;
+  const closedPerps = currentHistory ? closedHistory.perps : [];
+  const closedPredictions = currentHistory ? closedHistory.predictions : [];
+  const closedLoading = !currentHistory || closedHistory.status === 'loading';
+  const closedError = currentHistory && closedHistory.status === 'error';
   const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>('all');
   // Client-side pagination for closed positions
   const [closedPage, setClosedPage] = useState(1);
 
-  // Fetch closed positions (both perps and predictions)
+  // The existing all view returns both complete sections in one request.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: closedRetry is an intentional refetch trigger
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    setOutcomeFilter('all');
+    setClosedPage(1);
+    setClosedHistory({ userId, status: 'loading', perps: [], predictions: [] });
+    if (!userId) {
+      setClosedHistory({ userId, status: 'ready', perps: [], predictions: [] });
+      return () => controller.abort();
+    }
     async function fetchClosed() {
-      setClosedLoading(true);
       try {
-        const [perpsRes, predsRes] = await Promise.all([
-          fetch(
-            `/api/markets/positions/${encodeURIComponent(userId)}?status=closed&type=perps&limit=${CLOSED_PAGE_SIZE}&page=1`
-          ),
-          fetch(
-            `/api/markets/positions/${encodeURIComponent(userId)}?status=closed&type=predictions&limit=${CLOSED_PAGE_SIZE}&page=1`
-          ),
-        ]);
-
-        if (cancelled) return;
-
-        if (perpsRes.ok) {
-          const data = await perpsRes.json();
-          if (!cancelled) {
-            setClosedPerps(parseClosedPerps(data?.perpetuals?.positions ?? []));
-          }
-        }
-
-        if (predsRes.ok) {
-          const data = await predsRes.json();
-          if (!cancelled) {
-            setClosedPredictions(
-              parseClosedPredictions(data?.predictions?.positions ?? [])
-            );
-          }
-        }
+        const snapshot = await fetchClosedPositionsSnapshot(async (signal) => {
+          const response = await fetch(
+            `/api/markets/positions/${encodeURIComponent(userId)}?status=all&type=all`,
+            { signal }
+          );
+          if (!response.ok) throw new Error('Closed positions request failed');
+          return response.json();
+        }, controller.signal);
+        const perps = parseClosedPerps(snapshot.perpetuals);
+        const predictions = parseClosedPredictions(snapshot.predictions);
+        if (controller.signal.aborted) return;
+        setClosedHistory({ userId, status: 'ready', perps, predictions });
       } catch (err) {
+        if (controller.signal.aborted) return;
         logger.warn(
           'Failed to fetch closed positions',
           { userId, error: err },
           'PositionsTab'
         );
-      } finally {
-        if (!cancelled) setClosedLoading(false);
+        setClosedHistory({
+          userId,
+          status: 'error',
+          perps: [],
+          predictions: [],
+        });
       }
     }
     fetchClosed();
-    return () => {
-      cancelled = true;
-    };
-  }, [userId]);
+    return () => controller.abort();
+  }, [userId, closedRetry]);
 
   // Live prices for perp positions
   const tickers = useMemo(
@@ -421,7 +424,7 @@ export function PositionsTab({ userId }: PositionsTabProps) {
     <div className="space-y-4 md:space-y-6">
       <h2 className="font-semibold text-base">Positions</h2>
 
-      {!hasPositions && !closedLoading && (
+      {!hasPositions && !closedLoading && !closedError && (
         <div className="rounded-xl border border-border py-10 text-center">
           <p className="text-muted-foreground">No positions found</p>
           <p className="mt-1 text-muted-foreground text-sm">
@@ -644,7 +647,7 @@ export function PositionsTab({ userId }: PositionsTabProps) {
       )}
 
       {/* ── Closed Positions Section ── */}
-      {(hasClosedPositions || closedLoading) && (
+      {(hasClosedPositions || closedLoading || closedError) && (
         <div className="space-y-4 md:space-y-5">
           {/* Section header with outcome filter */}
           <div className="flex items-center justify-between border-border border-t pt-4 md:pt-5">
@@ -681,6 +684,22 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                   className="h-14 animate-pulse rounded-xl bg-muted"
                 />
               ))}
+            </div>
+          )}
+
+          {closedError && (
+            <div
+              role="alert"
+              className="flex items-center justify-between text-muted-foreground text-sm"
+            >
+              <span>Closed positions unavailable</span>
+              <button
+                type="button"
+                onClick={() => setClosedRetry((attempt) => attempt + 1)}
+                className="rounded-md px-2 py-1 hover:bg-muted hover:text-foreground"
+              >
+                Retry
+              </button>
             </div>
           )}
 
@@ -879,6 +898,7 @@ export function PositionsTab({ userId }: PositionsTabProps) {
 
           {/* Empty state for outcome filter */}
           {!closedLoading &&
+            !closedError &&
             allFilteredClosed.length === 0 &&
             outcomeFilter !== 'all' && (
               <div className="rounded-xl border border-border/60 py-6 text-center">

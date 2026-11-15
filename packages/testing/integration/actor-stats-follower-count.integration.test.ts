@@ -28,6 +28,7 @@ import { StaticDataRegistry } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
+import { fixtureRowJson } from './helpers/fixture-row-json';
 
 const statsSchema = z.object({
   stats: z.object({
@@ -270,7 +271,7 @@ async function cleanup(receipt: Ownership) {
           .where(
             and(
               eq(users.id, row.id),
-              sql`to_jsonb(${users}) = to_jsonb(jsonb_populate_record(NULL::"User", ${JSON.stringify(row)}::jsonb))`,
+              sql`to_jsonb(${users}) = to_jsonb(jsonb_populate_record(NULL::"User", ${fixtureRowJson('User', row)}::jsonb))`,
               sql`NOT EXISTS (SELECT 1 FROM ${gameOnboarding} WHERE ${gameOnboarding.userId} = ${row.id})`,
               sql`NOT EXISTS (SELECT 1 FROM ${userPnLSnapshots} WHERE ${userPnLSnapshots.userId} = ${row.id})`,
               sql`NOT EXISTS (SELECT 1 FROM ${whitelist} WHERE ${whitelist.userId} = ${row.id})`,

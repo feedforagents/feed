@@ -62,10 +62,12 @@ export const sendMessageAction: Action = {
   examples: [],
   validate: async (runtime) =>
     Boolean((runtime as FeedRuntime).a2aClient?.isConnected()),
-  handler: async (runtime, _message, state, _options, callback) => {
+  handler: async (runtime, _message, state, options, callback) => {
     const client = clientFor(runtime);
     const agentUserId = id.parse(client.agentId);
-    const params = sendParameters.parse(state?.data?.actionParams);
+    const params = sendParameters.parse(
+      options?.parameters ?? state?.data?.actionParams
+    );
     let chatId = params.chatId;
     let recipientId = params.recipientId;
     if (params.groupName) {

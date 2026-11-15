@@ -87,6 +87,7 @@ export async function main() {
       direct,
       ca,
       mode: 'prepare',
+      allowStagingBaselineAdditive: true,
       beforeWrite: async (state) => {
         verifyStagingAppRowAccess(state);
         await checkpoint();
@@ -115,6 +116,9 @@ export async function main() {
           })
         ),
         historyEntries: state.historyLength,
+        historyLineage:
+          state.historyLength === 4 ? 'baseline-additive' : 'canonical',
+        deferredRemovals: state.historyLength === 4 ? ['0001', '0002'] : [],
         columnsReady: state.columnsReady,
         indexReady: state.indexReady,
         feeTableOid: state.row.feeOid,
@@ -142,6 +146,13 @@ if (import.meta.main) {
           error instanceof SchemaHold
             ? error.reason
             : 'unexpected_schema_failure',
+        migrationHistory:
+          error instanceof SchemaHold &&
+          ['unexpected_migration_count', 'migration_history_mismatch'].includes(
+            error.reason
+          )
+            ? error.migrationHistory
+            : undefined,
       })
     );
     process.exitCode = 1;

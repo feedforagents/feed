@@ -28,6 +28,7 @@ import {
   whitelistConfig,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
+import { fixtureRowJson } from './helpers/fixture-row-json';
 import { createStewardTestToken } from './helpers/steward-auth';
 
 const baseUrl = new URL(
@@ -320,7 +321,7 @@ async function cleanup(receipt: Ownership) {
     await db.delete(users).where(
       and(
         eq(users.id, row.id),
-        sql`to_jsonb(${users}) = to_jsonb(jsonb_populate_record(NULL::"User", ${JSON.stringify(row)}::jsonb))`,
+        sql`to_jsonb(${users}) = to_jsonb(jsonb_populate_record(NULL::"User", ${fixtureRowJson('User', row)}::jsonb))`,
         // Baseline User FKs can otherwise delete or null non-owned children.
         sql`NOT EXISTS (SELECT 1 FROM ${gameOnboarding} WHERE ${gameOnboarding.userId} = ${row.id})`,
         sql`NOT EXISTS (SELECT 1 FROM ${userPnLSnapshots} WHERE ${userPnLSnapshots.userId} = ${row.id})`,
