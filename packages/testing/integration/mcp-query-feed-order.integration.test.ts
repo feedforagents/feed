@@ -276,31 +276,52 @@ describe('MCP query_feed total order', () => {
 describe('MCP query_feed fixture ownership under setup collision', () => {
   // Rows that simulate another owner's data. They are deliberately
   // kept out of every owned array the fixture helpers manage; this
-  // suite removes them itself at the end.
+  // suite removes them itself at the end — but only the rows its own
+  // inserts actually created. Each cleanup ID is registered from the
+  // RETURNING clause of its own successful INSERT, so a setup
+  // collision registers nothing and teardown cannot delete the row
+  // whose collision caused setup to fail.
   const foreign = { userId: '', postId: '' };
+  const acquired = { userId: '', postId: '' };
 
   beforeAll(async () => {
     foreign.userId = await generateSnowflakeId();
-    await db.insert(users).values({
-      id: foreign.userId,
-      username: 'f137-foreign-author',
-      isTest: false,
-      isActor: false,
-      updatedAt: new Date(),
-    });
+    const insertedUser = await db
+      .insert(users)
+      .values({
+        id: foreign.userId,
+        username: 'f137-foreign-author',
+        isTest: false,
+        isActor: false,
+        updatedAt: new Date(),
+      })
+      .returning({ id: users.id });
+    const userRow = insertedUser[0];
+    assert.ok(userRow, 'foreign user insert returned no row');
+    acquired.userId = userRow.id;
     foreign.postId = await generateSnowflakeId();
-    await db.insert(posts).values({
-      id: foreign.postId,
-      content: 'f137 foreign post',
-      authorId: foreign.userId,
-      timestamp: new Date(),
-      createdAt: new Date(),
-    });
+    const insertedPost = await db
+      .insert(posts)
+      .values({
+        id: foreign.postId,
+        content: 'f137 foreign post',
+        authorId: foreign.userId,
+        timestamp: new Date(),
+        createdAt: new Date(),
+      })
+      .returning({ id: posts.id });
+    const postRow = insertedPost[0];
+    assert.ok(postRow, 'foreign post insert returned no row');
+    acquired.postId = postRow.id;
   });
 
   afterAll(async () => {
-    await db.delete(posts).where(eq(posts.id, foreign.postId));
-    await db.delete(users).where(eq(users.id, foreign.userId));
+    if (acquired.postId) {
+      await db.delete(posts).where(eq(posts.id, acquired.postId));
+    }
+    if (acquired.userId) {
+      await db.delete(users).where(eq(users.id, acquired.userId));
+    }
   });
 
   it('a colliding setup registers nothing and cleanup preserves pre-existing rows', async () => {
