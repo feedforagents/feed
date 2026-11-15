@@ -28,6 +28,13 @@ interface IsolatedRunInput {
   snapshotAt: string;
 }
 
+function isDisposableDatabaseName(databaseName: string): boolean {
+  return (
+    /(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName) ||
+    /^feed_pr\d+$/.test(databaseName)
+  );
+}
+
 function assertDisposableDatabaseUrl(value: string | undefined): string {
   if (!value)
     throw new Error('DATABASE_URL is required for the isolated snapshot run');
@@ -35,10 +42,10 @@ function assertDisposableDatabaseUrl(value: string | undefined): string {
   const databaseName = decodeURIComponent(url.pathname.slice(1));
   if (
     !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) ||
-    !/(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName)
+    !isDisposableDatabaseName(databaseName)
   ) {
     throw new Error(
-      'DATABASE_URL must point to a local test or verification database'
+      'DATABASE_URL must point to a local test/verification database or a managed feed_pr<digits> database'
     );
   }
   return databaseName;

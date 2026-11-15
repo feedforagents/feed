@@ -510,9 +510,18 @@ const isolatedSnapshotHelper = resolve(
 );
 
 /**
- * A database URL is disposable only on loopback with a test-like name —
- * the same guard other integration suites use before touching a database.
+ * A database URL is disposable only on loopback with a test-like name or
+ * the managed per-PR profile (`feed_pr<digits>`) CI uses for owned
+ * local/official-CI databases — the same guard other integration suites
+ * use before touching a database.
  */
+function isDisposableDatabaseName(databaseName: string): boolean {
+  return (
+    /(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName) ||
+    /^feed_pr\d+$/.test(databaseName)
+  );
+}
+
 function assertDisposableDatabaseUrl(
   value: string | undefined,
   label: string
@@ -522,13 +531,32 @@ function assertDisposableDatabaseUrl(
   const databaseName = decodeURIComponent(url.pathname.slice(1));
   if (
     !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) ||
-    !/(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName)
+    !isDisposableDatabaseName(databaseName)
   ) {
     throw new Error(
-      `${label} must point to a local test or verification database`
+      `${label} must point to a local test/verification database or a managed feed_pr<digits> database`
     );
   }
   return databaseName;
+}
+
+/**
+ * Environment for a child process that runs against the freshly created
+ * target database: DATABASE_URL/DIRECT_DATABASE_URL are re-pointed, and
+ * any inherited DATABASE_READ_REPLICA_URL is dropped — @feed/db opens a
+ * read-replica client whenever it is set, and an inherited value would
+ * point the child at a database outside its fresh target.
+ */
+function freshTargetEnv(
+  freshUrlString: string
+): Record<string, string | undefined> {
+  const env = { ...process.env };
+  delete env.DATABASE_READ_REPLICA_URL;
+  return {
+    ...env,
+    DATABASE_URL: freshUrlString,
+    DIRECT_DATABASE_URL: freshUrlString,
+  };
 }
 
 async function runSpawned(
@@ -587,19 +615,13 @@ async function runSnapshotProducerInIsolatedDb(params: {
 
   await db.execute(sql.raw(`CREATE DATABASE "${freshDbName}"`));
   try {
-    const migrateEnv = {
-      ...process.env,
-      DATABASE_URL: freshUrlString,
-      DIRECT_DATABASE_URL: freshUrlString,
-    };
+    // Migrate via the supported workspace command: root `bun run
+    // db:migrate` delegates to packages/db, where drizzle-kit is declared.
+    // Do not address node_modules/drizzle-kit from the repository root —
+    // the workspace does not provide a hoisted root installation.
     await runSpawned(
-      [
-        'node',
-        'node_modules/drizzle-kit/bin.cjs',
-        'migrate',
-        '--config=packages/db/drizzle.config.cjs',
-      ],
-      { cwd: repoRoot, env: migrateEnv },
+      [process.execPath, 'run', 'db:migrate'],
+      { cwd: repoRoot, env: freshTargetEnv(freshUrlString) },
       `migrating isolated database ${freshDbName}`
     );
 
@@ -616,11 +638,9 @@ async function runSnapshotProducerInIsolatedDb(params: {
       snapshotAt: params.snapshotAt.toISOString(),
     };
     const childEnv = {
-      ...process.env,
+      ...freshTargetEnv(freshUrlString),
       NODE_ENV: 'test',
       BUN_ENV: 'test',
-      DATABASE_URL: freshUrlString,
-      DIRECT_DATABASE_URL: freshUrlString,
       DISABLE_RATE_LIMITING: 'true',
       TZ: 'UTC',
       PNL_SNAPSHOT_RUN_JSON: JSON.stringify(runInput),
