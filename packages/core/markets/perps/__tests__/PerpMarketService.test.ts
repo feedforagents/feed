@@ -410,6 +410,53 @@ describe('PerpMarketService', () => {
     );
   });
 
+  it('never rounds close proceeds up when the tail is just below a hundredth', async () => {
+    // PRD §9.1: proceeds round down. A tail a billionth below a hundredth is
+    // a real amount, not noise, and must not be credited as that hundredth.
+    const roundTrip = async (fundingPaid: number) => {
+      const localDb = new InMemoryPerpDb([baseMarket]);
+      const localWallet = new InMemoryWallet(10_000);
+      const local = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            localDb.transaction((tx) => operation(tx, localWallet)),
+        },
+        db: localDb,
+        wallet: localWallet,
+        fees: feeConfig,
+      });
+      const opened = await local.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      await localDb.updateOpenPosition(opened.positionId, { fundingPaid });
+      const before = (await localWallet.getBalance('u1')).balance;
+      const closed = await local.closePosition({
+        userId: 'u1',
+        positionId: opened.positionId,
+      });
+      const credited = (await localWallet.getBalance('u1')).balance - before;
+      const proceeds =
+        (closed.marginPaid ?? 0) + closed.realizedPnL! - closed.feePaid;
+      return { credited, proceeds };
+    };
+
+    // Learn the unrounded proceeds, then charge funding that leaves them a
+    // billionth below the hundredth at or under that amount.
+    const reference = await roundTrip(0);
+    const hundredth = floorPoints(reference.proceeds);
+    const { credited, proceeds } = await roundTrip(
+      reference.proceeds - (hundredth - 1e-9)
+    );
+
+    expect(proceeds).toBeLessThan(hundredth);
+    expect(hundredth - proceeds).toBeLessThan(1e-8);
+    expect(credited).toBeCloseTo(hundredth - 0.01, 9);
+  });
+
   it('calculates realized PnL from notional size while leverage only affects margin', async () => {
     const open = await service.openPosition({
       userId: 'u1',
