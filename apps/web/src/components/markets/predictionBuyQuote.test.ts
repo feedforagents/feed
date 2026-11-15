@@ -36,7 +36,10 @@ describe('calculatePredictionBuyQuote', () => {
     expect(noQuote.sharesBought).toBeGreaterThan(0);
 
     const minQuote = calculatePredictionBuyQuote(500, 500, 'yes', 1);
-    expect(minQuote.netAmount).toBeCloseTo(1 - FEE_CONFIG.TRADING_FEE_RATE, 10);
+    // The canonical fee rounds UP to whole cents, so a 1-point buy at 0.1%
+    // pays 0.01 (not 0.001) and nets 0.99.
+    expect(minQuote.fee).toBeCloseTo(0.01, 10);
+    expect(minQuote.netAmount).toBeCloseTo(0.99, 10);
     expect(minQuote.sharesBought).toBeGreaterThan(0);
   });
 });
