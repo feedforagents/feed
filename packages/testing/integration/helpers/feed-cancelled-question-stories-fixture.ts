@@ -18,13 +18,16 @@ assert.equal(process.env.DISABLE_RATE_LIMITING, 'true');
 mock.module('server-only', () => ({}));
 
 const {
+  arcStates,
   closeDatabase,
   db,
   inArray,
   markets,
   posts,
+  questionArcPlans,
   questions,
   reactions,
+  timeframedMarkets,
   users,
 } = await import('@feed/db');
 const { NextRequest } = await import('next/server');
@@ -277,16 +280,54 @@ try {
   }
 } finally {
   try {
-    if (owned.reactions.length)
-      await db.delete(reactions).where(inArray(reactions.id, owned.reactions));
-    if (owned.posts.length)
-      await db.delete(posts).where(inArray(posts.id, owned.posts));
-    if (owned.questions.length)
-      await db.delete(questions).where(inArray(questions.id, owned.questions));
-    if (owned.markets.length)
-      await db.delete(markets).where(inArray(markets.id, owned.markets));
-    if (owned.users.length)
-      await db.delete(users).where(inArray(users.id, owned.users));
+    // Guarded teardown: cleanup only ever deletes rows this fixture
+    // acquired via INSERT RETURNING, and refuses to delete a question
+    // that gained a dependent row outside the fixture — deleting the
+    // question would cascade-delete that row (ArcState /
+    // QuestionArcPlan / TimeframedMarket all reference questions.id
+    // ON DELETE CASCADE). Lock the owned question rows first so no
+    // concurrent process can attach a dependent row between the check
+    // and the deletes, and run the check and the deletes in one short
+    // transaction so the refusal is atomic.
+    await db.transaction(async (tx) => {
+      if (owned.questions.length) {
+        await tx
+          .select({ id: questions.id })
+          .from(questions)
+          .where(inArray(questions.id, owned.questions))
+          .for('update');
+        for (const [table, label] of [
+          [arcStates, 'ArcState'],
+          [questionArcPlans, 'QuestionArcPlan'],
+          [timeframedMarkets, 'TimeframedMarket'],
+        ] as const) {
+          const foreign = await tx
+            .select({ id: table.id })
+            .from(table)
+            .where(inArray(table.questionId, owned.questions))
+            .limit(1);
+          assert.equal(
+            foreign.length,
+            0,
+            `refusing cleanup: foreign ${label} attached to an owned question`
+          );
+        }
+      }
+      if (owned.reactions.length)
+        await tx
+          .delete(reactions)
+          .where(inArray(reactions.id, owned.reactions));
+      if (owned.posts.length)
+        await tx.delete(posts).where(inArray(posts.id, owned.posts));
+      if (owned.questions.length)
+        await tx
+          .delete(questions)
+          .where(inArray(questions.id, owned.questions));
+      if (owned.markets.length)
+        await tx.delete(markets).where(inArray(markets.id, owned.markets));
+      if (owned.users.length)
+        await tx.delete(users).where(inArray(users.id, owned.users));
+    });
     for (const [table, ids] of [
       [posts, owned.posts],
       [questions, owned.questions],
