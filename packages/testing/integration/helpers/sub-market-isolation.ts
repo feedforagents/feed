@@ -65,12 +65,18 @@ const NPC_TRADE_CASES = [
   'prediction market detail tradeCount (all NPC execution paths) > a failed sell creates no phantom mirror or wallet change',
   'prediction market detail tradeCount (all NPC execution paths) > invalidates a same-process feed cached while its mirror insert waits',
 ];
+const MARKETS_REVIEW_FILE =
+  'packages/testing/integration/markets-tick-review-hold.integration.test.ts';
+const MARKETS_REVIEW_CASES = [
+  'markets-tick manual resolution review > funded reviews stay held across ticks until approval; rejection postpones payment',
+];
 type Suite =
   | 'sub-market'
   | 'prediction-remainder'
   | 'plugin-perp-fee'
   | 'prediction-fee'
-  | 'npc-trade-count';
+  | 'npc-trade-count'
+  | 'markets-review';
 type Lease = {
   database: string;
   oid: string;
@@ -256,6 +262,13 @@ export async function verifyNpcTradeCountChildLease() {
   await verifyChildLease(
     process.env.FEED_NPC_TRADE_COUNT_CHILD,
     process.env.FEED_NPC_TRADE_COUNT_LEASE_FILE
+  );
+}
+
+export async function verifyMarketsReviewChildLease() {
+  await verifyChildLease(
+    process.env.FEED_MARKETS_REVIEW_CHILD,
+    process.env.FEED_MARKETS_REVIEW_LEASE_FILE
   );
 }
 
@@ -559,47 +572,60 @@ export async function runIsolatedNpcTradeCountCases() {
   await runIsolatedCases('npc-trade-count');
 }
 
+export async function runIsolatedMarketsReviewCases() {
+  await runIsolatedCases('markets-review');
+}
+
 async function runIsolatedCases(suite: Suite) {
+  const review = suite === 'markets-review';
   const npc = suite === 'npc-trade-count';
   const fee = suite === 'prediction-fee';
   const prediction = suite === 'prediction-remainder';
   const plugin = suite === 'plugin-perp-fee';
-  const file = npc
-    ? NPC_TRADE_FILE
-    : fee
-      ? PREDICTION_FEE_FILE
-      : plugin
-        ? PLUGIN_PERP_FILE
-        : prediction
-          ? PREDICTION_FILE
-          : FILE;
-  const cases = npc
-    ? NPC_TRADE_CASES
-    : fee
-      ? PREDICTION_FEE_CASES
-      : plugin
-        ? PLUGIN_PERP_CASES
-        : prediction
-          ? PREDICTION_CASES
-          : CASES;
-  const marker = npc
-    ? 'FEED_NPC_TRADE_COUNT_CHILD'
-    : fee
-      ? 'FEED_PREDICTION_FEE_CHILD'
-      : plugin
-        ? 'FEED_PLUGIN_PERP_FEE_CHILD'
-        : prediction
-          ? 'FEED_PREDICTION_REMAINDER_CHILD'
-          : 'FEED_SUB_MARKET_CHILD';
-  const leaseVariable = npc
-    ? 'FEED_NPC_TRADE_COUNT_LEASE_FILE'
-    : fee
-      ? 'FEED_PREDICTION_FEE_LEASE_FILE'
-      : plugin
-        ? 'FEED_PLUGIN_PERP_FEE_LEASE_FILE'
-        : prediction
-          ? 'FEED_PREDICTION_REMAINDER_LEASE_FILE'
-          : 'FEED_SUB_MARKET_LEASE_FILE';
+  const file = review
+    ? MARKETS_REVIEW_FILE
+    : npc
+      ? NPC_TRADE_FILE
+      : fee
+        ? PREDICTION_FEE_FILE
+        : plugin
+          ? PLUGIN_PERP_FILE
+          : prediction
+            ? PREDICTION_FILE
+            : FILE;
+  const cases = review
+    ? MARKETS_REVIEW_CASES
+    : npc
+      ? NPC_TRADE_CASES
+      : fee
+        ? PREDICTION_FEE_CASES
+        : plugin
+          ? PLUGIN_PERP_CASES
+          : prediction
+            ? PREDICTION_CASES
+            : CASES;
+  const marker = review
+    ? 'FEED_MARKETS_REVIEW_CHILD'
+    : npc
+      ? 'FEED_NPC_TRADE_COUNT_CHILD'
+      : fee
+        ? 'FEED_PREDICTION_FEE_CHILD'
+        : plugin
+          ? 'FEED_PLUGIN_PERP_FEE_CHILD'
+          : prediction
+            ? 'FEED_PREDICTION_REMAINDER_CHILD'
+            : 'FEED_SUB_MARKET_CHILD';
+  const leaseVariable = review
+    ? 'FEED_MARKETS_REVIEW_LEASE_FILE'
+    : npc
+      ? 'FEED_NPC_TRADE_COUNT_LEASE_FILE'
+      : fee
+        ? 'FEED_PREDICTION_FEE_LEASE_FILE'
+        : plugin
+          ? 'FEED_PLUGIN_PERP_FEE_LEASE_FILE'
+          : prediction
+            ? 'FEED_PREDICTION_REMAINDER_LEASE_FILE'
+            : 'FEED_SUB_MARKET_LEASE_FILE';
   requireThat(
     !process.env.FEED_SUB_MARKET_CHILD &&
       !process.env.FEED_SUB_MARKET_LEASE_FILE &&
@@ -610,7 +636,9 @@ async function runIsolatedCases(suite: Suite) {
       !process.env.FEED_PREDICTION_FEE_CHILD &&
       !process.env.FEED_PREDICTION_FEE_LEASE_FILE &&
       !process.env.FEED_NPC_TRADE_COUNT_CHILD &&
-      !process.env.FEED_NPC_TRADE_COUNT_LEASE_FILE,
+      !process.env.FEED_NPC_TRADE_COUNT_LEASE_FILE &&
+      !process.env.FEED_MARKETS_REVIEW_CHILD &&
+      !process.env.FEED_MARKETS_REVIEW_LEASE_FILE,
     'Parent cannot reuse a child marker'
   );
   const source = localUrl(process.env.DATABASE_URL);
@@ -624,15 +652,17 @@ async function runIsolatedCases(suite: Suite) {
   const directory = mkdtempSync(
     join(
       tmpdir(),
-      npc
-        ? 'feed-npc-trade-count-'
-        : fee
-          ? 'feed-prediction-fee-'
-          : plugin
-            ? 'feed-plugin-perp-fee-'
-            : prediction
-              ? 'feed-prediction-remainder-'
-              : 'feed-sub-market-'
+      review
+        ? 'feed-markets-review-'
+        : npc
+          ? 'feed-npc-trade-count-'
+          : fee
+            ? 'feed-prediction-fee-'
+            : plugin
+              ? 'feed-plugin-perp-fee-'
+              : prediction
+                ? 'feed-prediction-remainder-'
+                : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -700,6 +730,8 @@ async function runIsolatedCases(suite: Suite) {
       [marker]: nonce,
       [leaseVariable]: manifest,
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
+      // Fresh process memory only; never read or invalidate a shared cron cache.
+      ...(review ? { FEED_DISABLE_REDIS: '1' } : {}),
     };
     phase = 'migrate';
     await run(
@@ -708,7 +740,7 @@ async function runIsolatedCases(suite: Suite) {
       join(directory, 'migrate.log'),
       60000
     );
-    if (prediction || plugin || fee || npc) {
+    if (prediction || plugin || fee || npc || review) {
       phase = 'manual-idempotency-index';
       const actual = await identity(admin);
       const current = await leaseRow(admin, database);
@@ -760,15 +792,17 @@ async function runIsolatedCases(suite: Suite) {
         'psql'
       );
     }
-    phase = npc
-      ? 'six-npc-trade-count-child-cases'
-      : fee
-        ? 'seven-prediction-fee-child-cases'
-        : plugin
-          ? 'six-child-cases'
-          : prediction
-            ? 'ten-child-cases'
-            : 'four-child-cases';
+    phase = review
+      ? 'one-markets-review-child-case'
+      : npc
+        ? 'six-npc-trade-count-child-cases'
+        : fee
+          ? 'seven-prediction-fee-child-cases'
+          : plugin
+            ? 'six-child-cases'
+            : prediction
+              ? 'ten-child-cases'
+              : 'four-child-cases';
     const output = await run(
       ['test', file, '--timeout', '30000'],
       env,
@@ -782,7 +816,7 @@ async function runIsolatedCases(suite: Suite) {
       lines.find((line) =>
         new RegExp(
           '^\\(pass\\) ' +
-            (prediction || plugin || fee || npc
+            (prediction || plugin || fee || npc || review
               ? ''
               : 'sub-market transactional creation > ') +
             escape(name) +
@@ -795,16 +829,22 @@ async function runIsolatedCases(suite: Suite) {
         new RegExp('^\\s*' + cases.length + ' pass\\r?$', 'm').test(output) &&
         /^\s*0 fail\r?$/m.test(output) &&
         !/^\s*[1-9]\d* skip\r?$/m.test(output) &&
-        output.includes('Ran ' + cases.length + ' tests across 1 file.'),
-      npc
-        ? 'All six NPC history cases must pass without skips'
-        : fee
-          ? 'All seven real prediction fee cases must pass without skips'
-          : plugin
-            ? 'All six real perp fee cases must pass without skips'
-            : prediction
-              ? 'All ten real HTTP cases must pass without skips'
-              : 'All four original cases must pass without skips'
+        output.includes(
+          'Ran ' +
+            cases.length +
+            (review ? ' test across 1 file.' : ' tests across 1 file.')
+        ),
+      review
+        ? 'The real manual-review hold case must pass without skips'
+        : npc
+          ? 'All six NPC history cases must pass without skips'
+          : fee
+            ? 'All seven real prediction fee cases must pass without skips'
+            : plugin
+              ? 'All six real perp fee cases must pass without skips'
+              : prediction
+                ? 'All ten real HTTP cases must pass without skips'
+                : 'All four original cases must pass without skips'
     );
     childProof = {
       pass: cases.length,
@@ -900,15 +940,17 @@ async function runIsolatedCases(suite: Suite) {
     );
     passed = true;
     persist(resultPath, {
-      status: npc
-        ? 'PASS_ISOLATED_SIX_NPC_TRADE_COUNT_CASES'
-        : fee
-          ? 'PASS_ISOLATED_SEVEN_PREDICTION_FEE_CASES'
-          : plugin
-            ? 'PASS_ISOLATED_SIX_PLUGIN_PERP_FEE_CASES'
-            : prediction
-              ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
-              : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
+      status: review
+        ? 'PASS_ISOLATED_MARKETS_REVIEW_CASE'
+        : npc
+          ? 'PASS_ISOLATED_SIX_NPC_TRADE_COUNT_CASES'
+          : fee
+            ? 'PASS_ISOLATED_SEVEN_PREDICTION_FEE_CASES'
+            : plugin
+              ? 'PASS_ISOLATED_SIX_PLUGIN_PERP_FEE_CASES'
+              : prediction
+                ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
+                : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
       lease,
       childProof,
       databaseDropped: true,
@@ -916,15 +958,17 @@ async function runIsolatedCases(suite: Suite) {
       parentEnvironmentUnchanged: true,
     });
     console.info(
-      (npc
-        ? 'ISOLATED_NPC_TRADE_COUNT_RESULT '
-        : fee
-          ? 'ISOLATED_PREDICTION_FEE_RESULT '
-          : plugin
-            ? 'ISOLATED_PLUGIN_PERP_FEE_RESULT '
-            : prediction
-              ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
-              : 'ISOLATED_SUB_MARKET_RESULT ') +
+      (review
+        ? 'ISOLATED_MARKETS_REVIEW_RESULT '
+        : npc
+          ? 'ISOLATED_NPC_TRADE_COUNT_RESULT '
+          : fee
+            ? 'ISOLATED_PREDICTION_FEE_RESULT '
+            : plugin
+              ? 'ISOLATED_PLUGIN_PERP_FEE_RESULT '
+              : prediction
+                ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
+                : 'ISOLATED_SUB_MARKET_RESULT ') +
         JSON.stringify({
           pass: cases.length,
           skip: 0,
@@ -937,15 +981,17 @@ async function runIsolatedCases(suite: Suite) {
   } finally {
     if (!passed) {
       persist(resultPath, {
-        status: npc
-          ? 'HOLD_ISOLATED_NPC_TRADE_COUNT_CASES'
-          : fee
-            ? 'HOLD_ISOLATED_PREDICTION_FEE_CASES'
-            : plugin
-              ? 'HOLD_ISOLATED_PLUGIN_PERP_FEE_CASES'
-              : prediction
-                ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
-                : 'HOLD_ISOLATED_SUB_MARKET_CASES',
+        status: review
+          ? 'HOLD_ISOLATED_MARKETS_REVIEW_CASE'
+          : npc
+            ? 'HOLD_ISOLATED_NPC_TRADE_COUNT_CASES'
+            : fee
+              ? 'HOLD_ISOLATED_PREDICTION_FEE_CASES'
+              : plugin
+                ? 'HOLD_ISOLATED_PLUGIN_PERP_FEE_CASES'
+                : prediction
+                  ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
+                  : 'HOLD_ISOLATED_SUB_MARKET_CASES',
         phase,
         lease,
         childProof,
@@ -958,15 +1004,17 @@ async function runIsolatedCases(suite: Suite) {
         noAutomaticRetryOrSharedCleanup: true,
       });
       console.error(
-        (npc
-          ? 'ISOLATED_NPC_TRADE_COUNT_HOLD '
-          : fee
-            ? 'ISOLATED_PREDICTION_FEE_HOLD '
-            : plugin
-              ? 'ISOLATED_PLUGIN_PERP_FEE_HOLD '
-              : prediction
-                ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
-                : 'ISOLATED_SUB_MARKET_HOLD ') +
+        (review
+          ? 'ISOLATED_MARKETS_REVIEW_HOLD '
+          : npc
+            ? 'ISOLATED_NPC_TRADE_COUNT_HOLD '
+            : fee
+              ? 'ISOLATED_PREDICTION_FEE_HOLD '
+              : plugin
+                ? 'ISOLATED_PLUGIN_PERP_FEE_HOLD '
+                : prediction
+                  ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
+                  : 'ISOLATED_SUB_MARKET_HOLD ') +
           JSON.stringify({ phase, result: resultPath })
       );
     }
