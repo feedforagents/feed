@@ -86,6 +86,13 @@ export function FollowListModal({
   const loadingMoreRef = useRef(false);
   // Incremented on every fresh load so stale page fetches cannot append
   const sessionRef = useRef(0);
+  // Identity of the list currently shown. The profile caller reuses this
+  // one modal instance while switching type (followers <-> following),
+  // so a slow mutation must be bound to the list it started from: after
+  // the await, the completion checks this ref and touches no roster
+  // state once the shown list has changed.
+  const listIdentityRef = useRef({ userId, type });
+  listIdentityRef.current = { userId, type };
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
@@ -354,6 +361,11 @@ export function FollowListModal({
       [targetUserId]: !isCurrentlyFollowing,
     }));
 
+    // Set after the mutation resolves (below): whether the shown list
+    // changed while it was in flight. Declared here so the catch branch
+    // can apply the same gate as the success branch.
+    let listChanged = false;
+
     try {
       const response = await fetch(
         apiUrl(`/api/users/${encodeURIComponent(targetUserId)}/follow`),
@@ -365,12 +377,25 @@ export function FollowListModal({
         }
       );
 
+      // The modal instance is reused while the profile caller switches
+      // the shown list. A mutation that resolves after such a switch
+      // must not touch the new list's roster: no restart, no local row
+      // drop, and no status revert for a list this call did not start
+      // from. (The loading spinner at the end is still cleared: the old
+      // list's state is rebuilt by its next fetch, so a stuck spinner
+      // would otherwise survive a switch back.)
+      listChanged =
+        listIdentityRef.current.userId !== userId ||
+        listIdentityRef.current.type !== type;
+
       if (!response.ok) {
         // Revert optimistic update
-        setFollowingStatus((prev) => ({
-          ...prev,
-          [targetUserId]: isCurrentlyFollowing,
-        }));
+        if (!listChanged) {
+          setFollowingStatus((prev) => ({
+            ...prev,
+            [targetUserId]: isCurrentlyFollowing,
+          }));
+        }
         toast.error('Failed to update follow status');
       } else {
         // Dispatch event to update profile stats
@@ -385,6 +410,7 @@ export function FollowListModal({
         // row. Restart the walk when more pages may exist; otherwise drop
         // the row locally and adjust the total.
         if (
+          !listChanged &&
           isCurrentlyFollowing &&
           type === 'following' &&
           userId === user.id
@@ -393,7 +419,9 @@ export function FollowListModal({
             hasMoreRef.current ||
             (totalCount !== null && totalCount > users.length);
           if (morePagesMayExist) {
-            void fetchList();
+            // Call the latest loader, not the one captured when the
+            // button was clicked: it fetches the intended list only.
+            void fetchListRef.current();
           } else {
             setUsers((prev) => prev.filter((u) => u.id !== targetUserId));
             setTotalCount((prev) =>
@@ -403,11 +431,18 @@ export function FollowListModal({
         }
       }
     } catch {
+      // A failed request never reached the assignment above, so bind
+      // this completion the same way before touching roster state.
+      listChanged =
+        listIdentityRef.current.userId !== userId ||
+        listIdentityRef.current.type !== type;
       // Revert optimistic update on network error
-      setFollowingStatus((prev) => ({
-        ...prev,
-        [targetUserId]: isCurrentlyFollowing,
-      }));
+      if (!listChanged) {
+        setFollowingStatus((prev) => ({
+          ...prev,
+          [targetUserId]: isCurrentlyFollowing,
+        }));
+      }
       toast.error('Network error. Please try again.');
     }
 

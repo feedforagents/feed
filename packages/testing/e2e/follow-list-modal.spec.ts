@@ -17,9 +17,18 @@
  * old modal could never reach, and the row a stale page walk skips after
  * an unfollow).
  *
+ * Seed ownership: names are run-scoped, so one run never adopts rows left
+ * by an interrupted run; ids enter the cleanup lists only after a
+ * successful INSERT ... RETURNING, so cleanup deletes only rows this run
+ * actually wrote. A colliding setup fails before writing anything.
+ * The seed writes into the same local database the dev server reads (the
+ * server must see the roster), so beforeAll refuses a non-loopback
+ * DATABASE_URL instead of asserting a separate test-database name.
+ *
  * Run with: bunx playwright test follow-list-modal.spec.ts --config packages/testing/playwright.config.ts
  */
 
+import assert from 'node:assert/strict';
 import { closeDatabase, db, eq, follows, inArray, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { expect, type Page, test } from '@playwright/test';
@@ -34,7 +43,11 @@ const BASE_URL =
   'http://127.0.0.1:3400';
 
 const SEED_COUNT = 150;
-const SEED_PREFIX = 'f1809-e2e';
+// Run-scoped seed names: a fixed prefix would let one run adopt (and
+// delete) rows left by an interrupted run. The random suffix makes this
+// run's rows unique to it.
+const RUN_ID = crypto.randomUUID().slice(0, 8);
+const SEED_PREFIX = `f1809-e2e-${RUN_ID}`;
 const MINUTE_MS = 60 * 1000;
 
 test.describe.configure({ mode: 'serial', timeout: 180_000 });
@@ -43,7 +56,10 @@ test.setTimeout(180_000);
 let serverAvailable = false;
 let session: BrowserDevAuthSession | null = null;
 let viewerId = '';
+// Hold ONLY ids an INSERT ... RETURNING below actually returned, so
+// cleanup never deletes a row this run did not write.
 const seededUserIds: string[] = [];
+const seededFollowIds: string[] = [];
 const seedUsername = (i: number) =>
   `${SEED_PREFIX}-${String(i).padStart(3, '0')}`;
 
@@ -56,6 +72,22 @@ async function openFollowing(
   });
   await page
     .getByRole('button', { name: /Following/ })
+    .first()
+    .click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible({ timeout: 30_000 });
+  return dialog;
+}
+
+async function openFollowers(
+  page: Page,
+  profilePath = '/u/playwright-dev-admin'
+) {
+  await page.goto(`${BASE_URL}${profilePath}`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await page
+    .getByRole('button', { name: /Followers/ })
     .first()
     .click();
   const dialog = page.getByRole('dialog');
@@ -133,16 +165,50 @@ async function seedRoster() {
     updatedAt: Date;
   }> = [];
   for (let i = 0; i < SEED_COUNT; i++) {
-    const id = await generateSnowflakeId();
-    seededUserIds.push(id);
     userRows.push({
-      id,
+      id: await generateSnowflakeId(),
       username: seedUsername(i),
       displayName: `F1809 E2E ${String(i).padStart(3, '0')}`,
       updatedAt: new Date(now),
     });
   }
-  await db.insert(users).values(userRows);
+  // Collision control: fail before writing anything if any generated id
+  // or username is already present, so cleanup can only ever delete rows
+  // this run created. A failed or partial setup registers no ownership.
+  const clashingUsers = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      inArray(
+        users.id,
+        userRows.map((row) => row.id)
+      )
+    );
+  assert.equal(clashingUsers.length, 0, 'seed user ids already exist');
+  const clashingNames = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      inArray(
+        users.username,
+        userRows.map((row) => row.username)
+      )
+    );
+  assert.equal(clashingNames.length, 0, 'seed usernames already exist');
+  // Register ONLY the ids the database actually returned. A thrown or
+  // short insert registers nothing, so cleanup never assumes rows it
+  // never wrote.
+  const insertedUsers = await db
+    .insert(users)
+    .values(userRows)
+    .returning({ id: users.id });
+  assert.deepEqual(
+    insertedUsers.map((row) => row.id).sort(),
+    userRows.map((row) => row.id).sort(),
+    'seed users partial insert'
+  );
+  seededUserIds.push(...insertedUsers.map((row) => row.id));
+
   const followRows: Array<{
     id: string;
     followerId: string;
@@ -157,12 +223,37 @@ async function seedRoster() {
       createdAt: new Date(now - i * MINUTE_MS),
     });
   }
-  await db.insert(follows).values(followRows);
+  const clashingFollows = await db
+    .select({ id: follows.id })
+    .from(follows)
+    .where(
+      inArray(
+        follows.id,
+        followRows.map((row) => row.id)
+      )
+    );
+  assert.equal(clashingFollows.length, 0, 'seed follow ids already exist');
+  const insertedFollows = await db
+    .insert(follows)
+    .values(followRows)
+    .returning({ id: follows.id });
+  assert.deepEqual(
+    insertedFollows.map((row) => row.id).sort(),
+    followRows.map((row) => row.id).sort(),
+    'seed follows partial insert'
+  );
+  seededFollowIds.push(...insertedFollows.map((row) => row.id));
 }
 
 async function cleanupRoster() {
+  // Delete ONLY rows this run inserted (ids the inserts actually
+  // returned). Unrelated followers of the seeded users, and any rows a
+  // previous run left behind, are never matched here and survive.
+  if (seededFollowIds.length > 0) {
+    await db.delete(follows).where(inArray(follows.id, seededFollowIds));
+    seededFollowIds.length = 0;
+  }
   if (seededUserIds.length > 0) {
-    await db.delete(follows).where(inArray(follows.followingId, seededUserIds));
     await db.delete(users).where(inArray(users.id, seededUserIds));
     seededUserIds.length = 0;
   }
@@ -190,31 +281,24 @@ test.beforeAll(async ({ browser }) => {
     .update(users)
     .set({ stewardId: viewerId })
     .where(eq(users.id, viewerId));
+  // The seed writes into the same local database the dev server reads,
+  // so the server can see the roster. Refuse a non-loopback destination:
+  // this fixture must never write to a remote or production database.
+  // (No separate test-database name is asserted: the dev server's local
+  // database is the destination by design, and run-scoped names plus
+  // RETURNING ownership are what keep other rows safe in it.)
+  const databaseUrl = new URL(process.env.DATABASE_URL ?? '');
+  assert.ok(
+    ['localhost', '127.0.0.1', '[::1]'].includes(databaseUrl.hostname),
+    `refusing non-local DATABASE_URL host: ${databaseUrl.hostname}`
+  );
+
   await page.close();
   await context.close();
 
-  // Drop any seed left by an interrupted run, then seed fresh.
-  const stale = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.username, seedUsername(0)));
-  if (stale.length > 0) {
-    const staleIds = (
-      await db
-        .select({ id: users.id })
-        .from(users)
-        .where(
-          inArray(
-            users.username,
-            Array.from({ length: SEED_COUNT }, (_, i) => seedUsername(i))
-          )
-        )
-    ).map((row) => row.id);
-    if (staleIds.length > 0) {
-      await db.delete(follows).where(inArray(follows.followingId, staleIds));
-      await db.delete(users).where(inArray(users.id, staleIds));
-    }
-  }
+  // No adoption of rows from earlier runs: seed names are run-scoped, so
+  // leftovers keep names this run never matches, and cleanup only ever
+  // deletes ids this run's own inserts returned.
   await seedRoster();
 });
 
@@ -374,4 +458,131 @@ test('close/reopen and user switch start a fresh walk', async ({ page }) => {
   await expect(
     otherDialog.locator('p', { hasText: `@${SEED_PREFIX}-` })
   ).toHaveCount(0);
+});
+
+test('late unfollow completion does not write to the switched list', async ({
+  page,
+}) => {
+  test.skip(!serverAvailable, 'Server not available');
+  await installSignedIn(page);
+
+  // Hold the DELETE /follow response so the mutation resolves only after
+  // the modal has switched to Followers.
+  let releaseDelete!: () => void;
+  const deleteHeld = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  let deleteSeen = false;
+  await page.route('**/api/users/*/follow', async (route) => {
+    if (route.request().method() === 'DELETE') {
+      deleteSeen = true;
+      await deleteHeld;
+    }
+    await route.continue();
+  });
+
+  try {
+    const dialog = await openFollowing(page);
+    await expect(dialog).toContainText(/\(\d+\)/, { timeout: 30_000 });
+
+    // Unfollow the first row; the DELETE stays held.
+    const firstRow = page
+      .locator('[role="dialog"] p', { hasText: `@${SEED_PREFIX}-` })
+      .first()
+      .locator('xpath=../..');
+    await firstRow
+      .getByRole('button', { name: 'Following', exact: true })
+      .click();
+    await expect.poll(() => deleteSeen).toBe(true);
+
+    // Switch lists while the mutation is still in flight: close
+    // Following and open Followers. Capture the Followers list as shown
+    // before the delayed response is released.
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden({ timeout: 30_000 });
+    const followersDialog = await openFollowers(page);
+    await expect(
+      followersDialog.locator('#follow-list-modal-title')
+    ).toHaveText('Followers', { timeout: 30_000 });
+    await expect(followersDialog).toContainText(/\(\d+\)/, {
+      timeout: 30_000,
+    });
+    await page.waitForTimeout(500);
+    const followersBefore = await followersDialog.textContent();
+
+    // Release the delayed unfollow: on the old code the stale completion
+    // restarts the Following walk and writes Following rows under the
+    // Followers heading; with the fix the Followers list is untouched.
+    releaseDelete();
+    await page.waitForTimeout(2000);
+    expect(await followersDialog.textContent()).toBe(followersBefore);
+    await expect(
+      followersDialog.locator('#follow-list-modal-title')
+    ).toHaveText('Followers');
+    await expect(
+      followersDialog.locator('p', { hasText: `@${SEED_PREFIX}-` })
+    ).toHaveCount(0);
+  } finally {
+    releaseDelete();
+  }
+});
+
+test('failed insert registers no ownership and preserves existing rows', async () => {
+  test.skip(!serverAvailable, 'Server not available');
+  // A pre-existing row this run did not seed as roster data, plus a
+  // follow pointing at it: both must survive a failed insert, and the
+  // failed insert must register no ownership for cleanup.
+  const canaryId = await generateSnowflakeId();
+  const canaryUsername = `${SEED_PREFIX}-canary`;
+  const [canary] = await db
+    .insert(users)
+    .values({
+      id: canaryId,
+      username: canaryUsername,
+      displayName: 'F1809 E2E canary',
+      updatedAt: new Date(),
+    })
+    .returning({ id: users.id });
+  assert.ok(canary, 'canary insert returned no row');
+  const canaryFollowId = await generateSnowflakeId();
+  await db.insert(follows).values({
+    id: canaryFollowId,
+    followerId: viewerId,
+    followingId: canaryId,
+    createdAt: new Date(),
+  });
+  try {
+    // Colliding insert: username is unique, so this must fail, and the
+    // failed id must never enter the cleanup lists.
+    const collidingId = await generateSnowflakeId();
+    let failed = false;
+    try {
+      await db.insert(users).values({
+        id: collidingId,
+        username: canaryUsername,
+        displayName: 'F1809 E2E collision',
+        updatedAt: new Date(),
+      });
+    } catch {
+      failed = true;
+    }
+    expect(failed).toBe(true);
+    expect(seededUserIds).not.toContain(collidingId);
+    expect(seededUserIds).not.toContain(canaryId);
+    expect(seededFollowIds).not.toContain(canaryFollowId);
+    // The pre-existing rows survive untouched.
+    const [keptUser] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, canaryId));
+    expect(keptUser?.username).toBe(canaryUsername);
+    const [keptFollow] = await db
+      .select()
+      .from(follows)
+      .where(eq(follows.id, canaryFollowId));
+    expect(keptFollow?.followingId).toBe(canaryId);
+  } finally {
+    await db.delete(follows).where(eq(follows.id, canaryFollowId));
+    await db.delete(users).where(eq(users.id, canaryId));
+  }
 });
