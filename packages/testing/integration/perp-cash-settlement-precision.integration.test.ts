@@ -14,11 +14,14 @@ import {
   balanceTransactions,
   db,
   eq,
+  inArray,
   organizationState,
   perpMarketSnapshots,
   perpPositions,
   pointsTransactions,
   stockPrices,
+  tradingFeeOutbox,
+  tradingFees,
   users,
 } from '@feed/db';
 import { WalletService } from '@feed/engine';
@@ -56,6 +59,111 @@ async function ledger(uid: string, type: string) {
     );
 }
 
+/** Ledger and fee types the perp service writes for the fixture user. */
+const PERP_TYPES = [
+  'perp_open',
+  'perp_add_to_position',
+  'perp_partial_close',
+  'perp_close',
+  'perp_flip_position',
+];
+
+/** Rows this fixture inserted, as returned by each insert. */
+type Acquired = {
+  userId?: string;
+  organizationId?: string;
+  snapshotTicker?: string;
+};
+
+/**
+ * Removes only what the fixture acquired, in one transaction. A failed or
+ * colliding insert acquires nothing, so it authorizes no delete. The owner row
+ * is locked first. The fixture's own rows are deleted by owner together with
+ * its market or a perp type, and the owner is deleted only if nothing else is
+ * attached to it: an unexpected row aborts the transaction and keeps every row.
+ */
+async function releaseFixture(acquired: Acquired): Promise<void> {
+  const { userId, organizationId, snapshotTicker } = acquired;
+  await db.transaction(async (tx) => {
+    if (userId) {
+      const [owner] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, userId))
+        .for('update');
+      assert.equal(owner?.id, userId, 'fixture user is missing at teardown');
+      if (snapshotTicker) {
+        await tx
+          .delete(perpPositions)
+          .where(
+            and(
+              eq(perpPositions.userId, userId),
+              eq(perpPositions.ticker, snapshotTicker)
+            )
+          );
+      }
+      await tx
+        .delete(balanceTransactions)
+        .where(
+          and(
+            eq(balanceTransactions.userId, userId),
+            inArray(balanceTransactions.type, PERP_TYPES)
+          )
+        );
+      await tx
+        .delete(tradingFees)
+        .where(
+          and(
+            eq(tradingFees.userId, userId),
+            inArray(tradingFees.tradeType, PERP_TYPES)
+          )
+        );
+      await tx
+        .delete(tradingFeeOutbox)
+        .where(
+          and(
+            eq(tradingFeeOutbox.userId, userId),
+            inArray(tradingFeeOutbox.tradeType, PERP_TYPES)
+          )
+        );
+      await tx
+        .delete(pointsTransactions)
+        .where(
+          and(
+            eq(pointsTransactions.userId, userId),
+            eq(pointsTransactions.reason, 'trading_pnl')
+          )
+        );
+      const attached = await Promise.all([
+        tx.$count(perpPositions, eq(perpPositions.userId, userId)),
+        tx.$count(balanceTransactions, eq(balanceTransactions.userId, userId)),
+        tx.$count(tradingFees, eq(tradingFees.userId, userId)),
+        tx.$count(tradingFeeOutbox, eq(tradingFeeOutbox.userId, userId)),
+        tx.$count(pointsTransactions, eq(pointsTransactions.userId, userId)),
+      ]);
+      assert.deepEqual(
+        attached,
+        [0, 0, 0, 0, 0],
+        'a row this fixture did not create is attached to its user'
+      );
+      await tx.delete(users).where(eq(users.id, userId));
+    }
+    if (snapshotTicker) {
+      await tx
+        .delete(perpMarketSnapshots)
+        .where(eq(perpMarketSnapshots.ticker, snapshotTicker));
+    }
+    if (organizationId) {
+      await tx
+        .delete(stockPrices)
+        .where(eq(stockPrices.organizationId, organizationId));
+      await tx
+        .delete(organizationState)
+        .where(eq(organizationState.id, organizationId));
+    }
+  });
+}
+
 /**
  * `bookedPnL` returns the exact sum of the P&L deltas booked for the fixture
  * user. The calls still reach the database; the sum is read from them because
@@ -67,57 +175,61 @@ async function withFixture(
 ): Promise<void> {
   const uid = `perp-cash-${label}-${crypto.randomUUID()}`;
   const ticker = `PCASH${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  const acquired: Acquired = {};
   const recordPnL = spyOn(WalletService, 'recordPnL');
   const bookedPnL = () =>
     recordPnL.mock.calls
       .filter(([userId]) => userId === uid)
       .reduce((sum, [, pnl]) => sum + pnl, 0);
   try {
-    await db.insert(users).values({
-      id: uid,
-      username: uid,
-      virtualBalance: String(STARTING_BALANCE),
-      totalDeposited: String(STARTING_BALANCE),
-      lifetimePnL: '0',
-      updatedAt: new Date(),
-    });
-    await db.insert(organizationState).values({
-      id: ticker,
-      currentPrice: 100,
-      basePrice: 100,
-      updatedAt: new Date(),
-    });
-    await db.insert(perpMarketSnapshots).values({
-      ticker,
-      organizationId: ticker,
-      currentPrice: 100,
-      high24h: 100,
-      low24h: 100,
-      openInterest: 0,
-      volume24h: 0,
-      fundingRate: {
+    const [user] = await db
+      .insert(users)
+      .values({
+        id: uid,
+        username: uid,
+        virtualBalance: String(STARTING_BALANCE),
+        totalDeposited: String(STARTING_BALANCE),
+        lifetimePnL: '0',
+        updatedAt: new Date(),
+      })
+      .returning({ id: users.id });
+    assert.equal(user?.id, uid, 'fixture user was not inserted');
+    acquired.userId = uid;
+    const [organization] = await db
+      .insert(organizationState)
+      .values({
+        id: ticker,
+        currentPrice: 100,
+        basePrice: 100,
+        updatedAt: new Date(),
+      })
+      .returning({ id: organizationState.id });
+    assert.equal(organization?.id, ticker, 'fixture market was not inserted');
+    acquired.organizationId = ticker;
+    const [snapshot] = await db
+      .insert(perpMarketSnapshots)
+      .values({
         ticker,
-        rate: 0,
-        nextFundingTime: new Date().toISOString(),
-        predictedRate: 0,
-      },
-    });
+        organizationId: ticker,
+        currentPrice: 100,
+        high24h: 100,
+        low24h: 100,
+        openInterest: 0,
+        volume24h: 0,
+        fundingRate: {
+          ticker,
+          rate: 0,
+          nextFundingTime: new Date().toISOString(),
+          predictedRate: 0,
+        },
+      })
+      .returning({ ticker: perpMarketSnapshots.ticker });
+    assert.equal(snapshot?.ticker, ticker, 'fixture snapshot was not inserted');
+    acquired.snapshotTicker = ticker;
     await run(uid, ticker, bookedPnL);
   } finally {
     recordPnL.mockRestore();
-    await db
-      .delete(pointsTransactions)
-      .where(eq(pointsTransactions.userId, uid));
-    await db
-      .delete(balanceTransactions)
-      .where(eq(balanceTransactions.userId, uid));
-    await db.delete(perpPositions).where(eq(perpPositions.userId, uid));
-    await db.delete(stockPrices).where(eq(stockPrices.organizationId, ticker));
-    await db
-      .delete(perpMarketSnapshots)
-      .where(eq(perpMarketSnapshots.ticker, ticker));
-    await db.delete(organizationState).where(eq(organizationState.id, ticker));
-    await db.delete(users).where(eq(users.id, uid));
+    await releaseFixture(acquired);
   }
 }
 
