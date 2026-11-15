@@ -12,12 +12,14 @@
  * authentication. This suite drives the real route over HTTP with
  * per-user API keys, and keeps the direct executor cases below it.
  *
- * Recorded clients (CONTRIBUTING §10): two HTTP JSON-RPC clients,
- * distinguished by the clientInfo of their initialize handshakes and
- * by the API key each presents — the "viewer" client and the "peer"
- * client, each bound to its own account. Transport: Bun fetch against
- * a running server (TEST_API_URL, default http://127.0.0.1:3100), the
- * same boundary the CI production server exposes.
+ * HTTP protocol test identities: the two callers in this suite are
+ * distinguished only by the clientInfo labels of their initialize
+ * handshakes and by the API key each presents — the "viewer" identity
+ * and the "peer" identity, each bound to its own account. These labels
+ * are not recorded agent clients/providers/models under CONTRIBUTING
+ * §10. Transport: Bun fetch against a running server (TEST_API_URL,
+ * default http://127.0.0.1:3100), the same boundary the CI production
+ * server exposes.
  *
  * Caller authentication at this boundary has two layers, and the
  * negative cases accept the rejection either layer produces: the
@@ -38,25 +40,33 @@
  * and replica clients, which belong to the whole test process; the
  * preload disconnects the shared client when the run drains.
  *
- * Database guard: the suite refuses to run unless DATABASE_URL names
- * this suite's disposable database and the connected server confirms
- * the same name, so fixtures and teardown can never land in an
- * unintended database.
+ * Database guard: the suite runs only against the repository's strict
+ * disposable target — an intentional loopback database or the explicit
+ * GitHub Actions postgres@localhost:5432/test_db target, with an
+ * identical DIRECT URL and no replica — and the connected server must
+ * confirm the same database name, so fixtures and teardown can never
+ * land in an unintended database.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
+  and,
   chatParticipants,
   chats,
   db,
   eq,
+  gameOnboarding,
   groupMembers,
   groups,
   inArray,
+  notInArray,
   userApiKeys,
+  userPnLSnapshots,
   users,
+  whitelist,
+  whitelistConfig,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { z } from 'zod';
@@ -64,13 +74,57 @@ import { generateApiKey, hashApiKey } from '../../api/src/utils/api-keys';
 import { executeGetChats } from '../../mcp/src/handlers/tool-handlers';
 import type { AuthenticatedAgent } from '../../mcp/src/types/mcp';
 
-const EXPECTED_DATABASE = 'feed_test_fix1813';
+// Clients are lazy. Refuse unintended destinations before the first query.
+// This is the repository's strict guard, shared with the other HTTP
+// boundary suites: it accepts only an intentional loopback disposable
+// target or the explicit GitHub Actions postgres@localhost:5432/test_db
+// target, requires the DIRECT URL to name the identical target, and
+// refuses any read replica.
+if (process.env.DATABASE_READ_REPLICA_URL?.trim())
+  throw new Error('MCP get_chats fixture refuses a read replica');
+function databaseTarget(value: string | undefined): string {
+  if (!value) throw new Error('Explicit fixture database URL required');
+  const url = new URL(value);
+  const port = url.port || '5432';
+  const name = decodeURIComponent(url.pathname.slice(1));
+  if (
+    !['postgres:', 'postgresql:'].includes(url.protocol) ||
+    !['localhost', '127.0.0.1'].includes(url.hostname) ||
+    url.search ||
+    url.hash ||
+    !(
+      (port === '55685' &&
+        /^feed_pr\d+$/.test(name) &&
+        url.username === 'symbiex') ||
+      (port === '5432' && name === 'test_db' && process.env.CI === 'true')
+    )
+  )
+    throw new Error('Disposable loopback fixture database required');
+  return `${port}/${name}/${url.username}`;
+}
+const primary = databaseTarget(process.env.DATABASE_URL);
+if (
+  process.env.DIRECT_DATABASE_URL &&
+  databaseTarget(process.env.DIRECT_DATABASE_URL) !== primary
+)
+  throw new Error('MCP get_chats fixture primary/direct targets differ');
 const baseUrl =
   process.env.TEST_API_URL ||
   process.env.TEST_BASE_URL ||
   'http://127.0.0.1:3100';
+const endpoint = new URL(baseUrl);
+if (
+  endpoint.protocol !== 'http:' ||
+  !['localhost', '127.0.0.1'].includes(endpoint.hostname) ||
+  endpoint.username ||
+  endpoint.password ||
+  endpoint.pathname !== '/' ||
+  endpoint.search ||
+  endpoint.hash
+)
+  throw new Error('Disposable loopback HTTP server required');
 
-const RECORDED_CLIENTS = {
+const HTTP_CLIENT_IDENTITIES = {
   viewer: { name: 'get-chats-boundary-viewer', version: '1' },
   peer: { name: 'get-chats-boundary-peer', version: '1' },
 } as const;
@@ -113,20 +167,14 @@ const peerAll = () => [
 const peerDms = () => [dmA, dmB, leftChat, foreignChat];
 const peerGroups = () => [groupBacked, directGroup, peerOnlyGroup];
 
-async function assertIntendedDatabase(): Promise<void> {
-  const url = new URL(process.env.DATABASE_URL ?? '');
-  const configured = url.pathname.replace(/^\//, '');
-  assert.equal(
-    configured,
-    EXPECTED_DATABASE,
-    `refusing to run against unintended database target "${configured}"`
-  );
+async function assertConnectedDatabase(): Promise<void> {
+  const name = primary.split('/')[1];
   const rows = z
     .array(z.object({ current_database: z.string() }))
     .parse(await db.$queryRaw`SELECT current_database() AS current_database`);
   assert.equal(
     rows[0]?.current_database,
-    EXPECTED_DATABASE,
+    name,
     'connected database does not match the intended test target'
   );
 }
@@ -219,25 +267,135 @@ async function insertOwnedApiKey(
   return raw;
 }
 
+/**
+ * Delete only rows this fixture acquired, by ID — and refuse before
+ * deleting anything when a row this fixture does not own still
+ * references an owned parent. The checks and the deletes run in one
+ * transaction, so the refusal decision cannot drift apart from the
+ * deletion. Two gaps the old cleanup had:
+ *
+ * - Parent-ID ownership does not own every participant/member now
+ *   referencing that parent: a chatParticipant or groupMember row for
+ *   an owned chat/group can belong to a foreign user. Only rows whose
+ *   user is also owned are deleted; any other row refuses cleanup.
+ * - Deleting an owned user silently destroys or blanks another
+ *   owner's data through the five destructive User FK references:
+ *   three ON DELETE CASCADE (GameOnboarding, UserPnLSnapshot,
+ *   Whitelist) and two ON DELETE SET NULL (Whitelist.grantedBy,
+ *   WhitelistConfig.updatedBy). Any such row refuses cleanup.
+ */
 async function cleanupOwned(target: Owned): Promise<void> {
-  if (target.keys.length > 0) {
-    await db.delete(userApiKeys).where(inArray(userApiKeys.id, target.keys));
-  }
-  if (target.chats.length > 0) {
-    await db
-      .delete(chatParticipants)
-      .where(inArray(chatParticipants.chatId, target.chats));
-    await db.delete(chats).where(inArray(chats.id, target.chats));
-  }
-  if (target.groups.length > 0) {
-    await db
-      .delete(groupMembers)
-      .where(inArray(groupMembers.groupId, target.groups));
-    await db.delete(groups).where(inArray(groups.id, target.groups));
-  }
-  if (target.users.length > 0) {
-    await db.delete(users).where(inArray(users.id, target.users));
-  }
+  await db.transaction(async (tx) => {
+    if (target.chats.length > 0) {
+      const foreignParticipants = await tx
+        .select({ id: chatParticipants.id })
+        .from(chatParticipants)
+        .where(
+          target.users.length > 0
+            ? and(
+                inArray(chatParticipants.chatId, target.chats),
+                notInArray(chatParticipants.userId, target.users)
+              )
+            : inArray(chatParticipants.chatId, target.chats)
+        )
+        .limit(1);
+      if (foreignParticipants.length > 0)
+        throw new Error(
+          'cleanup refused: a participant this fixture does not own still references an owned chat'
+        );
+    }
+    if (target.groups.length > 0) {
+      const foreignMembers = await tx
+        .select({ id: groupMembers.id })
+        .from(groupMembers)
+        .where(
+          target.users.length > 0
+            ? and(
+                inArray(groupMembers.groupId, target.groups),
+                notInArray(groupMembers.userId, target.users)
+              )
+            : inArray(groupMembers.groupId, target.groups)
+        )
+        .limit(1);
+      if (foreignMembers.length > 0)
+        throw new Error(
+          'cleanup refused: a member this fixture does not own still references an owned group'
+        );
+    }
+    if (target.users.length > 0) {
+      const [onboarding, snapshots, whitelistRows, grantedRows, configRows] =
+        await Promise.all([
+          tx
+            .select({ id: gameOnboarding.id })
+            .from(gameOnboarding)
+            .where(inArray(gameOnboarding.userId, target.users))
+            .limit(1),
+          tx
+            .select({ id: userPnLSnapshots.id })
+            .from(userPnLSnapshots)
+            .where(inArray(userPnLSnapshots.userId, target.users))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id })
+            .from(whitelist)
+            .where(inArray(whitelist.userId, target.users))
+            .limit(1),
+          tx
+            .select({ id: whitelist.id })
+            .from(whitelist)
+            .where(inArray(whitelist.grantedBy, target.users))
+            .limit(1),
+          tx
+            .select({ id: whitelistConfig.id })
+            .from(whitelistConfig)
+            .where(inArray(whitelistConfig.updatedBy, target.users))
+            .limit(1),
+        ]);
+      if (
+        onboarding.length > 0 ||
+        snapshots.length > 0 ||
+        whitelistRows.length > 0 ||
+        grantedRows.length > 0 ||
+        configRows.length > 0
+      )
+        throw new Error(
+          'cleanup refused: a row this fixture does not own still references an owned user'
+        );
+    }
+
+    if (target.keys.length > 0) {
+      await tx.delete(userApiKeys).where(inArray(userApiKeys.id, target.keys));
+    }
+    if (target.chats.length > 0) {
+      if (target.users.length > 0) {
+        await tx
+          .delete(chatParticipants)
+          .where(
+            and(
+              inArray(chatParticipants.chatId, target.chats),
+              inArray(chatParticipants.userId, target.users)
+            )
+          );
+      }
+      await tx.delete(chats).where(inArray(chats.id, target.chats));
+    }
+    if (target.groups.length > 0) {
+      if (target.users.length > 0) {
+        await tx
+          .delete(groupMembers)
+          .where(
+            and(
+              inArray(groupMembers.groupId, target.groups),
+              inArray(groupMembers.userId, target.users)
+            )
+          );
+      }
+      await tx.delete(groups).where(inArray(groups.id, target.groups));
+    }
+    if (target.users.length > 0) {
+      await tx.delete(users).where(inArray(users.id, target.users));
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +482,7 @@ function expectAuthRejected(status: number, body: unknown): void {
 // ---------------------------------------------------------------------------
 
 beforeAll(async () => {
-  await assertIntendedDatabase();
+  await assertConnectedDatabase();
 
   viewerId = await insertOwnedUserInto(owned, 'viewer');
   peerId = await insertOwnedUserInto(owned, 'peer');
@@ -446,10 +604,10 @@ describe('MCP get_chats filter — direct executor', () => {
 // ---------------------------------------------------------------------------
 
 describe('MCP get_chats filter — /api/mcp boundary', () => {
-  it('records both agent clients: initialize answers and tools/list advertises the filter', async () => {
+  it('records both HTTP client identities: initialize answers and tools/list advertises the filter', async () => {
     for (const [client, apiKey] of [
-      [RECORDED_CLIENTS.viewer, viewerApiKey],
-      [RECORDED_CLIENTS.peer, peerApiKey],
+      [HTTP_CLIENT_IDENTITIES.viewer, viewerApiKey],
+      [HTTP_CLIENT_IDENTITIES.peer, peerApiKey],
     ] as const) {
       const { status, body, requestId } = await rpc(
         'initialize',
@@ -691,5 +849,76 @@ describe('MCP get_chats fixture ownership under setup collision', () => {
       .from(chatParticipants)
       .where(eq(chatParticipants.chatId, foreign.chatId));
     expect(foreignParticipants).toHaveLength(1);
+  });
+
+  it('cleanup refuses foreign participants and foreign user references, preserving every row', async () => {
+    const localOwned: Owned = { users: [], chats: [], groups: [], keys: [] };
+    const foreignParticipantUserId = await generateSnowflakeId();
+    const foreignParticipantRowId = await generateSnowflakeId();
+    const onboardingRowId = await generateSnowflakeId();
+    try {
+      const guardUserId = await insertOwnedUserInto(localOwned, 'guard');
+      const guardChatId = await createChat(
+        localOwned,
+        { isGroup: false, groupId: null },
+        [{ userId: guardUserId }]
+      );
+
+      // A participant this fixture does not own, on the owned chat...
+      await db.insert(users).values({
+        id: foreignParticipantUserId,
+        username: 'f135-guard-foreign-participant',
+        isTest: false,
+        isActor: false,
+        updatedAt: new Date(),
+      });
+      await db.insert(chatParticipants).values({
+        id: foreignParticipantRowId,
+        chatId: guardChatId,
+        userId: foreignParticipantUserId,
+        isActive: true,
+      });
+      // ...and a GameOnboarding row for the owned user, which deleting
+      // the user would silently cascade away.
+      await db.insert(gameOnboarding).values({
+        id: onboardingRowId,
+        userId: guardUserId,
+      });
+
+      await expect(cleanupOwned(localOwned)).rejects.toThrow(/cleanup refused/);
+
+      // The refusal rolls the whole transaction back: nothing was deleted.
+      const survivingParticipant = await db
+        .select({ id: chatParticipants.id })
+        .from(chatParticipants)
+        .where(eq(chatParticipants.id, foreignParticipantRowId));
+      expect(survivingParticipant).toEqual([{ id: foreignParticipantRowId }]);
+      const survivingOnboarding = await db
+        .select({ id: gameOnboarding.id })
+        .from(gameOnboarding)
+        .where(eq(gameOnboarding.id, onboardingRowId));
+      expect(survivingOnboarding).toEqual([{ id: onboardingRowId }]);
+      const survivingChat = await db
+        .select({ id: chats.id })
+        .from(chats)
+        .where(eq(chats.id, guardChatId));
+      expect(survivingChat).toEqual([{ id: guardChatId }]);
+      const survivingUser = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, guardUserId));
+      expect(survivingUser).toEqual([{ id: guardUserId }]);
+    } finally {
+      // Remove the foreign rows directly, then cleanup removes only the
+      // rows this fixture acquired.
+      await db
+        .delete(chatParticipants)
+        .where(eq(chatParticipants.id, foreignParticipantRowId));
+      await db
+        .delete(gameOnboarding)
+        .where(eq(gameOnboarding.id, onboardingRowId));
+      await db.delete(users).where(eq(users.id, foreignParticipantUserId));
+      await cleanupOwned(localOwned);
+    }
   });
 });
