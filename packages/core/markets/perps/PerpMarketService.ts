@@ -590,6 +590,16 @@ export class PerpMarketService {
 
     this.assertOpenPositionIntegrity(existingPosition);
 
+    // Gross size maximum, like openPosition enforces before it dispatches
+    // any existing-position branch: a flip's inverse leg can clear the
+    // minimum while the gross trade still exceeds the market limit.
+    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
+    if (input.size > maxPositionSize) {
+      throw new Error(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
+
     if (existingPosition.side === input.side) {
       // Same bounds as addToPosition: the added size must clear the
       // minimum on its own, and the resulting total must stay under
@@ -598,9 +608,6 @@ export class PerpMarketService {
       if (input.size < minOrderSize) {
         throw new Error(`Order size below minimum (${minOrderSize})`);
       }
-      const maxPositionSize = this.calculateMaxPositionSize(
-        market.openInterest
-      );
       if (existingPosition.size + input.size > maxPositionSize) {
         throw new Error(
           `Total position size would exceed market limit (${maxPositionSize.toLocaleString()})`
