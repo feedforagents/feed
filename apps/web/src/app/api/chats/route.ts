@@ -181,6 +181,9 @@ import {
   inArray,
   isNull,
   messages,
+  notInArray,
+  userBlocks,
+  userMutes,
   users,
 } from '@feed/db';
 import {
@@ -425,6 +428,51 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       directGroupMessageCounts.map((mc) => [mc.chatId, mc.count])
     );
 
+    // Direct-group previews follow the same sender rule as group-backed
+    // chats on staging: messages from users the viewer blocked or muted,
+    // or who blocked the viewer, never surface as the preview. The
+    // existing DM query below is left unchanged.
+    const [blockedRows, mutedRows, blockedByRows] = await Promise.all([
+      dbClient
+        .select({ id: userBlocks.blockedId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockerId, user.userId)),
+      dbClient
+        .select({ id: userMutes.mutedId })
+        .from(userMutes)
+        .where(eq(userMutes.muterId, user.userId)),
+      dbClient
+        .select({ id: userBlocks.blockerId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockedId, user.userId)),
+    ]);
+    const excludedSenderIds = [
+      ...blockedRows,
+      ...mutedRows,
+      ...blockedByRows,
+    ].map((row) => row.id);
+    const directGroupSenderScope =
+      excludedSenderIds.length > 0
+        ? notInArray(messages.senderId, excludedSenderIds)
+        : undefined;
+    const directGroupMessages =
+      directGroupChatIds.length > 0
+        ? await Promise.all(
+            directGroupChatIds.map(async (chatId) => {
+              const msgs = await dbClient
+                .select()
+                .from(messages)
+                .where(and(eq(messages.chatId, chatId), directGroupSenderScope))
+                .orderBy(desc(messages.createdAt))
+                .limit(1);
+              return { chatId, messages: msgs };
+            })
+          )
+        : [];
+    const directGroupMessagesMap = new Map(
+      directGroupMessages.map(({ chatId, messages }) => [chatId, messages])
+    );
+
     // Get participants and messages separately
     const [allParticipants, allMessages] = await Promise.all([
       dbClient
@@ -566,7 +614,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
     // Format direct group chats (no Group row behind them)
     const formattedDirectGroupChats = directGroupChatsDetails.map((chat) => {
-      const lastMessage = messagesByChatId.get(chat.id)?.[0] || null;
+      const lastMessage = directGroupMessagesMap.get(chat.id)?.[0] || null;
       return {
         id: chat.id,
         name: chat.name || 'Unnamed Group',

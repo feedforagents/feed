@@ -8,12 +8,17 @@ import {
   count,
   db,
   eq,
+  gameOnboarding,
   groupMembers,
   groups,
   inArray,
   messages,
+  notInArray,
   pointsTransactions,
+  userBlocks,
+  userPnLSnapshots,
   users,
+  whitelist,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { createStewardTestToken } from './helpers/steward-auth';
@@ -23,10 +28,51 @@ const baseUrl =
   process.env.TEST_BASE_URL ||
   'http://localhost:3000';
 
+// Strict guards: writes go only to a disposable local database and
+// requests only to an owned loopback server.
+function assertDisposableDatabaseUrl(
+  value: string | undefined,
+  label: string
+): string {
+  if (!value) throw new Error(`${label} is required for integration tests`);
+  const url = new URL(value);
+  const databaseName = decodeURIComponent(url.pathname.slice(1));
+  if (
+    !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) ||
+    !/(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName)
+  ) {
+    throw new Error(
+      `${label} must point to a local test or verification database`
+    );
+  }
+  return databaseName;
+}
+assertDisposableDatabaseUrl(process.env.DATABASE_URL, 'DATABASE_URL');
+const target = new URL(baseUrl);
+if (
+  target.protocol !== 'http:' ||
+  !['127.0.0.1', 'localhost'].includes(target.hostname) ||
+  target.username ||
+  target.password ||
+  target.pathname !== '/' ||
+  target.search ||
+  target.hash
+)
+  throw new Error('Owned loopback server required');
+
 const owned = {
   users: new Set<string>(),
   chats: new Set<string>(),
   groups: new Set<string>(),
+  // Every child row is registered only from its own successful write, by
+  // exact row id. Cleanup deletes exactly these ids and refuses when an
+  // unrecorded row sits under an owned parent, so a setup that fails
+  // partway — or a foreign row added later — can never be deleted by
+  // this fixture.
+  messages: new Set<string>(),
+  participants: new Set<string>(),
+  groupMembers: new Set<string>(),
+  ledger: new Set<string>(),
 };
 const tokens = new Map<string, string>();
 let viewer = '';
@@ -90,6 +136,22 @@ async function postDirectGroup(
   name: string,
   participantIds: string[]
 ): Promise<string> {
+  // The POST's verified ledger effect: snapshot the creator's
+  // private_channel_create rows first, then record only the rows the
+  // call itself added.
+  const ledgerBefore = new Set(
+    (
+      await db
+        .select({ id: pointsTransactions.id })
+        .from(pointsTransactions)
+        .where(
+          and(
+            eq(pointsTransactions.userId, viewer),
+            eq(pointsTransactions.reason, 'private_channel_create')
+          )
+        )
+    ).map((row) => row.id)
+  );
   const res = await fetch(`${baseUrl}/api/chats`, {
     method: 'POST',
     headers: { ...signed(viewer), 'content-type': 'application/json' },
@@ -98,21 +160,178 @@ async function postDirectGroup(
   assert.equal(res.status, 201);
   const body = (await res.json()) as { chat: { id: string } };
   owned.chats.add(body.chat.id);
+  const ledgerAfter = await db
+    .select({ id: pointsTransactions.id })
+    .from(pointsTransactions)
+    .where(
+      and(
+        eq(pointsTransactions.userId, viewer),
+        eq(pointsTransactions.reason, 'private_channel_create')
+      )
+    );
+  for (const row of ledgerAfter) {
+    if (!ledgerBefore.has(row.id)) owned.ledger.add(row.id);
+  }
+  // The endpoint creates the participant rows; record the exact ids it made.
+  const createdParticipants = await db
+    .select({ id: chatParticipants.id })
+    .from(chatParticipants)
+    .where(eq(chatParticipants.chatId, body.chat.id));
+  for (const row of createdParticipants) owned.participants.add(row.id);
   return body.chat.id;
 }
 
 /**
- * Delete the reputation ledger rows derived from fixture activity.
- * awardReputationInTx writes a PointsTransaction for the chat creator with
- * no cascading FK to User, so teardown must remove these rows explicitly,
- * before the owned users themselves are deleted. Keyed strictly by the
- * user IDs this fixture successfully created.
+ * Delete reputation ledger rows by exact row id — never by user id. A
+ * ledger row for an owned user that this fixture did not record (for
+ * example a second award written by another flow) must survive.
  */
-async function deleteOwnedLedgerRows(userIds: string[]) {
-  if (!userIds.length) return;
+async function deleteLedgerRowsById(ids: string[]) {
+  if (!ids.length) return;
   await db
     .delete(pointsTransactions)
-    .where(inArray(pointsTransactions.userId, userIds));
+    .where(inArray(pointsTransactions.id, ids));
+}
+
+/**
+ * Guarded fixture cleanup: refuse when an unrecorded child row sits under
+ * an owned parent, or when an owned user still has a row that would vanish
+ * through ON DELETE CASCADE (GameOnboarding, UserPnLSnapshot, Whitelist).
+ * The refusal check and the deletes run in one transaction, so the decision
+ * and the deletion cannot drift apart. On success only the exact recorded
+ * row ids are deleted, then the registry is cleared.
+ */
+async function cleanupOwnedFixtures(): Promise<void> {
+  await db.transaction(async (tx) => {
+    if (owned.users.size) {
+      const userIds = [...owned.users];
+      const [strayLedger] = await tx
+        .select({ id: pointsTransactions.id })
+        .from(pointsTransactions)
+        .where(
+          owned.ledger.size
+            ? and(
+                inArray(pointsTransactions.userId, userIds),
+                notInArray(pointsTransactions.id, [...owned.ledger])
+              )
+            : inArray(pointsTransactions.userId, userIds)
+        )
+        .limit(1);
+      if (strayLedger)
+        throw new Error(
+          `cleanup refused: unrecorded PointsTransaction ${strayLedger.id} for an owned user`
+        );
+      const [onboarding] = await tx
+        .select({ id: gameOnboarding.id })
+        .from(gameOnboarding)
+        .where(inArray(gameOnboarding.userId, userIds))
+        .limit(1);
+      if (onboarding)
+        throw new Error(
+          `cleanup refused: GameOnboarding ${onboarding.id} references an owned user`
+        );
+      const [snapshot] = await tx
+        .select({ id: userPnLSnapshots.id })
+        .from(userPnLSnapshots)
+        .where(inArray(userPnLSnapshots.userId, userIds))
+        .limit(1);
+      if (snapshot)
+        throw new Error(
+          `cleanup refused: UserPnLSnapshot ${snapshot.id} references an owned user`
+        );
+      const [whitelistRow] = await tx
+        .select({ id: whitelist.id })
+        .from(whitelist)
+        .where(inArray(whitelist.userId, userIds))
+        .limit(1);
+      if (whitelistRow)
+        throw new Error(
+          `cleanup refused: Whitelist ${whitelistRow.id} references an owned user`
+        );
+    }
+    if (owned.chats.size) {
+      const chatIds = [...owned.chats];
+      const [strayMessage] = await tx
+        .select({ id: messages.id })
+        .from(messages)
+        .where(
+          owned.messages.size
+            ? and(
+                inArray(messages.chatId, chatIds),
+                notInArray(messages.id, [...owned.messages])
+              )
+            : inArray(messages.chatId, chatIds)
+        )
+        .limit(1);
+      if (strayMessage)
+        throw new Error(
+          `cleanup refused: unrecorded Message ${strayMessage.id} in an owned chat`
+        );
+      const [strayParticipant] = await tx
+        .select({ id: chatParticipants.id })
+        .from(chatParticipants)
+        .where(
+          owned.participants.size
+            ? and(
+                inArray(chatParticipants.chatId, chatIds),
+                notInArray(chatParticipants.id, [...owned.participants])
+              )
+            : inArray(chatParticipants.chatId, chatIds)
+        )
+        .limit(1);
+      if (strayParticipant)
+        throw new Error(
+          `cleanup refused: unrecorded ChatParticipant ${strayParticipant.id} in an owned chat`
+        );
+    }
+    if (owned.groups.size) {
+      const [strayMember] = await tx
+        .select({ id: groupMembers.id })
+        .from(groupMembers)
+        .where(
+          owned.groupMembers.size
+            ? and(
+                inArray(groupMembers.groupId, [...owned.groups]),
+                notInArray(groupMembers.id, [...owned.groupMembers])
+              )
+            : inArray(groupMembers.groupId, [...owned.groups])
+        )
+        .limit(1);
+      if (strayMember)
+        throw new Error(
+          `cleanup refused: unrecorded GroupMember ${strayMember.id} in an owned group`
+        );
+    }
+    if (owned.ledger.size)
+      await tx
+        .delete(pointsTransactions)
+        .where(inArray(pointsTransactions.id, [...owned.ledger]));
+    if (owned.messages.size)
+      await tx
+        .delete(messages)
+        .where(inArray(messages.id, [...owned.messages]));
+    if (owned.participants.size)
+      await tx
+        .delete(chatParticipants)
+        .where(inArray(chatParticipants.id, [...owned.participants]));
+    if (owned.chats.size)
+      await tx.delete(chats).where(inArray(chats.id, [...owned.chats]));
+    if (owned.groupMembers.size)
+      await tx
+        .delete(groupMembers)
+        .where(inArray(groupMembers.id, [...owned.groupMembers]));
+    if (owned.groups.size)
+      await tx.delete(groups).where(inArray(groups.id, [...owned.groups]));
+    if (owned.users.size)
+      await tx.delete(users).where(inArray(users.id, [...owned.users]));
+  });
+  owned.users.clear();
+  owned.chats.clear();
+  owned.groups.clear();
+  owned.messages.clear();
+  owned.participants.clear();
+  owned.groupMembers.clear();
+  owned.ledger.clear();
 }
 
 beforeAll(async () => {
@@ -128,8 +347,10 @@ beforeAll(async () => {
     member1,
     member2,
   ]);
+  const directMessageId = await generateSnowflakeId();
+  owned.messages.add(directMessageId);
   await db.insert(messages).values({
-    id: await generateSnowflakeId(),
+    id: directMessageId,
     chatId: directGroupChatId,
     senderId: member1,
     content: 'hello from a direct group chat',
@@ -176,9 +397,14 @@ beforeAll(async () => {
     updatedAt: now,
   });
   owned.chats.add(backedGroupChatId);
+  const backedMemberIds = [
+    await generateSnowflakeId(),
+    await generateSnowflakeId(),
+  ];
+  for (const id of backedMemberIds) owned.groupMembers.add(id);
   await db.insert(groupMembers).values([
     {
-      id: await generateSnowflakeId(),
+      id: backedMemberIds[0],
       groupId,
       userId: viewer,
       role: 'owner',
@@ -186,7 +412,7 @@ beforeAll(async () => {
       lastMessageAt: now,
     },
     {
-      id: await generateSnowflakeId(),
+      id: backedMemberIds[1],
       groupId,
       userId: member1,
       role: 'member',
@@ -210,12 +436,19 @@ beforeAll(async () => {
     });
     owned.chats.add(chatId);
     dmChatIds.push(chatId);
+    const dmParticipantIds = [
+      await generateSnowflakeId(),
+      await generateSnowflakeId(),
+    ];
+    for (const id of dmParticipantIds) owned.participants.add(id);
     await db.insert(chatParticipants).values([
-      { id: await generateSnowflakeId(), chatId, userId: viewer },
-      { id: await generateSnowflakeId(), chatId, userId: other },
+      { id: dmParticipantIds[0], chatId, userId: viewer },
+      { id: dmParticipantIds[1], chatId, userId: other },
     ]);
+    const dmMessageId = await generateSnowflakeId();
+    owned.messages.add(dmMessageId);
     await db.insert(messages).values({
-      id: await generateSnowflakeId(),
+      id: dmMessageId,
       chatId,
       senderId: other,
       content: `dm ${i}`,
@@ -248,8 +481,10 @@ beforeAll(async () => {
     });
     owned.chats.add(cid);
     tiedGroupChatIds.push(cid);
+    const tiedMemberId = await generateSnowflakeId();
+    owned.groupMembers.add(tiedMemberId);
     await db.insert(groupMembers).values({
-      id: await generateSnowflakeId(),
+      id: tiedMemberId,
       groupId: gid,
       userId: viewer,
       role: 'owner',
@@ -260,37 +495,20 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Derived reputation ledger rows first: they reference the owned users
-  // and survive user deletion because there is no cascading FK.
-  await deleteOwnedLedgerRows([...owned.users]);
-  if (owned.chats.size) {
-    const ids = [...owned.chats];
-    await db.delete(messages).where(inArray(messages.chatId, ids));
-    await db
-      .delete(chatParticipants)
-      .where(inArray(chatParticipants.chatId, ids));
-    await db.delete(chats).where(inArray(chats.id, ids));
-  }
-  if (owned.groups.size) {
-    const ids = [...owned.groups];
-    await db.delete(groupMembers).where(inArray(groupMembers.groupId, ids));
-    await db.delete(groups).where(inArray(groups.id, ids));
-  }
-  if (owned.users.size)
-    await db.delete(users).where(inArray(users.id, [...owned.users]));
+  const userIds = [...owned.users];
+  await cleanupOwnedFixtures();
 
   // Cleanup evidence: nothing this fixture owned may remain behind.
-  if (owned.users.size) {
-    const ids = [...owned.users];
+  if (userIds.length) {
     const [ledgerLeft] = await db
       .select({ value: count() })
       .from(pointsTransactions)
-      .where(inArray(pointsTransactions.userId, ids));
+      .where(inArray(pointsTransactions.userId, userIds));
     assert.equal(ledgerLeft?.value ?? 0, 0);
     const [usersLeft] = await db
       .select({ value: count() })
       .from(users)
-      .where(inArray(users.id, ids));
+      .where(inArray(users.id, userIds));
     assert.equal(usersLeft?.value ?? 0, 0);
   }
 });
@@ -406,8 +624,20 @@ test('F1: ledger cleanup removes owned rows and preserves foreign rows', async (
     reason: 'private_channel_create',
   });
   const tempId = await makeUser('temp');
+  const ownedLedgerId = await generateSnowflakeId();
   await db.insert(pointsTransactions).values({
-    id: await generateSnowflakeId(),
+    id: ownedLedgerId,
+    userId: tempId,
+    amount: 1,
+    pointsBefore: 0,
+    pointsAfter: 1,
+    reason: 'private_channel_create',
+  });
+  // An unrecorded ledger row for the SAME owned user: the old user-scoped
+  // delete would have removed it; the exact-id delete must not.
+  const unrecordedLedgerId = await generateSnowflakeId();
+  await db.insert(pointsTransactions).values({
+    id: unrecordedLedgerId,
     userId: tempId,
     amount: 1,
     pointsBefore: 0,
@@ -415,23 +645,109 @@ test('F1: ledger cleanup removes owned rows and preserves foreign rows', async (
     reason: 'private_channel_create',
   });
 
-  await deleteOwnedLedgerRows([tempId]);
+  await deleteLedgerRowsById([ownedLedgerId]);
 
-  const tempLeft = await db
+  const [ownedRow] = await db
     .select({ id: pointsTransactions.id })
     .from(pointsTransactions)
-    .where(eq(pointsTransactions.userId, tempId));
-  expect(tempLeft.length).toBe(0);
+    .where(eq(pointsTransactions.id, ownedLedgerId));
+  expect(ownedRow).toBeUndefined();
+  const [unrecordedRow] = await db
+    .select({ id: pointsTransactions.id })
+    .from(pointsTransactions)
+    .where(eq(pointsTransactions.id, unrecordedLedgerId));
+  expect(unrecordedRow).toBeDefined();
   const foreignLeft = await db
     .select({ id: pointsTransactions.id })
     .from(pointsTransactions)
     .where(eq(pointsTransactions.userId, foreignId));
   expect(foreignLeft.length).toBe(1);
 
-  // The foreign rows were created by this file, so the file owns their
-  // final removal once the control assertions are done.
+  // The rows this test planted are its own: remove them explicitly so the
+  // shared teardown scope check still passes.
+  await db
+    .delete(pointsTransactions)
+    .where(eq(pointsTransactions.id, unrecordedLedgerId));
   await db
     .delete(pointsTransactions)
     .where(eq(pointsTransactions.userId, foreignId));
   await db.delete(users).where(eq(users.id, foreignId));
+});
+
+test('G1: a direct group preview skips a message from a blocked sender', async () => {
+  const blockId = await generateSnowflakeId();
+  try {
+    await db.insert(userBlocks).values({
+      id: blockId,
+      blockerId: viewer,
+      blockedId: member1,
+    });
+    const list = await getList(viewer);
+    const entry = list.groupChats.find((c) => c.id === directGroupChatId);
+    assert.ok(entry);
+    // The only message in this chat is from the blocked sender, so no
+    // preview survives; the count still counts every message in the chat.
+    expect(entry.lastMessage).toBeNull();
+    expect(entry.messageCount).toBe(1);
+    // DM previews are unchanged: the other participant is not blocked.
+    const dm = list.directChats.find((c) => c.id === dmChatIds[0]);
+    assert.ok(dm);
+    expect(dm.lastMessage?.content).toBe('dm 0');
+  } finally {
+    await db.delete(userBlocks).where(eq(userBlocks.id, blockId));
+  }
+});
+
+test('F2: cleanup refuses unrecorded rows under owned parents', async () => {
+  const tempId = await makeUser('refuse');
+  const strayLedgerId = await generateSnowflakeId();
+  await db.insert(pointsTransactions).values({
+    id: strayLedgerId,
+    userId: tempId,
+    amount: 1,
+    pointsBefore: 0,
+    pointsAfter: 1,
+    reason: 'private_channel_create',
+  });
+  const strayMessageId = await generateSnowflakeId();
+  await db.insert(messages).values({
+    id: strayMessageId,
+    chatId: directGroupChatId,
+    senderId: tempId,
+    content: 'stray message',
+    createdAt: new Date(),
+  });
+
+  let refused = false;
+  try {
+    await cleanupOwnedFixtures();
+  } catch (error) {
+    refused = /cleanup refused/.test((error as Error).message);
+  }
+  expect(refused).toBe(true);
+
+  // Nothing was deleted: the stray rows survive the refused cleanup.
+  const [ledgerRow] = await db
+    .select({ id: pointsTransactions.id })
+    .from(pointsTransactions)
+    .where(eq(pointsTransactions.id, strayLedgerId));
+  expect(ledgerRow).toBeDefined();
+  const [messageRow] = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(eq(messages.id, strayMessageId));
+  expect(messageRow).toBeDefined();
+
+  // The planted rows are this test's own: remove them explicitly, then the
+  // normal cleanup succeeds and removes the whole fixture.
+  await db.delete(messages).where(eq(messages.id, strayMessageId));
+  await db
+    .delete(pointsTransactions)
+    .where(eq(pointsTransactions.id, strayLedgerId));
+  await cleanupOwnedFixtures();
+  const [usersLeft] = await db
+    .select({ value: count() })
+    .from(users)
+    .where(eq(users.id, tempId));
+  expect(usersLeft?.value ?? 0).toBe(0);
 });
