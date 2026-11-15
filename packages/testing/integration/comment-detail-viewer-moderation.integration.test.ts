@@ -21,6 +21,7 @@ import {
   gameOnboarding,
   inArray,
   posts,
+  sql,
   userBlocks,
   userMutes,
   userPnLSnapshots,
@@ -52,10 +53,12 @@ type UserMuteInsert = typeof userMutes.$inferInsert;
  * Tracks only rows whose INSERT ... RETURNING succeeded. Cleanup deletes
  * exactly those rows by ID, so a setup that fails partway (for example on
  * an ID collision with a pre-existing row) can never delete data this
- * fixture did not create. Cleanup refuses outright while a row in a table
- * that cascades on users.id (GameOnboarding, UserPnLSnapshot, Whitelist)
+ * fixture did not create. Cleanup runs in one short transaction: it locks
+ * the owned User rows first, then refuses while a row in a table that
+ * cascades on users.id (GameOnboarding, UserPnLSnapshot, Whitelist)
  * still references an owned user, so a foreign child acquired after setup
- * is never deleted with its parent.
+ * — including one inserted while cleanup is in flight — is never deleted
+ * with its parent. A refusal rolls the whole cleanup back.
  */
 class OwnedFixtures {
   readonly userIds: string[] = [];
@@ -115,66 +118,78 @@ class OwnedFixtures {
   }
 
   async cleanup(): Promise<void> {
-    if (this.userIds.length > 0) {
-      // GameOnboarding, UserPnLSnapshot and Whitelist all reference
-      // users.id ON DELETE CASCADE. A row in one of those tables that this
-      // fixture did not create may still reference an owned user, and
-      // deleting the user would silently delete that foreign row too.
-      // Refuse before deleting anything, so the foreign row and every
-      // owned row survive unchanged.
-      const [foreignOnboarding, foreignSnapshot, foreignWhitelist] =
-        await Promise.all([
-          db
-            .select({
-              id: gameOnboarding.id,
-              userId: gameOnboarding.userId,
-            })
-            .from(gameOnboarding)
-            .where(inArray(gameOnboarding.userId, this.userIds))
-            .limit(1),
-          db
-            .select({
-              id: userPnLSnapshots.id,
-              userId: userPnLSnapshots.userId,
-            })
-            .from(userPnLSnapshots)
-            .where(inArray(userPnLSnapshots.userId, this.userIds))
-            .limit(1),
-          db
-            .select({ id: whitelist.id, userId: whitelist.userId })
-            .from(whitelist)
-            .where(inArray(whitelist.userId, this.userIds))
-            .limit(1),
-        ]);
-      const foreign =
-        foreignOnboarding[0] !== undefined
-          ? { label: 'GameOnboarding', ...foreignOnboarding[0] }
-          : foreignSnapshot[0] !== undefined
-            ? { label: 'UserPnLSnapshot', ...foreignSnapshot[0] }
-            : foreignWhitelist[0] !== undefined
-              ? { label: 'Whitelist', ...foreignWhitelist[0] }
-              : null;
-      if (foreign) {
-        throw new Error(
-          `OwnedFixtures.cleanup refused: ${foreign.label} ${foreign.id} still references owned user ${foreign.userId}`
-        );
+    await db.transaction(async (tx) => {
+      if (this.userIds.length > 0) {
+        // Lock the owned User rows before checking their children. A
+        // concurrent insert of a cascading child takes FOR KEY SHARE on
+        // the referenced user row, so it blocks until this transaction
+        // ends: no foreign child can appear between the lock and the
+        // checks below.
+        await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(inArray(users.id, this.userIds))
+          .for('update');
+        // GameOnboarding, UserPnLSnapshot and Whitelist all reference
+        // users.id ON DELETE CASCADE. A row in one of those tables that
+        // this fixture did not create may still reference an owned user,
+        // and deleting the user would silently delete that foreign row
+        // too. Refuse before deleting anything, so the foreign row and
+        // every owned row survive unchanged; throwing here rolls the
+        // whole cleanup back.
+        const [foreignOnboarding] = await tx
+          .select({
+            id: gameOnboarding.id,
+            userId: gameOnboarding.userId,
+          })
+          .from(gameOnboarding)
+          .where(inArray(gameOnboarding.userId, this.userIds))
+          .limit(1);
+        const [foreignSnapshot] = await tx
+          .select({
+            id: userPnLSnapshots.id,
+            userId: userPnLSnapshots.userId,
+          })
+          .from(userPnLSnapshots)
+          .where(inArray(userPnLSnapshots.userId, this.userIds))
+          .limit(1);
+        const [foreignWhitelist] = await tx
+          .select({ id: whitelist.id, userId: whitelist.userId })
+          .from(whitelist)
+          .where(inArray(whitelist.userId, this.userIds))
+          .limit(1);
+        const foreign =
+          foreignOnboarding !== undefined
+            ? { label: 'GameOnboarding', ...foreignOnboarding }
+            : foreignSnapshot !== undefined
+              ? { label: 'UserPnLSnapshot', ...foreignSnapshot }
+              : foreignWhitelist !== undefined
+                ? { label: 'Whitelist', ...foreignWhitelist }
+                : null;
+        if (foreign) {
+          throw new Error(
+            `OwnedFixtures.cleanup refused: ${foreign.label} ${foreign.id} still references owned user ${foreign.userId}`
+          );
+        }
       }
-    }
-    if (this.blockIds.length > 0) {
-      await db.delete(userBlocks).where(inArray(userBlocks.id, this.blockIds));
-    }
-    if (this.muteIds.length > 0) {
-      await db.delete(userMutes).where(inArray(userMutes.id, this.muteIds));
-    }
-    if (this.commentIds.length > 0) {
-      await db.delete(comments).where(inArray(comments.id, this.commentIds));
-    }
-    if (this.postIds.length > 0) {
-      await db.delete(posts).where(inArray(posts.id, this.postIds));
-    }
-    if (this.userIds.length > 0) {
-      await db.delete(users).where(inArray(users.id, this.userIds));
-    }
+      if (this.blockIds.length > 0) {
+        await tx
+          .delete(userBlocks)
+          .where(inArray(userBlocks.id, this.blockIds));
+      }
+      if (this.muteIds.length > 0) {
+        await tx.delete(userMutes).where(inArray(userMutes.id, this.muteIds));
+      }
+      if (this.commentIds.length > 0) {
+        await tx.delete(comments).where(inArray(comments.id, this.commentIds));
+      }
+      if (this.postIds.length > 0) {
+        await tx.delete(posts).where(inArray(posts.id, this.postIds));
+      }
+      if (this.userIds.length > 0) {
+        await tx.delete(users).where(inArray(users.id, this.userIds));
+      }
+    });
     this.userIds.length = 0;
     this.postIds.length = 0;
     this.commentIds.length = 0;
@@ -581,6 +596,92 @@ describe('fixture ownership', () => {
       expect(survivingOnboarding).toBeDefined();
       expect(survivingOnboarding?.userId).toBe(normal);
       expect(survivingOnboarding?.currentStep).toBe('welcome');
+      const [survivingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, normal));
+      expect(survivingUser).toBeDefined();
+      expect(survivingUser?.displayName).toBe('F75 Normal');
+    } finally {
+      // Remove the foreign row so the shared fixture's afterAll cleanup
+      // can proceed.
+      await db
+        .delete(gameOnboarding)
+        .where(eq(gameOnboarding.id, foreignOnboardingId));
+    }
+  });
+
+  it('cleanup refuses a foreign cascading child inserted while cleanup is in flight', async () => {
+    const foreignOnboardingId = await generateSnowflakeId();
+    const now = new Date();
+    try {
+      // A second transaction inserts the foreign GameOnboarding row and
+      // holds it uncommitted: the pre-delete checks cannot see it yet, so
+      // this exercises the check/delete interval instead of inserting the
+      // child before the checks (the case above). Cleanup must still
+      // refuse once the row commits.
+      const inserted = Promise.withResolvers<void>();
+      const releaseInsert = Promise.withResolvers<void>();
+      const inserter = db.transaction(async (tx) => {
+        await tx.insert(gameOnboarding).values({
+          id: foreignOnboardingId,
+          userId: normal,
+          currentStep: 'welcome',
+          state: {
+            completedSteps: [],
+            currentStep: 'welcome',
+            startedAt: now.toISOString(),
+            completedAt: null,
+            rewards: [],
+          },
+          isComplete: false,
+          createdAt: now,
+          updatedAt: now,
+        });
+        inserted.resolve();
+        await releaseInsert.promise;
+      });
+      await inserted.promise;
+      const pendingCleanup = fixtures.cleanup();
+      try {
+        // Wait until cleanup is blocked on an owned User row, proving it
+        // reached the user lock/delete while the child was still
+        // uncommitted.
+        const until = Date.now() + 5000;
+        let blocked = false;
+        while (Date.now() < until) {
+          const rows = await db.execute(
+            sql<{
+              count: number;
+            }>`SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query ILIKE '%User%'`
+          );
+          blocked = Number(rows[0]?.count ?? 0) > 0;
+          if (blocked) break;
+          await Bun.sleep(10);
+        }
+        expect(blocked).toBe(true);
+      } finally {
+        releaseInsert.resolve();
+        await inserter;
+      }
+      let refusal: unknown;
+      try {
+        await pendingCleanup;
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(Error);
+      expect((refusal as Error).message).toContain(
+        `GameOnboarding ${foreignOnboardingId} still references owned user ${normal}`
+      );
+
+      // The foreign row and the owned user row are both unchanged.
+      const [survivingOnboarding] = await db
+        .select()
+        .from(gameOnboarding)
+        .where(eq(gameOnboarding.id, foreignOnboardingId));
+      expect(survivingOnboarding).toBeDefined();
+      expect(survivingOnboarding?.userId).toBe(normal);
       const [survivingUser] = await db
         .select()
         .from(users)
