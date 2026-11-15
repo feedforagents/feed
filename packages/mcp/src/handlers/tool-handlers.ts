@@ -69,8 +69,11 @@ import {
   hasBlocked,
   inArray,
   isNull,
+  like,
   lte,
   markets,
+  not,
+  notExists,
   perpMarketSnapshots,
   posts,
   postTags,
@@ -1005,18 +1008,36 @@ export async function executeQueryFeed(
   }
 
   const now = new Date();
-  const posts = await db.post.findMany({
-    where: {
-      deletedAt: null,
-      timestamp: { lte: now }, // No future posts
-      ...(relatedQuestion !== undefined && { relatedQuestion }),
-    },
-    orderBy: { timestamp: 'desc' },
-    take: args.limit || 20,
-  });
+  // Filter in SQL before the limit without requiring NPC authors to have Users.
+  const feedPosts = await db
+    .select({
+      id: posts.id,
+      content: posts.content,
+      authorId: posts.authorId,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(
+      and(
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now),
+        not(like(posts.authorId, 'test-%')),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        ),
+        relatedQuestion !== undefined
+          ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined
+      )
+    )
+    .orderBy(desc(posts.timestamp))
+    .limit(args.limit || 20);
 
   return {
-    posts: posts.map((p) => ({
+    posts: feedPosts.map((p) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,

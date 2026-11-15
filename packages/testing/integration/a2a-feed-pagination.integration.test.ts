@@ -244,7 +244,7 @@ async function releaseControls(table: Table) {
 async function orderedIds() {
   return (
     await control.unsafe<{ id: string }[]>(
-      'SELECT id FROM "Post" WHERE "deletedAt" IS NULL ORDER BY "timestamp" DESC,id DESC'
+      'SELECT p.id FROM "Post" p WHERE p."deletedAt" IS NULL AND p."authorId" NOT LIKE \'test-%\' AND NOT EXISTS(SELECT 1 FROM "User" u WHERE u.id=p."authorId" AND u."isTest"=true) ORDER BY p."timestamp" DESC,p.id DESC'
     )
   ).map((row) => row.id);
 }

@@ -45,11 +45,15 @@ import {
   getRawDrizzle,
   groupMembers,
   isNull,
+  like,
   lte,
+  not,
+  notExists,
   posts,
   postTags,
   sql,
   tradingFeeOutbox,
+  users,
 } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
@@ -836,28 +840,33 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!Number.isSafeInteger(offset)) {
       throw new Error('offset must be a safe non-negative integer');
     }
-    // A total order keeps offset pages stable across equal timestamps when
-    // the feed is unchanged. Concurrent inserts or deletes can shift pages.
-    const posts = await db.post.findMany({
-      where: { deletedAt: null },
-      take: limit,
-      skip: offset,
-      orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
-      select: {
-        id: true,
-        content: true,
-        authorId: true,
-        timestamp: true,
-      },
-    });
-    return {
-      posts: posts.map((p) => ({
-        id: p.id,
-        content: p.content,
-        authorId: p.authorId,
-        timestamp: p.timestamp,
-      })),
-    };
+    // Match the existing web test-author predicate before applying the page.
+    // NOT EXISTS also keeps NPC/static authors that have no User row.
+    const feedPosts = await db
+      .select({
+        id: posts.id,
+        content: posts.content,
+        authorId: posts.authorId,
+        timestamp: posts.timestamp,
+      })
+      .from(posts)
+      .where(
+        and(
+          isNull(posts.deletedAt),
+          not(like(posts.authorId, 'test-%')),
+          notExists(
+            db
+              .select({ id: users.id })
+              .from(users)
+              .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+          )
+        )
+      )
+      // Stable-data continuation only; concurrent inserts/deletes can shift pages.
+      .orderBy(desc(posts.timestamp), desc(posts.id))
+      .limit(limit)
+      .offset(offset);
+    return { posts: feedPosts };
   }
 
   private async likePost(
