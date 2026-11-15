@@ -19,15 +19,23 @@
  * the open MCP notification-list change), while A2A already applies it.
  * Test and banned actors' notifications are returned by every surface,
  * including the web list, and stay returned.
+ *
+ * A second recipient carries a representative 120-row history (half live,
+ * half dead targets) so the count and page shape are measured at scale,
+ * not only on the 14-row fixture. Teardown registers every acquired row
+ * immediately and deletes only exact acquired IDs under parent locks.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import {
+  and,
   closeDatabase,
   comments,
   db,
   eq,
+  gameOnboarding,
   inArray,
+  notInArray,
   notifications,
   posts,
   userBlocks,
@@ -44,6 +52,8 @@ import {
 } from '../../mcp/src/handlers/tool-handlers';
 
 const T0 = 1_700_000_000_000;
+const BULK_LIVE = 60;
+const BULK_DEAD = 60;
 const ownedUsers: string[] = [];
 const ownedNotifications: string[] = [];
 const ownedPosts: string[] = [];
@@ -53,6 +63,8 @@ const ownedMutes: string[] = [];
 const labelOf = new Map<string, string>();
 
 let recipient: string;
+let bulk: string;
+const bulkLabels = new Map<string, string>();
 let control: string;
 const controlLabels = new Map<string, string>();
 
@@ -161,6 +173,9 @@ beforeAll(async () => {
     createdAt: new Date(),
     deletedAt: null,
   });
+  // Register immediately: if setup fails before the planned hard delete
+  // below, afterAll still removes this row.
+  ownedPosts.push(gonePostId);
 
   const liveCommentId = await generateSnowflakeId();
   await db.insert(comments).values({
@@ -328,24 +343,118 @@ beforeAll(async () => {
     { actorId: normal, type: 'like' },
     1
   );
+
+  // Representative history for the scaling check: 120 notifications on one
+  // user, half pointing at the live post and half at the deleted post,
+  // dead-target rows newest, so a filter applied after the limit would
+  // shrink the page and skew the count.
+  bulk = await mkUser('bulk');
+  let j = 1000;
+  for (let k = 0; k < BULK_LIVE + BULK_DEAD; k++) {
+    const dead = k % 2 === 1;
+    await mkNotification(
+      bulk,
+      bulkLabels,
+      dead ? `b-dead-${k}` : `b-live-${k}`,
+      {
+        actorId: normal,
+        type: 'like',
+        postId: dead ? deletedPostId : livePostId,
+      },
+      j++
+    );
+  }
 });
 
 afterAll(async () => {
-  if (ownedNotifications.length)
-    await db
-      .delete(notifications)
-      .where(inArray(notifications.id, ownedNotifications));
-  if (ownedBlocks.length)
-    await db.delete(userBlocks).where(inArray(userBlocks.id, ownedBlocks));
-  if (ownedMutes.length)
-    await db.delete(userMutes).where(inArray(userMutes.id, ownedMutes));
-  if (ownedComments.length)
-    await db.delete(comments).where(inArray(comments.id, ownedComments));
-  if (ownedPosts.length)
-    await db.delete(posts).where(inArray(posts.id, ownedPosts));
-  if (ownedUsers.length)
-    await db.delete(users).where(inArray(users.id, ownedUsers));
-  await closeDatabase();
+  try {
+    // Guarded cleanup, all in one transaction: lock the owned parent rows
+    // first so no concurrent child can attach while cleanup runs, then
+    // check — atomically with the deletes — that no foreign (unacquired)
+    // child references them, and only then delete exactly the acquired
+    // IDs, children before parents. A foreign child must fail loudly
+    // here instead of being cascade-deleted (a separately created
+    // GameOnboarding on an acquired user) or orphaned (a comment or
+    // repost pointing at an acquired post).
+    await db.transaction(async (tx) => {
+      if (ownedUsers.length)
+        await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(inArray(users.id, ownedUsers))
+          .for('update');
+      if (ownedPosts.length)
+        await tx
+          .select({ id: posts.id })
+          .from(posts)
+          .where(inArray(posts.id, ownedPosts))
+          .for('update');
+      if (ownedComments.length)
+        await tx
+          .select({ id: comments.id })
+          .from(comments)
+          .where(inArray(comments.id, ownedComments))
+          .for('update');
+
+      if (ownedUsers.length) {
+        const foreignOnboarding = await tx
+          .select({ id: gameOnboarding.id })
+          .from(gameOnboarding)
+          .where(inArray(gameOnboarding.userId, ownedUsers));
+        if (foreignOnboarding.length > 0)
+          throw new Error(
+            `refusing cleanup: ${foreignOnboarding.length} GameOnboarding row(s) reference owned users`
+          );
+      }
+      if (ownedPosts.length) {
+        const foreignComments = await tx
+          .select({ id: comments.id })
+          .from(comments)
+          .where(
+            ownedComments.length > 0
+              ? and(
+                  inArray(comments.postId, ownedPosts),
+                  notInArray(comments.id, ownedComments)
+                )
+              : inArray(comments.postId, ownedPosts)
+          );
+        if (foreignComments.length > 0)
+          throw new Error(
+            `refusing cleanup: ${foreignComments.length} comment(s) reference owned posts`
+          );
+        const foreignReposts = await tx
+          .select({ id: posts.id })
+          .from(posts)
+          .where(
+            and(
+              inArray(posts.originalPostId, ownedPosts),
+              notInArray(posts.id, ownedPosts)
+            )
+          );
+        if (foreignReposts.length > 0)
+          throw new Error(
+            `refusing cleanup: ${foreignReposts.length} repost(s) reference owned posts`
+          );
+      }
+
+      if (ownedNotifications.length)
+        await tx
+          .delete(notifications)
+          .where(inArray(notifications.id, ownedNotifications));
+      if (ownedBlocks.length)
+        await tx.delete(userBlocks).where(inArray(userBlocks.id, ownedBlocks));
+      if (ownedMutes.length)
+        await tx.delete(userMutes).where(inArray(userMutes.id, ownedMutes));
+      if (ownedComments.length)
+        await tx.delete(comments).where(inArray(comments.id, ownedComments));
+      if (ownedPosts.length)
+        await tx.delete(posts).where(inArray(posts.id, ownedPosts));
+      if (ownedUsers.length)
+        await tx.delete(users).where(inArray(users.id, ownedUsers));
+    });
+  } finally {
+    await closeDatabase();
+  }
 });
 
 const WEB_VISIBLE = [
@@ -423,6 +532,34 @@ describe('notification target visibility on agent surfaces', () => {
       )
     ).toEqual(WEB_VISIBLE);
     expect(result.unreadCount).toBe(7);
+  });
+
+  it('representative history: count and page shape stay exact at 120 rows', async () => {
+    const web = await webList(bulk);
+    expect(web.notifications).toHaveLength(BULK_LIVE);
+    expect(web.unreadCount).toBe(BULK_LIVE);
+
+    const mcpList = await executeGetNotifications(agent(bulk), {
+      limit: 10,
+    } as never);
+    expect(mcpList.notifications).toHaveLength(10);
+    for (const n of mcpList.notifications)
+      expect(bulkLabels.get(n.id)).toMatch(/^b-live-/);
+    const mcpCount = await executeGetUnreadCount(agent(bulk), {} as never);
+    expect(mcpCount.unreadCount).toBe(BULK_LIVE);
+
+    const a2a = (await FeedAgentExecutor.executeDirectly(
+      'messaging.get_notifications',
+      { limit: 10 },
+      bulk
+    )) as unknown as {
+      unreadCount: number;
+      notifications: Array<{ id: string }>;
+    };
+    expect(a2a.notifications).toHaveLength(10);
+    for (const n of a2a.notifications)
+      expect(bulkLabels.get(n.id)).toMatch(/^b-live-/);
+    expect(a2a.unreadCount).toBe(BULK_LIVE);
   });
 
   it('control user with only live targets is unchanged on every surface', async () => {
