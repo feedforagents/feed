@@ -36,11 +36,21 @@
  * Next revalidate is 60s — neither is the cause of the wrong values.
  *
  * Ownership: every row this file creates is recorded from its RETURNING
- * clause, and teardown deletes only those owned rows — including the
+ * clause (or, for server-generated ids, from the trade's own return
+ * value, or a market + trade-window lookup that refuses anything but
+ * the exact number of snapshots this fixture's trades wrote), and
+ * teardown deletes only those owned rows by id — including the
  * PredictionPriceHistory rows the real trades write, which have no
- * cascading FK — then verifies zero rows remain. A setup collision (a
- * second insert under an owned id) must reject instead of silently
- * reusing or overwriting the fixture.
+ * cascading FK. A market is only adopted when the row read back after
+ * creation matches this fixture's own question text and a createdAt at
+ * or after the creation call: createMarketFromQuestion returns the
+ * existing row on a lost race (ON CONFLICT DO NOTHING), and that
+ * fallback must never count as acquiring the market. The
+ * zero-leftover check stays scoped by marketId as detection — if a
+ * foreign row ever appears under an owned market, the suite fails
+ * instead of deleting it. A setup collision (a second insert under an
+ * owned id) must reject instead of silently reusing or overwriting
+ * the fixture.
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
@@ -53,9 +63,11 @@ import {
   PredictionMarketService,
 } from '@feed/core/markets/prediction';
 import {
+  and,
   closeDatabase,
   db,
   eq,
+  gte,
   inArray,
   markets,
   positions,
@@ -93,11 +105,41 @@ const tradedBuyId = `f43-wmp-traded-buy-${suffix}`;
 const tradedSellId = `f43-wmp-traded-sell-${suffix}`;
 let questionNumber = 1_900_000_000 + Math.floor(Math.random() * 100_000_000);
 
-// Rows this file owns, recorded from each insert's RETURNING clause.
-// Teardown deletes only these — never the preallocated ids as such.
+// Rows this file owns, recorded from each insert's RETURNING clause
+// (or, for server-generated ids, from the trade's own return value).
+// Teardown deletes only these by id — never the preallocated ids as
+// such, and never every row under an owned market.
 const ownedQuestionIds: string[] = [];
 const ownedMarketIds: string[] = [];
+const ownedHistoryIds: string[] = [];
+const ownedPositionIds: string[] = [];
 let ownedUserId: string | null = null;
+
+/**
+ * Acquisition receipt for a market: the row read back after creation
+ * must be the row this fixture just created — its question text and a
+ * createdAt at or after the creation call. createMarketFromQuestion
+ * uses ON CONFLICT DO NOTHING and returns the existing row when the
+ * insert loses a race, so a matching id alone proves nothing; a row
+ * created by another actor (different text, older createdAt) is
+ * refused here instead of adopted into ownedMarketIds.
+ */
+async function verifyMarketAcquired(
+  marketId: string,
+  acquiredAt: Date,
+  expectedQuestionText: string
+): Promise<void> {
+  const [row] = await db
+    .select({ question: markets.question, createdAt: markets.createdAt })
+    .from(markets)
+    .where(eq(markets.id, marketId));
+  if (!row) throw new Error(`market ${marketId} is missing after creation`);
+  if (row.question !== expectedQuestionText || row.createdAt < acquiredAt) {
+    throw new Error(
+      `market ${marketId} was not acquired by this fixture: the row was created by another actor (existing-row fallback)`
+    );
+  }
+}
 
 async function fetchWidget(token?: string) {
   const response = await widgetGET(
@@ -144,10 +186,16 @@ async function createMarket(
     });
   if (!question) throw new Error(`question insert failed for ${id}`);
   ownedQuestionIds.push(question.id);
+  const acquiredAt = new Date();
   const market = await new PredictionDbAdapter().createMarketFromQuestion(
     { ...question, status: 'active' as const },
     10000,
     { initialYesProbability }
+  );
+  await verifyMarketAcquired(
+    market.id,
+    acquiredAt,
+    `Widget price fixture ${id}`
   );
   ownedMarketIds.push(market.id);
 }
@@ -179,6 +227,36 @@ async function seedBaselineHistory(
     })
     .returning({ id: predictionPriceHistories.id });
   if (!row) throw new Error(`history seed failed for ${marketId}`);
+  ownedHistoryIds.push(row.id);
+}
+
+/**
+ * Trade snapshots carry server-generated ids, so they cannot be taken
+ * from a RETURNING clause. Collect them by owned market + trade
+ * window — and refuse unless the count is exactly the number of trades
+ * this fixture ran, so a row written by another actor while the
+ * fixture market exists is never adopted.
+ */
+async function collectTradeSnapshots(
+  marketId: string,
+  since: Date,
+  expectedCount: number
+): Promise<void> {
+  const rows = await db
+    .select({ id: predictionPriceHistories.id })
+    .from(predictionPriceHistories)
+    .where(
+      and(
+        eq(predictionPriceHistories.marketId, marketId),
+        gte(predictionPriceHistories.createdAt, since)
+      )
+    );
+  if (rows.length !== expectedCount) {
+    throw new Error(
+      `expected ${expectedCount} trade snapshots for ${marketId} since ${since.toISOString()}, found ${rows.length} — refusing to adopt foreign rows`
+    );
+  }
+  ownedHistoryIds.push(...rows.map((r) => r.id));
 }
 
 beforeAll(async () => {
@@ -221,36 +299,36 @@ beforeAll(async () => {
   // lexicographically greatest ID has a different baseline price.
   const oldTime = new Date(Date.now() - 30 * 86400000);
   for (let start = 0; start < 4000; start += 500) {
-    await db.insert(predictionPriceHistories).values(
-      Array.from({ length: 500 }, (_, i) => ({
-        id: `f43-old-${suffix}-${start + i}`,
-        marketId: historyLoadId,
-        yesPrice: 0.1,
-        noPrice: 0.9,
-        yesShares: '5000',
-        noShares: '5000',
-        liquidity: '10000',
-        eventType: 'trade',
-        source: 'system',
-        createdAt: oldTime,
-      }))
-    );
-  }
-  const tieTime = new Date(Date.now() - 26 * 3600_000);
-  await db.insert(predictionPriceHistories).values(
-    ['a', 'z'].map((label) => ({
-      id: `f43-tie-${suffix}-${label}`,
+    const oldRows = Array.from({ length: 500 }, (_, i) => ({
+      id: `f43-old-${suffix}-${start + i}`,
       marketId: historyLoadId,
-      yesPrice: label === 'z' ? 0.4 : 0.2,
-      noPrice: label === 'z' ? 0.6 : 0.8,
+      yesPrice: 0.1,
+      noPrice: 0.9,
       yesShares: '5000',
       noShares: '5000',
       liquidity: '10000',
       eventType: 'trade',
       source: 'system',
-      createdAt: tieTime,
-    }))
-  );
+      createdAt: oldTime,
+    }));
+    await db.insert(predictionPriceHistories).values(oldRows);
+    ownedHistoryIds.push(...oldRows.map((r) => r.id));
+  }
+  const tieTime = new Date(Date.now() - 26 * 3600_000);
+  const tieRows = ['a', 'z'].map((label) => ({
+    id: `f43-tie-${suffix}-${label}`,
+    marketId: historyLoadId,
+    yesPrice: label === 'z' ? 0.4 : 0.2,
+    noPrice: label === 'z' ? 0.6 : 0.8,
+    yesShares: '5000',
+    noShares: '5000',
+    liquidity: '10000',
+    eventType: 'trade',
+    source: 'system',
+    createdAt: tieTime,
+  }));
+  await db.insert(predictionPriceHistories).values(tieRows);
+  ownedHistoryIds.push(...tieRows.map((r) => r.id));
 
   const service = new PredictionMarketService({
     db: new PredictionDbAdapter(),
@@ -267,37 +345,51 @@ beforeAll(async () => {
       minFeeAmount: 0.01,
     },
   });
-  await service.buy({
+  const tradeStartedAt = new Date();
+  const buyResult = await service.buy({
     marketId: tradedBuyId,
     userId,
     amount: 1000,
     side: 'yes',
   });
+  ownedPositionIds.push(buyResult.positionId);
   const sellBuy = await service.buy({
     marketId: tradedSellId,
     userId,
     amount: 1000,
     side: 'yes',
   });
+  ownedPositionIds.push(sellBuy.positionId);
   await service.sell({
     marketId: tradedSellId,
     userId,
     shares: 500,
     positionId: sellBuy.positionId,
   });
+  // One snapshot per trade: the buy market wrote 1, the buy+sell
+  // market wrote 2. Anything else in the window is foreign.
+  await collectTradeSnapshots(tradedBuyId, tradeStartedAt, 1);
+  await collectTradeSnapshots(tradedSellId, tradeStartedAt, 2);
 });
 
 afterAll(async () => {
   expect(isRedisAvailable()).toBe(false);
   await invalidateCache('markets-widget-v3', { namespace: CACHE_KEYS.WIDGET });
-  // Delete only owned rows, in dependency order. The real trades also
-  // wrote PredictionPriceHistory rows (no cascading FK), so history for
-  // owned markets goes first. Any failure throws — cleanup is never
-  // swallowed — and the zero-check below proves nothing is left behind.
-  await db
+  // Delete only owned rows, by id, in dependency order. The real
+  // trades also wrote PredictionPriceHistory rows (no cascading FK),
+  // so owned history goes first. Any failure throws — cleanup is
+  // never swallowed — and the deleted counts prove exactly the owned
+  // rows were removed. The zero-checks below stay scoped by marketId
+  // as detection: if a foreign row ever appears under an owned
+  // market, the suite fails here instead of deleting it.
+  const deletedHistory = await db
     .delete(predictionPriceHistories)
-    .where(inArray(predictionPriceHistories.marketId, ownedMarketIds));
-  await db.delete(positions).where(inArray(positions.marketId, ownedMarketIds));
+    .where(inArray(predictionPriceHistories.id, ownedHistoryIds))
+    .returning({ id: predictionPriceHistories.id });
+  const deletedPositions = await db
+    .delete(positions)
+    .where(inArray(positions.id, ownedPositionIds))
+    .returning({ id: positions.id });
   const deletedMarkets = await db
     .delete(markets)
     .where(inArray(markets.id, ownedMarketIds))
@@ -316,6 +408,8 @@ afterAll(async () => {
     expect(deletedUsers.length).toBe(1);
   }
 
+  expect(deletedHistory.length).toBe(ownedHistoryIds.length);
+  expect(deletedPositions.length).toBe(ownedPositionIds.length);
   expect(deletedMarkets.length).toBe(ownedMarketIds.length);
   expect(deletedQuestions.length).toBe(ownedQuestionIds.length);
 
@@ -497,5 +591,62 @@ describe('markets widget prices', () => {
       .from(markets)
       .where(eq(markets.id, skewedId));
     expect(rows).toHaveLength(1);
+  });
+
+  it('refuses the adapter existing-row fallback instead of adopting the market', async () => {
+    const [question] = await db
+      .select()
+      .from(questions)
+      .where(eq(questions.id, skewedId))
+      .limit(1);
+    if (!question) throw new Error('skewed fixture question is missing');
+    // The adapter hands the existing row back on a lost race instead
+    // of failing — that return must never count as acquiring it.
+    const returned = await new PredictionDbAdapter().createMarketFromQuestion(
+      { ...question, status: 'active' as const },
+      10000,
+      { initialYesProbability: 0.8 }
+    );
+    expect(returned.id).toBe(skewedId);
+    // The row predates this call, so the acquisition receipt refuses
+    // it; the fixture still owns the market exactly once.
+    await expect(
+      verifyMarketAcquired(
+        skewedId,
+        new Date(),
+        `Widget price fixture ${skewedId}`
+      )
+    ).rejects.toThrow(/not acquired/);
+    expect(ownedMarketIds.filter((id) => id === skewedId)).toHaveLength(1);
+  });
+
+  it('refuses foreign child rows: history written by another actor under an owned market is never adopted', async () => {
+    const foreignId = `f43-wmp-foreign-${suffix}`;
+    await db.insert(predictionPriceHistories).values({
+      id: foreignId,
+      marketId: skewedId,
+      yesPrice: 0.9,
+      noPrice: 0.1,
+      yesShares: '5000',
+      noShares: '5000',
+      liquidity: '10000',
+      eventType: 'trade',
+      source: 'system',
+      createdAt: new Date(),
+    });
+    // The owned-id registry must not pick it up: teardown deletes by
+    // owned ids only, so this row is outside the fixture's cleanup
+    // scope even though it sits under an owned market.
+    expect(ownedHistoryIds).not.toContain(foreignId);
+    const rows = await db
+      .select({ id: predictionPriceHistories.id })
+      .from(predictionPriceHistories)
+      .where(eq(predictionPriceHistories.id, foreignId));
+    expect(rows).toHaveLength(1);
+    // Remove the probe row itself so afterAll's zero-leftover check
+    // still proves the fixture left nothing behind.
+    await db
+      .delete(predictionPriceHistories)
+      .where(eq(predictionPriceHistories.id, foreignId));
   });
 });
