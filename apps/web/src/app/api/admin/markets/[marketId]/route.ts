@@ -309,20 +309,38 @@ export const POST = withErrorHandling(
       }
       // Compare-and-set: only extend a market that is still unresolved and
       // still has the end date this decision was based on.
-      const extended = await db
-        .update(markets)
-        .set({
-          endDate: newEnd,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(markets.id, marketId),
-            eq(markets.resolved, false),
-            eq(markets.endDate, market.endDate)
+      // The cron resolves on questions.resolutionDate, not markets.endDate,
+      // so the question and timeframe rows must move together — otherwise
+      // the market still resolves on the original date while the UI shows
+      // the extended one.
+      const extended = await db.transaction(async (tx) => {
+        const rows = await tx
+          .update(markets)
+          .set({
+            endDate: newEnd,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(markets.id, marketId),
+              eq(markets.resolved, false),
+              eq(markets.endDate, market.endDate)
+            )
           )
-        )
-        .returning({ id: markets.id });
+          .returning({ id: markets.id });
+        if (rows.length === 0) return rows;
+        await tx
+          .update(questions)
+          .set({ resolutionDate: newEnd, updatedAt: new Date() })
+          .where(
+            and(eq(questions.id, marketId), eq(questions.status, 'active'))
+          );
+        await tx
+          .update(timeframedMarkets)
+          .set({ endTime: newEnd, updatedAt: new Date() })
+          .where(eq(timeframedMarkets.questionId, marketId));
+        return rows;
+      });
 
       if (extended.length === 0) {
         return errorResponse(
