@@ -2469,6 +2469,12 @@ export class PerpMarketService {
     if (inverseSize < minOrderSize) {
       throw new ValidationError(`Order size below minimum (${minOrderSize})`);
     }
+    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
+    if (inverseSize > maxPositionSize) {
+      throw new ValidationError(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
     const effectiveLeverage = Math.min(
       input.leverage,
       effectiveMaxLeverage(market)

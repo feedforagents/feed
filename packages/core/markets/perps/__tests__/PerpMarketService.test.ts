@@ -1182,6 +1182,16 @@ describe('PerpMarketService', () => {
 
       // Flipping 6,000 long via a 17,000 short would leave an 11,000 short (> 10,000 limit)
       await expect(
+        service.previewOrder({
+          userId: 'u3',
+          ticker: 'ABC',
+          side: 'short',
+          size: 17_000,
+          leverage: 10,
+        })
+      ).rejects.toThrow('Order size exceeds market limit (10,000)');
+
+      await expect(
         service.openPosition({
           userId: 'u3',
           ticker: 'ABC',
@@ -1232,6 +1242,27 @@ describe('PerpMarketService', () => {
 
       // Open interest drops so current maxPositionSize becomes 10,000
       await db.updateMarketStats('ABC', { openInterest: 15_000 });
+
+      // Previewing opposite-side reduce/close above current maxPositionSize must also succeed
+      const reducePreview = await service.previewOrder({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'short',
+        size: 12_000,
+        leverage: 10,
+      });
+      expect(reducePreview.rebalanceType).toBe('reduce');
+      expect(reducePreview.resultingSize).toBe(3_000);
+
+      const closePreview = await service.previewOrder({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'short',
+        size: 15_000,
+        leverage: 10,
+      });
+      expect(closePreview.rebalanceType).toBe('close');
+      expect(closePreview.resultingSize).toBe(0);
 
       // Closing the 15,000 long via opposite-side trade reduces risk and must not be blocked by maxPositionSize
       const closed = await service.openPosition({
