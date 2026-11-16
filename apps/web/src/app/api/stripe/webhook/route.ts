@@ -875,9 +875,13 @@ async function handleChargeRefunded(
   );
 
   // Calculate total refunded balance units based on cumulative USD. Use the
-  // same one-unit-per-cent conversion that credited the purchase: flooring
-  // here would take back one unit too few (113 / 100 * 100 === 112.99...).
-  const totalRefundedPoints = usdToBalanceUnits(totalRefundedUSD);
+  // same one-unit-per-cent conversion that credits current purchases, but do
+  // not take back more than the stored purchase actually credited. Purchases
+  // written before #1606 can contain 112 units for a $1.13 charge.
+  const totalRefundedPoints = Math.min(
+    usdToBalanceUnits(totalRefundedUSD),
+    Number(originalTx.amount)
+  );
 
   // Incremental = total cumulative - already processed
   const incrementalPointsToDeduct = totalRefundedPoints - alreadyDeductedPoints;

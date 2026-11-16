@@ -1,6 +1,7 @@
 /**
  * POST /api/stripe/webhook (charge.refunded) against a real database: a full
- * refund must take back exactly the balance units the purchase credited.
+ * refund must take back exactly the balance units the purchase credited,
+ * including a legacy purchase written with the old floor conversion.
  *
  * Checkout charges Math.round(amountUSD * 100) cents and fundPurchase credits
  * usdToBalanceUnits(amountUSD) = one unit per charged cent (#1606). The refund
@@ -91,6 +92,32 @@ async function seedPurchase(cents: number, userId?: string) {
     'stripe'
   );
   expect(funded.success).toBe(true);
+  return { setup, userId: setup.userId, paymentIntentId };
+}
+
+async function seedLegacyPurchase(cents: number, creditedUnits: number) {
+  const setup = await insertOwnedUser(await generateSnowflakeId());
+  const paymentIntentId = `pi_test_refund_${setup.userId}`;
+  setup.relatedIds.push(paymentIntentId);
+  const balanceBefore = await balanceOf(setup.userId);
+  const transactionId = await generateSnowflakeId();
+  await db
+    .update(users)
+    .set({
+      virtualBalance: String(balanceBefore + creditedUnits),
+      totalDeposited: String(balanceBefore + creditedUnits),
+    })
+    .where(eq(users.id, setup.userId));
+  await db.insert(balanceTransactions).values({
+    id: transactionId,
+    userId: setup.userId,
+    type: 'stripe_purchase',
+    amount: String(creditedUnits),
+    balanceBefore: String(balanceBefore),
+    balanceAfter: String(balanceBefore + creditedUnits),
+    relatedId: paymentIntentId,
+    description: JSON.stringify({ amountUSD: cents / 100 }),
+  });
   return { setup, userId: setup.userId, paymentIntentId };
 }
 
@@ -240,6 +267,18 @@ describe('charge.refunded takes back exactly the credited balance units', () => 
 
     await sendRefund(setup, paymentIntentId, 2007, 2007);
     expect(funded - (await balanceOf(userId))).toBe(2007);
+  });
+
+  it('a refund never takes back more than a legacy purchase credited', async () => {
+    const { setup, userId, paymentIntentId } = await seedLegacyPurchase(
+      113,
+      112
+    );
+    const funded = await balanceOf(userId);
+
+    await sendRefund(setup, paymentIntentId, 113, 113);
+
+    expect(funded - (await balanceOf(userId))).toBe(112);
   });
 });
 
