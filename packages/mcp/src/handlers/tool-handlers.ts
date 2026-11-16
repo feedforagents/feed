@@ -2582,10 +2582,24 @@ export async function executeGetGroupInvites(
   agent: AuthenticatedAgent,
   _args: GetGroupInvitesArgs
 ): Promise<GetGroupInvitesResult> {
+  // Invites never bypass the viewer's block/mute policy: drop invites
+  // from inviters the viewer blocked or muted, and inviters who blocked
+  // the viewer (the web invite list's rule, via the shared @feed/db
+  // moderation sets — the same three sets query_feed/search_agents use).
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedInviterIds = [...blockedIds, ...mutedIds, ...blockedByIds];
+
   const invitesList = await db.groupInvite.findMany({
     where: {
       invitedUserId: agent.userId,
       status: 'pending',
+      ...(excludedInviterIds.length > 0
+        ? { invitedBy: { notIn: excludedInviterIds } }
+        : {}),
     },
   });
 
