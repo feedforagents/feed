@@ -441,14 +441,63 @@ export class TradingBalanceFundingService {
           };
         }
 
-        const balanceAfter = Math.max(0, balanceBefore - requestedDeduction);
+        // A dispute can arrive for the full charge amount after a partial
+        // refund (Stripe: the issuer later corrects it, and on a 'lost'
+        // close only the partially refunded amount is returned). The refund
+        // handler already nets prior refunds for the same payment intent
+        // (cumulative accounting); net them here too so the refunded
+        // portion is not deducted a second time. Without this, refund +
+        // dispute deduct more than the charge, and the 'lost' close path
+        // never returns the refunded portion, so the loss is permanent.
+        let alreadyRefundedPoints = 0;
+        let netRequestedDeduction = requestedDeduction;
+        if (reason === 'dispute') {
+          const priorRefunds = await tx
+            .select({
+              amount: balanceTransactions.amount,
+              description: balanceTransactions.description,
+            })
+            .from(balanceTransactions)
+            .where(
+              and(
+                eq(balanceTransactions.userId, userId),
+                eq(balanceTransactions.type, 'stripe_refund')
+              )
+            );
+          alreadyRefundedPoints = priorRefunds.reduce(
+            (
+              sum: number,
+              row: { amount: string; description: string | null }
+            ) => {
+              if (!row.description) return sum;
+              let parsed: { originalPaymentIntentId?: string };
+              try {
+                parsed = JSON.parse(row.description) as {
+                  originalPaymentIntentId?: string;
+                };
+              } catch {
+                return sum;
+              }
+              return parsed.originalPaymentIntentId === paymentIntentId
+                ? sum + Math.abs(Number(row.amount))
+                : sum;
+            },
+            0
+          );
+          netRequestedDeduction = Math.max(
+            0,
+            requestedDeduction - alreadyRefundedPoints
+          );
+        }
+
+        const balanceAfter = Math.max(0, balanceBefore - netRequestedDeduction);
         const actualDeduction = balanceBefore - balanceAfter;
         const transactionId = await generateSnowflakeId();
 
         await tx
           .update(users)
           .set({
-            virtualBalance: sql`GREATEST(0, COALESCE(CAST("virtualBalance" AS NUMERIC), 0) - ${requestedDeduction})`,
+            virtualBalance: sql`GREATEST(0, COALESCE(CAST("virtualBalance" AS NUMERIC), 0) - ${netRequestedDeduction})`,
             totalWithdrawn: sql`COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) + ${actualDeduction}`,
           })
           .where(eq(users.id, userId));
@@ -463,8 +512,10 @@ export class TradingBalanceFundingService {
           relatedId: stripeEventId,
           description: JSON.stringify({
             amountUSD,
-            balanceUnitsRequested: requestedDeduction,
+            balanceUnitsRequested: netRequestedDeduction,
             balanceUnitsDeducted: actualDeduction,
+            alreadyRefundedBalanceUnits:
+              reason === 'dispute' ? alreadyRefundedPoints : undefined,
             originalPaymentIntentId: paymentIntentId,
             reversalReason: reason,
             reversedAt: new Date().toISOString(),
