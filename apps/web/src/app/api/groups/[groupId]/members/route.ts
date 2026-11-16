@@ -28,6 +28,7 @@ import {
   generateSnowflakeId,
   groupInvites,
   groupMembers,
+  hasBlocked,
   like,
   not,
   sql,
@@ -198,6 +199,19 @@ export const POST = withErrorHandling(
 
       if (userToAdd.isBanned) {
         throw new ApiError('Cannot add banned users to groups', 400);
+      }
+
+      // A block in either direction bars the invite. The DM send guard
+      // (BLOCKED_USER) and createNotification both refuse contact when
+      // either side blocked the other; without this the invite still
+      // reaches the invitee's list even though its notification is
+      // suppressed at creation.
+      const [inviterBlocked, inviteeBlocked] = await Promise.all([
+        hasBlocked(user.userId, data.userId),
+        hasBlocked(data.userId, user.userId),
+      ]);
+      if (inviterBlocked || inviteeBlocked) {
+        throw new ApiError('Cannot invite this user', 400);
       }
 
       // Check if user is already a member
