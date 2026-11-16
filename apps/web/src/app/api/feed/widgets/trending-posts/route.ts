@@ -83,6 +83,7 @@ import { optionalAuth, successResponse, withErrorHandling } from '@feed/api';
 import { asPublic, asUser } from '@feed/db';
 import { logger, TrendingPostsQuerySchema, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '../../_lib/viewer-moderation';
 
 interface TrendingPost {
   id: string;
@@ -138,7 +139,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const authUser = await optionalAuth(request).catch(() => null);
 
   // Get posts, interactions, and users with RLS
-  const { posts, allReactions, allComments, allShares, users } =
+  const { posts, allReactions, allComments, allShares, users, originalAuthorMap } =
     authUser && authUser.userId
       ? await asUser(authUser, async (db) => {
           const postsList = await db.post.findMany({
@@ -162,6 +163,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               allComments: [],
               allShares: [],
               users: [],
+              originalAuthorMap: new Map<string, string>(),
             };
           }
 
@@ -192,12 +194,33 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             select: { id: true, username: true, displayName: true },
           });
 
+          // Resolve original authors for reposts/quotes so viewer block/mute
+          // filtering can hide reposts of excluded authors.
+          const originalIds = [
+            ...new Set(
+              postsList
+                .map((p) => p.originalPostId)
+                .filter((id): id is string => id !== null)
+            ),
+          ];
+          const originalAuthors =
+            originalIds.length > 0
+              ? await db.post.findMany({
+                  where: { id: { in: originalIds } },
+                  select: { id: true, authorId: true },
+                })
+              : [];
+          const originalAuthorMap = new Map<string, string>(
+            originalAuthors.map((p) => [p.id, p.authorId])
+          );
+
           return {
             posts: postsList,
             allReactions: reactions,
             allComments: comments,
             allShares: shares,
             users: usersList,
+            originalAuthorMap,
           };
         })
       : await asPublic(async (db) => {
@@ -222,6 +245,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               allComments: [],
               allShares: [],
               users: [],
+              originalAuthorMap: new Map<string, string>(),
             };
           }
 
@@ -252,12 +276,33 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             select: { id: true, username: true, displayName: true },
           });
 
+          // Resolve original authors for reposts/quotes so viewer block/mute
+          // filtering can hide reposts of excluded authors.
+          const originalIds = [
+            ...new Set(
+              postsList
+                .map((p) => p.originalPostId)
+                .filter((id): id is string => id !== null)
+            ),
+          ];
+          const originalAuthors =
+            originalIds.length > 0
+              ? await db.post.findMany({
+                  where: { id: { in: originalIds } },
+                  select: { id: true, authorId: true },
+                })
+              : [];
+          const originalAuthorMap = new Map<string, string>(
+            originalAuthors.map((p) => [p.id, p.authorId])
+          );
+
           return {
             posts: postsList,
             allReactions: reactions,
             allComments: comments,
             allShares: shares,
             users: usersList,
+            originalAuthorMap,
           };
         });
 
@@ -309,8 +354,27 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   );
   const userMap = new Map(users.map((u) => [u.id, u]));
 
+  // Apply viewer block/mute filtering before trending scores are computed,
+  // so excluded posts do not take a top-5 slot. Anonymous viewers keep the
+  // unfiltered public snapshot.
+  const excludedAuthorIds = authUser?.userId
+    ? await loadViewerExcludedAuthorIds(authUser.userId)
+    : new Set<string>();
+  const visiblePosts =
+    excludedAuthorIds.size > 0
+      ? posts.filter((post) => {
+          if (excludedAuthorIds.has(post.authorId)) return false;
+          const originalAuthorId = post.originalPostId
+            ? (originalAuthorMap.get(post.originalPostId) ?? null)
+            : null;
+          return !(
+            originalAuthorId && excludedAuthorIds.has(originalAuthorId)
+          );
+        })
+      : posts;
+
   // Calculate trending scores and format posts
-  const trendingPosts: TrendingPost[] = posts
+  const trendingPosts: TrendingPost[] = visiblePosts
     .map((post) => {
       const likeCount = reactionMap.get(post.id) ?? 0;
       const commentCount = commentMap.get(post.id) ?? 0;
