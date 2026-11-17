@@ -320,6 +320,44 @@ describe('PredictionMarketService', () => {
     expect(closed?.shares).toBe(0);
   });
 
+  it('keeps a hundredth-share remainder that binary subtraction drops below the minimum', async () => {
+    // 10.01 - 10 is 0.009999999999999787 in IEEE-754. That lot is one
+    // hundredth of a share: the position column persists it as 0.010000
+    // and resolution pays 0.01 pt. Closing the position here deletes it.
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 10.01,
+      avgPrice: 0.5,
+      cashCostBasis: 5.01,
+      status: 'active',
+      pnl: 0,
+      outcome: null,
+      resolvedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const sold = await service.sell({
+      userId: 'u1',
+      marketId: 'm1',
+      shares: 10,
+    });
+    expect(sold.positionClosed).toBe(false);
+    expect(sold.remainingShares).toBe(0.01);
+
+    const held = await db.getPosition('u1', 'm1', 'yes');
+    expect(held?.status).toBe('active');
+    expect(held?.shares).toBe(0.01);
+
+    const before = (await wallet.getBalance('u1')).balance;
+    await service.resolve({ marketId: 'm1', winningSide: 'yes' });
+    const credited = (await wallet.getBalance('u1')).balance - before;
+    expect(credited).toBeCloseTo(0.01, 8);
+    expect(credited).toBeGreaterThan(0);
+  });
+
   it('should ignore closed positions when selecting a position to sell', async () => {
     await service.buy({
       userId: 'u1',

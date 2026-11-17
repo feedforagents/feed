@@ -43,7 +43,10 @@ export function calculatePredictionPositionSnapshot(params: {
   if (resolved && resolution !== null) {
     const isWinningSide =
       (side === 'yes' && resolution) || (side === 'no' && !resolution);
-    const currentValue = isWinningSide ? shares : 0;
+    // Value a winner at the settled credit, not raw shares (PRD §9.1, §9.2).
+    const currentValue = isWinningSide
+      ? PredictionPricing.calculateExpectedPayout(shares, avgPrice)
+      : 0;
 
     return {
       costBasis,

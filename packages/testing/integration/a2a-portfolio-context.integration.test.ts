@@ -32,7 +32,11 @@ import { recentMessagesProvider } from '../../agents/src/plugins/plugin-agent-co
 const userId = `portfolio-audit-${crypto.randomUUID()}`;
 // Organization state rows this suite inserted (CI starts from an empty schema).
 const createdOrgStateIds: string[] = [];
+const createdVisibleAgentIds: string[] = [];
 afterAll(async () => {
+  for (const id of createdVisibleAgentIds) {
+    await db.delete(users).where(eq(users.id, id));
+  }
   for (const id of createdOrgStateIds) {
     await db.delete(organizationState).where(eq(organizationState.id, id));
   }
@@ -174,6 +178,20 @@ test('A2A market responses satisfy the prompt provider contracts', async () => {
 });
 
 test('organization context resolves real names and tickers; user context retains agent identity', async () => {
+  // The portfolio owner is deliberately a hidden test account. Use a separate
+  // owned non-test agent to exercise the positive mention-identity contract.
+  const visibleAgentId = `${userId}-visible-agent`;
+  const insertedAgents = await db
+    .insert(users)
+    .values({
+      id: visibleAgentId,
+      username: visibleAgentId,
+      isAgent: true,
+      isTest: false,
+      updatedAt: new Date(),
+    })
+    .returning({ id: users.id });
+  createdVisibleAgentIds.push(...insertedAgents.map((row) => row.id));
   const [staticOrg] = StaticDataRegistry.getAllOrganizations();
   if (!staticOrg) throw new Error('Static data registry has no organizations');
   const inserted = await db
@@ -198,7 +216,8 @@ test('organization context resolves real names and tickers; user context retains
       userId
     )
   );
-  expect(found.find((user) => user.id === userId)?.isAgent).toBe(true);
+  expect(found.find((user) => user.id === visibleAgentId)?.isAgent).toBe(true);
+  expect(found.some((user) => user.id === userId)).toBe(false);
 });
 
 test('notifications include actual unread totals independently of the page limit', async () => {
