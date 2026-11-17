@@ -42,6 +42,7 @@ export interface PriceUpdateSummary {
 /** Add-to-position tx payload (includes post-commit helper fields). */
 type AddToPositionTransactionResult = {
   positionId: string;
+  balance: number;
   ticker: string;
   side: PerpSide;
   size: number;
@@ -61,6 +62,7 @@ type AddToPositionTransactionResult = {
 /** Flip-position tx payload (includes post-commit helper fields). */
 type FlipPositionTransactionResult = {
   positionId: string;
+  balance: number;
   ticker: string;
   side: PerpSide;
   size: number;
@@ -834,158 +836,159 @@ export class PerpMarketService {
    * @param input.maxSlippage - Maximum price deviation from entry. Rejects if exceeded.
    */
   async closePosition(input: PerpCloseInput): Promise<PerpTradeResult> {
-    const settlement = await this.db.transaction(async (tx) => {
-      const position = await tx.lockOpenPositionById(input.positionId);
-      if (!position) {
-        throw new Error(
-          `Position not found or already closed: ${input.positionId}`
-        );
-      }
-      if (position.userId !== input.userId) {
-        throw new Error('Not your position');
-      }
-
-      const markets = await tx.listMarkets();
-      const market = markets.find((m) => m.ticker === position.ticker);
-      if (!market) {
-        throw new Error(
-          `Market not found for position ticker ${position.ticker}`
-        );
-      }
-
-      const closePercentage = resolveClosePercentage(input.percentage);
-
-      const closeSize = position.size * closePercentage;
-      const remainingSize = position.size - closeSize;
-      const isFullClose = remainingSize < 0.01;
-      const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
-      if (!isFullClose && closeSize < minOrderSize) {
-        throw new Error(
-          `Partial close below minimum order size (${minOrderSize})`
-        );
-      }
-
-      const requestedExitPrice =
-        input.exitPriceOverride ??
-        this.getCloseExecutionQuote(market, position.side, closeSize)
-          .executionPrice;
-
-      if (!Number.isFinite(requestedExitPrice) || requestedExitPrice <= 0) {
-        throw new Error(
-          `Invalid exit price for ${position.ticker}: ${requestedExitPrice}. Cannot close position.`
-        );
-      }
-
-      const closeImpact = await this.previewCloseImpact({
-        ticker: position.ticker,
-        exitPrice: requestedExitPrice,
-        currentSpotPrice: market.currentPrice,
-        side: position.side,
-        closeSize,
-      });
-      const exitPrice = closeImpact?.avgExitPrice ?? requestedExitPrice;
-
-      // Enforce tolerance against the actual (post-impact) exit fill.
-      this.assertWithinSlippage(
-        exitPrice,
-        market.markPrice ?? market.currentPrice,
-        input.maxSlippage
-      );
-
-      const { pnl } = calculateUnrealizedPnL(
-        position.entryPrice,
-        exitPrice,
-        position.side,
-        closeSize
-      );
-      const proportionalFunding = position.fundingPaid * closePercentage;
-      const realizedPnL = pnl - proportionalFunding;
-      const marginPaid = closeSize / position.leverage;
-      // A close cannot lose more than the leg's margin: the settlement
-      // below is already floored at 0, but the uncapped realizedPnL above
-      // was stored/returned while recordPnL booked only -marginPaid, so
-      // the two records of the same close disagreed past the margin.
-      // Cap here, matching the liquidation cap (Math.max(..., -marginLoss)).
-      const cappedRealizedPnL = Math.max(realizedPnL, -marginPaid);
-      const grossSettlement = marginPaid + cappedRealizedPnL;
-      const fee = this.calculateFee(closeSize);
-      const netSettlement =
-        closeSize >= 0 && closeSize < 0.01
-          ? floorPoints(Math.max(0, grossSettlement - fee))
-          : Math.max(0, grossSettlement - fee);
-      const now = this.deps.clock?.now() ?? new Date();
-
-      if (isFullClose) {
-        await tx.closePosition(position.id, {
-          currentPrice: exitPrice,
-          closedAt: now,
-          realizedPnL: (position.realizedPnL ?? 0) + cappedRealizedPnL,
-          unrealizedPnL: 0,
-          unrealizedPnLPercent: 0,
-        });
-      } else {
-        const remainingFunding = position.fundingPaid - proportionalFunding;
-        const { pnl: remainingPnl, pnlPercent: remainingPnlPercent } =
-          calculateUnrealizedPnL(
-            position.entryPrice,
-            exitPrice,
-            position.side,
-            remainingSize
+    const settlement = await this.deps.settlement.run(
+      input.userId,
+      async (tx, wallet) => {
+        const position = await tx.lockOpenPositionById(input.positionId);
+        if (!position) {
+          throw new Error(
+            `Position not found or already closed: ${input.positionId}`
           );
-        await tx.updateOpenPosition(position.id, {
-          size: remainingSize,
-          fundingPaid: remainingFunding,
-          currentPrice: exitPrice,
-          // Keep the row's realized PnL in step with what has been settled,
-          // so the final close and the position views report lifetime PnL.
-          realizedPnL: (position.realizedPnL ?? 0) + cappedRealizedPnL,
-          unrealizedPnL: remainingPnl,
-          unrealizedPnLPercent: remainingPnlPercent,
-          lastUpdated: now,
+        }
+        if (position.userId !== input.userId) {
+          throw new Error('Not your position');
+        }
+
+        const markets = await tx.listMarkets();
+        const market = markets.find((m) => m.ticker === position.ticker);
+        if (!market) {
+          throw new Error(
+            `Market not found for position ticker ${position.ticker}`
+          );
+        }
+
+        const closePercentage = resolveClosePercentage(input.percentage);
+
+        const closeSize = position.size * closePercentage;
+        const remainingSize = position.size - closeSize;
+        const isFullClose = remainingSize < 0.01;
+        const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
+        if (!isFullClose && closeSize < minOrderSize) {
+          throw new Error(
+            `Partial close below minimum order size (${minOrderSize})`
+          );
+        }
+
+        const requestedExitPrice =
+          input.exitPriceOverride ??
+          this.getCloseExecutionQuote(market, position.side, closeSize)
+            .executionPrice;
+
+        if (!Number.isFinite(requestedExitPrice) || requestedExitPrice <= 0) {
+          throw new Error(
+            `Invalid exit price for ${position.ticker}: ${requestedExitPrice}. Cannot close position.`
+          );
+        }
+
+        const closeImpact = await this.previewCloseImpact({
+          ticker: position.ticker,
+          exitPrice: requestedExitPrice,
+          currentSpotPrice: market.currentPrice,
+          side: position.side,
+          closeSize,
         });
+        const exitPrice = closeImpact?.avgExitPrice ?? requestedExitPrice;
+
+        // Enforce tolerance against the actual (post-impact) exit fill.
+        this.assertWithinSlippage(
+          exitPrice,
+          market.markPrice ?? market.currentPrice,
+          input.maxSlippage
+        );
+
+        const { pnl } = calculateUnrealizedPnL(
+          position.entryPrice,
+          exitPrice,
+          position.side,
+          closeSize
+        );
+        const proportionalFunding = position.fundingPaid * closePercentage;
+        const realizedPnL = pnl - proportionalFunding;
+        const marginPaid = closeSize / position.leverage;
+        // A close cannot lose more than the leg's margin: the settlement
+        // below is already floored at 0, but the uncapped realizedPnL above
+        // was stored/returned while recordPnL booked only -marginPaid, so
+        // the two records of the same close disagreed past the margin.
+        // Cap here, matching the liquidation cap (Math.max(..., -marginLoss)).
+        const cappedRealizedPnL = Math.max(realizedPnL, -marginPaid);
+        const grossSettlement = marginPaid + cappedRealizedPnL;
+        const fee = this.calculateFee(closeSize);
+        const netSettlement =
+          closeSize >= 0 && closeSize < 0.01
+            ? floorPoints(Math.max(0, grossSettlement - fee))
+            : Math.max(0, grossSettlement - fee);
+        const now = this.deps.clock?.now() ?? new Date();
+
+        if (isFullClose) {
+          await tx.closePosition(position.id, {
+            currentPrice: exitPrice,
+            closedAt: now,
+            realizedPnL: (position.realizedPnL ?? 0) + cappedRealizedPnL,
+            unrealizedPnL: 0,
+            unrealizedPnLPercent: 0,
+          });
+        } else {
+          const remainingFunding = position.fundingPaid - proportionalFunding;
+          const { pnl: remainingPnl, pnlPercent: remainingPnlPercent } =
+            calculateUnrealizedPnL(
+              position.entryPrice,
+              exitPrice,
+              position.side,
+              remainingSize
+            );
+          await tx.updateOpenPosition(position.id, {
+            size: remainingSize,
+            fundingPaid: remainingFunding,
+            currentPrice: exitPrice,
+            // Keep the row's realized PnL in step with what has been settled,
+            // so the final close and the position views report lifetime PnL.
+            realizedPnL: (position.realizedPnL ?? 0) + cappedRealizedPnL,
+            unrealizedPnL: remainingPnl,
+            unrealizedPnLPercent: remainingPnlPercent,
+            lastUpdated: now,
+          });
+        }
+
+        const marketTotals = await tx.applyMarketDeltas(position.ticker, {
+          openInterest: -closeSize,
+          volume24h: closeSize,
+        });
+
+        const reason = isFullClose ? 'perp_close' : 'perp_partial_close';
+        if (netSettlement > 0) {
+          await wallet.credit({
+            userId: input.userId,
+            amount: netSettlement,
+            reason,
+            description: `${isFullClose ? 'Close' : `Partial close ${(closePercentage * 100).toFixed(0)}%`} ${position.leverage}x ${position.side} ${position.ticker}`,
+            relatedId: position.id,
+          });
+        }
+
+        await wallet.recordPnL({
+          userId: input.userId,
+          pnl: netSettlement - marginPaid,
+          reason,
+          relatedId: position.id,
+        });
+
+        return {
+          balance: (await wallet.getBalance(input.userId)).balance,
+          closeImpact,
+          closeSize,
+          exitPrice,
+          fee,
+          isFullClose,
+          marginPaid,
+          marketTotals,
+          now,
+          position,
+          realizedPnL: cappedRealizedPnL,
+          remainingSize,
+          requestedExitPrice,
+        };
       }
-
-      const marketTotals = await tx.applyMarketDeltas(position.ticker, {
-        openInterest: -closeSize,
-        volume24h: closeSize,
-      });
-
-      return {
-        closeImpact,
-        closePercentage,
-        closeSize,
-        exitPrice,
-        fee,
-        isFullClose,
-        marginPaid,
-        marketTotals,
-        netSettlement,
-        now,
-        position,
-        requestedExitPrice,
-        realizedPnL: cappedRealizedPnL,
-        remainingSize,
-      };
-    });
-
-    if (settlement.netSettlement > 0) {
-      await this.deps.wallet.credit({
-        userId: input.userId,
-        amount: settlement.netSettlement,
-        reason: settlement.isFullClose ? 'perp_close' : 'perp_partial_close',
-        description: `${settlement.isFullClose ? 'Close' : `Partial close ${(settlement.closePercentage * 100).toFixed(0)}%`} ${settlement.position.leverage}x ${settlement.position.side} ${settlement.position.ticker}`,
-        relatedId: settlement.position.id,
-      });
-    }
-
-    await this.deps.wallet.recordPnL({
-      userId: input.userId,
-      pnl: settlement.netSettlement - settlement.marginPaid,
-      reason: settlement.isFullClose ? 'perp_close' : 'perp_partial_close',
-      relatedId: settlement.position.id,
-    });
-
-    const balanceResult = await this.deps.wallet.getBalance(input.userId);
+    );
 
     // Fee bookkeeping: retries + optional outbox (see processFeeWithRetry).
     // Awaited — not fire-and-forget — so the fee intent is durable (settled
@@ -1050,7 +1053,7 @@ export class PerpMarketService {
       realizedPnL: settlement.realizedPnL,
       feePaid: settlement.fee,
       marginPaid: settlement.marginPaid,
-      balance: balanceResult.balance,
+      balance: settlement.balance,
       remainingSize: settlement.isFullClose ? 0 : settlement.remainingSize,
       fullyClosed: settlement.isFullClose,
     };
@@ -1734,6 +1737,7 @@ export class PerpMarketService {
           // Return result data for use after transaction commits
           return {
             positionId: freshPosition.id,
+            balance: (await wallet.getBalance(input.userId)).balance,
             ticker: freshPosition.ticker,
             side: freshPosition.side,
             size: actualNewSize,
@@ -1767,9 +1771,6 @@ export class PerpMarketService {
       { ticker: result.ticker }
     );
 
-    // Get balance after transaction commits
-    const balance = (await this.deps.wallet.getBalance(input.userId)).balance;
-
     // Broadcast trade event outside transaction (SSE should not hold DB locks)
     void this.emitTradeEvent({
       type: 'perp_trade',
@@ -1800,7 +1801,7 @@ export class PerpMarketService {
       liquidationPrice: result.liquidationPrice,
       marginPaid: result.marginPaid,
       feePaid: result.feePaid,
-      balance,
+      balance: result.balance,
       isRebalance: result.isRebalance,
       rebalanceType: result.rebalanceType,
       previousSize: result.previousSize,
@@ -2104,6 +2105,7 @@ export class PerpMarketService {
             const totalFees = closeFee + openFee;
             return {
               positionId: newPosition.id,
+              balance: (await wallet.getBalance(input.userId)).balance,
               ticker: position.ticker,
               side: tradeSide,
               size: inverseSize,
@@ -2150,9 +2152,6 @@ export class PerpMarketService {
         ),
       ]);
 
-      // Get balance after transaction commits
-      const balance = (await this.deps.wallet.getBalance(input.userId)).balance;
-
       // Broadcast flip event outside transaction (SSE should not hold DB locks)
       void this.emitTradeEvent({
         type: 'perp_trade',
@@ -2186,7 +2185,7 @@ export class PerpMarketService {
         marginPaid: flipResult.marginPaid,
         feePaid: flipResult.feePaid,
         realizedPnL: flipResult.realizedPnL,
-        balance,
+        balance: flipResult.balance,
         isRebalance: flipResult.isRebalance,
         rebalanceType: flipResult.rebalanceType,
         previousSize: flipResult.previousSize,
