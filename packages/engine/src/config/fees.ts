@@ -16,9 +16,10 @@ export const FEE_CONFIG = {
   // Trading fees
   TRADING_FEE_RATE: 0.001, // 0.1% on all trades
 
-  // Fee distribution
-  PLATFORM_SHARE: 0.5, // 50% to platform
-  REFERRER_SHARE: 0.5, // 50% to referrer (if they have one)
+  // Fee distribution. PRD §9.6 removes the referral fee share, and D-18
+  // forbids transferring points between users, so the platform keeps the fee.
+  PLATFORM_SHARE: 1,
+  REFERRER_SHARE: 0,
 
   // Minimum fees
   MIN_FEE_AMOUNT: 0.01, // Don't process fees < $0.01

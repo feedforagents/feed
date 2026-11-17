@@ -23,8 +23,12 @@ export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
     // Dynamically import Node.js-only modules to avoid Edge Runtime errors
     // Import from main package entry point
-    const { setDefaultErrorCapture, logDevCredentials, getStorageClient } =
-      await import('@feed/api');
+    const {
+      setDefaultErrorCapture,
+      logDevCredentials,
+      getStorageClient,
+      invalidateCachePattern,
+    } = await import('@feed/api');
     const { createSentryApiRouteCapture } = await import(
       './src/lib/sentry/api-route-capture'
     );
@@ -40,7 +44,22 @@ export async function register() {
 
     const { npcBootstrapService } = await import('@feed/agents');
 
-    const { setGeneratedImageStorage } = await import('@feed/engine');
+    const { setGeneratedImageStorage, setCacheInvalidationClient } =
+      await import('@feed/engine');
+
+    // Wire the trade-cache invalidation client. The engine's
+    // invalidateAfterPredictionTrade / invalidateAfterPerpTrade helpers
+    // delete the cached trades lists (namespace 'market-trades') through
+    // this injectable client; without it every call is a no-op and the
+    // trades lists are only ever refreshed by TTL expiry. The patterns
+    // passed by the helpers already carry the 'market-trades:' prefix,
+    // so they are handed to the cache service unmodified.
+    setCacheInvalidationClient({
+      deleteByPattern: async (pattern: string) => {
+        await invalidateCachePattern(pattern);
+        return 0;
+      },
+    });
     setGeneratedImageStorage(async (url) => {
       const response = await fetch(url, {
         signal: AbortSignal.timeout(30_000),
