@@ -131,7 +131,7 @@ for (const side of ['long', 'short'] as const) {
         if (kind === 'open' || kind === 'add' || kind === 'flip') {
           const fill =
             kind === 'add' && previous
-              ? (executed.entryPrice * 6000 - previous.entryPrice * 1000) / 5000
+              ? 5000 / (6000 / executed.entryPrice - 1000 / previous.entryPrice)
               : executed.entryPrice;
           expect(preview.executionPrice).toBeCloseTo(fill, 6);
           expect(preview.liquidationPrice).toBeCloseTo(
