@@ -3,9 +3,14 @@ import {
   relayCronToStaging,
   requireCronAuth,
   successResponse,
+  ValidationError,
   withErrorHandling,
 } from '@feed/api';
-import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
+import {
+  fundingPeriodStart,
+  PerpDbAdapter,
+  PerpMarketService,
+} from '@feed/core/markets/perps';
 import {
   createPerpSettlement,
   createPerpTradesCachePort,
@@ -20,6 +25,44 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // Use centralized cron auth (fail-closed in production)
   requireCronAuth(request, { jobName: 'PerpFunding' });
+
+  const firstPeriodValue = process.env.PERP_FUNDING_FIRST_PERIOD;
+  if (!firstPeriodValue) {
+    return successResponse({ success: true, skipped: 'funding-paused' });
+  }
+  const firstPeriod = new Date(firstPeriodValue);
+  if (
+    !firstPeriodValue.endsWith('Z') ||
+    fundingPeriodStart(firstPeriod).getTime() !== firstPeriod.getTime()
+  ) {
+    throw new Error('Invalid configured first perp funding period');
+  }
+
+  const scheduledTime = request.headers.get('X-Cloudflare-Cron-Time');
+  if (
+    (scheduledTime === null && request.method === 'GET') ||
+    (scheduledTime !== null && !/^\d{13}$/.test(scheduledTime))
+  ) {
+    throw new ValidationError('Funding requires a valid scheduled timestamp');
+  }
+  const period =
+    scheduledTime === null
+      ? fundingPeriodStart(startTime)
+      : new Date(Number(scheduledTime));
+  if (
+    fundingPeriodStart(period).getTime() !== period.getTime() ||
+    period > startTime
+  ) {
+    throw new ValidationError(
+      'Funding requires a completed UTC schedule boundary'
+    );
+  }
+  if (period < firstPeriod) {
+    return successResponse({
+      success: true,
+      skipped: 'before-funding-cutover',
+    });
+  }
 
   // Relay to staging if configured (REDIRECT_CRON_STAGING; disabled on Cloudflare)
   // but still execute locally (fan-out).
@@ -66,7 +109,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     },
   });
 
-  await service.processFundingAndLiquidations();
+  await service.processFundingStep(period);
 
   logger.info(
     'Perp funding step executed via cron',

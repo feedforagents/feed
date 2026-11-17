@@ -1317,14 +1317,19 @@ export class PerpMarketService {
 
   /**
    * Run a funding step (8h by default), updating fundingPaid per position and fundingRate per market.
-   * Funding is accrued to positions (not settled to wallets here; PnL is adjusted on close).
+   * Each open position is accrued at most once per UTC 8h period (PRD §9.3 item 4).
+   * The claim is keyed by position and period, so a later period does not hide
+   * an earlier one when workers finish out of order, and a replay of either
+   * period does not charge again. Funding is accrued to positions (not settled
+   * to wallets here; PnL is adjusted on close).
    */
-  async processFundingStep(): Promise<void> {
+  async processFundingStep(scheduledPeriod?: Date): Promise<void> {
     const markets = await this.db.listMarkets();
     const positions = await this.db.listOpenPositions();
 
     const positionsByTicker = new Map<string, PerpPositionAggregate>();
     for (const pos of positions) {
+      if (scheduledPeriod && pos.openedAt > scheduledPeriod) continue;
       const agg =
         positionsByTicker.get(pos.ticker) ||
         createPerpAggregate(pos.ticker, pos.organizationId);
@@ -1338,8 +1343,10 @@ export class PerpMarketService {
     }
 
     const now = this.deps.clock?.now() ?? new Date();
+    const periodStart = scheduledPeriod ?? fundingPeriodStart(now);
     const nextFundingTime = new Date(
-      now.getTime() + FUNDING_PERIOD_HOURS * 60 * 60 * 1000
+      (scheduledPeriod ? fundingPeriodStart(now) : now).getTime() +
+        FUNDING_PERIOD_HOURS * 60 * 60 * 1000
     ).toISOString();
 
     for (const market of markets) {
@@ -1362,7 +1369,13 @@ export class PerpMarketService {
         // the locked row so settled funding is not restored or charged again.
         await this.db.transaction(async (tx) => {
           const fresh = await tx.lockOpenPositionById(pos.id);
-          if (!fresh) return;
+          if (!fresh || (scheduledPeriod && fresh.openedAt > periodStart))
+            return;
+          // One row per (position, period). A later period already recorded
+          // does not hide this one, and a replay conflicts. The insert rolls
+          // back with the fundingPaid write if that write fails.
+          const claimed = await tx.claimFundingPeriod(fresh.id, periodStart);
+          if (!claimed) return;
 
           // periodRate is signed (negative when shorts dominate); the payer is
           // decided by paymentDirection, so apply only the magnitude here.
@@ -2931,6 +2944,12 @@ function calculateFundingPaymentForPeriod(
 
 function periodsPerYear(): number {
   return (365.25 * 24) / FUNDING_PERIOD_HOURS;
+}
+
+/** Start of the UTC 8h funding window that contains `now` (00:00, 08:00, 16:00). */
+export function fundingPeriodStart(now: Date): Date {
+  const periodMs = FUNDING_PERIOD_HOURS * 60 * 60 * 1000;
+  return new Date(Math.floor(now.getTime() / periodMs) * periodMs);
 }
 
 import { shouldLiquidate } from './utils';
