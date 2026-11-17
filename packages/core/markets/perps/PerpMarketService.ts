@@ -1,6 +1,8 @@
 import {
   ConflictError,
   calculateTradeImpact,
+  canonicalTradingFee,
+  floorPoints,
   getInitialReserves,
   logger,
   PERP_MARKET_CONFIG,
@@ -154,6 +156,19 @@ export class PerpMarketService {
    * Process trading fee with exponential backoff retries.
    * After exhaustion, persists to `tradingFeeOutbox` when configured; cron drains via
    * `FeeService.processTradingFee` and deletes the row in the same DB transaction.
+   *
+   * One `operationId` is generated per invocation (per fee leg) and reused
+   * across the retries, so a retry after an ambiguous post-commit error
+   * replays the recorded fee instead of inserting a second row and
+   * incrementing totals and the stability fund again. The same key is
+   * carried into the outbox when the retries exhaust, so the drain
+   * replays under it too: a fee that committed while every retry
+   * observed an error must not become an unkeyed second charge.
+   * Each leg gets its own id, so a legitimate repeat leg (same position,
+   * type and amount) still charges. If fee processing AND outbox enqueue
+   * both fail, this helper logs and returns success — it does NOT
+   * guarantee durable intent for that failure; the fee then needs
+   * manual reconciliation.
    */
   private async processFeeWithRetry(
     params: {
@@ -167,10 +182,14 @@ export class PerpMarketService {
   ): Promise<void> {
     if (!this.deps.feeProcessor) return;
 
+    const operationId = crypto.randomUUID();
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= FEE_PROCESSING_MAX_RETRIES; attempt++) {
       try {
-        await this.deps.feeProcessor.processTradingFee(params);
+        await this.deps.feeProcessor.processTradingFee({
+          ...params,
+          operationId,
+        });
         return;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -207,12 +226,17 @@ export class PerpMarketService {
     const outbox = this.deps.tradingFeeOutbox;
     if (outbox) {
       try {
+        // Carry the leg's operationId into the outbox: the fee may
+        // already have committed while every retry observed an error
+        // (e.g. the replay lookup itself failed), so the drain must
+        // replay under the same key instead of inserting unkeyed.
         await outbox.enqueue({
           userId: params.userId,
           amount: params.amount,
           type: params.type,
           relatedId: params.relatedId,
           positionId: params.positionId,
+          operationId,
           lastError: lastError?.message,
         });
       } catch (enqueueErr) {
@@ -748,9 +772,7 @@ export class PerpMarketService {
         positionId: position.id,
       },
       { ticker }
-    ).catch(() => {
-      // Error already logged in processFeeWithRetry; catch to prevent unhandled rejection
-    });
+    );
 
     const result: PerpTradeResult = {
       positionId: position.id,
@@ -887,7 +909,10 @@ export class PerpMarketService {
       const cappedRealizedPnL = Math.max(realizedPnL, -marginPaid);
       const grossSettlement = marginPaid + cappedRealizedPnL;
       const fee = this.calculateFee(closeSize);
-      const netSettlement = Math.max(0, grossSettlement - fee);
+      const netSettlement =
+        closeSize >= 0 && closeSize < 0.01
+          ? floorPoints(Math.max(0, grossSettlement - fee))
+          : Math.max(0, grossSettlement - fee);
       const now = this.deps.clock?.now() ?? new Date();
 
       if (isFullClose) {
@@ -963,7 +988,12 @@ export class PerpMarketService {
     const balanceResult = await this.deps.wallet.getBalance(input.userId);
 
     // Fee bookkeeping: retries + optional outbox (see processFeeWithRetry).
-    void this.processFeeWithRetry(
+    // Awaited — not fire-and-forget — so the fee intent is durable (settled
+    // inline or persisted to the outbox) before success is reported: the
+    // A2A path has no waitUntil/after to finish a detached promise if the
+    // invocation ends first. processFeeWithRetry never throws (failures are
+    // logged, then enqueued), so awaiting it cannot fail the committed trade.
+    await this.processFeeWithRetry(
       {
         userId: input.userId,
         amount: settlement.closeSize,
@@ -972,9 +1002,7 @@ export class PerpMarketService {
         positionId: settlement.position.id,
       },
       { ticker: settlement.position.ticker }
-    ).catch(() => {
-      // Error already logged in processFeeWithRetry; catch to prevent unhandled rejection
-    });
+    );
 
     // Apply market-level post-close impact after settlement to keep the close
     // path fail-safe (position is already settled if this step fails).
@@ -1415,12 +1443,17 @@ export class PerpMarketService {
   }
 
   private calculateFee(notional: number): number {
-    // FeeService records and splits the fee in integer cents (one
-    // canonical rounded fee), so charge that same cent-rounded amount:
-    // an unrounded charge would disagree with the fee ledger, the
-    // platform/referrer split and users.totalFeesPaid.
-    const fee =
-      Math.round(notional * this.deps.fees.tradingFeeRate * 100) / 100;
+    // A legacy full close can be below the new-order minimum. Its zero
+    // cent-settled fee base must not be turned into a fee by the min clamp.
+    // Keep custom minimums unchanged for every positive settled base.
+    if (notional >= 0 && notional < 0.01) return 0;
+    // FeeService records and splits the one canonical fee (PRD §9.1):
+    // the fee on the cent-settled notional, rounded UP to whole cents.
+    // Charge that same amount — any other rounding would disagree with
+    // the fee ledger, the platform/referrer split and
+    // users.totalFeesPaid. Settlement dust and fee totals are accounted
+    // separately; fee monotonicity across split trades is not promised.
+    const fee = canonicalTradingFee(notional, this.deps.fees.tradingFeeRate);
     return Math.max(fee, this.deps.fees.minFeeAmount);
   }
 
@@ -1720,8 +1753,10 @@ export class PerpMarketService {
       );
 
     // Process fees outside transaction to avoid holding locks during external work.
-    // Uses retry logic for reliability.
-    void this.processFeeWithRetry(
+    // Uses retry logic for reliability. Awaited — not fire-and-forget — so
+    // the fee intent is durable (settled inline or persisted to the outbox)
+    // before success is reported (see openPosition).
+    await this.processFeeWithRetry(
       {
         userId: input.userId,
         amount: addedSize,
@@ -1730,9 +1765,7 @@ export class PerpMarketService {
         positionId: result.positionId,
       },
       { ticker: result.ticker }
-    ).catch(() => {
-      // Error already logged in processFeeWithRetry; catch to prevent unhandled rejection
-    });
+    );
 
     // Get balance after transaction commits
     const balance = (await this.deps.wallet.getBalance(input.userId)).balance;
@@ -1974,7 +2007,10 @@ export class PerpMarketService {
             // and the liquidation cap (Math.max(..., -marginLoss)).
             const cappedRealizedPnL = Math.max(realizedPnL, -closeMarginPaid);
             const grossSettlement = closeMarginPaid + cappedRealizedPnL;
-            const netSettlement = Math.max(0, grossSettlement - closeFee);
+            const netSettlement =
+              position.size >= 0 && position.size < 0.01
+                ? floorPoints(Math.max(0, grossSettlement - closeFee))
+                : Math.max(0, grossSettlement - closeFee);
 
             await tx.closePosition(position.id, {
               currentPrice: exitPrice,
@@ -2089,7 +2125,9 @@ export class PerpMarketService {
         );
 
       // Fee bookkeeping for close + open legs (retries + optional outbox).
-      void Promise.all([
+      // Awaited — not fire-and-forget — so both legs' fee intents are
+      // durable before success is reported (see openPosition).
+      await Promise.all([
         this.processFeeWithRetry(
           {
             userId: input.userId,
@@ -2110,9 +2148,7 @@ export class PerpMarketService {
           },
           { ticker: existing.ticker }
         ),
-      ]).catch(() => {
-        // Errors logged inside processFeeWithRetry; avoid unhandled rejection
-      });
+      ]);
 
       // Get balance after transaction commits
       const balance = (await this.deps.wallet.getBalance(input.userId)).balance;
@@ -2494,7 +2530,10 @@ export class PerpMarketService {
     const closeFee = this.calculateFee(existing.size);
     const realizedPnL = closePnl - existing.fundingPaid;
     const grossSettlement = closeMarginPaid + realizedPnL;
-    const estimatedCloseSettlement = Math.max(0, grossSettlement - closeFee);
+    const estimatedCloseSettlement =
+      existing.size >= 0 && existing.size < 0.01
+        ? floorPoints(Math.max(0, grossSettlement - closeFee))
+        : Math.max(0, grossSettlement - closeFee);
     const marginRequired = inverseSize / effectiveLeverage;
     const openFee = this.calculateFee(inverseSize);
     const openCost = marginRequired + openFee;
@@ -2576,7 +2615,10 @@ export class PerpMarketService {
     const closeMarginPaid = closeSize / existing.leverage;
     const closeFee = this.calculateFee(closeSize);
     const grossSettlement = closeMarginPaid + realizedPnL;
-    const estimatedCloseSettlement = Math.max(0, grossSettlement - closeFee);
+    const estimatedCloseSettlement =
+      closeSize >= 0 && closeSize < 0.01
+        ? floorPoints(Math.max(0, grossSettlement - closeFee))
+        : Math.max(0, grossSettlement - closeFee);
     const quotedPrice =
       existing.side === 'long'
         ? closeExecution.bidPrice

@@ -73,7 +73,10 @@ import {
   inArray,
   messageReactions,
   messages,
+  notInArray,
   sql,
+  userBlocks,
+  userMutes,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -169,6 +172,36 @@ export const GET = withErrorHandling(
         .from(chatParticipants)
         .where(eq(chatParticipants.chatId, chatId));
 
+      // Match the existing group-history policy in A2A/MCP. Keep these reads
+      // on this user's transaction; failures must not expose unfiltered history.
+      const excludedAuthorIds = new Set<string>();
+      if (chat.isGroup) {
+        const [blocked, muted, blockedBy] = await Promise.all([
+          db
+            .select({ id: userBlocks.blockedId })
+            .from(userBlocks)
+            .where(eq(userBlocks.blockerId, userId)),
+          db
+            .select({ id: userMutes.mutedId })
+            .from(userMutes)
+            .where(eq(userMutes.muterId, userId)),
+          db
+            .select({ id: userBlocks.blockerId })
+            .from(userBlocks)
+            .where(eq(userBlocks.blockedId, userId)),
+        ]);
+        for (const row of [...blocked, ...muted, ...blockedBy]) {
+          if (typeof row.id !== 'string')
+            throw new Error('Invalid moderation author ID');
+          excludedAuthorIds.add(row.id);
+        }
+      }
+      const excludedSenderIds = [...excludedAuthorIds];
+      // Apply before every limit so hidden messages cannot consume page slots.
+      const senderScope = excludedSenderIds.length
+        ? notInArray(messages.senderId, excludedSenderIds)
+        : undefined;
+
       // Build message query — three modes:
       // 1. `after` (ISO timestamp): fetch messages NEWER than this time (ASC order, for sync)
       // 2. `cursor` (message ID): fetch messages OLDER than this cursor (DESC order, for load-more)
@@ -180,7 +213,11 @@ export const GET = withErrorHandling(
           .select()
           .from(messages)
           .where(
-            and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
+            and(
+              eq(messages.chatId, chatId),
+              gt(messages.createdAt, after),
+              senderScope
+            )
           )
           .orderBy(asc(messages.createdAt), asc(messages.id))
           .limit(effectiveLimit);
@@ -211,7 +248,8 @@ export const GET = withErrorHandling(
           .where(
             and(
               eq(messages.chatId, chatId),
-              sql`(${messages.createdAt}, ${messages.id}) < (${cursorMessage.createdAt}::text::timestamp without time zone, ${cursorMessage.id}::text)`
+              sql`(${messages.createdAt}, ${messages.id}) < (${cursorMessage.createdAt}::text::timestamp without time zone, ${cursorMessage.id}::text)`,
+              senderScope
             )
           )
           .orderBy(desc(messages.createdAt), desc(messages.id))
@@ -223,12 +261,17 @@ export const GET = withErrorHandling(
         messagesList = await db
           .select()
           .from(messages)
-          .where(eq(messages.chatId, chatId))
+          .where(and(eq(messages.chatId, chatId), senderScope))
           .orderBy(desc(messages.createdAt), desc(messages.id))
           .limit(effectiveLimit + 1);
       }
 
-      return { chat, participants: participantsList, messages: messagesList };
+      return {
+        chat,
+        participants: participantsList,
+        messages: messagesList,
+        excludedAuthorIds,
+      };
     };
 
     const fullChat = await asUser(authUser, fetchChatData);
@@ -415,13 +458,14 @@ export const GET = withErrorHandling(
     }
 
     // Resolve replied-to messages in batch
-    const replyToIds = [
-      ...new Set(
-        messagesInOrder
-          .map((m) => m.replyToMessageId)
-          .filter((id): id is string => !!id)
-      ),
-    ];
+    const replyToIdSet = new Set<string>();
+    for (const message of messagesInOrder) {
+      const id = message.replyToMessageId;
+      if (id == null || id === '') continue;
+      if (typeof id !== 'string') throw new Error('Invalid reply message ID');
+      replyToIdSet.add(id);
+    }
+    const replyToIds = [...replyToIdSet];
     const replyToMessagesMap = new Map<
       string,
       { id: string; content: string; senderId: string; senderName?: string }
@@ -441,6 +485,7 @@ export const GET = withErrorHandling(
       }, 'get-reply-to-messages');
 
       for (const rm of replyMessages) {
+        if (fullChat.excludedAuthorIds.has(rm.senderId)) continue;
         const sender = usersMap.get(rm.senderId);
         const actor = actorsMap.get(rm.senderId);
         replyToMessagesMap.set(rm.id, {
