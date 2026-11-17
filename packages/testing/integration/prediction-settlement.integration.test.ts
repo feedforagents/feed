@@ -353,10 +353,9 @@ describe('atomic prediction settlement with real Postgres and wallet', () => {
     await cancel();
     const after = await npcBalance(actor.id);
     expect(after.user).toBe(actor.userBalance);
-    expect(after.trading).toBeCloseTo(
-      990 + floorPoints(Number(holding.shares) * Number(holding.avgPrice)),
-      2
-    );
+    // Cancellation returns the gross cash paid, including the entry fee.
+    expect(Number(holding.cashCostBasis)).toBe(10);
+    expect(after.trading).toBe(1000);
     await cancel();
     expect(await npcBalance(actor.id)).toEqual(after);
   });

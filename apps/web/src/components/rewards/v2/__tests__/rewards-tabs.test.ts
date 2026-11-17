@@ -1,4 +1,11 @@
-import { describe, expect, it } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  setSystemTime,
+} from 'bun:test';
 import {
   type AchievementFromApi,
   mapStatus,
@@ -81,6 +88,14 @@ describe('mapStatus', () => {
 // ---------- formatCountdown ----------
 
 describe('formatCountdown', () => {
+  beforeEach(() => {
+    setSystemTime(new Date('2026-01-01T00:00:00Z'));
+  });
+
+  afterEach(() => {
+    setSystemTime();
+  });
+
   it('returns hours remaining for < 24h', () => {
     const fiveHoursFromNow = new Date(
       Date.now() + 5 * 60 * 60 * 1000

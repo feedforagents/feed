@@ -12,6 +12,8 @@ export interface LeaderboardEntry {
   reputationPoints: number;
   balance: number;
   lifetimePnL: number;
+  unrealizedPnL?: number;
+  netProfit?: number;
   capitalBase?: number;
   effectiveCapitalBase?: number;
   tradingReturn?: number;

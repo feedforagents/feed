@@ -6,7 +6,12 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
-import { createPerpSettlement, FEE_CONFIG, WalletService } from '@feed/engine';
+import {
+  createPerpSettlement,
+  createPerpTradesCachePort,
+  FEE_CONFIG,
+  WalletService,
+} from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
@@ -30,6 +35,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const service = new PerpMarketService({
     settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
+    cache: createPerpTradesCachePort(),
     wallet: {
       debit: ({ userId, amount, reason, description, relatedId }) =>
         WalletService.debit(

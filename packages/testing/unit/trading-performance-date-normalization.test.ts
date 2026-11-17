@@ -29,7 +29,7 @@ describe('TradingPerformanceService date normalization', () => {
       TradingPerformanceService.countWalletsAbove({
         id: 'user-1',
         createdAt: '2026-04-07T11:35:04.013Z',
-        tradingReturn: '0.42',
+        netProfit: '0.42',
       })
     ).resolves.toBe(0);
 
