@@ -21,13 +21,17 @@ import {
 } from '@feed/api';
 import {
   and,
+  asc,
   asUser,
   chatParticipants,
   eq,
   generateSnowflakeId,
   groupInvites,
   groupMembers,
+  like,
+  not,
   sql,
+  users,
 } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -59,64 +63,50 @@ export const GET = withErrorHandling(
         throw new ApiError('Group not found', 404);
       }
 
-      const members = await db.groupMember.findMany({
-        where: {
-          groupId,
-          isActive: true,
-        },
-        orderBy: {
-          joinedAt: 'asc',
-        },
+      // Authorization uses active membership, independently of roster visibility.
+      const requesterMembership = await db.groupMember.findFirst({
+        where: { groupId, userId: user.userId, isActive: true },
+        select: { id: true },
       });
-
-      const requesterMembership = members.find(
-        (member) => member.userId === user.userId
-      );
       if (!requesterMembership) {
         throw new ApiError('You are not a member of this group', 403);
       }
 
-      const memberIds = members.map((member) => member.userId);
-      const memberUsers =
-        memberIds.length > 0
-          ? await db.user.findMany({
-              where: {
-                id: { in: memberIds },
-              },
-              select: {
-                id: true,
-                displayName: true,
-                username: true,
-                profileImageUrl: true,
-                isActor: true,
-                isAgent: true,
-              },
-            })
-          : [];
-      const memberUserMap = new Map(
-        memberUsers.map((memberUser) => [memberUser.id, memberUser])
-      );
+      const members = await db
+        .select({
+          id: users.id,
+          displayName: users.displayName,
+          username: users.username,
+          profileImageUrl: users.profileImageUrl,
+          isActor: users.isActor,
+          isAgent: users.isAgent,
+          role: groupMembers.role,
+          joinedAt: groupMembers.joinedAt,
+        })
+        .from(groupMembers)
+        .innerJoin(users, eq(users.id, groupMembers.userId))
+        .where(
+          and(
+            eq(groupMembers.groupId, groupId),
+            eq(groupMembers.isActive, true),
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        )
+        .orderBy(asc(groupMembers.joinedAt));
 
-      return members.map((member) => {
-        const memberUser = memberUserMap.get(member.userId);
-        const memberType = memberUser?.isActor
-          ? 'npc'
-          : memberUser?.isAgent
-            ? 'agent'
-            : 'user';
-
-        return {
-          id: member.userId,
-          displayName: memberUser?.displayName ?? null,
-          username: memberUser?.username ?? null,
-          profileImageUrl: memberUser?.profileImageUrl ?? null,
-          memberType,
-          role: member.role,
-          isAdmin: member.role === 'admin' || member.role === 'owner',
-          isOwner: member.role === 'owner',
-          joinedAt: member.joinedAt,
-        };
-      });
+      return members.map((member) => ({
+        id: member.id,
+        displayName: member.displayName,
+        username: member.username,
+        profileImageUrl: member.profileImageUrl,
+        memberType: member.isActor ? 'npc' : member.isAgent ? 'agent' : 'user',
+        role: member.role,
+        isAdmin: member.role === 'admin' || member.role === 'owner',
+        isOwner: member.role === 'owner',
+        joinedAt: member.joinedAt,
+      }));
     });
 
     logger.info(

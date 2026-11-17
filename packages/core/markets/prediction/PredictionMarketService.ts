@@ -24,6 +24,9 @@ import type {
 const DEFAULT_LIQUIDITY = 10_000;
 const MIN_SHARES = 0.01;
 const MIN_TRADE_AMOUNT = 1;
+// Position.shares is numeric(18, 6). Binary subtraction can land just below
+// the minimum lot for a quantity the column persists on a hundredth boundary.
+const POSITION_SHARE_SCALE = 6;
 
 /**
  * Maximum absolute odds shift (in probability units, 0–1) allowed in a single
@@ -71,6 +74,13 @@ function pointsDifference(a: number, b: number): number {
   return new Decimal(a)
     .minus(b)
     .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+    .toNumber();
+}
+
+function sharesAtPositionScale(shares: number): number {
+  if (!Number.isFinite(shares)) return 0;
+  return new Decimal(shares)
+    .toDecimalPlaces(POSITION_SHARE_SCALE, Decimal.ROUND_HALF_UP)
     .toNumber();
 }
 
@@ -391,8 +401,18 @@ export class PredictionMarketService {
       liquidity: newLiquidity,
     });
 
-    const remaining = pos.shares - shares;
-    const positionClosed = remaining <= MIN_SHARES;
+    const rawRemaining = pos.shares - shares;
+    // Keep a remainder the share column would store as a sellable lot.
+    // 10.01 - 10 is 0.009999999999999787 in binary; numeric(18, 6) stores
+    // that as 0.010000, and that lot redeems for 0.01 pt (PRD §9.2).
+    const persistedRemaining = sharesAtPositionScale(rawRemaining);
+    const remaining =
+      rawRemaining > 0 &&
+      rawRemaining <= MIN_SHARES &&
+      persistedRemaining >= MIN_SHARES
+        ? persistedRemaining
+        : rawRemaining;
+    const positionClosed = remaining < MIN_SHARES;
     const previousCost = calculatePredictionCashCostBasis(
       pos,
       this.deps.fees.tradingFeeRate
