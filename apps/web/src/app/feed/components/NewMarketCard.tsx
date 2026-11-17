@@ -9,6 +9,7 @@ import { PredictionProbabilityChart } from '@/components/markets/PredictionProba
 import { PredictionTradingModal } from '@/components/markets/PredictionTradingModal';
 import { usePredictionHistory } from '@/hooks/usePredictionHistory';
 import type { MarketTimeRange, PredictionMarket } from '@/types/markets';
+import { computePercentages } from './feed-card-percentages';
 
 interface NewMarketCardProps {
   story: NarrativeStory;
@@ -62,16 +63,6 @@ function formatEndInfo(isoDate: string): { label: string; ended: boolean } {
     return { label: `Ended ${dateStr}`, ended: true };
   }
   return { label: formatCountdown(isoDate), ended: false };
-}
-
-function computePercentages(
-  yesShares: number,
-  noShares: number
-): { yesPercent: number; noPercent: number } {
-  const total = yesShares + noShares;
-  if (total === 0) return { yesPercent: 50, noPercent: 50 };
-  const yesPercent = Math.round((yesShares / total) * 100);
-  return { yesPercent, noPercent: 100 - yesPercent };
 }
 
 /**
