@@ -25,10 +25,10 @@ import { POST } from '@/app/api/admin/markets/[marketId]/route';
  *
  * An earlier version of this test called a helper that mirrored the route's
  * writes, so reverting the route did not fail the test — it was not
- * regression evidence for the route. This version calls the real PATCH
+ * regression evidence for the route. This version calls the real POST
  * handler (with the test-DID admin auth the admin-email suite uses), so
- * reverting the route patch alone must fail it; see the revert check in
- * REPORT.md.
+ * reverting the route patch alone must fail it; tests (a) and (b) fail
+ * against the base route.
  *
  * Auth: steward:test:<adminId> with ALLOW_TEST_PRIVY_DID_AUTH=true.
  * The fixture admin user carries isAdmin so requireAdmin passes.
@@ -269,6 +269,31 @@ describe('admin extend vs cron resolution timing (real route handler)', () => {
     const market = await readMarket(questionId);
     expect(market?.resolved).toBe(false);
     expect(await userBalance(userId)).toBe(1000);
+  });
+
+  it('(d) a non-active question fails the extend instead of splitting the dates', async () => {
+    const { questionId, originalEnd } = await fixture();
+    // The split state the extend must never create silently: the question
+    // is no longer active while the market is still unresolved.
+    await dbWrite
+      .update(questions)
+      .set({ status: 'resolved' })
+      .where(eq(questions.id, questionId));
+    const extended = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); // +3d
+
+    const response = await callExtend(questionId, extended);
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe('MARKET_CONFLICT');
+
+    // Nothing moved: the market, question and timeframe dates all stay
+    // at the original end.
+    const market = await readMarket(questionId);
+    expect(market?.endDate.getTime()).toBe(originalEnd.getTime());
+    const question = await readQuestion(questionId);
+    expect(question?.resolutionDate.getTime()).toBe(originalEnd.getTime());
+    const timeframe = await readTimeframe(questionId);
+    expect(timeframe?.endTime.getTime()).toBe(originalEnd.getTime());
   });
 
   it('(c) a CAS conflict leaves all three tables untouched', async () => {
