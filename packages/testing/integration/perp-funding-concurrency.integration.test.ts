@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it, setSystemTime, spyOn } from 'bun:test';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
   balanceTransactions,
@@ -17,6 +17,8 @@ import {
   FEE_CONFIG,
 } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
+import { NextRequest } from 'next/server';
+import { GET } from '../../../apps/web/src/app/api/cron/perp-funding/route';
 
 const owners: string[] = [];
 const tickers: string[] = [];
@@ -75,7 +77,8 @@ async function fixture(
   longSize = 200,
   shortSize = 100,
   fundingPaid = 10,
-  Adapter: new (ticker: string) => FundingSnapshotDb = FundingSnapshotDb
+  Adapter: new (ticker: string) => FundingSnapshotDb = FundingSnapshotDb,
+  openedAt?: Date
 ) {
   const userIds = [await generateSnowflakeId(), await generateSnowflakeId()];
   const positionIds = [
@@ -136,6 +139,7 @@ async function fixture(
         fundingPaid: i === 0 ? fundingPaid : -fundingPaid / 2,
         unrealizedPnL: 0,
         unrealizedPnLPercent: 0,
+        openedAt,
         lastUpdated: new Date(),
       });
       await createUserWalletAdapter(tx).debit({
@@ -418,5 +422,149 @@ describe('funding is once per 8h period on real Postgres', () => {
       (position) => position.id === committed.id
     )!;
     expect(committedAfter.fundingPaid).toBeCloseTo(committed.fundingPaid, 8);
+  });
+  it('retries the original Worker job across the UTC boundary after partial commit', async () => {
+    const earlier = new Date('2026-11-08T00:00:00.000Z');
+    const later = new Date('2026-11-08T08:00:00.000Z');
+    const f = await fixture(
+      200,
+      100,
+      0,
+      FundingSnapshotDb,
+      new Date(earlier.getTime() - 1000)
+    );
+    const secret = 'local-funding-fixture';
+    const previousSecret = process.env.CRON_SECRET;
+    const previousCutover = process.env.PERP_FUNDING_FIRST_PERIOD;
+    const previousRelay = process.env.REDIRECT_CRON_STAGING;
+    process.env.CRON_SECRET = secret;
+    process.env.REDIRECT_CRON_STAGING = 'false';
+    delete process.env.PERP_FUNDING_FIRST_PERIOD;
+
+    const listMarkets = PerpDbAdapter.prototype.listMarkets;
+    const marketSpy = spyOn(
+      PerpDbAdapter.prototype,
+      'listMarkets'
+    ).mockImplementation(async function (this: PerpDbAdapter) {
+      return (await listMarkets.call(this)).filter(
+        (market) => market.ticker === f.ticker
+      );
+    });
+    const update = PerpDbAdapter.prototype.updateOpenPosition;
+    let writes = 0;
+    const updateSpy = spyOn(
+      PerpDbAdapter.prototype,
+      'updateOpenPosition'
+    ).mockImplementation(async function (this: PerpDbAdapter, id, changes) {
+      if (changes.fundingPaid !== undefined && ++writes === 2) {
+        throw new Error('injected funding write failure');
+      }
+      return update.call(this, id, changes);
+    });
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: (request) => GET(new NextRequest(request)),
+    });
+    const path = '/api/cron/perp-funding';
+    let acknowledgements = 0;
+    // Type the Cloudflare binding inputs used here without importing its globals.
+    type QueueInput = {
+      messages: {
+        body: { path: string; scheduledTime: number };
+        ack: () => void;
+      }[];
+    };
+    type QueueBindings = {
+      APP: { fetch: typeof fetch };
+      APP_ORIGIN: string;
+      CRON_SECRET: string;
+      CRON_ENABLED: string;
+    };
+    const workerUrl = new URL(
+      '../../../workers/cron/src/index.ts',
+      import.meta.url
+    );
+    const worker = (await import(workerUrl.href)).default as {
+      queue: (batch: QueueInput, env: QueueBindings) => Promise<void>;
+    };
+    const deliver = (period: Date, credential = secret) =>
+      worker.queue(
+        {
+          messages: [
+            {
+              body: { path, scheduledTime: period.getTime() },
+              ack: () => {
+                acknowledgements += 1;
+              },
+            },
+          ],
+        },
+        {
+          APP: { fetch },
+          APP_ORIGIN: server.url.origin,
+          CRON_SECRET: credential,
+          CRON_ENABLED: 'true',
+        }
+      );
+    const receipts = () =>
+      dbWrite
+        .select()
+        .from(perpPositionFundingAccruals)
+        .where(inArray(perpPositionFundingAccruals.positionId, f.positionIds));
+
+    try {
+      setSystemTime(new Date(later.getTime() - 1));
+      await deliver(earlier);
+      expect(await receipts()).toHaveLength(0);
+      process.env.PERP_FUNDING_FIRST_PERIOD = earlier.toISOString();
+      await expect(deliver(earlier, 'wrong-secret')).rejects.toThrow(
+        /HTTP 40[13]/
+      );
+      await deliver(new Date(earlier.getTime() - 8 * 60 * 60 * 1000));
+      expect(await receipts()).toHaveLength(0);
+
+      await expect(deliver(earlier)).rejects.toThrow('HTTP 500');
+      expect(acknowledgements).toBe(2);
+      expect(
+        (await receipts()).map((row) => row.periodStart.toISOString())
+      ).toEqual([earlier.toISOString()]);
+
+      setSystemTime(new Date(later.getTime() + 1));
+      await deliver(later);
+      await deliver(earlier);
+      await deliver(earlier);
+      await deliver(later);
+      expect(acknowledgements).toBe(6);
+      const positions = await f.adapter.listOpenPositions();
+      expect(
+        positions.find((position) => position.side === 'long')?.fundingPaid
+      ).toBeCloseTo(expectedPayment(200, 1) * 2, 8);
+      expect(
+        positions.find((position) => position.side === 'short')?.fundingPaid
+      ).toBeCloseTo(expectedPayment(100, -1) * 2, 8);
+      const recorded = await receipts();
+      expect(recorded).toHaveLength(4);
+      for (const id of f.positionIds) {
+        expect(
+          recorded
+            .filter((row) => row.positionId === id)
+            .map((row) => row.periodStart.toISOString())
+            .sort()
+        ).toEqual([earlier.toISOString(), later.toISOString()]);
+      }
+    } finally {
+      setSystemTime();
+      await server.stop(true);
+      updateSpy.mockRestore();
+      marketSpy.mockRestore();
+      if (previousSecret === undefined) delete process.env.CRON_SECRET;
+      else process.env.CRON_SECRET = previousSecret;
+      if (previousCutover === undefined)
+        delete process.env.PERP_FUNDING_FIRST_PERIOD;
+      else process.env.PERP_FUNDING_FIRST_PERIOD = previousCutover;
+      if (previousRelay === undefined) delete process.env.REDIRECT_CRON_STAGING;
+      else process.env.REDIRECT_CRON_STAGING = previousRelay;
+    }
   });
 });
