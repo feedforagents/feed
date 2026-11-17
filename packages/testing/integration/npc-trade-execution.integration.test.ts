@@ -188,6 +188,39 @@ describe('TradeExecutionService (NPC) money paths', () => {
     expect(await actorBalance(ACTOR_ID)).toBeCloseTo(before + 109.9, 2);
   });
 
+  it('returns only the margin (not full notional) on a leveraged legacy perp close', async () => {
+    const positionId = await generateSnowflakeId();
+    const now = new Date();
+    await db.insert(poolPositions).values({
+      id: positionId,
+      poolId: ACTOR_ID,
+      marketType: 'perp',
+      ticker: `NOSUCHTICKER${suffix}`,
+      side: 'long',
+      entryPrice: 100,
+      currentPrice: 110,
+      size: 100,
+      leverage: 5,
+      unrealizedPnL: 0,
+      openedAt: now,
+      updatedAt: now,
+    });
+    const before = await actorBalance(ACTOR_ID);
+
+    const result = await service.executeSingleDecision(
+      decision({
+        action: 'close_position',
+        marketType: 'perp',
+        positionId,
+      })
+    );
+    expect(result.action).toBe('close_position');
+    // Capital at risk is the margin (size / leverage = 20), not the $100
+    // notional: margin 20 + pnl 10 - fee 0.1 = 29.9. Crediting the full
+    // notional would mint $80 of balance that was never debited.
+    expect(await actorBalance(ACTOR_ID)).toBeCloseTo(before + 29.9, 2);
+  });
+
   it("refuses to settle another actor's legacy position", async () => {
     const positionId = await generateSnowflakeId();
     const now = new Date();
