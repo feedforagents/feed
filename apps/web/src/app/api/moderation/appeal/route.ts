@@ -78,7 +78,7 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import type { JsonValue } from '@feed/db';
-import { db } from '@feed/db';
+import { and, db, eq, users, withTransaction } from '@feed/db';
 import { WalletService } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -119,6 +119,12 @@ function parseEvaluation<T>(response: string, schema: z.ZodType<T>): T {
   }
   return parsed.data;
 }
+
+const alreadyProcessed = () =>
+  successResponse(
+    { success: false, error: 'Appeal already processed for this account' },
+    409
+  );
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   const authUser = await authenticate(request);
@@ -316,7 +322,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       });
     }
     // Approved - restore account
-    await restoreAccount(userId, result.reasoning);
+    if (!(await restoreAccount(userId, result.reasoning))) {
+      return alreadyProcessed();
+    }
 
     return successResponse({
       success: true,
@@ -329,7 +337,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   if (result.isFalsePositive) {
     // Restore account
-    await restoreAccount(userId, result.reasoning);
+    if (!(await restoreAccount(userId, result.reasoning))) {
+      return alreadyProcessed();
+    }
 
     return successResponse({
       success: true,
@@ -524,56 +534,85 @@ async function collectAppealContext(
 }
 
 /**
- * Restore user account after successful appeal
+ * Restore user account after successful appeal.
+ *
+ * The ban state is claimed under a row lock, and the unban, stake clear and
+ * refund commit together, so concurrent appeals cannot each refund the stake.
+ * Returns false when another request already restored the account.
  */
-async function restoreAccount(userId: string, reasoning: string) {
-  const user = await db.user.findUnique({
-    where: { id: userId },
-    select: { falsePositiveHistory: true },
+async function restoreAccount(
+  userId: string,
+  reasoning: string
+): Promise<boolean> {
+  const restored = await withTransaction(async (tx) => {
+    const [locked] = await tx
+      .select({
+        falsePositiveHistory: users.falsePositiveHistory,
+        appealStaked: users.appealStaked,
+        appealStakeAmount: users.appealStakeAmount,
+        appealStakeTxHash: users.appealStakeTxHash,
+      })
+      .from(users)
+      .where(and(eq(users.id, userId), eq(users.isBanned, true)))
+      .limit(1)
+      .for('update');
+
+    if (!locked) return null;
+
+    const falsePositiveHistory =
+      (locked.falsePositiveHistory as Array<Record<string, unknown>> | null) ||
+      [];
+    falsePositiveHistory.push({
+      date: new Date().toISOString(),
+      reason: reasoning,
+      reviewedBy: 'ai',
+    });
+
+    const stakeAmount = Number(locked.appealStakeAmount);
+    const refund =
+      locked.appealStaked && stakeAmount > 0 && locked.appealStakeTxHash
+        ? { stakeAmount, stakeTxHash: locked.appealStakeTxHash }
+        : null;
+
+    // appealStakeTxHash is intentionally kept so the same escrow payment
+    // cannot be reused (and refunded again) for a later appeal.
+    await tx
+      .update(users)
+      .set({
+        isBanned: false,
+        isScammer: false,
+        isCSAM: false,
+        bannedAt: null,
+        bannedBy: null,
+        bannedReason: null,
+        appealStatus: 'approved',
+        appealReviewedAt: new Date(),
+        falsePositiveHistory: falsePositiveHistory as JsonValue,
+        ...(refund ? { appealStaked: false, appealStakeAmount: null } : {}),
+      })
+      .where(eq(users.id, userId));
+
+    if (refund) {
+      await WalletService.credit(
+        userId,
+        refund.stakeAmount,
+        'appeal_stake_refund',
+        'Appeal stake refund - account restored',
+        refund.stakeTxHash,
+        tx
+      );
+    }
+
+    return { refunded: refund?.stakeAmount };
   });
 
-  const falsePositiveHistory =
-    (user?.falsePositiveHistory as Array<Record<string, unknown>> | null) || [];
-  falsePositiveHistory.push({
-    date: new Date().toISOString(),
-    reason: reasoning,
-    reviewedBy: 'ai',
-  });
+  if (!restored) return false;
 
-  await db.user.update({
-    where: { id: userId },
-    data: {
-      isBanned: false,
-      isScammer: false,
-      isCSAM: false,
-      bannedAt: null,
-      bannedBy: null,
-      bannedReason: null,
-      appealStatus: 'approved',
-      appealReviewedAt: new Date(),
-      falsePositiveHistory: falsePositiveHistory as JsonValue,
-    },
-  });
-
-  // Refund stake if staked
-  const updatedUser = await db.user.findUnique({
-    where: { id: userId },
-    select: {
-      appealStaked: true,
-      appealStakeAmount: true,
-      appealStakeTxHash: true,
-    },
-  });
-
-  if (
-    updatedUser?.appealStaked &&
-    updatedUser.appealStakeAmount &&
-    updatedUser.appealStakeTxHash
-  ) {
-    await refundAppealStake(
-      userId,
-      Number(updatedUser.appealStakeAmount),
-      updatedUser.appealStakeTxHash
+  if (restored.refunded !== undefined) {
+    logger.info(
+      'Appeal stake refunded',
+      { userId, stakeAmount: restored.refunded },
+      'Appeal'
     );
   }
 
@@ -585,40 +624,5 @@ async function restoreAccount(userId: string, reasoning: string) {
   });
 
   logger.info('Account restored after appeal', { userId, reasoning }, 'Appeal');
-}
-
-/**
- * Refund appeal stake to user's virtual balance
- */
-async function refundAppealStake(
-  userId: string,
-  stakeAmount: number,
-  stakeTxHash: string
-): Promise<void> {
-  await WalletService.credit(
-    userId,
-    stakeAmount,
-    'appeal_stake_refund',
-    'Appeal stake refund - account restored',
-    stakeTxHash
-  );
-
-  // Clear stake flags. appealStakeTxHash is intentionally kept so the same
-  // escrow payment cannot be reused (and refunded again) for a later appeal.
-  await db.user.update({
-    where: { id: userId },
-    data: {
-      appealStaked: false,
-      appealStakeAmount: null,
-    },
-  });
-
-  logger.info(
-    'Appeal stake refunded',
-    {
-      userId,
-      stakeAmount,
-    },
-    'Appeal'
-  );
+  return true;
 }

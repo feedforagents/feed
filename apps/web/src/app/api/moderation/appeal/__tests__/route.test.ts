@@ -32,7 +32,35 @@ mock.module('@feed/api', () => ({
   withErrorHandling: (handler: (...args: unknown[]) => unknown) => handler,
 }));
 
+// Drizzle transaction stand-in for restoreAccount: the locked select returns
+// the banned user's row (or nothing), the update merges into currentUser.
+let currentUser: UserRow;
+const txUpdates: Array<Record<string, unknown>> = [];
+const fakeTx = {
+  select: () => ({
+    from: () => ({
+      where: () => ({
+        limit: () => ({
+          for: async () => (currentUser.isBanned ? [currentUser] : []),
+        }),
+      }),
+    }),
+  }),
+  update: () => ({
+    set: (data: Record<string, unknown>) => ({
+      where: async () => {
+        txUpdates.push(data);
+        currentUser = { ...currentUser, ...data } as UserRow;
+      },
+    }),
+  }),
+};
+
 mock.module('@feed/db', () => ({
+  and: (...args: unknown[]) => args,
+  eq: (...args: unknown[]) => args,
+  users: {},
+  withTransaction: async (fn: (tx: unknown) => unknown) => fn(fakeTx),
   db: {
     user: {
       findUnique: mockUserFindUnique,
@@ -58,8 +86,6 @@ const { POST } = await import('../route');
 
 const TX_HASH = `0x${'a'.repeat(64)}`;
 
-let currentUser: UserRow;
-
 function bannedUser(overrides: Partial<UserRow> = {}): UserRow {
   return {
     id: 'user-1',
@@ -84,10 +110,12 @@ function appealRequest(body: Record<string, unknown>): NextRequest {
 }
 
 function restoredAccount(): boolean {
-  return mockUserUpdate.mock.calls.some((call) => {
-    const arg = (call as unknown as [{ data: { isBanned?: boolean } }])[0];
-    return arg.data.isBanned === false;
-  });
+  return (
+    mockUserUpdate.mock.calls.some((call) => {
+      const arg = (call as unknown as [{ data: { isBanned?: boolean } }])[0];
+      return arg.data.isBanned === false;
+    }) || txUpdates.some((data) => data.isBanned === false)
+  );
 }
 
 describe('POST /api/moderation/appeal', () => {
@@ -99,6 +127,7 @@ describe('POST /api/moderation/appeal', () => {
     mockUserFindFirst.mockClear();
     mockEscrowFindUnique.mockReset();
     mockCredit.mockClear();
+    txUpdates.length = 0;
     mockCreateNotification.mockClear();
     mockAuthenticate.mockResolvedValue({
       userId: 'user-1',
@@ -217,6 +246,7 @@ describe('POST /api/moderation/appeal', () => {
       'appeal_stake_refund',
       'Appeal stake refund - account restored',
       TX_HASH,
+      fakeTx,
     ]);
     expect(currentUser.appealStaked).toBe(false);
     expect(currentUser.appealStakeTxHash).toBe(TX_HASH);
