@@ -48,6 +48,8 @@ let GET_DETAIL: typeof import('../../../apps/web/src/app/api/markets/predictions
 let marketId: string | undefined;
 let questionInserted = false;
 let marketInserted = false;
+// Own rate-limit bucket so CI's shared anonymous public-read bucket can't 429 us.
+let clientIp = '';
 
 // Short response bodies printed for the PR evidence (EVIDENCE_LOG=1).
 function evidence(label: string, body: unknown) {
@@ -60,7 +62,8 @@ async function readResolutionRoute() {
   const id = marketId;
   const response = await GET_RESOLUTION(
     new NextRequest(
-      `http://localhost/api/markets/predictions/${id}/resolution`
+      `http://localhost/api/markets/predictions/${id}/resolution`,
+      { headers: { 'x-forwarded-for': clientIp } }
     ),
     { params: Promise.resolve({ id }) }
   );
@@ -72,7 +75,9 @@ async function readDetailRoute() {
   if (!marketId) throw new Error('Owned market required');
   const id = marketId;
   const response = await GET_DETAIL(
-    new NextRequest(`http://localhost/api/markets/predictions/${id}`),
+    new NextRequest(`http://localhost/api/markets/predictions/${id}`, {
+      headers: { 'x-forwarded-for': clientIp },
+    }),
     { params: Promise.resolve({ id }) }
   );
   expect(response.status).toBe(200);
@@ -88,6 +93,9 @@ beforeAll(async () => {
   ));
 
   const id = await generateSnowflakeId();
+  const groups = BigInt(id).toString(16).padStart(16, '0').match(/.{4}/g);
+  if (!groups) throw new Error('Resolution audit fixture IP allocation failed');
+  clientIp = `2001:db8:1945:0:${groups.join(':')}`;
   marketId = id;
   const now = new Date();
   const later = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
