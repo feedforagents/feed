@@ -54,6 +54,8 @@ interface NPCState {
   npcId: string;
   archetype: string;
   balance: number;
+  /** Amount staked in open long/short positions; closes draw down this. */
+  openExposure: bigint;
 }
 
 interface SimulationState {
@@ -115,6 +117,23 @@ const SUPPORTED_ACTIONS = new Set([
   'wait',
   'hold',
 ]);
+
+/**
+ * Exact internal units for an amount already validated as finite and positive.
+ * Every finite Number's canonical decimal has at most 324 fractional places
+ * (Number.MIN_VALUE is 5e-324); this adds no amount rounding or minimum stake.
+ */
+function exposureUnits(amount: number): bigint {
+  const [mantissa, exponent = '0'] = amount.toString().split('e');
+  if (!mantissa) throw new RangeError('Invalid exposure amount');
+  const dot = mantissa.indexOf('.');
+  const decimals = dot < 0 ? 0 : mantissa.length - dot - 1;
+  const scale = 324 + Number(exponent) - decimals;
+  if (!Number.isInteger(scale) || scale < 0) {
+    throw new RangeError('Invalid finite exposure scale');
+  }
+  return BigInt(mantissa.replace('.', '')) * 10n ** BigInt(scale);
+}
 
 /** Validate an optional trade amount: defaults to 100, must be finite and > 0. */
 function resolveAmount(amount: unknown): number | string {
@@ -376,6 +395,12 @@ interface TrajectoryRecord {
 const TRAJECTORY_BUFFER_SIZE = 10_000;
 const trajectoryBuffer: TrajectoryRecord[] = [];
 let trajectorySeq = 0;
+/**
+ * Largest simulation size /init accepts. Each NPC carries state and every
+ * scenario build queries the database per NPC, so an unbounded count lets
+ * one request exhaust the server; 10_000 is 500x the default of 20.
+ */
+const MAX_NPCS = 10_000;
 const serverEpoch = Date.now().toString(36); // unique per server start
 
 function pushTrajectory(record: Omit<TrajectoryRecord, 'id' | 'timestamp'>) {
@@ -518,6 +543,14 @@ Bun.serve({
         };
 
         const numNPCs = body.numNPCs ?? 20;
+        if (!Number.isInteger(numNPCs) || numNPCs < 1 || numNPCs > MAX_NPCS) {
+          return Response.json(
+            {
+              error: `numNPCs must be an integer between 1 and ${MAX_NPCS}`,
+            },
+            { status: 400, headers }
+          );
+        }
         const seed = body.seed ?? Date.now();
         const npcIds = Array.from(
           { length: numNPCs },
@@ -531,6 +564,7 @@ Bun.serve({
             npcId,
             archetype: archetypeMap[npcId] ?? 'trader',
             balance: 10_000,
+            openExposure: 0n,
           });
         }
 
@@ -539,6 +573,9 @@ Bun.serve({
         state.seed = seed;
         state.syntheticMarkets = body.syntheticMarkets === true;
         random = createRng(seed);
+        // Clear run data without reusing IDs: polling cursors and existing
+        // SSE subscriptions survive /init within the same server epoch.
+        trajectoryBuffer.length = 0;
 
         return Response.json(
           {
@@ -610,7 +647,17 @@ Bun.serve({
         } else
           switch (action.type) {
             case 'open_long':
-            case 'open_short':
+            case 'open_short': {
+              const amount = amountOrError;
+              if (amount > npc.balance) {
+                success = false;
+                error = 'Insufficient balance';
+              } else {
+                npc.balance -= amount;
+                npc.openExposure += exposureUnits(amount);
+              }
+              break;
+            }
             case 'buy_yes':
             case 'buy_no':
             case 'sell_yes':
@@ -628,8 +675,15 @@ Bun.serve({
             case 'close_short':
             case 'close_position': {
               const closeAmount = amountOrError;
-              pnl = (random() - 0.4) * closeAmount * 0.2;
-              npc.balance += closeAmount + pnl;
+              const closeExposure = exposureUnits(closeAmount);
+              if (closeExposure > npc.openExposure) {
+                success = false;
+                error = 'Insufficient open position';
+              } else {
+                pnl = (random() - 0.4) * closeAmount * 0.2;
+                npc.openExposure -= closeExposure;
+                npc.balance += closeAmount + pnl;
+              }
               break;
             }
             case 'buy':
@@ -787,10 +841,17 @@ Bun.serve({
       // Poll-based trajectory streaming. Client remembers last seen ID.
       if (method === 'GET' && path === '/trajectories') {
         const sinceId = url.searchParams.get('since_id') ?? '';
-        const limit = Math.min(
-          parseInt(url.searchParams.get('limit') ?? '100', 10),
-          1000
-        );
+        // An unreadable limit used to parse to NaN and silently return an
+        // empty page, which a polling client cannot tell apart from "no new
+        // records". Reject it instead of answering with no data.
+        const limitValue = Number(url.searchParams.get('limit') ?? '100');
+        if (!Number.isInteger(limitValue) || limitValue < 1) {
+          return Response.json(
+            { error: 'limit must be a positive integer' },
+            { status: 400, headers }
+          );
+        }
+        const limit = Math.min(limitValue, 1000);
 
         let startIdx = 0;
         if (sinceId) {

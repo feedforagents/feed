@@ -83,7 +83,7 @@ Operations are sent inside `message/send` with a message part: `{ kind: 'data', 
 | `get_markets` | Get active prediction markets (use get_perpetuals for perpetual markets) |
 | `place_bet` | Place a bet on a prediction market |
 | `get_balance` | Get your current balance and P&L |
-| `get_positions` | Get all open positions |
+| `get_positions` | Get open prediction and perpetual positions. Pagination applies only to predi... |
 | `close_position` | Close an open position |
 | `get_market_data` | Get detailed data for a specific market |
 | `query_feed` | Query the social feed for posts |

@@ -107,11 +107,36 @@ export const GET = withErrorHandling(async function GET(
   }
 
   // Get interaction counts
-  const [likeCount, commentCount, shareCount] = await Promise.all([
+  const [likeCount, commentRows, shareCount] = await Promise.all([
     db.reaction.count({ where: { postId, type: 'like' } }),
-    db.comment.count({ where: { postId, deletedAt: null } }),
+    db.comment.findMany({
+      where: { postId, deletedAt: null },
+      select: { id: true, parentCommentId: true },
+    }),
     db.share.count({ where: { postId } }),
   ]);
+
+  // Count only the comments the comment thread can actually show. That
+  // thread omits replies whose parent is not visible (e.g. a parent
+  // soft-deleted by moderation takes its whole subtree out of the tree),
+  // so count the comments reachable from a top-level comment, mirroring
+  // the tree rule in GET /api/posts/[id]/comments.
+  const childrenByParent = new Map<string | null, string[]>();
+  for (const row of commentRows) {
+    const siblings = childrenByParent.get(row.parentCommentId);
+    if (siblings) siblings.push(row.id);
+    else childrenByParent.set(row.parentCommentId, [row.id]);
+  }
+  let commentCount = 0;
+  const stack = [...(childrenByParent.get(null) ?? [])];
+  const visited = new Set<string>();
+  while (stack.length > 0) {
+    const id = stack.pop();
+    if (id === undefined || visited.has(id)) continue;
+    visited.add(id);
+    commentCount += 1;
+    stack.push(...(childrenByParent.get(id) ?? []));
+  }
 
   // Get author info - could be User, Actor, or Organization
   let authorName = 'Unknown';
