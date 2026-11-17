@@ -18,7 +18,7 @@
 
 import { afterAll, describe, expect, it } from 'bun:test';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
-import { db, eq, perpMarketSnapshots } from '@feed/db';
+import { db, desc, eq, perpMarketSnapshots } from '@feed/db';
 import {
   createPerpSettlement,
   createUserWalletAdapter,
@@ -44,7 +44,10 @@ function makeService() {
   });
 }
 
-async function seedMarket(input: { metrics24hResetAt: Date }): Promise<string> {
+async function seedMarket(input: {
+  metrics24hResetAt: Date;
+  openInterest?: number;
+}): Promise<string> {
   const ticker = `F145${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
   const [inserted] = await db
     .insert(perpMarketSnapshots)
@@ -63,7 +66,7 @@ async function seedMarket(input: { metrics24hResetAt: Date }): Promise<string> {
       high24h: 200,
       low24h: 50,
       volume24h: 5000,
-      openInterest: 0,
+      openInterest: input.openInterest ?? 0,
       fundingRate: {
         ticker,
         rate: 0,
@@ -114,8 +117,15 @@ describe('perp snapshot 24h high/low across metrics rotation (agent context)', (
 
   it('serves the decision context a fresh-window range and volatility after rotation', async () => {
     const service = makeService();
+    // The context reads only the 12 markets with the most open interest.
+    const [leader] = await db
+      .select({ openInterest: perpMarketSnapshots.openInterest })
+      .from(perpMarketSnapshots)
+      .orderBy(desc(perpMarketSnapshots.openInterest))
+      .limit(1);
     const ticker = await seedMarket({
       metrics24hResetAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      openInterest: (leader?.openInterest ?? 0) + 1,
     });
 
     const summary = await service.applyPriceUpdates({ [ticker]: 121 });
