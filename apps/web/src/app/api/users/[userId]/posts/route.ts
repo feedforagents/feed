@@ -100,6 +100,7 @@ import {
   isNull,
   lte,
   ne,
+  notInArray,
   or,
   posts,
   reactions,
@@ -606,6 +607,14 @@ export const GET = withErrorHandling(
     }
     // Get user's posts - filter out future posts
     const now = new Date();
+    // Viewer moderation applies before paging: a simple repost whose
+    // original author the viewer must not see is excluded in SQL, so
+    // hidden rows never consume page slots — the same reason the
+    // deleted-original EXISTS subplan below exists. Anonymous reads
+    // have no moderation set and stay unfiltered.
+    const excludedAuthorIds: ReadonlySet<string> = user
+      ? await loadViewerExcludedAuthorIds(user.userId)
+      : new Set<string>();
     // Simple reposts of a deleted or future original are hidden below, so
     // exclude them here too; otherwise they would take up rows of a page.
     // A scalar lookup on the unique original id avoids hashing every visible
@@ -630,7 +639,19 @@ export const GET = withErrorHandling(
                   and(
                     eq(originalPost.id, posts.originalPostId),
                     isNull(originalPost.deletedAt),
-                    lte(originalPost.timestamp, now)
+                    lte(originalPost.timestamp, now),
+                    // A simple repost of an original by an author the
+                    // viewer must not see is excluded here, before the
+                    // page is cut. Quotes pass via the content branch
+                    // above and keep their row, rendering with
+                    // originalPost: null below.
+                    ...(excludedAuthorIds.size > 0
+                      ? [
+                          notInArray(originalPost.authorId, [
+                            ...excludedAuthorIds,
+                          ]),
+                        ]
+                      : [])
                   )
                 )
                 .limit(1)
@@ -879,9 +900,6 @@ export const GET = withErrorHandling(
     // and stay unfiltered. The profile owner's own posts are the
     // target of this page and stay listed; what the policy governs
     // here is the embedded original.
-    const excludedAuthorIds: ReadonlySet<string> = user
-      ? await loadViewerExcludedAuthorIds(user.userId)
-      : new Set<string>();
     const validPosts = userPosts.filter((post) => {
       if (post.originalPostId) {
         const originalPost = originalPostsMap.get(post.originalPostId);
