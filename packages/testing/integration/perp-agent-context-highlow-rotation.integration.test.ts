@@ -45,32 +45,36 @@ function makeService() {
 }
 
 async function seedMarket(input: { metrics24hResetAt: Date }): Promise<string> {
-  const ticker = `F145${Date.now().toString(36).toUpperCase()}${tickers.length}`;
-  tickers.push(ticker);
-  await db.insert(perpMarketSnapshots).values({
-    ticker,
-    organizationId: `org-${ticker.toLowerCase()}`,
-    currentPrice: 120,
-    // Price reference rotation NOT due (recent) so only the metrics
-    // rotation axis is exercised.
-    price24hAgo: 100,
-    price24hAgoUpdatedAt: new Date(),
-    metrics24hResetAt: input.metrics24hResetAt,
-    change24h: 20,
-    changePercent24h: 20,
-    // Previous window's extremes.
-    high24h: 200,
-    low24h: 50,
-    volume24h: 5000,
-    openInterest: 0,
-    fundingRate: {
+  const ticker = `F145${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  const [inserted] = await db
+    .insert(perpMarketSnapshots)
+    .values({
       ticker,
-      rate: 0,
-      nextFundingTime: new Date().toISOString(),
-      predictedRate: 0,
-    },
-  });
-  return ticker;
+      organizationId: `org-${ticker.toLowerCase()}`,
+      currentPrice: 120,
+      // Price reference rotation NOT due (recent) so only the metrics
+      // rotation axis is exercised.
+      price24hAgo: 100,
+      price24hAgoUpdatedAt: new Date(),
+      metrics24hResetAt: input.metrics24hResetAt,
+      change24h: 20,
+      changePercent24h: 20,
+      // Previous window's extremes.
+      high24h: 200,
+      low24h: 50,
+      volume24h: 5000,
+      openInterest: 0,
+      fundingRate: {
+        ticker,
+        rate: 0,
+        nextFundingTime: new Date().toISOString(),
+        predictedRate: 0,
+      },
+    })
+    .returning({ ticker: perpMarketSnapshots.ticker });
+  if (!inserted) throw new Error('Market fixture insert returned no row');
+  tickers.push(inserted.ticker);
+  return inserted.ticker;
 }
 
 async function readRow(ticker: string) {

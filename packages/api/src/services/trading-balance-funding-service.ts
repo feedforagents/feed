@@ -99,9 +99,16 @@ export class TradingBalanceFundingService {
     ]);
   }
 
+  /**
+   * The user's complete funding history, newest first.
+   *
+   * The settings Billing tab renders this array as the whole history,
+   * with no continuation. Its count badge and "Show all N transactions"
+   * button use the array length, so a cap silently hides older funding
+   * transactions while presenting the returned window as complete.
+   */
   static async getFundingHistory(
-    userId: string,
-    limit = 100
+    userId: string
   ): Promise<TradingBalanceFundingHistoryItem[]> {
     const transactions = await db
       .select({
@@ -121,8 +128,7 @@ export class TradingBalanceFundingService {
           inArray(balanceTransactions.type, [...FUNDING_TRANSACTION_TYPES])
         )
       )
-      .orderBy(desc(balanceTransactions.createdAt))
-      .limit(limit);
+      .orderBy(desc(balanceTransactions.createdAt));
 
     return transactions.map((transaction) => ({
       id: transaction.id,
