@@ -50,6 +50,8 @@ const ROT = `F53ROT${suffix}`;
 const STEADY = `F53STD${suffix}`;
 const FRESH = `F53NEW${suffix}`;
 const ZERO = `F53ZERO${suffix}`;
+const ip = crypto.getRandomValues(new Uint8Array(2));
+const headers = { 'x-forwarded-for': `198.19.${ip[0]}.${ip[1]}` };
 
 // Tickers / ids the database confirmed as inserted by this suite. Cleanup
 // deletes exactly these — never the pre-generated ids, which may belong to
@@ -119,7 +121,9 @@ async function cleanupOwnedMarkets(): Promise<void> {
 
 async function fetchTickerPerps(): Promise<TickerPerp[]> {
   const response = await tickerGET(
-    new NextRequest('http://localhost/api/ticker?streams=perps&limit=100')
+    new NextRequest('http://localhost/api/ticker?streams=perps&limit=100', {
+      headers,
+    })
   );
   expect(response.status).toBe(200);
   const body = (await response.json()) as { perps?: TickerPerp[] };
@@ -128,7 +132,9 @@ async function fetchTickerPerps(): Promise<TickerPerp[]> {
 
 async function fetchListedMarkets(): Promise<ListMarket[]> {
   const response = await perpsGET(
-    new NextRequest('http://localhost/api/markets/perps?page=1&limit=100')
+    new NextRequest('http://localhost/api/markets/perps?page=1&limit=100', {
+      headers,
+    })
   );
   expect(response.status).toBe(200);
   const body = (await response.json()) as { markets?: ListMarket[] };
@@ -339,7 +345,8 @@ describe('GET /api/ticker predictions yesPercent', () => {
   it('matches the canonical CPMM price for the same pool', async () => {
     const response = await tickerGET(
       new NextRequest(
-        'http://localhost/api/ticker?streams=predictions&limit=100'
+        'http://localhost/api/ticker?streams=predictions&limit=100',
+        { headers }
       )
     );
     expect(response.status).toBe(200);
