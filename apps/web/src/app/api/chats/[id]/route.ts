@@ -71,9 +71,12 @@ import {
   eq,
   gt,
   inArray,
-  lt,
   messageReactions,
   messages,
+  notInArray,
+  sql,
+  userBlocks,
+  userMutes,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -169,27 +172,65 @@ export const GET = withErrorHandling(
         .from(chatParticipants)
         .where(eq(chatParticipants.chatId, chatId));
 
+      // Match the existing group-history policy in A2A/MCP. Keep these reads
+      // on this user's transaction; failures must not expose unfiltered history.
+      const excludedAuthorIds = new Set<string>();
+      if (chat.isGroup) {
+        const [blocked, muted, blockedBy] = await Promise.all([
+          db
+            .select({ id: userBlocks.blockedId })
+            .from(userBlocks)
+            .where(eq(userBlocks.blockerId, userId)),
+          db
+            .select({ id: userMutes.mutedId })
+            .from(userMutes)
+            .where(eq(userMutes.muterId, userId)),
+          db
+            .select({ id: userBlocks.blockerId })
+            .from(userBlocks)
+            .where(eq(userBlocks.blockedId, userId)),
+        ]);
+        for (const row of [...blocked, ...muted, ...blockedBy]) {
+          if (typeof row.id !== 'string')
+            throw new Error('Invalid moderation author ID');
+          excludedAuthorIds.add(row.id);
+        }
+      }
+      const excludedSenderIds = [...excludedAuthorIds];
+      // Apply before every limit so hidden messages cannot consume page slots.
+      const senderScope = excludedSenderIds.length
+        ? notInArray(messages.senderId, excludedSenderIds)
+        : undefined;
+
       // Build message query — three modes:
       // 1. `after` (ISO timestamp): fetch messages NEWER than this time (ASC order, for sync)
       // 2. `cursor` (message ID): fetch messages OLDER than this cursor (DESC order, for load-more)
       // 3. Neither: fetch latest messages (DESC order, initial load)
-      let messagesList;
+      let messagesList: Array<typeof messages.$inferSelect>;
       if (after) {
         // Incremental sync: only messages after the given timestamp
         messagesList = await db
           .select()
           .from(messages)
           .where(
-            and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
+            and(
+              eq(messages.chatId, chatId),
+              gt(messages.createdAt, after),
+              senderScope
+            )
           )
-          .orderBy(asc(messages.createdAt))
+          .orderBy(asc(messages.createdAt), asc(messages.id))
           .limit(effectiveLimit);
       } else if (cursor) {
-        // Load older messages: get cursor's timestamp, then fetch before it.
-        // The cursor must belong to this chat; an unknown cursor is an error
-        // rather than a silent reset to the latest page.
+        // Keep the stored timestamp's full PostgreSQL precision: the Date
+        // decoder would discard microseconds before the next comparison.
+        // Bind as text too, so the driver does not serialize it as a Date.
+        // The unique ID breaks ties, and the cursor must belong to this chat.
         const [cursorMessage] = await db
-          .select({ createdAt: messages.createdAt })
+          .select({
+            createdAt: sql<string>`${messages.createdAt}::text`,
+            id: messages.id,
+          })
           .from(messages)
           .where(and(eq(messages.id, cursor), eq(messages.chatId, chatId)))
           .limit(1);
@@ -207,22 +248,30 @@ export const GET = withErrorHandling(
           .where(
             and(
               eq(messages.chatId, chatId),
-              lt(messages.createdAt, cursorMessage.createdAt)
+              sql`(${messages.createdAt}, ${messages.id}) < (${cursorMessage.createdAt}::text::timestamp without time zone, ${cursorMessage.id}::text)`,
+              senderScope
             )
           )
-          .orderBy(desc(messages.createdAt))
+          .orderBy(desc(messages.createdAt), desc(messages.id))
           .limit(effectiveLimit + 1);
       } else {
-        // Initial load: latest messages
+        // Initial load: latest messages. Order by (createdAt, id) so the
+        // page boundary inside a shared timestamp is deterministic
+        // and the cursor walk above can resume from it exactly.
         messagesList = await db
           .select()
           .from(messages)
-          .where(eq(messages.chatId, chatId))
-          .orderBy(desc(messages.createdAt))
+          .where(and(eq(messages.chatId, chatId), senderScope))
+          .orderBy(desc(messages.createdAt), desc(messages.id))
           .limit(effectiveLimit + 1);
       }
 
-      return { chat, participants: participantsList, messages: messagesList };
+      return {
+        chat,
+        participants: participantsList,
+        messages: messagesList,
+        excludedAuthorIds,
+      };
     };
 
     const fullChat = await asUser(authUser, fetchChatData);
@@ -409,13 +458,14 @@ export const GET = withErrorHandling(
     }
 
     // Resolve replied-to messages in batch
-    const replyToIds = [
-      ...new Set(
-        messagesInOrder
-          .map((m) => m.replyToMessageId)
-          .filter((id): id is string => !!id)
-      ),
-    ];
+    const replyToIdSet = new Set<string>();
+    for (const message of messagesInOrder) {
+      const id = message.replyToMessageId;
+      if (id == null || id === '') continue;
+      if (typeof id !== 'string') throw new Error('Invalid reply message ID');
+      replyToIdSet.add(id);
+    }
+    const replyToIds = [...replyToIdSet];
     const replyToMessagesMap = new Map<
       string,
       { id: string; content: string; senderId: string; senderName?: string }
@@ -435,6 +485,7 @@ export const GET = withErrorHandling(
       }, 'get-reply-to-messages');
 
       for (const rm of replyMessages) {
+        if (fullChat.excludedAuthorIds.has(rm.senderId)) continue;
         const sender = usersMap.get(rm.senderId);
         const actor = actorsMap.get(rm.senderId);
         replyToMessagesMap.set(rm.id, {
@@ -464,6 +515,14 @@ export const GET = withErrorHandling(
       'GET /api/chats/[id]'
     );
 
+    // The current member count for the room header. The participants
+    // array above is a name-resolution list, not the roster: it keeps
+    // departed members (inactive rows and row-less senders) so their old
+    // messages keep a name, so its length overstates membership. Current
+    // members are the active participant rows — the same rule this
+    // route's access check and the dedicated participants list apply.
+    const memberCount = fullChat.participants.filter((p) => p.isActive).length;
+
     const chatResponse: {
       id: string;
       name: string | null;
@@ -471,6 +530,7 @@ export const GET = withErrorHandling(
       createdAt: Date;
       updatedAt: Date;
       otherUser: typeof otherUser;
+      memberCount: number;
     } = {
       id: chat.id,
       name: displayName || chat.name,
@@ -478,6 +538,7 @@ export const GET = withErrorHandling(
       createdAt: chat.createdAt,
       updatedAt: chat.updatedAt,
       otherUser: otherUser,
+      memberCount,
     };
 
     return successResponse({
