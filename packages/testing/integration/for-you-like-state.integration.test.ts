@@ -29,7 +29,11 @@ import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { invalidateCache, narrativeEnrichmentKey } from '@feed/api';
+import {
+  getRedisClient,
+  invalidateCache,
+  narrativeEnrichmentKey,
+} from '@feed/api';
 import {
   and,
   count,
@@ -166,6 +170,13 @@ async function callLike(
   return { status: response.status, body };
 }
 
+async function clearLocalCandidateSnapshot() {
+  if (getRedisClient()) {
+    throw new Error('The For You fixture requires an in-process cache');
+  }
+  await invalidateCache('feed:for-you:v3:base', { namespace: 'feed' });
+}
+
 beforeAll(async () => {
   ({ GET: getForYou } = await import(
     '../../../apps/web/src/app/api/feed/for-you/route'
@@ -258,6 +269,9 @@ beforeAll(async () => {
     })
     .returning({ id: reactions.id });
   ownedReactionIds = createdReactions.map((row) => row.id);
+
+  // Other suites can warm the shared candidate cache before these posts exist.
+  await clearLocalCandidateSnapshot();
 });
 
 afterAll(async () => {
@@ -284,8 +298,10 @@ afterAll(async () => {
     await db.delete(users).where(inArray(users.id, ownedUserIds));
   }
 
-  // Clean only the cache keys this suite warmed for its own viewers —
-  // exact keys, never a shared flush.
+  // Drop the test's deleted candidates from the process-local snapshot.
+  await clearLocalCandidateSnapshot();
+
+  // Clean the exact keys warmed for this suite's viewers.
   for (const viewerId of [viewerA, viewerB]) {
     await Promise.all([
       invalidateCache(`feed:for-you:enrichment:${viewerId}`, {
