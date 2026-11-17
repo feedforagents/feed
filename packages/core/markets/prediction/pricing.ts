@@ -1,4 +1,4 @@
-import { floorPoints } from '@feed/shared';
+import { canonicalTradingFee, floorPoints } from '@feed/shared';
 
 /**
  * Prediction Market AMM Pricing — Constant Product Market Maker (CPMM)
@@ -199,6 +199,24 @@ export class PredictionPricing {
     };
   }
 
+  /**
+   * The fee actually charged must be the one canonical fee the fee ledger
+   * records and splits (FeeService.calculateFee): the fee on the
+   * cent-settled amount, rounded UP to whole cents
+   * (`canonicalTradingFee` in @feed/shared, PRD §9.1). Settling the amount
+   * to cents first keeps settlement dust out of the wallet. The required
+   * invariant is no extra total trader credit from splitting; total split
+   * fees need not be monotonic because each leg settles separately.
+   * A nearest-cent rounded fee
+   * fails that invariant: small legs round down to a zero fee, so split
+   * sells/buys beat whole ones. PerpMarketService.calculateFee charges
+   * this same canonical fee (#1611); prediction charges align with it
+   * here.
+   */
+  static canonicalFee(amount: number, feeRate: number): number {
+    return canonicalTradingFee(amount, feeRate);
+  }
+
   static calculateBuyWithFees(
     currentYesShares: number,
     currentNoShares: number,
@@ -206,7 +224,7 @@ export class PredictionPricing {
     totalAmount: number,
     feeRate: number
   ): ShareCalculationWithFees {
-    const fee = totalAmount * feeRate;
+    const fee = PredictionPricing.canonicalFee(totalAmount, feeRate);
     const netAmount = totalAmount - fee;
     const base = this.calculateBuy(
       currentYesShares,
@@ -237,10 +255,16 @@ export class PredictionPricing {
       sharesToSell
     );
     const gross = base.totalCost;
-    const fee = gross * feeRate;
-    const rawProceeds = gross - fee;
-    const netProceeds = floorPoints(rawProceeds);
-    const roundingRemainder = rawProceeds - netProceeds;
+    // Settle first (PRD §9.1): the gross proceeds floor to cents and the
+    // sub-cent remainder stays in house liquidity; the canonical fee is
+    // then charged on that settled amount. The seller is credited exactly
+    // settled − fee, both whole cents, so per-leg flooring plus per-leg
+    // ceiling fees guarantee a split sale never credits more than the
+    // whole sale.
+    const settledProceeds = floorPoints(gross);
+    const fee = PredictionPricing.canonicalFee(gross, feeRate);
+    const netProceeds = Number((settledProceeds - fee).toFixed(2));
+    const roundingRemainder = gross - settledProceeds;
     return {
       ...base,
       fee,

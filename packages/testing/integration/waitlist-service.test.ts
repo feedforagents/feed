@@ -214,7 +214,7 @@ describeWaitlist('WaitlistService', () => {
       expect(updatedReferrer?.referralCount).toBe(0);
     });
 
-    it('should award +100 points to referrer on valid referral', async () => {
+    it('does not credit a referrer when a user joins with a referral code', async () => {
       // Create referrer
       const referrerId = await generateSnowflakeId();
       await db.insert(users).values({
@@ -250,9 +250,8 @@ describeWaitlist('WaitlistService', () => {
       const result = await WaitlistService.markAsWaitlisted(userId, 'VALIDREF');
 
       expect(result.success).toBe(true);
-      expect(result.referrerRewarded).toBe(true);
+      expect(result.referrerRewarded).toBe(false);
 
-      // Verify referrer got points (REFERRAL_SIGNUP is 100 points)
       const [updatedReferrer] = await db
         .select({
           invitePoints: users.invitePoints,
@@ -263,9 +262,9 @@ describeWaitlist('WaitlistService', () => {
         .where(eq(users.id, referrerId))
         .limit(1);
 
-      expect(updatedReferrer?.invitePoints).toBe(100); // REFERRAL_SIGNUP is 100 points
-      expect(updatedReferrer?.reputationPoints).toBe(200); // 100 + 100
-      expect(updatedReferrer?.referralCount).toBe(1);
+      expect(updatedReferrer?.invitePoints).toBe(0);
+      expect(updatedReferrer?.reputationPoints).toBe(100);
+      expect(updatedReferrer?.referralCount).toBe(0);
     });
   });
 
