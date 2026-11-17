@@ -722,13 +722,29 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
                 id: questions.id,
                 questionNumber: questions.questionNumber,
                 status: questions.status,
+                requiresManualReview: questions.requiresManualReview,
+                resolutionReviewStatus: questions.resolutionReviewStatus,
+                resolutionDate: questions.resolutionDate,
               })
               .from(questions)
               .where(eq(questions.id, orphan.questionId))
               .limit(1);
 
-            // If question exists and is still active, resolve it
-            if (linkedQuestion && linkedQuestion.status === 'active') {
+            // Held for review or postponed by a rejection: keep the orphan active.
+            if (
+              linkedQuestion?.status === 'active' &&
+              isResolutionHeld(linkedQuestion, resolutionTimestamp)
+            ) {
+              shouldMarkTimeframedResolved = false;
+              logger.info(
+                `Q${linkedQuestion.questionNumber} is held for manual resolution review`,
+                {
+                  timeframedMarketId: orphan.id,
+                  reviewStatus: linkedQuestion.resolutionReviewStatus,
+                },
+                'MarketsTick'
+              );
+            } else if (linkedQuestion && linkedQuestion.status === 'active') {
               logger.info(
                 `Resolving orphaned market via question Q${linkedQuestion.questionNumber}`,
                 { timeframedMarketId: orphan.id },
@@ -1293,6 +1309,29 @@ async function getMarketsReadyForResolution(now: Date): Promise<
 }
 
 /**
+ * A resolution an admin still has to review, or one an admin rejected and
+ * postponed, must not pay out yet. The admin review queue
+ * (`/api/admin/resolutions`) only acts on questions that are still active.
+ */
+function isResolutionHeld(
+  question: {
+    requiresManualReview: boolean | null;
+    resolutionReviewStatus: string | null;
+    resolutionDate: Date;
+  },
+  now: Date
+): boolean {
+  if (
+    question.requiresManualReview &&
+    (question.resolutionReviewStatus === null ||
+      question.resolutionReviewStatus === 'pending')
+  ) {
+    return true;
+  }
+  return question.resolutionDate.getTime() > now.getTime();
+}
+
+/**
  * Resolve a market with complete lifecycle:
  * 1. Signal extraction (validation/logging)
  * 2. Proof generation (LLM-based resolution explanation)
@@ -1599,6 +1638,16 @@ async function resolveMarket(
       );
       // Continue with resolution even without proof - payout is critical
     }
+  }
+
+  // A proof stored on an earlier tick can still be waiting for admin review.
+  if (isResolutionHeld(question, new Date())) {
+    logger.info(
+      `Q${market.questionNumber} is held for manual resolution review`,
+      { reviewStatus: question.resolutionReviewStatus },
+      'MarketsTick'
+    );
+    return { resolved: false };
   }
 
   // ==========================================================================

@@ -32,7 +32,7 @@ import { callAgentLLM } from '../llm/agent-llm';
 import { resolveGroqModel } from '../llm/direct-groq';
 import { getNpcGameContext } from '../plugins/feed/providers/npc-game-context';
 import { ensureTrajectoryStep } from '../plugins/plugin-trajectory-logger/src/action-interceptor';
-import { agentService } from '../services/AgentService';
+import { type AgentService, agentService } from '../services/AgentService';
 import { logger } from '../shared/logger';
 import { normalizeDecisionAction } from './action-normalization';
 import {
@@ -1494,6 +1494,27 @@ export class MultiStepExecutor {
   // Action Executors
   // ===========================================================================
 
+  /**
+   * Best-effort activity logging. The action already committed in the
+   * direct executor, so a logging failure must not report the action as
+   * failed or abort the tick.
+   */
+  private async logActivity(
+    agentUserId: string,
+    log: Parameters<AgentService['createLog']>[1]
+  ): Promise<void> {
+    try {
+      await agentService.createLog(agentUserId, log);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(
+        `[MultiStep] Activity log failed after action completed: ${message}`,
+        { agentUserId },
+        'MultiStepExecutor'
+      );
+    }
+  }
+
   private async executeTrade(
     agentUserId: string,
     parameters: Record<string, unknown>,
@@ -1611,7 +1632,7 @@ export class MultiStepExecutor {
     const postResult = await executeDirectPost({ agentUserId, content });
 
     if (postResult.success && logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'post',
         level: 'info',
         message: `Created post: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`,
@@ -1669,7 +1690,7 @@ export class MultiStepExecutor {
     });
 
     if (commentResult.success && logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'comment',
         level: 'info',
         message: `Created comment on post ${postId}${parentCommentId ? ` (reply to ${parentCommentId})` : ''}: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`,
@@ -1720,12 +1741,20 @@ export class MultiStepExecutor {
 
     const likeResult = await executeDirectLike({ agentUserId, postId });
 
-    await agentService.createLog(agentUserId, {
+    // executeDirectLike succeeds idempotently when the like already exists
+    // (liked=false, no new row). Record that honestly — mirroring how
+    // executeFollow distinguishes "Now following" from "Already following" —
+    // instead of claiming a new like happened.
+    const likeSummary = likeResult.success
+      ? likeResult.liked
+        ? `Liked post ${postId}`
+        : `Already liked post ${postId}`
+      : `Like failed: ${likeResult.error}`;
+
+    await this.logActivity(agentUserId, {
       type: 'like',
       level: likeResult.success ? 'info' : 'warn',
-      message: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      message: likeSummary,
       metadata: {
         postId,
         success: likeResult.success,
@@ -1737,9 +1766,7 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.LIKE,
       success: likeResult.success,
-      summary: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      summary: likeSummary,
       result: {
         success: likeResult.success,
         liked: likeResult.liked,
@@ -1774,17 +1801,27 @@ export class MultiStepExecutor {
       comment,
     });
 
-    await agentService.createLog(agentUserId, {
+    // executeDirectRepost succeeds idempotently when the share already
+    // exists (alreadyReposted=true, no new share or quote post). Record
+    // that honestly — mirroring how executeFollow distinguishes "Now
+    // following" from "Already following" — instead of claiming a new
+    // repost happened.
+    const repostSummary = repostResult.success
+      ? repostResult.alreadyReposted
+        ? `Already reposted ${postId}`
+        : `Reposted ${postId}${comment ? ' with comment' : ''}`
+      : `Repost failed: ${repostResult.error}`;
+
+    await this.logActivity(agentUserId, {
       type: 'repost',
       level: repostResult.success ? 'info' : 'warn',
-      message: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      message: repostSummary,
       metadata: {
         postId,
         success: repostResult.success,
         repostId: repostResult.repostId ?? null,
         quotePostId: repostResult.quotePostId ?? null,
+        alreadyReposted: repostResult.alreadyReposted ?? false,
         hasComment: !!comment,
         error: repostResult.error ?? null,
       },
@@ -1793,13 +1830,12 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.REPOST,
       success: repostResult.success,
-      summary: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      summary: repostSummary,
       result: {
         success: repostResult.success,
         repostId: repostResult.repostId,
         quotePostId: repostResult.quotePostId,
+        alreadyReposted: repostResult.alreadyReposted,
         error: repostResult.error,
       },
       parameters,
@@ -1830,7 +1866,7 @@ export class MultiStepExecutor {
       targetUserId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'follow',
       level: followResult.success ? 'info' : 'warn',
       message: followResult.success
@@ -1889,7 +1925,7 @@ export class MultiStepExecutor {
       targetUserId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'follow',
       level: unfollowResult.success ? 'info' : 'warn',
       message: unfollowResult.success
@@ -2004,7 +2040,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'comment',
         level: commentResult.success ? 'info' : 'warn',
         message: commentResult.success
@@ -2097,7 +2133,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'chat',
         level: messageResult.success ? 'info' : 'warn',
         message: messageResult.success
@@ -2168,7 +2204,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'dm',
         level: messageResult.success ? 'info' : 'warn',
         message: messageResult.success
@@ -2257,7 +2293,7 @@ export class MultiStepExecutor {
       content,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: groupMessageResult.success ? 'info' : 'warn',
       message: groupMessageResult.success
@@ -2327,7 +2363,7 @@ export class MultiStepExecutor {
       memberIds: memberIdsRaw,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2385,7 +2421,7 @@ export class MultiStepExecutor {
       targetUserId: userId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2448,7 +2484,7 @@ export class MultiStepExecutor {
       reason,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2503,7 +2539,7 @@ export class MultiStepExecutor {
       groupId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success

@@ -153,7 +153,19 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asUser, generateSnowflakeId, groupInvites } from '@feed/db';
+import {
+  and,
+  asUser,
+  count,
+  eq,
+  generateSnowflakeId,
+  groupInvites,
+  groupMembers,
+  inArray,
+  like,
+  not,
+  users,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 import { nanoid } from 'nanoid';
 import type { NextRequest } from 'next/server';
@@ -207,19 +219,28 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       },
     });
 
-    // Get member counts for all groups
-    const memberCounts = await Promise.all(
-      groupIds.map((gid) =>
-        db.groupMember.count({
-          where: { groupId: gid, isActive: true },
-        })
-      )
-    );
-
+    const returnedGroupIds = [...new Set(userGroups.map((group) => group.id))];
+    // Aggregate only visible active memberships for the groups being returned.
+    const memberCounts =
+      returnedGroupIds.length > 0
+        ? await db
+            .select({ groupId: groupMembers.groupId, memberCount: count() })
+            .from(groupMembers)
+            .innerJoin(users, eq(users.id, groupMembers.userId))
+            .where(
+              and(
+                inArray(groupMembers.groupId, returnedGroupIds),
+                eq(groupMembers.isActive, true),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            )
+            .groupBy(groupMembers.groupId)
+        : [];
     const memberCountMap = new Map(
-      groupIds.map((gid, i) => [gid, memberCounts[i] ?? 0])
+      memberCounts.map((row) => [row.groupId, row.memberCount])
     );
-
     // Build role map from memberships
     const roleMap = new Map(memberships.map((m) => [m.groupId, m.role]));
 

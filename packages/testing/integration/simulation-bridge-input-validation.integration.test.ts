@@ -13,43 +13,17 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { join } from 'node:path';
 import { z } from 'zod';
+import { startBridge } from './helpers/simulation-bridge';
 
-const TEST_PORT = 34600 + Math.floor(Math.random() * 100);
-const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
-const BRIDGE_PATH = join(
-  import.meta.dir,
-  '../../../packages/sim/core/bridge/simulation-bridge-server.ts'
-);
+let bridge: Awaited<ReturnType<typeof startBridge>>;
 
-let server: ReturnType<typeof Bun.spawn> | null = null;
-
-async function waitForHealth(timeoutMs = 30000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
-    if (server?.exitCode !== null && server?.exitCode !== undefined) {
-      throw new Error(`Bridge server exited early (code ${server.exitCode})`);
-    }
-    try {
-      const res = await fetch(`${BASE_URL}/health`);
-      if (res.ok) return;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`Bridge server did not become healthy: ${String(lastError)}`);
-}
-
-async function post(path: string, body: Record<string, unknown>) {
-  const res = await fetch(`${BASE_URL}${path}`, {
+function post(path: string, body: object) {
+  return bridge.request(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return res;
 }
 
 async function initOk(numNPCs: number) {
@@ -61,7 +35,7 @@ async function initOk(numNPCs: number) {
 }
 
 async function npcCount() {
-  const response = await fetch(`${BASE_URL}/npcs`);
+  const response = await bridge.request('/npcs');
   expect(response.status).toBe(200);
   return z
     .object({ npcs: z.array(z.object({ npcId: z.string() })) })
@@ -79,19 +53,11 @@ const page = z.object({
 
 describe('Simulation bridge input validation', () => {
   beforeAll(async () => {
-    server = Bun.spawn(['bun', BRIDGE_PATH, '--port', String(TEST_PORT)], {
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    await waitForHealth();
+    bridge = await startBridge();
   });
 
   afterAll(async () => {
-    if (server) {
-      server.kill();
-      await server.exited;
-      server = null;
-    }
+    await bridge?.stop();
   });
 
   test('rejects a non-positive, fractional, or non-numeric numNPCs with 400', async () => {
@@ -132,8 +98,8 @@ describe('Simulation bridge input validation', () => {
     expect(executed.status).toBe(200);
     await executed.arrayBuffer();
     for (const limit of ['abc', '-5', '0', '1.5', '10abc']) {
-      const response = await fetch(
-        `${BASE_URL}/trajectories?limit=${encodeURIComponent(limit)}`
+      const response = await bridge.request(
+        `/trajectories?limit=${encodeURIComponent(limit)}`
       );
       expect(response.status).toBe(400);
       expect(errorBody.parse(await response.json()).error).toContain('limit');
@@ -142,10 +108,7 @@ describe('Simulation bridge input validation', () => {
 
   test('returns buffered trajectories for a valid limit', async () => {
     await initOk(2);
-    // The fork base predates the clear-on-/init fix, so earlier tests may
-    // have left records behind. Cursor from the current end instead of
-    // assuming an empty buffer.
-    const beforeResponse = await fetch(`${BASE_URL}/trajectories?limit=1000`);
+    const beforeResponse = await bridge.request('/trajectories?limit=1000');
     expect(beforeResponse.status).toBe(200);
     const beforePage = page.parse(await beforeResponse.json());
     const executed = await post('/execute', {
@@ -154,8 +117,8 @@ describe('Simulation bridge input validation', () => {
     });
     expect(executed.status).toBe(200);
     await executed.arrayBuffer();
-    const response = await fetch(
-      `${BASE_URL}/trajectories?since_id=${encodeURIComponent(beforePage.lastId)}&limit=1`
+    const response = await bridge.request(
+      `/trajectories?since_id=${encodeURIComponent(beforePage.lastId)}&limit=1`
     );
     expect(response.status).toBe(200);
     const result = page.parse(await response.json());

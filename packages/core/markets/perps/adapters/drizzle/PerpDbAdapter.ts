@@ -214,6 +214,7 @@ export class PerpDbAdapter implements PerpDbPort {
         | 'lastUpdated'
         | 'size'
         | 'entryPrice'
+        | 'realizedPnL'
       >
     >
   ): Promise<void> {
@@ -241,6 +242,9 @@ export class PerpDbAdapter implements PerpDbPort {
     }
     if (updates.entryPrice !== undefined) {
       setFields.entryPrice = updates.entryPrice;
+    }
+    if (updates.realizedPnL !== undefined) {
+      setFields.realizedPnL = updates.realizedPnL;
     }
 
     await this.dbClient
