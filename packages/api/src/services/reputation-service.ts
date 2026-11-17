@@ -42,13 +42,6 @@ import type {
 } from './leaderboard-types';
 
 /**
- * Maximum number of unqualified referrals that can earn signup reputation at any time.
- * When a referral becomes qualified (user links social account), a slot opens for
- * pending referrals to receive their deferred signup points (FIFO order).
- */
-const UNQUALIFIED_REFERRAL_LIMIT = 10;
-
-/**
  * Leaderboard category type (legacy — used by existing getLeaderboard)
  */
 type LeaderboardCategory = 'all' | 'earned' | 'referral';
@@ -544,7 +537,7 @@ export class ReputationService {
           });
         }
 
-        // Same IP within 24 hours = flag for review (still award but mark suspicious)
+        // Same IP within 24 hours is logged for review. The signup does not pay points.
         if (
           timeDiff >= 0 &&
           timeDiff < twentyFourHours &&
@@ -561,7 +554,7 @@ export class ReputationService {
             },
             'ReputationService'
           );
-          // Continue to award points but mark as suspicious
+          // Continue. The signup records the referral and does not pay points.
         } else if (hasDifferentIdentifiers) {
           logger.info(
             'Allowing referral despite same IP: users have different identifiers',
@@ -608,35 +601,13 @@ export class ReputationService {
         });
       }
 
-      const unqualifiedCount = await ReputationService.countUnqualifiedAwarded(
-        tx,
-        referrerId
+      // Do not credit the referrer. PRD §9.6 removes referral signup rewards
+      // and onboarding point bonuses. D-18 says points cannot be transferred
+      // between users. The referral row is still recorded by the caller.
+      const result = buildAwardReputationResult(
+        0,
+        referrerRow.reputationPoints
       );
-      const shouldAwardPoints = unqualifiedCount < UNQUALIFIED_REFERRAL_LIMIT;
-      if (!shouldAwardPoints) {
-        logger.info(
-          `Unqualified referral limit reached for user ${referrerId}. Points deferred.`,
-          { referrerId, unqualifiedCount, limit: UNQUALIFIED_REFERRAL_LIMIT },
-          'ReputationService'
-        );
-      }
-
-      const result = shouldAwardPoints
-        ? await ReputationService.awardReputationInTx(
-            tx,
-            referrerId,
-            POINTS.REFERRAL_SIGNUP,
-            'referral_signup',
-            {
-              referredUserId,
-              referrerIpHash: referrer?.registrationIpHash || null,
-              referredIpHash: referredUser?.registrationIpHash || null,
-              sameIp:
-                referrer?.registrationIpHash ===
-                referredUser?.registrationIpHash,
-            }
-          )
-        : buildAwardReputationResult(0, referrerRow.reputationPoints);
 
       const [referralRecord] = await tx
         .select({ id: referrals.id })
@@ -654,7 +625,7 @@ export class ReputationService {
         const updateData: {
           signupPointsAwarded: boolean;
           suspiciousReferralFlags?: JsonValue;
-        } = { signupPointsAwarded: shouldAwardPoints && result.success };
+        } = { signupPointsAwarded: false };
 
         if (
           referrer?.registrationIpHash &&
@@ -682,16 +653,6 @@ export class ReputationService {
           .update(referrals)
           .set(updateData)
           .where(eq(referrals.id, referralRecord.id));
-      }
-
-      if (shouldAwardPoints && result.success) {
-        await tx
-          .update(users)
-          .set({
-            referralCount: sql`${users.referralCount} + 1`,
-            lastReferralIpHash: referredUser?.registrationIpHash || null,
-          })
-          .where(eq(users.id, referrerId));
       }
 
       return result;
@@ -723,105 +684,14 @@ export class ReputationService {
     return existing !== undefined;
   }
 
-  /** Completed, unqualified referrals that already earned signup points. */
-  private static async countUnqualifiedAwarded(
-    tx: Transaction,
-    referrerId: string
-  ): Promise<number> {
-    const [row] = await tx
-      .select({ count: count() })
-      .from(referrals)
-      .where(
-        and(
-          eq(referrals.referrerId, referrerId),
-          eq(referrals.status, 'completed'),
-          isNull(referrals.qualifiedAt),
-          eq(referrals.signupPointsAwarded, true)
-        )
-      );
-    return row?.count ?? 0;
-  }
-
   /**
-   * Award pending referral signup reputation when a slot opens.
-   * Called when a referral becomes qualified, which frees up a slot for pending referrals.
-   * Uses FIFO ordering based on completedAt timestamp
+   * Deferred signup rewards used to pay a queued referrer. PRD §9.6 removes
+   * that credit, so a newly qualified referral does not release one.
    */
   static async awardPendingReferralSignupPoints(
-    referrerId: string
+    _referrerId: string
   ): Promise<AwardReputationResult | null> {
-    const outcome = await db.transaction(async (tx) => {
-      // Serialize with other awards for this referrer.
-      const [referrerRow] = await tx
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.id, referrerId))
-        .for('update');
-      if (!referrerRow) return null;
-
-      const unqualifiedCount = await ReputationService.countUnqualifiedAwarded(
-        tx,
-        referrerId
-      );
-      if (unqualifiedCount >= UNQUALIFIED_REFERRAL_LIMIT) {
-        return null;
-      }
-
-      // Oldest pending referral (FIFO) without signup reputation yet.
-      const [pendingReferral] = await tx
-        .select({
-          id: referrals.id,
-          referredUserId: referrals.referredUserId,
-          completedAt: referrals.completedAt,
-        })
-        .from(referrals)
-        .where(
-          and(
-            eq(referrals.referrerId, referrerId),
-            eq(referrals.status, 'completed'),
-            eq(referrals.signupPointsAwarded, false)
-          )
-        )
-        .orderBy(asc(referrals.completedAt))
-        .limit(1);
-      if (!pendingReferral) return null;
-
-      const result = await ReputationService.awardReputationInTx(
-        tx,
-        referrerId,
-        POINTS.REFERRAL_SIGNUP,
-        'referral_signup',
-        {
-          referredUserId: pendingReferral.referredUserId,
-          deferredAward: true,
-          originalCompletedAt:
-            pendingReferral.completedAt?.toISOString() ?? null,
-        }
-      );
-      if (!result.success) return result;
-
-      await tx
-        .update(referrals)
-        .set({ signupPointsAwarded: true })
-        .where(eq(referrals.id, pendingReferral.id));
-      await tx
-        .update(users)
-        .set({ referralCount: sql`${users.referralCount} + 1` })
-        .where(eq(users.id, referrerId));
-
-      logger.info(
-        `Awarded deferred referral signup reputation to user ${referrerId}`,
-        {
-          referrerId,
-          referredUserId: pendingReferral.referredUserId,
-          referralId: pendingReferral.id,
-          reputationAwarded: result.reputationAwarded,
-        },
-        'ReputationService'
-      );
-      return result;
-    });
-    return outcome;
+    return null;
   }
 
   /**
@@ -888,9 +758,8 @@ export class ReputationService {
 
     const referrerId = user.referredBy;
 
-    // Claim the qualification (qualifiedAt IS NULL) and award the referrer in
-    // one transaction: concurrent callers (Twitter/Discord/profile hooks)
-    // qualify and pay once, and a failed award rolls back the claim.
+    // Claim the qualification (qualifiedAt IS NULL) once. Concurrent callers
+    // set qualifiedAt and do not pay points.
     const qualificationResult = await db.transaction(async (tx) => {
       const [claimed] = await tx
         .update(referrals)
@@ -901,35 +770,20 @@ export class ReputationService {
         .returning({ id: referrals.id });
       if (!claimed) return null;
 
-      const result = await ReputationService.awardReputationInTx(
-        tx,
-        referrerId,
-        POINTS.REFERRAL_QUALIFIED,
-        'referral_qualified',
-        { referredUserId, qualifiedAt: new Date().toISOString() }
-      );
-      if (!result.success) {
-        throw new Error(
-          result.error ?? 'Failed to award referral qualification reputation'
-        );
-      }
-      return result;
+      // Record that the referred user qualified. Do not pay the referrer.
+      return buildAwardReputationResult(0, 0);
     });
 
     if (qualificationResult) {
       logger.info(
-        `Referral qualified: referrer ${referrerId} earned ${POINTS.REFERRAL_QUALIFIED} reputation for a qualified referral`,
+        'Referral qualified without a point credit',
         {
           referrerId,
           referredUserId,
           referralId: referral.id,
-          reputationAwarded: qualificationResult.reputationAwarded,
         },
         'ReputationService'
       );
-
-      // A qualified referral frees a slot for the oldest pending referral.
-      await this.awardPendingReferralSignupPoints(referrerId);
     }
 
     return qualificationResult;

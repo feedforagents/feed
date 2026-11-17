@@ -43,6 +43,7 @@ let otherId: string;
 let openPerpId: string;
 let closedPerpId: string;
 let otherPerpId: string;
+let owned: { userIds: string[]; perpIds: string[] } | undefined;
 
 async function fetchExport(uid: string) {
   const request = new NextRequest(
@@ -68,77 +69,91 @@ beforeAll(async () => {
   ];
   const now = new Date();
 
-  await db.insert(users).values([
-    {
-      id: userId,
-      username: `f34p-${userId}`,
-      displayName: 'Export Perp Fixture User',
-      updatedAt: now,
-    },
-    {
-      id: otherId,
-      username: `f34q-${otherId}`,
-      displayName: 'Export Perp Fixture Other',
-      updatedAt: now,
-    },
-  ]);
+  owned = await db.transaction(async (tx) => {
+    const insertedUsers = await tx
+      .insert(users)
+      .values([
+        {
+          id: userId,
+          username: `f34p-${userId}`,
+          displayName: 'Export Perp Fixture User',
+          updatedAt: now,
+        },
+        {
+          id: otherId,
+          username: `f34q-${otherId}`,
+          displayName: 'Export Perp Fixture Other',
+          updatedAt: now,
+        },
+      ])
+      .returning({ id: users.id });
 
-  await db.insert(perpPositions).values([
-    {
-      id: openPerpId,
-      userId,
-      ticker: 'F34AAA',
-      organizationId: 'f34-org',
-      side: 'long',
-      entryPrice: 10.5,
-      currentPrice: 11.25,
-      size: 100,
-      leverage: 5,
-      liquidationPrice: 8.4,
-      unrealizedPnL: 75,
-      unrealizedPnLPercent: 7.14,
-      lastUpdated: now,
-    },
-    {
-      id: closedPerpId,
-      userId,
-      ticker: 'F34BBB',
-      organizationId: 'f34-org',
-      side: 'short',
-      entryPrice: 20,
-      currentPrice: 21,
-      size: 50,
-      leverage: 2,
-      liquidationPrice: 30,
-      unrealizedPnL: 0,
-      unrealizedPnLPercent: 0,
-      lastUpdated: now,
-      closedAt: now,
-      realizedPnL: -42.5,
-    },
-    {
-      id: otherPerpId,
-      userId: otherId,
-      ticker: 'F34CCC',
-      organizationId: 'f34-org',
-      side: 'long',
-      entryPrice: 5,
-      currentPrice: 5,
-      size: 10,
-      leverage: 1,
-      liquidationPrice: 4,
-      unrealizedPnL: 0,
-      unrealizedPnLPercent: 0,
-      lastUpdated: now,
-    },
-  ]);
+    const insertedPerps = await tx
+      .insert(perpPositions)
+      .values([
+        {
+          id: openPerpId,
+          userId,
+          ticker: 'F34AAA',
+          organizationId: 'f34-org',
+          side: 'long',
+          entryPrice: 10.5,
+          currentPrice: 11.25,
+          size: 100,
+          leverage: 5,
+          liquidationPrice: 8.4,
+          unrealizedPnL: 75,
+          unrealizedPnLPercent: 7.14,
+          lastUpdated: now,
+        },
+        {
+          id: closedPerpId,
+          userId,
+          ticker: 'F34BBB',
+          organizationId: 'f34-org',
+          side: 'short',
+          entryPrice: 20,
+          currentPrice: 21,
+          size: 50,
+          leverage: 2,
+          liquidationPrice: 30,
+          unrealizedPnL: 0,
+          unrealizedPnLPercent: 0,
+          lastUpdated: now,
+          closedAt: now,
+          realizedPnL: -42.5,
+        },
+        {
+          id: otherPerpId,
+          userId: otherId,
+          ticker: 'F34CCC',
+          organizationId: 'f34-org',
+          side: 'long',
+          entryPrice: 5,
+          currentPrice: 5,
+          size: 10,
+          leverage: 1,
+          liquidationPrice: 4,
+          unrealizedPnL: 0,
+          unrealizedPnLPercent: 0,
+          lastUpdated: now,
+        },
+      ])
+      .returning({ id: perpPositions.id });
+    return {
+      userIds: insertedUsers.map(({ id }) => id),
+      perpIds: insertedPerps.map(({ id }) => id),
+    };
+  });
 });
 
 afterAll(async () => {
-  await db
-    .delete(perpPositions)
-    .where(inArray(perpPositions.id, [openPerpId, closedPerpId, otherPerpId]));
-  await db.delete(users).where(inArray(users.id, [userId, otherId]));
+  if (!owned) return;
+  const { userIds, perpIds } = owned;
+  await db.transaction(async (tx) => {
+    await tx.delete(perpPositions).where(inArray(perpPositions.id, perpIds));
+    await tx.delete(users).where(inArray(users.id, userIds));
+  });
 });
 
 describe('GET /api/users/export-data perp positions', () => {

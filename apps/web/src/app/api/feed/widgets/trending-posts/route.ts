@@ -175,7 +175,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             }),
             db.comment.groupBy({
               by: ['postId'],
-              where: { postId: { in: postIds } },
+              where: { postId: { in: postIds }, deletedAt: null },
               _count: { postId: true },
             }),
             db.share.groupBy({
@@ -235,7 +235,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             }),
             db.comment.groupBy({
               by: ['postId'],
-              where: { postId: { in: postIds } },
+              where: { postId: { in: postIds }, deletedAt: null },
               _count: { postId: true },
             }),
             db.share.groupBy({

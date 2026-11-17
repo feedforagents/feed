@@ -59,6 +59,10 @@ mock.module('@feed/engine', () => ({
   createPerpSettlement: () => ({}),
   createPerpTradesCachePort: () => ({}),
   createPerpPriceImpactPort: () => ({}),
+  createTradingFeeProcessor: () => ({
+    processTradingFee: async () => ({}),
+  }),
+  createTradingFeeOutboxAdapter: () => ({}),
   createUserWalletAdapter: () => ({}),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0.001,
@@ -66,6 +70,7 @@ mock.module('@feed/engine', () => ({
     REFERRER_SHARE: 0.5,
     MIN_FEE_AMOUNT: 0.01,
   },
+  FeeService: { processTradingFee: async () => ({}) },
   WalletService: { getBalance: async () => ({ balance: mockBalance }) },
 }));
 
@@ -130,8 +135,8 @@ describe('OPEN_PERP', () => {
     expect(openPositionMock).toHaveBeenCalledTimes(1);
   });
 
-  test('accepts the exact balance after rounding the service fee down', async () => {
-    mockBalance = 100.11;
+  test('accepts the exact balance after rounding the settled service fee up', async () => {
+    mockBalance = 100.12;
     const result = await openPerpAction.handler(
       runtime,
       message,
