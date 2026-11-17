@@ -34,6 +34,7 @@ import {
   type WalletPort,
 } from '@feed/core/markets/perps';
 import { FEE_CONFIG } from '@feed/engine';
+import { floorPoints } from '@feed/shared';
 
 const feeConfig = {
   tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
@@ -551,13 +552,14 @@ describe('perp close/add/reduce/flip fee failure (post-commit bookkeeping)', () 
     // The close fills at the synthetic execution price (below spot for a
     // long sell), so realised PnL is negative; assert the balance from the
     // reported settlement fields, mirroring PerpMarketService.test.ts:
-    // 9899.80 + (margin 100 + realised PnL - fee 0.20).
+    // 9899.80 + (margin 100 + realised PnL - fee 0.20), with the proceeds
+    // settled down to a hundredth (PRD §9.1).
     const balance = await wallet.getBalance('u1');
     expect(balance.balance).toBeCloseTo(
       9899.8 +
-        (result.marginPaid ?? 0) +
-        (result.realizedPnL ?? 0) -
-        result.feePaid,
+        floorPoints(
+          (result.marginPaid ?? 0) + (result.realizedPnL ?? 0) - result.feePaid
+        ),
       6
     );
 
@@ -639,13 +641,14 @@ describe('perp close/add/reduce/flip fee failure (post-commit bookkeeping)', () 
     expect(positions[0]?.size).toBe(100);
     // Half the margin back plus the partial close's realised PnL (negative:
     // synthetic exit fill below spot) less the fee, from the reported
-    // settlement fields: 9899.80 + (50 + realised PnL - 0.10).
+    // settlement fields: 9899.80 + (50 + realised PnL - 0.10), with the
+    // proceeds settled down to a hundredth (PRD §9.1).
     const balance = await wallet.getBalance('u1');
     expect(balance.balance).toBeCloseTo(
       9899.8 +
-        (result.marginPaid ?? 0) +
-        (result.realizedPnL ?? 0) -
-        result.feePaid,
+        floorPoints(
+          (result.marginPaid ?? 0) + (result.realizedPnL ?? 0) - result.feePaid
+        ),
       6
     );
 
@@ -690,14 +693,16 @@ describe('perp close/add/reduce/flip fee failure (post-commit bookkeeping)', () 
     // One net wallet movement: close settlement (margin 100 + realised PnL
     // - close fee) minus the flip leg's cost (new margin + open fee). Both
     // fees are in result.feePaid and the new margin in result.marginPaid:
-    // 9899.80 + 100 + realised PnL - total fees - new margin.
+    // 9899.80 + 100 + realised PnL - total fees - new margin. Each leg
+    // settles in hundredths (PRD §9.1): the close leg's proceeds round down,
+    // and the flip leg's charge (margin 50 + open fee 0.10) is already whole.
+    const openFee = 0.1;
+    const closeFee = result.feePaid - openFee;
     const balance = await wallet.getBalance('u1');
     expect(balance.balance).toBeCloseTo(
       9899.8 +
-        100 +
-        (result.realizedPnL ?? 0) -
-        result.feePaid -
-        (result.marginPaid ?? 0),
+        floorPoints(100 + (result.realizedPnL ?? 0) - closeFee) -
+        ((result.marginPaid ?? 0) + openFee),
       6
     );
 
