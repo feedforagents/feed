@@ -591,13 +591,43 @@ export class PerpMarketService {
     );
 
     if (!existingPosition) {
+      // Same account-level rejection as openPosition: the exposure cap and
+      // the max-positions limit, so the preview never quotes an order the
+      // open flow would refuse.
+      await this.assertUserExposure(
+        this.db,
+        input.userId,
+        input.size * input.leverage,
+        undefined,
+        true
+      );
       return this.buildOpenExecutionPreview(market, input);
     }
 
     this.assertOpenPositionIntegrity(existingPosition);
 
     if (existingPosition.side === input.side) {
+      // Same exposure check as addToPosition (the add inherits the
+      // existing position's leverage).
+      await this.assertUserExposure(
+        this.db,
+        input.userId,
+        input.size * existingPosition.leverage
+      );
       return this.buildAddPreview(market, existingPosition, input);
+    }
+
+    if (input.size > existingPosition.size) {
+      // Flip only: the new leg's exposure, excluding the leg being closed
+      // — the same check the flip leg in reduceOrFlipPosition runs. A
+      // reduce or an exact close adds no exposure and stays quotable.
+      await this.assertUserExposure(
+        this.db,
+        input.userId,
+        (input.size - existingPosition.size) *
+          Math.min(input.leverage, maxLeverage),
+        existingPosition.id
+      );
     }
 
     return this.buildOppositeSidePreview(market, existingPosition, input);
