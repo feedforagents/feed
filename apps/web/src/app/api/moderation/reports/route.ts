@@ -181,15 +181,18 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   // the same reporter, target and category could both read "no recent report"
   // and both insert, leaving duplicate rows in the moderation queue — for user
   // reports each duplicate would also run its own LLM evaluation and auto-ban
-  // pass. Serialize the check and the insert per (reporter, target, category)
-  // with a transaction-scoped advisory lock, the same pattern as the
-  // follow/block pair lock in packages/db/src/moderation/filters.ts: the
-  // second transaction waits, reads the first row, and raises the documented
-  // DUPLICATE_REPORT instead of inserting. The lock must be the first
-  // statement of the transaction.
+  // pass. Serialize the check and the insert with a transaction-scoped
+  // advisory lock, the same pattern as the follow/block pair lock in
+  // packages/db/src/moderation/filters.ts: the second transaction waits,
+  // reads the first row, and raises the documented DUPLICATE_REPORT instead
+  // of inserting. The key is reporter + category only — CreateReportSchema
+  // accepts a payload carrying reportedUserId, reportedPostId or both, so a
+  // per-target key would let a mixed-target request and a single-target
+  // request hold different locks while running the same post predicate.
+  // The lock must be the first statement of the transaction.
   const report = await db.$transaction(async (tx) => {
     await tx.execute(
-      sql`SELECT pg_advisory_xact_lock(hashtext(${'report-dedup:' + authUser.userId + ':' + (data.reportedUserId ?? data.reportedPostId) + ':' + data.category}))`
+      sql`SELECT pg_advisory_xact_lock(hashtext(${'report-dedup:' + authUser.userId + ':' + data.category}))`
     );
 
     if (data.reportedUserId) {
