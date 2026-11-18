@@ -171,15 +171,17 @@ export const GET = withErrorHandling(async function GET(
   // The recent-1000 sample above would understate both totals on any
   // market with more than 1000 positions; the admin trading stats sum
   // the same expression over every row.
-  const [totalPositions, volumeRows] = await Promise.all([
-    db.position.count({ where: { marketId: market.id } }),
-    db.$queryRaw<{ totalVolume: string }>`
-      SELECT COALESCE(SUM(shares::numeric * "avgPrice"::numeric), 0) as "totalVolume"
+  const [totals] = await db.$queryRaw<{
+    totalPositions: string;
+    totalVolume: string;
+  }>`
+      SELECT COUNT(*) AS "totalPositions",
+             COALESCE(SUM(shares::numeric * "avgPrice"::numeric), 0) AS "totalVolume"
       FROM "Position"
       WHERE "marketId" = ${market.id}
-    `,
-  ]);
-  const totalVolume = Number(volumeRows[0]?.totalVolume ?? 0);
+    `;
+  const totalPositions = Number(totals?.totalPositions ?? 0);
+  const totalVolume = Number(totals?.totalVolume ?? 0);
 
   // Simple momentum (price away from 0.5):
   const priceMomentum = currentYesPrice - 0.5;

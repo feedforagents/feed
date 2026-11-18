@@ -52,7 +52,16 @@
  */
 
 import { authenticate, successResponse, withErrorHandling } from '@feed/api';
-import { asUser } from '@feed/db';
+import {
+  and,
+  asUser,
+  count,
+  desc,
+  eq,
+  exists,
+  favorites as favoritesTable,
+  users,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -79,23 +88,31 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const { profiles: favoritedProfiles, total } = await asUser(
     user,
     async (db) => {
-      const [totalFavorites, favorites] = await Promise.all([
-        db.favorite.count({
-          where: {
-            userId: user.userId,
-          },
-        }),
-        db.favorite.findMany({
-          where: {
-            userId: user.userId,
-          },
-          orderBy: {
-            createdAt: 'desc',
-          },
-          skip: offset,
-          take: limit,
-        }),
+      // A deleted target leaves its Favorite behind. Apply the same target
+      // existence predicate to the SQL count and page, before LIMIT/OFFSET.
+      const visibleFavorite = and(
+        eq(favoritesTable.userId, user.userId),
+        exists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(eq(users.id, favoritesTable.targetUserId))
+        )
+      );
+      const [[totalRow], favorites] = await Promise.all([
+        db
+          .select({ total: count() })
+          .from(favoritesTable)
+          .where(visibleFavorite),
+        db
+          .select()
+          .from(favoritesTable)
+          .where(visibleFavorite)
+          .orderBy(desc(favoritesTable.createdAt), desc(favoritesTable.id))
+          .limit(limit)
+          .offset(offset),
       ]);
+      const totalFavorites = totalRow?.total ?? 0;
 
       if (favorites.length === 0) {
         return {

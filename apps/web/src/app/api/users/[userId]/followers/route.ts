@@ -136,6 +136,10 @@ function sqlList(values: string[]): SQL {
 /**
  * Followers of an actor: registry actors (matched by id or lower-case
  * username, as StaticDataRegistry.getActor does) and users with a User row.
+ * The human branch applies the hidden-tier membership every other
+ * discovery surface uses: not a test account (isTest flag or 'test-' id)
+ * and not banned. The predicate sits in the relation, before count and
+ * paging, so totals and pages measure the same membership.
  */
 function actorTargetRelations(targetId: string): SQL {
   const actors = StaticDataRegistry.getAllActors();
@@ -159,11 +163,15 @@ function actorTargetRelations(targetId: string): SQL {
     FROM ${userActorFollows}
     INNER JOIN ${users} ON ${users.id} = ${userActorFollows.userId}
     WHERE ${userActorFollows.actorId} = ${targetId}
+      AND ${users.isTest} = false
+      AND ${users.isBanned} = false
+      AND ${users.id} NOT LIKE 'test-%'
   `;
 }
 
 /**
- * Followers of a user: users with a User row, and active NPC follows whose
+ * Followers of a user: users with a User row (same hidden-tier membership
+ * as the actor target's human branch), and active NPC follows whose
  * reason is not 'user_followed' (NULL reasons stay excluded, as before).
  */
 function userTargetRelations(targetId: string): SQL {
@@ -173,6 +181,9 @@ function userTargetRelations(targetId: string): SQL {
     FROM ${follows}
     INNER JOIN ${users} ON ${users.id} = ${follows.followerId}
     WHERE ${follows.followingId} = ${targetId}
+      AND ${users.isTest} = false
+      AND ${users.isBanned} = false
+      AND ${users.id} NOT LIKE 'test-%'
     UNION ALL
     SELECT 1, ${followStatuses.npcId}, ${followStatuses.followedAt}, ${followStatuses.id}
     FROM ${followStatuses}

@@ -13,6 +13,7 @@ import {
   actorState,
   and,
   db,
+  gt,
   isNull,
   organizationState,
   perpPositions,
@@ -688,18 +689,26 @@ export class NPCInvestmentManager {
     // Determine how many positions to close based on risk level
     const positionsToClose = isHighRisk ? (hasLosses ? 5 : 3) : 2;
 
-    // Get all leveraged positions (open positions only with leverage > 1)
+    // Get all leveraged positions (open positions only with leverage > 1).
+    // Filter in SQL before the limit: closed rows keep their leverage, so
+    // limiting first and filtering in memory lets closed rows occupy the
+    // top-N slots and the de-risk silently closes fewer live positions
+    // than intended (in the worst case none at all).
     const positionsResult = await db
       .select()
       .from(poolPositions)
-      .where(eq(poolPositions.poolId, poolId))
+      .where(
+        and(
+          eq(poolPositions.poolId, poolId),
+          isNull(poolPositions.closedAt),
+          gt(poolPositions.leverage, 1)
+        )
+      )
       .orderBy(desc(poolPositions.leverage))
       .limit(positionsToClose);
 
-    // Filter for open positions with leverage > 1
-    const leveragedPositions = positionsResult.filter(
-      (p) => p.closedAt === null && (p.leverage ?? 0) > 1
-    );
+    // The SQL filter already restricts to open positions with leverage > 1.
+    const leveragedPositions = positionsResult;
 
     for (const position of leveragedPositions) {
       actions.push({
