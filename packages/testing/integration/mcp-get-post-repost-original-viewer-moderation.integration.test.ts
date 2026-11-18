@@ -166,9 +166,25 @@ beforeAll(async () => {
     repostOkId,
     quoteBlockedId,
     viewerRepostBlockedId,
-  ] = await Promise.all(
-    Array.from({ length: 17 }, () => generateSnowflakeId())
-  );
+  ] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ]);
 
   const now = new Date();
   const earlier = new Date(now.getTime() - 60_000);
