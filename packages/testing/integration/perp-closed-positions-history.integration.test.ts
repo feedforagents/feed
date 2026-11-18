@@ -35,6 +35,7 @@ const closedIds: string[] = [];
 const openIds: string[] = [];
 const predictionIds: string[] = [];
 const excludedPredictionIds: string[] = [];
+let activeDustPredictionId = '';
 let userId = '';
 
 function guardDisposableTarget() {
@@ -46,7 +47,7 @@ function guardDisposableTarget() {
     database.hostname === '127.0.0.1' &&
     database.port === '55685' &&
     database.username === 'symbiex' &&
-    /^\/feed_pr1705\d+$/.test(database.pathname);
+    /^\/feed_pr\d+$/.test(database.pathname);
   const ci =
     process.env.CI === 'true' &&
     process.env.GITHUB_ACTIONS === 'true' &&
@@ -327,13 +328,14 @@ beforeAll(async () => {
   );
   const market = await insertMarket();
   const predictions: Array<typeof positions.$inferInsert> = [];
-  for (let i = 0; i < 61; i++)
+  // Preserve every prior row and add one active dust control beside the closed dust row.
+  for (let i = 0; i < 62; i++)
     predictions.push({
       id: await generateSnowflakeId(),
       userId,
       marketId: market.id,
       side: true,
-      shares: i === 60 ? '0' : '2',
+      shares: i >= 60 ? '0' : '2',
       avgPrice: '.5',
       amount: '1',
       status:
@@ -357,14 +359,13 @@ beforeAll(async () => {
       row: sql<string>`to_jsonb("Position")::text`,
     })
   );
-  expect(insertedPredictions).toHaveLength(61);
+  expect(insertedPredictions).toHaveLength(62);
   const returnedIds = new Set(insertedPredictions.map((r) => r.id));
   for (const p of predictions) {
     expect(returnedIds.has(p.id)).toBe(true);
-    (p.status === 'active' || p.shares === '0'
-      ? excludedPredictionIds
-      : predictionIds
-    ).push(p.id);
+    if (p.status === 'active' && p.shares === '0')
+      activeDustPredictionId = p.id;
+    (p.status === 'active' ? excludedPredictionIds : predictionIds).push(p.id);
   }
 });
 afterAll(async () => {
@@ -404,11 +405,15 @@ describe('closed perp position history paging', () => {
     expect(times).toEqual([...times].sort((a, b) => b - a));
   });
 
-  it('selects complete closed and resolved prediction history without active or zero-share rows', async () => {
+  it('selects complete closed and resolved prediction history including zero-share rows without active rows', async () => {
     const snapshot = await requestSnapshot();
-    expect(snapshot.predictions.total).toBe(60); // 57 closed/resolved + 3 active; zero shares remain excluded by the existing API.
+    expect(snapshot.predictions.total).toBe(61); // 58 closed/resolved + 3 non-dust active; active dust stays excluded.
+    expect(activeDustPredictionId).not.toBe('');
+    expect(snapshot.predictions.positions.map((row) => row.id)).not.toContain(
+      activeDustPredictionId
+    );
     const rows = (await completeClosed()).predictions;
-    expect(rows).toHaveLength(57);
+    expect(rows).toHaveLength(58);
     expect(rows.map((r) => r.id)).toEqual(predictionIds);
     expect(new Set(rows.map((r) => r.status))).toEqual(
       new Set(['closed', 'resolved'])
@@ -422,9 +427,9 @@ describe('closed perp position history paging', () => {
     const lost =
       combined.perpetuals.filter((r) => (r.realizedPnL ?? 0) < 0).length +
       combined.predictions.filter((r) => (r.pnl ?? 0) < 0).length;
-    expect(won).toBe(72);
+    expect(won).toBe(73);
     expect(lost).toBe(70);
-    expect(won + lost).toBe(142);
+    expect(won + lost).toBe(143);
   });
 
   it('keeps a real 25-position timestamp tie in stable raw-ID order across the old cutoff', async () => {

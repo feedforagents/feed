@@ -44,7 +44,7 @@ These shape the plan. Paths are relative to the Feed repo root.
 
 | # | Finding | Impact |
 |---|---|---|
-| F1 | **The game may not be running in production.** `workers/cron/wrangler.production.jsonc:21` sets `CRON_ENABLED: "false"`, `.env.example` defaults `GAME_START=pause`, and the live feed shows "No Recommendations Yet" to visitors. Two scheduled jobs (`reputation-sync`, `profile-chain-sync`) have no route. | P0: restore and verify the tick before anything else. |
+| F1 | **Game tick health needs live verification.** The checked-in production Worker config now sets `CRON_ENABLED: "true"`, and `.env.example` still defaults `GAME_START=pause`. The initial assessment found an empty visitor feed. The Worker and internal scheduler no longer reference the missing `reputation-sync` and `profile-chain-sync` routes. | P0: verify live tick delivery and visitor-visible updates on staging before rollout. |
 | F2 | **There is no spot market.** Perp price = f(base price, net perp open interest of everyone) plus a random-walk "volatility" sim whose state is an in-process `Map` that resets on cold start. Each trade recomputes from base, snapping drift back. Narrative events do not move prices. | The "NPC spot buying drives perps" model must be built (§9.3). |
 | F3 | **MCP is not usable by ChatGPT/Claude connectors.** Hand-rolled JSON-RPC over POST, protocol default 2024-11-05, no Streamable HTTP, no OAuth 2.1 / DCR / PKCE, no `.well-known` metadata. Auth is static per-user API keys. Two routes (`/mcp`, `/api/mcp`) behave differently; `/api/mcp` accepts Bearer at the gate but rejects it at tool execution. Advertises resources/prompts it doesn't implement. | Rebuild the MCP transport and auth on the official SDK (§8). |
 | F4 | MCP has 76 tools, but writes straight to the DB, skipping REST business logic (notifications, repost posts). `share_post` ignores the quote comment. No home feed, no start-a-DM, no reply-to-post, no unrepost. `get_portfolio` and `get_leaderboard` build `/api/api/...` URLs. | Tool layer should call the same services as REST, not reimplement them. |
@@ -250,6 +250,24 @@ Required price model:
 6. Remove the random-walk volatility simulator as a price source; any "noise" comes from NPC spot trading.
 7. Bootstrap base prices stay (CoinGecko for crypto names, static for stocks); after bootstrap, only spot trading moves the index.
 8. Leverage cap reduced from 100× to 20× ([D-17b]) to reduce instant-liquidation churn for new players.
+
+**Approved staging funding rollout (2026-11-17).** Permit
+one additive migration, `0006_perp_funding_period_accrual`, after the verified
+fee migration `0005_trading_fee_idempotency_key`. Verify the canonical history
+or the approved additive history from §9.1 before applying the new migration.
+Keep the genuine preceding receipts and all existing staging
+identity, physical schema, lock and current-commit guards. The extension
+preserves existing positions and their accumulated funding.
+
+Accrue at most once per position and scheduled UTC eight-hour period. Each
+funding claim and the position's accrued funding update commit in the same
+transaction. Queue retries and staging relays retain their authenticated
+scheduled period across clock boundaries.
+Before enabling the revised worker path, pause and drain funding jobs and
+choose the first complete period after cutover. Existing accruals lack a
+period receipt, so the new job may not replay earlier periods.
+Keep scheduled funding paused until the first eligible UTC boundary is
+configured. Requests that predate it leave positions unchanged.
 
 ### 9.4 Leaderboard
 - **Rank by profit, not balance ([D-15b]):** net P&L = current equity − starting grant − points purchased. Buying points never raises rank. Show return % alongside.

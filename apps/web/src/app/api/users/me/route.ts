@@ -162,6 +162,7 @@ const userSelectFields = {
   hasProfileImage: users.hasProfileImage,
   referralCode: users.referralCode,
   referredBy: users.referredBy,
+  usernameChangedAt: users.usernameChangedAt,
   reputationPoints: users.reputationPoints,
   virtualBalance: users.virtualBalance,
   pointsAwardedForProfile: users.pointsAwardedForProfile,
@@ -204,6 +205,7 @@ type UserSelectResult = {
   hasProfileImage: boolean;
   referralCode: string | null;
   referredBy: string | null;
+  usernameChangedAt: Date | null;
   reputationPoints: number;
   virtualBalance: string;
   pointsAwardedForProfile: boolean;
@@ -250,6 +252,7 @@ function buildUserResponse(
     hasProfileImage: dbUser.hasProfileImage,
     referralCode: dbUser.referralCode,
     referredBy: dbUser.referredBy,
+    usernameChangedAt: toISOOrNull(dbUser.usernameChangedAt),
     reputationPoints: dbUser.reputationPoints,
     virtualBalance: Number(dbUser.virtualBalance ?? 0),
     pointsAwardedForProfile: dbUser.pointsAwardedForProfile,
