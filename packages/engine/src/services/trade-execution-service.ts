@@ -66,7 +66,10 @@ import {
   StaticDataRegistry,
   type StaticOrganization,
 } from './static-data-registry';
-import { invalidateAfterPredictionTrade } from './trade-cache-invalidation';
+import {
+  createPerpTradesCachePort,
+  invalidateAfterPredictionTrade,
+} from './trade-cache-invalidation';
 
 type PredictionTradeBroadcast = {
   type: 'prediction_trade';
@@ -519,6 +522,7 @@ export class TradeExecutionService {
       }),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -985,7 +989,15 @@ export class TradeExecutionService {
 
     // Calculate trading fee (0.1% on position size)
     const feeCalc = FeeService.calculateFee(position.size);
-    const grossReturn = position.size + realizedPnL;
+    // Legacy perp rows store the notional size, but the capital at risk is
+    // the margin (size / leverage): returning the full notional would mint
+    // size * (1 - 1/leverage) of balance that was never debited. At 1x (or
+    // unset) leverage the margin equals the size, so unleveraged closes are
+    // unchanged.
+    const effectiveLeverage =
+      position.leverage && position.leverage > 0 ? position.leverage : 1;
+    const margin = position.size / effectiveLeverage;
+    const grossReturn = margin + realizedPnL;
     const netReturn = Math.max(0, grossReturn - feeCalc.feeAmount);
 
     // Execute in transaction
@@ -1088,6 +1100,7 @@ export class TradeExecutionService {
       }),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,
