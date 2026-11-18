@@ -463,7 +463,7 @@ export class WalletService {
       };
     };
 
-    const result = tx ? apply(tx) : withTransaction(apply);
+    const result = await (tx ? apply(tx) : withTransaction(apply));
     if (afterCommit) afterCommit(() => WalletService.invalidateCache(userId));
     else await WalletService.invalidateCache(userId);
     return result;
