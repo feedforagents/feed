@@ -25,6 +25,7 @@ import {
 import { generateSnowflakeId } from '@feed/shared';
 import * as notificationService from '../../api/src/services/notification-service';
 import {
+  executeCreateComment,
   executeGetFavoritePosts,
   executeGetMarketPrices,
   executeGetMarkets,
@@ -52,6 +53,7 @@ let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
 let postId: string;
+let deletedPostId: string;
 let marketId: string;
 let activePositionId: string;
 let liveCommentId: string;
@@ -155,6 +157,17 @@ describe('MCP tool handlers', () => {
       })
       .returning({ id: posts.id });
     postIds.push(...insertedPosts.map((row) => row.id));
+    deletedPostId = await generateSnowflakeId();
+    const insertedDeletedPosts = await db
+      .insert(posts)
+      .values({
+        id: deletedPostId,
+        content: 'deleted post',
+        authorId: otherUserId,
+        deletedAt: new Date(),
+      })
+      .returning({ id: posts.id });
+    postIds.push(...insertedDeletedPosts.map((row) => row.id));
     const insertedFavorites = await db
       .insert(favorites)
       .values({
@@ -282,6 +295,12 @@ describe('MCP tool handlers', () => {
           .select({ id: notifications.id })
           .from(notifications)
           .where(inArray(notifications.userId, userIds))
+      ).toHaveLength(0);
+      expect(
+        await db
+          .select({ id: comments.id })
+          .from(comments)
+          .where(inArray(comments.authorId, userIds))
       ).toHaveLength(0);
     } finally {
       await closeDatabase();
@@ -625,5 +644,52 @@ describe('MCP tool handlers', () => {
     } finally {
       notify.mockRestore();
     }
+  });
+
+  it('comments on a live post via create_comment', async () => {
+    const result = await executeCreateComment(agent(), {
+      postId,
+      content: 'live comment',
+    });
+    commentIds.push(result.commentId);
+    expect(result.success).toBe(true);
+    const rows = await db
+      .select()
+      .from(comments)
+      .where(eq(comments.id, result.commentId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toBe('live comment');
+    expect(rows[0]!.postId).toBe(postId);
+  });
+
+  it('rejects comments on unknown posts via create_comment', async () => {
+    const unknownPostId = await generateSnowflakeId();
+    await expect(
+      executeCreateComment(agent(), {
+        postId: unknownPostId,
+        content: 'orphan comment',
+      }).then((result) => {
+        commentIds.push(result.commentId);
+        return result;
+      })
+    ).rejects.toThrow('Post not found');
+    expect(
+      await db.select().from(comments).where(eq(comments.postId, unknownPostId))
+    ).toHaveLength(0);
+  });
+
+  it('rejects comments on soft-deleted posts via create_comment', async () => {
+    await expect(
+      executeCreateComment(agent(), {
+        postId: deletedPostId,
+        content: 'comment on deleted post',
+      }).then((result) => {
+        commentIds.push(result.commentId);
+        return result;
+      })
+    ).rejects.toThrow('Post (deleted) not found');
+    expect(
+      await db.select().from(comments).where(eq(comments.postId, deletedPostId))
+    ).toHaveLength(0);
   });
 });
