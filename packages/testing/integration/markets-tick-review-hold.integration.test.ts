@@ -20,7 +20,7 @@ import {
 } from './helpers/sub-market-isolation';
 
 if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
-  test('runs funded manual reviews through four real ticks in a leased fresh database', async () => {
+  test('runs funded manual review and resolution races in a leased fresh database', async () => {
     await runIsolatedMarketsReviewCases();
   }, 300_000);
 } else {
@@ -31,6 +31,7 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
   const receiptPath = join(dirname(leaseFile), 'fixture-receipts.jsonl');
   writeFileSync(receiptPath, '', { flag: 'wx', mode: 0o600 });
   const {
+    adminAuditLogs,
     balanceTransactions,
     closeDatabase,
     db,
@@ -517,6 +518,110 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
         [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       for (const key of ['questions', 'markets', 'timeframed'] as const)
         expect(ordered(actual[key])).toEqual(ordered(support[key]));
+    });
+
+    test('a losing admin resolver preserves the paid outcome and writes no audit', async () => {
+      const fixture = await seedEndedMarket('unset');
+      const marketId = fixture.questionId;
+      const { POST } = await import('@/app/api/admin/markets/[marketId]/route');
+      const token = getAdminToken();
+      if (!token) throw new Error('Integration admin token is required');
+      const ready = Promise.withResolvers<number>();
+      const release = Promise.withResolvers<void>();
+      const winner = withPredictionSettlement(
+        marketId,
+        { system: 'test_game_tick' },
+        async (service, tx) => {
+          const [row] = await tx
+            .select({ pid: sql<number>`pg_backend_pid()` })
+            .from(markets)
+            .where(eq(markets.id, marketId));
+          if (!row) throw new Error('Missing settlement lock holder');
+          ready.resolve(row.pid);
+          await release.promise;
+          await service.resolve({ marketId, winningSide: 'yes' });
+          await tx
+            .update(questions)
+            .set({ status: 'resolved', resolvedOutcome: true })
+            .where(eq(questions.id, marketId));
+        },
+        {
+          fees: {
+            tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+            platformShare: FEE_CONFIG.PLATFORM_SHARE,
+            referrerShare: FEE_CONFIG.REFERRER_SHARE,
+            minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+          },
+        }
+      );
+      void winner.catch(ready.reject);
+      let pending: ReturnType<typeof POST> | undefined;
+      let response: Response;
+      try {
+        const pid = await ready.promise;
+        pending = POST(
+          new NextRequest(`http://localhost/api/admin/markets/${marketId}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-dev-admin-token': token,
+            },
+            body: JSON.stringify({ action: 'resolve', resolution: false }),
+          }),
+          { params: Promise.resolve({ marketId }) }
+        );
+        void pending.catch(() => {});
+        const deadline = Date.now() + 5000;
+        while (true) {
+          const waiting = await db.execute(sql`
+            SELECT waiting.pid
+            FROM pg_locks waiting
+            JOIN pg_locks held
+              ON (waiting.database, waiting.classid, waiting.objid, waiting.objsubid)
+               = (held.database, held.classid, held.objid, held.objsubid)
+            WHERE held.pid = ${pid}
+              AND held.locktype = 'advisory' AND held.granted
+              AND waiting.locktype = 'advisory' AND NOT waiting.granted
+          `);
+          if (waiting.length > 0) break;
+          if (Date.now() >= deadline)
+            throw new Error('Admin never reached the settlement lock');
+          await Bun.sleep(20);
+        }
+        release.resolve();
+        await winner;
+        response = await pending;
+      } finally {
+        release.resolve();
+        await Promise.allSettled([winner, pending]);
+      }
+
+      const [market] = await db
+        .select({ resolved: markets.resolved, resolution: markets.resolution })
+        .from(markets)
+        .where(eq(markets.id, marketId));
+      expect(market).toEqual({ resolved: true, resolution: true });
+      const [question] = await db
+        .select({
+          status: questions.status,
+          outcome: questions.resolvedOutcome,
+          reviewer: questions.resolutionReviewedBy,
+        })
+        .from(questions)
+        .where(eq(questions.id, marketId));
+      expect(question).toEqual({
+        status: 'resolved',
+        outcome: true,
+        reviewer: null,
+      });
+      expect((await stateOf(fixture)).payouts).toEqual([fixture.payout]);
+      expect(response.status).toBe(409);
+      expect(
+        await db
+          .select({ id: adminAuditLogs.id })
+          .from(adminAuditLogs)
+          .where(eq(adminAuditLogs.resourceId, marketId))
+      ).toEqual([]);
     });
   });
 }
