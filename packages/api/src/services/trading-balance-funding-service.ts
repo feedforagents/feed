@@ -442,80 +442,102 @@ export class TradingBalanceFundingService {
         }
 
         // Invariant: one charge can lose at most its own amount across
-        // refund + dispute. The dispute handler passes the ACTUAL dispute
-        // amount (webhook: `dispute.amount / 100`), which can be the full
-        // charge, only the unrefunded remainder, or a smaller slice of it
-        // (Stripe: "The disputed amount might be the full amount of the
-        // charge or a different amount"). Netting prior refunds out of the
+        // refund + dispute. Both paths run in this transaction under the
+        // same user-row lock (lockUserBalance), so the remaining exposure
+        // is computed once here from the rows already written for this
+        // payment intent:
+        //   remaining = charge amount
+        //     − prior refunds − prior disputes + prior dispute-won credits
+        // The dispute handler passes the ACTUAL dispute amount (webhook:
+        // `dispute.amount / 100`), which can be the full charge, only
+        // the unrefunded remainder, or a smaller slice of it (Stripe:
+        // "The disputed amount might be the full amount of the charge
+        // or a different amount"). Netting prior refunds out of the
         // requested amount is therefore wrong whenever the dispute is for
         // less than the full charge: e.g. $100 charge, $40 refund, $60
         // dispute must deduct $60, not $60 − $40 = $20.
-        // Correct cap: min(dispute amount, charge amount − prior refunds
-        // for the same payment intent). The charge amount comes from the
-        // original `stripe_purchase` row for this PI — the same lookup the
-        // dispute webhook uses to find the original transaction.
-        let alreadyRefundedPoints = 0;
-        let chargeAmountPoints: number | null = null;
-        let netRequestedDeduction = requestedDeduction;
-        if (reason === 'dispute') {
-          const priorRefunds = await tx
-            .select({
-              amount: balanceTransactions.amount,
-              description: balanceTransactions.description,
-            })
-            .from(balanceTransactions)
-            .where(
-              and(
-                eq(balanceTransactions.userId, userId),
-                eq(balanceTransactions.type, 'stripe_refund')
-              )
-            );
-          alreadyRefundedPoints = priorRefunds.reduce(
-            (
-              sum: number,
-              row: { amount: string; description: string | null }
-            ) => {
-              if (!row.description) return sum;
-              let parsed: { originalPaymentIntentId?: string };
-              try {
-                parsed = JSON.parse(row.description) as {
-                  originalPaymentIntentId?: string;
-                };
-              } catch {
-                return sum;
-              }
-              return parsed.originalPaymentIntentId === paymentIntentId
-                ? sum + Math.abs(Number(row.amount))
-                : sum;
-            },
-            0
-          );
-          const [originalPurchase] = await tx
-            .select({ amount: balanceTransactions.amount })
-            .from(balanceTransactions)
-            .where(
-              and(
-                eq(balanceTransactions.userId, userId),
-                eq(balanceTransactions.relatedId, paymentIntentId),
-                eq(balanceTransactions.type, 'stripe_purchase')
-              )
+        // The refund path previously had no cap at all: a $100 dispute
+        // followed by a distinct $40 refund deducted $140 for one $100
+        // charge (event-ID replay protection only covers the same event).
+        // Correct cap for both paths: min(requested amount, remaining
+        // exposure). The charge amount comes from the original
+        // `stripe_purchase` row for this PI — the same lookup the
+        // webhooks use to find the original transaction.
+        const priorReversals = await tx
+          .select({
+            type: balanceTransactions.type,
+            amount: balanceTransactions.amount,
+            description: balanceTransactions.description,
+          })
+          .from(balanceTransactions)
+          .where(
+            and(
+              eq(balanceTransactions.userId, userId),
+              inArray(balanceTransactions.type, [
+                'stripe_refund',
+                'stripe_dispute',
+                'stripe_dispute_won',
+              ])
             )
-            .limit(1);
-          if (originalPurchase) {
-            chargeAmountPoints = Math.abs(Number(originalPurchase.amount));
-            netRequestedDeduction = Math.min(
-              requestedDeduction,
-              Math.max(0, chargeAmountPoints - alreadyRefundedPoints)
-            );
-          } else {
-            // No purchase row (the webhook returns early without one, so
-            // this should not happen in production): keep the previous
-            // netting instead of regressing to the base double-deduction.
-            netRequestedDeduction = Math.max(
-              0,
-              requestedDeduction - alreadyRefundedPoints
-            );
+          );
+        let priorRefundedPoints = 0;
+        let priorDisputedPoints = 0;
+        let priorDisputeWonPoints = 0;
+        for (const row of priorReversals) {
+          if (!row.description) continue;
+          let parsed: { originalPaymentIntentId?: string };
+          try {
+            parsed = JSON.parse(row.description) as {
+              originalPaymentIntentId?: string;
+            };
+          } catch {
+            continue;
           }
+          if (parsed.originalPaymentIntentId !== paymentIntentId) continue;
+          if (row.type === 'stripe_refund') {
+            priorRefundedPoints += Math.abs(Number(row.amount));
+          } else if (row.type === 'stripe_dispute') {
+            priorDisputedPoints += Math.abs(Number(row.amount));
+          } else {
+            priorDisputeWonPoints += Number(row.amount);
+          }
+        }
+        const priorDeductedNetPoints =
+          priorRefundedPoints + priorDisputedPoints - priorDisputeWonPoints;
+        const [originalPurchase] = await tx
+          .select({ amount: balanceTransactions.amount })
+          .from(balanceTransactions)
+          .where(
+            and(
+              eq(balanceTransactions.userId, userId),
+              eq(balanceTransactions.relatedId, paymentIntentId),
+              eq(balanceTransactions.type, 'stripe_purchase')
+            )
+          )
+          .limit(1);
+        let chargeAmountPoints: number | null = null;
+        let netRequestedDeduction: number;
+        if (originalPurchase) {
+          chargeAmountPoints = Math.abs(Number(originalPurchase.amount));
+          netRequestedDeduction = Math.min(
+            requestedDeduction,
+            Math.max(0, chargeAmountPoints - priorDeductedNetPoints)
+          );
+        } else {
+          // No purchase row (the webhooks return early without one, so
+          // this should not happen in production): cap the request
+          // against what prior reversals already took, instead of
+          // regressing to the base double-deduction. The refund webhook
+          // already nets prior refunds out of its request, so only the
+          // net dispute deduction counts against a refund here.
+          const alreadyTakenPoints =
+            reason === 'dispute'
+              ? priorDeductedNetPoints
+              : Math.max(0, priorDisputedPoints - priorDisputeWonPoints);
+          netRequestedDeduction = Math.max(
+            0,
+            requestedDeduction - alreadyTakenPoints
+          );
         }
 
         const balanceAfter = Math.max(0, balanceBefore - netRequestedDeduction);
@@ -543,11 +565,10 @@ export class TradingBalanceFundingService {
             balanceUnitsRequested: netRequestedDeduction,
             balanceUnitsDeducted: actualDeduction,
             alreadyRefundedBalanceUnits:
-              reason === 'dispute' ? alreadyRefundedPoints : undefined,
-            chargeAmountBalanceUnits:
-              reason === 'dispute'
-                ? (chargeAmountPoints ?? undefined)
-                : undefined,
+              reason === 'dispute' ? priorRefundedPoints : undefined,
+            priorDisputedBalanceUnits: priorDisputedPoints,
+            priorDisputeWonBalanceUnits: priorDisputeWonPoints,
+            chargeAmountBalanceUnits: chargeAmountPoints ?? undefined,
             originalPaymentIntentId: paymentIntentId,
             reversalReason: reason,
             reversedAt: new Date().toISOString(),
@@ -587,7 +608,8 @@ export class TradingBalanceFundingService {
     userId: string,
     disputeId: string,
     amountUSD: number,
-    stripeEventId: string
+    stripeEventId: string,
+    paymentIntentId?: string
   ): Promise<TradingBalanceFundingResult> {
     const balanceDelta = usdToBalanceUnits(amountUSD);
 
@@ -650,6 +672,9 @@ export class TradingBalanceFundingService {
             amountUSD,
             balanceUnitsCredited: balanceDelta,
             disputeId,
+            // Links the restoration to the charge so reversePurchaseFunding
+            // can count it back into the remaining purchase exposure.
+            originalPaymentIntentId: paymentIntentId,
             creditedAt: new Date().toISOString(),
           }),
         });

@@ -32,6 +32,16 @@
  *   right. The new cases (b) and (c) are regression tests against the
  *   previous fix's formula, not base-vs-fix discriminators.
  *
+ * Follow-up (maintainer review on #1939): the cap lived only in the
+ * dispute branch — a refund after a full dispute deducted again, so one
+ * $100 charge could lose $140. Both paths now share one cap:
+ *   min(requested amount, charge − prior refunds − prior disputes
+ *       + prior dispute-won credits)
+ * computed inside the same transaction under the same user-row lock.
+ * New cases below prove both delivery orders (refund-first and
+ * dispute-first), the dispute-won restoration, and the zero-exposure
+ * case (full refund, then a dispute deducts $0).
+ *
  * Run: DISABLE_RATE_LIMITING=true DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_f3r2 TZ=UTC bun test integration/dispute-after-partial-refund.integration.test.ts --preload ./integration/preload.ts
  */
 
@@ -64,8 +74,8 @@ async function getUserLedger(userId: string): Promise<{
   };
 }
 
-/** Fund $100 (PI-1) + $100 top-up (PI-2), then a $40 partial refund on PI-1. */
-async function preparePartialRefundCase(): Promise<{
+/** Fund $100 (PI-1) + $100 top-up (PI-2), no refund yet. */
+async function prepareFundedCase(): Promise<{
   userId: string;
   paymentIntentId: string;
   stamp: string;
@@ -112,6 +122,17 @@ async function preparePartialRefundCase(): Promise<{
   );
   expect(funded2.success).toBe(true);
   expect((await getUserLedger(userId)).virtualBalance).toBe(20000);
+
+  return { userId, paymentIntentId, stamp };
+}
+
+/** Fund $100 (PI-1) + $100 top-up (PI-2), then a $40 partial refund on PI-1. */
+async function preparePartialRefundCase(): Promise<{
+  userId: string;
+  paymentIntentId: string;
+  stamp: string;
+}> {
+  const { userId, paymentIntentId, stamp } = await prepareFundedCase();
 
   // 3. Partial refund of $40 on PI-1.
   const refunded = await TradingBalanceFundingService.reversePurchaseFunding(
@@ -209,6 +230,135 @@ describe('dispute after a partial refund', () => {
     expect(ledger.totalWithdrawn).toBe(6000);
     expect(ledger.virtualBalance).toBe(14000);
     expect(disputed.balanceDelta).toBe(-2000);
+  });
+
+  it('caps a refund after a full dispute at the remaining exposure (dispute-first order)', async () => {
+    const { userId, paymentIntentId, stamp } = await prepareFundedCase();
+
+    // Full-amount dispute of $100 on PI-1 first.
+    const disputed = await TradingBalanceFundingService.reversePurchaseFunding(
+      userId,
+      paymentIntentId,
+      'dispute',
+      100,
+      `evt_f3_dispute_${stamp}`
+    );
+    expect(disputed.success).toBe(true);
+    expect(disputed.balanceDelta).toBe(-10000);
+    let ledger = await getUserLedger(userId);
+    expect(ledger.totalWithdrawn).toBe(10000);
+    expect(ledger.virtualBalance).toBe(10000);
+
+    // A distinct $40 refund for the same $100 purchase must deduct $0:
+    // the whole charge is already gone via the dispute. (Maintainer
+    // repro on #1939: the refund path had no cap, so this deducted $40
+    // and one $100 charge lost $140.)
+    const refunded = await TradingBalanceFundingService.reversePurchaseFunding(
+      userId,
+      paymentIntentId,
+      'refund',
+      40,
+      `evt_f3_refund_${stamp}`
+    );
+    expect(refunded.success).toBe(true);
+    ledger = await getUserLedger(userId);
+    console.log(
+      '[f3 repro] after dispute-first refund:',
+      ledger,
+      'refundDelta:',
+      refunded.balanceDelta
+    );
+
+    expect(Math.abs(refunded.balanceDelta)).toBe(0);
+    expect(ledger.totalWithdrawn).toBe(10000);
+    expect(ledger.virtualBalance).toBe(10000);
+  });
+
+  it('restores exposure after a won dispute so a later refund can deduct again', async () => {
+    const { userId, paymentIntentId, stamp } = await prepareFundedCase();
+
+    const disputed = await TradingBalanceFundingService.reversePurchaseFunding(
+      userId,
+      paymentIntentId,
+      'dispute',
+      100,
+      `evt_f3_dispute_${stamp}`
+    );
+    expect(disputed.success).toBe(true);
+    expect(disputed.balanceDelta).toBe(-10000);
+
+    // Merchant wins the dispute: the $100 deduction is restored.
+    const won = await TradingBalanceFundingService.creditDisputeWon(
+      userId,
+      `dp_f3_${stamp}`,
+      100,
+      `evt_f3_dispute_won_${stamp}`,
+      paymentIntentId
+    );
+    expect(won.success).toBe(true);
+    expect(won.balanceDelta).toBe(10000);
+    let ledger = await getUserLedger(userId);
+    expect(ledger.virtualBalance).toBe(20000);
+    expect(ledger.totalWithdrawn).toBe(0);
+
+    // A $40 refund for the same purchase can now deduct $40 again.
+    const refunded = await TradingBalanceFundingService.reversePurchaseFunding(
+      userId,
+      paymentIntentId,
+      'refund',
+      40,
+      `evt_f3_refund_${stamp}`
+    );
+    expect(refunded.success).toBe(true);
+    ledger = await getUserLedger(userId);
+    console.log(
+      '[f3 repro] after won-dispute refund:',
+      ledger,
+      'refundDelta:',
+      refunded.balanceDelta
+    );
+
+    expect(refunded.balanceDelta).toBe(-4000);
+    expect(ledger.totalWithdrawn).toBe(4000);
+    expect(ledger.virtualBalance).toBe(16000);
+  });
+
+  it('deducts nothing when a dispute arrives after a full refund', async () => {
+    const { userId, paymentIntentId, stamp } = await prepareFundedCase();
+
+    const refunded = await TradingBalanceFundingService.reversePurchaseFunding(
+      userId,
+      paymentIntentId,
+      'refund',
+      100,
+      `evt_f3_refund_${stamp}`
+    );
+    expect(refunded.success).toBe(true);
+    expect(refunded.balanceDelta).toBe(-10000);
+    let ledger = await getUserLedger(userId);
+    expect(ledger.totalWithdrawn).toBe(10000);
+    expect(ledger.virtualBalance).toBe(10000);
+
+    // The whole charge is already gone via the refund: zero exposure left.
+    const disputed = await TradingBalanceFundingService.reversePurchaseFunding(
+      userId,
+      paymentIntentId,
+      'dispute',
+      100,
+      `evt_f3_dispute_${stamp}`
+    );
+    expect(disputed.success).toBe(true);
+    ledger = await getUserLedger(userId);
+    console.log(
+      '[f3 repro] after full-refund dispute:',
+      ledger,
+      'disputeDelta:',
+      disputed.balanceDelta
+    );
+
+    expect(Math.abs(disputed.balanceDelta)).toBe(0);
+    expect(ledger.totalWithdrawn).toBe(10000);
+    expect(ledger.virtualBalance).toBe(10000);
   });
 
   afterAll(async () => {
