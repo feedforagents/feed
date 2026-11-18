@@ -115,7 +115,8 @@ export async function main() {
             database: app.database,
           })
         ),
-        historyEntries: state.historyLength,
+        historyEntries: state.historyLength + Number(state.fundingReady),
+        fundingLedgerReady: state.fundingReady,
         historyLineage:
           state.historyLength === 4 ? 'baseline-additive' : 'canonical',
         deferredRemovals: state.historyLength === 4 ? ['0001', '0002'] : [],
