@@ -20,6 +20,7 @@ import type {
 } from '@a2a-js/sdk/server';
 import {
   acceptGroupInvite,
+  sharePost as canonicalSharePost,
   checkRateLimitAsync,
   declineGroupInvite,
   RATE_LIMIT_CONFIGS,
@@ -42,12 +43,17 @@ import {
   getBlockedUserIds,
   getMutedUserIds,
   getRawDrizzle,
+  groupMembers,
   isNull,
+  like,
   lte,
+  not,
+  notExists,
   posts,
   postTags,
   sql,
   tradingFeeOutbox,
+  users,
 } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
@@ -359,8 +365,8 @@ function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
 
 /**
  * Durable queue for perp trading fees whose inline processing fails after
- * retries. Mirrors the web adapter
- * (apps/web/src/lib/services/trading-fee-outbox.ts): the cron drain claims
+ * retries. Mirrors the engine outbox service
+ * (packages/engine/src/services/trading-fee-outbox.ts): the cron drain claims
  * each row (DELETE … RETURNING) in the same transaction that runs
  * FeeService.processTradingFee, so a fee intent is never dropped silently
  * and never charged twice. Wired into the A2A perp service so the
@@ -379,7 +385,7 @@ function buildTradingFeeOutbox(): TradingFeeOutboxPort {
         tradeId: params.positionId,
         marketId: params.relatedId,
         // Carry the leg's key so the drain replays under it; see the
-        // web adapter (apps/web/src/lib/services/trading-fee-outbox.ts).
+        // engine outbox service (packages/engine/src/services/trading-fee-outbox.ts).
         idempotencyKey: params.operationId ?? null,
         lastError: params.lastError ?? null,
       });
@@ -830,25 +836,37 @@ export class FeedAgentExecutor implements AgentExecutor {
 
   private async getFeed(params: Record<string, JsonValue>) {
     const limit = this.parsePositiveInt(params.limit, 20, 100);
-    const posts = await db.post.findMany({
-      where: { deletedAt: null },
-      take: limit,
-      orderBy: { timestamp: 'desc' },
-      select: {
-        id: true,
-        content: true,
-        authorId: true,
-        timestamp: true,
-      },
-    });
-    return {
-      posts: posts.map((p) => ({
-        id: p.id,
-        content: p.content,
-        authorId: p.authorId,
-        timestamp: p.timestamp,
-      })),
-    };
+    const offset = this.parseNonNegativeInt(params.offset, 0);
+    if (!Number.isSafeInteger(offset)) {
+      throw new Error('offset must be a safe non-negative integer');
+    }
+    // Match the existing web test-author predicate before applying the page.
+    // NOT EXISTS also keeps NPC/static authors that have no User row.
+    const feedPosts = await db
+      .select({
+        id: posts.id,
+        content: posts.content,
+        authorId: posts.authorId,
+        timestamp: posts.timestamp,
+      })
+      .from(posts)
+      .where(
+        and(
+          isNull(posts.deletedAt),
+          not(like(posts.authorId, 'test-%')),
+          notExists(
+            db
+              .select({ id: users.id })
+              .from(users)
+              .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+          )
+        )
+      )
+      // Stable-data continuation only; concurrent inserts/deletes can shift pages.
+      .orderBy(desc(posts.timestamp), desc(posts.id))
+      .limit(limit)
+      .offset(offset);
+    return { posts: feedPosts };
   }
 
   private async likePost(
@@ -1004,28 +1022,23 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!postId) throw new Error('postId is required');
 
     const userId = requireContextAccountId({}, context);
-
-    // Verify post exists
-    const post = await db.post.findFirst({
-      where: { id: postId, deletedAt: null },
-    });
-
-    if (!post) {
-      throw new Error('Post not found');
+    const comment = params.comment;
+    if (comment !== undefined && typeof comment !== 'string') {
+      throw new Error('comment must be a string');
     }
 
-    // Create share
-    const share = await db.share.create({
-      data: {
-        id: await generateSnowflakeId(),
-        postId,
-        userId,
-      },
-    });
+    // Route through the canonical share service (the same one the HTTP route
+    // and the MCP tool use) so every transport applies the same rules: the
+    // post must exist, be published and not deleted; blocked users cannot
+    // share; a post is shared once per user; the share creates a repost post
+    // in the sharer's feed and notifies the original author.
+    const result = await canonicalSharePost(userId, postId, comment);
 
     return {
       success: true,
-      shareId: share.id,
+      shareId: result.shareId,
+      repostId: result.repostId,
+      shareCount: result.shareCount,
       message: 'Post shared',
     };
   }
@@ -2298,11 +2311,10 @@ export class FeedAgentExecutor implements AgentExecutor {
     // Leave the chat and, for group chats, the group membership too (same
     // rules as DELETE /api/chats/[id]/participants/me), atomically.
     await asUser(userId, async (tx) => {
-      const updated = await tx.chatParticipant.updateMany({
+      const participant = await tx.chatParticipant.findFirst({
         where: { chatId, userId, isActive: true },
-        data: { isActive: false },
       });
-      if (updated.count === 0) {
+      if (!participant) {
         throw new Error('Chat not found or already left');
       }
 
@@ -2310,25 +2322,48 @@ export class FeedAgentExecutor implements AgentExecutor {
         where: { id: chatId },
         select: { groupId: true },
       });
-      if (!chat?.groupId) return;
-
-      const membership = await tx.groupMember.findFirst({
-        where: { groupId: chat.groupId, userId, isActive: true },
-      });
-      if (!membership) return;
-      if (membership.role === 'owner') {
-        throw new Error(
-          'Group owners cannot leave. Transfer ownership or delete the group.'
-        );
+      if (chat?.groupId) {
+        // All leave writers take the member lock before the participant lock.
+        // Decide ownership only after waiting for a concurrent promotion.
+        const [membership] = await tx
+          .select({
+            id: groupMembers.id,
+            role: groupMembers.role,
+            isActive: groupMembers.isActive,
+          })
+          .from(groupMembers)
+          .where(
+            and(
+              eq(groupMembers.groupId, chat.groupId),
+              eq(groupMembers.userId, userId)
+            )
+          )
+          .limit(1)
+          .for('update');
+        if (membership?.isActive && membership.role === 'owner') {
+          throw new Error(
+            'Group owners cannot leave. Transfer ownership or delete the group.'
+          );
+        }
+        if (membership?.isActive) {
+          await tx.groupMember.update({
+            where: { id: membership.id },
+            data: {
+              isActive: false,
+              kickedAt: new Date(),
+              kickReason: 'User left',
+            },
+          });
+        }
       }
-      await tx.groupMember.update({
-        where: { id: membership.id },
-        data: {
-          isActive: false,
-          kickedAt: new Date(),
-          kickReason: 'User left',
-        },
+
+      const updated = await tx.chatParticipant.updateMany({
+        where: { chatId, userId, isActive: true },
+        data: { isActive: false },
       });
+      if (updated.count === 0) {
+        throw new Error('Chat not found or already left');
+      }
     });
 
     return { success: true, message: 'Left chat' };
@@ -2513,9 +2548,12 @@ export class FeedAgentExecutor implements AgentExecutor {
         // Match the web people search (GET /api/users/search): banned
         // accounts are never returned, and test accounts are not real
         // users — every user-facing surface hides them (feeds strip
-        // their posts, a test author's post list is empty).
+        // their posts, a test author's post list is empty). A test
+        // account carries the isTest flag or a 'test-' id prefix — the
+        // membership rule the feed surfaces use.
         isBanned: false,
         isTest: false,
+        NOT: { id: { startsWith: 'test-' } },
         OR: [
           { username: { contains: query, mode: 'insensitive' } },
           { displayName: { contains: query, mode: 'insensitive' } },

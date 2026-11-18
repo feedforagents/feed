@@ -5,6 +5,7 @@
  * the platform fee. Referral fee shares are not paid.
  */
 
+import type { FeeProcessor } from '@feed/core/markets/shared';
 import {
   and,
   count,
@@ -22,7 +23,12 @@ import {
   users,
   withTransaction,
 } from '@feed/db';
-import { generateSnowflakeId, logger } from '@feed/shared';
+import {
+  canonicalTradingFee,
+  floorPoints,
+  generateSnowflakeId,
+  logger,
+} from '@feed/shared';
 import type { SQL } from 'drizzle-orm';
 import { FEE_CONFIG, type FeeType } from '../config/fees';
 import { FeeRedistributionService } from './fee-redistribution-service';
@@ -108,8 +114,10 @@ export class FeeService {
   /**
    * Calculate fee for a trade amount
    *
-   * @description Calculates trading fee based on configured fee rate (0.1%).
-   * Returns fee amount, net amount after fee, and distribution breakdown.
+   * @description Calculates trading fee based on configured fee rate (0.1%):
+   * the canonical fee on the cent-settled amount, rounded up to whole
+   * cents (PRD §9.1). Returns fee amount, net amount after fee (settled
+   * amount minus fee), and distribution breakdown.
    *
    * @param {number} tradeAmount - Trade amount to calculate fee for
    * @returns {FeeCalculation} Fee calculation with amounts and distribution
@@ -127,21 +135,30 @@ export class FeeService {
       );
     }
 
-    // Work in integer cents from one canonical rounded fee so the split always
-    // conserves the total (platform + referrer === fee). The referrer share is
+    // Work in integer cents from the one canonical fee (PRD §9.1) so the
+    // split always conserves the total (platform + referrer === fee): the
+    // fee on the cent-settled amount (the trade amount floored to cents),
+    // rounded UP to whole cents — the same value execution charges
+    // (PredictionPricing.canonicalFee, PerpMarketService.calculateFee),
+    // so the amount recorded and split here is the amount the trader
+    // paid. Settling first and ceiling the fee is what makes the fee
+    // consistent with execution. The partition invariant concerns total
+    // trader credit, not monotonic total fees across settled legs. The referrer share is
     // rounded down; any sub-cent remainder stays with the platform.
-    const feeCents = Math.round(
-      tradeAmount * FEE_CONFIG.TRADING_FEE_RATE * 100
+    const settledAmount = floorPoints(tradeAmount);
+    const feeAmount = canonicalTradingFee(
+      tradeAmount,
+      FEE_CONFIG.TRADING_FEE_RATE
     );
+    const feeCents = Math.round(feeAmount * 100);
     const referrerCents = Math.floor(
       feeCents * FEE_CONFIG.REFERRER_SHARE + 1e-9
     );
     const platformCents = feeCents - referrerCents;
-    const feeAmount = feeCents / 100;
 
     return {
       feeAmount,
-      netAmount: Number((tradeAmount - feeAmount).toFixed(2)),
+      netAmount: Number((settledAmount - feeAmount).toFixed(2)),
       platformShare: platformCents / 100,
       referrerShare: referrerCents / 100,
     };
@@ -497,4 +514,36 @@ export class FeeService {
       totalTrades: result?.count || 0,
     };
   }
+}
+
+/**
+ * Shared FeeProcessor adapter for market services.
+ *
+ * @description Single place for the FeeProcessor-to-FeeService mapping,
+ * including the string-to-FeeType narrowing that market services pass as
+ * plain strings. It is intentionally non-transactional: no transaction
+ * argument is passed, matching callers that use a non-transactional wallet
+ * adapter. It changes no fee rate and no fee split; those remain owned by
+ * FeeService and FEE_CONFIG.
+ */
+export function createTradingFeeProcessor(): FeeProcessor {
+  return {
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
+      FeeService.processTradingFee(
+        userId,
+        type as FeeType,
+        amount,
+        positionId,
+        relatedId,
+        undefined,
+        operationId
+      ),
+  };
 }

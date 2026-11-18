@@ -67,7 +67,7 @@ import { generateSnowflakeId } from '@feed/shared';
 import {
   createTradingFeeOutboxAdapter,
   drainTradingFeeOutboxBatch,
-} from '../../../apps/web/src/lib/services/trading-fee-outbox';
+} from '../../engine/src/services/trading-fee-outbox';
 
 const createdUserIds: string[] = [];
 const createdMarketIds: string[] = [];
@@ -601,6 +601,7 @@ describe('A2A fee accounting against real Postgres', () => {
 describe('perp fee idempotent recovery against real Postgres', () => {
   type FaultState = {
     faultOnce: boolean;
+    failClosePnL?: boolean;
     /**
      * Fault every attempt: the fee commits, but each retry observes an
      * error, so the helper exhausts and enqueues instead of recovering
@@ -650,10 +651,33 @@ describe('perp fee idempotent recovery against real Postgres', () => {
         return result;
       },
     };
+    const withCloseFault = (
+      wallet: ReturnType<typeof createUserWalletAdapter>
+    ) => ({
+      ...wallet,
+      async recordPnL(params: Parameters<typeof wallet.recordPnL>[0]) {
+        if (
+          state.failClosePnL &&
+          (params.reason === 'perp_close' ||
+            params.reason === 'perp_partial_close')
+        ) {
+          throw new Error('injected close P&L failure');
+        }
+        return wallet.recordPnL(params);
+      },
+    });
     return new PerpMarketService({
-      settlement: createPerpSettlement(),
+      settlement: createPerpSettlement({
+        wallet: (_userId, tx, afterCommit) =>
+          withCloseFault(createUserWalletAdapter(tx, afterCommit)),
+      }),
       db: new PerpDbAdapter(),
-      wallet: createUserWalletAdapter(),
+      wallet: {
+        ...withCloseFault(createUserWalletAdapter()),
+        async getBalance() {
+          throw new Error('balance unavailable outside settlement');
+        },
+      },
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -674,6 +698,50 @@ describe('perp fee idempotent recovery against real Postgres', () => {
         and(eq(perpPositions.userId, traderId), isNull(perpPositions.closedAt))
       );
   }
+
+  it.each([
+    1, 0.5,
+  ])('rolls back a close of %s on P&L failure, then settles on retry', async (percentage) => {
+    const traderId = await createUser();
+    const ticker = await createPerpMarket();
+    const state: FaultState = {
+      faultOnce: false,
+      attempts: 0,
+      operationIds: [],
+    };
+    const service = buildFaultableService(state);
+    const opened = await service.openPosition({
+      userId: traderId,
+      ticker,
+      side: 'long',
+      size: 200,
+      leverage: 1,
+    });
+    const before = await readTraderState(traderId);
+    const close = () =>
+      service.closePosition({
+        userId: traderId,
+        positionId: opened.positionId,
+        percentage,
+      });
+
+    state.failClosePnL = true;
+    await expect(close()).rejects.toThrow('injected close P&L failure');
+    expect((await openPositions(traderId)).map(({ size }) => size)).toEqual([
+      200,
+    ]);
+    expect(await readTraderState(traderId)).toEqual(before);
+    expect(await tradeTypeRows(traderId, 'perp_close')).toHaveLength(0);
+
+    state.failClosePnL = false;
+    const closed = await close();
+    expect(closed.fullyClosed).toBe(percentage === 1);
+    expect(closed.balance).toBe((await readTraderState(traderId)).balance);
+    expect((await openPositions(traderId)).map(({ size }) => size)).toEqual(
+      percentage === 1 ? [] : [100]
+    );
+    expect(await tradeTypeRows(traderId, 'perp_close')).toHaveLength(1);
+  });
 
   it('add legs: a post-commit error recovers to one fee, and a legitimate repeat add charges again', async () => {
     const traderId = await createUser();
@@ -723,6 +791,7 @@ describe('perp fee idempotent recovery against real Postgres', () => {
     expect(afterFirst.fund - before.fund).toBeCloseTo(0.03, 6);
     // Added margin 100 + fee 0.10 debited.
     expect(afterFirst.balance).toBeCloseTo(before.balance - 100 - 0.1, 6);
+    expect(added.balance).toBe(afterFirst.balance);
     const positions = await openPositions(traderId);
     expect(positions).toHaveLength(1);
     expect(Number(positions[0]?.size)).toBe(300);
