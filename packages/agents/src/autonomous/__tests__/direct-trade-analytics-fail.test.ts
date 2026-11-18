@@ -119,6 +119,8 @@ mock.module('@feed/engine', () => ({
   createPerpPriceImpactPort: mock(() => ({})),
   createPerpTradesCachePort: mock(() => ({})),
   createPerpSettlement: mock(() => ({})),
+  createTradingFeeOutboxAdapter: mock(() => ({})),
+  createTradingFeeProcessor: mock(() => ({})),
   generateTagsFromPost: mock(async () => []),
   invalidateAfterPredictionTrade: mock(async () => undefined),
   PredictionPricing: {

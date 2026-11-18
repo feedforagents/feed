@@ -105,6 +105,8 @@ mock.module('@feed/engine', () => ({
   createPerpPriceImpactPort: mock(() => ({})),
   createPerpSettlement: mock(() => ({})),
   createPerpTradesCachePort: mock(() => ({})),
+  createTradingFeeOutboxAdapter: mock(() => ({})),
+  createTradingFeeProcessor: mock(() => ({})),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0,
     PLATFORM_SHARE: 0,

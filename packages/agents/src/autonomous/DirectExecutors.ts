@@ -52,6 +52,8 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
+  createTradingFeeProcessor,
   FEE_CONFIG,
   FeeService,
   type GeneratedTag,
@@ -232,6 +234,21 @@ function createPerpWalletAdapter(isNpc: boolean) {
       await WalletService.recordPnL(uid, pnl, reason, relatedId);
     },
     getBalance: (uid: string) => WalletService.getBalance(uid),
+  };
+}
+
+/**
+ * Fee ledger ports for a user agent's perp trade. The service charges the
+ * canonical fee from the user's wallet; these ports record it in the fee
+ * ledger and users.totalFeesPaid, or queue it in the outbox when the inline
+ * write fails (PRD section 9.1, Trading fee), as the web, A2A, MCP and
+ * plugin perp paths do. NPC trades keep their existing fee-free bookkeeping.
+ */
+function userFeeLedger(isNpc: boolean) {
+  if (isNpc) return {};
+  return {
+    feeProcessor: createTradingFeeProcessor(),
+    tradingFeeOutbox: createTradingFeeOutboxAdapter(),
   };
 }
 
@@ -915,12 +932,13 @@ async function executePerpTrade(params: {
     wallet: walletAdapter,
     cache: createPerpTradesCachePort(),
     fees: {
-      tradingFeeRate: 0.001,
-      platformShare: 0.5,
-      referrerShare: 0.5,
-      minFeeAmount: 0.01,
+      tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+      platformShare: FEE_CONFIG.PLATFORM_SHARE,
+      referrerShare: FEE_CONFIG.REFERRER_SHARE,
+      minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
     priceImpact: createPerpPriceImpactPort(),
+    ...userFeeLedger(isNpc),
   });
 
   const openResult = await service.openPosition({
@@ -1066,12 +1084,13 @@ async function executeClosePerpPosition(params: {
       wallet: walletAdapter,
       cache: createPerpTradesCachePort(),
       fees: {
-        tradingFeeRate: 0.001,
-        platformShare: 0.5,
-        referrerShare: 0.5,
-        minFeeAmount: 0.01,
+        tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+        platformShare: FEE_CONFIG.PLATFORM_SHARE,
+        referrerShare: FEE_CONFIG.REFERRER_SHARE,
+        minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
       },
       priceImpact: createPerpPriceImpactPort(),
+      ...userFeeLedger(isNpc),
     });
 
     // Capture the result from closePosition to get accurate realizedPnL
