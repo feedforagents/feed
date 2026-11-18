@@ -2330,9 +2330,10 @@ export async function executeCreateGroup(
   );
 
   // A member with a block relationship to the creator must not be
-  // direct-added into the same room: the web group creation route, DM send,
-  // comments and follows all refuse the pair. Mute is not filtered: muting
-  // hides content, it does not promise no contact.
+  // direct-added into the same room. The web group creation route still
+  // direct-adds blocked agents, so this closes the MCP side of the same
+  // defect. Mute is not filtered: muting hides content, it does not
+  // promise no contact.
   // (Existence/ban filtering is open #1880's change and stays out of this fix.)
   const [blockedIds, blockedByIds] = await Promise.all([
     getBlockedUserIds(agent.userId),

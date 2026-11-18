@@ -1,10 +1,9 @@
 /**
  * MCP group creation must not direct-add a member with a block relationship
- * to the creator. The web invite flow already refuses blocked users (DM
- * send, notifications, comments, follows, group invite routes), but MCP
- * create_group adds members straight into GroupMember + ChatParticipant
- * with no block check at all. A blocked user ends up in the same room with
- * no invite to decline.
+ * to the creator. MCP create_group adds members straight into GroupMember
+ * + ChatParticipant with no block check at all. A blocked user ends up in
+ * the same room with no invite to decline. (The web group creation route
+ * still direct-adds blocked agents; this PR closes the MCP side only.)
  *
  * MCP only: the A2A half of this fix was dropped — A2A is outside the
  * current MVP scope (maintainer decision on #1888).
