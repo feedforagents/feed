@@ -14,8 +14,12 @@
  * created it. A setup collision therefore registers nothing, and
  * teardown can only ever delete rows this file created — the
  * collision suite at the bottom proves a pre-existing row survives
- * both a failed setup and the cleanup. The preload disconnects the
- * shared client when the run drains, so this file does not close it.
+ * both a failed setup and the cleanup. Cleanup deletes a user's
+ * cascade children (GameOnboarding, UserPnLSnapshot, Whitelist)
+ * explicitly before the user, and the collision case cleans up in a
+ * finally so a failing assertion cannot leak a partial user. The
+ * preload disconnects the shared client when the run drains, so this
+ * file does not close it.
  *
  * Isolation: all fixture posts carry one run-owned question number,
  * so the questionId window (an existing filter) contains exactly
@@ -32,11 +36,14 @@ import { randomUUID } from 'node:crypto';
 import {
   db,
   eq,
+  gameOnboarding,
   inArray,
   posts,
   questions,
   userApiKeys,
+  userPnLSnapshots,
   users,
+  whitelist,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { z } from 'zod';
@@ -115,6 +122,18 @@ async function cleanupOwned(target: typeof owned): Promise<void> {
   }
   if (target.questions.length > 0) {
     await db.delete(questions).where(inArray(questions.id, target.questions));
+  }
+  if (target.users.length > 0) {
+    // Delete cascade children explicitly before their user: removing a
+    // user would otherwise silently cascade into rows this fixture never
+    // registered (GameOnboarding is created on demand for any user).
+    await db
+      .delete(gameOnboarding)
+      .where(inArray(gameOnboarding.userId, target.users));
+    await db
+      .delete(userPnLSnapshots)
+      .where(inArray(userPnLSnapshots.userId, target.users));
+    await db.delete(whitelist).where(inArray(whitelist.userId, target.users));
   }
   if (target.users.length > 0) {
     await db.delete(users).where(inArray(users.id, target.users));
@@ -316,12 +335,14 @@ describe('MCP query_feed fixture ownership under setup collision', () => {
   });
 
   afterAll(async () => {
-    if (acquired.postId) {
-      await db.delete(posts).where(eq(posts.id, acquired.postId));
-    }
-    if (acquired.userId) {
-      await db.delete(users).where(eq(users.id, acquired.userId));
-    }
+    // Route through the same guarded cleanup so the acquired user's
+    // cascade children are removed explicitly before the user itself.
+    await cleanupOwned({
+      users: acquired.userId ? [acquired.userId] : [],
+      posts: acquired.postId ? [acquired.postId] : [],
+      questions: [],
+      keys: [],
+    });
   });
 
   it('a colliding setup registers nothing and cleanup preserves pre-existing rows', async () => {
@@ -332,29 +353,35 @@ describe('MCP query_feed fixture ownership under setup collision', () => {
       keys: [],
     };
 
-    // A setup insert that collides with the pre-existing user fails,
-    // and because ownership is registered only from RETURNING, the
-    // failed insert leaves localOwned empty.
-    let collisionFailed = false;
+    let partialUserId = '';
     try {
-      await insertOwnedUserInto(localOwned, {
-        id: foreign.userId,
-        username: 'f137-collision-attempt',
+      // A setup insert that collides with the pre-existing user fails,
+      // and because ownership is registered only from RETURNING, the
+      // failed insert leaves localOwned empty.
+      let collisionFailed = false;
+      try {
+        await insertOwnedUserInto(localOwned, {
+          id: foreign.userId,
+          username: 'f137-collision-attempt',
+        });
+      } catch {
+        collisionFailed = true;
+      }
+      expect(collisionFailed).toBe(true);
+      expect(localOwned.users).toEqual([]);
+
+      // A partial setup: one later insert succeeds and is registered.
+      partialUserId = await insertOwnedUserInto(localOwned, {
+        id: await generateSnowflakeId(),
+        username: 'f137-partial-setup-user',
       });
-    } catch {
-      collisionFailed = true;
+      expect(localOwned.users).toEqual([partialUserId]);
+    } finally {
+      // Clean up even if an assertion above fails, so a failing
+      // assertion can no longer leak the partially created user into
+      // the shared database.
+      await cleanupOwned(localOwned);
     }
-    expect(collisionFailed).toBe(true);
-    expect(localOwned.users).toEqual([]);
-
-    // A partial setup: one later insert succeeds and is registered.
-    const partialUserId = await insertOwnedUserInto(localOwned, {
-      id: await generateSnowflakeId(),
-      username: 'f137-partial-setup-user',
-    });
-    expect(localOwned.users).toEqual([partialUserId]);
-
-    await cleanupOwned(localOwned);
 
     // The row the partial setup actually created is gone...
     const partialRows = await db
