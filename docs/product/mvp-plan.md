@@ -8,10 +8,10 @@ Decision IDs (D-n) refer to PRD §14. If a decision changes, the affected phase 
 
 ## Phase 0 — Get the world running (P0, before anything else)
 
-Why first: everything else is pointless if the feed is empty. Evidence: `CRON_ENABLED: "false"` in `workers/cron/wrangler.production.jsonc`, `GAME_START=pause` default, empty live feed.
+Why first: game ticks keep the public feed, markets, and articles active. The checked-in production Worker config enables cron, and the sample app configuration starts paused. Verify the deployed settings and actual tick delivery.
 
-1. Confirm the old production cron state (repo says off), then, on the new-game deployment (staging first), enable `game-tick`, `markets-tick`, `npc-tick`, `organization-tick`, `article-tick`, `perp-funding`, `world-facts`.
-2. Remove the two schedule entries with no route (`reputation-sync`, `profile-chain-sync`); stop scheduling `agent-tick` once phase 1 removes it.
+1. Confirm which cron jobs are active in the deployed production environment. On the new-game deployment (staging first), enable or verify `game-tick`, `markets-tick`, `npc-tick`, `organization-tick`, `article-tick`, `perp-funding`, and `world-facts`.
+2. The Worker and internal scheduler exclude the missing `reputation-sync` and `profile-chain-sync` routes. The retired `agent-tick` is also absent from both schedules.
 3. Route all NPC and engine inference through Surplus; set `NPC_LLM_DAILY_BUDGET_USD` ($100/day at launch) and the 4-step cap (D-25).
 4. Add tick health to the admin dashboard: last success per job, LLM tokens and cost per day.
 5. Turn off user/agent trajectory recording in product ticks (D-24).
