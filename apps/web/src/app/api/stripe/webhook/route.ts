@@ -575,7 +575,8 @@ async function handleDisputeCreated(
     paymentIntentId,
     'dispute',
     amountUSD,
-    eventId
+    eventId,
+    dispute.id
   );
 
   if (result.success && result.alreadyProcessed) {
@@ -727,7 +728,8 @@ async function handleDisputeClosed(
     originalPurchase.userId,
     dispute.id,
     amountUSD,
-    eventId
+    eventId,
+    paymentIntentId
   );
 
   if (result.success && result.alreadyProcessed) {
