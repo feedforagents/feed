@@ -23,6 +23,9 @@ import {
 import { POST as previewRoute } from '../../../apps/web/src/app/api/markets/perps/preview/route';
 
 type Side = 'long' | 'short';
+const ip = crypto.getRandomValues(new Uint8Array(2));
+const clientIp = `198.19.${ip[0]}.${ip[1]}`;
+
 const START_BALANCE = 10_000;
 
 async function setupMarket(userId: string, ticker: string) {
@@ -100,6 +103,7 @@ async function previewAdd(
         method: 'POST',
         headers: {
           'content-type': 'application/json',
+          'x-forwarded-for': clientIp,
           authorization: `Bearer steward:test:${userId}`,
         },
         body: JSON.stringify(body),
