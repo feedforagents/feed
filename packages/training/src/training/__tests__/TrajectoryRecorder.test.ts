@@ -5,9 +5,15 @@
  * Uses simulation mode to avoid database dependency.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { tmpdir } from 'node:os';
 import * as fs from 'fs';
 import * as path from 'path';
+
+const TEST_STORAGE_ROOT = fs.mkdtempSync(
+  path.join(tmpdir(), 'feed-trajectory-recorder-test-')
+);
+const TEST_STORAGE_STAT = fs.lstatSync(TEST_STORAGE_ROOT);
 
 // Mock ONLY external dependencies - not the code under test
 mock.module('@feed/db', () => ({
@@ -22,7 +28,7 @@ mock.module('@feed/db', () => ({
   llmCallLogs: {},
   rewardJudgments: { trajectoryId: 'trajectoryId' },
   isSimulationMode: () => true, // Always use simulation mode for tests
-  getJsonStoragePath: () => null,
+  getJsonStoragePath: () => TEST_STORAGE_ROOT,
 }));
 
 // Import the REAL class after mocking db
@@ -33,38 +39,26 @@ import type { Action, EnvironmentState, LLMCall } from '../types';
 // Test Setup
 // =============================================================================
 
-const TEST_OUTPUT_DIR = './training-data-output/trajectories';
+const TEST_OUTPUT_DIR = path.join(TEST_STORAGE_ROOT, 'trajectories');
 
 describe('TrajectoryRecorder - Real Class Tests', () => {
   let recorder: TrajectoryRecorder;
 
   beforeEach(() => {
     recorder = new TrajectoryRecorder();
-    // Clean up test output
-    if (fs.existsSync(TEST_OUTPUT_DIR)) {
-      const files = fs.readdirSync(TEST_OUTPUT_DIR);
-      for (const file of files) {
-        if (file.startsWith('test-')) {
-          fs.unlinkSync(path.join(TEST_OUTPUT_DIR, file));
-        }
-      }
-    }
   });
 
-  afterEach(() => {
-    // Cleanup after each test
-    if (fs.existsSync(TEST_OUTPUT_DIR)) {
-      const files = fs.readdirSync(TEST_OUTPUT_DIR);
-      for (const file of files) {
-        if (file.includes('test-agent')) {
-          try {
-            fs.unlinkSync(path.join(TEST_OUTPUT_DIR, file));
-          } catch {
-            // Ignore cleanup errors
-          }
-        }
-      }
+  afterAll(() => {
+    const current = fs.lstatSync(TEST_STORAGE_ROOT);
+    if (
+      current.isSymbolicLink() ||
+      !current.isDirectory() ||
+      current.ino !== TEST_STORAGE_STAT.ino ||
+      current.dev !== TEST_STORAGE_STAT.dev
+    ) {
+      throw new Error('Test storage changed; refusing cleanup');
     }
+    fs.rmSync(TEST_STORAGE_ROOT, { recursive: true });
   });
 
   // ===========================================================================

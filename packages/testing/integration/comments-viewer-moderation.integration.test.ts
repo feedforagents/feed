@@ -250,10 +250,10 @@ afterAll(async () => {
   await cleanUsers(owned.users);
 });
 
-test('anonymous readers retain visible authors and existing unreachable-child totals', async () => {
+test('anonymous readers count only reachable comments from visible authors', async () => {
   const { data } = await get();
   expect(ids(data.comments)).toEqual([...publicIds].sort());
-  expect(data.total).toBe(12); // Includes two allowed rows beneath absent/deleted parents.
+  expect(data.total).toBe(10);
   const root = flatten(data.comments).find((node) => node.id === normalRoot);
   assert.ok(root);
   expect(root.likeCount).toBe(2);
@@ -264,7 +264,7 @@ test('bearer viewer hides all three moderation directions before building the tr
   expect(ids(data.comments)).toEqual(
     [normalRoot, normalReply, grandchild, ownRoot].sort()
   );
-  expect(data.total).toBe(9); // Retained rows under hidden parents remain counted, never reparented.
+  expect(data.total).toBe(4);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect(
     flatten(data.comments).some((node) =>
@@ -285,7 +285,7 @@ test('cookie credentials resolve the same viewer without changing anonymous read
   expect(ids(data.comments)).toEqual(
     [normalRoot, normalReply, grandchild, ownRoot].sort()
   );
-  expect(data.total).toBe(9);
+  expect(data.total).toBe(4);
   expect(ids((await get()).data.comments)).toEqual([...publicIds].sort());
 });
 test('invalid optional credentials and development headers retain the public view', async () => {
@@ -296,7 +296,7 @@ test('invalid optional credentials and development headers retain the public vie
   for (const headers of headerCases) {
     const { data } = await get(headers);
     expect(ids(data.comments)).toEqual([...publicIds].sort());
-    expect(data.total).toBe(12);
+    expect(data.total).toBe(10);
   }
 });
 test('same-URL viewer reads follow owned mute removal and restoration', async () => {
@@ -318,7 +318,7 @@ test('same-URL viewer reads follow owned mute removal and restoration', async ()
         mutedReply,
       ].sort()
     );
-    expect(data.total).toBe(10);
+    expect(data.total).toBe(6);
   } finally {
     const restored = await db
       .insert(userMutes)
@@ -326,7 +326,7 @@ test('same-URL viewer reads follow owned mute removal and restoration', async ()
       .returning({ id: userMutes.id });
     for (const row of restored) owned.mutes.add(row.id);
   }
-  expect((await get(signed())).data.total).toBe(9);
+  expect((await get(signed())).data.total).toBe(4);
 });
 test('soft-deleting an owned root hides its descendants without reparenting', async () => {
   await db
@@ -336,7 +336,7 @@ test('soft-deleting an owned root hides its descendants without reparenting', as
   try {
     const { data } = await get(signed());
     expect(ids(data.comments)).toEqual([ownRoot]);
-    expect(data.total).toBe(8);
+    expect(data.total).toBe(1);
   } finally {
     await db
       .update(comments)

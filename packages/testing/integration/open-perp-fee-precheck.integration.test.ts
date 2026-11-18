@@ -19,6 +19,7 @@ import {
   agentLogs,
   agentTrades,
   balanceTransactions,
+  count,
   db,
   eq,
   organizationState,
@@ -26,6 +27,8 @@ import {
   perpPositions,
   pointsTransactions,
   stockPrices,
+  tradingFeeOutbox,
+  tradingFees,
   users,
 } from '@feed/db';
 import { WalletService } from '@feed/engine';
@@ -38,6 +41,15 @@ let TEST_TICKER = '';
 let ORG_ID = '';
 
 const testUserIds: string[] = [];
+let feeBaseline: { fees: number; outbox: number };
+
+async function feeCounts() {
+  const [[fees], [outbox]] = await Promise.all([
+    db.select({ count: count() }).from(tradingFees),
+    db.select({ count: count() }).from(tradingFeeOutbox),
+  ]);
+  return { fees: fees?.count ?? 0, outbox: outbox?.count ?? 0 };
+}
 
 async function createTestUser(virtualBalance: string): Promise<string> {
   const userId = await generateSnowflakeId();
@@ -91,12 +103,19 @@ async function deleteTestData(): Promise<void> {
   await db.delete(stockPrices).where(eq(stockPrices.organizationId, ORG_ID));
   await db.delete(organizationState).where(eq(organizationState.id, ORG_ID));
   for (const userId of testUserIds) {
+    // IDs enter testUserIds only after a successful User INSERT. Keep fee
+    // effects inside that acquired scope and delete children before the user.
+    await db
+      .delete(tradingFeeOutbox)
+      .where(eq(tradingFeeOutbox.userId, userId));
+    await db.delete(tradingFees).where(eq(tradingFees.userId, userId));
     for (const table of [agentTrades, agentLogs])
       await db.delete(table).where(eq(table.agentUserId, userId));
     for (const table of [balanceTransactions, pointsTransactions])
       await db.delete(table).where(eq(table.userId, userId));
     await db.delete(users).where(eq(users.id, userId));
   }
+  expect(await feeCounts()).toEqual(feeBaseline);
 }
 
 function runOpenPerp(userId: string, amount: number, leverage: number) {
@@ -116,6 +135,7 @@ describe('OPEN_PERP fee-aware balance pre-check (real DB)', () => {
   let leveragedUserId = '';
 
   beforeAll(async () => {
+    feeBaseline = await feeCounts();
     await createTestMarket();
     exactBalanceUserId = await createTestUser('100');
     fundedUserId = await createTestUser('200');
@@ -181,8 +201,8 @@ describe('OPEN_PERP fee-aware balance pre-check (real DB)', () => {
     const balance = await WalletService.getBalance(fundedUserId);
     expect(balance.balance).toBeCloseTo(99.9, 2);
   });
-  it('opens with exactly the rounded-down fee-inclusive balance', async () => {
-    const userId = await createTestUser('100.11');
+  it('opens with exactly the canonical fee-inclusive balance', async () => {
+    const userId = await createTestUser('100.12');
     const result = await runOpenPerp(userId, 100.01, 1);
     expect(result?.success).toBe(true);
     const positions = await db
