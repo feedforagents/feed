@@ -75,6 +75,10 @@ class ReproDb implements PerpDbPort {
     const pos = this.positions.get(id);
     return pos && !pos.closedAt ? { ...pos } : null;
   }
+  async claimFundingPeriod(): Promise<boolean> {
+    throw new Error('Funding is outside this fixture');
+  }
+
   async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
     return fn(this);
   }

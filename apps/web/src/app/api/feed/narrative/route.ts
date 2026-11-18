@@ -282,7 +282,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             timestamp: posts.timestamp,
           })
           .from(posts)
-          .where(inArray(posts.id, repostOriginalIds));
+          // Deleted originals must not be rendered inside reposts.
+          .where(
+            and(inArray(posts.id, repostOriginalIds), isNull(posts.deletedAt))
+          );
         const originalAuthorIds = [
           ...new Set(originalRows.map((r) => r.authorId)),
         ];
