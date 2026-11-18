@@ -127,7 +127,7 @@ export class TradingPerformanceService {
       FROM "Position" p
       JOIN "Market" m ON m."id" = p."marketId"
       JOIN "User" usr ON p."userId" = usr."id" OR p."userId" = usr."privyId"
-      WHERE m."resolved" = false
+      WHERE m."resolved" = false AND p."status" = 'active'
       GROUP BY usr."id"
     `);
   }

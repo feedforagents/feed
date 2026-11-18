@@ -89,7 +89,10 @@ export async function calculatePortfolioPnL(
       )
     );
 
-  // For prediction positions, we need to join with markets
+  // For prediction positions, we need to join with markets. Cancelled and
+  // sell-closed rows retain historical `shares` with `cashCostBasis = 0` and
+  // cancelled markets leave `markets.resolved = false`, so only `'active'`
+  // positions remain open holdings.
   const predictionPositionResults = await db
     .select({
       shares: positions.shares,
@@ -104,6 +107,7 @@ export async function calculatePortfolioPnL(
     .where(
       and(
         inArray(positions.userId, positionUserIds),
+        eq(positions.status, 'active'),
         eq(markets.resolved, false)
       )
     );

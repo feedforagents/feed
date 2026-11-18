@@ -180,10 +180,12 @@ describe('TradingPerformanceService equity metric SQL', () => {
       'SUM(pp."unrealizedPnL"::numeric - COALESCE(pp."fundingPaid"::numeric, 0))'
     );
     // Prediction positions are marked to market at the CPMM price of
-    // unresolved markets, mirroring calculatePortfolioPnL.
+    // unresolved markets, mirroring calculatePortfolioPnL. Non-active rows
+    // (closed or cancelled/refunded) must be excluded.
     expect(sqlText).toContain('FROM "Position" p');
     expect(sqlText).toContain('JOIN "Market" m ON m."id" = p."marketId"');
     expect(sqlText).toContain('m."resolved" = false');
+    expect(sqlText).toContain('p."status" = \'active\'');
     expect(sqlText).toContain('m."noShares" / (m."yesShares" + m."noShares")');
     expect(sqlText).toContain('m."yesShares" / (m."yesShares" + m."noShares")');
     // The mark subtracts the remaining GROSS cash basis, not net avgPrice:

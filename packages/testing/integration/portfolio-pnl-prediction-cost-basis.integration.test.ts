@@ -39,6 +39,7 @@ import {
   users,
 } from '@feed/db';
 import { FEE_CONFIG, withPredictionSettlement } from '@feed/engine';
+import { calculatePortfolioBreakdown } from '@feed/engine/services/portfolio-breakdown';
 import { calculatePortfolioPnL } from '@feed/engine/services/portfolio-pnl';
 import { generateSnowflakeId } from '@feed/shared';
 
@@ -340,4 +341,78 @@ test('legacy half-cent fallback matches the settlement service rather than binar
     1.5 - result.totalRefunded,
     8
   );
+
+  // After cancel settles and marks the row 'cancelled' (with cashCostBasis = 0
+  // while markets.resolved stays false), all open portfolio readers must
+  // exclude the cancelled row instead of valuing its retained shares.
+  const afterCancelPnl = await calculatePortfolioPnL(userId);
+  const afterCancelLeaderboard =
+    await TradingPerformanceService.getWalletEntry(userId);
+  const afterCancelBreakdown = await calculatePortfolioBreakdown(userId);
+  expect(afterCancelPnl).not.toBeNull();
+  expect(afterCancelLeaderboard).not.toBeNull();
+  expect(afterCancelBreakdown).not.toBeNull();
+  expect(afterCancelPnl?.unrealizedPredictionPnL).toBe(0);
+  expect(afterCancelPnl?.totalUnrealizedPnL).toBe(0);
+  expect(afterCancelPnl?.totalPnL).toBe(afterCancelPnl!.lifetimePnL);
+  expect(Number(afterCancelLeaderboard?.unrealizedPnL)).toBe(0);
+  expect(Number(afterCancelLeaderboard?.netProfit)).toBe(
+    afterCancelPnl!.totalPnL
+  );
+  expect(afterCancelBreakdown?.positions).toBe(0);
+  expect(afterCancelBreakdown?.totalAssets).toBe(afterCancelBreakdown!.wallet);
+});
+
+test('funded holding cancelled by void excludes refunded position from portfolio PnL, breakdown, and leaderboard', async () => {
+  const userId = await createTestUser({
+    usernamePrefix: 'pf-pnl-cancel-funded',
+    lifetimePnL: 0,
+    createdAt: new Date(),
+  });
+  await db
+    .update(users)
+    .set({ virtualBalance: '2000', totalDeposited: '2000' })
+    .where(eq(users.id, userId));
+  const marketId = await createMarket({ yesShares: 5000, noShares: 5000 });
+  const trade = <T>(
+    operation: Parameters<typeof withPredictionSettlement<T>>[2]
+  ) =>
+    withPredictionSettlement(
+      marketId,
+      { userId },
+      operation,
+      settlementOptions
+    );
+
+  await trade((service) =>
+    service.buy({ userId, marketId, side: 'yes', amount: 1000 })
+  );
+  await withPredictionSettlement(
+    marketId,
+    { system: 'synthetic_cancel_portfolio_regression' },
+    (service) => service.cancel({ marketId }),
+    settlementOptions
+  );
+
+  const [afterCancelPnl, afterCancelLeaderboard, afterCancelBreakdown] =
+    await Promise.all([
+      calculatePortfolioPnL(userId),
+      TradingPerformanceService.getWalletEntry(userId),
+      calculatePortfolioBreakdown(userId),
+    ]);
+
+  expect(afterCancelPnl).not.toBeNull();
+  expect(afterCancelLeaderboard).not.toBeNull();
+  expect(afterCancelBreakdown).not.toBeNull();
+  expect(afterCancelPnl?.availableBalance).toBe(2000);
+  expect(afterCancelPnl?.unrealizedPredictionPnL).toBe(0);
+  expect(afterCancelPnl?.totalUnrealizedPnL).toBe(0);
+  expect(afterCancelPnl?.totalPnL).toBe(0);
+  expect(afterCancelPnl?.accountEquity).toBe(2000);
+  expect(Number(afterCancelLeaderboard?.unrealizedPnL)).toBe(0);
+  expect(Number(afterCancelLeaderboard?.netProfit)).toBe(0);
+  expect(afterCancelBreakdown?.wallet).toBe(2000);
+  expect(afterCancelBreakdown?.positions).toBe(0);
+  expect(afterCancelBreakdown?.totalAssets).toBe(2000);
+  expect(afterCancelBreakdown?.totalPnL).toBe(0);
 });

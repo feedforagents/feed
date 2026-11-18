@@ -187,6 +187,7 @@ export async function calculatePortfolioBreakdown(
       .where(
         and(
           inArray(positions.userId, positionUserIds),
+          eq(positions.status, 'active'),
           eq(markets.resolved, false)
         )
       ),
