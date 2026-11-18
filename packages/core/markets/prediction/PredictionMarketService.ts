@@ -526,6 +526,9 @@ export class PredictionMarketService {
     if (market.resolved) return;
 
     const now = input.resolvedAt ?? this.now();
+    const activePositions = positions.filter(
+      (p) => !p.status || p.status === 'active'
+    );
 
     // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
     // Payouts are not split pool-proportionally: each winner is credited
@@ -536,7 +539,7 @@ export class PredictionMarketService {
       (winningSide === 'yes' && p.side === 'yes') ||
       (winningSide === 'no' && p.side === 'no');
 
-    const totalPayout = positions
+    const totalPayout = activePositions
       .filter(isWinnerSide)
       .reduce(
         (sum, p) =>
@@ -555,7 +558,7 @@ export class PredictionMarketService {
       resolutionDescription: resolutionDescription ?? undefined,
     });
 
-    for (const pos of positions) {
+    for (const pos of activePositions) {
       const isWinner = isWinnerSide(pos);
       const payout = isWinner
         ? PredictionPricing.calculateExpectedPayout(pos.shares, pos.avgPrice)
@@ -608,6 +611,10 @@ export class PredictionMarketService {
       type: 'prediction_resolution',
       marketId,
       winningSide,
+      // Consumers (chart history hook, terminal live state) read the final
+      // prices off this event, mirroring the snapshot recorded above.
+      yesPrice: winningSide === 'yes' ? 1 : 0,
+      noPrice: winningSide === 'no' ? 1 : 0,
       yesShares: market.yesShares,
       noShares: market.noShares,
       liquidity: newLiquidity,

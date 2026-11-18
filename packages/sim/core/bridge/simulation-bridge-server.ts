@@ -395,6 +395,12 @@ interface TrajectoryRecord {
 const TRAJECTORY_BUFFER_SIZE = 10_000;
 const trajectoryBuffer: TrajectoryRecord[] = [];
 let trajectorySeq = 0;
+/**
+ * Largest simulation size /init accepts. Each NPC carries state and every
+ * scenario build queries the database per NPC, so an unbounded count lets
+ * one request exhaust the server; 10_000 is 500x the default of 20.
+ */
+const MAX_NPCS = 10_000;
 const serverEpoch = Date.now().toString(36); // unique per server start
 
 function pushTrajectory(record: Omit<TrajectoryRecord, 'id' | 'timestamp'>) {
@@ -537,6 +543,14 @@ Bun.serve({
         };
 
         const numNPCs = body.numNPCs ?? 20;
+        if (!Number.isInteger(numNPCs) || numNPCs < 1 || numNPCs > MAX_NPCS) {
+          return Response.json(
+            {
+              error: `numNPCs must be an integer between 1 and ${MAX_NPCS}`,
+            },
+            { status: 400, headers }
+          );
+        }
         const seed = body.seed ?? Date.now();
         const npcIds = Array.from(
           { length: numNPCs },
@@ -672,15 +686,29 @@ Bun.serve({
               }
               break;
             }
-            case 'buy':
-            case 'sell': {
+            case 'buy': {
               const amt = amountOrError;
               if (amt > npc.balance) {
                 success = false;
                 error = 'Insufficient balance';
               } else {
+                // A buy opens a stake (like open_long): no PnL is realized
+                // until the matching sell, so a later sell cannot settle
+                // proceeds for a position that was never opened.
                 npc.balance -= amt;
+                npc.openExposure += exposureUnits(amt);
+              }
+              break;
+            }
+            case 'sell': {
+              const amt = amountOrError;
+              const sellExposure = exposureUnits(amt);
+              if (sellExposure > npc.openExposure) {
+                success = false;
+                error = 'Insufficient open position';
+              } else {
                 pnl = (random() - 0.45) * amt * 0.3;
+                npc.openExposure -= sellExposure;
                 npc.balance += amt + pnl;
               }
               break;
@@ -827,10 +855,17 @@ Bun.serve({
       // Poll-based trajectory streaming. Client remembers last seen ID.
       if (method === 'GET' && path === '/trajectories') {
         const sinceId = url.searchParams.get('since_id') ?? '';
-        const limit = Math.min(
-          parseInt(url.searchParams.get('limit') ?? '100', 10),
-          1000
-        );
+        // An unreadable limit used to parse to NaN and silently return an
+        // empty page, which a polling client cannot tell apart from "no new
+        // records". Reject it instead of answering with no data.
+        const limitValue = Number(url.searchParams.get('limit') ?? '100');
+        if (!Number.isInteger(limitValue) || limitValue < 1) {
+          return Response.json(
+            { error: 'limit must be a positive integer' },
+            { status: 400, headers }
+          );
+        }
+        const limit = Math.min(limitValue, 1000);
 
         let startIdx = 0;
         if (sinceId) {

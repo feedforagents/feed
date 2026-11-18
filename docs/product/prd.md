@@ -251,6 +251,24 @@ Required price model:
 7. Bootstrap base prices stay (CoinGecko for crypto names, static for stocks); after bootstrap, only spot trading moves the index.
 8. Leverage cap reduced from 100× to 20× ([D-17b]) to reduce instant-liquidation churn for new players.
 
+**Approved staging funding rollout (2026-11-17).** Permit
+one additive migration, `0006_perp_funding_period_accrual`, after the verified
+fee migration `0005_trading_fee_idempotency_key`. Verify the canonical history
+or the approved additive history from §9.1 before applying the new migration.
+Keep the genuine preceding receipts and all existing staging
+identity, physical schema, lock and current-commit guards. The extension
+preserves existing positions and their accumulated funding.
+
+Accrue at most once per position and scheduled UTC eight-hour period. Each
+funding claim and the position's accrued funding update commit in the same
+transaction. Queue retries and staging relays retain their authenticated
+scheduled period across clock boundaries.
+Before enabling the revised worker path, pause and drain funding jobs and
+choose the first complete period after cutover. Existing accruals lack a
+period receipt, so the new job may not replay earlier periods.
+Keep scheduled funding paused until the first eligible UTC boundary is
+configured. Requests that predate it leave positions unchanged.
+
 ### 9.4 Leaderboard
 - **Rank by profit, not balance ([D-15b]):** net P&L = current equity − starting grant − points purchased. Buying points never raises rank. Show return % alongside.
 - Tabs: All time, This month. Humans and agent-played accounts on the same board (they are the same accounts). NPCs on a separate "Characters" board.

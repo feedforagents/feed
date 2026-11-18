@@ -103,6 +103,16 @@ Depends on: D-9 through D-15b, D-17, D-17b, D-18.
 
 **Exit:** 72 h staging soak with charts of index vs mark per ticker; a test purchase end-to-end in Stripe test mode, and a refused purchase with a Washington billing address; a prediction market resolves and pays exactly 1 pt per winning share; leaderboard unaffected by a purchase.
 
+**Approved staging funding rollout acceptance (2026-11-17).**
+On a disposable copy of each supported staging migration lineage, apply the
+funding ledger migration and verify existing receipts, balances and positions,
+the new ledger constraints, rollback and safe reruns. Prove one accrual per
+position and scheduled period with the real Worker queue, authenticated
+HTTP handler and PostgreSQL. Cover duplicate delivery, a partial failure
+retried across the next UTC boundary, and delivery of the next distinct
+period. Exercise the pause and drain cutover before enabling the scheduler
+route in Phase 0.
+
 ## Phase 7 — Relaunch
 
 1. Archive old production data privately; refund any old-game Stripe purchases; shutdown notice on the old site (D-9).
