@@ -557,7 +557,14 @@ async function handleDisputeCreated(
     return { success: true }; // Don't retry - not our transaction
   }
 
-  const amountUSD = dispute.amount / 100; // Stripe uses cents
+  // Stripe uses cents. As for refunds, do not take back more than the stored
+  // purchase credited: a purchase written before #1606 can hold 112 units
+  // for a $1.13 charge.
+  const disputedUnits = Math.min(
+    usdToBalanceUnits(dispute.amount / 100),
+    Number(originalTx.amount)
+  );
+  const amountUSD = disputedUnits / 100;
 
   logger.warn(
     'Processing dispute (chargeback) - deducting points',

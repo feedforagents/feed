@@ -47,6 +47,16 @@ mock.module(stripeServerPath, () => ({
     if (parts.v1 !== expected) throw new Error('signature mismatch');
     return JSON.parse(payload);
   },
+  // The dispute handler reads the disputed charge from the Stripe API to find
+  // its payment intent. No network call: the test charge ID names the intent.
+  stripe: {
+    charges: {
+      retrieve: async (chargeId: string) => ({
+        id: chargeId,
+        payment_intent: { id: chargeId.replace(/^ch_test_/, '') },
+      }),
+    },
+  },
 }));
 
 process.env.STRIPE_SECRET_KEY ??= 'sk_test_synthetic_refund_cents';
@@ -95,11 +105,18 @@ async function seedPurchase(cents: number, userId?: string) {
   return { setup, userId: setup.userId, paymentIntentId };
 }
 
-async function seedLegacyPurchase(cents: number, creditedUnits: number) {
+// `otherUnits` is balance the user holds besides this purchase. With it, the
+// balance exceeds the purchase, so only the credited-units cap (and not the
+// zero floor on the balance) can stop an over-reversal.
+async function seedLegacyPurchase(
+  cents: number,
+  creditedUnits: number,
+  otherUnits = 0
+) {
   const setup = await insertOwnedUser(await generateSnowflakeId());
   const paymentIntentId = `pi_test_refund_${setup.userId}`;
   setup.relatedIds.push(paymentIntentId);
-  const balanceBefore = await balanceOf(setup.userId);
+  const balanceBefore = (await balanceOf(setup.userId)) + otherUnits;
   const transactionId = await generateSnowflakeId();
   await db
     .update(users)
@@ -221,6 +238,38 @@ async function sendRefund(
   expect(response.status).toBe(200);
 }
 
+async function sendDispute(
+  setup: OwnedSetup,
+  paymentIntentId: string,
+  amountCents: number
+) {
+  const eventId = `evt_test_dispute_${paymentIntentId}_${amountCents}`;
+  setup.relatedIds.push(eventId);
+  const payload = JSON.stringify({
+    id: eventId,
+    object: 'event',
+    type: 'charge.dispute.created',
+    data: {
+      object: {
+        id: `dp_test_${paymentIntentId}`,
+        object: 'dispute',
+        amount: amountCents,
+        charge: `ch_test_${paymentIntentId}`,
+        reason: 'fraudulent',
+        status: 'needs_response',
+      },
+    },
+  });
+  const response = await POST(
+    new NextRequest('http://localhost/api/stripe/webhook', {
+      method: 'POST',
+      headers: { 'stripe-signature': signPayload(payload) },
+      body: payload,
+    })
+  );
+  expect(response.status).toBe(200);
+}
+
 beforeAll(async () => {
   ({ POST } = await import(
     '../../../apps/web/src/app/api/stripe/webhook/route'
@@ -272,11 +321,27 @@ describe('charge.refunded takes back exactly the credited balance units', () => 
   it('a refund never takes back more than a legacy purchase credited', async () => {
     const { setup, userId, paymentIntentId } = await seedLegacyPurchase(
       113,
-      112
+      112,
+      500
     );
     const funded = await balanceOf(userId);
 
     await sendRefund(setup, paymentIntentId, 113, 113);
+
+    expect(funded - (await balanceOf(userId))).toBe(112);
+  });
+});
+
+describe('charge.dispute.created takes back at most the credited balance units', () => {
+  it('a dispute never takes back more than a legacy purchase credited', async () => {
+    const { setup, userId, paymentIntentId } = await seedLegacyPurchase(
+      113,
+      112,
+      500
+    );
+    const funded = await balanceOf(userId);
+
+    await sendDispute(setup, paymentIntentId, 113);
 
     expect(funded - (await balanceOf(userId))).toBe(112);
   });
