@@ -75,6 +75,20 @@ async function createUser(tag: string): Promise<string> {
   return id;
 }
 
+async function createAgent(tag: string): Promise<string> {
+  const id = await generateSnowflakeId();
+  await dbWrite.insert(users).values({
+    id,
+    username: `ginv-${tag}-${id.slice(-6)}`,
+    displayName: `GInv ${tag} ${id.slice(-6)}`,
+    isAgent: true,
+    isTest: true,
+    updatedAt: new Date(),
+  });
+  createdUsers.push(id);
+  return id;
+}
+
 async function block(blockerId: string, blockedId: string): Promise<void> {
   const id = await generateSnowflakeId();
   await dbWrite.insert(userBlocks).values({
@@ -195,6 +209,35 @@ async function acceptAs(userId: string, inviteId: string): Promise<Response> {
   );
 }
 
+async function createGroupViaHandler(
+  creatorId: string,
+  name: string,
+  memberIds: string[]
+): Promise<{
+  status: number;
+  groupId: string;
+  memberCount: number;
+  invitedCount: number;
+}> {
+  const res = await createGroup(
+    new NextRequest('http://localhost/api/groups', {
+      method: 'POST',
+      headers: authHeaders(creatorId),
+      body: JSON.stringify({ name, memberIds }),
+    })
+  );
+  const body = (await res.json()) as {
+    group: { id: string; memberCount: number; invitedCount: number };
+  };
+  createdGroups.push(body.group.id);
+  return {
+    status: res.status,
+    groupId: body.group.id,
+    memberCount: body.group.memberCount,
+    invitedCount: body.group.invitedCount,
+  };
+}
+
 async function isMember(groupId: string, userId: string): Promise<boolean> {
   const found = await dbWrite.query.groupMembers.findFirst({
     where: (m, { and, eq: e }) =>
@@ -211,10 +254,7 @@ afterAll(async () => {
   process.env.ALLOW_TEST_PRIVY_DID_AUTH = previousTestAuth;
   // Clean up in reverse dependency order. Fixture ids are unique snowflakes.
   if (createdInvites.length > 0) {
-    await dbWrite
-      .delete(groupInvites)
-      .where(eq(groupInvites.id, createdInvites[0]));
-    for (const id of createdInvites.slice(1)) {
+    for (const id of createdInvites) {
       await dbWrite.delete(groupInvites).where(eq(groupInvites.id, id));
     }
   }
@@ -323,6 +363,33 @@ describe('group invite vs block relationship', () => {
     });
     expect(rows).toHaveLength(0);
     createdGroups.push(body.group.id);
+  });
+
+  it('(g) group creation skips a blocked agent from direct add', async () => {
+    const creator = await createUser('creator-g');
+    const blockedAgent = await createAgent('blocked-g');
+    await block(creator, blockedAgent);
+
+    const { status, groupId, memberCount, invitedCount } =
+      await createGroupViaHandler(creator, 'ginv-g', [blockedAgent]);
+    expect(status).toBe(200);
+    expect(memberCount).toBe(1);
+    expect(invitedCount).toBe(0);
+    expect(await isMember(groupId, blockedAgent)).toBe(false);
+  });
+
+  it('(h) group creation direct-adds an unblocked agent', async () => {
+    const creator = await createUser('creator-h');
+    const agent = await createAgent('agent-h');
+
+    const { status, groupId, memberCount } = await createGroupViaHandler(
+      creator,
+      'ginv-h',
+      [agent]
+    );
+    expect(status).toBe(200);
+    expect(memberCount).toBe(2);
+    expect(await isMember(groupId, agent)).toBe(true);
   });
 
   it('(control) an unblocked invite still lists and accepts', async () => {
