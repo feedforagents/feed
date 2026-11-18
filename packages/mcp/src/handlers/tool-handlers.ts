@@ -87,6 +87,7 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -125,14 +126,22 @@ function buildWalletPort(): WalletPort {
 
 function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
         relatedId,
-        tx
+        tx,
+        operationId
       ),
   };
 }
@@ -670,6 +679,7 @@ function buildPerpService() {
       minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
     feeProcessor: buildFeeProcessor(),
+    tradingFeeOutbox: createTradingFeeOutboxAdapter(),
   });
 }
 
