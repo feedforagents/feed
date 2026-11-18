@@ -21,6 +21,7 @@ const {
   arcStates,
   closeDatabase,
   db,
+  gameOnboarding,
   inArray,
   markets,
   posts,
@@ -28,7 +29,9 @@ const {
   questions,
   reactions,
   timeframedMarkets,
+  userPnLSnapshots,
   users,
+  whitelist,
 } = await import('@feed/db');
 const { NextRequest } = await import('next/server');
 const { GET: forYouGET } = await import(
@@ -281,14 +284,17 @@ try {
 } finally {
   try {
     // Guarded teardown: cleanup only ever deletes rows this fixture
-    // acquired via INSERT RETURNING, and refuses to delete a question
+    // acquired via INSERT RETURNING, and refuses to delete a parent
     // that gained a dependent row outside the fixture — deleting the
     // question would cascade-delete that row (ArcState /
     // QuestionArcPlan / TimeframedMarket all reference questions.id
-    // ON DELETE CASCADE). Lock the owned question rows first so no
-    // concurrent process can attach a dependent row between the check
-    // and the deletes, and run the check and the deletes in one short
-    // transaction so the refusal is atomic.
+    // ON DELETE CASCADE), deleting a user would cascade-delete its
+    // GameOnboarding / UserPnLSnapshot / Whitelist rows, and deleting
+    // a market would silently NULL an unrelated question's marketId.
+    // Lock the owned parent rows first so no concurrent process can
+    // attach a dependent row between the check and the deletes, and
+    // run the check and the deletes in one short transaction so the
+    // refusal is atomic.
     await db.transaction(async (tx) => {
       if (owned.questions.length) {
         await tx
@@ -312,6 +318,50 @@ try {
             `refusing cleanup: foreign ${label} attached to an owned question`
           );
         }
+      }
+      if (owned.users.length) {
+        await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(inArray(users.id, owned.users))
+          .for('update');
+        for (const [table, label] of [
+          [gameOnboarding, 'GameOnboarding'],
+          [userPnLSnapshots, 'UserPnLSnapshot'],
+          [whitelist, 'Whitelist'],
+        ] as const) {
+          const foreign = await tx
+            .select({ id: table.id })
+            .from(table)
+            .where(inArray(table.userId, owned.users))
+            .limit(1);
+          assert.equal(
+            foreign.length,
+            0,
+            `refusing cleanup: foreign ${label} attached to an owned user`
+          );
+        }
+      }
+      if (owned.markets.length) {
+        await tx
+          .select({ id: markets.id })
+          .from(markets)
+          .where(inArray(markets.id, owned.markets))
+          .for('update');
+        // Only our own questions may point at an owned market: any other
+        // question would lose its marketId to ON DELETE SET NULL.
+        const pointing = await tx
+          .select({ id: questions.id })
+          .from(questions)
+          .where(inArray(questions.marketId, owned.markets));
+        const foreign = pointing.filter(
+          (row) => !owned.questions.includes(row.id)
+        );
+        assert.equal(
+          foreign.length,
+          0,
+          'refusing cleanup: foreign Question attached to an owned market'
+        );
       }
       if (owned.reactions.length)
         await tx
