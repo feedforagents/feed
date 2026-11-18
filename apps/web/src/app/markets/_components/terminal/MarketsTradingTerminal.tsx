@@ -28,6 +28,7 @@ import { PerpPositionsList } from '@/components/markets/PerpPositionsList';
 import { PerpPriceChart } from '@/components/markets/PerpPriceChart';
 import { PredictionPositionsList } from '@/components/markets/PredictionPositionsList';
 import { PredictionProbabilityChart } from '@/components/markets/PredictionProbabilityChart';
+import { calculatePredictionBuyQuote } from '@/components/markets/predictionBuyQuote';
 import {
   type BuyPredictionDetails,
   type SellPredictionDetails,
@@ -1299,12 +1300,11 @@ export function MarketsTradingTerminal({
     if (!predictionEffectiveShares) return null;
     if (predictionAmountNum <= 0) return null;
     try {
-      return PredictionPricing.calculateBuyWithFees(
+      return calculatePredictionBuyQuote(
         predictionEffectiveShares.yesShares,
         predictionEffectiveShares.noShares,
         predictionSide,
-        predictionAmountNum,
-        FEE_CONFIG.TRADING_FEE_RATE
+        predictionAmountNum
       );
     } catch {
       return null;

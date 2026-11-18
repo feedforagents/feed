@@ -5,7 +5,7 @@ import {
   NotFoundError,
 } from '@feed/shared';
 import Decimal from 'decimal.js-light';
-import { PredictionPricing } from './pricing';
+import { PredictionPricing, sharesAtPositionScale } from './pricing';
 import type {
   PredictionBuyInput,
   PredictionCancelInput,
@@ -24,9 +24,6 @@ import type {
 const DEFAULT_LIQUIDITY = 10_000;
 const MIN_SHARES = 0.01;
 const MIN_TRADE_AMOUNT = 1;
-// Position.shares is numeric(18, 6). Binary subtraction can land just below
-// the minimum lot for a quantity the column persists on a hundredth boundary.
-const POSITION_SHARE_SCALE = 6;
 
 /**
  * Maximum absolute odds shift (in probability units, 0–1) allowed in a single
@@ -74,13 +71,6 @@ function pointsDifference(a: number, b: number): number {
   return new Decimal(a)
     .minus(b)
     .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-    .toNumber();
-}
-
-function sharesAtPositionScale(shares: number): number {
-  if (!Number.isFinite(shares)) return 0;
-  return new Decimal(shares)
-    .toDecimalPlaces(POSITION_SHARE_SCALE, Decimal.ROUND_HALF_UP)
     .toNumber();
 }
 
@@ -274,6 +264,12 @@ export class PredictionMarketService {
           }
     );
 
+    // The database returns the stored share precision. Report the fill as
+    // the persisted delta so clients can use it in a subsequent sale.
+    const filledShares = new Decimal(position.shares)
+      .minus(existingPos?.shares ?? 0)
+      .toNumber();
+
     await this.recordSnapshot({
       marketId,
       yesPrice: calc.newYesPrice,
@@ -298,7 +294,7 @@ export class PredictionMarketService {
         actorId: userId,
         action: 'buy',
         side,
-        shares: calc.sharesBought,
+        shares: filledShares,
         amount,
         price: calc.avgPrice,
         source: tradeSource,
@@ -322,7 +318,7 @@ export class PredictionMarketService {
       positionId: position.id,
       marketId,
       side,
-      shares: calc.sharesBought,
+      shares: filledShares,
       avgPrice: calc.avgPrice,
       totalCost: amount,
       feePaid: calc.fee,

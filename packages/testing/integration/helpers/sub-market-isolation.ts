@@ -69,6 +69,7 @@ const MARKETS_REVIEW_FILE =
   'packages/testing/integration/markets-tick-review-hold.integration.test.ts';
 const MARKETS_REVIEW_CASES = [
   'markets-tick manual resolution review > funded reviews stay held across ticks until approval; rejection postpones payment',
+  'markets-tick manual resolution review > a losing admin resolver preserves the paid outcome and writes no audit',
 ];
 const BALANCE_DISPLAY_FILE =
   'packages/testing/integration/balance-display-consistency.integration.test.ts';
@@ -878,7 +879,7 @@ async function runIsolatedCases(suite: Suite) {
       : balance
         ? 'five-balance-display-child-cases'
         : review
-          ? 'one-markets-review-child-case'
+          ? 'two-markets-review-child-cases'
           : npc
             ? 'six-npc-trade-count-child-cases'
             : fee
@@ -923,14 +924,16 @@ async function runIsolatedCases(suite: Suite) {
         output.includes(
           'Ran ' +
             cases.length +
-            (review ? ' test across 1 file.' : ' tests across 1 file.')
+            (cases.length === 1
+              ? ' test across 1 file.'
+              : ' tests across 1 file.')
         ),
       closedPositions
         ? 'All eight closed prediction position cases must pass without skips'
         : balance
           ? 'All five balance display cases must pass without skips'
           : review
-            ? 'The real manual-review hold case must pass without skips'
+            ? 'Both manual-review and admin-resolution cases must pass without skips'
             : npc
               ? 'All six NPC history cases must pass without skips'
               : fee

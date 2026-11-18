@@ -18,8 +18,8 @@ interface CronSchedule {
 
 /**
  * Additional crons to trigger from game-tick.
- * Excludes game-tick (already running), reputation-sync, realtime-drain
- * (driven by the local cron simulator or their own callers).
+ * Excludes game-tick (already running) and realtime-drain
+ * (driven by the local cron simulator or its own callers).
  */
 const ADDITIONAL_CRONS: CronSchedule[] = [
   {
@@ -66,11 +66,6 @@ const ADDITIONAL_CRONS: CronSchedule[] = [
     path: '/api/cron/training-check',
     schedule: '0 * * * *', // Every hour at minute 0
     description: 'Training check',
-  },
-  {
-    path: '/api/cron/profile-chain-sync',
-    schedule: '0 */6 * * *', // Every 6 hours at minute 0
-    description: 'Profile chain sync',
   },
   {
     path: '/api/cron/whitelist-topn',

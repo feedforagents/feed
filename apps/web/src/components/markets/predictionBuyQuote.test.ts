@@ -13,14 +13,14 @@ describe('calculatePredictionBuyQuote', () => {
       10
     );
 
-    // Shares are the ones execution credits: the swap of the net amount.
+    // PostgreSQL stores the net swap's fill to six decimal places.
     const netSwap = PredictionPricing.calculateBuy(
       500,
       500,
       'yes',
       quote.netAmount
     );
-    expect(quote.sharesBought).toBeCloseTo(netSwap.sharesBought, 10);
+    expect(quote.sharesBought).toBe(183.163877);
     expect(quote.avgPrice).toBeCloseTo(netSwap.avgPrice, 10);
   });
 
