@@ -180,6 +180,9 @@ import {
   groups,
   inArray,
   messages,
+  notInArray,
+  userBlocks,
+  userMutes,
   users,
 } from '@feed/db';
 import {
@@ -346,13 +349,42 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     // Map chatId -> chat details
     const chatDetailsMap = new Map(filteredGroupChats.map((c) => [c.id, c]));
 
+    // Group-list previews omit authors the viewer blocked or muted and
+    // authors who blocked the viewer. Apply this before choosing the newest
+    // preview through this request's handle so failures do not fall back to
+    // an unfiltered message. History-route parity and DM previews are outside
+    // this change; the existing DM query remains unchanged.
+    const [blockedRows, mutedRows, blockedByRows] = await Promise.all([
+      dbClient
+        .select({ id: userBlocks.blockedId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockerId, user.userId)),
+      dbClient
+        .select({ id: userMutes.mutedId })
+        .from(userMutes)
+        .where(eq(userMutes.muterId, user.userId)),
+      dbClient
+        .select({ id: userBlocks.blockerId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockedId, user.userId)),
+    ]);
+    const excludedSenderIds = [
+      ...blockedRows,
+      ...mutedRows,
+      ...blockedByRows,
+    ].map((row) => row.id);
+    const groupSenderScope =
+      excludedSenderIds.length > 0
+        ? notInArray(messages.senderId, excludedSenderIds)
+        : undefined;
+
     // Get last messages for group chats
     const groupChatMessages = await Promise.all(
       groupChatIds.map(async (chatId) => {
         const msgs = await dbClient
           .select()
           .from(messages)
-          .where(eq(messages.chatId, chatId))
+          .where(and(eq(messages.chatId, chatId), groupSenderScope))
           .orderBy(desc(messages.createdAt))
           .limit(1);
         return { chatId, messages: msgs };
@@ -466,7 +498,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           (p) => p.userId !== user.userId
         );
         let chatName = chat.name || 'Direct Message';
-        let otherUserDetails = null;
+        let otherUserDetails: Pick<
+          typeof users.$inferSelect,
+          | 'id'
+          | 'displayName'
+          | 'username'
+          | 'profileImageUrl'
+          | 'isAgent'
+          | 'managedBy'
+        > | null = null;
 
         if (otherParticipant) {
           // Try to get user details (real users only, not actors)
