@@ -117,6 +117,18 @@ export function postFeedVisibilityConditions(
   const excludedAuthorIds = options?.excludedAuthorIds;
   if (excludedAuthorIds && excludedAuthorIds.length > 0) {
     conditions.push(notInArray(posts.authorId, excludedAuthorIds));
+    // A simple repost's visible content is the original: exclude it in
+    // SQL when the original's author is one of the viewer's excluded
+    // authors, so hidden rows never consume page slots — the same reason
+    // the dead-repost subplan below exists. Quote posts keep their row;
+    // callers omit the embedded original at render time.
+    const excludedOriginalAuthors = sql.join(
+      excludedAuthorIds.map((authorId) => sql`${authorId}`),
+      sql`, `
+    );
+    conditions.push(
+      sql`NOT (${posts.originalPostId} IS NOT NULL AND ${posts.content} = '' AND EXISTS (SELECT 1 FROM "Post" AS "feed_excluded_original" WHERE "feed_excluded_original"."id" = ${posts.originalPostId} AND "feed_excluded_original"."authorId" IN (${excludedOriginalAuthors})))`
+    );
   }
   if (options?.excludeDeadReposts) {
     conditions.push(
