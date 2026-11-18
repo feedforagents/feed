@@ -860,9 +860,11 @@ export class PerpMarketService {
           );
         }
 
-        const closePercentage = resolveClosePercentage(input.percentage);
-
-        const closeSize = position.size * closePercentage;
+        const closeSize =
+          input.size === undefined
+            ? position.size * resolveClosePercentage(input.percentage)
+            : resolveCloseSize(input.size, position.size);
+        const closePercentage = closeSize / position.size;
         const remainingSize = position.size - closeSize;
         const isFullClose = remainingSize < 0.01;
         const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
@@ -1875,11 +1877,10 @@ export class PerpMarketService {
 
     if (tradeSize < existing.size) {
       // REDUCE: Partial close of existing position
-      const closePercentage = tradeSize / existing.size;
       const closeResult = await this.closePosition({
         userId: input.userId,
         positionId: existing.id,
-        percentage: closePercentage,
+        size: tradeSize,
         maxSlippage,
       });
 
@@ -2840,6 +2841,15 @@ function resolveClosePercentage(percentage: number | undefined): number {
     );
   }
   return Math.min(1, percentage);
+}
+
+function resolveCloseSize(size: number, positionSize: number): number {
+  if (!Number.isFinite(size) || size <= 0 || size > positionSize + 1e-9) {
+    throw new Error(
+      `Close size must be a finite number in (0, ${positionSize}], got ${size}`
+    );
+  }
+  return Math.min(size, positionSize);
 }
 
 function normalizePriceMap(

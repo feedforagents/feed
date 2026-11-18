@@ -1112,6 +1112,52 @@ describe('PerpMarketService', () => {
       expect(pos?.closedAt).toBeNull();
     });
 
+    it('settles a reduce on the ordered size, so execution, preview and fee ledger agree', async () => {
+      const recordedFees: Array<{ amount: number; type: string }> = [];
+      const ledgerService = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            db.transaction((tx) => operation(tx, wallet)),
+        },
+        db,
+        wallet,
+        fees: feeConfig,
+        feeProcessor: {
+          processTradingFee: async ({ amount, type }) => {
+            recordedFees.push({ amount, type });
+            return { feeCharged: 0 };
+          },
+        },
+      });
+      await ledgerService.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 116,
+        leverage: 1,
+      });
+      const order = {
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'short' as const,
+        size: 30.01,
+        leverage: 1,
+      };
+      const preview = await ledgerService.previewOrder(order);
+
+      // 116 * (30.01 / 116) is 30.009999999999998 in binary; settling that
+      // floors to 30.00 and charges 0.03 instead of the canonical 0.04.
+      const result = await ledgerService.openPosition(order);
+
+      expect(result.rebalanceType).toBe('reduce');
+      expect(result.feePaid).toBe(0.04);
+      expect(result.feePaid).toBe(preview.estimatedFee);
+      expect(recordedFees.at(-1)).toEqual({
+        amount: 30.01,
+        type: 'perp_close',
+      });
+    });
+
     it('closes position when opening opposite side with equal size', async () => {
       // Open LONG position
       const initial = await service.openPosition({
