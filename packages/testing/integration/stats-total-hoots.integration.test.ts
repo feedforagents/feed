@@ -7,18 +7,24 @@
  *
  * Uses the real route and PostgreSQL. Only the server-only environment
  * marker is stubbed.
+ *
+ * Fixture ownership follows the receipts pattern from
+ * a2a-feed-pagination.integration.test.ts: proposed ids never authorize
+ * teardown. Every insert publishes its id from INSERT RETURNING only after
+ * the statement commits, and cleanup runs child-first inside one transaction
+ * under FOR UPDATE locks, refusing any row whose receipt no longer matches
+ * this fixture or any user row that still authors a post.
  */
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
 mock.module('server-only', () => ({}));
 
-import { db, eq, inArray, posts, users } from '@feed/db';
+import { and, db, eq, inArray, posts, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 import { GET } from '../../../apps/web/src/app/api/feed/widgets/stats/route';
 
-const userIds: string[] = [];
-const postIds: string[] = [];
+const owned = { users: [] as string[], posts: [] as string[] };
 let authorId: string;
 let visibleId: string;
 let deletedId: string;
@@ -54,8 +60,6 @@ beforeAll(async () => {
   visibleId = generated[1]!;
   deletedId = generated[2]!;
   futureId = generated[3]!;
-  userIds.push(authorId);
-  postIds.push(visibleId, deletedId, futureId);
 
   const now = new Date();
   const past = new Date(now.getTime() - 48 * 60 * 60 * 1000);
@@ -63,45 +67,118 @@ beforeAll(async () => {
 
   baseline = await readTotalHoots();
 
-  await db.insert(users).values({
-    id: authorId,
-    username: `sth${authorId}`,
-    displayName: 'Stats hoots fixture',
-    isTest: false,
-    updatedAt: now,
-  });
+  const [userRow] = await db
+    .insert(users)
+    .values({
+      id: authorId,
+      username: `sth${authorId}`,
+      displayName: 'Stats hoots fixture',
+      isTest: false,
+      updatedAt: now,
+    })
+    .returning({ id: users.id });
+  if (!userRow) throw new Error('Stats fixture user insert returned no row');
+  owned.users.push(userRow.id);
 
-  await db.insert(posts).values([
-    {
-      id: visibleId,
-      content: 'Stats hoots fixture (visible)',
-      authorId,
-      timestamp: past,
-      createdAt: past,
-      deletedAt: null,
-    },
-    {
-      id: deletedId,
-      content: 'Stats hoots fixture (moderated)',
-      authorId,
-      timestamp: past,
-      createdAt: past,
-      deletedAt: past,
-    },
-    {
-      id: futureId,
-      content: 'Stats hoots fixture (scheduled)',
-      authorId,
-      timestamp: future,
-      createdAt: past,
-      deletedAt: null,
-    },
-  ]);
+  const postRows = await db
+    .insert(posts)
+    .values([
+      {
+        id: visibleId,
+        content: 'Stats hoots fixture (visible)',
+        authorId,
+        timestamp: past,
+        createdAt: past,
+        deletedAt: null,
+      },
+      {
+        id: deletedId,
+        content: 'Stats hoots fixture (moderated)',
+        authorId,
+        timestamp: past,
+        createdAt: past,
+        deletedAt: past,
+      },
+      {
+        id: futureId,
+        content: 'Stats hoots fixture (scheduled)',
+        authorId,
+        timestamp: future,
+        createdAt: past,
+        deletedAt: null,
+      },
+    ])
+    .returning({ id: posts.id });
+  if (postRows.length !== 3) {
+    throw new Error('Stats fixture post insert returned an incomplete receipt');
+  }
+  owned.posts.push(...postRows.map((row) => row.id));
 });
 
+// Child-first, transactional, guarded: lock the receipts, delete only rows
+// this suite committed, and refuse if anything foreign remains. The tests
+// deliberately mutate timestamp/deletedAt, so the user guard checks identity
+// (username marker + no remaining authored post), not full-row equality.
+async function deleteOwnedRows(): Promise<void> {
+  if (owned.posts.length === 0 && owned.users.length === 0) return;
+  await db.transaction(async (tx) => {
+    if (owned.posts.length > 0) {
+      await tx
+        .select({ id: posts.id })
+        .from(posts)
+        .where(inArray(posts.id, owned.posts))
+        .for('update');
+    }
+    if (owned.users.length > 0) {
+      await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, owned.users))
+        .for('update');
+    }
+
+    if (owned.posts.length > 0) {
+      const removedPosts = await tx
+        .delete(posts)
+        .where(
+          and(inArray(posts.id, owned.posts), eq(posts.authorId, authorId))
+        )
+        .returning({ id: posts.id });
+      if (removedPosts.length !== owned.posts.length) {
+        throw new Error('Stats fixture cleanup refused Post');
+      }
+    }
+
+    if (owned.users.length > 0) {
+      const remaining = await tx
+        .select({ id: posts.id })
+        .from(posts)
+        .where(eq(posts.authorId, authorId));
+      if (remaining.length > 0) {
+        throw new Error(
+          'Stats fixture cleanup refused User: foreign Post child'
+        );
+      }
+      const removedUsers = await tx
+        .delete(users)
+        .where(
+          and(
+            inArray(users.id, owned.users),
+            eq(users.username, `sth${authorId}`)
+          )
+        )
+        .returning({ id: users.id });
+      if (removedUsers.length !== owned.users.length) {
+        throw new Error('Stats fixture cleanup refused User');
+      }
+    }
+  });
+  owned.posts.length = 0;
+  owned.users.length = 0;
+}
+
 afterAll(async () => {
-  if (postIds.length) await db.delete(posts).where(inArray(posts.id, postIds));
-  if (userIds.length) await db.delete(users).where(inArray(users.id, userIds));
+  await deleteOwnedRows();
 });
 
 describe('Platform stats count only reachable posts', () => {
@@ -113,23 +190,34 @@ describe('Platform stats count only reachable posts', () => {
   });
 
   it('still moves for content readers can see', async () => {
-    const extraId = await generateSnowflakeId();
     const now = new Date();
     const past = new Date(now.getTime() - 60 * 60 * 1000);
-    await db.insert(posts).values({
-      id: extraId,
-      content: 'Stats hoots fixture (extra visible)',
-      authorId,
-      timestamp: past,
-      createdAt: past,
-      deletedAt: null,
-    });
-    postIds.push(extraId);
+    const [extraRow] = await db
+      .insert(posts)
+      .values({
+        id: await generateSnowflakeId(),
+        content: 'Stats hoots fixture (extra visible)',
+        authorId,
+        timestamp: past,
+        createdAt: past,
+        deletedAt: null,
+      })
+      .returning({ id: posts.id });
+    if (!extraRow) {
+      throw new Error('Stats fixture extra post insert returned no row');
+    }
+    owned.posts.push(extraRow.id);
     try {
       expect(await readTotalHoots()).toBe(baseline + 2);
     } finally {
-      await db.delete(posts).where(eq(posts.id, extraId));
-      postIds.splice(postIds.indexOf(extraId), 1);
+      const removed = await db
+        .delete(posts)
+        .where(eq(posts.id, extraRow.id))
+        .returning({ id: posts.id });
+      if (removed.length !== 1) {
+        throw new Error('Stats fixture cleanup refused extra Post');
+      }
+      owned.posts.splice(owned.posts.indexOf(extraRow.id), 1);
     }
     expect(await readTotalHoots()).toBe(baseline + 1);
   });
