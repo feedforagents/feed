@@ -26,8 +26,13 @@
  * create still references it: positions and price-history rows point
  * at a market with no physical foreign key, so deleting the market
  * would orphan them, and a game-onboarding row is cascade-deleted
- * with its user. The control test below proves each refusal gate with
- * sentinel rows this run never recorded.
+ * with its user. It locks the owned parents first (FOR UPDATE), so a
+ * concurrent writer cannot attach a dependent between the check and
+ * the delete, and it also refuses on the other foreign keys that
+ * cascade or set NULL off a user or market (PnL snapshots, whitelist
+ * rows and grants, whitelist config, market questions). The control
+ * test below proves each refusal gate with sentinel rows this run
+ * never recorded.
  *
  * The by-username profile route counts positions with its own query
  * instead of the cached stats path, so it gets the same 'active' filter
@@ -51,7 +56,11 @@ import {
   markets,
   positions,
   predictionPriceHistories,
+  questions,
+  userPnLSnapshots,
   users,
+  whitelist,
+  whitelistConfig,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
@@ -189,12 +198,34 @@ async function callByUsername(username: string): Promise<ByUsernameBody> {
  * still references it. Positions and price-history rows carry a
  * marketId with no physical foreign key, so a foreign row under an
  * owned market would be orphaned by the market delete; a
- * game-onboarding row is cascade-deleted with its user. The throw
- * rolls the whole teardown back, so a refusal never leaves a partial
- * cleanup behind.
+ * game-onboarding row is cascade-deleted with its user, and the other
+ * foreign keys off a user or market cascade or set NULL the same way.
+ * The owned parents are locked first (FOR UPDATE): a concurrent
+ * writer attaching such a dependent takes FOR KEY SHARE on the parent
+ * row and blocks until this transaction ends, so the counts below
+ * cannot miss a row that lands between the check and the delete. The
+ * throw rolls the whole teardown back, so a refusal never leaves a
+ * partial cleanup behind.
  */
 async function cleanupOwnedSets(sets: OwnedSets): Promise<void> {
   await db.transaction(async (tx) => {
+    // Lock the owned parents before inspecting dependents (see the
+    // doc comment above). Positions have no physical foreign key, so
+    // their delete needs no lock; the parents are locked first.
+    if (sets.markets.size > 0) {
+      await tx
+        .select({ id: markets.id })
+        .from(markets)
+        .where(inArray(markets.id, [...sets.markets]))
+        .for('update');
+    }
+    if (sets.users.size > 0) {
+      await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, [...sets.users]))
+        .for('update');
+    }
     if (sets.positions.size > 0) {
       await tx
         .delete(positions)
@@ -220,6 +251,17 @@ async function cleanupOwnedSets(sets: OwnedSets): Promise<void> {
           `Refusing to delete fixture market: ${foreignHistory?.count} price-history row(s) not owned by this run still reference it`
         );
       }
+      // Question.marketId is SET NULL on market delete: a foreign
+      // question would silently lose its market.
+      const [foreignQuestions] = await tx
+        .select({ count: count() })
+        .from(questions)
+        .where(inArray(questions.marketId, marketIds));
+      if (Number(foreignQuestions?.count ?? 0) > 0) {
+        throw new Error(
+          `Refusing to delete fixture market: ${foreignQuestions?.count} question(s) not owned by this run still reference it`
+        );
+      }
       await tx.delete(markets).where(inArray(markets.id, marketIds));
     }
     if (sets.users.size > 0) {
@@ -240,6 +282,48 @@ async function cleanupOwnedSets(sets: OwnedSets): Promise<void> {
       if (Number(foreignPositions?.count ?? 0) > 0) {
         throw new Error(
           `Refusing to delete fixture user: ${foreignPositions?.count} position(s) not owned by this run still reference it`
+        );
+      }
+      // The other foreign keys off a user: PnL snapshots and whitelist
+      // rows cascade with the user, while whitelist grants and the
+      // whitelist config are SET NULL — all four would silently mutate
+      // a row this run did not create. (AdminRole is RESTRICT /
+      // NO ACTION, so a foreign admin row already fails the delete
+      // itself instead of mutating silently.)
+      const [foreignSnapshots] = await tx
+        .select({ count: count() })
+        .from(userPnLSnapshots)
+        .where(inArray(userPnLSnapshots.userId, userIds));
+      if (Number(foreignSnapshots?.count ?? 0) > 0) {
+        throw new Error(
+          `Refusing to delete fixture user: ${foreignSnapshots?.count} PnL snapshot(s) not owned by this run still reference it`
+        );
+      }
+      const [foreignWhitelistUsers] = await tx
+        .select({ count: count() })
+        .from(whitelist)
+        .where(inArray(whitelist.userId, userIds));
+      if (Number(foreignWhitelistUsers?.count ?? 0) > 0) {
+        throw new Error(
+          'Refusing to delete fixture user: a whitelist row not owned by this run still references it'
+        );
+      }
+      const [foreignWhitelistGrants] = await tx
+        .select({ count: count() })
+        .from(whitelist)
+        .where(inArray(whitelist.grantedBy, userIds));
+      if (Number(foreignWhitelistGrants?.count ?? 0) > 0) {
+        throw new Error(
+          'Refusing to delete fixture user: a whitelist grant not owned by this run still references it'
+        );
+      }
+      const [foreignWhitelistConfig] = await tx
+        .select({ count: count() })
+        .from(whitelistConfig)
+        .where(inArray(whitelistConfig.updatedBy, userIds));
+      if (Number(foreignWhitelistConfig?.count ?? 0) > 0) {
+        throw new Error(
+          'Refusing to delete fixture user: a whitelist config not owned by this run still references it'
         );
       }
       await tx.delete(users).where(inArray(users.id, userIds));
@@ -356,6 +440,12 @@ describe('profile header position count', () => {
       sentinelPositionId,
       sentinelHistoryId,
       sentinelOnboardingId,
+      controlUserCId,
+      sentinelQuestionId,
+      sentinelSnapshotId,
+      sentinelWhitelistUserId,
+      sentinelWhitelistGrantId,
+      sentinelConfigId,
     ] = await Promise.all([
       generateSnowflakeId(),
       generateSnowflakeId(),
@@ -363,7 +453,18 @@ describe('profile header position count', () => {
       generateSnowflakeId(),
       generateSnowflakeId(),
       generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
     ]);
+    // A questionNumber outside the fixture range; the insert fails
+    // loudly on a collision instead of reusing a foreign question.
+    const sentinelQuestionNumber = Math.floor(
+      1_000_000_000 + Math.random() * 1_000_000_000
+    );
     try {
       await insertUser(controlUserId, 'sentinel-user', control);
       await insertMarket(controlMarketId, control);
@@ -403,6 +504,50 @@ describe('profile header position count', () => {
         id: sentinelOnboardingId,
         userId: controlUserId,
       });
+      // Third user, inserted directly and never recorded: the
+      // whitelist sentinels need a granter / grantee outside the
+      // control sets so each whitelist gate trips on its own.
+      await db.insert(users).values({
+        id: controlUserCId,
+        username: `f197-sentinel-granter-${controlUserCId.slice(-12)}`,
+        displayName: 'F197 sentinel-granter',
+        isTest: false,
+        isBanned: false,
+        updatedAt: new Date(),
+      });
+      await db.insert(questions).values({
+        id: sentinelQuestionId,
+        questionNumber: sentinelQuestionNumber,
+        marketId: controlMarketId,
+        text: 'F197 sentinel question',
+        scenarioId: 1,
+        outcome: true,
+        rank: 1,
+        resolutionDate: new Date(),
+        status: 'active',
+        updatedAt: new Date(),
+      });
+      await db.insert(userPnLSnapshots).values({
+        id: sentinelSnapshotId,
+        userId: controlUserId,
+        snapshotAt: new Date(),
+      });
+      await db.insert(whitelist).values({
+        id: sentinelWhitelistUserId,
+        userId: controlUserId,
+        source: 'admin_manual',
+        grantedBy: controlUserCId,
+      });
+      await db.insert(whitelist).values({
+        id: sentinelWhitelistGrantId,
+        userId: controlUserCId,
+        source: 'admin_manual',
+        grantedBy: controlUserId,
+      });
+      await db.insert(whitelistConfig).values({
+        id: sentinelConfigId,
+        updatedBy: controlUserId,
+      });
 
       // Gate 1: a foreign position under the market refuses, and the
       // refused transaction leaves the owned position in place.
@@ -423,11 +568,24 @@ describe('profile header position count', () => {
         /price-history row/
       );
 
-      // Gate 3: with the history gone, the foreign game-onboarding
-      // row still refuses instead of being cascade-deleted with the user.
+      // Gate 3: with the history gone, the foreign question under the
+      // market still refuses instead of being SET NULL by the delete.
       await db
         .delete(predictionPriceHistories)
         .where(eq(predictionPriceHistories.id, sentinelHistoryId));
+      await expect(cleanupOwnedSets(control)).rejects.toThrow(
+        /question\(s\) not owned/
+      );
+      expect(
+        await db
+          .select({ id: questions.id })
+          .from(questions)
+          .where(eq(questions.id, sentinelQuestionId))
+      ).toHaveLength(1);
+
+      // Gate 4: with the question gone, the foreign game-onboarding
+      // row still refuses instead of being cascade-deleted with the user.
+      await db.delete(questions).where(eq(questions.id, sentinelQuestionId));
       await expect(cleanupOwnedSets(control)).rejects.toThrow(
         /game-onboarding row/
       );
@@ -438,11 +596,43 @@ describe('profile header position count', () => {
           .where(eq(gameOnboarding.id, sentinelOnboardingId))
       ).toHaveLength(1);
 
-      // With every foreign row removed, cleanup succeeds and deletes
-      // exactly the control rows.
+      // Gate 5: with the onboarding gone, the foreign PnL snapshot
+      // still refuses instead of cascading with the user.
       await db
         .delete(gameOnboarding)
         .where(eq(gameOnboarding.id, sentinelOnboardingId));
+      await expect(cleanupOwnedSets(control)).rejects.toThrow(/PnL snapshot/);
+
+      // Gate 6: with the snapshot gone, the foreign whitelist row
+      // (userId) still refuses instead of cascading.
+      await db
+        .delete(userPnLSnapshots)
+        .where(eq(userPnLSnapshots.id, sentinelSnapshotId));
+      await expect(cleanupOwnedSets(control)).rejects.toThrow(/whitelist row/);
+
+      // Gate 7: with that row gone, the foreign whitelist grant
+      // (grantedBy) still refuses instead of being SET NULL.
+      await db
+        .delete(whitelist)
+        .where(eq(whitelist.id, sentinelWhitelistUserId));
+      await expect(cleanupOwnedSets(control)).rejects.toThrow(
+        /whitelist grant/
+      );
+
+      // Gate 8: with the grant gone, the foreign whitelist config
+      // (updatedBy) still refuses instead of being SET NULL.
+      await db
+        .delete(whitelist)
+        .where(eq(whitelist.id, sentinelWhitelistGrantId));
+      await expect(cleanupOwnedSets(control)).rejects.toThrow(
+        /whitelist config/
+      );
+
+      // With every foreign row removed, cleanup succeeds and deletes
+      // exactly the control rows.
+      await db
+        .delete(whitelistConfig)
+        .where(eq(whitelistConfig.id, sentinelConfigId));
       await cleanupOwnedSets(control);
       expect(
         await db
@@ -471,11 +661,27 @@ describe('profile header position count', () => {
       await db
         .delete(predictionPriceHistories)
         .where(eq(predictionPriceHistories.id, sentinelHistoryId));
+      await db.delete(questions).where(eq(questions.id, sentinelQuestionId));
       await db
         .delete(gameOnboarding)
         .where(eq(gameOnboarding.id, sentinelOnboardingId));
+      await db
+        .delete(userPnLSnapshots)
+        .where(eq(userPnLSnapshots.id, sentinelSnapshotId));
+      await db
+        .delete(whitelist)
+        .where(
+          inArray(whitelist.id, [
+            sentinelWhitelistUserId,
+            sentinelWhitelistGrantId,
+          ])
+        );
+      await db
+        .delete(whitelistConfig)
+        .where(eq(whitelistConfig.id, sentinelConfigId));
       await db.delete(markets).where(eq(markets.id, controlMarketId));
       await db.delete(users).where(eq(users.id, controlUserId));
+      await db.delete(users).where(eq(users.id, controlUserCId));
     }
   });
 });
