@@ -614,6 +614,17 @@ export class PerpMarketService {
         input.userId,
         input.size * existingPosition.leverage
       );
+      // Same leverage-cap rejection as addToPosition: an add inherits the
+      // existing position's leverage, so a legacy position already above
+      // the market cap cannot grow even when the add itself requests an
+      // at-cap leverage. ValidationError (not a plain Error like the
+      // execution path throws) so the preview route answers 400, like the
+      // other preview refusals.
+      if (existingPosition.leverage > maxLeverage) {
+        throw new ValidationError(
+          `Cannot add to a position above the leverage cap (existing ${existingPosition.leverage}x exceeds ${maxLeverage}x); close or reduce it first`
+        );
+      }
       return this.buildAddPreview(market, existingPosition, input);
     }
 

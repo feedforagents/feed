@@ -202,6 +202,62 @@ describe('perp preview enforces the exposure cap', () => {
     }
   });
 
+  test('add to a legacy position above the leverage cap is rejected by the preview', async () => {
+    const userId = await createUser('10000');
+    const t1 = ticker('PEXPH');
+    const previousTestAuth = process.env.ALLOW_TEST_PRIVY_DID_AUTH;
+    process.env.ALLOW_TEST_PRIVY_DID_AUTH = 'true';
+    try {
+      await createMarket(t1);
+      const now = new Date();
+      // Legacy position opened before the market cap was lowered: 50x
+      // against a 20x cap. Inserted directly because openPosition refuses
+      // a 50x input at the current cap.
+      await db.insert(perpPositions).values({
+        id: `test-pos-legacy-${userId}`,
+        userId,
+        ticker: t1,
+        organizationId: t1,
+        side: 'long',
+        entryPrice: 100,
+        currentPrice: 100,
+        size: 100,
+        leverage: 50,
+        liquidationPrice: 50,
+        unrealizedPnL: 0,
+        unrealizedPnLPercent: 0,
+        fundingPaid: 0,
+        openedAt: now,
+        lastUpdated: now,
+        closedAt: null,
+        realizedPnL: 0,
+      });
+      // The add is small: 100 x 50 = 5,000 exposure, far under the cap,
+      // and 100 + 100 is far under the market size limit, so the leverage
+      // cap is the only reason this order is refused.
+      const quoted = await preview(userId, t1, 'long', 100, 20);
+      expect(quoted.status).toBe(400);
+      expect(errorMessage(quoted.body)).toMatch(
+        /Cannot add to a position above the leverage cap/
+      );
+      const service = createPerpMarketService({ withPriceImpact: true });
+      await expect(
+        service.openPosition({
+          userId,
+          ticker: t1,
+          side: 'long',
+          size: 100,
+          leverage: 20,
+        })
+      ).rejects.toThrow(/Cannot add to a position above the leverage cap/);
+    } finally {
+      await cleanup(userId, [t1]);
+      if (previousTestAuth === undefined)
+        delete process.env.ALLOW_TEST_PRIVY_DID_AUTH;
+      else process.env.ALLOW_TEST_PRIVY_DID_AUTH = previousTestAuth;
+    }
+  });
+
   test('flip over the exposure cap is rejected by the preview', async () => {
     const userId = await createUser('10000');
     const t1 = ticker('PEXPD');
