@@ -177,22 +177,23 @@ export const GET = withErrorHandling(
     // so count the comments reachable from a top-level comment, mirroring
     // the tree rule in GET /api/posts/[id]/comments.
     //
-    // The list also applies the signed viewer's block/mute policy before
-    // building its tree, through the same loadViewerExcludedAuthorIds
-    // definition used here: comments by authors the viewer blocked or
-    // muted — or who blocked the viewer — are excluded, and their replies
-    // go with them because the hidden parent is unreachable from the root.
+    // The signed viewer's moderation set is loaded once and used in two
+    // places: comments by authors the viewer blocked or muted — or who
+    // blocked the viewer — are excluded from the tree (their replies go
+    // with them because the hidden parent is unreachable from the root),
+    // and an embedded repost original by an excluded author is never
+    // exposed by the metadata block below. This is the same
+    // loadViewerExcludedAuthorIds definition every other surface uses.
     // Anonymous reads have no moderation set and stay unfiltered, exactly
     // like the list route.
+    const excludedAuthorIds: ReadonlySet<string> = canonicalUserId
+      ? await loadViewerExcludedAuthorIds(canonicalUserId)
+      : new Set<string>();
     let visibleCommentRows = commentRows;
-    if (canonicalUserId && commentRows.length > 0) {
-      const excludedAuthorIds =
-        await loadViewerExcludedAuthorIds(canonicalUserId);
-      if (excludedAuthorIds.size > 0) {
-        visibleCommentRows = commentRows.filter(
-          (row) => !excludedAuthorIds.has(row.authorId)
-        );
-      }
+    if (excludedAuthorIds.size > 0) {
+      visibleCommentRows = commentRows.filter(
+        (row) => !excludedAuthorIds.has(row.authorId)
+      );
     }
     const childrenByParent = new Map<string | null, string[]>();
     for (const row of visibleCommentRows) {
@@ -288,7 +289,15 @@ export const GET = withErrorHandling(
         .where(and(eq(posts.id, post.originalPostId), isNull(posts.deletedAt)))
         .limit(1);
 
-      if (originalPost) {
+      // An original by an author the signed viewer must not see is treated
+      // exactly like a deleted original above: no repost metadata at all.
+      // A quote keeps its own commentary in `content`; a simple repost
+      // renders as an empty shell rather than carrying the excluded
+      // author's content. Anonymous reads have no moderation set and stay
+      // unfiltered.
+      const originalIsExcluded =
+        !!originalPost && excludedAuthorIds.has(originalPost.authorId);
+      if (originalPost && !originalIsExcluded) {
         const isQuote = post.content && post.content.length > 0;
 
         // Get original post author
