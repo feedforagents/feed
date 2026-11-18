@@ -72,8 +72,13 @@ export async function fetchClosedPositionsSnapshot(
       throw new Error('Invalid prediction position');
     const closed = row.status === 'closed' || row.status === 'resolved';
     if (closed) timestamp(row.resolvedAt ?? row.createdAt ?? null);
-    // Preserve the endpoint's existing zero-share exclusion.
-    return closed && Number(row.shares) >= 0.01;
+    // Closed history keeps every closed/resolved row: selling all shares
+    // zeroes the row, and that is exactly how a prediction position
+    // closes. The dust filter guards the active view only — the
+    // positions endpoint already applies it status-specifically, so
+    // re-applying it here would drop every sell-closed row the
+    // endpoint just restored.
+    return closed;
   });
   return {
     perpetuals: sortClosed(closedPerps, (row) => timestamp(row.closedAt)),

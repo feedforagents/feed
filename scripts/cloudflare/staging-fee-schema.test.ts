@@ -24,6 +24,7 @@ import {
   MIGRATION_HISTORY_SAMPLE_LIMIT,
   physicalFeeSchemaDiagnostics,
   SchemaHold,
+  STAGING_FUNDING_MIGRATION,
   STAGING_ORIGINAL_MIGRATIONS,
   verifyAdditiveColumns,
   verifyAdditiveTargets,
@@ -50,6 +51,11 @@ function captureSchemaHold(run: () => void): SchemaHold {
   throw new Error('Expected a schema HOLD');
 }
 const sourceRoot = resolve(import.meta.dir, '../..');
+const stagingPins = [...STAGING_ORIGINAL_MIGRATIONS, STAGING_FUNDING_MIGRATION];
+const stagingAdditivePins = [
+  ...BASELINE_ADDITIVE_MIGRATIONS,
+  STAGING_FUNDING_MIGRATION,
+];
 function withMigrationSource(
   run: (root: string, output: string) => void
 ): void {
@@ -60,7 +66,7 @@ function withMigrationSource(
   try {
     mkdirSync(join(migrations, 'meta'), { recursive: true, mode: 0o700 });
     mkdirSync(output, { mode: 0o700 });
-    for (const pin of STAGING_ORIGINAL_MIGRATIONS) {
+    for (const pin of stagingPins) {
       copyFileSync(
         join(sourceRoot, 'packages/db/drizzle/migrations', `${pin.tag}.sql`),
         join(migrations, `${pin.tag}.sql`)
@@ -428,24 +434,23 @@ describe('staging fee schema release boundaries', () => {
       'receipted_fee_columns_missing'
     );
   });
-  it('materializes only byte-exact original additive SQL and an out-only normal CLI config', () => {
+  it('materializes the byte-exact additive SQL and funding ledger with an out-only CLI config', () => {
     withMigrationSource((root, output) => {
       const config = materializeBaselineAdditiveMigrations(root, output);
       const directory = join(output, 'migrations');
       expect(readdirSync(directory).sort()).toEqual(
-        [
-          ...BASELINE_ADDITIVE_MIGRATIONS.map((pin) => `${pin.tag}.sql`),
-          'meta',
-        ].sort()
+        [...stagingAdditivePins.map((pin) => `${pin.tag}.sql`), 'meta'].sort()
       );
       const journal = JSON.parse(
         readFileSync(join(directory, 'meta/_journal.json'), 'utf8')
       ) as { entries: { idx: number; tag: string; when: number }[] };
-      expect(journal.entries.map((entry) => entry.idx)).toEqual([0, 3, 4, 5]);
+      expect(journal.entries.map((entry) => entry.idx)).toEqual([
+        0, 3, 4, 5, 6,
+      ]);
       expect(journal.entries.map((entry) => String(entry.when))).toEqual(
-        BASELINE_ADDITIVE_MIGRATIONS.map((pin) => pin.when)
+        stagingAdditivePins.map((pin) => pin.when)
       );
-      for (const pin of BASELINE_ADDITIVE_MIGRATIONS) {
+      for (const pin of stagingAdditivePins) {
         const copy = join(directory, `${pin.tag}.sql`);
         expect(digest(readFileSync(copy, 'utf8'))).toBe(pin.hash);
         expect(
@@ -469,7 +474,7 @@ describe('staging fee schema release boundaries', () => {
     });
   });
   it('holds before materialization for edited selected or skipped originals and extra migration files', () => {
-    for (const pin of STAGING_ORIGINAL_MIGRATIONS) {
+    for (const pin of stagingPins) {
       withMigrationSource((root, output) => {
         const file = join(
           root,
@@ -485,7 +490,7 @@ describe('staging fee schema release boundaries', () => {
     }
     withMigrationSource((root, output) => {
       writeFileSync(
-        join(root, 'packages/db/drizzle/migrations/0006_unreviewed.sql'),
+        join(root, 'packages/db/drizzle/migrations/0007_unreviewed.sql'),
         'SELECT 1;'
       );
       expect(() => materializeBaselineAdditiveMigrations(root, output)).toThrow(

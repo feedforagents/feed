@@ -8,10 +8,10 @@ Decision IDs (D-n) refer to PRD §14. If a decision changes, the affected phase 
 
 ## Phase 0 — Get the world running (P0, before anything else)
 
-Why first: everything else is pointless if the feed is empty. Evidence: `CRON_ENABLED: "false"` in `workers/cron/wrangler.production.jsonc`, `GAME_START=pause` default, empty live feed.
+Why first: game ticks keep the public feed, markets, and articles active. The checked-in production Worker config enables cron, and the sample app configuration starts paused. Verify the deployed settings and actual tick delivery.
 
-1. Confirm the old production cron state (repo says off), then, on the new-game deployment (staging first), enable `game-tick`, `markets-tick`, `npc-tick`, `organization-tick`, `article-tick`, `perp-funding`, `world-facts`.
-2. Remove the two schedule entries with no route (`reputation-sync`, `profile-chain-sync`); stop scheduling `agent-tick` once phase 1 removes it.
+1. Confirm which cron jobs are active in the deployed production environment. On the new-game deployment (staging first), enable or verify `game-tick`, `markets-tick`, `npc-tick`, `organization-tick`, `article-tick`, `perp-funding`, and `world-facts`.
+2. The Worker and internal scheduler exclude the missing `reputation-sync` and `profile-chain-sync` routes. The retired `agent-tick` is also absent from both schedules.
 3. Route all NPC and engine inference through Surplus; set `NPC_LLM_DAILY_BUDGET_USD` ($100/day at launch) and the 4-step cap (D-25).
 4. Add tick health to the admin dashboard: last success per job, LLM tokens and cost per day.
 5. Turn off user/agent trajectory recording in product ticks (D-24).
@@ -102,6 +102,16 @@ Depends on: D-9 through D-15b, D-17, D-17b, D-18.
 **Approved — existing staging schema only.** Under the PRD §9.1 staging exception, the exact original baseline may receive only original additive migrations `0003`–`0005` through the normal migrator, with genuine `[0000, 0003, 0004, 0005]` receipts and all specified guards. Acceptance requires local nonempty-data retention, rollback, postflight shape and rerun proof, plus the existing required tests and build. Retained Farcaster/NFT data is preserved; this does not complete Phase 1 removals or Phase 6. Future cleanup needs a separate reviewed migration. Phase 7's fresh production database and D-8 remain unchanged.
 
 **Exit:** 72 h staging soak with charts of index vs mark per ticker; a test purchase end-to-end in Stripe test mode, and a refused purchase with a Washington billing address; a prediction market resolves and pays exactly 1 pt per winning share; leaderboard unaffected by a purchase.
+
+**Approved staging funding rollout acceptance (2026-11-17).**
+On a disposable copy of each supported staging migration lineage, apply the
+funding ledger migration and verify existing receipts, balances and positions,
+the new ledger constraints, rollback and safe reruns. Prove one accrual per
+position and scheduled period with the real Worker queue, authenticated
+HTTP handler and PostgreSQL. Cover duplicate delivery, a partial failure
+retried across the next UTC boundary, and delivery of the next distinct
+period. Exercise the pause and drain cutover before enabling the scheduler
+route in Phase 0.
 
 ## Phase 7 — Relaunch
 
