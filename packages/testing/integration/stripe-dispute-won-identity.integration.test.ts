@@ -165,7 +165,8 @@ async function sendDisputeEvent(
   type: 'charge.dispute.created' | 'charge.dispute.closed',
   amountCents: number,
   disputeTag = '',
-  eventTag = ''
+  eventTag = '',
+  expectedStatus = 200
 ) {
   const eventId = `evt_test_${type}_${paymentIntentId}${eventTag}`;
   setup.relatedIds.push(eventId);
@@ -191,7 +192,7 @@ async function sendDisputeEvent(
       body: payload,
     })
   );
-  expect(response.status).toBe(200);
+  expect(response.status).toBe(expectedStatus);
 }
 
 beforeAll(async () => {
@@ -211,6 +212,43 @@ afterAll(async () => {
 });
 
 describe('a won dispute restores only what that dispute took', () => {
+  it('retries a win before its debit and ignores a second created event', async () => {
+    const { setup, userId, paymentIntentId } = await seedPurchase(10000);
+    const beforeDispute = await balanceOf(userId);
+    await sendDisputeEvent(
+      setup,
+      paymentIntentId,
+      'charge.dispute.closed',
+      5000,
+      '',
+      '',
+      500
+    );
+    expect(await balanceOf(userId)).toBe(beforeDispute);
+    await sendDisputeEvent(
+      setup,
+      paymentIntentId,
+      'charge.dispute.created',
+      5000
+    );
+    await sendDisputeEvent(
+      setup,
+      paymentIntentId,
+      'charge.dispute.created',
+      5000,
+      '',
+      '_duplicate'
+    );
+    expect(await balanceOf(userId)).toBe(beforeDispute - 5000);
+    await sendDisputeEvent(
+      setup,
+      paymentIntentId,
+      'charge.dispute.closed',
+      5000
+    );
+    expect(await balanceOf(userId)).toBe(beforeDispute);
+  });
+
   it('winning the clamped second of two disputes restores only that dispute', async () => {
     const { setup, userId, paymentIntentId } = await seedPurchase(10000);
     // Top-up $100 on another payment so the second dispute can still deduct.

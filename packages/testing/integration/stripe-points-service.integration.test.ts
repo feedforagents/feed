@@ -481,6 +481,8 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
   describe('creditDisputeWon', () => {
     it('should re-credit points after winning dispute', async () => {
       const userId = await createDbUser();
+      const paymentIntentId = `pi_test_${userId}`;
+      const disputeId = `dp_test_${userId}`;
 
       // Simulate: purchase -> dispute -> win
       // 1. Purchase $50
@@ -488,17 +490,18 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
         userId,
         50,
         `cs_test_${Date.now()}`,
-        `pi_test_${Date.now()}`,
+        paymentIntentId,
         'stripe'
       );
 
       // 2. Dispute created - points deducted
       await TradingBalanceFundingService.reversePurchaseFunding(
         userId,
-        `pi_dispute_${Date.now()}`,
+        paymentIntentId,
         'dispute',
         50,
-        `evt_dispute_created_${Date.now()}`
+        `evt_dispute_created_${Date.now()}`,
+        disputeId
       );
 
       const balanceAfterDispute = await getUserBalance(userId);
@@ -507,9 +510,10 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
       // 3. Dispute won - re-credit
       const result = await TradingBalanceFundingService.creditDisputeWon(
         userId,
-        `dp_test_${Date.now()}`,
+        disputeId,
         50,
-        `evt_dispute_won_${Date.now()}`
+        `evt_dispute_won_${Date.now()}`,
+        paymentIntentId
       );
 
       expect(result.success).toBe(true);
@@ -524,14 +528,24 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
     });
 
     it('should add to existing balance when re-crediting', async () => {
-      // User earned some points between dispute and winning
-      const userId = await createDbUser(2000, 2000, 5000);
+      const userId = await createDbUser(7000, 2000);
+      const paymentIntentId = `pi_test_${userId}`;
+      const disputeId = `dp_test_${userId}`;
+      await TradingBalanceFundingService.reversePurchaseFunding(
+        userId,
+        paymentIntentId,
+        'dispute',
+        50,
+        `evt_created_${userId}`,
+        disputeId
+      );
 
       const result = await TradingBalanceFundingService.creditDisputeWon(
         userId,
-        `dp_test_${Date.now()}`,
+        disputeId,
         50,
-        `evt_dispute_won_${Date.now()}`
+        `evt_dispute_won_${Date.now()}`,
+        paymentIntentId
       );
 
       expect(result.success).toBe(true);
@@ -546,15 +560,26 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
     });
 
     it('should be idempotent - same event processed twice', async () => {
-      const userId = await createDbUser(0);
+      const userId = await createDbUser(3000, 0);
+      const paymentIntentId = `pi_test_${userId}`;
+      const disputeId = `dp_test_${userId}`;
+      await TradingBalanceFundingService.reversePurchaseFunding(
+        userId,
+        paymentIntentId,
+        'dispute',
+        30,
+        `evt_created_${userId}`,
+        disputeId
+      );
       const eventId = `evt_dispute_won_idempotent_${Date.now()}`;
 
       // First call
       const result1 = await TradingBalanceFundingService.creditDisputeWon(
         userId,
-        `dp_test_${Date.now()}`,
+        disputeId,
         30,
-        eventId
+        eventId,
+        paymentIntentId
       );
 
       expect(result1.success).toBe(true);
@@ -563,9 +588,10 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
       // Second call with same event ID
       const result2 = await TradingBalanceFundingService.creditDisputeWon(
         userId,
-        `dp_test_${Date.now()}`,
+        disputeId,
         30,
-        eventId
+        eventId,
+        paymentIntentId
       );
 
       expect(result2.success).toBe(true);
@@ -587,7 +613,8 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
         'non-existent-user',
         `dp_test_${Date.now()}`,
         50,
-        `evt_test_${Date.now()}`
+        `evt_test_${Date.now()}`,
+        'pi_non_existent_user'
       );
 
       expect(result.success).toBe(false);
@@ -656,6 +683,8 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
 
     it('should handle purchase -> dispute -> dispute won correctly', async () => {
       const userId = await createDbUser();
+      const paymentIntentId = `pi_test_${userId}`;
+      const disputeId = `dp_test_${userId}`;
       const scenario = TestScenarios.disputeWon;
 
       // Purchase
@@ -663,17 +692,18 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
         userId,
         scenario.purchaseAmountUSD,
         `cs_test_${Date.now()}`,
-        `pi_test_${Date.now()}`,
+        paymentIntentId,
         'stripe'
       );
 
       // Dispute created
       await TradingBalanceFundingService.reversePurchaseFunding(
         userId,
-        `pi_test_${Date.now()}`,
+        paymentIntentId,
         'dispute',
         scenario.purchaseAmountUSD,
-        `evt_dispute_${Date.now()}`
+        `evt_dispute_${Date.now()}`,
+        disputeId
       );
 
       const balanceAfterDispute = await getUserBalance(userId);
@@ -685,9 +715,10 @@ describe('TradingBalanceFundingService Stripe Integration', () => {
       // Dispute won
       await TradingBalanceFundingService.creditDisputeWon(
         userId,
-        `dp_test_${Date.now()}`,
+        disputeId,
         scenario.purchaseAmountUSD,
-        `evt_dispute_won_${Date.now()}`
+        `evt_dispute_won_${Date.now()}`,
+        paymentIntentId
       );
 
       const balanceAfterWin = await getUserBalance(userId);

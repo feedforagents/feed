@@ -97,7 +97,8 @@ async function processWebhookEvent(
         dispute.payment_intent,
         'dispute',
         amountUSD,
-        event.id
+        event.id,
+        dispute.id
       );
 
       if (!result.success) {
@@ -121,7 +122,8 @@ async function processWebhookEvent(
           userId,
           dispute.id,
           amountUSD,
-          event.id
+          event.id,
+          dispute.payment_intent
         );
 
         if (!result.success) {
@@ -365,11 +367,17 @@ describe('Stripe Webhook Handler Integration', () => {
 
   describe('charge.dispute.closed', () => {
     it('should re-credit points when dispute is won', async () => {
-      const userId = await createDbUser(0);
+      const userId = await createDbUser(7500, 0);
       const paymentIntentId = `pi_dispute_won_${Date.now()}`;
+      const disputeId = `dp_test_${userId}`;
       paymentIntentToUser.set(paymentIntentId, userId);
 
-      const event = createDisputeWonEvent(paymentIntentId, 75);
+      const debit = await processWebhookEvent(
+        createDisputeCreatedEvent(paymentIntentId, 75, { disputeId }),
+        getUserIdFromPaymentIntent
+      );
+      expect(debit.handled).toBe(true);
+      const event = createDisputeWonEvent(paymentIntentId, 75, { disputeId });
 
       const result = await processWebhookEvent(
         event,
@@ -501,6 +509,7 @@ describe('Stripe Webhook Handler Integration', () => {
       const userId = await createDbUser();
       const sessionId = `cs_lifecycle_${Date.now()}`;
       const paymentIntentId = `pi_lifecycle_${Date.now()}`;
+      const disputeId = `dp_test_${userId}`;
       paymentIntentToUser.set(paymentIntentId, userId);
 
       // 1. Checkout completed - $50
@@ -519,6 +528,7 @@ describe('Stripe Webhook Handler Integration', () => {
         50,
         {
           eventId: `evt_dispute_created_${Date.now()}`,
+          disputeId,
         }
       );
 
@@ -532,6 +542,7 @@ describe('Stripe Webhook Handler Integration', () => {
       // 3. Dispute won
       const disputeWonEvent = createDisputeWonEvent(paymentIntentId, 50, {
         eventId: `evt_dispute_won_${Date.now()}`,
+        disputeId,
       });
 
       await processWebhookEvent(disputeWonEvent, getUserIdFromPaymentIntent);
@@ -684,12 +695,22 @@ describe('Stripe Webhook Handler Integration', () => {
       });
 
       it('should process charge.dispute.closed (won) with app=feed', async () => {
-        const userId = await createDbUser(0);
+        const userId = await createDbUser(2500);
         const paymentIntentId = `pi_filter_won_${Date.now()}`;
+        const disputeId = `dp_test_${userId}`;
         paymentIntentToUser.set(paymentIntentId, userId);
 
+        const debit = await processWebhookEvent(
+          createDisputeCreatedEvent(paymentIntentId, 25, {
+            app: 'feed',
+            disputeId,
+          }),
+          getUserIdFromPaymentIntent
+        );
+        expect(debit.handled).toBe(true);
         const event = createDisputeWonEvent(paymentIntentId, 25, {
           app: 'feed',
+          disputeId,
         });
 
         const result = await processWebhookEvent(

@@ -5,6 +5,7 @@ import {
   desc,
   eq,
   inArray,
+  or,
   sql,
   type Transaction,
   users,
@@ -21,6 +22,15 @@ const FUNDING_TRANSACTION_TYPES = [
   'stripe_dispute',
   'stripe_dispute_won',
 ] as const;
+
+// BalanceTransaction.description also contains legacy plain text. Match the
+// quoted fields written by JSON.stringify without casting those rows to JSON.
+function stripeLedgerField(
+  field: 'disputeId' | 'originalPaymentIntentId',
+  value: string
+) {
+  return sql`strpos(${balanceTransactions.description}, ${`"${field}":${JSON.stringify(value)}`}) > 0`;
+}
 
 export interface TradingBalanceFundingResult {
   success: boolean;
@@ -422,7 +432,19 @@ export class TradingBalanceFundingService {
           .where(
             and(
               eq(balanceTransactions.userId, userId),
-              eq(balanceTransactions.relatedId, stripeEventId)
+              eq(balanceTransactions.type, transactionType),
+              or(
+                eq(balanceTransactions.relatedId, stripeEventId),
+                reason === 'dispute' && disputeId
+                  ? and(
+                      stripeLedgerField('disputeId', disputeId),
+                      stripeLedgerField(
+                        'originalPaymentIntentId',
+                        paymentIntentId
+                      )
+                    )
+                  : undefined
+              )
             )
           )
           .limit(1);
@@ -509,7 +531,7 @@ export class TradingBalanceFundingService {
     disputeId: string,
     amountUSD: number,
     stripeEventId: string,
-    paymentIntentId?: string
+    paymentIntentId: string
   ): Promise<TradingBalanceFundingResult> {
     const requestedUnits = usdToBalanceUnits(amountUSD);
 
@@ -529,7 +551,13 @@ export class TradingBalanceFundingService {
           .where(
             and(
               eq(balanceTransactions.userId, userId),
-              eq(balanceTransactions.relatedId, stripeEventId)
+              eq(balanceTransactions.type, 'stripe_dispute_won'),
+              or(
+                eq(balanceTransactions.relatedId, stripeEventId),
+                // Stripe dispute IDs are unique. This also recognizes credits
+                // recorded before we started storing the payment intent.
+                stripeLedgerField('disputeId', disputeId)
+              )
             )
           )
           .limit(1);
@@ -549,83 +577,36 @@ export class TradingBalanceFundingService {
           };
         }
 
-        // A win restores exactly what THIS dispute deducted — never the
-        // full disputed amount, and never twice (PRD §9.1 / MVP Phase 6
-        // accounting). The deduction row is found by dispute identity, not
-        // by "latest reversal for the payment intent": with two disputes
-        // on one payment, winning the first must restore the first
-        // deduction, not the latest one (#1624's error, per maintainer
-        // review). Rows written before the webhook started recording the
-        // dispute id have no identity to match, so they keep the previous
-        // behaviour (full requested credit) instead of breaking in-flight
-        // disputes.
-        const priorRows = await tx
+        const [deduction] = await tx
           .select({
             id: balanceTransactions.id,
-            type: balanceTransactions.type,
             amount: balanceTransactions.amount,
-            description: balanceTransactions.description,
           })
           .from(balanceTransactions)
           .where(
             and(
               eq(balanceTransactions.userId, userId),
-              inArray(balanceTransactions.type, [
-                'stripe_dispute',
-                'stripe_dispute_won',
-              ])
+              eq(balanceTransactions.type, 'stripe_dispute'),
+              stripeLedgerField('disputeId', disputeId),
+              stripeLedgerField('originalPaymentIntentId', paymentIntentId)
             )
-          );
+          )
+          .limit(1);
 
-        let matchedDeductionUnits: number | null = null;
-        let matchedDeductionId: string | null = null;
-        for (const row of priorRows) {
-          if (!row.description) continue;
-          let parsed: {
-            disputeId?: string;
-            originalPaymentIntentId?: string;
-            balanceUnitsDeducted?: number;
-            restoredDeductionId?: string;
+        if (!deduction) {
+          // Stripe can deliver the win before the debit. Leave it retryable.
+          // Legacy debits without a dispute ID need operator reconciliation.
+          return {
+            success: false,
+            balanceDelta: 0,
+            newBalance: balanceBefore,
+            error: 'No recorded debit for this Stripe dispute and payment',
           };
-          try {
-            parsed = JSON.parse(row.description) as {
-              disputeId?: string;
-              originalPaymentIntentId?: string;
-              balanceUnitsDeducted?: number;
-              restoredDeductionId?: string;
-            };
-          } catch {
-            continue;
-          }
-          if (parsed.disputeId !== disputeId) continue;
-          if (row.type === 'stripe_dispute_won') {
-            return {
-              success: true,
-              balanceDelta: Number(row.amount),
-              newBalance: balanceBefore,
-              alreadyProcessed: true,
-              transactionId: row.id,
-            };
-          }
-          if (
-            paymentIntentId &&
-            parsed.originalPaymentIntentId &&
-            parsed.originalPaymentIntentId !== paymentIntentId
-          ) {
-            continue;
-          }
-          matchedDeductionUnits =
-            typeof parsed.balanceUnitsDeducted === 'number'
-              ? parsed.balanceUnitsDeducted
-              : Math.abs(Number(row.amount));
-          matchedDeductionId = row.id;
         }
 
-        const balanceDelta =
-          matchedDeductionUnits === null
-            ? requestedUnits
-            : Math.min(requestedUnits, Math.max(0, matchedDeductionUnits));
-        if (matchedDeductionUnits !== null && balanceDelta < requestedUnits) {
+        const deductedUnits = Math.max(0, -Number(deduction.amount));
+        const balanceDelta = Math.min(requestedUnits, deductedUnits);
+        if (balanceDelta < requestedUnits) {
           logger.info(
             'Dispute win credit clamped to the recorded deduction',
             {
@@ -633,7 +614,7 @@ export class TradingBalanceFundingService {
               disputeId,
               requestedUnits,
               balanceDelta,
-              matchedDeductionId,
+              matchedDeductionId: deduction.id,
             },
             'TradingBalanceFundingService'
           );
@@ -662,11 +643,9 @@ export class TradingBalanceFundingService {
             amountUSD,
             balanceUnitsCredited: balanceDelta,
             disputeId,
-            // Links the restoration to the charge so reversePurchaseFunding
-            // can count it back into the remaining purchase exposure.
             originalPaymentIntentId: paymentIntentId,
-            restoredDeductionId: matchedDeductionId ?? undefined,
-            balanceUnitsDeducted: matchedDeductionUnits ?? undefined,
+            restoredDeductionId: deduction.id,
+            balanceUnitsDeducted: deductedUnits,
             creditedAt: new Date().toISOString(),
           }),
         });
