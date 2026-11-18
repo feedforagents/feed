@@ -159,7 +159,20 @@ export const GET = withErrorHandling(
     const { type, page, limit } = UserPostsQuerySchema.parse(queryParams);
 
     if (type === 'replies') {
-      // Get user's comments (replies)
+      // Get user's comments (replies), one validated page at a time.
+      // `total` is the full visible reply count, not the page length, so
+      // callers can page past the first 100 replies.
+      const [totalReplies] = await db
+        .select({ value: count() })
+        .from(comments)
+        .where(
+          and(
+            eq(comments.authorId, canonicalUserId),
+            isNull(comments.deletedAt)
+          )
+        );
+      const total = Number(totalReplies?.value ?? 0);
+
       const userComments = await db
         .select()
         .from(comments)
@@ -169,14 +182,15 @@ export const GET = withErrorHandling(
             isNull(comments.deletedAt)
           )
         )
-        .orderBy(desc(comments.createdAt))
-        .limit(100);
+        .orderBy(desc(comments.createdAt), desc(comments.id))
+        .limit(limit)
+        .offset((page - 1) * limit);
 
       if (userComments.length === 0) {
         return successResponse({
           type: 'replies',
           items: [],
-          total: 0,
+          total,
         });
       }
 
@@ -579,14 +593,14 @@ export const GET = withErrorHandling(
 
       logger.info(
         'User replies fetched successfully',
-        { userId: canonicalUserId, total: replies.length },
+        { userId: canonicalUserId, total },
         'GET /api/users/[userId]/posts'
       );
 
       return successResponse({
         type: 'replies',
         items: replies,
-        total: replies.length,
+        total,
       });
     }
     // Get user's posts - filter out future posts
@@ -828,7 +842,12 @@ export const GET = withErrorHandling(
               count: count(),
             })
             .from(comments)
-            .where(inArray(comments.postId, originalPostIds))
+            .where(
+              and(
+                inArray(comments.postId, originalPostIds),
+                isNull(comments.deletedAt)
+              )
+            )
             .groupBy(comments.postId),
           db
             .select({

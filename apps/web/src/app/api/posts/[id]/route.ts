@@ -68,6 +68,7 @@ import {
   addPublicReadHeaders,
   authenticate,
   BusinessLogicError,
+  getCanonicalUserId,
   NotFoundError,
   publicRateLimit,
   successResponse,
@@ -89,6 +90,7 @@ import {
 import { StaticDataRegistry } from '@feed/engine';
 import { logger, PostIdParamSchema, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 import { POST as likePost } from './like/route';
 
 /**
@@ -131,6 +133,7 @@ export const GET = withErrorHandling(
 
     // Get counts and user interactions
     const userId = user?.userId;
+    const canonicalUserId = user ? getCanonicalUserId(user) : undefined;
 
     // Unknown (or not-yet-published) IDs are simply not found. This route
     // never creates posts on read.
@@ -147,14 +150,18 @@ export const GET = withErrorHandling(
     }
 
     // Get counts
-    const [[likeCountResult], [commentCountResult], [shareCountResult]] =
+    const [[likeCountResult], commentRows, [shareCountResult]] =
       await Promise.all([
         db
           .select({ count: count() })
           .from(reactions)
           .where(and(eq(reactions.postId, postId), eq(reactions.type, 'like'))),
         db
-          .select({ count: count() })
+          .select({
+            id: comments.id,
+            authorId: comments.authorId,
+            parentCommentId: comments.parentCommentId,
+          })
           .from(comments)
           .where(and(eq(comments.postId, postId), isNull(comments.deletedAt))),
         db
@@ -164,7 +171,45 @@ export const GET = withErrorHandling(
       ]);
 
     const likeCount = Number(likeCountResult?.count ?? 0);
-    const commentCount = Number(commentCountResult?.count ?? 0);
+    // Count only the comments the comment list below can actually show.
+    // That list omits replies whose parent is not visible (e.g. a parent
+    // soft-deleted by moderation takes its whole subtree out of the tree),
+    // so count the comments reachable from a top-level comment, mirroring
+    // the tree rule in GET /api/posts/[id]/comments.
+    //
+    // The list also applies the signed viewer's block/mute policy before
+    // building its tree, through the same loadViewerExcludedAuthorIds
+    // definition used here: comments by authors the viewer blocked or
+    // muted — or who blocked the viewer — are excluded, and their replies
+    // go with them because the hidden parent is unreachable from the root.
+    // Anonymous reads have no moderation set and stay unfiltered, exactly
+    // like the list route.
+    let visibleCommentRows = commentRows;
+    if (canonicalUserId && commentRows.length > 0) {
+      const excludedAuthorIds =
+        await loadViewerExcludedAuthorIds(canonicalUserId);
+      if (excludedAuthorIds.size > 0) {
+        visibleCommentRows = commentRows.filter(
+          (row) => !excludedAuthorIds.has(row.authorId)
+        );
+      }
+    }
+    const childrenByParent = new Map<string | null, string[]>();
+    for (const row of visibleCommentRows) {
+      const siblings = childrenByParent.get(row.parentCommentId);
+      if (siblings) siblings.push(row.id);
+      else childrenByParent.set(row.parentCommentId, [row.id]);
+    }
+    let commentCount = 0;
+    const stack = [...(childrenByParent.get(null) ?? [])];
+    const visited = new Set<string>();
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (id === undefined || visited.has(id)) continue;
+      visited.add(id);
+      commentCount += 1;
+      stack.push(...(childrenByParent.get(id) ?? []));
+    }
     const shareCount = Number(shareCountResult?.count ?? 0);
 
     // Get user interactions
