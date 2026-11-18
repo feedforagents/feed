@@ -5,7 +5,7 @@ import {
   NotFoundError,
 } from '@feed/shared';
 import Decimal from 'decimal.js-light';
-import { PredictionPricing } from './pricing';
+import { PredictionPricing, sharesAtPositionScale } from './pricing';
 import type {
   PredictionBuyInput,
   PredictionCancelInput,
@@ -24,9 +24,6 @@ import type {
 const DEFAULT_LIQUIDITY = 10_000;
 const MIN_SHARES = 0.01;
 const MIN_TRADE_AMOUNT = 1;
-// Position.shares is numeric(18, 6). Binary subtraction can land just below
-// the minimum lot for a quantity the column persists on a hundredth boundary.
-const POSITION_SHARE_SCALE = 6;
 
 /**
  * Maximum absolute odds shift (in probability units, 0–1) allowed in a single
@@ -74,13 +71,6 @@ function pointsDifference(a: number, b: number): number {
   return new Decimal(a)
     .minus(b)
     .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-    .toNumber();
-}
-
-function sharesAtPositionScale(shares: number): number {
-  if (!Number.isFinite(shares)) return 0;
-  return new Decimal(shares)
-    .toDecimalPlaces(POSITION_SHARE_SCALE, Decimal.ROUND_HALF_UP)
     .toNumber();
 }
 
