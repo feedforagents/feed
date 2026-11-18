@@ -41,7 +41,11 @@
  * - charge.refunded: Reverse funded balance (Phase 2)
  */
 
-import { TradingBalanceFundingService, withErrorHandling } from '@feed/api';
+import {
+  TradingBalanceFundingService,
+  usdToBalanceUnits,
+  withErrorHandling,
+} from '@feed/api';
 import { and, balanceTransactions, db, eq } from '@feed/db';
 import { logger } from '@feed/shared';
 import { NextResponse } from 'next/server';
@@ -710,7 +714,46 @@ async function handleDisputeClosed(
     return { success: true }; // Don't retry - no deduction to reverse
   }
 
-  const amountUSD = dispute.amount / 100; // Stripe uses cents
+  // A won dispute gives back what the dispute took, not the disputed amount.
+  // The deduction stops at a zero balance, so a user who spent the balance
+  // before the chargeback lost fewer units than the dispute amount. Each
+  // dispute deduction stores originalPaymentIntentId in its description JSON.
+  const disputeDeductions = await db
+    .select({
+      amount: balanceTransactions.amount,
+      description: balanceTransactions.description,
+    })
+    .from(balanceTransactions)
+    .where(
+      and(
+        eq(balanceTransactions.userId, originalPurchase.userId),
+        eq(balanceTransactions.type, 'stripe_dispute')
+      )
+    );
+  const deductedUnits = disputeDeductions
+    .filter((tx) => {
+      if (!tx.description) return false;
+      const desc = JSON.parse(tx.description) as {
+        originalPaymentIntentId?: string;
+      };
+      return desc.originalPaymentIntentId === paymentIntentId;
+    })
+    .reduce((sum, tx) => sum + Math.abs(Number(tx.amount)), 0);
+  const recreditUnits = Math.min(
+    usdToBalanceUnits(dispute.amount / 100), // Stripe uses cents
+    deductedUnits
+  );
+
+  if (recreditUnits <= 0) {
+    logger.info(
+      'Won dispute took no balance units - nothing to re-credit',
+      { disputeId: dispute.id, userId: originalPurchase.userId },
+      'StripeWebhook'
+    );
+    return { success: true };
+  }
+
+  const amountUSD = recreditUnits / 100;
 
   logger.info(
     'Re-crediting trading balance after winning dispute',
