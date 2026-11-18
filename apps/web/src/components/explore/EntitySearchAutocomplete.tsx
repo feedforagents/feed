@@ -245,7 +245,7 @@ export function EntitySearchAutocomplete({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
-      if (!isCurrent) return;
+      if (!isCurrent && event.key !== 'Escape') return;
       if (!isOpen) {
         if (event.key === 'Enter' && suggestions.length > 0 && suggestions[0]) {
           event.preventDefault();
