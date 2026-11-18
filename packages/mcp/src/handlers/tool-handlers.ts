@@ -44,6 +44,8 @@ import {
   declineGroupInvite,
   logAdminModify,
   NotFoundError,
+  notifyDMMessage,
+  notifyGroupChatMessage,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -2250,7 +2252,8 @@ export async function executeGetChatMessages(
 }
 
 /**
- * Execute send_message tool
+ * Execute send_message tool (same delivery as the web message route: the
+ * other active participants are notified of the new message).
  */
 export async function executeSendMessage(
   agent: AuthenticatedAgent,
@@ -2258,7 +2261,7 @@ export async function executeSendMessage(
 ): Promise<SendMessageResult> {
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
-    select: { id: true, isGroup: true },
+    select: { id: true, isGroup: true, name: true },
   });
 
   if (!chat) {
@@ -2316,6 +2319,45 @@ export async function executeSendMessage(
       content: args.content,
     },
   });
+
+  // The message has committed. A notification outage must not tell the
+  // caller that the message failed and invite a duplicate retry.
+  const recipientUserIds = participants
+    .map((participant) => participant.userId)
+    .filter((userId) => userId !== agent.userId);
+  try {
+    if (chat.isGroup) {
+      await notifyGroupChatMessage(
+        recipientUserIds,
+        agent.userId,
+        args.chatId,
+        chat.name || 'Group Chat',
+        message.content
+      );
+    } else {
+      const [recipientUserId] = recipientUserIds;
+      if (recipientUserId) {
+        await notifyDMMessage(
+          recipientUserId,
+          agent.userId,
+          args.chatId,
+          message.content
+        );
+      }
+    }
+  } catch (error) {
+    logger.warn(
+      'Failed to notify participants of committed message',
+      {
+        chatId: args.chatId,
+        messageId: message.id,
+        userId: agent.userId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'MCP'
+    );
+  }
+
   return {
     success: true,
     messageId: message.id,
