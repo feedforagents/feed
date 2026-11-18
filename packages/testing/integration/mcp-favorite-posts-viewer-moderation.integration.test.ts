@@ -21,6 +21,7 @@
  * - the MCP notification list (#1835) and unread count (#1828) do too
  *
  * Real DB, real handler (executeGetFavoritePosts directly).
+ * Requires DATABASE_URL pointing at a disposable database with schema applied.
  *
  * Run with: DISABLE_RATE_LIMITING=true
  *   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_f11r2
@@ -30,16 +31,21 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { generateApiKey, hashApiKey } from '@feed/api';
 import {
   dbWrite,
+  eq,
   favorites,
+  gameOnboarding,
   inArray,
   posts,
+  userApiKeys,
   userBlocks,
   userMutes,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
+import { NextRequest } from 'next/server';
 import { executeGetFavoritePosts } from '../../mcp/src/handlers/tool-handlers';
 
 const VIEWER = await generateSnowflakeId();
@@ -54,6 +60,8 @@ const postIds: string[] = [];
 const favoriteIds: string[] = [];
 const blockIds: string[] = [];
 const muteIds: string[] = [];
+let viewerApiKey = '';
+let viewerApiKeyId = '';
 
 async function insertUser(id: string) {
   const rows = await dbWrite
@@ -144,6 +152,15 @@ describe('MCP get_favorite_posts viewer moderation', () => {
     await insertBlock(VIEWER, AUTH_BLOCKED);
     await insertMute(VIEWER, AUTH_MUTED);
     await insertBlock(AUTH_BLOCKER, VIEWER);
+    // Per-user API key so the MCP flow over HTTP can authenticate as VIEWER.
+    viewerApiKey = generateApiKey();
+    viewerApiKeyId = await generateSnowflakeId();
+    await dbWrite.insert(userApiKeys).values({
+      id: viewerApiKeyId,
+      userId: VIEWER,
+      keyHash: hashApiKey(viewerApiKey),
+      name: 'f11-http',
+    });
   });
 
   afterAll(async () => {
@@ -151,6 +168,12 @@ describe('MCP get_favorite_posts viewer moderation', () => {
     await dbWrite.delete(favorites).where(inArray(favorites.id, favoriteIds));
     await dbWrite.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
     await dbWrite.delete(userMutes).where(inArray(userMutes.id, muteIds));
+    await dbWrite.delete(userApiKeys).where(eq(userApiKeys.id, viewerApiKeyId));
+    // Guard the parent Users delete: remove onboarding rows for the fixture
+    // users explicitly instead of relying on the ON DELETE CASCADE.
+    await dbWrite
+      .delete(gameOnboarding)
+      .where(inArray(gameOnboarding.userId, userIds));
     await dbWrite.delete(users).where(inArray(users.id, userIds));
   });
 
@@ -178,5 +201,38 @@ describe('MCP get_favorite_posts viewer moderation', () => {
     expect(authorIds).toEqual(
       [AUTH_BLOCKED, AUTH_BLOCKER, AUTH_MUTED, AUTH_OK].sort()
     );
+  });
+
+  it('returns only the unblocked favorited author over HTTP (POST /api/mcp tools/call)', async () => {
+    const { POST } = await import('../../../apps/web/src/app/api/mcp/route');
+    const request = new NextRequest('https://feed.example/api/mcp', {
+      method: 'POST',
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: {
+          name: 'get_favorite_posts',
+          arguments: { limit: 20 },
+        },
+        id: 1,
+      }),
+      headers: {
+        'content-type': 'application/json',
+        'X-Feed-Api-Key': viewerApiKey,
+      },
+    });
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      result?: { content?: Array<{ text?: string }>; isError?: boolean };
+      error?: { message?: string };
+    };
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBe(false);
+    const text = body.result?.content?.[0]?.text ?? '';
+    const payload = JSON.parse(text) as {
+      posts: Array<{ authorId: string }>;
+    };
+    expect(payload.posts.map((post) => post.authorId)).toEqual([AUTH_OK]);
   });
 });
