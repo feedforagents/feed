@@ -35,6 +35,7 @@ import type {
 import {
   and,
   asUser,
+  count,
   db,
   dbWrite,
   desc,
@@ -49,6 +50,10 @@ import {
   lte,
   not,
   notExists,
+  notInArray,
+  notifications,
+  notificationTargetVisibilityCondition,
+  or,
   posts,
   postTags,
   sql,
@@ -2401,33 +2406,56 @@ export class FeedAgentExecutor implements AgentExecutor {
     const excludedActorIds = [
       ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
     ];
-    const moderationFilter =
+    const moderationCondition =
       excludedActorIds.length > 0
-        ? {
-            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
-          }
-        : {};
+        ? or(
+            isNull(notifications.actorId),
+            notInArray(notifications.actorId, excludedActorIds)
+          )
+        : undefined;
 
-    const notifications = await db.notification.findMany({
-      where: { userId, ...moderationFilter },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      select: {
-        id: true,
-        type: true,
-        title: true,
-        message: true,
-        read: true,
-        createdAt: true,
-      },
-    });
+    // Match the web list's target visibility as well: a notification whose
+    // post or comment no longer exists (or is soft-deleted) is hidden there
+    // and excluded from its unread count, so it is excluded here too. The
+    // EXISTS predicate runs inside the list/count queries, so no
+    // notification history is materialized.
+    const targetCondition = notificationTargetVisibilityCondition();
 
-    const unreadCount = await db.notification.count({
-      where: { userId, read: false, ...moderationFilter },
-    });
+    const rows = await db
+      .select({
+        id: notifications.id,
+        type: notifications.type,
+        title: notifications.title,
+        message: notifications.message,
+        read: notifications.read,
+        createdAt: notifications.createdAt,
+      })
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.userId, userId),
+          moderationCondition,
+          targetCondition
+        )
+      )
+      .orderBy(desc(notifications.createdAt), desc(notifications.id))
+      .limit(limit);
+
+    const [countRow] = await db
+      .select({ value: count() })
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.userId, userId),
+          eq(notifications.read, false),
+          moderationCondition,
+          targetCondition
+        )
+      );
+    const unreadCount = countRow?.value ?? 0;
     return {
       unreadCount,
-      notifications: notifications.map((n) => ({
+      notifications: rows.map((n) => ({
         id: n.id,
         type: n.type,
         title: n.title,

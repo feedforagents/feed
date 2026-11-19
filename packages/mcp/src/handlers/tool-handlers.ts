@@ -56,6 +56,7 @@ import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   acquireUserBlockPairLock,
   and,
+  count,
   db,
   dbWrite,
   desc,
@@ -74,6 +75,8 @@ import {
   markets,
   not,
   notExists,
+  notifications,
+  notificationTargetVisibilityCondition,
   perpMarketSnapshots,
   posts,
   postTags,
@@ -2507,10 +2510,22 @@ export async function executeGetUnreadCount(
   agent: AuthenticatedAgent,
   _args: GetUnreadCountArgs
 ): Promise<GetUnreadCountResult> {
-  const unreadCount = await db.notification.count({
-    where: { userId: agent.userId, read: false },
-  });
-  return { unreadCount };
+  // Match the web notification list's target visibility: a notification
+  // whose post or comment no longer exists (or is soft-deleted) is hidden
+  // there and excluded from its unread count, so it is excluded here too.
+  // The EXISTS predicate runs inside the count query, so no notification
+  // history is materialized.
+  const [row] = await db
+    .select({ value: count() })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, agent.userId),
+        eq(notifications.read, false),
+        notificationTargetVisibilityCondition()
+      )
+    );
+  return { unreadCount: row?.value ?? 0 };
 }
 
 // ============================================================================
@@ -2524,11 +2539,20 @@ export async function executeGetNotifications(
   agent: AuthenticatedAgent,
   args: GetNotificationsArgs
 ): Promise<GetNotificationsResult> {
-  const notificationsList = await db.notification.findMany({
-    where: { userId: agent.userId },
-    orderBy: { createdAt: 'desc' },
-    take: args.limit || 100,
-  });
+  // Same target visibility as the web notification list (see
+  // executeGetUnreadCount): dead targets are excluded in the query, before
+  // the limit is taken.
+  const notificationsList = await db
+    .select()
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, agent.userId),
+        notificationTargetVisibilityCondition()
+      )
+    )
+    .orderBy(desc(notifications.createdAt), desc(notifications.id))
+    .limit(args.limit || 100);
   return {
     notifications: notificationsList.map((n) => ({
       id: n.id,
