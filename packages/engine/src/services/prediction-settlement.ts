@@ -8,8 +8,16 @@ import type {
   FeeProcessor,
   WalletPort,
 } from '@feed/core/markets/shared';
-import { dbWrite, eq, markets, sql, type Transaction } from '@feed/db';
-import { logger } from '@feed/shared';
+import {
+  and,
+  dbWrite,
+  eq,
+  markets,
+  predictionTradeIdempotency,
+  sql,
+  type Transaction,
+} from '@feed/db';
+import { generateSnowflakeId, type JsonValue, logger } from '@feed/shared';
 import { createNpcWalletAdapter } from './npc-wallet-adapter';
 import { StaticDataRegistry } from './static-data-registry';
 import { createUserWalletAdapter } from './user-wallet-adapter';
@@ -22,6 +30,16 @@ export type PredictionSettlementOptions = Omit<
 > & {
   feeProcessor?: (tx: Transaction) => FeeProcessor;
   wallet?: (tx: Transaction, afterCommit: AfterCommitScheduler) => WalletPort;
+  /**
+   * Client-supplied idempotency key for one trade request (e.g. the web
+   * buy/sell route's `Idempotency-Key` header). When set, a resend with
+   * the same key replays the stored first-execution result instead of
+   * executing the trade again. Unset for callers that do not carry a key
+   * (older surfaces, system flows); those are not deduplicated.
+   * Same shape as the fee legs' operationId (migration 0005), extended
+   * to the trade body itself.
+   */
+  idempotencyKey?: string;
 };
 
 /** Resolve mixed player/NPC holdings back to the wallet that funds trades. */
@@ -52,6 +70,7 @@ export async function withPredictionSettlement<T>(
   const {
     wallet: walletFactory,
     feeProcessor: feeProcessorFactory,
+    idempotencyKey,
     ...serviceOptions
   } = options;
   const committed = await dbWrite.transaction(async (tx) => {
@@ -71,6 +90,27 @@ export async function withPredictionSettlement<T>(
       .where(eq(markets.id, marketId))
       .for('update');
 
+    // A resend of a keyed trade replays the first execution's result.
+    // The lookup runs after the advisory lock, so a concurrent resend on
+    // the same market waits here and then sees the committed row instead
+    // of executing twice. (A key reused across different markets is a
+    // client error and is not serialized — the key must be unique per
+    // trade request.)
+    if (idempotencyKey) {
+      const [existing] = await tx
+        .select({ result: predictionTradeIdempotency.result })
+        .from(predictionTradeIdempotency)
+        .where(
+          and(
+            eq(predictionTradeIdempotency.userId, userId),
+            eq(predictionTradeIdempotency.idempotencyKey, idempotencyKey)
+          )
+        );
+      if (existing) {
+        return { result: existing.result as unknown as T, effects };
+      }
+    }
+
     const service = new PredictionMarketService({
       ...serviceOptions,
       db: new PredictionDbAdapter(tx),
@@ -81,6 +121,15 @@ export async function withPredictionSettlement<T>(
       feeProcessor: feeProcessorFactory?.(tx),
     });
     const result = await operation(service, tx);
+    if (idempotencyKey) {
+      await tx.insert(predictionTradeIdempotency).values({
+        id: await generateSnowflakeId(),
+        userId,
+        idempotencyKey,
+        marketId,
+        result: result as unknown as JsonValue,
+      });
+    }
     return { result, effects };
   });
 

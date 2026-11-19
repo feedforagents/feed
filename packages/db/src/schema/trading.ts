@@ -156,6 +156,52 @@ export const tradingFeeOutbox = pgTable(
 export type TradingFeeOutboxRow = typeof tradingFeeOutbox.$inferSelect;
 export type NewTradingFeeOutboxRow = typeof tradingFeeOutbox.$inferInsert;
 
+/**
+ * Idempotency record for one prediction trade (buy or sell) executed
+ * through `withPredictionSettlement`.
+ *
+ * A client resend (timeout retry / double-click) carries the same
+ * `Idempotency-Key` header; the settlement replays the stored result
+ * instead of executing the trade a second time. The fee legs already
+ * have this shape (`TradingFee.idempotencyKey`, migration 0005) — this
+ * table extends the same idea to the trade body itself, which has no
+ * single row to key on.
+ *
+ * Scope: the key is scoped to one user. A legitimate repeat trade must
+ * use a fresh key; reusing a key across different trades replays the
+ * first result. Concurrent resends of the same key on the same market
+ * are serialized by the settlement's advisory lock; the unique index
+ * below is the backstop.
+ */
+export const predictionTradeIdempotency = pgTable(
+  'PredictionTradeIdempotency',
+  {
+    id: text('id').primaryKey(),
+    userId: text('userId').notNull(),
+    /** Client-supplied key, e.g. the `Idempotency-Key` request header. */
+    idempotencyKey: text('idempotencyKey').notNull(),
+    marketId: text('marketId').notNull(),
+    /** Stored first-execution result, replayed verbatim on resend. */
+    result: json('result').$type<JsonValue>().notNull(),
+    createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('PredictionTradeIdempotency_userId_key_idx').on(
+      table.userId,
+      table.idempotencyKey
+    ),
+    index('PredictionTradeIdempotency_userId_createdAt_idx').on(
+      table.userId,
+      table.createdAt
+    ),
+  ]
+);
+
+export type PredictionTradeIdempotencyRow =
+  typeof predictionTradeIdempotency.$inferSelect;
+export type NewPredictionTradeIdempotencyRow =
+  typeof predictionTradeIdempotency.$inferInsert;
+
 // Feedback
 export const feedbacks = pgTable(
   'Feedback',
