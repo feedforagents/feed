@@ -23,7 +23,10 @@ import { generateSnowflakeId, type JsonValue } from '@feed/shared';
 
 const createdUsers: string[] = [];
 const createdPosts: string[] = [];
+const createdGroups: string[] = [];
+const createdChats: string[] = [];
 let userId: string;
+let groupMemberId: string;
 let liveFeedPostId: string;
 let deletedFeedPostId: string;
 let groupId: string;
@@ -92,6 +95,15 @@ describe('FeedAgentExecutor policies', () => {
       chatId,
       userId,
     });
+
+    groupMemberId = await generateSnowflakeId();
+    await db.insert(users).values({
+      id: groupMemberId,
+      username: `exec_grp_${groupMemberId.slice(-10)}`,
+      isActor: false,
+      updatedAt: new Date(),
+    });
+    createdUsers.push(groupMemberId);
   });
 
   afterAll(async () => {
@@ -103,6 +115,14 @@ describe('FeedAgentExecutor policies', () => {
     await db.delete(chats).where(eq(chats.id, chatId));
     await db.delete(groupMembers).where(eq(groupMembers.groupId, groupId));
     await db.delete(groups).where(eq(groups.id, groupId));
+    await db
+      .delete(chatParticipants)
+      .where(inArray(chatParticipants.chatId, createdChats));
+    await db.delete(chats).where(inArray(chats.id, createdChats));
+    await db
+      .delete(groupMembers)
+      .where(inArray(groupMembers.groupId, createdGroups));
+    await db.delete(groups).where(inArray(groups.id, createdGroups));
     await db.delete(users).where(inArray(users.id, createdUsers));
   });
 
@@ -145,6 +165,25 @@ describe('FeedAgentExecutor policies', () => {
       displayName: '  Exec Tester  ',
     })) as { user: { displayName: string } };
     expect(ok.user.displayName).toBe('Exec Tester');
+  });
+
+  it('creating a group assigns the creator the owner role, and the owner cannot leave', async () => {
+    const created = (await run('messaging.create_group', {
+      name: 'executor owner group',
+      memberIds: [groupMemberId],
+    })) as { group: { id: string; chatId: string } };
+    createdGroups.push(created.group.id);
+    createdChats.push(created.group.chatId);
+
+    const [membership] = await db
+      .select({ role: groupMembers.role })
+      .from(groupMembers)
+      .where(eq(groupMembers.groupId, created.group.id));
+    expect(membership?.role).toBe('owner');
+
+    await expect(
+      run('messaging.leave_chat', { chatId: created.group.chatId })
+    ).rejects.toThrow('Group owners cannot leave');
   });
 
   it('leaving a group chat also deactivates group membership', async () => {
