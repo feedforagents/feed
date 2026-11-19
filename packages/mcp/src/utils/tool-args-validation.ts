@@ -5,6 +5,7 @@
  */
 
 import {
+  ChatMessageContentSchema,
   CreateCommentSchema,
   CreatePostSchema,
   isPointsAmount,
@@ -312,7 +313,7 @@ const GetChatMessagesArgsSchema = z.object({
 
 const SendMessageArgsSchema = z.object({
   chatId: z.string().min(1),
-  content: z.string().min(1).max(5000),
+  content: ChatMessageContentSchema,
 }) satisfies z.ZodType<SendMessageArgs>;
 
 const CreateGroupArgsSchema = z.object({

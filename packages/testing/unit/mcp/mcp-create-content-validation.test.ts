@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   validateCreateCommentArgs,
   validateCreatePostArgs,
+  validateSendMessageArgs,
 } from '../../../mcp/src/utils/tool-args-validation';
 
 describe('MCP create content validation', () => {
@@ -70,5 +71,30 @@ describe('MCP create content validation', () => {
     expect(() =>
       validateCreateCommentArgs({ postId: 'p1', content: 'x'.repeat(2001) })
     ).toThrow();
+  });
+
+  it('trims comment content before applying the website-aligned 2000-character limit', () => {
+    const content = ` ${'x'.repeat(2000)} `;
+    expect(validateCreateCommentArgs({ postId: 'p1', content }).content).toBe(
+      'x'.repeat(2000)
+    );
+  });
+
+  it('rejects space-only message content', () => {
+    expect(() =>
+      validateSendMessageArgs({ chatId: 'c1', content: '   ' })
+    ).toThrow();
+  });
+
+  it('rejects tab and newline-only message content', () => {
+    expect(() =>
+      validateSendMessageArgs({ chatId: 'c1', content: '\t\n' })
+    ).toThrow();
+  });
+
+  it('trims padded message content', () => {
+    expect(
+      validateSendMessageArgs({ chatId: 'c1', content: '  hello  ' }).content
+    ).toBe('hello');
   });
 });
