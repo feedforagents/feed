@@ -4,6 +4,7 @@
  * Priority: Groq > Claude > OpenAI
  */
 
+import { scheduledInferenceFetch } from '@feed/db';
 import OpenAI from 'openai';
 import 'dotenv/config';
 import { getSurplusConfig, logger } from '@feed/shared';
@@ -199,6 +200,7 @@ export class FeedLLMClient {
       this.client = new OpenAI({
         apiKey: surplus.apiKey,
         baseURL: surplus.baseURL,
+        fetch: scheduledInferenceFetch,
         timeout: timeoutMs,
         maxRetries: sdkMaxRetries,
       });

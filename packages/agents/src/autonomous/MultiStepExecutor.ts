@@ -17,6 +17,7 @@ import {
   db,
   desc,
   eq,
+  getScheduledInferenceThrottle,
   gte,
   npcTrades,
   questions,
@@ -283,7 +284,12 @@ export class MultiStepExecutor {
       await this.getLatestContextRefreshSummary(agentUserId);
 
     // NPC budgets may be reduced, but cannot exceed the four-step ceiling.
-    const effectiveMaxIterations = this.npcMaxIterations;
+    const effectiveMaxIterations = process.env.NPC_LLM_DAILY_BUDGET_USD
+      ? Math.min(
+          this.npcMaxIterations,
+          (await getScheduledInferenceThrottle()).maxSteps
+        )
+      : this.npcMaxIterations;
     for (let iteration = 1; iteration <= effectiveMaxIterations; iteration++) {
       signal?.throwIfAborted();
       const iterationStartTime = Date.now();

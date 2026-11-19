@@ -30,7 +30,7 @@ import {
   verifyCronAuth,
   withErrorHandling,
 } from '@feed/api';
-import { db, eq, games } from '@feed/db';
+import { db, eq, games, getScheduledInferenceThrottle } from '@feed/db';
 import {
   ActorSocialActions,
   FollowingMechanics,
@@ -298,8 +298,26 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       return !lastPost || toISO(lastPost).split('T')[0] !== today;
     });
 
+    const throttle = process.env.NPC_LLM_DAILY_BUDGET_USD
+      ? await getScheduledInferenceThrottle()
+      : undefined;
+    if (throttle?.exhausted) {
+      recordCronExecution('npc-tick', new Date(startTime), {
+        success: false,
+        skipped: true,
+        reason: 'Inference budget exhausted or suspended',
+      });
+      return NextResponse.json({
+        success: false,
+        skipped: true,
+        reason: 'Inference budget exhausted or suspended',
+      });
+    }
+    const batchSize = throttle?.reduceBatch
+      ? Math.max(1, Math.floor(NPCS_PER_TICK / 2))
+      : NPCS_PER_TICK;
     // Reserve 30% of batch for diversity (NPCs that haven't posted today)
-    const diversitySlotsReserved = Math.max(1, Math.floor(NPCS_PER_TICK * 0.3));
+    const diversitySlotsReserved = Math.max(1, Math.floor(batchSize * 0.3));
 
     // Shuffle never-posted NPCs for fair selection among them using Fisher-Yates
     const fisherYatesShuffle = <T>(arr: T[]): T[] => {
@@ -323,7 +341,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     const remainingCandidates = candidates.filter(
       (c) => !diversityIds.has(c.npc.id)
     );
-    const regularSlots = NPCS_PER_TICK - diversitySelection.length;
+    const regularSlots = batchSize - diversitySelection.length;
     const regularSelection = postingProbabilityService.weightedSample(
       remainingCandidates,
       regularSlots

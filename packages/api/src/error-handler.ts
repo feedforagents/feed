@@ -25,6 +25,15 @@ const SENSITIVE_HEADER_KEYS = new Set([
   'set-cookie',
 ]);
 
+const scheduledInferenceRoutes = new Set([
+  '/api/cron/game-tick',
+  '/api/cron/npc-tick',
+  '/api/cron/markets-tick',
+  '/api/cron/organization-tick',
+  '/api/cron/article-tick',
+  '/api/cron/world-facts',
+]);
+
 function sanitizeHeaders(headers: Headers): Record<string, string> {
   const headersObj: Record<string, string> = {};
   headers.forEach((value, key) => {
@@ -609,6 +618,14 @@ export function withErrorHandling<TContext extends RouteContext = RouteContext>(
 ): (req: NextRequest, context?: TContext) => Promise<Response> {
   return async (req: NextRequest, context?: TContext): Promise<Response> => {
     try {
+      if (
+        process.env.NPC_LLM_DAILY_BUDGET_USD &&
+        scheduledInferenceRoutes.has(new URL(req.url).pathname)
+      ) {
+        return await FeedDb.withScheduledInferenceBudget(async () =>
+          handler(req, context!)
+        );
+      }
       const response = await handler(req, context!);
       return response;
     } catch (error) {
