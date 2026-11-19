@@ -50,6 +50,7 @@ mock.module('@feed/db', () => ({
   groupMembers: {},
   groups: {},
   gte: (...args: unknown[]) => args,
+  hasBlocked: mock(async () => false),
   isNull: (...args: unknown[]) => args,
   messages: {},
   perpPositions: {},
