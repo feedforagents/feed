@@ -642,13 +642,6 @@ export class PerpMarketService {
       throw new Error(`Invalid leverage (1-${maxLeverage})`);
     }
 
-    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
-    if (size > maxPositionSize) {
-      throw new Error(
-        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
-      );
-    }
-
     // Check for existing position on same ticker → rebalance instead of rejecting
     const existingPosition = await this.db.getOpenPositionByUserAndTicker(
       input.userId,
@@ -673,6 +666,13 @@ export class PerpMarketService {
       }
     }
 
+    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
+    if (size > maxPositionSize) {
+      throw new Error(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
+
     const entryQuote = this.getOpenExecutionQuote(market, side, size);
     const entryPrice = entryQuote.executionPrice;
 
@@ -688,7 +688,7 @@ export class PerpMarketService {
     if (maxSlippage !== undefined && maxSlippage > 0) {
       this.assertWithinSlippage(
         await this.expectedOpenFill(market, side, size, entryPrice),
-        market.markPrice,
+        market.markPrice ?? market.currentPrice,
         maxSlippage
       );
     }
@@ -1647,7 +1647,7 @@ export class PerpMarketService {
           addedSize,
           currentPrice
         ),
-        market.markPrice,
+        market.markPrice ?? market.currentPrice,
         input.maxSlippage
       );
     }
@@ -1915,6 +1915,14 @@ export class PerpMarketService {
       if (inverseSize < minOrderSize) {
         throw new ValidationError(`Order size below minimum (${minOrderSize})`);
       }
+      const maxPositionSize = this.calculateMaxPositionSize(
+        market.openInterest
+      );
+      if (inverseSize > maxPositionSize) {
+        throw new ValidationError(
+          `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+        );
+      }
       // Slippage protection for both legs against the fills the flip will
       // execute at, checked before any funds move (same as a fresh open).
       if (maxSlippage !== undefined && maxSlippage > 0) {
@@ -1951,7 +1959,7 @@ export class PerpMarketService {
             inverseQuote,
             existing.side === 'long' ? -existing.size : existing.size
           ),
-          market.markPrice,
+          market.markPrice ?? market.currentPrice,
           maxSlippage
         );
       }
@@ -1977,6 +1985,11 @@ export class PerpMarketService {
             ) {
               throw new ConflictError(
                 'Position changed concurrently; retry the flip with fresh state'
+              );
+            }
+            if (tradeSize - position.size > maxPositionSize) {
+              throw new ValidationError(
+                `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
               );
             }
 
@@ -2511,6 +2524,12 @@ export class PerpMarketService {
     const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
     if (inverseSize < minOrderSize) {
       throw new ValidationError(`Order size below minimum (${minOrderSize})`);
+    }
+    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
+    if (inverseSize > maxPositionSize) {
+      throw new ValidationError(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
     }
     const effectiveLeverage = Math.min(
       input.leverage,
