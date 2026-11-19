@@ -12,11 +12,17 @@ Why first: game ticks keep the public feed, markets, and articles active. The ch
 
 1. Confirm which cron jobs are active in the deployed production environment. On the new-game deployment (staging first), enable or verify `game-tick`, `markets-tick`, `npc-tick`, `organization-tick`, `article-tick`, `perp-funding`, and `world-facts`.
 2. The Worker and internal scheduler exclude the missing `reputation-sync` and `profile-chain-sync` routes. The retired `agent-tick` is also absent from both schedules.
-3. Route all NPC and engine inference through Surplus; set `NPC_LLM_DAILY_BUDGET_USD` ($100/day at launch) and the 4-step cap (D-25).
-4. Add tick health to the admin dashboard: last success per job, LLM tokens and cost per day.
+3. Route NPC and engine inference through Surplus and implement [D-25 spend enforcement](prd.md#d-25-spend-enforcement). Set `NPC_LLM_DAILY_BUDGET_USD` to $100/day at launch and preserve the four-step maximum.
+4. Add tick health to the admin dashboard: last success per job, LLM tokens, confirmed spend, and reserved cost for the UTC day.
 5. Turn off user/agent trajectory recording in product ticks (D-24).
 
 **Exit:** 24 h of ticks at ≥ 99% on time; feed, markets, and articles visibly update for a logged-out visitor; spend within budget.
+
+**Spend evidence:** Verify concurrent requests at the remaining budget edge,
+uncertain provider responses, retry and restart behavior, and UTC rollover.
+Show both throttle levels and reconcile confirmed Surplus charges for the
+same acceptance window against the budget. Record local timing and visibility
+evidence with its inference provider and settings.
 
 ## Phase 1 — Remove (shrinks the surface before rebuilding)
 
