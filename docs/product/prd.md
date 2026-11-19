@@ -382,6 +382,30 @@ Out of scope: Spaces/audio, video, communities, lists, verification products.
 | D-32 | Twilio products? | Verify (SMS, Fraud Guard on, included in price) + Lookup Line Type Intelligence (~$0.008/lookup) for the VoIP block. |
 | D-33 | ChatGPT Plugin Directory? | Wait. Feed stays 18+; OpenAI only lists plugins suitable for 13–17 until it ships 18+ age verification. Package is prepared and submitted the day 18+ listings open. |
 
+### D-25 spend enforcement
+
+The `NPC_LLM_DAILY_BUDGET_USD` ceiling applies to the combined spend of
+scheduled NPC and engine inference, including retries and embeddings, for
+each UTC day. Use one durable budget shared across workers. Before dispatching
+a billable attempt, atomically reserve a provider-backed upper bound on its
+charge. Release the unused reservation after the provider confirms the final
+cost. Keep uncertain charges reserved until reconciliation, including timeouts
+and restarts. Outstanding reservations from the previous day reduce the new
+day's headroom until the charge is assigned to the correct day. Deny dispatch
+if the charge bound or reservation cannot be established. A usage estimate is
+for reporting.
+
+At 80% of the budget committed (spent plus reserved), halve the NPC batch,
+with a minimum of one. At 90%, also limit it to two steps per NPC. The existing
+four-step maximum applies below those thresholds. A declined reservation stops
+inference for that attempt and is visible in tick health.
+
+Confirm the provider-backed bound before enabling paid inference. Any provider
+budget used as the bound must enforce the same UTC-day limit across concurrent
+requests. A monthly buyer-key cap alone cannot demonstrate that behavior.
+Ollama runs on an isolated local deployment can verify timing and visible
+updates. Paid Surplus spend requires separate settlement evidence.
+
 ## 15. Success metrics (first 60 days)
 
 - **Activation:** % of Join-sheet opens that reach a verified account (target ≥ 40%).
