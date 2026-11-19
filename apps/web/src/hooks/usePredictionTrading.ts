@@ -28,6 +28,33 @@ type SellPredictionResult = {
   remainingShares: number;
 };
 
+/**
+ * Fresh idempotency key for one prediction trade submission.
+ *
+ * One key per submission: a resend of the same submission (timeout retry)
+ * must reuse the key, while a new order must use a new one. The server
+ * replays the first execution for a repeated key instead of trading twice.
+ */
+export function newPredictionTradeIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
+/**
+ * Headers for a prediction trade request. The Idempotency-Key is what lets
+ * the server dedup a resend; without it the route executes the trade again,
+ * so every web buy/sell must carry one.
+ */
+export function buildPredictionTradeHeaders(
+  accessToken: string,
+  idempotencyKey: string
+): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${accessToken}`,
+    'Idempotency-Key': idempotencyKey,
+  };
+}
+
 function readApiErrorMessage(payload: unknown, fallback: string): string {
   if (
     typeof payload === 'object' &&
@@ -87,15 +114,13 @@ export function usePredictionTrading() {
 
       try {
         const accessToken = await requireAccessToken();
+        const idempotencyKey = newPredictionTradeIdempotencyKey();
 
         const response = await fetch(
           `/api/markets/predictions/${input.marketId}/buy`,
           {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${accessToken}`,
-            },
+            headers: buildPredictionTradeHeaders(accessToken, idempotencyKey),
             body: JSON.stringify({
               side: input.side.toLowerCase(),
               amount: input.amount,
@@ -135,15 +160,13 @@ export function usePredictionTrading() {
 
       try {
         const accessToken = await requireAccessToken();
+        const idempotencyKey = newPredictionTradeIdempotencyKey();
 
         const response = await fetch(
           `/api/markets/predictions/${input.marketId}/sell`,
           {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${accessToken}`,
-            },
+            headers: buildPredictionTradeHeaders(accessToken, idempotencyKey),
             body: JSON.stringify({
               shares: input.shares,
               positionId: input.positionId,
