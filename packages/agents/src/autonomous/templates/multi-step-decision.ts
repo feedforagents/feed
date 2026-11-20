@@ -40,6 +40,7 @@ export interface PerpMarketContext {
   currentPrice: number;
   initialPrice: number;
   changePercent: number;
+  maxOrderSize: number;
 }
 
 export interface PostContext {
@@ -218,11 +219,11 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
   },
   [Actions.FOLLOW]: {
     name: Actions.FOLLOW,
-    description: 'Follow a user or agent',
+    description: 'Follow a user or agent account',
     requiredFeature: Features.ENGAGING,
     parameters: ['userId'],
     parameterSchema: `{
-  "userId": "exact_user_id_from_recent_posts_or_context"
+  "userId": "exact_user_or_agent_account_id_from_recent_posts_or_context"
 }`,
   },
   [Actions.UNFOLLOW]: {
@@ -364,6 +365,7 @@ export interface PerpPositionContext {
   ticker: string;
   side: string;
   size: number;
+  maxOrderSize?: number;
   pnl: number;
   pnlPercent: number; // e.g., +2.3 or -10.5
   entryPrice: number;
@@ -1257,7 +1259,9 @@ function formatAgentPositions(
   }
 
   if (positions.perps.length > 0) {
-    lines.push('Perp positions (use ticker to close):');
+    lines.push(
+      'Perp positions (use ticker to close). Same-side additions count existing size toward the order limit:'
+    );
     for (const p of positions.perps) {
       const pnlSign = p.pnlPercent >= 0 ? '+' : '';
       const priceMovement = p.pnlPercent >= 0 ? '📈' : '📉';
@@ -1265,6 +1269,9 @@ function formatAgentPositions(
       lines.push(
         `  - ${p.side.toUpperCase()} ${p.ticker}: $${p.size.toFixed(0)} size`
       );
+      if (p.maxOrderSize !== undefined) {
+        lines.push(`    Maximum order size: ${p.maxOrderSize} points.`);
+      }
       lines.push(
         `    ${priceInfo} | ${priceMovement} ${pnlSign}${p.pnlPercent.toFixed(1)}% | P&L: ${p.pnl >= 0 ? '+' : ''}$${p.pnl.toFixed(2)} | held: ${p.timeHeld}`
       );
@@ -1385,7 +1392,7 @@ function formatPerpMarkets(markets: PerpMarketContext[]): string {
     .map((m) => {
       const direction =
         m.changePercent > 0 ? '📈' : m.changePercent < 0 ? '📉' : '➡️';
-      return `- ${m.ticker}: ${m.name} @ $${m.currentPrice.toFixed(2)} ${direction} ${m.changePercent > 0 ? '+' : ''}${m.changePercent.toFixed(1)}%`;
+      return `- ${m.ticker}: ${m.name} @ $${m.currentPrice.toFixed(2)} ${direction} ${m.changePercent > 0 ? '+' : ''}${m.changePercent.toFixed(1)}% | Maximum order size: ${m.maxOrderSize} points.`;
     })
     .join('\n');
 }

@@ -265,6 +265,7 @@ describe('normalizeTradeDecisionParameters', () => {
         currentPrice: 1650,
         initialPrice: 1250,
         changePercent: 32,
+        maxOrderSize: 10_000,
       },
     ],
     agentPositions: {
@@ -717,14 +718,18 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
   const actor = StaticDataRegistry.getAllActors()[0]!;
   afterEach(() => mock.restore());
 
-  function prepare(executor: MultiStepExecutor, posting = false) {
+  function prepare(
+    executor: MultiStepExecutor,
+    posting = false,
+    trading = false
+  ) {
     const runtime = {
       agentId: actor.id,
       character: {
         name: actor.name,
         feed: {
           autonomy: {
-            trading: false,
+            trading,
             posting,
             commenting: false,
             dms: false,
@@ -869,6 +874,100 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     );
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('gives an oversized perp order the existing correction before dispatch', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      true
+    );
+    context.balance = 100_000;
+    context.enabledFeatures.push(Features.TRADING);
+    context.perpMarkets = [
+      {
+        ticker: 'NVDAI',
+        name: 'NVIDAI',
+        currentPrice: 100,
+        initialPrice: 100,
+        changePercent: 0,
+        maxOrderSize: 10_000,
+      },
+    ];
+    const trade = {
+      thought: 'Open a long.',
+      action: Actions.TRADE,
+      parameters: {
+        marketType: 'perp',
+        marketId: 'NVDAI',
+        side: 'open_long',
+        amount: 10_001,
+      },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: trade, rawResponse: '{}' })
+      .mockResolvedValueOnce({
+        decision: {
+          ...trade,
+          parameters: { ...trade.parameters, amount: 10_000 },
+        },
+        rawResponse: '{}',
+      });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[0]?.[0]).toContain(
+      'Maximum order size: 10000 points'
+    );
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      'available size limit of 10000 points'
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[2]).toMatchObject({ amount: 10_000 });
+  });
+
+  test('gives an organization follow target the existing correction before dispatch', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(executor);
+    const accountPost = context.recentPosts[0]!;
+    const organization = StaticDataRegistry.getOrganization('the-daily-wire')!;
+    context.recentPosts.push({
+      ...accountPost,
+      id: 'organization-post',
+      authorId: organization.id,
+      authorName: organization.name,
+    });
+    const follow = {
+      thought: 'Follow an author.',
+      action: Actions.FOLLOW,
+      parameters: { userId: organization.id },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: follow, rawResponse: '{}' })
+      .mockResolvedValueOnce({
+        decision: {
+          ...follow,
+          parameters: { userId: accountPost.authorId },
+        },
+        rawResponse: '{}',
+      });
+
+    expect((await executor.execute(actor.id, runtime, true)).success).toBe(
+      true
+    );
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      'Organizations are ineligible FOLLOW targets'
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[2]).toEqual({
+      userId: accountPost.authorId,
+    });
   });
 
   test('an offered clue takes the only POST slot even if its publication is stale', async () => {

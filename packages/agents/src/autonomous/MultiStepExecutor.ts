@@ -1128,12 +1128,26 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         }
 
         if (parameters.marketType === 'perp') {
-          const knownPerpTickers = new Set([
-            ...context.perpMarkets.map((market) => market.ticker),
-            ...context.agentPositions.perps.map((position) => position.ticker),
-          ]);
-          if (!knownPerpTickers.has(marketId)) {
+          const market = context.perpMarkets.find(
+            ({ ticker }) => ticker === marketId
+          );
+          const position = context.agentPositions.perps.find(
+            ({ ticker }) => ticker === marketId
+          );
+          if (!market && !position) {
             return `Your TRADE used perp marketId ${marketId}, but that ticker is not in the current context. Choose an exact ticker from Available Perp Markets or your open positions.`;
+          }
+          if (!closing) {
+            const limit = market?.maxOrderSize ?? position?.maxOrderSize;
+            if (limit === undefined || !Number.isFinite(limit)) {
+              return 'Opening a perp requires a current order size limit. Choose another market or action.';
+            }
+            const sameSideSize =
+              position && `open_${position.side}` === side ? position.size : 0;
+            const availableSize = Math.max(0, limit - sameSideSize);
+            if (amount > availableSize) {
+              return `Requested perp amount exceeds the available size limit of ${availableSize} points on ${marketId}. Reduce the amount or choose another action.`;
+            }
           }
         }
 
@@ -1233,6 +1247,12 @@ ${describeNpcMarketClue(offeredMarketClue)}`
       case Actions.UNFOLLOW:
         if (!userId) {
           return `Your ${action} was invalid because it requires a valid userId from the visible social context. Choose a valid target or a different action.`;
+        }
+        if (
+          action === Actions.FOLLOW &&
+          StaticDataRegistry.getOrganization(userId)
+        ) {
+          return 'Organizations are ineligible FOLLOW targets. Choose a user or agent account, or a different action.';
         }
         return undefined;
 
