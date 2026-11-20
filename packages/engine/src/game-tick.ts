@@ -193,9 +193,11 @@ export interface GameTickResult {
 /** Executes a complete game tick (content, markets, questions, system updates). */
 export async function executeGameTick(
   skipContentGeneration = false,
-  skip = new Set<string>()
+  skip = new Set<string>(),
+  scheduledAt?: Date
 ): Promise<GameTickResult> {
   const fastMode = process.env.FEED_TRUST_CORPUS_FAST_MODE === 'true';
+  const scheduledGeneration = skip.has('scheduled-generation');
   const timestamp = new Date();
   const startedAt = Date.now();
   const budgetMs = Number(process.env.GAME_TICK_BUDGET_MS || 180000); // 3 minutes default
@@ -310,18 +312,15 @@ export async function executeGameTick(
     }
     tracer?.endNode('bootstrap-content', { skipped: fastMode });
 
-    // Initialize LLM client for game tick operations
-    // Priority: Groq > Claude > OpenAI
-    const llmClient = FeedLLMClient.forGameTick();
-    const stats = llmClient.getStats();
-    logger.info(
-      'LLM client initialized for game tick operations',
-      {
-        provider: stats.provider,
-        model: stats.model,
-      },
-      'GameTick'
-    );
+    const llmClient = scheduledGeneration ? null : FeedLLMClient.forGameTick();
+    if (llmClient) {
+      const { provider, model } = llmClient.getStats();
+      logger.info(
+        'LLM client initialized for game tick operations',
+        { provider, model },
+        'GameTick'
+      );
+    }
 
     // Get active questions from database
     tracer?.startNode('questions-load', { fastMode });
@@ -353,7 +352,12 @@ export async function executeGameTick(
       activeCount: activeQuestions.length,
       fastMode,
     });
-    if (activeQuestions.length === 0 && Date.now() < deadline && !fastMode) {
+    if (
+      llmClient &&
+      activeQuestions.length === 0 &&
+      Date.now() < deadline &&
+      !fastMode
+    ) {
       logger.info(
         'First tick detected - generating initial questions',
         {},
@@ -412,7 +416,7 @@ export async function executeGameTick(
       skipContentGeneration,
       fastMode,
     });
-    if (!skipContentGeneration && !fastMode) {
+    if (llmClient && !skipContentGeneration && !fastMode) {
       // Generate world events based on active questions
       // Pass llmClient to enable breaking article generation for high-impact events
       // Shuffle active questions before slicing to rotate which questions get events
@@ -497,7 +501,7 @@ export async function executeGameTick(
     const currentActiveCount =
       currentActiveQuestions.length - result.questionsResolved;
     tracer?.startNode('question-topup', { currentActiveCount, fastMode });
-    if (currentActiveCount < 10 && !fastMode) {
+    if (llmClient && currentActiveCount < 10 && !fastMode) {
       const shouldForceGeneration = currentActiveCount <= 0;
       if (Date.now() < deadline || shouldForceGeneration) {
         if (shouldForceGeneration && Date.now() >= deadline) {
@@ -609,14 +613,9 @@ export async function executeGameTick(
       'GameTick'
     );
 
-    await db
-      .update(games)
-      .set({
-        lastTickAt: timestamp,
-        updatedAt: timestamp,
-        currentDay: currentDay ?? 1,
-      })
-      .where(eq(games.isContinuous, true));
+    if (!scheduledGeneration) {
+      await advanceGameClock(timestamp, currentDay);
+    }
     tracer?.endNode('game-state-update', { currentDay });
 
     tracer?.startNode('widget-caches', { fastMode });
@@ -669,9 +668,9 @@ export async function executeGameTick(
     tracer?.endNode('reputation-sync', { synced: result.reputationSynced });
 
     // ==========================================================================
-    // WORLD FACTS - process RSS + parodies inline if no cron is running
+    // WORLD FACTS - legacy inline RSS owner
     // ==========================================================================
-    if (!fastMode) {
+    if (!fastMode && !scheduledGeneration) {
       try {
         const feedResult = await rssFeedService.fetchAllFeeds();
         if (feedResult.stored > 0) {
@@ -735,7 +734,12 @@ export async function executeGameTick(
       shouldEvolve: shouldEvolveRelationships,
       fastMode,
     });
-    if (shouldEvolveRelationships && Date.now() < deadline && !fastMode) {
+    if (
+      llmClient &&
+      shouldEvolveRelationships &&
+      Date.now() < deadline &&
+      !fastMode
+    ) {
       logger.info('Evolving NPC relationships...', undefined, 'GameTick');
       const relationshipEngine = new RelationshipEvolutionEngine(llmClient);
       const relationshipsUpdated =
@@ -772,7 +776,9 @@ export async function executeGameTick(
     const skipNpcGroupDynamics =
       process.env.FEED_SKIP_NPC_GROUP_DYNAMICS === 'true' ||
       process.env.FEED_TRUST_CORPUS_FAST_MODE === 'true';
-    if (skipNpcGroupDynamics || fastMode) {
+    if (scheduledGeneration) {
+      tracer?.skipNode('group-dynamics', 'scheduled-generation');
+    } else if (skipNpcGroupDynamics || fastMode) {
       logger.info(
         'Skipping NPC group dynamics for this tick',
         {
@@ -1042,6 +1048,10 @@ export async function executeGameTick(
       throw error;
     }
 
+    if (scheduledGeneration) {
+      await advanceGameClock(timestamp, currentDay, scheduledAt);
+    }
+
     // Finalize DAG trace
     tracer?.startNode('token-stats-finalize', {});
 
@@ -1086,6 +1096,21 @@ export async function executeGameTick(
       }
     }
   }
+}
+
+async function advanceGameClock(
+  timestamp: Date,
+  currentDay: number | undefined,
+  scheduledAt = timestamp
+) {
+  await db
+    .update(games)
+    .set({
+      lastTickAt: scheduledAt,
+      updatedAt: timestamp,
+      currentDay: currentDay ?? 1,
+    })
+    .where(eq(games.isContinuous, true));
 }
 
 async function refreshPerpQuoteStates(): Promise<number> {
@@ -2497,7 +2522,7 @@ export async function simulateMarketVolatility(options?: {
 async function processNarrativeArcs(
   activeQuestions: Array<{ id: string }>,
   dayNumber: number,
-  llmClient: FeedLLMClient,
+  llmClient: FeedLLMClient | null,
   clock: { gameStartedAt: Date | null; now: Date }
 ): Promise<{
   arcsProcessed: number;

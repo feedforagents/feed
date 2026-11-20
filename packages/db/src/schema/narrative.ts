@@ -6,6 +6,7 @@ import {
   jsonb,
   type PgColumn,
   pgTable,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -13,6 +14,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { questions } from './markets';
+import { posts } from './posts';
 
 /**
  * Market timeframe category
@@ -90,6 +92,22 @@ export type ArcStateType =
   | DailyArcState
   | IntradayArcState
   | FlashArcState;
+
+// A published or removed clue still consumes its market phase.
+export const npcMarketClues = pgTable(
+  'NpcMarketClue',
+  {
+    questionId: text('questionId')
+      .notNull()
+      .references(() => questions.id, { onDelete: 'cascade' }),
+    phase: text('phase').$type<ArcStateType>().notNull(),
+    postId: text('postId').references(() => posts.id, { onDelete: 'set null' }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.questionId, table.phase] }),
+    index('NpcMarketClue_postId_idx').on(table.postId),
+  ]
+);
 
 /**
  * Pending state transition

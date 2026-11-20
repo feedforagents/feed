@@ -55,6 +55,7 @@ import {
   parseDecisionJson,
 } from './decision-json';
 import { executeDirectShareInformation } from './intel-payment-executors';
+import { describeNpcMarketClue, type NpcMarketClue } from './npc-market-clue';
 import { normalizeSocialDecisionParameters } from './social-parameter-normalization';
 import { topicDiversityService } from './TopicDiversityService';
 import {
@@ -173,7 +174,8 @@ export class MultiStepExecutor {
     agentUserId: string,
     runtime: IAgentRuntime,
     isNpc = true,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    marketClue?: NpcMarketClue
   ): Promise<MultiStepExecutorResult> {
     signal?.throwIfAborted();
     const actor = StaticDataRegistry.getActor(agentUserId);
@@ -277,7 +279,11 @@ export class MultiStepExecutor {
       : baseSystemPrompt;
 
     // Missing NPC context is a failed tick, never permission to act without it.
-    const npcGameContext = await getNpcGameContext(agentUserId);
+    const npcGameContext = await getNpcGameContext(
+      agentUserId,
+      marketClue?.questionId
+    );
+    let pendingMarketClue = marketClue;
 
     const contextRefreshSummary =
       await this.getLatestContextRefreshSummary(agentUserId);
@@ -298,7 +304,7 @@ export class MultiStepExecutor {
       // Compute per-iteration effectiveFeatures based on current trace
       // This enforces one-POST-per-tick: if we've already posted, remove 'posting'
       const hasPostedThisTick = trace.some(
-        (r) => r.actionType === Actions.POST && r.success
+        (r) => r.actionType === Actions.POST && r.success && !r.result?.skipped
       );
       const effectiveFeatures = hasPostedThisTick
         ? enabledFeatures.filter((f) => f !== Features.POSTING)
@@ -327,6 +333,9 @@ export class MultiStepExecutor {
         runtime.character as unknown as Record<string, unknown>
       )?.postExamples as string[] | undefined;
 
+      const offeredMarketClue = effectiveFeatures.includes(Features.POSTING)
+        ? pendingMarketClue
+        : undefined;
       const { prompt, tokenBreakdown } = buildMultiStepDecisionPrompt({
         agentName,
         tokenBudget:
@@ -342,7 +351,11 @@ export class MultiStepExecutor {
         traceActionResults: trace,
         context,
         isNpc,
-        npcGameContext,
+        npcGameContext: offeredMarketClue
+          ? `${npcGameContext}
+
+${describeNpcMarketClue(offeredMarketClue)}`
+          : npcGameContext,
         characterStyle: characterStyle?.post,
         characterPostExamples,
       });
@@ -499,8 +512,10 @@ export class MultiStepExecutor {
         runtime,
         isNpc,
         { prompt, completion: rawResponse, thought: decision.thought },
-        agentUserId
+        agentUserId,
+        offeredMarketClue
       );
+      if (actionResult.result?.marketClueStatus) pendingMarketClue = undefined;
       await this.recordTrajectoryStep(runtime, decision, actionResult);
       iterationTimings.actionExecution = Date.now() - actionStartTime;
       iterationTimings.total = Date.now() - iterationStartTime;
@@ -1258,7 +1273,8 @@ export class MultiStepExecutor {
     _runtime: IAgentRuntime,
     _isNpc: boolean,
     logContext?: { prompt: string; completion: string; thought: string },
-    ownerId: string = agentUserId
+    ownerId: string = agentUserId,
+    marketClue?: NpcMarketClue
   ): Promise<ActionTraceResult> {
     const normalizedAction = normalizeDecisionAction(action);
 
@@ -1299,7 +1315,12 @@ export class MultiStepExecutor {
         return this.executeTrade(agentUserId, parameters, ownerId);
 
       case Actions.POST:
-        return this.executePost(agentUserId, parameters, logContext);
+        return this.executePost(
+          agentUserId,
+          parameters,
+          logContext,
+          marketClue
+        );
 
       case Actions.COMMENT:
         return this.executeComment(agentUserId, parameters, logContext);
@@ -1612,7 +1633,8 @@ export class MultiStepExecutor {
   private async executePost(
     agentUserId: string,
     parameters: Record<string, unknown>,
-    logContext?: { prompt: string; completion: string; thought: string }
+    logContext?: { prompt: string; completion: string; thought: string },
+    marketClue?: NpcMarketClue
   ): Promise<ActionTraceResult> {
     // Post rate limiting removed — all agents can post freely
 
@@ -1629,7 +1651,24 @@ export class MultiStepExecutor {
       };
     }
 
-    const postResult = await executeDirectPost({ agentUserId, content });
+    const postResult = await executeDirectPost({
+      agentUserId,
+      content,
+      marketClue: parameters.marketClue === true ? marketClue : undefined,
+    });
+    if (postResult.marketClueStatus && !postResult.postId) {
+      return {
+        actionType: Actions.POST,
+        success: true,
+        summary: `Skipped market clue: ${postResult.marketClueStatus}`,
+        result: {
+          skipped: true,
+          marketClueStatus: postResult.marketClueStatus,
+        },
+        parameters,
+        timestamp: Date.now(),
+      };
+    }
 
     if (postResult.success && logContext) {
       await this.logActivity(agentUserId, {
@@ -1655,6 +1694,7 @@ export class MultiStepExecutor {
       result: {
         success: postResult.success,
         postId: postResult.postId,
+        marketClueStatus: postResult.marketClueStatus,
         error: postResult.error,
       },
       parameters,
@@ -2584,7 +2624,7 @@ export class MultiStepExecutor {
     };
 
     for (const result of trace) {
-      if (!result.success) continue;
+      if (!result.success || result.result?.skipped) continue;
 
       switch (result.actionType) {
         case Actions.TRADE:

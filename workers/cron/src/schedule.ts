@@ -16,6 +16,12 @@ export const jobs = [
   { path: '/api/cron/trading-fee-outbox', cron: '*/5 * * * *' },
 ] as const;
 
+// Roll these paid jobs out only on the Phase 0 validation stack until D-25.
+export const localnetJobs = [
+  { path: '/api/cron/npc-tick?mode=groups', cron: '*/2 * * * *' },
+  { path: '/api/cron/world-facts?mode=headlines', cron: '*/5 * * * *' },
+] as const;
+
 function matches(field: string, value: number): boolean {
   return field.split(',').some((entry) => {
     if (entry === '*') return true;
@@ -26,11 +32,12 @@ function matches(field: string, value: number): boolean {
   });
 }
 
-export function dueJobs(timestamp: number) {
+export function dueJobs(timestamp: number, localnet = false) {
   const date = new Date(timestamp);
   if (!Number.isFinite(date.getTime()))
     throw new Error('Invalid schedule timestamp');
-  return jobs.filter(({ cron }) => {
+  const schedules = localnet ? [...jobs, ...localnetJobs] : jobs;
+  return schedules.filter(({ cron }) => {
     const [minute, hour, day, month, weekday] = cron.split(' ');
     if (!minute || !hour || day !== '*' || month !== '*' || weekday !== '*') {
       throw new Error(`Unsupported schedule: ${cron}`);
@@ -46,7 +53,7 @@ export interface CronJob {
   scheduledTime: number;
 }
 
-export function isCronJob(value: unknown): value is CronJob {
+export function isCronJob(value: unknown, localnet = false): value is CronJob {
   if (
     !value ||
     typeof value !== 'object' ||
@@ -54,9 +61,10 @@ export function isCronJob(value: unknown): value is CronJob {
     !('scheduledTime' in value)
   )
     return false;
+  const schedules = localnet ? [...jobs, ...localnetJobs] : jobs;
   return (
     typeof value.scheduledTime === 'number' &&
-    jobs.some((job) => job.path === value.path) &&
+    schedules.some((job) => job.path === value.path) &&
     Number.isFinite(value.scheduledTime)
   );
 }

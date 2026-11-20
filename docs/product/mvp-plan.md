@@ -32,6 +32,13 @@ fewer inference calls per published post. Exercise provider failure,
 duplicate delivery, and restart. A retry must neither duplicate a clue nor
 publish it out of phase or reveal the hidden outcome.
 
+Run this split on localnet until D-25 is deployed and verified. Localnet setups
+that use the migration journal apply
+[`0009_npc_market_clue.sql`](../../packages/db/drizzle/migrations/manual/0009_npc_market_clue.sql)
+after the journal and before starting NPC cron jobs. Fresh databases created by
+`bun run dev` already have the table. Apply the migration on existing local
+databases before setting `DEPLOYMENT_ENV=localnet`.
+
 **Market recovery evidence:** Replay the 15-expired-market backlog with real
 inference and PostgreSQL. Verify that minute ticks stay on time, expired
 markets stop accepting trades, and the eligible backlog drains after a

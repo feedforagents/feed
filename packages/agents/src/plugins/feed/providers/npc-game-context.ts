@@ -119,7 +119,10 @@ function formatSignalAsNaturalLanguage(
  * @param agentId - The agent's ID
  * @returns Game context string for NPCs, empty string otherwise
  */
-export async function getNpcGameContext(agentId: string): Promise<string> {
+export async function getNpcGameContext(
+  agentId: string,
+  excludedSignalQuestionId?: string
+): Promise<string> {
   // Only NPCs get game context
   const npcActor = StaticDataRegistry.getActor(agentId);
   if (!npcActor) {
@@ -167,6 +170,7 @@ You are ${npcActor.name}. Just be yourself — talk about what interests you, re
   const intuitions: string[] = [];
 
   for (const market of activeMarkets) {
+    if (market.questionId === excludedSignalQuestionId) continue;
     const arcPlan = await getArcPlan(market.questionId);
     if (!arcPlan) continue;
 
