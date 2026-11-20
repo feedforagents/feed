@@ -123,6 +123,13 @@ mock.module('@feed/shared', () => ({
     value ? new Date(value).toISOString() : null,
 }));
 
+mock.module('@feed/db', () => ({
+  // The list route reads traded volume through asPublic, which needs a live
+  // database. Unit tests run without one, so stub the ledger aggregate as
+  // an empty volume map (volume reads 0) instead of connecting.
+  asPublic: async () => new Map(),
+}));
+
 const { GET } = await import('../route');
 
 type ListBody = {
