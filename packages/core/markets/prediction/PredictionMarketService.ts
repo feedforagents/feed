@@ -12,6 +12,7 @@ import type {
   PredictionCancelResult,
   PredictionDbPort,
   PredictionMarketRecord,
+  PredictionMarketStatus,
   PredictionPositionRecord,
   PredictionPriceSnapshotRecord,
   PredictionResolveInput,
@@ -129,6 +130,7 @@ export class PredictionMarketService {
   async listMarkets(options?: {
     limit?: number;
     offset?: number;
+    status?: PredictionMarketStatus;
   }): Promise<PredictionMarketRecord[]> {
     if (this.db.listMarkets) {
       return this.db.listMarkets(options);
@@ -147,6 +149,21 @@ export class PredictionMarketService {
       return this.db.countUnresolvedMarkets();
     }
     return (await this.listMarkets()).length;
+  }
+
+  /**
+   * Row count for one lifecycle slice; used for pagination metadata so the
+   * reported `total` matches the filtered list. Falls back to the slice's
+   * own list length when the adapter has no dedicated count.
+   */
+  async countMarketsByStatus(status: PredictionMarketStatus): Promise<number> {
+    if (this.db.countMarketsByStatus) {
+      return this.db.countMarketsByStatus(status);
+    }
+    if (status === 'ACTIVE') {
+      return this.countUnresolvedMarkets();
+    }
+    return (await this.listMarkets({ status })).length;
   }
 
   async listUserPositions(userId: string): Promise<PredictionPositionRecord[]> {

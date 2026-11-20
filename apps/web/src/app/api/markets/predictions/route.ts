@@ -131,7 +131,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     );
   }
 
-  const { userId } = queryParse.data;
+  const { userId, status } = queryParse.data;
   const usePagination = searchParams.has('limit') || searchParams.has('page');
   const page = Math.max(1, queryParse.data.page ?? 1);
   const limit = Math.min(100, Math.max(1, queryParse.data.limit ?? 20));
@@ -142,9 +142,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   let total: number | undefined;
 
   if (usePagination) {
-    total = await service.countUnresolvedMarkets();
+    total = await service.countMarketsByStatus(status ?? 'ACTIVE');
     const offset = (page - 1) * limit;
-    markets = await service.listMarkets({ limit, offset });
+    markets = await service.listMarkets({ limit, offset, status });
+  } else if (status) {
+    // WHY bypass the shared 'all' cache: that key holds the open list.
+    // A filtered list must neither read it nor poison it — the same
+    // reasoning as the pagination bypass above.
+    markets = await service.listMarkets({ status });
   } else {
     markets = await getCacheOrFetch('all', () => service.listMarkets(), {
       namespace: CACHE_KEYS.MARKETS_API_PREDICTIONS_LIST,
