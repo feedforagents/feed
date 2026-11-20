@@ -33,27 +33,34 @@ import type {
   WalletPort,
 } from '@feed/core/markets/shared';
 import {
+  acquireUserBlockPairLock,
   and,
   asUser,
   db,
   dbWrite,
   desc,
   eq,
+  follows,
+  followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
   getRawDrizzle,
   groupMembers,
+  hasBlocked,
   isNull,
   like,
   lte,
   not,
   notExists,
+  or,
   posts,
   postTags,
   sql,
   tradingFeeOutbox,
+  userBlocks,
   users,
+  withTransaction,
 } from '@feed/db';
 import { perpMarketSnapshots } from '@feed/db/schema';
 import {
@@ -1411,24 +1418,11 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!followingId) throw new Error('userId is required');
     if (followerId === followingId) throw new Error('Cannot follow yourself');
 
-    // Check if already following
-    const existingFollow = await db.follow.findFirst({
-      where: { followerId, followingId },
-    });
-
-    if (existingFollow) {
-      return { success: true, message: 'Already following' };
-    }
-
-    await db.follow.create({
-      data: {
-        id: await generateSnowflakeId(),
-        followerId,
-        followingId,
-      },
-    });
-
-    return { success: true, message: 'Now following user' };
+    const created = await followUserWithBlockCheck(followerId, followingId);
+    return {
+      success: true,
+      message: created ? 'Now following user' : 'Already following',
+    };
   }
 
   private async unfollowUser(
@@ -3099,59 +3093,49 @@ export class FeedAgentExecutor implements AgentExecutor {
     const targetUserId = String(params.userId ?? '');
     const reason = params.reason ? String(params.reason) : null;
 
-    // Check if target user exists
-    const targetUser = await db.user.findUnique({
-      where: { id: targetUserId },
-      select: { id: true, username: true, displayName: true },
-    });
+    const block = await withTransaction(async (tx) => {
+      await acquireUserBlockPairLock(tx, agentId, targetUserId);
+      const [targetUser] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, targetUserId))
+        .limit(1);
+      if (!targetUser) {
+        throw new Error(`User ${targetUserId} not found`);
+      }
+      if (await hasBlocked(agentId, targetUserId, tx)) {
+        return undefined;
+      }
 
-    if (!targetUser) {
-      throw new Error(`User ${targetUserId} not found`);
-    }
-
-    // Check if already blocked
-    const existingBlock = await db.userBlock.findFirst({
-      where: {
-        blockerId: agentId,
-        blockedId: targetUserId,
-      },
-    });
-
-    if (existingBlock) {
-      return { success: false, message: 'User is already blocked' };
-    }
-
-    // Use transaction to ensure block creation and follow deletions are atomic
-    const block = await db.$transaction(async (tx) => {
-      // Create block
-      const newBlock = await tx.userBlock.create({
-        data: {
+      const [newBlock] = await tx
+        .insert(userBlocks)
+        .values({
           id: await generateSnowflakeId(),
           blockerId: agentId,
           blockedId: targetUserId,
           reason: reason || null,
-        },
-      });
-
-      // Unfollow if following (bidirectional - delete both directions)
-      await Promise.all([
-        tx.follow.deleteMany({
-          where: {
-            followerId: agentId,
-            followingId: targetUserId,
-          },
-        }),
-        tx.follow.deleteMany({
-          where: {
-            followerId: targetUserId,
-            followingId: agentId,
-          },
-        }),
-      ]);
-
+        })
+        .returning();
+      await tx
+        .delete(follows)
+        .where(
+          or(
+            and(
+              eq(follows.followerId, agentId),
+              eq(follows.followingId, targetUserId)
+            ),
+            and(
+              eq(follows.followerId, targetUserId),
+              eq(follows.followingId, agentId)
+            )
+          )
+        );
       return newBlock;
     });
 
+    if (!block) {
+      return { success: false, message: 'User is already blocked' };
+    }
     return { success: true, message: 'User blocked successfully', block };
   }
 
