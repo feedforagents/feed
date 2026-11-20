@@ -74,8 +74,8 @@ function summarizeQuestion(fullText: string): string {
  */
 function formatSignalAsNaturalLanguage(
   signal: { direction: 'YES' | 'NO'; reason: string },
-  phase: 'early' | 'middle' | 'late' | 'climax',
-  questionTopic: string
+  questionTopic: string,
+  phase?: 'early' | 'middle' | 'late' | 'climax'
 ): string {
   const expectation = ` You expect the following claim to ${signal.direction === 'YES' ? 'come true' : 'not come true'}: "${questionTopic}".`;
 
@@ -141,7 +141,21 @@ export async function getNpcGameContext(
     ? []
     : await gameService.getActiveMarketSummaries(5);
 
-  if (!publicOnly && activeMarkets.length === 0) {
+  const timedRoleContext =
+    !publicOnly && process.env.DEPLOYMENT_ENV === 'localnet'
+      ? await (
+          await import('./npc-timed-market-signals')
+        ).getTimedNpcRoleContext(
+          agentId,
+          activeMarkets.map((market) => market.questionId)
+        )
+      : undefined;
+
+  if (
+    !publicOnly &&
+    activeMarkets.length === 0 &&
+    !timedRoleContext?.signals.length
+  ) {
     // No active markets — character context only
     return `
 === WHO YOU ARE ===
@@ -165,10 +179,17 @@ You are ${npcActor.name}. Just be yourself — talk about what interests you, re
 `.trim();
   }
 
-  const intuitions: string[] = [];
-  if (activeMarkets.length > 0) {
+  const intuitions = (timedRoleContext?.signals ?? []).map(
+    ({ signal, question }) => formatSignalAsNaturalLanguage(signal, question)
+  );
+  const legacyMarkets = timedRoleContext
+    ? activeMarkets.filter(
+        (market) => !timedRoleContext.timedQuestionIds.has(market.questionId)
+      )
+    : activeMarkets;
+  if (legacyMarkets.length > 0 && intuitions.length < 5) {
     const currentDay = await gameService.getCurrentGameDay();
-    for (const market of activeMarkets) {
+    for (const market of legacyMarkets) {
       const arcPlan = await getArcPlan(market.questionId);
       if (!arcPlan) continue;
 
@@ -184,12 +205,13 @@ You are ${npcActor.name}. Just be yourself — talk about what interests you, re
       // Convert to natural language (NEVER expose technical details)
       const intuition = formatSignalAsNaturalLanguage(
         signal,
-        phase,
-        market.question
+        market.question,
+        phase
       );
 
       if (intuition) {
         intuitions.push(intuition);
+        if (intuitions.length === 5) break;
       }
     }
   }

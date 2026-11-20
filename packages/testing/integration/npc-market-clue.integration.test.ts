@@ -10,6 +10,7 @@ import {
   posts,
   questionArcPlans,
   questions,
+  timeframedMarketRoles,
   timeframedMarkets,
 } from '@feed/db';
 import { isActiveHour, StaticDataRegistry } from '@feed/engine';
@@ -19,6 +20,8 @@ import {
   publishNpcMarketClue,
   selectDueNpcMarketClue,
 } from '../../agents/src/autonomous/npc-market-clue';
+import { getNpcGameContext } from '../../agents/src/plugins/feed/providers/npc-game-context';
+import { getTimedNpcRoleContext } from '../../agents/src/plugins/feed/providers/npc-timed-market-signals';
 
 test('publishes one current clue per market phase and preserves ordinary NPC posts', async () => {
   const now = new Date();
@@ -128,13 +131,50 @@ test('publishes one current clue per market phase and preserves ordinary NPC pos
       phaseRatios: { early: 0.5, middle: 0.5, late: 0.75, climax: 1 },
     });
 
+    // Existing daily plans remain eligible while no timed role row exists.
+    expect((await selectDueNpcMarketClue(gameId, [actor.id]))?.actorId).toBe(
+      actor.id
+    );
+    expect(await getNpcGameContext(actor.id)).toContain(
+      `You expect the following claim to come true: "${question}".`
+    );
+    await dbWrite.insert(timeframedMarketRoles).values({
+      timeframedMarketId: frameId,
+      insiderActorIds: [],
+      deceiverActorIds: [],
+    });
+    expect(await selectDueNpcMarketClue(gameId, [actor.id])).toBeUndefined();
+    expect(await getNpcGameContext(actor.id)).not.toContain(question);
+
+    // A timed-role-only NPC qualifies even when the frame has no affiliates,
+    // and the timed deceiver signal supersedes the legacy insider role.
+    await dbWrite
+      .update(timeframedMarketRoles)
+      .set({ deceiverActorIds: [actor.id] })
+      .where(eq(timeframedMarketRoles.timeframedMarketId, frameId));
+    expect(await getNpcGameContext(actor.id)).toContain(
+      `You expect the following claim to not come true: "${question}".`
+    );
+    expect(await getNpcGameContext(actor.id, true)).not.toContain(question);
+
     const current = await selectDueNpcMarketClue(gameId, [actor.id]);
     if (!current) throw new Error('Expected an eligible resolving clue');
     expect(current.phase).toBe('resolving');
+    expect(current.actorId).toBe(actor.id);
+    await dbWrite
+      .update(timeframedMarketRoles)
+      .set({ deceiverActorIds: [] })
+      .where(eq(timeframedMarketRoles.timeframedMarketId, frameId));
+    expect(await publishNpcMarketClue(current, candidatePost(0))).toBe('stale');
+    await dbWrite
+      .update(timeframedMarketRoles)
+      .set({ deceiverActorIds: [actor.id] })
+      .where(eq(timeframedMarketRoles.timeframedMarketId, frameId));
     await dbWrite
       .update(timeframedMarkets)
       .set({ endTime: now })
       .where(eq(timeframedMarkets.id, frameId));
+    expect(await getNpcGameContext(actor.id)).not.toContain(question);
     expect(await publishNpcMarketClue(current, candidatePost(0))).toBe('stale');
     await dbWrite
       .update(timeframedMarkets)
@@ -161,6 +201,10 @@ test('publishes one current clue per market phase and preserves ordinary NPC pos
     expect(await selectDueNpcMarketClue(gameId, [actor.id])).toBeUndefined();
 
     process.env.DEPLOYMENT_ENV = 'staging';
+    const hosted = await getTimedNpcRoleContext(actor.id, [questionId]);
+    expect(hosted.signals).toHaveLength(0);
+    expect(hosted.timedQuestionIds.size).toBe(0);
+    expect(await selectDueNpcMarketClue(gameId, [actor.id])).toBeUndefined();
     expect(await publishNpcMarketClue(current, candidatePost(0))).toBe('stale');
     const ordinary = await executeDirectPost({
       agentUserId: actor.id,

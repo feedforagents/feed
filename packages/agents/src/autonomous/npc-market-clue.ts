@@ -14,6 +14,7 @@ import {
   questionArcPlans,
   questions,
   sql,
+  timeframedMarketRoles,
   timeframedMarkets,
 } from '@feed/db';
 import {
@@ -47,6 +48,13 @@ const latestPlan = sql<string>`(
   ORDER BY plan."createdAt" DESC, plan."id" DESC
   LIMIT 1
 )`;
+
+const effectiveInsiders = sql<
+  string[] | null
+>`coalesce(${timeframedMarketRoles.insiderActorIds}, ${questionArcPlans.insiderActorIds})`;
+const effectiveDeceivers = sql<
+  string[] | null
+>`coalesce(${timeframedMarketRoles.deceiverActorIds}, ${questionArcPlans.deceiverActorIds})`;
 
 function eligibleActors(affiliates: string[] | null, plan: ArcRoles | null) {
   return [
@@ -89,14 +97,18 @@ export async function selectDueNpcMarketClue(
         ),
       marketId: markets.id,
       plan: {
-        insiderActorIds: questionArcPlans.insiderActorIds,
-        deceiverActorIds: questionArcPlans.deceiverActorIds,
+        insiderActorIds: effectiveInsiders,
+        deceiverActorIds: effectiveDeceivers,
       },
     })
     .from(timeframedMarkets)
     .innerJoin(questions, eq(questions.id, timeframedMarkets.questionId))
     .innerJoin(markets, eq(markets.id, marketIdForQuestion))
     .innerJoin(games, eq(games.id, markets.gameId))
+    .leftJoin(
+      timeframedMarketRoles,
+      eq(timeframedMarketRoles.timeframedMarketId, timeframedMarkets.id)
+    )
     .leftJoin(questionArcPlans, eq(questionArcPlans.id, latestPlan))
     .where(
       and(
@@ -113,8 +125,8 @@ export async function selectDueNpcMarketClue(
         gt(timeframedMarkets.endTime, now),
         sql`(
           jsonb_exists_any(${timeframedMarkets.affiliatedActorIds}, ${matchIds})
-          OR jsonb_exists_any(${questionArcPlans.insiderActorIds}, ${matchIds})
-          OR jsonb_exists_any(${questionArcPlans.deceiverActorIds}, ${matchIds})
+          OR jsonb_exists_any(${effectiveInsiders}, ${matchIds})
+          OR jsonb_exists_any(${effectiveDeceivers}, ${matchIds})
         )`,
         notExists(
           dbWrite
@@ -265,16 +277,25 @@ export async function publishNpcMarketClue(
       return 'stale';
     }
 
-    const [plan] = await tx
-      .select({
-        insiderActorIds: questionArcPlans.insiderActorIds,
-        deceiverActorIds: questionArcPlans.deceiverActorIds,
-      })
-      .from(questionArcPlans)
-      .where(eq(questionArcPlans.questionId, clue.questionId))
-      .orderBy(desc(questionArcPlans.createdAt), desc(questionArcPlans.id))
-      .limit(1)
+    const [timedRoles] = await tx
+      .select()
+      .from(timeframedMarketRoles)
+      .where(eq(timeframedMarketRoles.timeframedMarketId, clue.frameId))
       .for('share');
+    const plan =
+      timedRoles ??
+      (
+        await tx
+          .select({
+            insiderActorIds: questionArcPlans.insiderActorIds,
+            deceiverActorIds: questionArcPlans.deceiverActorIds,
+          })
+          .from(questionArcPlans)
+          .where(eq(questionArcPlans.questionId, clue.questionId))
+          .orderBy(desc(questionArcPlans.createdAt), desc(questionArcPlans.id))
+          .limit(1)
+          .for('share')
+      )[0];
     const now = new Date();
     if (
       now < state.frame.startTime ||

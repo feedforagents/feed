@@ -872,6 +872,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
   });
 
   test('an offered clue takes the only POST slot even if its publication is stale', async () => {
+    spyOn(Math, 'random').mockReturnValue(0.5);
     const executor = new MultiStepExecutor(2);
     const { context, gameContext, runtime, decision, execute } = prepare(
       executor,

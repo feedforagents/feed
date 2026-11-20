@@ -373,6 +373,15 @@ export const timeframedMarkets = pgTable(
   ]
 );
 
+// Private actor assignments are kept out of the public market frame.
+export const timeframedMarketRoles = pgTable('TimeframedMarketRoles', {
+  timeframedMarketId: text('timeframedMarketId')
+    .primaryKey()
+    .references(() => timeframedMarkets.id, { onDelete: 'cascade' }),
+  insiderActorIds: jsonb('insiderActorIds').$type<string[]>().notNull(),
+  deceiverActorIds: jsonb('deceiverActorIds').$type<string[]>().notNull(),
+});
+
 export const timeframedMarketsRelations = relations(
   timeframedMarkets,
   ({ one, many }) => ({
