@@ -51,12 +51,15 @@ import {
   asc,
   asPublic,
   asUser,
+  balanceTransactions,
+  type DrizzleClient,
   desc,
   getDbInstance,
   inArray,
   lte,
   predictionPriceHistories,
 } from '@feed/db';
+import { sql } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
@@ -76,6 +79,36 @@ function isWidgetMarketOpen(
   now: number
 ): boolean {
   return q.status === 'active' && new Date(q.resolutionDate).getTime() >= now;
+}
+
+/**
+ * All-time traded volume per market from the wallet ledger: the sum of
+ * ABS(amount) over BalanceTransaction rows of type pred_buy / pred_sell
+ * with relatedId = market id. Every user prediction trade writes exactly
+ * one such row (WalletService.debit 'pred_buy' on buy, WalletService.credit
+ * 'pred_sell' on sell), so this is the same aggregate the admin trading
+ * stats route already reports as volume — with no new table and no
+ * migration. Markets with no trades have no rows and read 0.
+ */
+async function loadTradedVolumes(
+  database: DrizzleClient,
+  marketIds: string[]
+): Promise<Map<string, number>> {
+  if (marketIds.length === 0) return new Map();
+  const rows = await database
+    .select({
+      marketId: balanceTransactions.relatedId,
+      volume: sql<number>`coalesce(sum(abs(${balanceTransactions.amount}::numeric)), 0)`,
+    })
+    .from(balanceTransactions)
+    .where(
+      and(
+        inArray(balanceTransactions.type, ['pred_buy', 'pred_sell']),
+        inArray(balanceTransactions.relatedId, marketIds)
+      )
+    )
+    .groupBy(balanceTransactions.relatedId);
+  return new Map(rows.map((row) => [String(row.marketId), Number(row.volume)]));
 }
 
 export const GET = withErrorHandling(async function GET(request: NextRequest) {
@@ -108,6 +141,10 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
         });
 
         const marketMap = new Map(markets.map((m) => [m.id, m]));
+
+        const volumeMap = await asPublic((database) =>
+          loadTradedVolumes(database, marketIds)
+        );
 
         // 24h change from the canonical recorded price history: the
         // latest snapshot at or before 24h ago is the baseline. A
@@ -164,7 +201,6 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
               const market = marketMap.get(String(q.id));
               const yesShares = market ? Number(market.yesShares) : 0;
               const noShares = market ? Number(market.noShares) : 0;
-              const totalShares = yesShares + noShares;
 
               const yesPrice = PredictionPricing.getCurrentPrice(
                 yesShares,
@@ -183,7 +219,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
                 question: q.text,
                 yesPrice,
                 noPrice,
-                volume: totalShares,
+                volume: volumeMap.get(String(q.id)) ?? 0,
                 endDate: q.resolutionDate,
                 changePercent24h:
                   changePercent24h !== undefined ? changePercent24h : undefined,
@@ -251,6 +287,10 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   const marketMap = new Map(markets.map((m) => [m.id, m]));
 
+  const volumeMap = await asUser(authUser, (database) =>
+    loadTradedVolumes(database, marketIds)
+  );
+
   // 24h change from the canonical recorded price history: the latest
   // snapshot at or before 24h ago is the baseline. A market with no
   // snapshot that old reports no change — the past pool is never
@@ -305,7 +345,6 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
       const market = marketMap.get(String(q.id));
       const yesShares = market ? Number(market.yesShares) : 0;
       const noShares = market ? Number(market.noShares) : 0;
-      const totalShares = yesShares + noShares;
 
       const yesPrice = PredictionPricing.getCurrentPrice(
         yesShares,
@@ -324,7 +363,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
         question: q.text,
         yesPrice,
         noPrice,
-        volume: totalShares,
+        volume: volumeMap.get(String(q.id)) ?? 0,
         endDate: q.resolutionDate,
         changePercent24h:
           changePercent24h !== undefined ? changePercent24h : undefined,
