@@ -32,7 +32,7 @@ import {
   verifyCronAuth,
   withErrorHandling,
 } from '@feed/api';
-import { db, eq, games } from '@feed/db';
+import { db, eq, games, getScheduledInferenceThrottle } from '@feed/db';
 import {
   ActorSocialActions,
   FollowingMechanics,
@@ -287,6 +287,25 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       'NPCTick'
     );
 
+    const throttle = process.env.NPC_LLM_DAILY_BUDGET_USD
+      ? await getScheduledInferenceThrottle()
+      : undefined;
+    if (throttle?.exhausted) {
+      recordCronExecution('npc-tick', new Date(startTime), {
+        success: false,
+        skipped: true,
+        reason: 'Inference budget exhausted or suspended',
+      });
+      return NextResponse.json({
+        success: false,
+        skipped: true,
+        reason: 'Inference budget exhausted or suspended',
+      });
+    }
+    const batchSize = throttle?.reduceBatch
+      ? Math.max(1, Math.floor(NPCS_PER_TICK / 2))
+      : NPCS_PER_TICK;
+
     // Give one due clue a slot in the ordinary decision batch.
     const marketClue = localnet
       ? await selectDueNpcMarketClue(
@@ -295,7 +314,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
         )
       : undefined;
     const clueNpc = activeNpcs.find((npc) => npc.id === marketClue?.actorId);
-    const ordinarySlots = NPCS_PER_TICK - Number(Boolean(clueNpc));
+    const ordinarySlots = batchSize - Number(Boolean(clueNpc));
 
     // Calculate probability for each active NPC (equal chance with spam prevention)
     const ordinaryNpcs = activeNpcs.filter((npc) => npc.id !== clueNpc?.id);
@@ -322,7 +341,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     // Reserve 30% of batch for diversity (NPCs that haven't posted today)
     const diversitySlotsReserved = Math.min(
       ordinarySlots,
-      Math.max(1, Math.floor(NPCS_PER_TICK * 0.3))
+      Math.max(1, Math.floor(batchSize * 0.3))
     );
 
     // Shuffle never-posted NPCs for fair selection among them using Fisher-Yates

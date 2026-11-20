@@ -12,6 +12,7 @@
 
 import { createGroq } from '@ai-sdk/groq';
 import type { IAgentRuntime } from '@elizaos/core';
+import { scheduledInferenceFetch } from '@feed/db';
 import { GROQ_MODELS, getAgentLLMBridge, getSurplusConfig } from '@feed/shared';
 import { generateText } from 'ai';
 import {
@@ -105,7 +106,11 @@ export function createAgentGroq(runtime?: IAgentRuntime) {
   if (surplus) {
     return createGroq({
       apiKey: surplus.apiKey,
-      fetch: runtime?.fetch ?? undefined,
+      fetch: Object.assign(
+        (input: RequestInfo | URL, options?: RequestInit) =>
+          scheduledInferenceFetch(input, options, runtime?.fetch ?? undefined),
+        { preconnect: fetch.preconnect }
+      ),
       baseURL: surplus.baseURL,
     });
   }

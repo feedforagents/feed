@@ -22,6 +22,7 @@ import {
   notExists,
   posts,
   postTags,
+  scheduledInferenceFetch,
   tags,
   trendingTags,
   users,
@@ -120,6 +121,7 @@ async function getOpenAIClient(): Promise<OpenAIClient | null> {
     openaiClient = new OpenAI({
       apiKey,
       baseURL,
+      fetch: scheduledInferenceFetch,
       maxRetries: 0,
       timeout: 60000,
     });

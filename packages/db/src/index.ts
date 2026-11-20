@@ -71,6 +71,7 @@ export type {
   UserWithAgentRelations,
   UserWithMetrics,
 } from './model-types';
+export * from './scheduled-inference-budget';
 // Re-export types
 export * from './types';
 export {
