@@ -103,6 +103,8 @@ export interface PredictionMarket {
   yesProbability?: number;
   noProbability?: number;
   tradeCount?: number;
+  /** Traded volume from the wallet ledger (all-time Σ ABS(amount) over pred_buy / pred_sell rows). */
+  volume?: number;
   resolutionProofUrl?: string | null;
   resolutionDescription?: string | null;
 }
