@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   addPublicReadHeaders,
   CACHE_KEYS,
@@ -97,6 +98,39 @@ async function loadTradedVolumes(
     )
     .groupBy(balanceTransactions.relatedId);
   return new Map(rows.map((row) => [String(row.marketId), Number(row.volume)]));
+}
+
+/**
+ * Traded-volume map cached under the list TTL (12 s), in the same
+ * namespace as the market list itself. The values are public
+ * (BalanceTransaction has no RLS policy, so asPublic returns the same
+ * sums) and the key is a hash of the page's market-id set, so a
+ * different page misses and refetches. Cached as [marketId, volume]
+ * entries because the cache JSON-serializes values and a Map would not
+ * survive the round-trip. Without this, the aggregate ran on every list
+ * request — including the paginated path, which has no list cache — and
+ * there is no index on BalanceTransaction.relatedId, so it scans every
+ * pred_buy / pred_sell row in the ledger. Every trade, resolve, or
+ * cancel invalidates this whole namespace
+ * (invalidateMarketsApiPredictionsList), so the cached volume cannot go
+ * stale past the next trade.
+ */
+async function loadCachedTradedVolumes(
+  fetchVolumes: () => Promise<Map<string, number>>,
+  marketIds: string[]
+): Promise<Map<string, number>> {
+  const key = `volumes:${createHash('sha256')
+    .update([...marketIds].sort().join(','))
+    .digest('hex')}`;
+  const entries = await getCacheOrFetch<[string, number][]>(
+    key,
+    async () => [...(await fetchVolumes()).entries()],
+    {
+      namespace: CACHE_KEYS.MARKETS_API_PREDICTIONS_LIST,
+      ttl: DEFAULT_TTLS.MARKETS_API_PREDICTIONS_LIST,
+    }
+  );
+  return new Map(entries);
 }
 
 function createPredictionService() {
@@ -205,11 +239,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // (yesShares + noShares) are not volume — a freshly seeded, never-traded
   // market would otherwise display its seed liquidity as volume and
   // outrank markets with real trades.
-  const volumeByMarket = await asPublic((database) =>
-    loadTradedVolumes(
-      database,
-      markets.map((m) => m.id)
-    )
+  const volumeByMarket = await loadCachedTradedVolumes(
+    () =>
+      asPublic((database) =>
+        loadTradedVolumes(
+          database,
+          markets.map((m) => m.id)
+        )
+      ),
+    markets.map((m) => m.id)
   );
 
   const userPositionsMap = new Map<string, PredictionUserPositionSnapshot[]>();
