@@ -372,29 +372,62 @@ export const GET = withErrorHandling(
     let postIsShared = false;
 
     if (post) {
-      const [[likeCountResult], [commentCountResult], [shareCountResult]] =
-        await Promise.all([
-          db
-            .select({ count: count() })
-            .from(reactions)
-            .where(
-              and(eq(reactions.postId, post.id), eq(reactions.type, 'like'))
-            ),
-          db
-            .select({ count: count() })
-            .from(comments)
-            .where(
-              and(eq(comments.postId, post.id), isNull(comments.deletedAt))
-            ),
-          db
-            .select({ count: count() })
-            .from(shares)
-            .where(eq(shares.postId, post.id)),
-        ]);
+      const [[likeCountResult], [shareCountResult]] = await Promise.all([
+        db
+          .select({ count: count() })
+          .from(reactions)
+          .where(
+            and(eq(reactions.postId, post.id), eq(reactions.type, 'like'))
+          ),
+        db
+          .select({ count: count() })
+          .from(shares)
+          .where(eq(shares.postId, post.id)),
+      ]);
 
       postLikeCount = Number(likeCountResult?.count ?? 0);
-      postCommentCount = Number(commentCountResult?.count ?? 0);
       postShareCount = Number(shareCountResult?.count ?? 0);
+
+      // Count only the comments the post detail screen can actually
+      // show for this viewer, mirroring the tree rule in
+      // GET /api/posts/[id]: replies whose parent is not visible are
+      // unreachable from the root and omitted with their parent, and
+      // comments by authors the viewer blocked or muted — or who
+      // blocked the viewer — are excluded with their subtrees, through
+      // the same loadViewerExcludedAuthorIds set this route already
+      // uses for its replies. The raw row count would promise comments
+      // the post detail header and the comment list never show, so the
+      // thread page header would disagree with the post detail screen
+      // for the same post and viewer.
+      const commentRows = await db
+        .select({
+          id: comments.id,
+          authorId: comments.authorId,
+          parentCommentId: comments.parentCommentId,
+        })
+        .from(comments)
+        .where(and(eq(comments.postId, post.id), isNull(comments.deletedAt)));
+      const visibleCommentRows =
+        excludedAuthorIds.size > 0
+          ? commentRows.filter((row) => !excludedAuthorIds.has(row.authorId))
+          : commentRows;
+      const childrenByParent = new Map<string | null, string[]>();
+      for (const row of visibleCommentRows) {
+        const siblings = childrenByParent.get(row.parentCommentId);
+        if (siblings) siblings.push(row.id);
+        else childrenByParent.set(row.parentCommentId, [row.id]);
+      }
+      let visibleCommentCount = 0;
+      const stack = [...(childrenByParent.get(null) ?? [])];
+      const visited = new Set<string>();
+      while (stack.length > 0) {
+        const id = stack.pop();
+        if (id === undefined || visited.has(id)) continue;
+        visited.add(id);
+        visibleCommentCount += 1;
+        stack.push(...(childrenByParent.get(id) ?? []));
+      }
+      postCommentCount = visibleCommentCount;
 
       if (canonicalUserId) {
         const [[likedResult], [sharedResult]] = await Promise.all([
