@@ -18,8 +18,10 @@ import {
   acquireAgentLock,
   agentRuntimeManager,
   autonomousCoordinator,
+  getNpcMarketCluePublication,
   npcBootstrapService,
   releaseAgentLock,
+  selectDueNpcMarketClue,
   withAgentExecutionLease,
 } from '@feed/agents';
 import {
@@ -48,6 +50,7 @@ import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { ensureEngineServices } from '@/lib/engine/ensure-engine-services';
+import { runNpcGroupWork } from './group-work';
 
 /** Game state shape for cache */
 interface GameState {
@@ -91,6 +94,13 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
 
   // Wire engine services (distributed locks, rate limiting, broadcasting)
   ensureEngineServices();
+
+  const localnet = process.env.DEPLOYMENT_ENV === 'localnet';
+  if (_req.nextUrl.searchParams.get('mode') === 'groups') {
+    return localnet
+      ? runNpcGroupWork(_req)
+      : NextResponse.json({ success: true, skipped: true });
+  }
 
   const startTime = Date.now();
   const processId = `npc-tick-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
@@ -277,8 +287,19 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       'NPCTick'
     );
 
+    // Give one due clue a slot in the ordinary decision batch.
+    const marketClue = localnet
+      ? await selectDueNpcMarketClue(
+          gameState.id,
+          activeNpcs.map((npc) => npc.id)
+        )
+      : undefined;
+    const clueNpc = activeNpcs.find((npc) => npc.id === marketClue?.actorId);
+    const ordinarySlots = NPCS_PER_TICK - Number(Boolean(clueNpc));
+
     // Calculate probability for each active NPC (equal chance with spam prevention)
-    const candidates = activeNpcs.map((npc) => ({
+    const ordinaryNpcs = activeNpcs.filter((npc) => npc.id !== clueNpc?.id);
+    const candidates = ordinaryNpcs.map((npc) => ({
       npc,
       probability: postingProbabilityService.calculate(
         npc,
@@ -292,14 +313,17 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     // This ensures broader coverage across all NPCs instead of same ones repeatedly
     // =======================================================================
     const today = toISO(now).split('T')[0];
-    const neverPostedToday = activeNpcs.filter((npc) => {
+    const neverPostedToday = ordinaryNpcs.filter((npc) => {
       const state = stateMap.get(npc.id);
       const lastPost = state?.lastPostAt;
       return !lastPost || toISO(lastPost).split('T')[0] !== today;
     });
 
     // Reserve 30% of batch for diversity (NPCs that haven't posted today)
-    const diversitySlotsReserved = Math.max(1, Math.floor(NPCS_PER_TICK * 0.3));
+    const diversitySlotsReserved = Math.min(
+      ordinarySlots,
+      Math.max(1, Math.floor(NPCS_PER_TICK * 0.3))
+    );
 
     // Shuffle never-posted NPCs for fair selection among them using Fisher-Yates
     const fisherYatesShuffle = <T>(arr: T[]): T[] => {
@@ -323,13 +347,14 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     const remainingCandidates = candidates.filter(
       (c) => !diversityIds.has(c.npc.id)
     );
-    const regularSlots = NPCS_PER_TICK - diversitySelection.length;
+    const regularSlots = ordinarySlots - diversitySelection.length;
     const regularSelection = postingProbabilityService.weightedSample(
       remainingCandidates,
       regularSlots
     );
 
     const npcsThisTick = [
+      ...(clueNpc ? [clueNpc] : []),
       ...diversitySelection,
       ...regularSelection.map((s) => s.npc),
     ];
@@ -427,7 +452,8 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
               runtime,
               NPC_TICK_CONFIG.recordTrajectories,
               true,
-              signal
+              signal,
+              npc.id === clueNpc?.id ? marketClue : undefined
             )
         );
 
@@ -665,6 +691,17 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     const success =
       !abortedDueToCircuitBreaker && (processed === 0 || errors < processed);
 
+    const cluePublication = marketClue
+      ? await getNpcMarketCluePublication(marketClue)
+      : undefined;
+    const clueMetrics = localnet
+      ? {
+          marketCluePostId: cluePublication?.postId ?? null,
+          marketCluePublishedAt: cluePublication?.publishedAt ?? null,
+          oldestPendingClueAt: marketClue?.oldestPendingAt ?? null,
+        }
+      : undefined;
+
     // Record metrics
     recordCronExecution('npc-tick', new Date(startTime), {
       success,
@@ -676,6 +713,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       errorCount: errors,
       skippedLocked: skippedDueToLock,
       abortedDueToCircuitBreaker,
+      ...clueMetrics,
       // Diversity metrics for monitoring NPC posting distribution
       diversityMetrics: {
         uniquePostersThisTick,
@@ -696,6 +734,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       npcUnfollows,
       errors,
       abortedDueToCircuitBreaker,
+      ...clueMetrics,
       // Diversity metrics for monitoring NPC posting distribution
       diversityMetrics: {
         uniquePostersThisTick,

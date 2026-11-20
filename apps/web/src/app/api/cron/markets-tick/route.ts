@@ -65,6 +65,7 @@ import {
   posts,
   questions,
   sql,
+  timeframedMarketRoles,
   timeframedMarkets,
   worldEvents,
 } from '@feed/db';
@@ -73,6 +74,7 @@ import {
   dailyTopicService,
   deriveTopicFromText,
   FeedLLMClient,
+  getCurrentArcState,
   getMaxSubMarketDuration,
   getPredictionMarketInitialization,
   isEligibleActor,
@@ -1906,6 +1908,7 @@ async function createMarketForTimeframe(
     // Wrap all DB writes in a transaction to prevent orphaned rows
     // If any step fails, the entire transaction rolls back
     let market!: { id: string };
+    const localnet = process.env.DEPLOYMENT_ENV === 'localnet';
 
     await db.transaction(async (tx) => {
       // Step 1: Create the question in the database
@@ -1957,7 +1960,7 @@ async function createMarketForTimeframe(
       await tx.insert(timeframedMarkets).values({
         id: timeframedMarketId,
         questionId,
-        timeframe: mapTimeframeToDbType(timeframe),
+        timeframe: dbTimeframe,
         granularTimeframe: timeframe, // Store precise timeframe key ('15m', '30m', etc.)
         category: inferCategory(questionData.text),
         topicKey: questionTopic.topicKey,
@@ -1965,12 +1968,21 @@ async function createMarketForTimeframe(
         topicDate: questionTopic.date,
         startTime: now,
         endTime: resolutionDate,
-        arcState: (arcPlan.phaseOrder[0] || 'setup') as ArcStateType,
+        arcState: localnet
+          ? getCurrentArcState(now, resolutionDate, dbTimeframe, now)
+          : ((arcPlan.phaseOrder[0] || 'setup') as ArcStateType),
         arcStateEnteredAt: now,
         // Store affiliated actors/orgs for context in NPC behavior
         affiliatedActorIds: arcPlan.affiliatedActorIds,
         affiliatedOrgIds: arcPlan.affiliatedOrgIds,
       });
+      if (localnet) {
+        await tx.insert(timeframedMarketRoles).values({
+          timeframedMarketId,
+          insiderActorIds: arcPlan.insiders,
+          deceiverActorIds: arcPlan.deceivers,
+        });
+      }
     });
 
     logger.info(
@@ -2414,6 +2426,10 @@ async function createSubMarket(
       timeframe,
       topic: inheritedTopic,
       arcState: (arcPlan.phaseOrder[0] || 'setup') as ArcStateType,
+      roles: {
+        insiderActorIds: arcPlan.insiders,
+        deceiverActorIds: arcPlan.deceivers,
+      },
       affiliatedActorIds: finalAffiliatedActorIds,
       affiliatedOrgIds: finalAffiliatedOrgIds,
       gameId: gameState.id,
