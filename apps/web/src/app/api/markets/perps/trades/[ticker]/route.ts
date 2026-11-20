@@ -352,7 +352,16 @@ export const GET = withErrorHandling(
         leverage: pos.leverage,
         entryPrice: Number(pos.entryPrice),
         currentPrice: Number(pos.currentPrice),
-        unrealizedPnL: Number(pos.unrealizedPnL),
+        // Open rows show the P&L the close will actually realize: the
+        // stored mark PnL net of accrued funding (settlement is
+        // realizedPnL = pnl - fundingPaid, PerpMarketService close
+        // paths). The stored value is price-only, so the feed overstated
+        // it by exactly fundingPaid. Closed rows show no P&L in the feed
+        // ("Position closed"), so their stored values pass through
+        // untouched.
+        unrealizedPnL: pos.closedAt
+          ? Number(pos.unrealizedPnL)
+          : Number(pos.unrealizedPnL) - Number(pos.fundingPaid ?? 0),
         liquidationPrice: Number(pos.liquidationPrice),
         timestamp: pos.openedAt,
         closedAt: pos.closedAt,
