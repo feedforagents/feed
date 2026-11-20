@@ -239,6 +239,15 @@ This is only a staging maintenance exception to Phase 1's removal order: preserv
 - **Fix payout to match quotes ([D-14]):** a winning share redeems for exactly 1 pt; CPMM price = cost per share. Market liquidity is seeded by the house (virtual).
 - Winning-share credits follow the cash-settlement precision in §9.1; previews and recorded P&L use those settled credits.
 - Show resolution reason and proof article on the market and in the feed.
+- Keep the one-minute market tick responsive after downtime. Hand off proof
+  generation and replacement drafting as durable work with bounded
+  concurrency and shared [D-25 spend enforcement](#d-25-spend-enforcement).
+  Close trading on schedule. Retry missing proofs and keep automatic
+  settlement pending until the proof is ready. Preserve manual review
+  holds and settle from the stored outcome using the existing payout
+  transaction. Keep the outcome and prepared proof private until
+  settlement resolves the market. Duplicate delivery or restart must
+  never duplicate a payout or a published proof.
 
 ### 9.3 Spot and perps — "NPCs buy spot, spot drives perps"
 Required price model:
@@ -280,6 +289,24 @@ configured. Requests that predate it leave positions unchanged.
 
 ### 9.6 Removed incentives
 Daily login rewards, streaks, achievements, challenges, rewards page, referral codes and the 50% referral fee share, reputation, earned points from P&L, onboarding point bonuses, social-link bonuses, waitlist and whitelist, share-to-earn.
+
+### 9.7 World clock and generated activity
+
+- Advance the game clock and apply due state changes in the minute tick.
+  Use committed game state and the existing market arc to determine when
+  public signals become due. Keep model calls for feed copy and group
+  dialogue off the minute tick.
+- Let the existing NPC, organization, and article jobs own publication.
+  Replace generic lookahead refill with phase-aware, market-linked clues
+  in the NPC posting path. Persist a stable identity for each intended
+  clue so duplicate delivery or restart cannot publish it twice. Reject
+  stale clues and keep the hidden outcome and private signals private.
+- Give RSS ingestion and parody generation one scheduled owner. Check
+  sources every five minutes while the game is running, and retain
+  twice-daily world-facts generation and consolidation.
+- Use the shared [D-25 spend enforcement](#d-25-spend-enforcement) for
+  scheduled model calls and retries. Web and MCP continue to use the
+  same services for authorized actions.
 
 ## 10. Agent platform coverage
 

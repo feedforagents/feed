@@ -4,6 +4,7 @@
  * Priority: Groq > Claude > OpenAI
  */
 
+import { setTimeout as waitForRetry } from 'node:timers/promises';
 import { scheduledInferenceFetch } from '@feed/db';
 import OpenAI from 'openai';
 import 'dotenv/config';
@@ -341,6 +342,7 @@ export class FeedLLMClient {
       temperature?: number;
       maxTokens?: number;
       format?: 'xml' | 'json';
+      signal?: AbortSignal;
       /** Prompt type identifier for logging and monitoring */
       promptType?: string;
       /** Prompt template for logging and monitoring */
@@ -355,6 +357,7 @@ export class FeedLLMClient {
       temperature = 0.7,
       maxTokens: requestedMaxTokens = 32000,
       format = 'xml',
+      signal,
       promptType = 'unknown',
       promptTemplate,
     } = options;
@@ -421,6 +424,7 @@ WORLD RULES:
         content: string;
       }>
     ) => {
+      signal?.throwIfAborted();
       const started = Date.now();
       const metadata = {
         provider: this.provider,
@@ -436,19 +440,22 @@ WORLD RULES:
           .join('\n\n'),
         messages: requestMessages,
       };
-      const response = await this.client!.chat.completions.create({
-        model,
-        messages: requestMessages,
-        ...(useJsonFormat ? { response_format: useJsonFormat } : {}),
-        temperature: completionTemperature,
-        max_tokens: maxTokens,
-        ...(model.includes('qwen3')
-          ? { reasoning_effort: 'none' as const }
-          : {}),
-        ...(model.includes('gpt-5')
-          ? { reasoning_effort: 'minimal' as const }
-          : {}),
-      }).catch((error: Error) => {
+      const response = await this.client!.chat.completions.create(
+        {
+          model,
+          messages: requestMessages,
+          ...(useJsonFormat ? { response_format: useJsonFormat } : {}),
+          temperature: completionTemperature,
+          max_tokens: maxTokens,
+          ...(model.includes('qwen3')
+            ? { reasoning_effort: 'none' as const }
+            : {}),
+          ...(model.includes('gpt-5')
+            ? { reasoning_effort: 'minimal' as const }
+            : {}),
+        },
+        signal ? { signal } : undefined
+      ).catch((error: Error) => {
         attemptCalls.push({
           ...metadata,
           rawResponse: '',
@@ -682,6 +689,7 @@ WORLD RULES:
       } catch (error: unknown) {
         failedAttemptDurationMs = Date.now() - callStartTime;
         outcomeError = error instanceof Error ? error.message : String(error);
+        signal?.throwIfAborted();
         const err = error as {
           status?: number;
           message?: string;
@@ -745,7 +753,7 @@ WORLD RULES:
               'FeedLLMClient'
             );
 
-            await new Promise((resolve) => setTimeout(resolve, delay));
+            await waitForRetry(delay, undefined, { signal });
             continue;
           }
         }
@@ -773,7 +781,7 @@ WORLD RULES:
             'FeedLLMClient'
           );
 
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          await waitForRetry(delay, undefined, { signal });
           continue;
         }
 
@@ -800,7 +808,7 @@ WORLD RULES:
             'FeedLLMClient'
           );
 
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          await waitForRetry(delay, undefined, { signal });
           continue;
         }
 

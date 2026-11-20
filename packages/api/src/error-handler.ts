@@ -32,6 +32,7 @@ const scheduledInferenceRoutes = new Set([
   '/api/cron/organization-tick',
   '/api/cron/article-tick',
   '/api/cron/world-facts',
+  '/api/cron/training-check',
 ]);
 
 function sanitizeHeaders(headers: Headers): Record<string, string> {

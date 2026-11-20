@@ -4,8 +4,10 @@ import { StaticDataRegistry } from '@feed/engine';
 import * as agentLLM from '../../llm/agent-llm';
 import * as npcContextProvider from '../../plugins/feed/providers/npc-game-context';
 import { normalizeDecisionAction } from '../action-normalization';
+import * as directExecutors from '../DirectExecutors';
 import { extractFirstJsonObject } from '../decision-json';
 import { MultiStepExecutor } from '../MultiStepExecutor';
+import type { NpcMarketClue } from '../npc-market-clue';
 import { normalizeSocialDecisionParameters } from '../social-parameter-normalization';
 import {
   Actions,
@@ -715,7 +717,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
   const actor = StaticDataRegistry.getAllActors()[0]!;
   afterEach(() => mock.restore());
 
-  function prepare(executor: MultiStepExecutor) {
+  function prepare(executor: MultiStepExecutor, posting = false) {
     const runtime = {
       agentId: actor.id,
       character: {
@@ -723,7 +725,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
         feed: {
           autonomy: {
             trading: false,
-            posting: false,
+            posting,
             commenting: false,
             dms: false,
             groups: false,
@@ -738,7 +740,9 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       openPositions: 0,
       pendingCommentReplies: [],
       pendingChatMessages: [],
-      enabledFeatures: [Features.ENGAGING],
+      enabledFeatures: posting
+        ? [Features.ENGAGING, Features.POSTING]
+        : [Features.ENGAGING],
       predictionMarkets: [],
       perpMarkets: [],
       recentPosts: [
@@ -761,7 +765,10 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       getLatestContextRefreshSummary: MultiStepExecutor['getLatestContextRefreshSummary'];
       recordTrajectoryStep: MultiStepExecutor['recordTrajectoryStep'];
     };
-    spyOn(npcContextProvider, 'getNpcGameContext').mockResolvedValue('');
+    const gameContext = spyOn(
+      npcContextProvider,
+      'getNpcGameContext'
+    ).mockResolvedValue('');
     spyOn(executor, 'gatherContext').mockResolvedValue(context);
     spyOn(internal, 'getLatestContextRefreshSummary').mockResolvedValue(
       undefined
@@ -783,7 +790,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       summary: 'Liked',
       timestamp: Date.now(),
     });
-    return { runtime, decision, execute };
+    return { context, gameContext, runtime, decision, execute };
   }
 
   for (const [label, executor, expected] of [
@@ -862,6 +869,116 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     );
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('an offered clue takes the only POST slot even if its publication is stale', async () => {
+    spyOn(Math, 'random').mockReturnValue(0.5);
+    const executor = new MultiStepExecutor(2);
+    const { context, gameContext, runtime, decision, execute } = prepare(
+      executor,
+      true
+    );
+    execute.mockRestore();
+    gameContext.mockImplementation(async (_actorId, publicOnly) =>
+      publicOnly ? 'Public world fact canary' : 'Private outcome canary'
+    );
+    context.pendingChatMessages = [
+      {
+        id: 'dm-1',
+        chatId: 'private-chat',
+        chatName: 'Private DM',
+        isGroupChat: false,
+        author: 'Other',
+        content: 'Private DM canary',
+        recentMessages: [],
+        formattedContext: 'Private DM canary',
+        timestamp: new Date(),
+      },
+    ];
+    context.groupChats = [{ id: 'group-1', name: 'Private group name canary' }];
+    context.groupChatIntel = [
+      {
+        chatName: 'Private group chat',
+        summary: 'Private group intel canary',
+        keyFacts: [],
+        recentMessages: [],
+      },
+    ];
+    context.contextRefreshSummary = 'Private context refresh canary';
+    context.narrativeContext = {
+      resolvedQuestions: '',
+      recentTrades: '',
+      eventSignals: 'Private event signal canary',
+    };
+    const publish = spyOn(
+      directExecutors,
+      'executeDirectPost'
+    ).mockResolvedValue({
+      success: true,
+      marketClueStatus: 'stale',
+    });
+    const now = new Date();
+    const clue: NpcMarketClue = {
+      actorId: actor.id,
+      gameId: 'game-1',
+      marketId: 'market-1',
+      questionId: 'question-1',
+      frameId: 'frame-1',
+      phase: 'live',
+      phaseEnteredAt: now,
+      oldestPendingAt: now,
+      question: 'Will the lighthouse reopen?',
+    };
+    const postDecision = {
+      thought: 'Post an update about the lighthouse.',
+      action: Actions.POST,
+      parameters: { content: 'Watch for a new beacon scan tonight.' },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({
+        decision: { ...postDecision },
+        rawResponse: '{}',
+      })
+      .mockResolvedValueOnce({
+        decision: { ...postDecision },
+        rawResponse: '{}',
+      })
+      .mockResolvedValueOnce({
+        decision: {
+          thought: 'Finish',
+          action: Actions.FINISH,
+          parameters: {},
+          isFinish: true,
+        },
+        rawResponse: '{}',
+      });
+
+    const result = await executor.execute(
+      actor.id,
+      runtime,
+      true,
+      undefined,
+      clue
+    );
+
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish.mock.calls[0]?.[0].marketClue).toBe(clue);
+    expect(result.actionsExecuted.posts).toBe(0);
+    expect(decision.mock.calls[0]?.[0]).toContain(
+      'A market update is due for this question:'
+    );
+    expect(decision.mock.calls[0]?.[0]).toContain('Public world fact canary');
+    expect(decision.mock.calls[0]?.[0]).toContain('An actionable post');
+    expect(decision.mock.calls[0]?.[0]).not.toMatch(/Private .* canary/);
+    expect(gameContext.mock.calls[0]).toEqual([actor.id, true]);
+    expect(decision.mock.calls[1]?.[0]).toContain('Private outcome canary');
+    expect(decision.mock.calls[1]?.[0]).not.toContain(
+      'A market update is due for this question:'
+    );
+    expect(decision.mock.calls[2]?.[4]?.feedback).toContain(
+      'feature "posting" is disabled'
+    );
   });
 
   test('repeated disabled decisions exhaust the existing two attempts without execution', async () => {

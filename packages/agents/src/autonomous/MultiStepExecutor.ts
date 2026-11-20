@@ -56,6 +56,7 @@ import {
   parseDecisionJson,
 } from './decision-json';
 import { executeDirectShareInformation } from './intel-payment-executors';
+import { describeNpcMarketClue, type NpcMarketClue } from './npc-market-clue';
 import { normalizeSocialDecisionParameters } from './social-parameter-normalization';
 import { topicDiversityService } from './TopicDiversityService';
 import {
@@ -174,7 +175,8 @@ export class MultiStepExecutor {
     agentUserId: string,
     runtime: IAgentRuntime,
     isNpc = true,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    marketClue?: NpcMarketClue
   ): Promise<MultiStepExecutorResult> {
     signal?.throwIfAborted();
     const actor = StaticDataRegistry.getActor(agentUserId);
@@ -277,11 +279,10 @@ export class MultiStepExecutor {
       ? `${baseSystemPrompt}\n\n${balanceGuidance}`
       : baseSystemPrompt;
 
-    // Missing NPC context is a failed tick, never permission to act without it.
-    const npcGameContext = await getNpcGameContext(agentUserId);
-
-    const contextRefreshSummary =
-      await this.getLatestContextRefreshSummary(agentUserId);
+    let publicNpcGameContext: string | undefined;
+    let privateNpcContext:
+      | { game: string; refreshSummary?: string }
+      | undefined;
 
     // NPC budgets may be reduced, but cannot exceed the four-step ceiling.
     const effectiveMaxIterations = process.env.NPC_LLM_DAILY_BUDGET_USD
@@ -301,23 +302,60 @@ export class MultiStepExecutor {
         'MultiStepExecutor'
       );
 
-      // Compute per-iteration effectiveFeatures based on current trace
-      // This enforces one-POST-per-tick: if we've already posted, remove 'posting'
-      const hasPostedThisTick = trace.some(
+      // A stale or duplicate clue also consumes this tick's only POST.
+      const postSlotUsed = trace.some(
         (r) => r.actionType === Actions.POST && r.success
       );
-      const effectiveFeatures = hasPostedThisTick
-        ? enabledFeatures.filter((f) => f !== Features.POSTING)
-        : enabledFeatures;
+      const offeredMarketClue =
+        !postSlotUsed && enabledFeatures.includes(Features.POSTING)
+          ? marketClue
+          : undefined;
+      const effectiveFeatures = offeredMarketClue
+        ? enabledFeatures.filter(
+            (feature) =>
+              feature !== Features.DMS && feature !== Features.GROUP_CHATS
+          )
+        : postSlotUsed
+          ? enabledFeatures.filter((feature) => feature !== Features.POSTING)
+          : enabledFeatures;
+
+      // The clue prompt sees public context only. Load the ordinary context
+      // when the remaining actions no longer have a clue to publish.
+      let npcGameContext: string;
+      if (offeredMarketClue) {
+        publicNpcGameContext ??= await getNpcGameContext(agentUserId, true);
+        npcGameContext = publicNpcGameContext;
+      } else {
+        privateNpcContext ??= {
+          game: await getNpcGameContext(agentUserId),
+          refreshSummary:
+            await this.getLatestContextRefreshSummary(agentUserId),
+        };
+        npcGameContext = privateNpcContext.game;
+      }
 
       // Gather fresh context (state refreshes after each action)
       const contextStartTime = Date.now();
-      const context = await this.gatherContext(
+      const gathered = await this.gatherContext(
         agentUserId,
         effectiveFeatures,
         isNpc,
-        contextRefreshSummary
+        offeredMarketClue ? undefined : privateNpcContext?.refreshSummary
       );
+      const context: AgentTickContext = offeredMarketClue
+        ? {
+            ...gathered,
+            pendingChatMessages: [],
+            groupChats: undefined,
+            groupChatIntel: undefined,
+            contextRefreshSummary: undefined,
+            narrativeContext: undefined,
+            worldEvents: undefined,
+            relationships: undefined,
+            recentMemory: undefined,
+            agentTradeHistory: undefined,
+          }
+        : gathered;
       iterationTimings.gatherContext = Date.now() - contextStartTime;
 
       const actionability = this.getActionabilitySummary(context);
@@ -348,7 +386,11 @@ export class MultiStepExecutor {
         traceActionResults: trace,
         context,
         isNpc,
-        npcGameContext,
+        npcGameContext: offeredMarketClue
+          ? `${npcGameContext}
+
+${describeNpcMarketClue(offeredMarketClue)}`
+          : npcGameContext,
         characterStyle: characterStyle?.post,
         characterPostExamples,
       });
@@ -505,7 +547,8 @@ export class MultiStepExecutor {
         runtime,
         isNpc,
         { prompt, completion: rawResponse, thought: decision.thought },
-        agentUserId
+        agentUserId,
+        offeredMarketClue
       );
       await this.recordTrajectoryStep(runtime, decision, actionResult);
       iterationTimings.actionExecution = Date.now() - actionStartTime;
@@ -1264,7 +1307,8 @@ export class MultiStepExecutor {
     _runtime: IAgentRuntime,
     _isNpc: boolean,
     logContext?: { prompt: string; completion: string; thought: string },
-    ownerId: string = agentUserId
+    ownerId: string = agentUserId,
+    marketClue?: NpcMarketClue
   ): Promise<ActionTraceResult> {
     const normalizedAction = normalizeDecisionAction(action);
 
@@ -1305,7 +1349,12 @@ export class MultiStepExecutor {
         return this.executeTrade(agentUserId, parameters, ownerId);
 
       case Actions.POST:
-        return this.executePost(agentUserId, parameters, logContext);
+        return this.executePost(
+          agentUserId,
+          parameters,
+          logContext,
+          marketClue
+        );
 
       case Actions.COMMENT:
         return this.executeComment(agentUserId, parameters, logContext);
@@ -1618,7 +1667,8 @@ export class MultiStepExecutor {
   private async executePost(
     agentUserId: string,
     parameters: Record<string, unknown>,
-    logContext?: { prompt: string; completion: string; thought: string }
+    logContext?: { prompt: string; completion: string; thought: string },
+    marketClue?: NpcMarketClue
   ): Promise<ActionTraceResult> {
     // Post rate limiting removed — all agents can post freely
 
@@ -1635,7 +1685,24 @@ export class MultiStepExecutor {
       };
     }
 
-    const postResult = await executeDirectPost({ agentUserId, content });
+    const postResult = await executeDirectPost({
+      agentUserId,
+      content,
+      marketClue,
+    });
+    if (postResult.marketClueStatus && !postResult.postId) {
+      return {
+        actionType: Actions.POST,
+        success: true,
+        summary: `Skipped market clue: ${postResult.marketClueStatus}`,
+        result: {
+          skipped: true,
+          marketClueStatus: postResult.marketClueStatus,
+        },
+        parameters,
+        timestamp: Date.now(),
+      };
+    }
 
     if (postResult.success && logContext) {
       await this.logActivity(agentUserId, {
@@ -1661,6 +1728,7 @@ export class MultiStepExecutor {
       result: {
         success: postResult.success,
         postId: postResult.postId,
+        marketClueStatus: postResult.marketClueStatus,
         error: postResult.error,
       },
       parameters,
@@ -2590,7 +2658,7 @@ export class MultiStepExecutor {
     };
 
     for (const result of trace) {
-      if (!result.success) continue;
+      if (!result.success || result.result?.skipped) continue;
 
       switch (result.actionType) {
         case Actions.TRADE:

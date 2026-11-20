@@ -62,6 +62,7 @@ import {
   eq,
   favorites,
   follows,
+  followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
@@ -1850,22 +1851,7 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  const existing = await db.follow.findFirst({
-    where: {
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
-  if (existing) {
-    return { success: true };
-  }
-  await db.follow.create({
-    data: {
-      id: await generateSnowflakeId(),
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
+  await followUserWithBlockCheck(agent.userId, args.userId);
   return { success: true };
 }
 

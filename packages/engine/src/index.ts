@@ -240,6 +240,7 @@ export * from './services';
 // Narrative State Service (arc plans, phases, signal direction)
 export {
   type DatabaseArcPlan,
+  getActorRoleSignal,
   getArcPlan,
   getPhaseForDay as getArcPhaseForDay,
   getSignalDirection,

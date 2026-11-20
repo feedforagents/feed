@@ -74,6 +74,19 @@ const ADDITIONAL_CRONS: CronSchedule[] = [
   },
 ];
 
+const LOCALNET_CRONS: CronSchedule[] = [
+  {
+    path: '/api/cron/npc-tick?mode=groups',
+    schedule: '*/2 * * * *',
+    description: 'NPC group interactions',
+  },
+  {
+    path: '/api/cron/world-facts?mode=headlines',
+    schedule: '*/5 * * * *',
+    description: 'RSS and parody headlines',
+  },
+];
+
 /**
  * Check if a cron should run based on its schedule and current time
  */
@@ -135,12 +148,11 @@ function matchesCronField(field: string, value: number): boolean {
  * Trigger additional crons that should run at the current time.
  * Called from game-tick to ensure all crons run even on staging.
  */
-export async function triggerScheduledCrons(): Promise<{
+export async function triggerScheduledCrons(now = new Date()): Promise<{
   triggered: string[];
   failed: string[];
   skipped: string[];
 }> {
-  const now = new Date();
   const triggered: string[] = [];
   const failed: string[] = [];
   const skipped: string[] = [];
@@ -148,6 +160,8 @@ export async function triggerScheduledCrons(): Promise<{
   // Get base URL for internal API calls
   const baseUrl = getBaseUrl();
 
+  const localnet = process.env.DEPLOYMENT_ENV === 'localnet';
+  const localnetCrons = localnet ? LOCALNET_CRONS : [];
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret) {
     logger.warn(
@@ -158,14 +172,14 @@ export async function triggerScheduledCrons(): Promise<{
     return {
       triggered: [],
       failed: [],
-      skipped: ADDITIONAL_CRONS.map((c) => c.path),
+      skipped: [...ADDITIONAL_CRONS, ...localnetCrons].map((c) => c.path),
     };
   }
 
-  for (const cron of ADDITIONAL_CRONS) {
+  async function trigger(cron: CronSchedule, timeoutMs: number) {
     if (!shouldRunCron(cron.schedule, now)) {
       skipped.push(cron.path);
-      continue;
+      return;
     }
 
     try {
@@ -180,9 +194,12 @@ export async function triggerScheduledCrons(): Promise<{
         headers: {
           Authorization: `Bearer ${cronSecret}`,
           'User-Agent': 'feed-internal-cron-scheduler/1.0',
+          ...(localnet
+            ? { 'X-Cloudflare-Cron-Time': String(now.getTime()) }
+            : {}),
         },
         // Don't wait too long for each cron
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
 
       if (response.ok) {
@@ -209,6 +226,15 @@ export async function triggerScheduledCrons(): Promise<{
       );
     }
   }
+
+  // Slow auxiliary work starts independently of the legacy schedule.
+  const localnetRuns = Promise.all(
+    localnetCrons.map((cron) => trigger(cron, 110_000))
+  );
+  for (const cron of ADDITIONAL_CRONS) {
+    await trigger(cron, 30_000);
+  }
+  await localnetRuns;
 
   logger.info(
     'Internal cron scheduler complete',
