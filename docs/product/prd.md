@@ -44,7 +44,7 @@ These shape the plan. Paths are relative to the Feed repo root.
 
 | # | Finding | Impact |
 |---|---|---|
-| F1 | **The game may not be running in production.** `workers/cron/wrangler.production.jsonc:21` sets `CRON_ENABLED: "false"`, `.env.example` defaults `GAME_START=pause`, and the live feed shows "No Recommendations Yet" to visitors. Two scheduled jobs (`reputation-sync`, `profile-chain-sync`) have no route. | P0: restore and verify the tick before anything else. |
+| F1 | **Game tick health needs live verification.** The checked-in production Worker config now sets `CRON_ENABLED: "true"`, and `.env.example` still defaults `GAME_START=pause`. The initial assessment found an empty visitor feed. The Worker and internal scheduler no longer reference the missing `reputation-sync` and `profile-chain-sync` routes. | P0: verify live tick delivery and visitor-visible updates on staging before rollout. |
 | F2 | **There is no spot market.** Perp price = f(base price, net perp open interest of everyone) plus a random-walk "volatility" sim whose state is an in-process `Map` that resets on cold start. Each trade recomputes from base, snapping drift back. Narrative events do not move prices. | The "NPC spot buying drives perps" model must be built (§9.3). |
 | F3 | **MCP is not usable by ChatGPT/Claude connectors.** Hand-rolled JSON-RPC over POST, protocol default 2024-11-05, no Streamable HTTP, no OAuth 2.1 / DCR / PKCE, no `.well-known` metadata. Auth is static per-user API keys. Two routes (`/mcp`, `/api/mcp`) behave differently; `/api/mcp` accepts Bearer at the gate but rejects it at tool execution. Advertises resources/prompts it doesn't implement. | Rebuild the MCP transport and auth on the official SDK (§8). |
 | F4 | MCP has 76 tools, but writes straight to the DB, skipping REST business logic (notifications, repost posts). `share_post` ignores the quote comment. No home feed, no start-a-DM, no reply-to-post, no unrepost. `get_portfolio` and `get_leaderboard` build `/api/api/...` URLs. | Tool layer should call the same services as REST, not reimplement them. |
@@ -219,6 +219,7 @@ ChatGPT Apps SDK / MCP Apps widgets for the feed, a market card, and the portfol
 ### 9.1 Currency
 - **One currency: Points**, shown as `pts` with no `$` sign ([D-10]). Kills the "ƀ"/"$"/reputation-points confusion.
 - **Settlement precision:** cash inputs have at most two decimal places; reject finer inputs before funds move. Cash proceeds round down to two decimal places, with the remainder retained in house liquidity. P&L uses the amount actually credited. Splitting a trade or settlement must never increase the total points credited. Share quantities may retain their existing finer precision.
+- **Trading fee:** one canonical fee for every trade (prediction and perps): the fee is computed on the cent-settled amount — the trade amount settled per the precision rule above — and rounded UP to whole cents. Execution, previews and the fee ledger (the recorded fee, its platform/referrer split and `users.totalFeesPaid`) all use that same fee, so the books always agree with what the trader was charged. The required partition invariant concerns the points actually credited: splitting must never increase total trader credit. Per-leg settlement dust can make total recorded fees differ, including lower split fees; fee monotonicity is not promised, and each execution must still reconcile its charge with its ledger. Consequences for small trades are accepted and must stay visible: at the 0.1% rate a 1 pt trade pays a 0.01 pt fee (an effective 1%), and a sale whose settled proceeds are 0.01 pt nets 0 after its fee. A supported legacy perp full close whose notional settles to zero also has a zero fee; this does not lower the minimum for new orders, and its cash credit must still follow settlement precision.
 - **Start: 100 pts** per account, once, at phone verification ([D-11]). The user's message said "$100"; the code today grants 1,000.
 - **Buy more** on feed.fun only, via Stripe Checkout: cards, Apple Pay / Google Pay, and Stripe stablecoin payments (USDC; settles to USD; 1.5% fee) to cover "crypto." Rate: 100 pts per $1; packs $5 / $20 / $50 ([D-12]). No other crypto rails; x402 deleted.
 - **Points are game points [D-18].** They can be bought but never cashed out, sold, transferred between users, redeemed for anything, or won as prizes. They have no monetary value outside the game. Terms of Service and every purchase screen say so. Purchases are live at launch.
@@ -226,6 +227,12 @@ ChatGPT Apps SDK / MCP Apps widgets for the feed, a market card, and the portfol
 - Purchased points never affect leaderboard rank (§9.4).
 - **Going broke:** a player at 0 pts with no open positions can keep playing socially and can buy more. No free refills ([D-15]).
 - Remove `reputationPoints`, `earnedPoints`, `invitePoints`, `bonusPoints`, all `pointsAwardedFor*` flags.
+
+**Approved — staging-only schema compatibility.** The maintainer approved this bounded staging maintenance exception on 2026-11-12. To restore accounting in §9.1 and retained perps in §9.3 without deleting existing staging data, only a staging database with the exact original `0000_fresh_baseline` receipt may use the original additive migrations `0003_prediction_cash_cost_basis`, `0004_leverage_cap_20`, and `0005_trading_fee_idempotency_key` through the normal pinned migrator. Its genuine resulting history is `[0000, 0003, 0004, 0005]`; no receipts may be invented, adopted or rewritten for skipped `0001`/`0002` removals.
+
+This path must fail closed on unsupported history or physical state. Preserve APP/DIRECT primary identity, ordinary public-table/OID and migration ownership checks, forced SQL target resolution, TLS, grants/RLS, lock limits, current-commit/required-check guards, and the verified concurrent index before application upload. Local evidence must prove genuine receipts, unchanged nonempty retained data, transaction rollback, postflight physical shapes and safe reruns; existing required quality gates remain mandatory.
+
+This is only a staging maintenance exception to Phase 1's removal order: preserve retired Farcaster/NFT data, do not claim those removals or any MVP phase complete, and require a separate reviewed migration for future cleanup. It does not change the production fresh-baseline/new-game requirements in §7.3 (D-8) or the relaunch plan.
 
 ### 9.2 Prediction markets
 - Keep the existing market lifecycle (10 rolling slots from 15 minutes to 3 days, LLM-decided hidden outcome, insider/deceiver NPCs, increasing signal over time, proof article at resolution).
@@ -243,6 +250,24 @@ Required price model:
 6. Remove the random-walk volatility simulator as a price source; any "noise" comes from NPC spot trading.
 7. Bootstrap base prices stay (CoinGecko for crypto names, static for stocks); after bootstrap, only spot trading moves the index.
 8. Leverage cap reduced from 100× to 20× ([D-17b]) to reduce instant-liquidation churn for new players.
+
+**Approved staging funding rollout (2026-11-17).** Permit
+one additive migration, `0006_perp_funding_period_accrual`, after the verified
+fee migration `0005_trading_fee_idempotency_key`. Verify the canonical history
+or the approved additive history from §9.1 before applying the new migration.
+Keep the genuine preceding receipts and all existing staging
+identity, physical schema, lock and current-commit guards. The extension
+preserves existing positions and their accumulated funding.
+
+Accrue at most once per position and scheduled UTC eight-hour period. Each
+funding claim and the position's accrued funding update commit in the same
+transaction. Queue retries and staging relays retain their authenticated
+scheduled period across clock boundaries.
+Before enabling the revised worker path, pause and drain funding jobs and
+choose the first complete period after cutover. Existing accruals lack a
+period receipt, so the new job may not replay earlier periods.
+Keep scheduled funding paused until the first eligible UTC boundary is
+configured. Requests that predate it leave positions unchanged.
 
 ### 9.4 Leaderboard
 - **Rank by profit, not balance ([D-15b]):** net P&L = current equity − starting grant − points purchased. Buying points never raises rank. Show return % alongside.
@@ -356,6 +381,30 @@ Out of scope: Spaces/audio, video, communities, lists, verification products.
 | D-31 | Which hosts get a listing at launch? | Claude Connectors Directory, Muse Connector Platform, ClawHub skill. ChatGPT by developer-mode connector until D-33. Others by custom connector. |
 | D-32 | Twilio products? | Verify (SMS, Fraud Guard on, included in price) + Lookup Line Type Intelligence (~$0.008/lookup) for the VoIP block. |
 | D-33 | ChatGPT Plugin Directory? | Wait. Feed stays 18+; OpenAI only lists plugins suitable for 13–17 until it ships 18+ age verification. Package is prepared and submitted the day 18+ listings open. |
+
+### D-25 spend enforcement
+
+The `NPC_LLM_DAILY_BUDGET_USD` ceiling applies to the combined spend of
+scheduled NPC and engine inference, including retries and embeddings, for
+each UTC day. Use one durable budget shared across workers. Before dispatching
+a billable attempt, atomically reserve a provider-backed upper bound on its
+charge. Release the unused reservation after the provider confirms the final
+cost. Keep uncertain charges reserved until reconciliation, including timeouts
+and restarts. Outstanding reservations from the previous day reduce the new
+day's headroom until the charge is assigned to the correct day. Deny dispatch
+if the charge bound or reservation cannot be established. A usage estimate is
+for reporting.
+
+At 80% of the budget committed (spent plus reserved), halve the NPC batch,
+with a minimum of one. At 90%, also limit it to two steps per NPC. The existing
+four-step maximum applies below those thresholds. A declined reservation stops
+inference for that attempt and is visible in tick health.
+
+Confirm the provider-backed bound before enabling paid inference. Any provider
+budget used as the bound must enforce the same UTC-day limit across concurrent
+requests. A monthly buyer-key cap alone cannot demonstrate that behavior.
+Ollama runs on an isolated local deployment can verify timing and visible
+updates. Paid Surplus spend requires separate settlement evidence.
 
 ## 15. Success metrics (first 60 days)
 

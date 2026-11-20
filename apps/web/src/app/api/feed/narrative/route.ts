@@ -282,7 +282,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             timestamp: posts.timestamp,
           })
           .from(posts)
-          .where(inArray(posts.id, repostOriginalIds));
+          // Deleted originals must not be rendered inside reposts.
+          .where(
+            and(inArray(posts.id, repostOriginalIds), isNull(posts.deletedAt))
+          );
         const originalAuthorIds = [
           ...new Set(originalRows.map((r) => r.authorId)),
         ];
@@ -501,6 +504,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const stories: NarrativeStory[] = [];
 
       for (const [storyKey, storyPosts] of storyPostMap) {
+        // General posts are emitted below as standalone cards; grouping them
+        // into a "General" mega-story as well duplicated every one of them.
+        if (storyKey === GENERAL_STORY_KEY) continue;
+
         // Sort posts newest first within each story
         storyPosts.sort(
           (a, b) =>

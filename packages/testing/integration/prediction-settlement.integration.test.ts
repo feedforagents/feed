@@ -159,8 +159,6 @@ async function executeBuyShares(
 async function fixture() {
   const userId = await generateSnowflakeId();
   const marketId = await generateSnowflakeId();
-  userIds.push(userId);
-  marketIds.push(marketId);
   await dbWrite.insert(users).values({
     id: userId,
     username: `settlement-${userId}`,
@@ -169,6 +167,7 @@ async function fixture() {
     totalDeposited: '1000',
     updatedAt: new Date(),
   });
+  userIds.push(userId);
   await dbWrite.insert(markets).values({
     id: marketId,
     question: 'Prediction settlement regression',
@@ -178,6 +177,7 @@ async function fixture() {
     endDate: new Date(Date.now() + 86_400_000),
     updatedAt: new Date(),
   });
+  marketIds.push(marketId);
   return { userId, marketId, agent: { userId, agentId: userId } };
 }
 
@@ -353,10 +353,9 @@ describe('atomic prediction settlement with real Postgres and wallet', () => {
     await cancel();
     const after = await npcBalance(actor.id);
     expect(after.user).toBe(actor.userBalance);
-    expect(after.trading).toBeCloseTo(
-      990 + floorPoints(Number(holding.shares) * Number(holding.avgPrice)),
-      2
-    );
+    // Cancellation returns the gross cash paid, including the entry fee.
+    expect(Number(holding.cashCostBasis)).toBe(10);
+    expect(after.trading).toBe(1000);
     await cancel();
     expect(await npcBalance(actor.id)).toEqual(after);
   });
@@ -429,6 +428,39 @@ describe('atomic prediction settlement with real Postgres and wallet', () => {
     expect(question?.status).toBe('resolved');
     await resolveQuestionPayouts(questionNumber);
     expect((await state(f.userId, f.marketId)).balance).toBe(paid.balance);
+  });
+
+  it('reports precisely the shares committed by each MCP buy', async () => {
+    const f = await fixture();
+    const first = await executeBuyShares(f.agent, {
+      marketId: f.marketId,
+      outcome: 'YES',
+      amount: 6.47,
+    });
+    const beforeAdd = await state(f.userId, f.marketId);
+    const initialShares = Number(beforeAdd.holdings[0]?.shares);
+    expect(first.position.shares).toBe(initialShares);
+
+    const add = await executeBuyShares(f.agent, {
+      marketId: f.marketId,
+      outcome: 'YES',
+      amount: 8.19,
+    });
+    const afterAdd = await state(f.userId, f.marketId);
+    const shares = Number(afterAdd.holdings[0]?.shares);
+    expect(add.position.id).toBe(first.position.id);
+    expect(add.position.shares).toBe(
+      Number((shares - initialShares).toFixed(6))
+    );
+
+    const sold = await executeSellShares(f.agent, {
+      positionId: first.position.id,
+      shares: Number((first.position.shares + add.position.shares).toFixed(6)),
+    });
+    expect(sold.positionClosed).toBe(true);
+    expect(
+      Number((await state(f.userId, f.marketId)).holdings[0]?.shares)
+    ).toBe(0);
   });
 
   it('allows one overlapping full MCP sell and credits it once', async () => {

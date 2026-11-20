@@ -17,6 +17,7 @@ import {
   comments,
   count,
   db,
+  dbWrite,
   desc,
   eq,
   follows,
@@ -339,12 +340,20 @@ export async function getAgentGroupChats(
       .where(eq(groups.type, 'team'));
     const teamGroupIds = new Set(teamGroups.map((g) => g.id));
 
-    // Use DB-side aggregate count instead of loading all participant rows
+    // Use DB-side aggregate count instead of loading all participant rows.
+    // Membership paths can retain rows with isActive: false (MCP leave does;
+    // HTTP member removal deletes the participant). Inactive rows must not
+    // grant group context or inflate active member counts.
     const rawDb = getRawDrizzle();
     const agentParticipation = rawDb
       .select({ chatId: chatParticipants.chatId })
       .from(chatParticipants)
-      .where(eq(chatParticipants.userId, agentUserId))
+      .where(
+        and(
+          eq(chatParticipants.userId, agentUserId),
+          eq(chatParticipants.isActive, true)
+        )
+      )
       .as('agent_participation');
 
     const groupChatsWithCount = await rawDb
@@ -356,7 +365,13 @@ export async function getAgentGroupChats(
       })
       .from(chats)
       .innerJoin(agentParticipation, eq(chats.id, agentParticipation.chatId))
-      .innerJoin(chatParticipants, eq(chats.id, chatParticipants.chatId))
+      .innerJoin(
+        chatParticipants,
+        and(
+          eq(chats.id, chatParticipants.chatId),
+          eq(chatParticipants.isActive, true)
+        )
+      )
       .where(eq(chats.isGroup, true))
       .groupBy(chats.id, chats.name, chats.groupId)
       .limit(10); // Fetch more to account for filtering
@@ -427,13 +442,15 @@ export async function resolveUserByUsername(
   const clean = username.replace(/^@/, '').trim().toLowerCase();
   if (!clean) return null;
 
-  const [user] = await db
+  const results = await dbWrite
     .select({ id: users.id })
     .from(users)
-    .where(eq(users.username, clean))
-    .limit(1);
+    .where(sql`lower(${users.username}) = ${clean}`)
+    .limit(2);
 
-  return user?.id ?? null;
+  if (results.length > 1)
+    throw new Error(`Ambiguous username: ${clean}; use a user ID`);
+  return results[0]?.id ?? null;
 }
 
 /**

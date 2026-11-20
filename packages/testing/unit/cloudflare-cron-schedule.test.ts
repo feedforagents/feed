@@ -1,5 +1,15 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { dueJobs, isCronJob, jobs } from '../../../workers/cron/src/schedule';
+
+// The Worker entry uses Cloudflare runtime types this package does not load, so
+// it is imported by URL at run time instead of by a typed static import.
+const workerUrl = new URL('../../../workers/cron/src/index.ts', import.meta.url)
+  .href;
+type WorkerQueue = (
+  batch: unknown,
+  env: unknown,
+  ctx: unknown
+) => Promise<void>;
 
 const at = (time: string) =>
   dueJobs(Date.parse(`2026-10-10T${time}:00Z`)).map((job) => job.path);
@@ -29,6 +39,41 @@ describe('Cloudflare cron schedule', () => {
     );
     expect(await Bun.file(route).exists()).toBe(true);
   });
+  test.each(
+    jobs.map(({ path }) => path)
+  )('scheduled route %s answers the method the worker sends', async (path) => {
+    const methods: string[] = [];
+    const env = {
+      APP: {
+        fetch: async (request: Request) => {
+          methods.push(request.method);
+          return new Response('{}');
+        },
+      },
+      JOBS: {},
+      APP_ORIGIN: 'https://app.example',
+      CRON_SECRET: 'secret',
+      CRON_ENABLED: 'true',
+    };
+    const message = {
+      body: { path, scheduledTime: 0 },
+      ack: () => {},
+      retry: () => {},
+    };
+    const worker = (await import(workerUrl)).default as {
+      queue: WorkerQueue;
+    };
+    await worker.queue({ messages: [message] }, env, {});
+    expect(methods).toHaveLength(1);
+    const method = methods[0];
+    // Next.js answers 405 when the route module does not export the method.
+    const source = await Bun.file(
+      new URL(`../../../apps/web/src/app${path}/route.ts`, import.meta.url)
+    ).text();
+    expect(source).toMatch(
+      new RegExp(`export (const|async function) ${method}\\b`)
+    );
+  });
   test('all migrated jobs execute in a UTC day', () => {
     const seen = new Set<string>();
     const start = Date.parse('2026-10-10T00:00:00Z');
@@ -36,6 +81,65 @@ describe('Cloudflare cron schedule', () => {
       for (const job of dueJobs(start + minute * 60_000)) seen.add(job.path);
     }
     expect(seen.size).toBe(jobs.length);
+  });
+  test.each([
+    [200, '{"success":true}', 'completed'],
+    [200, '{"success":true,"skipped":true}', 'skipped'],
+    [200, '{"success":false}', 'failed'],
+    [200, 'invalid JSON', 'unknown'],
+    [503, '{"success":true}', 'failed'],
+  ])('logs cron status %s and body %s as %s', async (status, body, outcome) => {
+    const path = '/api/cron/game-tick';
+    const scheduledTime = Date.parse('2026-10-10T00:00:00Z');
+    let acknowledged = false;
+    const worker = (await import(workerUrl)).default as { queue: WorkerQueue };
+    const log = spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      const delivery = worker.queue(
+        {
+          messages: [
+            {
+              body: { path, scheduledTime },
+              attempts: 2,
+              ack: () => {
+                acknowledged = true;
+              },
+            },
+          ],
+        },
+        {
+          APP: {
+            fetch: async () =>
+              new Response(body, {
+                status,
+                headers: { 'content-type': 'application/json' },
+              }),
+          },
+          APP_ORIGIN: 'https://app.example',
+          CRON_SECRET: 'secret',
+          CRON_ENABLED: 'true',
+        },
+        {}
+      );
+      if (status === 503) {
+        await expect(delivery).rejects.toThrow('HTTP 503');
+      } else {
+        await delivery;
+      }
+      expect(acknowledged).toBe(status === 200);
+      expect(log).toHaveBeenCalledWith({
+        event: 'cron_delivery',
+        job: path,
+        scheduledTime,
+        startedAt: expect.any(Number),
+        finishedAt: expect.any(Number),
+        attempt: 2,
+        httpStatus: status,
+        outcome,
+      });
+    } finally {
+      log.mockRestore();
+    }
   });
   test('queue messages cannot invoke arbitrary routes', () => {
     expect(isCronJob({ path: '/api/admin/delete', scheduledTime: 0 })).toBe(

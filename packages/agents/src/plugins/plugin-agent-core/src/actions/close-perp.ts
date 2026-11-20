@@ -16,6 +16,9 @@ import { and, db, eq, isNull, perpPositions } from '@feed/db';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
+  createTradingFeeProcessor,
   createUserWalletAdapter,
   FEE_CONFIG,
 } from '@feed/engine';
@@ -137,6 +140,7 @@ export const closePerpAction: Action = {
         settlement: createPerpSettlement(),
         db: new PerpDbAdapter(),
         wallet: createUserWalletAdapter(),
+        cache: createPerpTradesCachePort(),
         fees: {
           tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
           platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -144,6 +148,8 @@ export const closePerpAction: Action = {
           minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
         },
         priceImpact: createPerpPriceImpactPort(),
+        feeProcessor: createTradingFeeProcessor(),
+        tradingFeeOutbox: createTradingFeeOutboxAdapter(),
       });
 
       const positionSize = Number(position.size);

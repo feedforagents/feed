@@ -244,7 +244,8 @@ const MIN_KEYWORD_OVERLAP = 0.15;
  */
 function checkKeywordOverlap(
   sourceText: string,
-  generatedText: string
+  generatedText: string,
+  useShorterKeywordSet: boolean
 ): { passed: boolean; overlap: number | null; reasons: string[] } {
   const sourceKeywords = extractKeywords(sourceText);
   const generatedKeywords = extractKeywords(generatedText);
@@ -260,7 +261,10 @@ function checkKeywordOverlap(
     if (sourceKeywords.has(word)) shared++;
   }
 
-  const overlap = shared / generatedKeywords.size;
+  const keywordCount = useShorterKeywordSet
+    ? Math.min(sourceKeywords.size, generatedKeywords.size)
+    : generatedKeywords.size;
+  const overlap = shared / keywordCount;
   const passed = overlap >= MIN_KEYWORD_OVERLAP;
 
   return {
@@ -461,7 +465,8 @@ function checkEntityDensity(text: string): {
  */
 export async function validateGrounding(
   sourceText: string,
-  generatedText: string
+  generatedText: string,
+  { useShorterKeywordSet = false }: { useShorterKeywordSet?: boolean } = {}
 ): Promise<GroundingResult> {
   // Empty source or output: grounding cannot be established.
   const trimmedSource = sourceText.trim();
@@ -482,7 +487,11 @@ export async function validateGrounding(
   const scores: number[] = [];
 
   // 1. Keyword overlap (free, <1ms)
-  const keywords = checkKeywordOverlap(sourceText, generatedText);
+  const keywords = checkKeywordOverlap(
+    sourceText,
+    generatedText,
+    useShorterKeywordSet
+  );
   if (keywords.overlap !== null) scores.push(keywords.overlap);
   if (!keywords.passed) reasons.push(...keywords.reasons);
 

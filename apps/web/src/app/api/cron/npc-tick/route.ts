@@ -661,10 +661,14 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       'NPCTick'
     );
 
+    const processed = results.length - skippedDueToLock;
+    const success =
+      !abortedDueToCircuitBreaker && (processed === 0 || errors < processed);
+
     // Record metrics
     recordCronExecution('npc-tick', new Date(startTime), {
-      success: !abortedDueToCircuitBreaker,
-      processed: results.length - skippedDueToLock,
+      success,
+      processed,
       totalActions: totalActionsExecuted,
       npcSocialActionsProcessed,
       npcFollowsCreated,
@@ -682,8 +686,8 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     });
 
     return NextResponse.json({
-      success: !abortedDueToCircuitBreaker,
-      processed: results.length - skippedDueToLock,
+      success,
+      processed,
       skippedLocked: skippedDueToLock,
       duration,
       totalActions: totalActionsExecuted,

@@ -5,7 +5,7 @@ import {
   NotFoundError,
 } from '@feed/shared';
 import Decimal from 'decimal.js-light';
-import { PredictionPricing } from './pricing';
+import { PredictionPricing, sharesAtPositionScale } from './pricing';
 import type {
   PredictionBuyInput,
   PredictionCancelInput,
@@ -52,8 +52,11 @@ function grossUpBuyAmount(netAmount: number, feeRate: number): number {
 
 // Historical rows cannot recover the original fee configuration; retain the old
 // estimate until a new trade records the remaining gross cash cost explicitly.
-function cashCostBasis(
-  position: PredictionPositionRecord,
+export function calculatePredictionCashCostBasis(
+  position: Pick<
+    PredictionPositionRecord,
+    'cashCostBasis' | 'avgPrice' | 'shares'
+  >,
   feeRate: number
 ): number {
   return (
@@ -230,7 +233,10 @@ export class PredictionMarketService {
             ...existingPos,
             shares: existingPos.shares + calc.sharesBought,
             cashCostBasis: new Decimal(
-              cashCostBasis(existingPos, this.deps.fees.tradingFeeRate)
+              calculatePredictionCashCostBasis(
+                existingPos,
+                this.deps.fees.tradingFeeRate
+              )
             )
               .plus(amount)
               .toNumber(),
@@ -258,6 +264,12 @@ export class PredictionMarketService {
           }
     );
 
+    // The database returns the stored share precision. Report the fill as
+    // the persisted delta so clients can use it in a subsequent sale.
+    const filledShares = new Decimal(position.shares)
+      .minus(existingPos?.shares ?? 0)
+      .toNumber();
+
     await this.recordSnapshot({
       marketId,
       yesPrice: calc.newYesPrice,
@@ -282,7 +294,7 @@ export class PredictionMarketService {
         actorId: userId,
         action: 'buy',
         side,
-        shares: calc.sharesBought,
+        shares: filledShares,
         amount,
         price: calc.avgPrice,
         source: tradeSource,
@@ -306,7 +318,7 @@ export class PredictionMarketService {
       positionId: position.id,
       marketId,
       side,
-      shares: calc.sharesBought,
+      shares: filledShares,
       avgPrice: calc.avgPrice,
       totalCost: amount,
       feePaid: calc.fee,
@@ -385,9 +397,22 @@ export class PredictionMarketService {
       liquidity: newLiquidity,
     });
 
-    const remaining = pos.shares - shares;
-    const positionClosed = remaining <= MIN_SHARES;
-    const previousCost = cashCostBasis(pos, this.deps.fees.tradingFeeRate);
+    const rawRemaining = pos.shares - shares;
+    // Keep a remainder the share column would store as a sellable lot.
+    // 10.01 - 10 is 0.009999999999999787 in binary; numeric(18, 6) stores
+    // that as 0.010000, and that lot redeems for 0.01 pt (PRD §9.2).
+    const persistedRemaining = sharesAtPositionScale(rawRemaining);
+    const remaining =
+      rawRemaining > 0 &&
+      rawRemaining <= MIN_SHARES &&
+      persistedRemaining >= MIN_SHARES
+        ? persistedRemaining
+        : rawRemaining;
+    const positionClosed = remaining < MIN_SHARES;
+    const previousCost = calculatePredictionCashCostBasis(
+      pos,
+      this.deps.fees.tradingFeeRate
+    );
     const remainingCost = positionClosed
       ? 0
       : new Decimal(previousCost)
@@ -497,6 +522,9 @@ export class PredictionMarketService {
     if (market.resolved) return;
 
     const now = input.resolvedAt ?? this.now();
+    const activePositions = positions.filter(
+      (p) => !p.status || p.status === 'active'
+    );
 
     // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
     // Payouts are not split pool-proportionally: each winner is credited
@@ -507,7 +535,7 @@ export class PredictionMarketService {
       (winningSide === 'yes' && p.side === 'yes') ||
       (winningSide === 'no' && p.side === 'no');
 
-    const totalPayout = positions
+    const totalPayout = activePositions
       .filter(isWinnerSide)
       .reduce(
         (sum, p) =>
@@ -526,14 +554,14 @@ export class PredictionMarketService {
       resolutionDescription: resolutionDescription ?? undefined,
     });
 
-    for (const pos of positions) {
+    for (const pos of activePositions) {
       const isWinner = isWinnerSide(pos);
       const payout = isWinner
         ? PredictionPricing.calculateExpectedPayout(pos.shares, pos.avgPrice)
         : 0;
       const pnl = pointsDifference(
         payout,
-        cashCostBasis(pos, this.deps.fees.tradingFeeRate)
+        calculatePredictionCashCostBasis(pos, this.deps.fees.tradingFeeRate)
       );
 
       if (payout > 0) {
@@ -579,6 +607,10 @@ export class PredictionMarketService {
       type: 'prediction_resolution',
       marketId,
       winningSide,
+      // Consumers (chart history hook, terminal live state) read the final
+      // prices off this event, mirroring the snapshot recorded above.
+      yesPrice: winningSide === 'yes' ? 1 : 0,
+      noPrice: winningSide === 'no' ? 1 : 0,
       yesShares: market.yesShares,
       noShares: market.noShares,
       liquidity: newLiquidity,
@@ -599,7 +631,8 @@ export class PredictionMarketService {
    *
    * Unlike resolve(), this:
    * - Sets resolution to null (no winner/loser)
-   * - Refunds each position at their original cost basis (shares * avgPrice)
+   * - Refunds each position at their original cost basis (the gross cash
+   *   paid for the held shares, entry fees included)
    * - Sets PnL to 0 for all positions (full refund)
    * - Marks positions as 'cancelled'
    */
@@ -642,13 +675,16 @@ export class PredictionMarketService {
         continue;
       }
 
-      // Calculate refund amount (original investment)
-      const costBasis = pos.shares * pos.avgPrice;
-      const refundAmount = floorPoints(costBasis);
-      const refundPnl = pointsDifference(
-        refundAmount,
-        cashCostBasis(pos, this.deps.fees.tradingFeeRate)
+      // Calculate refund amount (original investment): the gross cash the
+      // user actually paid for the held shares, entry fees included. Using
+      // shares * avgPrice here would refund only the net-of-fee amount and
+      // book the entry fee as a loss on a market the user did not exit.
+      const costBasis = calculatePredictionCashCostBasis(
+        pos,
+        this.deps.fees.tradingFeeRate
       );
+      const refundAmount = floorPoints(costBasis);
+      const refundPnl = pointsDifference(refundAmount, costBasis);
 
       if (refundAmount > 0) {
         // Credit user their original investment

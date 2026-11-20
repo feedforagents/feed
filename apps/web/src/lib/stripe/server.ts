@@ -70,7 +70,9 @@ export const POINTS_CONFIG = {
  * Calculate points from USD amount
  */
 export function calculatePointsFromUSD(amountUSD: number): number {
-  return Math.floor(amountUSD * POINTS_CONFIG.POINTS_PER_DOLLAR);
+  // Round, not floor: 1.13 * 100 === 112.99999999999999 in floating point, and
+  // checkout charges Math.round(amountUSD * 100) cents.
+  return Math.round(amountUSD * POINTS_CONFIG.POINTS_PER_DOLLAR);
 }
 
 /**
