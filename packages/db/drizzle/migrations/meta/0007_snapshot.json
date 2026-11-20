@@ -13822,6 +13822,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "operation": {
+          "name": "operation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fingerprint": {
+          "name": "fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "result": {
           "name": "result",
           "type": "json",

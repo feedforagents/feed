@@ -121,4 +121,33 @@ describe('usePredictionTrading fetch', () => {
     expect(secondKey).toMatch(UUID_V4);
     expect(secondKey).not.toBe(firstKey);
   });
+
+  it('refuses a second trade while one is in flight', async () => {
+    const hook = renderHook();
+    let releaseFetch!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      fetchCalls.push({ url: String(url), init: init ?? {} });
+      await gate;
+      return {
+        ok: true,
+        json: async () => ({ position: { shares: 10, avgPrice: 0.5 } }),
+      } as Response;
+    }) as typeof fetch;
+
+    const first = hook.buyPrediction({
+      marketId: 'm1',
+      side: 'YES',
+      amount: 100,
+    });
+    await expect(
+      hook.buyPrediction({ marketId: 'm1', side: 'YES', amount: 100 })
+    ).rejects.toThrow('already in progress');
+    releaseFetch();
+    await first;
+
+    expect(fetchCalls).toHaveLength(1);
+  });
 });

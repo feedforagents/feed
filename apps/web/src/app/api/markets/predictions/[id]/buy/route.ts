@@ -26,7 +26,9 @@ import { trackServerEvent } from '@/lib/posthog/server';
 
 const serviceOptions = (
   marketId: string,
-  idempotencyKey?: string
+  idempotencyKey?: string,
+  idempotencyOperation?: 'buy' | 'sell',
+  idempotencyFingerprint?: string
 ): PredictionSettlementOptions => ({
   broadcast: {
     emit: (channel, payload) =>
@@ -35,6 +37,8 @@ const serviceOptions = (
   cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
   clock: { now: () => new Date() },
   idempotencyKey,
+  idempotencyOperation,
+  idempotencyFingerprint,
   fees: {
     tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
     platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -58,7 +62,7 @@ const serviceOptions = (
  * Client-supplied idempotency key for one trade request. A resend (timeout
  * retry / double-click) must carry the same key; the settlement then replays
  * the first execution instead of trading twice. A fresh trade must use a
- * fresh key — reusing a key replays the first result.
+ * fresh key — reusing a key for a different request returns 409.
  */
 function readIdempotencyKey(request: NextRequest): string | undefined {
   const raw = request.headers.get('idempotency-key');
@@ -96,7 +100,12 @@ export const POST = withErrorHandling(
           side,
           amount,
         }),
-      serviceOptions(marketId, readIdempotencyKey(request))
+      serviceOptions(
+        marketId,
+        readIdempotencyKey(request),
+        'buy',
+        JSON.stringify({ side, amount })
+      )
     );
 
     const balance = await WalletService.getBalance(user.userId);

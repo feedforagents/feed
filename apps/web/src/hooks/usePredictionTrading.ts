@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 
 type PredictionTradeSide = 'YES' | 'NO';
@@ -97,6 +97,11 @@ export function usePredictionTrading() {
   const { getAccessToken } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // One trade at a time per hook instance: a second call while one is
+  // pending (double-click, impatient retry) must not start a second
+  // trade with a fresh key. The modal already disables its buttons
+  // while loading; this is the backstop for other callers.
+  const inFlightRef = useRef(false);
 
   const requireAccessToken = useCallback(async () => {
     const token = await getAccessToken();
@@ -109,6 +114,10 @@ export function usePredictionTrading() {
 
   const buyPrediction = useCallback(
     async (input: BuyPredictionInput): Promise<BuyPredictionResult> => {
+      if (inFlightRef.current) {
+        throw new Error('A prediction trade is already in progress.');
+      }
+      inFlightRef.current = true;
       setLoading(true);
       setError(null);
 
@@ -147,6 +156,7 @@ export function usePredictionTrading() {
         setError(message);
         throw caughtError;
       } finally {
+        inFlightRef.current = false;
         setLoading(false);
       }
     },
@@ -155,6 +165,10 @@ export function usePredictionTrading() {
 
   const sellPrediction = useCallback(
     async (input: SellPredictionInput): Promise<SellPredictionResult> => {
+      if (inFlightRef.current) {
+        throw new Error('A prediction trade is already in progress.');
+      }
+      inFlightRef.current = true;
       setLoading(true);
       setError(null);
 
@@ -196,6 +210,7 @@ export function usePredictionTrading() {
         setError(message);
         throw caughtError;
       } finally {
+        inFlightRef.current = false;
         setLoading(false);
       }
     },

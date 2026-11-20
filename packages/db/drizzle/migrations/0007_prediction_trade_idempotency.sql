@@ -3,6 +3,8 @@ CREATE TABLE "PredictionTradeIdempotency" (
 	"userId" text NOT NULL,
 	"idempotencyKey" text NOT NULL,
 	"marketId" text NOT NULL,
+	"operation" text NOT NULL,
+	"fingerprint" text NOT NULL,
 	"result" json NOT NULL,
 	"createdAt" timestamp DEFAULT now() NOT NULL
 );
