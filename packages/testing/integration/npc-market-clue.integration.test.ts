@@ -96,6 +96,15 @@ test('publishes one current clue per market phase and preserves ordinary NPC pos
       .update(games)
       .set({ isRunning: true })
       .where(eq(games.id, gameId));
+    // The flash market is between its midpoint and close, but its persisted
+    // phase has not advanced. Reject the old clue even while the market trades.
+    await dbWrite
+      .update(timeframedMarkets)
+      .set({ startTime: new Date(now.getTime() - 20 * 60_000) })
+      .where(eq(timeframedMarkets.id, frameId));
+    expect(await publishNpcMarketClue(initial, candidatePost(0))).toBe('stale');
+    expect(await selectDueNpcMarketClue(gameId, [actor.id])).toBeUndefined();
+
     await dbWrite
       .update(timeframedMarkets)
       .set({ arcState: 'resolving' })

@@ -16,7 +16,11 @@ import {
   sql,
   timeframedMarkets,
 } from '@feed/db';
-import { isActiveHour, StaticDataRegistry } from '@feed/engine';
+import {
+  getCurrentArcState,
+  isActiveHour,
+  StaticDataRegistry,
+} from '@feed/engine';
 
 type ArcRoles = Pick<
   typeof questionArcPlans.$inferSelect,
@@ -70,6 +74,9 @@ export async function selectDueNpcMarketClue(
     .select({
       frame: {
         id: timeframedMarkets.id,
+        timeframe: timeframedMarkets.timeframe,
+        startTime: timeframedMarkets.startTime,
+        endTime: timeframedMarkets.endTime,
         arcState: timeframedMarkets.arcState,
         arcStateEnteredAt: timeframedMarkets.arcStateEnteredAt,
         affiliatedActorIds: timeframedMarkets.affiliatedActorIds,
@@ -128,6 +135,12 @@ export async function selectDueNpcMarketClue(
   if (!candidate) return undefined;
   const { frame, questionId, question, marketId, plan, oldestPendingAt } =
     candidate;
+  if (
+    getCurrentArcState(frame.startTime, frame.endTime, frame.timeframe, now) !==
+    frame.arcState
+  ) {
+    return undefined;
+  }
   const actorId = eligibleActors(frame.affiliatedActorIds, plan).find((id) =>
     npcIds.has(id)
   );
@@ -163,7 +176,7 @@ export function describeNpcMarketClue(clue: NpcMarketClue): string {
     : 'Offer a tentative angle or open question that highlights the current uncertainty.';
   return `A market update is due for this question: ${JSON.stringify(clue.question)}.
 Make your next POST a short observation in your own voice about that question. ${guidance} Use public developments supplied in your context, or identify an observable milestone if there is no corroborating update.
-Do not invent events, sources or evidence, present a result as known, or reveal private information. Include "marketClue": true in the POST parameters for this observation only. Use the normal parameters for other actions and posts.`;
+Do not invent events, sources or evidence, present a result as known, or reveal private information.`;
 }
 
 export async function getNpcMarketCluePublication(clue: NpcMarketClue) {
@@ -268,6 +281,12 @@ export async function publishNpcMarketClue(
       now >= state.frame.endTime ||
       now >= state.question.resolutionDate ||
       now >= market.endDate ||
+      getCurrentArcState(
+        state.frame.startTime,
+        state.frame.endTime,
+        state.frame.timeframe,
+        now
+      ) !== clue.phase ||
       !isActiveHour(actor, now.getUTCHours(), state.gameDay) ||
       !eligibleActors(state.frame.affiliatedActorIds, plan ?? null).includes(
         actor.id

@@ -121,7 +121,7 @@ function formatSignalAsNaturalLanguage(
  */
 export async function getNpcGameContext(
   agentId: string,
-  excludedSignalQuestionId?: string
+  publicOnly = false
 ): Promise<string> {
   // Only NPCs get game context
   const npcActor = StaticDataRegistry.getActor(agentId);
@@ -137,9 +137,11 @@ export async function getNpcGameContext(
       : '';
 
   // Get active prediction markets via service layer
-  const activeMarkets = await gameService.getActiveMarketSummaries(5);
+  const activeMarkets = publicOnly
+    ? []
+    : await gameService.getActiveMarketSummaries(5);
 
-  if (activeMarkets.length === 0) {
+  if (!publicOnly && activeMarkets.length === 0) {
     // No active markets — character context only
     return `
 === WHO YOU ARE ===
@@ -163,35 +165,32 @@ You are ${npcActor.name}. Just be yourself — talk about what interests you, re
 `.trim();
   }
 
-  // Get current game day via service layer
-  const currentDay = await gameService.getCurrentGameDay();
-
-  // Build intuitions for each active market with arc plan
   const intuitions: string[] = [];
+  if (activeMarkets.length > 0) {
+    const currentDay = await gameService.getCurrentGameDay();
+    for (const market of activeMarkets) {
+      const arcPlan = await getArcPlan(market.questionId);
+      if (!arcPlan) continue;
 
-  for (const market of activeMarkets) {
-    if (market.questionId === excludedSignalQuestionId) continue;
-    const arcPlan = await getArcPlan(market.questionId);
-    if (!arcPlan) continue;
+      const phase = getArcPhaseForDay(currentDay, arcPlan);
 
-    const phase = getArcPhaseForDay(currentDay, arcPlan);
+      const outcome = await gameService.getQuestionOutcome(market.id);
+      if (outcome === null) {
+        throw new Error(`Missing question outcome for market ${market.id}`);
+      }
 
-    const outcome = await gameService.getQuestionOutcome(market.id);
-    if (outcome === null) {
-      throw new Error(`Missing question outcome for market ${market.id}`);
-    }
+      const signal = getSignalDirection(arcPlan, phase, agentId, outcome);
 
-    const signal = getSignalDirection(arcPlan, phase, agentId, outcome);
+      // Convert to natural language (NEVER expose technical details)
+      const intuition = formatSignalAsNaturalLanguage(
+        signal,
+        phase,
+        market.question
+      );
 
-    // Convert to natural language (NEVER expose technical details)
-    const intuition = formatSignalAsNaturalLanguage(
-      signal,
-      phase,
-      market.question
-    );
-
-    if (intuition) {
-      intuitions.push(intuition);
+      if (intuition) {
+        intuitions.push(intuition);
+      }
     }
   }
 
