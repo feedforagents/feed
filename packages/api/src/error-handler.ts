@@ -621,7 +621,10 @@ export function withErrorHandling<TContext extends RouteContext = RouteContext>(
     try {
       if (
         process.env.NPC_LLM_DAILY_BUDGET_USD &&
-        scheduledInferenceRoutes.has(new URL(req.url).pathname)
+        // Next matches the route without its optional trailing slash.
+        scheduledInferenceRoutes.has(
+          new URL(req.url).pathname.replace(/\/$/, '')
+        )
       ) {
         return await FeedDb.withScheduledInferenceBudget(async () =>
           handler(req, context!)
