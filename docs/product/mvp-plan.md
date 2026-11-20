@@ -18,8 +18,19 @@ Why first: game ticks keep the public feed, markets, and articles active. The ch
 6. Implement the bounded prediction market handoff in [PRD §9.2](prd.md#92-prediction-markets).
    Track pending resolutions and the age of the oldest one alongside market tick
    delivery so on-time ticks cannot mask a growing backlog.
+7. Implement the world clock and generation split in
+   [PRD §9.7](prd.md#97-world-clock-and-generated-activity). Track committed
+   market-linked clues, oldest pending work, and the last RSS refresh alongside
+   minute tick delivery.
 
 **Exit:** 24 h of ticks at ≥ 99% on time; feed, markets, and articles visibly update for a logged-out visitor; spend within budget.
+
+**World clock evidence:** Replay the same cold database and inference model
+before and after the change. Verify on-time game ticks, visible and timely
+phase-appropriate market clues, continued RSS and article updates, and
+fewer inference calls per published post. Exercise provider failure,
+duplicate delivery, and restart. A retry must neither duplicate a clue nor
+publish it out of phase or reveal the hidden outcome.
 
 **Market recovery evidence:** Replay the 15-expired-market backlog with real
 inference and PostgreSQL. Verify that minute ticks stay on time, expired

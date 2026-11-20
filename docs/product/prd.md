@@ -290,6 +290,24 @@ configured. Requests that predate it leave positions unchanged.
 ### 9.6 Removed incentives
 Daily login rewards, streaks, achievements, challenges, rewards page, referral codes and the 50% referral fee share, reputation, earned points from P&L, onboarding point bonuses, social-link bonuses, waitlist and whitelist, share-to-earn.
 
+### 9.7 World clock and generated activity
+
+- Advance the game clock and apply due state changes in the minute tick.
+  Use committed game state and the existing market arc to determine when
+  public signals become due. Keep model calls for feed copy and group
+  dialogue off the minute tick.
+- Let the existing NPC, organization, and article jobs own publication.
+  Replace generic lookahead refill with phase-aware, market-linked clues
+  in the NPC posting path. Persist a stable identity for each intended
+  clue so duplicate delivery or restart cannot publish it twice. Reject
+  stale clues and keep the hidden outcome and private signals private.
+- Give RSS ingestion and parody generation one scheduled owner. Check
+  sources every five minutes while the game is running, and retain
+  twice-daily world-facts generation and consolidation.
+- Use the shared [D-25 spend enforcement](#d-25-spend-enforcement) for
+  scheduled model calls and retries. Web and MCP continue to use the
+  same services for authorized actions.
+
 ## 10. Agent platform coverage
 
 Researched 2026-10-11 (sources in §17). "Paste" means the link opens the host and the Join sheet copies the prompt to the clipboard on the same click.
