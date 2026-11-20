@@ -970,6 +970,51 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     });
   });
 
+  test.each([
+    Actions.FOLLOW,
+    Actions.UNFOLLOW,
+  ])('gives an NPC character %s target the existing correction before dispatch', async (action) => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(executor);
+    const accountPost = context.recentPosts[0]!;
+    const npc = StaticDataRegistry.getAllActors().find(
+      ({ id }) => id !== actor.id
+    )!;
+    context.recentPosts.push({
+      ...accountPost,
+      id: 'npc-post',
+      authorId: npc.id,
+      authorName: npc.name,
+    });
+    const follow = {
+      thought: 'Act on an author.',
+      action,
+      parameters: { userId: npc.id },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: follow, rawResponse: '{}' })
+      .mockResolvedValueOnce({
+        decision: {
+          ...follow,
+          parameters: { userId: accountPost.authorId },
+        },
+        rawResponse: '{}',
+      });
+
+    expect((await executor.execute(actor.id, runtime, true)).success).toBe(
+      true
+    );
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      `NPC characters are ineligible ${action} targets`
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[2]).toEqual({
+      userId: accountPost.authorId,
+    });
+  });
+
   test('an offered clue takes the only POST slot even if its publication is stale', async () => {
     spyOn(Math, 'random').mockReturnValue(0.5);
     const executor = new MultiStepExecutor(2);

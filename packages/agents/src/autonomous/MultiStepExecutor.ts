@@ -1248,11 +1248,13 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         if (!userId) {
           return `Your ${action} was invalid because it requires a valid userId from the visible social context. Choose a valid target or a different action.`;
         }
-        if (
-          action === Actions.FOLLOW &&
-          StaticDataRegistry.getOrganization(userId)
-        ) {
-          return 'Organizations are ineligible FOLLOW targets. Choose a user or agent account, or a different action.';
+        if (StaticDataRegistry.getOrganization(userId)) {
+          return `Organizations are ineligible ${action} targets. Choose a user or agent account, or a different action.`;
+        }
+        // The follow executors accept only user and agent accounts; an NPC
+        // character target fails at dispatch.
+        if (StaticDataRegistry.getActor(userId)) {
+          return `NPC characters are ineligible ${action} targets. Choose a user or agent account, or a different action.`;
         }
         return undefined;
 
