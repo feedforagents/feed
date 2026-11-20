@@ -1539,10 +1539,21 @@ export async function resolveQuestionPayouts(
   let totalPayout = 0;
   let positionsSettled = 0;
 
-  await withPredictionSettlement(
+  const settled = await withPredictionSettlement(
     marketId,
     { system: 'game_tick_prediction_resolve' },
     async (coreService, tx) => {
+      // The pre-lock check above can go stale while another resolver (the
+      // admin route) holds the settlement lock. Re-read under the lock so
+      // this tick never rewrites the question of a market it did not settle
+      // (#1954 fixed the admin side of the same race).
+      const [current] = await tx
+        .select({ resolved: marketsSchema.resolved })
+        .from(marketsSchema)
+        .where(eq(marketsSchema.id, marketId))
+        .limit(1);
+      if (!current || current.resolved) return false;
+
       // Estimate positions settled for logging (coreService updates all positions for the market)
       // Use COUNT(*) instead of SELECT to avoid loading all position IDs into memory
       // Note: count(*) returns bigint in Postgres; we parse as string to avoid overflow
@@ -1581,6 +1592,7 @@ export async function resolveQuestionPayouts(
           updatedAt: resolutionTimestamp,
         })
         .where(eq(timeframedMarkets.questionId, question.id));
+      return true;
     },
     {
       wallet: (tx, afterCommit) => {
@@ -1609,6 +1621,18 @@ export async function resolveQuestionPayouts(
       clock: { now: () => resolutionTimestamp },
     }
   );
+
+  // The tick lost the race to another resolver: the market, question and
+  // payouts already belong to the winner. Do not rewrite them with this
+  // tick's outcome — including reputation, which is outcome-sensitive.
+  if (!settled) {
+    logger.info(
+      'Market already resolved, skipping payouts',
+      { marketId, questionNumber },
+      'GameTick'
+    );
+    return;
+  }
 
   // Update reputation in database (no longer requires deployer key or on-chain calls)
   await ReputationService.updateReputationForResolvedMarket({
