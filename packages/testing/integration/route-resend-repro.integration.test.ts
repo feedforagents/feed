@@ -34,8 +34,12 @@ mock.module('@/lib/posthog/server', () => ({
   trackServerEvent: mock(async () => undefined),
 }));
 
-const { POST: buyPOST } = await import('./route');
-const { POST: sellPOST } = await import('../sell/route');
+const { POST: buyPOST } = await import(
+  '../../../apps/web/src/app/api/markets/predictions/[id]/buy/route'
+);
+const { POST: sellPOST } = await import(
+  '../../../apps/web/src/app/api/markets/predictions/[id]/sell/route'
+);
 
 const userIds: string[] = [];
 const marketIds: string[] = [];
