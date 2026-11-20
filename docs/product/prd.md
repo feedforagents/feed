@@ -239,6 +239,15 @@ This is only a staging maintenance exception to Phase 1's removal order: preserv
 - **Fix payout to match quotes ([D-14]):** a winning share redeems for exactly 1 pt; CPMM price = cost per share. Market liquidity is seeded by the house (virtual).
 - Winning-share credits follow the cash-settlement precision in §9.1; previews and recorded P&L use those settled credits.
 - Show resolution reason and proof article on the market and in the feed.
+- Keep the one-minute market tick responsive after downtime. Hand off proof
+  generation and replacement drafting as durable work with bounded
+  concurrency and shared [D-25 spend enforcement](#d-25-spend-enforcement).
+  Close trading on schedule. Retry missing proofs and keep automatic
+  settlement pending until the proof is ready. Preserve manual review
+  holds and settle from the stored outcome using the existing payout
+  transaction. Keep the outcome and prepared proof private until
+  settlement resolves the market. Duplicate delivery or restart must
+  never duplicate a payout or a published proof.
 
 ### 9.3 Spot and perps — "NPCs buy spot, spot drives perps"
 Required price model:
