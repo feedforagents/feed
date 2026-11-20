@@ -1,7 +1,13 @@
 'use client';
 
 import type { PerpPositionFromAPI, PredictionPosition } from '@feed/shared';
-import { cn, FEED_POINTS_SYMBOL, logger, toNumber } from '@feed/shared';
+import {
+  calculateNetStoredUnrealizedPnL,
+  cn,
+  FEED_POINTS_SYMBOL,
+  logger,
+  toNumber,
+} from '@feed/shared';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { PositionDetailModal } from '@/components/profile/PositionDetailModal';
@@ -247,6 +253,17 @@ export function PositionsPreviewPanel() {
             {displayPositions.map((item) => {
               if (item.type === 'perp') {
                 const perp = item.data as PerpPositionFromAPI;
+                // The stored unrealizedPnL is price-only; accrued funding
+                // settles at close (realizedPnL = pnl - fundingPaid, PRD
+                // §9.3), so show the funding-netted value — the same
+                // number the close will realize — not the overstated raw
+                // value.
+                const { pnl: netPnl, pnlPercent: netPnlPercent } =
+                  calculateNetStoredUnrealizedPnL(
+                    perp.unrealizedPnL,
+                    perp.size,
+                    perp.fundingPaid ?? 0
+                  );
                 return (
                   <button
                     key={`perp-${perp.id}`}
@@ -276,13 +293,11 @@ export function PositionsPreviewPanel() {
                       <span
                         className={cn(
                           'font-medium text-xs',
-                          perp.unrealizedPnL >= 0
-                            ? 'text-green-500'
-                            : 'text-red-500'
+                          netPnl >= 0 ? 'text-green-500' : 'text-red-500'
                         )}
                       >
-                        {formatPoints(perp.unrealizedPnL)} pts (
-                        {formatPercent(perp.unrealizedPnLPercent)})
+                        {formatPoints(netPnl)} pts (
+                        {formatPercent(netPnlPercent)})
                       </span>
                     </div>
                   </button>
