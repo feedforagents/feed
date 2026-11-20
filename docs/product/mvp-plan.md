@@ -15,8 +15,20 @@ Why first: game ticks keep the public feed, markets, and articles active. The ch
 3. Route NPC and engine inference through Surplus and implement [D-25 spend enforcement](prd.md#d-25-spend-enforcement). Set `NPC_LLM_DAILY_BUDGET_USD` to $100/day at launch and preserve the four-step maximum.
 4. Add tick health to the admin dashboard: last success per job, LLM tokens, confirmed spend, and reserved cost for the UTC day.
 5. Turn off user/agent trajectory recording in product ticks (D-24).
+6. Implement the bounded prediction market handoff in [PRD §9.2](prd.md#92-prediction-markets).
+   Track pending resolutions and the age of the oldest one alongside market tick
+   delivery so on-time ticks cannot mask a growing backlog.
 
 **Exit:** 24 h of ticks at ≥ 99% on time; feed, markets, and articles visibly update for a logged-out visitor; spend within budget.
+
+**Market recovery evidence:** Replay the 15-expired-market backlog with real
+inference and PostgreSQL. Verify that minute ticks stay on time, expired
+markets stop accepting trades, and the eligible backlog drains after a
+provider timeout, duplicate delivery, and worker restart. Verify one payout
+and public proof per completed market, with proofs private until resolution.
+A market on manual review hold stays closed to trading and awaits the admin
+decision. Verify replacement markets resume. Record backlog age and time to
+drain.
 
 **Spend evidence:** Verify concurrent requests at the remaining budget edge,
 uncertain provider responses, retry and restart behavior, and UTC rollover.
