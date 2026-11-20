@@ -268,6 +268,7 @@ describe('normalizeTradeDecisionParameters', () => {
         initialPrice: 1250,
         changePercent: 32,
         maxOrderSize: 10_000,
+        minOrderSize: 10,
       },
     ],
     agentPositions: {
@@ -1234,6 +1235,117 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     );
   });
 
+  test('gives a perp order below the minimum after the balance cap the existing correction before dispatch', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      true
+    );
+    context.balance = 8;
+    context.enabledFeatures.push(Features.TRADING);
+    context.perpMarkets = [
+      {
+        ticker: 'NVDAI',
+        name: 'NVIDAI',
+        currentPrice: 100,
+        initialPrice: 100,
+        changePercent: 0,
+        maxOrderSize: 10_000,
+        minOrderSize: 10,
+      },
+    ];
+    const trade = {
+      thought: 'Open a long.',
+      action: Actions.TRADE,
+      parameters: {
+        marketType: 'perp',
+        marketId: 'NVDAI',
+        side: 'open_long',
+        amount: 50,
+      },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: trade, rawResponse: '{}' })
+      .mockResolvedValueOnce({
+        decision: {
+          thought: 'Like instead.',
+          action: Actions.LIKE,
+          parameters: { postId: 'post-1' },
+          isFinish: false,
+        },
+        rawResponse: '{}',
+      });
+
+    expect((await executor.execute(actor.id, runtime, true)).success).toBe(
+      true
+    );
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[0]?.[0]).toContain(
+      'Minimum order size: 10 points'
+    );
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      'need at least 10 points after capping to your balance of 8'
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('gives an entry trade with less than 1 point of balance the existing correction before dispatch', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      true
+    );
+    context.balance = 0.5;
+    context.enabledFeatures.push(Features.TRADING);
+    context.predictionMarkets = [
+      {
+        id: 'market-1',
+        question: 'Will it happen?',
+        yesPrice: 0.5,
+        noPrice: 0.5,
+        volume: 0,
+        maxSafeBet: 500,
+        endDate: '2026-12-31T00:00:00.000Z',
+      },
+    ];
+    const trade = {
+      thought: 'Buy yes.',
+      action: Actions.TRADE,
+      parameters: {
+        marketType: 'prediction',
+        marketId: 'market-1',
+        side: 'buy_yes',
+        amount: 25,
+      },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: trade, rawResponse: '{}' })
+      .mockResolvedValueOnce({
+        decision: {
+          thought: 'Like instead.',
+          action: Actions.LIKE,
+          parameters: { postId: 'post-1' },
+          isFinish: false,
+        },
+        rawResponse: '{}',
+      });
+
+    expect((await executor.execute(actor.id, runtime, true)).success).toBe(
+      true
+    );
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      'Entry trades need at least 1 point after capping to your balance of 0.5'
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
   test('gives an oversized perp order the existing correction before dispatch', async () => {
     const executor = new MultiStepExecutor(1);
     const { context, runtime, decision, execute } = prepare(
@@ -1251,6 +1363,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
         initialPrice: 100,
         changePercent: 0,
         maxOrderSize: 10_000,
+        minOrderSize: 10,
       },
     ];
     const trade = {

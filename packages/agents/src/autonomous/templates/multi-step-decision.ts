@@ -46,6 +46,7 @@ export interface PerpMarketContext {
   initialPrice: number;
   changePercent: number;
   maxOrderSize: number;
+  minOrderSize: number;
 }
 
 export interface PostContext {
@@ -370,6 +371,7 @@ export interface PerpPositionContext {
   side: string;
   size: number;
   maxOrderSize?: number;
+  minOrderSize?: number;
   pnl: number;
   pnlPercent: number; // e.g., +2.3 or -10.5
   entryPrice: number;
@@ -1272,6 +1274,9 @@ function formatAgentPositions(
       if (p.maxOrderSize !== undefined) {
         lines.push(`    Maximum order size: ${p.maxOrderSize} points.`);
       }
+      if (p.minOrderSize !== undefined) {
+        lines.push(`    Minimum order size: ${p.minOrderSize} points.`);
+      }
       lines.push(
         `    ${priceInfo} | ${priceMovement} ${pnlSign}${p.pnlPercent.toFixed(1)}% | P&L: ${p.pnl >= 0 ? '+' : ''}$${p.pnl.toFixed(2)} | held: ${p.timeHeld}`
       );
@@ -1392,7 +1397,7 @@ function formatPerpMarkets(markets: PerpMarketContext[]): string {
     .map((m) => {
       const direction =
         m.changePercent > 0 ? '📈' : m.changePercent < 0 ? '📉' : '➡️';
-      return `- ${m.ticker}: ${m.name} @ $${m.currentPrice.toFixed(2)} ${direction} ${m.changePercent > 0 ? '+' : ''}${m.changePercent.toFixed(1)}% | Maximum order size: ${m.maxOrderSize} points.`;
+      return `- ${m.ticker}: ${m.name} @ $${m.currentPrice.toFixed(2)} ${direction} ${m.changePercent > 0 ? '+' : ''}${m.changePercent.toFixed(1)}% | Minimum order size: ${m.minOrderSize} points. | Maximum order size: ${m.maxOrderSize} points.`;
     })
     .join('\n');
 }

@@ -1265,6 +1265,12 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         ) {
           return 'TRADE amount must be finite and positive (zero is allowed only to close all holdings).';
         }
+        // Entry trades execute at most the current balance and need at least
+        // 1 point after that cap (executeDirectTrade).
+        const executedAmount = Math.min(amount, context.balance);
+        if (!closing && executedAmount < 1) {
+          return `Entry trades need at least 1 point after capping to your balance of ${context.balance}. Sell or close a position, or choose a different action.`;
+        }
 
         if (parameters.marketType === 'prediction') {
           const knownPredictionMarketIds = new Set([
@@ -1307,6 +1313,10 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             const availableSize = Math.max(0, limit - sameSideSize);
             if (amount > availableSize) {
               return `Requested perp amount exceeds the available size limit of ${availableSize} points on ${marketId}. Reduce the amount or choose another action.`;
+            }
+            const minimum = market?.minOrderSize ?? position?.minOrderSize;
+            if (minimum !== undefined && executedAmount < minimum) {
+              return `Perp orders on ${marketId} need at least ${minimum} points after capping to your balance of ${context.balance}. Increase the amount or choose another action.`;
             }
           }
         }
