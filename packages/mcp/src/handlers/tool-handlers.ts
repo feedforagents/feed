@@ -1369,13 +1369,57 @@ export async function executeGetTradeHistory(
  * Execute get_post tool
  */
 export async function executeGetPost(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetPostArgs
 ): Promise<GetPostResult> {
   const apiBaseUrl = getAPIBaseUrl();
-  return safeFetchRequired<GetPostResult>(
+  const result = await safeFetchRequired<GetPostResult>(
     new URL(`${apiBaseUrl}/posts/${args.postId}`)
   );
+
+  // The proxied detail route is read anonymously, so the repost original it
+  // embeds is unfiltered. The website's single-post route hides that
+  // original when its author is one the viewer blocked or muted, or who
+  // blocked the viewer (PRD §8.1: tools use the same business logic as the
+  // website, moderation included), so the MCP result must hide it too —
+  // by stripping the repost metadata, exactly as the route does for a
+  // deleted or non-exposable original. The post body itself is untouched.
+  const data = result.data;
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const originalPost = (data as Record<string, unknown>).originalPost;
+    if (
+      originalPost &&
+      typeof originalPost === 'object' &&
+      !Array.isArray(originalPost)
+    ) {
+      const originalAuthorId = (originalPost as Record<string, unknown>)
+        .authorId;
+      if (typeof originalAuthorId === 'string') {
+        const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+          getBlockedUserIds(agent.userId),
+          getMutedUserIds(agent.userId),
+          getBlockedByUserIds(agent.userId),
+        ]);
+        const excludedAuthorIds = new Set([
+          ...blockedIds,
+          ...mutedIds,
+          ...blockedByIds,
+        ]);
+        if (excludedAuthorIds.has(originalAuthorId)) {
+          const rest: Record<string, JsonValue> = {
+            ...(data as Record<string, JsonValue>),
+          };
+          delete rest.isRepost;
+          delete rest.isQuote;
+          delete rest.quoteComment;
+          delete rest.originalPostId;
+          delete rest.originalPost;
+          return { ...result, data: rest };
+        }
+      }
+    }
+  }
+  return result;
 }
 
 /**
