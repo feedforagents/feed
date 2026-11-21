@@ -39,12 +39,40 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       },
     });
 
-    if (pendingInvites.length === 0) {
+    // A block or mute hides the invite at read time, mirroring the
+    // notification list (GET /api/notifications) and the unread count.
+    // The notification for a blocked inviter is already suppressed at
+    // creation, but the invite row itself is not — without this filter
+    // the invite still reaches the invitee's list and can be accepted.
+    const [blockedByMe, mutedByMe, blockedMe] = await Promise.all([
+      db.userBlock.findMany({
+        where: { blockerId: user.userId },
+        select: { blockedId: true },
+      }),
+      db.userMute.findMany({
+        where: { muterId: user.userId },
+        select: { mutedId: true },
+      }),
+      db.userBlock.findMany({
+        where: { blockedId: user.userId },
+        select: { blockerId: true },
+      }),
+    ]);
+    const hiddenInviters = new Set([
+      ...blockedByMe.map((row) => row.blockedId),
+      ...mutedByMe.map((row) => row.mutedId),
+      ...blockedMe.map((row) => row.blockerId),
+    ]);
+    const visibleInvites = pendingInvites.filter(
+      (invite) => !hiddenInviters.has(invite.invitedBy)
+    );
+
+    if (visibleInvites.length === 0) {
       return [];
     }
 
     // Fetch group details
-    const groupIds = [...new Set(pendingInvites.map((inv) => inv.groupId))];
+    const groupIds = [...new Set(visibleInvites.map((inv) => inv.groupId))];
     const groups = await db.group.findMany({
       where: {
         id: { in: groupIds },
@@ -74,7 +102,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     );
     const groupMap = new Map(groups.map((g) => [g.id, g]));
 
-    return pendingInvites.map((invite) => {
+    return visibleInvites.map((invite) => {
       const group = groupMap.get(invite.groupId);
       return {
         inviteId: invite.id,

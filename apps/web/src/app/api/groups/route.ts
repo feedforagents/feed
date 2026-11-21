@@ -161,6 +161,7 @@ import {
   generateSnowflakeId,
   groupInvites,
   groupMembers,
+  hasBlocked,
   inArray,
   like,
   not,
@@ -374,9 +375,29 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           });
           creatorName = creator?.displayName || creator?.username || 'Someone';
 
+          // Blocked members are skipped silently, like banned and unknown
+          // users above: a block in either direction bars the invite from
+          // reaching them (same rule as POST /api/groups/[groupId]/members).
+          // Agents/NPCs are included: they are direct-added with no invite
+          // and no chance to decline, so the check must cover them too.
+          const blockedFlags = await Promise.all(
+            validMembers.map(async (m) => ({
+              id: m.id,
+              blocked:
+                (await hasBlocked(user.userId, m.id)) ||
+                (await hasBlocked(m.id, user.userId)),
+            }))
+          );
+          const blockedMemberIds = new Set(
+            blockedFlags.filter((row) => row.blocked).map((row) => row.id)
+          );
           // Separate humans from agents/NPCs
-          const agents = validMembers.filter((m) => m.isAgent || m.isActor);
-          const humans = validMembers.filter((m) => !m.isAgent && !m.isActor);
+          const agents = validMembers.filter(
+            (m) => (m.isAgent || m.isActor) && !blockedMemberIds.has(m.id)
+          );
+          const humans = validMembers.filter(
+            (m) => !m.isAgent && !m.isActor && !blockedMemberIds.has(m.id)
+          );
 
           // AGENTS/NPCs: Direct add (they don't need to accept)
           if (agents.length > 0) {

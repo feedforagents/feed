@@ -17,6 +17,7 @@ import {
   type DrizzleClient,
   generateSnowflakeId,
   groupMembers,
+  hasBlocked,
   sql,
 } from '@feed/db';
 import { GROUP_CONFIG } from '@feed/shared';
@@ -77,6 +78,20 @@ export async function acceptGroupInvite(
 ): Promise<{ groupId: string; chatId: string | null }> {
   return asUser(userId, async (db) => {
     const invite = await claimPendingInvite(db, userId, inviteId, 'accepted');
+
+    // A block in either direction bars the accept: the invite must not
+    // pull the invitee into a group with someone they blocked (or who
+    // blocked them). The claim above rolls back with the transaction on
+    // throw, so the invite stays pending.
+    if (invite.invitedBy) {
+      const [blockedByMe, blockedMe] = await Promise.all([
+        hasBlocked(userId, invite.invitedBy),
+        hasBlocked(invite.invitedBy, userId),
+      ]);
+      if (blockedByMe || blockedMe) {
+        throw new ApiError('This invite is not available', 403);
+      }
+    }
 
     const invitedGroup = await db.group.findUnique({
       where: { id: invite.groupId },
