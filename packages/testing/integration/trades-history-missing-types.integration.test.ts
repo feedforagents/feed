@@ -1,88 +1,81 @@
-/**
- * GET /api/trades?userId=... against a real database, fed by the real
- * trading services: the balance entries in a user's own trade history must
- * cover every balance-changing trade event the services record.
- *
- * The route documents itself as the trading feed over "Balance transactions
- * (buys, sells, deposits, withdrawals)" and the canonical fee config
- * (FEE_CONFIG.FEE_TYPES) enumerates the trade types the wallet records:
- * pred_buy, pred_sell, perp_open, perp_close, perp_add_to_position and
- * perp_flip_position. Settlement credits a winning prediction with
- * pred_resolve, a cancelled market refunds with pred_cancel, and the perp
- * service records a partial close as perp_partial_close — the pair of
- * perp_close. The route's type filter listed only five types, so a payout,
- * a refund, an add, a partial close and a flip moved the user's balance
- * without ever appearing in their history.
- *
- * Fixtures are produced by the real PredictionMarketService and
- * PerpMarketService wired to the real WalletService, so every ledger row
- * below is one a production flow writes; the test asserts the premise
- * (the rows exist in BalanceTransaction) before asserting the route shows
- * them. The only stub is the `server-only` marker package.
- */
-
-import { afterAll, describe, expect, it, mock } from 'bun:test';
-
-mock.module('server-only', () => ({}));
-
+/** PRD §§9.1–9.3 / MVP Phase 6: existing balance-changing trades appear in history. */
+import { afterAll, beforeAll, expect, mock, test } from 'bun:test';
 import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@feed/core/markets/prediction';
-import {
-  balanceTransactions,
-  db,
-  eq,
-  inArray,
-  markets,
-  organizationState,
-  perpMarketSnapshots,
-  perpPositions,
-  pointsTransactions,
-  positions,
-  predictionPriceHistories,
-  tradingFeeOutbox,
-  tradingFees,
-  users,
-} from '@feed/db';
-import { FEE_CONFIG } from '@feed/engine/config/fees';
-import { WalletService } from '@feed/engine/services/wallet-service';
-import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
-import { createPerpMarketService } from '../../../apps/web/src/app/api/markets/perps/_adapters';
-import { GET } from '../../../apps/web/src/app/api/trades/route';
+  runIsolatedTradeHistoryCase,
+  startTradeHistoryServer,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const TRADE_TYPES = [
-  'pred_buy',
-  'pred_sell',
-  'pred_resolve',
-  'pred_cancel',
-  'perp_open',
-  'perp_close',
-  'perp_add_to_position',
-  'perp_partial_close',
-  'perp_flip_position',
-] as const;
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('runs the trade history HTTP case in a leased fresh database', async () => {
+    await runIsolatedTradeHistoryCase();
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  // This Next.js build guard has no database or runtime behavior.
+  mock.module('server-only', () => ({}));
+  const { PredictionDbAdapter, PredictionMarketService } = await import(
+    '@feed/core/markets/prediction'
+  );
+  const {
+    balanceTransactions,
+    db,
+    eq,
+    markets,
+    organizationState,
+    perpMarketSnapshots,
+    perpPositions,
+    users,
+  } = await import('@feed/db');
+  const { FEE_CONFIG } = await import('@feed/engine/config/fees');
+  const { WalletService } = await import(
+    '@feed/engine/services/wallet-service'
+  );
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { createPerpMarketService } = await import(
+    '../../../apps/web/src/app/api/markets/perps/_adapters'
+  );
 
-type TradesResponse = {
-  trades: Array<{
-    type: string;
-    id: string;
-    market?: { id: string } | null;
-    transactionType?: string;
-    amount?: string;
-  }>;
-  total: number;
-};
+  const tradeTypes = [
+    'pred_buy',
+    'pred_sell',
+    'pred_resolve',
+    'pred_cancel',
+    'perp_open',
+    'perp_close',
+    'perp_add_to_position',
+    'perp_partial_close',
+    'perp_flip_position',
+  ] as const;
 
-class HistoryFixture {
-  private userIds: string[] = [];
-  private marketIds: string[] = [];
-  private organizationIds: string[] = [];
-  private snapshotTickers: string[] = [];
+  type TradesResponse = {
+    trades: Array<{
+      type: string;
+      id: string;
+      market?: { id: string } | null;
+      transactionType?: string;
+      amount?: string;
+    }>;
+    total: number;
+    hasMore: boolean;
+  };
 
-  async createUser(id = ''): Promise<string> {
-    const userId = id || (await generateSnowflakeId());
+  let api: Awaited<ReturnType<typeof startTradeHistoryServer>>;
+  beforeAll(async () => {
+    api = await startTradeHistoryServer();
+  }, 40_000);
+  afterAll(async () => {
+    try {
+      await api?.stop();
+    } finally {
+      await db.$disconnect();
+    }
+  }, 20_000);
+
+  // Only the lease holder retires the database. This fixture never deletes rows
+  // by parent ID or assumes ownership of service-created writes.
+  async function createUser(): Promise<string> {
+    const userId = await generateSnowflakeId();
     const [owned] = await db
       .insert(users)
       .values({
@@ -103,12 +96,11 @@ class HistoryFixture {
       })
       .returning({ id: users.id });
     if (!owned) throw new Error('User insert returned no ownership');
-    this.userIds.push(owned.id);
     return owned.id;
   }
 
-  async createMarket(tag: string, id = ''): Promise<string> {
-    const marketId = id || (await generateSnowflakeId());
+  async function createMarket(tag: string): Promise<string> {
+    const marketId = await generateSnowflakeId();
     const [owned] = await db
       .insert(markets)
       .values({
@@ -118,16 +110,15 @@ class HistoryFixture {
         yesShares: '500',
         noShares: '500',
         resolved: false,
-        endDate: new Date('2027-01-01T00:00:00.000Z'),
+        endDate: new Date(Date.now() + 60 * 60 * 1000),
         updatedAt: new Date(),
       })
       .returning({ id: markets.id });
     if (!owned) throw new Error('Market insert returned no ownership');
-    this.marketIds.push(owned.id);
     return owned.id;
   }
 
-  async createOrganization(ticker: string): Promise<void> {
+  async function createOrganization(ticker: string): Promise<void> {
     const [owned] = await db
       .insert(organizationState)
       .values({
@@ -138,10 +129,9 @@ class HistoryFixture {
       })
       .returning({ id: organizationState.id });
     if (!owned) throw new Error('Organization insert returned no ownership');
-    this.organizationIds.push(owned.id);
   }
 
-  async createSnapshot(ticker: string): Promise<void> {
+  async function createSnapshot(ticker: string): Promise<void> {
     const [owned] = await db
       .insert(perpMarketSnapshots)
       .values({
@@ -161,108 +151,48 @@ class HistoryFixture {
       })
       .returning({ ticker: perpMarketSnapshots.ticker });
     if (!owned) throw new Error('Snapshot insert returned no ownership');
-    this.snapshotTickers.push(owned.ticker);
   }
 
-  async cleanup(): Promise<void> {
-    for (const userId of this.userIds) {
-      await db
-        .delete(tradingFeeOutbox)
-        .where(eq(tradingFeeOutbox.userId, userId));
-      await db.delete(tradingFees).where(eq(tradingFees.userId, userId));
-      await db
-        .delete(balanceTransactions)
-        .where(eq(balanceTransactions.userId, userId));
-      await db.delete(positions).where(eq(positions.userId, userId));
-      await db.delete(perpPositions).where(eq(perpPositions.userId, userId));
-      const points = await db
-        .select({ id: pointsTransactions.id })
-        .from(pointsTransactions)
-        .where(eq(pointsTransactions.userId, userId));
-      if (points.length)
-        await db.delete(pointsTransactions).where(
-          inArray(
-            pointsTransactions.id,
-            points.map((row) => row.id)
-          )
-        );
-      expect(
-        await db
-          .select({ id: pointsTransactions.id })
-          .from(pointsTransactions)
-          .where(eq(pointsTransactions.userId, userId))
-      ).toHaveLength(0);
-      await db.delete(users).where(eq(users.id, userId));
-    }
-    if (this.marketIds.length > 0) {
-      // Recover service children only beneath parents whose INSERT succeeded,
-      // including rows created before a later assertion or setup failure.
-      const snapshots = await db
-        .select({ id: predictionPriceHistories.id })
-        .from(predictionPriceHistories)
-        .where(inArray(predictionPriceHistories.marketId, this.marketIds));
-      if (snapshots.length > 0) {
-        await db.delete(predictionPriceHistories).where(
-          inArray(
-            predictionPriceHistories.id,
-            snapshots.map(({ id }) => id)
-          )
-        );
-      }
-      expect(
-        await db
-          .select({ id: predictionPriceHistories.id })
-          .from(predictionPriceHistories)
-          .where(inArray(predictionPriceHistories.marketId, this.marketIds))
-      ).toHaveLength(0);
-      await db.delete(markets).where(inArray(markets.id, this.marketIds));
-      expect(
-        await db
-          .select({ id: markets.id })
-          .from(markets)
-          .where(inArray(markets.id, this.marketIds))
-      ).toHaveLength(0);
-    }
-    if (this.snapshotTickers.length > 0) {
-      await db
-        .delete(perpMarketSnapshots)
-        .where(inArray(perpMarketSnapshots.ticker, this.snapshotTickers));
-      expect(
-        await db
-          .select({ ticker: perpMarketSnapshots.ticker })
-          .from(perpMarketSnapshots)
-          .where(inArray(perpMarketSnapshots.ticker, this.snapshotTickers))
-      ).toHaveLength(0);
-    }
-    if (this.organizationIds.length > 0) {
-      await db
-        .delete(organizationState)
-        .where(inArray(organizationState.id, this.organizationIds));
-      expect(
-        await db
-          .select({ id: organizationState.id })
-          .from(organizationState)
-          .where(inArray(organizationState.id, this.organizationIds))
-      ).toHaveLength(0);
-    }
-    if (this.userIds.length > 0) {
-      expect(
-        await db
-          .select({ id: users.id })
-          .from(users)
-          .where(inArray(users.id, this.userIds))
-      ).toHaveLength(0);
-    }
+  async function readTrades(params: Record<string, string>) {
+    const url = new URL('/api/trades', api.url);
+    url.search = new URLSearchParams(params).toString();
+    const response = await fetch(url, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(5_000),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      data?: TradesResponse;
+    } & TradesResponse;
+    return body.data ?? body;
   }
-}
 
-describe('user trade history covers every recorded trade event', () => {
-  const fixture = new HistoryFixture();
-  afterAll(() => fixture.cleanup());
+  const keys = (data: TradesResponse) =>
+    data.trades.map((trade) => `${trade.type}:${trade.id}`);
 
-  it('shows settlement, refund, add, partial close and flip entries', async () => {
-    const userId = await fixture.createUser();
+  async function expectPageWalk(
+    params: Record<string, string>,
+    data: TradesResponse
+  ) {
+    const expected = keys(data);
+    const walked: string[] = [];
+    for (let offset = 0; offset <= data.total; offset += 3) {
+      const page = await readTrades({
+        ...params,
+        limit: '3',
+        offset: String(offset),
+      });
+      expect(page.total).toBe(data.total);
+      expect(page.hasMore).toBe(offset + 3 < data.total);
+      expect(keys(page)).toEqual(expected.slice(offset, offset + 3));
+      walked.push(...keys(page));
+    }
+    expect(walked).toEqual(expected);
+    expect(new Set(walked).size).toBe(data.total);
+  }
 
+  test('serves the persisted prediction and perp trade history over HTTP', async () => {
+    const userId = await createUser();
     const prediction = new PredictionMarketService({
       db: new PredictionDbAdapter(),
       wallet: {
@@ -285,7 +215,7 @@ describe('user trade history covers every recorded trade event', () => {
 
     // Prediction: buy -> resolve (settlement payout), buy -> cancel
     // (refund), buy -> sell (already-listed control).
-    const marketA = await fixture.createMarket('resolve');
+    const marketA = await createMarket('resolve');
     await prediction.buy({
       userId,
       marketId: marketA,
@@ -294,7 +224,7 @@ describe('user trade history covers every recorded trade event', () => {
     });
     await prediction.resolve({ marketId: marketA, winningSide: 'yes' });
 
-    const marketB = await fixture.createMarket('cancel');
+    const marketB = await createMarket('cancel');
     await prediction.buy({
       userId,
       marketId: marketB,
@@ -303,7 +233,7 @@ describe('user trade history covers every recorded trade event', () => {
     });
     await prediction.cancel({ marketId: marketB });
 
-    const marketC = await fixture.createMarket('sell');
+    const marketC = await createMarket('sell');
     const boughtC = await prediction.buy({
       userId,
       marketId: marketC,
@@ -319,8 +249,8 @@ describe('user trade history covers every recorded trade event', () => {
 
     // Perps: open -> add -> partial close -> flip -> full close.
     const ticker = `F88${userId}`;
-    await fixture.createOrganization(ticker);
-    await fixture.createSnapshot(ticker);
+    await createOrganization(ticker);
+    await createSnapshot(ticker);
     const perps = createPerpMarketService();
     const opened = await perps.openPosition({
       userId,
@@ -363,178 +293,58 @@ describe('user trade history covers every recorded trade event', () => {
       .select()
       .from(balanceTransactions)
       .where(eq(balanceTransactions.userId, userId));
-    const ledgerByType = new Map<string, string[]>();
-    for (const row of ledger) {
-      const list = ledgerByType.get(row.type) ?? [];
-      list.push(row.amount);
-      ledgerByType.set(row.type, list);
-    }
-    for (const type of TRADE_TYPES) {
-      expect(ledgerByType.has(type)).toBe(true);
-    }
+    const persistedTradeTypes = new Set(ledger.map((row) => row.type));
+    expect(persistedTradeTypes).toEqual(new Set(tradeTypes));
 
-    // The user's history must show every one of those entries, with the
-    // ledger amounts.
-    const response = await GET(
-      new NextRequest(`http://localhost/api/trades?userId=${userId}&limit=100`)
+    const anotherUserId = await createUser();
+    await prediction.buy({
+      userId: anotherUserId,
+      marketId: marketC,
+      side: 'yes',
+      amount: 50,
+    });
+    const [unrelatedBalanceRow] = await db
+      .select({ id: balanceTransactions.id })
+      .from(balanceTransactions)
+      .where(eq(balanceTransactions.userId, anotherUserId));
+    if (!unrelatedBalanceRow)
+      throw new Error('Second trader buy had no ledger row');
+
+    const filtered = await readTrades({ userId, limit: '100' });
+    const balanceItems = filtered.trades.filter(
+      (trade) => trade.type === 'balance'
     );
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      data?: TradesResponse;
-    } & TradesResponse;
-    const data = body.data ?? body;
-    const balanceItems = data.trades.filter((t) => t.type === 'balance');
-    const shownByType = new Map<string, string[]>();
-    for (const item of balanceItems) {
-      const list = shownByType.get(item.transactionType as string) ?? [];
-      list.push(item.amount as string);
-      shownByType.set(item.transactionType as string, list);
-    }
-    for (const type of TRADE_TYPES) {
-      expect(shownByType.get(type)?.sort()).toEqual(
-        ledgerByType.get(type)?.sort()
-      );
-    }
-    expect(balanceItems.length).toBe(ledger.length);
-    // The conflict resolution must preserve staging's merged pagination,
-    // while adding settlement/refund context to that shared service.
-    for (const item of balanceItems) {
-      const row = ledger.find((row) => row.id === item.id);
-      expect(row).toBeDefined();
-      if (
-        row &&
-        ['pred_buy', 'pred_sell', 'pred_resolve', 'pred_cancel'].includes(
-          row.type
-        )
-      ) {
+    expect(balanceItems.map(({ id }) => id).sort()).toEqual(
+      ledger.map(({ id }) => id).sort()
+    );
+    for (const row of ledger) {
+      const item = balanceItems.find(({ id }) => id === row.id);
+      expect(item?.transactionType).toBe(row.type);
+      expect(item?.amount).toBe(row.amount);
+      if (row.type.startsWith('pred_')) {
         if (row.relatedId === null)
           throw new Error('Prediction ledger is missing its market link');
-        expect(item.market?.id).toBe(row.relatedId);
+        expect(item?.market?.id).toBe(row.relatedId);
       }
     }
-    const walked: string[] = [];
-    for (let offset = 0; offset <= data.total; offset += 3) {
-      const pageResponse = await GET(
-        new NextRequest(
-          `http://localhost/api/trades?userId=${userId}&limit=3&offset=${offset}`
-        )
-      );
-      expect(pageResponse.status).toBe(200);
-      const pageBody = (await pageResponse.json()) as {
-        data?: TradesResponse;
-      } & TradesResponse;
-      const page = pageBody.data ?? pageBody;
-      expect(page.total).toBe(data.total);
-      expect(page.trades.map((t) => `${t.type}:${t.id}`)).toEqual(
-        data.trades.slice(offset, offset + 3).map((t) => `${t.type}:${t.id}`)
-      );
-      walked.push(...page.trades.map((t) => `${t.type}:${t.id}`));
-    }
-    expect(walked).toEqual(data.trades.map((t) => `${t.type}:${t.id}`));
-  });
 
-  it('does not acquire existing users, ledgers, markets, organizations or snapshots on collision', async () => {
-    const existing = new HistoryFixture();
-    const attempted = new HistoryFixture();
-    try {
-      const userId = await existing.createUser();
-      const marketId = await existing.createMarket('collision');
-      const ticker = `F88${userId}`;
-      await existing.createOrganization(ticker);
-      await existing.createSnapshot(ticker);
-      await WalletService.debit(
-        userId,
-        1,
-        'pred_buy',
-        'collision control',
-        marketId
-      );
-      const readExisting = async () => ({
-        users: await db.select().from(users).where(eq(users.id, userId)),
-        ledger: await db
-          .select()
-          .from(balanceTransactions)
-          .where(eq(balanceTransactions.userId, userId)),
-        markets: await db
-          .select()
-          .from(markets)
-          .where(eq(markets.id, marketId)),
-        organizations: await db
-          .select()
-          .from(organizationState)
-          .where(eq(organizationState.id, ticker)),
-        snapshots: await db
-          .select()
-          .from(perpMarketSnapshots)
-          .where(eq(perpMarketSnapshots.ticker, ticker)),
-      });
-      const before = await readExisting();
-      expect(before.ledger).toHaveLength(1);
-      for (const insert of [
-        () => attempted.createUser(userId),
-        () => attempted.createMarket('collision', marketId),
-        () => attempted.createOrganization(ticker),
-        () => attempted.createSnapshot(ticker),
-      ]) {
-        await expect(insert()).rejects.toMatchObject({
-          cause: { code: '23505' },
-        });
-      }
-      await attempted.cleanup();
-      expect(await readExisting()).toEqual(before);
-    } finally {
-      await attempted.cleanup();
-      await existing.cleanup();
-    }
+    const another = await readTrades({ userId: anotherUserId, limit: '100' });
+    expect(keys(another)).toContain(`balance:${unrelatedBalanceRow.id}`);
+    const all = await readTrades({ limit: '100' });
+    expect(keys(all).sort()).toEqual(
+      [...keys(filtered), ...keys(another)].sort()
+    );
+    await expectPageWalk({ userId }, filtered);
+    await expectPageWalk({}, all);
+    console.info(
+      'TRADE_HISTORY_HTTP_RESULT ' +
+        JSON.stringify({
+          route: '/api/trades',
+          status: 200,
+          tradeTypes: [...persistedTradeTypes].sort(),
+          filtered: filtered.total,
+          global: all.total,
+        })
+    );
   });
-
-  it('cleans partial setup without deleting an unacquired snapshot or market', async () => {
-    const existing = new HistoryFixture();
-    const attempted = new HistoryFixture();
-    try {
-      const marketId = await existing.createMarket('partial-control');
-      const ticker = `F88${await generateSnowflakeId()}`;
-      // An existing snapshot does not imply this fixture owns the organization.
-      await existing.createSnapshot(ticker);
-      const before = await db
-        .select()
-        .from(perpMarketSnapshots)
-        .where(eq(perpMarketSnapshots.ticker, ticker));
-      const userId = await attempted.createUser();
-      const ownedMarket = await attempted.createMarket('partial');
-      await WalletService.debit(
-        userId,
-        1,
-        'pred_buy',
-        'partial setup',
-        ownedMarket
-      );
-      await attempted.createOrganization(ticker);
-      await expect(attempted.createSnapshot(ticker)).rejects.toMatchObject({
-        cause: { code: '23505' },
-      });
-      await expect(
-        attempted.createMarket('collision', marketId)
-      ).rejects.toMatchObject({ cause: { code: '23505' } });
-      await attempted.cleanup();
-      expect(
-        await db
-          .select()
-          .from(perpMarketSnapshots)
-          .where(eq(perpMarketSnapshots.ticker, ticker))
-      ).toEqual(before);
-      expect(
-        await db.select().from(markets).where(eq(markets.id, marketId))
-      ).toHaveLength(1);
-      expect(
-        await db
-          .select()
-          .from(balanceTransactions)
-          .where(eq(balanceTransactions.userId, userId))
-      ).toHaveLength(0);
-    } finally {
-      await attempted.cleanup();
-      await existing.cleanup();
-    }
-  });
-});
+}

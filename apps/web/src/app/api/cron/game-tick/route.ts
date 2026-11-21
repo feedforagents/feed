@@ -68,7 +68,7 @@ import {
   WorldStateSnapshotService,
 } from '@feed/engine';
 import { logger, toISOOrNull } from '@feed/shared';
-import type { NextRequest } from 'next/server';
+import { after, type NextRequest } from 'next/server';
 import {
   isInternalCronSchedulerEnabled,
   triggerScheduledCrons,
@@ -275,6 +275,47 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           lastTickAt: toISOOrNull(gameState.lastTickAt),
         },
       });
+    }
+
+    if (process.env.DEPLOYMENT_ENV === 'localnet') {
+      const suppliedTime = Number(
+        request.headers.get('x-cloudflare-cron-time')
+      );
+      const scheduledTime =
+        suppliedTime > 0 && suppliedTime <= startTime
+          ? suppliedTime
+          : startTime;
+      const scheduledAt = new Date(scheduledTime);
+      const scheduledMinute = Math.floor(scheduledTime / 60_000);
+      const lastMinute = gameState.lastTickAt
+        ? Math.floor(new Date(gameState.lastTickAt).getTime() / 60_000)
+        : -1;
+      if (isInternalCronSchedulerEnabled() && lastMinute <= scheduledMinute) {
+        after(async () => {
+          await triggerScheduledCrons(scheduledAt);
+        });
+      }
+      if (lastMinute >= scheduledMinute) {
+        return successResponse({
+          success: true,
+          skipped: true,
+          reason: 'Game clock already advanced',
+        });
+      }
+
+      const result = await executeGameTick(
+        true,
+        new Set(['scheduled-generation']),
+        scheduledAt
+      );
+      const duration = Date.now() - startTime;
+      recordCronExecution('game-tick', new Date(startTime), {
+        success: true,
+        duration,
+        eventsCreated: result.eventsCreated,
+        marketsUpdated: result.marketsUpdated,
+      });
+      return successResponse({ success: true, duration, result });
     }
 
     // 5. Check buffer status - only generate if buffer < 15 minutes

@@ -170,7 +170,7 @@ function extractKeywords(text: string): Set<string> {
  * as proper nouns; they pass through unchecked rather than triggering
  * false entity-consistency failures.
  */
-const PROPER_NOUN_PATTERN = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/g;
+const PROPER_NOUN_PATTERN = /\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)+)\b/g;
 
 /**
  * Distinct (case-insensitive) multi-word proper nouns in `text`, first
@@ -244,7 +244,8 @@ const MIN_KEYWORD_OVERLAP = 0.15;
  */
 function checkKeywordOverlap(
   sourceText: string,
-  generatedText: string
+  generatedText: string,
+  useShorterKeywordSet: boolean
 ): { passed: boolean; overlap: number | null; reasons: string[] } {
   const sourceKeywords = extractKeywords(sourceText);
   const generatedKeywords = extractKeywords(generatedText);
@@ -260,7 +261,10 @@ function checkKeywordOverlap(
     if (sourceKeywords.has(word)) shared++;
   }
 
-  const overlap = shared / generatedKeywords.size;
+  const keywordCount = useShorterKeywordSet
+    ? Math.min(sourceKeywords.size, generatedKeywords.size)
+    : generatedKeywords.size;
+  const overlap = shared / keywordCount;
   const passed = overlap >= MIN_KEYWORD_OVERLAP;
 
   return {
@@ -277,6 +281,10 @@ function checkKeywordOverlap(
 // ─── Entity Consistency ──────────────────────────────────────────
 
 const MAX_UNKNOWN_ENTITIES = 1;
+const ENTITY_PREFIX_WORDS =
+  /^(?:(?:A|An|The|For|On|In|At|To|From|With|And|But|Or)(?:[ \t]+|$))+/;
+const DATE_LEAD_IN =
+  /^On[ \t]+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)$/;
 
 /**
  * Check that generated text doesn't introduce entities absent from
@@ -299,15 +307,20 @@ export function checkEntityConsistency(
 
   const unknownEntities: string[] = [];
   for (const entity of generatedEntities) {
+    if (allowed.has(entity.toLowerCase())) continue;
+    const name = entity.replace(ENTITY_PREFIX_WORDS, '');
+    if (name === '' || DATE_LEAD_IN.test(entity)) continue;
+
+    // A sentence or headline may capitalize a determiner before a known name.
+    // Check the original candidate as well when reporting an unknown name.
+    if (allowed.has(name.toLowerCase())) continue;
     const inSource = sourceText
       ? new RegExp(
           `(?<![\\p{L}\\p{N}_])${escapeRegex(entity)}(?![\\p{L}\\p{N}_])`,
           'iu'
         ).test(sourceText)
       : false;
-    if (!allowed.has(entity.toLowerCase()) && !inSource) {
-      unknownEntities.push(entity);
-    }
+    if (!inSource) unknownEntities.push(entity);
   }
 
   const passed = unknownEntities.length <= MAX_UNKNOWN_ENTITIES;
@@ -461,7 +474,8 @@ function checkEntityDensity(text: string): {
  */
 export async function validateGrounding(
   sourceText: string,
-  generatedText: string
+  generatedText: string,
+  { useShorterKeywordSet = false }: { useShorterKeywordSet?: boolean } = {}
 ): Promise<GroundingResult> {
   // Empty source or output: grounding cannot be established.
   const trimmedSource = sourceText.trim();
@@ -482,7 +496,11 @@ export async function validateGrounding(
   const scores: number[] = [];
 
   // 1. Keyword overlap (free, <1ms)
-  const keywords = checkKeywordOverlap(sourceText, generatedText);
+  const keywords = checkKeywordOverlap(
+    sourceText,
+    generatedText,
+    useShorterKeywordSet
+  );
   if (keywords.overlap !== null) scores.push(keywords.overlap);
   if (!keywords.passed) reasons.push(...keywords.reasons);
 

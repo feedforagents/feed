@@ -27,6 +27,7 @@ import type {
 } from './types';
 import {
   getOpenPerpPositionIntegrityIssue,
+  getPerpMarketOrderSizeLimit,
   isOpenPerpPositionStateValid,
   MAX_PERP_USER_EXPOSURE,
 } from './utils';
@@ -97,8 +98,6 @@ function effectiveMaxLeverage(market: { maxLeverage?: number | null }): number {
   );
 }
 const DEFAULT_MIN_ORDER_SIZE = 10;
-const MIN_MAX_POSITION_SIZE = 10_000;
-const OPEN_INTEREST_LIMIT_RATIO = 0.1;
 const FUNDING_PERIOD_HOURS = 8;
 const BASE_FUNDING_RATE = 0.01; // 1% APR base
 const MAX_FUNDING_RATE = 0.5; // 50% APR cap
@@ -642,7 +641,7 @@ export class PerpMarketService {
       throw new Error(`Invalid leverage (1-${maxLeverage})`);
     }
 
-    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
     if (size > maxPositionSize) {
       throw new Error(
         `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
@@ -1630,7 +1629,7 @@ export class PerpMarketService {
     }
 
     // Check max position size
-    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
     const newTotalSize = existing.size + addedSize;
     if (newTotalSize > maxPositionSize) {
       throw new Error(
@@ -2230,11 +2229,6 @@ export class PerpMarketService {
 
       return finalResult;
     }
-  }
-
-  private calculateMaxPositionSize(openInterest: number): number {
-    const fromOi = openInterest * OPEN_INTEREST_LIMIT_RATIO;
-    return Math.max(fromOi, MIN_MAX_POSITION_SIZE);
   }
 
   private async getRequiredMarket(ticker: string): Promise<PerpMarketRecord> {
