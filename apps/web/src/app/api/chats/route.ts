@@ -179,6 +179,7 @@ import {
   groupMembers,
   groups,
   inArray,
+  isNull,
   messages,
   notInArray,
   userBlocks,
@@ -421,6 +422,86 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       .from(chats)
       .where(and(inArray(chats.id, dmChatIds), eq(chats.isGroup, false)));
 
+    // Direct group chats (created via POST /api/chats) have no Group row:
+    // membership lives in chatParticipants and chats.groupId stays null, so
+    // the groupMembers-based branch above can never see them. Collect the
+    // ones the viewer actively participates in so they are listed too.
+    const activeParticipantChatIds = new Set(
+      dmParticipantsList.filter((p) => p.isActive).map((p) => p.chatId)
+    );
+    const directGroupChatsDetails =
+      dmChatIds.length > 0
+        ? (
+            await dbClient
+              .select()
+              .from(chats)
+              .where(
+                and(
+                  inArray(chats.id, dmChatIds),
+                  eq(chats.isGroup, true),
+                  isNull(chats.groupId)
+                )
+              )
+          ).filter((c) => activeParticipantChatIds.has(c.id))
+        : [];
+    const directGroupChatIds = directGroupChatsDetails.map((c) => c.id);
+    const directGroupMessageCounts =
+      directGroupChatIds.length > 0
+        ? await dbClient
+            .select({ chatId: messages.chatId, count: count(messages.id) })
+            .from(messages)
+            .where(inArray(messages.chatId, directGroupChatIds))
+            .groupBy(messages.chatId)
+        : [];
+    const directGroupCountMap = new Map(
+      directGroupMessageCounts.map((mc) => [mc.chatId, mc.count])
+    );
+
+    // Direct-group previews follow the same sender rule as group-backed
+    // chats on staging: messages from users the viewer blocked or muted,
+    // or who blocked the viewer, never surface as the preview. The
+    // existing DM query below is left unchanged.
+    const [blockedRows, mutedRows, blockedByRows] = await Promise.all([
+      dbClient
+        .select({ id: userBlocks.blockedId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockerId, user.userId)),
+      dbClient
+        .select({ id: userMutes.mutedId })
+        .from(userMutes)
+        .where(eq(userMutes.muterId, user.userId)),
+      dbClient
+        .select({ id: userBlocks.blockerId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockedId, user.userId)),
+    ]);
+    const excludedSenderIds = [
+      ...blockedRows,
+      ...mutedRows,
+      ...blockedByRows,
+    ].map((row) => row.id);
+    const directGroupSenderScope =
+      excludedSenderIds.length > 0
+        ? notInArray(messages.senderId, excludedSenderIds)
+        : undefined;
+    const directGroupMessages =
+      directGroupChatIds.length > 0
+        ? await Promise.all(
+            directGroupChatIds.map(async (chatId) => {
+              const msgs = await dbClient
+                .select()
+                .from(messages)
+                .where(and(eq(messages.chatId, chatId), directGroupSenderScope))
+                .orderBy(desc(messages.createdAt))
+                .limit(1);
+              return { chatId, messages: msgs };
+            })
+          )
+        : [];
+    const directGroupMessagesMap = new Map(
+      directGroupMessages.map(({ chatId, messages }) => [chatId, messages])
+    );
+
     // Get participants and messages separately
     const [allParticipants, allMessages] = await Promise.all([
       dbClient
@@ -568,7 +649,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       })
     ).then((chatsList) => chatsList.filter((c) => c !== null));
 
-    return { groupChats: formattedGroupChats, directChats: directChatsList };
+    // Format direct group chats (no Group row behind them)
+    const formattedDirectGroupChats = directGroupChatsDetails.map((chat) => {
+      const lastMessage = directGroupMessagesMap.get(chat.id)?.[0] || null;
+      return {
+        id: chat.id,
+        name: chat.name || 'Unnamed Group',
+        isGroup: true,
+        lastMessage,
+        messageCount: directGroupCountMap.get(chat.id) ?? 0,
+        qualityScore: null,
+        lastMessageAt: lastMessage?.createdAt ?? chat.updatedAt,
+        updatedAt: chat.updatedAt,
+      };
+    });
+
+    return {
+      groupChats: [...formattedGroupChats, ...formattedDirectGroupChats],
+      directChats: directChatsList,
+    };
   });
 
   logger.info(
