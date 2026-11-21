@@ -90,7 +90,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asUser, comments, eq, posts, users } from '@feed/db';
+import { asUser, comments, eq, hasBlocked, posts, users } from '@feed/db';
 import {
   CreateCommentSchema,
   generateSnowflakeId,
@@ -141,6 +141,7 @@ export const POST = withErrorHandling(
       const [parentPost] = await dbClient
         .select({
           id: posts.id,
+          authorId: posts.authorId,
           timestamp: posts.timestamp,
           deletedAt: posts.deletedAt,
         })
@@ -155,6 +156,22 @@ export const POST = withErrorHandling(
         throw new BusinessLogicError(
           'Cannot reply to deleted content',
           'CONTENT_DELETED'
+        );
+      }
+
+      // Same rule as POST /api/posts/[id]/comments: a reply may not be
+      // posted when the post author and the replier blocked each other.
+      // Without this, a blocked user can keep participating in the
+      // thread — visible to every other reader — through this route
+      // while the top-level route refuses the identical action.
+      const [postBlocked, postBlockedMe] = await Promise.all([
+        hasBlocked(parentPost.authorId, user.userId),
+        hasBlocked(user.userId, parentPost.authorId),
+      ]);
+      if (postBlocked || postBlockedMe) {
+        throw new BusinessLogicError(
+          'Cannot comment on this post',
+          'BLOCKED_USER'
         );
       }
 
