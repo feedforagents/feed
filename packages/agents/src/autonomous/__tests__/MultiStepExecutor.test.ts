@@ -1080,6 +1080,105 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     );
   });
 
+  test('a rejected post stays in the trace while a later step publishes a fresh post', async () => {
+    spyOn(Math, 'random').mockReturnValue(0.5);
+    const executor = new MultiStepExecutor(2);
+    const { runtime, decision, execute } = prepare(executor, true);
+    execute.mockRestore();
+    const publish = spyOn(directExecutors, 'executeDirectPost')
+      .mockResolvedValueOnce({
+        success: false,
+        rejection: 'post-diversity',
+        error: 'Content rejected: Content is 42% similar to a recent post.',
+      })
+      .mockResolvedValueOnce({ success: true, postId: 'fresh-post' });
+    for (const content of ['A recycled take', 'A new telescope observation']) {
+      decision.mockResolvedValueOnce({
+        decision: {
+          thought: 'Post an update.',
+          action: Actions.POST,
+          parameters: { content },
+          isFinish: false,
+        },
+        rawResponse: '{}',
+      });
+    }
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(result.iterations).toBe(2);
+    expect(result.actionsExecuted.posts).toBe(1);
+    expect(result.trace[0]).toMatchObject({
+      actionType: Actions.POST,
+      success: false,
+      result: { rejection: 'post-diversity' },
+    });
+    expect(result.trace[1]?.result?.postId).toBe('fresh-post');
+    expect(decision.mock.calls[1]?.[0]).toContain(
+      'Post rejected by diversity checks'
+    );
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  test('ordinary POST failures still fail the tick', async () => {
+    spyOn(Math, 'random').mockReturnValue(0.5);
+    const executor = new MultiStepExecutor(2);
+    const { runtime, decision, execute } = prepare(executor, true);
+    execute.mockRestore();
+    spyOn(directExecutors, 'executeDirectPost').mockResolvedValue({
+      success: false,
+      error: 'Database unavailable',
+    });
+    decision.mockResolvedValueOnce({
+      decision: {
+        thought: 'Post an update.',
+        action: Actions.POST,
+        parameters: { content: 'A new telescope observation' },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    });
+
+    await expect(executor.execute(actor.id, runtime, true)).rejects.toThrow(
+      'Agent action POST failed: Post failed: Database unavailable'
+    );
+    expect(decision).toHaveBeenCalledTimes(1);
+  });
+
+  test('diversity rejections cannot extend the four-step budget or count as publications', async () => {
+    spyOn(Math, 'random').mockReturnValue(0.5);
+    const executor = new MultiStepExecutor();
+    const { runtime, decision, execute } = prepare(executor, true);
+    execute.mockRestore();
+    const publish = spyOn(
+      directExecutors,
+      'executeDirectPost'
+    ).mockResolvedValue({
+      success: false,
+      rejection: 'post-diversity',
+      error: 'Content rejected: Content is too similar to a recent post.',
+    });
+    decision.mockResolvedValue({
+      decision: {
+        thought: 'Post an update.',
+        action: Actions.POST,
+        parameters: { content: 'A recycled take' },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(result.actionsExecuted.posts).toBe(0);
+    expect(result.trace).toHaveLength(4);
+    expect(result.trace.every((action) => !action.success)).toBe(true);
+    expect(decision).toHaveBeenCalledTimes(4);
+    expect(publish).toHaveBeenCalledTimes(4);
+  });
+
   test('repeated disabled decisions exhaust the existing two attempts without execution', async () => {
     const executor = new MultiStepExecutor(1);
     const { runtime, decision, execute } = prepare(executor);
