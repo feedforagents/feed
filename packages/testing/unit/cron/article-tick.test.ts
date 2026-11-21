@@ -86,6 +86,8 @@ let articleEvents: Array<{
   visibility: string;
 }> = [];
 let articleTopics: string[] = [];
+let nextArticleSlot = Infinity;
+let articlePersistenceRateLimited = false;
 
 const nextMockSnowflakeId = (): string => {
   mockSnowflakeCounter += 1;
@@ -267,6 +269,7 @@ const registerMocks = () => {
         maxAllowed: 2,
         remaining: Math.max(0, 2 - cronMockState.articleCount),
       }),
+      getNextAvailableAt: async () => nextArticleSlot,
     },
     ArticleGenerator: class {
       generateArticleForQuestion = async (question: { text: string }) => {
@@ -329,10 +332,10 @@ const registerMocks = () => {
     markEventAsCovered: async (eventId: string) => {
       cronMockState.articleCoveredEventIds.add(eventId);
     },
-    persistArticle: async (input: { id: string }) => ({
-      success: true,
-      articleId: input.id,
-    }),
+    persistArticle: async (input: { id: string }) =>
+      articlePersistenceRateLimited
+        ? { success: false, rateLimited: true }
+        : { success: true, articleId: input.id },
     getReputationBreakdown: () => ({
       total: 0,
       level: 'neutral',
@@ -440,6 +443,8 @@ describe('Article Tick Cron', () => {
     cronMockState.articleCoveredEventIds.clear();
     articleEvents = [];
     articleTopics = [];
+    nextArticleSlot = Infinity;
+    articlePersistenceRateLimited = false;
   });
 
   describe('Authorization', () => {
@@ -538,6 +543,7 @@ describe('Article Tick Cron', () => {
         currentDay: 1,
       };
       cronMockState.articleCount = 2; // At limit
+      nextArticleSlot = Date.now() + 30_000;
 
       const req = new NextRequest('http://localhost/api/cron/article-tick', {
         method: 'POST',
@@ -548,6 +554,38 @@ describe('Article Tick Cron', () => {
       expect(data.success).toBe(true);
       expect(data.skipped).toBe(true);
       expect(data.reason).toBe('Rate limit reached');
+    });
+
+    test('attempts one article when a slot opens shortly after the tick', async () => {
+      cronMockState.articleGame = {
+        id: 'game-123',
+        isContinuous: true,
+        isRunning: true,
+        currentDay: 1,
+      };
+      cronMockState.articleCount = 2;
+      nextArticleSlot = Date.now() + 15_000;
+
+      const request = () =>
+        new NextRequest('http://localhost/api/cron/article-tick', {
+          method: 'POST',
+        });
+      const published = await POST(request());
+      expect(await published.json()).toMatchObject({
+        skipped: false,
+        articlesCreated: 1,
+      });
+      expect(articleTopics).toHaveLength(1);
+
+      articleTopics = [];
+      articlePersistenceRateLimited = true;
+      const blocked = await POST(request());
+      expect(await blocked.json()).toMatchObject({
+        skipped: true,
+        articlesCreated: 0,
+        reason: 'rate_limit_at_persist',
+      });
+      expect(articleTopics).toHaveLength(1);
     });
 
     test('should proceed when under rate limit', async () => {
