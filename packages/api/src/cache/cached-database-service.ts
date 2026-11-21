@@ -568,6 +568,15 @@ class CachedDatabaseService {
 
   /**
    * Invalidate cache for specific actor's posts
+   *
+   * The whole namespace is evicted, not just `${actorId}:*`: the keys
+   * `getPostsByActor` writes are the JSON `["post-visibility-v1",
+   * authorId, ...]` form whenever a visibility object is passed — and the
+   * GET /api/posts route always passes one — so the old prefix pattern
+   * matched nothing and a newly published post stayed off the author's
+   * profile until the 180s TTL expired. Evicting the namespace keeps the
+   * invalidation independent of the key format, the same way
+   * `invalidatePostsCache` already clears its namespaces with `*`.
    */
   async invalidateActorPostsCache(actorId: string) {
     logger.info(
@@ -575,7 +584,7 @@ class CachedDatabaseService {
       { actorId },
       'CachedDatabaseService'
     );
-    await invalidateCachePattern(`${actorId}:*`, {
+    await invalidateCachePattern('*', {
       namespace: CACHE_KEYS.POSTS_BY_ACTOR,
     });
   }
