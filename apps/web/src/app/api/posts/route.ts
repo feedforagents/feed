@@ -884,6 +884,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       limit,
       source: 'following',
       nextCursor: followingNextCursor,
+      // The cursor is the pagination signal: a page shortened by the
+      // moderation filter above can still have a next page, so hasMore
+      // follows the cursor, not the returned page length.
+      hasMore: followingNextCursor !== null,
     });
     // Personalized (follows + moderation): never cacheable by shared caches.
     if (rateLimitInfo) addPrivateReadHeaders(followingRes, rateLimitInfo);
