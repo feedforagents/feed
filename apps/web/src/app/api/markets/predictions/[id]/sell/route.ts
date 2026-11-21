@@ -16,6 +16,7 @@ import {
   withPredictionSettlement,
 } from '@feed/engine';
 import {
+  BadRequestError,
   logger,
   PredictionMarketIdSchema,
   PredictionMarketSellSchema,
@@ -23,13 +24,21 @@ import {
 import type { NextRequest } from 'next/server';
 import { trackServerEvent } from '@/lib/posthog/server';
 
-const serviceOptions = (marketId: string): PredictionSettlementOptions => ({
+const serviceOptions = (
+  marketId: string,
+  idempotencyKey?: string,
+  idempotencyOperation?: 'buy' | 'sell',
+  idempotencyFingerprint?: string
+): PredictionSettlementOptions => ({
   broadcast: {
     emit: (channel, payload) =>
       broadcastToChannel(channel, payload as Record<string, JsonValue>),
   },
   cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
   clock: { now: () => new Date() },
+  idempotencyKey,
+  idempotencyOperation,
+  idempotencyFingerprint,
   fees: {
     tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
     platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -48,6 +57,24 @@ const serviceOptions = (marketId: string): PredictionSettlementOptions => ({
       ),
   }),
 });
+
+/**
+ * Client-supplied idempotency key for one trade request. A resend (timeout
+ * retry / double-click) must carry the same key; the settlement then replays
+ * the first execution instead of trading twice. A fresh trade must use a
+ * fresh key — reusing a key for a different request returns 409.
+ */
+function readIdempotencyKey(request: NextRequest): string | undefined {
+  const raw = request.headers.get('idempotency-key');
+  if (raw === null) return undefined;
+  const key = raw.trim();
+  if (key.length === 0 || key.length > 128) {
+    throw new BadRequestError(
+      'Idempotency-Key must be 1-128 characters when provided'
+    );
+  }
+  return key;
+}
 
 // POST /api/markets/predictions/[id]/sell - offchain prediction market sell
 export const POST = withErrorHandling(
@@ -73,7 +100,12 @@ export const POST = withErrorHandling(
           shares,
           positionId,
         }),
-      serviceOptions(marketId)
+      serviceOptions(
+        marketId,
+        readIdempotencyKey(request),
+        'sell',
+        JSON.stringify({ shares, positionId: positionId ?? null })
+      )
     );
 
     const balance = await WalletService.getBalance(user.userId);
