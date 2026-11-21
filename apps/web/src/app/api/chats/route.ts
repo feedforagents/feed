@@ -162,6 +162,7 @@
 
 import {
   authenticate,
+  BusinessLogicError,
   ReputationService,
   successResponse,
   withErrorHandling,
@@ -178,6 +179,7 @@ import {
   eq,
   groupMembers,
   groups,
+  hasBlocked,
   inArray,
   messages,
   notInArray,
@@ -600,7 +602,60 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const { name, isGroup, participantIds } = ChatCreateSchema.parse(body);
 
   // Create the chat with RLS
+  let addedParticipantCount = 0;
   const chat = await asUser(user, async (dbClient) => {
+    const requestedIds = participantIds ?? [];
+
+    if (!isGroup) {
+      // A 1:1 chat follows the DM rules (POST /api/chats/dm): no NPC
+      // target, and neither side of a block relationship. Reject outright
+      // so a blocked attempt leaves no chat behind — the same rule the
+      // web message route, MCP send_message, A2A send_message (#1853)
+      // and the autonomous-agent DM path (#1897) already enforce.
+      for (const participantId of requestedIds) {
+        const [target] = await dbClient
+          .select({ isActor: users.isActor })
+          .from(users)
+          .where(eq(users.id, participantId))
+          .limit(1);
+        if (target?.isActor) {
+          throw new BusinessLogicError(
+            'Cannot send direct messages to NPC actors. Use group chats to interact with NPCs.',
+            'INVALID_DM_TARGET'
+          );
+        }
+        const [isBlocked, hasBlockedMe] = await Promise.all([
+          hasBlocked(user.userId, participantId),
+          hasBlocked(participantId, user.userId),
+        ]);
+        if (isBlocked || hasBlockedMe) {
+          throw new BusinessLogicError(
+            'Cannot send messages to this user',
+            'BLOCKED_USER'
+          );
+        }
+      }
+    }
+
+    // Group chats silently drop participants on either side of a block
+    // relationship, like POST /api/groups does for invitees and like the
+    // A2A/MCP create_group paths do (F6-01) — the chat itself is still
+    // created. Mutes are not filtered: muting hides content, it is not
+    // a "no contact" promise.
+    const addableIds = isGroup
+      ? (
+          await Promise.all(
+            requestedIds.map(async (participantId) => {
+              const [isBlocked, hasBlockedMe] = await Promise.all([
+                hasBlocked(user.userId, participantId),
+                hasBlocked(participantId, user.userId),
+              ]);
+              return isBlocked || hasBlockedMe ? null : participantId;
+            })
+          )
+        ).filter((id): id is string => id !== null)
+      : requestedIds;
+
     // Create the chat
     const now = new Date();
     const [newChat] = await dbClient
@@ -626,8 +681,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     });
 
     // Add other participants if provided
-    if (participantIds && Array.isArray(participantIds)) {
-      for (const participantId of participantIds) {
+    addedParticipantCount = addableIds.length;
+    if (addableIds && Array.isArray(addableIds)) {
+      for (const participantId of addableIds) {
         await dbClient.insert(chatParticipants).values({
           id: await generateSnowflakeId(),
           chatId: newChat.id,
@@ -664,7 +720,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       chatId: chat.id,
       userId: user.userId,
       isGroup,
-      participantCount: (participantIds?.length || 0) + 1,
+      participantCount: addedParticipantCount + 1,
     },
     'POST /api/chats'
   );
