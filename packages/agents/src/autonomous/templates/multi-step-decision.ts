@@ -18,7 +18,7 @@ export interface ActionTraceResult {
   summary?: string;
   error?: string;
   result?: {
-    rejection?: 'post-diversity';
+    rejection?: 'post-diversity' | 'prediction-quote-unavailable';
     [key: string]: string | number | boolean | null | undefined;
   };
   parameters?: Record<string, unknown>;
@@ -936,6 +936,7 @@ ${formatPredictionMarkets(context.predictionMarkets)}
 ${formatPerpMarkets(context.perpMarkets)}`
       : `
 # Available Prediction Markets
+Buy only a market listed here with a positive Maximum safe buy. A market ID shown only in Your Open Positions is for selling a held side, subject to the existing sale rules.
 ${formatPredictionMarkets(context.predictionMarkets)}
 
 # Available Perp Markets
@@ -1600,7 +1601,7 @@ function formatActionSchemas(enabledFeatures: string[]): string {
       schemas.push(`TRADE (prediction - open position):
 {
   "marketType": "prediction",
-  "marketId": "exact_market_id_from_list",
+  "marketId": "exact_id_from_Available_Prediction_Markets",
   "side": "buy_yes | buy_no",
   "amount": 100,
   "reasoning": "Why this trade"

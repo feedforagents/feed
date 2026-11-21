@@ -930,6 +930,136 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     expect(execute.mock.calls[0]?.[2]).toMatchObject({ amount: 10_000 });
   });
 
+  const heldPrediction = {
+    marketId: 'held-only-market',
+    question: 'Will the lighthouse reopen?',
+    side: 'YES',
+    shares: 10,
+    avgPrice: 0.5,
+    currentPrice: 0.6,
+    pnlPercent: 20,
+    timeHeld: '20m',
+    timeHeldMs: 1_200_000,
+  };
+
+  function buyPrediction(marketId: string) {
+    return {
+      decision: {
+        thought: 'Buy the YES side.',
+        action: Actions.TRADE,
+        parameters: {
+          marketType: 'prediction',
+          marketId,
+          side: 'buy_yes',
+          amount: 5,
+        },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    };
+  }
+
+  test('refuses a buy without a quote before dispatch and allows a later quoted buy', async () => {
+    const executor = new MultiStepExecutor(2);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      true
+    );
+    context.enabledFeatures.push(Features.TRADING);
+    context.openPositions = 1;
+    context.agentPositions.predictions = [heldPrediction];
+    context.predictionMarkets = [
+      {
+        id: 'quoted-market',
+        question: 'Will the observatory reopen?',
+        yesPrice: 0.6,
+        noPrice: 0.4,
+        volume: 100,
+        maxSafeBet: 10,
+        endDate: '2026-11-21T18:00:00.000Z',
+      },
+    ];
+    decision
+      .mockResolvedValueOnce(buyPrediction(heldPrediction.marketId))
+      .mockResolvedValueOnce(buyPrediction(heldPrediction.marketId))
+      .mockResolvedValueOnce(buyPrediction('quoted-market'));
+    execute.mockResolvedValueOnce({
+      actionType: Actions.TRADE,
+      success: true,
+      summary: 'Bought YES',
+      timestamp: Date.now(),
+    });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(decision.mock.calls[0]?.[0]).toContain(
+      'A market ID shown only in Your Open Positions is for selling a held side'
+    );
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      'Buy only an ID under Available Prediction Markets'
+    );
+    expect(decision).toHaveBeenCalledTimes(3);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[2]).toMatchObject({
+      marketId: 'quoted-market',
+      side: 'buy_yes',
+    });
+    expect(result.success).toBe(true);
+    expect(result.iterations).toBe(2);
+    expect(result.actionsExecuted.trades).toBe(1);
+    expect(result.trace[0]).toMatchObject({
+      actionType: Actions.TRADE,
+      success: false,
+      parameters: { marketId: heldPrediction.marketId },
+      result: { rejection: 'prediction-quote-unavailable' },
+    });
+  });
+
+  test('a final refused buy leaves zero trades and completes the NPC tick', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      true
+    );
+    context.agentPositions.predictions = [heldPrediction];
+    decision.mockImplementation(async () =>
+      buyPrediction(heldPrediction.marketId)
+    );
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.iterations).toBe(1);
+    expect(result.actionsExecuted.trades).toBe(0);
+  });
+
+  test('an unknown market ID still fails after correction without dispatch', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor, false, true);
+    decision.mockImplementation(async () => buyPrediction('unknown-market'));
+
+    await expect(executor.execute(actor.id, runtime, true)).rejects.toThrow(
+      'that market is not in the current context'
+    );
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test('the standalone tick still rejects a user agent before planning', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor, false, true);
+
+    await expect(executor.execute(actor.id, runtime, false)).rejects.toThrow(
+      'Only NPCs can execute autonomous ticks'
+    );
+    expect(decision).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   test('gives an organization follow target the existing correction before dispatch', async () => {
     const executor = new MultiStepExecutor(1);
     const { context, runtime, decision, execute } = prepare(executor);

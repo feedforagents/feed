@@ -133,6 +133,9 @@ export interface MultiStepExecutorResult {
   duration: number;
 }
 
+const PREDICTION_QUOTE_UNAVAILABLE =
+  'Prediction buy requires a current quote. Buy only an ID under Available Prediction Markets with a positive safe buy limit, or choose another action.';
+
 function isDiversityRejectedPost(action: ActionTraceResult): boolean {
   return (
     action.actionType === Actions.POST &&
@@ -298,7 +301,11 @@ export class MultiStepExecutor {
           (await getScheduledInferenceThrottle()).maxSteps
         )
       : this.npcMaxIterations;
-    for (let iteration = 1; iteration <= effectiveMaxIterations; iteration++) {
+    iterations: for (
+      let iteration = 1;
+      iteration <= effectiveMaxIterations;
+      iteration++
+    ) {
       signal?.throwIfAborted();
       const iterationStartTime = Date.now();
       const iterationTimings: Record<string, number> = {};
@@ -480,6 +487,27 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             );
             validationFeedback = validationError;
             continue;
+          }
+
+          if (validationError === PREDICTION_QUOTE_UNAVAILABLE) {
+            trace.push({
+              actionType: Actions.TRADE,
+              success: false,
+              error: validationError,
+              result: { rejection: 'prediction-quote-unavailable' },
+              parameters: normalizedParameters,
+              timestamp: Date.now(),
+            });
+            logger.warn(
+              '[MultiStep] Prediction buy skipped without a current quote',
+              {
+                agentUserId,
+                iteration,
+                marketId: normalizedParameters.marketId,
+              },
+              'MultiStepExecutor'
+            );
+            continue iterations;
           }
 
           throw new Error(
@@ -1129,14 +1157,14 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             ),
           ]);
           if (!knownPredictionMarketIds.has(marketId)) {
-            return `Your TRADE used prediction marketId ${marketId}, but that market is not in the current context. Choose an exact marketId from Available Prediction Markets or your open positions.`;
+            return `Your TRADE used prediction marketId ${marketId}, but that market is not in the current context. Buy using a quoted ID under Available Prediction Markets. To sell, use the ID and side of a held position.`;
           }
           if (side === 'buy_yes' || side === 'buy_no') {
             const market = context.predictionMarkets.find(
               (m) => m.id === marketId
             );
             if (!market || !Number.isFinite(market.maxSafeBet))
-              return 'Prediction buy requires current liquidity limits in context.';
+              return PREDICTION_QUOTE_UNAVAILABLE;
             if (amount > market.maxSafeBet)
               return `Requested amount exceeds safe liquidity limit $${market.maxSafeBet}. Reduce the amount or choose another action.`;
           }
@@ -2740,7 +2768,11 @@ ${describeNpcMarketClue(offeredMarketClue)}`
 
     return {
       success: trace.every(
-        (action) => action.success || isDiversityRejectedPost(action)
+        (action) =>
+          action.success ||
+          isDiversityRejectedPost(action) ||
+          (action.actionType === Actions.TRADE &&
+            action.result?.rejection === 'prediction-quote-unavailable')
       ),
       actionsExecuted: counts,
       iterations: trace.length,
