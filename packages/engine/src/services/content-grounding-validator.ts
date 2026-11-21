@@ -303,7 +303,7 @@ export function checkEntityConsistency(
     }
   }
 
-  const unknownEntities: string[] = [];
+  const unknownEntities = new Map<string, string>();
   for (const entity of generatedEntities) {
     if (allowed.has(entity.toLowerCase())) continue;
     const name = entity.replace(ENTITY_PREFIX_WORDS, '');
@@ -312,26 +312,28 @@ export function checkEntityConsistency(
 
     // A sentence or headline may capitalize a determiner before a known name.
     // Check the original candidate as well when reporting an unknown name.
-    if (allowed.has(name.toLowerCase())) continue;
+    const key = name.toLowerCase();
+    if (allowed.has(key)) continue;
     const inSource = sourceText
       ? new RegExp(
           `(?<![\\p{L}\\p{N}_])${escapeRegex(entity)}(?![\\p{L}\\p{N}_])`,
           'iu'
         ).test(sourceText)
       : false;
-    if (!inSource) unknownEntities.push(entity);
+    if (!inSource && !unknownEntities.has(key)) {
+      unknownEntities.set(key, entity);
+    }
   }
 
-  const passed = unknownEntities.length <= MAX_UNKNOWN_ENTITIES;
+  const passed = unknownEntities.size <= MAX_UNKNOWN_ENTITIES;
   return {
     passed,
     score: passed ? 1 : 0,
-    reasons:
-      unknownEntities.length > MAX_UNKNOWN_ENTITIES
-        ? [
-            `${unknownEntities.length} unknown entities: ${unknownEntities.slice(0, 3).join(', ')}`,
-          ]
-        : [],
+    reasons: passed
+      ? []
+      : [
+          `${unknownEntities.size} unknown entities: ${[...unknownEntities.values()].slice(0, 3).join(', ')}`,
+        ],
   };
 }
 
