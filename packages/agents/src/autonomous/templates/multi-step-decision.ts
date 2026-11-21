@@ -6,7 +6,7 @@
  * Services are "dumb executors" - all reasoning happens here.
  */
 
-import { NPC_POST_QUALITY_RULES } from '@feed/engine';
+import { NPC_POST_QUALITY_RULES, StaticDataRegistry } from '@feed/engine';
 
 // =============================================================================
 // Types
@@ -255,7 +255,7 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
     requiredFeature: Features.DMS,
     parameters: ['recipientId', 'content'],
     parameterSchema: `{
-  "recipientId": "exact_user_id_from_list",
+  "recipientId": "exact_user_agent_or_npc_id_from_recent_posts",
   "content": "Message content"
 }`,
   },
@@ -857,7 +857,7 @@ You just coordinated in a group chat. Make this visible in the public feed:
     priorityActions.push('LIKE posts you find interesting');
     priorityActions.push('REPOST valuable content');
     priorityActions.push(
-      'FOLLOW users/agents you consistently agree with or engage with'
+      'FOLLOW user or agent accounts you consistently engage with'
     );
     priorityActions.push(
       'UNFOLLOW users/agents when they are no longer relevant to your strategy'
@@ -948,14 +948,9 @@ ${formatPerpMarkets(context.perpMarkets)}`
 
   // Show recent posts if commenting, engaging, or DMs enabled (used to discover users)
   const showRecentPosts = canComment || canRespondDMs || canEngage;
-  const recentPostsHeader = canComment
-    ? '# Recent Posts (can comment on, follow, or DM authors)'
-    : canRespondDMs
-      ? '# Recent Posts (can follow or DM authors)'
-      : '# Recent Posts (can follow authors)';
   const commentingSection = showRecentPosts
     ? `
-${recentPostsHeader}
+# Recent Posts
 ${formatRecentPosts(context.recentPosts)}`
     : '';
 
@@ -1162,7 +1157,7 @@ ${context.diversityInstructions ? `${context.diversityInstructions}` : ''}
 3. **One Action Per Iteration**: Choose ONE action, then you'll get fresh context for the next.
 4. **No Duplicates**: Don't repeat the same action on the same target.
 5. **VARY YOUR ACTIONS**: Each iteration, try a DIFFERENT action type. If you just traded, now like a post. If you commented, now DM someone. Mix it up naturally.
-6. **CHAIN REACTIONS**: See something interesting? React to it: LIKE it → COMMENT on it → TRADE based on it → DM the author. Real people chain actions naturally.
+6. **CHAIN REACTIONS**: See something interesting? React to it: LIKE it → COMMENT on it → TRADE based on it → DM an eligible author. Real people chain actions naturally.
 7. **Keep Going**: Use the remaining steps for useful actions; finish when no further action is warranted.
 8. **PRIVACY**: NEVER use POST to reply to a private message (DM). Use REPLY_CHAT for DMs.
 ${hasPostedThisTick ? `9. **NO MORE POSTS**: You already posted this tick. Choose other actions (comment, like, trade, DM, group message, follow).` : canPost && tradeCount >= 3 ? `9. **TIME TO POST**: You've made ${tradeCount} trades but haven't shared your thoughts yet. POST something — a hot take, a reaction to news, your thesis. Then keep going with more actions.` : ''}`,
@@ -1176,11 +1171,11 @@ ${canPost ? '- **POST**: Share your take on events, markets, or anything on your
 ${canComment ? '- **COMMENT**: Write a top-level comment on a recent post' : ''}
 ${canEngage ? '- **LIKE**: Show appreciation for a post (costs nothing, builds connections!)' : ''}
 ${canEngage ? "- **REPOST**: Share someone else's post with your take added" : ''}
-${canEngage ? '- **FOLLOW**: Follow a user/agent whose posts you find interesting (use userId from Recent Posts)' : ''}
-${canEngage ? '- **UNFOLLOW**: Unfollow users/agents that are no longer relevant' : ''}
+${canEngage ? '- **FOLLOW**: Use the exact userId of a user or agent account. NPC actors and organizations are ineligible.' : ''}
+${canEngage ? '- **UNFOLLOW**: Use the exact userId of a user or agent account you follow. NPC actors are ineligible.' : ''}
 ${canComment ? '- **REPLY_COMMENT**: Reply to a pending comment on your post or thread' : ''}
 ${canRespondDMs || canGroupChat ? '- **REPLY_CHAT**: Reply to a pending DM/group message' : ''}
-${canRespondDMs ? '- **DM**: Start a NEW private conversation with someone interesting (use their userId from Recent Posts)' : ''}
+${canRespondDMs ? '- **DM**: Use a user, agent, or NPC author’s userId as recipientId. Organizations cannot receive DMs.' : ''}
 ${canGroupChat ? '- **GROUP_MESSAGE**: Share thoughts or intel with your group chat' : ''}
 ${canGroupChat ? '- **CREATE_GROUP**: Start a new group chat and invite people' : ''}
 ${canGroupChat ? '- **INVITE_TO_GROUP**: Add someone interesting to your group (use groupId + userId)' : ''}
@@ -1409,7 +1404,12 @@ function formatRecentPosts(posts: PostContext[]): string {
     .map((p, idx) => {
       // Use short index for display, store real ID for parameters
       const engagementStats = `💬${p.commentCount} ❤️${p.likeCount ?? 0} 🔁${p.repostCount ?? 0}`;
-      const baseInfo = `- Post #${idx + 1} (id: ${p.id}) @${p.authorName} (userId: ${p.authorId}) (${p.timeAgo}): "${p.content}" [${engagementStats}]`;
+      const authorKind = StaticDataRegistry.hasActor(p.authorId)
+        ? ', NPC actor'
+        : StaticDataRegistry.hasOrganization(p.authorId)
+          ? ', organization'
+          : '';
+      const baseInfo = `- Post #${idx + 1} (id: ${p.id}) @${p.authorName} (userId: ${p.authorId}${authorKind}) (${p.timeAgo}): "${p.content}" [${engagementStats}]`;
 
       // Show agent's existing engagement
       const engagementNotes: string[] = [];

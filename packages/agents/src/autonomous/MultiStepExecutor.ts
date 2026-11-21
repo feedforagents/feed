@@ -145,6 +145,12 @@ const REPOST_OWN_POST_UNAVAILABLE =
   'REPOST requires a post by another author. Choose an exact postId from Recent Posts or Pending Comment Replies, or a different action.';
 const REPLY_CHAT_TARGET_UNAVAILABLE =
   'Your REPLY_CHAT target is unavailable. Copy an exact chatId from Pending Chat Messages as a double-quoted JSON string or choose a different action.';
+const FOLLOW_ACTOR_UNAVAILABLE =
+  'NPC actors are ineligible FOLLOW and UNFOLLOW targets. Choose a user or agent account, or a different action.';
+const FOLLOW_ORGANIZATION_UNAVAILABLE =
+  'Organizations are ineligible FOLLOW targets. Choose a user or agent account, or a different action.';
+const DM_ORGANIZATION_UNAVAILABLE =
+  'Organizations cannot receive DMs. Choose a user, agent, or NPC, or a different action.';
 
 const SOCIAL_TARGET_REJECTION = {
   rejection: 'social-target-unavailable',
@@ -175,6 +181,9 @@ const UNAVAILABLE_DECISION_TARGETS = new Map<
   [ENGAGEMENT_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
   [REPOST_OWN_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
   [REPLY_CHAT_TARGET_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [FOLLOW_ACTOR_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [FOLLOW_ORGANIZATION_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [DM_ORGANIZATION_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
 ]);
 
 function isDiversityRejectedPost(action: ActionTraceResult): boolean {
@@ -1339,17 +1348,23 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         if (!userId) {
           return `Your ${action} was invalid because it requires a valid userId from the visible social context. Choose a valid target or a different action.`;
         }
+        if (StaticDataRegistry.hasActor(userId)) {
+          return FOLLOW_ACTOR_UNAVAILABLE;
+        }
         if (
           action === Actions.FOLLOW &&
-          StaticDataRegistry.getOrganization(userId)
+          StaticDataRegistry.hasOrganization(userId)
         ) {
-          return 'Organizations are ineligible FOLLOW targets. Choose a user or agent account, or a different action.';
+          return FOLLOW_ORGANIZATION_UNAVAILABLE;
         }
         return undefined;
 
       case Actions.DM:
         if (!recipientId || !content) {
           return 'Your DM was invalid because it requires a valid recipientId and message content. Choose a valid DM target or a different action.';
+        }
+        if (StaticDataRegistry.hasOrganization(recipientId)) {
+          return DM_ORGANIZATION_UNAVAILABLE;
         }
         return undefined;
 
@@ -2835,7 +2850,10 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             (action.actionType === Actions.COMMENT ||
               action.actionType === Actions.REPLY_CHAT ||
               action.actionType === Actions.LIKE ||
-              action.actionType === Actions.REPOST))
+              action.actionType === Actions.REPOST ||
+              action.actionType === Actions.FOLLOW ||
+              action.actionType === Actions.UNFOLLOW ||
+              action.actionType === Actions.DM))
       ),
       actionsExecuted: counts,
       iterations: trace.length,

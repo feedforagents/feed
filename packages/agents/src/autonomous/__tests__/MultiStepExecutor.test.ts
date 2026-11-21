@@ -824,7 +824,8 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     executor: MultiStepExecutor,
     posting = false,
     trading = false,
-    groups = false
+    groups = false,
+    dms = false
   ) {
     const runtime = {
       agentId: actor.id,
@@ -835,7 +836,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
             trading,
             posting,
             commenting: false,
-            dms: false,
+            dms,
             groups,
           },
         },
@@ -867,10 +868,9 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       ],
       agentPositions: { predictions: [], perps: [] },
     };
-    if (groups) {
-      spyOn(Math, 'random').mockReturnValue(0.9);
-      context.enabledFeatures.push(Features.GROUP_CHATS);
-    }
+    if (groups || dms) spyOn(Math, 'random').mockReturnValue(0.9);
+    if (groups) context.enabledFeatures.push(Features.GROUP_CHATS);
+    if (dms) context.enabledFeatures.push(Features.DMS);
     const internal = executor as unknown as {
       getDecision: MultiStepExecutor['getDecision'];
       executeAction: MultiStepExecutor['executeAction'];
@@ -1301,43 +1301,151 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  test('gives an organization follow target the existing correction before dispatch', async () => {
+  for (const action of [Actions.FOLLOW, Actions.UNFOLLOW]) {
+    test(`skips repeated ${action} of an NPC author without dispatch`, async () => {
+      const executor = new MultiStepExecutor(1);
+      const { context, runtime, decision, execute } = prepare(executor);
+      const npc = StaticDataRegistry.getActor('jeff-baizos')!;
+      context.recentPosts.push({
+        ...context.recentPosts[0]!,
+        id: 'npc-post',
+        authorId: npc.id,
+        authorName: npc.name,
+      });
+      const rejectedAction = {
+        actionType: action,
+        success: false,
+        summary: 'NPC actors are not supported here',
+        timestamp: Date.now(),
+      };
+      execute.mockResolvedValue(rejectedAction);
+      decision.mockImplementation(async () => ({
+        decision: {
+          thought: 'Change who I follow.',
+          action,
+          parameters: { userId: npc.id },
+          isFinish: false,
+        },
+        rawResponse: '{}',
+      }));
+
+      const result = await executor.execute(actor.id, runtime, true);
+
+      expect(decision.mock.calls[0]?.[0]).toContain(
+        `(userId: ${npc.id}, NPC actor)`
+      );
+      expect(decision).toHaveBeenCalledTimes(2);
+      expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+        'NPC actors are ineligible FOLLOW and UNFOLLOW targets'
+      );
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(result.actionsExecuted.engagements).toBe(0);
+      expect(result.trace).toHaveLength(1);
+      expect(result.trace[0]).toMatchObject({
+        actionType: action,
+        success: false,
+        result: { rejection: 'social-target-unavailable' },
+      });
+    });
+  }
+
+  for (const [target, feedback] of [
+    [
+      StaticDataRegistry.getActor('jeff-baizos')!,
+      'NPC actors are ineligible FOLLOW and UNFOLLOW targets',
+    ],
+    [
+      StaticDataRegistry.getOrganization('the-daily-wire')!,
+      'Organizations are ineligible FOLLOW targets',
+    ],
+  ] as const) {
+    test(`corrects a FOLLOW of ${target.id} before dispatching to an account`, async () => {
+      const executor = new MultiStepExecutor(1);
+      const { context, runtime, decision, execute } = prepare(executor);
+      const accountPost = context.recentPosts[0]!;
+      context.recentPosts.push({
+        ...accountPost,
+        id: 'ineligible-author-post',
+        authorId: target.id,
+        authorName: target.name,
+      });
+      const follow = {
+        thought: 'Follow an author.',
+        action: Actions.FOLLOW,
+        parameters: { userId: target.id },
+        isFinish: false,
+      };
+      decision
+        .mockResolvedValueOnce({ decision: follow, rawResponse: '{}' })
+        .mockResolvedValueOnce({
+          decision: {
+            ...follow,
+            parameters: { userId: accountPost.authorId },
+          },
+          rawResponse: '{}',
+        });
+
+      expect((await executor.execute(actor.id, runtime, true)).success).toBe(
+        true
+      );
+      expect(decision).toHaveBeenCalledTimes(2);
+      expect(decision.mock.calls[1]?.[4]?.feedback).toContain(feedback);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(execute.mock.calls[0]?.[2]).toEqual({
+        userId: accountPost.authorId,
+      });
+    });
+  }
+
+  test('skips repeated DM to an organization author without dispatch', async () => {
     const executor = new MultiStepExecutor(1);
-    const { context, runtime, decision, execute } = prepare(executor);
-    const accountPost = context.recentPosts[0]!;
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      false,
+      false,
+      true
+    );
     const organization = StaticDataRegistry.getOrganization('the-daily-wire')!;
     context.recentPosts.push({
-      ...accountPost,
+      ...context.recentPosts[0]!,
       id: 'organization-post',
       authorId: organization.id,
       authorName: organization.name,
     });
-    const follow = {
-      thought: 'Follow an author.',
-      action: Actions.FOLLOW,
-      parameters: { userId: organization.id },
-      isFinish: false,
-    };
-    decision
-      .mockResolvedValueOnce({ decision: follow, rawResponse: '{}' })
-      .mockResolvedValueOnce({
-        decision: {
-          ...follow,
-          parameters: { userId: accountPost.authorId },
+    execute.mockResolvedValue({
+      actionType: Actions.DM,
+      success: false,
+      summary: `Recipient not found: ${organization.id}`,
+      timestamp: Date.now(),
+    });
+    decision.mockImplementation(async () => ({
+      decision: {
+        thought: 'Ask the author a question.',
+        action: Actions.DM,
+        parameters: {
+          recipientId: organization.id,
+          content: 'What do you think about this?',
         },
-        rawResponse: '{}',
-      });
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    }));
 
-    expect((await executor.execute(actor.id, runtime, true)).success).toBe(
-      true
-    );
+    const result = await executor.execute(actor.id, runtime, true);
+
     expect(decision).toHaveBeenCalledTimes(2);
     expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
-      'Organizations are ineligible FOLLOW targets'
+      'Choose a user, agent, or NPC'
     );
-    expect(execute).toHaveBeenCalledTimes(1);
-    expect(execute.mock.calls[0]?.[2]).toEqual({
-      userId: accountPost.authorId,
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.actionsExecuted.messages).toBe(0);
+    expect(result.trace[0]).toMatchObject({
+      actionType: Actions.DM,
+      success: false,
+      result: { rejection: 'social-target-unavailable' },
     });
   });
 
