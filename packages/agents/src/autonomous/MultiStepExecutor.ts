@@ -165,6 +165,8 @@ const FOLLOW_ACTOR_UNAVAILABLE =
   'NPC actors are ineligible FOLLOW and UNFOLLOW targets. Choose a user or agent account, or a different action.';
 const FOLLOW_ORGANIZATION_UNAVAILABLE =
   'Organizations are ineligible FOLLOW targets. Choose a user or agent account, or a different action.';
+const UNFOLLOW_ORGANIZATION_UNAVAILABLE =
+  'Organizations are ineligible UNFOLLOW targets. Choose a user or agent account, or a different action.';
 const DM_ORGANIZATION_UNAVAILABLE =
   'Organizations cannot receive DMs. Choose a user, agent, or NPC, or a different action.';
 
@@ -199,6 +201,7 @@ const UNAVAILABLE_DECISION_TARGETS = new Map<
   [REPLY_CHAT_TARGET_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
   [FOLLOW_ACTOR_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
   [FOLLOW_ORGANIZATION_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [UNFOLLOW_ORGANIZATION_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
   [DM_ORGANIZATION_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
 ]);
 
@@ -1402,11 +1405,10 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         if (StaticDataRegistry.hasActor(userId)) {
           return FOLLOW_ACTOR_UNAVAILABLE;
         }
-        if (
-          action === Actions.FOLLOW &&
-          StaticDataRegistry.hasOrganization(userId)
-        ) {
-          return FOLLOW_ORGANIZATION_UNAVAILABLE;
+        if (StaticDataRegistry.hasOrganization(userId)) {
+          return action === Actions.FOLLOW
+            ? FOLLOW_ORGANIZATION_UNAVAILABLE
+            : UNFOLLOW_ORGANIZATION_UNAVAILABLE;
         }
         return undefined;
 
