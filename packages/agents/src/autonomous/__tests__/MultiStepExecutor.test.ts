@@ -3,6 +3,7 @@ import type { IAgentRuntime } from '@elizaos/core';
 import { StaticDataRegistry } from '@feed/engine';
 import * as agentLLM from '../../llm/agent-llm';
 import * as npcContextProvider from '../../plugins/feed/providers/npc-game-context';
+import { logger } from '../../shared/logger';
 import { normalizeDecisionAction } from '../action-normalization';
 import * as directExecutors from '../DirectExecutors';
 import { extractFirstJsonObject } from '../decision-json';
@@ -504,6 +505,7 @@ describe('normalizeSocialDecisionParameters', () => {
         'COMMENT',
         {
           postId: 'none',
+          commentId: 'none',
           parentCommentId: 'none',
           content: 'hello',
         },
@@ -580,7 +582,7 @@ describe('normalizeSocialDecisionParameters', () => {
       content: 'hello',
     });
   });
-  test('rejects a parent comment that belongs to a different post', () => {
+  test('preserves a supplied parent comment for validation', () => {
     expect(
       normalizeSocialDecisionParameters(
         'COMMENT',
@@ -588,7 +590,11 @@ describe('normalizeSocialDecisionParameters', () => {
         context as never,
         'agent-1'
       )
-    ).toEqual({ content: 'hi' });
+    ).toEqual({
+      postId: 'post-2',
+      parentCommentId: 'comment-1',
+      content: 'hi',
+    });
   });
 
   test('keeps a well-formed explicit id that is outside the rendered context', () => {
@@ -662,6 +668,102 @@ describe('getDecisionValidationError', () => {
     groupChats: [],
     openPositions: 0,
   } as const;
+
+  test('rejects unlisted post and pending-chat IDs before dispatch', () => {
+    const visibleContext = {
+      ...context,
+      pendingChatMessages: [{ chatId: 'chat-1' }],
+    } as unknown as AgentTickContext;
+    for (const action of [Actions.COMMENT, Actions.LIKE, Actions.REPOST]) {
+      const parameters = normalizeSocialDecisionParameters(
+        action,
+        { postId: 'post-92', content: 'An opinion' },
+        visibleContext,
+        'agent-1'
+      );
+      expect(
+        executor['getDecisionValidationError'](
+          action,
+          parameters,
+          visibleContext
+        )
+      ).toContain('Recent Posts');
+    }
+
+    expect(
+      executor['getDecisionValidationError'](
+        Actions.REPLY_CHAT,
+        { chatId: 'chat-92', content: 'A reply' },
+        visibleContext
+      )
+    ).toContain('Pending Chat Messages');
+    expect(
+      executor['getDecisionValidationError'](
+        Actions.REPLY_CHAT,
+        { chatId: 'chat-1', content: 'A reply' },
+        visibleContext
+      )
+    ).toBeUndefined();
+  });
+
+  test('a COMMENT with explicit parent intent must use REPLY_COMMENT', () => {
+    const visibleContext = {
+      ...context,
+      recentPosts: [{ ...context.recentPosts[0], agentComment: undefined }],
+    } as unknown as AgentTickContext;
+    for (const replyParameters of [
+      { postId: 'post-1', parentCommentId: 'comment-42' },
+      { postId: 'post-1', parentCommentId: 'comment by @author' },
+      { postId: 'post-1', parentCommentId: Number.MAX_SAFE_INTEGER + 1 },
+      { parentCommentId: { id: 'comment-42' } },
+      { commentId: ['comment-42'] },
+    ]) {
+      const parameters = normalizeSocialDecisionParameters(
+        Actions.COMMENT,
+        { ...replyParameters, content: 'A reply' },
+        visibleContext,
+        'agent-1'
+      );
+      expect(
+        executor['getDecisionValidationError'](
+          Actions.COMMENT,
+          parameters,
+          visibleContext
+        )
+      ).toContain('replies must use REPLY_COMMENT');
+    }
+  });
+
+  test('a pending reply exposes other authors’ posts for reposts and keeps own posts available for likes', () => {
+    const visibleContext = {
+      ...context,
+      pendingCommentReplies: [
+        { postId: 'post-2', post: { isYourPost: true } },
+        { postId: 'post-3', post: { isYourPost: false } },
+      ],
+    } as unknown as AgentTickContext;
+    expect(
+      executor['getDecisionValidationError'](
+        Actions.REPOST,
+        { postId: 'post-2' },
+        visibleContext
+      )
+    ).toContain('another author');
+    expect(
+      executor['getDecisionValidationError'](
+        Actions.REPOST,
+        { postId: 'post-3' },
+        visibleContext
+      )
+    ).toBeUndefined();
+    expect(
+      executor['getDecisionValidationError'](
+        Actions.LIKE,
+        { postId: 'post-2' },
+        visibleContext
+      )
+    ).toBeUndefined();
+  });
 
   test('rejects duplicate social actions before direct execution', () => {
     expect(
@@ -966,6 +1068,53 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     expect(decision).toHaveBeenCalledTimes(3);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('a repeated unavailable REPLY_CHAT is private and consumes one bounded step', async () => {
+    const executor = new MultiStepExecutor();
+    const { runtime, decision, execute } = prepare(
+      executor,
+      false,
+      false,
+      true
+    );
+    const warn = spyOn(logger, 'warn').mockImplementation(() => {});
+    const response = {
+      decision: {
+        thought: 'Reply in a chat.',
+        action: Actions.REPLY_CHAT,
+        parameters: { chatId: 'chat-92', content: 'Private reply content.' },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    };
+    decision.mockResolvedValueOnce(response).mockResolvedValueOnce(response);
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(result.iterations).toBe(4);
+    expect(result.actionsExecuted.messages).toBe(0);
+    expect(result.trace[0]).toMatchObject({
+      actionType: Actions.REPLY_CHAT,
+      success: false,
+      result: { rejection: 'social-target-unavailable' },
+    });
+    expect(result.trace[0]?.parameters).toBeUndefined();
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
+      'Pending Chat Messages'
+    );
+    expect(decision).toHaveBeenCalledTimes(5);
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(execute.mock.calls.map((call) => call[1])).toEqual([
+      Actions.LIKE,
+      Actions.LIKE,
+      Actions.LIKE,
+    ]);
+    expect(warn.mock.calls[0]?.[1]).not.toHaveProperty('parameters');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(
+      'Private reply content.'
+    );
   });
 
   test('gives an oversized perp order the existing correction before dispatch', async () => {
