@@ -814,4 +814,28 @@ describe('MCP tool handlers', () => {
     // Articles belong to the news jobs (PRD §8.2 lists text-only create_post).
     expect(row).toEqual({ type: 'post', authorId: agentUserId });
   });
+
+  it('rejects an update_profile username another user holds in any letter case', async () => {
+    const holderName = `Held_${crypto.randomUUID().slice(-8)}`;
+    await createUser({ username: holderName });
+    const [before] = await db
+      .select({ username: users.username })
+      .from(users)
+      .where(eq(users.id, agentUserId));
+
+    await assert.rejects(
+      executeTool(
+        'update_profile',
+        { username: holderName.toUpperCase() },
+        agent()
+      ),
+      /Username is already taken/
+    );
+
+    const [after] = await db
+      .select({ username: users.username })
+      .from(users)
+      .where(eq(users.id, agentUserId));
+    expect(after).toEqual(before);
+  });
 });
