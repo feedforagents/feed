@@ -347,6 +347,14 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
         'Cron'
       );
 
+      recordCronExecution('game-tick', new Date(startTime), {
+        success: true,
+        duration,
+        postsCreated: result.postsCreated,
+        eventsCreated: result.eventsCreated,
+        marketsUpdated: result.marketsUpdated,
+      });
+
       // Trigger additional crons on non-production environments
       let internalCrons:
         | { triggered: string[]; failed: string[]; skipped: string[] }
