@@ -174,7 +174,9 @@ const OpenPositionArgsSchema = z.object({
   ticker: z.string().min(1),
   side: z.enum(['LONG', 'SHORT']),
   amount: z.number().positive(),
-  leverage: z.number().min(1).max(20),
+  // PerpPosition.leverage is an integer column and the HTTP open route
+  // (PerpOpenPositionSchema) accepts whole-number leverage only.
+  leverage: z.number().int().min(1).max(20),
 }) satisfies z.ZodType<OpenPositionArgs>;
 
 const GetMarketPricesArgsSchema = z.object({
