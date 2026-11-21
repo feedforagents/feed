@@ -79,6 +79,7 @@
 
 import { authenticate, successResponse, withErrorHandling } from '@feed/api';
 import {
+  chatParticipants,
   db,
   eq,
   feedbacks,
@@ -183,6 +184,14 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
     // Delete group memberships
     await tx.delete(groupMembers).where(eq(groupMembers.userId, userId));
+
+    // Delete chat participants (group chats and DMs). The chat detail
+    // route lists every participant row, so a deleted account otherwise
+    // stays in every chat's member list as an 'Unknown' entry. Messages
+    // the user sent are kept, matching group-post history retention.
+    await tx
+      .delete(chatParticipants)
+      .where(eq(chatParticipants.userId, userId));
 
     // Delete group invites (both received and sent)
     await tx
