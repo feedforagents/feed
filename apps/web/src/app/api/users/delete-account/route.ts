@@ -85,6 +85,7 @@ import {
   followStatuses,
   groupInvites,
   groupMembers,
+  messageReactions,
   or,
   poolDeposits,
   referrals,
@@ -199,6 +200,13 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
     // Delete share actions
     await tx.delete(shareActions).where(eq(shareActions.userId, userId));
+
+    // Delete chat message reactions (MessageReaction has no foreign
+    // keys, so no cascade removes them; reaction counts aggregate the
+    // table directly and would keep counting this user forever)
+    await tx
+      .delete(messageReactions)
+      .where(eq(messageReactions.userId, userId));
 
     // Delete pool deposits
     await tx.delete(poolDeposits).where(eq(poolDeposits.userId, userId));
