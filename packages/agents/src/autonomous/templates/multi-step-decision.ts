@@ -18,7 +18,10 @@ export interface ActionTraceResult {
   summary?: string;
   error?: string;
   result?: {
-    rejection?: 'post-diversity' | 'prediction-quote-unavailable';
+    rejection?:
+      | 'post-diversity'
+      | 'prediction-quote-unavailable'
+      | 'group-message-chat-unavailable';
     [key: string]: string | number | boolean | null | undefined;
   };
   parameters?: Record<string, unknown>;
@@ -258,7 +261,7 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
   },
   [Actions.GROUP_MESSAGE]: {
     name: Actions.GROUP_MESSAGE,
-    description: 'Send a message to a group chat',
+    description: 'Send a message using the chatId listed in Your Group Chats',
     requiredFeature: Features.GROUP_CHATS,
     parameters: ['chatId', 'content'],
     parameterSchema: `{

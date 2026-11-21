@@ -721,7 +721,8 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
   function prepare(
     executor: MultiStepExecutor,
     posting = false,
-    trading = false
+    trading = false,
+    groups = false
   ) {
     const runtime = {
       agentId: actor.id,
@@ -733,7 +734,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
             posting,
             commenting: false,
             dms: false,
-            groups: false,
+            groups,
           },
         },
       },
@@ -764,6 +765,10 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       ],
       agentPositions: { predictions: [], perps: [] },
     };
+    if (groups) {
+      spyOn(Math, 'random').mockReturnValue(0.9);
+      context.enabledFeatures.push(Features.GROUP_CHATS);
+    }
     const internal = executor as unknown as {
       getDecision: MultiStepExecutor['getDecision'];
       executeAction: MultiStepExecutor['executeAction'];
@@ -872,6 +877,93 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
       'feature "posting" is disabled'
     );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('corrects a GROUP_MESSAGE that uses a group ID in place of the chat ID', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      false,
+      true
+    );
+    context.groupChats = [
+      {
+        id: '123456789012345678',
+        groupId: '223456789012345678',
+        name: 'Group',
+      },
+    ];
+    const message = {
+      thought: 'Talk with the group.',
+      action: Actions.GROUP_MESSAGE,
+      parameters: {
+        chatId: '223456789012345678',
+        content: 'Hello.',
+      },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: message, rawResponse: '{}' })
+      .mockResolvedValueOnce({
+        decision: {
+          ...message,
+          parameters: {
+            ...message.parameters,
+            chatId: '123456789012345678',
+          },
+        },
+        rawResponse: '{}',
+      });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain('Your Group Chats');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.GROUP_MESSAGE);
+    expect(execute.mock.calls[0]?.[2]).toMatchObject({
+      chatId: '123456789012345678',
+    });
+  });
+
+  test('skips a repeated unknown GROUP_MESSAGE target and can take another step', async () => {
+    const executor = new MultiStepExecutor(2);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      false,
+      true
+    );
+    context.groupChats = [{ id: '123456789012345678', name: 'Group' }];
+    const message = {
+      thought: 'Talk with the group.',
+      action: Actions.GROUP_MESSAGE,
+      parameters: {
+        chatId: '299999999999999999',
+        content: 'Private group content.',
+      },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: message, rawResponse: '{}' })
+      .mockResolvedValueOnce({ decision: message, rawResponse: '{}' });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(result.iterations).toBe(2);
+    expect(result.actionsExecuted.messages).toBe(0);
+    expect(result.trace[0]).toMatchObject({
+      actionType: Actions.GROUP_MESSAGE,
+      success: false,
+      result: { rejection: 'group-message-chat-unavailable' },
+    });
+    expect(result.trace[0]?.parameters).toBeUndefined();
+    expect(decision).toHaveBeenCalledTimes(3);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
   });
