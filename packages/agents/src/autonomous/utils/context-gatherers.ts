@@ -5,6 +5,7 @@
  * for agent decision making.
  */
 
+import { getPerpMarketOrderSizeLimit } from '@feed/core/markets/perps';
 import { maxSafeBuy } from '@feed/core/markets/prediction/client';
 import {
   actorRelationships,
@@ -113,7 +114,7 @@ export async function getPredictionMarkets(): Promise<
  */
 export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
   const orgStates = await getDbInstance().getOrganizationsByPrice();
-  const result: PerpMarketContext[] = [];
+  const candidates: Array<Omit<PerpMarketContext, 'maxOrderSize'>> = [];
 
   for (const state of orgStates.slice(0, 8)) {
     const staticOrg = StaticDataRegistry.getOrganization(state.id);
@@ -132,7 +133,7 @@ export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
     );
     const changePercent = ((currentPrice - initialPrice) / initialPrice) * 100;
 
-    result.push({
+    candidates.push({
       ticker: staticOrg.ticker,
       name: staticOrg.name,
       currentPrice,
@@ -141,7 +142,29 @@ export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
     });
   }
 
-  return result;
+  if (candidates.length === 0) return [];
+  const snapshots = await db
+    .select({
+      ticker: perpMarketSnapshots.ticker,
+      openInterest: perpMarketSnapshots.openInterest,
+    })
+    .from(perpMarketSnapshots)
+    .where(
+      inArray(
+        perpMarketSnapshots.ticker,
+        candidates.map((candidate) => candidate.ticker)
+      )
+    );
+  const limits = new Map(
+    snapshots.map(({ ticker, openInterest }) => [
+      ticker,
+      getPerpMarketOrderSizeLimit(openInterest),
+    ])
+  );
+  return candidates.flatMap((market) => {
+    const maxOrderSize = limits.get(market.ticker);
+    return maxOrderSize === undefined ? [] : [{ ...market, maxOrderSize }];
+  });
 }
 
 // =============================================================================
@@ -270,8 +293,13 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       unrealizedPnL: perpPositions.unrealizedPnL,
       unrealizedPnLPercent: perpPositions.unrealizedPnLPercent,
       openedAt: perpPositions.openedAt,
+      openInterest: perpMarketSnapshots.openInterest,
     })
     .from(perpPositions)
+    .leftJoin(
+      perpMarketSnapshots,
+      eq(perpMarketSnapshots.ticker, perpPositions.ticker)
+    )
     .where(
       and(eq(perpPositions.userId, agentUserId), isNull(perpPositions.closedAt))
     );
@@ -304,6 +332,10 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       ticker: p.ticker,
       side: p.side,
       size: requireContextNumber(p.size, `position ${p.ticker} size`, 0),
+      maxOrderSize:
+        p.openInterest === null
+          ? undefined
+          : getPerpMarketOrderSizeLimit(p.openInterest),
       pnl: requireContextNumber(
         p.unrealizedPnL,
         `position ${p.ticker} unrealizedPnL`

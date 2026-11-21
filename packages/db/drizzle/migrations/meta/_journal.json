@@ -43,6 +43,13 @@
       "when": 1794307141641,
       "tag": "0005_trading_fee_idempotency_key",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794955977560,
+      "tag": "0006_perp_funding_period_accrual",
+      "breakpoints": true
     }
   ]
 }

@@ -515,6 +515,14 @@ export const GET = withErrorHandling(
       'GET /api/chats/[id]'
     );
 
+    // The current member count for the room header. The participants
+    // array above is a name-resolution list, not the roster: it keeps
+    // departed members (inactive rows and row-less senders) so their old
+    // messages keep a name, so its length overstates membership. Current
+    // members are the active participant rows — the same rule this
+    // route's access check and the dedicated participants list apply.
+    const memberCount = fullChat.participants.filter((p) => p.isActive).length;
+
     const chatResponse: {
       id: string;
       name: string | null;
@@ -522,6 +530,7 @@ export const GET = withErrorHandling(
       createdAt: Date;
       updatedAt: Date;
       otherUser: typeof otherUser;
+      memberCount: number;
     } = {
       id: chat.id,
       name: displayName || chat.name,
@@ -529,6 +538,7 @@ export const GET = withErrorHandling(
       createdAt: chat.createdAt,
       updatedAt: chat.updatedAt,
       otherUser: otherUser,
+      memberCount,
     };
 
     return successResponse({

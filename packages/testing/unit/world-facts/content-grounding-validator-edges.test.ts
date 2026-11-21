@@ -9,10 +9,23 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  checkEntityConsistency,
   filterIncoherent,
   validateCoherence,
   validateGrounding,
 } from '@feed/engine';
+
+test('article grounding accepts capitalized lead-ins without allowing invented names', () => {
+  const text =
+    'The Trump Terminal commented on the market. For The market index, trading resumed. On Nov. 20 markets opened.';
+  expect(checkEntityConsistency(text)).toMatchObject({ passed: true });
+  expect(
+    checkEntityConsistency(`${text} On New Jupiter, Xavier Fictional agreed.`)
+  ).toMatchObject({
+    passed: false,
+    reasons: [expect.stringContaining('On New Jupiter, Xavier Fictional')],
+  });
+});
 
 // ─── validateGrounding: Edge Cases ──────────────────────────────────────────
 
