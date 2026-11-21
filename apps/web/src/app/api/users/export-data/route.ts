@@ -292,8 +292,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       })
       .from(notifications)
       .where(eq(notifications.userId, userId))
-      .orderBy(desc(notifications.createdAt))
-      .limit(100), // Limit to recent notifications
+      .orderBy(desc(notifications.createdAt)),
     db
       .select({
         id: feedbacks.id,
@@ -344,8 +343,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       })
       .from(tradingFees)
       .where(eq(tradingFees.userId, userId))
-      .orderBy(desc(tradingFees.createdAt))
-      .limit(100),
+      .orderBy(desc(tradingFees.createdAt)),
     db
       .select({
         id: tradingFees.id,
@@ -356,8 +354,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       })
       .from(tradingFees)
       .where(eq(tradingFees.referrerId, userId))
-      .orderBy(desc(tradingFees.createdAt))
-      .limit(100),
+      .orderBy(desc(tradingFees.createdAt)),
   ]);
 
   if (!user) {
