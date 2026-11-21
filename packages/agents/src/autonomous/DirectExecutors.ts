@@ -278,6 +278,7 @@ export interface DirectPostParams {
 
 export interface DirectPostResult {
   marketClueStatus?: 'published' | 'duplicate' | 'stale';
+  rejection?: 'post-diversity';
   success: boolean;
   postId?: string;
   error?: string;
@@ -1177,6 +1178,7 @@ export async function executeDirectPost(
 
     return {
       success: false,
+      rejection: 'post-diversity',
       error: `Content rejected: ${diversityIssues[0]}`,
     };
   }
@@ -1222,6 +1224,7 @@ export async function executeDirectPost(
           );
           return {
             success: false,
+            rejection: 'post-diversity',
             error: 'Content too similar to a recent post by another NPC',
           };
         }
@@ -1262,7 +1265,12 @@ export async function executeDirectPost(
   }
 
   // Record topic coverage for future diversity checks
-  topicDiversityService.recordTopicCoverage(agentUserId, cleanContent);
+  topicDiversityService.recordTopicCoverage(
+    agentUserId,
+    cleanContent,
+    undefined,
+    post.timestamp
+  );
 
   // Generate and store tags. Tagging is best-effort: the post is already
   // committed, so a tag-generation or tag-storage failure must not report

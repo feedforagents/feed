@@ -18,6 +18,7 @@ export interface ActionTraceResult {
   summary?: string;
   error?: string;
   result?: {
+    rejection?: 'post-diversity';
     [key: string]: string | number | boolean | null | undefined;
   };
   parameters?: Record<string, unknown>;

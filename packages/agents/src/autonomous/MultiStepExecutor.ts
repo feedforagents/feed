@@ -133,6 +133,13 @@ export interface MultiStepExecutorResult {
   duration: number;
 }
 
+function isDiversityRejectedPost(action: ActionTraceResult): boolean {
+  return (
+    action.actionType === Actions.POST &&
+    action.result?.rejection === 'post-diversity'
+  );
+}
+
 // =============================================================================
 // Multi-Step Executor
 // =============================================================================
@@ -555,9 +562,17 @@ ${describeNpcMarketClue(offeredMarketClue)}`
       iterationTimings.total = Date.now() - iterationStartTime;
 
       trace.push(actionResult);
-      if (!actionResult.success) {
+      const rejectedPost = isDiversityRejectedPost(actionResult);
+      if (!actionResult.success && !rejectedPost) {
         throw new Error(
           `Agent action ${normalizedAction} failed: ${actionResult.error || actionResult.summary || 'No failure detail returned'}`
+        );
+      }
+      if (rejectedPost) {
+        logger.warn(
+          '[MultiStep] NPC post rejected by diversity checks',
+          { agentUserId, iteration, reason: actionResult.error },
+          'MultiStepExecutor'
         );
       }
 
@@ -1724,6 +1739,19 @@ ${describeNpcMarketClue(offeredMarketClue)}`
       };
     }
 
+    if (postResult.rejection === 'post-diversity') {
+      return {
+        actionType: Actions.POST,
+        success: false,
+        summary:
+          'Post rejected by diversity checks. Try a different observation in distinct language, or choose another action.',
+        error: postResult.error,
+        result: { rejection: postResult.rejection },
+        parameters,
+        timestamp: Date.now(),
+      };
+    }
+
     if (postResult.success && logContext) {
       await this.logActivity(agentUserId, {
         type: 'post',
@@ -2711,7 +2739,9 @@ ${describeNpcMarketClue(offeredMarketClue)}`
     }
 
     return {
-      success: trace.every((action) => action.success),
+      success: trace.every(
+        (action) => action.success || isDiversityRejectedPost(action)
+      ),
       actionsExecuted: counts,
       iterations: trace.length,
       trace,
