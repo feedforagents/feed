@@ -41,7 +41,11 @@
  * - charge.refunded: Reverse funded balance (Phase 2)
  */
 
-import { TradingBalanceFundingService, withErrorHandling } from '@feed/api';
+import {
+  TradingBalanceFundingService,
+  usdToBalanceUnits,
+  withErrorHandling,
+} from '@feed/api';
 import { and, balanceTransactions, db, eq } from '@feed/db';
 import { logger } from '@feed/shared';
 import { NextResponse } from 'next/server';
@@ -553,7 +557,14 @@ async function handleDisputeCreated(
     return { success: true }; // Don't retry - not our transaction
   }
 
-  const amountUSD = dispute.amount / 100; // Stripe uses cents
+  // Stripe uses cents. As for refunds, do not take back more than the stored
+  // purchase credited: a purchase written before #1606 can hold 112 units
+  // for a $1.13 charge.
+  const disputedUnits = Math.min(
+    usdToBalanceUnits(dispute.amount / 100),
+    Number(originalTx.amount)
+  );
+  const amountUSD = disputedUnits / 100;
 
   logger.warn(
     'Processing dispute (chargeback) - deducting points',
@@ -870,8 +881,14 @@ async function handleChargeRefunded(
     0
   );
 
-  // Calculate total refunded balance units based on cumulative USD
-  const totalRefundedPoints = Math.floor(totalRefundedUSD * 100);
+  // Calculate total refunded balance units based on cumulative USD. Use the
+  // same one-unit-per-cent conversion that credits current purchases, but do
+  // not take back more than the stored purchase actually credited. Purchases
+  // written before #1606 can contain 112 units for a $1.13 charge.
+  const totalRefundedPoints = Math.min(
+    usdToBalanceUnits(totalRefundedUSD),
+    Number(originalTx.amount)
+  );
 
   // Incremental = total cumulative - already processed
   const incrementalPointsToDeduct = totalRefundedPoints - alreadyDeductedPoints;
