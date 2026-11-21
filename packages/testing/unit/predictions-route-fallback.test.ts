@@ -18,6 +18,10 @@ mock.module('@feed/api', () => ({
 
 mock.module('@feed/db', () => ({
   ...dbActual,
+  // The list route reads traded volume through asPublic, which needs a live
+  // database. Unit tests run without one, so stub the ledger aggregate as
+  // an empty volume map (volume reads 0) instead of connecting.
+  asPublic: async () => new Map(),
   db: {
     user: {
       findUnique: mock(async () => null),

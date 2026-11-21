@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   addPublicReadHeaders,
   CACHE_KEYS,
@@ -14,8 +15,16 @@ import {
   type PredictionPositionRecord,
   PredictionPricing,
 } from '@feed/core/markets/prediction';
+import {
+  and,
+  asPublic,
+  balanceTransactions,
+  type DrizzleClient,
+  inArray,
+} from '@feed/db';
 import { FEE_CONFIG, WalletService } from '@feed/engine';
 import { logger, MarketQuerySchema, toISOOrNull } from '@feed/shared';
+import { sql } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 import {
@@ -52,6 +61,76 @@ function buildUserPositionsRecord(
   }
 
   return userPositionsMap;
+}
+
+/**
+ * All-time traded volume per market from the wallet ledger: the sum of
+ * ABS(amount) over BalanceTransaction rows of type pred_buy / pred_sell
+ * with relatedId = market id. Every user prediction trade writes exactly
+ * one such row (WalletService.debit 'pred_buy' on buy, WalletService.credit
+ * 'pred_sell' on sell), so this is the same aggregate the admin trading
+ * stats route already reports as volume — with no new table and no
+ * migration. Markets with no trades have no rows and read 0.
+ *
+ * ERROR CONTRACT: a failed volume aggregate fails this request (500 via
+ * withErrorHandling) instead of falling back to zero. Volume is
+ * load-bearing — the list sorts by it — so a silent zero would misrank
+ * markets and print a false "no trades" for a market that did trade. A
+ * zero in a successful response means exactly one thing: the market has
+ * no recorded trades.
+ */
+async function loadTradedVolumes(
+  database: DrizzleClient,
+  marketIds: string[]
+): Promise<Map<string, number>> {
+  if (marketIds.length === 0) return new Map();
+  const rows = await database
+    .select({
+      marketId: balanceTransactions.relatedId,
+      volume: sql<number>`coalesce(sum(abs(${balanceTransactions.amount}::numeric)), 0)`,
+    })
+    .from(balanceTransactions)
+    .where(
+      and(
+        inArray(balanceTransactions.type, ['pred_buy', 'pred_sell']),
+        inArray(balanceTransactions.relatedId, marketIds)
+      )
+    )
+    .groupBy(balanceTransactions.relatedId);
+  return new Map(rows.map((row) => [String(row.marketId), Number(row.volume)]));
+}
+
+/**
+ * Traded-volume map cached under the list TTL (12 s), in the same
+ * namespace as the market list itself. The values are public
+ * (BalanceTransaction has no RLS policy, so asPublic returns the same
+ * sums) and the key is a hash of the page's market-id set, so a
+ * different page misses and refetches. Cached as [marketId, volume]
+ * entries because the cache JSON-serializes values and a Map would not
+ * survive the round-trip. Without this, the aggregate ran on every list
+ * request — including the paginated path, which has no list cache — and
+ * there is no index on BalanceTransaction.relatedId, so it scans every
+ * pred_buy / pred_sell row in the ledger. Every trade, resolve, or
+ * cancel invalidates this whole namespace
+ * (invalidateMarketsApiPredictionsList), so the cached volume cannot go
+ * stale past the next trade.
+ */
+async function loadCachedTradedVolumes(
+  fetchVolumes: () => Promise<Map<string, number>>,
+  marketIds: string[]
+): Promise<Map<string, number>> {
+  const key = `volumes:${createHash('sha256')
+    .update([...marketIds].sort().join(','))
+    .digest('hex')}`;
+  const entries = await getCacheOrFetch<[string, number][]>(
+    key,
+    async () => [...(await fetchVolumes()).entries()],
+    {
+      namespace: CACHE_KEYS.MARKETS_API_PREDICTIONS_LIST,
+      ttl: DEFAULT_TTLS.MARKETS_API_PREDICTIONS_LIST,
+    }
+  );
+  return new Map(entries);
 }
 
 function createPredictionService() {
@@ -154,6 +233,23 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const marketMap = new Map(markets.map((m) => [m.id, m]));
 
+  // Traded volume per market, from the wallet ledger — the all-time sum of
+  // ABS(amount) over each market's pred_buy / pred_sell rows. The list
+  // views print this as "Vol" and sort by it; the pool balances
+  // (yesShares + noShares) are not volume — a freshly seeded, never-traded
+  // market would otherwise display its seed liquidity as volume and
+  // outrank markets with real trades.
+  const volumeByMarket = await loadCachedTradedVolumes(
+    () =>
+      asPublic((database) =>
+        loadTradedVolumes(
+          database,
+          markets.map((m) => m.id)
+        )
+      ),
+    markets.map((m) => m.id)
+  );
+
   const userPositionsMap = new Map<string, PredictionUserPositionSnapshot[]>();
   if (userId && authUser?.userId === userId) {
     try {
@@ -222,6 +318,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       createdDate: toISOOrNull(m.createdAt),
       yesShares,
       noShares,
+      volume: volumeByMarket.get(m.id) ?? 0,
       yesProbability: yesProb,
       noProbability: noProb,
       liquidity: m.liquidity,
