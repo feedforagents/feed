@@ -140,18 +140,8 @@ type ArticleGenerationResult =
 
 export const dynamic = 'force-dynamic';
 
-/**
- * Maximum articles to generate per tick.
- *
- * Set to 1 to ensure:
- * - Minimal TOCTOU race window (only one article attempt per tick)
- * - Even distribution across cron intervals
- * - Predictable LLM cost per tick
- *
- * With cron running every 10 minutes, this allows up to 6 articles/hour
- * if the rate limiter (default 2/hour) permits.
- */
-const MAX_ARTICLES_PER_TICK = 1;
+// Let the half-hour tick use a slot about to open in the rolling hourly cap.
+const RATE_LIMIT_WAIT_MS = 60_000;
 
 /**
  * Helper to persist an article using the shared persistence service.
@@ -163,7 +153,8 @@ const MAX_ARTICLES_PER_TICK = 1;
  */
 async function persistArticleFromGenerator(
   article: Article,
-  gameState: GameState
+  gameState: GameState,
+  rateLimitWaitUntil: number
 ) {
   // Validate required fields before calling persistence service
   if (!article.id?.trim()) {
@@ -201,9 +192,8 @@ async function persistArticleFromGenerator(
       slant: article.slant,
       category: article.category,
       relatedQuestion: article.relatedQuestion,
-      timestamp: article.publishedAt,
     },
-    { checkRateLimit: true }
+    { rateLimitWaitUntil }
   );
 }
 
@@ -337,11 +327,15 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       });
     }
 
-    // Check rate limit first
+    // Generate during a short wait for capacity, then enforce the cap at publication.
+    const rateLimitWaitUntil = startTime + RATE_LIMIT_WAIT_MS;
     const { allowed, currentCount, maxAllowed, remaining } =
       await articleRateLimiter.canGenerateArticle();
 
-    if (!allowed) {
+    if (
+      !allowed &&
+      (await articleRateLimiter.getNextAvailableAt()) > rateLimitWaitUntil
+    ) {
       logger.info(
         'Article tick skipped - rate limit reached',
         { currentCount, maxAllowed },
@@ -359,7 +353,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     }
 
     logger.info(
-      'Article rate limit check passed',
+      'Article tick admitted to generation',
       { currentCount, maxAllowed, remaining },
       'ArticleTick'
     );
@@ -396,105 +390,82 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     // Create LLM client for article generation
     const llmClient = FeedLLMClient.forGameTick();
 
-    let articlesCreated = 0;
-    let errorCount = 0;
-    const articlesToGenerate = Math.min(MAX_ARTICLES_PER_TICK, remaining);
+    let result: ArticleGenerationResult | undefined;
 
     // Generate articles based on active events. Events are tried in random
     // order until an uncovered one is found, so an already-covered random
     // pick does not fall through to a baseline article while other events
     // still need coverage.
-    let eventArticleAttempted = false;
-    if (articlesToGenerate > 0) {
-      const candidates = activeEventsData.activeEvents.filter(
-        (event) =>
-          event.visibility === 'public' || event.visibility === 'leaked'
+    const candidates = activeEventsData.activeEvents.filter(
+      (event) => event.visibility === 'public' || event.visibility === 'leaked'
+    );
+    while (candidates.length > 0) {
+      const [event] = candidates.splice(
+        Math.floor(secureRandom() * candidates.length),
+        1
       );
-      while (candidates.length > 0 && !eventArticleAttempted) {
-        const [event] = candidates.splice(
-          Math.floor(secureRandom() * candidates.length),
-          1
+      if (!event) break;
+
+      const eventId = event.questionId;
+      if (await hasEventBeenCovered(eventId)) {
+        logger.debug(
+          'Event already covered - skipping',
+          { eventId },
+          'ArticleTick'
         );
-        if (!event) break;
-
-        // Check if we've already covered this event using DB-backed tracking
-        const eventId = event.questionId;
-        if (await hasEventBeenCovered(eventId)) {
-          logger.debug(
-            'Event already covered - skipping',
-            { eventId },
-            'ArticleTick'
-          );
-          continue;
-        }
-
-        eventArticleAttempted = true;
-
-        // Pick a random news org to write the article
-        const orgIndex = Math.floor(secureRandom() * newsOrgs.length);
-        const org = newsOrgs[orgIndex]!;
-
-        const result = await generateEventArticle(
-          event,
-          org,
-          actorsList,
-          worldFactsContext,
-          gameState,
-          llmClient
-        );
-
-        if (result.status === 'success') {
-          articlesCreated++;
-          // Mark this event as covered for future duplicate detection (DB-backed)
-          await markEventAsCovered(eventId, org.id, result.id);
-          logger.info(
-            `Article created by ${org.name}`,
-            { eventId, articleId: result.id },
-            'ArticleTick'
-          );
-        } else if (result.status === 'error') {
-          // Count actual errors for accurate metrics
-          errorCount++;
-        }
-        // 'skipped' status is not an error, just means rate limit hit
+        continue;
       }
-    }
 
-    // Baseline (editorial) articles are only for ticks with no uncovered
-    // event. A failed or rate-limited event attempt must not trigger a second
-    // (paid) generation.
-    if (!eventArticleAttempted && articlesToGenerate > 0) {
-      const orgIndex = Math.floor(secureRandom() * newsOrgs.length);
-      const org = newsOrgs[orgIndex]!;
-
-      const result = await generateBaselineArticle(
+      const org = newsOrgs[Math.floor(secureRandom() * newsOrgs.length)]!;
+      result = await generateEventArticle(
+        event,
         org,
         actorsList,
         worldFactsContext,
         gameState,
-        llmClient
+        llmClient,
+        rateLimitWaitUntil
       );
-
       if (result.status === 'success') {
-        articlesCreated++;
+        await markEventAsCovered(eventId, org.id, result.id);
+        logger.info(
+          `Article created by ${org.name}`,
+          { eventId, articleId: result.id },
+          'ArticleTick'
+        );
+      }
+      break;
+    }
+
+    // A tick makes one article attempt. Editorials fill slots with no uncovered event.
+    if (!result) {
+      const org = newsOrgs[Math.floor(secureRandom() * newsOrgs.length)]!;
+      result = await generateBaselineArticle(
+        org,
+        actorsList,
+        worldFactsContext,
+        gameState,
+        llmClient,
+        rateLimitWaitUntil
+      );
+      if (result.status === 'success') {
         logger.info(
           `Baseline article created by ${org.name}`,
           { articleId: result.id },
           'ArticleTick'
         );
-      } else if (result.status === 'error') {
-        // Count actual errors for accurate metrics
-        errorCount++;
       }
-      // 'skipped' status is not an error, just means rate limit hit
     }
 
+    const articlesCreated = result.status === 'success' ? 1 : 0;
+    const errorCount = result.status === 'error' ? 1 : 0;
+    const skipped = result.status === 'skipped';
     const duration = Date.now() - startTime;
     const success = errorCount === 0;
 
     logger.info(
       `Article tick completed in ${duration}ms`,
-      { articlesCreated, errorCount, success },
+      { articlesCreated, errorCount, success, skipped },
       'ArticleTick'
     );
 
@@ -502,14 +473,13 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       success,
       articlesCreated,
       errorCount,
+      skipped,
     });
 
-    // Note: skipped: false indicates the tick ran to completion (vs early-exit scenarios
-    // like rate limit reached, no game, game paused). This provides consistent response
-    // shape for monitoring and test assertions.
     return NextResponse.json({
       success,
-      skipped: false,
+      skipped,
+      ...(result.status === 'skipped' ? { reason: result.reason } : {}),
       articlesCreated,
       errorCount,
       duration,
@@ -530,19 +500,9 @@ async function generateEventArticle(
   actorsList: StaticActor[],
   worldFactsContext: string,
   gameState: GameState,
-  llmClient: FeedLLMClient
+  llmClient: FeedLLMClient,
+  rateLimitWaitUntil: number
 ): Promise<ArticleGenerationResult> {
-  // P0: Pre-check rate limit BEFORE expensive LLM calls to avoid wasting resources
-  const { allowed } = await articleRateLimiter.canGenerateArticle();
-  if (!allowed) {
-    logger.info(
-      'Event article skipped - rate limit reached before LLM call',
-      { eventId: event.questionId, orgId: org.id },
-      'ArticleTick'
-    );
-    return { status: 'skipped', reason: 'rate_limit' };
-  }
-
   // Create ArticleGenerator instance
   const articleGen = new ArticleGenerator(llmClient);
 
@@ -569,7 +529,11 @@ async function generateEventArticle(
     );
 
     // Persist the article using shared persistence service (includes rate limit check)
-    const result = await persistArticleFromGenerator(article, gameState);
+    const result = await persistArticleFromGenerator(
+      article,
+      gameState,
+      rateLimitWaitUntil
+    );
 
     // Handle persistence failures - distinguish rate limiting from actual errors
     if (!result.success) {
@@ -609,7 +573,8 @@ async function generateBaselineArticle(
   actorsList: StaticActor[],
   worldFactsContext: string,
   gameState: GameState,
-  llmClient: FeedLLMClient
+  llmClient: FeedLLMClient,
+  rateLimitWaitUntil: number
 ): Promise<ArticleGenerationResult> {
   // Pick a random actor to focus on
   const actorIndex = Math.floor(
@@ -620,17 +585,6 @@ async function generateBaselineArticle(
   const topic = actor
     ? `${actor.name} and recent developments`
     : 'AI industry trends and market movements';
-
-  // P0: Pre-check rate limit BEFORE expensive LLM calls to avoid wasting resources
-  const { allowed } = await articleRateLimiter.canGenerateArticle();
-  if (!allowed) {
-    logger.info(
-      'Baseline article skipped - rate limit reached before LLM call',
-      { topic, orgId: org.id },
-      'ArticleTick'
-    );
-    return { status: 'skipped', reason: 'rate_limit' };
-  }
 
   // Create ArticleGenerator instance
   const articleGen = new ArticleGenerator(llmClient);
@@ -659,7 +613,11 @@ async function generateBaselineArticle(
     );
 
     // Persist the article using shared persistence service (includes rate limit check)
-    const result = await persistArticleFromGenerator(article, gameState);
+    const result = await persistArticleFromGenerator(
+      article,
+      gameState,
+      rateLimitWaitUntil
+    );
 
     // Handle persistence failures - distinguish rate limiting from actual errors
     if (!result.success) {
