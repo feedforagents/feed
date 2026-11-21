@@ -10,6 +10,14 @@ import type {
 
 export type PredictionSide = 'yes' | 'no';
 
+/**
+ * Lifecycle slice for the market list. Mirrors the `status` enum of
+ * MarketQuerySchema (GET /api/markets/predictions): ACTIVE is the open
+ * list, RESOLVED settled with an outcome, CANCELLED settled without one
+ * (resolved with a null resolution).
+ */
+export type PredictionMarketStatus = 'ACTIVE' | 'RESOLVED' | 'CANCELLED';
+
 // Domain records (DB-facing)
 export interface QuestionRecord {
   id: string;
@@ -76,9 +84,13 @@ export interface PredictionDbPort {
   listMarkets?(options?: {
     limit?: number;
     offset?: number;
+    /** Lifecycle slice; omitted means the open (ACTIVE) list. */
+    status?: PredictionMarketStatus;
   }): Promise<PredictionMarketRecord[]>;
   /** Active (unresolved) row count; used for pagination metadata. */
   countUnresolvedMarkets?(): Promise<number>;
+  /** Row count for one lifecycle slice; used for pagination metadata. */
+  countMarketsByStatus?(status: PredictionMarketStatus): Promise<number>;
   listUserPositions?(userId: string): Promise<PredictionPositionRecord[]>;
   getQuestion?(idOrNumber: string): Promise<QuestionRecord | null>;
   createMarketFromQuestion(

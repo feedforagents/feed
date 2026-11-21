@@ -87,7 +87,7 @@ GET /api/markets/predictions?page=1&limit=5
 
 **Perps:** `countMarkets()` counts all rows in `perpMarketSnapshots` (matches what unpaginated `listMarkets()` returns). Sorted by `ticker ASC` for stable page boundaries.
 
-**Predictions:** `countUnresolvedMarkets()` counts `WHERE resolved = false` (matches what `listMarkets()` returns — also filters `resolved = false`). Sorted by `createdAt DESC` so newest markets appear first.
+**Predictions:** `countUnresolvedMarkets()` counts `WHERE resolved = false` (matches what `listMarkets()` returns — also filters `resolved = false`). Sorted by `createdAt DESC` so newest markets appear first. When `?status=` is passed (`ACTIVE` | `RESOLVED` | `CANCELLED`), the list and `total` follow that slice instead (RESOLVED = settled with an outcome, CANCELLED = settled without one); omitting it keeps the open list above. A filtered unpaginated request bypasses the shared `all` cache key, like the pagination path does.
 
 ---
 
