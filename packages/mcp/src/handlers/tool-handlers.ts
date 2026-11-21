@@ -3598,12 +3598,30 @@ export async function executeGetFavoritePosts(
   // Query directly as the authenticated agent. The HTTP favorites route
   // authenticates the caller, so calling it with an X-User-Id header always
   // returned an empty list.
+  // Favorites never bypass the viewer's block/mute policy: drop
+  // favorited authors the viewer blocked or muted, and authors who
+  // blocked the viewer — the web favorites feed's rule (GET
+  // /api/posts/feed/favorites, loadViewerExcludedAuthorIds) and the
+  // A2A getFavoritePosts rule. Filter before paginating so excluded
+  // authors never consume page slots.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = new Set([
+    ...blockedIds,
+    ...mutedIds,
+    ...blockedByIds,
+  ]);
   const favoritedUserIds = (
     await db
       .select({ targetUserId: favorites.targetUserId })
       .from(favorites)
       .where(eq(favorites.userId, agent.userId))
-  ).map((row) => row.targetUserId);
+  )
+    .map((row) => row.targetUserId)
+    .filter((id: string) => !excludedAuthorIds.has(id));
   if (favoritedUserIds.length === 0) {
     return { posts: [] };
   }
