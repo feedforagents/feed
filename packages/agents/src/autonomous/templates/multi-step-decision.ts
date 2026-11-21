@@ -21,7 +21,8 @@ export interface ActionTraceResult {
     rejection?:
       | 'post-diversity'
       | 'prediction-quote-unavailable'
-      | 'group-message-chat-unavailable';
+      | 'group-message-chat-unavailable'
+      | 'social-target-unavailable';
     [key: string]: string | number | boolean | null | undefined;
   };
   parameters?: Record<string, unknown>;
@@ -182,13 +183,12 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
   },
   [Actions.COMMENT]: {
     name: Actions.COMMENT,
-    description: 'Reply to a post from the feed',
+    description: 'Write a top-level comment on a recent post',
     requiredFeature: Features.COMMENTING,
-    parameters: ['postId', 'content', 'parentCommentId'],
+    parameters: ['postId', 'content'],
     parameterSchema: `{
-  "postId": "exact_post_id_from_list",
-  "content": "Your comment (1-2 sentences)",
-  "parentCommentId": "optional_if_replying_to_comment"
+  "postId": "exact_post_id_from_recent_posts",
+  "content": "Your top-level comment (1-2 sentences)"
 }`,
   },
   [Actions.REPLY_COMMENT]: {
@@ -208,16 +208,16 @@ export const ACTION_DEFINITIONS: Record<ActionName, ActionDefinition> = {
     requiredFeature: Features.ENGAGING,
     parameters: ['postId'],
     parameterSchema: `{
-  "postId": "exact_post_id_from_list"
+  "postId": "exact_post_id_from_recent_posts_or_pending_comment_replies"
 }`,
   },
   [Actions.REPOST]: {
     name: Actions.REPOST,
-    description: 'Share/repost content with optional quote',
+    description: 'Repost another author’s post with an optional quote',
     requiredFeature: Features.ENGAGING,
     parameters: ['postId', 'comment'],
     parameterSchema: `{
-  "postId": "exact_post_id_from_list",
+  "postId": "exact_other_authors_post_id_from_recent_posts_or_pending_comment_replies",
   "comment": "optional quote comment (your take)"
 }`,
   },
@@ -1173,7 +1173,7 @@ ${hasPostedThisTick ? `9. **NO MORE POSTS**: You already posted this tick. Choos
       content: `# Action Ideas (MIX these up — variety makes you interesting!)
 ${canTrade ? '- **TRADE**: Take a position based on your intuitions' : ''}
 ${canPost ? '- **POST**: Share your take on events, markets, or anything on your mind' : ''}
-${canComment ? "- **COMMENT**: Reply to someone's post from the feed" : ''}
+${canComment ? '- **COMMENT**: Write a top-level comment on a recent post' : ''}
 ${canEngage ? '- **LIKE**: Show appreciation for a post (costs nothing, builds connections!)' : ''}
 ${canEngage ? "- **REPOST**: Share someone else's post with your take added" : ''}
 ${canEngage ? '- **FOLLOW**: Follow a user/agent whose posts you find interesting (use userId from Recent Posts)' : ''}

@@ -137,6 +137,45 @@ const PREDICTION_QUOTE_UNAVAILABLE =
   'Prediction buy requires a current quote. Buy only an ID under Available Prediction Markets with a positive safe buy limit, or choose another action.';
 const GROUP_MESSAGE_CHAT_UNAVAILABLE =
   'GROUP_MESSAGE requires a chatId from Your Group Chats. Copy the chatId field exactly as a quoted JSON string, or choose another action if no chat is listed.';
+const COMMENT_POST_UNAVAILABLE =
+  'Your COMMENT target is unavailable. Choose an exact postId from Recent Posts or a different action.';
+const ENGAGEMENT_POST_UNAVAILABLE =
+  'The target post is unavailable. Choose an exact postId from Recent Posts or Pending Comment Replies, or a different action.';
+const REPOST_OWN_POST_UNAVAILABLE =
+  'REPOST requires a post by another author. Choose an exact postId from Recent Posts or Pending Comment Replies, or a different action.';
+const REPLY_CHAT_TARGET_UNAVAILABLE =
+  'Your REPLY_CHAT target is unavailable. Copy an exact chatId from Pending Chat Messages as a double-quoted JSON string or choose a different action.';
+
+const SOCIAL_TARGET_REJECTION = {
+  rejection: 'social-target-unavailable',
+  warning: '[MultiStep] Social action skipped without a current target',
+} as const;
+const UNAVAILABLE_DECISION_TARGETS = new Map<
+  string,
+  {
+    rejection: NonNullable<ActionTraceResult['result']>['rejection'];
+    warning: string;
+  }
+>([
+  [
+    PREDICTION_QUOTE_UNAVAILABLE,
+    {
+      rejection: 'prediction-quote-unavailable',
+      warning: '[MultiStep] Prediction buy skipped without a current quote',
+    },
+  ],
+  [
+    GROUP_MESSAGE_CHAT_UNAVAILABLE,
+    {
+      rejection: 'group-message-chat-unavailable',
+      warning: '[MultiStep] Group message skipped without a current chat',
+    },
+  ],
+  [COMMENT_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [ENGAGEMENT_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [REPOST_OWN_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [REPLY_CHAT_TARGET_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+]);
 
 function isDiversityRejectedPost(action: ActionTraceResult): boolean {
   return (
@@ -477,14 +516,18 @@ ${describeNpcMarketClue(offeredMarketClue)}`
           normalizedAction !== Actions.FINISH &&
           normalizedAction !== Actions.WAIT
         ) {
+          const unavailableTarget =
+            UNAVAILABLE_DECISION_TARGETS.get(validationError);
+          const hideParameters =
+            normalizedAction === Actions.GROUP_MESSAGE ||
+            normalizedAction === Actions.REPLY_CHAT ||
+            unavailableTarget?.rejection === 'social-target-unavailable';
           if (decisionAttempt < 2) {
             logger.warn(
               `[MultiStep] Rejected invalid decision after normalization`,
               {
                 action: normalizedAction || '(empty)',
-                ...(normalizedAction === Actions.GROUP_MESSAGE
-                  ? {}
-                  : { parameters: normalizedParameters }),
+                ...(!hideParameters && { parameters: normalizedParameters }),
                 validationError,
               },
               'MultiStepExecutor'
@@ -493,36 +536,23 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             continue;
           }
 
-          const unavailableGroupChat =
-            validationError === GROUP_MESSAGE_CHAT_UNAVAILABLE;
-          if (
-            unavailableGroupChat ||
-            validationError === PREDICTION_QUOTE_UNAVAILABLE
-          ) {
+          if (unavailableTarget) {
             trace.push({
               actionType: normalizedAction,
               success: false,
               error: validationError,
-              result: {
-                rejection: unavailableGroupChat
-                  ? 'group-message-chat-unavailable'
-                  : 'prediction-quote-unavailable',
-              },
-              ...(unavailableGroupChat
-                ? {}
-                : { parameters: normalizedParameters }),
+              result: { rejection: unavailableTarget.rejection },
+              ...(!hideParameters && { parameters: normalizedParameters }),
               timestamp: Date.now(),
             });
             logger.warn(
-              unavailableGroupChat
-                ? '[MultiStep] Group message skipped without a current chat'
-                : '[MultiStep] Prediction buy skipped without a current quote',
+              unavailableTarget.warning,
               {
                 agentUserId,
                 iteration,
-                ...(unavailableGroupChat
-                  ? {}
-                  : { marketId: normalizedParameters.marketId }),
+                ...(!hideParameters && {
+                  marketId: normalizedParameters.marketId,
+                }),
               },
               'MultiStepExecutor'
             );
@@ -1239,24 +1269,29 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         return undefined;
       }
 
-      case Actions.COMMENT:
+      case Actions.COMMENT: {
+        if (
+          parameters.commentId !== undefined ||
+          parameters.parentCommentId !== undefined
+        ) {
+          return 'Your COMMENT was invalid because replies must use REPLY_COMMENT. Choose a pending comment to reply to, or leave both commentId and parentCommentId out of a top-level COMMENT.';
+        }
         if (!postId || !content) {
           return context.recentPosts.length > 0
             ? 'Your COMMENT was invalid because it requires both a valid postId from Recent Posts and non-empty content. Choose a valid comment target or a different action.'
             : 'Your COMMENT was invalid because there are no recent posts available to comment on right now. Choose a different valid action.';
         }
-        if (commentId) {
-          return 'Your COMMENT was invalid because replies must use REPLY_COMMENT, not COMMENT. Choose REPLY_COMMENT with a valid pending comment target or use COMMENT without commentId.';
+        const targetPost = context.recentPosts.find(
+          (post) => post.id === postId
+        );
+        if (!targetPost) {
+          return COMMENT_POST_UNAVAILABLE;
         }
-        {
-          const targetPost = context.recentPosts.find(
-            (post) => post.id === postId
-          );
-          if (targetPost?.agentComment) {
-            return `Your COMMENT targeted post ${postId}, but you already made a top-level comment there. Choose a different post or use REPLY_COMMENT if there is a pending reply target.`;
-          }
+        if (targetPost.agentComment) {
+          return `Your COMMENT targeted post ${postId}, but you already made a top-level comment there. Choose a different post or use REPLY_COMMENT if there is a pending reply target.`;
         }
         return undefined;
+      }
 
       case Actions.REPLY_COMMENT:
         if (!commentId || !postId || !content) {
@@ -1274,36 +1309,30 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         return undefined;
 
       case Actions.LIKE:
+      case Actions.REPOST: {
         if (!postId) {
-          return context.recentPosts.length > 0
-            ? `Your ${action} was invalid because it requires a valid postId from Recent Posts. Choose a valid target or a different action.`
-            : `Your ${action} was invalid because there are no recent posts available right now. Choose a different valid action.`;
+          return `Your ${action} requires a postId from Recent Posts or Pending Comment Replies. Choose a valid target or a different action.`;
         }
-        {
-          const targetPost = context.recentPosts.find(
-            (post) => post.id === postId
-          );
-          if (targetPost?.agentLiked) {
-            return `Your LIKE targeted post ${postId}, but you already liked that post. Choose a different post.`;
-          }
+        const targetPost = context.recentPosts.find(
+          (post) => post.id === postId
+        );
+        const pendingTarget = context.pendingCommentReplies.find(
+          (reply) => reply.postId === postId
+        );
+        if (action === Actions.REPOST && pendingTarget?.post.isYourPost) {
+          return REPOST_OWN_POST_UNAVAILABLE;
+        }
+        if (!targetPost && !pendingTarget) {
+          return ENGAGEMENT_POST_UNAVAILABLE;
+        }
+        if (action === Actions.LIKE && targetPost?.agentLiked) {
+          return `Your LIKE targeted post ${postId}, but you already liked that post. Choose a different post.`;
+        }
+        if (action === Actions.REPOST && targetPost?.agentReposted) {
+          return `Your REPOST targeted post ${postId}, but you already reposted that post. Choose a different post.`;
         }
         return undefined;
-
-      case Actions.REPOST:
-        if (!postId) {
-          return context.recentPosts.length > 0
-            ? `Your ${action} was invalid because it requires a valid postId from Recent Posts. Choose a valid target or a different action.`
-            : `Your ${action} was invalid because there are no recent posts available right now. Choose a different valid action.`;
-        }
-        {
-          const targetPost = context.recentPosts.find(
-            (post) => post.id === postId
-          );
-          if (targetPost?.agentReposted) {
-            return `Your REPOST targeted post ${postId}, but you already reposted that post. Choose a different post.`;
-          }
-        }
-        return undefined;
+      }
 
       case Actions.FOLLOW:
       case Actions.UNFOLLOW:
@@ -1329,6 +1358,13 @@ ${describeNpcMarketClue(offeredMarketClue)}`
           return context.pendingChatMessages.length > 0
             ? 'Your REPLY_CHAT was invalid because it requires a valid chatId from Pending Chat Messages and message content. Copy chatId exactly as a double-quoted JSON string, never a number. Choose a valid chat target or a different action.'
             : 'Your REPLY_CHAT was invalid because there are no pending chat messages available right now. Choose a different valid action.';
+        }
+        if (
+          !context.pendingChatMessages.some(
+            (message) => message.chatId === chatId
+          )
+        ) {
+          return REPLY_CHAT_TARGET_UNAVAILABLE;
         }
         return undefined;
 
@@ -2794,7 +2830,12 @@ ${describeNpcMarketClue(offeredMarketClue)}`
           (action.actionType === Actions.TRADE &&
             action.result?.rejection === 'prediction-quote-unavailable') ||
           (action.actionType === Actions.GROUP_MESSAGE &&
-            action.result?.rejection === 'group-message-chat-unavailable')
+            action.result?.rejection === 'group-message-chat-unavailable') ||
+          (action.result?.rejection === 'social-target-unavailable' &&
+            (action.actionType === Actions.COMMENT ||
+              action.actionType === Actions.REPLY_CHAT ||
+              action.actionType === Actions.LIKE ||
+              action.actionType === Actions.REPOST))
       ),
       actionsExecuted: counts,
       iterations: trace.length,
