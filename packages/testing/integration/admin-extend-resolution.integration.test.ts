@@ -111,7 +111,7 @@ async function fixture() {
   await dbWrite.insert(timeframedMarkets).values({
     id: timeframeId,
     questionId,
-    timeframe: '1d',
+    timeframe: 'daily',
     startTime: now,
     endTime: originalEnd,
     arcStateEnteredAt: now,

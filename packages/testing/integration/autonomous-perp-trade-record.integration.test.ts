@@ -306,9 +306,9 @@ describe('autonomous perp trade record (static NPC)', () => {
     expect(added!.size).toBeCloseTo(150, 6);
     const blendedEntry = added!.entryPrice;
     expect(add.entryPrice).toBeCloseTo(blendedEntry, 8);
-    // blendedEntry * 150 = openEntry * 100 + addFill * 50, so the fill of the
-    // added 50 is recoverable from the persisted rows alone.
-    const addFill = (blendedEntry * 150 - openEntry * 100) / 50;
+    // Subtract the original units from the combined holding to recover the
+    // incremental fill from the two persisted entries.
+    const addFill = 50 / (150 / blendedEntry - 100 / openEntry);
     expect(Math.abs(addFill - blendedEntry)).toBeGreaterThan(1);
 
     rows = await history();

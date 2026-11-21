@@ -28,6 +28,7 @@ import {
   physicalFeeSchemaDiagnostics,
   requireCondition,
   SchemaHold,
+  STAGING_FUNDING_MIGRATION,
   sameDatabase,
   text,
   verifyAdditiveColumns,
@@ -172,6 +173,10 @@ function expectedMigrations(): Migration[] {
     '0004_leverage_cap_20',
     '0005_trading_fee_idempotency_key',
   ];
+  if (entries.length === tags.length + 1) {
+    tags.push(STAGING_FUNDING_MIGRATION.tag);
+    verifyOriginalMigrationSource(ROOT);
+  }
   requireCondition(entries.length === tags.length, 'unexpected_journal');
   return entries.map((entry, index) => {
     requireCondition(
@@ -266,6 +271,19 @@ SELECT json_build_object(
     FROM (VALUES ('PerpMarketSnapshot'),('Position'),('TradingFee'),('TradingFeeOutbox')) t(name)
     LEFT JOIN pg_catalog.pg_class c ON c.oid=pg_catalog.to_regclass('public.'||pg_catalog.quote_ident(t.name))
     LEFT JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace),
+  'fundingPosition',(SELECT json_build_object('oid',c.oid::text,'kind',c.relkind,'canMigrate',pg_has_role(current_user,c.relowner,'USAGE')) FROM pg_catalog.pg_class c WHERE c.oid=pg_catalog.to_regclass('public."PerpPosition"')),
+  'fundingLedger',(SELECT json_build_object(
+    'oid',c.oid::text,'kind',c.relkind,'rls',c.relrowsecurity,
+    'canMigrate',pg_has_role(current_user,c.relowner,'USAGE'),
+    'appAccess',has_table_privilege(current_user,c.oid,'SELECT') AND has_table_privilege(current_user,c.oid,'INSERT'),
+    'columns',(SELECT json_agg(json_build_array(a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),a.attnotnull,a.atthasdef) ORDER BY a.attnum)
+      FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped),
+    'constraints',(SELECT count(*) FROM pg_catalog.pg_constraint t WHERE t.conrelid=c.oid AND t.contype<>'n'),
+    'primary',EXISTS(SELECT 1 FROM pg_catalog.pg_constraint t WHERE t.conrelid=c.oid AND t.contype='p' AND t.conkey=ARRAY[1,2]::smallint[] AND t.convalidated),
+    'positionFk',EXISTS(SELECT 1 FROM pg_catalog.pg_constraint t JOIN pg_catalog.pg_attribute a ON a.attrelid=t.confrelid AND a.attname='id' AND NOT a.attisdropped
+      WHERE t.conrelid=c.oid AND t.contype='f' AND t.confrelid=pg_catalog.to_regclass('public."PerpPosition"')
+      AND t.conkey=ARRAY[1]::smallint[] AND t.confkey=ARRAY[a.attnum] AND t.confdeltype='c' AND t.convalidated))
+    FROM pg_catalog.pg_class c WHERE c.oid=pg_catalog.to_regclass('public."PerpPositionFundingAccrual"')),
   'additiveColumns',COALESCE((SELECT json_agg(json_build_object('table',c.relname,'column',a.attname,'type',pg_catalog.format_type(a.atttypid,a.atttypmod),'notNull',a.attnotnull,'hasDefault',a.atthasdef,'defaultExpression',pg_catalog.pg_get_expr(d.adbin,d.adrelid),'dropped',a.attisdropped) ORDER BY c.relname,a.attname)
     FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
     LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
@@ -291,11 +309,18 @@ function inspect(
   text(row.feeOid);
   text(row.outboxOid);
   text(row.address);
+  const receipts = list(row.history);
+  const tail = object(receipts.at(-1) ?? {});
+  const fundingMigration = migrations[STAGING_FUNDING_MIGRATION.index];
+  const fundingReady =
+    fundingMigration !== undefined &&
+    tail.hash === fundingMigration.hash &&
+    tail.when === fundingMigration.when;
   let historyLength: number;
   try {
     historyLength = verifyHistory(
-      row.history,
-      migrations,
+      fundingReady ? receipts.slice(0, -1) : receipts,
+      migrations.slice(0, STAGING_FUNDING_MIGRATION.index),
       allowStagingBaselineAdditive
     );
   } catch (error) {
@@ -327,7 +352,36 @@ function inspect(
     columnsReady || !indexReady,
     'index_without_receipted_columns'
   );
-  return { row, historyLength, columnsReady, indexReady };
+  if (fundingMigration) {
+    const position = object(row.fundingPosition);
+    requireCondition(
+      row.searchPath === 'pg_catalog,public' &&
+        position.kind === 'r' &&
+        typeof position.oid === 'string' &&
+        /^[1-9]\d*$/.test(position.oid),
+      'incorrect_funding_target'
+    );
+    if (fundingReady) {
+      const ledger = object(row.fundingLedger);
+      requireCondition(
+        (historyLength === 4 || historyLength === 6) &&
+          ledger.kind === 'r' &&
+          ledger.rls === false &&
+          ledger.constraints === 2 &&
+          ledger.primary === true &&
+          ledger.positionFk === true &&
+          JSON.stringify(ledger.columns) ===
+            '[["positionId","text",true,false],["periodStart","timestamp with time zone",true,false]]',
+        'incorrect_funding_ledger'
+      );
+    } else {
+      requireCondition(
+        row.fundingLedger === null,
+        'unreceipted_funding_ledger'
+      );
+    }
+  }
+  return { row, historyLength, columnsReady, indexReady, fundingReady };
 }
 export function migrationUrl(target: Endpoint, ca: string) {
   const url = new URL('postgresql://invalid');
@@ -404,7 +458,9 @@ function verifyDatabaseIdentity(app: FeeSchemaState, direct: FeeSchemaState) {
       app.row.address === direct.row.address &&
       app.row.port === direct.row.port &&
       app.row.feeOid === direct.row.feeOid &&
-      app.row.outboxOid === direct.row.outboxOid,
+      app.row.outboxOid === direct.row.outboxOid &&
+      object(app.row.fundingPosition ?? {}).oid ===
+        object(direct.row.fundingPosition ?? {}).oid,
     'app_direct_server_mismatch'
   );
   if (
@@ -421,7 +477,10 @@ function verifyDatabaseIdentity(app: FeeSchemaState, direct: FeeSchemaState) {
 function verifyDatabasePair(app: FeeSchemaState, direct: FeeSchemaState) {
   verifyDatabaseIdentity(app, direct);
   requireCondition(
-    app.historyLength === direct.historyLength,
+    app.historyLength === direct.historyLength &&
+      app.fundingReady === direct.fundingReady &&
+      object(app.row.fundingLedger ?? {}).oid ===
+        object(direct.row.fundingLedger ?? {}).oid,
     'app_direct_server_mismatch'
   );
 }
@@ -448,6 +507,8 @@ export async function inspectOrPrepareFeeSchema({
     'direct_origin_identity_mismatch'
   );
   const migrations = expectedMigrations();
+  const fundingRequired =
+    migrations.length === STAGING_FUNDING_MIGRATION.index + 1;
   if (allowStagingBaselineAdditive) verifyOriginalMigrationSource(ROOT);
   onPhase?.('readonly_catalog');
   let appState = inspect(app, ca, migrations, allowStagingBaselineAdditive);
@@ -471,10 +532,20 @@ export async function inspectOrPrepareFeeSchema({
       'migration_role_not_owner'
     );
     if (additive) verifyAdditiveTargets(directState.row.additiveTargets, true);
+    if (fundingRequired) {
+      requireCondition(
+        appState.columnsReady &&
+          appState.indexReady &&
+          appState.historyLength === completedHistoryLength &&
+          object(directState.row.fundingPosition).canMigrate === true,
+        'funding_requires_verified_fee_schema'
+      );
+    }
     await beforeWrite(appState);
     if (
       appState.historyLength === 5 ||
-      (additive && appState.historyLength === 1)
+      (additive && appState.historyLength === 1) ||
+      (fundingRequired && !appState.fundingReady)
     ) {
       onPhase?.('normal_column_migration');
       const url = migrationUrl(direct, ca);
@@ -537,26 +608,54 @@ export async function inspectOrPrepareFeeSchema({
       verifyDatabasePair(columns, refreshedDirect);
       verifyAdditiveTargets(refreshedDirect.row.additiveTargets, true);
     }
-    await beforeWrite(columns);
-    onPhase?.('concurrent_index');
-    psql(
-      direct,
-      ca,
-      readFileSync(
-        join(
-          MIGRATIONS,
-          'manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql'
+    if (fundingRequired) {
+      const migratedDirect = inspect(
+        direct,
+        ca,
+        migrations,
+        allowStagingBaselineAdditive
+      );
+      verifyDatabasePair(columns, migratedDirect);
+      requireCondition(
+        columns.fundingReady &&
+          object(migratedDirect.row.fundingLedger).canMigrate === true,
+        'funding_ledger_not_verified'
+      );
+      if (object(columns.row.fundingLedger).appAccess !== true) {
+        await beforeWrite(columns);
+        const role = `"${app.user.replaceAll('"', '""')}"`;
+        psql(
+          direct,
+          ca,
+          `GRANT SELECT, INSERT ON TABLE public."PerpPositionFundingAccrual" TO ${role};`,
+          true
+        );
+      }
+    } else {
+      await beforeWrite(columns);
+      onPhase?.('concurrent_index');
+      psql(
+        direct,
+        ca,
+        readFileSync(
+          join(
+            MIGRATIONS,
+            'manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql'
+          ),
+          'utf8'
         ),
-        'utf8'
-      ),
-      true
-    );
+        true
+      );
+    }
     appState = inspect(app, ca, migrations, allowStagingBaselineAdditive);
     verifyDatabaseIdentity(appState, directState);
     requireCondition(
       appState.columnsReady &&
         appState.indexReady &&
-        appState.historyLength === completedHistoryLength,
+        appState.historyLength === completedHistoryLength &&
+        (!fundingRequired ||
+          (appState.fundingReady &&
+            object(appState.row.fundingLedger).appAccess === true)),
       'prepared_schema_not_verified'
     );
   }

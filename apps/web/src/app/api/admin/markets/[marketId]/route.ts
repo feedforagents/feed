@@ -208,10 +208,19 @@ export const POST = withErrorHandling(
 
       // Use transaction to ensure atomic updates of market, positions, questions, and timeframedMarkets
       const resolvedAt = new Date();
-      await withPredictionSettlement(
+      const settled = await withPredictionSettlement(
         marketId,
         { system: 'admin_prediction_resolve' },
         async (service, tx) => {
+          // The check above can go stale while another resolver (the game
+          // tick) holds the settlement lock. Re-read under the lock so this
+          // request never rewrites the question of a market it did not settle.
+          const [current] = await tx
+            .select({ resolved: markets.resolved })
+            .from(markets)
+            .where(eq(markets.id, marketId))
+            .limit(1);
+          if (!current || current.resolved) return false;
           await service.resolve({
             marketId,
             winningSide: resolution ? 'yes' : 'no',
@@ -240,9 +249,17 @@ export const POST = withErrorHandling(
               updatedAt: resolvedAt,
             })
             .where(eq(timeframedMarkets.questionId, marketId));
+          return true;
         },
         serviceOptions(marketId)
       );
+      if (!settled) {
+        return errorResponse(
+          'Market already resolved',
+          'ALREADY_RESOLVED',
+          409
+        );
+      }
 
       let notificationsCreated = 0;
 

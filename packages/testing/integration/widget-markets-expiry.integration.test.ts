@@ -63,7 +63,7 @@ if (
 const prefix = `widget-expiry-${crypto.randomUUID()}`;
 const questionIds = new Set<string>();
 const userIds = new Set<string>();
-const cacheKey = 'markets-widget-v2';
+const cacheKey = 'markets-widget-v3';
 const cacheOptions = { namespace: CACHE_KEYS.WIDGET };
 const endpoint = 'http://localhost/api/feed/widgets/markets';
 const marketSchema = z.array(z.object({ id: z.string() }));

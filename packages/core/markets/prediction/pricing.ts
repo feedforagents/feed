@@ -1,4 +1,15 @@
 import { canonicalTradingFee, floorPoints } from '@feed/shared';
+import Decimal from 'decimal.js-light';
+
+// Match PostgreSQL's rounding for Position.shares, a numeric(18, 6) column.
+const POSITION_SHARE_SCALE = 6;
+
+export function sharesAtPositionScale(shares: number): number {
+  if (!Number.isFinite(shares)) return 0;
+  return new Decimal(shares)
+    .toDecimalPlaces(POSITION_SHARE_SCALE, Decimal.ROUND_HALF_UP)
+    .toNumber();
+}
 
 /**
  * Prediction Market AMM Pricing — Constant Product Market Maker (CPMM)
