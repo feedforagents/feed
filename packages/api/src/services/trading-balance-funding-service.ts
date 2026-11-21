@@ -5,6 +5,7 @@ import {
   desc,
   eq,
   inArray,
+  or,
   sql,
   type Transaction,
   users,
@@ -21,6 +22,15 @@ const FUNDING_TRANSACTION_TYPES = [
   'stripe_dispute',
   'stripe_dispute_won',
 ] as const;
+
+// BalanceTransaction.description also contains legacy plain text. Match the
+// quoted fields written by JSON.stringify without casting those rows to JSON.
+function stripeLedgerField(
+  field: 'disputeId' | 'originalPaymentIntentId',
+  value: string
+) {
+  return sql`strpos(${balanceTransactions.description}, ${`"${field}":${JSON.stringify(value)}`}) > 0`;
+}
 
 export interface TradingBalanceFundingResult {
   success: boolean;
@@ -399,7 +409,8 @@ export class TradingBalanceFundingService {
     paymentIntentId: string,
     reason: 'refund' | 'dispute',
     amountUSD: number,
-    stripeEventId: string
+    stripeEventId: string,
+    disputeId?: string
   ): Promise<TradingBalanceFundingResult> {
     const requestedDeduction = usdToBalanceUnits(amountUSD);
     const transactionType =
@@ -421,7 +432,19 @@ export class TradingBalanceFundingService {
           .where(
             and(
               eq(balanceTransactions.userId, userId),
-              eq(balanceTransactions.relatedId, stripeEventId)
+              eq(balanceTransactions.type, transactionType),
+              or(
+                eq(balanceTransactions.relatedId, stripeEventId),
+                reason === 'dispute' && disputeId
+                  ? and(
+                      stripeLedgerField('disputeId', disputeId),
+                      stripeLedgerField(
+                        'originalPaymentIntentId',
+                        paymentIntentId
+                      )
+                    )
+                  : undefined
+              )
             )
           )
           .limit(1);
@@ -466,6 +489,9 @@ export class TradingBalanceFundingService {
             balanceUnitsRequested: requestedDeduction,
             balanceUnitsDeducted: actualDeduction,
             originalPaymentIntentId: paymentIntentId,
+            // Links the deduction to the Stripe dispute so a later win
+            // restores exactly this deduction (PRD §9.1 accounting).
+            disputeId: reason === 'dispute' ? disputeId : undefined,
             reversalReason: reason,
             reversedAt: new Date().toISOString(),
           }),
@@ -504,9 +530,10 @@ export class TradingBalanceFundingService {
     userId: string,
     disputeId: string,
     amountUSD: number,
-    stripeEventId: string
+    stripeEventId: string,
+    paymentIntentId: string
   ): Promise<TradingBalanceFundingResult> {
-    const balanceDelta = usdToBalanceUnits(amountUSD);
+    const requestedUnits = usdToBalanceUnits(amountUSD);
 
     const result = await db.transaction(
       async (tx): Promise<TradingBalanceFundingResult> => {
@@ -524,7 +551,13 @@ export class TradingBalanceFundingService {
           .where(
             and(
               eq(balanceTransactions.userId, userId),
-              eq(balanceTransactions.relatedId, stripeEventId)
+              eq(balanceTransactions.type, 'stripe_dispute_won'),
+              or(
+                eq(balanceTransactions.relatedId, stripeEventId),
+                // Stripe dispute IDs are unique. This also recognizes credits
+                // recorded before we started storing the payment intent.
+                stripeLedgerField('disputeId', disputeId)
+              )
             )
           )
           .limit(1);
@@ -542,6 +575,49 @@ export class TradingBalanceFundingService {
             alreadyProcessed: true,
             transactionId: existingCredit.id,
           };
+        }
+
+        const [deduction] = await tx
+          .select({
+            id: balanceTransactions.id,
+            amount: balanceTransactions.amount,
+          })
+          .from(balanceTransactions)
+          .where(
+            and(
+              eq(balanceTransactions.userId, userId),
+              eq(balanceTransactions.type, 'stripe_dispute'),
+              stripeLedgerField('disputeId', disputeId),
+              stripeLedgerField('originalPaymentIntentId', paymentIntentId)
+            )
+          )
+          .limit(1);
+
+        if (!deduction) {
+          // Stripe can deliver the win before the debit. Leave it retryable.
+          // Legacy debits without a dispute ID need operator reconciliation.
+          return {
+            success: false,
+            balanceDelta: 0,
+            newBalance: balanceBefore,
+            error: 'No recorded debit for this Stripe dispute and payment',
+          };
+        }
+
+        const deductedUnits = Math.max(0, -Number(deduction.amount));
+        const balanceDelta = Math.min(requestedUnits, deductedUnits);
+        if (balanceDelta < requestedUnits) {
+          logger.info(
+            'Dispute win credit clamped to the recorded deduction',
+            {
+              userId,
+              disputeId,
+              requestedUnits,
+              balanceDelta,
+              matchedDeductionId: deduction.id,
+            },
+            'TradingBalanceFundingService'
+          );
         }
 
         const balanceAfter = balanceBefore + balanceDelta;
@@ -567,6 +643,9 @@ export class TradingBalanceFundingService {
             amountUSD,
             balanceUnitsCredited: balanceDelta,
             disputeId,
+            originalPaymentIntentId: paymentIntentId,
+            restoredDeductionId: deduction.id,
+            balanceUnitsDeducted: deductedUnits,
             creditedAt: new Date().toISOString(),
           }),
         });
@@ -587,7 +666,7 @@ export class TradingBalanceFundingService {
           userId,
           disputeId,
           amountUSD,
-          balanceDelta,
+          balanceDelta: result.balanceDelta,
           newBalance: result.newBalance,
           stripeEventId,
         },

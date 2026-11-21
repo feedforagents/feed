@@ -42,7 +42,7 @@
  */
 
 import { TradingBalanceFundingService, withErrorHandling } from '@feed/api';
-import { and, balanceTransactions, db, eq } from '@feed/db';
+import { and, balanceTransactions, db, dbWrite, eq } from '@feed/db';
 import { logger } from '@feed/shared';
 import { NextResponse } from 'next/server';
 import type Stripe from 'stripe';
@@ -527,7 +527,7 @@ async function handleDisputeCreated(
 
   // Find the original transaction to get the userId
   // Purchases are stored in balanceTransactions with relatedId = paymentIntentId
-  const originalTxResult = await db
+  const originalTxResult = await dbWrite
     .select({
       userId: balanceTransactions.userId,
       amount: balanceTransactions.amount,
@@ -575,7 +575,8 @@ async function handleDisputeCreated(
     paymentIntentId,
     'dispute',
     amountUSD,
-    eventId
+    eventId,
+    dispute.id
   );
 
   if (result.success && result.alreadyProcessed) {
@@ -681,10 +682,9 @@ async function handleDisputeClosed(
     return { success: true }; // Don't retry - can't process without payment intent
   }
 
-  // Find the dispute deduction transaction to get the userId
-  // Dispute deductions are stored in balanceTransactions with type = 'stripe_dispute'
-  // We look for the original purchase to get the userId
-  const originalPurchaseResult = await db
+  // Read the original purchase from the primary so replica lag cannot
+  // cause Stripe to acknowledge an event without processing it.
+  const originalPurchaseResult = await dbWrite
     .select({
       userId: balanceTransactions.userId,
       amount: balanceTransactions.amount,
@@ -727,7 +727,8 @@ async function handleDisputeClosed(
     originalPurchase.userId,
     dispute.id,
     amountUSD,
-    eventId
+    eventId,
+    paymentIntentId
   );
 
   if (result.success && result.alreadyProcessed) {
