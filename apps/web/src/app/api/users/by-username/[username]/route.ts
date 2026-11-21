@@ -84,6 +84,7 @@ import {
   eq,
   followStatuses,
   follows,
+  isNull,
   like,
   not,
   positions,
@@ -164,7 +165,15 @@ export const GET = withErrorHandling(
       db
         .select({ count: count() })
         .from(comments)
-        .where(eq(comments.authorId, dbUser.id)),
+        .where(
+          and(
+            eq(comments.authorId, dbUser.id),
+            // The profile replies tab counts and delivers only
+            // non-deleted comments, so the header count must use the same
+            // membership or the two disagree on the same profile screen.
+            isNull(comments.deletedAt)
+          )
+        ),
       db
         .select({ count: count() })
         .from(reactions)
