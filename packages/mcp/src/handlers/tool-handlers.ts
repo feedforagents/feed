@@ -38,6 +38,7 @@ import {
 } from '@feed/a2a';
 import {
   acceptGroupInvite,
+  assertUsernameAvailable,
   BusinessLogicError,
   checkRateLimitAsync,
   declineGroupInvite,
@@ -75,14 +76,12 @@ import {
   like,
   lte,
   markets,
-  ne,
   not,
   notExists,
   perpMarketSnapshots,
   posts,
   postTags,
   questions,
-  sql,
   timeframedMarkets,
   userBlocks,
   users,
@@ -1870,19 +1869,7 @@ export async function executeUpdateProfile(
   if (args.displayName !== undefined) updateData.displayName = args.displayName;
   if (args.bio !== undefined) updateData.bio = args.bio;
   if (args.username !== undefined) {
-    // Usernames resolve case-insensitively, so reject one another user holds
-    // in any letter case, as the website profile route does.
-    const [holder] = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(
-        and(
-          sql`lower(${users.username}) = lower(${args.username})`,
-          ne(users.id, agent.userId)
-        )
-      )
-      .limit(1);
-    if (holder) throw new Error('Username is already taken');
+    await assertUsernameAvailable(args.username, agent.userId);
     updateData.username = args.username;
   }
   if (args.profileImageUrl !== undefined)

@@ -83,8 +83,8 @@
 
 import {
   AuthorizationError,
+  assertUsernameAvailable,
   authenticate,
-  BusinessLogicError,
   cachedDb,
   checkProfileUpdateRateLimit,
   isReferralCodeAvailableForUser,
@@ -96,7 +96,7 @@ import {
   updateProfileWithLeaderboardInvalidation,
   withErrorHandling,
 } from '@feed/api';
-import { and, db, eq, ne, sql, users } from '@feed/db';
+import { db, eq, users } from '@feed/db';
 import { logger, UpdateUserSchema, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { trackServerEvent } from '@/lib/posthog/server';
@@ -156,24 +156,7 @@ export const POST = withErrorHandling(
 
     // Check username uniqueness only if username is being updated (case-insensitive)
     if (username !== undefined) {
-      const normalizedUsername = username.trim();
-      const [existingUser] = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(
-          and(
-            sql`lower(${users.username}) = lower(${normalizedUsername})`,
-            ne(users.id, canonicalUserId)
-          )
-        )
-        .limit(1);
-
-      if (existingUser) {
-        throw new BusinessLogicError(
-          'Username is already taken',
-          'USERNAME_TAKEN'
-        );
-      }
+      await assertUsernameAvailable(username.trim(), canonicalUserId);
     }
 
     const [currentUser] = await db

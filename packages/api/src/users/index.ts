@@ -20,3 +20,4 @@ export {
   requireUserByIdentifier,
   type TargetLookupResult,
 } from './user-lookup';
+export { assertUsernameAvailable } from './username-availability';

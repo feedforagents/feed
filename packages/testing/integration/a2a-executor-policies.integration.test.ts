@@ -201,6 +201,31 @@ describe('FeedAgentExecutor policies', () => {
     expect(ok.user.displayName).toBe('Exec Tester');
   });
 
+  it('rejects a users.update_profile username another user holds in any letter case', async () => {
+    const holderId = await generateSnowflakeId();
+    const holderName = `Held_${holderId.slice(-10)}`;
+    await db.insert(users).values({
+      id: holderId,
+      username: holderName,
+      updatedAt: new Date(),
+    });
+    createdUsers.push(holderId);
+    const [before] = await db
+      .select({ username: users.username })
+      .from(users)
+      .where(eq(users.id, userId));
+
+    await expect(
+      run('users.update_profile', { username: holderName.toUpperCase() })
+    ).rejects.toThrow('Username is already taken');
+
+    const [after] = await db
+      .select({ username: users.username })
+      .from(users)
+      .where(eq(users.id, userId));
+    expect(after).toEqual(before);
+  });
+
   it('rejects users.follow in either block direction', async () => {
     await assertDisposableAgentFollowDatabase();
     const blockedByUserId = await createFollowPeer();

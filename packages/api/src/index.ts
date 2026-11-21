@@ -261,6 +261,7 @@ export * from './swagger';
 export type { ErrorLike, JsonValue, StringRecord } from './types';
 // User management utilities
 export {
+  assertUsernameAvailable,
   type CanonicalUser,
   type EnsureUserOptions,
   ensureMinimalUserByIdentifier,

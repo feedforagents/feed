@@ -20,6 +20,7 @@ import type {
 } from '@a2a-js/sdk/server';
 import {
   acceptGroupInvite,
+  assertUsernameAvailable,
   sharePost as canonicalSharePost,
   checkRateLimitAsync,
   declineGroupInvite,
@@ -1428,6 +1429,7 @@ export class FeedAgentExecutor implements AgentExecutor {
       updateData.bio = parsed.data.bio || null;
     }
     if (parsed.data.username !== undefined) {
+      await assertUsernameAvailable(parsed.data.username, userId);
       updateData.username = parsed.data.username;
     }
     if (parsed.data.profileImageUrl !== undefined) {
