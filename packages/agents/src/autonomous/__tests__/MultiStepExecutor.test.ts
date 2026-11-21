@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import type { IAgentRuntime } from '@elizaos/core';
 import { StaticDataRegistry } from '@feed/engine';
+import { APICallError } from 'ai';
 import * as agentLLM from '../../llm/agent-llm';
 import * as npcContextProvider from '../../plugins/feed/providers/npc-game-context';
 import { logger } from '../../shared/logger';
@@ -918,6 +919,120 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       expect(result.iterations).toBe(expected);
       expect(decision).toHaveBeenCalledTimes(expected);
       expect(execute).toHaveBeenCalledTimes(expected);
+    });
+  }
+
+  function providerError(statusCode: number, retryAfter?: string) {
+    return new APICallError({
+      message: `Provider returned HTTP ${statusCode}`,
+      url: 'https://provider.example/chat/completions',
+      requestBodyValues: {},
+      statusCode,
+      responseHeaders: retryAfter ? { 'retry-after': retryAfter } : undefined,
+    });
+  }
+
+  test('retries the same rate-limited decision without repeating a completed action', async () => {
+    const executor = new MultiStepExecutor(2);
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockRestore();
+    const { signal } = new AbortController();
+    const call = spyOn(agentLLM, 'callAgentLLM')
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          thought: 'Like the available post.',
+          action: Actions.LIKE,
+          parameters: { postId: 'post-1' },
+        })
+      )
+      .mockRejectedValueOnce(providerError(429, '0'))
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          thought: 'Finish the tick.',
+          action: Actions.FINISH,
+          parameters: {},
+        })
+      );
+
+    const result = await executor.execute(actor.id, runtime, true, signal);
+
+    expect(result.success).toBe(true);
+    expect(result.actionsExecuted.engagements).toBe(1);
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(call.mock.calls[2]?.[0]).toEqual(call.mock.calls[1]?.[0]);
+    expect(call.mock.calls[2]?.[0]).toMatchObject({ signal });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('shares the rate-limit allowance with a later decision correction', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockRestore();
+    const first = providerError(429, '0');
+    const later = providerError(429, '0');
+    const call = spyOn(agentLLM, 'callAgentLLM')
+      .mockRejectedValueOnce(first)
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          thought: 'Like an unavailable post.',
+          action: Actions.LIKE,
+          parameters: { postId: 'unavailable-999' },
+        })
+      )
+      .mockRejectedValue(later);
+
+    await expect(executor.execute(actor.id, runtime, true)).rejects.toBe(later);
+
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(call.mock.calls[2]?.[0].prompt).toContain(
+      'The target post is unavailable'
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test('cancels the backoff before a lease-aborted tick can retry', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockRestore();
+    const controller = new AbortController();
+    const call = spyOn(agentLLM, 'callAgentLLM').mockImplementationOnce(
+      async () => {
+        setTimeout(() => controller.abort(), 10);
+        throw providerError(429, '1');
+      }
+    );
+
+    await expect(
+      executor.execute(actor.id, runtime, true, controller.signal)
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  for (const [label, error, expectedCalls] of [
+    ['a persistent rate limit', providerError(429, '0'), 2],
+    ['a long Retry-After', providerError(429, '6'), 1],
+    ['other provider errors', providerError(503, '0'), 1],
+    [
+      'a budget denial',
+      new Error('Scheduled inference budget exhausted or suspended'),
+      1,
+    ],
+  ] as const) {
+    test(`keeps ${label} a failed decision`, async () => {
+      const executor = new MultiStepExecutor(1);
+      const { runtime, decision, execute } = prepare(executor);
+      decision.mockRestore();
+      const call = spyOn(agentLLM, 'callAgentLLM').mockRejectedValue(error);
+
+      await expect(executor.execute(actor.id, runtime, true)).rejects.toBe(
+        error
+      );
+
+      expect(call).toHaveBeenCalledTimes(expectedCalls);
+      expect(execute).not.toHaveBeenCalled();
     });
   }
 
