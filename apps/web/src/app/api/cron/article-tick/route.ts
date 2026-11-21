@@ -142,6 +142,8 @@ export const dynamic = 'force-dynamic';
 
 // Leave room before the internal scheduler's 30-second request deadline.
 const RATE_LIMIT_WAIT_MS = 25_000;
+// The queued Worker has a longer request deadline.
+const WORKER_RATE_LIMIT_WAIT_MS = 120_000;
 
 /**
  * Helper to persist an article using the shared persistence service.
@@ -327,8 +329,19 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       });
     }
 
+    // The internal scheduler also sends a cron timestamp on localnet.
+    const scheduledTime = Number(_req.headers.get('x-cloudflare-cron-time'));
+    const fromQueuedWorker =
+      _req.method === 'GET' &&
+      Number.isSafeInteger(scheduledTime) &&
+      scheduledTime > 0 &&
+      !_req.headers
+        .get('user-agent')
+        ?.startsWith('feed-internal-cron-scheduler/');
     // Generate during a short wait for capacity, then enforce the cap at publication.
-    const rateLimitWaitUntil = startTime + RATE_LIMIT_WAIT_MS;
+    const rateLimitWaitUntil =
+      startTime +
+      (fromQueuedWorker ? WORKER_RATE_LIMIT_WAIT_MS : RATE_LIMIT_WAIT_MS);
     const { allowed, currentCount, maxAllowed, remaining } =
       await articleRateLimiter.canGenerateArticle();
 
