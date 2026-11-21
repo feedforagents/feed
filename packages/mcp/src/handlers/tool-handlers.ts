@@ -329,6 +329,7 @@ async function checkMcpRateLimit(
     | 'transfer'
     | 'post'
     | 'share_post'
+    | 'send_message'
 ): Promise<void> {
   const configMap: Record<
     string,
@@ -341,6 +342,7 @@ async function checkMcpRateLimit(
     transfer: RATE_LIMIT_CONFIGS.DEFAULT, // Use default for transfers
     post: RATE_LIMIT_CONFIGS.CREATE_POST,
     share_post: RATE_LIMIT_CONFIGS.SHARE_POST,
+    send_message: RATE_LIMIT_CONFIGS.SEND_MESSAGE,
   };
   const config = configMap[operation];
   if (!config) return;
@@ -2252,6 +2254,10 @@ export async function executeSendMessage(
   agent: AuthenticatedAgent,
   args: SendMessageArgs
 ): Promise<SendMessageResult> {
+  // Same per-account budget as POST /api/chats/[id]/message, so MCP clients
+  // and the website share one message limit.
+  await checkMcpRateLimit(agent.userId, 'send_message');
+
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
     select: { id: true, isGroup: true },
