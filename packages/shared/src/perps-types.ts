@@ -164,6 +164,30 @@ export function calculateUnrealizedPnL(
 }
 
 /**
+ * Displayed unrealized PnL for an open position from its stored
+ * mark-to-market value: the stored price-only unrealizedPnL less accrued
+ * funding paid (plus funding received, when negative).
+ *
+ * Accrued funding is already-settled cash: closePosition settles realized
+ * PnL as mark PnL less fundingPaid (PRD §9.3), so a displayed PnL that
+ * renders the stored value as-is overstates what the holder will realize
+ * by exactly fundingPaid. The wallet P&L tab nets funding the same way
+ * in SQL, and the close dialog nets it from prices; this is the
+ * stored-value variant for displays that render the persisted
+ * unrealizedPnL instead of recomputing it (the feed Open Positions
+ * preview panel and its detail modal). pnlPercent is recomputed from the
+ * netted PnL so the two displayed numbers agree with each other.
+ */
+export function calculateNetStoredUnrealizedPnL(
+  unrealizedPnL: number,
+  size: number,
+  fundingPaid: number
+): { pnl: number; pnlPercent: number } {
+  const netPnl = unrealizedPnL - fundingPaid;
+  return { pnl: netPnl, pnlPercent: size === 0 ? 0 : (netPnl / size) * 100 };
+}
+
+/**
  * Calculate funding payment for a single 8-hour period
  * Funding is paid every 8 hours based on the funding rate
  *

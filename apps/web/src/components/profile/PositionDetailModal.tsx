@@ -6,6 +6,7 @@ import {
 } from '@feed/core/markets/prediction/client';
 import type { PerpPositionFromAPI, PredictionPosition } from '@feed/shared';
 import {
+  calculateNetStoredUnrealizedPnL,
   cn,
   FEED_POINTS_SYMBOL,
   formatDate,
@@ -171,6 +172,20 @@ export function PositionDetailModal({
   const fetchPerpMarketsFromStore = usePerpMarketsStore(
     (state) => state.fetchMarkets
   );
+
+  // Funding-netted unrealized PnL for a perp position: the stored value is
+  // price-only, and accrued funding settles at close (realizedPnL = pnl -
+  // fundingPaid, PRD §9.3), so the tile must show the netted number — the
+  // same number the close will realize — not the overstated raw value.
+  // The separate Funding Paid tile below stays as the breakdown.
+  const perpNetPnl =
+    type === 'perp' && data && 'ticker' in data
+      ? calculateNetStoredUnrealizedPnL(
+          (data as PerpPositionFromAPI).unrealizedPnL,
+          (data as PerpPositionFromAPI).size,
+          (data as PerpPositionFromAPI).fundingPaid ?? 0
+        )
+      : null;
   const [perpMarket, setPerpMarket] = useState<PerpMarket | null>(null);
   const [predictionMarket, setPredictionMarket] =
     useState<PredictionMarket | null>(null);
@@ -512,8 +527,7 @@ export function PositionDetailModal({
                   <div>
                     <h3 className="mb-2 flex items-center gap-2 font-semibold text-foreground text-lg">
                       {(data as PerpPositionFromAPI).ticker}
-                      {(data as PerpPositionFromAPI).unrealizedPnLPercent >=
-                      0 ? (
+                      {(perpNetPnl?.pnlPercent ?? 0) >= 0 ? (
                         <TrendingUp className="h-5 w-5 text-green-600" />
                       ) : (
                         <TrendingDown className="h-5 w-5 text-red-600" />
@@ -572,15 +586,12 @@ export function PositionDetailModal({
                       <div
                         className={cn(
                           'font-bold text-lg',
-                          (data as PerpPositionFromAPI).unrealizedPnL >= 0
+                          (perpNetPnl?.pnl ?? 0) >= 0
                             ? 'text-green-600'
                             : 'text-red-600'
                         )}
                       >
-                        {formatPoints(
-                          (data as PerpPositionFromAPI).unrealizedPnL
-                        )}{' '}
-                        pts
+                        {formatPoints(perpNetPnl?.pnl ?? 0)} pts
                       </div>
                     </div>
                     {(data as PerpPositionFromAPI).liquidationPrice && (
