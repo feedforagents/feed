@@ -432,9 +432,14 @@ export const POST = withErrorHandling(
     }
 
     // If parentCommentId provided, validate it exists and belongs to this post
+    let parentCommentAuthorId: string | undefined;
     if (parentCommentId) {
       const [parentComment] = await db
-        .select({ id: comments.id, postId: comments.postId })
+        .select({
+          id: comments.id,
+          postId: comments.postId,
+          authorId: comments.authorId,
+        })
         .from(comments)
         .where(
           and(eq(comments.id, parentCommentId), isNull(comments.deletedAt))
@@ -451,6 +456,8 @@ export const POST = withErrorHandling(
           'PARENT_COMMENT_MISMATCH'
         );
       }
+
+      parentCommentAuthorId = parentComment.authorId;
     }
 
     // Get the post to find the authorId for notifications
@@ -468,6 +475,23 @@ export const POST = withErrorHandling(
       ]);
 
       if (isBlocked || hasBlockedMe) {
+        throw new BusinessLogicError(
+          'Cannot comment on this post',
+          'BLOCKED_USER'
+        );
+      }
+    }
+
+    // Replies use the same rule against the parent comment author: a reply
+    // under a comment whose author blocked the replier (or vice versa) is
+    // refused, just like a comment on a blocking post author's post.
+    if (parentCommentAuthorId) {
+      const [parentBlocked, parentBlockedMe] = await Promise.all([
+        hasBlocked(parentCommentAuthorId, canonicalUserId),
+        hasBlocked(canonicalUserId, parentCommentAuthorId),
+      ]);
+
+      if (parentBlocked || parentBlockedMe) {
         throw new BusinessLogicError(
           'Cannot comment on this post',
           'BLOCKED_USER'
