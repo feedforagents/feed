@@ -99,6 +99,11 @@ const MCP_FEE_CASES = [
   'MCP perp fee recovery against real Postgres > open_position: a fee that commits but fails every retry is recorded once, also after the drain',
   'MCP perp fee recovery against real Postgres > close_position: a post-commit fee error recovers to one close fee',
 ];
+const TRADE_HISTORY_FILE =
+  'packages/testing/integration/trades-history-missing-types.integration.test.ts';
+const TRADE_HISTORY_CASES = [
+  'serves the persisted prediction and perp trade history over HTTP',
+];
 type Suite =
   | 'sub-market'
   | 'prediction-remainder'
@@ -108,7 +113,8 @@ type Suite =
   | 'markets-review'
   | 'balance-display'
   | 'closed-prediction-positions'
-  | 'mcp-perp-fee';
+  | 'mcp-perp-fee'
+  | 'trade-history';
 type Lease = {
   database: string;
   oid: string;
@@ -442,6 +448,14 @@ export async function startNpcTradeCountServer() {
   );
 }
 
+export async function startTradeHistoryServer() {
+  await verifySubMarketChildLease();
+  return startOwnedPredictionServer(
+    process.env.FEED_SUB_MARKET_LEASE_FILE!,
+    false
+  );
+}
+
 async function startOwnedPredictionServer(
   leaseFile: string,
   testAuth: boolean
@@ -641,7 +655,13 @@ export async function runIsolatedMcpPerpFeeCases() {
   await runIsolatedCases('mcp-perp-fee');
 }
 
+export async function runIsolatedTradeHistoryCase() {
+  await runIsolatedCases('trade-history');
+}
+
 async function runIsolatedCases(suite: Suite) {
+  // The trade-history fixture uses the original child marker and lease file.
+  const tradeHistory = suite === 'trade-history';
   const closedPositions = suite === 'closed-prediction-positions';
   const balance = suite === 'balance-display';
   const review = suite === 'markets-review';
@@ -666,7 +686,9 @@ async function runIsolatedCases(suite: Suite) {
                 ? PREDICTION_FILE
                 : mcpFee
                   ? MCP_FEE_FILE
-                  : FILE;
+                  : tradeHistory
+                    ? TRADE_HISTORY_FILE
+                    : FILE;
   const cases = closedPositions
     ? CLOSED_PREDICTION_POSITIONS_CASES
     : balance
@@ -683,7 +705,9 @@ async function runIsolatedCases(suite: Suite) {
                 ? PREDICTION_CASES
                 : mcpFee
                   ? MCP_FEE_CASES
-                  : CASES;
+                  : tradeHistory
+                    ? TRADE_HISTORY_CASES
+                    : CASES;
   const marker = closedPositions
     ? 'FEED_CLOSED_PREDICTION_POSITIONS_CHILD'
     : balance
@@ -766,7 +790,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'feed-prediction-remainder-'
                     : mcpFee
                       ? 'feed-mcp-perp-fee-'
-                      : 'feed-sub-market-'
+                      : tradeHistory
+                        ? 'feed-trade-history-'
+                        : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -838,7 +864,9 @@ async function runIsolatedCases(suite: Suite) {
       ...(review ? { FEED_DISABLE_REDIS: '1' } : {}),
       ...(balance ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(closedPositions ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
-      ...(mcpFee ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
+      ...(mcpFee || tradeHistory
+        ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' }
+        : {}),
     };
     phase = 'migrate';
     await run(
@@ -855,7 +883,8 @@ async function runIsolatedCases(suite: Suite) {
       review ||
       balance ||
       closedPositions ||
-      mcpFee
+      mcpFee ||
+      tradeHistory
     ) {
       phase = 'manual-idempotency-index';
       const actual = await identity(admin);
@@ -924,7 +953,9 @@ async function runIsolatedCases(suite: Suite) {
                   ? 'ten-child-cases'
                   : mcpFee
                     ? 'three-mcp-perp-fee-child-cases'
-                    : 'four-child-cases';
+                    : tradeHistory
+                      ? 'trade-history-http-child-case'
+                      : 'four-child-cases';
     const output = await run(
       ['test', file, '--timeout', '30000'],
       env,
@@ -945,7 +976,8 @@ async function runIsolatedCases(suite: Suite) {
             review ||
             balance ||
             closedPositions ||
-            mcpFee
+            mcpFee ||
+            tradeHistory
               ? ''
               : 'sub-market transactional creation > ') +
             escape(name) +
@@ -981,7 +1013,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'All ten real HTTP cases must pass without skips'
                     : mcpFee
                       ? 'All three real MCP perp fee cases must pass without skips'
-                      : 'All four original cases must pass without skips'
+                      : tradeHistory
+                        ? 'Trade history must pass over real HTTP without skips'
+                        : 'All four original cases must pass without skips'
     );
     childProof = {
       pass: cases.length,
@@ -1093,7 +1127,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
                     : mcpFee
                       ? 'PASS_ISOLATED_THREE_MCP_PERP_FEE_CASES'
-                      : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
+                      : tradeHistory
+                        ? 'PASS_ISOLATED_TRADE_HISTORY_HTTP_CASE'
+                        : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
       lease,
       childProof,
       databaseDropped: true,
@@ -1117,7 +1153,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
                     : mcpFee
                       ? 'ISOLATED_MCP_PERP_FEE_RESULT '
-                      : 'ISOLATED_SUB_MARKET_RESULT ') +
+                      : tradeHistory
+                        ? 'ISOLATED_TRADE_HISTORY_RESULT '
+                        : 'ISOLATED_SUB_MARKET_RESULT ') +
         JSON.stringify({
           pass: cases.length,
           skip: 0,
@@ -1146,7 +1184,9 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
                       : mcpFee
                         ? 'HOLD_ISOLATED_MCP_PERP_FEE_CASES'
-                        : 'HOLD_ISOLATED_SUB_MARKET_CASES',
+                        : tradeHistory
+                          ? 'HOLD_ISOLATED_TRADE_HISTORY_HTTP_CASE'
+                          : 'HOLD_ISOLATED_SUB_MARKET_CASES',
         phase,
         lease,
         childProof,
@@ -1175,7 +1215,9 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
                       : mcpFee
                         ? 'ISOLATED_MCP_PERP_FEE_HOLD '
-                        : 'ISOLATED_SUB_MARKET_HOLD ') +
+                        : tradeHistory
+                          ? 'ISOLATED_TRADE_HISTORY_HOLD '
+                          : 'ISOLATED_SUB_MARKET_HOLD ') +
           JSON.stringify({ phase, result: resultPath })
       );
     }
