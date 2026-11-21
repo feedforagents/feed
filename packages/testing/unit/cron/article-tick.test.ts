@@ -588,6 +588,38 @@ describe('Article Tick Cron', () => {
       expect(articleTopics).toHaveLength(1);
     });
 
+    test.each([
+      ['queued Worker', 30_000, undefined, 1],
+      ['internal scheduler', 30_000, 'feed-internal-cron-scheduler/1.0', 0],
+      ['queued Worker beyond its wait window', 125_000, undefined, 0],
+    ] as const)('%s respects its wait window', async (_, delay, userAgent, count) => {
+      cronMockState.articleGame = {
+        id: 'game-123',
+        isContinuous: true,
+        isRunning: true,
+        currentDay: 1,
+      };
+      cronMockState.articleCount = 2;
+      nextArticleSlot = Date.now() + delay;
+
+      const headers = new Headers({
+        'X-Cloudflare-Cron-Time': String(Date.now()),
+      });
+      if (userAgent) {
+        headers.set('User-Agent', userAgent);
+      }
+      const req = new NextRequest('http://localhost/api/cron/article-tick', {
+        headers,
+      });
+      const res = await GET(req);
+
+      expect(await res.json()).toMatchObject({
+        skipped: count === 0,
+        articlesCreated: count,
+      });
+      expect(articleTopics).toHaveLength(count);
+    });
+
     test('should proceed when under rate limit', async () => {
       cronMockState.articleGame = {
         id: 'game-123',
