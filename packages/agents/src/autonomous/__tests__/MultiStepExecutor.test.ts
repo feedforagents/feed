@@ -932,7 +932,9 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     });
   }
 
-  test('retries the same rate-limited decision without repeating a completed action', async () => {
+  test.each([
+    429, 502,
+  ])('retries the same decision after HTTP %i without repeating a completed action', async (statusCode) => {
     const executor = new MultiStepExecutor(2);
     const { runtime, decision, execute } = prepare(executor);
     decision.mockRestore();
@@ -945,7 +947,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
           parameters: { postId: 'post-1' },
         })
       )
-      .mockRejectedValueOnce(providerError(429, '0'))
+      .mockRejectedValueOnce(providerError(statusCode, '0'))
       .mockResolvedValueOnce(
         JSON.stringify({
           thought: 'Finish the tick.',
@@ -965,12 +967,12 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
   });
 
-  test('shares the rate-limit allowance with a later decision correction', async () => {
+  test('shares the retry allowance between HTTP 429 and 502 across a decision correction', async () => {
     const executor = new MultiStepExecutor(1);
     const { runtime, decision, execute } = prepare(executor);
     decision.mockRestore();
     const first = providerError(429, '0');
-    const later = providerError(429, '0');
+    const later = providerError(502, '0');
     const call = spyOn(agentLLM, 'callAgentLLM')
       .mockRejectedValueOnce(first)
       .mockResolvedValueOnce(
