@@ -135,6 +135,8 @@ export interface MultiStepExecutorResult {
 
 const PREDICTION_QUOTE_UNAVAILABLE =
   'Prediction buy requires a current quote. Buy only an ID under Available Prediction Markets with a positive safe buy limit, or choose another action.';
+const GROUP_MESSAGE_CHAT_UNAVAILABLE =
+  'GROUP_MESSAGE requires a chatId from Your Group Chats. Copy the chatId field exactly as a quoted JSON string, or choose another action if no chat is listed.';
 
 function isDiversityRejectedPost(action: ActionTraceResult): boolean {
   return (
@@ -480,7 +482,9 @@ ${describeNpcMarketClue(offeredMarketClue)}`
               `[MultiStep] Rejected invalid decision after normalization`,
               {
                 action: normalizedAction || '(empty)',
-                parameters: normalizedParameters,
+                ...(normalizedAction === Actions.GROUP_MESSAGE
+                  ? {}
+                  : { parameters: normalizedParameters }),
                 validationError,
               },
               'MultiStepExecutor'
@@ -489,21 +493,36 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             continue;
           }
 
-          if (validationError === PREDICTION_QUOTE_UNAVAILABLE) {
+          const unavailableGroupChat =
+            validationError === GROUP_MESSAGE_CHAT_UNAVAILABLE;
+          if (
+            unavailableGroupChat ||
+            validationError === PREDICTION_QUOTE_UNAVAILABLE
+          ) {
             trace.push({
-              actionType: Actions.TRADE,
+              actionType: normalizedAction,
               success: false,
               error: validationError,
-              result: { rejection: 'prediction-quote-unavailable' },
-              parameters: normalizedParameters,
+              result: {
+                rejection: unavailableGroupChat
+                  ? 'group-message-chat-unavailable'
+                  : 'prediction-quote-unavailable',
+              },
+              ...(unavailableGroupChat
+                ? {}
+                : { parameters: normalizedParameters }),
               timestamp: Date.now(),
             });
             logger.warn(
-              '[MultiStep] Prediction buy skipped without a current quote',
+              unavailableGroupChat
+                ? '[MultiStep] Group message skipped without a current chat'
+                : '[MultiStep] Prediction buy skipped without a current quote',
               {
                 agentUserId,
                 iteration,
-                marketId: normalizedParameters.marketId,
+                ...(unavailableGroupChat
+                  ? {}
+                  : { marketId: normalizedParameters.marketId }),
               },
               'MultiStepExecutor'
             );
@@ -1314,10 +1333,11 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         return undefined;
 
       case Actions.GROUP_MESSAGE:
-        if (!chatId || !content) {
-          return (context.groupChats?.length ?? 0) > 0
-            ? 'Your GROUP_MESSAGE was invalid because it requires a valid chatId from Your Group Chats and message content. Choose a valid group chat or a different action.'
-            : 'Your GROUP_MESSAGE was invalid because you have no available group chats right now. Choose a different valid action.';
+        if (!content) {
+          return 'Your GROUP_MESSAGE was invalid because it requires message content. Add content or choose another action.';
+        }
+        if (!context.groupChats?.some((chat) => chat.id === chatId)) {
+          return GROUP_MESSAGE_CHAT_UNAVAILABLE;
         }
         return undefined;
 
@@ -2772,7 +2792,9 @@ ${describeNpcMarketClue(offeredMarketClue)}`
           action.success ||
           isDiversityRejectedPost(action) ||
           (action.actionType === Actions.TRADE &&
-            action.result?.rejection === 'prediction-quote-unavailable')
+            action.result?.rejection === 'prediction-quote-unavailable') ||
+          (action.actionType === Actions.GROUP_MESSAGE &&
+            action.result?.rejection === 'group-message-chat-unavailable')
       ),
       actionsExecuted: counts,
       iterations: trace.length,
