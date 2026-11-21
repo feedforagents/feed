@@ -479,18 +479,60 @@ export const POST = withErrorHandling(
     const now = new Date();
     const commentId = await generateSnowflakeId();
 
-    const [newComment] = await db
-      .insert(comments)
-      .values({
-        id: commentId,
-        content: content.trim(),
-        postId,
-        authorId: canonicalUserId,
-        parentCommentId: parentCommentId || null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
+    // Re-validate the parent under a row lock and insert in the same
+    // transaction: the comment-delete route locks every row its
+    // subtree walk visits, so a reply either commits before the walk
+    // reaches its parent (and is collected for deletion) or blocks
+    // until the deletion commits (and then finds its parent gone).
+    // The plain check above stays as the fast 404 for an obviously
+    // bad parent; only this locked re-check is authoritative, because
+    // a reply validated without a lock could slip in between the
+    // check and the insert.
+    const [newComment] = await db.transaction(async (tx) => {
+      if (parentCommentId) {
+        const [lockedParent] = await tx
+          .select({ id: comments.id, postId: comments.postId })
+          .from(comments)
+          .where(
+            and(eq(comments.id, parentCommentId), isNull(comments.deletedAt))
+          )
+          .limit(1)
+          .for('update');
+
+        if (!lockedParent) {
+          throw new NotFoundError('Parent comment', parentCommentId);
+        }
+
+        if (lockedParent.postId !== postId) {
+          throw new BusinessLogicError(
+            'Parent comment does not belong to this post',
+            'PARENT_COMMENT_MISMATCH'
+          );
+        }
+      }
+
+      const [created] = await tx
+        .insert(comments)
+        .values({
+          id: commentId,
+          content: content.trim(),
+          postId,
+          authorId: canonicalUserId,
+          parentCommentId: parentCommentId || null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      if (!created) {
+        throw new BusinessLogicError(
+          'Failed to create comment',
+          'COMMENT_CREATION_FAILED'
+        );
+      }
+
+      return [created];
+    });
 
     if (!newComment) {
       throw new BusinessLogicError(
