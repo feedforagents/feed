@@ -29,7 +29,6 @@
  * require passing referrer context through the MCP API key or session.
  */
 
-import type { JsonRpcParams, JsonRpcRequest } from '@feed/a2a';
 import {
   handleAppealBanWithEscrow,
   handleCreateEscrowPayment,
@@ -459,6 +458,8 @@ import type {
   GetUserStatsResult,
   GetUserWalletArgs,
   GetUserWalletResult,
+  JsonRpcParams,
+  JsonRpcRequest,
   LeaveChatArgs,
   LeaveChatResult,
   LikeCommentArgs,
