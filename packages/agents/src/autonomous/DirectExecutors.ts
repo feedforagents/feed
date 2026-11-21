@@ -33,9 +33,12 @@ import {
   dmAcceptances,
   eq,
   follows,
+  getBlockedByUserIds,
+  getBlockedUserIds,
   groupMembers,
   groups,
   gte,
+  hasBlocked,
   inArray,
   isNull,
   messages,
@@ -2217,6 +2220,20 @@ export async function executeDirectCreateGroup(
     }
   }
 
+  // A member with a block relationship to the agent must not be direct-added
+  // into the same room: a block in either direction bars the member, the
+  // same rule the web group creation route (#1938) and MCP create_group
+  // (#1941) enforce by silently skipping blocked members. Mute is not
+  // filtered: muting hides content, it does not promise no contact.
+  const [blockedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agentUserId),
+    getBlockedByUserIds(agentUserId),
+  ]);
+  const blockedMemberIds = new Set([...blockedIds, ...blockedByIds]);
+  const addableMemberIds = validMemberIds.filter(
+    (id) => !blockedMemberIds.has(id)
+  );
+
   const groupId = await generateSnowflakeId();
   const chatId = await generateSnowflakeId();
   const now = new Date();
@@ -2264,7 +2281,7 @@ export async function executeDirectCreateGroup(
     });
 
     // Add initial members
-    for (const memberId of validMemberIds) {
+    for (const memberId of addableMemberIds) {
       await tx.insert(groupMembers).values({
         id: await generateSnowflakeId(),
         groupId,
@@ -2286,7 +2303,7 @@ export async function executeDirectCreateGroup(
   });
 
   logger.info(
-    `[DirectExecutor] Created group "${cleanName}" with ${validMemberIds.length} initial members`,
+    `[DirectExecutor] Created group "${cleanName}" with ${addableMemberIds.length} initial members`,
     { agentUserId, groupId, chatId },
     'DirectExecutors'
   );
@@ -2353,6 +2370,19 @@ export async function executeDirectInviteToGroup(
 
   if (!targetUser) {
     return { success: false, error: `User not found: ${cleanTargetId}` };
+  }
+
+  // Same rules as the web group invite route (#1938) and the direct follow
+  // / DM executors (#1900 / #1897): neither side of a block relationship
+  // can add the other to a group. This also covers reactivating a member
+  // who was kicked and then blocked — the invite is direct, with no
+  // acceptance flow, so the check has to live here.
+  const [targetBlockedAgent, agentBlockedTarget] = await Promise.all([
+    hasBlocked(cleanTargetId, agentUserId),
+    hasBlocked(agentUserId, cleanTargetId),
+  ]);
+  if (targetBlockedAgent || agentBlockedTarget) {
+    return { success: false, error: 'Cannot invite this user' };
   }
 
   // Check if already a member (use upsert to handle race conditions)
