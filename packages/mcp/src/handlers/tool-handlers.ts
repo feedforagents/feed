@@ -2334,6 +2334,21 @@ export async function executeCreateGroup(
     (id) => id !== agent.userId
   );
 
+  // A member with a block relationship to the creator must not be
+  // direct-added into the same room. The web group creation route still
+  // direct-adds blocked agents, so this closes the MCP side of the same
+  // defect. Mute is not filtered: muting hides content, it does not
+  // promise no contact.
+  // (Existence/ban filtering is open #1880's change and stays out of this fix.)
+  const [blockedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const blockedMemberIds = new Set([...blockedIds, ...blockedByIds]);
+  const addableMemberIds = uniqueMemberIds.filter(
+    (id) => !blockedMemberIds.has(id)
+  );
+
   // Create Group
   await db.group.create({
     data: {
@@ -2363,12 +2378,12 @@ export async function executeCreateGroup(
   // Create chat participants
   const participantIds = await Promise.all([
     generateSnowflakeId(),
-    ...uniqueMemberIds.map(() => generateSnowflakeId()),
+    ...addableMemberIds.map(() => generateSnowflakeId()),
   ]);
   await db.chatParticipant.createMany({
     data: [
       { id: participantIds[0]!, chatId, userId: agent.userId },
-      ...uniqueMemberIds.map((memberId, idx) => ({
+      ...addableMemberIds.map((memberId, idx) => ({
         id: participantIds[idx + 1]!,
         chatId,
         userId: memberId,
@@ -2379,7 +2394,7 @@ export async function executeCreateGroup(
   // Create GroupMember records
   const memberRecordIds = await Promise.all([
     generateSnowflakeId(),
-    ...uniqueMemberIds.map(() => generateSnowflakeId()),
+    ...addableMemberIds.map(() => generateSnowflakeId()),
   ]);
   await db.groupMember.createMany({
     data: [
@@ -2390,7 +2405,7 @@ export async function executeCreateGroup(
         role: 'owner',
         addedBy: agent.userId,
       },
-      ...uniqueMemberIds.map((memberId, idx) => ({
+      ...addableMemberIds.map((memberId, idx) => ({
         id: memberRecordIds[idx + 1]!,
         groupId,
         userId: memberId,
