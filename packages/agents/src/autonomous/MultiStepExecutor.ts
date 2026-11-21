@@ -8,6 +8,7 @@
  * This eliminates double LLM calls and makes execution faster.
  */
 
+import { setTimeout as waitForRetry } from 'node:timers/promises';
 import type { IAgentRuntime } from '@elizaos/core';
 import {
   actorState,
@@ -29,7 +30,8 @@ import {
   StaticDataRegistry,
 } from '@feed/engine';
 import { getSurplusConfig, type JsonValue } from '@feed/shared';
-import { callAgentLLM } from '../llm/agent-llm';
+import { APICallError } from 'ai';
+import { type AgentLLMParams, callAgentLLM } from '../llm/agent-llm';
 import { resolveGroqModel } from '../llm/direct-groq';
 import { getNpcGameContext } from '../plugins/feed/providers/npc-game-context';
 import { ensureTrajectoryStep } from '../plugins/plugin-trajectory-logger/src/action-interceptor';
@@ -94,6 +96,20 @@ import { requireContextNumber } from './utils/context-validation';
 // =============================================================================
 // Helpers
 // =============================================================================
+
+const DEFAULT_RATE_LIMIT_WAIT_MS = 2_000;
+const MAX_RATE_LIMIT_WAIT_MS = 5_000;
+
+function getRateLimitWaitMs(retryAfter?: string): number {
+  const hint = retryAfter?.trim();
+  if (!hint) return DEFAULT_RATE_LIMIT_WAIT_MS;
+  if (/^\d+(?:\.\d+)?$/.test(hint)) return Math.ceil(Number(hint) * 1_000);
+
+  const retryAt = Date.parse(hint);
+  return Number.isNaN(retryAt)
+    ? DEFAULT_RATE_LIMIT_WAIT_MS
+    : Math.max(0, retryAt - Date.now());
+}
 
 /**
  * Build event-market signal connections from world events.
@@ -249,6 +265,7 @@ export class MultiStepExecutor {
     }
     const startTime = Date.now();
     const trace: ActionTraceResult[] = [];
+    const rateLimitRetry = { used: false };
 
     logger.info(
       `[MultiStep] Starting multi-step execution for agent ${agentUserId}`,
@@ -479,6 +496,8 @@ ${describeNpcMarketClue(offeredMarketClue)}`
           systemPrompt,
           {
             feedback: validationFeedback,
+            rateLimitRetry,
+            signal,
           }
         );
 
@@ -1069,16 +1088,21 @@ ${describeNpcMarketClue(offeredMarketClue)}`
   }
 
   /**
-   * Get LLM decision with retry logic
+   * Get an LLM decision, with bounded retries for invalid JSON and rate limits.
    */
   private async getDecision(
     prompt: string,
     runtime: IAgentRuntime,
-    _iteration: number,
+    iteration: number,
     systemPrompt?: string,
-    options?: { feedback?: string }
+    options?: {
+      feedback?: string;
+      rateLimitRetry?: { used: boolean };
+      signal?: AbortSignal;
+    }
   ): Promise<{ decision: MultiStepDecision; rawResponse: string } | null> {
     const maxRetries = 3;
+    const { feedback, rateLimitRetry, signal } = options ?? {};
 
     const system = systemPrompt
       ? `${systemPrompt}\n\nIMPORTANT: Output valid JSON only. No markdown, no explanations, and no <think> tags. The first character of your reply must be "{" and the last character must be "}".`
@@ -1086,15 +1110,16 @@ ${describeNpcMarketClue(offeredMarketClue)}`
     let retryFeedback = '';
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      signal?.throwIfAborted();
       const promptSegments = [prompt];
-      if (options?.feedback) {
-        promptSegments.push(options.feedback);
+      if (feedback) {
+        promptSegments.push(feedback);
       }
       if (retryFeedback) {
         promptSegments.push(retryFeedback);
       }
       const promptWithConstraints = promptSegments.join('\n\n');
-      const response = await callAgentLLM({
+      const request: AgentLLMParams = {
         prompt: promptWithConstraints,
         system,
         runtime,
@@ -1108,6 +1133,32 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         maxTokens: 1000,
         actionType: 'multi_step_decision',
         purpose: 'action',
+        signal,
+      };
+      const response = await callAgentLLM(request).catch(async (error) => {
+        if (
+          !rateLimitRetry ||
+          rateLimitRetry.used ||
+          !APICallError.isInstance(error) ||
+          error.statusCode !== 429
+        ) {
+          throw error;
+        }
+        const delayMs = getRateLimitWaitMs(
+          error.responseHeaders?.['retry-after']
+        );
+        if (delayMs > MAX_RATE_LIMIT_WAIT_MS) throw error;
+
+        signal?.throwIfAborted();
+        rateLimitRetry.used = true;
+        logger.warn(
+          '[MultiStep] Retrying rate-limited NPC decision',
+          { agentUserId: runtime.agentId, iteration, delayMs },
+          'MultiStepExecutor'
+        );
+        await waitForRetry(delayMs, undefined, { signal });
+        signal?.throwIfAborted();
+        return callAgentLLM(request);
       });
 
       const jsonText = extractFirstJsonObject(response);
