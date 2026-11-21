@@ -1416,21 +1416,40 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  for (const action of [Actions.FOLLOW, Actions.UNFOLLOW]) {
-    test(`skips repeated ${action} of an NPC author without dispatch`, async () => {
+  const npcFollowTarget = StaticDataRegistry.getActor('jeff-baizos')!;
+  const organizationFollowTarget =
+    StaticDataRegistry.getOrganization('the-daily-wire')!;
+  const npcFollowFeedback =
+    'NPC actors are ineligible FOLLOW and UNFOLLOW targets';
+  const organizationUnfollowFeedback =
+    'Organizations are ineligible UNFOLLOW targets';
+
+  for (const [action, target, authorKind, feedback] of [
+    [Actions.FOLLOW, npcFollowTarget, 'NPC actor', npcFollowFeedback],
+    [Actions.UNFOLLOW, npcFollowTarget, 'NPC actor', npcFollowFeedback],
+    [
+      Actions.UNFOLLOW,
+      organizationFollowTarget,
+      'organization',
+      organizationUnfollowFeedback,
+    ],
+  ] as const) {
+    test(`skips repeated ${action} of ${target.id} without dispatch`, async () => {
       const executor = new MultiStepExecutor(1);
       const { context, runtime, decision, execute } = prepare(executor);
-      const npc = StaticDataRegistry.getActor('jeff-baizos')!;
       context.recentPosts.push({
         ...context.recentPosts[0]!,
-        id: 'npc-post',
-        authorId: npc.id,
-        authorName: npc.name,
+        id: 'ineligible-author-post',
+        authorId: target.id,
+        authorName: target.name,
       });
       const rejectedAction = {
         actionType: action,
         success: false,
-        summary: 'NPC actors are not supported here',
+        summary:
+          authorKind === 'organization'
+            ? `User not found: ${target.id}`
+            : 'NPC actors are not supported here',
         timestamp: Date.now(),
       };
       execute.mockResolvedValue(rejectedAction);
@@ -1438,7 +1457,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
         decision: {
           thought: 'Change who I follow.',
           action,
-          parameters: { userId: npc.id },
+          parameters: { userId: target.id },
           isFinish: false,
         },
         rawResponse: '{}',
@@ -1447,12 +1466,10 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       const result = await executor.execute(actor.id, runtime, true);
 
       expect(decision.mock.calls[0]?.[0]).toContain(
-        `(userId: ${npc.id}, NPC actor)`
+        `(userId: ${target.id}, ${authorKind})`
       );
       expect(decision).toHaveBeenCalledTimes(2);
-      expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
-        'NPC actors are ineligible FOLLOW and UNFOLLOW targets'
-      );
+      expect(decision.mock.calls[1]?.[4]?.feedback).toContain(feedback);
       expect(execute).not.toHaveBeenCalled();
       expect(result.success).toBe(true);
       expect(result.actionsExecuted.engagements).toBe(0);
@@ -1465,17 +1482,17 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     });
   }
 
-  for (const [target, feedback] of [
+  for (const [action, target, feedback] of [
+    [Actions.FOLLOW, npcFollowTarget, npcFollowFeedback],
+    [Actions.UNFOLLOW, npcFollowTarget, npcFollowFeedback],
     [
-      StaticDataRegistry.getActor('jeff-baizos')!,
-      'NPC actors are ineligible FOLLOW and UNFOLLOW targets',
-    ],
-    [
-      StaticDataRegistry.getOrganization('the-daily-wire')!,
+      Actions.FOLLOW,
+      organizationFollowTarget,
       'Organizations are ineligible FOLLOW targets',
     ],
+    [Actions.UNFOLLOW, organizationFollowTarget, organizationUnfollowFeedback],
   ] as const) {
-    test(`corrects a FOLLOW of ${target.id} before dispatching to an account`, async () => {
+    test(`corrects ${action} of ${target.id} before dispatching to an account`, async () => {
       const executor = new MultiStepExecutor(1);
       const { context, runtime, decision, execute } = prepare(executor);
       const accountPost = context.recentPosts[0]!;
@@ -1485,17 +1502,17 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
         authorId: target.id,
         authorName: target.name,
       });
-      const follow = {
-        thought: 'Follow an author.',
-        action: Actions.FOLLOW,
+      const intent = {
+        thought: 'Change who I follow.',
+        action,
         parameters: { userId: target.id },
         isFinish: false,
       };
       decision
-        .mockResolvedValueOnce({ decision: follow, rawResponse: '{}' })
+        .mockResolvedValueOnce({ decision: intent, rawResponse: '{}' })
         .mockResolvedValueOnce({
           decision: {
-            ...follow,
+            ...intent,
             parameters: { userId: accountPost.authorId },
           },
           rawResponse: '{}',
@@ -1507,6 +1524,7 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       expect(decision).toHaveBeenCalledTimes(2);
       expect(decision.mock.calls[1]?.[4]?.feedback).toContain(feedback);
       expect(execute).toHaveBeenCalledTimes(1);
+      expect(execute.mock.calls[0]?.[1]).toBe(action);
       expect(execute.mock.calls[0]?.[2]).toEqual({
         userId: accountPost.authorId,
       });
