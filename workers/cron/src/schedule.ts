@@ -18,6 +18,7 @@ export const jobs = [
 
 // Roll these paid jobs out only on the Phase 0 validation stack until D-25.
 export const localnetJobs = [
+  { path: '/api/cron/markets-recovery', cron: '* * * * *' },
   { path: '/api/cron/npc-tick?mode=groups', cron: '*/2 * * * *' },
   { path: '/api/cron/world-facts?mode=headlines', cron: '*/5 * * * *' },
 ] as const;

@@ -29,6 +29,7 @@ const scheduledInferenceRoutes = new Set([
   '/api/cron/game-tick',
   '/api/cron/npc-tick',
   '/api/cron/markets-tick',
+  '/api/cron/markets-recovery',
   '/api/cron/organization-tick',
   '/api/cron/article-tick',
   '/api/cron/world-facts',

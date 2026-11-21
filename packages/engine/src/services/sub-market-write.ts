@@ -7,9 +7,11 @@ import {
   and,
   db,
   eq,
+  gt,
   isNotNull,
   isNull,
   type MarketCategory,
+  ownsPredictionRecoveryLease,
   questions,
   sql,
   timeframedMarketRoles,
@@ -38,6 +40,7 @@ export function getMaxSubMarketDuration(
 
 interface SubMarketWrite {
   parentId: string;
+  leaseOwner?: string;
   category: MarketCategory;
   questionId: string;
   questionNumber: number;
@@ -67,12 +70,21 @@ export async function writeSubMarket(input: SubMarketWrite): Promise<boolean> {
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtext(${'markets-tick:sub-market-cap'}))`
     );
+    if (
+      input.leaseOwner &&
+      !(await ownsPredictionRecoveryLease(tx, input.leaseOwner))
+    ) {
+      return false;
+    }
+
+    const now = new Date();
     const [countResult] = await tx
       .select({ count: sql<number>`count(*)::int` })
       .from(timeframedMarkets)
       .where(
         and(
           eq(timeframedMarkets.isActive, true),
+          gt(timeframedMarkets.endTime, now),
           isNotNull(timeframedMarkets.parentMarketId)
         )
       );
@@ -95,7 +107,6 @@ export async function writeSubMarket(input: SubMarketWrite): Promise<boolean> {
       .for('update');
     if (!parent) return false;
 
-    const now = new Date();
     const maxDuration = getMaxSubMarketDuration(parent.endTime, now.getTime());
     if (maxDuration === null || input.durationMs > maxDuration) return false;
     const resolutionDate = new Date(now.getTime() + input.durationMs);

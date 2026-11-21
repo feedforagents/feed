@@ -20,6 +20,7 @@ export * from './narrative';
 export * from './organization-state';
 export * from './pools';
 export * from './posts';
+export * from './prediction-resolution-work';
 export * from './scambench';
 export * from './sessions';
 export * from './trading';

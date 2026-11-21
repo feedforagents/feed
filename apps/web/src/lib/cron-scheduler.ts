@@ -176,9 +176,9 @@ export async function triggerScheduledCrons(now = new Date()): Promise<{
     };
   }
 
-  async function trigger(cron: CronSchedule, timeoutMs: number) {
+  async function trigger(cron: CronSchedule, timeoutMs: number, report = true) {
     if (!shouldRunCron(cron.schedule, now)) {
-      skipped.push(cron.path);
+      if (report) skipped.push(cron.path);
       return;
     }
 
@@ -203,14 +203,14 @@ export async function triggerScheduledCrons(now = new Date()): Promise<{
       });
 
       if (response.ok) {
-        triggered.push(cron.path);
+        if (report) triggered.push(cron.path);
         logger.info(
           `✓ Cron triggered successfully: ${cron.path}`,
           { status: response.status },
           'CronScheduler'
         );
       } else {
-        failed.push(cron.path);
+        if (report) failed.push(cron.path);
         logger.warn(
           `✗ Cron failed: ${cron.path}`,
           { status: response.status, statusText: response.statusText },
@@ -218,7 +218,7 @@ export async function triggerScheduledCrons(now = new Date()): Promise<{
         );
       }
     } catch (error) {
-      failed.push(cron.path);
+      if (report) failed.push(cron.path);
       logger.error(
         `✗ Cron error: ${cron.path}`,
         { error: error instanceof Error ? error.message : String(error) },
@@ -227,6 +227,19 @@ export async function triggerScheduledCrons(now = new Date()): Promise<{
     }
   }
 
+  // The local game-tick route calls this scheduler after sending its response.
+  const recoveryRun = localnet
+    ? trigger(
+        {
+          path: '/api/cron/markets-recovery',
+          schedule: '* * * * *',
+          description: 'Market recovery',
+        },
+        840_000,
+        false
+      )
+    : undefined;
+
   // Slow auxiliary work starts independently of the legacy schedule.
   const localnetRuns = Promise.all(
     localnetCrons.map((cron) => trigger(cron, 110_000))
@@ -234,7 +247,7 @@ export async function triggerScheduledCrons(now = new Date()): Promise<{
   for (const cron of ADDITIONAL_CRONS) {
     await trigger(cron, 30_000);
   }
-  await localnetRuns;
+  await Promise.all([localnetRuns, recoveryRun]);
 
   logger.info(
     'Internal cron scheduler complete',

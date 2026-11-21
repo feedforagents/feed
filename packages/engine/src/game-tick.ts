@@ -16,6 +16,7 @@ import {
   count,
   db,
   getDbInstance as dbService,
+  dbWrite,
   desc,
   eq,
   games,
@@ -25,12 +26,14 @@ import {
   type JsonValue,
   markets as marketsSchema,
   organizationState,
+  ownsPredictionRecoveryLease,
   perpMarketSnapshots,
   perpPositions,
   pools,
   positions,
   posts,
   postTags,
+  predictionResolutionWork,
   questions as questionsSchema,
   sql,
   tags,
@@ -1517,27 +1520,46 @@ async function generateNewQuestions(
 }
 
 /**
- * Resolve question payouts
+ * Resolve question payouts. Market recovery publishes its prepared proof in
+ * the same transaction and returns true only when it settles the market.
  */
 export async function resolveQuestionPayouts(
-  questionNumber: number
-): Promise<void> {
-  const [question] = await db
+  questionNumber: number,
+  recovery?: {
+    resolutionDate: Date;
+    outcome: boolean;
+    description: string;
+    confidence: number;
+    proof: typeof posts.$inferInsert;
+    published?: boolean;
+    leaseOwner?: string;
+    marketId?: string;
+  }
+): Promise<boolean> {
+  const read = recovery ? dbWrite : db;
+  const [question] = await read
     .select()
     .from(questionsSchema)
     .where(eq(questionsSchema.questionNumber, questionNumber))
     .limit(1);
 
-  if (!question) return;
+  if (!question) return false;
 
-  // Try to find market by question id first, then by question text
-  let [market] = await db
+  // Recovery uses the market selected by the due-work query.
+  let [market] = await read
     .select()
     .from(marketsSchema)
-    .where(eq(marketsSchema.id, question.id))
+    .where(
+      eq(
+        marketsSchema.id,
+        recovery
+          ? (recovery.marketId ?? question.marketId ?? question.id)
+          : question.id
+      )
+    )
     .limit(1);
 
-  if (!market) {
+  if (!market && !recovery) {
     [market] = await db
       .select()
       .from(marketsSchema)
@@ -1545,7 +1567,7 @@ export async function resolveQuestionPayouts(
       .limit(1);
   }
 
-  if (!market) return;
+  if (!market) return false;
 
   if (market.resolved) {
     logger.info(
@@ -1553,10 +1575,10 @@ export async function resolveQuestionPayouts(
       { marketId: market.id, questionNumber },
       'GameTick'
     );
-    return;
+    return false;
   }
 
-  const winningSide = question.outcome;
+  const winningSide = recovery?.outcome ?? question.outcome;
   const resolutionTimestamp = new Date();
 
   const marketId = market.id;
@@ -1573,11 +1595,87 @@ export async function resolveQuestionPayouts(
       // this tick never rewrites the question of a market it did not settle
       // (#1954 fixed the admin side of the same race).
       const [current] = await tx
-        .select({ resolved: marketsSchema.resolved })
+        .select({
+          resolved: marketsSchema.resolved,
+          endDate: marketsSchema.endDate,
+          question: marketsSchema.question,
+        })
         .from(marketsSchema)
         .where(eq(marketsSchema.id, marketId))
         .limit(1);
       if (!current || current.resolved) return false;
+
+      let reviewAt = resolutionTimestamp;
+      let reviewedBy = 'system';
+      const proofUrl = recovery ? `/article/${recovery.proof.id}` : undefined;
+      if (recovery) {
+        if (
+          recovery.leaseOwner !== undefined &&
+          !(await ownsPredictionRecoveryLease(tx, recovery.leaseOwner))
+        ) {
+          return false;
+        }
+        const [eligible] = await tx
+          .select({
+            marketId: questionsSchema.marketId,
+            text: questionsSchema.text,
+            status: questionsSchema.status,
+            outcome: questionsSchema.outcome,
+            resolutionDate: questionsSchema.resolutionDate,
+            requiresManualReview: questionsSchema.requiresManualReview,
+            reviewStatus: questionsSchema.resolutionReviewStatus,
+            reviewedAt: questionsSchema.resolutionReviewedAt,
+            reviewedBy: questionsSchema.resolutionReviewedBy,
+            proofUrl: questionsSchema.resolutionProofUrl,
+          })
+          .from(questionsSchema)
+          .where(eq(questionsSchema.id, question.id))
+          .for('update');
+        if (
+          !eligible ||
+          (eligible.marketId !== null
+            ? eligible.marketId !== marketId
+            : marketId !== question.id && eligible.text !== current.question) ||
+          eligible.status !== 'active' ||
+          eligible.outcome !== recovery.outcome ||
+          eligible.resolutionDate.getTime() !==
+            recovery.resolutionDate.getTime() ||
+          eligible.resolutionDate > resolutionTimestamp ||
+          current.endDate > resolutionTimestamp ||
+          (eligible.requiresManualReview &&
+            (eligible.reviewStatus === null ||
+              eligible.reviewStatus === 'pending'))
+        ) {
+          return false;
+        }
+        if (eligible.reviewStatus === 'approved') {
+          reviewAt = eligible.reviewedAt ?? resolutionTimestamp;
+          reviewedBy = eligible.reviewedBy ?? 'system';
+        }
+        if (recovery.published) {
+          if (eligible.proofUrl !== proofUrl) return false;
+          const [published] = await tx
+            .select({ id: posts.id })
+            .from(posts)
+            .where(
+              and(
+                eq(posts.id, recovery.proof.id),
+                eq(posts.type, 'proof'),
+                isNull(posts.deletedAt)
+              )
+            )
+            .for('key share');
+          if (!published) return false;
+        } else {
+          await tx.insert(posts).values({
+            ...recovery.proof,
+            type: 'proof',
+            relatedQuestion: questionNumber,
+            timestamp: resolutionTimestamp,
+            createdAt: resolutionTimestamp,
+          });
+        }
+      }
 
       // Estimate positions settled for logging (coreService updates all positions for the market)
       // Use COUNT(*) instead of SELECT to avoid loading all position IDs into memory
@@ -1592,8 +1690,10 @@ export async function resolveQuestionPayouts(
         marketId,
         winningSide: winningSide ? 'yes' : 'no',
         resolvedAt: resolutionTimestamp,
-        resolutionDescription: question.resolutionDescription ?? undefined,
-        resolutionProofUrl: question.resolutionProofUrl ?? undefined,
+        resolutionDescription:
+          recovery?.description ?? question.resolutionDescription ?? undefined,
+        resolutionProofUrl:
+          proofUrl ?? question.resolutionProofUrl ?? undefined,
       });
 
       await tx
@@ -1601,8 +1701,15 @@ export async function resolveQuestionPayouts(
         .set({
           status: 'resolved',
           resolvedOutcome: winningSide,
-          resolutionReviewedAt: resolutionTimestamp,
-          resolutionReviewedBy: 'system',
+          resolutionReviewedAt: reviewAt,
+          resolutionReviewedBy: reviewedBy,
+          ...(recovery
+            ? {
+                resolutionDescription: recovery.description,
+                resolutionProofUrl: proofUrl,
+                resolutionConfidence: recovery.confidence,
+              }
+            : {}),
           updatedAt: resolutionTimestamp,
         })
         .where(eq(questionsSchema.id, question.id));
@@ -1617,6 +1724,11 @@ export async function resolveQuestionPayouts(
           updatedAt: resolutionTimestamp,
         })
         .where(eq(timeframedMarkets.questionId, question.id));
+      if (recovery) {
+        await tx
+          .delete(predictionResolutionWork)
+          .where(eq(predictionResolutionWork.questionId, question.id));
+      }
       return true;
     },
     {
@@ -1652,18 +1764,27 @@ export async function resolveQuestionPayouts(
   // tick's outcome — including reputation, which is outcome-sensitive.
   if (!settled) {
     logger.info(
-      'Market already resolved, skipping payouts',
+      'Market no longer eligible for this payout',
       { marketId, questionNumber },
       'GameTick'
     );
-    return;
+    return false;
   }
 
   // Update reputation in database (no longer requires deployer key or on-chain calls)
-  await ReputationService.updateReputationForResolvedMarket({
-    marketId: marketId,
-    outcome: winningSide,
-  });
+  try {
+    await ReputationService.updateReputationForResolvedMarket({
+      marketId: marketId,
+      outcome: winningSide,
+    });
+  } catch (error) {
+    if (!recovery) throw error;
+    logger.warn(
+      'Prediction recovery payout committed without a reputation update',
+      { marketId, questionNumber, error: formatError(error) },
+      'GameTick'
+    );
+  }
 
   logger.info(
     'Resolved prediction market payouts',
@@ -1676,6 +1797,7 @@ export async function resolveQuestionPayouts(
     },
     'GameTick'
   );
+  return true;
 }
 
 /**
