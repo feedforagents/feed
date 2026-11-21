@@ -140,8 +140,8 @@ type ArticleGenerationResult =
 
 export const dynamic = 'force-dynamic';
 
-// Let the half-hour tick use a slot about to open in the rolling hourly cap.
-const RATE_LIMIT_WAIT_MS = 60_000;
+// Leave room before the internal scheduler's 30-second request deadline.
+const RATE_LIMIT_WAIT_MS = 25_000;
 
 /**
  * Helper to persist an article using the shared persistence service.

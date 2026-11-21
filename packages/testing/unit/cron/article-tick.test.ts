@@ -543,6 +543,7 @@ describe('Article Tick Cron', () => {
         currentDay: 1,
       };
       cronMockState.articleCount = 2; // At limit
+      nextArticleSlot = Date.now() + 30_000;
 
       const req = new NextRequest('http://localhost/api/cron/article-tick', {
         method: 'POST',
