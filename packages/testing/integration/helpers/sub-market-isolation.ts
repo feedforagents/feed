@@ -99,6 +99,11 @@ const MCP_FEE_CASES = [
   'MCP perp fee recovery against real Postgres > open_position: a fee that commits but fails every retry is recorded once, also after the drain',
   'MCP perp fee recovery against real Postgres > close_position: a post-commit fee error recovers to one close fee',
 ];
+const REDUCE_FEE_FILE =
+  'packages/testing/integration/perp-reduce-fee-ledger.integration.test.ts';
+const REDUCE_FEE_CASES = [
+  'reduce through the open route charges and records the canonical fee on the ordered size',
+];
 type Suite =
   | 'sub-market'
   | 'prediction-remainder'
@@ -108,7 +113,8 @@ type Suite =
   | 'markets-review'
   | 'balance-display'
   | 'closed-prediction-positions'
-  | 'mcp-perp-fee';
+  | 'mcp-perp-fee'
+  | 'perp-reduce-fee';
 type Lease = {
   database: string;
   oid: string;
@@ -322,6 +328,13 @@ export async function verifyMcpPerpFeeChildLease() {
   await verifyChildLease(
     process.env.FEED_MCP_PERP_FEE_CHILD,
     process.env.FEED_MCP_PERP_FEE_LEASE_FILE
+  );
+}
+
+export async function verifyPerpReduceFeeChildLease() {
+  await verifyChildLease(
+    process.env.FEED_PERP_REDUCE_FEE_CHILD,
+    process.env.FEED_PERP_REDUCE_FEE_LEASE_FILE
   );
 }
 
@@ -641,6 +654,10 @@ export async function runIsolatedMcpPerpFeeCases() {
   await runIsolatedCases('mcp-perp-fee');
 }
 
+export async function runIsolatedPerpReduceFeeCases() {
+  await runIsolatedCases('perp-reduce-fee');
+}
+
 async function runIsolatedCases(suite: Suite) {
   const closedPositions = suite === 'closed-prediction-positions';
   const balance = suite === 'balance-display';
@@ -650,6 +667,7 @@ async function runIsolatedCases(suite: Suite) {
   const prediction = suite === 'prediction-remainder';
   const plugin = suite === 'plugin-perp-fee';
   const mcpFee = suite === 'mcp-perp-fee';
+  const reduceFee = suite === 'perp-reduce-fee';
   const file = closedPositions
     ? CLOSED_PREDICTION_POSITIONS_FILE
     : balance
@@ -666,7 +684,9 @@ async function runIsolatedCases(suite: Suite) {
                 ? PREDICTION_FILE
                 : mcpFee
                   ? MCP_FEE_FILE
-                  : FILE;
+                  : reduceFee
+                    ? REDUCE_FEE_FILE
+                    : FILE;
   const cases = closedPositions
     ? CLOSED_PREDICTION_POSITIONS_CASES
     : balance
@@ -683,7 +703,9 @@ async function runIsolatedCases(suite: Suite) {
                 ? PREDICTION_CASES
                 : mcpFee
                   ? MCP_FEE_CASES
-                  : CASES;
+                  : reduceFee
+                    ? REDUCE_FEE_CASES
+                    : CASES;
   const marker = closedPositions
     ? 'FEED_CLOSED_PREDICTION_POSITIONS_CHILD'
     : balance
@@ -700,7 +722,9 @@ async function runIsolatedCases(suite: Suite) {
                 ? 'FEED_PREDICTION_REMAINDER_CHILD'
                 : mcpFee
                   ? 'FEED_MCP_PERP_FEE_CHILD'
-                  : 'FEED_SUB_MARKET_CHILD';
+                  : reduceFee
+                    ? 'FEED_PERP_REDUCE_FEE_CHILD'
+                    : 'FEED_SUB_MARKET_CHILD';
   const leaseVariable = closedPositions
     ? 'FEED_CLOSED_PREDICTION_POSITIONS_LEASE_FILE'
     : balance
@@ -717,7 +741,9 @@ async function runIsolatedCases(suite: Suite) {
                 ? 'FEED_PREDICTION_REMAINDER_LEASE_FILE'
                 : mcpFee
                   ? 'FEED_MCP_PERP_FEE_LEASE_FILE'
-                  : 'FEED_SUB_MARKET_LEASE_FILE';
+                  : reduceFee
+                    ? 'FEED_PERP_REDUCE_FEE_LEASE_FILE'
+                    : 'FEED_SUB_MARKET_LEASE_FILE';
   requireThat(
     !process.env.FEED_CLOSED_PREDICTION_POSITIONS_CHILD &&
       !process.env.FEED_CLOSED_PREDICTION_POSITIONS_LEASE_FILE &&
@@ -736,7 +762,9 @@ async function runIsolatedCases(suite: Suite) {
       !process.env.FEED_BALANCE_DISPLAY_CHILD &&
       !process.env.FEED_BALANCE_DISPLAY_LEASE_FILE &&
       !process.env.FEED_MCP_PERP_FEE_CHILD &&
-      !process.env.FEED_MCP_PERP_FEE_LEASE_FILE,
+      !process.env.FEED_MCP_PERP_FEE_LEASE_FILE &&
+      !process.env.FEED_PERP_REDUCE_FEE_CHILD &&
+      !process.env.FEED_PERP_REDUCE_FEE_LEASE_FILE,
     'Parent cannot reuse a child marker'
   );
   const source = localUrl(process.env.DATABASE_URL);
@@ -766,7 +794,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'feed-prediction-remainder-'
                     : mcpFee
                       ? 'feed-mcp-perp-fee-'
-                      : 'feed-sub-market-'
+                      : reduceFee
+                        ? 'feed-perp-reduce-fee-'
+                        : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -839,6 +869,7 @@ async function runIsolatedCases(suite: Suite) {
       ...(balance ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(closedPositions ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(mcpFee ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
+      ...(reduceFee ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
     };
     phase = 'migrate';
     await run(
@@ -855,7 +886,8 @@ async function runIsolatedCases(suite: Suite) {
       review ||
       balance ||
       closedPositions ||
-      mcpFee
+      mcpFee ||
+      reduceFee
     ) {
       phase = 'manual-idempotency-index';
       const actual = await identity(admin);
@@ -924,7 +956,9 @@ async function runIsolatedCases(suite: Suite) {
                   ? 'ten-child-cases'
                   : mcpFee
                     ? 'three-mcp-perp-fee-child-cases'
-                    : 'four-child-cases';
+                    : reduceFee
+                      ? 'one-perp-reduce-fee-child-case'
+                      : 'four-child-cases';
     const output = await run(
       ['test', file, '--timeout', '30000'],
       env,
@@ -945,7 +979,8 @@ async function runIsolatedCases(suite: Suite) {
             review ||
             balance ||
             closedPositions ||
-            mcpFee
+            mcpFee ||
+            reduceFee
               ? ''
               : 'sub-market transactional creation > ') +
             escape(name) +
@@ -981,7 +1016,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'All ten real HTTP cases must pass without skips'
                     : mcpFee
                       ? 'All three real MCP perp fee cases must pass without skips'
-                      : 'All four original cases must pass without skips'
+                      : reduceFee
+                        ? 'The real perp reduce fee case must pass without skips'
+                        : 'All four original cases must pass without skips'
     );
     childProof = {
       pass: cases.length,
@@ -1093,7 +1130,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'PASS_ISOLATED_TEN_PREDICTION_REMAINDER_CASES'
                     : mcpFee
                       ? 'PASS_ISOLATED_THREE_MCP_PERP_FEE_CASES'
-                      : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
+                      : reduceFee
+                        ? 'PASS_ISOLATED_PERP_REDUCE_FEE_CASE'
+                        : 'PASS_ISOLATED_FOUR_SUB_MARKET_CASES',
       lease,
       childProof,
       databaseDropped: true,
@@ -1117,7 +1156,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'ISOLATED_PREDICTION_REMAINDER_RESULT '
                     : mcpFee
                       ? 'ISOLATED_MCP_PERP_FEE_RESULT '
-                      : 'ISOLATED_SUB_MARKET_RESULT ') +
+                      : reduceFee
+                        ? 'ISOLATED_PERP_REDUCE_FEE_RESULT '
+                        : 'ISOLATED_SUB_MARKET_RESULT ') +
         JSON.stringify({
           pass: cases.length,
           skip: 0,
@@ -1146,7 +1187,9 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'HOLD_ISOLATED_PREDICTION_REMAINDER_CASES'
                       : mcpFee
                         ? 'HOLD_ISOLATED_MCP_PERP_FEE_CASES'
-                        : 'HOLD_ISOLATED_SUB_MARKET_CASES',
+                        : reduceFee
+                          ? 'HOLD_ISOLATED_PERP_REDUCE_FEE_CASE'
+                          : 'HOLD_ISOLATED_SUB_MARKET_CASES',
         phase,
         lease,
         childProof,
@@ -1175,7 +1218,9 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'ISOLATED_PREDICTION_REMAINDER_HOLD '
                       : mcpFee
                         ? 'ISOLATED_MCP_PERP_FEE_HOLD '
-                        : 'ISOLATED_SUB_MARKET_HOLD ') +
+                        : reduceFee
+                          ? 'ISOLATED_PERP_REDUCE_FEE_HOLD '
+                          : 'ISOLATED_SUB_MARKET_HOLD ') +
           JSON.stringify({ phase, result: resultPath })
       );
     }
