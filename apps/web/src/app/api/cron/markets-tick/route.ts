@@ -64,6 +64,7 @@ import {
   positions,
   posts,
   questions,
+  readPredictionRecoveryHealth,
   sql,
   timeframedMarketRoles,
   timeframedMarkets,
@@ -419,6 +420,27 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       marketsByTimeframe: {},
       durationMs: 0,
     });
+  }
+
+  if (process.env.DEPLOYMENT_ENV === 'localnet') {
+    const startTime = new Date();
+    try {
+      const health = await readPredictionRecoveryHealth(startTime);
+      const result = {
+        success: true,
+        ...health,
+        durationMs: Date.now() - startTime.getTime(),
+      };
+      recordCronExecution('markets-tick', startTime, result);
+      logger.info('Markets tick completed', result, 'MarketsTick');
+      return NextResponse.json(result);
+    } catch (error) {
+      recordCronExecution('markets-tick', startTime, {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   const startTime = Date.now();

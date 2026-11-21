@@ -96,11 +96,21 @@ const nextMockSnowflakeId = (): string => {
 
 // Track which table is being queried for table-aware mocking
 let currentQueryTable: string | null = null;
-const savedReasons: string[] = [];
-const proofDescriptions: string[] = [];
-let resolutionEventCalls = 0;
-let proofReasonWasStored = false;
-let rejectResolutionProof = false;
+const recoveryAttempt = mock(async () => 'pending' as const);
+const storeMarketRow = mock(
+  (_table: string, _values: Record<string, unknown>) => {}
+);
+let provideRecoveryTopic = false;
+const recoveryTopic = {
+  topicKey: 'openai',
+  topicLabel: 'OpenAI',
+  summary: 'OpenAI is the single topic for today',
+  date: new Date('2026-03-06T00:00:00.000Z'),
+  sourceType: 'auto' as const,
+  sourceHeadlineIds: [],
+  selectionReason: 'Matched headlines',
+  isLocked: false,
+};
 let payoutCalls = 0;
 
 // Table reference symbols for detection
@@ -114,6 +124,7 @@ const TABLE_REFS = {
     questionNumber: 'questionNumber',
   },
   timeframedMarkets: { _tableName: 'timeframedMarkets' },
+  timeframedMarketRoles: { _tableName: 'timeframedMarketRoles' },
   worldEvents: { _tableName: 'worldEvents', timestamp: 'timestamp' },
   posts: { _tableName: 'posts' },
   userAgentConfigs: { _tableName: 'userAgentConfigs' },
@@ -160,7 +171,7 @@ const createQueryBuilder = (
   const builder = {
     set: mock((_values?: Record<string, unknown>) => builder),
     where: mock(() => builder),
-    values: mock(() => builder),
+    values: mock((_values?: Record<string, unknown>) => builder),
     from: mock((table: { _tableName?: string }) => {
       // Track which table is being queried
       if (table && table._tableName) {
@@ -202,21 +213,17 @@ const createMutationBuilder = (operation: 'insert' | 'update' | 'delete') => {
     if (table && table._tableName) {
       currentQueryTable = table._tableName;
     }
-    let pendingUpdate: Record<string, unknown> | undefined;
-    const builder = createQueryBuilder(() => {
-      if (
-        operation === 'update' &&
-        table._tableName === 'questions' &&
-        typeof pendingUpdate?.resolutionDescription === 'string'
-      ) {
-        savedReasons.push(pendingUpdate.resolutionDescription);
-      }
-      return [{ id: `mock-${operation}-id` }];
-    }, operation);
-    builder.set.mockImplementation((values) => {
-      pendingUpdate = values;
-      return builder;
-    });
+    const builder = createQueryBuilder(
+      () => [{ id: `mock-${operation}-id` }],
+      operation
+    );
+    if (operation === 'insert' && table._tableName) {
+      const tableName = table._tableName;
+      builder.values.mockImplementation((values) => {
+        if (values) storeMarketRow(tableName, values);
+        return builder;
+      });
+    }
     return builder;
   });
 };
@@ -225,6 +232,21 @@ const registerMocks = () => {
   // Mock @feed/db - table-aware query handling
   mock.module('@feed/db', () => ({
     ...actualDbModule,
+    ownsPredictionRecoveryLease: async () => true,
+    readPredictionRecoveryHealth: async () => ({
+      pendingResolutions: cronMockState.marketsActiveQuestions.length,
+      oldestPendingResolutionAgeMs: cronMockState.marketsActiveQuestions.length
+        ? 1000
+        : null,
+    }),
+    listDuePredictionRecoveryMarkets: async (_now: Date, limit: number) =>
+      cronMockState.marketsActiveQuestions.slice(0, limit).map((q) => ({
+        id: q.id,
+        questionNumber: q.questionNumber,
+        resolutionDate: q.resolutionDate,
+        outcome: true,
+        timeframe: '1d',
+      })),
     db: {
       select: mock((columns?: Record<string, unknown>) => {
         // Reset table tracking for new query
@@ -275,6 +297,7 @@ const registerMocks = () => {
     agentTrades: TABLE_REFS.agentTrades,
     npcTrades: TABLE_REFS.npcTrades,
     timeframedMarkets: TABLE_REFS.timeframedMarkets,
+    timeframedMarketRoles: TABLE_REFS.timeframedMarketRoles,
     worldEvents: TABLE_REFS.worldEvents,
     posts: TABLE_REFS.posts,
     eq: (): SqlCondition => ({}),
@@ -346,12 +369,13 @@ const registerMocks = () => {
     recordCronExecution: () => {},
     DistributedLockService: {
       acquireLock: async (options?: { lockId?: string }) => {
-        if (options?.lockId?.includes('markets-tick')) {
+        if (options?.lockId?.includes('markets-recovery')) {
           return cronMockState.marketsAcquireLockResult;
         }
         return true;
       },
       releaseLock: async () => {},
+      renewLock: async () => true,
     },
   }));
 
@@ -366,6 +390,7 @@ const registerMocks = () => {
   // Mock @feed/engine
   mock.module('@feed/engine', () => ({
     ...actualEngineModule,
+    processPredictionMarketRecovery: recoveryAttempt,
     articleRateLimiter: {
       canGenerateArticle: async () => ({
         allowed: cronMockState.articleCount < 2,
@@ -397,18 +422,11 @@ const registerMocks = () => {
         publishedAt: new Date(),
       });
     },
+    getCurrentArcState: () => 'active',
     dailyTopicService: {
-      getTopicCandidatesForDate: async () => [],
-      ensureTopicForDate: async () => ({
-        topicKey: 'openai',
-        topicLabel: 'OpenAI',
-        summary: 'OpenAI is the single topic for today',
-        date: new Date('2026-03-06T00:00:00.000Z'),
-        sourceType: 'auto' as const,
-        sourceHeadlineIds: [],
-        selectionReason: 'Matched headlines',
-        isLocked: false,
-      }),
+      getTopicCandidatesForDate: async () =>
+        provideRecoveryTopic ? [recoveryTopic] : [],
+      ensureTopicForDate: async () => recoveryTopic,
     },
     deriveTopicFromText: (text: string, date?: Date) => ({
       topicKey: 'legacy-parent',
@@ -446,35 +464,6 @@ const registerMocks = () => {
           affiliatedActorIds: [],
           affiliatedOrgIds: [],
         };
-      }
-      async generateResolutionEvent() {
-        resolutionEventCalls++;
-        return 'The product was launched';
-      }
-      async generateProofForResolution(
-        _question: unknown,
-        description: string
-      ) {
-        proofDescriptions.push(description);
-        proofReasonWasStored =
-          savedReasons.includes(description) ||
-          cronMockState.marketsActiveQuestions.some(
-            (question) => question.resolutionDescription === description
-          );
-        if (rejectResolutionProof)
-          throw new Error('Proof rejected by quality gate');
-        return {
-          description,
-          confidence: 0.95,
-          requiresManualReview: false,
-          proof: null,
-        };
-      }
-      async generateResolutionWithProof() {
-        return this.generateProofForResolution(
-          null,
-          await this.generateResolutionEvent()
-        );
       }
     },
     getActiveEventsForPosting: async () => ({ activeEvents: [] }),
@@ -556,8 +545,8 @@ const registerMocks = () => {
         durationMs: 86400000,
         phases: {},
         phaseOrder: ['setup', 'peak', 'resolution'],
-        insiders: [],
-        deceivers: [],
+        insiders: ['npc-insider'],
+        deceivers: ['npc-deceiver'],
         affiliatedOrgIds: [],
         affiliatedActorIds: [],
         createdAt: new Date(),
@@ -574,16 +563,22 @@ const registerMocks = () => {
 // Route handlers are loaded dynamically after mock registration.
 let GET: (req: NextRequest) => Promise<Response>;
 let POST: (req: NextRequest) => Promise<Response>;
+let RECOVERY: (req: NextRequest) => Promise<Response>;
 
 describe('Markets Tick Cron', () => {
+  const originalDeployment = process.env.DEPLOYMENT_ENV;
   beforeAll(async () => {
+    process.env.DEPLOYMENT_ENV = 'localnet';
     registerMocks();
     const routeModule = await import('@/app/api/cron/markets-tick/route');
     GET = routeModule.GET;
     POST = routeModule.POST;
+    RECOVERY = (await import('@/app/api/cron/markets-recovery/route')).POST;
   });
 
   afterAll(() => {
+    if (originalDeployment === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = originalDeployment;
     mock.restore();
   });
 
@@ -594,12 +589,10 @@ describe('Markets Tick Cron', () => {
     cronMockState.marketsCronAuthResult = true;
     cronMockState.marketsAcquireLockResult = true;
     currentQueryTable = null;
-    savedReasons.length = 0;
-    proofDescriptions.length = 0;
-    resolutionEventCalls = 0;
-    proofReasonWasStored = false;
-    rejectResolutionProof = false;
     payoutCalls = 0;
+    recoveryAttempt.mockClear();
+    storeMarketRow.mockClear();
+    provideRecoveryTopic = false;
   });
 
   describe('Authorization', () => {
@@ -656,121 +649,136 @@ describe('Markets Tick Cron', () => {
     });
   });
 
-  describe('Distributed Lock', () => {
-    test('should skip when lock cannot be acquired', async () => {
-      cronMockState.marketsGame = {
-        id: 'game-123',
-        isContinuous: true,
-        isRunning: true,
-        currentDay: 1,
-      };
+  test('minute tick reports backlog without invoking recovery even if the worker lease is busy', async () => {
+    cronMockState.marketsAcquireLockResult = false;
+    cronMockState.marketsActiveQuestions = [
+      {
+        id: 'pending-proof',
+        questionNumber: 60,
+        resolutionDate: new Date(Date.now() - 1000),
+        status: 'active',
+      },
+    ];
+    const response = await POST(
+      new NextRequest('http://localhost/api/cron/markets-tick', {
+        method: 'POST',
+      })
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      success: true,
+      pendingResolutions: 1,
+      oldestPendingResolutionAgeMs: 1000,
+    });
+    expect(recoveryAttempt).not.toHaveBeenCalled();
+  });
+
+  test('hosted production recovery remains unavailable before paid spend verification', async () => {
+    const env = process.env as Record<string, string | undefined>;
+    const originalNodeEnv = env.NODE_ENV;
+    const originalDeployment = env.DEPLOYMENT_ENV;
+    env.NODE_ENV = 'production';
+    env.DEPLOYMENT_ENV = 'staging';
+    try {
+      const response = await RECOVERY(
+        new NextRequest('http://localhost/api/cron/markets-recovery', {
+          method: 'POST',
+        })
+      );
+      expect(response.status).toBe(503);
       cronMockState.marketsAcquireLockResult = false;
-
-      const req = new NextRequest('http://localhost/api/cron/markets-tick', {
-        method: 'POST',
-      });
-      const res = await POST(req);
-      const data = await res.json();
-
-      // Should indicate lock failure/skip (route returns "Previous tick still running")
-      expect(res.status).toBe(200);
-      expect(data.success).toBe(true);
-      expect(data.skipped).toBe(true);
-      expect(data.reason).toContain('Previous tick still running');
-    });
-  });
-
-  describe('Game State Checks', () => {
-    test('should skip when game is not running', async () => {
-      cronMockState.marketsGame = {
-        id: 'game-123',
-        isContinuous: true,
-        isRunning: false,
-        currentDay: 1,
-      };
-
-      const req = new NextRequest('http://localhost/api/cron/markets-tick', {
-        method: 'POST',
-      });
-      const res = await POST(req);
-      const data = await res.json();
-
-      expect(data.success).toBe(true);
-      expect(data.skipped).toBe(true);
-      expect(data.reason).toBe('Game not running');
-    });
-
-    // Additional integration tests (game running, market creation, resolution)
-    // are in packages/testing/integration/markets-tick.integration.test.ts
-    // These require real database access and are run separately.
-  });
-
-  for (const storedReason of [
-    null,
-    'A previously generated resolution reason',
-  ]) {
-    test(`retains the resolution reason when proof is rejected: stored=${Boolean(storedReason)}`, async () => {
-      cronMockState.marketsGame = {
-        id: 'game-123',
-        isContinuous: true,
-        isRunning: true,
-        currentDay: 1,
-      };
-      cronMockState.marketsActiveQuestions = [
-        {
-          id: 'question-proof-failure',
-          questionNumber: 60,
-          resolutionDate: new Date(Date.now() - 1000),
-          status: 'active',
-          resolutionDescription: storedReason,
-        },
-      ];
-      rejectResolutionProof = true;
-      const response = await POST(
+      const legacy = await POST(
         new NextRequest('http://localhost/api/cron/markets-tick', {
           method: 'POST',
         })
       );
-      expect(response.status).toBe(200);
-      const result = await response.json();
-      expect(result.marketsResolved).toBe(1);
-      expect(payoutCalls).toBe(1);
-      expect(resolutionEventCalls).toBe(storedReason ? 0 : 1);
-      expect(proofDescriptions).toEqual([
-        storedReason ?? 'The product was launched',
-      ]);
-      expect(proofReasonWasStored).toBe(true);
-      expect(savedReasons).toEqual(
-        storedReason ? [] : ['The product was launched']
-      );
-    });
-  }
-});
+      expect(legacy.status).toBe(200);
+      expect(await legacy.json()).toMatchObject({
+        success: true,
+        skipped: true,
+      });
+      expect(recoveryAttempt).not.toHaveBeenCalled();
+    } finally {
+      if (originalNodeEnv === undefined) delete env.NODE_ENV;
+      else env.NODE_ENV = originalNodeEnv;
+      if (originalDeployment === undefined) delete env.DEPLOYMENT_ENV;
+      else env.DEPLOYMENT_ENV = originalDeployment;
+    }
+  });
 
-describe('Market Timeframe Configuration', () => {
-  test('should have correct market distribution (10 total)', () => {
-    // Expected: 1x 3-day, 1x 2-day, 1x 1-day, 1x 12-hour, 1x 6-hour, 1x 1-hour, 2x 30-minute, 2x 15-minute
-    //
-    // IMPORTANT: These values are a deliberate contract-style duplication of the production
-    // MARKET_TIMEFRAMES config in markets-tick/route.ts. Do NOT import production internals here.
-    // If the production config changes, this test must be updated to match. This ensures the
-    // test acts as a contract verification rather than a tautology.
-    const expectedMarkets = {
-      '3d': 1,
-      '2d': 1,
-      '1d': 1,
-      '12h': 1,
-      '6h': 1,
-      '1h': 1,
-      '30m': 2,
-      '15m': 2,
-    };
-
-    const totalExpected = Object.values(expectedMarkets).reduce(
-      (a, b) => a + b,
-      0
+  test('recovery skips when a pass already holds the lease', async () => {
+    cronMockState.marketsAcquireLockResult = false;
+    const response = await RECOVERY(
+      new NextRequest('http://localhost/api/cron/markets-recovery', {
+        method: 'POST',
+      })
     );
-    expect(totalExpected).toBe(10);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      success: true,
+      skipped: true,
+      reason: 'Previous recovery pass still running',
+    });
+    expect(recoveryAttempt).not.toHaveBeenCalled();
+  });
+
+  test('replacement markets keep their current arc and persisted NPC roles', async () => {
+    cronMockState.marketsGame = {
+      id: 'game-123',
+      isContinuous: true,
+      isRunning: true,
+      currentDay: 1,
+    };
+    provideRecoveryTopic = true;
+
+    const response = await RECOVERY(
+      new NextRequest('http://localhost/api/cron/markets-recovery', {
+        method: 'POST',
+      })
+    );
+    expect(await response.json()).toMatchObject({
+      success: true,
+      marketsCreated: 2,
+    });
+    const frames = storeMarketRow.mock.calls.filter(
+      ([table]) => table === 'timeframedMarkets'
+    );
+    expect(frames).toHaveLength(2);
+    for (const [, frame] of frames) {
+      expect(frame.arcState).toBe('active');
+      expect(storeMarketRow).toHaveBeenCalledWith('timeframedMarketRoles', {
+        timeframedMarketId: frame.id,
+        insiderActorIds: ['npc-insider'],
+        deceiverActorIds: ['npc-deceiver'],
+      });
+    }
+  });
+
+  test('only two pending proofs start per recovery pass and neither settles', async () => {
+    cronMockState.marketsGame = {
+      id: 'game-123',
+      isContinuous: true,
+      isRunning: true,
+      currentDay: 1,
+    };
+    cronMockState.marketsActiveQuestions = [60, 61, 62].map(
+      (questionNumber) => ({
+        id: `pending-proof-${questionNumber}`,
+        questionNumber,
+        resolutionDate: new Date(Date.now() - 1000),
+        status: 'active',
+      })
+    );
+    const response = await RECOVERY(
+      new NextRequest('http://localhost/api/cron/markets-recovery', {
+        method: 'POST',
+      })
+    );
+    const result = await response.json();
+    expect(response.status).toBe(200);
+    expect(result.marketsResolved).toBe(0);
+    expect(recoveryAttempt).toHaveBeenCalledTimes(2);
+    expect(payoutCalls).toBe(0);
   });
 });
 
@@ -913,22 +921,14 @@ describe('inferGranularTimeframe', () => {
 
 describe('Sub-Market Batch Creation Logic', () => {
   const MAX_SUB_MARKETS = 10;
-  const MAX_SUB_MARKETS_PER_TICK = 5;
+  const MAX_SUB_MARKETS_PER_TICK = 1;
 
   test('should create up to MAX_SUB_MARKETS_PER_TICK when many needed', () => {
     const activeSubMarkets = 0;
     const subMarketsNeeded = MAX_SUB_MARKETS - activeSubMarkets; // 10
     const createCount = Math.min(subMarketsNeeded, MAX_SUB_MARKETS_PER_TICK);
 
-    expect(createCount).toBe(5);
-  });
-
-  test('should create exact amount when fewer than limit needed', () => {
-    const activeSubMarkets = 7;
-    const subMarketsNeeded = MAX_SUB_MARKETS - activeSubMarkets; // 3
-    const createCount = Math.min(subMarketsNeeded, MAX_SUB_MARKETS_PER_TICK);
-
-    expect(createCount).toBe(3);
+    expect(createCount).toBe(1);
   });
 
   test('should create zero when at maximum', () => {
@@ -1239,7 +1239,7 @@ describe('inferSubMarketTimeframe (Fixed Version)', () => {
 
 describe('Transactional Sub-Market Creation Logic', () => {
   const MAX_SUB_MARKETS = 10;
-  const MAX_SUB_MARKETS_PER_TICK = 5;
+  const MAX_SUB_MARKETS_PER_TICK = 1;
 
   test('should abort creation when count reaches MAX_SUB_MARKETS inside transaction', () => {
     // Simulate scenario where count was 8 outside tx, but 10 inside tx
@@ -1260,7 +1260,7 @@ describe('Transactional Sub-Market Creation Logic', () => {
     const subMarketsNeeded = MAX_SUB_MARKETS - activeSubMarkets; // 10
     const createCount = Math.min(subMarketsNeeded, MAX_SUB_MARKETS_PER_TICK);
 
-    expect(createCount).toBe(5);
+    expect(createCount).toBe(1);
   });
 
   test('should track gapFillingSkippedDueToMax metric correctly', () => {

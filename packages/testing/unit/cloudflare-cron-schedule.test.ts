@@ -46,6 +46,9 @@ describe('Cloudflare cron schedule', () => {
     expect(at('18:00')).toContain('/api/cron/world-facts');
   });
   test('auxiliary jobs are due on their own localnet cadence only', () => {
+    const recovery = '/api/cron/markets-recovery';
+    expect(at('12:05', true)).toContain(recovery);
+    expect(at('12:05')).not.toContain(recovery);
     const headlines = '/api/cron/world-facts?mode=headlines';
     const groups = '/api/cron/npc-tick?mode=groups';
     expect(at('12:05', true)).toContain(headlines);

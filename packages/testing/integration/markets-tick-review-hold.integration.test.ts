@@ -40,11 +40,20 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     inArray,
     markets,
     positions,
+    posts,
+    predictionResolutionWork,
     questions,
     sql,
     timeframedMarkets,
     users,
   } = await import('@feed/db');
+  const recoveryMigration = await Bun.file(
+    new URL(
+      '../../db/drizzle/migrations/manual/0008_prediction_resolution_work.sql',
+      import.meta.url
+    )
+  ).text();
+  await db.execute(sql.raw(recoveryMigration));
   const { FEE_CONFIG, mapGranularToDbTimeframe, withPredictionSettlement } =
     await import('@feed/engine');
   const { generateSnowflakeId } = await import('@feed/shared');
@@ -63,6 +72,7 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     timeframedId: string;
     userId: string;
     payout: number;
+    proofId: string;
   };
   type Review = 'pending' | 'unset' | 'rejected' | 'approved';
   let support: Support;
@@ -76,11 +86,13 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
   const originalCronSecret = process.env.CRON_SECRET;
   const originalGameStart = process.env.GAME_START;
   const originalRelay = process.env.REDIRECT_CRON_STAGING;
+  const originalDeployment = process.env.DEPLOYMENT_ENV;
 
   beforeAll(async () => {
     process.env.CRON_SECRET = 'review-hold-integration';
     process.env.GAME_START = 'true';
     process.env.REDIRECT_CRON_STAGING = 'false';
+    process.env.DEPLOYMENT_ENV = 'localnet';
     expect(await db.select({ id: games.id }).from(games)).toHaveLength(0);
     expect(await db.select({ id: questions.id }).from(questions)).toHaveLength(
       0
@@ -225,6 +237,8 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     else process.env.GAME_START = originalGameStart;
     if (originalRelay === undefined) delete process.env.REDIRECT_CRON_STAGING;
     else process.env.REDIRECT_CRON_STAGING = originalRelay;
+    if (originalDeployment === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = originalDeployment;
     // No row cleanup: only the existing positive-lease whole-child DROP on pass.
     // A failed child and every acquired physical receipt are retained.
     await closeDatabase();
@@ -235,7 +249,9 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     const questionId = await generateSnowflakeId();
     const timeframedId = await generateSnowflakeId();
     const userId = await generateSnowflakeId();
-    const fixture = { questionId, timeframedId, userId, payout: 0 };
+    const proofId = await generateSnowflakeId();
+    const fixture = { questionId, timeframedId, userId, payout: 0, proofId };
+    const resolutionDate = new Date(now - 60000);
     const [max] = await db
       .select({ max: sql<number>`COALESCE(MAX("questionNumber"), 0)` })
       .from(questions);
@@ -276,9 +292,8 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
             : {
                 requiresManualReview: true,
                 resolutionReviewStatus: review === 'unset' ? null : review,
-                resolutionDate: new Date(now - 60000),
+                resolutionDate,
                 resolutionDescription: 'Low-confidence proof',
-                resolutionProofUrl: 'https://example.invalid/proof',
               }),
         })
         .returning({
@@ -300,6 +315,26 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
           id: markets.id,
           canonical: sql<string>`to_jsonb(${markets})::text`,
         });
+      if (review !== 'rejected') {
+        await tx.insert(predictionResolutionWork).values({
+          questionId,
+          resolutionDate,
+          outcome: true,
+          draft: {
+            description: 'Low-confidence proof',
+            confidence: 0.3,
+            requiresManualReview: true,
+            post: {
+              id: proofId,
+              type: 'proof',
+              authorId: userId,
+              content: 'Low-confidence proof',
+              fullContent: 'A generated proof awaits review.',
+              articleTitle: 'Resolution proof',
+            },
+          },
+        });
+      }
       return { u, q, m };
     });
     remember('User', acquired.u);
@@ -382,8 +417,13 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
       .select()
       .from(balanceTransactions)
       .where(eq(balanceTransactions.userId, ids.userId));
+    const proofs = await db
+      .select({ id: posts.id })
+      .from(posts)
+      .where(eq(posts.id, ids.proofId));
     return {
       balance: Number(user?.virtualBalance),
+      publicProofs: proofs.length,
       payouts: ledger
         .filter((row) => row.type === 'pred_resolve')
         .map((row) => Number(row.amount)),
@@ -394,9 +434,9 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
   }
 
   async function runTick() {
-    const { POST } = await import('@/app/api/cron/markets-tick/route');
+    const { POST } = await import('@/app/api/cron/markets-recovery/route');
     const res = await POST(
-      new NextRequest('http://localhost/api/cron/markets-tick', {
+      new NextRequest('http://localhost/api/cron/markets-recovery', {
         method: 'POST',
         headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
       })
@@ -440,6 +480,7 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     return {
       balance: 400,
       payouts: [],
+      publicProofs: 0,
       status: 'active',
       paid: false,
       timeframedActive: true,
@@ -449,6 +490,7 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     return {
       balance: 400 + fixture.payout,
       payouts: [fixture.payout],
+      publicProofs: 1,
       status: 'resolved',
       paid: true,
       timeframedActive: false,

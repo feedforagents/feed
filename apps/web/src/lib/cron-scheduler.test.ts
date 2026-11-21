@@ -47,6 +47,7 @@ it('dispatches localnet auxiliary jobs at the supplied UTC time only', async () 
   );
   const headlines = '/api/cron/world-facts?mode=headlines';
   const groups = '/api/cron/npc-tick?mode=groups';
+  const recovery = '/api/cron/markets-recovery';
   env.CRON_SECRET = 'local-cron-test';
   env.DEPLOYMENT_ENV = 'localnet';
   try {
@@ -55,6 +56,10 @@ it('dispatches localnet auxiliary jobs at the supplied UTC time only', async () 
     expect(due.triggered).toContain(headlines);
     expect(due.triggered).toContain(groups);
     expect(due.triggered).toContain('/api/cron/world-facts');
+    expect(due.triggered).not.toContain(recovery);
+    expect(
+      fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname)
+    ).toContain(recovery);
     expect(
       fetcher.mock.calls.map(([url]) => new URL(String(url)).search)
     ).toContain('?mode=headlines');
@@ -70,12 +75,16 @@ it('dispatches localnet auxiliary jobs at the supplied UTC time only', async () 
     expect(between.skipped).toContain(groups);
 
     env.DEPLOYMENT_ENV = 'staging';
+    fetcher.mockClear();
     const hosted = await triggerScheduledCrons(
       new Date('2026-10-10T06:00:00Z')
     );
     expect(hosted.triggered).toContain('/api/cron/world-facts');
     expect(hosted.triggered).not.toContain(headlines);
     expect(hosted.triggered).not.toContain(groups);
+    expect(
+      fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname)
+    ).not.toContain(recovery);
   } finally {
     fetcher.mockRestore();
   }

@@ -11,3 +11,12 @@ For the [Phase 0 staging window](../product/mvp-plan.md#phase-0--get-the-world-r
 Before enabling the [D-25 spend cap](../product/prd.md#d-25-spend-enforcement), apply [the reservation migration](../../packages/db/drizzle/migrations/manual/0007_scheduled_inference_budget.sql) in a separate, reviewed transaction on the target database. The fee and funding migration runner does not apply it. Include the reservation table in the fresh baseline when regenerating it for Phase 1. Verify a provider-enforced maximum charge for each request made with the configured Surplus key across chat, embeddings, and image generation. Configure the maximum in micro-USD with `SURPLUS_VERIFIED_MAX_REQUEST_MICRO_USD` and enable the cap with `NPC_LLM_DAILY_BUDGET_USD=100` on all workers serving scheduled routes. Keep paid scheduled inference paused while the provider bound is unverified.
 
 Each entry in `ScheduledInferenceReservation` carries a reserved maximum and, when available, a confirmed charge. The reservation remains pending if the response lacks a confirmed charge or crosses midnight. Compare pending entries with the provider's request logs before assigning a charge to a UTC day. A charge above the verified maximum suspends subsequent requests, including after midnight. Find declines and unresolved charges in server logs under `InferenceBudget`.
+
+For market recovery on localnet, score `markets-tick` on its minute schedule
+and use the pending count and oldest pending resolution age to measure backlog
+drain. `markets-recovery` has its own delivery logs. Review held markets
+separately from work eligible for automatic settlement. Apply
+[the private work table migration](../../packages/db/drizzle/migrations/manual/0008_prediction_resolution_work.sql)
+before enabling localnet recovery on an existing database. Hosted deployments
+retain their market tick and admin review path. A hosted cutover requires the
+private work table and verified shared D-25 spend enforcement.
