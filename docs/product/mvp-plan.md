@@ -135,6 +135,17 @@ Depends on: D-9 through D-15b, D-17, D-17b, D-18.
 4. **Spot/index/perp rebuild** (PRD §9.3): spot CPMM pools per ticker, NPC-only spot trading action, persisted index price, mark = index + bounded premium, funding from mark–index, liquidation on mark, remove random-walk price source and duplicate price stores, leverage cap 20×. Run on staging with NPC load for ≥ 72 h; check perps track spot, funding sign is correct, no runaway prices.
 5. Profit leaderboard (all time / month) excluding purchases; separate Characters board.
 
+**Proposed Stripe reversal acceptance.** Exercise signed webhook delivery with
+a disposable PostgreSQL database and verify the wallet balance and ledger
+together. For a $100 purchase, deliver a $100 dispute debit, then a delayed
+$40 cumulative refund, then the dispute win. The win restores 6,000 pts and
+leaves 4,000 pts withheld. For another $100 purchase, queue concurrent $40
+and $60 cumulative refund events behind the wallet lock. The total debit is
+6,000 pts. In both cases, replay the events and deliver stale snapshots or
+distinct event IDs with the same state. The totals stay the same. Verify that
+a win preserves the hold for any other open or lost dispute, and that an
+ambiguous legacy debit produces no wallet movement.
+
 **Approved — existing staging schema only.** Under the PRD §9.1 staging exception, the exact original baseline may receive only original additive migrations `0003`–`0005` through the normal migrator, with genuine `[0000, 0003, 0004, 0005]` receipts and all specified guards. Acceptance requires local nonempty-data retention, rollback, postflight shape and rerun proof, plus the existing required tests and build. Retained Farcaster/NFT data is preserved; this does not complete Phase 1 removals or Phase 6. Future cleanup needs a separate reviewed migration. Phase 7's fresh production database and D-8 remain unchanged.
 
 **Exit:** 72 h staging soak with charts of index vs mark per ticker; a test purchase end-to-end in Stripe test mode, and a refused purchase with a Washington billing address; a prediction market resolves and pays exactly 1 pt per winning share; leaderboard unaffected by a purchase.

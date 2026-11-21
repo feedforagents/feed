@@ -228,6 +228,27 @@ ChatGPT Apps SDK / MCP Apps widgets for the feed, a market card, and the portfol
 - **Going broke:** a player at 0 pts with no open positions can keep playing socially and can buy more. No free refills ([D-15]).
 - Remove `reputationPoints`, `earnedPoints`, `invitePoints`, `bonusPoints`, all `pointsAwardedFor*` flags.
 
+**Proposed — Stripe purchase reversals.** For each settled purchase, store the
+highest confirmed cumulative refund total in Stripe’s integer cents in the
+existing ledger state, separately from the points actually debited. Record
+increases even when no points move. Send pending, failed, or contradictory
+refund state for reconciliation before changing the wallet. Under the existing wallet lock, cap the purchase's
+net reversal at its original points credit and record each balance change
+and its ledger entry together.
+
+Match each dispute debit to its Stripe dispute ID. A won dispute may restore
+points once, up to the amount actually debited for that dispute. Limit the
+credit so the remaining net debit covers confirmed refunds and preserves
+points withheld for other open or lost disputes. Deduplicate Stripe event
+deliveries by event ID and make their wallet effects idempotent across
+distinct event IDs carrying the same state.
+If a legacy debit cannot be matched unambiguously to the settled purchase and
+dispute, leave the balance untouched and require reconciliation. Stripe can
+deliver a refund event after a dispute event even when the refund was issued
+first. [Stripe webhook ordering](https://docs.stripe.com/webhooks#event-ordering) ·
+[Stripe dispute lifecycle](https://docs.stripe.com/disputes/how-disputes-work#during-the-dispute) ·
+[Stripe refund status](https://docs.stripe.com/refunds#failed-refunds)
+
 **Approved — staging-only schema compatibility.** The maintainer approved this bounded staging maintenance exception on 2026-11-12. To restore accounting in §9.1 and retained perps in §9.3 without deleting existing staging data, only a staging database with the exact original `0000_fresh_baseline` receipt may use the original additive migrations `0003_prediction_cash_cost_basis`, `0004_leverage_cap_20`, and `0005_trading_fee_idempotency_key` through the normal pinned migrator. Its genuine resulting history is `[0000, 0003, 0004, 0005]`; no receipts may be invented, adopted or rewritten for skipped `0001`/`0002` removals.
 
 This path must fail closed on unsupported history or physical state. Preserve APP/DIRECT primary identity, ordinary public-table/OID and migration ownership checks, forced SQL target resolution, TLS, grants/RLS, lock limits, current-commit/required-check guards, and the verified concurrent index before application upload. Local evidence must prove genuine receipts, unchanged nonempty retained data, transaction rollback, postflight physical shapes and safe reruns; existing required quality gates remain mandatory.
