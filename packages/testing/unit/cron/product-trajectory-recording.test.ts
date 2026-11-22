@@ -57,6 +57,8 @@ mock.module('@feed/agents', () => ({
   npcBootstrapService: { bootstrapNpc: async () => {} },
   acquireAgentLock: async () => true,
   releaseAgentLock: async () => {},
+  selectDueNpcMarketClue: async () => undefined,
+  getNpcMarketCluePublication: async () => undefined,
   withAgentExecutionLease: async <T>(
     _id: string,
     _owner: string,
@@ -93,6 +95,18 @@ mock.module(
   () => ({ ensureEngineServices: () => {} })
 );
 
+mock.module(
+  new URL(
+    '../../../../apps/web/src/app/api/cron/npc-tick/group-work.ts',
+    import.meta.url
+  ).pathname,
+  () => ({
+    runNpcGroupWork: async () => {
+      throw new Error('Group work called from ordinary NPC trajectory tests');
+    },
+  })
+);
+
 const npcRoute = await import(
   '../../../../apps/web/src/app/api/cron/npc-tick/route'
 );
@@ -109,7 +123,26 @@ describe('product tick training recording boundary', () => {
       new NextRequest('http://localhost/api/cron/npc-tick', { method: 'POST' })
     );
     expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      success: true,
+      processed: 1,
+      errors: 0,
+    });
     expect(executeTick).toHaveBeenCalledTimes(1);
     expect(executeTick.mock.calls[0]?.slice(2, 4)).toEqual([enabled, true]);
+  });
+
+  test('an NPC tick fails when its only attempt fails below the breaker threshold', async () => {
+    executeTick.mockRejectedValueOnce(new Error('NPC runtime unavailable'));
+    const response = await npcRoute.POST(
+      new NextRequest('http://localhost/api/cron/npc-tick', { method: 'POST' })
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      success: false,
+      processed: 1,
+      errors: 1,
+      abortedDueToCircuitBreaker: false,
+    });
   });
 });

@@ -63,29 +63,45 @@ let plainViewerId: string;
 let chatId: string;
 
 // Ownership is acquired per table from INSERT ... RETURNING results only.
-const ownedUserIds: string[] = [];
-const ownedBlockIds: string[] = [];
-const ownedMuteIds: string[] = [];
-const ownedNotificationIds: string[] = [];
+type FixtureRows = {
+  userIds: string[];
+  blockIds: string[];
+  muteIds: string[];
+  notificationIds: string[];
+};
 
-async function cleanupOwnedFixtures() {
-  if (ownedNotificationIds.length > 0) {
-    await db
-      .delete(notifications)
-      .where(inArray(notifications.id, ownedNotificationIds));
-  }
-  if (ownedBlockIds.length > 0) {
-    await db.delete(userBlocks).where(inArray(userBlocks.id, ownedBlockIds));
-  }
-  if (ownedMuteIds.length > 0) {
-    await db.delete(userMutes).where(inArray(userMutes.id, ownedMuteIds));
-  }
-  if (ownedUserIds.length > 0) {
-    await db.delete(users).where(inArray(users.id, ownedUserIds));
-  }
+const ownedRows: FixtureRows = {
+  userIds: [],
+  blockIds: [],
+  muteIds: [],
+  notificationIds: [],
+};
+
+async function cleanupRows({
+  userIds,
+  blockIds,
+  muteIds,
+  notificationIds,
+}: FixtureRows) {
+  await db.transaction(async (tx) => {
+    if (notificationIds.length > 0) {
+      await tx
+        .delete(notifications)
+        .where(inArray(notifications.id, notificationIds));
+    }
+    if (blockIds.length > 0) {
+      await tx.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
+    }
+    if (muteIds.length > 0) {
+      await tx.delete(userMutes).where(inArray(userMutes.id, muteIds));
+    }
+    if (userIds.length > 0) {
+      await tx.delete(users).where(inArray(users.id, userIds));
+    }
+  });
 }
 
-afterAll(cleanupOwnedFixtures);
+afterAll(() => cleanupRows(ownedRows));
 
 async function fetchChatUnreadCount(userId: string) {
   const result = (await FeedAgentExecutor.executeDirectly(
@@ -116,7 +132,7 @@ async function insertChatNotification(
     })
     .returning({ id: notifications.id });
   assert.ok(row);
-  ownedNotificationIds.push(row.id);
+  ownedRows.notificationIds.push(row.id);
 }
 
 beforeAll(async () => {
@@ -158,7 +174,7 @@ beforeAll(async () => {
       }))
     )
     .returning({ id: users.id });
-  ownedUserIds.push(...insertedUsers.map((row) => row.id));
+  ownedRows.userIds.push(...insertedUsers.map((row) => row.id));
 
   // The recipient muted one actor, blocked another, and is blocked by a
   // third — the three sets every other read surface excludes at read time.
@@ -174,12 +190,12 @@ beforeAll(async () => {
       { id: blockRowB, blockerId: blockerId, blockedId: recipientId },
     ])
     .returning({ id: userBlocks.id });
-  ownedBlockIds.push(...insertedBlocks.map((row) => row.id));
+  ownedRows.blockIds.push(...insertedBlocks.map((row) => row.id));
   const insertedMutes = await db
     .insert(userMutes)
     .values([{ id: muteRow, muterId: recipientId, mutedId: mutedId }])
     .returning({ id: userMutes.id });
-  ownedMuteIds.push(...insertedMutes.map((row) => row.id));
+  ownedRows.muteIds.push(...insertedMutes.map((row) => row.id));
 
   // Chat notifications for the recipient: 2 visible, 3 muted, 1 blocked
   // (created before the block), 1 from the actor who blocked the
@@ -210,7 +226,7 @@ beforeAll(async () => {
     })
     .returning({ id: notifications.id });
   assert.ok(nonChatRow);
-  ownedNotificationIds.push(nonChatRow.id);
+  ownedRows.notificationIds.push(nonChatRow.id);
 
   // A viewer with no moderation relations keeps the raw count.
   await insertChatNotification(plainViewerId, visibleId, false);
@@ -300,105 +316,117 @@ describe('retained FEED_MESSAGES provider path', () => {
 
 describe('fixture ownership', () => {
   it('teardown removes only rows the fixture actually owns', async () => {
-    // Foreign rows this fixture never created: a user, a block row in
-    // which that user blocks the recipient (relation-scoped cleanup
-    // keyed on the owned blockedId would have deleted it), and a chat
-    // notification for the foreign user.
+    // These sentinels belong to the control, separately from the main
+    // cohort. Its block references the recipient to catch cleanup by
+    // relation in place of exact acquired IDs.
+    const controls: FixtureRows = {
+      userIds: [],
+      blockIds: [],
+      muteIds: [],
+      notificationIds: [],
+    };
     const foreignUserId = await generateSnowflakeId();
     const foreignBlockId = await generateSnowflakeId();
     const foreignNotificationId = await generateSnowflakeId();
-    await db.insert(users).values({
-      id: foreignUserId,
-      username: `f84-foreign-${foreignUserId}`,
-      displayName: 'F84 Foreign',
-      updatedAt: new Date(),
-    });
-    await db.insert(userBlocks).values({
-      id: foreignBlockId,
-      blockerId: foreignUserId,
-      blockedId: recipientId,
-    });
-    await db.insert(notifications).values({
-      id: foreignNotificationId,
-      userId: foreignUserId,
-      type: 'system',
-      actorId: visibleId,
-      chatId,
-      title: 'New Message',
-      message: 'foreign chat message',
-      read: false,
-    });
 
-    // A partial setup step that tries to claim an existing notification
-    // ID fails on the duplicate key; because ownership comes only from
-    // RETURNING, the failed step owns nothing.
-    const partialOwnedIds: string[] = [];
-    let setupFailed = false;
     try {
-      const [row] = await db
+      const [foreignUser] = await db
+        .insert(users)
+        .values({
+          id: foreignUserId,
+          username: `f84-foreign-${foreignUserId}`,
+          displayName: 'F84 Foreign',
+          updatedAt: new Date(),
+        })
+        .returning({ id: users.id });
+      assert.ok(foreignUser);
+      controls.userIds.push(foreignUser.id);
+
+      const [foreignBlock] = await db
+        .insert(userBlocks)
+        .values({
+          id: foreignBlockId,
+          blockerId: foreignUser.id,
+          blockedId: recipientId,
+        })
+        .returning({ id: userBlocks.id });
+      assert.ok(foreignBlock);
+      controls.blockIds.push(foreignBlock.id);
+
+      const [foreignNotification] = await db
         .insert(notifications)
         .values({
           id: foreignNotificationId,
-          userId: recipientId,
+          userId: foreignUser.id,
           type: 'system',
           actorId: visibleId,
           chatId,
           title: 'New Message',
-          message: 'partial setup attempt',
+          message: 'foreign chat message',
           read: false,
         })
         .returning({ id: notifications.id });
-      if (row) partialOwnedIds.push(row.id);
-    } catch {
-      setupFailed = true;
+      assert.ok(foreignNotification);
+      controls.notificationIds.push(foreignNotification.id);
+
+      const ownedCount = ownedRows.notificationIds.length;
+      const tryClaimNotification = async () => {
+        const inserted = await db
+          .insert(notifications)
+          .values({
+            id: foreignNotification.id,
+            userId: recipientId,
+            type: 'system',
+            actorId: visibleId,
+            chatId,
+            title: 'New Message',
+            message: 'partial setup attempt',
+            read: false,
+          })
+          .returning({ id: notifications.id });
+        ownedRows.notificationIds.push(...inserted.map((row) => row.id));
+      };
+      await expect(tryClaimNotification()).rejects.toThrow();
+      expect(ownedRows.notificationIds).toHaveLength(ownedCount);
+
+      // Hold the main users until the control's references are released.
+      await cleanupRows({ ...ownedRows, userIds: [] });
+
+      const [ownedNotificationsLeft] = await db
+        .select({ n: count() })
+        .from(notifications)
+        .where(inArray(notifications.id, ownedRows.notificationIds));
+      assert.ok(ownedNotificationsLeft);
+      expect(ownedNotificationsLeft.n).toBe(0);
+
+      const [foreignUsersLeft] = await db
+        .select({ n: count() })
+        .from(users)
+        .where(inArray(users.id, controls.userIds));
+      assert.ok(foreignUsersLeft);
+      expect(foreignUsersLeft.n).toBe(1);
+      const [foreignBlocksLeft] = await db
+        .select({ n: count() })
+        .from(userBlocks)
+        .where(inArray(userBlocks.id, controls.blockIds));
+      assert.ok(foreignBlocksLeft);
+      expect(foreignBlocksLeft.n).toBe(1);
+      const [foreignNotificationsLeft] = await db
+        .select({ n: count() })
+        .from(notifications)
+        .where(inArray(notifications.id, controls.notificationIds));
+      assert.ok(foreignNotificationsLeft);
+      expect(foreignNotificationsLeft.n).toBe(1);
+    } finally {
+      await cleanupRows(controls);
     }
-    expect(setupFailed).toBe(true);
-    expect(partialOwnedIds).toHaveLength(0);
 
-    await cleanupOwnedFixtures();
-
-    // Everything the fixture owned is gone.
+    await cleanupRows(ownedRows);
     const [ownedUsersLeft] = await db
       .select({ n: count() })
       .from(users)
-      .where(inArray(users.id, ownedUserIds));
+      .where(inArray(users.id, ownedRows.userIds));
     assert.ok(ownedUsersLeft);
     expect(ownedUsersLeft.n).toBe(0);
-    const [ownedNotificationsLeft] = await db
-      .select({ n: count() })
-      .from(notifications)
-      .where(inArray(notifications.id, ownedNotificationIds));
-    assert.ok(ownedNotificationsLeft);
-    expect(ownedNotificationsLeft.n).toBe(0);
-
-    // Every foreign row survives, including the block that references
-    // an owned user and the notification whose ID the failed setup
-    // step tried to claim.
-    const [foreignUsersLeft] = await db
-      .select({ n: count() })
-      .from(users)
-      .where(inArray(users.id, [foreignUserId]));
-    assert.ok(foreignUsersLeft);
-    expect(foreignUsersLeft.n).toBe(1);
-    const [foreignBlocksLeft] = await db
-      .select({ n: count() })
-      .from(userBlocks)
-      .where(inArray(userBlocks.id, [foreignBlockId]));
-    assert.ok(foreignBlocksLeft);
-    expect(foreignBlocksLeft.n).toBe(1);
-    const [foreignNotificationsLeft] = await db
-      .select({ n: count() })
-      .from(notifications)
-      .where(inArray(notifications.id, [foreignNotificationId]));
-    assert.ok(foreignNotificationsLeft);
-    expect(foreignNotificationsLeft.n).toBe(1);
-
-    // Remove the foreign rows by the exact IDs this case created them
-    // with.
-    await db
-      .delete(notifications)
-      .where(inArray(notifications.id, [foreignNotificationId]));
-    await db.delete(userBlocks).where(inArray(userBlocks.id, [foreignBlockId]));
-    await db.delete(users).where(inArray(users.id, [foreignUserId]));
   });
 });

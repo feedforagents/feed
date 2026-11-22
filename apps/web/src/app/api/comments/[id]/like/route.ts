@@ -164,6 +164,7 @@ export const POST = withErrorHandling(
         id: comments.id,
         authorId: comments.authorId,
         postId: comments.postId,
+        deletedAt: comments.deletedAt,
       })
       .from(comments)
       .where(eq(comments.id, commentId))
@@ -171,6 +172,17 @@ export const POST = withErrorHandling(
 
     if (!comment) {
       throw new NotFoundError('Comment', commentId);
+    }
+
+    // Soft-deleted (moderated) comments are hidden everywhere, so they
+    // cannot collect new likes — the post like route applies the same
+    // rule to deleted posts. An existing like can still be removed via
+    // DELETE, which does not check deletedAt.
+    if (comment.deletedAt) {
+      throw new BusinessLogicError(
+        'Cannot like deleted comment',
+        'COMMENT_DELETED'
+      );
     }
 
     // Check if already liked
