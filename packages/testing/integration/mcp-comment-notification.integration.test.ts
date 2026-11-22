@@ -1,240 +1,213 @@
-/**
- * MCP create_comment follows the same rules as the web comments route and
- * the other MCP write tools: the post must exist, be published and not
- * deleted, and a fresh comment notifies the post author (never the agent
- * itself, and never across a block). A notification failure must not fail
- * the committed comment.
- *
- * Requires DATABASE_URL pointing at a disposable database with schema applied.
- */
-
-import { afterAll, describe, expect, it, spyOn } from 'bun:test';
+/** Retained comments and notifications. PRD §§8.1/12 and MVP Phases 3/5. */
+import { afterAll, expect, test } from 'bun:test';
+import { NextRequest } from 'next/server';
 import {
-  comments,
-  db,
-  eq,
-  inArray,
-  notifications,
-  posts,
-  userBlocks,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import * as notificationService from '../../api/src/services/notification-service';
-import { executeCreateComment } from '../../mcp/src/handlers/tool-handlers';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const userIds: string[] = [];
-const postIds: string[] = [];
-const commentIds: string[] = [];
-const blockIds: string[] = [];
+const cases = {
+  notification: 'notifies the author after persisting a signed MCP comment',
+  self: 'persists self-comments without notifying the author',
+  block: 'refuses both directions of a block without persisting or notifying',
+  deleted: 'refuses a comment on a deleted post',
+  missing: 'refuses a comment on an unknown post',
+  scheduled: 'refuses a comment on a future post',
+  outage: 'returns the committed comment when the notification write fails',
+};
 
-async function createUser(): Promise<string> {
-  const id = await generateSnowflakeId();
-  await db.insert(users).values({
-    id,
-    username: `mcpc_${id.slice(-10)}`,
-    isActor: false,
-    updatedAt: new Date(),
-  });
-  userIds.push(id);
-  return id;
-}
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks MCP comment notifications in a disposable PostgreSQL database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'mcp-comment-notification',
+      file: 'packages/testing/integration/mcp-comment-notification.integration.test.ts',
+      cases: Object.values(cases),
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  const {
+    comments,
+    db,
+    eq,
+    notifications,
+    posts,
+    sql,
+    userApiKeys,
+    userBlocks,
+    users,
+  } = await import('@feed/db');
+  const { generateApiKey, hashApiKey } = await import('@feed/api');
+  const { POST } = await import('../../../apps/web/src/app/api/mcp/route');
 
-async function createPost(
-  authorId: string,
-  overrides: Partial<typeof posts.$inferInsert> = {}
-): Promise<string> {
-  const id = await generateSnowflakeId();
-  await db.insert(posts).values({
-    id,
-    content: 'post to comment on',
-    authorId,
-    timestamp: new Date(Date.now() - 60_000),
-    ...overrides,
-  });
-  postIds.push(id);
-  return id;
-}
+  const sender = 'comment-notification-sender';
+  const author = 'comment-notification-author';
+  const authorBlocked = 'comment-notification-author-blocked';
+  const senderBlocked = 'comment-notification-sender-blocked';
+  const live = 'comment-notification-live';
+  const self = 'comment-notification-self';
+  const missing = 'comment-notification-missing';
+  const deleted = 'comment-notification-deleted';
+  const scheduled = 'comment-notification-scheduled';
+  const outage = 'comment-notification-outage';
+  const content = 'MCP comment notification fixture';
+  const key = generateApiKey();
+  const now = new Date();
+  const past = new Date(now.getTime() - 60_000);
+  const future = new Date(now.getTime() + 3_600_000);
 
-async function commentsOn(postId: string) {
-  return db
-    .select({ id: comments.id, authorId: comments.authorId })
-    .from(comments)
-    .where(eq(comments.postId, postId));
-}
-
-async function notificationsFor(postId: string) {
-  return db
-    .select({
-      userId: notifications.userId,
-      type: notifications.type,
-      actorId: notifications.actorId,
-      postId: notifications.postId,
-      commentId: notifications.commentId,
-    })
-    .from(notifications)
-    .where(eq(notifications.postId, postId));
-}
-
-describe('MCP create_comment', () => {
-  afterAll(async () => {
-    // Narrow cleanup: only rows this file's own inserts acquired — the
-    // comments it landed (by id) and the notifications those comments
-    // produced (by commentId). Never sweep by recipient or post.
-    if (commentIds.length) {
-      await db
-        .delete(notifications)
-        .where(inArray(notifications.commentId, commentIds));
-      await db.delete(comments).where(inArray(comments.id, commentIds));
-    }
-    await db.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
-    // Foreign-child refusal: fail loudly if any child row still
-    // references the owned parents instead of sweeping it away with
-    // the parent delete.
-    if (postIds.length) {
-      expect(
-        await db
-          .select({ id: notifications.id })
-          .from(notifications)
-          .where(inArray(notifications.postId, postIds))
-      ).toHaveLength(0);
-      expect(
-        await db
-          .select({ id: comments.id })
-          .from(comments)
-          .where(inArray(comments.postId, postIds))
-      ).toHaveLength(0);
-    }
-    await db.delete(posts).where(inArray(posts.id, postIds));
-    await db.delete(users).where(inArray(users.id, userIds));
-  });
-
-  it('notifies the post author when the agent comments', async () => {
-    const author = await createUser();
-    const agentUserId = await createUser();
-    const postId = await createPost(author);
-
-    const result = await executeCreateComment(
-      { agentId: 'agent', userId: agentUserId },
-      { postId, content: 'nice post' }
+  await db.transaction(async (tx) => {
+    await tx.insert(users).values(
+      [sender, author, authorBlocked, senderBlocked].map((id) => ({
+        id,
+        username: id,
+        updatedAt: now,
+      }))
     );
-    commentIds.push(result.commentId);
+    await tx.insert(userApiKeys).values({
+      id: 'comment-notification-key',
+      userId: sender,
+      keyHash: hashApiKey(key),
+    });
+    await tx.insert(posts).values([
+      { id: live, authorId: author, content, timestamp: past },
+      { id: self, authorId: sender, content, timestamp: past },
+      { id: authorBlocked, authorId: authorBlocked, content, timestamp: past },
+      { id: senderBlocked, authorId: senderBlocked, content, timestamp: past },
+      {
+        id: deleted,
+        authorId: author,
+        content,
+        timestamp: past,
+        deletedAt: now,
+      },
+      { id: scheduled, authorId: author, content, timestamp: future },
+      { id: outage, authorId: author, content, timestamp: past },
+    ]);
+    await tx.insert(userBlocks).values([
+      { id: authorBlocked, blockerId: authorBlocked, blockedId: sender },
+      { id: senderBlocked, blockerId: sender, blockedId: senderBlocked },
+    ]);
+  });
 
-    expect(result.success).toBe(true);
-    expect(await commentsOn(postId)).toHaveLength(1);
-    expect(await notificationsFor(postId)).toEqual([
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      if (new URL(request.url).pathname !== '/api/mcp') {
+        return new Response(null, { status: 404 });
+      }
+      // Exercise the per-user key flow instead of the local dev bypass.
+      const headers = new Headers(request.headers);
+      headers.set('host', 'comment-notification.test');
+      return POST(new NextRequest(request, { headers }));
+    },
+  });
+  afterAll(() => server.stop(true));
+  const endpoint = new URL('/api/mcp', server.url);
+
+  async function comment(postId: string) {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Feed-Api-Key': key },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: postId,
+        method: 'tools/call',
+        params: {
+          name: 'create_comment',
+          arguments: { postId, content },
+        },
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      result?: { isError?: boolean; content?: { text?: string }[] };
+    };
+    expect(body.result).toBeDefined();
+    return body.result;
+  }
+
+  async function commentsOn(postId: string) {
+    return db
+      .select({
+        id: comments.id,
+        authorId: comments.authorId,
+        content: comments.content,
+      })
+      .from(comments)
+      .where(eq(comments.postId, postId));
+  }
+
+  async function notificationsOn(postId: string) {
+    return db
+      .select({
+        userId: notifications.userId,
+        type: notifications.type,
+        actorId: notifications.actorId,
+        commentId: notifications.commentId,
+      })
+      .from(notifications)
+      .where(eq(notifications.postId, postId));
+  }
+
+  async function expectRefused(postId: string, message: string) {
+    const result = await comment(postId);
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text?.toLowerCase()).toContain(message);
+    expect(await commentsOn(postId)).toEqual([]);
+    expect(await notificationsOn(postId)).toEqual([]);
+  }
+
+  test(cases.notification, async () => {
+    const unsigned = await fetch(endpoint, { method: 'POST' });
+    expect(unsigned.status).toBe(401);
+    expect((await comment(live))?.isError).toBe(false);
+    const saved = await commentsOn(live);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ authorId: sender, content });
+    expect(await notificationsOn(live)).toEqual([
       {
         userId: author,
         type: 'comment',
-        actorId: agentUserId,
-        postId,
-        commentId: result.commentId,
+        actorId: sender,
+        commentId: saved[0]?.id ?? null,
       },
     ]);
   });
 
-  it('does not notify when the agent comments on its own post', async () => {
-    const agentUserId = await createUser();
-    const postId = await createPost(agentUserId);
-
-    const result = await executeCreateComment(
-      { agentId: 'agent', userId: agentUserId },
-      { postId, content: 'note to self' }
-    );
-    commentIds.push(result.commentId);
-
-    expect(result.success).toBe(true);
-    expect(await commentsOn(postId)).toHaveLength(1);
-    expect(await notificationsFor(postId)).toHaveLength(0);
+  test(cases.self, async () => {
+    expect((await comment(self))?.isError).toBe(false);
+    expect(await commentsOn(self)).toEqual([
+      { id: expect.any(String), authorId: sender, content },
+    ]);
+    expect(await notificationsOn(self)).toEqual([]);
   });
 
-  it('does not notify across a block, but the comment still lands', async () => {
-    const author = await createUser();
-    const agentUserId = await createUser();
-    const postId = await createPost(author);
-    const inserted = await db
-      .insert(userBlocks)
-      .values({
-        id: await generateSnowflakeId(),
-        blockerId: author,
-        blockedId: agentUserId,
-      })
-      .returning({ id: userBlocks.id });
-    blockIds.push(...inserted.map((row) => row.id));
-
-    const result = await executeCreateComment(
-      { agentId: 'agent', userId: agentUserId },
-      { postId, content: 'blocked hello' }
-    );
-    commentIds.push(result.commentId);
-
-    expect(result.success).toBe(true);
-    expect(await commentsOn(postId)).toHaveLength(1);
-    expect(await notificationsFor(postId)).toHaveLength(0);
-  });
-
-  it('rejects a comment on a deleted post', async () => {
-    const author = await createUser();
-    const agentUserId = await createUser();
-    const postId = await createPost(author, { deletedAt: new Date() });
-
-    await expect(
-      executeCreateComment(
-        { agentId: 'agent', userId: agentUserId },
-        { postId, content: 'too late' }
-      )
-    ).rejects.toThrow('deleted');
-    expect(await commentsOn(postId)).toHaveLength(0);
-    expect(await notificationsFor(postId)).toHaveLength(0);
-  });
-
-  it('rejects a comment on an unknown post', async () => {
-    const agentUserId = await createUser();
-    const postId = await generateSnowflakeId();
-
-    await expect(
-      executeCreateComment(
-        { agentId: 'agent', userId: agentUserId },
-        { postId, content: 'into the void' }
-      )
-    ).rejects.toThrow('not found');
-    expect(await commentsOn(postId)).toHaveLength(0);
-  });
-
-  it('rejects a comment on a future post', async () => {
-    const author = await createUser();
-    const agentUserId = await createUser();
-    const postId = await createPost(author, {
-      timestamp: new Date(Date.now() + 60 * 60 * 1000),
-    });
-
-    await expect(
-      executeCreateComment(
-        { agentId: 'agent', userId: agentUserId },
-        { postId, content: 'early' }
-      )
-    ).rejects.toThrow('not found');
-    expect(await commentsOn(postId)).toHaveLength(0);
-    expect(await notificationsFor(postId)).toHaveLength(0);
-  });
-
-  it('still reports the committed comment when the author notification fails', async () => {
-    const author = await createUser();
-    const agentUserId = await createUser();
-    const postId = await createPost(author);
-    const notify = spyOn(notificationService, 'notifyCommentOnPost');
-    notify.mockRejectedValueOnce(new Error('notification unavailable'));
-    try {
-      const result = await executeCreateComment(
-        { agentId: 'agent', userId: agentUserId },
-        { postId, content: 'committed anyway' }
-      );
-      commentIds.push(result.commentId);
-
-      expect(result.success).toBe(true);
-      expect(await commentsOn(postId)).toHaveLength(1);
-    } finally {
-      notify.mockRestore();
+  test(cases.block, async () => {
+    for (const postId of [authorBlocked, senderBlocked]) {
+      await expectRefused(postId, 'cannot comment on this post');
     }
   });
-});
+
+  for (const [postId, name, message] of [
+    [deleted, cases.deleted, 'deleted'],
+    [missing, cases.missing, 'not found'],
+    [scheduled, cases.scheduled, 'not found'],
+  ] as const) {
+    test(name, () => expectRefused(postId, message));
+  }
+
+  test(cases.outage, async () => {
+    // Force just this fixture's notification INSERT to fail inside the lease.
+    await db.execute(sql`
+      ALTER TABLE "Notification" ADD CONSTRAINT fixture_notification_outage
+      CHECK ("postId" <> 'comment-notification-outage')
+    `);
+    expect((await comment(outage))?.isError).toBe(false);
+    expect(await commentsOn(outage)).toEqual([
+      { id: expect.any(String), authorId: sender, content },
+    ]);
+    expect(await notificationsOn(outage)).toEqual([]);
+  });
+}

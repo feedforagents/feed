@@ -73,24 +73,23 @@ function validateLimiterConfig(config: {
 }
 
 /**
- * Count non-deleted articles published within [now - windowMs, now].
+ * Non-deleted articles published within [now - windowMs, now].
  * Future-dated rows are excluded.
  */
-async function countRecentArticles(windowMs: number): Promise<number> {
-  const now = new Date();
-  const windowStart = new Date(now.getTime() - windowMs);
+function recentArticlesWindow(now: Date, windowMs: number) {
+  return and(
+    eq(posts.type, 'article'),
+    gte(posts.timestamp, new Date(now.getTime() - windowMs)),
+    lte(posts.timestamp, now),
+    isNull(posts.deletedAt)
+  );
+}
 
+async function countRecentArticles(windowMs: number): Promise<number> {
   const [result] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(posts)
-    .where(
-      and(
-        eq(posts.type, 'article'),
-        gte(posts.timestamp, windowStart),
-        lte(posts.timestamp, now),
-        isNull(posts.deletedAt)
-      )
-    );
+    .where(recentArticlesWindow(new Date(), windowMs));
 
   return result?.count ?? 0;
 }
@@ -186,6 +185,26 @@ export class ArticleRateLimiterService {
     }
 
     return result;
+  }
+
+  /**
+   * Earliest time, in Unix milliseconds, when the current window has room.
+   */
+  async getNextAvailableAt(): Promise<number> {
+    const { maxArticlesPerHour, windowMs } = this.config;
+    const now = new Date();
+    const [lastOccupiedSlot] = await db
+      .select({ timestamp: posts.timestamp })
+      .from(posts)
+      .where(recentArticlesWindow(now, windowMs))
+      .orderBy(sql`${posts.timestamp} desc`)
+      .limit(1)
+      .offset(maxArticlesPerHour - 1);
+
+    // The start of the current window is inclusive.
+    return lastOccupiedSlot
+      ? lastOccupiedSlot.timestamp.getTime() + windowMs + 1
+      : now.getTime();
   }
 
   /**
