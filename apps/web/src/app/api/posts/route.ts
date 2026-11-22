@@ -29,7 +29,7 @@
  *         name: cursor
  *         schema:
  *           type: string
- *         description: Cursor for pagination (timestamp)
+ *         description: Cursor returned by the previous page. Legacy timestamp-only cursors are also accepted.
  *       - in: query
  *         name: actorId
  *         schema:
@@ -254,6 +254,7 @@ import {
   count,
   db,
   desc,
+  encodePostCursor,
   eq,
   follows,
   getBlockedByUserIds,
@@ -261,8 +262,10 @@ import {
   getMutedUserIds,
   inArray,
   isNull,
-  lt,
   lte,
+  type PostFeedVisibilityOptions,
+  postCursorConditions,
+  postFeedVisibilityConditions,
   posts,
   reactions,
   sql,
@@ -754,17 +757,28 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               count: count(),
             })
             .from(comments)
-            .where(inArray(comments.postId, postIds))
+            .where(
+              and(inArray(comments.postId, postIds), isNull(comments.deletedAt))
+            )
             .groupBy(comments.postId)
         : [],
     ]);
 
     // Create maps for quick lookup
-    const reactionMap = new Map(
-      reactionCounts.map((r) => [r.postId, Number(r.count)])
+    // The rows' postId is nullable in the schema (reactions/comments
+    // postId has no .notNull()), so the tuple key carries null even
+    // though the inArray filter only ever returns real post ids.
+    const reactionMap = new Map<string | null, number>(
+      reactionCounts.map((r): [string | null, number] => [
+        r.postId,
+        Number(r.count),
+      ])
     );
-    const commentMap = new Map(
-      commentCounts.map((c) => [c.postId, Number(c.count)])
+    const commentMap = new Map<string | null, number>(
+      commentCounts.map((c): [string | null, number] => [
+        c.postId,
+        Number(c.count),
+      ])
     );
 
     // Fetch original posts for reposts in the following feed.
@@ -855,17 +869,51 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       };
     });
 
+    // Continuation for the next page: the last fetched post's
+    // (timestamp, id), so a client can resume inside a group of posts
+    // that share one timestamp instead of skipping the rest of it.
+    const lastFetchedPost = postsResult[postsResult.length - 1];
+    const followingNextCursor =
+      postsResult.length === limit && lastFetchedPost
+        ? encodePostCursor(lastFetchedPost.timestamp, lastFetchedPost.id)
+        : null;
+
     const followingRes = NextResponse.json({
       success: true,
       posts: formattedFollowingPosts,
       limit,
       source: 'following',
+      nextCursor: followingNextCursor,
     });
     // Personalized (follows + moderation): never cacheable by shared caches.
     if (rateLimitInfo) addPrivateReadHeaders(followingRes, rateLimitInfo);
     else followingRes.headers.set('Cache-Control', 'private, no-store');
     return followingRes;
   }
+
+  // Visibility filters for this viewer, applied in SQL before each page is
+  // cut below. Filtering a fetched page afterwards shortens that page, and
+  // the response derives hasMore from the shortened page — so one hidden
+  // post in a page would report the end of the feed and strand every older
+  // post. (The in-memory moderation filter below stays as a second guard.)
+  const filterUserId = authUser?.userId;
+  const viewerExcludedAuthorIds: string[] = filterUserId
+    ? [
+        ...new Set(
+          (
+            await Promise.all([
+              getBlockedUserIds(filterUserId),
+              getMutedUserIds(filterUserId),
+              getBlockedByUserIds(filterUserId),
+            ])
+          ).flat()
+        ),
+      ]
+    : [];
+  const feedVisibility: PostFeedVisibilityOptions = {
+    excludedAuthorIds: viewerExcludedAuthorIds,
+    excludeDeadReposts: true,
+  };
 
   // Get posts from database with cursor-based pagination
   let postsResult: Post[];
@@ -887,10 +935,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     const now = new Date();
 
     // Build conditions
-    const conditions = [eq(posts.type, type), isNull(posts.deletedAt)];
+    const conditions = [
+      eq(posts.type, type),
+      isNull(posts.deletedAt),
+      ...postFeedVisibilityConditions(feedVisibility),
+    ];
 
     if (cursor) {
-      conditions.push(lt(posts.timestamp, new Date(cursor)));
+      conditions.push(...(await postCursorConditions(cursor)));
     }
     conditions.push(lte(posts.timestamp, now)); // No future posts
 
@@ -898,7 +950,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       .select()
       .from(posts)
       .where(and(...conditions))
-      .orderBy(desc(posts.timestamp))
+      .orderBy(desc(posts.timestamp), desc(posts.id))
       .limit(limit);
 
     logger.info(
@@ -908,7 +960,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     );
   } else if (actorId) {
     // Get posts by specific actor (cached with cursor)
-    postsResult = await cachedDb.getPostsByActor(actorId, limit, cursor);
+    postsResult = await cachedDb.getPostsByActor(
+      actorId,
+      limit,
+      cursor,
+      feedVisibility
+    );
     logger.info(
       'Fetched posts by actor (cached)',
       { actorId, count: postsResult.length },
@@ -916,7 +973,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     );
   } else {
     // Get recent posts with cursor-based pagination
-    postsResult = await cachedDb.getRecentPosts(limit, cursor);
+    postsResult = await cachedDb.getRecentPosts(limit, cursor, feedVisibility);
     logger.info(
       'Fetched recent posts (cached)',
       { count: postsResult.length, limit, cursor },
@@ -944,20 +1001,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     }
   }
 
-  // Apply moderation filters only for authenticated user (use auth identity, not query param)
-  const filterUserId = authUser?.userId;
-  if (filterUserId) {
-    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
-      getBlockedUserIds(filterUserId),
-      getMutedUserIds(filterUserId),
-      getBlockedByUserIds(filterUserId),
-    ]);
-
-    const excludedUserIds = new Set([
-      ...blockedIds,
-      ...mutedIds,
-      ...blockedByIds,
-    ]);
+  // Defense in depth: the page queries above already exclude this viewer's
+  // blocked/muted/blocking authors in SQL (see feedVisibility). Keep the
+  // in-memory moderation filter so no branch can leak a hidden post.
+  if (viewerExcludedAuthorIds.length > 0) {
+    const excludedUserIds = new Set(viewerExcludedAuthorIds);
     postsResult = postsResult.filter(
       (post) => !excludedUserIds.has(post.authorId)
     );
@@ -1330,11 +1378,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     'GET /api/posts'
   );
 
-  // Calculate next cursor (timestamp of last post for keyset pagination)
-  const nextCursor =
-    formattedPosts.length > 0
-      ? formattedPosts[formattedPosts.length - 1]?.timestamp
-      : null;
+  // Next keyset cursor: last post's timestamp and id, so posts sharing that
+  // timestamp are not skipped on the next page.
+  const lastPost = formattedPosts[formattedPosts.length - 1];
+  const nextCursor = lastPost
+    ? encodePostCursor(lastPost.timestamp, lastPost.id)
+    : null;
 
   const response = NextResponse.json({
     success: true,
