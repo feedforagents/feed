@@ -248,7 +248,8 @@ mock.module('@feed/engine', () => ({
       newNoShares: 100,
     })),
     calculateBuyWithFees: mock(() => ({
-      shares: 10,
+      sharesBought: 10,
+      avgPrice: 0.999,
       totalCost: 9.99,
       newYesShares: 110,
       newNoShares: 100,

@@ -57,10 +57,12 @@ import {
   acquireUserBlockPairLock,
   and,
   db,
+  dbWrite,
   desc,
   eq,
   favorites,
   follows,
+  followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
@@ -68,8 +70,11 @@ import {
   hasBlocked,
   inArray,
   isNull,
+  like,
   lte,
   markets,
+  not,
+  notExists,
   perpMarketSnapshots,
   posts,
   postTags,
@@ -83,6 +88,7 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -121,14 +127,22 @@ function buildWalletPort(): WalletPort {
 
 function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
         relatedId,
-        tx
+        tx,
+        operationId
       ),
   };
 }
@@ -666,6 +680,7 @@ function buildPerpService() {
       minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
     feeProcessor: buildFeeProcessor(),
+    tradingFeeOutbox: createTradingFeeOutboxAdapter(),
   });
 }
 
@@ -846,6 +861,21 @@ export async function executeGetPositions(
     skip: args.offset,
   });
 
+  // Open perpetual positions are open positions too: the same server opens
+  // and closes them (open_position / close_position), the A2A
+  // portfolio.get_positions returns them next to prediction positions, and
+  // the web wallet lists them in the same view. A marketId filter names a
+  // prediction market, so it narrows the result to prediction positions.
+  const perpPositionsRaw = args.marketId
+    ? []
+    : await db.perpPosition.findMany({
+        where: {
+          userId: agent.userId,
+          closedAt: null,
+        },
+        orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
+      });
+
   // Get markets separately
   const marketIds = positionsRaw
     .map((p) => p.marketId)
@@ -868,6 +898,17 @@ export async function executeGetPositions(
       side: p.side ? 'YES' : 'NO',
       shares: p.shares.toString(),
       avgPrice: p.avgPrice.toString(),
+    })),
+    perpPositions: perpPositionsRaw.map((p) => ({
+      id: p.id,
+      ticker: p.ticker,
+      side: resolvePerpSide(p.side),
+      size: p.size.toString(),
+      entryPrice: p.entryPrice.toString(),
+      currentPrice: p.currentPrice.toString(),
+      leverage: p.leverage,
+      unrealizedPnL: p.unrealizedPnL.toString(),
+      fundingPaid: p.fundingPaid.toString(),
     })),
   };
 }
@@ -978,18 +1019,36 @@ export async function executeQueryFeed(
   }
 
   const now = new Date();
-  const posts = await db.post.findMany({
-    where: {
-      deletedAt: null,
-      timestamp: { lte: now }, // No future posts
-      ...(relatedQuestion !== undefined && { relatedQuestion }),
-    },
-    orderBy: { timestamp: 'desc' },
-    take: args.limit || 20,
-  });
+  // Filter in SQL before the limit without requiring NPC authors to have Users.
+  const feedPosts = await db
+    .select({
+      id: posts.id,
+      content: posts.content,
+      authorId: posts.authorId,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(
+      and(
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now),
+        not(like(posts.authorId, 'test-%')),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        ),
+        relatedQuestion !== undefined
+          ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined
+      )
+    )
+    .orderBy(desc(posts.timestamp))
+    .limit(args.limit || 20);
 
   return {
-    posts: posts.map((p) => ({
+    posts: feedPosts.map((p) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
@@ -1528,6 +1587,24 @@ export async function executeCreateComment(
   agent: AuthenticatedAgent,
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
+  const post = await dbWrite.post.findFirst({
+    where: { id: args.postId },
+  });
+
+  // Unknown posts cannot take comments (and are never created from the ID:
+  // comments.postId has no foreign key, so an unchecked comment would
+  // become an orphan row).
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
+  // Soft-deleted posts are hidden everywhere, so they cannot collect new
+  // comments — the web post comments route applies the same rule, as does
+  // the A2A createComment executor.
+  if (post.deletedAt) {
+    throw new NotFoundError('Post (deleted)', args.postId);
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {
@@ -1774,22 +1851,7 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  const existing = await db.follow.findFirst({
-    where: {
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
-  if (existing) {
-    return { success: true };
-  }
-  await db.follow.create({
-    data: {
-      id: await generateSnowflakeId(),
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
+  await followUserWithBlockCheck(agent.userId, args.userId);
   return { success: true };
 }
 
@@ -1890,6 +1952,15 @@ export async function executeSearchUsers(
 ): Promise<SearchUsersResult> {
   const usersList = await db.user.findMany({
     where: {
+      // Match the web people search (GET /api/users/search) and the A2A
+      // people lookup (users.search): banned accounts are never returned,
+      // and test accounts are not real users. A test account carries the
+      // isTest flag or a 'test-' id prefix — the membership rule the feed
+      // surfaces use. The exclusions run before the limit so hidden
+      // accounts cannot occupy result slots.
+      isBanned: false,
+      isTest: false,
+      NOT: { id: { startsWith: 'test-' } },
       OR: [
         { username: { contains: args.query, mode: 'insensitive' } },
         { displayName: { contains: args.query, mode: 'insensitive' } },
@@ -1943,6 +2014,15 @@ export async function executeSearchAgents(
           : []),
         { OR: [{ isAgent: true }, { isActor: true }] },
         { isBanned: false },
+        // Test accounts are not real agents or NPCs — every user-facing
+        // surface hides them (the A2A people lookup states the rule
+        // verbatim). A test account carries the isTest flag or a 'test-'
+        // id prefix: NPC User rows are bootstrapped from pack actors
+        // without copying the flag, so both axes are required. The
+        // exclusions run before the limit so hidden accounts cannot
+        // occupy result slots.
+        { isTest: false },
+        { NOT: { id: { startsWith: 'test-' } } },
       ],
     },
     select: {

@@ -28,6 +28,7 @@ import {
   physicalFeeSchemaDiagnostics,
   requireCondition,
   SchemaHold,
+  STAGING_FUNDING_MIGRATION,
   sameDatabase,
   text,
   verifyAdditiveColumns,
@@ -172,6 +173,10 @@ function expectedMigrations(): Migration[] {
     '0004_leverage_cap_20',
     '0005_trading_fee_idempotency_key',
   ];
+  if (entries.length === tags.length + 1) {
+    tags.push(STAGING_FUNDING_MIGRATION.tag);
+    verifyOriginalMigrationSource(ROOT);
+  }
   requireCondition(entries.length === tags.length, 'unexpected_journal');
   return entries.map((entry, index) => {
     requireCondition(
@@ -213,7 +218,7 @@ function pgEnvironment(
       : '-c statement_timeout=5000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=5000 -c default_transaction_read_only=on -c search_path=pg_catalog,public',
   };
 }
-function psql(
+export function psql(
   target: Endpoint,
   ca: string,
   input: string,
@@ -244,7 +249,30 @@ function psql(
   );
   return result.stdout.trim();
 }
-const catalogSql = `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+// Phase 0 uses the same read-only catalog snapshot as the fee inspection.
+const phase0CatalogFields = `,
+  'phase0Tables',(SELECT json_object_agg(t.name,json_build_object(
+    'kind',c.relkind,'rls',c.relrowsecurity,
+    'publicAccess',EXISTS(SELECT 1 FROM pg_catalog.aclexplode(c.relacl) a WHERE a.grantee=0)
+      OR EXISTS(SELECT 1 FROM pg_catalog.pg_attribute p CROSS JOIN LATERAL pg_catalog.aclexplode(p.attacl) a
+        WHERE p.attrelid=c.oid AND p.attnum>0 AND NOT p.attisdropped AND a.grantee=0),
+    'appAccess',has_table_privilege(current_user,c.oid,'SELECT') AND has_table_privilege(current_user,c.oid,'INSERT')
+      AND has_table_privilege(current_user,c.oid,'UPDATE')
+      AND (t.name<>'PredictionResolutionWork' OR has_table_privilege(current_user,c.oid,'DELETE')),
+    'columns',(SELECT json_agg(json_build_array(a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),a.attnotnull,pg_catalog.pg_get_expr(d.adbin,d.adrelid)) ORDER BY a.attnum)
+      FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+      WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped),
+    'constraints',(SELECT json_agg(CASE WHEN k.convalidated THEN pg_catalog.pg_get_constraintdef(k.oid) END ORDER BY k.contype,k.conname)
+      FROM pg_catalog.pg_constraint k WHERE k.conrelid=c.oid AND k.contype<>'n'),
+    'indexes',(SELECT json_object_agg(i.relname,pg_catalog.pg_get_indexdef(i.oid))
+      FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class i ON i.oid=x.indexrelid
+      WHERE x.indrelid=c.oid AND x.indisvalid AND x.indisready AND x.indislive AND NOT x.indisprimary)))
+    FROM (VALUES ('ScheduledInferenceReservation'),('PredictionResolutionWork')) t(name)
+    LEFT JOIN pg_catalog.pg_class c ON c.oid=pg_catalog.to_regclass('public.'||pg_catalog.quote_ident(t.name)))`;
+
+const catalogSql = (
+  includePhase0 = false
+) => `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SELECT json_build_object(
   'database',current_database(),'role',current_user,'sessionRole',session_user,
   'address',pg_catalog.host(inet_server_addr()),'port',inet_server_port(),
@@ -266,19 +294,88 @@ SELECT json_build_object(
     FROM (VALUES ('PerpMarketSnapshot'),('Position'),('TradingFee'),('TradingFeeOutbox')) t(name)
     LEFT JOIN pg_catalog.pg_class c ON c.oid=pg_catalog.to_regclass('public.'||pg_catalog.quote_ident(t.name))
     LEFT JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace),
+  'fundingPosition',(SELECT json_build_object('oid',c.oid::text,'kind',c.relkind,'canMigrate',pg_has_role(current_user,c.relowner,'USAGE')) FROM pg_catalog.pg_class c WHERE c.oid=pg_catalog.to_regclass('public."PerpPosition"')),
+  'fundingLedger',(SELECT json_build_object(
+    'oid',c.oid::text,'kind',c.relkind,'rls',c.relrowsecurity,
+    'canMigrate',pg_has_role(current_user,c.relowner,'USAGE'),
+    'appAccess',has_table_privilege(current_user,c.oid,'SELECT') AND has_table_privilege(current_user,c.oid,'INSERT'),
+    'columns',(SELECT json_agg(json_build_array(a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),a.attnotnull,a.atthasdef) ORDER BY a.attnum)
+      FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped),
+    'constraints',(SELECT count(*) FROM pg_catalog.pg_constraint t WHERE t.conrelid=c.oid AND t.contype<>'n'),
+    'primary',EXISTS(SELECT 1 FROM pg_catalog.pg_constraint t WHERE t.conrelid=c.oid AND t.contype='p' AND t.conkey=ARRAY[1,2]::smallint[] AND t.convalidated),
+    'positionFk',EXISTS(SELECT 1 FROM pg_catalog.pg_constraint t JOIN pg_catalog.pg_attribute a ON a.attrelid=t.confrelid AND a.attname='id' AND NOT a.attisdropped
+      WHERE t.conrelid=c.oid AND t.contype='f' AND t.confrelid=pg_catalog.to_regclass('public."PerpPosition"')
+      AND t.conkey=ARRAY[1]::smallint[] AND t.confkey=ARRAY[a.attnum] AND t.confdeltype='c' AND t.convalidated))
+    FROM pg_catalog.pg_class c WHERE c.oid=pg_catalog.to_regclass('public."PerpPositionFundingAccrual"')),
   'additiveColumns',COALESCE((SELECT json_agg(json_build_object('table',c.relname,'column',a.attname,'type',pg_catalog.format_type(a.atttypid,a.atttypmod),'notNull',a.attnotnull,'hasDefault',a.atthasdef,'defaultExpression',pg_catalog.pg_get_expr(d.adbin,d.adrelid),'dropped',a.attisdropped) ORDER BY c.relname,a.attname)
     FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
     LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
-    WHERE a.attnum>0 AND ((c.oid=pg_catalog.to_regclass('public."Position"') AND a.attname='cashCostBasis') OR (c.oid=pg_catalog.to_regclass('public."PerpMarketSnapshot"') AND a.attname='maxLeverage'))),'[]'::json)
+    WHERE a.attnum>0 AND ((c.oid=pg_catalog.to_regclass('public."Position"') AND a.attname='cashCostBasis') OR (c.oid=pg_catalog.to_regclass('public."PerpMarketSnapshot"') AND a.attname='maxLeverage'))),'[]'::json)${includePhase0 ? phase0CatalogFields : ''}
 );
 ROLLBACK;`;
+
+export function phase0RuntimeInput(args: string[]) {
+  requireCondition(
+    args.length === 3 &&
+      args.every((flag) => flag === 'true' || flag === 'false'),
+    'invalid_phase0_runtime_checks'
+  );
+  return {
+    gameStartPaused: args[0] === 'true',
+    canonicalDailyBudgetUsd100: args[1] === 'true',
+    requestBoundPresent: args[2] === 'true',
+  };
+}
+
+export function phase0Inspection(tables: Record<string, unknown>) {
+  const budget = object(tables.ScheduledInferenceReservation);
+  const recovery = object(tables.PredictionResolutionWork);
+  const indexes = object(budget.indexes ?? {});
+  return {
+    migration0007: {
+      tablePresent: budget.kind === 'r',
+      catalogMatches:
+        budget.kind === 'r' &&
+        budget.rls === false &&
+        JSON.stringify(budget.columns) ===
+          '[["id","text",true,null],["boundMicroUsd","bigint",true,null],["createdAt","timestamp with time zone",true,"now()"],["costMicroUsd","bigint",false,null],["settledAt","timestamp with time zone",false,null]]' &&
+        JSON.stringify(budget.constraints) ===
+          JSON.stringify([
+            'CHECK (("boundMicroUsd" > 0))',
+            'CHECK (((("settledAt" IS NULL) AND ("costMicroUsd" IS NULL)) OR (("settledAt" IS NOT NULL) AND ("costMicroUsd" IS NOT NULL) AND ("costMicroUsd" >= 0))))',
+            'PRIMARY KEY (id)',
+          ]) &&
+        indexes.scheduled_inference_settled_at_idx ===
+          'CREATE INDEX scheduled_inference_settled_at_idx ON public."ScheduledInferenceReservation" USING btree ("settledAt")' &&
+        indexes.scheduled_inference_bound_violation_idx ===
+          'CREATE INDEX scheduled_inference_bound_violation_idx ON public."ScheduledInferenceReservation" USING btree (id) WHERE ("costMicroUsd" > "boundMicroUsd")',
+      appRoleAccess: budget.appAccess === true && budget.rls === false,
+    },
+    migration0008: {
+      tablePresent: recovery.kind === 'r',
+      catalogMatches:
+        recovery.kind === 'r' &&
+        recovery.rls === false &&
+        JSON.stringify(recovery.columns) ===
+          '[["questionId","text",true,null],["resolutionDate","timestamp without time zone",true,null],["outcome","boolean",true,null],["nextAttemptAt","timestamp with time zone",false,null],["draft","jsonb",false,null]]' &&
+        JSON.stringify(recovery.constraints) ===
+          JSON.stringify([
+            'FOREIGN KEY ("questionId") REFERENCES "Question"(id) ON DELETE CASCADE',
+            'PRIMARY KEY ("questionId")',
+          ]),
+      appRoleAccess: recovery.appAccess === true && recovery.rls === false,
+    },
+  };
+}
+
 function inspect(
   target: Endpoint,
   ca: string,
   migrations: Migration[],
-  allowStagingBaselineAdditive = false
+  allowStagingBaselineAdditive = false,
+  includePhase0 = false
 ) {
-  const row = object(JSON.parse(psql(target, ca, catalogSql)));
+  const row = object(JSON.parse(psql(target, ca, catalogSql(includePhase0))));
   requireCondition(
     row.database === target.database &&
       row.role === target.user &&
@@ -291,11 +388,18 @@ function inspect(
   text(row.feeOid);
   text(row.outboxOid);
   text(row.address);
+  const receipts = list(row.history);
+  const tail = object(receipts.at(-1) ?? {});
+  const fundingMigration = migrations[STAGING_FUNDING_MIGRATION.index];
+  const fundingReady =
+    fundingMigration !== undefined &&
+    tail.hash === fundingMigration.hash &&
+    tail.when === fundingMigration.when;
   let historyLength: number;
   try {
     historyLength = verifyHistory(
-      row.history,
-      migrations,
+      fundingReady ? receipts.slice(0, -1) : receipts,
+      migrations.slice(0, STAGING_FUNDING_MIGRATION.index),
       allowStagingBaselineAdditive
     );
   } catch (error) {
@@ -327,7 +431,36 @@ function inspect(
     columnsReady || !indexReady,
     'index_without_receipted_columns'
   );
-  return { row, historyLength, columnsReady, indexReady };
+  if (fundingMigration) {
+    const position = object(row.fundingPosition);
+    requireCondition(
+      row.searchPath === 'pg_catalog,public' &&
+        position.kind === 'r' &&
+        typeof position.oid === 'string' &&
+        /^[1-9]\d*$/.test(position.oid),
+      'incorrect_funding_target'
+    );
+    if (fundingReady) {
+      const ledger = object(row.fundingLedger);
+      requireCondition(
+        (historyLength === 4 || historyLength === 6) &&
+          ledger.kind === 'r' &&
+          ledger.rls === false &&
+          ledger.constraints === 2 &&
+          ledger.primary === true &&
+          ledger.positionFk === true &&
+          JSON.stringify(ledger.columns) ===
+            '[["positionId","text",true,false],["periodStart","timestamp with time zone",true,false]]',
+        'incorrect_funding_ledger'
+      );
+    } else {
+      requireCondition(
+        row.fundingLedger === null,
+        'unreceipted_funding_ledger'
+      );
+    }
+  }
+  return { row, historyLength, columnsReady, indexReady, fundingReady };
 }
 export function migrationUrl(target: Endpoint, ca: string) {
   const url = new URL('postgresql://invalid');
@@ -395,8 +528,9 @@ export interface FeeSchemaDatabaseOptions {
   mode: 'inspect' | 'prepare';
   beforeWrite: (state: FeeSchemaState) => Promise<void>;
   onPhase?: (phase: string) => void;
-  // Only the guarded normal staging wrapper opts into the approved exception.
+  // Only the guarded staging wrapper and its read-only inspector opt in.
   allowStagingBaselineAdditive?: boolean;
+  includePhase0?: boolean;
 }
 function verifyDatabaseIdentity(app: FeeSchemaState, direct: FeeSchemaState) {
   requireCondition(
@@ -404,7 +538,9 @@ function verifyDatabaseIdentity(app: FeeSchemaState, direct: FeeSchemaState) {
       app.row.address === direct.row.address &&
       app.row.port === direct.row.port &&
       app.row.feeOid === direct.row.feeOid &&
-      app.row.outboxOid === direct.row.outboxOid,
+      app.row.outboxOid === direct.row.outboxOid &&
+      object(app.row.fundingPosition ?? {}).oid ===
+        object(direct.row.fundingPosition ?? {}).oid,
     'app_direct_server_mismatch'
   );
   if (
@@ -421,7 +557,10 @@ function verifyDatabaseIdentity(app: FeeSchemaState, direct: FeeSchemaState) {
 function verifyDatabasePair(app: FeeSchemaState, direct: FeeSchemaState) {
   verifyDatabaseIdentity(app, direct);
   requireCondition(
-    app.historyLength === direct.historyLength,
+    app.historyLength === direct.historyLength &&
+      app.fundingReady === direct.fundingReady &&
+      object(app.row.fundingLedger ?? {}).oid ===
+        object(direct.row.fundingLedger ?? {}).oid,
     'app_direct_server_mismatch'
   );
 }
@@ -438,6 +577,7 @@ export async function inspectOrPrepareFeeSchema({
   beforeWrite,
   onPhase,
   allowStagingBaselineAdditive = false,
+  includePhase0 = false,
 }: FeeSchemaDatabaseOptions): Promise<FeeSchemaState> {
   requireCondition(
     ['inspect', 'prepare'].includes(mode),
@@ -448,9 +588,17 @@ export async function inspectOrPrepareFeeSchema({
     'direct_origin_identity_mismatch'
   );
   const migrations = expectedMigrations();
+  const fundingRequired =
+    migrations.length === STAGING_FUNDING_MIGRATION.index + 1;
   if (allowStagingBaselineAdditive) verifyOriginalMigrationSource(ROOT);
   onPhase?.('readonly_catalog');
-  let appState = inspect(app, ca, migrations, allowStagingBaselineAdditive);
+  let appState = inspect(
+    app,
+    ca,
+    migrations,
+    allowStagingBaselineAdditive,
+    mode === 'inspect' && includePhase0
+  );
   const directState = inspect(
     direct,
     ca,
@@ -471,10 +619,20 @@ export async function inspectOrPrepareFeeSchema({
       'migration_role_not_owner'
     );
     if (additive) verifyAdditiveTargets(directState.row.additiveTargets, true);
+    if (fundingRequired) {
+      requireCondition(
+        appState.columnsReady &&
+          appState.indexReady &&
+          appState.historyLength === completedHistoryLength &&
+          object(directState.row.fundingPosition).canMigrate === true,
+        'funding_requires_verified_fee_schema'
+      );
+    }
     await beforeWrite(appState);
     if (
       appState.historyLength === 5 ||
-      (additive && appState.historyLength === 1)
+      (additive && appState.historyLength === 1) ||
+      (fundingRequired && !appState.fundingReady)
     ) {
       onPhase?.('normal_column_migration');
       const url = migrationUrl(direct, ca);
@@ -537,26 +695,60 @@ export async function inspectOrPrepareFeeSchema({
       verifyDatabasePair(columns, refreshedDirect);
       verifyAdditiveTargets(refreshedDirect.row.additiveTargets, true);
     }
-    await beforeWrite(columns);
-    onPhase?.('concurrent_index');
-    psql(
-      direct,
-      ca,
-      readFileSync(
-        join(
-          MIGRATIONS,
-          'manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql'
+    if (fundingRequired) {
+      const migratedDirect = inspect(
+        direct,
+        ca,
+        migrations,
+        allowStagingBaselineAdditive
+      );
+      verifyDatabasePair(columns, migratedDirect);
+      requireCondition(
+        columns.fundingReady &&
+          object(migratedDirect.row.fundingLedger).canMigrate === true,
+        'funding_ledger_not_verified'
+      );
+      if (object(columns.row.fundingLedger).appAccess !== true) {
+        await beforeWrite(columns);
+        const role = `"${app.user.replaceAll('"', '""')}"`;
+        psql(
+          direct,
+          ca,
+          `GRANT SELECT, INSERT ON TABLE public."PerpPositionFundingAccrual" TO ${role};`,
+          true
+        );
+      }
+    } else {
+      await beforeWrite(columns);
+      onPhase?.('concurrent_index');
+      psql(
+        direct,
+        ca,
+        readFileSync(
+          join(
+            MIGRATIONS,
+            'manual/0005b_trading_fee_idempotency_key_idx_concurrently.sql'
+          ),
+          'utf8'
         ),
-        'utf8'
-      ),
-      true
+        true
+      );
+    }
+    appState = inspect(
+      app,
+      ca,
+      migrations,
+      allowStagingBaselineAdditive,
+      includePhase0
     );
-    appState = inspect(app, ca, migrations, allowStagingBaselineAdditive);
     verifyDatabaseIdentity(appState, directState);
     requireCondition(
       appState.columnsReady &&
         appState.indexReady &&
-        appState.historyLength === completedHistoryLength,
+        appState.historyLength === completedHistoryLength &&
+        (!fundingRequired ||
+          (appState.fundingReady &&
+            object(appState.row.fundingLedger).appAccess === true)),
       'prepared_schema_not_verified'
     );
   }
@@ -591,6 +783,14 @@ export async function main() {
   );
   await verifyCommit(sha);
   await verifyChecks(sha);
+  if (mode === 'inspect') {
+    console.info(
+      JSON.stringify({
+        commit: sha,
+        phase0GitHubRuntimeInput: phase0RuntimeInput(process.argv.slice(2)),
+      })
+    );
+  }
   phase = 'live_binding_identity';
   const staging = await liveOrigin('staging', STAGING_BINDING, sha);
   const production = await liveOrigin('production', PRODUCTION_BINDING);
@@ -608,6 +808,8 @@ export async function main() {
       direct,
       ca,
       mode: mode as 'inspect' | 'prepare',
+      allowStagingBaselineAdditive: mode === 'inspect',
+      includePhase0: mode === 'inspect',
       beforeWrite: () => verifyCommit(sha),
       onPhase: (value) => {
         phase = value;
@@ -652,6 +854,9 @@ export async function main() {
         appRoleGrants: appState.row.grants,
         appRoleFlags: appState.row.roleFlags,
         rowSecurity: appState.row.rowSecurity,
+        ...(mode === 'inspect' && {
+          phase0Schema: phase0Inspection(object(appState.row.phase0Tables)),
+        }),
       })
     );
   } finally {
