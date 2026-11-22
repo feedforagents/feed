@@ -90,6 +90,7 @@ import {
   reactions,
   referrals,
   shareActions,
+  shares,
   tradingFees,
   userActorFollows,
   userInteractions,
@@ -205,6 +206,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
     // Delete share actions
     await tx.delete(shareActions).where(eq(shareActions.userId, userId));
+
+    // Delete shares (the Share table has no foreign keys, so the user
+    // deletion below cannot cascade to it)
+    await tx.delete(shares).where(eq(shares.userId, userId));
 
     // Delete pool deposits
     await tx.delete(poolDeposits).where(eq(poolDeposits.userId, userId));
