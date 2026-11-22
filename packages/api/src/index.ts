@@ -228,6 +228,11 @@ export {
 } from './redis';
 // Services
 export * from './services';
+export {
+  exportObject,
+  exportRows,
+  streamExport,
+} from './services/user-data-export';
 // SSE Event Broadcasting
 export {
   type AgentActivityEvent,
