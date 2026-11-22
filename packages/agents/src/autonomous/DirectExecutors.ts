@@ -48,6 +48,7 @@ import {
 } from '@feed/db';
 import { npcTrades } from '@feed/db/schema';
 import {
+  createNpcPerpSettlement,
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
   createPerpSettlement,
@@ -909,12 +910,7 @@ async function executePerpTrade(params: {
   const walletAdapter = createPerpWalletAdapter(isNpc);
 
   const service = new PerpMarketService({
-    settlement: createPerpSettlement({
-      system: isNpc ? 'npc_perp_trade' : undefined,
-      wallet: isNpc
-        ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-        : undefined,
-    }),
+    settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: walletAdapter,
     cache: createPerpTradesCachePort(),
@@ -1060,12 +1056,7 @@ async function executeClosePerpPosition(params: {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
     const service = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: isNpc ? 'npc_perp_trade' : undefined,
-        wallet: isNpc
-          ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-          : undefined,
-      }),
+      settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
       cache: createPerpTradesCachePort(),

@@ -80,6 +80,7 @@ type FlipPositionTransactionResult = {
   previousEntryPrice: number;
   newOpenInterest: number;
   volume24h: number;
+  closeFeeRecorded: boolean;
 };
 
 /** PRD §9.3 item 8 [D-17b]: max leverage is 20x. */
@@ -840,7 +841,7 @@ export class PerpMarketService {
   async closePosition(input: PerpCloseInput): Promise<PerpTradeResult> {
     const settlement = await this.deps.settlement.run(
       input.userId,
-      async (tx, wallet) => {
+      async (tx, wallet, recordCloseFee) => {
         const position = await tx.lockOpenPositionById(input.positionId);
         if (!position) {
           throw new Error(
@@ -974,12 +975,19 @@ export class PerpMarketService {
           relatedId: position.id,
         });
 
+        // Losses can leave fewer whole cents than the nominal fee.
+        const collectedFee = recordCloseFee
+          ? Math.min(fee, floorPoints(grossSettlement))
+          : fee;
+        await recordCloseFee?.(position.id, position.ticker, collectedFee);
+
         return {
           balance: (await wallet.getBalance(input.userId)).balance,
+          closeFeeRecorded: Boolean(recordCloseFee),
           closeImpact,
           closeSize,
           exitPrice,
-          fee,
+          fee: collectedFee,
           isFullClose,
           marginPaid,
           marketTotals,
@@ -998,16 +1006,18 @@ export class PerpMarketService {
     // A2A path has no waitUntil/after to finish a detached promise if the
     // invocation ends first. processFeeWithRetry never throws (failures are
     // logged, then enqueued), so awaiting it cannot fail the committed trade.
-    await this.processFeeWithRetry(
-      {
-        userId: input.userId,
-        amount: settlement.closeSize,
-        type: 'perp_close',
-        relatedId: settlement.position.ticker,
-        positionId: settlement.position.id,
-      },
-      { ticker: settlement.position.ticker }
-    );
+    if (!settlement.closeFeeRecorded) {
+      await this.processFeeWithRetry(
+        {
+          userId: input.userId,
+          amount: settlement.closeSize,
+          type: 'perp_close',
+          relatedId: settlement.position.ticker,
+          positionId: settlement.position.id,
+        },
+        { ticker: settlement.position.ticker }
+      );
+    }
 
     // Apply market-level post-close impact after settlement to keep the close
     // path fail-safe (position is already settled if this step fails).
@@ -1958,7 +1968,7 @@ export class PerpMarketService {
       const flipResult =
         await this.deps.settlement.run<FlipPositionTransactionResult>(
           input.userId,
-          async (tx, wallet) => {
+          async (tx, wallet, recordCloseFee) => {
             // Row-lock the position being flipped so a concurrent close/flip
             // cannot settle it twice.
             const position = await tx.lockOpenPositionById(existing.id);
@@ -2118,8 +2128,17 @@ export class PerpMarketService {
               relatedId: position.id,
             });
 
+            const collectedCloseFee = recordCloseFee
+              ? Math.min(closeFee, floorPoints(grossSettlement))
+              : closeFee;
+            await recordCloseFee?.(
+              position.id,
+              position.ticker,
+              collectedCloseFee
+            );
+
             // Return result data for use after transaction commits
-            const totalFees = closeFee + openFee;
+            const totalFees = collectedCloseFee + openFee;
             return {
               positionId: newPosition.id,
               balance: (await wallet.getBalance(input.userId)).balance,
@@ -2131,6 +2150,7 @@ export class PerpMarketService {
               liquidationPrice,
               marginPaid: marginRequired,
               feePaid: totalFees,
+              closeFeeRecorded: Boolean(recordCloseFee),
               exitPrice,
               realizedPnL: cappedRealizedPnL,
               isRebalance: true,
@@ -2146,17 +2166,20 @@ export class PerpMarketService {
       // Fee bookkeeping for close + open legs (retries + optional outbox).
       // Awaited — not fire-and-forget — so both legs' fee intents are
       // durable before success is reported (see openPosition).
+      const recordCloseAfterCommit = flipResult.closeFeeRecorded
+        ? undefined
+        : this.processFeeWithRetry(
+            {
+              userId: input.userId,
+              amount: existing.size,
+              type: 'perp_close',
+              relatedId: existing.ticker,
+              positionId: existing.id,
+            },
+            { ticker: existing.ticker }
+          );
       await Promise.all([
-        this.processFeeWithRetry(
-          {
-            userId: input.userId,
-            amount: existing.size,
-            type: 'perp_close',
-            relatedId: existing.ticker,
-            positionId: existing.id,
-          },
-          { ticker: existing.ticker }
-        ),
+        recordCloseAfterCommit,
         this.processFeeWithRetry(
           {
             userId: input.userId,

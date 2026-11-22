@@ -10,13 +10,15 @@ import {
 
 const closeCase = 'selects a marked live perp once and settles its close once';
 const profitCase = 'uses margin for shorts and preserves prediction cost basis';
+const legacyFeeCase = 'records only the cents collected by legacy perp exits';
+const directFeeCase = 'records autonomous perp reductions, flips and closes';
 
 if (!process.env.FEED_SUB_MARKET_CHILD) {
   test('runs NPC risk and close cases in a leased database', async () => {
     await runIsolatedSubMarketCases({
       name: 'npc-perp-risk',
       file: 'packages/testing/integration/npc-perp-risk.integration.test.ts',
-      cases: [closeCase, profitCase],
+      cases: [closeCase, profitCase, legacyFeeCase, directFeeCase],
     });
   }, 300_000);
 } else {
@@ -32,9 +34,14 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     perpPositions,
     poolPositions,
     pools,
+    sql,
+    tradingFees,
     users,
   } = await import('@feed/db');
-  const { TradeExecutionService } = await import('@feed/engine');
+  const { executeDirectTrade } = await import('@feed/agents');
+  const { StaticDataRegistry, TradeExecutionService } = await import(
+    '@feed/engine'
+  );
   const { canonicalTradingFee, generateSnowflakeId } = await import(
     '@feed/shared'
   );
@@ -127,11 +134,10 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     return id;
   }
 
-  async function openPerp(
-    actorId: string,
-    market: { ticker: string; organizationId: string },
-    action: 'open_long' | 'open_short'
-  ) {
+  async function seedPerpMarket(market: {
+    ticker: string;
+    organizationId: string;
+  }) {
     await db.insert(organizationState).values({
       id: market.organizationId,
       currentPrice: 100,
@@ -150,6 +156,14 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
         nextFundingTime: new Date().toISOString(),
       },
     });
+  }
+
+  async function openPerp(
+    actorId: string,
+    market: { ticker: string; organizationId: string },
+    action: 'open_long' | 'open_short'
+  ) {
+    await seedPerpMarket(market);
     const { positionId } =
       await new TradeExecutionService().executeSingleDecision({
         npcId: actorId,
@@ -206,6 +220,45 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
       .where(eq(actorState.id, actorId));
     if (!row) throw new Error('Expected a persisted NPC actor');
     return Number(row.balance);
+  }
+
+  function closeFees(actorId: string) {
+    return db
+      .select({
+        tradeId: tradingFees.tradeId,
+        marketId: tradingFees.marketId,
+        feeAmount: tradingFees.feeAmount,
+        platformFee: tradingFees.platformFee,
+        referrerFee: tradingFees.referrerFee,
+        referrerId: tradingFees.referrerId,
+      })
+      .from(tradingFees)
+      .where(
+        and(
+          eq(tradingFees.userId, actorId),
+          eq(tradingFees.tradeType, 'perp_close')
+        )
+      )
+      .orderBy(tradingFees.id);
+  }
+
+  function expectedFee(tradeId: string, marketId: string, fee: number) {
+    return {
+      tradeId,
+      marketId,
+      feeAmount: fee.toFixed(2),
+      platformFee: fee.toFixed(2),
+      referrerFee: '0.00',
+      referrerId: null,
+    };
+  }
+
+  async function totalFees(actorId: string) {
+    const [user] = await db
+      .select({ total: users.totalFeesPaid })
+      .from(users)
+      .where(eq(users.id, actorId));
+    return Number(user?.total);
   }
 
   function legacyPerp(poolId: string, id: string) {
@@ -268,7 +321,29 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
       true
     );
 
+    if (!action) throw new Error('Expected an NPC close action');
     const beforeClose = await balance(actorId);
+
+    // This entire database is leased to the fixture. Force a real ledger
+    // insert failure and check that the position and wallet stay open.
+    await db.execute(sql`alter table "TradingFee" add constraint
+      npc_exit_test_no_fee check ("feeAmount" < 0) not valid`);
+    try {
+      const refused = await request(actorId, {
+        action: 'execute',
+        rebalanceAction: action,
+      });
+      expect(refused.ok).toBe(false);
+      expect((await readPerp(opened.id)).closedAt).toBeNull();
+      expect(await balance(actorId)).toBe(beforeClose);
+      expect(await closeFees(actorId)).toEqual([]);
+      expect(await totalFees(actorId)).toBe(0);
+    } finally {
+      await db.execute(
+        sql`alter table "TradingFee" drop constraint npc_exit_test_no_fee`
+      );
+    }
+
     const closed = await request(actorId, {
       action: 'rebalance',
       strategy: 'aggressive',
@@ -293,6 +368,10 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     });
     expect(replay.ok).toBe(false);
     expect(await balance(actorId)).toBe(afterClose);
+    expect(await closeFees(actorId)).toEqual([
+      expectedFee(opened.id, opened.ticker, fee),
+    ]);
+    expect(await totalFees(actorId)).toBe(fee);
     const closes = await db
       .select({ id: npcTrades.id })
       .from(npcTrades)
@@ -348,5 +427,129 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     expect(
       actions.find(({ positionId }) => positionId === opened.id)?.reason
     ).toContain('30.0%');
+  });
+
+  test(legacyFeeCase, async () => {
+    const actorId = await createActor('1000');
+    const normal = legacyPerp(actorId, 'fee-legacy-normal');
+    const capped = {
+      ...legacyPerp(actorId, 'fee-legacy-capped'),
+      currentPrice: 80.0625,
+    };
+    const empty = {
+      ...legacyPerp(actorId, 'fee-legacy-zero'),
+      currentPrice: 70,
+    };
+    await db.insert(poolPositions).values([normal, capped, empty]);
+
+    const closeLegacy = (position: typeof normal) =>
+      request(actorId, {
+        action: 'execute',
+        rebalanceAction: {
+          type: 'close',
+          marketType: 'perp',
+          positionId: position.id,
+          ticker: position.ticker,
+          side: position.side,
+          targetSize: 0,
+          reason: 'fixture exit',
+        },
+      });
+
+    for (const position of [normal, capped, empty]) {
+      expect((await closeLegacy(position)).status).toBe(200);
+    }
+    expect((await closeLegacy(capped)).ok).toBe(false);
+    expect(await balance(actorId)).toBe(1019.9);
+    expect(await closeFees(actorId)).toEqual([
+      expectedFee(normal.id, normal.ticker, 0.1),
+      expectedFee(capped.id, capped.ticker, 0.06),
+    ]);
+    expect(await totalFees(actorId)).toBe(0.16);
+  });
+
+  test(directFeeCase, async () => {
+    const actorId = 'ailon-musk';
+    const ticker = StaticDataRegistry.getAllOrganizations().find(
+      (org) => org.ticker && !['NVDAI', 'TSLAI'].includes(org.ticker)
+    );
+    if (!ticker?.ticker) throw new Error('Expected a distinct fixture market');
+    const market = { ticker: ticker.ticker, organizationId: ticker.id };
+    await seedPerpMarket(market);
+    const now = new Date();
+    await db.insert(users).values({
+      id: actorId,
+      username: 'npc-fee-fixture',
+      isActor: true,
+      updatedAt: now,
+    });
+    await db
+      .insert(actorState)
+      .values({ id: actorId, tradingBalance: '10000', updatedAt: now });
+
+    const trade = (
+      side: 'open_long' | 'open_short' | 'close_position',
+      amount: number
+    ) =>
+      executeDirectTrade({
+        agentUserId: actorId,
+        marketType: 'perp',
+        marketId: market.ticker,
+        side,
+        amount,
+        reasoning: 'fixture autonomous exit',
+        skipPerpResolution: true,
+      });
+    const openPosition = async () => {
+      const [position] = await db
+        .select({ id: perpPositions.id })
+        .from(perpPositions)
+        .where(
+          and(
+            eq(perpPositions.userId, actorId),
+            sql`${perpPositions.closedAt} is null`
+          )
+        );
+      if (!position) throw new Error('Expected an open autonomous position');
+      return position.id;
+    };
+
+    expect((await trade('open_long', 100)).success).toBe(true);
+    const initial = await openPosition();
+    expect(await closeFees(actorId)).toEqual([]);
+    expect(await totalFees(actorId)).toBe(0);
+    expect((await trade('open_short', 20)).success).toBe(true);
+    expect(await closeFees(actorId)).toEqual([
+      expectedFee(initial, market.ticker, 0.02),
+    ]);
+    expect((await trade('open_short', 120)).success).toBe(true);
+    const flipped = await openPosition();
+    expect(flipped).not.toBe(initial);
+    expect(await closeFees(actorId)).toEqual([
+      expectedFee(initial, market.ticker, 0.02),
+      expectedFee(initial, market.ticker, 0.08),
+    ]);
+    expect((await trade('close_position', 0)).success).toBe(true);
+
+    // A short can lose its whole margin. The closed position then pays no
+    // fee and adds nothing to the ledger or trader total.
+    expect((await trade('open_short', 40)).success).toBe(true);
+    const beforeNoProceeds = await balance(actorId);
+    await db
+      .update(organizationState)
+      .set({ currentPrice: 300, basePrice: 300 })
+      .where(eq(organizationState.id, market.organizationId));
+    await db
+      .update(perpMarketSnapshots)
+      .set({ currentPrice: 300, markPrice: 300 })
+      .where(eq(perpMarketSnapshots.ticker, market.ticker));
+    expect((await trade('close_position', 0)).success).toBe(true);
+    expect(await balance(actorId)).toBe(beforeNoProceeds);
+    expect(await closeFees(actorId)).toEqual([
+      expectedFee(initial, market.ticker, 0.02),
+      expectedFee(initial, market.ticker, 0.08),
+      expectedFee(flipped, market.ticker, 0.04),
+    ]);
+    expect(await totalFees(actorId)).toBe(0.14);
   });
 }

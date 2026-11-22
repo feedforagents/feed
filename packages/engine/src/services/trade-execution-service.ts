@@ -57,7 +57,7 @@ import { FeeService } from './fee-service';
 import { NpcTradeRateLimiter } from './npc-trade-rate-limiter';
 import { createNpcWalletAdapter } from './npc-wallet-adapter';
 import { createPerpPriceImpactPort } from './perp-price-impact-port';
-import { createPerpSettlement } from './perp-settlement';
+import { createNpcPerpSettlement } from './perp-settlement';
 import {
   type PredictionSettlementOptions,
   withPredictionSettlement,
@@ -519,10 +519,7 @@ export class TradeExecutionService {
     // Use PerpMarketService for consistency with user trades
     // This ensures NPC positions get funding and liquidation applied
     const perpService = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: 'npc_perp_trade',
-        wallet: (userId, tx) => createNpcWalletAdapter(userId, tx),
-      }),
+      settlement: createNpcPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
       cache: createPerpTradesCachePort(),
@@ -1050,6 +1047,15 @@ export class TradeExecutionService {
         throw new Error(`Actor not found: ${actorId}`);
       }
 
+      await FeeService.recordTradingFee(
+        actorId,
+        'perp_close',
+        Math.min(feeCalc.feeAmount, floorPoints(Math.max(0, grossReturn))),
+        positionId,
+        position.ticker ?? undefined,
+        tx
+      );
+
       // Record trade (poolId is optional now)
       await tx.insert(npcTrades).values({
         id: await generateSnowflakeId(),
@@ -1103,10 +1109,7 @@ export class TradeExecutionService {
     }
   ): Promise<ExecutedTrade> {
     const perpService = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: 'npc_perp_trade',
-        wallet: (userId, tx) => createNpcWalletAdapter(userId, tx),
-      }),
+      settlement: createNpcPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
       cache: createPerpTradesCachePort(),
