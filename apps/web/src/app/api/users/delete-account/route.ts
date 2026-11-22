@@ -88,8 +88,10 @@ import {
   messageReactions,
   or,
   poolDeposits,
+  reactions,
   referrals,
   shareActions,
+  shares,
   tradingFees,
   userActorFollows,
   userInteractions,
@@ -182,6 +184,16 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       .delete(userInteractions)
       .where(eq(userInteractions.userId, userId));
 
+    // Delete reactions (likes) the user made. The Reaction table has no
+    // foreign keys, so nothing cascades when the user row is deleted:
+    // without this the likes keep counting on posts and comments forever.
+    await tx.delete(reactions).where(eq(reactions.userId, userId));
+
+    // Chat reaction counts read this table directly, which has no User FK.
+    await tx
+      .delete(messageReactions)
+      .where(eq(messageReactions.userId, userId));
+
     // Delete group memberships
     await tx.delete(groupMembers).where(eq(groupMembers.userId, userId));
 
@@ -201,12 +213,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     // Delete share actions
     await tx.delete(shareActions).where(eq(shareActions.userId, userId));
 
-    // Delete chat message reactions (MessageReaction has no foreign
-    // keys, so no cascade removes them; reaction counts aggregate the
-    // table directly and would keep counting this user forever)
-    await tx
-      .delete(messageReactions)
-      .where(eq(messageReactions.userId, userId));
+    // Delete shares (the Share table has no foreign keys, so the user
+    // deletion below cannot cascade to it)
+    await tx.delete(shares).where(eq(shares.userId, userId));
 
     // Delete pool deposits
     await tx.delete(poolDeposits).where(eq(poolDeposits.userId, userId));

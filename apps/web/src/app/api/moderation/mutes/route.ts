@@ -54,7 +54,7 @@
  */
 
 import { authenticate, successResponse, withErrorHandling } from '@feed/api';
-import { db } from '@feed/db';
+import { count, db, desc, eq, userMutes, users } from '@feed/db';
 import { GetMutesSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
@@ -67,28 +67,38 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     offset: searchParams.get('offset') || '0',
   });
 
-  const [mutes, total] = await Promise.all([
-    db.userMute.findMany({
-      where: { muterId: authUser.userId },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-      include: {
+  // Apply target existence before counting and paging. Deleted targets leave
+  // moderation edges behind; provisioned NPC User rows remain valid targets.
+  const owned = eq(userMutes.muterId, authUser.userId);
+  const [[totalRow], mutes] = await Promise.all([
+    db
+      .select({ total: count() })
+      .from(userMutes)
+      .innerJoin(users, eq(users.id, userMutes.mutedId))
+      .where(owned),
+    db
+      .select({
+        id: userMutes.id,
+        muterId: userMutes.muterId,
+        mutedId: userMutes.mutedId,
+        reason: userMutes.reason,
+        createdAt: userMutes.createdAt,
         muted: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true,
-            profileImageUrl: true,
-            isActor: true,
-          },
+          id: users.id,
+          username: users.username,
+          displayName: users.displayName,
+          profileImageUrl: users.profileImageUrl,
+          isActor: users.isActor,
         },
-      },
-    }),
-    db.userMute.count({
-      where: { muterId: authUser.userId },
-    }),
+      })
+      .from(userMutes)
+      .innerJoin(users, eq(users.id, userMutes.mutedId))
+      .where(owned)
+      .orderBy(desc(userMutes.createdAt), desc(userMutes.id))
+      .limit(limit)
+      .offset(offset),
   ]);
+  const total = totalRow?.total ?? 0;
 
   return successResponse({
     mutes,

@@ -5,6 +5,7 @@
  * the platform fee. Referral fee shares are not paid.
  */
 
+import type { FeeProcessor } from '@feed/core/markets/shared';
 import {
   and,
   count,
@@ -22,7 +23,13 @@ import {
   users,
   withTransaction,
 } from '@feed/db';
-import { generateSnowflakeId, logger } from '@feed/shared';
+import {
+  canonicalTradingFee,
+  floorPoints,
+  generateSnowflakeId,
+  isPointsAmount,
+  logger,
+} from '@feed/shared';
 import type { SQL } from 'drizzle-orm';
 import { FEE_CONFIG, type FeeType } from '../config/fees';
 import { FeeRedistributionService } from './fee-redistribution-service';
@@ -108,8 +115,10 @@ export class FeeService {
   /**
    * Calculate fee for a trade amount
    *
-   * @description Calculates trading fee based on configured fee rate (0.1%).
-   * Returns fee amount, net amount after fee, and distribution breakdown.
+   * @description Calculates trading fee based on configured fee rate (0.1%):
+   * the canonical fee on the cent-settled amount, rounded up to whole
+   * cents (PRD §9.1). Returns fee amount, net amount after fee (settled
+   * amount minus fee), and distribution breakdown.
    *
    * @param {number} tradeAmount - Trade amount to calculate fee for
    * @returns {FeeCalculation} Fee calculation with amounts and distribution
@@ -127,21 +136,30 @@ export class FeeService {
       );
     }
 
-    // Work in integer cents from one canonical rounded fee so the split always
-    // conserves the total (platform + referrer === fee). The referrer share is
+    // Work in integer cents from the one canonical fee (PRD §9.1) so the
+    // split always conserves the total (platform + referrer === fee): the
+    // fee on the cent-settled amount (the trade amount floored to cents),
+    // rounded UP to whole cents — the same value execution charges
+    // (PredictionPricing.canonicalFee, PerpMarketService.calculateFee),
+    // so the amount recorded and split here is the amount the trader
+    // paid. Settling first and ceiling the fee is what makes the fee
+    // consistent with execution. The partition invariant concerns total
+    // trader credit, not monotonic total fees across settled legs. The referrer share is
     // rounded down; any sub-cent remainder stays with the platform.
-    const feeCents = Math.round(
-      tradeAmount * FEE_CONFIG.TRADING_FEE_RATE * 100
+    const settledAmount = floorPoints(tradeAmount);
+    const feeAmount = canonicalTradingFee(
+      tradeAmount,
+      FEE_CONFIG.TRADING_FEE_RATE
     );
+    const feeCents = Math.round(feeAmount * 100);
     const referrerCents = Math.floor(
       feeCents * FEE_CONFIG.REFERRER_SHARE + 1e-9
     );
     const platformCents = feeCents - referrerCents;
-    const feeAmount = feeCents / 100;
 
     return {
       feeAmount,
-      netAmount: Number((tradeAmount - feeAmount).toFixed(2)),
+      netAmount: Number((settledAmount - feeAmount).toFixed(2)),
       platformShare: platformCents / 100,
       referrerShare: referrerCents / 100,
     };
@@ -173,6 +191,13 @@ export class FeeService {
    * @param {string} [tradeId] - Optional trade ID for reference
    * @param {string} [marketId] - Optional market ID for reference
    * @param {TransactionContext} [existingTx] - Optional existing transaction/client to reuse (avoids nested transactions)
+   * @param {string} [operationId] - Optional idempotency key for one fee
+   *   operation (one leg of one trade). When given, a row already recorded
+   *   under this key is returned as-is instead of inserting a second fee
+   *   row, crediting totals, or diverting to the fund again — so a retry
+   *   after an ambiguous post-commit error cannot duplicate accounting.
+   *   Callers must generate a fresh key per operation: a (position, type)
+   *   pair alone cannot tell a retry from a legitimate repeat leg.
    * @returns {Promise<FeeDistributionResult>} Fee distribution result
    *
    * @example
@@ -192,18 +217,44 @@ export class FeeService {
     tradeAmount: number,
     tradeId?: string,
     marketId?: string,
-    existingTx?: TransactionContext
+    existingTx?: TransactionContext,
+    operationId?: string
   ): Promise<FeeDistributionResult> {
-    const feeCalc = FeeService.calculateFee(tradeAmount);
+    return FeeService.recordTradingFee(
+      userId,
+      tradeType,
+      FeeService.calculateFee(tradeAmount).feeAmount,
+      tradeId,
+      marketId,
+      existingTx,
+      operationId
+    );
+  }
+
+  /** Record a fee already collected by the settlement. */
+  static async recordTradingFee(
+    userId: string,
+    tradeType: FeeType,
+    feeAmount: number,
+    tradeId?: string,
+    marketId?: string,
+    existingTx?: TransactionContext,
+    operationId?: string
+  ): Promise<FeeDistributionResult> {
+    if (!isPointsAmount(feeAmount)) {
+      throw new Error(
+        'Collected trading fee must be a nonnegative whole-cent amount'
+      );
+    }
 
     // Skip if fee is below minimum
-    if (feeCalc.feeAmount < FEE_CONFIG.MIN_FEE_AMOUNT) {
+    if (feeAmount < FEE_CONFIG.MIN_FEE_AMOUNT) {
       logger.debug(
-        `Fee ${feeCalc.feeAmount} below minimum, skipping`,
+        `Fee ${feeAmount} below minimum, skipping`,
         {
           userId,
           tradeType,
-          tradeAmount,
+          feeAmount,
         },
         'FeeService'
       );
@@ -221,11 +272,34 @@ export class FeeService {
     const processFee = async (
       tx: TransactionContext
     ): Promise<FeeDistributionResult & { stabilityFundDiversion: number }> => {
+      // Idempotent replay: a retry of the same operation (same key) after
+      // an ambiguous post-commit error returns the recorded fee without
+      // inserting, crediting totals, or diverting to the fund again. The
+      // partial unique index on idempotencyKey is the backstop: if a
+      // concurrent duplicate slips past this check, its insert fails and
+      // the caller's retry lands here instead of duplicating accounting.
+      if (operationId) {
+        const [existing] = await tx
+          .select()
+          .from(tradingFees)
+          .where(eq(tradingFees.idempotencyKey, operationId))
+          .limit(1);
+        if (existing) {
+          return {
+            feeCharged: Number(existing.feeAmount),
+            referrerPaid: Number(existing.referrerFee),
+            platformReceived: Number(existing.platformFee),
+            referrerId: existing.referrerId,
+            stabilityFundDiversion: 0,
+          };
+        }
+      }
+
       // Do not credit another user. PRD §9.6 removes the referral fee share,
       // and D-18 says points cannot be transferred between users.
       const referrerPaid = 0;
       const referrerId = null;
-      const platformReceived = Number(feeCalc.feeAmount.toFixed(2));
+      const platformReceived = Number(feeAmount.toFixed(2));
 
       await tx.insert(tradingFees).values({
         id: await generateSnowflakeId(),
@@ -233,10 +307,18 @@ export class FeeService {
         tradeType,
         tradeId: tradeId || null,
         marketId: marketId || null,
-        feeAmount: new Decimal(feeCalc.feeAmount).toString(),
+        feeAmount: new Decimal(feeAmount).toString(),
         platformFee: new Decimal(platformReceived).toString(),
         referrerFee: new Decimal(referrerPaid).toString(),
         referrerId,
+        // Both idempotencyKey columns and the verified unique index
+        // (migration 0005 + manual 0005b) are prerequisites for every
+        // application instance: the locked drizzle-orm (0.44.7) insert
+        // builder emits every TradingFee column — checked with
+        // toSQL() — so even an unkeyed call references this column
+        // (as DEFAULT) and fails on a schema without it. There is no
+        // old-schema compatibility.
+        idempotencyKey: operationId ?? null,
       });
 
       // Atomic increment: concurrent fees for the same trader must not lose
@@ -244,7 +326,7 @@ export class FeeService {
       await tx
         .update(users)
         .set({
-          totalFeesPaid: sql`COALESCE(${users.totalFeesPaid}, 0) + ${feeCalc.feeAmount}`,
+          totalFeesPaid: sql`COALESCE(${users.totalFeesPaid}, 0) + ${feeAmount}`,
         })
         .where(eq(users.id, userId));
 
@@ -257,7 +339,7 @@ export class FeeService {
       }
 
       return {
-        feeCharged: feeCalc.feeAmount,
+        feeCharged: feeAmount,
         referrerPaid,
         platformReceived,
         referrerId,
@@ -458,4 +540,36 @@ export class FeeService {
       totalTrades: result?.count || 0,
     };
   }
+}
+
+/**
+ * Shared FeeProcessor adapter for market services.
+ *
+ * @description Single place for the FeeProcessor-to-FeeService mapping,
+ * including the string-to-FeeType narrowing that market services pass as
+ * plain strings. It is intentionally non-transactional: no transaction
+ * argument is passed, matching callers that use a non-transactional wallet
+ * adapter. It changes no fee rate and no fee split; those remain owned by
+ * FeeService and FEE_CONFIG.
+ */
+export function createTradingFeeProcessor(): FeeProcessor {
+  return {
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
+      FeeService.processTradingFee(
+        userId,
+        type as FeeType,
+        amount,
+        positionId,
+        relatedId,
+        undefined,
+        operationId
+      ),
+  };
 }
