@@ -18,20 +18,15 @@ assert.equal(process.env.DISABLE_RATE_LIMITING, 'true');
 mock.module('server-only', () => ({}));
 
 const {
-  arcStates,
   closeDatabase,
   db,
-  gameOnboarding,
   inArray,
   markets,
   posts,
-  questionArcPlans,
   questions,
   reactions,
-  timeframedMarkets,
-  userPnLSnapshots,
+  sql,
   users,
-  whitelist,
 } = await import('@feed/db');
 const { NextRequest } = await import('next/server');
 const { GET: forYouGET } = await import(
@@ -283,100 +278,72 @@ try {
   }
 } finally {
   try {
-    // Guarded teardown: cleanup only ever deletes rows this fixture
-    // acquired via INSERT RETURNING, and refuses to delete a parent
-    // that gained a dependent row outside the fixture — deleting the
-    // question would cascade-delete that row (ArcState /
-    // QuestionArcPlan / TimeframedMarket all reference questions.id
-    // ON DELETE CASCADE), deleting a user would cascade-delete its
-    // GameOnboarding / UserPnLSnapshot / Whitelist rows, and deleting
-    // a market would silently NULL an unrelated question's marketId.
-    // Lock the owned parent rows first so no concurrent process can
-    // attach a dependent row between the check and the deletes, and
-    // run the check and the deletes in one short transaction so the
-    // refusal is atomic.
+    // Read the live foreign keys under the parent locks. Local tests and
+    // journal-migrated databases can have different Phase 0 tables.
     await db.transaction(async (tx) => {
-      if (owned.questions.length) {
-        await tx
-          .select({ id: questions.id })
-          .from(questions)
-          .where(inArray(questions.id, owned.questions))
-          .for('update');
-        for (const [table, label] of [
-          [arcStates, 'ArcState'],
-          [questionArcPlans, 'QuestionArcPlan'],
-          [timeframedMarkets, 'TimeframedMarket'],
-        ] as const) {
-          const foreign = await tx
-            .select({ id: table.id })
-            .from(table)
-            .where(inArray(table.questionId, owned.questions))
-            .limit(1);
-          assert.equal(
-            foreign.length,
-            0,
-            `refusing cleanup: foreign ${label} attached to an owned question`
-          );
-        }
-      }
-      if (owned.users.length) {
-        await tx
-          .select({ id: users.id })
-          .from(users)
-          .where(inArray(users.id, owned.users))
-          .for('update');
-        for (const [table, label] of [
-          [gameOnboarding, 'GameOnboarding'],
-          [userPnLSnapshots, 'UserPnLSnapshot'],
-          [whitelist, 'Whitelist'],
-        ] as const) {
-          const foreign = await tx
-            .select({ id: table.id })
-            .from(table)
-            .where(inArray(table.userId, owned.users))
-            .limit(1);
-          assert.equal(
-            foreign.length,
-            0,
-            `refusing cleanup: foreign ${label} attached to an owned user`
-          );
-        }
-      }
-      if (owned.markets.length) {
-        await tx
-          .select({ id: markets.id })
-          .from(markets)
-          .where(inArray(markets.id, owned.markets))
-          .for('update');
-        // Only our own questions may point at an owned market: any other
-        // question would lose its marketId to ON DELETE SET NULL.
-        const pointing = await tx
-          .select({ id: questions.id })
-          .from(questions)
-          .where(inArray(questions.marketId, owned.markets));
-        const foreign = pointing.filter(
-          (row) => !owned.questions.includes(row.id)
-        );
-        assert.equal(
-          foreign.length,
-          0,
-          'refusing cleanup: foreign Question attached to an owned market'
-        );
-      }
-      if (owned.reactions.length)
+      await tx.execute(sql`SET LOCAL search_path = public, pg_temp`);
+      await tx.execute(sql`SET LOCAL row_security = off`);
+      if (owned.reactions.length) {
         await tx
           .delete(reactions)
           .where(inArray(reactions.id, owned.reactions));
-      if (owned.posts.length)
-        await tx.delete(posts).where(inArray(posts.id, owned.posts));
-      if (owned.questions.length)
-        await tx
-          .delete(questions)
-          .where(inArray(questions.id, owned.questions));
-      if (owned.markets.length)
-        await tx.delete(markets).where(inArray(markets.id, owned.markets));
-      if (owned.users.length)
-        await tx.delete(users).where(inArray(users.id, owned.users));
+      }
+
+      for (const [parentName, table, ids] of [
+        ['Post', posts, owned.posts],
+        ['Question', questions, owned.questions],
+        ['Market', markets, owned.markets],
+        ['User', users, owned.users],
+      ] as const) {
+        if (!ids.length) continue;
+        const locked = await tx
+          .select({ id: table.id })
+          .from(table)
+          .where(inArray(table.id, ids))
+          .for('update');
+        assert.equal(locked.length, ids.length, 'fixture parent disappeared');
+
+        const references = await tx.execute<{
+          schema: string;
+          table: string;
+          column: string;
+          byId: boolean;
+        }>(sql`
+          SELECT ns.nspname AS schema, rel.relname AS "table",
+            child.attname AS "column",
+            (cardinality(fk.confkey) = 1 AND parent.attname = 'id') AS "byId"
+          FROM pg_catalog.pg_constraint AS fk
+          JOIN pg_catalog.pg_class AS rel ON rel.oid = fk.conrelid
+          JOIN pg_catalog.pg_namespace AS ns ON ns.oid = rel.relnamespace
+          JOIN pg_catalog.pg_attribute AS child
+            ON child.attrelid = fk.conrelid AND child.attnum = fk.conkey[1]
+          JOIN pg_catalog.pg_attribute AS parent
+            ON parent.attrelid = fk.confrelid AND parent.attnum = fk.confkey[1]
+          WHERE fk.contype = 'f'
+            AND fk.confrelid = ${`public."${parentName}"`}::pg_catalog.regclass
+            AND fk.confdeltype IN ('c', 'n', 'd')
+        `);
+        const idsSql = sql.join(
+          ids.map((id) => sql`${id}`),
+          sql`, `
+        );
+        for (const reference of references) {
+          assert.ok(
+            reference.byId,
+            'unsupported foreign key on fixture parent'
+          );
+          const foreign = await tx.execute(sql`
+            SELECT 1 FROM ${sql.identifier(reference.schema)}.${sql.identifier(reference.table)}
+            WHERE ${sql.identifier(reference.column)} IN (${idsSql}) LIMIT 1
+          `);
+          assert.equal(
+            foreign.length,
+            0,
+            `refusing cleanup: foreign ${reference.table} attached to a fixture row`
+          );
+        }
+        await tx.delete(table).where(inArray(table.id, ids));
+      }
     });
     for (const [table, ids] of [
       [posts, owned.posts],

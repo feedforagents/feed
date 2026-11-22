@@ -8,15 +8,51 @@ Decision IDs (D-n) refer to PRD §14. If a decision changes, the affected phase 
 
 ## Phase 0 — Get the world running (P0, before anything else)
 
-Why first: everything else is pointless if the feed is empty. Evidence: `CRON_ENABLED: "false"` in `workers/cron/wrangler.production.jsonc`, `GAME_START=pause` default, empty live feed.
+Why first: game ticks keep the public feed, markets, and articles active. The checked-in production Worker config enables cron, and the sample app configuration starts paused. Verify the deployed settings and actual tick delivery.
 
-1. Confirm the old production cron state (repo says off), then, on the new-game deployment (staging first), enable `game-tick`, `markets-tick`, `npc-tick`, `organization-tick`, `article-tick`, `perp-funding`, `world-facts`.
-2. Remove the two schedule entries with no route (`reputation-sync`, `profile-chain-sync`); stop scheduling `agent-tick` once phase 1 removes it.
-3. Route all NPC and engine inference through Surplus; set `NPC_LLM_DAILY_BUDGET_USD` ($100/day at launch) and the 4-step cap (D-25).
-4. Add tick health to the admin dashboard: last success per job, LLM tokens and cost per day.
+1. Confirm which cron jobs are active in the deployed production environment. On the new-game deployment (staging first), enable or verify `game-tick`, `markets-tick`, `npc-tick`, `organization-tick`, `article-tick`, `perp-funding`, and `world-facts`.
+2. The Worker and internal scheduler exclude the missing `reputation-sync` and `profile-chain-sync` routes. The retired `agent-tick` is also absent from both schedules.
+3. Route NPC and engine inference through Surplus and implement [D-25 spend enforcement](prd.md#d-25-spend-enforcement). Set `NPC_LLM_DAILY_BUDGET_USD` to $100/day at launch and preserve the four-step maximum.
+4. Add tick health to the admin dashboard: last success per job, LLM tokens, confirmed spend, and reserved cost for the UTC day.
 5. Turn off user/agent trajectory recording in product ticks (D-24).
+6. Implement the bounded prediction market handoff in [PRD §9.2](prd.md#92-prediction-markets).
+   Track pending resolutions and the age of the oldest one alongside market tick
+   delivery so on-time ticks cannot mask a growing backlog.
+7. Implement the world clock and generation split in
+   [PRD §9.7](prd.md#97-world-clock-and-generated-activity). Track committed
+   market-linked clues, oldest pending work, and the last RSS refresh alongside
+   minute tick delivery.
 
 **Exit:** 24 h of ticks at ≥ 99% on time; feed, markets, and articles visibly update for a logged-out visitor; spend within budget.
+
+**World clock evidence:** Replay the same cold database and inference model
+before and after the change. Verify on-time game ticks, visible and timely
+phase-appropriate market clues, continued RSS and article updates, and
+fewer inference calls per published post. Exercise provider failure,
+duplicate delivery, and restart. A retry must neither duplicate a clue nor
+publish it out of phase or reveal the hidden outcome.
+
+Run this split on localnet until D-25 is deployed and verified. Localnet setups
+that use the migration journal apply
+[`0009_npc_market_clue.sql`](../../packages/db/drizzle/migrations/manual/0009_npc_market_clue.sql)
+after the journal and before starting NPC cron jobs. Fresh databases created by
+`bun run dev` already have the table. Apply the migration on existing local
+databases before setting `DEPLOYMENT_ENV=localnet`.
+
+**Market recovery evidence:** Replay the 15-expired-market backlog with real
+inference and PostgreSQL. Verify that minute ticks stay on time, expired
+markets stop accepting trades, and the eligible backlog drains after a
+provider timeout, duplicate delivery, and worker restart. Verify one payout
+and public proof per completed market, with proofs private until resolution.
+A market on manual review hold stays closed to trading and awaits the admin
+decision. Verify replacement markets resume. Record backlog age and time to
+drain.
+
+**Spend evidence:** Verify concurrent requests at the remaining budget edge,
+uncertain provider responses, retry and restart behavior, and UTC rollover.
+Show both throttle levels and reconcile confirmed Surplus charges for the
+same acceptance window against the budget. Record local timing and visibility
+evidence with its inference provider and settings.
 
 ## Phase 1 — Remove (shrinks the surface before rebuilding)
 
@@ -31,6 +67,8 @@ Order matters because of cross-imports (PRD F5, F9).
 7. Regenerate the fresh database baseline without the removed tables and columns (no data migration: new game, D-8); regenerate types.
 
 **Exit:** typecheck, lint, existing required tests, and build pass; game ticks still healthy on staging; web E2E of feed, post, reply, like, repost, follow, DM, group chat, prediction trade, perp trade passes with a test account. Net line count reported.
+
+**Approved staging-only exception:** The exception in PRD §9.1 and Phase 6 may defer Farcaster/NFT schema removals solely for the guarded additive financial upgrade. Retention does not satisfy this phase's removal or exit criteria; production and relaunch requirements remain unchanged.
 
 ## Phase 2 — Phone accounts (replaces Steward)
 
@@ -93,10 +131,23 @@ Depends on: D-9 through D-15b, D-17, D-17b, D-18.
 2. Stripe Checkout packs at 100 pts/$1 (fix the mismatch in `trading-balance-funding-service.ts`), stablecoin method, Washington block (billing address + IP), web only. Purchases are live at launch; Terms and checkout state that points are buy-only and never cash out (D-18).
 3. Prediction payout = 1 pt per winning share.
    Enforce PRD §9.1 settlement precision: reject cash inputs finer than two decimals, round cash proceeds down, retain remainders in house liquidity, and calculate P&L from settled credits. Verify real persisted balances and ledgers for fractional inputs, split sells, resolution and cancellation; splitting operations must not create points.
+   Enforce the PRD §9.1 canonical trading fee on prediction and perp trades: the fee is charged on the cent-settled amount and rounded up to whole cents, identically in execution, previews and the fee ledger. Verify against a real database that split and repeated trades never increase total trader credit or receive more buy shares than whole execution, that charged fees equal recorded fees (ledger rows, splits and `users.totalFeesPaid`) to the cent, and that dust proceeds settle to zero while a one-cent settled sale nets zero after its one-cent fee.
 4. **Spot/index/perp rebuild** (PRD §9.3): spot CPMM pools per ticker, NPC-only spot trading action, persisted index price, mark = index + bounded premium, funding from mark–index, liquidation on mark, remove random-walk price source and duplicate price stores, leverage cap 20×. Run on staging with NPC load for ≥ 72 h; check perps track spot, funding sign is correct, no runaway prices.
 5. Profit leaderboard (all time / month) excluding purchases; separate Characters board.
 
+**Approved — existing staging schema only.** Under the PRD §9.1 staging exception, the exact original baseline may receive only original additive migrations `0003`–`0005` through the normal migrator, with genuine `[0000, 0003, 0004, 0005]` receipts and all specified guards. Acceptance requires local nonempty-data retention, rollback, postflight shape and rerun proof, plus the existing required tests and build. Retained Farcaster/NFT data is preserved; this does not complete Phase 1 removals or Phase 6. Future cleanup needs a separate reviewed migration. Phase 7's fresh production database and D-8 remain unchanged.
+
 **Exit:** 72 h staging soak with charts of index vs mark per ticker; a test purchase end-to-end in Stripe test mode, and a refused purchase with a Washington billing address; a prediction market resolves and pays exactly 1 pt per winning share; leaderboard unaffected by a purchase.
+
+**Approved staging funding rollout acceptance (2026-11-17).**
+On a disposable copy of each supported staging migration lineage, apply the
+funding ledger migration and verify existing receipts, balances and positions,
+the new ledger constraints, rollback and safe reruns. Prove one accrual per
+position and scheduled period with the real Worker queue, authenticated
+HTTP handler and PostgreSQL. Cover duplicate delivery, a partial failure
+retried across the next UTC boundary, and delivery of the next distinct
+period. Exercise the pause and drain cutover before enabling the scheduler
+route in Phase 0.
 
 ## Phase 7 — Relaunch
 
