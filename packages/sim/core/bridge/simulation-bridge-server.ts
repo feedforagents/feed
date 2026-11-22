@@ -37,9 +37,11 @@
 
 import { PredictionPricing } from '@feed/core/markets/prediction';
 import {
+  and,
   db,
   desc,
   eq,
+  isNull,
   markets,
   perpPositions,
   positions as positionsTable,
@@ -218,12 +220,16 @@ async function getPositionsForUser(npcId: string) {
   const predPositions = await db
     .select()
     .from(positionsTable)
-    .where(eq(positionsTable.userId, npcId));
+    .where(
+      and(eq(positionsTable.userId, npcId), eq(positionsTable.status, 'active'))
+    );
 
   const perpPos = await db
     .select()
     .from(perpPositions)
-    .where(eq(perpPositions.userId, npcId));
+    .where(
+      and(eq(perpPositions.userId, npcId), isNull(perpPositions.closedAt))
+    );
 
   return [
     ...predPositions.map((p) => ({
