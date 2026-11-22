@@ -238,15 +238,20 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     expect(await monitor(actorId)).toEqual([]);
 
     const foreign = legacyPerp(foreignActor, 'risk-foreign');
-    await db
-      .insert(poolPositions)
-      .values([
-        legacyPerp(actorId, 'risk-legacy-b'),
-        legacyPerp(actorId, 'risk-legacy-a'),
-        legacyPerp(actorId, 'risk-legacy-c'),
-        legacyPerp(actorId, opened.id),
-        { ...foreign, unrealizedPnL: -100 },
-      ]);
+    await db.insert(poolPositions).values([
+      // Closed positions outrank the live ones by leverage but must not
+      // take any of the de-risking slots.
+      ...[0, 1, 2].map((index) => ({
+        ...legacyPerp(actorId, `risk-closed-${index}`),
+        leverage: 10,
+        closedAt: new Date(),
+      })),
+      legacyPerp(actorId, 'risk-legacy-b'),
+      legacyPerp(actorId, 'risk-legacy-a'),
+      legacyPerp(actorId, 'risk-legacy-c'),
+      legacyPerp(actorId, opened.id),
+      { ...foreign, unrealizedPnL: -100 },
+    ]);
     await markPerp(actorId, opened);
     const [action] = await monitor(actorId);
     expect(action).toMatchObject({
