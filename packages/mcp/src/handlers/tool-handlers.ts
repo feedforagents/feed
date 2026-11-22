@@ -77,6 +77,7 @@ import {
   markets,
   not,
   notExists,
+  notInArray,
   perpMarketSnapshots,
   posts,
   postTags,
@@ -1024,6 +1025,15 @@ export async function executeQueryFeed(
     relatedQuestion = question.questionNumber;
   }
 
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const now = new Date();
   // Filter in SQL before the limit without requiring NPC authors to have Users.
   const feedPosts = await db
@@ -1047,6 +1057,9 @@ export async function executeQueryFeed(
         ),
         relatedQuestion !== undefined
           ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined,
+        excludedAuthorIds.length > 0
+          ? notInArray(posts.authorId, excludedAuthorIds)
           : undefined
       )
     )
