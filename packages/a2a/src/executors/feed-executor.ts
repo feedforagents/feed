@@ -69,6 +69,7 @@ import {
   createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
+  getCurrentTrendingTags,
   type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
@@ -2627,34 +2628,13 @@ export class FeedAgentExecutor implements AgentExecutor {
   ): Promise<TrendingTagsResponse> {
     const limit = this.parsePositiveInt(params.limit, 10, 50);
 
-    // Get trending tags with their tag info via query
-    const trendingTagsList = await db.trendingTag.findMany({
-      take: limit,
-      orderBy: { score: 'desc' },
+    const trendingTagsList = await getCurrentTrendingTags(limit, {
+      requireIdentity: true,
     });
-
-    // Get tag IDs
-    const tagIds = trendingTagsList.map((tt) => tt.tagId);
-
-    // Fetch actual tag info
-    const tags =
-      tagIds.length > 0
-        ? await db.tag.findMany({
-            where: { id: { in: tagIds } },
-          })
-        : [];
-
-    // Create a map for quick lookup
-    const tagMap = new Map(tags.map((t) => [t.id, t]));
 
     return {
       tags: trendingTagsList.map((tt) => {
-        const tag = tagMap.get(tt.tagId);
-        if (!tag || !tag.name.trim() || !tag.displayName.trim()) {
-          throw new Error(
-            `Trending tag ${tt.tagId} is missing its required identity`
-          );
-        }
+        const tag = tt.tag;
         return {
           id: tag.id,
           name: tag.name,

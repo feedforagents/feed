@@ -90,6 +90,7 @@ import {
   createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
+  getCurrentTrendingTags,
   invalidateAfterPredictionTrade,
   type PredictionSettlementOptions,
   StaticDataRegistry,
@@ -2933,19 +2934,10 @@ export async function executeGetTrendingTags(
   _agent: AuthenticatedAgent,
   args: GetTrendingTagsArgs
 ): Promise<GetTrendingTagsResult> {
-  const trendingTagsList = await db.trendingTag.findMany({
-    orderBy: { rank: 'asc' },
-    take: args.limit || 20,
-  });
-  const tagIds = trendingTagsList.map((tt) => tt.tagId);
-  const tagsList = await db.tag.findMany({
-    where: { id: { in: tagIds } },
-    select: { id: true, name: true },
-  });
-  const tagsMap = new Map(tagsList.map((t) => [t.id, t]));
+  const trendingTagsList = await getCurrentTrendingTags(args.limit || 20);
   return {
     tags: trendingTagsList.map((tt) => ({
-      tag: tagsMap.get(tt.tagId)?.name || '',
+      tag: tt.tag.name,
       postCount: tt.postCount,
       trendScore: tt.score || 0,
     })),
