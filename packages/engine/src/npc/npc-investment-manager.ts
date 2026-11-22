@@ -13,6 +13,7 @@ import {
   actorState,
   and,
   db,
+  dbWrite,
   isNull,
   organizationState,
   perpPositions,
@@ -20,7 +21,7 @@ import {
   pools,
 } from '@feed/db';
 import { logger } from '@feed/shared';
-import { desc, eq, inArray, or } from 'drizzle-orm';
+import { eq, inArray, or } from 'drizzle-orm';
 import { getReputationBreakdown } from '../reputation';
 import { StaticDataRegistry } from '../services/static-data-registry';
 import { TradeExecutionService } from '../services/trade-execution-service';
@@ -66,56 +67,11 @@ export interface RebalanceAction {
   reason: string;
 }
 
-/**
- * Capital at risk for a position, used as the denominator for the
- * stop-loss / profit-take thresholds (percentages of invested capital).
- * Perp size is notional, so the capital at risk is the margin
- * (size / leverage); prediction size is already the cost basis. A perp
- * loss measured against notional would never reach the threshold: at 5x
- * a -25% margin loss is only -5% of notional, so the position would bleed
- * to liquidation instead of being stop-lossed.
- */
-function getPositionCapitalBasis(position: {
-  marketType: string;
-  size: number;
-  leverage?: number | null;
-}): number {
-  if (position.marketType === 'perp') {
-    return getPositionExposure(position.size, position.leverage);
-  }
-  return Math.abs(position.size);
-}
-
-/**
- * Map a live perp position row (perpPositions table) to a
- * PortfolioPosition. Live perp positions are not mirrored into
- * poolPositions, so the risk finders must read them from here.
- */
-function mapPerpPositionToPortfolioPosition(
-  poolId: string,
-  position: {
-    id: string;
-    ticker: string;
-    side: string;
-    size: number | string;
-    entryPrice: number | string;
-    currentPrice: number | string;
-    unrealizedPnL: number | string;
-    leverage: number | null;
-  }
-): PortfolioPosition {
-  return {
-    id: position.id,
-    poolId,
-    marketType: 'perp',
-    ticker: position.ticker ?? undefined,
-    side: position.side,
-    size: Number(position.size),
-    entryPrice: Number(position.entryPrice),
-    currentPrice: Number(position.currentPrice),
-    unrealizedPnL: Number(position.unrealizedPnL),
-    leverage: position.leverage ?? undefined,
-  };
+function getPositionCapitalBasis(position: PortfolioPosition): number {
+  return getPositionExposure(
+    position.size,
+    position.marketType === 'perp' ? position.leverage : undefined
+  );
 }
 
 export class NPCInvestmentManager {
@@ -123,9 +79,16 @@ export class NPCInvestmentManager {
    * Get portfolio metrics for an NPC pool
    */
   static async getPortfolioMetrics(poolId: string): Promise<PortfolioMetrics> {
+    return (await NPCInvestmentManager.readPortfolio(poolId, db)).metrics;
+  }
+
+  private static async readPortfolio(
+    poolId: string,
+    database: Pick<typeof dbWrite, 'select'>
+  ) {
     // The trading system now uses actorState.tradingBalance as the source of truth.
     // poolId = actorId for NPC pools, so we query actorState directly.
-    const actorStateResult = await db
+    const actorStateResult = await database
       .select({ tradingBalance: actorState.tradingBalance })
       .from(actorState)
       .where(eq(actorState.id, poolId))
@@ -137,7 +100,7 @@ export class NPCInvestmentManager {
     }
 
     // Get all positions (both open and closed) for this pool
-    const positionResults = await db
+    const positionResults = await database
       .select()
       .from(poolPositions)
       .where(eq(poolPositions.poolId, poolId));
@@ -147,7 +110,7 @@ export class NPCInvestmentManager {
     );
 
     // Get perp positions once and split into open/closed in memory.
-    const perpPositionsResult = await db
+    const perpPositionsResult = await database
       .select({
         id: perpPositions.id,
         ticker: perpPositions.ticker,
@@ -272,7 +235,7 @@ export class NPCInvestmentManager {
       totalValue
     );
 
-    return {
+    const metrics: PortfolioMetrics = {
       totalValue,
       availableBalance,
       unrealizedPnL,
@@ -281,6 +244,7 @@ export class NPCInvestmentManager {
       utilization,
       riskScore,
     };
+    return { metrics, openPositions: allOpenPositions, perpPositionIds };
   }
 
   /**
@@ -303,10 +267,12 @@ export class NPCInvestmentManager {
     riskScore += leverageRisk * 0.4;
 
     // Factor 2: Concentration risk (30% weight)
+    // Concentration is the largest position's share of the portfolio, so
+    // measure it by invested value (margin for perps via getPositionExposure),
+    // not by unrealized PnL: a huge position with no PnL yet is still
+    // concentrated, and a small position with a large gain is not.
     const largestPosition = Math.max(
-      ...positions.map((pos) =>
-        Math.abs(Number.parseFloat(pos.unrealizedPnL?.toString() || '0'))
-      )
+      ...positions.map((pos) => getPositionExposure(pos.size, pos.leverage))
     );
     const concentrationRisk = Math.min(1, largestPosition / totalValue);
     riskScore += concentrationRisk * 0.3;
@@ -332,7 +298,9 @@ export class NPCInvestmentManager {
     npcUserId: string,
     strategy: 'aggressive' | 'conservative' | 'balanced'
   ): Promise<RebalanceAction[]> {
-    const metrics = await NPCInvestmentManager.getPortfolioMetrics(poolId);
+    // Make exit decisions from current position state on the primary.
+    const { metrics, openPositions, perpPositionIds } =
+      await NPCInvestmentManager.readPortfolio(poolId, dbWrite);
     const actions: RebalanceAction[] = [];
 
     // Risk thresholds by strategy
@@ -353,8 +321,9 @@ export class NPCInvestmentManager {
       );
 
       // Generate de-risking actions
-      const deRiskActions = await NPCInvestmentManager.generateDeRiskingActions(
-        poolId,
+      const deRiskActions = NPCInvestmentManager.generateDeRiskingActions(
+        openPositions,
+        perpPositionIds,
         metrics
       );
       actions.push(...deRiskActions);
@@ -376,64 +345,41 @@ export class NPCInvestmentManager {
       // Could trigger new investment allocations here
     }
 
-    // Check for positions with large unrealized losses
-    const lossyPositions =
-      await NPCInvestmentManager.findPositionsWithLargeDrawdowns(poolId, 0.2); // >20% loss
-    if (lossyPositions.length > 0) {
-      logger.warn(
-        `Found ${lossyPositions.length} positions with large drawdowns`,
-        { poolId, npcUserId },
-        'NPCInvestmentManager'
-      );
+    const planned = new Set(actions.map((action) => action.positionId));
+    const profitActions: RebalanceAction[] = [];
+    for (const position of openPositions) {
+      if (planned.has(position.id)) continue;
+      const capitalBasis = getPositionCapitalBasis(position);
+      if (capitalBasis <= 0) continue;
 
-      for (const position of lossyPositions) {
-        actions.push({
-          type: 'close',
-          positionId: position.id,
-          marketType: position.marketType,
-          ticker: position.ticker,
-          marketId: position.marketId,
-          side: position.side,
-          targetSize: 0,
-          reason: `Stop-loss triggered: ${position.unrealizedPnL.toFixed(2)} loss`,
-        });
-      }
+      const pnlRatio = position.unrealizedPnL / capitalBasis;
+      const stopLoss = pnlRatio < -0.2;
+      const profitTake = pnlRatio > 0.25;
+      if (!stopLoss && !profitTake) continue;
+
+      planned.add(position.id);
+      (stopLoss ? actions : profitActions).push({
+        type: stopLoss ? 'close' : 'profit_take',
+        positionId: position.id,
+        marketType: position.marketType,
+        ticker: position.ticker,
+        marketId: position.marketId,
+        side: position.side,
+        targetSize: 0,
+        reason: stopLoss
+          ? `Stop-loss triggered: ${position.unrealizedPnL.toFixed(2)} loss`
+          : `Profit-taking triggered: +${position.unrealizedPnL.toFixed(2)} profit (${(pnlRatio * 100).toFixed(1)}%)`,
+      });
     }
 
-    // Check for positions with large unrealized profits (profit-taking)
-    const profitablePositions =
-      await NPCInvestmentManager.findPositionsWithLargeProfits(poolId, 0.25); // >25% profit
-    if (profitablePositions.length > 0) {
-      logger.info(
-        `Found ${profitablePositions.length} positions with large profits`,
-        { poolId, npcUserId },
-        'NPCInvestmentManager'
-      );
+    NPCInvestmentManager.logOpportunisticRebalance(
+      poolId,
+      openPositions,
+      metrics,
+      strategy
+    );
 
-      for (const position of profitablePositions) {
-        actions.push({
-          type: 'profit_take',
-          positionId: position.id,
-          marketType: position.marketType,
-          ticker: position.ticker,
-          marketId: position.marketId,
-          side: position.side,
-          targetSize: 0,
-          reason: `Profit-taking triggered: +${position.unrealizedPnL.toFixed(2)} profit (${((position.unrealizedPnL / getPositionCapitalBasis(position)) * 100).toFixed(1)}%)`,
-        });
-      }
-    }
-
-    // Generate opportunistic rebalance actions (partial profits, redeploy idle cash)
-    const opportunisticActions =
-      await NPCInvestmentManager.generateOpportunisticRebalanceActions(
-        poolId,
-        metrics,
-        strategy
-      );
-    actions.push(...opportunisticActions);
-
-    return actions;
+    return actions.concat(profitActions);
   }
 
   /**
@@ -722,86 +668,26 @@ export class NPCInvestmentManager {
     return baselineDecisions;
   }
 
-  /**
-   * Generate de-risking actions to reduce portfolio risk
-   */
-  private static async generateDeRiskingActions(
-    poolId: string,
+  private static generateDeRiskingActions(
+    openPositions: PortfolioPosition[],
+    perpPositionIds: Set<string>,
     metrics: PortfolioMetrics
-  ): Promise<RebalanceAction[]> {
-    const actions: RebalanceAction[] = [];
+  ): RebalanceAction[] {
+    const positionsToClose =
+      metrics.riskScore > 0.7 ? (metrics.unrealizedPnL < 0 ? 5 : 3) : 2;
 
-    // Calculate de-risking urgency based on metrics
-    const riskScore = metrics.riskScore || 0;
-    const unrealizedPnL = metrics.unrealizedPnL || 0;
-    const isHighRisk = riskScore > 0.7;
-    const hasLosses = unrealizedPnL < 0;
-
-    // Determine how many positions to close based on risk level
-    const positionsToClose = isHighRisk ? (hasLosses ? 5 : 3) : 2;
-
-    // Get all leveraged positions (open positions only with leverage > 1)
-    const positionsResult = await db
-      .select()
-      .from(poolPositions)
-      .where(eq(poolPositions.poolId, poolId))
-      .orderBy(desc(poolPositions.leverage))
-      .limit(positionsToClose);
-
-    // Filter for open positions with leverage > 1
-    const leveragedPositions = positionsResult.filter(
-      (p) => p.closedAt === null && (p.leverage ?? 0) > 1
-    );
-
-    // Live perp positions live in perpPositions, not poolPositions: a
-    // leveraged perp was never de-risked. Include open perp positions,
-    // deduped against legacy pool mirrors by id, and keep the highest
-    // leverage candidates across both sources.
-    const perpPositionsResult = await db
-      .select()
-      .from(perpPositions)
-      .where(
-        and(eq(perpPositions.userId, poolId), isNull(perpPositions.closedAt))
+    const isLivePerp = (position: PortfolioPosition) =>
+      position.marketType === 'perp' && perpPositionIds.has(position.id);
+    return openPositions
+      .filter((position) => (position.leverage ?? 0) > 1)
+      .sort(
+        (a, b) =>
+          (b.leverage ?? 0) - (a.leverage ?? 0) ||
+          Number(isLivePerp(b)) - Number(isLivePerp(a)) ||
+          a.id.localeCompare(b.id)
       )
-      .orderBy(desc(perpPositions.leverage))
-      .limit(positionsToClose);
-    const seenPositionIds = new Set(leveragedPositions.map((p) => p.id));
-    const leveragedPerpPositions = perpPositionsResult.filter(
-      (p) =>
-        p.closedAt === null &&
-        (p.leverage ?? 0) > 1 &&
-        !seenPositionIds.has(p.id)
-    );
-
-    const candidates: Array<{
-      id: string;
-      marketType: 'perp' | 'prediction';
-      ticker?: string;
-      marketId?: string;
-      side: string;
-      leverage: number;
-    }> = [
-      ...leveragedPositions.map((p) => ({
-        id: p.id,
-        marketType: p.marketType as 'perp' | 'prediction',
-        ticker: p.ticker || undefined,
-        marketId: p.marketId || undefined,
-        side: p.side,
-        leverage: p.leverage ?? 0,
-      })),
-      ...leveragedPerpPositions.map((p) => ({
-        id: p.id,
-        marketType: 'perp' as const,
-        ticker: p.ticker || undefined,
-        marketId: undefined,
-        side: p.side,
-        leverage: p.leverage ?? 0,
-      })),
-    ];
-    candidates.sort((a, b) => b.leverage - a.leverage);
-
-    for (const position of candidates.slice(0, positionsToClose)) {
-      actions.push({
+      .slice(0, positionsToClose)
+      .map((position) => ({
         type: 'close',
         positionId: position.id,
         marketType: position.marketType,
@@ -810,200 +696,15 @@ export class NPCInvestmentManager {
         side: position.side,
         targetSize: 0,
         reason: `De-risking: high leverage (${position.leverage}x)`,
-      });
-    }
-
-    return actions;
+      }));
   }
 
-  /**
-   * Find positions with large unrealized drawdowns
-   */
-  private static async findPositionsWithLargeDrawdowns(
+  private static logOpportunisticRebalance(
     poolId: string,
-    threshold: number // e.g., 0.2 = 20% loss
-  ): Promise<PortfolioPosition[]> {
-    const positionsResult = await db
-      .select()
-      .from(poolPositions)
-      .where(eq(poolPositions.poolId, poolId));
-
-    // Filter for open positions only
-    const openPositions = positionsResult.filter((p) => p.closedAt === null);
-
-    const lossyPositions: PortfolioPosition[] = [];
-
-    for (const position of openPositions) {
-      const unrealizedPnL = Number.parseFloat(
-        position.unrealizedPnL?.toString() || '0'
-      );
-      const capitalBasis = getPositionCapitalBasis({
-        marketType: position.marketType,
-        size: Number.parseFloat(position.size?.toString() || '0'),
-        leverage: position.leverage ?? undefined,
-      });
-
-      if (capitalBasis > 0) {
-        const lossPercentage = unrealizedPnL / capitalBasis;
-
-        if (lossPercentage < -threshold) {
-          // Map database PoolPosition to PortfolioPosition interface
-          const portfolioPosition: PortfolioPosition = {
-            id: position.id,
-            poolId: position.poolId,
-            marketType:
-              position.marketType === 'perp' ||
-              position.marketType === 'prediction'
-                ? position.marketType
-                : 'prediction',
-            ticker: position.ticker ?? undefined,
-            marketId: position.marketId ?? undefined,
-            side: position.side,
-            size: Number(position.size),
-            entryPrice: Number(position.entryPrice),
-            currentPrice: Number(position.currentPrice),
-            unrealizedPnL: Number(position.unrealizedPnL),
-            leverage: position.leverage ?? undefined,
-          };
-          lossyPositions.push(portfolioPosition);
-        }
-      }
-    }
-
-    // Live perp positions live in perpPositions, not poolPositions: a
-    // losing perp never reached this finder, so no stop-loss action was
-    // ever raised for it. Include them, deduped against legacy pool
-    // mirrors by id, with the loss measured against margin.
-    const openPerpPositions = await db
-      .select()
-      .from(perpPositions)
-      .where(
-        and(eq(perpPositions.userId, poolId), isNull(perpPositions.closedAt))
-      );
-    const seenPositionIds = new Set(openPositions.map((p) => p.id));
-    for (const position of openPerpPositions) {
-      if (position.closedAt !== null || seenPositionIds.has(position.id)) {
-        continue;
-      }
-      const unrealizedPnL = Number.parseFloat(
-        position.unrealizedPnL?.toString() || '0'
-      );
-      const capitalBasis = getPositionCapitalBasis({
-        marketType: 'perp',
-        size: Number.parseFloat(position.size?.toString() || '0'),
-        leverage: position.leverage ?? undefined,
-      });
-      if (capitalBasis <= 0) continue;
-      if (unrealizedPnL / capitalBasis < -threshold) {
-        lossyPositions.push(
-          mapPerpPositionToPortfolioPosition(poolId, position)
-        );
-      }
-    }
-
-    return lossyPositions;
-  }
-
-  /**
-   * Find positions with large unrealized profits
-   */
-  private static async findPositionsWithLargeProfits(
-    poolId: string,
-    threshold: number // e.g., 0.25 = 25% profit
-  ): Promise<PortfolioPosition[]> {
-    // Query only open positions (closedAt IS NULL) directly in SQL for efficiency
-    const openPositions = await db
-      .select()
-      .from(poolPositions)
-      .where(
-        and(eq(poolPositions.poolId, poolId), isNull(poolPositions.closedAt))
-      );
-
-    const profitablePositions: PortfolioPosition[] = [];
-
-    for (const position of openPositions) {
-      const unrealizedPnL = Number.parseFloat(
-        position.unrealizedPnL?.toString() || '0'
-      );
-      const capitalBasis = getPositionCapitalBasis({
-        marketType: position.marketType,
-        size: Number.parseFloat(position.size?.toString() || '0'),
-        leverage: position.leverage ?? undefined,
-      });
-
-      if (capitalBasis > 0) {
-        const profitPercentage = unrealizedPnL / capitalBasis;
-
-        if (profitPercentage > threshold) {
-          // Map database PoolPosition to PortfolioPosition interface
-          const portfolioPosition: PortfolioPosition = {
-            id: position.id,
-            poolId: position.poolId,
-            marketType:
-              position.marketType === 'perp' ||
-              position.marketType === 'prediction'
-                ? position.marketType
-                : 'prediction',
-            ticker: position.ticker ?? undefined,
-            marketId: position.marketId ?? undefined,
-            side: position.side,
-            size: Number(position.size),
-            entryPrice: Number(position.entryPrice),
-            currentPrice: Number(position.currentPrice),
-            unrealizedPnL: Number(position.unrealizedPnL),
-            leverage: position.leverage ?? undefined,
-          };
-          profitablePositions.push(portfolioPosition);
-        }
-      }
-    }
-
-    // Live perp positions live in perpPositions, not poolPositions: a
-    // profitable perp never reached this finder, so no profit-taking
-    // action was ever raised for it. Include them, deduped against
-    // legacy pool mirrors by id, with the profit measured against margin.
-    const openPerpPositions = await db
-      .select()
-      .from(perpPositions)
-      .where(
-        and(eq(perpPositions.userId, poolId), isNull(perpPositions.closedAt))
-      );
-    const seenPositionIds = new Set(openPositions.map((p) => p.id));
-    for (const position of openPerpPositions) {
-      if (position.closedAt !== null || seenPositionIds.has(position.id)) {
-        continue;
-      }
-      const unrealizedPnL = Number.parseFloat(
-        position.unrealizedPnL?.toString() || '0'
-      );
-      const capitalBasis = getPositionCapitalBasis({
-        marketType: 'perp',
-        size: Number.parseFloat(position.size?.toString() || '0'),
-        leverage: position.leverage ?? undefined,
-      });
-      if (capitalBasis <= 0) continue;
-      if (unrealizedPnL / capitalBasis > threshold) {
-        profitablePositions.push(
-          mapPerpPositionToPortfolioPosition(poolId, position)
-        );
-      }
-    }
-
-    return profitablePositions;
-  }
-
-  /**
-   * Generate opportunistic rebalance actions
-   * - Take partial profits on positions that have grown beyond target allocation
-   * - Redeploy idle cash when utilization is below target
-   */
-  private static async generateOpportunisticRebalanceActions(
-    poolId: string,
+    openPositions: PortfolioPosition[],
     metrics: PortfolioMetrics,
     strategy: 'aggressive' | 'conservative' | 'balanced'
-  ): Promise<RebalanceAction[]> {
-    const actions: RebalanceAction[] = [];
-
+  ): void {
     // Target allocations by strategy
     const maxPositionAllocation = {
       aggressive: 0.25, // 25% max per position
@@ -1017,21 +718,13 @@ export class NPCInvestmentManager {
       balanced: 65,
     };
 
-    // Get open positions directly in SQL for efficiency
-    const openPositions = await db
-      .select()
-      .from(poolPositions)
-      .where(
-        and(eq(poolPositions.poolId, poolId), isNull(poolPositions.closedAt))
-      );
-
     // Check for positions that have grown too large (need partial profit-taking)
     const maxAllocation = maxPositionAllocation[strategy];
     const totalValue = metrics.totalValue;
 
     for (const position of openPositions) {
       const positionValue =
-        Number(position.size) + Number(position.unrealizedPnL || 0);
+        getPositionCapitalBasis(position) + position.unrealizedPnL;
 
       // Guard against division by zero
       if (positionValue <= 0 || totalValue <= 0) {
@@ -1071,8 +764,6 @@ export class NPCInvestmentManager {
         'NPCInvestmentManager'
       );
     }
-
-    return actions;
   }
 
   /**

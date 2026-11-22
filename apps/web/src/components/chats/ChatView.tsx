@@ -70,15 +70,20 @@ export function ChatView({
   onReply,
   onDismissReply,
 }: ChatViewProps) {
-  // Convert chat participants to mentionable members format
+  // Convert chat participants to mentionable members format.
+  // Departed members (isActive === false) stay in `participants` so their
+  // old messages keep a name, but they are no longer in the chat and must
+  // not be offered as mention suggestions.
   const mentionableMembers: MentionableAgent[] = useMemo(() => {
     if (!chatDetails?.participants) return [];
-    return chatDetails.participants.map((p) => ({
-      id: p.id,
-      username: p.username || null,
-      displayName: p.displayName || null,
-      profileImageUrl: p.profileImageUrl || null,
-    }));
+    return chatDetails.participants
+      .filter((p) => p.isActive !== false)
+      .map((p) => ({
+        id: p.id,
+        username: p.username || null,
+        displayName: p.displayName || null,
+        profileImageUrl: p.profileImageUrl || null,
+      }));
   }, [chatDetails?.participants]);
 
   // Empty state when no chat selected
