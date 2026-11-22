@@ -190,14 +190,15 @@ export class TimeframeArcPlanner {
     const phases = structuredClone(PHASE_CONFIGS[category]);
     const phaseOrder = Object.keys(phases);
 
-    // Select insiders and deceivers
+    // Select disjoint insiders and deceivers so an insider never occupies a
+    // deceiver slot (getActorRoleSignal resolves insiderActorIds first).
     const insiders = this.selectInsiders(
       questionText,
       actors,
       organizations,
       affiliatedActorIds
     );
-    const deceivers = this.selectDeceivers(actors, category);
+    const deceivers = this.selectDeceivers(actors, category, insiders);
 
     const plan: TimeframeArcPlan = {
       questionId,
@@ -360,17 +361,20 @@ export class TimeframeArcPlanner {
    */
   private selectDeceivers(
     actors: Actor[],
-    category: TimeframeCategory
+    category: TimeframeCategory,
+    excludeActorIds: readonly string[] = []
   ): string[] {
     // Fewer deceivers for short timeframes (less time for misdirection)
     const maxDeceivers =
       category === 'flash' ? 0 : category === 'intraday' ? 1 : 2;
 
+    const excluded = new Set(excludeActorIds);
     const potentialDeceivers = actors.filter(
       (a) =>
-        a.personality?.includes('contrarian') ||
-        a.personality?.includes('conspiracy') ||
-        a.description?.toLowerCase().includes('conspiracy')
+        !excluded.has(a.id) &&
+        (a.personality?.includes('contrarian') ||
+          a.personality?.includes('conspiracy') ||
+          a.description?.toLowerCase().includes('conspiracy'))
     );
 
     const shuffled = shuffleArray(potentialDeceivers);
