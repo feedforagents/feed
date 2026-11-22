@@ -233,9 +233,14 @@ Tests with real LLM calls (required as evidence when behavior depends on an LLM)
 bun run test:integration:live
 ```
 
-This runs the agent action, engine output, full agent tick, full production
-tick, and trading-and-questions integration files with real inference. If the
-output says the tests were skipped, your key or `RUN_LIVE_LLM_TESTS` is missing.
+This runs these integration files with real inference:
+
+- `engine-generation-output.test.ts`
+- `full-agent-tick.test.ts`
+- `full-production-tick.test.ts`
+- `trading-and-questions.integration.test.ts`
+
+If the output says the tests were skipped, your key or `RUN_LIVE_LLM_TESTS` is missing.
 A skipped test is not evidence.
 
 Other suites:
