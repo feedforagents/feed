@@ -95,42 +95,97 @@ export const GET = withErrorHandling(async function GET(
 
   const metrics = await NPCInvestmentManager.getPortfolioMetrics(pool.id);
 
-  const positions = await db.poolPosition.findMany({
-    where: {
-      poolId: pool.id,
-      closedAt: null,
-    },
-    select: {
-      id: true,
-      marketType: true,
-      ticker: true,
-      marketId: true,
-      side: true,
-      size: true,
-      entryPrice: true,
-      currentPrice: true,
-      unrealizedPnL: true,
-      leverage: true,
-      openedAt: true,
-    },
-    orderBy: {
-      openedAt: 'desc',
-    },
-  });
+  // The aggregates above merge two position tables: NPC prediction trades
+  // are mirrored into PoolPosition, but NPC perp trades live only in
+  // PerpPosition (TradeExecutionService opens them through PerpMarketService
+  // with no pool mirror). Listing only PoolPosition hid every open perp
+  // position while positionCount and unrealizedPnL still included it, so
+  // list the same merged set the metrics count. Pool rows for perps are
+  // legacy mirrors of PerpPosition rows; drop a pool row whose id exists in
+  // PerpPosition, exactly as getPortfolioMetrics does, to avoid listing the
+  // same position twice.
+  const [poolPositionsList, perpPositionsList] = await Promise.all([
+    db.poolPosition.findMany({
+      where: {
+        poolId: pool.id,
+        closedAt: null,
+      },
+      select: {
+        id: true,
+        marketType: true,
+        ticker: true,
+        marketId: true,
+        side: true,
+        size: true,
+        entryPrice: true,
+        currentPrice: true,
+        unrealizedPnL: true,
+        leverage: true,
+        openedAt: true,
+      },
+      orderBy: {
+        openedAt: 'desc',
+      },
+    }),
+    db.perpPosition.findMany({
+      where: {
+        userId: pool.id,
+      },
+      select: {
+        id: true,
+        ticker: true,
+        side: true,
+        size: true,
+        entryPrice: true,
+        currentPrice: true,
+        unrealizedPnL: true,
+        leverage: true,
+        openedAt: true,
+        closedAt: true,
+      },
+    }),
+  ]);
 
-  const formattedPositions = positions.map((pos) => ({
-    id: pos.id,
-    marketType: pos.marketType,
-    ticker: pos.ticker,
-    marketId: pos.marketId,
-    side: pos.side,
-    size: Number(pos.size),
-    entryPrice: Number(pos.entryPrice),
-    currentPrice: Number(pos.currentPrice),
-    unrealizedPnL: Number(pos.unrealizedPnL),
-    leverage: pos.leverage,
-    createdAt: toISO(pos.openedAt),
-  }));
+  const perpPositionIds = new Set(perpPositionsList.map((pos) => pos.id));
+
+  const formattedPositions = [
+    ...poolPositionsList
+      .filter(
+        (pos) => pos.marketType !== 'perp' || !perpPositionIds.has(pos.id)
+      )
+      .map((pos) => ({
+        id: pos.id,
+        marketType: pos.marketType,
+        ticker: pos.ticker,
+        marketId: pos.marketId,
+        side: pos.side,
+        size: Number(pos.size),
+        entryPrice: Number(pos.entryPrice),
+        currentPrice: Number(pos.currentPrice),
+        unrealizedPnL: Number(pos.unrealizedPnL),
+        leverage: pos.leverage,
+        createdAt: toISO(pos.openedAt),
+        openedAt: pos.openedAt,
+      })),
+    ...perpPositionsList
+      .filter((pos) => pos.closedAt === null)
+      .map((pos) => ({
+        id: pos.id,
+        marketType: 'perp',
+        ticker: pos.ticker,
+        marketId: null,
+        side: pos.side,
+        size: Number(pos.size),
+        entryPrice: Number(pos.entryPrice),
+        currentPrice: Number(pos.currentPrice),
+        unrealizedPnL: Number(pos.unrealizedPnL),
+        leverage: pos.leverage,
+        createdAt: toISO(pos.openedAt),
+        openedAt: pos.openedAt,
+      })),
+  ]
+    .sort((a, b) => b.openedAt.getTime() - a.openedAt.getTime())
+    .map(({ openedAt: _openedAt, ...position }) => position);
 
   const res = NextResponse.json({
     success: true,
