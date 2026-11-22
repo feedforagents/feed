@@ -641,8 +641,8 @@ async function startOwnedPredictionServer(
   }
 }
 
-export async function runIsolatedSubMarketCases() {
-  await runIsolatedCases('sub-market');
+export async function runIsolatedSubMarketCases(fixture?: IsolatedFixture) {
+  await runIsolatedCases('sub-market', fixture);
 }
 
 export async function runIsolatedPredictionRemainderCases() {
@@ -673,8 +673,10 @@ export async function runIsolatedBalanceDisplayCases() {
   await runIsolatedCases('balance-display');
 }
 
-export async function runIsolatedClosedPredictionPositionsCases() {
-  await runIsolatedCases('closed-prediction-positions');
+export async function runIsolatedClosedPredictionPositionsCases(
+  fixture?: IsolatedFixture
+) {
+  await runIsolatedCases('closed-prediction-positions', fixture);
 }
 
 export async function runIsolatedMcpPerpFeeCases() {
@@ -693,7 +695,13 @@ export async function runIsolatedChatMentionCases() {
   await runIsolatedCases('chat-mentions');
 }
 
-async function runIsolatedCases(suite: Suite) {
+interface IsolatedFixture {
+  name: string;
+  file: string;
+  cases: string[];
+}
+
+async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
   // Chat mentions, stats and trade history use the original child lease.
   const chatMentions = suite === 'chat-mentions';
   const stats = suite === 'stats-total-hoots';
@@ -912,6 +920,7 @@ async function runIsolatedCases(suite: Suite) {
       [marker]: nonce,
       [leaseVariable]: manifest,
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
+      ...(fixture ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       // Fresh process memory only; never read or invalidate a shared cron cache.
       ...(scenario ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(review ? { FEED_DISABLE_REDIS: '1' } : {}),
@@ -1015,10 +1024,11 @@ async function runIsolatedCases(suite: Suite) {
                         : chatMentions
                           ? 'three-chat-mention-child-cases'
                           : 'four-child-cases';
+    if (fixture) phase = fixture.name + '-child-cases';
     const output = await run(
       [
         'test',
-        scenario ? PREDICTION_SCENARIO_FILE : file,
+        fixture?.file ?? (scenario ? PREDICTION_SCENARIO_FILE : file),
         '--timeout',
         '30000',
       ],
@@ -1029,12 +1039,14 @@ async function runIsolatedCases(suite: Suite) {
     const escape = (text: string) =>
       text.replace(/[$.*+?^{}()|[\]\\]/g, '\\$&');
     const lines = output.split('\n');
-    const expectedCases = scenario ? PREDICTION_SCENARIO_CASES : cases;
+    const expectedCases =
+      fixture?.cases ?? (scenario ? PREDICTION_SCENARIO_CASES : cases);
     const passes = expectedCases.map((name) =>
       lines.find((line) =>
         new RegExp(
           '^\\(pass\\) ' +
-            (scenario ||
+            (fixture ||
+            scenario ||
             prediction ||
             plugin ||
             fee ||
