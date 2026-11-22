@@ -92,6 +92,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     authUser && authUser.userId
       ? await asUser(authUser, async (db) => {
           const eventsList: UpcomingEvent[] = [];
+          // Ordering key per event id. The date/time strings pushed below are
+          // display-only (month/day, no year), so re-parsing them to sort would
+          // pin every event to 2001 and order January before December across
+          // the year boundary; the source timestamp keeps the true chronology.
+          const sortTimes = new Map<string, number>();
 
           // 1. Get active questions that will resolve soon (within configured days)
           const activeQuestions = await db.question.findMany({
@@ -208,6 +213,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               }
             }
 
+            sortTimes.set(question.id, resolutionDate.getTime());
             eventsList.push({
               id: question.id,
               title,
@@ -337,6 +343,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             else if (eventTypeLower.includes('conference'))
               title = 'Tech Conference';
 
+            sortTimes.set(event.id, eventDate.getTime());
             eventsList.push({
               id: event.id,
               title,
@@ -358,19 +365,24 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             });
           }
 
-          // Sort by date/time and take top N
+          // Sort by the source timestamp and take top N. Re-parsing the
+          // display strings here would ignore the year (a missing year parses
+          // as 2001), flipping December/January order at the year boundary.
           const sortedEvents = eventsList
-            .sort((a, b) => {
-              const dateA = new Date(`${a.date} ${a.time || ''}`).getTime();
-              const dateB = new Date(`${b.date} ${b.time || ''}`).getTime();
-              return dateA - dateB;
-            })
+            .sort(
+              (a, b) => (sortTimes.get(a.id) ?? 0) - (sortTimes.get(b.id) ?? 0)
+            )
             .slice(0, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
 
           return sortedEvents;
         })
       : await asPublic(async (db) => {
           const eventsList: UpcomingEvent[] = [];
+          // Ordering key per event id. The date/time strings pushed below are
+          // display-only (month/day, no year), so re-parsing them to sort would
+          // pin every event to 2001 and order January before December across
+          // the year boundary; the source timestamp keeps the true chronology.
+          const sortTimes = new Map<string, number>();
 
           // 1. Get active questions that will resolve soon (within configured days)
           const activeQuestions = await db.question.findMany({
@@ -487,6 +499,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               }
             }
 
+            sortTimes.set(question.id, resolutionDate.getTime());
             eventsList.push({
               id: question.id,
               title,
@@ -616,6 +629,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             else if (eventTypeLower.includes('conference'))
               title = 'Tech Conference';
 
+            sortTimes.set(event.id, eventDate.getTime());
             eventsList.push({
               id: event.id,
               title,
@@ -637,13 +651,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             });
           }
 
-          // Sort by date/time and take top N
+          // Sort by the source timestamp and take top N. Re-parsing the
+          // display strings here would ignore the year (a missing year parses
+          // as 2001), flipping December/January order at the year boundary.
           const sortedEvents = eventsList
-            .sort((a, b) => {
-              const dateA = new Date(`${a.date} ${a.time || ''}`).getTime();
-              const dateB = new Date(`${b.date} ${b.time || ''}`).getTime();
-              return dateA - dateB;
-            })
+            .sort(
+              (a, b) => (sortTimes.get(a.id) ?? 0) - (sortTimes.get(b.id) ?? 0)
+            )
             .slice(0, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
 
           return sortedEvents;

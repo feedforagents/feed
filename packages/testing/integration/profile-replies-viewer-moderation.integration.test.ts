@@ -33,6 +33,7 @@ import {
   gameOnboarding,
   inArray,
   notInArray,
+  npcMarketClues,
   or,
   posts,
   sql,
@@ -171,32 +172,37 @@ beforeAll(async () => {
     '../../../apps/web/src/app/api/users/[userId]/posts/route'
   ));
 
-  [
-    owner,
-    viewer,
-    normal,
-    blocked,
-    muted,
-    blocker,
-    postNormal,
-    postBlocked,
-    postMuted,
-    postBlocker,
-    pcNormal,
-    pcBlocked,
-    pcMuted,
-    pcBlocker,
-    rPostNormal,
-    rPostBlocked,
-    rPostMuted,
-    rPostBlocker,
-    rPcNormal,
-    rPcBlocked,
-    rPcMuted,
-    rPcBlocker,
-  ] = await Promise.all(
+  const ids = await Promise.all(
     Array.from({ length: 22 }, () => generateSnowflakeId())
   );
+  const nextId = () => {
+    const id = ids.shift();
+    if (id === undefined)
+      throw new Error('Fixture ID allocation was incomplete');
+    return id;
+  };
+  owner = nextId();
+  viewer = nextId();
+  normal = nextId();
+  blocked = nextId();
+  muted = nextId();
+  blocker = nextId();
+  postNormal = nextId();
+  postBlocked = nextId();
+  postMuted = nextId();
+  postBlocker = nextId();
+  pcNormal = nextId();
+  pcBlocked = nextId();
+  pcMuted = nextId();
+  pcBlocker = nextId();
+  rPostNormal = nextId();
+  rPostBlocked = nextId();
+  rPostMuted = nextId();
+  rPostBlocker = nextId();
+  rPcNormal = nextId();
+  rPcBlocked = nextId();
+  rPcMuted = nextId();
+  rPcBlocker = nextId();
 
   const now = new Date();
   const at = (seconds: number) => new Date(now.getTime() + seconds * 1000);
@@ -516,6 +522,25 @@ async function cleanupOwned(): Promise<void> {
         .for('update');
     }
     const foreign: string[] = [];
+    if (postIds.length > 0) {
+      await tx
+        .select({ id: posts.id })
+        .from(posts)
+        .where(inArray(posts.id, postIds))
+        .for('update');
+      // The manual clue migration is present in localnet and may be absent in CI.
+      const [clueTable] = await tx.execute<{ present: boolean }>(
+        sql`SELECT pg_catalog.to_regclass('public."NpcMarketClue"') IS NOT NULL AS present`
+      );
+      if (clueTable?.present) {
+        const [clue] = await tx
+          .select({ questionId: npcMarketClues.questionId })
+          .from(npcMarketClues)
+          .where(inArray(npcMarketClues.postId, postIds))
+          .limit(1);
+        if (clue) foreign.push('NpcMarketClue.postId');
+      }
+    }
     if (userIds.length > 0) {
       // Physical destructive paths: deleting an owned user cascades these
       // rows away (GameOnboarding/UserPnLSnapshot/Whitelist) or nulls the
@@ -724,26 +749,32 @@ describe('profile replies viewer moderation', () => {
     const bystanderId = await generateSnowflakeId();
     const freshId = await generateSnowflakeId();
     const canaryBlockId = await generateSnowflakeId();
+    let controlUsers: { id: string }[] = [];
+    let controlBlocks: { id: string }[] = [];
     try {
-      await db.insert(users).values([
-        {
-          id: canaryId,
-          username: `f148-canary-${canaryId}`,
-          displayName: 'F148 Canary',
-          updatedAt: new Date(),
-        },
-        {
-          id: bystanderId,
-          username: `f148-bystander-${bystanderId}`,
-          displayName: 'F148 Bystander',
-          updatedAt: new Date(),
-        },
-      ]);
-      await db
+      controlUsers = await db
+        .insert(users)
+        .values([
+          {
+            id: canaryId,
+            username: `f148-canary-${canaryId}`,
+            displayName: 'F148 Canary',
+            updatedAt: new Date(),
+          },
+          {
+            id: bystanderId,
+            username: `f148-bystander-${bystanderId}`,
+            displayName: 'F148 Bystander',
+            updatedAt: new Date(),
+          },
+        ])
+        .returning({ id: users.id });
+      controlBlocks = await db
         .insert(userBlocks)
         .values([
           { id: canaryBlockId, blockerId: canaryId, blockedId: bystanderId },
-        ]);
+        ])
+        .returning({ id: userBlocks.id });
       let failure: unknown;
       try {
         await db.insert(users).values([
@@ -787,8 +818,8 @@ describe('profile replies viewer moderation', () => {
         .where(eq(userBlocks.id, canaryBlockId));
       expect(blockStillThere?.id).toBe(canaryBlockId);
     } finally {
-      await db.delete(userBlocks).where(eq(userBlocks.id, canaryBlockId));
-      await db.delete(users).where(inArray(users.id, [canaryId, bystanderId]));
+      for (const row of controlUsers) ownedUsers.add(row.id);
+      for (const row of controlBlocks) ownedBlocks.add(row.id);
     }
   });
 });
