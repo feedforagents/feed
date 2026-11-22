@@ -104,6 +104,13 @@ const TRADE_HISTORY_FILE =
 const TRADE_HISTORY_CASES = [
   'serves the persisted prediction and perp trade history over HTTP',
 ];
+const STATS_TOTAL_HOOTS_FILE =
+  'packages/testing/integration/stats-total-hoots.integration.test.ts';
+const STATS_TOTAL_HOOTS_CASES = [
+  'Platform stats count only reachable posts > adds only the reachable fixture post to the platform total',
+  'Platform stats count only reachable posts > still moves for content readers can see',
+  'Platform stats count only reachable posts > follows moderation: publishing a scheduled post raises the total, removing one lowers it',
+];
 type Suite =
   | 'sub-market'
   | 'prediction-remainder'
@@ -114,7 +121,8 @@ type Suite =
   | 'balance-display'
   | 'closed-prediction-positions'
   | 'mcp-perp-fee'
-  | 'trade-history';
+  | 'trade-history'
+  | 'stats-total-hoots';
 type Lease = {
   database: string;
   oid: string;
@@ -659,8 +667,13 @@ export async function runIsolatedTradeHistoryCase() {
   await runIsolatedCases('trade-history');
 }
 
+export async function runIsolatedStatsTotalHootsCases() {
+  await runIsolatedCases('stats-total-hoots');
+}
+
 async function runIsolatedCases(suite: Suite) {
-  // The trade-history fixture uses the original child marker and lease file.
+  // Stats and trade history use the original child marker and lease file.
+  const stats = suite === 'stats-total-hoots';
   const tradeHistory = suite === 'trade-history';
   const closedPositions = suite === 'closed-prediction-positions';
   const balance = suite === 'balance-display';
@@ -688,7 +701,9 @@ async function runIsolatedCases(suite: Suite) {
                   ? MCP_FEE_FILE
                   : tradeHistory
                     ? TRADE_HISTORY_FILE
-                    : FILE;
+                    : stats
+                      ? STATS_TOTAL_HOOTS_FILE
+                      : FILE;
   const cases = closedPositions
     ? CLOSED_PREDICTION_POSITIONS_CASES
     : balance
@@ -707,7 +722,9 @@ async function runIsolatedCases(suite: Suite) {
                   ? MCP_FEE_CASES
                   : tradeHistory
                     ? TRADE_HISTORY_CASES
-                    : CASES;
+                    : stats
+                      ? STATS_TOTAL_HOOTS_CASES
+                      : CASES;
   const marker = closedPositions
     ? 'FEED_CLOSED_PREDICTION_POSITIONS_CHILD'
     : balance
@@ -792,7 +809,9 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'feed-mcp-perp-fee-'
                       : tradeHistory
                         ? 'feed-trade-history-'
-                        : 'feed-sub-market-'
+                        : stats
+                          ? 'feed-stats-total-hoots-'
+                          : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -864,7 +883,7 @@ async function runIsolatedCases(suite: Suite) {
       ...(review ? { FEED_DISABLE_REDIS: '1' } : {}),
       ...(balance ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(closedPositions ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
-      ...(mcpFee || tradeHistory
+      ...(mcpFee || tradeHistory || stats
         ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' }
         : {}),
     };
@@ -955,7 +974,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'three-mcp-perp-fee-child-cases'
                     : tradeHistory
                       ? 'trade-history-http-child-case'
-                      : 'four-child-cases';
+                      : stats
+                        ? 'three-stats-total-hoots-child-cases'
+                        : 'four-child-cases';
     const output = await run(
       ['test', file, '--timeout', '30000'],
       env,
@@ -977,7 +998,8 @@ async function runIsolatedCases(suite: Suite) {
             balance ||
             closedPositions ||
             mcpFee ||
-            tradeHistory
+            tradeHistory ||
+            stats
               ? ''
               : 'sub-market transactional creation > ') +
             escape(name) +
@@ -1015,7 +1037,9 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'All three real MCP perp fee cases must pass without skips'
                       : tradeHistory
                         ? 'Trade history must pass over real HTTP without skips'
-                        : 'All four original cases must pass without skips'
+                        : stats
+                          ? 'All three stats cases must pass over HTTP without skips'
+                          : 'All four original cases must pass without skips'
     );
     childProof = {
       pass: cases.length,
