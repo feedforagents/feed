@@ -252,7 +252,7 @@ export function psql(
 // Phase 0 uses the same read-only catalog snapshot as the fee inspection.
 const phase0CatalogFields = `,
   'phase0Tables',(SELECT json_object_agg(t.name,json_build_object(
-    'kind',c.relkind,'rls',c.relrowsecurity,
+    'oid',c.oid::text,'kind',c.relkind,'rls',c.relrowsecurity,
     'publicAccess',EXISTS(SELECT 1 FROM pg_catalog.aclexplode(c.relacl) a WHERE a.grantee=0)
       OR EXISTS(SELECT 1 FROM pg_catalog.pg_attribute p CROSS JOIN LATERAL pg_catalog.aclexplode(p.attacl) a
         WHERE p.attrelid=c.oid AND p.attnum>0 AND NOT p.attisdropped AND a.grantee=0),

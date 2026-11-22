@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// PRD 9.2, MVP Phase 0: prepare staging storage for durable market recovery.
+// PRD D-25 and 9.2, MVP Phase 0: stage the spend ledger and market recovery storage.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,9 +22,22 @@ import {
   text,
 } from './staging-fee-schema-policy';
 
-const migrationSha256 =
-  '9eb07e4a49783bdcb83c8fb308bc04cb11b9a19fc7ac9653049e54acf1a4351b';
-const workTable = 'public."PredictionResolutionWork"';
+const migrations = {
+  '0007': {
+    filename: '0007_scheduled_inference_budget.sql',
+    sha256: '67d04d140f3e49edf40acb749d0b408267289ae7938463146013e9760c39d8cf',
+    table: 'ScheduledInferenceReservation',
+    privileges: ['SELECT', 'INSERT', 'UPDATE'],
+  },
+  '0008': {
+    filename: '0008_prediction_resolution_work.sql',
+    sha256: '9eb07e4a49783bdcb83c8fb308bc04cb11b9a19fc7ac9653049e54acf1a4351b',
+    table: 'PredictionResolutionWork',
+    privileges: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  },
+} as const;
+type MigrationId = keyof typeof migrations;
+
 const questionTable = 'public."Question"';
 
 function sqlLiteral(value: string) {
@@ -32,6 +45,7 @@ function sqlLiteral(value: string) {
 }
 
 function migrationTransaction(
+  id: MigrationId,
   state: FeeSchemaState,
   app: Endpoint,
   direct: Endpoint,
@@ -39,13 +53,39 @@ function migrationTransaction(
 ) {
   const appUser = sqlLiteral(app.user);
   const appRole = `"${app.user.replaceAll('"', '""')}"`;
-  const privileges = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
+  const { table, privileges } = migrations[id];
+  const workTable = `public."${table}"`;
   const appHasAccess = privileges
     .map(
       (privilege) =>
         `pg_catalog.has_table_privilege(${appUser}, '${workTable}', '${privilege}')`
     )
     .join(' AND ');
+  const relatedTableGuard =
+    id === '0007'
+      ? `OR pg_catalog.to_regclass('public."PredictionResolutionWork"')::pg_catalog.oid::pg_catalog.text IS DISTINCT FROM ${sqlLiteral(text(object(object(state.row.phase0Tables).PredictionResolutionWork).oid))}`
+      : `OR pg_catalog.to_regclass('"Question"') IS DISTINCT FROM pg_catalog.to_regclass('${questionTable}')
+    OR NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+      JOIN pg_catalog.pg_constraint k ON k.conrelid = c.oid
+      WHERE c.oid = pg_catalog.to_regclass('${questionTable}') AND c.relkind = 'r'
+        AND a.attname = 'id' AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull
+        AND a.atttypid = 'pg_catalog.text'::pg_catalog.regtype
+        AND k.contype = 'p' AND k.convalidated AND k.conkey = ARRAY[a.attnum]
+    )`;
+  const pinQuestion =
+    id === '0008'
+      ? `PERFORM pg_catalog.set_config('feed.staging_0008_question_oid',
+    pg_catalog.to_regclass('${questionTable}')::pg_catalog.oid::pg_catalog.text, true);`
+      : '';
+  const questionForeignKey =
+    id === '0008'
+      ? `AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid
+      AND k.contype = 'f' AND k.convalidated AND k.confdeltype = 'c'
+      AND k.confrelid = pg_catalog.to_regclass('${questionTable}')
+      AND k.confrelid = pg_catalog.current_setting('feed.staging_0008_question_oid')::pg_catalog.oid)`
+      : '';
   return `BEGIN READ WRITE;
 SET LOCAL statement_timeout = '15s';
 SET LOCAL lock_timeout = '1s';
@@ -66,31 +106,18 @@ DO ${sqlLiteral(`BEGIN
   END IF;
 
   IF pg_catalog.to_regclass('${workTable}') IS NOT NULL
-    OR pg_catalog.to_regclass('"Question"') IS DISTINCT FROM pg_catalog.to_regclass('${questionTable}')
-    OR NOT EXISTS (
-      SELECT 1 FROM pg_catalog.pg_class c
-      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
-      JOIN pg_catalog.pg_constraint k ON k.conrelid = c.oid
-      WHERE c.oid = pg_catalog.to_regclass('${questionTable}') AND c.relkind = 'r'
-        AND a.attname = 'id' AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull
-        AND a.atttypid = 'pg_catalog.text'::pg_catalog.regtype
-        AND k.contype = 'p' AND k.convalidated AND k.conkey = ARRAY[a.attnum]
-    ) THEN
-    RAISE EXCEPTION 'recovery table or Question target mismatch';
+    ${relatedTableGuard} THEN
+    RAISE EXCEPTION 'manual migration target mismatch';
   END IF;
-  PERFORM pg_catalog.set_config('feed.staging_0008_question_oid',
-    pg_catalog.to_regclass('${questionTable}')::pg_catalog.oid::pg_catalog.text, true);
+  ${pinQuestion}
 END`)} LANGUAGE plpgsql;
 ${migration}
 DO ${sqlLiteral(`BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_class c
-    JOIN pg_catalog.pg_constraint k ON k.conrelid = c.oid
     WHERE c.oid = pg_catalog.to_regclass('${workTable}') AND c.relkind = 'r'
       AND NOT c.relrowsecurity AND c.xmin = pg_catalog.pg_current_xact_id()::pg_catalog.xid
-      AND k.contype = 'f' AND k.convalidated AND k.confdeltype = 'c'
-      AND k.confrelid = pg_catalog.to_regclass('${questionTable}')
-      AND k.confrelid = pg_catalog.current_setting('feed.staging_0008_question_oid')::pg_catalog.oid
+      ${questionForeignKey}
       AND NOT EXISTS (
         SELECT 1 FROM pg_catalog.aclexplode(c.relacl) a WHERE a.grantee = 0
       )
@@ -100,19 +127,20 @@ DO ${sqlLiteral(`BEGIN
         WHERE p.attrelid = c.oid AND p.attnum > 0 AND NOT p.attisdropped AND a.grantee = 0
       )
   ) THEN
-    RAISE EXCEPTION 'created recovery table mismatch';
+    RAISE EXCEPTION 'created manual migration table mismatch';
   END IF;
   IF NOT (${appHasAccess}) THEN
     EXECUTE ${sqlLiteral(`GRANT ${privileges.join(', ')} ON TABLE ${workTable} TO ${appRole}`)};
   END IF;
   IF NOT (${appHasAccess}) THEN
-    RAISE EXCEPTION 'recovery table grants missing';
+    RAISE EXCEPTION 'manual migration table grants missing';
   END IF;
 END`)} LANGUAGE plpgsql;
 COMMIT;`;
 }
 
-function existingCheckpoint(state: FeeSchemaState) {
+function existingCheckpoint(state: FeeSchemaState, id: MigrationId) {
+  const other = migrations[id === '0007' ? '0008' : '0007'].table;
   return {
     database: state.row.database,
     address: state.row.address,
@@ -124,7 +152,7 @@ function existingCheckpoint(state: FeeSchemaState) {
     feeOid: state.row.feeOid,
     outboxOid: state.row.outboxOid,
     index: state.row.index,
-    migration0007: object(state.row.phase0Tables).ScheduledInferenceReservation,
+    otherMigration: object(state.row.phase0Tables)[other],
   };
 }
 
@@ -136,24 +164,19 @@ interface ApplyOptions {
   onPhase?: (phase: string) => void;
 }
 
-export async function applyStaging0008({
-  app,
-  direct,
-  ca,
-  beforeWrite,
-  onPhase,
-}: ApplyOptions) {
+export async function applyStagingPhase0(
+  id: MigrationId,
+  { app, direct, ca, beforeWrite, onPhase }: ApplyOptions
+) {
+  const { filename, sha256, table } = migrations[id];
   const migration = readFileSync(
     new URL(
-      '../../packages/db/drizzle/migrations/manual/0008_prediction_resolution_work.sql',
+      `../../packages/db/drizzle/migrations/manual/${filename}`,
       import.meta.url
     ),
     'utf8'
   );
-  requireCondition(
-    digest(migration) === migrationSha256,
-    'migration_source_mismatch'
-  );
+  requireCondition(digest(migration) === sha256, 'migration_source_mismatch');
   const inspect = () =>
     inspectOrPrepareFeeSchema({
       app,
@@ -171,36 +194,51 @@ export async function applyStaging0008({
     'staging_checkpoint_incomplete'
   );
   const tables = object(before.row.phase0Tables);
-  const existing = object(tables.PredictionResolutionWork);
+  if (id === '0007') {
+    const recovery = phase0Inspection(tables).migration0008;
+    const recoveryTable = object(tables.PredictionResolutionWork);
+    requireCondition(
+      recovery.catalogMatches &&
+        recovery.appRoleAccess &&
+        recoveryTable.indexes === null &&
+        recoveryTable.publicAccess === false,
+      'staging_recovery_checkpoint_incomplete'
+    );
+  }
+  const existing = object(tables[table]);
   const action = existing.kind === null ? 'applied' : 'already_applied';
   let after = before;
   if (action === 'applied') {
     onPhase?.('prewrite_checkpoint');
     await beforeWrite();
-    onPhase?.('apply_0008');
+    onPhase?.(`apply_${id}`);
     psql(
       direct,
       ca,
-      migrationTransaction(before, app, direct, migration),
+      migrationTransaction(id, before, app, direct, migration),
       true
     );
-    onPhase?.('verify_0008');
+    onPhase?.(`verify_${id}`);
     after = await inspect();
     requireCondition(
-      JSON.stringify(existingCheckpoint(before)) ===
-        JSON.stringify(existingCheckpoint(after)),
+      JSON.stringify(existingCheckpoint(before, id)) ===
+        JSON.stringify(existingCheckpoint(after, id)),
       'staging_checkpoint_changed'
     );
   }
   const afterTables = object(after.row.phase0Tables);
   const phase0Schema = phase0Inspection(afterTables);
-  const recovery = object(afterTables.PredictionResolutionWork);
+  const expected =
+    id === '0007' ? phase0Schema.migration0007 : phase0Schema.migration0008;
+  const target = object(afterTables[table]);
   requireCondition(
-    phase0Schema.migration0008.catalogMatches &&
-      phase0Schema.migration0008.appRoleAccess &&
-      recovery.indexes === null &&
-      recovery.publicAccess === false,
-    'recovery_schema_drift'
+    expected.catalogMatches &&
+      expected.appRoleAccess &&
+      target.publicAccess === false &&
+      (id === '0007'
+        ? Object.keys(object(target.indexes ?? {})).length === 2
+        : target.indexes === null),
+    'manual_schema_drift'
   );
   return {
     action,
@@ -217,6 +255,11 @@ export async function applyStaging0008({
 let phase = 'workflow_guard';
 
 async function main() {
+  const id = process.argv[2];
+  requireCondition(
+    process.argv.length === 3 && (id === '0007' || id === '0008'),
+    'invalid_manual_migration'
+  );
   const sha = verifyStagingDeploymentContext(process.env);
   requireCondition(
     process.env.STAGING_GAME_PAUSED === 'true',
@@ -239,12 +282,12 @@ async function main() {
   };
   await verifyRevision();
   const directory = mkdtempSync(
-    join(process.env.RUNNER_TEMP || tmpdir(), 'feed-staging-0008-')
+    join(process.env.RUNNER_TEMP || tmpdir(), `feed-staging-${id}-`)
   );
   const ca = join(directory, 'database-ca.pem');
   try {
     writeFileSync(ca, text(process.env.DATABASE_CA_CERT), { mode: 0o600 });
-    const result = await applyStaging0008({
+    const result = await applyStagingPhase0(id, {
       app,
       direct,
       ca,
@@ -259,8 +302,8 @@ async function main() {
       JSON.stringify({
         status: 'PASS',
         commit: sha,
-        migration: '0008',
-        migrationSha256,
+        migration: id,
+        migrationSha256: migrations[id].sha256,
         targetAuthority: 'protected-staging-database-config',
         tlsVerification: 'verify-ca',
         databaseIdentityHash,
