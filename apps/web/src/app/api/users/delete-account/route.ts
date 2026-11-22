@@ -87,6 +87,7 @@ import {
   groupMembers,
   or,
   poolDeposits,
+  reactions,
   referrals,
   shareActions,
   tradingFees,
@@ -180,6 +181,11 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     await tx
       .delete(userInteractions)
       .where(eq(userInteractions.userId, userId));
+
+    // Delete reactions (likes) the user made. The Reaction table has no
+    // foreign keys, so nothing cascades when the user row is deleted:
+    // without this the likes keep counting on posts and comments forever.
+    await tx.delete(reactions).where(eq(reactions.userId, userId));
 
     // Delete group memberships
     await tx.delete(groupMembers).where(eq(groupMembers.userId, userId));
