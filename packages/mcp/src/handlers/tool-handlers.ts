@@ -1612,6 +1612,14 @@ export async function executeCreateComment(
     throw new NotFoundError('Post (deleted)', args.postId);
   }
 
+  const [authorBlockedCaller, callerBlockedAuthor] = await Promise.all([
+    hasBlocked(post.authorId, agent.userId),
+    hasBlocked(agent.userId, post.authorId),
+  ]);
+  if (authorBlockedCaller || callerBlockedAuthor) {
+    throw new BusinessLogicError('Cannot comment on this post', 'BLOCKED_USER');
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {

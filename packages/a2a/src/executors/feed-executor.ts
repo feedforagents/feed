@@ -1151,6 +1151,14 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('Post not found');
     }
 
+    const [authorBlockedCaller, callerBlockedAuthor] = await Promise.all([
+      hasBlocked(post.authorId, userId),
+      hasBlocked(userId, post.authorId),
+    ]);
+    if (authorBlockedCaller || callerBlockedAuthor) {
+      throw new Error('Cannot comment on this post');
+    }
+
     const commentId = await generateSnowflakeId();
     await db.comment.create({
       data: {
