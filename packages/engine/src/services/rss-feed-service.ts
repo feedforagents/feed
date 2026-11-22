@@ -7,6 +7,7 @@
  * @module services/rss-feed-service
  */
 
+import { setTimeout as delay } from 'node:timers/promises';
 import type { RSSHeadline } from '@feed/db';
 import {
   and,
@@ -66,10 +67,15 @@ export class RSSFeedService {
   /**
    * Fetch and parse RSS feed from URL with exponential retry
    */
-  async fetchFeed(url: string, maxRetries = 3): Promise<ParsedFeed> {
+  async fetchFeed(
+    url: string,
+    maxRetries = 3,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {}
+  ): Promise<ParsedFeed> {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
+      options.signal?.throwIfAborted();
       try {
         // Exponential backoff: 1s, 2s, 4s
         if (attempt > 0) {
@@ -79,14 +85,17 @@ export class RSSFeedService {
             { url, delayMs },
             'RSSFeedService'
           );
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          await delay(delayMs, undefined, { signal: options.signal });
         }
 
+        const timeout = AbortSignal.timeout(options.timeoutMs ?? 15_000);
         const response = await fetch(url, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (compatible; FeedBot/1.0)',
           },
-          signal: AbortSignal.timeout(15000), // 15 second timeout
+          signal: options.signal
+            ? AbortSignal.any([options.signal, timeout])
+            : timeout,
         });
 
         if (!response.ok) {
@@ -200,6 +209,7 @@ export class RSSFeedService {
 
         throw new Error('Unknown feed format');
       } catch (error) {
+        options.signal?.throwIfAborted();
         lastError = error as Error;
 
         if (attempt === maxRetries - 1) {
@@ -228,7 +238,13 @@ export class RSSFeedService {
   /**
    * Fetch all active RSS feeds and store new headlines
    */
-  async fetchAllFeeds(): Promise<{
+  async fetchAllFeeds(
+    options: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      attempts?: number;
+    } = {}
+  ): Promise<{
     fetched: number;
     stored: number;
     errors: number;
@@ -249,13 +265,16 @@ export class RSSFeedService {
     let errors = 0;
 
     for (const source of sources) {
+      if (options.signal?.aborted) break;
+
       // A failing source (network/HTTP/parse, after fetchFeed's retries) must
       // not abort the sweep for the remaining independent sources. Record the
       // failure on the source and continue; DB errors below still propagate.
       let feed: ParsedFeed;
       try {
-        feed = await this.fetchFeed(source.feedUrl);
+        feed = await this.fetchFeed(source.feedUrl, options.attempts, options);
       } catch (error) {
+        if (options.signal?.aborted) break;
         errors++;
         logger.warn(
           'RSS source fetch failed; continuing with remaining sources',
@@ -276,6 +295,7 @@ export class RSSFeedService {
 
       // Store new headlines (check by link to avoid duplicates)
       for (const item of feed.items) {
+        if (options.signal?.aborted) break;
         if (!item.title) continue;
 
         // Pre-filter: skip non-news garbage before any DB work

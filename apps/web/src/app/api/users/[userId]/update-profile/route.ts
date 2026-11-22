@@ -87,13 +87,13 @@ import {
   BusinessLogicError,
   cachedDb,
   checkProfileUpdateRateLimit,
-  invalidateCachePattern,
   isReferralCodeAvailableForUser,
   logProfileUpdate,
   notifyProfileComplete,
   ReputationService,
   requireUserByIdentifier,
   successResponse,
+  updateProfileWithLeaderboardInvalidation,
   withErrorHandling,
 } from '@feed/api';
 import { and, db, eq, ne, sql, users } from '@feed/db';
@@ -267,27 +267,34 @@ export const POST = withErrorHandling(
           : undefined,
     };
 
-    const [updatedUser] = await db
-      .update(users)
-      .set(updateData)
-      .where(eq(users.id, canonicalUserId))
-      .returning({
-        id: users.id,
-        username: users.username,
-        displayName: users.displayName,
-        bio: users.bio,
-        profileImageUrl: users.profileImageUrl,
-        coverImageUrl: users.coverImageUrl,
-        profileComplete: users.profileComplete,
-        hasUsername: users.hasUsername,
-        hasBio: users.hasBio,
-        hasProfileImage: users.hasProfileImage,
-        reputationPoints: users.reputationPoints,
-        referralCount: users.referralCount,
-        referralCode: users.referralCode,
-        usernameChangedAt: users.usernameChangedAt,
-        privyId: users.privyId,
-      });
+    const updatedUser = await updateProfileWithLeaderboardInvalidation(
+      canonicalUserId,
+      updateData,
+      async (client) => {
+        const [user] = await client
+          .update(users)
+          .set(updateData)
+          .where(eq(users.id, canonicalUserId))
+          .returning({
+            id: users.id,
+            username: users.username,
+            displayName: users.displayName,
+            bio: users.bio,
+            profileImageUrl: users.profileImageUrl,
+            coverImageUrl: users.coverImageUrl,
+            profileComplete: users.profileComplete,
+            hasUsername: users.hasUsername,
+            hasBio: users.hasBio,
+            hasProfileImage: users.hasProfileImage,
+            reputationPoints: users.reputationPoints,
+            referralCount: users.referralCount,
+            referralCode: users.referralCode,
+            usernameChangedAt: users.usernameChangedAt,
+            privyId: users.privyId,
+          });
+        return user;
+      }
+    );
 
     // Refresh identifier caches after any profile update because these caches now
     // store full user rows, not just identifiers.
@@ -302,17 +309,6 @@ export const POST = withErrorHandling(
           username: isUsernameChanging ? currentUser!.username : undefined,
         }
       );
-
-      // Leaderboard pages are cached whole (shared Redis pages in the
-      // 'leaderboard-personal' namespace) with each row's displayName and
-      // profileImageUrl baked in, and nothing else invalidates them when a
-      // profile changes. The leaderboard route computes the requester's own
-      // position fresh, so without this a cached page keeps showing the old
-      // identity next to the fresh one in the same response. Drop the cached
-      // pages so the next read regenerates them from the updated row.
-      await invalidateCachePattern('*', {
-        namespace: 'leaderboard-personal',
-      });
     }
 
     // Award reputation for profile milestones.

@@ -1,147 +1,255 @@
-/**
- * GET /api/leaderboard after a profile rename, against a real database.
- *
- * Leaderboard pages are cached whole (shared pages, 120s default TTL) with
- * each row's displayName/profileImageUrl baked into the cached payload,
- * while the same route computes the requesting user's own position fresh
- * on every request ("user positions are always computed fresh"). A profile
- * update invalidates the user and identifier caches, so every other
- * identity surface reflects a rename immediately — but nothing invalidated
- * the leaderboard page cache, so right after a rename one leaderboard
- * response showed the user under their old name/avatar in the page rows
- * and their new name/avatar in currentUser.
- *
- * The update goes through the real update-profile route and the reads
- * through the real leaderboard and profile routes; no module is mocked
- * beyond the `server-only` import guard.
- */
+/** PRD §§9.4/12, MVP Phases 5/6: leaderboard rows follow retained profile edits. */
+import { afterAll, expect, mock, test } from 'bun:test';
+import {
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+const CASE =
+  'refreshes both boards after identity writes from web, MCP and A2A';
 
-mock.module('server-only', () => ({}));
+if (process.env.FEED_SUB_MARKET_CHILD) {
+  await verifySubMarketChildLease();
+  process.env.STEWARD_JWT_SECRET ||= crypto.randomUUID();
+  mock.module('server-only', () => ({}));
 
-import { db, inArray, users } from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
-
-const OLD = {
-  username: 'renameprobeold',
-  displayName: 'Rename Probe Old',
-  profileImageUrl: 'https://img.example/rename-old.png',
-};
-const NEW = {
-  displayName: 'Rename Probe New',
-  bio: 'rename probe new bio',
-  profileImageUrl: 'https://img.example/rename-new.png',
-};
-const OTHER = {
-  username: 'renameprobeother',
-  displayName: 'Rename Probe Other',
-  profileImageUrl: 'https://img.example/rename-other.png',
-};
-
-let U = '';
-let W = '';
-let updateProfilePOST: Function;
-let profileGET: Function;
-let leaderboardGET: Function;
-
-function req(url: string, asUser?: string, init?: RequestInit) {
-  const headers = new Headers(init?.headers);
-  if (asUser) headers.set('x-dev-user-id', asUser);
-  return new NextRequest(new Request(url, { ...init, headers }));
-}
-
-type LeaderboardBody = {
-  leaderboard: Array<Record<string, unknown>>;
-  currentUser: { entry: Record<string, unknown> } | null;
-};
-
-async function readLeaderboard(): Promise<LeaderboardBody> {
-  const res = await leaderboardGET(
-    req(
-      `http://localhost/api/leaderboard?metric=reputation&type=wallet&page=1&pageSize=100&userId=${U}`
-    )
+  const { db, eq, inArray, profileUpdateLogs, userApiKeys, users } =
+    await import('@feed/db');
+  const { generateApiKey, getCache, hashApiKey, setCache } = await import(
+    '@feed/api'
   );
-  return (await res.json()) as LeaderboardBody;
-}
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { SignJWT } = await import('jose');
+  const { NextRequest } = await import('next/server');
+  const { POST: updateProfile } = await import(
+    '../../../apps/web/src/app/api/users/[userId]/update-profile/route'
+  );
+  const { GET: leaderboard } = await import(
+    '../../../apps/web/src/app/api/leaderboard/route'
+  );
+  const { POST: mcp } = await import('../../../apps/web/src/app/api/mcp/route');
+  const { POST: a2a } = await import('../../../apps/web/src/app/api/a2a/route');
 
-beforeAll(async () => {
-  const base = '../../../apps/web/src/app/api';
-  ({ POST: updateProfilePOST } = await import(
-    `${base}/users/[userId]/update-profile/route`
-  ));
-  ({ GET: profileGET } = await import(`${base}/users/[userId]/profile/route`));
-  ({ GET: leaderboardGET } = await import(`${base}/leaderboard/route`));
+  afterAll(() => db.$disconnect());
 
-  [U, W] = await Promise.all([generateSnowflakeId(), generateSnowflakeId()]);
-  const now = new Date();
-  await db.insert(users).values([
-    {
-      id: U,
-      username: OLD.username,
-      displayName: OLD.displayName,
-      profileImageUrl: OLD.profileImageUrl,
-      reputationPoints: 888888,
-      updatedAt: now,
-    },
-    {
-      id: W,
-      username: OTHER.username,
-      displayName: OTHER.displayName,
-      profileImageUrl: OTHER.profileImageUrl,
-      reputationPoints: 777777,
-      updatedAt: now,
-    },
-  ]);
-});
-
-afterAll(async () => {
-  await db.delete(users).where(inArray(users.id, [U, W]));
-});
-
-describe('leaderboard identity after a profile rename', () => {
-  it('shows the new name/avatar in the page rows, matching currentUser', async () => {
-    // Warm the shared page cache with the pre-rename identity.
-    const before = await readLeaderboard();
-    const beforeRow = before.leaderboard.find((e) => e.id === U);
-    expect(beforeRow?.displayName).toBe(OLD.displayName);
-    expect(before.currentUser?.entry.displayName).toBe(OLD.displayName);
-
-    const updateRes = await updateProfilePOST(
-      req(`http://localhost/api/users/${U}/update-profile`, U, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...NEW }),
-      }),
-      { params: Promise.resolve({ userId: U }) }
-    );
-    expect(updateRes.status).toBe(200);
-
-    // Guard: the profile header already reflects the rename (it goes
-    // through the identifier/user caches the update invalidates).
-    const profileRes = await profileGET(
-      req(`http://localhost/api/users/${U}/profile`),
-      { params: Promise.resolve({ userId: U }) }
-    );
-    const profileBody = (await profileRes.json()) as {
-      user: Record<string, unknown> | null;
+  test(CASE, async () => {
+    const [ownerId, viewerId] = await Promise.all([
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+    ]);
+    const ownedIds: string[] = [];
+    const original = {
+      username: `before${ownerId}`,
+      displayName: 'Old name',
+      profileImageUrl: 'https://example.com/old.png',
     };
-    expect(profileBody.user?.displayName).toBe(NEW.displayName);
-    expect(profileBody.user?.profileImageUrl).toBe(NEW.profileImageUrl);
+    const peer = {
+      username: `peer${viewerId}`,
+      displayName: 'Unrelated viewer',
+      profileImageUrl: 'https://example.com/peer.png',
+    };
+    const apiKey = generateApiKey();
+    const apiKeyId = await generateSnowflakeId();
+    let ownedKeyId: string | undefined;
+    try {
+      const identities = await db
+        .insert(users)
+        .values(
+          [
+            { id: ownerId, ...original, reputationPoints: 1000 },
+            { id: viewerId, ...peer, reputationPoints: 500 },
+          ].map((user) => ({
+            ...user,
+            stewardId: `f41-${user.id}`,
+            updatedAt: new Date(),
+            pointsAwardedForProfile: true,
+          }))
+        )
+        .returning({ id: users.id });
+      ownedIds.push(...identities.map(({ id }) => id));
+      const [key] = await db
+        .insert(userApiKeys)
+        .values({ id: apiKeyId, userId: ownerId, keyHash: hashApiKey(apiKey) })
+        .returning({ id: userApiKeys.id });
+      ownedKeyId = key?.id;
 
-    const after = await readLeaderboard();
-    const afterRow = after.leaderboard.find((e) => e.id === U);
-    const otherRow = after.leaderboard.find((e) => e.id === W);
+      const secret = new TextEncoder().encode(process.env.STEWARD_JWT_SECRET);
+      async function sign(id: string) {
+        return new SignJWT({ userId: `f41-${id}` })
+          .setProtectedHeader({ alg: 'HS256' })
+          .setIssuer('steward')
+          .setIssuedAt()
+          .setExpirationTime('5m')
+          .sign(secret);
+      }
+      const [writer, reader] = await Promise.all([
+        sign(ownerId),
+        sign(viewerId),
+      ]);
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(request) {
+          const req = new NextRequest(request);
+          switch (req.nextUrl.pathname) {
+            case '/api/leaderboard':
+              return leaderboard(req);
+            case '/api/profile':
+              return updateProfile(req, {
+                params: Promise.resolve({ userId: ownerId }),
+              });
+            case '/api/mcp':
+              return mcp(req);
+            case '/api/a2a':
+              return a2a(req);
+            default:
+              return new Response(null, { status: 404 });
+          }
+        },
+      });
 
-    // The requester's fresh position carries the new identity...
-    expect(after.currentUser?.entry.displayName).toBe(NEW.displayName);
-    expect(after.currentUser?.entry.profileImageUrl).toBe(NEW.profileImageUrl);
-    // ...and the page rows in the same response must agree with it.
-    expect(afterRow?.displayName).toBe(NEW.displayName);
-    expect(afterRow?.profileImageUrl).toBe(NEW.profileImageUrl);
-    // Another user's row is unaffected by the rename.
-    expect(otherRow?.displayName).toBe(OTHER.displayName);
-    expect(otherRow?.profileImageUrl).toBe(OTHER.profileImageUrl);
+      type Identity = {
+        username: string;
+        displayName: string;
+        profileImageUrl: string | null;
+      };
+      async function readBoards(identity: Identity, cache: 'hit' | 'miss') {
+        for (const metric of ['trading', 'reputation']) {
+          for (const pageSize of [2, 100]) {
+            const response = await fetch(
+              new URL(
+                `api/leaderboard?metric=${metric}&pageSize=${pageSize}&userId=${ownerId}`,
+                server.url
+              ),
+              { headers: { Authorization: `Bearer ${reader}` } }
+            );
+            expect(response.status).toBe(200);
+            expect(response.headers.get('x-cache')).toBe(
+              `leaderboard-${cache}`
+            );
+            expect(response.headers.get('cache-control')).toBe(
+              'private, no-store'
+            );
+            const result: {
+              leaderboard: Array<Identity & { id: string }>;
+              currentUser: { entry: Identity };
+            } = await response.json();
+            expect(
+              result.leaderboard.find(({ id }) => id === ownerId)
+            ).toMatchObject(identity);
+            expect(result.currentUser.entry).toMatchObject(identity);
+            expect(
+              result.leaderboard.find(({ id }) => id === viewerId)
+            ).toMatchObject(peer);
+          }
+        }
+      }
+      async function post(
+        path: string,
+        body: Record<string, number | object | string>,
+        auth: Record<string, string>
+      ) {
+        const response = await fetch(new URL(path, server.url), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...auth },
+          body: JSON.stringify(body),
+        });
+        expect(response.status).toBe(200);
+        return response.json();
+      }
+      try {
+        await readBoards(original, 'miss');
+        await readBoards(original, 'hit');
+        await setCache('sentinel', 'owned', { namespace: 'leaderboard-proof' });
+        const webAuth = { Authorization: `Bearer ${writer}` };
+        await post('api/profile', { bio: 'Only the bio changed' }, webAuth);
+        await post('api/profile', { ...original }, webAuth);
+        await readBoards(original, 'hit');
+
+        const withRemovedAvatar = { ...original, profileImageUrl: null };
+        await post('api/profile', { profileImageUrl: '' }, webAuth);
+        await readBoards(withRemovedAvatar, 'miss');
+
+        const renamed = { ...withRemovedAvatar, username: `after${ownerId}` };
+        const mcpReply = await post(
+          'api/mcp',
+          {
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: {
+              name: 'update_profile',
+              arguments: { username: renamed.username },
+            },
+          },
+          { 'X-Feed-Api-Key': apiKey, Accept: 'application/json' }
+        );
+        expect(mcpReply.error).toBeUndefined();
+        expect(mcpReply.result?.isError).not.toBe(true);
+        await readBoards(renamed, 'miss');
+
+        const renamedAgain = { ...renamed, displayName: 'Agent name' };
+        const a2aReply = await post(
+          'api/a2a',
+          {
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'message/send',
+            params: {
+              message: {
+                kind: 'message',
+                role: 'user',
+                messageId: crypto.randomUUID(),
+                contextId: ownerId,
+                parts: [
+                  {
+                    kind: 'data',
+                    data: {
+                      operation: 'users.update_profile',
+                      params: { displayName: renamedAgain.displayName },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+          { 'X-Feed-Api-Key': apiKey }
+        );
+        expect(a2aReply.error).toBeUndefined();
+        await readBoards(renamedAgain, 'miss');
+        expect(
+          await getCache<string>('sentinel', { namespace: 'leaderboard-proof' })
+        ).toBe('owned');
+      } finally {
+        server.stop(true);
+      }
+    } finally {
+      if (ownedKeyId) {
+        await db.delete(userApiKeys).where(eq(userApiKeys.id, ownedKeyId));
+      }
+      if (ownedIds.length > 0) {
+        const logs = await db
+          .select({ id: profileUpdateLogs.id })
+          .from(profileUpdateLogs)
+          .where(inArray(profileUpdateLogs.userId, ownedIds));
+        if (logs.length > 0) {
+          await db.delete(profileUpdateLogs).where(
+            inArray(
+              profileUpdateLogs.id,
+              logs.map(({ id }) => id)
+            )
+          );
+        }
+        await db.delete(users).where(inArray(users.id, ownedIds));
+      }
+    }
   });
-});
+} else {
+  test('checks leaderboard identity in a disposable database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'leaderboard-profile-identity',
+      file: 'packages/testing/integration/leaderboard-rename-propagation.integration.test.ts',
+      cases: [CASE],
+    });
+  }, 30000);
+}
