@@ -1,320 +1,183 @@
 /**
- * Post likeCount after the liker deletes their account, against a real
- * database and the real routes.
- *
- * POST /api/users/delete-account states the contract in its own response:
- * "Your account and personal data have been deleted from our servers." The
- * route deletes the user's follows, interactions, group memberships,
- * invites, follow statuses, share actions and pool deposits inside the
- * deletion transaction and relies on schema cascades for "most other
- * tables". Reaction has no foreign keys at all, so nothing cascades: the
- * deleted user's like rows survive and every likeCount surface (post
- * detail, post interactions, feed pipelines) keeps counting a person who
- * no longer exists.
- *
- * Sibling precedent for cleaning reactions up with their owner: deleting
- * a comment deletes the reactions on that comment
- * (apps/web/src/app/api/comments/[id]/route.ts). Deleting the account must
- * do the same for the reactions the account made.
- *
- * Toggle guard in the same file: the like -> duplicate-like -> unlike ->
- * re-like cycle must keep the count exact (the Reaction table also has a
- * unique (postId, userId, type) constraint).
- *
- * Auth uses the non-production x-dev-user-id header. Only the
- * `server-only` marker package is stubbed.
+ * A deleted account's reactions must stop contributing to existing post
+ * counts. Exercise the real route in a verified disposable database and
+ * a separate process with its own public-read rate-limit state.
  */
-
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-
-mock.module('server-only', () => ({}));
-
+import { describe, expect, it, mock } from 'bun:test';
 import {
-  and,
-  count,
-  db,
-  eq,
-  inArray,
-  notifications,
-  posts,
-  reactions,
-  sql,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-let authorId: string;
-let likerId: string;
-let controlLikerId: string;
-let postId: string;
-// Only ids returned by a successful INSERT RETURNING are registered here.
-// A failed setup must not leave an id behind for teardown to delete.
-const ownedUserIds: string[] = [];
-const ownedPostIds: string[] = [];
+const suite = 'post likeCount population';
+const toggleCase =
+  'keeps the count exact across like / duplicate / unlike / re-like';
+const deletionCase =
+  'stops counting a liker once that liker deletes their account';
 
-let likePOST: typeof import('../../../apps/web/src/app/api/posts/[id]/like/route').POST;
-let likeDELETE: typeof import('../../../apps/web/src/app/api/posts/[id]/like/route').DELETE;
-let detailGET: typeof import('../../../apps/web/src/app/api/posts/[id]/route').GET;
-let interactionsGET: typeof import('../../../apps/web/src/app/api/posts/[id]/interactions/route').GET;
-let deleteAccountPOST: typeof import('../../../apps/web/src/app/api/users/delete-account/route').POST;
+if (process.env.FEED_SUB_MARKET_CHILD) {
+  await verifySubMarketChildLease();
 
-function req(url: string, userId: string, method = 'GET', body?: unknown) {
-  return new NextRequest(
-    new Request(url, {
-      method,
-      headers: {
-        'x-dev-user-id': userId,
-        ...(body ? { 'content-type': 'application/json' } : {}),
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    })
-  );
-}
-
-async function like(userId: string, method: 'POST' | 'DELETE' = 'POST') {
-  const response = await (method === 'POST' ? likePOST : likeDELETE)(
-    req(`http://localhost/api/posts/${postId}/like`, userId, method),
-    { params: Promise.resolve({ id: postId }) }
-  );
-  return response.status;
-}
-
-async function detailLikeCount(viewerId: string) {
-  const response = await detailGET(
-    req(`http://localhost/api/posts/${postId}`, viewerId),
-    { params: Promise.resolve({ id: postId }) }
-  );
-  const body = (await response.json().catch(() => null)) as {
-    data?: { post?: { likeCount?: number }; likeCount?: number };
-  } | null;
-  return body?.data?.post?.likeCount ?? body?.data?.likeCount;
-}
-
-async function interactionsLikeCount(viewerId: string) {
-  const response = await interactionsGET(
-    req(`http://localhost/api/posts/${postId}/interactions?limit=10`, viewerId),
-    { params: Promise.resolve({ id: postId }) }
-  );
-  const body = (await response.json().catch(() => null)) as {
-    data?: { likeCount?: number };
-    likeCount?: number;
-  } | null;
-  return body?.data?.likeCount ?? body?.likeCount;
-}
-
-async function likeRowsBy(userId: string) {
-  return db
-    .select({ id: reactions.id })
-    .from(reactions)
-    .where(
-      and(
-        eq(reactions.postId, postId),
-        eq(reactions.userId, userId),
-        eq(reactions.type, 'like')
-      )
-    );
-}
-
-/**
- * Disposable-target guard (same rule as
- * trading-and-questions.integration.test.ts): the configured database must
- * be a local test/verification database, and the live connection must point
- * at it. Fixture teardown deletes rows, so it must never run against a
- * shared or production database.
- */
-function assertDisposableDatabaseUrl(value: string | undefined, label: string) {
-  if (!value) throw new Error(`${label} is required for integration tests`);
-  const url = new URL(value);
-  const databaseName = decodeURIComponent(url.pathname.slice(1));
-  if (
-    !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) ||
-    !/(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName)
-  ) {
-    throw new Error(
-      `${label} must point to a local test or verification database`
-    );
-  }
-  return databaseName;
-}
-
-async function assertDisposableDatabaseTarget() {
-  const databaseName = assertDisposableDatabaseUrl(
-    process.env.DATABASE_URL,
-    'DATABASE_URL'
-  );
-  for (const label of [
-    'DIRECT_DATABASE_URL',
-    'DATABASE_READ_REPLICA_URL',
-  ] as const) {
-    if (
-      process.env[label] &&
-      assertDisposableDatabaseUrl(process.env[label], label) !== databaseName
-    ) {
-      throw new Error(`${label} must point to the same disposable database`);
-    }
-  }
-  const [connected] = await db.execute(sql`SELECT current_database() AS name`);
-  if (connected?.name !== databaseName)
-    throw new Error('Connected database does not match DATABASE_URL');
-}
-
-beforeAll(async () => {
-  await assertDisposableDatabaseTarget();
-
-  ({ POST: likePOST, DELETE: likeDELETE } = await import(
+  // This Next.js marker has no runtime behavior under the Bun test runner.
+  mock.module('server-only', () => ({}));
+  const { db, eq, posts, reactions, users } = await import('@feed/db');
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { NextRequest } = await import('next/server');
+  const { POST: likePOST, DELETE: likeDELETE } = await import(
     '../../../apps/web/src/app/api/posts/[id]/like/route'
-  ));
-  ({ GET: detailGET } = await import(
+  );
+  const { GET: detailGET } = await import(
     '../../../apps/web/src/app/api/posts/[id]/route'
-  ));
-  ({ GET: interactionsGET } = await import(
+  );
+  const { GET: interactionsGET } = await import(
     '../../../apps/web/src/app/api/posts/[id]/interactions/route'
-  ));
-  ({ POST: deleteAccountPOST } = await import(
+  );
+  const { POST: deleteAccountPOST } = await import(
     '../../../apps/web/src/app/api/users/delete-account/route'
-  ));
+  );
 
-  [authorId, likerId, controlLikerId, postId] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-
-  const now = new Date();
-  const past = new Date(now.getTime() - 10 * 60_000);
-
-  // privyId = own id so ensureUserForAuth resolves the fixture row
-  // directly instead of provisioning a fresh account.
-  // Register cleanup ids only from the INSERT RETURNING receipts: if an
-  // insert fails (e.g. a primary-key collision), no id is registered and
-  // teardown deletes nothing.
-  const insertedUsers = await db
-    .insert(users)
-    .values([
-      {
-        id: authorId,
-        privyId: authorId,
-        username: `f166-author-${authorId}`,
-        displayName: 'F166 Author',
-        updatedAt: now,
-      },
-      {
-        id: likerId,
-        privyId: likerId,
-        username: `f166-liker-${likerId}`,
-        displayName: 'F166 Liker',
-        updatedAt: now,
-      },
-      {
-        id: controlLikerId,
-        privyId: controlLikerId,
-        username: `f166-control-${controlLikerId}`,
-        displayName: 'F166 Control Liker',
-        updatedAt: now,
-      },
-    ])
-    .returning({ id: users.id });
-  ownedUserIds.push(...insertedUsers.map((row) => row.id));
-
-  const [insertedPost] = await db
-    .insert(posts)
-    .values({
+  async function seedPost() {
+    const [authorId, likerId, controlId, postId] = await Promise.all([
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+    ]);
+    const updatedAt = new Date();
+    const past = new Date(updatedAt.getTime() - 10 * 60_000);
+    await db.insert(users).values(
+      [authorId, likerId, controlId].map((id) => ({
+        id,
+        username: `f166-${id}`,
+        displayName: 'F166 fixture account',
+        updatedAt,
+      }))
+    );
+    await db.insert(posts).values({
       id: postId,
       content: 'Fixture post for like-count deletion test',
       authorId,
       timestamp: past,
       createdAt: past,
-    })
-    .returning({ id: posts.id });
-  if (insertedPost) ownedPostIds.push(insertedPost.id);
-});
-
-/**
- * Teardown deletes only rows this fixture acquired (INSERT RETURNING
- * receipts): reactions and notifications made by owned users on the owned
- * post, then the owned post and users. It never deletes all rows for a post
- * id. If a row outside the owned set still references the post, teardown
- * refuses to delete the post instead of deleting around it.
- */
-afterAll(async () => {
-  if (ownedPostIds.length > 0 && ownedUserIds.length > 0) {
-    await db
-      .delete(notifications)
-      .where(
-        and(
-          inArray(notifications.postId, ownedPostIds),
-          inArray(notifications.userId, ownedUserIds)
-        )
-      )
-      .catch(() => {});
-    await db
-      .delete(reactions)
-      .where(
-        and(
-          inArray(reactions.postId, ownedPostIds),
-          inArray(reactions.userId, ownedUserIds)
-        )
-      );
-    const [leftoverReactions] = await db
-      .select({ n: count() })
-      .from(reactions)
-      .where(inArray(reactions.postId, ownedPostIds));
-    const [leftoverNotifications] = await db
-      .select({ n: count() })
-      .from(notifications)
-      .where(inArray(notifications.postId, ownedPostIds));
-    if ((leftoverReactions?.n ?? 0) > 0 || (leftoverNotifications?.n ?? 0) > 0)
-      throw new Error(
-        'Refusing to delete the fixture post: rows outside the owned set still reference it'
-      );
-    await db.delete(posts).where(inArray(posts.id, ownedPostIds));
+    });
+    return { authorId, likerId, controlId, postId };
   }
-  if (ownedUserIds.length > 0) {
-    await db.delete(users).where(inArray(users.id, ownedUserIds));
-  }
-});
 
-describe('post likeCount population', () => {
-  it('keeps the count exact across like / duplicate / unlike / re-like', async () => {
-    expect(await like(likerId)).toBe(200);
-    expect(await detailLikeCount(authorId)).toBe(1);
-
-    // Duplicate like is rejected and does not double-count.
-    expect(await like(likerId)).toBe(400);
-    expect(await detailLikeCount(authorId)).toBe(1);
-    expect(await likeRowsBy(likerId)).toHaveLength(1);
-
-    expect(await like(controlLikerId)).toBe(200);
-    expect(await detailLikeCount(authorId)).toBe(2);
-
-    expect(await like(likerId, 'DELETE')).toBe(200);
-    expect(await detailLikeCount(authorId)).toBe(1);
-
-    expect(await like(likerId)).toBe(200);
-    expect(await detailLikeCount(authorId)).toBe(2);
-  });
-
-  it('stops counting a liker once that liker deletes their account', async () => {
-    const response = await deleteAccountPOST(
-      req('http://localhost/api/users/delete-account', likerId, 'POST', {
-        confirmation: 'DELETE MY ACCOUNT',
-      })
+  function request(path: string, userId: string, init?: RequestInit) {
+    const headers = new Headers(init?.headers);
+    headers.set('x-dev-user-id', userId);
+    return new NextRequest(
+      new Request(`http://localhost${path}`, { ...init, headers })
     );
-    expect(response.status).toBe(200);
+  }
 
-    // The account itself is gone (the route's own contract).
-    const [gone] = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.id, likerId));
-    expect(gone).toBeUndefined();
+  function context(postId: string) {
+    return { params: Promise.resolve({ id: postId }) };
+  }
 
-    // Its likes must be gone too, and every count surface must agree:
-    // only the control liker remains.
-    expect(await detailLikeCount(authorId)).toBe(1);
-    expect(await interactionsLikeCount(authorId)).toBe(1);
-    expect(await likeRowsBy(likerId)).toHaveLength(0);
+  async function like(
+    postId: string,
+    userId: string,
+    method: 'POST' | 'DELETE' = 'POST'
+  ) {
+    const response = await (method === 'POST' ? likePOST : likeDELETE)(
+      request(`/api/posts/${postId}/like`, userId, { method }),
+      context(postId)
+    );
+    return response.status;
+  }
+
+  async function detailCount(postId: string, userId: string) {
+    const res = await detailGET(
+      request(`/api/posts/${postId}`, userId),
+      context(postId)
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { likeCount: number } };
+    return body.data.likeCount;
+  }
+
+  async function interactionsCount(postId: string, userId: string) {
+    const res = await interactionsGET(
+      request(`/api/posts/${postId}/interactions?limit=10`, userId),
+      context(postId)
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { likeCount: number };
+    return body.likeCount;
+  }
+
+  function postReactions(postId: string) {
+    return db
+      .select({ userId: reactions.userId, type: reactions.type })
+      .from(reactions)
+      .where(eq(reactions.postId, postId));
+  }
+
+  describe(suite, () => {
+    it(toggleCase, async () => {
+      const { authorId, likerId, controlId, postId } = await seedPost();
+      expect(await like(postId, likerId)).toBe(200);
+      expect(await detailCount(postId, authorId)).toBe(1);
+
+      expect(await like(postId, likerId)).toBe(400);
+      expect(await detailCount(postId, authorId)).toBe(1);
+      expect(await postReactions(postId)).toEqual([
+        { userId: likerId, type: 'like' },
+      ]);
+
+      expect(await like(postId, controlId)).toBe(200);
+      expect(await detailCount(postId, authorId)).toBe(2);
+      expect(await like(postId, likerId, 'DELETE')).toBe(200);
+      expect(await detailCount(postId, authorId)).toBe(1);
+      expect(await like(postId, likerId)).toBe(200);
+      expect(await detailCount(postId, authorId)).toBe(2);
+    });
+
+    it(deletionCase, async () => {
+      const { authorId, likerId, controlId, postId } = await seedPost();
+      expect(await like(postId, likerId)).toBe(200);
+      expect(await like(postId, controlId)).toBe(200);
+      const before = await detailCount(postId, authorId);
+      expect(before).toBe(2);
+
+      const response = await deleteAccountPOST(
+        request('/api/users/delete-account', likerId, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ confirmation: 'DELETE MY ACCOUNT' }),
+        })
+      );
+      expect(response.status).toBe(200);
+
+      const [gone] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, likerId));
+      expect(gone).toBeUndefined();
+
+      const detail = await detailCount(postId, authorId);
+      const interactions = await interactionsCount(postId, authorId);
+      const remaining = await postReactions(postId);
+      console.info('DELETE_ACCOUNT_REACTION_COUNTS', {
+        postId,
+        deletionStatus: response.status,
+        before,
+        detail,
+        interactions,
+        remaining: remaining.length,
+      });
+      expect(detail).toBe(1);
+      expect(interactions).toBe(1);
+      expect(remaining).toEqual([{ userId: controlId, type: 'like' }]);
+    });
   });
-});
+} else {
+  it('runs the like and deletion cases on a verified disposable database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'post-like-count-deleted-account',
+      file: 'packages/testing/integration/post-like-count-deleted-account.integration.test.ts',
+      cases: [`${suite} > ${toggleCase}`, `${suite} > ${deletionCase}`],
+    });
+  }, 300_000);
+}

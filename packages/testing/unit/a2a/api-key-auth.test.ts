@@ -18,29 +18,11 @@ const mockValidateUserApiKey = mock(async (apiKey: string) => {
   return null;
 });
 
-// Mock @feed/api BEFORE importing @feed/a2a (which re-exports from @feed/api).
-// Must provide every named export that @feed/a2a transitively imports.
-const _actualFeedApi = await import('@feed/api');
-mock.module('@feed/api', () => ({
-  ..._actualFeedApi,
+// Mock the per-user lookup before loading the public A2A compatibility exports.
+const apiKeys = await import('../../../api/src/utils/api-keys');
+mock.module('../../../api/src/utils/api-keys', () => ({
+  ...apiKeys,
   validateUserApiKey: mockValidateUserApiKey,
-  clearApiKeyCache: () => {},
-  getApiKeyCacheStats: () => ({ size: 0, hits: 0, misses: 0 }),
-  invalidateCachedKey: () => {},
-  invalidateCachedKeysForUser: () => {},
-  checkRateLimitAsync: async () => ({ allowed: true }),
-  RATE_LIMIT_CONFIGS: {
-    A2A_REQUEST: {
-      maxRequests: 100,
-      windowMs: 60000,
-      actionType: 'a2a_request',
-    },
-  },
-  withErrorHandling: (handler: (req: unknown) => Promise<unknown>) => handler,
-  getCache: async () => null,
-  setCache: async () => {},
-  getRedisClient: () => null,
-  isRedisAvailable: () => false,
 }));
 
 // Dynamic import AFTER mock is set up
