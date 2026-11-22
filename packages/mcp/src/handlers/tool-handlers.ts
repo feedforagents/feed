@@ -29,7 +29,6 @@
  * require passing referrer context through the MCP API key or session.
  */
 
-import type { JsonRpcParams, JsonRpcRequest } from '@feed/a2a';
 import {
   handleAppealBanWithEscrow,
   handleCreateEscrowPayment,
@@ -39,35 +38,56 @@ import {
 } from '@feed/a2a';
 import {
   acceptGroupInvite,
+  BusinessLogicError,
   checkRateLimitAsync,
   declineGroupInvite,
   logAdminModify,
+  NotFoundError,
+  notifyReactionOnComment,
+  notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
+  sharePost,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
+import { PredictionPricing } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
+  acquireUserBlockPairLock,
   and,
   db,
+  dbWrite,
   desc,
   eq,
   favorites,
+  follows,
+  followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
+  groupMembers,
   hasBlocked,
   inArray,
   isNull,
+  like,
   lte,
   markets,
+  not,
+  notExists,
   perpMarketSnapshots,
   posts,
+  postTags,
+  questions,
+  timeframedMarkets,
+  userBlocks,
   users,
+  withTransaction,
 } from '@feed/db';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -83,6 +103,7 @@ import {
   logger,
   retryIfRetryable,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 
 function buildWalletPort(): WalletPort {
   return {
@@ -106,14 +127,22 @@ function buildWalletPort(): WalletPort {
 
 function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
         relatedId,
-        tx
+        tx,
+        operationId
       ),
   };
 }
@@ -299,6 +328,7 @@ async function checkMcpRateLimit(
     | 'close_position'
     | 'transfer'
     | 'post'
+    | 'share_post'
 ): Promise<void> {
   const configMap: Record<
     string,
@@ -310,6 +340,7 @@ async function checkMcpRateLimit(
     close_position: RATE_LIMIT_CONFIGS.CLOSE_POSITION,
     transfer: RATE_LIMIT_CONFIGS.DEFAULT, // Use default for transfers
     post: RATE_LIMIT_CONFIGS.CREATE_POST,
+    share_post: RATE_LIMIT_CONFIGS.SHARE_POST,
   };
   const config = configMap[operation];
   if (!config) return;
@@ -428,6 +459,8 @@ import type {
   GetUserStatsResult,
   GetUserWalletArgs,
   GetUserWalletResult,
+  JsonRpcParams,
+  JsonRpcRequest,
   LeaveChatArgs,
   LeaveChatResult,
   LikeCommentArgs,
@@ -640,6 +673,7 @@ function buildPerpService() {
     settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: buildWalletPort(),
+    cache: createPerpTradesCachePort(),
     priceImpact: createPerpPriceImpactPort(),
     fees: {
       tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
@@ -648,6 +682,7 @@ function buildPerpService() {
       minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
     feeProcessor: buildFeeProcessor(),
+    tradingFeeOutbox: createTradingFeeOutboxAdapter(),
   });
 }
 
@@ -828,6 +863,21 @@ export async function executeGetPositions(
     skip: args.offset,
   });
 
+  // Open perpetual positions are open positions too: the same server opens
+  // and closes them (open_position / close_position), the A2A
+  // portfolio.get_positions returns them next to prediction positions, and
+  // the web wallet lists them in the same view. A marketId filter names a
+  // prediction market, so it narrows the result to prediction positions.
+  const perpPositionsRaw = args.marketId
+    ? []
+    : await db.perpPosition.findMany({
+        where: {
+          userId: agent.userId,
+          closedAt: null,
+        },
+        orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
+      });
+
   // Get markets separately
   const marketIds = positionsRaw
     .map((p) => p.marketId)
@@ -850,6 +900,17 @@ export async function executeGetPositions(
       side: p.side ? 'YES' : 'NO',
       shares: p.shares.toString(),
       avgPrice: p.avgPrice.toString(),
+    })),
+    perpPositions: perpPositionsRaw.map((p) => ({
+      id: p.id,
+      ticker: p.ticker,
+      side: resolvePerpSide(p.side),
+      size: p.size.toString(),
+      entryPrice: p.entryPrice.toString(),
+      currentPrice: p.currentPrice.toString(),
+      leverage: p.leverage,
+      unrealizedPnL: p.unrealizedPnL.toString(),
+      fundingPaid: p.fundingPaid.toString(),
     })),
   };
 }
@@ -960,18 +1021,36 @@ export async function executeQueryFeed(
   }
 
   const now = new Date();
-  const posts = await db.post.findMany({
-    where: {
-      deletedAt: null,
-      timestamp: { lte: now }, // No future posts
-      ...(relatedQuestion !== undefined && { relatedQuestion }),
-    },
-    orderBy: { timestamp: 'desc' },
-    take: args.limit || 20,
-  });
+  // Filter in SQL before the limit without requiring NPC authors to have Users.
+  const feedPosts = await db
+    .select({
+      id: posts.id,
+      content: posts.content,
+      authorId: posts.authorId,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(
+      and(
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now),
+        not(like(posts.authorId, 'test-%')),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        ),
+        relatedQuestion !== undefined
+          ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined
+      )
+    )
+    .orderBy(desc(posts.timestamp))
+    .limit(args.limit || 20);
 
   return {
-    posts: posts.map((p) => ({
+    posts: feedPosts.map((p) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
@@ -1149,14 +1228,12 @@ export async function executeGetMarketPrices(
   if (!market) {
     throw new Error('Market not found');
   }
-  const totalShares = Number(market.yesShares) + Number(market.noShares);
-  const yesPrice =
-    totalShares > 0 ? Number(market.yesShares) / totalShares : 0.5;
-  const noPrice = totalShares > 0 ? Number(market.noShares) / totalShares : 0.5;
+  const yesShares = Number(market.yesShares);
+  const noShares = Number(market.noShares);
   return {
     marketId: market.id,
-    yesPrice,
-    noPrice,
+    yesPrice: PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes'),
+    noPrice: PredictionPricing.getCurrentPrice(yesShares, noShares, 'no'),
     timestamp: new Date().toISOString(),
   };
 }
@@ -1354,12 +1431,34 @@ export async function executeDeletePost(
 }
 
 /**
- * Execute like_post tool
+ * Execute like_post tool (same rules as the web like route: the post must
+ * exist, be published and not deleted; a fresh like notifies the author).
  */
 export async function executeLikePost(
   agent: AuthenticatedAgent,
   args: LikePostArgs
 ): Promise<LikePostResult> {
+  const now = new Date();
+  const [post] = await db
+    .select({
+      id: posts.id,
+      authorId: posts.authorId,
+      deletedAt: posts.deletedAt,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(eq(posts.id, args.postId))
+    .limit(1);
+
+  // Unknown or not-yet-published posts cannot be liked (and are never
+  // created from the ID).
+  if (!post || post.timestamp > now) {
+    throw new NotFoundError('Post', args.postId);
+  }
+  if (post.deletedAt) {
+    throw new BusinessLogicError('Cannot like deleted post', 'POST_DELETED');
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       postId: args.postId,
@@ -1378,6 +1477,30 @@ export async function executeLikePost(
       type: 'like',
     },
   });
+
+  // The like has committed. A notification outage must not tell the caller
+  // that the like failed and invite an unsuccessful retry.
+  if (post.authorId && post.authorId !== agent.userId) {
+    try {
+      await notifyReactionOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        'like'
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed like',
+        {
+          postId: args.postId,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return { success: true, liked: true };
 }
 
@@ -1400,21 +1523,20 @@ export async function executeUnlikePost(
 }
 
 /**
- * Execute share_post tool
+ * Execute share_post tool (canonical sharePost, same as the web share route)
  */
 export async function executeSharePost(
   agent: AuthenticatedAgent,
   args: SharePostArgs
 ): Promise<SharePostResult> {
-  const shareId = await generateSnowflakeId();
-  await db.share.create({
-    data: {
-      id: shareId,
-      userId: agent.userId,
-      postId: args.postId,
-    },
-  });
-  return { success: true, shareId };
+  await checkMcpRateLimit(agent.userId, 'share_post');
+  const result = await sharePost(agent.userId, args.postId, args.comment);
+  return {
+    success: true,
+    shareId: result.shareId,
+    repostId: result.repostId,
+    shareCount: result.shareCount,
+  };
 }
 
 /**
@@ -1467,6 +1589,24 @@ export async function executeCreateComment(
   agent: AuthenticatedAgent,
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
+  const post = await dbWrite.post.findFirst({
+    where: { id: args.postId },
+  });
+
+  // Unknown posts cannot take comments (and are never created from the ID:
+  // comments.postId has no foreign key, so an unchecked comment would
+  // become an orphan row).
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
+  // Soft-deleted posts are hidden everywhere, so they cannot collect new
+  // comments — the web post comments route applies the same rule, as does
+  // the A2A createComment executor.
+  if (post.deletedAt) {
+    throw new NotFoundError('Post (deleted)', args.postId);
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {
@@ -1508,12 +1648,35 @@ export async function executeDeleteComment(
 }
 
 /**
- * Execute like_comment tool
+ * Execute like_comment tool (same rules as the web comment like route: the
+ * comment must exist and not be soft-deleted; a fresh like notifies the
+ * comment author).
  */
 export async function executeLikeComment(
   agent: AuthenticatedAgent,
   args: LikeCommentArgs
 ): Promise<LikeCommentResult> {
+  const comment = await db.comment.findFirst({
+    where: { id: args.commentId },
+  });
+
+  // Unknown comments cannot be liked (and are never created from the ID:
+  // reactions.commentId has no foreign key, so an unchecked like would
+  // become an orphan row).
+  if (!comment) {
+    throw new NotFoundError('Comment', args.commentId);
+  }
+
+  // Soft-deleted (moderated) comments are hidden everywhere, so they cannot
+  // collect new likes — the web comment like route applies the same rule
+  // (COMMENT_DELETED), as does the A2A likeComment executor.
+  if (comment.deletedAt) {
+    throw new BusinessLogicError(
+      'Cannot like deleted comment',
+      'COMMENT_DELETED'
+    );
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       commentId: args.commentId,
@@ -1530,6 +1693,30 @@ export async function executeLikeComment(
         type: 'like',
       },
     });
+
+    // The like has committed. A notification outage must not tell the
+    // caller that the like failed and invite an unsuccessful retry.
+    if (comment.authorId && comment.authorId !== agent.userId) {
+      try {
+        await notifyReactionOnComment(
+          comment.authorId,
+          agent.userId,
+          args.commentId,
+          comment.postId,
+          'like'
+        );
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed comment like',
+          {
+            commentId: args.commentId,
+            userId: agent.userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'MCP'
+        );
+      }
+    }
   }
   return { success: true };
 }
@@ -1547,22 +1734,25 @@ export async function executeGetPostsByTag(
   if (!tag) {
     return { posts: [] };
   }
-  const postTagsList = await db.postTag.findMany({
-    where: { tagId: tag.id },
-    take: args.limit || 20,
-    skip: args.offset || 0,
-    orderBy: { createdAt: 'desc' },
-  });
-  const postIds = postTagsList.map((pt) => pt.postId);
-  const postsList = await db.post.findMany({
-    where: {
-      id: { in: postIds },
-      deletedAt: null,
-    },
-    orderBy: { timestamp: 'desc' },
-  });
+  // Select the page after publication eligibility, so newer hidden
+  // memberships cannot consume its slots. Tagged articles remain supported.
+  const now = new Date();
+  const rows = await db
+    .select({ post: posts })
+    .from(postTags)
+    .innerJoin(posts, eq(postTags.postId, posts.id))
+    .where(
+      and(
+        eq(postTags.tagId, tag.id),
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now)
+      )
+    )
+    .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
+    .offset(args.offset || 0)
+    .limit(args.limit || 20);
   return {
-    posts: postsList.map((p) => ({
+    posts: rows.map(({ post: p }) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
@@ -1663,22 +1853,7 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  const existing = await db.follow.findFirst({
-    where: {
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
-  if (existing) {
-    return { success: true };
-  }
-  await db.follow.create({
-    data: {
-      id: await generateSnowflakeId(),
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
+  await followUserWithBlockCheck(agent.userId, args.userId);
   return { success: true };
 }
 
@@ -1779,6 +1954,15 @@ export async function executeSearchUsers(
 ): Promise<SearchUsersResult> {
   const usersList = await db.user.findMany({
     where: {
+      // Match the web people search (GET /api/users/search) and the A2A
+      // people lookup (users.search): banned accounts are never returned,
+      // and test accounts are not real users. A test account carries the
+      // isTest flag or a 'test-' id prefix — the membership rule the feed
+      // surfaces use. The exclusions run before the limit so hidden
+      // accounts cannot occupy result slots.
+      isBanned: false,
+      isTest: false,
+      NOT: { id: { startsWith: 'test-' } },
       OR: [
         { username: { contains: args.query, mode: 'insensitive' } },
         { displayName: { contains: args.query, mode: 'insensitive' } },
@@ -1832,6 +2016,15 @@ export async function executeSearchAgents(
           : []),
         { OR: [{ isAgent: true }, { isActor: true }] },
         { isBanned: false },
+        // Test accounts are not real agents or NPCs — every user-facing
+        // surface hides them (the A2A people lookup states the rule
+        // verbatim). A test account carries the isTest flag or a 'test-'
+        // id prefix: NPC User rows are bootstrapped from pack actors
+        // without copying the flag, so both axes are required. The
+        // exclusions run before the limit so hidden accounts cannot
+        // occupy result slots.
+        { isTest: false },
+        { NOT: { id: { startsWith: 'test-' } } },
       ],
     },
     select: {
@@ -1991,7 +2184,7 @@ export async function executeGetChatMessages(
 ): Promise<GetChatMessagesResult> {
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
-    select: { id: true },
+    select: { id: true, isGroup: true },
   });
 
   if (!chat) {
@@ -2011,8 +2204,34 @@ export async function executeGetChatMessages(
     throw new Error('Unauthorized: You do not have access to this chat');
   }
 
+  // A group chat is a reading surface like any other feed: authors the
+  // viewer blocked or muted, and authors who blocked the viewer, must
+  // not appear in the viewer's message list — the same rule the web
+  // group chat history (GET /api/chats/[id]), the A2A
+  // messaging.get_chat_messages, and this file's search_agents handler
+  // apply. The filter lives in the query itself so limit/offset page
+  // over only the messages the viewer may see. DM history is out of
+  // scope: a block relationship already prevents creating a DM and
+  // sending in one.
+  let excludedSenderIds: string[] = [];
+  if (chat.isGroup) {
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(agent.userId),
+      getMutedUserIds(agent.userId),
+      getBlockedByUserIds(agent.userId),
+    ]);
+    excludedSenderIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+  }
+
   const messagesList = await db.message.findMany({
-    where: { chatId: args.chatId },
+    where: {
+      chatId: args.chatId,
+      ...(excludedSenderIds.length > 0
+        ? { senderId: { notIn: excludedSenderIds } }
+        : {}),
+    },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 50,
     skip: args.offset || 0,
@@ -2191,44 +2410,82 @@ export async function executeCreateGroup(
 }
 
 /**
- * Execute leave_chat tool
- * Chat.groupId → Group.id relationship
+ * Execute leave_chat tool.
+ *
+ * Chat.groupId → Group.id. The owner decision and both writes commit
+ * together on the primary. GroupMember is locked before ChatParticipant,
+ * matching DELETE /api/chats/[id]/participants/me (member update, then
+ * participant removal). Taking the participant lock first deadlocks with
+ * that route (PostgreSQL 40P01).
  */
 export async function executeLeaveChat(
   agent: AuthenticatedAgent,
   args: LeaveChatArgs
 ): Promise<LeaveChatResult> {
-  // Mark chat participant as inactive
-  await db.chatParticipant.updateMany({
-    where: {
-      chatId: args.chatId,
-      userId: agent.userId,
-    },
-    data: { isActive: false },
-  });
-
-  // Find the chat to get its groupId
-  const chat = await db.chat.findUnique({
-    where: { id: args.chatId },
-    select: { groupId: true },
-  });
-
-  // Also update GroupMember if there's an associated group
-  if (chat?.groupId) {
-    await db.groupMember.updateMany({
-      where: {
-        groupId: chat.groupId,
-        userId: agent.userId,
-      },
-      data: {
-        isActive: false,
-        kickedAt: new Date(),
-        kickReason: 'User left',
-      },
+  // $transaction is a primary write. Reads stay inside it so a replica
+  // cannot serve a stale role.
+  return db.$transaction(async (tx) => {
+    const chat = await tx.chat.findUnique({
+      where: { id: args.chatId },
+      select: { groupId: true },
     });
-  }
 
-  return { success: true };
+    // A missing chat, or a chat the caller never joined, has no participant
+    // row. Refuse that before any write so the tool does not report success
+    // after updating zero rows.
+    const participant = await tx.chatParticipant.findFirst({
+      where: { chatId: args.chatId, userId: agent.userId },
+    });
+    if (!participant) {
+      throw new Error('You are not a member of this chat.');
+    }
+
+    if (chat?.groupId) {
+      // Hold this row for the rest of the transaction, then read its role.
+      // A promotion to owner that commits while this waits is visible here.
+      const [membership] = await tx
+        .select({
+          id: groupMembers.id,
+          role: groupMembers.role,
+          isActive: groupMembers.isActive,
+        })
+        .from(groupMembers)
+        .where(
+          and(
+            eq(groupMembers.groupId, chat.groupId),
+            eq(groupMembers.userId, agent.userId)
+          )
+        )
+        .limit(1)
+        .for('update');
+
+      if (membership?.isActive && membership.role === 'owner') {
+        throw new Error(
+          'Group owners cannot leave. Transfer ownership or delete the group.'
+        );
+      }
+
+      // Same row the lock just read. An inactive row, including an inactive
+      // owner, is left alone.
+      if (membership?.isActive) {
+        await tx.groupMember.update({
+          where: { id: membership.id },
+          data: {
+            isActive: false,
+            kickedAt: new Date(),
+            kickReason: 'User left',
+          },
+        });
+      }
+    }
+
+    await tx.chatParticipant.update({
+      where: { id: participant.id },
+      data: { isActive: false },
+    });
+
+    return { success: true };
+  });
 }
 
 /**
@@ -2480,17 +2737,52 @@ export async function executeResolveMarket(
 
   const winningSide = args.resolution ? 'yes' : 'no';
 
+  // Mirror the admin web route: settlement, question, and timeframed
+  // updates commit together. The trending widget and the new-markets feed
+  // list a market while its question is 'active', so resolving only the
+  // market row would leave a settled market displayed as live there.
+  const resolvedAt = new Date();
   await withPredictionSettlement(
     args.marketId,
     { system: 'mcp_admin_resolve' },
-    (service) =>
-      service.resolve({
+    async (service, tx: import('@feed/db').Transaction) => {
+      // The outer check can become stale while another resolver holds the
+      // settlement lock. Preserve rejection before changing lifecycle rows.
+      const [current] = await tx
+        .select({ resolved: markets.resolved })
+        .from(markets)
+        .where(eq(markets.id, args.marketId))
+        .limit(1);
+      if (!current) throw new Error('Market not found');
+      if (current.resolved) throw new Error('Market already resolved');
+      await service.resolve({
         marketId: args.marketId,
         winningSide,
+        resolvedAt,
         resolutionDescription:
           args.reason ||
           `Resolved by admin as ${args.resolution ? 'YES' : 'NO'}`,
-      }),
+      });
+      await tx
+        .update(questions)
+        .set({
+          status: 'resolved',
+          resolvedOutcome: args.resolution,
+          resolutionReviewedAt: resolvedAt,
+          resolutionReviewedBy: agent.userId,
+          updatedAt: resolvedAt,
+        })
+        .where(eq(questions.id, args.marketId));
+      await tx
+        .update(timeframedMarkets)
+        .set({
+          isActive: false,
+          isResolved: true,
+          resolvedAt,
+          updatedAt: resolvedAt,
+        })
+        .where(eq(timeframedMarkets.questionId, args.marketId));
+    },
     predictionServiceOptions(args.marketId)
   );
 
@@ -2733,22 +3025,61 @@ export async function executeBlockUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot block yourself');
   }
-  const existing = await db.userBlock.findFirst({
-    where: {
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
+
+  // Share the website follow/block lock before reading any pair state. All
+  // validation and writes use this primary transaction, including retries.
+  await withTransaction(async (tx) => {
+    await acquireUserBlockPairLock(tx, agent.userId, args.userId);
+
+    const [targetUser] = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, args.userId))
+      .limit(1);
+    if (!targetUser) {
+      throw new Error(`User ${args.userId} not found`);
+    }
+
+    const [existing] = await tx
+      .select({ id: userBlocks.id })
+      .from(userBlocks)
+      .where(
+        and(
+          eq(userBlocks.blockerId, agent.userId),
+          eq(userBlocks.blockedId, args.userId)
+        )
+      )
+      .limit(1);
+    if (!existing) {
+      await tx.insert(userBlocks).values({
+        id: await generateSnowflakeId(),
+        blockerId: agent.userId,
+        blockedId: args.userId,
+      });
+    }
+
+    // An existing block must also sever leftover edges. Keep reciprocal
+    // deletes ordered, as in the submitted fix, within the same transaction.
+    const [firstUserId, secondUserId] = [agent.userId, args.userId].sort();
+    if (!firstUserId || !secondUserId) throw new Error('Missing block pair');
+    await tx
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followerId, firstUserId),
+          eq(follows.followingId, secondUserId)
+        )
+      );
+    await tx
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followerId, secondUserId),
+          eq(follows.followingId, firstUserId)
+        )
+      );
   });
-  if (existing) {
-    return { success: true };
-  }
-  await db.userBlock.create({
-    data: {
-      id: await generateSnowflakeId(),
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
-  });
+
   return { success: true };
 }
 
@@ -3293,7 +3624,19 @@ export async function executeGetFavoritePosts(
       and(
         inArray(posts.authorId, favoritedUserIds),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, new Date())
+        lte(posts.timestamp, new Date()),
+        // Apply the web feed's test-author rule (DatabaseService
+        // .getRecentPosts): test accounts — the isTest flag or a
+        // 'test-' id prefix — must not leak into the favorites feed
+        // either, even when the agent favorited them. Excluded in SQL
+        // before paginating, so pages stay full.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp))

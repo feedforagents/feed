@@ -5,9 +5,11 @@
  * Used to exclude blocked or muted users from feeds and search results.
  */
 
-import { and, eq } from 'drizzle-orm';
-import { db } from '../db';
-import { userBlocks, userMutes } from '../schema';
+import { generateSnowflakeId } from '@feed/shared';
+import { and, eq, sql } from 'drizzle-orm';
+import type { Transaction } from '../db';
+import { db, withTransaction } from '../db';
+import { follows, userBlocks, userMutes } from '../schema';
 
 /**
  * Get list of user IDs that the current user has blocked.
@@ -75,13 +77,16 @@ export async function getFilteredUserIds(userId: string): Promise<string[]> {
  *
  * @param blockerId - ID of the user who may have blocked
  * @param blockedId - ID of the user who may be blocked
+ * @param tx - Optional transaction to read from, so a block committed by a
+ * concurrent write serialized on the same pair lock is visible
  * @returns True if blockerId has blocked blockedId
  */
 export async function hasBlocked(
   blockerId: string,
-  blockedId: string
+  blockedId: string,
+  tx?: Transaction
 ): Promise<boolean> {
-  const block = await db
+  const block = await (tx ?? db)
     .select({ blockerId: userBlocks.blockerId })
     .from(userBlocks)
     .where(
@@ -93,6 +98,53 @@ export async function hasBlocked(
     .limit(1);
 
   return block.length > 0;
+}
+
+/**
+ * Take the transaction-scoped advisory lock shared by the follow and block
+ * writes for one unordered user pair. The key is order-independent, so a
+ * follow and a block for the same two users serialize against each other
+ * no matter which direction each one runs in: whichever transaction takes
+ * the lock first completes before the other reads block state. Reading the
+ * block state before taking this lock leaves a window where a block
+ * committed mid-follow leaves both a block and a follow behind.
+ *
+ * Must be the first statement of the follow and block transactions.
+ */
+export async function acquireUserBlockPairLock(
+  tx: Transaction,
+  userIdA: string,
+  userIdB: string
+): Promise<void> {
+  const [first, second] = [userIdA, userIdB].sort();
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext(${'user-block-pair:' + first + ':' + second}))`
+  );
+}
+
+/** Create an agent follow under the same pair lock used by block writers. */
+export async function followUserWithBlockCheck(
+  followerId: string,
+  followingId: string
+): Promise<boolean> {
+  return withTransaction(async (tx) => {
+    await acquireUserBlockPairLock(tx, followerId, followingId);
+    const [targetBlockedMe, iBlockedTarget] = await Promise.all([
+      hasBlocked(followingId, followerId, tx),
+      hasBlocked(followerId, followingId, tx),
+    ]);
+    if (targetBlockedMe || iBlockedTarget) {
+      throw new Error('Cannot follow this user');
+    }
+    const [created] = await tx
+      .insert(follows)
+      .values({ id: await generateSnowflakeId(), followerId, followingId })
+      .onConflictDoNothing({
+        target: [follows.followerId, follows.followingId],
+      })
+      .returning({ id: follows.id });
+    return Boolean(created);
+  });
 }
 
 /**

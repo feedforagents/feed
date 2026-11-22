@@ -2,7 +2,7 @@ import {
   type AuthResult,
   getServerApiKey,
   validateApiKeyAsync,
-} from '@feed/a2a';
+} from '@feed/api';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 

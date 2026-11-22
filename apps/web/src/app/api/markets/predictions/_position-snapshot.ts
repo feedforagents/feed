@@ -2,6 +2,7 @@ import {
   calculatePredictionPositionSnapshot,
   type PredictionMarketRecord,
   type PredictionPositionRecord,
+  PredictionPricing,
 } from '@feed/core/markets/prediction';
 import { FEE_CONFIG } from '@feed/engine';
 
@@ -51,7 +52,13 @@ export function buildPredictionUserPositionSnapshot(
     currentValue: snapshot.currentValue,
     costBasis: snapshot.costBasis,
     unrealizedPnL: snapshot.unrealizedPnL,
-    maxPayout: position.shares * (1 + position.avgPrice),
+    // PRD §9.2 [D-14] + §9.1: a winning share redeems for exactly 1 pt, so
+    // the preview must be the credit settlement actually pays — the stake
+    // is not returned on top of the redemption.
+    maxPayout: PredictionPricing.calculateExpectedPayout(
+      position.shares,
+      position.avgPrice
+    ),
     resolved: market.resolved,
     resolution: market.resolution ?? null,
   };

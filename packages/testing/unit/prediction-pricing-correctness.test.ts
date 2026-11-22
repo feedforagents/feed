@@ -145,8 +145,14 @@ describe('CPMM fee integration', () => {
       feeRate
     );
     const noFee = PredictionPricing.calculateSell(5000, 5000, 'yes', 100);
-    expect(result.fee).toBeCloseTo(noFee.totalCost * 0.01, 6);
-    expect(result.netProceeds).toBe(floorPoints(noFee.totalCost - result.fee));
+    // The charged fee is the canonical fee the fee ledger records
+    // (FeeService.calculateFee): the fee on the cent-settled (floored)
+    // gross, rounded UP to whole cents — not the unrounded rate product.
+    const settledGross = floorPoints(noFee.totalCost);
+    expect(result.fee).toBe(
+      Math.ceil(settledGross * feeRate * 100 - 1e-9) / 100
+    );
+    expect(result.netProceeds).toBe(settledGross - result.fee);
     expect(result.roundingRemainder).toBeCloseTo(
       noFee.totalCost - result.fee - result.netProceeds!,
       10
