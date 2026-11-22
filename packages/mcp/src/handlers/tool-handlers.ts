@@ -625,6 +625,8 @@ export async function executeGetMarkets(
   // runs (proof generation, manual review holds), but buys on it are
   // refused. The website trading list and its count use the same
   // predicate (PredictionDbAdapter), so do not offer those markets here.
+  // `gte` matches that adapter; the buy guard refuses at now >= endDate,
+  // so at the exact deadline instant a listed market is not buyable.
   const markets = await db.market.findMany({
     where: { resolved: false, endDate: { gte: new Date() } },
     orderBy: { createdAt: 'desc' },
