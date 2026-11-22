@@ -1048,7 +1048,11 @@ export async function executeQueryFeed(
           : undefined
       )
     )
-    .orderBy(desc(posts.timestamp))
+    // Total order, matching the web feed query
+    // (DatabaseService.getRecentPosts orders by timestamp desc, id desc):
+    // with timestamp alone, posts sharing one timestamp are cut by the
+    // limit in storage order, so the head of a tied block is arbitrary.
+    .orderBy(desc(posts.timestamp), desc(posts.id))
     .limit(args.limit || 20);
 
   return {
