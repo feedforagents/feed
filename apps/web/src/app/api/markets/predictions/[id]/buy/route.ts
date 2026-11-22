@@ -3,7 +3,10 @@ import {
   authenticate,
   broadcastToChannel,
   checkProgress,
+  checkRateLimitAsync,
   invalidateMarketsApiPredictionsAfterUserTrade,
+  RATE_LIMIT_CONFIGS,
+  rateLimitError,
   successResponse,
   withErrorHandling,
 } from '@feed/api';
@@ -59,6 +62,14 @@ export const POST = withErrorHandling(
       await context.params
     );
     const user = await authenticate(request);
+
+    // Same per-account limit as the MCP and A2A prediction trades.
+    const rateLimitResult = await checkRateLimitAsync(
+      user.userId,
+      RATE_LIMIT_CONFIGS.BUY_PREDICTION
+    );
+    if (!rateLimitResult.allowed)
+      return rateLimitError(rateLimitResult.retryAfter);
     const { side, amount } = PredictionMarketTradeSchema.parse(
       await request.json()
     );
