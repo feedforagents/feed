@@ -2,40 +2,22 @@
  * FollowListModal E2E: profile follow lists page past 100 rows, restart
  * after an own unfollow, and recover from a failed later page.
  *
- * Prerequisites:
- * - Dev server running at PLAYWRIGHT_BASE_URL (default 127.0.0.1:3400)
- *   with dev auth enabled (ALLOW_TEST_PRIVY_DID_AUTH=true).
- * - A production server also works if FEED_STEWARD_TEST_TOKEN holds a
- *   Steward JWT for the Playwright dev user (the spec links the dev user's
- *   stewardId to its own id so the token resolves to the same row).
- * - Database reachable through the same DATABASE_URL the server uses, so
- *   the seed below and the server read the same roster.
+ * Run against a loopback Next server and a positively identified disposable
+ * PostgreSQL database. The server and spec must share DATABASE_URL and
+ * STEWARD_JWT_SECRET. Locally, use a freshly created feed_pr<digits> database
+ * and the same URL for DIRECT_DATABASE_URL.
  *
- * The seed is 150 fresh users the Playwright dev user follows. Row order
- * follows the API's createdAt-desc sort: seed i is created now - i minutes,
- * so seed 000 is the first row and seed 100 is the 101st row (the row the
- * old modal could never reach, and the row a stale page walk skips after
- * an unfollow).
- *
- * Seed ownership: names are run-scoped, so one run never adopts rows left
- * by an interrupted run; ids enter the cleanup lists only after a
- * successful INSERT ... RETURNING, so cleanup deletes only rows this run
- * actually wrote. A colliding setup fails before writing anything.
- * The seed writes into the same local database the dev server reads (the
- * server must see the roster), so beforeAll refuses a non-loopback
- * DATABASE_URL instead of asserting a separate test-database name.
- *
- * Run with: bunx playwright test follow-list-modal.spec.ts --config packages/testing/playwright.config.ts
+ * The roster contains 150 run-owned follows. Seed 100 is the first row
+ * beyond the initial page and the row a stale offset skips after unfollow.
  */
 
 import assert from 'node:assert/strict';
 import { closeDatabase, db, eq, follows, inArray, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { expect, type Page, test } from '@playwright/test';
-import {
-  type BrowserDevAuthSession,
-  installPlaywrightDevAuth,
-} from './dev-auth';
+import { SignJWT } from 'jose';
+import { assertDisposableAgentFollowDatabase } from '../integration/helpers/agent-follow-database';
+import { PLAYWRIGHT_DEV_AUTH_STORAGE_KEY } from './dev-auth';
 
 const BASE_URL =
   process.env.PLAYWRIGHT_BASE_URL ||
@@ -49,12 +31,12 @@ const SEED_COUNT = 150;
 const RUN_ID = crypto.randomUUID().slice(0, 8);
 const SEED_PREFIX = `f1809-e2e-${RUN_ID}`;
 const MINUTE_MS = 60 * 1000;
+const VIEWER_USERNAME = `${SEED_PREFIX}-viewer`;
+const VIEWER_PROFILE = `/u/${VIEWER_USERNAME}`;
 
 test.describe.configure({ mode: 'serial', timeout: 180_000 });
-test.setTimeout(180_000);
+test.use({ storageState: { cookies: [], origins: [] } });
 
-let serverAvailable = false;
-let session: BrowserDevAuthSession | null = null;
 let viewerId = '';
 // Hold ONLY ids an INSERT ... RETURNING below actually returned, so
 // cleanup never deletes a row this run did not write.
@@ -63,15 +45,9 @@ const seededFollowIds: string[] = [];
 const seedUsername = (i: number) =>
   `${SEED_PREFIX}-${String(i).padStart(3, '0')}`;
 
-async function openFollowing(
-  page: Page,
-  profilePath = '/u/playwright-dev-admin'
-) {
-  await page.goto(`${BASE_URL}${profilePath}`, {
-    waitUntil: 'domcontentloaded',
-  });
+async function showFollowList(page: Page, name: 'Following' | 'Followers') {
   await page
-    .getByRole('button', { name: /Following/ })
+    .getByRole('button', { name: new RegExp(`${name}$`) })
     .first()
     .click();
   const dialog = page.getByRole('dialog');
@@ -79,53 +55,50 @@ async function openFollowing(
   return dialog;
 }
 
-async function openFollowers(
-  page: Page,
-  profilePath = '/u/playwright-dev-admin'
-) {
-  await page.goto(`${BASE_URL}${profilePath}`, {
+async function openFollowing(page: Page) {
+  await page.goto(`${BASE_URL}${VIEWER_PROFILE}`, {
     waitUntil: 'domcontentloaded',
   });
-  await page
-    .getByRole('button', { name: /Followers/ })
-    .first()
-    .click();
-  const dialog = page.getByRole('dialog');
-  await expect(dialog).toBeVisible({ timeout: 30_000 });
-  return dialog;
+  return showFollowList(page, 'Following');
 }
 
-// Signed-in setup: install dev auth, then mark the game guide complete in
-// localStorage before the first app navigation, so the first-run tour does
-// not redirect the profile page to /onboarding mid-test.
 async function installSignedIn(page: Page) {
-  const authSession = await installPlaywrightDevAuth(page, BASE_URL);
-  // Production servers ignore the dev-auth bypass, so when a Steward test
-  // token is provided (FEED_STEWARD_TEST_TOKEN), install it as the
-  // steward-token cookie — the same credential production users carry.
-  const stewardToken = process.env.FEED_STEWARD_TEST_TOKEN;
-  if (stewardToken) {
-    await page.context().addCookies([
-      {
-        name: 'steward-token',
-        value: stewardToken,
-        url: BASE_URL,
-        sameSite: 'Lax',
-      },
-    ]);
-  }
-  await page.addInitScript(
-    ({ userId }) => {
-      const key = 'feed-game-guide-completed';
-      const prev = JSON.parse(
-        window.localStorage.getItem(key) ?? '{}'
-      ) as Record<string, boolean>;
-      prev[userId] = true;
-      window.localStorage.setItem(key, JSON.stringify(prev));
-    },
-    { userId: authSession.userId }
+  const secret = process.env.STEWARD_JWT_SECRET;
+  assert.ok(
+    secret && viewerId,
+    'Owned viewer and Steward signing fixture required'
   );
-  return authSession;
+  const accessToken = await new SignJWT({ userId: viewerId })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuer('steward')
+    .setIssuedAt()
+    .setExpirationTime('10m')
+    .sign(new TextEncoder().encode(secret));
+  await page.context().addCookies([
+    {
+      name: 'steward-token',
+      value: accessToken,
+      url: BASE_URL,
+      sameSite: 'Lax',
+    },
+  ]);
+  await page.addInitScript(
+    ({ storageKey, authSession }) => {
+      window.localStorage.setItem(storageKey, JSON.stringify(authSession));
+      window.localStorage.setItem(
+        'feed-game-guide-completed',
+        JSON.stringify({ [authSession.userId]: true })
+      );
+    },
+    {
+      storageKey: PLAYWRIGHT_DEV_AUTH_STORAGE_KEY,
+      authSession: {
+        userId: viewerId,
+        accessToken,
+        displayName: 'Follow list viewer',
+      },
+    }
+  );
 }
 
 async function scrollListToBottom(page: Page) {
@@ -149,11 +122,15 @@ async function loadedHandles(page: Page) {
 }
 
 async function scrollUntilLoaded(page: Page, expected: number) {
-  for (let i = 0; i < 10; i++) {
-    await scrollListToBottom(page);
-    if ((await loadedRowCount(page)) >= expected) return;
-    await page.waitForTimeout(500);
-  }
+  await expect
+    .poll(
+      async () => {
+        await scrollListToBottom(page);
+        return loadedRowCount(page);
+      },
+      { timeout: 30_000 }
+    )
+    .toBe(expected);
 }
 
 async function seedRoster() {
@@ -259,51 +236,51 @@ async function cleanupRoster() {
   }
 }
 
-test.beforeAll(async ({ browser }) => {
-  try {
-    const response = await fetch(`${BASE_URL}/api/health`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    serverAvailable = response.ok;
-  } catch {
-    serverAvailable = false;
-  }
-  if (!serverAvailable) return;
-
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  session = await installPlaywrightDevAuth(page, BASE_URL);
-  viewerId = session.userId;
-  // Link the dev user to the Steward identity used by FEED_STEWARD_TEST_TOKEN
-  // (userId == viewer id), so a Steward JWT resolves to this same row
-  // instead of creating a second user. No-op for dev-server runs.
-  await db
-    .update(users)
-    .set({ stewardId: viewerId })
-    .where(eq(users.id, viewerId));
-  // The seed writes into the same local database the dev server reads,
-  // so the server can see the roster. Refuse a non-loopback destination:
-  // this fixture must never write to a remote or production database.
-  // (No separate test-database name is asserted: the dev server's local
-  // database is the destination by design, and run-scoped names plus
-  // RETURNING ownership are what keep other rows safe in it.)
-  const databaseUrl = new URL(process.env.DATABASE_URL ?? '');
+test.beforeAll(async () => {
+  const target = new URL(BASE_URL);
   assert.ok(
-    ['localhost', '127.0.0.1', '[::1]'].includes(databaseUrl.hostname),
-    `refusing non-local DATABASE_URL host: ${databaseUrl.hostname}`
+    ['http:', 'https:'].includes(target.protocol) &&
+      ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname) &&
+      !target.username &&
+      !target.password,
+    'Follow-list browser tests require a loopback web server'
   );
+  await assertDisposableAgentFollowDatabase();
+  const response = await fetch(`${BASE_URL}/api/health`, {
+    redirect: 'error',
+    signal: AbortSignal.timeout(20_000),
+  });
+  assert.ok(response.ok, 'Follow-list web server is unavailable');
 
-  await page.close();
-  await context.close();
-
-  // No adoption of rows from earlier runs: seed names are run-scoped, so
-  // leftovers keep names this run never matches, and cleanup only ever
-  // deletes ids this run's own inserts returned.
+  const id = await generateSnowflakeId();
+  const now = new Date();
+  const [viewer] = await db
+    .insert(users)
+    .values({
+      id,
+      stewardId: id,
+      username: VIEWER_USERNAME,
+      displayName: 'Follow list viewer',
+      bio: 'Owned browser fixture',
+      profileComplete: true,
+      hasUsername: true,
+      hasBio: true,
+      profileSetupCompletedAt: now,
+      tosAccepted: true,
+      tosAcceptedAt: now,
+      privacyPolicyAccepted: true,
+      privacyPolicyAcceptedAt: now,
+      gameGuideCompletedAt: now,
+      updatedAt: now,
+    })
+    .returning({ id: users.id });
+  assert.ok(viewer, 'Viewer insert returned no row');
+  viewerId = viewer.id;
+  seededUserIds.push(viewer.id);
   await seedRoster();
 });
 
 test.afterAll(async () => {
-  if (!serverAvailable) return;
   await cleanupRoster();
   await closeDatabase();
 });
@@ -311,7 +288,6 @@ test.afterAll(async () => {
 test('logged-out browsing shows the following list without follow buttons', async ({
   browser,
 }) => {
-  test.skip(!serverAvailable, 'Server not available');
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
@@ -333,15 +309,17 @@ test('logged-out browsing shows the following list without follow buttons', asyn
 });
 
 test('signed-in paging reaches all 150 rows exactly once', async ({ page }) => {
-  test.skip(!serverAvailable, 'Server not available');
   await installSignedIn(page);
   const dialog = await openFollowing(page);
-  await expect(dialog).toContainText('(150)', { timeout: 30_000 });
+  await expect(rowHandles(page)).toHaveCount(100, { timeout: 30_000 });
+  const initialTotal = (await dialog.innerText()).includes('(150)');
 
-  // Scroll until the sentinel loads the second page.
+  // Scroll before checking the initial badge so the same recording
+  // shows whether row 101 was reachable on each revision.
   await scrollUntilLoaded(page, SEED_COUNT);
   const handles = await loadedHandles(page);
   expect(handles).toHaveLength(SEED_COUNT);
+  expect(initialTotal).toBe(true);
   expect(new Set(handles).size).toBe(SEED_COUNT);
   // The 101st row (seed 100) is reachable only past page 1.
   expect(handles).toContain(`@${seedUsername(100)}`);
@@ -351,7 +329,6 @@ test('signed-in paging reaches all 150 rows exactly once', async ({ page }) => {
 test('own unfollow restarts the walk instead of skipping a row', async ({
   page,
 }) => {
-  test.skip(!serverAvailable, 'Server not available');
   await installSignedIn(page);
   const dialog = await openFollowing(page);
   await expect(dialog).toContainText('(150)', { timeout: 30_000 });
@@ -386,7 +363,6 @@ test('own unfollow restarts the walk instead of skipping a row', async ({
 test('failed page 2 offers a retry in the same open modal', async ({
   page,
 }) => {
-  test.skip(!serverAvailable, 'Server not available');
   await installSignedIn(page);
 
   let failedOnce = false;
@@ -424,7 +400,6 @@ test('failed page 2 offers a retry in the same open modal', async ({
 });
 
 test('close/reopen and user switch start a fresh walk', async ({ page }) => {
-  test.skip(!serverAvailable, 'Server not available');
   await installSignedIn(page);
   const dialog = await openFollowing(page);
   await expect(dialog).toContainText('(149)', { timeout: 30_000 });
@@ -432,7 +407,7 @@ test('close/reopen and user switch start a fresh walk', async ({ page }) => {
   // Close and reopen: a fresh page 1, not the previous scroll position.
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden({ timeout: 30_000 });
-  const reopened = await openFollowing(page);
+  const reopened = await showFollowList(page, 'Following');
   await expect(reopened).toContainText('(149)', { timeout: 30_000 });
   // Seed 000 was unfollowed in the earlier test, so the first row is now
   // seed 001.
@@ -463,7 +438,6 @@ test('close/reopen and user switch start a fresh walk', async ({ page }) => {
 test('late unfollow completion does not write to the switched list', async ({
   page,
 }) => {
-  test.skip(!serverAvailable, 'Server not available');
   await installSignedIn(page);
 
   // Hold the DELETE /follow response so the mutation resolves only after
@@ -473,6 +447,13 @@ test('late unfollow completion does not write to the switched list', async ({
     releaseDelete = resolve;
   });
   let deleteSeen = false;
+  let followerLoads = 0;
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith('/followers') && url.searchParams.get('page')) {
+      followerLoads++;
+    }
+  });
   await page.route('**/api/users/*/follow', async (route) => {
     if (route.request().method() === 'DELETE') {
       deleteSeen = true;
@@ -500,25 +481,30 @@ test('late unfollow completion does not write to the switched list', async ({
     // before the delayed response is released.
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 30_000 });
-    const followersDialog = await openFollowers(page);
+    const followersDialog = await showFollowList(page, 'Followers');
     await expect(
       followersDialog.locator('#follow-list-modal-title')
     ).toHaveText('Followers', { timeout: 30_000 });
-    await expect(followersDialog).toContainText(/\(\d+\)/, {
-      timeout: 30_000,
-    });
-    await page.waitForTimeout(500);
-    const followersBefore = await followersDialog.textContent();
+    await expect(followersDialog).toContainText('No followers yet');
+    const loadsBeforeDelete = followerLoads;
+    const completed = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'DELETE' &&
+        new URL(response.url()).pathname.endsWith('/follow')
+    );
 
-    // Release the delayed unfollow: on the old code the stale completion
-    // restarts the Following walk and writes Following rows under the
-    // Followers heading; with the fix the Followers list is untouched.
+    // The profile's updated count proves the real response reached its
+    // original callback while the same mounted profile shows Followers.
     releaseDelete();
-    await page.waitForTimeout(2000);
-    expect(await followersDialog.textContent()).toBe(followersBefore);
+    expect((await completed).ok()).toBe(true);
+    await expect(
+      page.getByRole('button', { name: /^148\s*Following$/ })
+    ).toBeVisible({ timeout: 30_000 });
+    expect(followerLoads).toBe(loadsBeforeDelete);
     await expect(
       followersDialog.locator('#follow-list-modal-title')
     ).toHaveText('Followers');
+    await expect(followersDialog).toContainText('No followers yet');
     await expect(
       followersDialog.locator('p', { hasText: `@${SEED_PREFIX}-` })
     ).toHaveCount(0);
@@ -528,7 +514,6 @@ test('late unfollow completion does not write to the switched list', async ({
 });
 
 test('failed insert registers no ownership and preserves existing rows', async () => {
-  test.skip(!serverAvailable, 'Server not available');
   // A pre-existing row this run did not seed as roster data, plus a
   // follow pointing at it: both must survive a failed insert, and the
   // failed insert must register no ownership for cleanup.

@@ -86,6 +86,7 @@ export {
   generateTagsForPosts,
   generateTagsFromPost,
   getCurrentTrendingTags,
+  getLatestTrendingCalculation,
   getPostsByTag,
   getRelatedTags,
   getTagStatistics,
@@ -124,6 +125,7 @@ export * from './scambench-scenario-seeding-service';
 export * from './static-data-registry';
 export * from './trade-cache-invalidation';
 export * from './trade-execution-service';
+export * from './trading-fee-outbox';
 export * from './user-wallet-adapter';
 export * from './wallet-service';
 export * from './world-facts-consolidator';
