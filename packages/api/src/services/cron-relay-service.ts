@@ -51,6 +51,8 @@ export async function relayCronToStaging(
 
   const { pathname, search } = new URL(request.url);
   const targetUrl = `${stagingBaseUrl}${pathname}${search}`;
+  const fundingTime =
+    routeName === 'perp-funding' ? headers.get('x-cloudflare-cron-time') : null;
 
   try {
     const res = await fetch(targetUrl, {
@@ -58,6 +60,9 @@ export async function relayCronToStaging(
       headers: {
         Authorization: `Bearer ${cronSecret}`,
         'x-cron-relay': routeName,
+        ...(fundingTime === null
+          ? {}
+          : { 'x-cloudflare-cron-time': fundingTime }),
       },
       cache: 'no-store',
       signal: AbortSignal.timeout(10000),

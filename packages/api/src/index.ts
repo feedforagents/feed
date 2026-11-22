@@ -301,6 +301,18 @@ export {
   validateUserApiKey,
   verifyApiKey,
 } from './utils';
+// API Key Authentication
+export {
+  A2A_API_KEY_HEADER,
+  type ApiKeyAuthConfig,
+  type AuthRequest,
+  type AuthResult,
+  getRequiredApiKey,
+  getServerApiKey,
+  isLocalHost,
+  validateApiKey,
+  validateApiKeyAsync,
+} from './utils/api-key-auth';
 // Wallet auth utilities
 export {
   requireFreshToken,

@@ -121,6 +121,15 @@ describe('ContentQualityGate.validateArticle', () => {
     expect(result.score).toBeGreaterThan(0);
   });
 
+  test('accepts a long article that covers every keyword in a short source', async () => {
+    const source = 'Harbor dredging permits delayed.';
+    const article =
+      'Harbor dredging permits were delayed. The setback leaves contractors balancing vessel availability against the cost of idle equipment. Shipping operators are reviewing berth reservations and contingency plans as crews await a revised timetable. Smaller logistics companies face tighter margins because they have fewer alternatives when routes change. Workers could rotate through maintenance assignments while supervisors coordinate surveys and review safety procedures. Local businesses near the waterfront expect quieter weekdays if deliveries move elsewhere. The eventual opening date will depend on approval, weather conditions, and whether suppliers can meet the new sequence of work.';
+
+    const result = await ContentQualityGate.validateArticle(article, source);
+    expect(result).toMatchObject({ passed: true, reasons: [] });
+  });
+
   test('allows source-mentioned product phrases with case differences', async () => {
     const source =
       'StrAItegy launches a viral meme coin at OpenAGI terminal secure Copilot. The launch uses Terminal Copilot for secure terminal access.';

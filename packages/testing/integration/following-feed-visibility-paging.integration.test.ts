@@ -53,18 +53,24 @@ import {
   follows,
   gameOnboarding,
   inArray,
+  notInArray,
+  npcMarketClues,
+  or,
   posts,
+  sql,
   userActorFollows,
   userBlocks,
   userMutes,
   userPnLSnapshots,
   users,
   whitelist,
+  whitelistConfig,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
 import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
+import { assertDisposableAgentFollowDatabase } from './helpers/agent-follow-database';
 
 type FollowingResponse = {
   success: boolean;
@@ -82,8 +88,18 @@ let token: string;
 const visibleIds: string[] = []; // normal author's posts, newest first
 const hiddenIds: string[] = []; // must never appear on any page
 const mutedPostIds: string[] = [];
-type OwnedRows = { postIds: string[]; userIds: string[] };
-const owned: OwnedRows = { postIds: [], userIds: [] };
+function ownedRows() {
+  return {
+    postIds: [] as string[],
+    userIds: [] as string[],
+    followIds: [] as string[],
+    actorFollowIds: [] as string[],
+    blockIds: [] as string[],
+    muteIds: [] as string[],
+  };
+}
+type OwnedRows = ReturnType<typeof ownedRows>;
+const owned = ownedRows();
 const allPostIds = owned.postIds;
 let clientIp: string;
 
@@ -115,13 +131,25 @@ async function createViewer(scope = owned) {
   return { userId, token: await signToken(userId) };
 }
 
-async function follow(viewer: string, author: string) {
-  await db.insert(follows).values({
-    id: await generateSnowflakeId(),
-    followerId: viewer,
-    followingId: author,
-    createdAt: new Date(),
-  });
+async function follow(viewer: string, author: string, scope = owned) {
+  const rows = await db
+    .insert(follows)
+    .values({
+      id: await generateSnowflakeId(),
+      followerId: viewer,
+      followingId: author,
+      createdAt: new Date(),
+    })
+    .returning({ id: follows.id });
+  scope.followIds.push(...rows.map(({ id }) => id));
+}
+
+async function insertMute(muterId: string, mutedId: string, scope = owned) {
+  const rows = await db
+    .insert(userMutes)
+    .values({ id: await generateSnowflakeId(), muterId, mutedId })
+    .returning({ id: userMutes.id });
+  scope.muteIds.push(...rows.map(({ id }) => id));
 }
 
 async function moderate(
@@ -148,6 +176,10 @@ async function moderate(
     { params: Promise.resolve({ userId: target }) }
   );
   expect(response.status).toBe(200);
+  const result: { mute?: { id: string }; block?: { id: string } } =
+    await response.json();
+  if (result.mute) owned.muteIds.push(result.mute.id);
+  if (result.block) owned.blockIds.push(result.block.id);
 }
 
 async function insertOwnedUsers(
@@ -181,74 +213,133 @@ async function cleanup(scope: OwnedRows) {
   // Cache/rate-limit side effects stay outside the transaction: no
   // network calls inside db.transaction().
   await db.transaction(async (tx) => {
-    for (const postId of scope.postIds) {
+    if (scope.postIds.length > 0) {
       await tx
         .select({ id: posts.id })
         .from(posts)
-        .where(eq(posts.id, postId))
+        .where(inArray(posts.id, scope.postIds))
         .for('update');
       // This fixture owns no comments: any comment on an owned post is
       // foreign, and deleting the post would orphan it (no physical FK).
       const [foreignComment] = await tx
         .select({ id: comments.id })
         .from(comments)
-        .where(eq(comments.postId, postId))
+        .where(inArray(comments.postId, scope.postIds))
         .limit(1);
       if (foreignComment) {
-        throw new Error(
-          `cleanup refused: foreign comment on owned post ${postId}`
-        );
+        throw new Error('cleanup refused: foreign comment on owned post');
       }
-    }
-    for (const userId of scope.userIds) {
-      await tx
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.id, userId))
-        .for('update');
-      // Any of these rows is owned by a separate flow: deleting the user
-      // would silently remove it via ON DELETE CASCADE.
-      const [onboarding, snapshots, whitelistRows] = await Promise.all([
-        tx
-          .select({ id: gameOnboarding.id })
-          .from(gameOnboarding)
-          .where(eq(gameOnboarding.userId, userId))
-          .limit(1),
-        tx
-          .select({ id: userPnLSnapshots.id })
-          .from(userPnLSnapshots)
-          .where(eq(userPnLSnapshots.userId, userId))
-          .limit(1),
-        tx
-          .select({ id: whitelist.id })
-          .from(whitelist)
-          .where(eq(whitelist.userId, userId))
-          .limit(1),
-      ]);
-      if (
-        onboarding.length > 0 ||
-        snapshots.length > 0 ||
-        whitelistRows.length > 0
-      ) {
-        throw new Error(
-          `cleanup refused: foreign row references user ${userId}`
-        );
+      // Localnet's manual clue migration adds a nullable post reference.
+      const [clueTable] = await tx.execute<{ present: boolean }>(
+        sql`SELECT pg_catalog.to_regclass('public."NpcMarketClue"') IS NOT NULL AS present`
+      );
+      if (clueTable?.present) {
+        const [clue] = await tx
+          .select({ questionId: npcMarketClues.questionId })
+          .from(npcMarketClues)
+          .where(inArray(npcMarketClues.postId, scope.postIds))
+          .limit(1);
+        if (clue) {
+          throw new Error(
+            'cleanup refused: foreign clue references owned post'
+          );
+        }
       }
     }
     if (scope.userIds.length > 0) {
       await tx
-        .delete(userMutes)
-        .where(inArray(userMutes.muterId, scope.userIds));
-      await tx
-        .delete(userBlocks)
-        .where(inArray(userBlocks.blockerId, scope.userIds));
-      await tx
-        .delete(follows)
-        .where(inArray(follows.followerId, scope.userIds));
-      await tx
-        .delete(userActorFollows)
-        .where(inArray(userActorFollows.userId, scope.userIds));
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, scope.userIds))
+        .for('update');
+      // Check both cascading and nullable foreign keys and any unowned
+      // following or moderation edges before deleting the fixture users.
+      const dependants = await Promise.all([
+        tx
+          .select({ id: gameOnboarding.id })
+          .from(gameOnboarding)
+          .where(inArray(gameOnboarding.userId, scope.userIds))
+          .limit(1),
+        tx
+          .select({ id: userPnLSnapshots.id })
+          .from(userPnLSnapshots)
+          .where(inArray(userPnLSnapshots.userId, scope.userIds))
+          .limit(1),
+        tx
+          .select({ id: whitelist.id })
+          .from(whitelist)
+          .where(
+            or(
+              inArray(whitelist.userId, scope.userIds),
+              inArray(whitelist.grantedBy, scope.userIds)
+            )
+          )
+          .limit(1),
+        tx
+          .select({ id: whitelistConfig.id })
+          .from(whitelistConfig)
+          .where(inArray(whitelistConfig.updatedBy, scope.userIds))
+          .limit(1),
+        tx
+          .select({ id: follows.id })
+          .from(follows)
+          .where(
+            and(
+              or(
+                inArray(follows.followerId, scope.userIds),
+                inArray(follows.followingId, scope.userIds)
+              ),
+              notInArray(follows.id, scope.followIds)
+            )
+          )
+          .limit(1),
+        tx
+          .select({ id: userActorFollows.id })
+          .from(userActorFollows)
+          .where(
+            and(
+              inArray(userActorFollows.userId, scope.userIds),
+              notInArray(userActorFollows.id, scope.actorFollowIds)
+            )
+          )
+          .limit(1),
+        tx
+          .select({ id: userMutes.id })
+          .from(userMutes)
+          .where(
+            and(
+              or(
+                inArray(userMutes.muterId, scope.userIds),
+                inArray(userMutes.mutedId, scope.userIds)
+              ),
+              notInArray(userMutes.id, scope.muteIds)
+            )
+          )
+          .limit(1),
+        tx
+          .select({ id: userBlocks.id })
+          .from(userBlocks)
+          .where(
+            and(
+              or(
+                inArray(userBlocks.blockerId, scope.userIds),
+                inArray(userBlocks.blockedId, scope.userIds)
+              ),
+              notInArray(userBlocks.id, scope.blockIds)
+            )
+          )
+          .limit(1),
+      ]);
+      if (dependants.some((rows) => rows.length > 0)) {
+        throw new Error('cleanup refused: foreign row references owned user');
+      }
     }
+    await tx.delete(userMutes).where(inArray(userMutes.id, scope.muteIds));
+    await tx.delete(userBlocks).where(inArray(userBlocks.id, scope.blockIds));
+    await tx.delete(follows).where(inArray(follows.id, scope.followIds));
+    await tx
+      .delete(userActorFollows)
+      .where(inArray(userActorFollows.id, scope.actorFollowIds));
     if (scope.postIds.length > 0) {
       await tx.delete(posts).where(inArray(posts.id, scope.postIds));
     }
@@ -287,6 +378,7 @@ async function cleanup(scope: OwnedRows) {
   if (scope === owned && scope.userIds.includes(viewerId) && clientIp) {
     await resetRateLimit(clientIp, 'public_read');
   }
+  for (const ids of Object.values(scope)) ids.length = 0;
 }
 
 let GET: (request: NextRequest) => Promise<Response>;
@@ -351,6 +443,7 @@ async function followingIds(caller = { userId: viewerId, token }, limit = 2) {
 }
 
 beforeAll(async () => {
+  await assertDisposableAgentFollowDatabase();
   ({ GET } = await import(routePath));
 
   viewerId = await generateSnowflakeId();
@@ -404,24 +497,13 @@ beforeAll(async () => {
   ]);
   clientIp = `2001:db8:${viewerId.slice(-8, -4)}:${viewerId.slice(-4)}::f102`;
 
-  await db.insert(follows).values(
-    await Promise.all(
-      [normalId, prefixedId, flaggedId, mutedId].map(async (followingId) => ({
-        id: await generateSnowflakeId(),
-        followerId: viewerId,
-        followingId,
-        createdAt: at(120),
-      }))
-    )
-  );
+  for (const followingId of [normalId, prefixedId, flaggedId, mutedId]) {
+    await follow(viewerId, followingId);
+  }
 
   // Muting keeps the follow edge; the muted author's posts must be
   // excluded when the page is cut, not after.
-  await db.insert(userMutes).values({
-    id: await generateSnowflakeId(),
-    muterId: viewerId,
-    mutedId,
-  });
+  await insertMute(viewerId, mutedId);
 
   const defs: Array<{
     author: string;
@@ -562,11 +644,15 @@ describe('GET /api/posts?following=true author exclusions', () => {
     );
     if (!actor) throw new Error('No retained registry NPC is available');
     const npcViewer = await createViewer();
-    await db.insert(userActorFollows).values({
-      id: await generateSnowflakeId(),
-      userId: npcViewer.userId,
-      actorId: actor.id,
-    });
+    const rows = await db
+      .insert(userActorFollows)
+      .values({
+        id: await generateSnowflakeId(),
+        userId: npcViewer.userId,
+        actorId: actor.id,
+      })
+      .returning({ id: userActorFollows.id });
+    owned.actorFollowIds.push(...rows.map(({ id }) => id));
     const npcPost = await insertOwnedPost({
       id: await generateSnowflakeId(),
       authorId: actor.id,
@@ -605,8 +691,8 @@ describe('GET /api/posts?following=true author exclusions', () => {
   });
 
   it('preserves a colliding sentinel and its cache after partial setup cleanup', async () => {
-    const existing: OwnedRows = { postIds: [], userIds: [] };
-    const attempted: OwnedRows = { postIds: [], userIds: [] };
+    const existing = ownedRows();
+    const attempted = ownedRows();
     try {
       const sentinel = await createViewer(existing);
       const postId = await insertOwnedPost(
@@ -619,12 +705,8 @@ describe('GET /api/posts?following=true author exclusions', () => {
         },
         existing
       );
-      await follow(sentinel.userId, normalId);
-      await db.insert(userMutes).values({
-        id: await generateSnowflakeId(),
-        muterId: sentinel.userId,
-        mutedId,
-      });
+      await follow(sentinel.userId, normalId, existing);
+      await insertMute(sentinel.userId, mutedId, existing);
       expect(await followingIds(sentinel)).toEqual(visibleIds.slice(0, 2));
       const cacheKey = `${sentinel.userId}:2:offset:0:excl:${mutedId}`;
       const cached = await getCache<Array<{ id: string }>>(cacheKey, {
@@ -694,7 +776,8 @@ describe('GET /api/posts?following=true author exclusions', () => {
   });
 
   it('refuses cleanup when a separately acquired onboarding row references an owned user', async () => {
-    const scope: OwnedRows = { postIds: [], userIds: [] };
+    const scope = ownedRows();
+    let onboardingId: string | undefined;
     try {
       const user = await createViewer(scope);
       const postId = await insertOwnedPost(
@@ -709,10 +792,11 @@ describe('GET /api/posts?following=true author exclusions', () => {
       // A GameOnboarding row acquired by a separate flow for the same
       // user: deleting the user would silently remove it via
       // ON DELETE CASCADE, so the guarded cleanup must refuse instead.
-      await db.insert(gameOnboarding).values({
-        id: await generateSnowflakeId(),
-        userId: user.userId,
-      });
+      const [onboarding] = await db
+        .insert(gameOnboarding)
+        .values({ id: await generateSnowflakeId(), userId: user.userId })
+        .returning({ id: gameOnboarding.id });
+      onboardingId = onboarding?.id;
       await expect(cleanup(scope)).rejects.toThrow('cleanup refused');
       expect(
         await db.select().from(users).where(eq(users.id, user.userId))
@@ -728,11 +812,75 @@ describe('GET /api/posts?following=true author exclusions', () => {
       ).toHaveLength(1);
     } finally {
       // Remove the foreign row directly, then the guarded cleanup can run.
-      if (scope.userIds[0]) {
+      if (onboardingId) {
         await db
           .delete(gameOnboarding)
-          .where(eq(gameOnboarding.userId, scope.userIds[0]));
+          .where(eq(gameOnboarding.id, onboardingId));
       }
+      await cleanup(scope);
+    }
+  });
+
+  it('preserves separately acquired follow, grant and config references', async () => {
+    const scope = ownedRows();
+    const user = await createViewer(scope);
+    const target = await createViewer();
+    const external = ownedRows();
+    let grantId: string | undefined;
+    let configId: string | undefined;
+    try {
+      await follow(user.userId, target.userId, external);
+      await expect(cleanup(scope)).rejects.toThrow('cleanup refused');
+      expect(
+        await db
+          .select()
+          .from(follows)
+          .where(inArray(follows.id, external.followIds))
+      ).toHaveLength(1);
+      await cleanup(external);
+
+      const [grant] = await db
+        .insert(whitelist)
+        .values({
+          id: await generateSnowflakeId(),
+          userId: target.userId,
+          source: 'admin_manual',
+          grantedBy: user.userId,
+        })
+        .returning({ id: whitelist.id });
+      grantId = grant?.id;
+      if (!grantId) throw new Error('Grant insert returned no ownership');
+      await expect(cleanup(scope)).rejects.toThrow('cleanup refused');
+      expect(
+        await db
+          .select({ grantedBy: whitelist.grantedBy })
+          .from(whitelist)
+          .where(eq(whitelist.id, grantId))
+      ).toEqual([{ grantedBy: user.userId }]);
+      await db.delete(whitelist).where(eq(whitelist.id, grantId));
+      grantId = undefined;
+
+      const [config] = await db
+        .insert(whitelistConfig)
+        .values({ id: await generateSnowflakeId(), updatedBy: user.userId })
+        .returning({ id: whitelistConfig.id });
+      configId = config?.id;
+      if (!configId) throw new Error('Config insert returned no ownership');
+      await expect(cleanup(scope)).rejects.toThrow('cleanup refused');
+      expect(
+        await db
+          .select({ updatedBy: whitelistConfig.updatedBy })
+          .from(whitelistConfig)
+          .where(eq(whitelistConfig.id, configId))
+      ).toEqual([{ updatedBy: user.userId }]);
+    } finally {
+      if (grantId) await db.delete(whitelist).where(eq(whitelist.id, grantId));
+      if (configId) {
+        await db
+          .delete(whitelistConfig)
+          .where(eq(whitelistConfig.id, configId));
+      }
+      await cleanup(external);
       await cleanup(scope);
     }
   });

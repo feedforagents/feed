@@ -13,6 +13,7 @@ import {
   actorState,
   and,
   db,
+  gt,
   isNull,
   organizationState,
   perpPositions,
@@ -251,10 +252,12 @@ export class NPCInvestmentManager {
     riskScore += leverageRisk * 0.4;
 
     // Factor 2: Concentration risk (30% weight)
+    // Concentration is the largest position's share of the portfolio, so
+    // measure it by invested value (margin for perps via getPositionExposure),
+    // not by unrealized PnL: a huge position with no PnL yet is still
+    // concentrated, and a small position with a large gain is not.
     const largestPosition = Math.max(
-      ...positions.map((pos) =>
-        Math.abs(Number.parseFloat(pos.unrealizedPnL?.toString() || '0'))
-      )
+      ...positions.map((pos) => getPositionExposure(pos.size, pos.leverage))
     );
     const concentrationRisk = Math.min(1, largestPosition / totalValue);
     riskScore += concentrationRisk * 0.3;
@@ -688,18 +691,26 @@ export class NPCInvestmentManager {
     // Determine how many positions to close based on risk level
     const positionsToClose = isHighRisk ? (hasLosses ? 5 : 3) : 2;
 
-    // Get all leveraged positions (open positions only with leverage > 1)
+    // Get all leveraged positions (open positions only with leverage > 1).
+    // Filter in SQL before the limit: closed rows keep their leverage, so
+    // limiting first and filtering in memory lets closed rows occupy the
+    // top-N slots and the de-risk silently closes fewer live positions
+    // than intended (in the worst case none at all).
     const positionsResult = await db
       .select()
       .from(poolPositions)
-      .where(eq(poolPositions.poolId, poolId))
+      .where(
+        and(
+          eq(poolPositions.poolId, poolId),
+          isNull(poolPositions.closedAt),
+          gt(poolPositions.leverage, 1)
+        )
+      )
       .orderBy(desc(poolPositions.leverage))
       .limit(positionsToClose);
 
-    // Filter for open positions with leverage > 1
-    const leveragedPositions = positionsResult.filter(
-      (p) => p.closedAt === null && (p.leverage ?? 0) > 1
-    );
+    // The SQL filter already restricts to open positions with leverage > 1.
+    const leveragedPositions = positionsResult;
 
     for (const position of leveragedPositions) {
       actions.push({
