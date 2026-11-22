@@ -3441,7 +3441,10 @@ export class FeedAgentExecutor implements AgentExecutor {
     const [blocksRaw, total] = await Promise.all([
       db.userBlock.findMany({
         where: { blockerId: agentId },
-        orderBy: { createdAt: 'desc' },
+        // Total order, the web block list's (GET /api/moderation/blocks):
+        // with createdAt alone, blocks sharing one timestamp have no fixed
+        // order, so offset pages can repeat one block and skip another.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit,
         skip: offset,
       }),
@@ -3505,7 +3508,8 @@ export class FeedAgentExecutor implements AgentExecutor {
     const [mutesRaw, total] = await Promise.all([
       db.userMute.findMany({
         where: { muterId: agentId },
-        orderBy: { createdAt: 'desc' },
+        // Total order, the web mute list's (GET /api/moderation/mutes).
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit,
         skip: offset,
       }),
@@ -3854,7 +3858,8 @@ export class FeedAgentExecutor implements AgentExecutor {
     const favorites = await db.favorite.findMany({
       where: { userId },
       take: limit,
-      orderBy: { createdAt: 'desc' },
+      // Total order, the web favorites list's (GET /api/profiles/favorites).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: { targetUserId: true, createdAt: true },
     });
 
