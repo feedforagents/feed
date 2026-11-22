@@ -3,7 +3,7 @@
  *
  * @description
  * Search for users by username or display name with fuzzy matching.
- * Returns real users only by default (excludes NPCs, agents, banned users, and current user).
+ * Returns real users only by default (excludes NPCs, agents, banned users, test users, and current user).
  * Designed for user mention autocomplete, friend finding, and social discovery.
  *
  * **Features:**
@@ -13,7 +13,8 @@
  * - Excludes NPCs/actors by default
  * - Excludes agents by default (use includeAgents=true to include)
  * - Excludes banned users
- * - Limits to 20 results (performance)
+ * - Excludes test users (isTest flag or 'test-' id prefix)
+ * - Limits to 20 results per offset window (performance)
  * - Alphabetically sorted results
  *
  * **Search Behavior:**
@@ -54,6 +55,13 @@
  *           type: boolean
  *         description: Include AI agents in results (default false)
  *         example: false
+ *       - in: query
+ *         name: offset
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 0
+ *         description: Skip ranked matches before the 20-result window (default 0)
  *     responses:
  *       200:
  *         description: Search results
@@ -109,17 +117,26 @@
  */
 
 import {
-  addPublicReadHeaders,
+  addPrivateReadHeaders,
   authenticate,
   publicRateLimit,
   successResponse,
   withErrorHandling,
 } from '@feed/api';
 import {
+  and,
+  asc,
   asUser,
+  eq,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
+  ilike,
+  not,
+  notInArray,
+  or,
+  sql,
+  users,
 } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -138,10 +155,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
   const includeAgents = searchParams.get('includeAgents') === 'true';
+  const parsedOffset = Number.parseInt(searchParams.get('offset') ?? '', 10);
+  const offset =
+    Number.isSafeInteger(parsedOffset) && parsedOffset > 0 ? parsedOffset : 0;
 
   if (!query || query.trim().length < 2) {
     const res = successResponse({ users: [] });
-    if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
+    if (rateLimitInfo) addPrivateReadHeaders(res, rateLimitInfo);
+    else res.headers.set('Cache-Control', 'private, no-store');
     return res;
   }
 
@@ -157,146 +178,48 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const excludedUserIds = [...blockedIds, ...mutedIds, ...blockedByIds];
 
-  // Search for users (excluding the current user, NPCs, and blocked/muted users)
-  // Optionally include AI agents if includeAgents=true
-  const users = await asUser(user, async (db) => {
-    const baseFilters = [
-      {
-        id: {
-          not: user.userId,
-        },
-      },
-      ...(excludedUserIds.length > 0
-        ? [{ id: { notIn: excludedUserIds } }]
-        : []),
-      {
-        isActor: false,
-      },
-      ...(includeAgents ? [] : [{ isAgent: false }]),
-      {
-        isBanned: false,
-      },
-    ];
+  // Match the adapter's literal LIKE escaping and retain its distinct case-folding inputs.
+  const escapeLike = (value: string) =>
+    value.replace(/[\\%_]/g, (char) => `\\${char}`);
+  const usersFound = await asUser(user, async (db) => {
+    const exact = sql`lower(${users.username}) = lower(${rawSearchTerm})`;
+    const prefix = or(
+      ilike(users.username, `${escapeLike(rawSearchTerm)}%`),
+      ilike(users.displayName, `${escapeLike(rawSearchTerm)}%`)
+    );
+    const contains = or(
+      ilike(users.username, `%${escapeLike(searchTerm)}%`),
+      ilike(users.displayName, `%${escapeLike(rawSearchTerm)}%`)
+    );
+    const rank = sql`CASE WHEN ${exact} THEN 0 WHEN ${prefix} THEN 1 ELSE 2 END`;
 
-    const select = {
-      id: true,
-      displayName: true,
-      username: true,
-      profileImageUrl: true,
-      bio: true,
-      ...(includeAgents && { isAgent: true }),
-    };
-
-    // The adapter has no case-insensitive equals, so find exact usernames with
-    // the same filters in SQL. The viewer id keeps the NOT IN list non-empty.
-    const exactIds = await db.$queryRaw<{ id: string }>`
-      SELECT id FROM "User"
-      WHERE lower(username) = lower(${rawSearchTerm})
-        AND id NOT IN ${[user.userId, ...excludedUserIds]}
-        AND "isActor" = false
-        AND (${includeAgents} OR "isAgent" = false)
-        AND "isBanned" = false
-      ORDER BY username
-      LIMIT 20
-    `;
-
-    const exactMatches =
-      exactIds.length > 0
-        ? await db.user.findMany({
-            where: {
-              AND: [
-                ...baseFilters,
-                { id: { in: exactIds.map((row) => row.id) } },
-              ],
-            },
-            select,
-            take: 20,
-            orderBy: [
-              {
-                username: 'asc',
-              },
-            ],
-          })
-        : [];
-
-    const seenIds = new Set(exactMatches.map((entry) => entry.id));
-    const remainingAfterExact = 20 - exactMatches.length;
-
-    const prefixMatches =
-      remainingAfterExact > 0
-        ? await db.user.findMany({
-            where: {
-              AND: [
-                ...baseFilters,
-                ...(seenIds.size > 0 ? [{ id: { notIn: [...seenIds] } }] : []),
-                {
-                  OR: [
-                    {
-                      username: {
-                        startsWith: rawSearchTerm,
-                        mode: 'insensitive',
-                      },
-                    },
-                    {
-                      displayName: {
-                        startsWith: rawSearchTerm,
-                        mode: 'insensitive',
-                      },
-                    },
-                  ],
-                },
-              ],
-            },
-            select,
-            take: remainingAfterExact,
-            orderBy: [
-              {
-                username: 'asc',
-              },
-            ],
-          })
-        : [];
-
-    prefixMatches.forEach((entry) => seenIds.add(entry.id));
-    const remainingAfterPrefix =
-      20 - exactMatches.length - prefixMatches.length;
-
-    const fallbackMatches =
-      remainingAfterPrefix > 0
-        ? await db.user.findMany({
-            where: {
-              AND: [
-                ...baseFilters,
-                ...(seenIds.size > 0 ? [{ id: { notIn: [...seenIds] } }] : []),
-                {
-                  OR: [
-                    {
-                      username: {
-                        contains: searchTerm,
-                        mode: 'insensitive',
-                      },
-                    },
-                    {
-                      displayName: {
-                        contains: rawSearchTerm,
-                        mode: 'insensitive',
-                      },
-                    },
-                  ],
-                },
-              ],
-            },
-            select,
-            take: remainingAfterPrefix,
-            orderBy: [
-              {
-                username: 'asc',
-              },
-            ],
-          })
-        : [];
-
-    return [...exactMatches, ...prefixMatches, ...fallbackMatches];
+    return (
+      db
+        .select({
+          id: users.id,
+          displayName: users.displayName,
+          username: users.username,
+          profileImageUrl: users.profileImageUrl,
+          bio: users.bio,
+          ...(includeAgents && { isAgent: users.isAgent }),
+        })
+        .from(users)
+        .where(
+          and(
+            notInArray(users.id, [user.userId, ...excludedUserIds]),
+            eq(users.isActor, false),
+            ...(includeAgents ? [] : [eq(users.isAgent, false)]),
+            eq(users.isBanned, false),
+            eq(users.isTest, false),
+            not(sql`${users.id} LIKE ${'test-%'}`),
+            or(exact, prefix, contains)
+          )
+        )
+        // Keep username ASC / NULLS LAST; id makes otherwise tied pages deterministic.
+        .orderBy(rank, asc(users.username), asc(users.id))
+        .limit(20)
+        .offset(offset)
+    );
   });
 
   logger.info(
@@ -304,15 +227,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     {
       userId: user.userId,
       query: searchTerm,
-      results: users.length,
+      results: usersFound.length,
       includeAgents,
     },
     'GET /api/users/search'
   );
 
   const res = successResponse({
-    users,
+    users: usersFound,
   });
-  if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
+  if (rateLimitInfo) addPrivateReadHeaders(res, rateLimitInfo);
+  else res.headers.set('Cache-Control', 'private, no-store');
   return res;
 });
