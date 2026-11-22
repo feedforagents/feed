@@ -1,9 +1,17 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test';
+import {
+  afterEach,
+  describe,
+  expect,
+  mock,
+  setSystemTime,
+  test,
+} from 'bun:test';
 import { FeedStewardAuth } from '../../../apps/web/src/lib/auth/feed-steward-auth';
 import { createSessionCookieSync } from '../../../apps/web/src/lib/auth/session-cookie-sync';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
+  setSystemTime();
   globalThis.fetch = originalFetch;
 });
 function token(userId = 'user', expiresIn = 600) {
@@ -116,6 +124,7 @@ describe('Steward refresh lifecycle', () => {
     expect(auth.getRefreshToken()).toBeNull();
   });
   test('blocks focus, timer and getToken refresh while account-switch cookie sync is pending', async () => {
+    setSystemTime(new Date('2030-01-01T00:00:00.999Z'));
     const auth = setup(1);
     const oldToken = auth.getSession()!.token;
     const refreshRequest = mock(async () => success());
