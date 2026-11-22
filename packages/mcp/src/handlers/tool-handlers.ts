@@ -2244,7 +2244,9 @@ export async function executeGetChatMessages(
         ? { senderId: { notIn: excludedSenderIds } }
         : {}),
     },
-    orderBy: { createdAt: 'desc' },
+    // Break timestamp ties for deterministic pages over unchanged history.
+    // Concurrent inserts/deletes can still shift offset windows.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: args.limit || 50,
     skip: args.offset || 0,
   });
