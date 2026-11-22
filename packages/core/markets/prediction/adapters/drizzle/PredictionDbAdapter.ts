@@ -8,7 +8,7 @@ import {
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import type { InferInsertModel } from 'drizzle-orm';
-import { and, count, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { PredictionPricing } from '../../pricing';
 import type {
   PredictionDbPort,
@@ -69,13 +69,42 @@ const mapPosition = (
 export class PredictionDbAdapter implements PredictionDbPort {
   constructor(private readonly client: DbClient = db) {}
 
+  /**
+   * Attach each market's scenario. The scenario lives on the market's
+   * question (questions.scenarioId) — a market is created from exactly one
+   * question under the same id — so one batched lookup by id fills it in.
+   * Markets without a linked question keep `scenario` unset.
+   */
+  private async withScenarios(
+    records: PredictionMarketRecord[]
+  ): Promise<PredictionMarketRecord[]> {
+    if (records.length === 0) return records;
+    const rows = await this.client
+      .select({ id: questions.id, scenarioId: questions.scenarioId })
+      .from(questions)
+      .where(
+        inArray(
+          questions.id,
+          records.map((r) => r.id)
+        )
+      );
+    const byId = new Map(rows.map((r) => [r.id, r.scenarioId]));
+    for (const record of records) {
+      const scenario = byId.get(record.id);
+      if (scenario != null) record.scenario = scenario;
+    }
+    return records;
+  }
+
   async getMarketById(id: string): Promise<PredictionMarketRecord | null> {
     const [m] = await this.client
       .select()
       .from(markets)
       .where(eq(markets.id, id))
       .limit(1);
-    return m ? mapMarket(m) : null;
+    if (!m) return null;
+    const [record] = await this.withScenarios([mapMarket(m)]);
+    return record ?? null;
   }
 
   async getMarketsByIds(ids: string[]): Promise<PredictionMarketRecord[]> {
@@ -84,27 +113,34 @@ export class PredictionDbAdapter implements PredictionDbPort {
       .select()
       .from(markets)
       .where(inArray(markets.id, ids));
-    return ms.map(mapMarket);
+    return this.withScenarios(ms.map(mapMarket));
   }
 
   /**
-   * WHY resolved=false filter: Both count and list must agree on the same
-   * predicate so pagination metadata (total) matches the returned rows.
-   * Resolved/cancelled markets are excluded from the trading list — they're
-   * historical, not actionable.
+   * Count and list share the unresolved/deadline predicate shape. Each query
+   * captures its own clock and snapshot, so a deadline crossing or concurrent
+   * write can still change the result between calls. This is not full buy
+   * eligibility: liquidity, funding and other checks remain on the buy path.
+   * Equality matches assertMarketActiveForBuy, which rejects now > endDate.
+   * Position exits use direct market lookup rather than this discovery list;
+   * existing route caches can retain results from an earlier database fetch.
    */
+  private openMarketPredicate() {
+    return and(eq(markets.resolved, false), gte(markets.endDate, new Date()));
+  }
+
   async countUnresolvedMarkets(): Promise<number> {
     const [row] = await this.client
       .select({ c: count() })
       .from(markets)
-      .where(eq(markets.resolved, false));
+      .where(this.openMarketPredicate());
     return Number(row?.c ?? 0);
   }
 
   /**
-   * WHY orderBy createdAt DESC: Newest markets first — matches user expectation
-   * that recent questions appear at the top. Provides stable pagination when
-   * new markets aren't being created during the request.
+   * WHY createdAt DESC, id DESC: Newest markets first, with a unique tiebreaker
+   * so stable rows cannot move between offset pages when timestamps tie.
+   * Separate requests are not an atomic snapshot of concurrent changes.
    */
   async listMarkets(options?: {
     limit?: number;
@@ -113,13 +149,13 @@ export class PredictionDbAdapter implements PredictionDbPort {
     const base = this.client
       .select()
       .from(markets)
-      .where(eq(markets.resolved, false))
-      .orderBy(desc(markets.createdAt));
+      .where(this.openMarketPredicate())
+      .orderBy(desc(markets.createdAt), desc(markets.id));
     const rows =
       options?.limit != null
         ? await base.limit(options.limit).offset(options.offset ?? 0)
         : await base;
-    return rows.map(mapMarket);
+    return this.withScenarios(rows.map(mapMarket));
   }
 
   async listUserPositions(userId: string): Promise<PredictionPositionRecord[]> {
@@ -147,6 +183,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
       return {
         id: byId.id,
         questionNumber: byId.questionNumber ?? undefined,
+        scenarioId: byId.scenarioId,
         text: byId.text,
         status: (byId.status as QuestionRecord['status']) ?? 'active',
         resolutionDate: byId.resolutionDate,
@@ -174,6 +211,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
       ? {
           id: q.id,
           questionNumber: q.questionNumber ?? undefined,
+          scenarioId: q.scenarioId,
           text: q.text,
           status: (q.status as QuestionRecord['status']) ?? 'active',
           resolutionDate: q.resolutionDate,
@@ -241,7 +279,9 @@ export class PredictionDbAdapter implements PredictionDbPort {
         .where(eq(questions.id, question.id))
         .returning({ id: questions.id });
       if (!linked) throw new Error(`Question not found: ${question.id}`);
-      return mapMarket(market);
+      const record = mapMarket(market);
+      if (question.scenarioId != null) record.scenario = question.scenarioId;
+      return record;
     });
   }
 

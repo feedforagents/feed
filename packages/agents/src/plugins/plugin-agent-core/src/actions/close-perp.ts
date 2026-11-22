@@ -17,6 +17,8 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
+  createTradingFeeProcessor,
   createUserWalletAdapter,
   FEE_CONFIG,
 } from '@feed/engine';
@@ -146,6 +148,8 @@ export const closePerpAction: Action = {
           minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
         },
         priceImpact: createPerpPriceImpactPort(),
+        feeProcessor: createTradingFeeProcessor(),
+        tradingFeeOutbox: createTradingFeeOutboxAdapter(),
       });
 
       const positionSize = Number(position.size);

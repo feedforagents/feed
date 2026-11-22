@@ -17,6 +17,8 @@ interface ApiUser {
   bio?: string;
   imageUrl?: string;
   isActor?: boolean;
+  isBanned?: boolean;
+  isTest?: boolean;
 }
 
 /**
@@ -40,6 +42,46 @@ interface RegistryEntity {
   bio?: string;
   imageUrl?: string;
   type: 'user' | 'actor';
+}
+
+/**
+ * Build the suggestion list from a registry response.
+ *
+ * Membership rules for the user entries (the same rules the sibling
+ * discovery surfaces apply — people search drops banned users, and the
+ * feed drops test authors): NPC users (isActor) appear through the
+ * actors array instead, banned users are not discoverable people, and
+ * test accounts (isTest flag or an id starting with 'test-') are not
+ * real people. The autocomplete API mode applies these rules before its
+ * result limit; this mapper keeps the same defensive rule. Default registry
+ * requests still include all users for the existing admin panel.
+ */
+export function buildAutocompleteEntities(data: {
+  users?: ApiUser[];
+  actors?: ApiActor[];
+}): RegistryEntity[] {
+  const users: RegistryEntity[] = (data.users || [])
+    .filter(
+      (u: ApiUser) =>
+        !u.isActor && !u.isBanned && !u.isTest && !u.id.startsWith('test-')
+    )
+    .map((u: ApiUser) => ({
+      id: u.id,
+      name: u.name,
+      username: u.username,
+      bio: u.bio,
+      imageUrl: u.imageUrl,
+      type: 'user' as const,
+    }));
+  const actors: RegistryEntity[] = (data.actors || []).map((a: ApiActor) => ({
+    id: a.id,
+    name: a.name,
+    username: undefined,
+    bio: a.description || a.role,
+    imageUrl: a.imageUrl,
+    type: 'actor' as const,
+  }));
+  return [...users, ...actors];
 }
 
 /**
@@ -82,6 +124,14 @@ interface EntitySearchAutocompleteProps {
   searchType?: 'all' | 'users' | 'actors';
 }
 
+type SuggestionResult = {
+  value: string;
+  searchType: NonNullable<EntitySearchAutocompleteProps['searchType']>;
+  entities: RegistryEntity[];
+};
+
+const EMPTY_SUGGESTIONS: RegistryEntity[] = [];
+
 export function EntitySearchAutocomplete({
   value,
   onChange,
@@ -92,7 +142,12 @@ export function EntitySearchAutocomplete({
   searchType = 'all',
 }: EntitySearchAutocompleteProps) {
   const router = useRouter();
-  const [suggestions, setSuggestions] = useState<RegistryEntity[]>([]);
+  const [result, setResult] = useState<SuggestionResult | null>(null);
+  const isCurrent =
+    result !== null &&
+    result.value === value &&
+    result.searchType === searchType;
+  const suggestions = isCurrent ? result.entities : EMPTY_SUGGESTIONS;
   const [isOpen, setIsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [loading, setLoading] = useState(false);
@@ -105,7 +160,7 @@ export function EntitySearchAutocomplete({
     const controller = new AbortController();
     const fetchSuggestions = async () => {
       if (!value.trim()) {
-        setSuggestions([]);
+        setResult(null);
         setIsOpen(false);
         setSelectedIndex(-1);
         setLoading(false);
@@ -116,6 +171,7 @@ export function EntitySearchAutocomplete({
       const params = new URLSearchParams({
         search: value,
         type: searchType,
+        autocomplete: 'true',
       });
       let response: Response;
       try {
@@ -125,7 +181,7 @@ export function EntitySearchAutocomplete({
         );
       } catch {
         if (!controller.signal.aborted) {
-          setSuggestions([]);
+          setResult(null);
           setIsOpen(false);
           setLoading(false);
         }
@@ -134,34 +190,13 @@ export function EntitySearchAutocomplete({
       if (controller.signal.aborted) return;
       if (response.ok) {
         const data = await response.json();
-        // Filter out NPC users (isActor: true) - they appear in the actors array
-        const users: RegistryEntity[] = (data.users || [])
-          .filter((u: ApiUser) => !u.isActor)
-          .map((u: ApiUser) => ({
-            id: u.id,
-            name: u.name,
-            username: u.username,
-            bio: u.bio,
-            imageUrl: u.imageUrl,
-            type: 'user' as const,
-          }));
-        const actors: RegistryEntity[] = (data.actors || []).map(
-          (a: ApiActor) => ({
-            id: a.id,
-            name: a.name,
-            username: undefined,
-            bio: a.description || a.role,
-            imageUrl: a.imageUrl,
-            type: 'actor' as const,
-          })
-        );
         if (controller.signal.aborted) return;
-        const allEntities = [...users, ...actors];
-        setSuggestions(allEntities.slice(0, 10));
+        const allEntities = buildAutocompleteEntities(data);
+        setResult({ value, searchType, entities: allEntities.slice(0, 10) });
         setIsOpen(true);
         setSelectedIndex(allEntities.length ? 0 : -1);
       } else {
-        setSuggestions([]);
+        setResult(null);
         setIsOpen(false);
         setSelectedIndex(-1);
       }
@@ -210,6 +245,7 @@ export function EntitySearchAutocomplete({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (!isCurrent && event.key !== 'Escape') return;
       if (!isOpen) {
         if (event.key === 'Enter' && suggestions.length > 0 && suggestions[0]) {
           event.preventDefault();
@@ -249,7 +285,7 @@ export function EntitySearchAutocomplete({
           break;
       }
     },
-    [isOpen, suggestions, selectedIndex, navigateToEntity]
+    [isCurrent, isOpen, suggestions, selectedIndex, navigateToEntity]
   );
 
   return (
@@ -290,7 +326,7 @@ export function EntitySearchAutocomplete({
         <button
           onClick={() => {
             onChange('');
-            setSuggestions([]);
+            setResult(null);
             setIsOpen(false);
             setSelectedIndex(-1);
           }}
@@ -308,7 +344,7 @@ export function EntitySearchAutocomplete({
         </button>
       )}
 
-      {isOpen && (
+      {isOpen && (isCurrent || loading) && (
         <div className="absolute top-full right-0 left-0 z-50 mt-2 max-h-[400px] overflow-hidden overflow-y-auto rounded-2xl border border-border bg-card shadow-xl">
           {loading && (
             <div className="px-4 py-6 text-center text-muted-foreground text-sm">

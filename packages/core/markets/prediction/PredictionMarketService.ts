@@ -5,7 +5,7 @@ import {
   NotFoundError,
 } from '@feed/shared';
 import Decimal from 'decimal.js-light';
-import { PredictionPricing } from './pricing';
+import { PredictionPricing, sharesAtPositionScale } from './pricing';
 import type {
   PredictionBuyInput,
   PredictionCancelInput,
@@ -264,6 +264,12 @@ export class PredictionMarketService {
           }
     );
 
+    // The database returns the stored share precision. Report the fill as
+    // the persisted delta so clients can use it in a subsequent sale.
+    const filledShares = new Decimal(position.shares)
+      .minus(existingPos?.shares ?? 0)
+      .toNumber();
+
     await this.recordSnapshot({
       marketId,
       yesPrice: calc.newYesPrice,
@@ -288,7 +294,7 @@ export class PredictionMarketService {
         actorId: userId,
         action: 'buy',
         side,
-        shares: calc.sharesBought,
+        shares: filledShares,
         amount,
         price: calc.avgPrice,
         source: tradeSource,
@@ -312,7 +318,7 @@ export class PredictionMarketService {
       positionId: position.id,
       marketId,
       side,
-      shares: calc.sharesBought,
+      shares: filledShares,
       avgPrice: calc.avgPrice,
       totalCost: amount,
       feePaid: calc.fee,
@@ -391,8 +397,18 @@ export class PredictionMarketService {
       liquidity: newLiquidity,
     });
 
-    const remaining = pos.shares - shares;
-    const positionClosed = remaining <= MIN_SHARES;
+    const rawRemaining = pos.shares - shares;
+    // Keep a remainder the share column would store as a sellable lot.
+    // 10.01 - 10 is 0.009999999999999787 in binary; numeric(18, 6) stores
+    // that as 0.010000, and that lot redeems for 0.01 pt (PRD §9.2).
+    const persistedRemaining = sharesAtPositionScale(rawRemaining);
+    const remaining =
+      rawRemaining > 0 &&
+      rawRemaining <= MIN_SHARES &&
+      persistedRemaining >= MIN_SHARES
+        ? persistedRemaining
+        : rawRemaining;
+    const positionClosed = remaining < MIN_SHARES;
     const previousCost = calculatePredictionCashCostBasis(
       pos,
       this.deps.fees.tradingFeeRate
@@ -506,6 +522,9 @@ export class PredictionMarketService {
     if (market.resolved) return;
 
     const now = input.resolvedAt ?? this.now();
+    const activePositions = positions.filter(
+      (p) => !p.status || p.status === 'active'
+    );
 
     // PRD §9.2 [D-14]: a winning share redeems for exactly 1 pt.
     // Payouts are not split pool-proportionally: each winner is credited
@@ -516,7 +535,7 @@ export class PredictionMarketService {
       (winningSide === 'yes' && p.side === 'yes') ||
       (winningSide === 'no' && p.side === 'no');
 
-    const totalPayout = positions
+    const totalPayout = activePositions
       .filter(isWinnerSide)
       .reduce(
         (sum, p) =>
@@ -535,7 +554,7 @@ export class PredictionMarketService {
       resolutionDescription: resolutionDescription ?? undefined,
     });
 
-    for (const pos of positions) {
+    for (const pos of activePositions) {
       const isWinner = isWinnerSide(pos);
       const payout = isWinner
         ? PredictionPricing.calculateExpectedPayout(pos.shares, pos.avgPrice)
@@ -588,6 +607,10 @@ export class PredictionMarketService {
       type: 'prediction_resolution',
       marketId,
       winningSide,
+      // Consumers (chart history hook, terminal live state) read the final
+      // prices off this event, mirroring the snapshot recorded above.
+      yesPrice: winningSide === 'yes' ? 1 : 0,
+      noPrice: winningSide === 'no' ? 1 : 0,
       yesShares: market.yesShares,
       noShares: market.noShares,
       liquidity: newLiquidity,
@@ -756,25 +779,26 @@ export class PredictionMarketService {
     if (market.resolved) {
       throw new BadRequestError('Market has resolved');
     }
-    if (this.now() > market.endDate) {
-      throw new BadRequestError('Market expired');
-    }
-    if (market.liquidity <= 0) {
-      throw new BadRequestError('Market has no liquidity');
-    }
+    this.assertMarketBeforeClose(market);
   }
 
   /**
    * Assert market allows position exits (sells).
-   * Users can sell on expired markets to close positions before resolution.
-   * Allows selling on cancelled/deactivated markets (resolved but no outcome determined).
-   * Only blocks if market has fully resolved with a determined outcome.
+   * Before the scheduled close, legacy deactivated markets can allow exits
+   * when they have no outcome and the position is still active.
    */
   private assertMarketActiveForSell(market: PredictionMarketRecord) {
     if (market.resolved && market.resolution !== null) {
       throw new BadRequestError(
         'Market has resolved with outcome - positions are auto-settled'
       );
+    }
+    this.assertMarketBeforeClose(market);
+  }
+
+  private assertMarketBeforeClose(market: PredictionMarketRecord) {
+    if (this.now() >= market.endDate) {
+      throw new BadRequestError('Market expired');
     }
     if (market.liquidity <= 0) {
       throw new BadRequestError('Market has no liquidity');

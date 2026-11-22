@@ -84,6 +84,7 @@ import {
   eq,
   followStatuses,
   follows,
+  like,
   not,
   positions,
   reactions,
@@ -156,10 +157,18 @@ export const GET = withErrorHandling(
       [followingCount],
       [actorFollowingCount],
     ] = await Promise.all([
+      // Count open positions. The profile header documents this number
+      // as the number of open positions, and the profile's positions
+      // list counts open prediction positions as exactly the 'active'
+      // ones — closed and resolved positions belong to its closed view
+      // — so this route applies the same filter or it keeps counting
+      // positions after they end.
       db
         .select({ count: count() })
         .from(positions)
-        .where(eq(positions.userId, dbUser.id)),
+        .where(
+          and(eq(positions.userId, dbUser.id), eq(positions.status, 'active'))
+        ),
       db
         .select({ count: count() })
         .from(comments)
@@ -171,7 +180,18 @@ export const GET = withErrorHandling(
       db
         .select({ count: count() })
         .from(follows)
-        .where(eq(follows.followingId, dbUser.id)),
+        .innerJoin(users, eq(follows.followerId, users.id))
+        .where(
+          and(
+            eq(follows.followingId, dbUser.id),
+            // The followers list hides test and banned accounts, so the
+            // header count must use the same membership or the two
+            // disagree on the same profile screen.
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        ),
       // NPC followers live in FollowStatus (written by the engine when an
       // NPC follows this user). The followers list includes them with this
       // same filter, so the profile count must include them too.
@@ -188,7 +208,16 @@ export const GET = withErrorHandling(
       db
         .select({ count: count() })
         .from(follows)
-        .where(eq(follows.followerId, dbUser.id)),
+        .innerJoin(users, eq(follows.followingId, users.id))
+        .where(
+          and(
+            eq(follows.followerId, dbUser.id),
+            // Same hidden-tier membership as the following list.
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        ),
       // Actor follows live in their own table; the by-id profile stats
       // (CachedDatabaseService.getUserProfileStats) and the following list
       // both add them to the following total.

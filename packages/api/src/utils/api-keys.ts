@@ -19,6 +19,7 @@
 
 import { asSystem, eq, userApiKeys } from '@feed/db';
 import { logger } from '@feed/shared';
+import { runInBackground } from '@feed/shared/server/request-scope';
 import crypto from 'crypto';
 import { getRedisClient, isRedisAvailable } from '../redis';
 import { monotonicLastUsedAt } from './api-key-lastused-flusher';
@@ -163,31 +164,34 @@ function scheduleLastUsedUpdate(
     // MULTI/EXEC so the hash and queue are updated together.
     // Fire-and-forget: authentication must not wait on (or fail because of)
     // lastUsedAt telemetry. On Redis failure, fall back to a direct DB write.
-    redisClient
-      .multi()
-      .hset(REDIS_KEY_LAST_USED_UPDATES, keyId, timestamp)
-      .zadd(REDIS_KEY_LAST_USED_QUEUE, now, keyId)
-      .exec()
-      .then((results) => {
-        const failed =
-          results === null || results.some(([cmdErr]) => cmdErr !== null);
-        if (failed) {
+    // Keep both writes inside the Worker's lifetime and socket cleanup scope.
+    runInBackground(
+      redisClient
+        .multi()
+        .hset(REDIS_KEY_LAST_USED_UPDATES, keyId, timestamp)
+        .zadd(REDIS_KEY_LAST_USED_QUEUE, now, keyId)
+        .exec()
+        .then((results) => {
+          const failed =
+            results === null || results.some(([cmdErr]) => cmdErr !== null);
+          if (failed) {
+            logger.warn(
+              'Failed to write lastUsedAt to Redis cache',
+              { keyId },
+              'ApiKeyAuth'
+            );
+            fallbackToDirectDbWrite(keyId);
+          }
+        })
+        .catch((err) => {
           logger.warn(
             'Failed to write lastUsedAt to Redis cache',
-            { keyId },
+            { keyId, error: err },
             'ApiKeyAuth'
           );
           fallbackToDirectDbWrite(keyId);
-        }
-      })
-      .catch((err) => {
-        logger.warn(
-          'Failed to write lastUsedAt to Redis cache',
-          { keyId, error: err },
-          'ApiKeyAuth'
-        );
-        fallbackToDirectDbWrite(keyId);
-      });
+        })
+    );
 
     return;
   }
@@ -213,18 +217,20 @@ function scheduleLastUsedUpdate(
 function fallbackToDirectDbWrite(keyId: string): void {
   // WHY fire-and-forget: Don't block authentication flow. If DB write fails, we log warning
   // but don't fail authentication. lastUsedAt is informational, not critical for auth.
-  asSystem(async (dbClient) => {
-    await dbClient
-      .update(userApiKeys)
-      .set({ lastUsedAt: monotonicLastUsedAt(new Date()) })
-      .where(eq(userApiKeys.id, keyId));
-  }).catch((err) => {
-    logger.warn(
-      'Failed to update lastUsedAt (fallback)',
-      { keyId, error: err },
-      'ApiKeyAuth'
-    );
-  });
+  runInBackground(
+    asSystem(async (dbClient) => {
+      await dbClient
+        .update(userApiKeys)
+        .set({ lastUsedAt: monotonicLastUsedAt(new Date()) })
+        .where(eq(userApiKeys.id, keyId));
+    }).catch((err) => {
+      logger.warn(
+        'Failed to update lastUsedAt (fallback)',
+        { keyId, error: err },
+        'ApiKeyAuth'
+      );
+    })
+  );
 }
 
 /**
