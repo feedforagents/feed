@@ -18,6 +18,9 @@ import { NextRequest } from 'next/server';
 import { createPerpMarketService } from '../../../apps/web/src/app/api/markets/perps/_adapters';
 import { POST } from '../../../apps/web/src/app/api/markets/perps/preview/route';
 
+const ip = crypto.getRandomValues(new Uint8Array(2));
+const clientIp = `198.19.${ip[0]}.${ip[1]}`;
+
 for (const side of ['long', 'short'] as const) {
   for (const kind of ['open', 'add', 'reduce', 'close', 'flip'] as const) {
     test(`${side} ${kind}: real preview agrees with persisted execution and does not mutate the wallet`, async () => {
@@ -81,6 +84,7 @@ for (const side of ['long', 'short'] as const) {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
+              'x-forwarded-for': clientIp,
               ...(auth
                 ? { authorization: `Bearer steward:test:${userId}` }
                 : {}),
@@ -131,7 +135,7 @@ for (const side of ['long', 'short'] as const) {
         if (kind === 'open' || kind === 'add' || kind === 'flip') {
           const fill =
             kind === 'add' && previous
-              ? (executed.entryPrice * 6000 - previous.entryPrice * 1000) / 5000
+              ? 5000 / (6000 / executed.entryPrice - 1000 / previous.entryPrice)
               : executed.entryPrice;
           expect(preview.executionPrice).toBeCloseTo(fill, 6);
           expect(preview.liquidationPrice).toBeCloseTo(

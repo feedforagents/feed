@@ -1,151 +1,189 @@
-/**
- * MCP follow_user follows the same rules as the web follow route and the
- * other MCP write tools: a fresh follow notifies the followed user (never
- * across a block), a repeat follow does not notify again, and a
- * notification failure must not fail the committed follow.
- *
- * Requires DATABASE_URL pointing at a disposable database with schema applied.
- */
-
-import { afterAll, describe, expect, it, spyOn } from 'bun:test';
+/** Retained follow notifications. PRD §§8.1/12 and MVP Phases 3/5. */
+import { afterAll, expect, test } from 'bun:test';
+import { NextRequest } from 'next/server';
 import {
-  db,
-  eq,
-  follows,
-  inArray,
-  notifications,
-  userBlocks,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import * as notificationService from '../../api/src/services/notification-service';
-import { executeFollowUser } from '../../mcp/src/handlers/tool-handlers';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const userIds: string[] = [];
-const blockIds: string[] = [];
+const cases = {
+  newFollow: 'notifies the target of a newly committed follow',
+  duplicate: 'keeps duplicate follows successful without new notifications',
+  self: 'rejects self-follows without persisting or notifying',
+  block: 'refuses both directions of a block without persisting or notifying',
+  outage: 'returns the committed follow when the notification write fails',
+};
 
-async function createUser(): Promise<string> {
-  const id = await generateSnowflakeId();
-  await db.insert(users).values({
-    id,
-    username: `mcpf_${id.slice(-10)}`,
-    isActor: false,
-    updatedAt: new Date(),
-  });
-  userIds.push(id);
-  return id;
-}
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks MCP follow notifications in a disposable PostgreSQL database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'mcp-follow-notification',
+      file: 'packages/testing/integration/mcp-follow-notification.integration.test.ts',
+      cases: Object.values(cases),
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  const {
+    and,
+    db,
+    eq,
+    follows,
+    notifications,
+    sql,
+    userApiKeys,
+    userBlocks,
+    users,
+  } = await import('@feed/db');
+  const { generateApiKey, hashApiKey } = await import('@feed/api');
+  const { POST } = await import('../../../apps/web/src/app/api/mcp/route');
 
-async function followRows(followerId: string) {
-  return db
-    .select({ id: follows.id, followingId: follows.followingId })
-    .from(follows)
-    .where(eq(follows.followerId, followerId));
-}
+  const follower = 'mcp-follow-actor';
+  const target = 'mcp-follow-target';
+  const alreadyFollowed = 'mcp-follow-previous';
+  const blockedByTarget = 'mcp-follow-target-blocked';
+  const blockedByFollower = 'mcp-follow-actor-blocked';
+  const outage = 'mcp-follow-outage';
+  const key = generateApiKey();
 
-async function followNotificationsFor(userId: string) {
-  return db
-    .select({
-      userId: notifications.userId,
-      type: notifications.type,
-      actorId: notifications.actorId,
-    })
-    .from(notifications)
-    .where(eq(notifications.userId, userId));
-}
-
-describe('MCP follow_user', () => {
-  afterAll(async () => {
-    await db
-      .delete(notifications)
-      .where(inArray(notifications.userId, userIds));
-    await db.delete(follows).where(inArray(follows.followerId, userIds));
-    await db.delete(follows).where(inArray(follows.followingId, userIds));
-    await db.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
-    await db.delete(users).where(inArray(users.id, userIds));
-  });
-
-  it('notifies the followed user when the agent follows them', async () => {
-    const target = await createUser();
-    const agentUserId = await createUser();
-
-    const result = await executeFollowUser(
-      { agentId: 'agent', userId: agentUserId },
-      { userId: target }
+  await db.transaction(async (tx) => {
+    await tx.insert(users).values(
+      [
+        follower,
+        target,
+        alreadyFollowed,
+        blockedByTarget,
+        blockedByFollower,
+        outage,
+      ].map((id) => ({
+        id,
+        username: id,
+        updatedAt: new Date(),
+      }))
     );
-
-    expect(result.success).toBe(true);
-    expect(await followRows(agentUserId)).toHaveLength(1);
-    expect(await followNotificationsFor(target)).toEqual([
-      { userId: target, type: 'follow', actorId: agentUserId },
+    await tx.insert(userApiKeys).values({
+      id: 'mcp-follow-key',
+      userId: follower,
+      keyHash: hashApiKey(key),
+    });
+    await tx.insert(follows).values({
+      id: 'mcp-follow-existing',
+      followerId: follower,
+      followingId: alreadyFollowed,
+    });
+    await tx.insert(userBlocks).values([
+      { id: blockedByTarget, blockerId: blockedByTarget, blockedId: follower },
+      {
+        id: blockedByFollower,
+        blockerId: follower,
+        blockedId: blockedByFollower,
+      },
     ]);
   });
 
-  it('does not notify again when the agent is already following', async () => {
-    const target = await createUser();
-    const agentUserId = await createUser();
-    const agent = { agentId: 'agent', userId: agentUserId };
-
-    await executeFollowUser(agent, { userId: target });
-    const again = await executeFollowUser(agent, { userId: target });
-
-    expect(again.success).toBe(true);
-    expect(await followRows(agentUserId)).toHaveLength(1);
-    expect(await followNotificationsFor(target)).toHaveLength(1);
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      if (new URL(request.url).pathname !== '/api/mcp') {
+        return new Response(null, { status: 404 });
+      }
+      // Exercise the per-user key flow instead of the local dev bypass.
+      const headers = new Headers(request.headers);
+      headers.set('host', 'follow-notification.test');
+      return POST(new NextRequest(request, { headers }));
+    },
   });
+  afterAll(() => server.stop(true));
+  const endpoint = new URL('/api/mcp', server.url);
 
-  it('rejects a self-follow and does not notify', async () => {
-    const agentUserId = await createUser();
+  async function follow(userId: string) {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Feed-Api-Key': key },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: crypto.randomUUID(),
+        method: 'tools/call',
+        params: { name: 'follow_user', arguments: { userId } },
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      result?: { isError?: boolean; content?: { text?: string }[] };
+    };
+    expect(body.result).toBeDefined();
+    return body.result;
+  }
 
-    await expect(
-      executeFollowUser(
-        { agentId: 'agent', userId: agentUserId },
-        { userId: agentUserId }
-      )
-    ).rejects.toThrow('Cannot follow yourself');
-    expect(await followRows(agentUserId)).toHaveLength(0);
-    expect(await followNotificationsFor(agentUserId)).toHaveLength(0);
-  });
-
-  it('does not notify across a block, but the follow still lands', async () => {
-    const target = await createUser();
-    const agentUserId = await createUser();
-    const inserted = await db
-      .insert(userBlocks)
-      .values({
-        id: await generateSnowflakeId(),
-        blockerId: target,
-        blockedId: agentUserId,
-      })
-      .returning({ id: userBlocks.id });
-    blockIds.push(...inserted.map((row) => row.id));
-
-    const result = await executeFollowUser(
-      { agentId: 'agent', userId: agentUserId },
-      { userId: target }
-    );
-
-    expect(result.success).toBe(true);
-    expect(await followRows(agentUserId)).toHaveLength(1);
-    expect(await followNotificationsFor(target)).toHaveLength(0);
-  });
-
-  it('still reports the committed follow when the notification fails', async () => {
-    const target = await createUser();
-    const agentUserId = await createUser();
-    const notify = spyOn(notificationService, 'notifyFollow');
-    notify.mockRejectedValueOnce(new Error('notification unavailable'));
-    try {
-      const result = await executeFollowUser(
-        { agentId: 'agent', userId: agentUserId },
-        { userId: target }
+  function followsTo(userId: string) {
+    return db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(
+        and(eq(follows.followerId, follower), eq(follows.followingId, userId))
       );
+  }
 
-      expect(result.success).toBe(true);
-      expect(await followRows(agentUserId)).toHaveLength(1);
-      expect(notify).toHaveBeenCalledTimes(1);
-    } finally {
-      notify.mockRestore();
+  function noticesTo(userId: string) {
+    return db
+      .select({
+        userId: notifications.userId,
+        type: notifications.type,
+        actorId: notifications.actorId,
+      })
+      .from(notifications)
+      .where(eq(notifications.userId, userId));
+  }
+
+  async function expectRefused(userId: string, reason: string) {
+    const result = await follow(userId);
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toContain(reason);
+    expect(await followsTo(userId)).toEqual([]);
+    expect(await noticesTo(userId)).toEqual([]);
+  }
+
+  test(cases.newFollow, async () => {
+    const unsigned = await fetch(endpoint, { method: 'POST' });
+    expect(unsigned.status).toBe(401);
+    expect((await follow(target))?.isError).toBe(false);
+    expect(await followsTo(target)).toHaveLength(1);
+    expect(await noticesTo(target)).toEqual([
+      { userId: target, type: 'follow', actorId: follower },
+    ]);
+  });
+
+  test(cases.duplicate, async () => {
+    // This existing follow has no notice for the service's deduper to suppress.
+    // Repeat calls must take the existing-edge path regardless of notification state.
+    const repeated = await Promise.all([
+      follow(alreadyFollowed),
+      follow(alreadyFollowed),
+    ]);
+    expect(repeated.map((result) => result?.isError)).toEqual([false, false]);
+    expect(await followsTo(alreadyFollowed)).toEqual([
+      { id: 'mcp-follow-existing' },
+    ]);
+    expect(await noticesTo(alreadyFollowed)).toEqual([]);
+  });
+
+  test(cases.self, () => expectRefused(follower, 'Cannot follow yourself'));
+
+  test(cases.block, async () => {
+    for (const userId of [blockedByTarget, blockedByFollower]) {
+      await expectRefused(userId, 'Cannot follow this user');
     }
   });
-});
+
+  test(cases.outage, async () => {
+    // Force just this fixture's follow notification INSERT to fail inside the lease.
+    await db.execute(sql`
+      ALTER TABLE "Notification" ADD CONSTRAINT fixture_follow_notification_outage
+      CHECK ("userId" <> 'mcp-follow-outage' OR "type" <> 'follow')
+    `);
+    expect((await follow(outage))?.isError).toBe(false);
+    expect(await followsTo(outage)).toHaveLength(1);
+    expect(await noticesTo(outage)).toEqual([]);
+  });
+}
