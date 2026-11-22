@@ -5,6 +5,7 @@
  * for agent decision making.
  */
 
+import { getPerpMarketOrderSizeLimit } from '@feed/core/markets/perps';
 import { maxSafeBuy } from '@feed/core/markets/prediction/client';
 import {
   actorRelationships,
@@ -17,6 +18,7 @@ import {
   comments,
   count,
   db,
+  dbWrite,
   desc,
   eq,
   follows,
@@ -40,7 +42,7 @@ import {
   users,
   worldEvents,
 } from '@feed/db';
-import { StaticDataRegistry } from '@feed/engine';
+import { FEE_CONFIG, StaticDataRegistry } from '@feed/engine';
 import { logger } from '../../shared/logger';
 import type {
   AgentMemoryEntry,
@@ -101,7 +103,7 @@ export async function getPredictionMarkets(): Promise<
       yesPrice,
       noPrice,
       volume: yesShares + noShares,
-      maxSafeBet: maxSafeBuy(yesShares, noShares),
+      maxSafeBet: maxSafeBuy(yesShares, noShares, FEE_CONFIG.TRADING_FEE_RATE),
       endDate: m.endDate.toISOString(),
     };
   });
@@ -112,7 +114,7 @@ export async function getPredictionMarkets(): Promise<
  */
 export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
   const orgStates = await getDbInstance().getOrganizationsByPrice();
-  const result: PerpMarketContext[] = [];
+  const candidates: Array<Omit<PerpMarketContext, 'maxOrderSize'>> = [];
 
   for (const state of orgStates.slice(0, 8)) {
     const staticOrg = StaticDataRegistry.getOrganization(state.id);
@@ -131,7 +133,7 @@ export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
     );
     const changePercent = ((currentPrice - initialPrice) / initialPrice) * 100;
 
-    result.push({
+    candidates.push({
       ticker: staticOrg.ticker,
       name: staticOrg.name,
       currentPrice,
@@ -140,7 +142,29 @@ export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
     });
   }
 
-  return result;
+  if (candidates.length === 0) return [];
+  const snapshots = await db
+    .select({
+      ticker: perpMarketSnapshots.ticker,
+      openInterest: perpMarketSnapshots.openInterest,
+    })
+    .from(perpMarketSnapshots)
+    .where(
+      inArray(
+        perpMarketSnapshots.ticker,
+        candidates.map((candidate) => candidate.ticker)
+      )
+    );
+  const limits = new Map(
+    snapshots.map(({ ticker, openInterest }) => [
+      ticker,
+      getPerpMarketOrderSizeLimit(openInterest),
+    ])
+  );
+  return candidates.flatMap((market) => {
+    const maxOrderSize = limits.get(market.ticker);
+    return maxOrderSize === undefined ? [] : [{ ...market, maxOrderSize }];
+  });
 }
 
 // =============================================================================
@@ -269,8 +293,13 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       unrealizedPnL: perpPositions.unrealizedPnL,
       unrealizedPnLPercent: perpPositions.unrealizedPnLPercent,
       openedAt: perpPositions.openedAt,
+      openInterest: perpMarketSnapshots.openInterest,
     })
     .from(perpPositions)
+    .leftJoin(
+      perpMarketSnapshots,
+      eq(perpMarketSnapshots.ticker, perpPositions.ticker)
+    )
     .where(
       and(eq(perpPositions.userId, agentUserId), isNull(perpPositions.closedAt))
     );
@@ -303,6 +332,10 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       ticker: p.ticker,
       side: p.side,
       size: requireContextNumber(p.size, `position ${p.ticker} size`, 0),
+      maxOrderSize:
+        p.openInterest === null
+          ? undefined
+          : getPerpMarketOrderSizeLimit(p.openInterest),
       pnl: requireContextNumber(
         p.unrealizedPnL,
         `position ${p.ticker} unrealizedPnL`
@@ -339,12 +372,20 @@ export async function getAgentGroupChats(
       .where(eq(groups.type, 'team'));
     const teamGroupIds = new Set(teamGroups.map((g) => g.id));
 
-    // Use DB-side aggregate count instead of loading all participant rows
+    // Use DB-side aggregate count instead of loading all participant rows.
+    // Membership paths can retain rows with isActive: false (MCP leave does;
+    // HTTP member removal deletes the participant). Inactive rows must not
+    // grant group context or inflate active member counts.
     const rawDb = getRawDrizzle();
     const agentParticipation = rawDb
       .select({ chatId: chatParticipants.chatId })
       .from(chatParticipants)
-      .where(eq(chatParticipants.userId, agentUserId))
+      .where(
+        and(
+          eq(chatParticipants.userId, agentUserId),
+          eq(chatParticipants.isActive, true)
+        )
+      )
       .as('agent_participation');
 
     const groupChatsWithCount = await rawDb
@@ -356,7 +397,13 @@ export async function getAgentGroupChats(
       })
       .from(chats)
       .innerJoin(agentParticipation, eq(chats.id, agentParticipation.chatId))
-      .innerJoin(chatParticipants, eq(chats.id, chatParticipants.chatId))
+      .innerJoin(
+        chatParticipants,
+        and(
+          eq(chats.id, chatParticipants.chatId),
+          eq(chatParticipants.isActive, true)
+        )
+      )
       .where(eq(chats.isGroup, true))
       .groupBy(chats.id, chats.name, chats.groupId)
       .limit(10); // Fetch more to account for filtering
@@ -427,13 +474,15 @@ export async function resolveUserByUsername(
   const clean = username.replace(/^@/, '').trim().toLowerCase();
   if (!clean) return null;
 
-  const [user] = await db
+  const results = await dbWrite
     .select({ id: users.id })
     .from(users)
-    .where(eq(users.username, clean))
-    .limit(1);
+    .where(sql`lower(${users.username}) = ${clean}`)
+    .limit(2);
 
-  return user?.id ?? null;
+  if (results.length > 1)
+    throw new Error(`Ambiguous username: ${clean}; use a user ID`);
+  return results[0]?.id ?? null;
 }
 
 /**

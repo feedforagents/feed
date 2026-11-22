@@ -38,11 +38,24 @@ describe('Stripe Server Helpers', () => {
       expect(calculatePointsFromUSD(1000)).toBe(100000);
     });
 
-    it('should floor decimal amounts', () => {
+    it('should round decimal amounts to the cent that checkout charges', () => {
       expect(calculatePointsFromUSD(1.5)).toBe(150);
       expect(calculatePointsFromUSD(1.99)).toBe(199);
-      expect(calculatePointsFromUSD(1.999)).toBe(199);
+      expect(calculatePointsFromUSD(1.999)).toBe(200);
       expect(calculatePointsFromUSD(10.49)).toBe(1049);
+    });
+
+    it('should credit exactly one point per charged cent', () => {
+      // 1.13 * 100 === 112.99999999999999 in floating point.
+      expect(calculatePointsFromUSD(1.13)).toBe(113);
+      expect(calculatePointsFromUSD(2.01)).toBe(201);
+      for (let cents = 100; cents <= 100_000; cents++) {
+        const amountUSD = cents / 100;
+        expect(calculatePointsFromUSD(amountUSD)).toBe(
+          Math.round(amountUSD * 100)
+        );
+        expect(calculatePointsFromUSD(amountUSD)).toBe(cents);
+      }
     });
 
     it('should handle zero', () => {
@@ -52,7 +65,7 @@ describe('Stripe Server Helpers', () => {
     it('should handle very small amounts', () => {
       expect(calculatePointsFromUSD(0.01)).toBe(1);
       expect(calculatePointsFromUSD(0.001)).toBe(0);
-      expect(calculatePointsFromUSD(0.009)).toBe(0);
+      expect(calculatePointsFromUSD(0.009)).toBe(1);
     });
   });
 

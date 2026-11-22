@@ -113,10 +113,11 @@ function summarize(r: CronResult): string {
       if (result.marketsUpdated)
         parts.push(`marketsUpdated=${result.marketsUpdated}`);
     }
-  } else if (r.name === 'markets-tick') {
-    if (d.resolved != null) parts.push(`resolved=${d.resolved}`);
-    if (d.created != null) parts.push(`created=${d.created}`);
-    if (d.active != null) parts.push(`active=${d.active}`);
+  } else if (r.name === 'markets-tick' || r.name === 'markets-recovery') {
+    if (d.pendingResolutions != null)
+      parts.push(`pending=${d.pendingResolutions}`);
+    if (d.marketsResolved != null) parts.push(`resolved=${d.marketsResolved}`);
+    if (d.marketsCreated != null) parts.push(`created=${d.marketsCreated}`);
     if (d.skipped != null && d.skipped)
       parts.push(`skipped: ${d.reason ?? ''}`);
   } else if (r.name === 'npc-tick') {
@@ -244,7 +245,12 @@ function printPredDiff(before: PredSnapshot[], after: PredSnapshot[]): void {
 // ---------------------------------------------------------------------------
 // Single tick run
 // ---------------------------------------------------------------------------
-const TICK_ORDER = ['game-tick', 'markets-tick', 'npc-tick'] as const;
+const TICK_ORDER = [
+  'game-tick',
+  'markets-tick',
+  'markets-recovery',
+  'npc-tick',
+] as const;
 
 async function runTick(runNum: number): Promise<void> {
   console.log(`\n${bold}${cyan}=== Tick #${runNum} — ${ts()} ===${reset}`);
@@ -253,6 +259,12 @@ async function runTick(runNum: number): Promise<void> {
   const predBefore = await getPredSnapshot();
 
   for (const name of TICK_ORDER) {
+    if (
+      name === 'markets-recovery' &&
+      process.env.DEPLOYMENT_ENV !== 'localnet'
+    ) {
+      continue;
+    }
     if (!shouldRun(name)) {
       console.log(`${dim}  ${name.padEnd(14)} skipped (--skip/--only)${reset}`);
       continue;
