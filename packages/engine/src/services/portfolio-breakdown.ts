@@ -165,6 +165,7 @@ export async function calculatePortfolioBreakdown(
         size: perpPositions.size,
         leverage: perpPositions.leverage,
         unrealizedPnL: perpPositions.unrealizedPnL,
+        fundingPaid: perpPositions.fundingPaid,
       })
       .from(perpPositions)
       .where(

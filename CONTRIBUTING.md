@@ -122,9 +122,11 @@ bun run steward:init      # first run only: creates the Feed tenant in Steward
 bun run env:validate      # checks the required variables
 ```
 
-`bun install` also runs `scripts/postinstall-agent-frameworks.ts`. This script
-clones Hermes Agent, OpenClaw, elizaOS, and ClawBench into
-`../external-sources/`. Set `FEED_SKIP_AGENT_FRAMEWORKS_BOOTSTRAP=1` to skip it.
+`bun install` does not clone or build the external agent frameworks. To set
+up the optional frameworks for local agent testing or benchmarks, explicitly
+run `bun run agent-frameworks:bootstrap`. This command clones sources into
+`../external-sources/` and requires network access. See the
+[Simulation & Training section](README.md#simulation--training) for details.
 
 ## 6. Environment variables
 
@@ -338,6 +340,50 @@ understand the problem and the result. Use the PR template, and include:
 - [ ] Risks and tradeoffs.
 - [ ] `.env.example` updated when you add or change a variable.
 - [ ] No secrets, `.env` files, or `runs/` output in the diff.
+
+## Evidence
+
+Include an `## Evidence` section in every PR. Start each field on its own line
+with the exact name below. A Markdown bullet before the name is optional.
+Use `Change types:` with `docs` alone for documentation-only changes. For
+other work, list all applicable types from `non-ui`, `ui`, `performance`,
+and `hardware`, separated by commas.
+
+- `Test results:` Give the tested commit, environment, exact commands and
+  outcomes. Link the run or attach the relevant output. Identify failed,
+  skipped or blocked checks. For docs-only work, report the links and
+  instructions you checked.
+- `Proof of change:` Identify the affected supported workflow, why it matters
+  and how to reproduce it. For fixes, show the failure on the base and success
+  with the PR using the same inputs. For other changes, demonstrate the
+  approved outcome and link the supporting evidence.
+- `Runtime logs:` For non-UI fixes, attach redacted logs from the exercised
+  API, database migration, MCP call or engine tick. Include an invocation or
+  correlation ID and the resulting response or state. Use the applicable
+  integration or live-inference suite in [section 7](#7-run-tests).
+- `UI video:` For an allowed broken-flow fix, attach videos of the complete
+  flow failing on the base and passing on the PR.
+- `Benchmarks:` For performance changes, compare the same representative
+  workload, data and environment before and after. Report latency or
+  throughput, error counts and run spread. For trading or prompt changes,
+  use the fixed-input measurements in [section 8](#8-validate-the-trading-algorithm).
+- `On-device testing:` For deep links, mobile handoff, or hardware-dependent
+  login and wallet flows, test the affected supported devices. Record the
+  device model, OS, host version, steps and result, and attach a device log
+  or video. Follow [MVP Phase 4](docs/product/mvp-plan.md#phase-4--agent-hosts-and-deep-links)
+  for host and platform coverage.
+
+Give exact commands and observed results inline or link to attachments,
+job runs, or repository permalinks that reviewers can open. Each applicable
+field requires substantive evidence. Blank fields, placeholders, and `N/A`
+do not count. Redact credentials and private data from every attachment.
+Update the evidence when changes to the PR head affect the result. Include
+the signature supplied by the Slop.cash workflow on its submissions.
+
+We close PRs that lack evidence of a useful change, including added complexity
+for a highly unlikely path without evidence that it occurs in supported use
+or threatens an existing requirement. For Slop.cash contributions, this also
+costs the contributor points under the applicable points policy.
 
 ## 12. Rewards
 

@@ -8,6 +8,7 @@
  * This eliminates double LLM calls and makes execution faster.
  */
 
+import { setTimeout as waitForRetry } from 'node:timers/promises';
 import type { IAgentRuntime } from '@elizaos/core';
 import {
   actorState,
@@ -17,6 +18,7 @@ import {
   db,
   desc,
   eq,
+  getScheduledInferenceThrottle,
   gte,
   npcTrades,
   questions,
@@ -28,11 +30,12 @@ import {
   StaticDataRegistry,
 } from '@feed/engine';
 import { getSurplusConfig, type JsonValue } from '@feed/shared';
-import { callAgentLLM } from '../llm/agent-llm';
+import { APICallError } from 'ai';
+import { type AgentLLMParams, callAgentLLM } from '../llm/agent-llm';
 import { resolveGroqModel } from '../llm/direct-groq';
 import { getNpcGameContext } from '../plugins/feed/providers/npc-game-context';
 import { ensureTrajectoryStep } from '../plugins/plugin-trajectory-logger/src/action-interceptor';
-import { agentService } from '../services/AgentService';
+import { type AgentService, agentService } from '../services/AgentService';
 import { logger } from '../shared/logger';
 import { normalizeDecisionAction } from './action-normalization';
 import {
@@ -55,6 +58,7 @@ import {
   parseDecisionJson,
 } from './decision-json';
 import { executeDirectShareInformation } from './intel-payment-executors';
+import { describeNpcMarketClue, type NpcMarketClue } from './npc-market-clue';
 import { normalizeSocialDecisionParameters } from './social-parameter-normalization';
 import { topicDiversityService } from './TopicDiversityService';
 import {
@@ -93,6 +97,20 @@ import { requireContextNumber } from './utils/context-validation';
 // Helpers
 // =============================================================================
 
+const DEFAULT_PROVIDER_RETRY_WAIT_MS = 2_000;
+const MAX_PROVIDER_RETRY_WAIT_MS = 5_000;
+
+function getProviderRetryWaitMs(retryAfter?: string): number {
+  const hint = retryAfter?.trim();
+  if (!hint) return DEFAULT_PROVIDER_RETRY_WAIT_MS;
+  if (/^\d+(?:\.\d+)?$/.test(hint)) return Math.ceil(Number(hint) * 1_000);
+
+  const retryAt = Date.parse(hint);
+  return Number.isNaN(retryAt)
+    ? DEFAULT_PROVIDER_RETRY_WAIT_MS
+    : Math.max(0, retryAt - Date.now());
+}
+
 /**
  * Build event-market signal connections from world events.
  * Maps events that have a `relatedQuestion` to show which events may affect
@@ -129,6 +147,69 @@ export interface MultiStepExecutorResult {
   iterations: number;
   trace: ActionTraceResult[];
   duration: number;
+}
+
+const PREDICTION_QUOTE_UNAVAILABLE =
+  'Prediction buy requires a current quote. Buy only an ID under Available Prediction Markets with a positive safe buy limit, or choose another action.';
+const GROUP_MESSAGE_CHAT_UNAVAILABLE =
+  'GROUP_MESSAGE requires a chatId from Your Group Chats. Copy the chatId field exactly as a quoted JSON string, or choose another action if no chat is listed.';
+const COMMENT_POST_UNAVAILABLE =
+  'Your COMMENT target is unavailable. Choose an exact postId from Recent Posts or a different action.';
+const ENGAGEMENT_POST_UNAVAILABLE =
+  'The target post is unavailable. Choose an exact postId from Recent Posts or Pending Comment Replies, or a different action.';
+const REPOST_OWN_POST_UNAVAILABLE =
+  'REPOST requires a post by another author. Choose an exact postId from Recent Posts or Pending Comment Replies, or a different action.';
+const REPLY_CHAT_TARGET_UNAVAILABLE =
+  'Your REPLY_CHAT target is unavailable. Copy an exact chatId from Pending Chat Messages as a double-quoted JSON string or choose a different action.';
+const FOLLOW_ACTOR_UNAVAILABLE =
+  'NPC actors are ineligible FOLLOW and UNFOLLOW targets. Choose a user or agent account, or a different action.';
+const FOLLOW_ORGANIZATION_UNAVAILABLE =
+  'Organizations are ineligible FOLLOW targets. Choose a user or agent account, or a different action.';
+const UNFOLLOW_ORGANIZATION_UNAVAILABLE =
+  'Organizations are ineligible UNFOLLOW targets. Choose a user or agent account, or a different action.';
+const DM_ORGANIZATION_UNAVAILABLE =
+  'Organizations cannot receive DMs. Choose a user, agent, or NPC, or a different action.';
+
+const SOCIAL_TARGET_REJECTION = {
+  rejection: 'social-target-unavailable',
+  warning: '[MultiStep] Social action skipped without a current target',
+} as const;
+const UNAVAILABLE_DECISION_TARGETS = new Map<
+  string,
+  {
+    rejection: NonNullable<ActionTraceResult['result']>['rejection'];
+    warning: string;
+  }
+>([
+  [
+    PREDICTION_QUOTE_UNAVAILABLE,
+    {
+      rejection: 'prediction-quote-unavailable',
+      warning: '[MultiStep] Prediction buy skipped without a current quote',
+    },
+  ],
+  [
+    GROUP_MESSAGE_CHAT_UNAVAILABLE,
+    {
+      rejection: 'group-message-chat-unavailable',
+      warning: '[MultiStep] Group message skipped without a current chat',
+    },
+  ],
+  [COMMENT_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [ENGAGEMENT_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [REPOST_OWN_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [REPLY_CHAT_TARGET_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [FOLLOW_ACTOR_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [FOLLOW_ORGANIZATION_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [UNFOLLOW_ORGANIZATION_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+  [DM_ORGANIZATION_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
+]);
+
+function isDiversityRejectedPost(action: ActionTraceResult): boolean {
+  return (
+    action.actionType === Actions.POST &&
+    action.result?.rejection === 'post-diversity'
+  );
 }
 
 // =============================================================================
@@ -173,7 +254,8 @@ export class MultiStepExecutor {
     agentUserId: string,
     runtime: IAgentRuntime,
     isNpc = true,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    marketClue?: NpcMarketClue
   ): Promise<MultiStepExecutorResult> {
     signal?.throwIfAborted();
     const actor = StaticDataRegistry.getActor(agentUserId);
@@ -186,6 +268,7 @@ export class MultiStepExecutor {
     }
     const startTime = Date.now();
     const trace: ActionTraceResult[] = [];
+    const providerRetry = { used: false };
 
     logger.info(
       `[MultiStep] Starting multi-step execution for agent ${agentUserId}`,
@@ -276,15 +359,23 @@ export class MultiStepExecutor {
       ? `${baseSystemPrompt}\n\n${balanceGuidance}`
       : baseSystemPrompt;
 
-    // Missing NPC context is a failed tick, never permission to act without it.
-    const npcGameContext = await getNpcGameContext(agentUserId);
-
-    const contextRefreshSummary =
-      await this.getLatestContextRefreshSummary(agentUserId);
+    let publicNpcGameContext: string | undefined;
+    let privateNpcContext:
+      | { game: string; refreshSummary?: string }
+      | undefined;
 
     // NPC budgets may be reduced, but cannot exceed the four-step ceiling.
-    const effectiveMaxIterations = this.npcMaxIterations;
-    for (let iteration = 1; iteration <= effectiveMaxIterations; iteration++) {
+    const effectiveMaxIterations = process.env.NPC_LLM_DAILY_BUDGET_USD
+      ? Math.min(
+          this.npcMaxIterations,
+          (await getScheduledInferenceThrottle()).maxSteps
+        )
+      : this.npcMaxIterations;
+    iterations: for (
+      let iteration = 1;
+      iteration <= effectiveMaxIterations;
+      iteration++
+    ) {
       signal?.throwIfAborted();
       const iterationStartTime = Date.now();
       const iterationTimings: Record<string, number> = {};
@@ -295,23 +386,60 @@ export class MultiStepExecutor {
         'MultiStepExecutor'
       );
 
-      // Compute per-iteration effectiveFeatures based on current trace
-      // This enforces one-POST-per-tick: if we've already posted, remove 'posting'
-      const hasPostedThisTick = trace.some(
+      // A stale or duplicate clue also consumes this tick's only POST.
+      const postSlotUsed = trace.some(
         (r) => r.actionType === Actions.POST && r.success
       );
-      const effectiveFeatures = hasPostedThisTick
-        ? enabledFeatures.filter((f) => f !== Features.POSTING)
-        : enabledFeatures;
+      const offeredMarketClue =
+        !postSlotUsed && enabledFeatures.includes(Features.POSTING)
+          ? marketClue
+          : undefined;
+      const effectiveFeatures = offeredMarketClue
+        ? enabledFeatures.filter(
+            (feature) =>
+              feature !== Features.DMS && feature !== Features.GROUP_CHATS
+          )
+        : postSlotUsed
+          ? enabledFeatures.filter((feature) => feature !== Features.POSTING)
+          : enabledFeatures;
+
+      // The clue prompt sees public context only. Load the ordinary context
+      // when the remaining actions no longer have a clue to publish.
+      let npcGameContext: string;
+      if (offeredMarketClue) {
+        publicNpcGameContext ??= await getNpcGameContext(agentUserId, true);
+        npcGameContext = publicNpcGameContext;
+      } else {
+        privateNpcContext ??= {
+          game: await getNpcGameContext(agentUserId),
+          refreshSummary:
+            await this.getLatestContextRefreshSummary(agentUserId),
+        };
+        npcGameContext = privateNpcContext.game;
+      }
 
       // Gather fresh context (state refreshes after each action)
       const contextStartTime = Date.now();
-      const context = await this.gatherContext(
+      const gathered = await this.gatherContext(
         agentUserId,
         effectiveFeatures,
         isNpc,
-        contextRefreshSummary
+        offeredMarketClue ? undefined : privateNpcContext?.refreshSummary
       );
+      const context: AgentTickContext = offeredMarketClue
+        ? {
+            ...gathered,
+            pendingChatMessages: [],
+            groupChats: undefined,
+            groupChatIntel: undefined,
+            contextRefreshSummary: undefined,
+            narrativeContext: undefined,
+            worldEvents: undefined,
+            relationships: undefined,
+            recentMemory: undefined,
+            agentTradeHistory: undefined,
+          }
+        : gathered;
       iterationTimings.gatherContext = Date.now() - contextStartTime;
 
       const actionability = this.getActionabilitySummary(context);
@@ -342,7 +470,11 @@ export class MultiStepExecutor {
         traceActionResults: trace,
         context,
         isNpc,
-        npcGameContext,
+        npcGameContext: offeredMarketClue
+          ? `${npcGameContext}
+
+${describeNpcMarketClue(offeredMarketClue)}`
+          : npcGameContext,
         characterStyle: characterStyle?.post,
         characterPostExamples,
       });
@@ -367,6 +499,8 @@ export class MultiStepExecutor {
           systemPrompt,
           {
             feedback: validationFeedback,
+            providerRetry,
+            signal,
           }
         );
 
@@ -413,18 +547,47 @@ export class MultiStepExecutor {
           normalizedAction !== Actions.FINISH &&
           normalizedAction !== Actions.WAIT
         ) {
+          const unavailableTarget =
+            UNAVAILABLE_DECISION_TARGETS.get(validationError);
+          const hideParameters =
+            normalizedAction === Actions.GROUP_MESSAGE ||
+            normalizedAction === Actions.REPLY_CHAT ||
+            unavailableTarget?.rejection === 'social-target-unavailable';
           if (decisionAttempt < 2) {
             logger.warn(
               `[MultiStep] Rejected invalid decision after normalization`,
               {
                 action: normalizedAction || '(empty)',
-                parameters: normalizedParameters,
+                ...(!hideParameters && { parameters: normalizedParameters }),
                 validationError,
               },
               'MultiStepExecutor'
             );
             validationFeedback = validationError;
             continue;
+          }
+
+          if (unavailableTarget) {
+            trace.push({
+              actionType: normalizedAction,
+              success: false,
+              error: validationError,
+              result: { rejection: unavailableTarget.rejection },
+              ...(!hideParameters && { parameters: normalizedParameters }),
+              timestamp: Date.now(),
+            });
+            logger.warn(
+              unavailableTarget.warning,
+              {
+                agentUserId,
+                iteration,
+                ...(!hideParameters && {
+                  marketId: normalizedParameters.marketId,
+                }),
+              },
+              'MultiStepExecutor'
+            );
+            continue iterations;
           }
 
           throw new Error(
@@ -499,16 +662,25 @@ export class MultiStepExecutor {
         runtime,
         isNpc,
         { prompt, completion: rawResponse, thought: decision.thought },
-        agentUserId
+        agentUserId,
+        offeredMarketClue
       );
       await this.recordTrajectoryStep(runtime, decision, actionResult);
       iterationTimings.actionExecution = Date.now() - actionStartTime;
       iterationTimings.total = Date.now() - iterationStartTime;
 
       trace.push(actionResult);
-      if (!actionResult.success) {
+      const rejectedPost = isDiversityRejectedPost(actionResult);
+      if (!actionResult.success && !rejectedPost) {
         throw new Error(
           `Agent action ${normalizedAction} failed: ${actionResult.error || actionResult.summary || 'No failure detail returned'}`
+        );
+      }
+      if (rejectedPost) {
+        logger.warn(
+          '[MultiStep] NPC post rejected by diversity checks',
+          { agentUserId, iteration, reason: actionResult.error },
+          'MultiStepExecutor'
         );
       }
 
@@ -919,16 +1091,21 @@ export class MultiStepExecutor {
   }
 
   /**
-   * Get LLM decision with retry logic
+   * Get an LLM decision with bounded JSON correction and provider retries.
    */
   private async getDecision(
     prompt: string,
     runtime: IAgentRuntime,
-    _iteration: number,
+    iteration: number,
     systemPrompt?: string,
-    options?: { feedback?: string }
+    options?: {
+      feedback?: string;
+      providerRetry?: { used: boolean };
+      signal?: AbortSignal;
+    }
   ): Promise<{ decision: MultiStepDecision; rawResponse: string } | null> {
     const maxRetries = 3;
+    const { feedback, providerRetry, signal } = options ?? {};
 
     const system = systemPrompt
       ? `${systemPrompt}\n\nIMPORTANT: Output valid JSON only. No markdown, no explanations, and no <think> tags. The first character of your reply must be "{" and the last character must be "}".`
@@ -936,15 +1113,16 @@ export class MultiStepExecutor {
     let retryFeedback = '';
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      signal?.throwIfAborted();
       const promptSegments = [prompt];
-      if (options?.feedback) {
-        promptSegments.push(options.feedback);
+      if (feedback) {
+        promptSegments.push(feedback);
       }
       if (retryFeedback) {
         promptSegments.push(retryFeedback);
       }
       const promptWithConstraints = promptSegments.join('\n\n');
-      const response = await callAgentLLM({
+      const request: AgentLLMParams = {
         prompt: promptWithConstraints,
         system,
         runtime,
@@ -958,6 +1136,37 @@ export class MultiStepExecutor {
         maxTokens: 1000,
         actionType: 'multi_step_decision',
         purpose: 'action',
+        signal,
+      };
+      const response = await callAgentLLM(request).catch(async (error) => {
+        if (
+          !providerRetry ||
+          providerRetry.used ||
+          !APICallError.isInstance(error) ||
+          (error.statusCode !== 429 && error.statusCode !== 502)
+        ) {
+          throw error;
+        }
+        const delayMs = getProviderRetryWaitMs(
+          error.responseHeaders?.['retry-after']
+        );
+        if (delayMs > MAX_PROVIDER_RETRY_WAIT_MS) throw error;
+
+        signal?.throwIfAborted();
+        providerRetry.used = true;
+        logger.warn(
+          '[MultiStep] Retrying NPC decision after provider rejection',
+          {
+            agentUserId: runtime.agentId,
+            iteration,
+            statusCode: error.statusCode,
+            delayMs,
+          },
+          'MultiStepExecutor'
+        );
+        await waitForRetry(delayMs, undefined, { signal });
+        signal?.throwIfAborted();
+        return callAgentLLM(request);
       });
 
       const jsonText = extractFirstJsonObject(response);
@@ -1065,26 +1274,40 @@ export class MultiStepExecutor {
             ),
           ]);
           if (!knownPredictionMarketIds.has(marketId)) {
-            return `Your TRADE used prediction marketId ${marketId}, but that market is not in the current context. Choose an exact marketId from Available Prediction Markets or your open positions.`;
+            return `Your TRADE used prediction marketId ${marketId}, but that market is not in the current context. Buy using a quoted ID under Available Prediction Markets. To sell, use the ID and side of a held position.`;
           }
           if (side === 'buy_yes' || side === 'buy_no') {
             const market = context.predictionMarkets.find(
               (m) => m.id === marketId
             );
             if (!market || !Number.isFinite(market.maxSafeBet))
-              return 'Prediction buy requires current liquidity limits in context.';
+              return PREDICTION_QUOTE_UNAVAILABLE;
             if (amount > market.maxSafeBet)
               return `Requested amount exceeds safe liquidity limit $${market.maxSafeBet}. Reduce the amount or choose another action.`;
           }
         }
 
         if (parameters.marketType === 'perp') {
-          const knownPerpTickers = new Set([
-            ...context.perpMarkets.map((market) => market.ticker),
-            ...context.agentPositions.perps.map((position) => position.ticker),
-          ]);
-          if (!knownPerpTickers.has(marketId)) {
+          const market = context.perpMarkets.find(
+            ({ ticker }) => ticker === marketId
+          );
+          const position = context.agentPositions.perps.find(
+            ({ ticker }) => ticker === marketId
+          );
+          if (!market && !position) {
             return `Your TRADE used perp marketId ${marketId}, but that ticker is not in the current context. Choose an exact ticker from Available Perp Markets or your open positions.`;
+          }
+          if (!closing) {
+            const limit = market?.maxOrderSize ?? position?.maxOrderSize;
+            if (limit === undefined || !Number.isFinite(limit)) {
+              return 'Opening a perp requires a current order size limit. Choose another market or action.';
+            }
+            const sameSideSize =
+              position && `open_${position.side}` === side ? position.size : 0;
+            const availableSize = Math.max(0, limit - sameSideSize);
+            if (amount > availableSize) {
+              return `Requested perp amount exceeds the available size limit of ${availableSize} points on ${marketId}. Reduce the amount or choose another action.`;
+            }
           }
         }
 
@@ -1114,24 +1337,29 @@ export class MultiStepExecutor {
         return undefined;
       }
 
-      case Actions.COMMENT:
+      case Actions.COMMENT: {
+        if (
+          parameters.commentId !== undefined ||
+          parameters.parentCommentId !== undefined
+        ) {
+          return 'Your COMMENT was invalid because replies must use REPLY_COMMENT. Choose a pending comment to reply to, or leave both commentId and parentCommentId out of a top-level COMMENT.';
+        }
         if (!postId || !content) {
           return context.recentPosts.length > 0
             ? 'Your COMMENT was invalid because it requires both a valid postId from Recent Posts and non-empty content. Choose a valid comment target or a different action.'
             : 'Your COMMENT was invalid because there are no recent posts available to comment on right now. Choose a different valid action.';
         }
-        if (commentId) {
-          return 'Your COMMENT was invalid because replies must use REPLY_COMMENT, not COMMENT. Choose REPLY_COMMENT with a valid pending comment target or use COMMENT without commentId.';
+        const targetPost = context.recentPosts.find(
+          (post) => post.id === postId
+        );
+        if (!targetPost) {
+          return COMMENT_POST_UNAVAILABLE;
         }
-        {
-          const targetPost = context.recentPosts.find(
-            (post) => post.id === postId
-          );
-          if (targetPost?.agentComment) {
-            return `Your COMMENT targeted post ${postId}, but you already made a top-level comment there. Choose a different post or use REPLY_COMMENT if there is a pending reply target.`;
-          }
+        if (targetPost.agentComment) {
+          return `Your COMMENT targeted post ${postId}, but you already made a top-level comment there. Choose a different post or use REPLY_COMMENT if there is a pending reply target.`;
         }
         return undefined;
+      }
 
       case Actions.REPLY_COMMENT:
         if (!commentId || !postId || !content) {
@@ -1149,47 +1377,52 @@ export class MultiStepExecutor {
         return undefined;
 
       case Actions.LIKE:
+      case Actions.REPOST: {
         if (!postId) {
-          return context.recentPosts.length > 0
-            ? `Your ${action} was invalid because it requires a valid postId from Recent Posts. Choose a valid target or a different action.`
-            : `Your ${action} was invalid because there are no recent posts available right now. Choose a different valid action.`;
+          return `Your ${action} requires a postId from Recent Posts or Pending Comment Replies. Choose a valid target or a different action.`;
         }
-        {
-          const targetPost = context.recentPosts.find(
-            (post) => post.id === postId
-          );
-          if (targetPost?.agentLiked) {
-            return `Your LIKE targeted post ${postId}, but you already liked that post. Choose a different post.`;
-          }
+        const targetPost = context.recentPosts.find(
+          (post) => post.id === postId
+        );
+        const pendingTarget = context.pendingCommentReplies.find(
+          (reply) => reply.postId === postId
+        );
+        if (action === Actions.REPOST && pendingTarget?.post.isYourPost) {
+          return REPOST_OWN_POST_UNAVAILABLE;
+        }
+        if (!targetPost && !pendingTarget) {
+          return ENGAGEMENT_POST_UNAVAILABLE;
+        }
+        if (action === Actions.LIKE && targetPost?.agentLiked) {
+          return `Your LIKE targeted post ${postId}, but you already liked that post. Choose a different post.`;
+        }
+        if (action === Actions.REPOST && targetPost?.agentReposted) {
+          return `Your REPOST targeted post ${postId}, but you already reposted that post. Choose a different post.`;
         }
         return undefined;
-
-      case Actions.REPOST:
-        if (!postId) {
-          return context.recentPosts.length > 0
-            ? `Your ${action} was invalid because it requires a valid postId from Recent Posts. Choose a valid target or a different action.`
-            : `Your ${action} was invalid because there are no recent posts available right now. Choose a different valid action.`;
-        }
-        {
-          const targetPost = context.recentPosts.find(
-            (post) => post.id === postId
-          );
-          if (targetPost?.agentReposted) {
-            return `Your REPOST targeted post ${postId}, but you already reposted that post. Choose a different post.`;
-          }
-        }
-        return undefined;
+      }
 
       case Actions.FOLLOW:
       case Actions.UNFOLLOW:
         if (!userId) {
           return `Your ${action} was invalid because it requires a valid userId from the visible social context. Choose a valid target or a different action.`;
         }
+        if (StaticDataRegistry.hasActor(userId)) {
+          return FOLLOW_ACTOR_UNAVAILABLE;
+        }
+        if (StaticDataRegistry.hasOrganization(userId)) {
+          return action === Actions.FOLLOW
+            ? FOLLOW_ORGANIZATION_UNAVAILABLE
+            : UNFOLLOW_ORGANIZATION_UNAVAILABLE;
+        }
         return undefined;
 
       case Actions.DM:
         if (!recipientId || !content) {
           return 'Your DM was invalid because it requires a valid recipientId and message content. Choose a valid DM target or a different action.';
+        }
+        if (StaticDataRegistry.hasOrganization(recipientId)) {
+          return DM_ORGANIZATION_UNAVAILABLE;
         }
         return undefined;
 
@@ -1199,13 +1432,21 @@ export class MultiStepExecutor {
             ? 'Your REPLY_CHAT was invalid because it requires a valid chatId from Pending Chat Messages and message content. Copy chatId exactly as a double-quoted JSON string, never a number. Choose a valid chat target or a different action.'
             : 'Your REPLY_CHAT was invalid because there are no pending chat messages available right now. Choose a different valid action.';
         }
+        if (
+          !context.pendingChatMessages.some(
+            (message) => message.chatId === chatId
+          )
+        ) {
+          return REPLY_CHAT_TARGET_UNAVAILABLE;
+        }
         return undefined;
 
       case Actions.GROUP_MESSAGE:
-        if (!chatId || !content) {
-          return (context.groupChats?.length ?? 0) > 0
-            ? 'Your GROUP_MESSAGE was invalid because it requires a valid chatId from Your Group Chats and message content. Choose a valid group chat or a different action.'
-            : 'Your GROUP_MESSAGE was invalid because you have no available group chats right now. Choose a different valid action.';
+        if (!content) {
+          return 'Your GROUP_MESSAGE was invalid because it requires message content. Add content or choose another action.';
+        }
+        if (!context.groupChats?.some((chat) => chat.id === chatId)) {
+          return GROUP_MESSAGE_CHAT_UNAVAILABLE;
         }
         return undefined;
 
@@ -1258,7 +1499,8 @@ export class MultiStepExecutor {
     _runtime: IAgentRuntime,
     _isNpc: boolean,
     logContext?: { prompt: string; completion: string; thought: string },
-    ownerId: string = agentUserId
+    ownerId: string = agentUserId,
+    marketClue?: NpcMarketClue
   ): Promise<ActionTraceResult> {
     const normalizedAction = normalizeDecisionAction(action);
 
@@ -1299,7 +1541,12 @@ export class MultiStepExecutor {
         return this.executeTrade(agentUserId, parameters, ownerId);
 
       case Actions.POST:
-        return this.executePost(agentUserId, parameters, logContext);
+        return this.executePost(
+          agentUserId,
+          parameters,
+          logContext,
+          marketClue
+        );
 
       case Actions.COMMENT:
         return this.executeComment(agentUserId, parameters, logContext);
@@ -1494,6 +1741,27 @@ export class MultiStepExecutor {
   // Action Executors
   // ===========================================================================
 
+  /**
+   * Best-effort activity logging. The action already committed in the
+   * direct executor, so a logging failure must not report the action as
+   * failed or abort the tick.
+   */
+  private async logActivity(
+    agentUserId: string,
+    log: Parameters<AgentService['createLog']>[1]
+  ): Promise<void> {
+    try {
+      await agentService.createLog(agentUserId, log);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(
+        `[MultiStep] Activity log failed after action completed: ${message}`,
+        { agentUserId },
+        'MultiStepExecutor'
+      );
+    }
+  }
+
   private async executeTrade(
     agentUserId: string,
     parameters: Record<string, unknown>,
@@ -1591,7 +1859,8 @@ export class MultiStepExecutor {
   private async executePost(
     agentUserId: string,
     parameters: Record<string, unknown>,
-    logContext?: { prompt: string; completion: string; thought: string }
+    logContext?: { prompt: string; completion: string; thought: string },
+    marketClue?: NpcMarketClue
   ): Promise<ActionTraceResult> {
     // Post rate limiting removed — all agents can post freely
 
@@ -1608,10 +1877,40 @@ export class MultiStepExecutor {
       };
     }
 
-    const postResult = await executeDirectPost({ agentUserId, content });
+    const postResult = await executeDirectPost({
+      agentUserId,
+      content,
+      marketClue,
+    });
+    if (postResult.marketClueStatus && !postResult.postId) {
+      return {
+        actionType: Actions.POST,
+        success: true,
+        summary: `Skipped market clue: ${postResult.marketClueStatus}`,
+        result: {
+          skipped: true,
+          marketClueStatus: postResult.marketClueStatus,
+        },
+        parameters,
+        timestamp: Date.now(),
+      };
+    }
+
+    if (postResult.rejection === 'post-diversity') {
+      return {
+        actionType: Actions.POST,
+        success: false,
+        summary:
+          'Post rejected by diversity checks. Try a different observation in distinct language, or choose another action.',
+        error: postResult.error,
+        result: { rejection: postResult.rejection },
+        parameters,
+        timestamp: Date.now(),
+      };
+    }
 
     if (postResult.success && logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'post',
         level: 'info',
         message: `Created post: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`,
@@ -1634,6 +1933,7 @@ export class MultiStepExecutor {
       result: {
         success: postResult.success,
         postId: postResult.postId,
+        marketClueStatus: postResult.marketClueStatus,
         error: postResult.error,
       },
       parameters,
@@ -1669,7 +1969,7 @@ export class MultiStepExecutor {
     });
 
     if (commentResult.success && logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'comment',
         level: 'info',
         message: `Created comment on post ${postId}${parentCommentId ? ` (reply to ${parentCommentId})` : ''}: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`,
@@ -1720,12 +2020,20 @@ export class MultiStepExecutor {
 
     const likeResult = await executeDirectLike({ agentUserId, postId });
 
-    await agentService.createLog(agentUserId, {
+    // executeDirectLike succeeds idempotently when the like already exists
+    // (liked=false, no new row). Record that honestly — mirroring how
+    // executeFollow distinguishes "Now following" from "Already following" —
+    // instead of claiming a new like happened.
+    const likeSummary = likeResult.success
+      ? likeResult.liked
+        ? `Liked post ${postId}`
+        : `Already liked post ${postId}`
+      : `Like failed: ${likeResult.error}`;
+
+    await this.logActivity(agentUserId, {
       type: 'like',
       level: likeResult.success ? 'info' : 'warn',
-      message: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      message: likeSummary,
       metadata: {
         postId,
         success: likeResult.success,
@@ -1737,9 +2045,7 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.LIKE,
       success: likeResult.success,
-      summary: likeResult.success
-        ? `Liked post ${postId}`
-        : `Like failed: ${likeResult.error}`,
+      summary: likeSummary,
       result: {
         success: likeResult.success,
         liked: likeResult.liked,
@@ -1774,17 +2080,27 @@ export class MultiStepExecutor {
       comment,
     });
 
-    await agentService.createLog(agentUserId, {
+    // executeDirectRepost succeeds idempotently when the share already
+    // exists (alreadyReposted=true, no new share or quote post). Record
+    // that honestly — mirroring how executeFollow distinguishes "Now
+    // following" from "Already following" — instead of claiming a new
+    // repost happened.
+    const repostSummary = repostResult.success
+      ? repostResult.alreadyReposted
+        ? `Already reposted ${postId}`
+        : `Reposted ${postId}${comment ? ' with comment' : ''}`
+      : `Repost failed: ${repostResult.error}`;
+
+    await this.logActivity(agentUserId, {
       type: 'repost',
       level: repostResult.success ? 'info' : 'warn',
-      message: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      message: repostSummary,
       metadata: {
         postId,
         success: repostResult.success,
         repostId: repostResult.repostId ?? null,
         quotePostId: repostResult.quotePostId ?? null,
+        alreadyReposted: repostResult.alreadyReposted ?? false,
         hasComment: !!comment,
         error: repostResult.error ?? null,
       },
@@ -1793,13 +2109,12 @@ export class MultiStepExecutor {
     return {
       actionType: Actions.REPOST,
       success: repostResult.success,
-      summary: repostResult.success
-        ? `Reposted ${postId}${comment ? ' with comment' : ''}`
-        : `Repost failed: ${repostResult.error}`,
+      summary: repostSummary,
       result: {
         success: repostResult.success,
         repostId: repostResult.repostId,
         quotePostId: repostResult.quotePostId,
+        alreadyReposted: repostResult.alreadyReposted,
         error: repostResult.error,
       },
       parameters,
@@ -1830,7 +2145,7 @@ export class MultiStepExecutor {
       targetUserId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'follow',
       level: followResult.success ? 'info' : 'warn',
       message: followResult.success
@@ -1889,7 +2204,7 @@ export class MultiStepExecutor {
       targetUserId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'follow',
       level: unfollowResult.success ? 'info' : 'warn',
       message: unfollowResult.success
@@ -2004,7 +2319,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'comment',
         level: commentResult.success ? 'info' : 'warn',
         message: commentResult.success
@@ -2097,7 +2412,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'chat',
         level: messageResult.success ? 'info' : 'warn',
         message: messageResult.success
@@ -2168,7 +2483,7 @@ export class MultiStepExecutor {
     });
 
     if (logContext) {
-      await agentService.createLog(agentUserId, {
+      await this.logActivity(agentUserId, {
         type: 'dm',
         level: messageResult.success ? 'info' : 'warn',
         message: messageResult.success
@@ -2257,7 +2572,7 @@ export class MultiStepExecutor {
       content,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: groupMessageResult.success ? 'info' : 'warn',
       message: groupMessageResult.success
@@ -2327,7 +2642,7 @@ export class MultiStepExecutor {
       memberIds: memberIdsRaw,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2385,7 +2700,7 @@ export class MultiStepExecutor {
       targetUserId: userId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2448,7 +2763,7 @@ export class MultiStepExecutor {
       reason,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2503,7 +2818,7 @@ export class MultiStepExecutor {
       groupId,
     });
 
-    await agentService.createLog(agentUserId, {
+    await this.logActivity(agentUserId, {
       type: 'chat',
       level: result.success ? 'info' : 'warn',
       message: result.success
@@ -2548,7 +2863,7 @@ export class MultiStepExecutor {
     };
 
     for (const result of trace) {
-      if (!result.success) continue;
+      if (!result.success || result.result?.skipped) continue;
 
       switch (result.actionType) {
         case Actions.TRADE:
@@ -2581,7 +2896,23 @@ export class MultiStepExecutor {
     }
 
     return {
-      success: trace.every((action) => action.success),
+      success: trace.every(
+        (action) =>
+          action.success ||
+          isDiversityRejectedPost(action) ||
+          (action.actionType === Actions.TRADE &&
+            action.result?.rejection === 'prediction-quote-unavailable') ||
+          (action.actionType === Actions.GROUP_MESSAGE &&
+            action.result?.rejection === 'group-message-chat-unavailable') ||
+          (action.result?.rejection === 'social-target-unavailable' &&
+            (action.actionType === Actions.COMMENT ||
+              action.actionType === Actions.REPLY_CHAT ||
+              action.actionType === Actions.LIKE ||
+              action.actionType === Actions.REPOST ||
+              action.actionType === Actions.FOLLOW ||
+              action.actionType === Actions.UNFOLLOW ||
+              action.actionType === Actions.DM))
+      ),
       actionsExecuted: counts,
       iterations: trace.length,
       trace,

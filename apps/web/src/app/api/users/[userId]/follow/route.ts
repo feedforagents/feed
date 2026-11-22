@@ -99,10 +99,12 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  acquireUserBlockPairLock,
   and,
   db,
   eq,
   follows,
+  hasBlocked,
   userActorFollows,
   users,
   withTransaction,
@@ -177,6 +179,29 @@ export const POST = withErrorHandling(
       // Target is a regular user - use Follow model
       // Check if already following and create follow inside transaction
       const newFollow = await withTransaction(async (tx) => {
+        // Serialize against block creation for this pair first: the pair
+        // lock is shared with the block route, so whichever write takes it
+        // completes before the other reads block state. A block check
+        // before this transaction leaves a window where a block committed
+        // mid-follow leaves both a block and a follow behind.
+        await acquireUserBlockPairLock(tx, user.userId, targetId);
+
+        // A block removes follow relationships in both directions (see the
+        // block route), so neither side may recreate the edge while a block
+        // stands — the same rule the comment and share POSTs enforce. Read
+        // on this transaction's connection so a block serialized ahead of
+        // us is visible.
+        const [targetBlockedMe, iBlockedTarget] = await Promise.all([
+          hasBlocked(targetId, user.userId, tx),
+          hasBlocked(user.userId, targetId, tx),
+        ]);
+        if (targetBlockedMe || iBlockedTarget) {
+          throw new BusinessLogicError(
+            'Cannot follow this user',
+            'BLOCKED_USER'
+          );
+        }
+
         const [existingFollow] = await tx
           .select({ id: follows.id })
           .from(follows)

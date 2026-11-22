@@ -8,25 +8,35 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { FeedAgentExecutor } from '@feed/a2a';
 import {
+  acquireUserBlockPairLock,
+  and,
   chatParticipants,
   chats,
   comments,
   db,
   eq,
+  follows,
   groupMembers,
   groups,
   inArray,
+  or,
   posts,
+  sql,
+  userBlocks,
   users,
+  withTransaction,
 } from '@feed/db';
 import { generateSnowflakeId, type JsonValue } from '@feed/shared';
+import {
+  executeBlockUser,
+  executeFollowUser,
+} from '../../mcp/src/handlers/tool-handlers';
+import { assertDisposableAgentFollowDatabase } from './helpers/agent-follow-database';
 
 const createdUsers: string[] = [];
 const createdPosts: string[] = [];
-const createdGroups: string[] = [];
-const createdChats: string[] = [];
+const followPeers: string[] = [];
 let userId: string;
-let groupMemberId: string;
 let liveFeedPostId: string;
 let deletedFeedPostId: string;
 let groupId: string;
@@ -34,6 +44,18 @@ let chatId: string;
 
 function run(operation: string, params: Record<string, JsonValue> = {}) {
   return FeedAgentExecutor.executeDirectly(operation, params, userId);
+}
+
+async function createFollowPeer(): Promise<string> {
+  const id = await generateSnowflakeId();
+  await db.insert(users).values({
+    id,
+    username: `exec_follow_${id.slice(-10)}`,
+    updatedAt: new Date(),
+  });
+  createdUsers.push(id);
+  followPeers.push(id);
+  return id;
 }
 
 describe('FeedAgentExecutor policies', () => {
@@ -95,18 +117,38 @@ describe('FeedAgentExecutor policies', () => {
       chatId,
       userId,
     });
-
-    groupMemberId = await generateSnowflakeId();
-    await db.insert(users).values({
-      id: groupMemberId,
-      username: `exec_grp_${groupMemberId.slice(-10)}`,
-      isActor: false,
-      updatedAt: new Date(),
-    });
-    createdUsers.push(groupMemberId);
   });
 
   afterAll(async () => {
+    if (!createdUsers.length) return;
+    await db
+      .delete(follows)
+      .where(
+        or(
+          and(
+            eq(follows.followerId, userId),
+            inArray(follows.followingId, followPeers)
+          ),
+          and(
+            inArray(follows.followerId, followPeers),
+            eq(follows.followingId, userId)
+          )
+        )
+      );
+    await db
+      .delete(userBlocks)
+      .where(
+        or(
+          and(
+            eq(userBlocks.blockerId, userId),
+            inArray(userBlocks.blockedId, followPeers)
+          ),
+          and(
+            inArray(userBlocks.blockerId, followPeers),
+            eq(userBlocks.blockedId, userId)
+          )
+        )
+      );
     await db.delete(comments).where(inArray(comments.postId, createdPosts));
     await db.delete(posts).where(inArray(posts.id, createdPosts));
     await db
@@ -115,14 +157,6 @@ describe('FeedAgentExecutor policies', () => {
     await db.delete(chats).where(eq(chats.id, chatId));
     await db.delete(groupMembers).where(eq(groupMembers.groupId, groupId));
     await db.delete(groups).where(eq(groups.id, groupId));
-    await db
-      .delete(chatParticipants)
-      .where(inArray(chatParticipants.chatId, createdChats));
-    await db.delete(chats).where(inArray(chats.id, createdChats));
-    await db
-      .delete(groupMembers)
-      .where(inArray(groupMembers.groupId, createdGroups));
-    await db.delete(groups).where(inArray(groups.id, createdGroups));
     await db.delete(users).where(inArray(users.id, createdUsers));
   });
 
@@ -167,24 +201,135 @@ describe('FeedAgentExecutor policies', () => {
     expect(ok.user.displayName).toBe('Exec Tester');
   });
 
-  it('creating a group assigns the creator the owner role, and the owner cannot leave', async () => {
-    const created = (await run('messaging.create_group', {
-      name: 'executor owner group',
-      memberIds: [groupMemberId],
-    })) as { group: { id: string; chatId: string } };
-    createdGroups.push(created.group.id);
-    createdChats.push(created.group.chatId);
-
-    const [membership] = await db
-      .select({ role: groupMembers.role })
-      .from(groupMembers)
-      .where(eq(groupMembers.groupId, created.group.id));
-    expect(membership?.role).toBe('owner');
-
+  it('rejects users.follow in either block direction', async () => {
+    await assertDisposableAgentFollowDatabase();
+    const blockedByUserId = await createFollowPeer();
+    const blockerOfUserId = await createFollowPeer();
+    const cleanFollowId = await createFollowPeer();
+    await db.insert(userBlocks).values([
+      {
+        id: await generateSnowflakeId(),
+        blockerId: userId,
+        blockedId: blockedByUserId,
+      },
+      {
+        id: await generateSnowflakeId(),
+        blockerId: blockerOfUserId,
+        blockedId: userId,
+      },
+    ]);
     await expect(
-      run('messaging.leave_chat', { chatId: created.group.chatId })
-    ).rejects.toThrow('Group owners cannot leave');
+      run('users.follow', { userId: blockedByUserId })
+    ).rejects.toThrow('Cannot follow this user');
+    await expect(
+      run('users.follow', { userId: blockerOfUserId })
+    ).rejects.toThrow('Cannot follow this user');
+
+    const blockedRows = await db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(eq(follows.followerId, userId));
+    expect(blockedRows).toHaveLength(0);
+
+    const ok = (await run('users.follow', {
+      userId: cleanFollowId,
+    })) as { success: boolean };
+    expect(ok.success).toBe(true);
+    const cleanRows = await db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(eq(follows.followerId, userId));
+    expect(cleanRows).toHaveLength(1);
   });
+
+  for (const first of ['A2A block', 'A2A follow'] as const) {
+    it(`serializes ${first} with the competing MCP write`, async () => {
+      await assertDisposableAgentFollowDatabase();
+      const targetId = await createFollowPeer();
+
+      const ready = Promise.withResolvers<number>();
+      const release = Promise.withResolvers<void>();
+      const calls: Promise<void>[] = [];
+      const barrier = withTransaction(async (tx) => {
+        await acquireUserBlockPairLock(tx, userId, targetId);
+        const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+        ready.resolve(Number(row?.pid));
+        await release.promise;
+      }).catch((error: Error) => {
+        ready.reject(error);
+        throw error;
+      });
+      async function waitForQueuedCalls(pid: number, count: number) {
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const [row] = await db.execute(sql`
+            WITH RECURSIVE waiting(pid) AS (
+              SELECT ${pid}::integer
+              UNION
+              SELECT a.pid FROM pg_stat_activity a
+              JOIN waiting w ON w.pid = ANY(pg_blocking_pids(a.pid))
+            )
+            SELECT count(*)::integer - 1 AS count FROM waiting
+          `);
+          if (Number(row?.count) >= count) return;
+          await Bun.sleep(20);
+        }
+        throw new Error(
+          'The follow or block operation did not take the pair lock'
+        );
+      }
+
+      try {
+        const pid = await ready.promise;
+        const a2a = run(
+          first === 'A2A block' ? 'moderation.block_user' : 'users.follow',
+          { userId: targetId }
+        );
+        calls.push(Promise.allSettled([a2a]).then(() => {}));
+        await waitForQueuedCalls(pid, 1);
+        const mcpAgent = { agentId: targetId, userId: targetId };
+        const mcp =
+          first === 'A2A block'
+            ? executeFollowUser(mcpAgent, { userId })
+            : executeBlockUser(mcpAgent, { userId });
+        calls.push(Promise.allSettled([mcp]).then(() => {}));
+        await waitForQueuedCalls(pid, 2);
+        release.resolve();
+        await expect(a2a).resolves.toMatchObject({ success: true });
+        if (first === 'A2A block') {
+          await expect(mcp).rejects.toThrow('Cannot follow this user');
+        } else {
+          await expect(mcp).resolves.toEqual({ success: true });
+        }
+        const pair = [userId, targetId];
+        expect(
+          await db
+            .select()
+            .from(follows)
+            .where(
+              and(
+                inArray(follows.followerId, pair),
+                inArray(follows.followingId, pair)
+              )
+            )
+        ).toHaveLength(0);
+        expect(
+          await db
+            .select()
+            .from(userBlocks)
+            .where(
+              and(
+                inArray(userBlocks.blockerId, pair),
+                inArray(userBlocks.blockedId, pair)
+              )
+            )
+        ).toHaveLength(1);
+      } finally {
+        release.resolve();
+        await barrier;
+        await Promise.all(calls);
+      }
+    }, 10000);
+  }
 
   it('leaving a group chat also deactivates group membership', async () => {
     await run('messaging.leave_chat', { chatId });

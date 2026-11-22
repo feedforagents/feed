@@ -8,6 +8,7 @@ import {
   isPointsAmount,
   JsonValueSchema,
   LEADERBOARD_SCOPES,
+  UpdateUserSchema,
 } from '@feed/shared';
 import { z } from 'zod';
 import type {
@@ -220,7 +221,9 @@ const UnlikePostArgsSchema = z.object({
 
 const SharePostArgsSchema = z.object({
   postId: z.string().min(1),
-  comment: z.string().optional(),
+  // The comment becomes the quote post's content; the PRD caps posts at 280
+  // characters.
+  comment: z.string().max(280).optional(),
 }) satisfies z.ZodType<SharePostArgs>;
 
 const GetCommentsArgsSchema = z.object({
@@ -252,11 +255,12 @@ const GetUserProfileArgsSchema = z.object({
   userId: z.string().min(1),
 }) satisfies z.ZodType<GetUserProfileArgs>;
 
-const UpdateProfileArgsSchema = z.object({
-  displayName: z.string().optional(),
-  bio: z.string().max(500).optional(),
-  username: z.string().optional(),
-  profileImageUrl: z.string().optional(),
+// Same validation as the HTTP profile update route and A2A.
+const UpdateProfileArgsSchema = UpdateUserSchema.pick({
+  displayName: true,
+  bio: true,
+  username: true,
+  profileImageUrl: true,
 }) satisfies z.ZodType<UpdateProfileArgs>;
 
 const FollowUserArgsSchema = z.object({
