@@ -308,12 +308,6 @@ export function getAvailableTools(): MCPTool[] {
             type: 'string',
             description: 'Post content (1-5000 characters)',
           },
-          type: {
-            type: 'string',
-            enum: ['post', 'article'],
-            description: 'Post type',
-            default: 'post',
-          },
           mediaUrl: {
             type: 'string',
             description: 'Optional media URL for the post image/attachment',

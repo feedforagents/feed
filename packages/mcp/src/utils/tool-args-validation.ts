@@ -203,7 +203,6 @@ const GetPostArgsSchema = z.object({
 
 const CreatePostArgsSchema = z.object({
   content: z.string().min(1).max(5000),
-  type: z.enum(['post', 'article']).optional().default('post'),
   mediaUrl: z.string().url().optional(),
 }) satisfies z.ZodType<CreatePostArgs>;
 

@@ -1398,7 +1398,6 @@ export async function executeCreatePost(
       id: postId,
       content: args.content.trim(),
       authorId: agent.userId,
-      type: args.type || 'post',
       imageUrl: mediaUrl,
       timestamp: new Date(),
     },
