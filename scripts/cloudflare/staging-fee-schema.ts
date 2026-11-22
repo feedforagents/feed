@@ -218,7 +218,7 @@ function pgEnvironment(
       : '-c statement_timeout=5000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=5000 -c default_transaction_read_only=on -c search_path=pg_catalog,public',
   };
 }
-function psql(
+export function psql(
   target: Endpoint,
   ca: string,
   input: string,
@@ -253,6 +253,9 @@ function psql(
 const phase0CatalogFields = `,
   'phase0Tables',(SELECT json_object_agg(t.name,json_build_object(
     'kind',c.relkind,'rls',c.relrowsecurity,
+    'publicAccess',EXISTS(SELECT 1 FROM pg_catalog.aclexplode(c.relacl) a WHERE a.grantee=0)
+      OR EXISTS(SELECT 1 FROM pg_catalog.pg_attribute p CROSS JOIN LATERAL pg_catalog.aclexplode(p.attacl) a
+        WHERE p.attrelid=c.oid AND p.attnum>0 AND NOT p.attisdropped AND a.grantee=0),
     'appAccess',has_table_privilege(current_user,c.oid,'SELECT') AND has_table_privilege(current_user,c.oid,'INSERT')
       AND has_table_privilege(current_user,c.oid,'UPDATE')
       AND (t.name<>'PredictionResolutionWork' OR has_table_privilege(current_user,c.oid,'DELETE')),
