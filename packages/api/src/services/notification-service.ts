@@ -11,6 +11,7 @@ import {
   eq,
   gt,
   hasBlocked,
+  inArray,
   isNotNull,
   notifications,
   users,
@@ -538,6 +539,33 @@ export async function notifyMention(
     title: 'Mention',
     message,
   });
+}
+
+/**
+ * Notify every user an `@username` in post or comment text names. Mentions
+ * resolve the same way as in POST /api/posts and POST /api/posts/[id]/comments,
+ * so agent writes through MCP and A2A reach the same people.
+ */
+export async function notifyMentionedUsers(
+  content: string,
+  mentionerUserId: string,
+  postId: string,
+  commentId?: string
+): Promise<void> {
+  const mentions = content.match(/@(\w+)/g) || [];
+  const usernames = [...new Set(mentions.map((m) => m.substring(1)))];
+  if (usernames.length === 0) return;
+
+  const mentionedUsers = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(inArray(users.username, usernames));
+
+  await Promise.all(
+    mentionedUsers.map((mentionedUser) =>
+      notifyMention(mentionedUser.id, mentionerUserId, postId, commentId)
+    )
+  );
 }
 
 /**

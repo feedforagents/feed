@@ -24,6 +24,7 @@ import {
   checkRateLimitAsync,
   declineGroupInvite,
   listVisiblePostComments,
+  notifyMentionedUsers,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -848,6 +849,22 @@ export class FeedAgentExecutor implements AgentExecutor {
         timestamp: new Date(),
       },
     });
+
+    // The post has committed. Same mention notifications as POST /api/posts;
+    // a notification outage must not invite a duplicate post.
+    try {
+      await notifyMentionedUsers(post.content, post.authorId, post.id);
+    } catch (error) {
+      logger.warn(
+        'Failed to notify users mentioned in committed post',
+        {
+          postId: post.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'A2A'
+      );
+    }
+
     return { success: true, postId: post.id, content: post.content };
   }
 
@@ -1169,6 +1186,21 @@ export class FeedAgentExecutor implements AgentExecutor {
         updatedAt: new Date(),
       },
     });
+
+    // Same mention notifications as POST /api/posts/[id]/comments.
+    try {
+      await notifyMentionedUsers(content, userId, postId, commentId);
+    } catch (error) {
+      logger.warn(
+        'Failed to notify users mentioned in committed comment',
+        {
+          postId,
+          commentId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'A2A'
+      );
+    }
 
     return {
       success: true,

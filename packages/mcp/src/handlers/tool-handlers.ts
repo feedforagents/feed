@@ -50,6 +50,7 @@ import {
   notifyDMMessage,
   notifyFollow,
   notifyGroupChatMessage,
+  notifyMentionedUsers,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -1485,6 +1486,23 @@ export async function executeCreatePost(
       timestamp: new Date(),
     },
   });
+
+  // The post has committed. Same mention notifications as POST /api/posts;
+  // a notification outage must not invite a duplicate post.
+  try {
+    await notifyMentionedUsers(post.content, agent.userId, post.id);
+  } catch (error) {
+    logger.warn(
+      'Failed to notify users mentioned in committed post',
+      {
+        postId: post.id,
+        userId: agent.userId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'MCP'
+    );
+  }
+
   return {
     success: true,
     postId: post.id,
@@ -1733,6 +1751,27 @@ export async function executeCreateComment(
         'MCP'
       );
     }
+  }
+
+  // Same mention notifications as POST /api/posts/[id]/comments.
+  try {
+    await notifyMentionedUsers(
+      comment.content,
+      agent.userId,
+      args.postId,
+      comment.id
+    );
+  } catch (error) {
+    logger.warn(
+      'Failed to notify users mentioned in committed comment',
+      {
+        postId: args.postId,
+        commentId: comment.id,
+        userId: agent.userId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'MCP'
+    );
   }
 
   return {
