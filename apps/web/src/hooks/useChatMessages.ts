@@ -83,6 +83,13 @@ export enum OptimisticMessageIdPrefix {
   Thinking = 'thinking-',
 }
 
+function isOptimisticMessageId(id: string): boolean {
+  return (
+    id.startsWith(OptimisticMessageIdPrefix.Pending) ||
+    id.startsWith(OptimisticMessageIdPrefix.Thinking)
+  );
+}
+
 /**
  * Time window (ms) for matching optimistic messages to confirmed messages.
  * If a confirmed message arrives within this window of an optimistic message
@@ -532,7 +539,14 @@ export function useChatMessages(chatId: string | null) {
         const currentData = queryClient.getQueryData<ChatMessagesData>(
           chatMessagesQueryKey(targetChatId, userId)
         );
-        const lastMessage = currentData?.messages?.at(-1);
+        const cachedMessages = currentData?.messages;
+        let anchorIndex = (cachedMessages?.length ?? 0) - 1;
+        let lastMessage = cachedMessages?.[anchorIndex];
+        // Local placeholders do not have a row to use as the server anchor.
+        while (lastMessage && isOptimisticMessageId(lastMessage.id)) {
+          anchorIndex -= 1;
+          lastMessage = cachedMessages?.[anchorIndex];
+        }
         if (!lastMessage) {
           // No cache — do a full reload instead of sync
           hasLoadedRef.current.delete(targetChatId);
@@ -658,9 +672,7 @@ export function useChatMessages(chatId: string | null) {
     if (!chatId || !userId || !cachedData || cachedData.messages.length === 0)
       return;
     const confirmedMessages = cachedData.messages.filter(
-      (m) =>
-        !m.id.startsWith(OptimisticMessageIdPrefix.Pending) &&
-        !m.id.startsWith(OptimisticMessageIdPrefix.Thinking)
+      (message) => !isOptimisticMessageId(message.id)
     );
     if (confirmedMessages.length === lastPersistedCountRef.current) return;
 
@@ -687,9 +699,7 @@ export function useChatMessages(chatId: string | null) {
   // ── Mutation helpers (same interface as before) ─────────────────────
   const addMessage = useCallback(
     (message: ChatMessage) => {
-      const isOptimistic =
-        message.id.startsWith(OptimisticMessageIdPrefix.Pending) ||
-        message.id.startsWith(OptimisticMessageIdPrefix.Thinking);
+      const isOptimistic = isOptimisticMessageId(message.id);
       setCachedData((old) => {
         if (!old)
           return { messages: [message], hasMore: false, nextCursor: null };
