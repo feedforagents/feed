@@ -19,13 +19,17 @@ import {
   isNull,
   lte,
   ne,
+  notExists,
   posts,
   postTags,
+  scheduledInferenceFetch,
   tags,
   trendingTags,
+  users,
   withTransaction,
 } from '@feed/db';
 import { generateSnowflakeId, logger } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 import OpenAI from 'openai';
 import { tracedCompletion } from '../llm/traced-completion';
 import { isPromptLoggingEnabled, logPrompt } from '../utils/prompt-logger';
@@ -117,6 +121,7 @@ async function getOpenAIClient(): Promise<OpenAIClient | null> {
     openaiClient = new OpenAI({
       apiKey,
       baseURL,
+      fetch: scheduledInferenceFetch,
       maxRetries: 0,
       timeout: 60000,
     });
@@ -478,12 +483,22 @@ export async function getPostsByTag(
   }
 
   // Deleted and future-dated posts are excluded from both the page and the
-  // total so pagination and counts agree.
+  // total so pagination and counts agree. Test authors are excluded the
+  // same way every other feed excludes them (main feed, following feed,
+  // an actor's own post list): accounts flagged isTest in the users table
+  // and ids starting with 'test-'.
   const now = new Date();
   const eligible = and(
     eq(postTags.tagId, tag.id),
     isNull(posts.deletedAt),
-    lte(posts.timestamp, now)
+    lte(posts.timestamp, now),
+    notLike(posts.authorId, 'test-%'),
+    notExists(
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+    )
   );
 
   const [pageRows, totalResult] = await Promise.all([
@@ -492,7 +507,13 @@ export async function getPostsByTag(
       .from(postTags)
       .innerJoin(posts, eq(postTags.postId, posts.id))
       .where(eligible)
-      .orderBy(desc(postTags.createdAt))
+      // Total order: memberships created in one batch share a
+      // createdAt, and a single-column sort lets each offset page
+      // order that tied block differently, repeating some posts and
+      // skipping others permanently. The unique post id breaks ties
+      // so pages are stable (same rule as the A2A/MCP posts-by-tag
+      // surfaces).
+      .orderBy(desc(postTags.createdAt), desc(posts.id))
       .offset(offset)
       .limit(limit),
     db

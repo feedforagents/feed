@@ -27,6 +27,7 @@ const requestPaths: string[] = [];
 const saved = { ...process.env };
 let responseText = 'A model response';
 let status = 200;
+let holdResponse: (() => Promise<void>) | undefined;
 let queuedResponses: Array<{
   content: string;
   finish: string;
@@ -38,6 +39,7 @@ const server = Bun.serve({
   async fetch(request) {
     requestPaths.push(new URL(request.url).pathname);
     requests.push(await request.json());
+    await holdResponse?.();
     if (status !== 200)
       return Response.json(
         { error: { message: 'Controlled provider failure' } },
@@ -85,6 +87,33 @@ afterAll(() => {
 });
 
 describe('actual provider transport and trajectory bridge', () => {
+  test('a deadline aborts an in-flight structured request without retrying', async () => {
+    const initial = requests.length;
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const controller = new AbortController();
+    holdResponse = () => {
+      started.resolve();
+      return release.promise;
+    };
+    try {
+      const client = new FeedLLMClient('', 'groq');
+      const result = client
+        .generateJSON('Wait for the provider', undefined, {
+          signal: controller.signal,
+        })
+        .catch((error) => error);
+      await started.promise;
+      const reason = new Error('headline deadline');
+      controller.abort(reason);
+      expect(await result).toBe(reason);
+      expect(requests.length - initial).toBe(1);
+    } finally {
+      holdResponse = undefined;
+      release.resolve();
+    }
+  });
+
   test('raw helper calls capture success, provider failure and empty output', async () => {
     const client = new OpenAI({
       apiKey: 'local-test-only',

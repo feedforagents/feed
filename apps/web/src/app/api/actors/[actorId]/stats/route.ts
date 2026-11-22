@@ -9,6 +9,10 @@
  * counts (from both ActorFollow and UserActorFollow), following count, and post count.
  * Supports lookup by actor ID or name (case-insensitive).
  *
+ * Also serves the organization profile's header counts: for an organization ID,
+ * the post count covers posts authored under the organization ID (the posts its
+ * profile lists), while follow counts use the org's resolved actor account.
+ *
  * @openapi
  * /api/actors/{actorId}/stats:
  *   get:
@@ -80,7 +84,16 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db } from '@feed/db';
+import {
+  and,
+  count,
+  db,
+  eq,
+  like,
+  not,
+  userActorFollows,
+  users,
+} from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -114,11 +127,32 @@ export const GET = withErrorHandling(
         ) ?? null;
     }
 
+    // Match the follow-list read fallback for organization profile IDs.
+    if (!actor) {
+      const organization = StaticDataRegistry.getOrganization(actorId);
+      if (organization) {
+        actor = StaticDataRegistry.getActor(`org-${organization.id}`);
+      }
+    }
+
     if (!actor) {
       throw new BusinessLogicError(`Actor ${actorId} not found`, 'NOT_FOUND');
     }
 
     const actualActorId = actor.id;
+
+    // The organization profile (/orgs/[id]) reads its header counts from
+    // this route with the organization id, while its posts tab lists posts
+    // authored under that same organization id (generateOrgPost writes
+    // authorId: org.id). An org id resolves to the org's shadow actor
+    // above through their shared username, so counting posts under the
+    // resolved actor id would report a different author's posts than the
+    // ones the org page lists. When the identifier is an organization id,
+    // count the organization's own posts; the follow counts keep the
+    // resolved actor id, which is where follows of the org's account are
+    // recorded (the follow route resolves the same way).
+    const organization = StaticDataRegistry.getOrganization(actorId);
+    const postAuthorId = organization ? organization.id : actualActorId;
 
     // Get follower counts (both from ActorFollow and UserActorFollow)
     const [
@@ -131,21 +165,33 @@ export const GET = withErrorHandling(
       db.actorFollow.count({
         where: { followingId: actualActorId },
       }),
-      // Users following this actor (UserActorFollow)
-      db.userActorFollow.count({
-        where: {
-          actorId: actualActorId,
-        },
-      }),
+      // Users following this actor (UserActorFollow), counting only the
+      // visible membership: the actor followers list hides hidden account
+      // tiers (test accounts: isTest flag or 'test-' id; banned accounts),
+      // so the header count must use the same membership or the number
+      // and the list disagree on the same profile screen.
+      db
+        .select({ count: count() })
+        .from(userActorFollows)
+        .innerJoin(users, eq(userActorFollows.userId, users.id))
+        .where(
+          and(
+            eq(userActorFollows.actorId, actualActorId),
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        )
+        .then((rows) => Number(rows[0]?.count ?? 0)),
       // This actor following others (only NPC-to-NPC follows via ActorFollow)
       db.actorFollow.count({
         where: { followerId: actualActorId },
       }),
-      // Visible posts by this actor: not deleted and already published
+      // Visible posts by this author: not deleted and already published
       // (future-scheduled posts must not be counted or hinted at).
       db.post.count({
         where: {
-          authorId: actualActorId,
+          authorId: postAuthorId,
           deletedAt: null,
           timestamp: { lte: new Date() },
         },

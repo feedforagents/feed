@@ -3339,17 +3339,21 @@ async function main() {
         gameTickJob
       );
 
+      const marketJobName =
+        process.env.DEPLOYMENT_ENV === 'localnet'
+          ? 'markets-recovery'
+          : 'markets-tick';
       const marketsJob = await invokeCronRoute(
-        '../apps/web/src/app/api/cron/markets-tick/route.ts',
-        'markets-tick',
+        `../apps/web/src/app/api/cron/${marketJobName}/route.ts`,
+        marketJobName,
         cycle,
-        '/api/cron/markets-tick'
+        `/api/cron/${marketJobName}`
       );
       jobArtifacts.push(marketsJob);
       writeJson(
         path.join(
           jobsDir,
-          `${String(cycle).padStart(2, '0')}-markets-tick.json`
+          `${String(cycle).padStart(2, '0')}-${marketJobName}.json`
         ),
         marketsJob
       );

@@ -59,13 +59,14 @@ export function parseAgentCardSkills(content: string): Array<{
   const idPattern = /id:\s*'([^']+)'/g;
   const indices: { id: string; start: number }[] = [];
   let m: RegExpExecArray | null;
-  while ((m = idPattern.exec(block)) !== null)
-    indices.push({ id: m[1], start: m.index });
+  while ((m = idPattern.exec(block)) !== null) {
+    const id = m[1];
+    if (id) indices.push({ id, start: m.index });
+  }
   const blocks: { id: string; raw: string }[] = [];
-  for (let i = 0; i < indices.length; i++) {
+  for (const [i, skill] of indices.entries()) {
     // Find the end of this skill block: either the start of next skill or end of skills array
-    let end =
-      i + 1 < indices.length ? indices[i + 1].start : block.indexOf('\n  ],');
+    let end = indices[i + 1]?.start ?? block.indexOf('\n  ],');
     // Handle case where the closing array pattern isn't found
     if (end === -1) {
       end = block.indexOf('\n];'); // Try alternate closing pattern
@@ -73,8 +74,8 @@ export function parseAgentCardSkills(content: string): Array<{
         end = block.length; // Fallback to end of string if no closing pattern found
       }
     }
-    const raw = block.slice(indices[i].start, end).trim();
-    blocks.push({ id: indices[i].id, raw });
+    const raw = block.slice(skill.start, end).trim();
+    blocks.push({ id: skill.id, raw });
   }
 
   const nameRe = /name:\s*'([^']+)'/;
@@ -113,7 +114,8 @@ export function parseExecutorOperations(content: string): string[] {
   const re = /case\s+'([^']+)':/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(content)) !== null) {
-    if (m[1] !== 'default') ops.push(m[1]);
+    const operation = m[1];
+    if (operation && operation !== 'default') ops.push(operation);
   }
   return [...new Set(ops)].sort();
 }
@@ -209,7 +211,8 @@ export function parseMCPTools(
       .replace(/\\'/g, "'")
       .replace(/\s+/g, ' ')
       .trim();
-    tools.push({ name: m[1], description: desc });
+    const name = m[1];
+    if (name) tools.push({ name, description: desc });
   }
   return tools;
 }
@@ -380,12 +383,10 @@ function main() {
   const args = process.argv.slice(2);
   const outArg = args.indexOf('--output');
   const packageMode = args.includes('--package');
+  const requestedOutputPath = outArg !== -1 ? args[outArg + 1] : undefined;
   const outputPath =
-    outArg !== -1 && args[outArg + 1]
-      ? args[outArg + 1]
-      : packageMode
-        ? join(ROOT, 'skills')
-        : DEFAULT_OUTPUT;
+    requestedOutputPath ||
+    (packageMode ? join(ROOT, 'skills') : DEFAULT_OUTPUT);
 
   const agentCardContent = readFileSync(A2A_AGENT_CARD, 'utf-8');
   const executorContent = readFileSync(A2A_EXECUTOR, 'utf-8');

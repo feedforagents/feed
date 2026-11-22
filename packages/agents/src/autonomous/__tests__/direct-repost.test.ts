@@ -28,12 +28,14 @@ mock.module('@feed/db', () => ({
   chats: {},
   comments: {},
   db: mockDb,
+  desc: (column: unknown) => column,
   dmAcceptances: {},
   eq: (a: unknown, b: unknown) => ({ a, b }),
   follows: { id: 'id', followerId: 'followerId', followingId: 'followingId' },
   groupMembers: {},
   groups: {},
   gte: (...args: unknown[]) => args,
+  inArray: (...args: unknown[]) => args,
   isNull: (...args: unknown[]) => args,
   messages: {},
   perpPositions: {},
@@ -70,6 +72,10 @@ mock.module('@feed/core/markets/prediction', () => ({
 }));
 
 mock.module('@feed/engine', () => ({
+  createNpcWalletAdapter: mock(() => ({})),
+  createPerpPriceImpactPort: mock(() => ({})),
+  createPerpSettlement: mock(() => ({})),
+  createPerpTradesCachePort: mock(() => ({})),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0,
     PLATFORM_SHARE: 0,
@@ -81,10 +87,10 @@ mock.module('@feed/engine', () => ({
   generateTagsFromPost: mock(async () => []),
   invalidateAfterPredictionTrade: mock(async () => undefined),
   PredictionPricing: {},
-  createPerpPriceImpactPort: mock(() => ({})),
   StaticDataRegistry: { getActor: mock(() => null) },
   storeTagsForPost: mock(async () => undefined),
   WalletService: class {},
+  withPredictionSettlement: mock(async () => undefined),
 }));
 
 mock.module('../../shared/logger', () => ({
@@ -246,5 +252,89 @@ describe('executeDirectRepost', () => {
 
     expect(result.success).toBe(true);
     expect(sharedPostId).toBe(quotePost.id);
+  });
+
+  test.each([
+    'direct',
+    'drizzle',
+  ])('marks a %s unique-constraint result as an already-existing repost', async (shape) => {
+    const originalPost = {
+      id: 'post-original',
+      authorId: 'user-1',
+      content: 'Original content',
+      originalPostId: null,
+    };
+    let selectCallCount = 0;
+    mockDb.select = mock(() => ({
+      from: mock(() => ({
+        where: mock(() => ({
+          limit: mock(async () => {
+            selectCallCount += 1;
+            return selectCallCount === 1
+              ? [originalPost]
+              : [{ id: 'share-existing' }];
+          }),
+        })),
+      })),
+    }));
+
+    const uniqueError = Object.assign(
+      new Error('duplicate key value violates unique constraint'),
+      { code: '23505' }
+    );
+    mockDb.transaction = mock(
+      async (callback: (tx: unknown) => Promise<void>) => {
+        await callback({
+          insert: mock(() => ({
+            values: mock(async () => {
+              throw shape === 'drizzle'
+                ? new Error('Failed query: insert into shares', {
+                    cause: uniqueError,
+                  })
+                : uniqueError;
+            }),
+          })),
+        });
+        return undefined;
+      }
+    ) as typeof mockDb.transaction;
+
+    const result = await executeDirectRepost({
+      agentUserId: 'user-2',
+      postId: 'post-original',
+      comment: undefined,
+    });
+
+    expect(result).toEqual({
+      success: true,
+      repostId: 'share-existing',
+      alreadyReposted: true,
+    });
+  });
+
+  test('does not treat another wrapped PostgreSQL failure as a duplicate', async () => {
+    const source = {
+      id: 'post-original',
+      authorId: 'user-1',
+      content: 'Original',
+      originalPostId: null,
+    };
+    mockDb.select = mock(() => ({
+      from: mock(() => ({
+        where: mock(() => ({ limit: mock(async () => [source]) })),
+      })),
+    }));
+    const queryError = new Error('Failed query: insert into shares', {
+      cause: Object.assign(new Error('foreign key violation'), {
+        code: '23503',
+      }),
+    });
+    mockDb.transaction = mock(async () => {
+      throw queryError;
+    });
+    await expect(
+      executeDirectRepost({ agentUserId: 'user-2', postId: source.id })
+    ).rejects.toBe(queryError);
+    expect(mockDb.select).toHaveBeenCalledTimes(1);
   });
 });

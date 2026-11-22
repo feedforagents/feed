@@ -36,6 +36,8 @@ import {
 } from '@feed/db';
 import {
   createPerpSettlement,
+  createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
   PriceUpdateService,
@@ -47,7 +49,6 @@ import {
   logger,
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
-import { createTradingFeeOutboxAdapter } from '@/lib/services/trading-fee-outbox';
 
 /**
  * Creates a WalletPort adapter that wraps WalletService methods.
@@ -99,13 +100,22 @@ export function createBroadcastAdapter(): BroadcastPort {
  */
 export function createFeeProcessorAdapter(): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
-        relatedId
+        relatedId,
+        undefined,
+        operationId
       ),
   };
 }
@@ -204,6 +214,7 @@ export function createPerpMarketService(
     settlement: createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: createWalletAdapter(),
+    cache: createPerpTradesCachePort(),
     fees: perpFeeConfig,
   };
 
