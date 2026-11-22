@@ -1,5 +1,5 @@
 import { logger, type MessageMetadata } from '@feed/shared';
-import { useQueryClient } from '@tanstack/react-query';
+import { skipToken, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   type MessageReactionSummary,
@@ -176,10 +176,8 @@ export const chatMessagesQueryKey = (chatId: string, userId?: string | null) =>
  * Shape of the data stored in the React Query cache for a chat.
  * Bundles messages with pagination state so they stay in sync.
  *
- * Cache lifetime: Data is written/read via setQueryData/getQueryData (not useQuery).
- * React Query's default gcTime (5 min) applies — unused chat data is garbage-collected
- * 5 minutes after the last component stops referencing it. For frequently-visited chats,
- * data stays alive indefinitely. For cross-session persistence, IndexedDB handles it.
+ * Data is written imperatively and observed by the open chat. IndexedDB
+ * handles cross-session persistence.
  */
 export interface ChatMessagesData {
   messages: ChatMessage[];
@@ -642,8 +640,11 @@ export function useChatMessages(chatId: string | null) {
     if (isConnected && chatId) setIsLoading(false);
   }, [isConnected, chatId]);
 
-  // ── Derived state from cache ────────────────────────────────────────
-  const cachedData = getCachedData();
+  // Observe writes from reconnect and SSE without starting another fetch.
+  const { data: cachedData } = useQuery<ChatMessagesData>({
+    queryKey: chatMessagesQueryKey(chatId ?? '', userId),
+    queryFn: skipToken,
+  });
   const messages = cachedData?.messages ?? [];
   const hasMore = cachedData?.hasMore ?? false;
 
