@@ -83,6 +83,7 @@ import {
 import {
   generateTrendingSummary,
   getCurrentTrendingTags,
+  getLatestTrendingCalculation,
   groupTrendingTags,
   type TrendingTag,
 } from '@feed/engine';
@@ -91,8 +92,10 @@ import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
 // Server-side cache with longer TTL
+type TrendingResponse = Awaited<ReturnType<typeof groupTrendingTags>>;
 interface CachedTrendingData {
-  data: unknown[];
+  batch: string;
+  data: TrendingResponse;
   timestamp: number;
 }
 
@@ -100,13 +103,28 @@ let trendingCache: CachedTrendingData | null = null;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // Request deduplication: prevent concurrent requests from all running expensive LLM calls
-let ongoingRequest: Promise<unknown[]> | null = null;
+let ongoingRequest: {
+  batch: string;
+  promise: Promise<TrendingResponse>;
+} | null = null;
 
 export const GET = withErrorHandling(async (_request: NextRequest) => {
   const startTime = Date.now();
 
-  // Check server-side cache first
-  if (trendingCache && Date.now() - trendingCache.timestamp < CACHE_TTL_MS) {
+  const calculation = await getLatestTrendingCalculation();
+  if (!calculation?.hasTags) {
+    return NextResponse.json({
+      success: true,
+      trending: [],
+      message: 'No trending data yet - check back after first game tick',
+    });
+  }
+  const batch = calculation.batch;
+
+  if (
+    trendingCache?.batch === batch &&
+    Date.now() - trendingCache.timestamp < CACHE_TTL_MS
+  ) {
     logger.debug(
       'Returning cached trending data',
       {
@@ -123,13 +141,13 @@ export const GET = withErrorHandling(async (_request: NextRequest) => {
   }
 
   // Request deduplication: if another request is already processing, wait for it
-  if (ongoingRequest) {
+  if (ongoingRequest?.batch === batch) {
     logger.debug(
       'Waiting for ongoing trending request to complete',
       undefined,
       'GET /api/feed/widgets/trending'
     );
-    const result = await ongoingRequest;
+    const result = await ongoingRequest.promise;
     return NextResponse.json({
       success: true,
       trending: result,
@@ -139,15 +157,14 @@ export const GET = withErrorHandling(async (_request: NextRequest) => {
   // Create the processing promise
   const processingPromise = (async () => {
     // Get trending tags from cache (get more tags for better grouping)
-    const trending = await getCurrentTrendingTags(10);
+    const trending = await getCurrentTrendingTags(10, calculation);
 
-    if (!trending || trending.length === 0) {
+    if (trending.length === 0) {
       logger.info(
         'No trending tags available',
         undefined,
         'GET /api/feed/widgets/trending'
       );
-      trendingCache = { data: [], timestamp: Date.now() };
       return [];
     }
 
@@ -201,12 +218,6 @@ export const GET = withErrorHandling(async (_request: NextRequest) => {
     // Return top 5 groups
     const topGroups = groupedTrending.slice(0, 5);
 
-    // Cache the result
-    trendingCache = {
-      data: topGroups,
-      timestamp: Date.now(),
-    };
-
     const duration = Date.now() - startTime;
     logger.info(
       'Generated trending data',
@@ -222,10 +233,17 @@ export const GET = withErrorHandling(async (_request: NextRequest) => {
 
   // Always release the shared promise (success, empty or failure) so an
   // expired cache or a rejected attempt cannot poison later requests.
-  const sharedRequest: Promise<unknown[]> = processingPromise.finally(() => {
-    if (ongoingRequest === sharedRequest) ongoingRequest = null;
-  });
-  ongoingRequest = sharedRequest;
+  const sharedRequest: Promise<TrendingResponse> = processingPromise
+    .then((data) => {
+      if (ongoingRequest?.promise === sharedRequest) {
+        trendingCache = { batch, data, timestamp: Date.now() };
+      }
+      return data;
+    })
+    .finally(() => {
+      if (ongoingRequest?.promise === sharedRequest) ongoingRequest = null;
+    });
+  ongoingRequest = { batch, promise: sharedRequest };
 
   const result = await sharedRequest;
 

@@ -13,20 +13,28 @@ import {
   asc,
   count,
   db,
+  dbWrite,
   desc,
   eq,
+  gameConfigs,
+  gte,
   inArray,
   isNull,
+  lt,
   lte,
   ne,
+  notExists,
   posts,
   postTags,
+  scheduledInferenceFetch,
+  sql,
   tags,
   trendingTags,
   users,
   withTransaction,
 } from '@feed/db';
 import { generateSnowflakeId, logger } from '@feed/shared';
+import { getTableColumns, notLike } from 'drizzle-orm';
 import OpenAI from 'openai';
 import { tracedCompletion } from '../llm/traced-completion';
 import { isPromptLoggingEnabled, logPrompt } from '../utils/prompt-logger';
@@ -118,6 +126,7 @@ async function getOpenAIClient(): Promise<OpenAIClient | null> {
     openaiClient = new OpenAI({
       apiKey,
       baseURL,
+      fetch: scheduledInferenceFetch,
       maxRetries: 0,
       timeout: 60000,
     });
@@ -479,12 +488,13 @@ export async function getPostsByTag(
   }
 
   // Deleted and future-dated posts are excluded from both the page and the
-  // total so pagination and counts agree.
-  const now = new Date();
+  // total so pagination and counts agree. Test authors are excluded the
+  // same way every other feed excludes them (main feed, following feed,
+  // an actor's own post list): accounts flagged isTest in the users table
+  // and ids starting with 'test-'.
   const eligible = and(
     eq(postTags.tagId, tag.id),
-    isNull(posts.deletedAt),
-    lte(posts.timestamp, now)
+    eligibleTaggedPosts(new Date())
   );
 
   const [pageRows, totalResult] = await Promise.all([
@@ -493,7 +503,13 @@ export async function getPostsByTag(
       .from(postTags)
       .innerJoin(posts, eq(postTags.postId, posts.id))
       .where(eligible)
-      .orderBy(desc(postTags.createdAt))
+      // Total order: memberships created in one batch share a
+      // createdAt, and a single-column sort lets each offset page
+      // order that tied block differently, repeating some posts and
+      // skipping others permanently. The unique post id breaks ties
+      // so pages are stable (same rule as the A2A/MCP posts-by-tag
+      // surfaces).
+      .orderBy(desc(postTags.createdAt), desc(posts.id))
       .offset(offset)
       .limit(limit),
     db
@@ -508,6 +524,20 @@ export async function getPostsByTag(
     posts: pageRows.map((row) => row.post),
     total: totalResult[0]?.count ?? 0,
   };
+}
+
+function eligibleTaggedPosts(now: Date) {
+  return and(
+    isNull(posts.deletedAt),
+    lte(posts.timestamp, now),
+    notLike(posts.authorId, 'test-%'),
+    notExists(
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+    )
+  );
 }
 
 /**
@@ -530,111 +560,50 @@ export async function getTagStatistics(
 > {
   const last24Hours = new Date(windowEnd.getTime() - 24 * 60 * 60 * 1000);
 
-  // Query postTags within time window, then keep only posts a viewer can
-  // actually see on the tag page, so the stored trending postCount agrees
-  // with the tag page: not soft-deleted, already published (post timestamp
-  // not after the window end), and not written by a test author — the same
-  // test-author rule as the main feed and getPostsByTag (accounts flagged
-  // isTest in the users table and ids starting with 'test-').
-  const allPostTags = await db.query.postTags.findMany({
-    where: (pt, { and: andOp, gte: whereGte, lte: whereLte }) =>
-      andOp(
-        whereGte(pt.createdAt, windowStart),
-        whereLte(pt.createdAt, windowEnd)
+  return dbWrite
+    .select({
+      tagId: tags.id,
+      tagName: tags.name,
+      tagDisplayName: tags.displayName,
+      tagCategory: tags.category,
+      postCount: count(),
+      recentPostCount:
+        sql<number>`count(*) filter (where ${postTags.createdAt} >= ${last24Hours.toISOString()}::timestamp)`.mapWith(
+          Number
+        ),
+      oldestPostDate: sql<Date>`min(${postTags.createdAt})`.mapWith(
+        postTags.createdAt
       ),
-    with: {
-      tag: true,
-      post: true,
-    },
-    orderBy: asc(postTags.createdAt),
-  });
+      newestPostDate: sql<Date>`max(${postTags.createdAt})`.mapWith(
+        postTags.createdAt
+      ),
+    })
+    .from(postTags)
+    .innerJoin(posts, eq(postTags.postId, posts.id))
+    .innerJoin(tags, eq(postTags.tagId, tags.id))
+    .where(
+      and(
+        gte(postTags.createdAt, windowStart),
+        lte(postTags.createdAt, windowEnd),
+        eligibleTaggedPosts(windowEnd)
+      )
+    )
+    .groupBy(tags.id, tags.name, tags.displayName, tags.category)
+    .having(gte(count(), 3))
+    .orderBy(desc(count()));
+}
 
-  type PostTagInWindow = (typeof allPostTags)[number];
+const TRENDING_CALCULATION_KEY = 'latest-trending-calculation';
 
-  const publishedPostTags = allPostTags.filter(
-    (pt: PostTagInWindow) =>
-      !pt.post.deletedAt && pt.post.timestamp <= windowEnd
-  );
-
-  const candidateAuthorIds = [
-    ...new Set(
-      publishedPostTags.map((pt: PostTagInWindow) => pt.post.authorId)
-    ),
-  ];
-  const testAuthorRows =
-    candidateAuthorIds.length > 0
-      ? await db
-          .select({ id: users.id })
-          .from(users)
-          .where(
-            and(eq(users.isTest, true), inArray(users.id, candidateAuthorIds))
-          )
-      : [];
-  const testAuthorIds = new Set(
-    testAuthorRows.map((row: { id: string }) => row.id)
-  );
-
-  const postTagsList = publishedPostTags.filter(
-    (pt: PostTagInWindow) =>
-      !pt.post.authorId.startsWith('test-') &&
-      !testAuthorIds.has(pt.post.authorId)
-  );
-
-  const tagStats = new Map<
-    string,
-    {
-      tag: {
-        id: string;
-        name: string;
-        displayName: string;
-        category: string | null;
-      };
-      postCount: number;
-      recentPostCount: number;
-      oldestPostDate: Date;
-      newestPostDate: Date;
-    }
-  >();
-
-  postTagsList.forEach((pt) => {
-    const existing = tagStats.get(pt.tagId);
-    const isRecent = pt.createdAt >= last24Hours;
-
-    if (existing) {
-      existing.postCount++;
-      if (isRecent) existing.recentPostCount++;
-      if (pt.createdAt < existing.oldestPostDate)
-        existing.oldestPostDate = pt.createdAt;
-      if (pt.createdAt > existing.newestPostDate)
-        existing.newestPostDate = pt.createdAt;
-    } else {
-      tagStats.set(pt.tagId, {
-        tag: pt.tag,
-        postCount: 1,
-        recentPostCount: isRecent ? 1 : 0,
-        oldestPostDate: pt.createdAt,
-        newestPostDate: pt.createdAt,
-      });
-    }
-  });
-
-  return Array.from(tagStats.values())
-    .filter((stats) => stats.postCount >= 3)
-    .map((stats) => ({
-      tagId: stats.tag.id,
-      tagName: stats.tag.name,
-      tagDisplayName: stats.tag.displayName,
-      tagCategory: stats.tag.category,
-      postCount: stats.postCount,
-      recentPostCount: stats.recentPostCount,
-      oldestPostDate: stats.oldestPostDate,
-      newestPostDate: stats.newestPostDate,
-    }))
-    .sort((a, b) => b.postCount - a.postCount);
+export interface TrendingCalculation {
+  calculatedAt: Date;
+  batch: string;
+  hasTags: boolean;
+  recorded: boolean;
 }
 
 /**
- * Store trending tags calculation results
+ * Store history and mark the current calculation in the same transaction.
  */
 export async function storeTrendingTags(
   tagsList: Array<{
@@ -647,66 +616,90 @@ export async function storeTrendingTags(
   windowStart: Date,
   windowEnd: Date
 ): Promise<void> {
-  const trendingTagIds = await Promise.all(
-    tagsList.map(() => generateSnowflakeId())
+  const hasTags = tagsList.length > 0;
+  const rows = await Promise.all(
+    tagsList.map(async (tag) => ({
+      ...tag,
+      id: await generateSnowflakeId(),
+      windowStart,
+      windowEnd,
+      calculatedAt: windowEnd,
+      relatedContext: tag.relatedContext || null,
+    }))
   );
-  // Every row of one calculation shares the same calculatedAt, which is the
-  // batch identity getCurrentTrendingTags reads.
-  const calculatedAt = new Date();
 
   await withTransaction(async (tx) => {
-    for (let idx = 0; idx < tagsList.length; idx++) {
-      const tag = tagsList[idx];
-      if (!tag) continue;
-      const trendingTagId = trendingTagIds[idx];
-      if (!trendingTagId) {
-        throw new Error(`Failed to generate trending tag ID for index ${idx}`);
-      }
-      await tx.insert(trendingTags).values({
-        id: trendingTagId,
-        tagId: tag.tagId,
-        score: tag.score,
-        postCount: tag.postCount,
-        rank: tag.rank,
-        windowStart,
-        windowEnd,
-        calculatedAt,
-        relatedContext: tag.relatedContext || null,
-      });
+    // Only the latest window can publish, including when it has no rows.
+    const [published] = await tx
+      .insert(gameConfigs)
+      .values({
+        id: TRENDING_CALCULATION_KEY,
+        key: TRENDING_CALCULATION_KEY,
+        value: hasTags,
+        updatedAt: windowEnd,
+      })
+      .onConflictDoUpdate({
+        target: gameConfigs.key,
+        set: { value: hasTags, updatedAt: windowEnd },
+        setWhere: lt(gameConfigs.updatedAt, windowEnd),
+      })
+      .returning({ id: gameConfigs.id });
+
+    if (published && rows.length > 0) {
+      await tx.insert(trendingTags).values(rows);
     }
   });
-
-  logger.info(
-    'Stored trending tags',
-    { count: tagsList.length, windowStart, windowEnd },
-    'TagService'
-  );
 }
 
-/**
- * Get current trending tags (most recent calculation)
- */
-export async function getCurrentTrendingTags(
-  limit = 10
-): Promise<TrendingTagWithTag[]> {
-  const [latestCalculation] = await db
-    .select({ calculatedAt: trendingTags.calculatedAt })
+export async function getLatestTrendingCalculation(): Promise<
+  TrendingCalculation | undefined
+> {
+  const [completed] = await dbWrite
+    .select({
+      calculatedAt: gameConfigs.updatedAt,
+      batch: sql<string>`${gameConfigs.updatedAt}::text`,
+      value: gameConfigs.value,
+    })
+    .from(gameConfigs)
+    .where(eq(gameConfigs.key, TRENDING_CALCULATION_KEY))
+    .limit(1);
+
+  if (completed) {
+    return {
+      calculatedAt: completed.calculatedAt,
+      batch: completed.batch,
+      hasTags: completed.value === true,
+      recorded: true,
+    };
+  }
+
+  // Databases created before the publication marker still have tag rows.
+  const [legacy] = await dbWrite
+    .select({
+      calculatedAt: trendingTags.calculatedAt,
+      // Older rows may have microseconds that JavaScript Date loses.
+      batch: sql<string>`${trendingTags.calculatedAt}::text`,
+    })
     .from(trendingTags)
     .orderBy(desc(trendingTags.calculatedAt))
     .limit(1);
+  return legacy ? { ...legacy, hasTags: true, recorded: false } : undefined;
+}
 
-  if (!latestCalculation) {
-    return [];
-  }
+export async function getCurrentTrendingTags(
+  limit = 10,
+  calculation?: TrendingCalculation
+): Promise<TrendingTagWithTag[]> {
+  const current = calculation ?? (await getLatestTrendingCalculation());
+  if (!current?.hasTags) return [];
 
-  // Only the latest calculation batch (rows share calculatedAt), instead of
-  // a 1-second window that could mix overlapping runs.
-  return (await db.query.trendingTags.findMany({
-    where: eq(trendingTags.calculatedAt, latestCalculation.calculatedAt),
-    with: { tag: true },
-    orderBy: asc(trendingTags.rank),
-    limit,
-  })) as TrendingTagWithTag[];
+  return dbWrite
+    .select({ ...getTableColumns(trendingTags), tag: tags })
+    .from(trendingTags)
+    .innerJoin(tags, eq(trendingTags.tagId, tags.id))
+    .where(sql`${trendingTags.calculatedAt} = ${current.batch}::timestamp`)
+    .orderBy(asc(trendingTags.rank))
+    .limit(limit);
 }
 
 /**

@@ -14,7 +14,6 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { EmbedModeProvider } from '@/contexts/EmbedContext';
 import { FontSizeProvider } from '@/contexts/FontSizeContext';
 import { WidgetRefreshProvider } from '@/contexts/WidgetRefreshContext';
-import { AutoDailyRewardProvider } from '@/hooks/useAutoDailyReward';
 import { SessionHeartbeatProvider } from '@/hooks/useSessionHeartbeat';
 import { hydrateChatCacheFromIndexedDB } from '@/lib/chat/hydrateChatCache';
 import { useAuthStore } from '@/stores/authStore';
@@ -124,19 +123,17 @@ export function Providers({
           </Suspense>
           <OnboardingProvider>
             <SessionHeartbeatProvider>
-              <AutoDailyRewardProvider>
-                <GameGuideProvider>
-                  <OutcomeNotificationProvider>
-                    <WidgetRefreshProvider>
-                      {mounted ? (
-                        <Fragment>{children}</Fragment>
-                      ) : (
-                        <div className="min-h-dvh bg-sidebar md:min-h-screen" />
-                      )}
-                    </WidgetRefreshProvider>
-                  </OutcomeNotificationProvider>
-                </GameGuideProvider>
-              </AutoDailyRewardProvider>
+              <GameGuideProvider>
+                <OutcomeNotificationProvider>
+                  <WidgetRefreshProvider>
+                    {mounted ? (
+                      <Fragment>{children}</Fragment>
+                    ) : (
+                      <div className="min-h-dvh bg-sidebar md:min-h-screen" />
+                    )}
+                  </WidgetRefreshProvider>
+                </OutcomeNotificationProvider>
+              </GameGuideProvider>
             </SessionHeartbeatProvider>
           </OnboardingProvider>
         </DiscordActivityProvider>
