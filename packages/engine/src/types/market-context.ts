@@ -49,6 +49,8 @@ export interface NPCPosition {
   entryPrice: number;
   currentPrice: number;
   size: number;
+  /** Leverage for perp positions; `size` is the leveraged notional. */
+  leverage?: number;
   shares?: number;
   unrealizedPnL: number;
   openedAt: string;

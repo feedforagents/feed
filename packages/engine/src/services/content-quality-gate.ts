@@ -193,7 +193,11 @@ export class ContentQualityGate {
     // 3. Grounding: article should relate to its source context (skipped
     // when the structure is already invalid — avoids embedding calls)
     if (structure.passed) {
-      const grounding = await validateGrounding(sourceContext, articleText);
+      // A long article can cover every keyword in a short source without
+      // those keywords making up 15% of its body vocabulary.
+      const grounding = await validateGrounding(sourceContext, articleText, {
+        useShorterKeywordSet: true,
+      });
       scores.push(grounding.confidence);
       if (!grounding.grounded) reasons.push(...grounding.reasons);
     }
