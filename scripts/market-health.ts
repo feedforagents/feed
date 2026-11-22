@@ -19,7 +19,7 @@ import {
   perpMarketSnapshots,
   predictionPriceHistories,
 } from '@feed/db/schema';
-import { and, desc, eq, gte } from 'drizzle-orm';
+import { and, count, eq, gte, lte, max, min } from 'drizzle-orm';
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -179,28 +179,30 @@ async function analyzeMarkets(): Promise<HealthReport> {
       });
     }
 
-    // Recent price swing
-    const history = await db
+    // Aggregate all observations in the reporting window.
+    const [history] = await db
       .select({
-        yesPrice: predictionPriceHistories.yesPrice,
-        createdAt: predictionPriceHistories.createdAt,
+        sampleCount: count(),
+        minPrice: min(predictionPriceHistories.yesPrice),
+        maxPrice: max(predictionPriceHistories.yesPrice),
       })
       .from(predictionPriceHistories)
       .where(
         and(
           eq(predictionPriceHistories.marketId, market.id),
-          gte(predictionPriceHistories.createdAt, historyFrom)
+          gte(predictionPriceHistories.createdAt, historyFrom),
+          lte(predictionPriceHistories.createdAt, now)
         )
-      )
-      .orderBy(desc(predictionPriceHistories.createdAt))
-      .limit(50);
+      );
 
     let swingPct: number | undefined;
-    if (history.length >= 2) {
-      const prices = history.map((h) => h.yesPrice);
-      const minP = Math.min(...prices);
-      const maxP = Math.max(...prices);
-      swingPct = (maxP - minP) * 100;
+    if (
+      history &&
+      history.sampleCount >= 2 &&
+      history.minPrice != null &&
+      history.maxPrice != null
+    ) {
+      swingPct = (history.maxPrice - history.minPrice) * 100;
       if (swingPct > PRED_SWING_WARN_PCT) {
         flags.push({
           type: 'VOLATILE',
