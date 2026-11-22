@@ -52,6 +52,9 @@ import {
   invalidateCachePattern,
 } from './cache-service';
 
+// Large post-list namespaces benefit from fewer Redis SCAN round trips.
+const POST_CACHE_SCAN_COUNT = 1000;
+
 /** Keep cursor text and viewer policy in separate, unambiguous key fields. */
 function postFeedCacheKey(
   limit: number,
@@ -60,21 +63,25 @@ function postFeedCacheKey(
   authorId?: string
 ): string {
   const isCursor = typeof cursorOrOffset === 'string';
+  // Keep all policy variants under the same actor invalidation prefix.
+  const prefix = authorId === undefined ? '' : `${authorId}:`;
   if (!visibility) {
-    const prefix = authorId === undefined ? '' : `${authorId}:`;
     return isCursor
       ? `${prefix}${limit}:cursor:${cursorOrOffset}`
       : `${prefix}${limit}:offset:${cursorOrOffset || 0}`;
   }
-  return JSON.stringify([
-    'post-visibility-v1',
-    authorId ?? null,
-    limit,
-    isCursor ? 'cursor' : 'offset',
-    cursorOrOffset ?? 0,
-    [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
-    visibility.excludeDeadReposts === true,
-  ]);
+  return (
+    prefix +
+    JSON.stringify([
+      'post-visibility-v1',
+      authorId ?? null,
+      limit,
+      isCursor ? 'cursor' : 'offset',
+      cursorOrOffset ?? 0,
+      [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
+      visibility.excludeDeadReposts === true,
+    ])
+  );
 }
 
 /**
@@ -594,8 +601,14 @@ class CachedDatabaseService {
   async invalidatePostsCache() {
     logger.info('Invalidating posts cache', undefined, 'CachedDatabaseService');
     await Promise.all([
-      invalidateCachePattern('*', { namespace: CACHE_KEYS.POSTS_LIST }),
-      invalidateCachePattern('*', { namespace: CACHE_KEYS.POSTS_FOLLOWING }),
+      invalidateCachePattern('*', {
+        namespace: CACHE_KEYS.POSTS_LIST,
+        scanCount: POST_CACHE_SCAN_COUNT,
+      }),
+      invalidateCachePattern('*', {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+        scanCount: POST_CACHE_SCAN_COUNT,
+      }),
     ]);
   }
 
@@ -610,6 +623,7 @@ class CachedDatabaseService {
     );
     await invalidateCachePattern(`${actorId}:*`, {
       namespace: CACHE_KEYS.POSTS_BY_ACTOR,
+      scanCount: POST_CACHE_SCAN_COUNT,
     });
   }
 
