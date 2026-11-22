@@ -44,6 +44,7 @@ import {
   logAdminModify,
   NotFoundError,
   notifyCommentOnPost,
+  notifyFollow,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -1902,7 +1903,22 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  await followUserWithBlockCheck(agent.userId, args.userId);
+  const created = await followUserWithBlockCheck(agent.userId, args.userId);
+  if (created) {
+    try {
+      await notifyFollow(args.userId, agent.userId);
+    } catch (error) {
+      logger.warn(
+        'Failed to notify user of committed follow',
+        {
+          userId: args.userId,
+          followerId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
   return { success: true };
 }
 
