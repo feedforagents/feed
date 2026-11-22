@@ -22,7 +22,9 @@ import {
   favorites,
   gameOnboarding,
   inArray,
+  npcMarketClues,
   posts,
+  sql,
   userPnLSnapshots,
   users,
   whitelist,
@@ -161,6 +163,29 @@ async function cleanup(acquired: OwnedRows) {
         throw new Error(
           'cleanup refused: a foreign row still references an owned user'
         );
+      }
+    }
+    if (acquired.postIds.length > 0) {
+      await tx
+        .select({ id: posts.id })
+        .from(posts)
+        .where(inArray(posts.id, acquired.postIds))
+        .for('update');
+      // Localnet's manual clue migration adds a nullable reference to posts.
+      const [clueTable] = await tx.execute<{ present: boolean }>(
+        sql`SELECT pg_catalog.to_regclass('public."NpcMarketClue"') IS NOT NULL AS present`
+      );
+      if (clueTable?.present) {
+        const [clue] = await tx
+          .select({ questionId: npcMarketClues.questionId })
+          .from(npcMarketClues)
+          .where(inArray(npcMarketClues.postId, acquired.postIds))
+          .limit(1);
+        if (clue) {
+          throw new Error(
+            'cleanup refused: a foreign NPC market clue still references an owned post'
+          );
+        }
       }
     }
     if (acquired.favoriteIds.length > 0) {

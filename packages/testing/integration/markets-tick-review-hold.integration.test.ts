@@ -20,7 +20,7 @@ import {
 } from './helpers/sub-market-isolation';
 
 if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
-  test('runs funded manual reviews through four real ticks in a leased fresh database', async () => {
+  test('runs funded manual review and resolution races in a leased fresh database', async () => {
     await runIsolatedMarketsReviewCases();
   }, 300_000);
 } else {
@@ -31,6 +31,7 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
   const receiptPath = join(dirname(leaseFile), 'fixture-receipts.jsonl');
   writeFileSync(receiptPath, '', { flag: 'wx', mode: 0o600 });
   const {
+    adminAuditLogs,
     balanceTransactions,
     closeDatabase,
     db,
@@ -39,11 +40,20 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     inArray,
     markets,
     positions,
+    posts,
+    predictionResolutionWork,
     questions,
     sql,
     timeframedMarkets,
     users,
   } = await import('@feed/db');
+  const recoveryMigration = await Bun.file(
+    new URL(
+      '../../db/drizzle/migrations/manual/0008_prediction_resolution_work.sql',
+      import.meta.url
+    )
+  ).text();
+  await db.execute(sql.raw(recoveryMigration));
   const { FEE_CONFIG, mapGranularToDbTimeframe, withPredictionSettlement } =
     await import('@feed/engine');
   const { generateSnowflakeId } = await import('@feed/shared');
@@ -62,6 +72,7 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     timeframedId: string;
     userId: string;
     payout: number;
+    proofId: string;
   };
   type Review = 'pending' | 'unset' | 'rejected' | 'approved';
   let support: Support;
@@ -75,11 +86,13 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
   const originalCronSecret = process.env.CRON_SECRET;
   const originalGameStart = process.env.GAME_START;
   const originalRelay = process.env.REDIRECT_CRON_STAGING;
+  const originalDeployment = process.env.DEPLOYMENT_ENV;
 
   beforeAll(async () => {
     process.env.CRON_SECRET = 'review-hold-integration';
     process.env.GAME_START = 'true';
     process.env.REDIRECT_CRON_STAGING = 'false';
+    process.env.DEPLOYMENT_ENV = 'localnet';
     expect(await db.select({ id: games.id }).from(games)).toHaveLength(0);
     expect(await db.select({ id: questions.id }).from(questions)).toHaveLength(
       0
@@ -224,6 +237,8 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     else process.env.GAME_START = originalGameStart;
     if (originalRelay === undefined) delete process.env.REDIRECT_CRON_STAGING;
     else process.env.REDIRECT_CRON_STAGING = originalRelay;
+    if (originalDeployment === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = originalDeployment;
     // No row cleanup: only the existing positive-lease whole-child DROP on pass.
     // A failed child and every acquired physical receipt are retained.
     await closeDatabase();
@@ -234,7 +249,9 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     const questionId = await generateSnowflakeId();
     const timeframedId = await generateSnowflakeId();
     const userId = await generateSnowflakeId();
-    const fixture = { questionId, timeframedId, userId, payout: 0 };
+    const proofId = await generateSnowflakeId();
+    const fixture = { questionId, timeframedId, userId, payout: 0, proofId };
+    const resolutionDate = new Date(now - 60000);
     const [max] = await db
       .select({ max: sql<number>`COALESCE(MAX("questionNumber"), 0)` })
       .from(questions);
@@ -275,9 +292,8 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
             : {
                 requiresManualReview: true,
                 resolutionReviewStatus: review === 'unset' ? null : review,
-                resolutionDate: new Date(now - 60000),
+                resolutionDate,
                 resolutionDescription: 'Low-confidence proof',
-                resolutionProofUrl: 'https://example.invalid/proof',
               }),
         })
         .returning({
@@ -299,6 +315,26 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
           id: markets.id,
           canonical: sql<string>`to_jsonb(${markets})::text`,
         });
+      if (review !== 'rejected') {
+        await tx.insert(predictionResolutionWork).values({
+          questionId,
+          resolutionDate,
+          outcome: true,
+          draft: {
+            description: 'Low-confidence proof',
+            confidence: 0.3,
+            requiresManualReview: true,
+            post: {
+              id: proofId,
+              type: 'proof',
+              authorId: userId,
+              content: 'Low-confidence proof',
+              fullContent: 'A generated proof awaits review.',
+              articleTitle: 'Resolution proof',
+            },
+          },
+        });
+      }
       return { u, q, m };
     });
     remember('User', acquired.u);
@@ -381,8 +417,13 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
       .select()
       .from(balanceTransactions)
       .where(eq(balanceTransactions.userId, ids.userId));
+    const proofs = await db
+      .select({ id: posts.id })
+      .from(posts)
+      .where(eq(posts.id, ids.proofId));
     return {
       balance: Number(user?.virtualBalance),
+      publicProofs: proofs.length,
       payouts: ledger
         .filter((row) => row.type === 'pred_resolve')
         .map((row) => Number(row.amount)),
@@ -393,9 +434,9 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
   }
 
   async function runTick() {
-    const { POST } = await import('@/app/api/cron/markets-tick/route');
+    const { POST } = await import('@/app/api/cron/markets-recovery/route');
     const res = await POST(
-      new NextRequest('http://localhost/api/cron/markets-tick', {
+      new NextRequest('http://localhost/api/cron/markets-recovery', {
         method: 'POST',
         headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
       })
@@ -439,6 +480,7 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     return {
       balance: 400,
       payouts: [],
+      publicProofs: 0,
       status: 'active',
       paid: false,
       timeframedActive: true,
@@ -448,6 +490,7 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
     return {
       balance: 400 + fixture.payout,
       payouts: [fixture.payout],
+      publicProofs: 1,
       status: 'resolved',
       paid: true,
       timeframedActive: false,
@@ -517,6 +560,110 @@ if (!process.env.FEED_MARKETS_REVIEW_CHILD) {
         [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       for (const key of ['questions', 'markets', 'timeframed'] as const)
         expect(ordered(actual[key])).toEqual(ordered(support[key]));
+    });
+
+    test('a losing admin resolver preserves the paid outcome and writes no audit', async () => {
+      const fixture = await seedEndedMarket('unset');
+      const marketId = fixture.questionId;
+      const { POST } = await import('@/app/api/admin/markets/[marketId]/route');
+      const token = getAdminToken();
+      if (!token) throw new Error('Integration admin token is required');
+      const ready = Promise.withResolvers<number>();
+      const release = Promise.withResolvers<void>();
+      const winner = withPredictionSettlement(
+        marketId,
+        { system: 'test_game_tick' },
+        async (service, tx) => {
+          const [row] = await tx
+            .select({ pid: sql<number>`pg_backend_pid()` })
+            .from(markets)
+            .where(eq(markets.id, marketId));
+          if (!row) throw new Error('Missing settlement lock holder');
+          ready.resolve(row.pid);
+          await release.promise;
+          await service.resolve({ marketId, winningSide: 'yes' });
+          await tx
+            .update(questions)
+            .set({ status: 'resolved', resolvedOutcome: true })
+            .where(eq(questions.id, marketId));
+        },
+        {
+          fees: {
+            tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+            platformShare: FEE_CONFIG.PLATFORM_SHARE,
+            referrerShare: FEE_CONFIG.REFERRER_SHARE,
+            minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+          },
+        }
+      );
+      void winner.catch(ready.reject);
+      let pending: ReturnType<typeof POST> | undefined;
+      let response: Response;
+      try {
+        const pid = await ready.promise;
+        pending = POST(
+          new NextRequest(`http://localhost/api/admin/markets/${marketId}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-dev-admin-token': token,
+            },
+            body: JSON.stringify({ action: 'resolve', resolution: false }),
+          }),
+          { params: Promise.resolve({ marketId }) }
+        );
+        void pending.catch(() => {});
+        const deadline = Date.now() + 5000;
+        while (true) {
+          const waiting = await db.execute(sql`
+            SELECT waiting.pid
+            FROM pg_locks waiting
+            JOIN pg_locks held
+              ON (waiting.database, waiting.classid, waiting.objid, waiting.objsubid)
+               = (held.database, held.classid, held.objid, held.objsubid)
+            WHERE held.pid = ${pid}
+              AND held.locktype = 'advisory' AND held.granted
+              AND waiting.locktype = 'advisory' AND NOT waiting.granted
+          `);
+          if (waiting.length > 0) break;
+          if (Date.now() >= deadline)
+            throw new Error('Admin never reached the settlement lock');
+          await Bun.sleep(20);
+        }
+        release.resolve();
+        await winner;
+        response = await pending;
+      } finally {
+        release.resolve();
+        await Promise.allSettled([winner, pending]);
+      }
+
+      const [market] = await db
+        .select({ resolved: markets.resolved, resolution: markets.resolution })
+        .from(markets)
+        .where(eq(markets.id, marketId));
+      expect(market).toEqual({ resolved: true, resolution: true });
+      const [question] = await db
+        .select({
+          status: questions.status,
+          outcome: questions.resolvedOutcome,
+          reviewer: questions.resolutionReviewedBy,
+        })
+        .from(questions)
+        .where(eq(questions.id, marketId));
+      expect(question).toEqual({
+        status: 'resolved',
+        outcome: true,
+        reviewer: null,
+      });
+      expect((await stateOf(fixture)).payouts).toEqual([fixture.payout]);
+      expect(response.status).toBe(409);
+      expect(
+        await db
+          .select({ id: adminAuditLogs.id })
+          .from(adminAuditLogs)
+          .where(eq(adminAuditLogs.resourceId, marketId))
+      ).toEqual([]);
     });
   });
 }

@@ -128,6 +128,88 @@ describe('getSyntheticPerpExecutionPrice', () => {
     expect(quote.executionPrice).toBeGreaterThan(0);
   });
 
+  it('keeps bid below ask for sub-cent prices', () => {
+    const market = createMarket({
+      currentPrice: 0.00005,
+      markPrice: 0.00005,
+      indexPrice: 0.00005,
+      price24hAgo: 0.00005,
+      high24h: 0.00006,
+      low24h: 0.00004,
+    });
+    const quote = getSyntheticPerpQuoteState(market);
+
+    expect(quote.bidPrice).toBeLessThan(quote.askPrice);
+    expect(quote.bidPrice).toBeLessThanOrEqual(quote.midPrice);
+    expect(quote.askPrice).toBeGreaterThanOrEqual(quote.midPrice);
+  });
+
+  it('regenerates an uncrossed quote when the stored quote is crossed', () => {
+    const market = createMarket({
+      currentPrice: 0.00005,
+      markPrice: 0.00005,
+      indexPrice: 0.00005,
+      price24hAgo: 0.00005,
+      high24h: 0.00006,
+      low24h: 0.00004,
+      bidPrice: 0.0001,
+      askPrice: 0.00005,
+      spreadBps: 50,
+      bidDepth: 500,
+      askDepth: 500,
+    });
+    const quote = getSyntheticPerpQuoteState(market);
+
+    expect(quote.bidPrice).toBeLessThan(quote.askPrice);
+    expect(quote.bidPrice).toBeLessThanOrEqual(quote.midPrice);
+  });
+
+  it('keeps evolved quotes uncrossed for sub-cent prices', () => {
+    const market = createMarket({
+      currentPrice: 0.00005,
+      markPrice: 0.00005,
+      indexPrice: 0.00005,
+      price24hAgo: 0.00005,
+      high24h: 0.00006,
+      low24h: 0.00004,
+    });
+    const previous = getSyntheticPerpQuoteState(
+      createMarket({ currentPrice: 100, markPrice: 100, indexPrice: 100 })
+    );
+    const evolved = evolveSyntheticPerpQuoteState({
+      market,
+      previousQuote: previous,
+      elapsedMs: 60_000,
+    });
+
+    expect(evolved.bidPrice).toBeLessThan(evolved.askPrice);
+    expect(evolved.bidPrice).toBeLessThanOrEqual(evolved.midPrice);
+  });
+
+  it('does not let a sell execute above a buy at sub-cent prices', () => {
+    const market = createMarket({
+      currentPrice: 0.00005,
+      markPrice: 0.00005,
+      indexPrice: 0.00005,
+      price24hAgo: 0.00005,
+      high24h: 0.00006,
+      low24h: 0.00004,
+    });
+    const buy = getSyntheticPerpExecutionPrice({
+      market,
+      side: 'buy',
+      size: 10,
+    });
+    const sell = getSyntheticPerpExecutionPrice({
+      market,
+      side: 'sell',
+      size: 10,
+    });
+
+    expect(sell.executionPrice).toBeLessThan(sell.midPrice);
+    expect(sell.executionPrice).toBeLessThan(buy.executionPrice);
+  });
+
   it('partially relaxes stressed quotes back toward target liquidity over time', () => {
     const market = createMarket();
     const stressed = {

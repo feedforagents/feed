@@ -80,8 +80,21 @@
  */
 
 import { optionalAuth, successResponse, withErrorHandling } from '@feed/api';
-import { asPublic, asUser } from '@feed/db';
+import {
+  and,
+  asPublic,
+  asUser,
+  desc,
+  eq,
+  gte,
+  isNull,
+  lte,
+  notExists,
+  posts as postsTable,
+  users as usersTable,
+} from '@feed/db';
 import { logger, TrendingPostsQuerySchema, toISO } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 
 interface TrendingPost {
@@ -141,19 +154,42 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const { posts, allReactions, allComments, allShares, users } =
     authUser && authUser.userId
       ? await asUser(authUser, async (db) => {
-          const postsList = await db.post.findMany({
-            where: {
-              timestamp: {
-                gte: oneDayAgo,
-                lte: now, // ✅ No future posts
-              },
-              deletedAt: null, // Filter out deleted posts
-            },
-            orderBy: {
-              timestamp: 'desc',
-            },
-            take: 100, // Get more posts to calculate trending from
-          });
+          const postsList = await db
+            .select({
+              id: postsTable.id,
+              content: postsTable.content,
+              authorId: postsTable.authorId,
+              timestamp: postsTable.timestamp,
+            })
+            .from(postsTable)
+            .where(
+              and(
+                gte(postsTable.timestamp, oneDayAgo),
+                lte(postsTable.timestamp, now), // ✅ No future posts
+                isNull(postsTable.deletedAt), // Filter out deleted posts
+                // Test authors are excluded in SQL before the 100-post
+                // candidate window, the same rule every sibling post list
+                // applies (main feed, following feed, single-tag page,
+                // grouped trending). Filtering after the fetch would let
+                // test posts crowd real posts out of the window and into
+                // the top five. Authors with no user row (NPC actors,
+                // organizations) are not test authors and stay visible.
+                notLike(postsTable.authorId, 'test-%'),
+                notExists(
+                  db
+                    .select({ id: usersTable.id })
+                    .from(usersTable)
+                    .where(
+                      and(
+                        eq(usersTable.id, postsTable.authorId),
+                        eq(usersTable.isTest, true)
+                      )
+                    )
+                )
+              )
+            )
+            .orderBy(desc(postsTable.timestamp))
+            .limit(100); // Get more posts to calculate trending from
 
           if (postsList.length === 0) {
             return {
@@ -201,19 +237,42 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           };
         })
       : await asPublic(async (db) => {
-          const postsList = await db.post.findMany({
-            where: {
-              timestamp: {
-                gte: oneDayAgo,
-                lte: now, // ✅ No future posts
-              },
-              deletedAt: null, // Filter out deleted posts
-            },
-            orderBy: {
-              timestamp: 'desc',
-            },
-            take: 100, // Get more posts to calculate trending from
-          });
+          const postsList = await db
+            .select({
+              id: postsTable.id,
+              content: postsTable.content,
+              authorId: postsTable.authorId,
+              timestamp: postsTable.timestamp,
+            })
+            .from(postsTable)
+            .where(
+              and(
+                gte(postsTable.timestamp, oneDayAgo),
+                lte(postsTable.timestamp, now), // ✅ No future posts
+                isNull(postsTable.deletedAt), // Filter out deleted posts
+                // Test authors are excluded in SQL before the 100-post
+                // candidate window, the same rule every sibling post list
+                // applies (main feed, following feed, single-tag page,
+                // grouped trending). Filtering after the fetch would let
+                // test posts crowd real posts out of the window and into
+                // the top five. Authors with no user row (NPC actors,
+                // organizations) are not test authors and stay visible.
+                notLike(postsTable.authorId, 'test-%'),
+                notExists(
+                  db
+                    .select({ id: usersTable.id })
+                    .from(usersTable)
+                    .where(
+                      and(
+                        eq(usersTable.id, postsTable.authorId),
+                        eq(usersTable.isTest, true)
+                      )
+                    )
+                )
+              )
+            )
+            .orderBy(desc(postsTable.timestamp))
+            .limit(100); // Get more posts to calculate trending from
 
           if (postsList.length === 0) {
             return {
