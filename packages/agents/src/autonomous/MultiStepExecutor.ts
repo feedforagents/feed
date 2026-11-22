@@ -25,11 +25,16 @@ import {
 } from '@feed/db';
 import {
   countTokensSync,
+  FEE_CONFIG,
   generateWorldContext,
   getSafeContextLimit,
   StaticDataRegistry,
 } from '@feed/engine';
-import { getSurplusConfig, type JsonValue } from '@feed/shared';
+import {
+  canonicalTradingFee,
+  getSurplusConfig,
+  type JsonValue,
+} from '@feed/shared';
 import { APICallError } from 'ai';
 import { type AgentLLMParams, callAgentLLM } from '../llm/agent-llm';
 import { resolveGroqModel } from '../llm/direct-groq';
@@ -1317,6 +1322,39 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             const minimum = market?.minOrderSize ?? position?.minOrderSize;
             if (minimum !== undefined && executedAmount < minimum) {
               return `Perp orders on ${marketId} need at least ${minimum} points after capping to your balance of ${context.balance}. Increase the amount or choose another action.`;
+            }
+            const flipping =
+              position !== undefined && `open_${position.side}` !== side;
+            // A flip opens the remainder past the held size as a new
+            // position, which must meet the minimum on its own
+            // (PerpMarketService.reduceOrFlipPosition).
+            if (
+              flipping &&
+              minimum !== undefined &&
+              executedAmount > position.size &&
+              executedAmount - position.size < minimum
+            ) {
+              const inverseSize = executedAmount - position.size;
+              return `Your TRADE would close your ${position.side} of ${position.size} points on ${marketId} and open the remaining ${inverseSize} points on the other side, below the minimum order size of ${minimum} points. Close the position exactly, or open at least ${position.size + minimum} points.`;
+            }
+            // A new or added position debits its 1x margin plus the open fee
+            // (PerpMarketService.openPosition, fee config from
+            // executePerpTrade), so the capped size alone can exceed the
+            // balance.
+            if (!flipping) {
+              const openFee =
+                executedAmount < 0.01
+                  ? 0
+                  : Math.max(
+                      canonicalTradingFee(
+                        executedAmount,
+                        FEE_CONFIG.TRADING_FEE_RATE
+                      ),
+                      FEE_CONFIG.MIN_FEE_AMOUNT
+                    );
+              if (executedAmount + openFee > context.balance) {
+                return `Perp orders on ${marketId} cost the size plus a ${openFee} point fee, which exceeds your balance of ${context.balance}. Reduce the amount so size plus fee fits your balance, or choose another action.`;
+              }
             }
           }
         }
