@@ -254,7 +254,7 @@ export class NPCInvestmentManager {
     positions: PortfolioPosition[],
     totalValue: number
   ): number {
-    if (positions.length === 0 || totalValue === 0) return 0;
+    if (positions.length === 0) return 0;
 
     let riskScore = 0;
 
@@ -271,10 +271,18 @@ export class NPCInvestmentManager {
     // measure it by invested value (margin for perps via getPositionExposure),
     // not by unrealized PnL: a huge position with no PnL yet is still
     // concentrated, and a small position with a large gain is not.
+    // When equity is exhausted (totalValue <= 0), any positive exposure
+    // saturates concentration at 1 instead of dividing by zero or turning
+    // negative.
     const largestPosition = Math.max(
       ...positions.map((pos) => getPositionExposure(pos.size, pos.leverage))
     );
-    const concentrationRisk = Math.min(1, largestPosition / totalValue);
+    const concentrationRisk =
+      largestPosition <= 0
+        ? 0
+        : totalValue <= 0
+          ? 1
+          : Math.min(1, largestPosition / totalValue);
     riskScore += concentrationRisk * 0.3;
 
     // Factor 3: Drawdown risk (30% weight)
@@ -283,7 +291,9 @@ export class NPCInvestmentManager {
     }, 0);
     const drawdownRisk =
       totalUnrealizedPnL < 0
-        ? Math.min(1, Math.abs(totalUnrealizedPnL) / totalValue)
+        ? totalValue <= 0
+          ? 1
+          : Math.min(1, Math.abs(totalUnrealizedPnL) / totalValue)
         : 0;
     riskScore += drawdownRisk * 0.3;
 

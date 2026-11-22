@@ -72,5 +72,73 @@ describe('calculateRiskScore concentration factor', () => {
 
   it('returns 0 when there are no positions', () => {
     expect(calculateRiskScore([], 100_000)).toBe(0);
+    expect(calculateRiskScore([], 0)).toBe(0);
+    expect(calculateRiskScore([], -50)).toBe(0);
+  });
+});
+
+describe('calculateRiskScore underwater and zero-equity portfolios', () => {
+  it('saturates concentration and drawdown at 1 when totalValue reaches zero', () => {
+    const positions = [
+      makePosition({
+        id: 'pos-zero-equity',
+        marketType: 'perp',
+        size: 1_000,
+        leverage: 10,
+        unrealizedPnL: -100,
+      }),
+    ];
+
+    // 10x leverage (0.4) + full concentration (0.3) + full drawdown (0.3) = 1.0.
+    expect(calculateRiskScore(positions, 0)).toBeCloseTo(1, 6);
+  });
+
+  it('stays bounded at maximum risk instead of turning negative when totalValue is negative', () => {
+    const positions = [
+      makePosition({
+        id: 'pos-underwater',
+        marketType: 'perp',
+        size: 1_000,
+        leverage: 10,
+        unrealizedPnL: -150,
+      }),
+    ];
+
+    const justAboveZero = calculateRiskScore(positions, 1);
+    const atZero = calculateRiskScore(positions, 0);
+    const belowZero = calculateRiskScore(positions, -50);
+
+    expect(justAboveZero).toBeCloseTo(1, 6);
+    expect(belowZero).toBeCloseTo(1, 6);
+    expect(atZero).toBeCloseTo(1, 6);
+  });
+
+  it('keeps low-leverage underwater portfolios above de-risk thresholds', () => {
+    const positions = [
+      makePosition({
+        id: 'pos-1x-underwater',
+        marketType: 'prediction',
+        size: 100,
+        unrealizedPnL: -150,
+      }),
+    ];
+
+    // 0.4 * (1/10) + 0.3 * 1 + 0.3 * 1 = 0.64.
+    expect(calculateRiskScore(positions, -50)).toBeCloseTo(0.64, 6);
+  });
+
+  it('avoids NaN when an open position has zero exposure and totalValue is zero', () => {
+    const positions = [
+      makePosition({
+        id: 'pos-empty',
+        size: 0,
+        unrealizedPnL: 0,
+      }),
+    ];
+
+    // 0.4 * (1/10) + 0 + 0 = 0.04.
+    const score = calculateRiskScore(positions, 0);
+    expect(Number.isFinite(score)).toBe(true);
+    expect(score).toBeCloseTo(0.04, 6);
   });
 });
