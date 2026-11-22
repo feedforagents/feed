@@ -1512,6 +1512,14 @@ export async function executeDeletePost(
   if (post.authorId !== agent.userId) {
     throw new Error('Unauthorized: You can only delete your own posts');
   }
+  // Same refusal as DELETE /api/posts/[id]: a repeat delete must not
+  // rewrite deletedAt or clear the global post-list caches again.
+  if (post.deletedAt) {
+    throw new BusinessLogicError(
+      'Post already deleted',
+      'POST_ALREADY_DELETED'
+    );
+  }
   await db.post.update({
     where: { id: args.postId },
     data: { deletedAt: new Date() },

@@ -169,6 +169,43 @@ try {
     assertInNone(await families(mcpAuthor), mcpExisting);
   });
 
+  // MCP delete_post on an already-deleted post is refused like the website
+  // route and does not clear the warmed lists. A row inserted straight into
+  // the database after warming shows up only if Recent was rebuilt.
+  await runCase('mcp-repeat-delete-refused-keeps-cache', async () => {
+    const gone = await addPost(mcpAuthor);
+    await executeDeletePost(
+      { agentId: mcpAuthor, userId: mcpAuthor },
+      { postId: gone }
+    );
+    const firstDeletedAt = await deletedAt(gone);
+    assert.ok(firstDeletedAt);
+    await families(mcpAuthor);
+    const [probe] = await db
+      .insert(posts)
+      .values({
+        id: await generateSnowflakeId(),
+        authorId: mcpAuthor,
+        content: 'agent post cache probe',
+        timestamp: new Date(Date.now() - 30_000),
+      })
+      .returning({ id: posts.id });
+    assert.ok(probe);
+    owned.postIds.push(probe.id);
+    await assert.rejects(
+      executeDeletePost(
+        { agentId: mcpAuthor, userId: mcpAuthor },
+        { postId: gone }
+      ),
+      /Post already deleted/
+    );
+    assert.deepEqual(await deletedAt(gone), firstDeletedAt);
+    assert.ok(
+      !(await list()).includes(probe.id),
+      'Recent was rebuilt after the repeat delete'
+    );
+  });
+
   // MCP create_post: warm every list, publish, read again.
   await runCase('mcp-create-post-all-cache-families', async () => {
     await families(mcpAuthor);

@@ -5,7 +5,8 @@
  * way the website POST /api/posts and DELETE /api/posts/[id] routes do.
  * Before the fix the agent paths wrote the row and left every warmed list
  * serving the old page until its TTL (45 s for the feeds, 180 s for the
- * author profile).
+ * author profile). An MCP delete of an already-deleted post is refused
+ * with POST_ALREADY_DELETED, as on the website, and leaves the lists cached.
  */
 import { test } from 'bun:test';
 import assert from 'node:assert/strict';
@@ -49,7 +50,7 @@ test('MCP and A2A post writes refresh cached post lists in a private process', (
   const stderr = new TextDecoder().decode(child.stderr);
   assert.equal(process.env.NODE_ENV, before);
   assert.ok(child.success, `${stdout}\n${stderr}`);
-  assert.ok(stdout.includes('AGENT_POST_CACHE_OK cases=5'), stdout);
+  assert.ok(stdout.includes('AGENT_POST_CACHE_OK cases=6'), stdout);
   for (const line of stdout.split('\n')) {
     if (line.startsWith('AGENT_POST_CACHE_')) console.log(line);
   }
