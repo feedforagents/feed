@@ -76,6 +76,7 @@ class InMemoryWallet implements WalletPort {
 class InMemoryPerpDb implements PerpDbPort {
   private markets = new Map<string, PerpMarketRecord>();
   private positions = new Map<string, PerpPositionRecord>();
+  private fundingClaims = new Set<string>();
   private idCounter = 1;
 
   constructor(initialMarkets: PerpMarketRecord[]) {
@@ -129,6 +130,16 @@ class InMemoryPerpDb implements PerpDbPort {
     const pos = this.positions.get(id);
     if (!pos || pos.closedAt) return null;
     return { ...pos };
+  }
+
+  async claimFundingPeriod(
+    positionId: string,
+    periodStart: Date
+  ): Promise<boolean> {
+    const key = `${positionId}:${periodStart.getTime()}`;
+    if (this.fundingClaims.has(key)) return false;
+    this.fundingClaims.add(key);
+    return true;
   }
 
   async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
