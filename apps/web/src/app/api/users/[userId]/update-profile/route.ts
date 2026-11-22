@@ -90,6 +90,7 @@ import {
   isReferralCodeAvailableForUser,
   logProfileUpdate,
   notifyProfileComplete,
+  RateLimitError,
   ReputationService,
   requireUserByIdentifier,
   successResponse,
@@ -206,7 +207,13 @@ export const POST = withErrorHandling(
       normalizedUsername !== undefined &&
       normalizedUsername !== (currentUser!.username ?? '');
 
-    await checkProfileUpdateRateLimit(canonicalUserId, isUsernameChanging);
+    const rateLimit = await checkProfileUpdateRateLimit(
+      canonicalUserId,
+      isUsernameChanging
+    );
+    if (!rateLimit.allowed) {
+      throw new RateLimitError(rateLimit.reason, rateLimit.retryAfter);
+    }
 
     // On-chain sync is handled by a separate background job.
     // Profile updates are now database-first - we save to DB immediately
