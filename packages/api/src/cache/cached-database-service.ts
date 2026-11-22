@@ -52,6 +52,9 @@ import {
   invalidateCachePattern,
 } from './cache-service';
 
+// Large post-list namespaces benefit from fewer Redis SCAN round trips.
+const POST_CACHE_SCAN_COUNT = 1000;
+
 /** Keep cursor text and viewer policy in separate, unambiguous key fields. */
 function postFeedCacheKey(
   limit: number,
@@ -598,8 +601,14 @@ class CachedDatabaseService {
   async invalidatePostsCache() {
     logger.info('Invalidating posts cache', undefined, 'CachedDatabaseService');
     await Promise.all([
-      invalidateCachePattern('*', { namespace: CACHE_KEYS.POSTS_LIST }),
-      invalidateCachePattern('*', { namespace: CACHE_KEYS.POSTS_FOLLOWING }),
+      invalidateCachePattern('*', {
+        namespace: CACHE_KEYS.POSTS_LIST,
+        scanCount: POST_CACHE_SCAN_COUNT,
+      }),
+      invalidateCachePattern('*', {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+        scanCount: POST_CACHE_SCAN_COUNT,
+      }),
     ]);
   }
 
@@ -614,6 +623,7 @@ class CachedDatabaseService {
     );
     await invalidateCachePattern(`${actorId}:*`, {
       namespace: CACHE_KEYS.POSTS_BY_ACTOR,
+      scanCount: POST_CACHE_SCAN_COUNT,
     });
   }
 

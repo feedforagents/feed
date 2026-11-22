@@ -442,7 +442,7 @@ export async function invalidateCache(
  */
 export async function invalidateCachePattern(
   pattern: string,
-  options: CacheOptions = {}
+  options: CacheOptions & { scanCount?: number } = {}
 ): Promise<void> {
   const fullPattern = options.namespace
     ? `${options.namespace}:${pattern}`
@@ -452,7 +452,10 @@ export async function invalidateCachePattern(
   const client = getRedisClient();
   if (client) {
     // Use SCAN to find matching keys
-    const stream = client.scanStream({ match: fullPattern });
+    const stream = client.scanStream({
+      match: fullPattern,
+      count: options.scanCount,
+    });
     const keys: string[] = [];
 
     stream.on('data', (resultKeys: string[]) => {
