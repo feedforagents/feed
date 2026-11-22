@@ -164,6 +164,7 @@ export {
   checkProfileUpdateRateLimit,
   getProfileUpdateHistory,
   logProfileUpdate,
+  updateProfileWithLeaderboardInvalidation,
 } from './profile';
 // Query Parameter Utilities
 export {

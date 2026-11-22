@@ -26,6 +26,7 @@ import {
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
+  updateProfileWithLeaderboardInvalidation,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
@@ -1429,22 +1430,15 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('At least one field to update is required');
     }
 
-    await db.user.update({
-      where: { id: userId },
-      data: updateData,
-    });
-
-    // Fetch the updated user to return clean data
-    const user = await db.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        bio: true,
-        profileImageUrl: true,
-      },
-    });
+    const user = await updateProfileWithLeaderboardInvalidation(
+      userId,
+      updateData,
+      (client) =>
+        client.user.update({
+          where: { id: userId },
+          data: updateData,
+        })
+    );
 
     return {
       success: true,

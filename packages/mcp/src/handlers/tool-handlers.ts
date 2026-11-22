@@ -48,6 +48,7 @@ import {
   RATE_LIMIT_CONFIGS,
   RateLimitError,
   sharePost,
+  updateProfileWithLeaderboardInvalidation,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
@@ -1828,19 +1829,15 @@ export async function executeUpdateProfile(
   if (args.username !== undefined) updateData.username = args.username;
   if (args.profileImageUrl !== undefined)
     updateData.profileImageUrl = args.profileImageUrl;
-  const user = await db.user.update({
-    where: { id: agent.userId },
-    data: updateData,
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      bio: true,
-      profileImageUrl: true,
-      reputationPoints: true,
-      virtualBalance: true,
-    },
-  });
+  const user = await updateProfileWithLeaderboardInvalidation(
+    agent.userId,
+    updateData,
+    (client) =>
+      client.user.update({
+        where: { id: agent.userId },
+        data: updateData,
+      })
+  );
   return {
     success: true,
     profile: {

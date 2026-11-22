@@ -101,6 +101,7 @@ export const CACHE_KEYS = {
   POSTS_LIST: 'posts:list',
   POSTS_BY_ACTOR: 'posts:actor',
   POSTS_FOLLOWING: 'posts:following',
+  LEADERBOARD_PERSONAL: 'leaderboard-personal',
   USER: 'user',
   USER_BALANCE: 'user:balance',
   /**
