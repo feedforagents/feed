@@ -14,11 +14,13 @@ import {
   inArray,
   messages,
   notInArray,
+  or,
   pointsTransactions,
   userBlocks,
   userPnLSnapshots,
   users,
   whitelist,
+  whitelistConfig,
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { createStewardTestToken } from './helpers/steward-auth';
@@ -38,6 +40,7 @@ function assertDisposableDatabaseUrl(
   const url = new URL(value);
   const databaseName = decodeURIComponent(url.pathname.slice(1));
   if (
+    !['postgres:', 'postgresql:'].includes(url.protocol) ||
     !['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname) ||
     !/(?:^|[_-])(test|testing|verification)(?:[_-]|$)/i.test(databaseName)
   ) {
@@ -205,6 +208,12 @@ async function cleanupOwnedFixtures(): Promise<void> {
   await db.transaction(async (tx) => {
     if (owned.users.size) {
       const userIds = [...owned.users];
+      // Hold the owned parents before checking their foreign-key references.
+      await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, userIds))
+        .for('update');
       const [strayLedger] = await tx
         .select({ id: pointsTransactions.id })
         .from(pointsTransactions)
@@ -242,11 +251,25 @@ async function cleanupOwnedFixtures(): Promise<void> {
       const [whitelistRow] = await tx
         .select({ id: whitelist.id })
         .from(whitelist)
-        .where(inArray(whitelist.userId, userIds))
+        .where(
+          or(
+            inArray(whitelist.userId, userIds),
+            inArray(whitelist.grantedBy, userIds)
+          )
+        )
         .limit(1);
       if (whitelistRow)
         throw new Error(
           `cleanup refused: Whitelist ${whitelistRow.id} references an owned user`
+        );
+      const [config] = await tx
+        .select({ id: whitelistConfig.id })
+        .from(whitelistConfig)
+        .where(inArray(whitelistConfig.updatedBy, userIds))
+        .limit(1);
+      if (config)
+        throw new Error(
+          `cleanup refused: WhitelistConfig ${config.id} references an owned user`
         );
     }
     if (owned.chats.size) {
@@ -348,7 +371,6 @@ beforeAll(async () => {
     member2,
   ]);
   const directMessageId = await generateSnowflakeId();
-  owned.messages.add(directMessageId);
   await db.insert(messages).values({
     id: directMessageId,
     chatId: directGroupChatId,
@@ -356,6 +378,7 @@ beforeAll(async () => {
     content: 'hello from a direct group chat',
     createdAt: new Date('2026-03-01T00:00:00Z'),
   });
+  owned.messages.add(directMessageId);
 
   // A-left: a second direct group chat whose invited participant has left
   // (the leave flow retains the participant row with isActive = false).
@@ -400,8 +423,7 @@ beforeAll(async () => {
   const backedMemberIds = [
     await generateSnowflakeId(),
     await generateSnowflakeId(),
-  ];
-  for (const id of backedMemberIds) owned.groupMembers.add(id);
+  ] as const;
   await db.insert(groupMembers).values([
     {
       id: backedMemberIds[0],
@@ -420,6 +442,7 @@ beforeAll(async () => {
       lastMessageAt: now,
     },
   ]);
+  for (const id of backedMemberIds) owned.groupMembers.add(id);
 
   // C: 30 DM chats; 15 share one identical last-message timestamp (ties).
   const tieTime = new Date('2026-01-01T00:00:00Z');
@@ -439,14 +462,13 @@ beforeAll(async () => {
     const dmParticipantIds = [
       await generateSnowflakeId(),
       await generateSnowflakeId(),
-    ];
-    for (const id of dmParticipantIds) owned.participants.add(id);
+    ] as const;
     await db.insert(chatParticipants).values([
       { id: dmParticipantIds[0], chatId, userId: viewer },
       { id: dmParticipantIds[1], chatId, userId: other },
     ]);
+    for (const id of dmParticipantIds) owned.participants.add(id);
     const dmMessageId = await generateSnowflakeId();
-    owned.messages.add(dmMessageId);
     await db.insert(messages).values({
       id: dmMessageId,
       chatId,
@@ -454,6 +476,7 @@ beforeAll(async () => {
       content: `dm ${i}`,
       createdAt: i < 15 ? tieTime : new Date(Date.UTC(2026, 0, 2, 0, i, 0)),
     });
+    owned.messages.add(dmMessageId);
   }
 
   // D: 25 group-backed chats whose memberships share one lastMessageAt.
@@ -482,7 +505,6 @@ beforeAll(async () => {
     owned.chats.add(cid);
     tiedGroupChatIds.push(cid);
     const tiedMemberId = await generateSnowflakeId();
-    owned.groupMembers.add(tiedMemberId);
     await db.insert(groupMembers).values({
       id: tiedMemberId,
       groupId: gid,
@@ -491,6 +513,7 @@ beforeAll(async () => {
       isActive: true,
       lastMessageAt: tiedAt,
     });
+    owned.groupMembers.add(tiedMemberId);
   }
 });
 
@@ -615,8 +638,9 @@ test('F1: ledger cleanup removes owned rows and preserves foreign rows', async (
     stewardId: `f134-steward-foreign-${foreignId}`,
     updatedAt: new Date(),
   });
+  const foreignLedgerId = await generateSnowflakeId();
   await db.insert(pointsTransactions).values({
-    id: await generateSnowflakeId(),
+    id: foreignLedgerId,
     userId: foreignId,
     amount: 1,
     pointsBefore: 0,
@@ -670,18 +694,18 @@ test('F1: ledger cleanup removes owned rows and preserves foreign rows', async (
     .where(eq(pointsTransactions.id, unrecordedLedgerId));
   await db
     .delete(pointsTransactions)
-    .where(eq(pointsTransactions.userId, foreignId));
+    .where(eq(pointsTransactions.id, foreignLedgerId));
   await db.delete(users).where(eq(users.id, foreignId));
 });
 
 test('G1: a direct group preview skips a message from a blocked sender', async () => {
   const blockId = await generateSnowflakeId();
+  await db.insert(userBlocks).values({
+    id: blockId,
+    blockerId: viewer,
+    blockedId: member1,
+  });
   try {
-    await db.insert(userBlocks).values({
-      id: blockId,
-      blockerId: viewer,
-      blockedId: member1,
-    });
     const list = await getList(viewer);
     const entry = list.groupChats.find((c) => c.id === directGroupChatId);
     assert.ok(entry);

@@ -123,7 +123,7 @@ function getTargetQuoteState(
 
   return {
     midPrice,
-    bidPrice: Math.max(0.0001, midPrice - halfSpread),
+    bidPrice: Math.max(midPrice * 1e-4, midPrice - halfSpread),
     askPrice: Math.max(midPrice, midPrice + halfSpread),
     spreadBps,
     bidDepth,
@@ -206,7 +206,7 @@ export function evolveSyntheticPerpQuoteState(params: {
 
   return {
     midPrice: target.midPrice,
-    bidPrice: Math.max(0.0001, target.midPrice - halfSpread),
+    bidPrice: Math.max(target.midPrice * 1e-4, target.midPrice - halfSpread),
     askPrice: Math.max(target.midPrice, target.midPrice + halfSpread),
     spreadBps,
     bidDepth,
@@ -237,7 +237,7 @@ export function getSyntheticPerpExecutionPrice(params: {
   const executionPrice =
     side === 'buy'
       ? askPrice + impactPrice
-      : Math.max(0.0001, bidPrice - impactPrice);
+      : Math.max(midPrice * 1e-4, bidPrice - impactPrice);
 
   const midShiftBps = clamp(impactBps * 0.35, 0, 140);
   const nextMidPrice =

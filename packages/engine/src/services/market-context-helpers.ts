@@ -4,6 +4,7 @@ import {
   type PredictionMarketRecord,
   PredictionPricing,
 } from '@feed/core/markets/prediction/client';
+import { FEE_CONFIG } from '../config/fees';
 import type {
   PerpMarketSnapshot,
   PredictionMarketSnapshot,
@@ -87,6 +88,10 @@ export function buildPredictionMarketSnapshot(
     urgencyLevel: profile.urgencyLevel,
     eventSensitivity: profile.eventSensitivity,
     // Max safe single-trade size given current pool depth and 20ppt slippage cap.
-    maxSafeBet: maxSafeBuy(market.yesShares, market.noShares),
+    maxSafeBet: maxSafeBuy(
+      market.yesShares,
+      market.noShares,
+      FEE_CONFIG.TRADING_FEE_RATE
+    ),
   };
 }

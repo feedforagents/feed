@@ -110,6 +110,7 @@
 import {
   authenticate,
   BusinessLogicError,
+  cachedDb,
   InternalServerError,
   NotFoundError,
   successResponse,
@@ -239,6 +240,19 @@ export const POST = withErrorHandling(
           );
 
         return created;
+      });
+
+      // The block deleted follow relationships in both directions, which
+      // changes both users' follower/following counts. Invalidate both
+      // users' caches — the same invalidation the follow route performs
+      // when it changes these rows — so profile headers stop counting the
+      // removed follows immediately instead of when the cached profile
+      // stats expire.
+      await Promise.all([
+        cachedDb.invalidateUserCache(authUser.userId),
+        cachedDb.invalidateUserCache(targetUserId),
+      ]).catch((error) => {
+        logger.warn('Failed to invalidate user cache after block', { error });
       });
 
       logger.info(
