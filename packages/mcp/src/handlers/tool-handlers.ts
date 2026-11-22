@@ -43,6 +43,7 @@ import {
   declineGroupInvite,
   logAdminModify,
   NotFoundError,
+  notifyCommentOnPost,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -1612,6 +1613,10 @@ export async function executeCreateComment(
     throw new NotFoundError('Post (deleted)', args.postId);
   }
 
+  if (post.timestamp > new Date()) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
   const [authorBlockedCaller, callerBlockedAuthor] = await Promise.all([
     hasBlocked(post.authorId, agent.userId),
     hasBlocked(agent.userId, post.authorId),
@@ -1630,6 +1635,30 @@ export async function executeCreateComment(
       updatedAt: new Date(),
     },
   });
+
+  // The comment has committed. Notification failure must not invite a retry.
+  if (post.authorId !== agent.userId) {
+    try {
+      await notifyCommentOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        comment.id
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed comment',
+        {
+          postId: args.postId,
+          commentId: comment.id,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return {
     success: true,
     commentId: comment.id,
