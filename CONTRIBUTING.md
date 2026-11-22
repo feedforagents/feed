@@ -122,9 +122,11 @@ bun run steward:init      # first run only: creates the Feed tenant in Steward
 bun run env:validate      # checks the required variables
 ```
 
-`bun install` also runs `scripts/postinstall-agent-frameworks.ts`. This script
-clones Hermes Agent, OpenClaw, elizaOS, and ClawBench into
-`../external-sources/`. Set `FEED_SKIP_AGENT_FRAMEWORKS_BOOTSTRAP=1` to skip it.
+`bun install` does not clone or build the external agent frameworks. To set
+up the optional frameworks for local agent testing or benchmarks, explicitly
+run `bun run agent-frameworks:bootstrap`. This command clones sources into
+`../external-sources/` and requires network access. See the
+[Simulation & Training section](README.md#simulation--training) for details.
 
 ## 6. Environment variables
 
