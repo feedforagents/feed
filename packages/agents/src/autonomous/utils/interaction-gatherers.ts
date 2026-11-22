@@ -149,14 +149,14 @@ export async function gatherPendingCommentReplies(
 
     // Build post info
     const postAuthor = comment.post.User;
+    const isYourPost = comment.post.authorId === agentUserId;
     const post: PostInfo = {
       id: comment.post.id,
       content: comment.post.content,
-      authorName:
-        comment.post.authorId === agentUserId
-          ? 'You'
-          : formatUserName(postAuthor?.displayName, postAuthor?.username),
-      isYourPost: isOnAgentPost,
+      authorName: isYourPost
+        ? 'You'
+        : formatUserName(postAuthor?.displayName, postAuthor?.username),
+      isYourPost,
     };
 
     // Format context for prompt

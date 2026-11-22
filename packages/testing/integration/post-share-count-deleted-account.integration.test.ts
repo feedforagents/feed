@@ -1,314 +1,185 @@
 /**
- * Post shareCount after the sharer deletes their account, against a real
- * database and the real routes.
- *
- * POST /api/users/delete-account states the contract in its own response:
- * "Your account and personal data have been deleted from our servers." The
- * route deletes the user's follows, interactions, group memberships,
- * invites, follow statuses, share actions and pool deposits inside the
- * deletion transaction and relies on schema cascades for "most other
- * tables". Share has no foreign keys at all, so nothing cascades: the
- * deleted user's share rows survive and every shareCount surface (post
- * detail, post interactions, embed, feed pipelines) keeps counting a
- * person who no longer exists.
- *
- * Sibling precedent for cleaning shares up with their owner: unsharing a
- * post (DELETE /api/posts/[id]/share) deletes the share row and the count
- * drops immediately. Deleting the account must do the same for the shares
- * the account made. (Same shape as the Reaction orphan fixed for likes:
- * the delete transaction must clear the user's rows in tables that carry
- * no foreign keys.)
- *
- * Toggle guard in the same file: the share -> duplicate-share -> unshare
- * -> re-share cycle must keep the count exact (the Share table also has a
- * unique (userId, postId) constraint).
- *
- * Auth uses the non-production x-dev-user-id header. Only the
- * `server-only` marker package is stubbed.
+ * A deleted account's shares must stop contributing to existing post
+ * counts. Exercise the real route in a verified disposable database and
+ * a separate process with its own public-read rate-limit state.
  */
-
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-
-mock.module('server-only', () => ({}));
-
+import { describe, expect, it, mock } from 'bun:test';
 import {
-  and,
-  db,
-  eq,
-  inArray,
-  notifications,
-  posts,
-  shares,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-let authorId: string;
-let sharerId: string;
-let controlSharerId: string;
-let postId: string;
-// Only IDs published here may be deleted by afterAll. A generated ID is
-// not ownership: a failed insert may have collided with an existing row, so
-// each list is filled only from a successful INSERT RETURNING receipt (for
-// fixtures) or from a successful share operation's own response/read-back
-// (for shares, repost posts and notifications).
-const ownedUserIds: string[] = [];
-const ownedPostIds: string[] = [];
-const ownedShareIds: string[] = [];
-const ownedRepostIds: string[] = [];
-const ownedNotificationIds: string[] = [];
+const suite = 'post shareCount population';
+const toggleCase =
+  'keeps the count exact across share / duplicate / unshare / re-share';
+const deletionCase =
+  'stops counting a sharer once that sharer deletes their account';
 
-let sharePOST: typeof import('../../../apps/web/src/app/api/posts/[id]/share/route').POST;
-let shareDELETE: typeof import('../../../apps/web/src/app/api/posts/[id]/share/route').DELETE;
-let detailGET: typeof import('../../../apps/web/src/app/api/posts/[id]/route').GET;
-let interactionsGET: typeof import('../../../apps/web/src/app/api/posts/[id]/interactions/route').GET;
-let deleteAccountPOST: typeof import('../../../apps/web/src/app/api/users/delete-account/route').POST;
+if (process.env.FEED_SUB_MARKET_CHILD) {
+  await verifySubMarketChildLease();
 
-function req(url: string, userId: string, method = 'GET', body?: unknown) {
-  return new NextRequest(
-    new Request(url, {
-      method,
-      headers: {
-        'x-dev-user-id': userId,
-        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    })
-  );
-}
-
-async function shareNotificationIds(actorId: string) {
-  const rows = await db
-    .select({ id: notifications.id })
-    .from(notifications)
-    .where(
-      and(
-        eq(notifications.userId, authorId),
-        eq(notifications.type, 'share'),
-        eq(notifications.actorId, actorId),
-        eq(notifications.postId, postId)
-      )
-    );
-  return rows.map((row) => row.id);
-}
-
-async function share(userId: string, method: 'POST' | 'DELETE' = 'POST') {
-  const handler = method === 'POST' ? sharePOST : shareDELETE;
-  // Share notifications are deduped by (recipient, type, actor, post), so a
-  // re-share may create none: only rows that appear around this call were
-  // created by it.
-  const beforeNotificationIds =
-    method === 'POST'
-      ? new Set(await shareNotificationIds(userId))
-      : new Set<string>();
-  const response = await handler(
-    req(
-      `http://localhost/api/posts/${postId}/share`,
-      userId,
-      method,
-      method === 'POST' ? {} : undefined
-    ),
-    { params: Promise.resolve({ id: postId }) }
-  );
-  if (method === 'POST' && response.status === 201) {
-    const body = (await response
-      .clone()
-      .json()
-      .catch(() => null)) as {
-      data?: { repostPost?: { id?: string } };
-    } | null;
-    const repostId = body?.data?.repostPost?.id;
-    if (repostId && !ownedRepostIds.includes(repostId)) {
-      ownedRepostIds.push(repostId);
-    }
-    // 201 plus the unique (userId, postId) constraint proves this row was
-    // created by this call: a pre-existing share would have been a 400.
-    const [createdShare] = await db
-      .select({ id: shares.id })
-      .from(shares)
-      .where(and(eq(shares.userId, userId), eq(shares.postId, postId)))
-      .limit(1);
-    if (createdShare && !ownedShareIds.includes(createdShare.id)) {
-      ownedShareIds.push(createdShare.id);
-    }
-    for (const id of await shareNotificationIds(userId)) {
-      if (
-        !beforeNotificationIds.has(id) &&
-        !ownedNotificationIds.includes(id)
-      ) {
-        ownedNotificationIds.push(id);
-      }
-    }
-  }
-  return response.status;
-}
-
-async function detailShareCount(viewerId: string) {
-  const response = await detailGET(
-    req(`http://localhost/api/posts/${postId}`, viewerId),
-    { params: Promise.resolve({ id: postId }) }
-  );
-  const body = (await response.json().catch(() => null)) as {
-    data?: { post?: { shareCount?: number }; shareCount?: number };
-  } | null;
-  return body?.data?.post?.shareCount ?? body?.data?.shareCount;
-}
-
-async function interactionsShareCount(viewerId: string) {
-  const response = await interactionsGET(
-    req(`http://localhost/api/posts/${postId}/interactions?limit=10`, viewerId),
-    { params: Promise.resolve({ id: postId }) }
-  );
-  const body = (await response.json().catch(() => null)) as {
-    data?: { shareCount?: number };
-    shareCount?: number;
-  } | null;
-  return body?.data?.shareCount ?? body?.shareCount;
-}
-
-async function shareRowsBy(userId: string) {
-  return db
-    .select({ id: shares.id })
-    .from(shares)
-    .where(and(eq(shares.postId, postId), eq(shares.userId, userId)));
-}
-
-beforeAll(async () => {
-  ({ POST: sharePOST, DELETE: shareDELETE } = await import(
+  // This Next.js marker has no runtime behavior under the Bun test runner.
+  mock.module('server-only', () => ({}));
+  const { db, eq, posts, shares, users } = await import('@feed/db');
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { NextRequest } = await import('next/server');
+  const { POST: sharePOST, DELETE: shareDELETE } = await import(
     '../../../apps/web/src/app/api/posts/[id]/share/route'
-  ));
-  ({ GET: detailGET } = await import(
+  );
+  const { GET: detailGET } = await import(
     '../../../apps/web/src/app/api/posts/[id]/route'
-  ));
-  ({ GET: interactionsGET } = await import(
+  );
+  const { GET: interactionsGET } = await import(
     '../../../apps/web/src/app/api/posts/[id]/interactions/route'
-  ));
-  ({ POST: deleteAccountPOST } = await import(
+  );
+  const { POST: deleteAccountPOST } = await import(
     '../../../apps/web/src/app/api/users/delete-account/route'
-  ));
+  );
 
-  [authorId, sharerId, controlSharerId, postId] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-
-  const now = new Date();
-  const past = new Date(now.getTime() - 10 * 60_000);
-
-  // privyId = own id so ensureUserForAuth resolves the fixture row
-  // directly instead of provisioning a fresh account.
-  // Publish ownership only after the INSERT succeeds: if this batch
-  // collides with a pre-existing row, nothing is registered for cleanup.
-  const insertedUsers = await db
-    .insert(users)
-    .values([
-      {
-        id: authorId,
-        privyId: authorId,
-        username: `f171-author-${authorId}`,
-        displayName: 'F171 Author',
-        updatedAt: now,
-      },
-      {
-        id: sharerId,
-        privyId: sharerId,
-        username: `f171-sharer-${sharerId}`,
-        displayName: 'F171 Sharer',
-        updatedAt: now,
-      },
-      {
-        id: controlSharerId,
-        privyId: controlSharerId,
-        username: `f171-control-${controlSharerId}`,
-        displayName: 'F171 Control Sharer',
-        updatedAt: now,
-      },
-    ])
-    .returning({ id: users.id });
-  ownedUserIds.push(...insertedUsers.map((row) => row.id));
-
-  const [insertedPost] = await db
-    .insert(posts)
-    .values({
+  async function seedPost() {
+    const [authorId, sharerId, controlId, postId] = await Promise.all([
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+    ]);
+    const updatedAt = new Date();
+    const past = new Date(updatedAt.getTime() - 10 * 60_000);
+    await db.insert(users).values(
+      [authorId, sharerId, controlId].map((id) => ({
+        id,
+        username: `f171-${id}`,
+        displayName: 'F171 fixture account',
+        updatedAt,
+      }))
+    );
+    await db.insert(posts).values({
       id: postId,
       content: 'Fixture post for share-count deletion test',
       authorId,
       timestamp: past,
       createdAt: past,
-    })
-    .returning({ id: posts.id });
-  if (!insertedPost) {
-    throw new Error('Fixture post was not created');
+    });
+    return { authorId, sharerId, controlId, postId };
   }
-  ownedPostIds.push(insertedPost.id);
-});
 
-afterAll(async () => {
-  // Delete only rows this file created, by their exact acquired IDs. Never
-  // select by postId or originalPostId: those predicates also match foreign
-  // shares, notifications and reposts of the fixture post.
-  if (ownedNotificationIds.length > 0) {
-    await db
-      .delete(notifications)
-      .where(inArray(notifications.id, ownedNotificationIds))
-      .catch(() => {});
-  }
-  if (ownedShareIds.length > 0) {
-    await db.delete(shares).where(inArray(shares.id, ownedShareIds));
-  }
-  if (ownedRepostIds.length > 0) {
-    await db.delete(posts).where(inArray(posts.id, ownedRepostIds));
-  }
-  if (ownedPostIds.length > 0) {
-    await db.delete(posts).where(inArray(posts.id, ownedPostIds));
-  }
-  if (ownedUserIds.length > 0) {
-    await db.delete(users).where(inArray(users.id, ownedUserIds));
-  }
-});
-
-describe('post shareCount population', () => {
-  it('keeps the count exact across share / duplicate / unshare / re-share', async () => {
-    expect(await share(sharerId)).toBe(201);
-    expect(await detailShareCount(authorId)).toBe(1);
-
-    // Duplicate share is rejected and does not double-count.
-    expect(await share(sharerId)).toBe(400);
-    expect(await detailShareCount(authorId)).toBe(1);
-    expect(await shareRowsBy(sharerId)).toHaveLength(1);
-
-    expect(await share(controlSharerId)).toBe(201);
-    expect(await detailShareCount(authorId)).toBe(2);
-
-    expect(await share(sharerId, 'DELETE')).toBe(200);
-    expect(await detailShareCount(authorId)).toBe(1);
-
-    expect(await share(sharerId)).toBe(201);
-    expect(await detailShareCount(authorId)).toBe(2);
-  });
-
-  it('stops counting a sharer once that sharer deletes their account', async () => {
-    const response = await deleteAccountPOST(
-      req('http://localhost/api/users/delete-account', sharerId, 'POST', {
-        confirmation: 'DELETE MY ACCOUNT',
-      })
+  function request(path: string, userId: string, init?: RequestInit) {
+    const headers = new Headers(init?.headers);
+    headers.set('x-dev-user-id', userId);
+    return new NextRequest(
+      new Request(`http://localhost${path}`, { ...init, headers })
     );
-    expect(response.status).toBe(200);
+  }
 
-    // The account itself is gone (the route's own contract).
-    const [gone] = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.id, sharerId));
-    expect(gone).toBeUndefined();
+  function context(postId: string) {
+    return { params: Promise.resolve({ id: postId }) };
+  }
 
-    // Its shares must be gone too, and every count surface must agree:
-    // only the control sharer remains.
-    expect(await detailShareCount(authorId)).toBe(1);
-    expect(await interactionsShareCount(authorId)).toBe(1);
-    expect(await shareRowsBy(sharerId)).toHaveLength(0);
+  async function share(
+    postId: string,
+    userId: string,
+    method: 'POST' | 'DELETE' = 'POST'
+  ) {
+    const response = await (method === 'POST' ? sharePOST : shareDELETE)(
+      request(`/api/posts/${postId}/share`, userId, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+      context(postId)
+    );
+    return response.status;
+  }
+
+  async function detailCount(postId: string, userId: string) {
+    const res = await detailGET(
+      request(`/api/posts/${postId}`, userId),
+      context(postId)
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { shareCount: number } };
+    return body.data.shareCount;
+  }
+
+  async function interactionsCount(postId: string, userId: string) {
+    const res = await interactionsGET(
+      request(`/api/posts/${postId}/interactions?limit=10`, userId),
+      context(postId)
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { shareCount: number };
+    return body.shareCount;
+  }
+
+  function postShares(postId: string) {
+    return db
+      .select({ userId: shares.userId })
+      .from(shares)
+      .where(eq(shares.postId, postId));
+  }
+
+  describe(suite, () => {
+    it(toggleCase, async () => {
+      const { authorId, sharerId, controlId, postId } = await seedPost();
+      expect(await share(postId, sharerId)).toBe(201);
+      expect(await detailCount(postId, authorId)).toBe(1);
+
+      expect(await share(postId, sharerId)).toBe(400);
+      expect(await detailCount(postId, authorId)).toBe(1);
+      expect(await postShares(postId)).toEqual([{ userId: sharerId }]);
+
+      expect(await share(postId, controlId)).toBe(201);
+      expect(await detailCount(postId, authorId)).toBe(2);
+      expect(await share(postId, sharerId, 'DELETE')).toBe(200);
+      expect(await detailCount(postId, authorId)).toBe(1);
+      expect(await share(postId, sharerId)).toBe(201);
+      expect(await detailCount(postId, authorId)).toBe(2);
+    });
+
+    it(deletionCase, async () => {
+      const { authorId, sharerId, controlId, postId } = await seedPost();
+      expect(await share(postId, sharerId)).toBe(201);
+      expect(await share(postId, controlId)).toBe(201);
+      const before = await detailCount(postId, authorId);
+      expect(before).toBe(2);
+
+      const response = await deleteAccountPOST(
+        request('/api/users/delete-account', sharerId, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ confirmation: 'DELETE MY ACCOUNT' }),
+        })
+      );
+      expect(response.status).toBe(200);
+
+      const [gone] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, sharerId));
+      expect(gone).toBeUndefined();
+
+      const detail = await detailCount(postId, authorId);
+      const interactions = await interactionsCount(postId, authorId);
+      const remaining = await postShares(postId);
+      console.info('DELETE_ACCOUNT_SHARE_COUNTS', {
+        postId,
+        deletionStatus: response.status,
+        before,
+        detail,
+        interactions,
+        remaining: remaining.length,
+      });
+      expect(detail).toBe(1);
+      expect(interactions).toBe(1);
+      expect(remaining).toEqual([{ userId: controlId }]);
+    });
   });
-});
+} else {
+  it('runs the share and deletion cases on a verified disposable database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'post-share-count-deleted-account',
+      file: 'packages/testing/integration/post-share-count-deleted-account.integration.test.ts',
+      cases: [`${suite} > ${toggleCase}`, `${suite} > ${deletionCase}`],
+    });
+  }, 300_000);
+}
