@@ -28,6 +28,7 @@ import { PerpPositionsList } from '@/components/markets/PerpPositionsList';
 import { PerpPriceChart } from '@/components/markets/PerpPriceChart';
 import { PredictionPositionsList } from '@/components/markets/PredictionPositionsList';
 import { PredictionProbabilityChart } from '@/components/markets/PredictionProbabilityChart';
+import { calculatePredictionBuyQuote } from '@/components/markets/predictionBuyQuote';
 import {
   type BuyPredictionDetails,
   type SellPredictionDetails,
@@ -260,6 +261,14 @@ function parsePredictionSide(params: URLSearchParams): 'yes' | 'no' | null {
   const side = params.get('side');
   if (side === 'yes' || side === 'no') return side;
   return null;
+}
+
+/**
+ * Cashtag ($SYMBOL) links in posts and comments navigate to
+ * `/markets?search=<symbol>`; the symbol is the search the user arrived with.
+ */
+export function parseSearchQuery(params: URLSearchParams): string {
+  return params.get('search') ?? '';
 }
 
 function formatYesPct(raw: number): string {
@@ -539,6 +548,7 @@ export function MarketsTradingTerminal({
 }: MarketsTradingTerminalProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const arrivalSearchQuery = parseSearchQuery(searchParams);
 
   const terminalRootRef = useRef<HTMLDivElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -598,7 +608,7 @@ export function MarketsTradingTerminal({
     parseSort(searchParams)
   );
   const [sortDesc, setSortDesc] = useState(() => parseSortDesc(searchParams));
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(() => arrivalSearchQuery);
   const [selected, setSelected] = useState<MarketKey | null>(() =>
     parseSelected(searchParams)
   );
@@ -862,6 +872,11 @@ export function MarketsTradingTerminal({
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [showMarketsMenu]);
+
+  // Only a changed arrival term replaces locally typed search text.
+  useEffect(() => {
+    setQuery(arrivalSearchQuery);
+  }, [arrivalSearchQuery]);
 
   // One-way sync from URL → local UI state
   useEffect(() => {
@@ -1286,12 +1301,11 @@ export function MarketsTradingTerminal({
     if (!predictionEffectiveShares) return null;
     if (predictionAmountNum <= 0) return null;
     try {
-      return PredictionPricing.calculateBuyWithFees(
+      return calculatePredictionBuyQuote(
         predictionEffectiveShares.yesShares,
         predictionEffectiveShares.noShares,
         predictionSide,
-        predictionAmountNum,
-        FEE_CONFIG.TRADING_FEE_RATE
+        predictionAmountNum
       );
     } catch {
       return null;
@@ -2320,6 +2334,7 @@ export function MarketsTradingTerminal({
       <div className="hidden min-h-0 flex-1 flex-col md:flex">
         {!selected ? (
           <MarketsDashboard
+            initialSearchQuery={arrivalSearchQuery}
             perpMarkets={perpMarkets}
             predictionMarkets={predictionMarkets}
             perpLoading={perpLoading}

@@ -9,8 +9,12 @@ import type { ArcStateType, PendingTransition } from '@feed/db';
 import {
   evaluateStateTransition,
   getExpectedState,
+  getNextScheduledEvent,
+  scheduledEventHour,
   shouldGenerateEvent,
 } from '../services/narrative-event-processor';
+import type { ScheduledEvent } from '../services/question-arc-planner';
+import { getGameDayNumber } from '../utils/date-utils';
 
 // Mock arc state for testing
 const createMockArcState = (
@@ -261,5 +265,74 @@ describe('Narrative Event Processor - Edge Cases', () => {
     // Should handle null gracefully
     const result = evaluateStateTransition(arc, 2);
     expect(result).toBeNull();
+  });
+});
+
+function scheduled(
+  overrides: Pick<ScheduledEvent, 'baseDay' | 'jitterHours'>
+): ScheduledEvent {
+  return {
+    baseDay: overrides.baseDay,
+    jitterHours: overrides.jitterHours,
+    eventType: 'rumor',
+    description: 'scheduled rumor',
+    signalDirection: 'YES',
+    fired: false,
+  };
+}
+
+describe('scheduled world events use game time', () => {
+  test('hour is elapsed time from game start in every host timezone', () => {
+    // These instants are 12 hours apart, so a wall-clock hour cannot be 8
+    // for both. Game hour is 8 for both because each clock starts 8.5h earlier.
+    const starts = [
+      new Date('2026-11-06T15:00:00.000Z'),
+      new Date('2026-11-06T03:00:00.000Z'),
+    ];
+    for (const startedAt of starts) {
+      const now = new Date(startedAt.getTime() + (8 * 60 + 30) * 60 * 1000);
+      expect(scheduledEventHour(startedAt, now)).toBe(8);
+    }
+  });
+
+  test('an event eight game hours in does not fire after ninety minutes', () => {
+    const startedAt = new Date('2026-11-06T15:00:00.000Z');
+    const now = new Date(startedAt.getTime() + 90 * 60 * 1000);
+    const event = scheduled({ baseDay: 1, jitterHours: 8 });
+    const hour = scheduledEventHour(startedAt, now);
+
+    expect(getGameDayNumber(startedAt, now)).toBe(1);
+    expect(hour).toBe(1);
+    expect(getNextScheduledEvent([event], 1, hour)).toBeNull();
+  });
+
+  test('negative jitter fires on the previous game day at the shifted hour', () => {
+    const startedAt = new Date('2026-11-06T15:00:00.000Z');
+    // baseDay 2 plus -4 hours is game day 1 at hour 20.
+    const event = scheduled({ baseDay: 2, jitterHours: -4 });
+    const before = new Date(startedAt.getTime() + 19 * 60 * 60 * 1000);
+    const due = new Date(startedAt.getTime() + 20 * 60 * 60 * 1000);
+
+    expect(getGameDayNumber(startedAt, before)).toBe(1);
+    expect(scheduledEventHour(startedAt, before)).toBe(19);
+    expect(
+      getNextScheduledEvent([event], 1, scheduledEventHour(startedAt, before))
+    ).toBeNull();
+    expect(getGameDayNumber(startedAt, due)).toBe(1);
+    expect(scheduledEventHour(startedAt, due)).toBe(20);
+    expect(
+      getNextScheduledEvent([event], 1, scheduledEventHour(startedAt, due))
+    ).toBe(event);
+  });
+
+  test('a later game day fires an event whose hour has not come around again', () => {
+    const event = scheduled({ baseDay: 1, jitterHours: 18 });
+    expect(getNextScheduledEvent([event], 2, 3)).toBe(event);
+  });
+
+  test('missing game start keeps the host hour', () => {
+    const now = new Date('2026-11-06T16:30:00.000Z');
+    expect(scheduledEventHour(null, now)).toBe(now.getHours());
+    expect(scheduledEventHour(new Date(Number.NaN), now)).toBe(now.getHours());
   });
 });

@@ -6,8 +6,8 @@
  *
  * @description
  * Exports all user data in JSON format for GDPR compliance (right to data portability).
- * Includes user profile, posts, comments, reactions, positions, transactions, referrals,
- * notifications, and all associated data.
+ * Includes user profile, posts, comments, reactions, positions (including perp
+ * positions), transactions, referrals, notifications, and all associated data.
  *
  * @openapi
  * /api/users/export-data:
@@ -70,6 +70,7 @@ import {
   follows,
   notifications,
   or,
+  perpPositions,
   pointsTransactions,
   positions,
   posts,
@@ -99,6 +100,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     userReactions,
     userPosts,
     userPositions,
+    userPerpPositions,
     userFollows,
     userFollowers,
     userBalanceTransactions,
@@ -200,6 +202,28 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       })
       .from(positions)
       .where(eq(positions.userId, userId)),
+    db
+      .select({
+        id: perpPositions.id,
+        ticker: perpPositions.ticker,
+        organizationId: perpPositions.organizationId,
+        side: perpPositions.side,
+        entryPrice: perpPositions.entryPrice,
+        currentPrice: perpPositions.currentPrice,
+        size: perpPositions.size,
+        leverage: perpPositions.leverage,
+        liquidationPrice: perpPositions.liquidationPrice,
+        unrealizedPnL: perpPositions.unrealizedPnL,
+        unrealizedPnLPercent: perpPositions.unrealizedPnLPercent,
+        fundingPaid: perpPositions.fundingPaid,
+        openedAt: perpPositions.openedAt,
+        lastUpdated: perpPositions.lastUpdated,
+        closedAt: perpPositions.closedAt,
+        realizedPnL: perpPositions.realizedPnL,
+        settledAt: perpPositions.settledAt,
+      })
+      .from(perpPositions)
+      .where(eq(perpPositions.userId, userId)),
     db
       .select({
         id: follows.id,
@@ -360,6 +384,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     },
     trading: {
       positions: userPositions,
+      perp_positions: userPerpPositions,
       balance_transactions: userBalanceTransactions,
     },
     social: {

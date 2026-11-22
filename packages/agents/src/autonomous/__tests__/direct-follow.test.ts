@@ -44,12 +44,14 @@ mock.module('@feed/db', () => ({
   chats: {},
   comments: {},
   db: mockDb,
+  desc: (column: unknown) => column,
   dmAcceptances: {},
   eq: (a: unknown, b: unknown) => ({ a, b }),
   follows: { id: 'id', followerId: 'followerId', followingId: 'followingId' },
   groupMembers: {},
   groups: {},
   gte: (...args: unknown[]) => args,
+  inArray: (...args: unknown[]) => args,
   isNull: (...args: unknown[]) => args,
   messages: {},
   perpPositions: {},
@@ -86,6 +88,10 @@ mock.module('@feed/core/markets/prediction', () => ({
 }));
 
 mock.module('@feed/engine', () => ({
+  createNpcWalletAdapter: mock(() => ({})),
+  createPerpPriceImpactPort: mock(() => ({})),
+  createPerpSettlement: mock(() => ({})),
+  createPerpTradesCachePort: mock(() => ({})),
   FEE_CONFIG: {
     TRADING_FEE_RATE: 0,
     PLATFORM_SHARE: 0,
@@ -97,10 +103,10 @@ mock.module('@feed/engine', () => ({
   generateTagsFromPost: mock(async () => []),
   invalidateAfterPredictionTrade: mock(async () => undefined),
   PredictionPricing: {},
-  createPerpPriceImpactPort: mock(() => ({})),
   StaticDataRegistry: { getActor: mock(() => null) },
   storeTagsForPost: mock(async () => undefined),
   WalletService: class {},
+  withPredictionSettlement: mock(async () => undefined),
 }));
 
 mock.module('../../shared/logger', () => ({

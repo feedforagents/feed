@@ -35,6 +35,9 @@ export interface PersistArticleOptions {
    */
   checkRateLimit?: boolean;
 
+  /** Allow a scheduled article to wait for an imminent slot, until this Unix millisecond. */
+  rateLimitWaitUntil?: number;
+
   /**
    * Whether to generate a cover image for the article.
    * Default: true if FAL_KEY environment variable is set
@@ -107,20 +110,32 @@ export async function persistArticle(
   article: ArticlePersistInput,
   options: PersistArticleOptions = {}
 ): Promise<PersistArticleResult> {
-  const { checkRateLimit = true, generateImage = !!process.env.FAL_KEY } =
-    options;
+  const {
+    checkRateLimit = true,
+    rateLimitWaitUntil,
+    generateImage = !!process.env.FAL_KEY,
+  } = options;
 
   // Rate limit check
   if (checkRateLimit) {
-    const { allowed, currentCount, maxAllowed } =
-      await articleRateLimiter.canGenerateArticle();
-    if (!allowed) {
+    let limit = await articleRateLimiter.canGenerateArticle();
+    if (!limit.allowed && rateLimitWaitUntil !== undefined) {
+      const availableAt = await articleRateLimiter.getNextAvailableAt();
+      if (availableAt <= rateLimitWaitUntil) {
+        const delay = availableAt - Date.now();
+        if (delay > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        }
+        limit = await articleRateLimiter.canGenerateArticle();
+      }
+    }
+    if (!limit.allowed) {
       logger.debug(
         'Article persistence blocked by rate limit',
         {
           authorOrgId: article.authorOrgId,
-          currentCount,
-          maxAllowed,
+          currentCount: limit.currentCount,
+          maxAllowed: limit.maxAllowed,
         },
         'ArticlePersistence'
       );
