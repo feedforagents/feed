@@ -40,6 +40,7 @@ import {
   acceptGroupInvite,
   BusinessLogicError,
   broadcastToChannel,
+  cachedDb,
   checkRateLimitAsync,
   countVisiblePostComments,
   declineGroupInvite,
@@ -1945,6 +1946,13 @@ export async function executeUpdateProfile(
   if (args.username !== undefined) updateData.username = args.username;
   if (args.profileImageUrl !== undefined)
     updateData.profileImageUrl = args.profileImageUrl;
+  const previous =
+    args.username !== undefined
+      ? await db.user.findUnique({
+          where: { id: agent.userId },
+          select: { username: true },
+        })
+      : null;
   const user = await updateProfileWithLeaderboardInvalidation(
     agent.userId,
     updateData,
@@ -1953,6 +1961,11 @@ export async function executeUpdateProfile(
         where: { id: agent.userId },
         data: updateData,
       })
+  );
+  // Same identifier cache refresh as the website profile update route.
+  await cachedDb.invalidateUserIdentifierCaches(
+    { id: user.id, privyId: user.privyId, username: user.username },
+    { username: previous?.username }
   );
   return {
     success: true,
