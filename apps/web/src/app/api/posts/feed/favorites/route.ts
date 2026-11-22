@@ -195,7 +195,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           lte(posts.timestamp, now)
         )
       )
-      .orderBy(desc(posts.createdAt))
+      // Order by id as a tiebreaker: posts can share a createdAt (it
+      // defaults to the transaction timestamp, and engine batch creation
+      // stamps posts from millisecond-precision Dates), and OFFSET paging
+      // over an under-determined order returns a different tie order per
+      // page — duplicating some tied posts and skipping others entirely.
+      .orderBy(desc(posts.createdAt), desc(posts.id))
       .offset(offset)
       .limit(limit + 1);
 
