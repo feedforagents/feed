@@ -82,23 +82,6 @@ function resolvePredictionMarketId(
     return undefined;
   }
 
-  const directId = context.predictionMarkets.find(
-    (market) => market.id === trimmed
-  );
-  if (directId) {
-    return directId.id;
-  }
-
-  const numericPrefix = trimmed.match(/^(\d+)/)?.[1];
-  if (numericPrefix) {
-    const prefixed = context.predictionMarkets.find(
-      (market) => market.id === numericPrefix
-    );
-    if (prefixed) {
-      return prefixed.id;
-    }
-  }
-
   const predictionCandidates = [
     ...context.predictionMarkets.map((market) => ({
       id: market.id,
@@ -112,6 +95,21 @@ function resolvePredictionMarketId(
     (candidate, index, collection) =>
       collection.findIndex((entry) => entry.id === candidate.id) === index
   );
+
+  const directId = predictionCandidates.find((market) => market.id === trimmed);
+  if (directId) {
+    return directId.id;
+  }
+
+  const numericPrefix = trimmed.match(/^(\d+)/)?.[1];
+  if (numericPrefix) {
+    const prefixed = predictionCandidates.find(
+      (market) => market.id === numericPrefix
+    );
+    if (prefixed) {
+      return prefixed.id;
+    }
+  }
 
   const normalized = trimmed.toUpperCase();
   const byQuestion = predictionCandidates.find((market) => {
@@ -141,16 +139,33 @@ function resolvePerpTicker(
     .split(/\s+/, 1)[0]
     ?.trim();
 
-  for (const market of context.perpMarkets) {
+  const perpCandidates: Array<{ ticker: string; name?: string }> = [
+    ...context.perpMarkets.map((market) => ({
+      ticker: market.ticker,
+      name: market.name,
+    })),
+  ];
+  const seenTickers = new Set(
+    perpCandidates.map((market) => market.ticker.toUpperCase())
+  );
+  for (const position of context.agentPositions.perps) {
+    const tickerKey = position.ticker.toUpperCase();
+    if (!seenTickers.has(tickerKey)) {
+      seenTickers.add(tickerKey);
+      perpCandidates.push({ ticker: position.ticker });
+    }
+  }
+
+  for (const market of perpCandidates) {
     const ticker = market.ticker.toUpperCase();
-    const name = market.name.toUpperCase();
+    const name = market.name?.toUpperCase();
 
     if (
       normalized === ticker ||
       leadingToken === ticker ||
       normalized.startsWith(`${ticker}:`) ||
       normalized.includes(`${ticker} @`) ||
-      normalized === name
+      (name !== undefined && normalized === name)
     ) {
       return market.ticker;
     }
