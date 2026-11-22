@@ -19,10 +19,14 @@ mock.module('@feed/api', () => ({
 }));
 
 mock.module('@feed/db', () => ({
+  and: () => undefined,
+  balanceTransactions: {},
+  count: () => undefined,
   db: {},
   eq: () => undefined,
   inArray: () => undefined,
   markets: {},
+  npcTrades: {},
   sql: () => undefined,
   users: {},
 }));

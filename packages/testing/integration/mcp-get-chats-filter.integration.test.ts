@@ -62,6 +62,7 @@ import {
   groups,
   inArray,
   notInArray,
+  or,
   userApiKeys,
   userPnLSnapshots,
   users,
@@ -134,9 +135,19 @@ type Owned = {
   chats: string[];
   groups: string[];
   keys: string[];
+  participants: string[];
+  members: string[];
 };
 
-const owned: Owned = { users: [], chats: [], groups: [], keys: [] };
+const ownership = (): Owned => ({
+  users: [],
+  chats: [],
+  groups: [],
+  keys: [],
+  participants: [],
+  members: [],
+});
+const owned = ownership();
 
 let viewerId = '';
 let peerId = '';
@@ -222,16 +233,58 @@ async function insertOwnedChatInto(
 }
 
 async function addParticipant(
+  target: Owned,
   chatId: string,
   userId: string,
   isActive = true
-): Promise<void> {
-  await db.insert(chatParticipants).values({
-    id: await generateSnowflakeId(),
-    chatId,
-    userId,
-    isActive,
-  });
+): Promise<string> {
+  const [row] = await db
+    .insert(chatParticipants)
+    .values({
+      id: await generateSnowflakeId(),
+      chatId,
+      userId,
+      isActive,
+    })
+    .returning({ id: chatParticipants.id });
+  assert.ok(row, 'chat participant insert returned no row');
+  target.participants.push(row.id);
+  return row.id;
+}
+
+async function insertOwnedGroupInto(
+  target: Owned,
+  ownerId: string
+): Promise<string> {
+  const [row] = await db
+    .insert(groups)
+    .values({
+      id: await generateSnowflakeId(),
+      name: 'f135 group',
+      type: 'user',
+      ownerId,
+      createdById: ownerId,
+      updatedAt: new Date(),
+    })
+    .returning({ id: groups.id });
+  assert.ok(row, 'group insert returned no row');
+  target.groups.push(row.id);
+  return row.id;
+}
+
+async function addGroupMember(
+  target: Owned,
+  groupId: string,
+  userId: string,
+  role: 'admin' | 'member'
+): Promise<string> {
+  const [row] = await db
+    .insert(groupMembers)
+    .values({ id: await generateSnowflakeId(), groupId, userId, role })
+    .returning({ id: groupMembers.id });
+  assert.ok(row, 'group member insert returned no row');
+  target.members.push(row.id);
+  return row.id;
 }
 
 async function createChat(
@@ -241,7 +294,12 @@ async function createChat(
 ): Promise<string> {
   const chatId = await insertOwnedChatInto(target, values);
   for (const member of members) {
-    await addParticipant(chatId, member.userId, member.isActive ?? true);
+    await addParticipant(
+      target,
+      chatId,
+      member.userId,
+      member.isActive ?? true
+    );
   }
   return chatId;
 }
@@ -271,13 +329,8 @@ async function insertOwnedApiKey(
  * Delete only rows this fixture acquired, by ID — and refuse before
  * deleting anything when a row this fixture does not own still
  * references an owned parent. The checks and the deletes run in one
- * transaction, so the refusal decision cannot drift apart from the
- * deletion. Two gaps the old cleanup had:
- *
- * - Parent-ID ownership does not own every participant/member now
- *   referencing that parent: a chatParticipant or groupMember row for
- *   an owned chat/group can belong to a foreign user. Only rows whose
- *   user is also owned are deleted; any other row refuses cleanup.
+ * transaction. Each child is owned only by its returned row ID, even
+ * when both sides of the relation are fixture-owned.
  * - Deleting an owned user silently destroys or blanks another
  *   owner's data through the five destructive User FK references:
  *   three ON DELETE CASCADE (GameOnboarding, UserPnLSnapshot,
@@ -286,43 +339,66 @@ async function insertOwnedApiKey(
  */
 async function cleanupOwned(target: Owned): Promise<void> {
   await db.transaction(async (tx) => {
-    if (target.chats.length > 0) {
+    const participantScope = or(
+      target.chats.length
+        ? inArray(chatParticipants.chatId, target.chats)
+        : undefined,
+      target.users.length
+        ? inArray(chatParticipants.userId, target.users)
+        : undefined
+    );
+    if (participantScope) {
       const foreignParticipants = await tx
         .select({ id: chatParticipants.id })
         .from(chatParticipants)
         .where(
-          target.users.length > 0
-            ? and(
-                inArray(chatParticipants.chatId, target.chats),
-                notInArray(chatParticipants.userId, target.users)
-              )
-            : inArray(chatParticipants.chatId, target.chats)
+          and(
+            participantScope,
+            target.participants.length
+              ? notInArray(chatParticipants.id, target.participants)
+              : undefined
+          )
         )
         .limit(1);
       if (foreignParticipants.length > 0)
         throw new Error(
-          'cleanup refused: a participant this fixture does not own still references an owned chat'
+          'cleanup refused: a participant this fixture does not own still references an owned parent'
         );
     }
-    if (target.groups.length > 0) {
+
+    const memberScope = or(
+      target.groups.length
+        ? inArray(groupMembers.groupId, target.groups)
+        : undefined,
+      target.users.length
+        ? inArray(groupMembers.userId, target.users)
+        : undefined
+    );
+    if (memberScope) {
       const foreignMembers = await tx
         .select({ id: groupMembers.id })
         .from(groupMembers)
         .where(
-          target.users.length > 0
-            ? and(
-                inArray(groupMembers.groupId, target.groups),
-                notInArray(groupMembers.userId, target.users)
-              )
-            : inArray(groupMembers.groupId, target.groups)
+          and(
+            memberScope,
+            target.members.length
+              ? notInArray(groupMembers.id, target.members)
+              : undefined
+          )
         )
         .limit(1);
       if (foreignMembers.length > 0)
         throw new Error(
-          'cleanup refused: a member this fixture does not own still references an owned group'
+          'cleanup refused: a member this fixture does not own still references an owned parent'
         );
     }
+
     if (target.users.length > 0) {
+      await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, target.users))
+        .for('update');
       const [onboarding, snapshots, whitelistRows, grantedRows, configRows] =
         await Promise.all([
           tx
@@ -366,30 +442,20 @@ async function cleanupOwned(target: Owned): Promise<void> {
     if (target.keys.length > 0) {
       await tx.delete(userApiKeys).where(inArray(userApiKeys.id, target.keys));
     }
+    if (target.participants.length > 0) {
+      await tx
+        .delete(chatParticipants)
+        .where(inArray(chatParticipants.id, target.participants));
+    }
+    if (target.members.length > 0) {
+      await tx
+        .delete(groupMembers)
+        .where(inArray(groupMembers.id, target.members));
+    }
     if (target.chats.length > 0) {
-      if (target.users.length > 0) {
-        await tx
-          .delete(chatParticipants)
-          .where(
-            and(
-              inArray(chatParticipants.chatId, target.chats),
-              inArray(chatParticipants.userId, target.users)
-            )
-          );
-      }
       await tx.delete(chats).where(inArray(chats.id, target.chats));
     }
     if (target.groups.length > 0) {
-      if (target.users.length > 0) {
-        await tx
-          .delete(groupMembers)
-          .where(
-            and(
-              inArray(groupMembers.groupId, target.groups),
-              inArray(groupMembers.userId, target.users)
-            )
-          );
-      }
       await tx.delete(groups).where(inArray(groups.id, target.groups));
     }
     if (target.users.length > 0) {
@@ -500,34 +566,19 @@ beforeAll(async () => {
   ]);
 
   // Group-backed group chat: Group row + groupMembers + chats.groupId.
-  const groupId = await generateSnowflakeId();
-  const insertedGroup = await db
-    .insert(groups)
-    .values({
-      id: groupId,
-      name: 'f135 group',
-      type: 'user',
-      ownerId: viewerId,
-      createdById: viewerId,
-      updatedAt: new Date(),
-    })
-    .returning({ id: groups.id });
-  const groupRow = insertedGroup[0];
-  assert.ok(groupRow, 'group insert returned no row');
-  owned.groups.push(groupRow.id);
+  const groupId = await insertOwnedGroupInto(owned, viewerId);
   for (const userId of [viewerId, peerId]) {
-    await db.insert(groupMembers).values({
-      id: await generateSnowflakeId(),
-      groupId: groupRow.id,
+    await addGroupMember(
+      owned,
+      groupId,
       userId,
-      role: userId === viewerId ? 'admin' : 'member',
-    });
+      userId === viewerId ? 'admin' : 'member'
+    );
   }
-  groupBacked = await createChat(
-    owned,
-    { isGroup: true, groupId: groupRow.id },
-    [{ userId: viewerId }, { userId: peerId }]
-  );
+  groupBacked = await createChat(owned, { isGroup: true, groupId }, [
+    { userId: viewerId },
+    { userId: peerId },
+  ]);
 
   // Direct group chat: isGroup with groupId null, chatParticipants only
   // (the shape POST /api/chats with isGroup=true creates).
@@ -754,43 +805,24 @@ describe('MCP get_chats fixture ownership under setup collision', () => {
   // Rows that simulate another owner's data. They stay out of every
   // owned array the fixture helpers manage; this suite removes them
   // itself at the end.
+  const foreignOwned = ownership();
   const foreign = { userId: '', chatId: '' };
 
   beforeAll(async () => {
-    foreign.userId = await generateSnowflakeId();
-    await db.insert(users).values({
-      id: foreign.userId,
-      username: 'f135-foreign-user',
-      isTest: false,
-      isActor: false,
-      updatedAt: new Date(),
-    });
-    foreign.chatId = await generateSnowflakeId();
-    await db.insert(chats).values({
-      id: foreign.chatId,
-      name: 'f135 foreign chat',
-      isGroup: false,
-      groupId: null,
-      updatedAt: new Date(),
-    });
-    await db.insert(chatParticipants).values({
-      id: await generateSnowflakeId(),
-      chatId: foreign.chatId,
-      userId: foreign.userId,
-      isActive: true,
-    });
+    foreign.userId = await insertOwnedUserInto(foreignOwned, 'foreign');
+    foreign.chatId = await createChat(
+      foreignOwned,
+      { isGroup: false, groupId: null },
+      [{ userId: foreign.userId }]
+    );
   });
 
   afterAll(async () => {
-    await db
-      .delete(chatParticipants)
-      .where(eq(chatParticipants.chatId, foreign.chatId));
-    await db.delete(chats).where(eq(chats.id, foreign.chatId));
-    await db.delete(users).where(eq(users.id, foreign.userId));
+    await cleanupOwned(foreignOwned);
   });
 
   it('a colliding setup registers nothing and cleanup preserves pre-existing rows', async () => {
-    const localOwned: Owned = { users: [], chats: [], groups: [], keys: [] };
+    const localOwned = ownership();
 
     // A setup insert that collides with the pre-existing user fails,
     // and because ownership is registered only from RETURNING, the
@@ -837,7 +869,10 @@ describe('MCP get_chats fixture ownership under setup collision', () => {
       .from(users)
       .where(eq(users.id, foreign.userId));
     expect(foreignUser).toEqual([
-      { id: foreign.userId, username: 'f135-foreign-user' },
+      {
+        id: foreign.userId,
+        username: `f135-foreign-${foreign.userId.slice(-6)}`,
+      },
     ]);
     const foreignChatRows = await db
       .select({ id: chats.id })
@@ -852,10 +887,9 @@ describe('MCP get_chats fixture ownership under setup collision', () => {
   });
 
   it('cleanup refuses foreign participants and foreign user references, preserving every row', async () => {
-    const localOwned: Owned = { users: [], chats: [], groups: [], keys: [] };
-    const foreignParticipantUserId = await generateSnowflakeId();
-    const foreignParticipantRowId = await generateSnowflakeId();
-    const onboardingRowId = await generateSnowflakeId();
+    const localOwned = ownership();
+    const separateOwner = ownership();
+    let onboardingRowId: string | undefined;
     try {
       const guardUserId = await insertOwnedUserInto(localOwned, 'guard');
       const guardChatId = await createChat(
@@ -865,25 +899,23 @@ describe('MCP get_chats fixture ownership under setup collision', () => {
       );
 
       // A participant this fixture does not own, on the owned chat...
-      await db.insert(users).values({
-        id: foreignParticipantUserId,
-        username: 'f135-guard-foreign-participant',
-        isTest: false,
-        isActor: false,
-        updatedAt: new Date(),
-      });
-      await db.insert(chatParticipants).values({
-        id: foreignParticipantRowId,
-        chatId: guardChatId,
-        userId: foreignParticipantUserId,
-        isActive: true,
-      });
+      const foreignParticipantUserId = await insertOwnedUserInto(
+        separateOwner,
+        'guard-foreign-participant'
+      );
+      const foreignParticipantRowId = await addParticipant(
+        separateOwner,
+        guardChatId,
+        foreignParticipantUserId
+      );
       // ...and a GameOnboarding row for the owned user, which deleting
       // the user would silently cascade away.
-      await db.insert(gameOnboarding).values({
-        id: onboardingRowId,
-        userId: guardUserId,
-      });
+      const [onboarding] = await db
+        .insert(gameOnboarding)
+        .values({ id: await generateSnowflakeId(), userId: guardUserId })
+        .returning({ id: gameOnboarding.id });
+      assert.ok(onboarding, 'onboarding insert returned no row');
+      onboardingRowId = onboarding.id;
 
       await expect(cleanupOwned(localOwned)).rejects.toThrow(/cleanup refused/);
 
@@ -911,13 +943,67 @@ describe('MCP get_chats fixture ownership under setup collision', () => {
     } finally {
       // Remove the foreign rows directly, then cleanup removes only the
       // rows this fixture acquired.
-      await db
-        .delete(chatParticipants)
-        .where(eq(chatParticipants.id, foreignParticipantRowId));
-      await db
-        .delete(gameOnboarding)
-        .where(eq(gameOnboarding.id, onboardingRowId));
-      await db.delete(users).where(eq(users.id, foreignParticipantUserId));
+      await cleanupOwned(separateOwner);
+      if (onboardingRowId) {
+        await db
+          .delete(gameOnboarding)
+          .where(eq(gameOnboarding.id, onboardingRowId));
+      }
+      await cleanupOwned(localOwned);
+    }
+  });
+
+  it('refuses unacquired participant and member rows even when both parents are owned', async () => {
+    const localOwned = ownership();
+    const separateOwner = ownership();
+    try {
+      const guardUserId = await insertOwnedUserInto(localOwned, 'same-parent');
+      const guardChatId = await createChat(
+        localOwned,
+        { isGroup: false, groupId: null },
+        []
+      );
+      const guardGroupId = await insertOwnedGroupInto(localOwned, guardUserId);
+
+      const participantId = await addParticipant(
+        separateOwner,
+        guardChatId,
+        guardUserId
+      );
+      await expect(cleanupOwned(localOwned)).rejects.toThrow(
+        /a participant this fixture does not own/
+      );
+      expect(
+        await db
+          .select({ id: chatParticipants.id })
+          .from(chatParticipants)
+          .where(eq(chatParticipants.id, participantId))
+      ).toEqual([{ id: participantId }]);
+      await cleanupOwned(separateOwner);
+
+      const memberId = await addGroupMember(
+        separateOwner,
+        guardGroupId,
+        guardUserId,
+        'member'
+      );
+      await expect(cleanupOwned(localOwned)).rejects.toThrow(
+        /a member this fixture does not own/
+      );
+      expect(
+        await db
+          .select({ id: groupMembers.id })
+          .from(groupMembers)
+          .where(eq(groupMembers.id, memberId))
+      ).toEqual([{ id: memberId }]);
+      expect(
+        await db
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.id, guardUserId))
+      ).toEqual([{ id: guardUserId }]);
+    } finally {
+      await cleanupOwned(separateOwner);
       await cleanupOwned(localOwned);
     }
   });

@@ -2,7 +2,7 @@
 /**
  * Local Cron Simulator
  *
- * Simulates the Cloudflare cron scheduler locally by calling game-tick, markets-tick, and npc-tick endpoints every minute.
+ * Simulates the Cloudflare cron scheduler locally by calling game, market health, market recovery, and NPC endpoints every minute.
  * Use this if you don't want to run the full daemon but want content generation and agent activity.
  *
  * Usage:
@@ -14,7 +14,6 @@
 
 const CRON_INTERVAL = 60000; // 60 seconds
 const GAME_TICK_URL = 'http://localhost:3000/api/cron/game-tick';
-const MARKETS_TICK_URL = 'http://localhost:3000/api/cron/markets-tick';
 const NPC_TICK_URL = 'http://localhost:3000/api/cron/npc-tick';
 
 let intervalId: NodeJS.Timeout | null = null;
@@ -148,22 +147,22 @@ async function executeNpcTick() {
   }
 }
 
-async function executeMarketsTick() {
-  console.info(
-    `📈 Triggering markets tick #${tickCount}...`,
-    undefined,
-    'LocalCron'
-  );
+let marketRecovery: Promise<void> | undefined;
 
-  const response = await fetch(MARKETS_TICK_URL, {
+async function executeMarketsTick(job: 'markets-tick' | 'markets-recovery') {
+  const tick = tickCount;
+  console.info(`📈 Triggering ${job} #${tick}...`, undefined, 'LocalCron');
+
+  const response = await fetch(`http://localhost:3000/api/cron/${job}`, {
     method: 'POST',
+    signal: AbortSignal.timeout(840_000),
     headers: {
       Authorization: `Bearer ${process.env.CRON_SECRET || 'development'}`,
       'Content-Type': 'application/json',
     },
   }).catch((error: Error) => {
     console.error(
-      `Markets tick #${tickCount} error: ${error.message}`,
+      `${job} #${tick} error: ${error.message}`,
       { error },
       'LocalCron'
     );
@@ -176,7 +175,7 @@ async function executeMarketsTick() {
   if (!response.ok) {
     const text = await response.text();
     console.error(
-      `Markets tick #${tickCount} failed (HTTP ${response.status})`,
+      `${job} #${tick} failed (HTTP ${response.status})`,
       { body: text.slice(0, 500) },
       'LocalCron'
     );
@@ -187,17 +186,17 @@ async function executeMarketsTick() {
     const data = await response.json();
     if (data.skipped) {
       console.info(
-        `Markets tick #${tickCount} skipped: ${data.reason}`,
+        `${job} #${tick} skipped: ${data.reason}`,
         undefined,
         'LocalCron'
       );
     } else {
       console.info(
-        `✅ Markets tick #${tickCount} completed`,
+        `✅ ${job} #${tick} completed`,
         {
-          resolved: data.resolved ?? 0,
-          created: data.created ?? 0,
-          active: data.active ?? 0,
+          pending: data.pendingResolutions,
+          resolved: data.marketsResolved,
+          created: data.marketsCreated,
         },
         'LocalCron'
       );
@@ -206,8 +205,21 @@ async function executeMarketsTick() {
 }
 
 async function executeTick() {
+  if (process.env.DEPLOYMENT_ENV === 'localnet' && !marketRecovery) {
+    marketRecovery = executeMarketsTick('markets-recovery')
+      .catch((error: unknown) => {
+        console.error(
+          'Market recovery response failed',
+          { error },
+          'LocalCron'
+        );
+      })
+      .finally(() => {
+        marketRecovery = undefined;
+      });
+  }
   await executeGameTick();
-  await executeMarketsTick();
+  await executeMarketsTick('markets-tick');
   await executeNpcTick();
 }
 
@@ -272,7 +284,7 @@ async function main() {
   console.info('🔄 LOCAL CRON SIMULATOR', undefined, 'LocalCron');
   console.info('======================', undefined, 'LocalCron');
   console.info(
-    'Simulating the cron scheduler by calling game-tick, markets-tick, npc-tick every minute',
+    'Simulating the cron scheduler by calling game, market health, market recovery, and NPC jobs every minute',
     undefined,
     'LocalCron'
   );
