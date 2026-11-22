@@ -66,6 +66,31 @@ describe('ContentQualityGate.validateParody', () => {
     expect(typeof result.passed).toBe('boolean');
     expect(typeof result.score).toBe('number');
   });
+
+  test('parody allows entities present in originalTitle while still rejecting invented entities', async () => {
+    const original =
+      'Federal Reserve and European Union debate Silicon Valley regulation';
+    const groundedParody =
+      'Federal Reserve and European Union hold emergency Silicon Valley robot regulation summit';
+
+    const groundedResult = await ContentQualityGate.validateParody(
+      original,
+      groundedParody
+    );
+    expect(groundedResult.passed).toBe(true);
+    expect(groundedResult.reasons).toHaveLength(0);
+
+    const fabricatedParody =
+      'Quantum Harbor and Silver Archive debate regulation after Federal Reserve talk';
+    const fabricatedResult = await ContentQualityGate.validateParody(
+      original,
+      fabricatedParody
+    );
+    expect(fabricatedResult.passed).toBe(false);
+    expect(
+      fabricatedResult.reasons.some((r) => r.includes('unknown entities'))
+    ).toBe(true);
+  });
 });
 
 describe('ContentQualityGate.validateWorldFact', () => {
@@ -106,6 +131,31 @@ describe('ContentQualityGate.validateWorldFact', () => {
     expect(result.reasons.some((r) => r.includes('unknown entities'))).toBe(
       true
     );
+  });
+
+  test('world fact with sourceContext allows entities grounded in that source', async () => {
+    const source =
+      'Federal Reserve and European Union released joint Silicon Valley banking guidance.';
+    const consolidated =
+      'The Federal Reserve and European Union issued coordinated banking guidance affecting Silicon Valley lenders.';
+
+    const groundedResult = await ContentQualityGate.validateWorldFact(
+      consolidated,
+      source
+    );
+    expect(groundedResult.passed).toBe(true);
+    expect(groundedResult.reasons).toHaveLength(0);
+
+    const hallucinated =
+      'Quantum Harbor and Silver Archive issued banking guidance alongside the Federal Reserve.';
+    const hallucinatedResult = await ContentQualityGate.validateWorldFact(
+      hallucinated,
+      source
+    );
+    expect(hallucinatedResult.passed).toBe(false);
+    expect(
+      hallucinatedResult.reasons.some((r) => r.includes('unknown entities'))
+    ).toBe(true);
   });
 });
 

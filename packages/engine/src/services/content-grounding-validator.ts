@@ -300,6 +300,10 @@ export function checkEntityConsistency(
   if (sourceText) {
     for (const entity of extractProperNouns(sourceText)) {
       allowed.add(entity.toLowerCase());
+      const stripped = entity.replace(ENTITY_PREFIX_WORDS, '');
+      if (/[ \t]/.test(stripped)) {
+        allowed.add(stripped.toLowerCase());
+      }
     }
   }
 
@@ -311,12 +315,13 @@ export function checkEntityConsistency(
     if (!/[ \t]/.test(name)) continue;
 
     // A sentence or headline may capitalize a determiner before a known name.
-    // Check the original candidate as well when reporting an unknown name.
+    // Match the stripped name against sourceText so differing sentence lead-ins
+    // (e.g. "For Federal Reserve" vs "The Federal Reserve") still ground cleanly.
     const key = name.toLowerCase();
     if (allowed.has(key)) continue;
     const inSource = sourceText
       ? new RegExp(
-          `(?<![\\p{L}\\p{N}_])${escapeRegex(entity)}(?![\\p{L}\\p{N}_])`,
+          `(?<![\\p{L}\\p{N}_])${escapeRegex(name)}(?![\\p{L}\\p{N}_])`,
           'iu'
         ).test(sourceText)
       : false;
