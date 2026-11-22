@@ -40,6 +40,7 @@ import {
   acceptGroupInvite,
   BusinessLogicError,
   broadcastToChannel,
+  cachedDb,
   checkRateLimitAsync,
   countVisiblePostComments,
   declineGroupInvite,
@@ -1485,6 +1486,10 @@ export async function executeCreatePost(
       timestamp: new Date(),
     },
   });
+  // Same list refresh as POST /api/posts: Recent, Following and the
+  // author's profile list must show the new post before their TTL ends.
+  await cachedDb.invalidatePostsCache();
+  await cachedDb.invalidateActorPostsCache(agent.userId);
   return {
     success: true,
     postId: post.id,
@@ -1511,6 +1516,10 @@ export async function executeDeletePost(
     where: { id: args.postId },
     data: { deletedAt: new Date() },
   });
+  // Same list refresh as DELETE /api/posts/[id], so warmed lists stop
+  // serving the deleted post.
+  await cachedDb.invalidatePostsCache();
+  await cachedDb.invalidateActorPostsCache(post.authorId);
   return { success: true };
 }
 
