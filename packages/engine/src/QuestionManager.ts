@@ -844,7 +844,12 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
     question: Question,
     _actors: SelectedActor[],
     _organizations: Organization[],
-    recentEvents: DayTimeline[]
+    recentEvents: ReadonlyArray<{
+      events: ReadonlyArray<
+        Pick<WorldEvent, 'description' | 'relatedQuestion'>
+      >;
+    }>,
+    options: { recordWorldImpact?: boolean } = {}
   ): Promise<string> {
     // Get context from recent events related to this question
     const relatedEvents = recentEvents
@@ -896,8 +901,9 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
       throw new Error('Resolution event must be a nonempty string');
     }
 
-    // Assess world impact
-    await this.assessAndRecordWorldImpact(question, eventDescription);
+    if (options.recordWorldImpact !== false) {
+      await this.assessAndRecordWorldImpact(question, eventDescription);
+    }
 
     return eventDescription;
   }
@@ -905,7 +911,7 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
   /**
    * Assess if a resolution event changes the world and record it if so
    */
-  private async assessAndRecordWorldImpact(
+  async assessAndRecordWorldImpact(
     question: Question,
     resolutionEvent: string
   ): Promise<void> {
