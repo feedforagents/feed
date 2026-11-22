@@ -2628,16 +2628,13 @@ export class FeedAgentExecutor implements AgentExecutor {
   ): Promise<TrendingTagsResponse> {
     const limit = this.parsePositiveInt(params.limit, 10, 50);
 
-    const trendingTagsList = await getCurrentTrendingTags(limit);
+    const trendingTagsList = await getCurrentTrendingTags(limit, {
+      requireIdentity: true,
+    });
 
     return {
       tags: trendingTagsList.map((tt) => {
         const tag = tt.tag;
-        if (!tag || !tag.name.trim() || !tag.displayName.trim()) {
-          throw new Error(
-            `Trending tag ${tt.tagId} is missing its required identity`
-          );
-        }
         return {
           id: tag.id,
           name: tag.name,

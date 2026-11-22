@@ -157,7 +157,7 @@ export const GET = withErrorHandling(async (_request: NextRequest) => {
   // Create the processing promise
   const processingPromise = (async () => {
     // Get trending tags from cache (get more tags for better grouping)
-    const trending = await getCurrentTrendingTags(10, calculation);
+    const trending = await getCurrentTrendingTags(10, { calculation });
 
     if (trending.length === 0) {
       logger.info(

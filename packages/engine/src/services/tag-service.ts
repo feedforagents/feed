@@ -19,6 +19,7 @@ import {
   gameConfigs,
   gte,
   inArray,
+  isNotNull,
   isNull,
   lt,
   lte,
@@ -688,18 +689,38 @@ export async function getLatestTrendingCalculation(): Promise<
 
 export async function getCurrentTrendingTags(
   limit = 10,
-  calculation?: TrendingCalculation
+  options: {
+    calculation?: TrendingCalculation;
+    requireIdentity?: boolean;
+  } = {}
 ): Promise<TrendingTagWithTag[]> {
-  const current = calculation ?? (await getLatestTrendingCalculation());
+  const current = options.calculation ?? (await getLatestTrendingCalculation());
   if (!current?.hasTags) return [];
 
-  return dbWrite
+  const rows = await dbWrite
     .select({ ...getTableColumns(trendingTags), tag: tags })
     .from(trendingTags)
-    .innerJoin(tags, eq(trendingTags.tagId, tags.id))
-    .where(sql`${trendingTags.calculatedAt} = ${current.batch}::timestamp`)
+    .leftJoin(tags, eq(trendingTags.tagId, tags.id))
+    .where(
+      and(
+        sql`${trendingTags.calculatedAt} = ${current.batch}::timestamp`,
+        options.requireIdentity ? undefined : isNotNull(tags.id)
+      )
+    )
     .orderBy(asc(trendingTags.rank))
     .limit(limit);
+  return rows.flatMap((row) => {
+    const { tag } = row;
+    if (
+      options.requireIdentity &&
+      (!tag || !tag.name.trim() || !tag.displayName.trim())
+    ) {
+      throw new Error(
+        `Trending tag ${row.tagId} is missing its required identity`
+      );
+    }
+    return tag ? [{ ...row, tag }] : [];
+  });
 }
 
 /**
