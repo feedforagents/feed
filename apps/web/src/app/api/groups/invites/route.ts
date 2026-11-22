@@ -6,7 +6,17 @@
  */
 
 import { authenticate, successResponse, withErrorHandling } from '@feed/api';
-import { asUser } from '@feed/db';
+import {
+  and,
+  asUser,
+  count,
+  eq,
+  groupMembers,
+  inArray,
+  like,
+  not,
+  users,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
@@ -34,21 +44,33 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     }
 
     // Fetch group details
-    const groupIds = pendingInvites.map((inv) => inv.groupId);
+    const groupIds = [...new Set(pendingInvites.map((inv) => inv.groupId))];
     const groups = await db.group.findMany({
       where: {
         id: { in: groupIds },
       },
     });
 
-    // Get member counts for each group
-    const memberCounts = await Promise.all(
-      groupIds.map((gid) =>
-        db.groupMember.count({ where: { groupId: gid, isActive: true } })
-      )
-    );
+    // Aggregate only visible active memberships for the groups being returned.
+    const memberCounts =
+      groupIds.length > 0
+        ? await db
+            .select({ groupId: groupMembers.groupId, memberCount: count() })
+            .from(groupMembers)
+            .innerJoin(users, eq(users.id, groupMembers.userId))
+            .where(
+              and(
+                inArray(groupMembers.groupId, groupIds),
+                eq(groupMembers.isActive, true),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            )
+            .groupBy(groupMembers.groupId)
+        : [];
     const memberCountMap = new Map(
-      groupIds.map((gid, i) => [gid, memberCounts[i] ?? 0])
+      memberCounts.map((row) => [row.groupId, row.memberCount])
     );
     const groupMap = new Map(groups.map((g) => [g.id, g]));
 

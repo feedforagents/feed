@@ -13,10 +13,12 @@ import {
   gte,
   inArray,
   isNull,
+  like,
   lt,
   lte,
   markets,
   not,
+  notExists,
   posts,
   questions,
   reactions,
@@ -106,6 +108,25 @@ export interface StoriesPipelineResult {
   generatedAt: string;
 }
 
+/**
+ * The test-author exclusion every sibling feed applies
+ * (DatabaseService.getRecentPosts excludes test authors in SQL, the
+ * following feed filters out test users, and the favorites feed does the
+ * same): a post is hidden when its author's user row has isTest = true or
+ * its author id starts with 'test-'. Built fresh per query.
+ */
+function excludeTestAuthors() {
+  return and(
+    not(like(posts.authorId, 'test-%')),
+    notExists(
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+    )
+  );
+}
+
 export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
   const todaysTopic = await dailyTopicService.getCurrentTopic().catch((err) => {
     logger.warn('Failed to get daily topic', { error: err }, 'StoriesPipeline');
@@ -133,6 +154,7 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
     .where(
       and(
         isNull(posts.deletedAt),
+        excludeTestAuthors(),
         gte(posts.timestamp, cutoff),
         lte(posts.timestamp, now),
         isNull(posts.commentOnPostId),
@@ -173,6 +195,7 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
       .where(
         and(
           isNull(posts.deletedAt),
+          excludeTestAuthors(),
           gte(posts.timestamp, backfillCutoff),
           lt(posts.timestamp, cutoff),
           isNull(posts.commentOnPostId),
@@ -212,6 +235,7 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
         .where(
           and(
             isNull(posts.deletedAt),
+            excludeTestAuthors(),
             gte(posts.timestamp, backfillCutoff),
             lt(posts.timestamp, cutoff),
             isNull(posts.commentOnPostId),
@@ -573,8 +597,9 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
     const arcState = meta?.arcState ?? null;
     const storyTopicKey = meta?.topicKey ?? null;
 
-    // Skip resolved or expired questions
-    if (meta?.status === 'resolved') continue;
+    // Skip questions that are no longer live: resolved, cancelled by an
+    // admin void (all positions refunded), or past their resolution date.
+    if (meta?.status === 'resolved' || meta?.status === 'cancelled') continue;
     if (meta?.resolutionDate && meta.resolutionDate <= now) continue;
 
     const baseScore = calculateStoryScore(

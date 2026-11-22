@@ -88,6 +88,7 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  aliasedTable,
   and,
   comments,
   count,
@@ -95,8 +96,12 @@ import {
   desc,
   eq,
   inArray,
+  isNotNull,
   isNull,
   lte,
+  ne,
+  notInArray,
+  or,
   posts,
   reactions,
   shares,
@@ -110,6 +115,7 @@ import {
   UserPostsQuerySchema,
 } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 
 /**
  * GET /api/users/[userId]/posts
@@ -152,10 +158,35 @@ export const GET = withErrorHandling(
       page: searchParams.get('page') ?? undefined,
       limit: searchParams.get('limit') ?? undefined,
     };
-    const { type } = UserPostsQuerySchema.parse(queryParams);
+    const { type, page, limit } = UserPostsQuerySchema.parse(queryParams);
 
     if (type === 'replies') {
-      // Get user's comments (replies)
+      // Apply the viewer's moderation policy, as the post feeds, favorites
+      // feed, notifications, user search and the post comment list do:
+      // content by authors the viewer blocked or muted — or who blocked
+      // the viewer — is not returned or counted. The profile owner's own
+      // replies are the target of this page and stay listed; what the
+      // policy governs here is the embedded context (parent post, parent
+      // comment) and the reply counts. Anonymous reads have no moderation
+      // set and stay unfiltered.
+      const excludedAuthorIds: ReadonlySet<string> = user
+        ? await loadViewerExcludedAuthorIds(user.userId)
+        : new Set<string>();
+
+      // Get user's comments (replies), one validated page at a time.
+      // `total` is the full visible reply count, not the page length, so
+      // callers can page past the first 100 replies.
+      const [totalReplies] = await db
+        .select({ value: count() })
+        .from(comments)
+        .where(
+          and(
+            eq(comments.authorId, canonicalUserId),
+            isNull(comments.deletedAt)
+          )
+        );
+      const total = Number(totalReplies?.value ?? 0);
+
       const userComments = await db
         .select()
         .from(comments)
@@ -165,14 +196,15 @@ export const GET = withErrorHandling(
             isNull(comments.deletedAt)
           )
         )
-        .orderBy(desc(comments.createdAt))
-        .limit(100);
+        .orderBy(desc(comments.createdAt), desc(comments.id))
+        .limit(limit)
+        .offset((page - 1) * limit);
 
       if (userComments.length === 0) {
         return successResponse({
           type: 'replies',
           items: [],
-          total: 0,
+          total,
         });
       }
 
@@ -204,7 +236,13 @@ export const GET = withErrorHandling(
           )
         );
 
-      const postsMap = new Map(postsData.map((p) => [p.id, p]));
+      // A parent post by an author the viewer must not see is never
+      // exposed either; the reply renders with post: null instead, like
+      // for a deleted or future parent.
+      const exposablePostsData = postsData.filter(
+        (p) => !excludedAuthorIds.has(p.authorId)
+      );
+      const postsMap = new Map(exposablePostsData.map((p) => [p.id, p]));
 
       // Fetch parent comments (for replies to comments)
       let parentCommentsMap = new Map<
@@ -232,7 +270,13 @@ export const GET = withErrorHandling(
             )
           );
 
-        parentCommentsMap = new Map(parentCommentsData.map((c) => [c.id, c]));
+        // Same rule for parent comments: one by an author the viewer
+        // must not see renders as parentComment: null, like a deleted one.
+        parentCommentsMap = new Map(
+          parentCommentsData
+            .filter((c) => !excludedAuthorIds.has(c.authorId))
+            .map((c) => [c.id, c])
+        );
       }
 
       // Fetch like counts for comments
@@ -254,7 +298,9 @@ export const GET = withErrorHandling(
         likeCountsResult.map((r) => [r.commentId, Number(r.count)])
       );
 
-      // Fetch reply counts for comments
+      // Fetch reply counts for comments. Child replies by authors the
+      // viewer must not see are never counted, matching the comment
+      // detail route's reply counting.
       const replyCountsResult = await db
         .select({
           parentCommentId: comments.parentCommentId,
@@ -264,7 +310,10 @@ export const GET = withErrorHandling(
         .where(
           and(
             inArray(comments.parentCommentId, commentIds),
-            isNull(comments.deletedAt)
+            isNull(comments.deletedAt),
+            ...(excludedAuthorIds.size > 0
+              ? [notInArray(comments.authorId, [...excludedAuthorIds])]
+              : [])
           )
         )
         .groupBy(comments.parentCommentId);
@@ -372,7 +421,10 @@ export const GET = withErrorHandling(
               .where(
                 and(
                   inArray(comments.parentCommentId, parentCommentIds),
-                  isNull(comments.deletedAt)
+                  isNull(comments.deletedAt),
+                  ...(excludedAuthorIds.size > 0
+                    ? [notInArray(comments.authorId, [...excludedAuthorIds])]
+                    : [])
                 )
               )
               .groupBy(comments.parentCommentId),
@@ -460,7 +512,7 @@ export const GET = withErrorHandling(
       ];
       const allAuthorIds = [
         ...new Set([
-          ...postsData.map((p) => p.authorId),
+          ...exposablePostsData.map((p) => p.authorId),
           ...parentCommentAuthorIds,
         ]),
       ];
@@ -575,18 +627,23 @@ export const GET = withErrorHandling(
 
       logger.info(
         'User replies fetched successfully',
-        { userId: canonicalUserId, total: replies.length },
+        { userId: canonicalUserId, total },
         'GET /api/users/[userId]/posts'
       );
 
       return successResponse({
         type: 'replies',
         items: replies,
-        total: replies.length,
+        total,
       });
     }
     // Get user's posts - filter out future posts
     const now = new Date();
+    // Simple reposts of a deleted or future original are hidden below, so
+    // exclude them here too; otherwise they would take up rows of a page.
+    // A scalar lookup on the unique original id avoids hashing every visible
+    // post for an EXISTS subplan when only a small page is requested.
+    const originalPost = aliasedTable(posts, 'originalPost');
     const userPosts = await db
       .select()
       .from(posts)
@@ -594,11 +651,29 @@ export const GET = withErrorHandling(
         and(
           eq(posts.authorId, canonicalUserId),
           isNull(posts.deletedAt),
-          lte(posts.timestamp, now)
+          lte(posts.timestamp, now),
+          or(
+            isNull(posts.originalPostId),
+            ne(posts.content, ''),
+            isNotNull(
+              db
+                .select({ id: originalPost.id })
+                .from(originalPost)
+                .where(
+                  and(
+                    eq(originalPost.id, posts.originalPostId),
+                    isNull(originalPost.deletedAt),
+                    lte(originalPost.timestamp, now)
+                  )
+                )
+                .limit(1)
+            )
+          )
         )
       )
-      .orderBy(desc(posts.timestamp))
-      .limit(100);
+      .orderBy(desc(posts.timestamp), desc(posts.id))
+      .limit(limit)
+      .offset((page - 1) * limit);
 
     if (userPosts.length === 0) {
       return successResponse({
@@ -801,7 +876,12 @@ export const GET = withErrorHandling(
               count: count(),
             })
             .from(comments)
-            .where(inArray(comments.postId, originalPostIds))
+            .where(
+              and(
+                inArray(comments.postId, originalPostIds),
+                isNull(comments.deletedAt)
+              )
+            )
             .groupBy(comments.postId),
           db
             .select({

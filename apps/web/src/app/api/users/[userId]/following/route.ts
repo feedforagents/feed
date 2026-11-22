@@ -101,6 +101,8 @@ import {
   eq,
   follows,
   inArray,
+  like,
+  not,
   userActorFollows,
   users,
 } from '@feed/db';
@@ -209,7 +211,16 @@ export const GET = withErrorHandling(
         })
         .from(follows)
         .innerJoin(users, eq(follows.followingId, users.id))
-        .where(eq(follows.followerId, targetId))
+        .where(
+          and(
+            eq(follows.followerId, targetId),
+            // Hidden account tiers never appear on discovery surfaces
+            // (test accounts: isTest flag or 'test-' id; banned accounts).
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        )
         .orderBy(desc(follows.createdAt));
 
       // Get actors being followed (UserActorFollow model)
@@ -329,6 +340,25 @@ export const GET = withErrorHandling(
     const total = followingList.length;
     const offset = (page - 1) * limit;
     const pageItems = followingList.slice(offset, offset + limit);
+
+    if (targetActor && authUser?.userId && pageItems.length > 0) {
+      const viewerRelations = await db
+        .select({ actorId: userActorFollows.actorId })
+        .from(userActorFollows)
+        .where(
+          and(
+            eq(userActorFollows.userId, authUser.userId),
+            inArray(
+              userActorFollows.actorId,
+              pageItems.map((item) => item.id)
+            )
+          )
+        );
+      const viewerActorIds = new Set(viewerRelations.map((row) => row.actorId));
+      for (const item of pageItems) {
+        item.viewerFollows = viewerActorIds.has(item.id);
+      }
+    }
 
     return successResponse({
       following: pageItems,
