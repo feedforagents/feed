@@ -111,6 +111,13 @@ const STATS_TOTAL_HOOTS_CASES = [
   'Platform stats count only reachable posts > still moves for content readers can see',
   'Platform stats count only reachable posts > follows moderation: publishing a scheduled post raises the total, removing one lowers it',
 ];
+const CHAT_MENTION_FILE =
+  'packages/testing/integration/chat-mention-participants.integration.test.ts';
+const CHAT_MENTION_CASES = [
+  'GET /api/chats/[id] participants as the mention source > marks departed participants inactive so mentions skip them',
+  'GET /api/chats/[id] participants as the mention source > keeps departed senders listed with names for old messages',
+  'GET /api/chats/[id] participants as the mention source > keeps every active member reachable behind a shared prefix',
+];
 type Suite =
   | 'sub-market'
   | 'prediction-remainder'
@@ -122,7 +129,8 @@ type Suite =
   | 'closed-prediction-positions'
   | 'mcp-perp-fee'
   | 'trade-history'
-  | 'stats-total-hoots';
+  | 'stats-total-hoots'
+  | 'chat-mentions';
 type Lease = {
   database: string;
   oid: string;
@@ -671,8 +679,13 @@ export async function runIsolatedStatsTotalHootsCases() {
   await runIsolatedCases('stats-total-hoots');
 }
 
+export async function runIsolatedChatMentionCases() {
+  await runIsolatedCases('chat-mentions');
+}
+
 async function runIsolatedCases(suite: Suite) {
-  // Stats and trade history use the original child marker and lease file.
+  // Chat mentions, stats and trade history use the original child lease.
+  const chatMentions = suite === 'chat-mentions';
   const stats = suite === 'stats-total-hoots';
   const tradeHistory = suite === 'trade-history';
   const closedPositions = suite === 'closed-prediction-positions';
@@ -703,7 +716,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? TRADE_HISTORY_FILE
                     : stats
                       ? STATS_TOTAL_HOOTS_FILE
-                      : FILE;
+                      : chatMentions
+                        ? CHAT_MENTION_FILE
+                        : FILE;
   const cases = closedPositions
     ? CLOSED_PREDICTION_POSITIONS_CASES
     : balance
@@ -724,7 +739,9 @@ async function runIsolatedCases(suite: Suite) {
                     ? TRADE_HISTORY_CASES
                     : stats
                       ? STATS_TOTAL_HOOTS_CASES
-                      : CASES;
+                      : chatMentions
+                        ? CHAT_MENTION_CASES
+                        : CASES;
   const marker = closedPositions
     ? 'FEED_CLOSED_PREDICTION_POSITIONS_CHILD'
     : balance
@@ -811,7 +828,9 @@ async function runIsolatedCases(suite: Suite) {
                         ? 'feed-trade-history-'
                         : stats
                           ? 'feed-stats-total-hoots-'
-                          : 'feed-sub-market-'
+                          : chatMentions
+                            ? 'feed-chat-mentions-'
+                            : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -883,7 +902,7 @@ async function runIsolatedCases(suite: Suite) {
       ...(review ? { FEED_DISABLE_REDIS: '1' } : {}),
       ...(balance ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(closedPositions ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
-      ...(mcpFee || tradeHistory || stats
+      ...(mcpFee || tradeHistory || stats || chatMentions
         ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' }
         : {}),
     };
@@ -976,7 +995,9 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'trade-history-http-child-case'
                       : stats
                         ? 'three-stats-total-hoots-child-cases'
-                        : 'four-child-cases';
+                        : chatMentions
+                          ? 'three-chat-mention-child-cases'
+                          : 'four-child-cases';
     const output = await run(
       ['test', file, '--timeout', '30000'],
       env,
@@ -999,7 +1020,8 @@ async function runIsolatedCases(suite: Suite) {
             closedPositions ||
             mcpFee ||
             tradeHistory ||
-            stats
+            stats ||
+            chatMentions
               ? ''
               : 'sub-market transactional creation > ') +
             escape(name) +
@@ -1039,7 +1061,9 @@ async function runIsolatedCases(suite: Suite) {
                         ? 'Trade history must pass over real HTTP without skips'
                         : stats
                           ? 'All three stats cases must pass over HTTP without skips'
-                          : 'All four original cases must pass without skips'
+                          : chatMentions
+                            ? 'All three chat mention cases must pass over HTTP without skips'
+                            : 'All four original cases must pass without skips'
     );
     childProof = {
       pass: cases.length,
