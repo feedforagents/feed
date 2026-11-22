@@ -1,3 +1,4 @@
+/// <reference path="../../../apps/web/src/global.d.ts" />
 /**
  * Post detail page must reconcile the persisted post-like state with the
  * server when the post loads — the same defect #1775 fixed for comments.
