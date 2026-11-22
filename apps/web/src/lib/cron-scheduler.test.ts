@@ -10,6 +10,7 @@ const saved = {
   DEPLOYMENT_ENV: env.DEPLOYMENT_ENV,
   DEPLOYMENT_PLATFORM: env.DEPLOYMENT_PLATFORM,
   ENABLE_INTERNAL_CRON_SCHEDULER: env.ENABLE_INTERNAL_CRON_SCHEDULER,
+  NEXT_PUBLIC_APP_URL: env.NEXT_PUBLIC_APP_URL,
   NODE_ENV: env.NODE_ENV,
 };
 
@@ -87,5 +88,52 @@ it('dispatches localnet auxiliary jobs at the supplied UTC time only', async () 
     ).not.toContain(recovery);
   } finally {
     fetcher.mockRestore();
+  }
+});
+
+it('reports failures and skips from successful HTTP deliveries', async () => {
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      switch (new URL(request.url).pathname) {
+        case '/api/cron/article-tick':
+          return Response.json({
+            success: false,
+            skipped: false,
+            errorCount: 1,
+            articlesCreated: 0,
+          });
+        case '/api/cron/organization-tick':
+          return Response.json({ success: true, skipped: true });
+        case '/api/cron/npc-tick':
+          return Response.json({ success: false, skipped: true });
+        case '/api/cron/health-check':
+          return new Response(null, { status: 503 });
+        case '/api/cron/metrics-snapshot':
+          return new Response('legacy response');
+        default:
+          return Response.json({ success: true });
+      }
+    },
+  });
+  env.CRON_SECRET = 'local-cron-test';
+  env.DEPLOYMENT_ENV = 'staging';
+  env.NEXT_PUBLIC_APP_URL = server.url.origin;
+  try {
+    const result = await triggerScheduledCrons(
+      new Date('2026-10-10T06:00:00Z')
+    );
+    expect(result.failed).toEqual([
+      '/api/cron/npc-tick',
+      '/api/cron/article-tick',
+      '/api/cron/health-check',
+    ]);
+    expect(result.skipped).toContain('/api/cron/organization-tick');
+    expect(result.triggered).toContain('/api/cron/markets-tick');
+    expect(result.triggered).toContain('/api/cron/metrics-snapshot');
+    expect(result.triggered).not.toContain('/api/cron/organization-tick');
+  } finally {
+    await server.stop(true);
   }
 });
