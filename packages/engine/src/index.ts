@@ -240,10 +240,12 @@ export * from './services';
 // Narrative State Service (arc plans, phases, signal direction)
 export {
   type DatabaseArcPlan,
+  getActorRoleSignal,
   getArcPlan,
   getPhaseForDay as getArcPhaseForDay,
   getSignalDirection,
 } from './services/narrative-state-service';
+export { processPredictionMarketRecovery } from './services/prediction-market-recovery';
 export { sharedChatContextService } from './services/shared-chat-context-service';
 export {
   getMaxSubMarketDuration,

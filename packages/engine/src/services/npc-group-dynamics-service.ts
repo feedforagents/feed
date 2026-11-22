@@ -127,7 +127,8 @@ export class NPCGroupDynamicsService {
    * @param rng - Optional random number generator (defaults to Math.random)
    */
   static async processTickDynamics(
-    rng: RngFunction = Math.random
+    rng: RngFunction = Math.random,
+    signal?: AbortSignal
   ): Promise<GroupDynamicsResult> {
     const startTime = Date.now();
     const result: GroupDynamicsResult = {
@@ -183,10 +184,13 @@ export class NPCGroupDynamicsService {
     if (llm) {
       const messages = await NPCGroupDynamicsService.postGroupMessages(
         llm,
-        rng
+        rng,
+        signal
       );
       result.messagesPosted = messages;
     }
+
+    signal?.throwIfAborted();
 
     // 5. Invite users to groups
     const invites = await NPCGroupDynamicsService.inviteUsersToGroups(rng);
@@ -550,7 +554,8 @@ export class NPCGroupDynamicsService {
    */
   private static async postGroupMessages(
     llm: FeedLLMClient,
-    rng: RngFunction
+    rng: RngFunction,
+    signal?: AbortSignal
   ): Promise<number> {
     let messagesPosted = 0;
 
@@ -568,6 +573,7 @@ export class NPCGroupDynamicsService {
       .limit(20);
 
     for (const group of groupList) {
+      signal?.throwIfAborted();
       // Tier is already available from the JOIN
       const tier = group.tier === null ? null : assertTierLevel(group.tier);
 
@@ -743,6 +749,7 @@ Return only a JSON object with a nonempty message string:
             maxTokens: 512,
             format: 'json',
             promptType: 'npc_group_dynamic_message',
+            signal,
           }
         );
         response = normalizeNpcGroupMessageResponse(rawResponse);
@@ -757,6 +764,7 @@ Return only a JSON object with a nonempty message string:
         );
         throw error;
       }
+      signal?.throwIfAborted();
       if (!response?.message) {
         throw new Error(`Missing generated group message for ${randomNpc.id}`);
       }

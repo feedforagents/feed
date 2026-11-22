@@ -62,6 +62,7 @@ import {
   eq,
   favorites,
   follows,
+  followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
@@ -87,6 +88,7 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -125,14 +127,22 @@ function buildWalletPort(): WalletPort {
 
 function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
         relatedId,
-        tx
+        tx,
+        operationId
       ),
   };
 }
@@ -670,6 +680,7 @@ function buildPerpService() {
       minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
     feeProcessor: buildFeeProcessor(),
+    tradingFeeOutbox: createTradingFeeOutboxAdapter(),
   });
 }
 
@@ -1840,22 +1851,7 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  const existing = await db.follow.findFirst({
-    where: {
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
-  if (existing) {
-    return { success: true };
-  }
-  await db.follow.create({
-    data: {
-      id: await generateSnowflakeId(),
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
+  await followUserWithBlockCheck(agent.userId, args.userId);
   return { success: true };
 }
 
@@ -2018,6 +2014,15 @@ export async function executeSearchAgents(
           : []),
         { OR: [{ isAgent: true }, { isActor: true }] },
         { isBanned: false },
+        // Test accounts are not real agents or NPCs — every user-facing
+        // surface hides them (the A2A people lookup states the rule
+        // verbatim). A test account carries the isTest flag or a 'test-'
+        // id prefix: NPC User rows are bootstrapped from pack actors
+        // without copying the flag, so both axes are required. The
+        // exclusions run before the limit so hidden accounts cannot
+        // occupy result slots.
+        { isTest: false },
+        { NOT: { id: { startsWith: 'test-' } } },
       ],
     },
     select: {
