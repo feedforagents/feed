@@ -89,6 +89,10 @@ const CLOSED_PREDICTION_POSITIONS_CASES = [
   'user positions list — closed prediction positions > closed perp positions still listed (guard)',
   'user positions list — closed prediction positions > a position sold through the real trading service appears in the closed view',
   'user positions list — closed prediction positions > the mounted Closed Positions flow keeps the sell-closed row',
+  'user positions list — closed prediction positions > closed view lists a position cancelled by voiding',
+  'user positions list — closed prediction positions > status=all prices a cancelled position at its refund, not the live market',
+  'user positions list — closed prediction positions > the mounted Closed Positions flow keeps the cancelled row',
+  'user positions list — closed prediction positions > a position voided through the real trading service appears in the closed view at cost basis',
   'user positions list — closed prediction positions > a failed sell still leaves the bought position owned for cleanup',
   'user positions list — closed prediction positions > cleanup removes only rows this suite created',
 ];
@@ -1002,7 +1006,7 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
     phase = scenarioOrClosedPositions
       ? scenario
         ? 'prediction-scenario-http-child-case'
-        : 'eight-closed-prediction-position-child-cases'
+        : 'twelve-closed-prediction-position-child-cases'
       : balance
         ? 'five-balance-display-child-cases'
         : review
@@ -1082,7 +1086,7 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
       scenarioOrClosedPositions
         ? scenario
           ? 'Prediction scenario must pass over real HTTP without skips'
-          : 'All eight closed prediction position cases must pass without skips'
+          : 'All twelve closed prediction position cases must pass without skips'
         : balance
           ? 'All five balance display cases must pass without skips'
           : review

@@ -70,11 +70,16 @@ export async function fetchClosedPositionsSnapshot(
       !Number.isFinite(Number(row.shares))
     )
       throw new Error('Invalid prediction position');
-    const closed = row.status === 'closed' || row.status === 'resolved';
+    const closed =
+      row.status === 'closed' ||
+      row.status === 'resolved' ||
+      row.status === 'cancelled';
     if (closed) timestamp(row.resolvedAt ?? row.createdAt ?? null);
-    // Closed history keeps every closed/resolved row: selling all shares
+    // Closed history keeps every closed/resolved/cancelled row: selling all shares
     // zeroes the row, and that is exactly how a prediction position
-    // closes. The dust filter guards the active view only — the
+    // closes. A voided position is refunded at cost basis and closed the
+    // same way, so it belongs here too — dropping it would erase the
+    // refunded position from history entirely. The dust filter guards the active view only — the
     // positions endpoint already applies it status-specifically, so
     // re-applying it here would drop every sell-closed row the
     // endpoint just restored.

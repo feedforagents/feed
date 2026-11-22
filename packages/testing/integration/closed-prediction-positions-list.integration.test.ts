@@ -15,6 +15,17 @@
  * `total` undercounted. Resolved positions (which keep their shares)
  * and closed perp positions (which keep their size) were unaffected.
  *
+ * A position voided by an admin cancel is a third ended state the closed
+ * view misses: PredictionMarketService.cancel refunds the position at its
+ * cost basis and writes status 'cancelled' with resolvedAt, but the closed
+ * query and the wallet tab's Closed Positions selector admit only
+ * 'closed' and 'resolved' — so the refunded position vanishes from
+ * history entirely. Where the endpoint does return it (status=all), the
+ * position snapshot still prices it at the live CPMM market, as if the
+ * dead market were trading: the refund already sits in the wallet while
+ * the row shows a live value. These tests prove a cancelled position
+ * belongs to the closed view priced at its refund (cost basis, PnL 0).
+ *
  * These tests drive the real route handler. One test also drives the
  * real PredictionMarketService buy -> sell-all flow against the real
  * database so the sell-closed row is produced by the service itself.
@@ -26,7 +37,7 @@
  * The route, snapshot builder, trading service and PostgreSQL run for real.
  * The server-only marker is stubbed and the service uses a no-op wallet, fixed
  * balance and zero fees: this proves position-state mapping, not cash/fees.
- * All eight cases run in a positively leased fresh child dataset/process;
+ * All twelve cases run in a positively leased fresh child dataset/process;
  * the caller's rows are never mutated. Failed children are retained.
  *
  * Run with:
@@ -45,7 +56,7 @@ if (
   !process.env.FEED_CLOSED_PREDICTION_POSITIONS_CHILD &&
   !process.env.FEED_CLOSED_PREDICTION_POSITIONS_LEASE_FILE
 ) {
-  it('runs all eight closed prediction position cases in a leased fresh database', async () => {
+  it('runs all twelve closed prediction position cases in a leased fresh database', async () => {
     await runIsolatedClosedPredictionPositionsCases();
   }, 300_000);
 } else {
@@ -137,6 +148,9 @@ if (
   let posResolved: string;
   let posSoldWin: string;
   let posSoldLoss: string;
+  // Position voided by the admin cancel path (seeded by the cancelled-row
+  // case below, so the earlier cases keep their exact fixture).
+  let posCancelled = '';
   let perpOpen: string;
   let perpClosed: string;
   // Position created by the real trading service in the sell-through test,
@@ -416,6 +430,140 @@ if (
       expect(ids).toContain(posResolved);
       expect(ids).toContain(serviceSoldPositionId);
       expect(ids).not.toContain(posOpen);
+    });
+
+    it('closed view lists a position cancelled by voiding', async () => {
+      // The exact row PredictionMarketService.cancel writes: the market
+      // resolved with no outcome, the position status 'cancelled' with
+      // its shares kept and resolvedAt set. The pool is deliberately
+      // unbalanced (800/200) so the live market price (0.2) differs
+      // from the 0.5 entry — the pricing case below can tell a live
+      // valuation apart from the refund.
+      const voidedMarketId = await generateSnowflakeId();
+      const [createdVoidedMarket] = await db
+        .insert(markets)
+        .values({
+          id: voidedMarketId,
+          question: `Voided test market ${voidedMarketId.slice(-6)}`,
+          yesShares: '800',
+          noShares: '200',
+          liquidity: '1000',
+          resolved: true,
+          resolution: null,
+          endDate: new Date(Date.now() + 86_400_000),
+          updatedAt: new Date(),
+        })
+        .returning({ id: markets.id });
+      allMarketIds.push(createdVoidedMarket!.id);
+      posCancelled = await insertPosition({
+        marketId: createdVoidedMarket!.id,
+        status: 'cancelled',
+        shares: '10',
+        pnl: '0',
+        resolvedAt: new Date(),
+      });
+
+      const body = await fetchSnapshot('status=closed&type=prediction');
+      const ids = body.predictions.positions.map((p) => p.id);
+      expect(ids).toContain(posCancelled);
+      expect(ids).not.toContain(posOpen);
+      // resolved + two sell-closed + the service-sold row + the cancelled row.
+      expect(body.predictions.total).toBe(5);
+
+      // The open view must still not show it (guard).
+      const openBody = await fetchSnapshot('status=open');
+      expect(openBody.predictions.positions.map((p) => p.id)).not.toContain(
+        posCancelled
+      );
+    });
+
+    it('status=all prices a cancelled position at its refund, not the live market', async () => {
+      const body = await fetchSnapshot('status=all&type=prediction');
+      const rows = body.predictions.positions as unknown as Array<
+        Record<string, unknown>
+      >;
+      const row = rows.find((p) => p.id === posCancelled);
+      expect(row).toBeDefined();
+      // cancel() refunds at cost basis: 10 shares at avg 0.5 with the
+      // 0.1% trading fee, so the row is worth its refund and nothing more.
+      const costBasis = (10 * 0.5) / (1 - 0.001);
+      expect(row!.status).toBe('cancelled');
+      expect(row!.resolved).toBe(true);
+      expect(row!.resolution).toBeNull();
+      expect(Number(row!.currentValue)).toBeCloseTo(costBasis, 2);
+      expect(Number(row!.unrealizedPnL)).toBeCloseTo(0, 2);
+      expect(Number(row!.currentPrice)).toBeCloseTo(costBasis / 10, 4);
+    });
+
+    it('the mounted Closed Positions flow keeps the cancelled row', async () => {
+      const body = await fetchSnapshot('status=all&type=all');
+      const result = await fetchClosedPositionsSnapshot(async () => body);
+      const ids = result.predictions.map((p) => p.id);
+      expect(ids).toContain(posCancelled);
+      expect(ids).not.toContain(posOpen);
+    });
+
+    it('a position voided through the real trading service appears in the closed view at cost basis', async () => {
+      const service = makePredictionService();
+
+      const marketId = await generateSnowflakeId();
+      const [createdMarket] = await db
+        .insert(markets)
+        .values({
+          id: marketId,
+          question: `Void-through test market ${marketId.slice(-6)}`,
+          yesShares: '10000',
+          noShares: '10000',
+          liquidity: '20000',
+          resolved: false,
+          resolution: null,
+          endDate: new Date(Date.now() + 86_400_000),
+          updatedAt: new Date(),
+        })
+        .returning({ id: markets.id });
+      allMarketIds.push(createdMarket!.id);
+
+      const bought = await service.buy({
+        userId,
+        marketId,
+        side: 'yes',
+        amount: 100,
+      });
+      allPositionIds.push(bought.positionId);
+
+      const cancelled = await service.cancel({
+        marketId,
+        reason: 'test void',
+      });
+      expect(cancelled.positionsRefunded).toBe(1);
+
+      const [row] = await db
+        .select()
+        .from(positions)
+        .where(eq(positions.id, bought.positionId));
+      expect(row?.status).toBe('cancelled');
+      const [marketRow] = await db
+        .select()
+        .from(markets)
+        .where(eq(markets.id, marketId));
+      expect(marketRow?.resolved).toBe(true);
+      expect(marketRow?.resolution).toBeNull();
+
+      const closedBody = await fetchSnapshot('status=closed&type=prediction');
+      expect(closedBody.predictions.positions.map((p) => p.id)).toContain(
+        bought.positionId
+      );
+
+      const allBody = await fetchSnapshot('status=all&type=prediction');
+      const rows = allBody.predictions.positions as unknown as Array<
+        Record<string, unknown>
+      >;
+      const snap = rows.find((p) => p.id === bought.positionId);
+      expect(snap).toBeDefined();
+      const expectedCostBasis =
+        (Number(row?.shares) * Number(row?.avgPrice)) / (1 - 0.001);
+      expect(Number(snap!.currentValue)).toBeCloseTo(expectedCostBasis, 2);
+      expect(Number(snap!.unrealizedPnL)).toBeCloseTo(0, 2);
     });
 
     it('a failed sell still leaves the bought position owned for cleanup', async () => {

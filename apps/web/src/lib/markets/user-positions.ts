@@ -132,11 +132,11 @@ export async function getUserPositionsSnapshot({
 
   const closedAtFilter =
     status === 'closed' ? { not: null } : status === 'all' ? undefined : null;
-  // Open prediction positions are exactly the 'active' ones; resolved or
-  // closed positions belong to the closed view.
+  // Open prediction positions are exactly the 'active' ones; resolved,
+  // closed or cancelled (voided) positions belong to the closed view.
   const predictionStatusFilter =
     status === 'closed'
-      ? { in: ['closed', 'resolved'] }
+      ? { in: ['closed', 'resolved', 'cancelled'] }
       : status === 'open'
         ? 'active'
         : undefined;

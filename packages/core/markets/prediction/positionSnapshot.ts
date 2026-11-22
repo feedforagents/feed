@@ -57,6 +57,20 @@ export function calculatePredictionPositionSnapshot(params: {
     };
   }
 
+  if (resolved && resolution === null) {
+    // Voided (cancelled) market: cancel() refunds the position at its cost
+    // basis, so the settled value is the refund — not a live CPMM price off
+    // the dead pool. The refund already sits in the wallet; pricing the row
+    // at the market would double-count it. PnL is 0 by construction.
+    return {
+      costBasis,
+      currentProbability,
+      currentUnitPrice: shares > 0 ? costBasis / shares : 0,
+      currentValue: costBasis,
+      unrealizedPnL: 0,
+    };
+  }
+
   if (shares <= 0 || yesShares <= 0 || noShares <= 0) {
     return {
       costBasis,
