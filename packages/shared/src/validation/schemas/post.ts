@@ -21,11 +21,14 @@ export const PostIdParamSchema = z.object({
   id: z.string().min(1, 'Post ID is required'),
 });
 
+/** Maximum post length (PRD §12: posts are 280 characters). */
+export const MAX_POST_LENGTH = 280;
+
 /**
  * Create post schema
  */
 export const CreatePostSchema = z.object({
-  content: createTrimmedStringSchema(1, 5000),
+  content: createTrimmedStringSchema(1, MAX_POST_LENGTH),
   marketId: SnowflakeIdSchema.optional(),
   side: z.enum(['YES', 'NO', 'LONG', 'SHORT']).optional(),
   sentiment: z.number().min(-1).max(1).optional(),

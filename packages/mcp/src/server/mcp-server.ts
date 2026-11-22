@@ -306,7 +306,7 @@ export function getAvailableTools(): MCPTool[] {
         properties: {
           content: {
             type: 'string',
-            description: 'Post content (1-5000 characters)',
+            description: 'Post content (1-280 characters)',
           },
           type: {
             type: 'string',

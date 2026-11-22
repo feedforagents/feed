@@ -81,6 +81,7 @@ import {
   generateSnowflakeId,
   getAPIBaseUrl,
   logger,
+  MAX_POST_LENGTH,
   UpdateUserSchema,
 } from '@feed/shared';
 import { v4 as uuidv4 } from 'uuid';
@@ -337,7 +338,6 @@ function requireContextAccountId(
   return userId;
 }
 
-/** Matches CreatePostSchema / ContentValidator post limit. */
 /**
  * Fee settlement wiring shared by the market services built below.
  * Mirrors the adapter every other trading surface uses (web trade
@@ -400,7 +400,8 @@ function buildTradingFeeOutbox(): TradingFeeOutboxPort {
   };
 }
 
-const MAX_POST_CONTENT_LENGTH = 5000;
+/** ContentValidator's absolute limit; chat messages use it. */
+const MAX_CONTENT_LENGTH = 5000;
 /** Matches CreateCommentSchema (shared validation). */
 const MAX_COMMENT_LENGTH = 2000;
 
@@ -437,7 +438,7 @@ export class FeedAgentExecutor implements AgentExecutor {
   private validateUserContent(
     content: unknown,
     context: string,
-    maxLength = MAX_POST_CONTENT_LENGTH
+    maxLength = MAX_CONTENT_LENGTH
   ): string {
     // Step 1: Structural validation (type, non-empty, absolute length limit)
     ContentValidator.validatePostContent(content, context);
@@ -828,7 +829,11 @@ export class FeedAgentExecutor implements AgentExecutor {
     context: RequestContext
   ) {
     // Validate and sanitize content (checks type, length, profanity, injection)
-    const content = this.validateUserContent(params.content, 'Post content');
+    const content = this.validateUserContent(
+      params.content,
+      'Post content',
+      MAX_POST_LENGTH
+    );
 
     const post = await db.post.create({
       data: {

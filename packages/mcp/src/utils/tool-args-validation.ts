@@ -8,6 +8,7 @@ import {
   isPointsAmount,
   JsonValueSchema,
   LEADERBOARD_SCOPES,
+  MAX_POST_LENGTH,
   UpdateUserSchema,
 } from '@feed/shared';
 import { z } from 'zod';
@@ -202,7 +203,7 @@ const GetPostArgsSchema = z.object({
 }) satisfies z.ZodType<GetPostArgs>;
 
 const CreatePostArgsSchema = z.object({
-  content: z.string().min(1).max(5000),
+  content: z.string().min(1).max(MAX_POST_LENGTH),
   type: z.enum(['post', 'article']).optional().default('post'),
   mediaUrl: z.string().url().optional(),
 }) satisfies z.ZodType<CreatePostArgs>;
