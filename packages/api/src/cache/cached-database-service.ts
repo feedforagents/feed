@@ -41,7 +41,7 @@ import {
   userActorFollows,
   users,
 } from '@feed/db';
-import { StaticDataRegistry } from '@feed/engine';
+import { StaticDataRegistry, WalletService } from '@feed/engine';
 import { logger, resolveUserIdentifierKind } from '@feed/shared';
 import {
   CACHE_KEYS,
@@ -52,6 +52,9 @@ import {
   invalidateCachePattern,
 } from './cache-service';
 
+// Large post-list namespaces benefit from fewer Redis SCAN round trips.
+const POST_CACHE_SCAN_COUNT = 1000;
+
 /** Keep cursor text and viewer policy in separate, unambiguous key fields. */
 function postFeedCacheKey(
   limit: number,
@@ -60,21 +63,25 @@ function postFeedCacheKey(
   authorId?: string
 ): string {
   const isCursor = typeof cursorOrOffset === 'string';
+  // Keep all policy variants under the same actor invalidation prefix.
+  const prefix = authorId === undefined ? '' : `${authorId}:`;
   if (!visibility) {
-    const prefix = authorId === undefined ? '' : `${authorId}:`;
     return isCursor
       ? `${prefix}${limit}:cursor:${cursorOrOffset}`
       : `${prefix}${limit}:offset:${cursorOrOffset || 0}`;
   }
-  return JSON.stringify([
-    'post-visibility-v1',
-    authorId ?? null,
-    limit,
-    isCursor ? 'cursor' : 'offset',
-    cursorOrOffset ?? 0,
-    [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
-    visibility.excludeDeadReposts === true,
-  ]);
+  return (
+    prefix +
+    JSON.stringify([
+      'post-visibility-v1',
+      authorId ?? null,
+      limit,
+      isCursor ? 'cursor' : 'offset',
+      cursorOrOffset ?? 0,
+      [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
+      visibility.excludeDeadReposts === true,
+    ])
+  );
 }
 
 /**
@@ -153,25 +160,51 @@ class CachedDatabaseService {
     userId: string,
     followedIds: string[],
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    excludedAuthorIds?: string[]
   ): Promise<Post[]> {
     const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${userId}:${limit}:cursor:${cursorOrOffset}`
-      : `${userId}:${limit}:offset:${cursorOrOffset || 0}`;
+    // The viewer's moderation exclusions shape the result, so they are
+    // part of the cache key: a page cut for one exclusion set must
+    // never be served to the same viewer under a different one.
+    const excludedSuffix =
+      excludedAuthorIds && excludedAuthorIds.length > 0
+        ? `:excl:${[...excludedAuthorIds].sort().join(',')}`
+        : '';
+    const cacheKey =
+      (isCursor
+        ? `${userId}:${limit}:cursor:${cursorOrOffset}`
+        : `${userId}:${limit}:offset:${cursorOrOffset || 0}`) + excludedSuffix;
 
     return getCacheOrFetch(
       cacheKey,
       async () => {
-        // First, filter out test users from followedIds
-        const testUsers = await db
-          .select({ id: users.id })
-          .from(users)
-          .where(and(inArray(users.id, followedIds), eq(users.isTest, true)));
+        // Authors the viewer must not see (blocked, muted, or blocking
+        // them) are dropped before the page is cut. Filtering a fetched
+        // page afterwards lets their newest posts spend the limit and
+        // strands the visible posts behind them.
+        const excludedAuthorIdSet = new Set(excludedAuthorIds ?? []);
+        const candidateIds = followedIds.filter(
+          (id) => !excludedAuthorIdSet.has(id)
+        );
+
+        // First, filter out test users from the candidate ids. Test
+        // authors come in two shapes — a users row flagged isTest and
+        // an id starting with 'test-' — and the canonical
+        // getRecentPosts excludes both before paginating.
+        const testUsers =
+          candidateIds.length > 0
+            ? await db
+                .select({ id: users.id })
+                .from(users)
+                .where(
+                  and(inArray(users.id, candidateIds), eq(users.isTest, true))
+                )
+            : [];
 
         // Get test actors from static registry
         const testActorIds = StaticDataRegistry.getAllActors()
-          .filter((a) => a.isTest && followedIds.includes(a.id))
+          .filter((a) => a.isTest && candidateIds.includes(a.id))
           .map((a) => a.id);
 
         const testAuthorIds = new Set([
@@ -179,9 +212,9 @@ class CachedDatabaseService {
           ...testActorIds,
         ]);
 
-        // Remove test users from followedIds
-        const nonTestFollowedIds = followedIds.filter(
-          (id) => !testAuthorIds.has(id)
+        // Remove test users from the candidate ids
+        const nonTestFollowedIds = candidateIds.filter(
+          (id) => !testAuthorIds.has(id) && !id.startsWith('test-')
         );
 
         const cursor = isCursor ? (cursorOrOffset as string) : undefined;
@@ -393,11 +426,18 @@ class CachedDatabaseService {
             .from(userActorFollows)
             .where(eq(userActorFollows.userId, userId)),
 
-          // Count positions
+          // Count open positions. The profile route documents this
+          // number as the number of open positions, and the profile's
+          // positions list counts open prediction positions as exactly
+          // the 'active' ones — closed and resolved positions belong
+          // to its closed view — so the header applies the same filter
+          // or it keeps counting positions after they end.
           db
             .select({ count: count() })
             .from(positions)
-            .where(eq(positions.userId, userId)),
+            .where(
+              and(eq(positions.userId, userId), eq(positions.status, 'active'))
+            ),
 
           // Count comments
           db
@@ -561,8 +601,14 @@ class CachedDatabaseService {
   async invalidatePostsCache() {
     logger.info('Invalidating posts cache', undefined, 'CachedDatabaseService');
     await Promise.all([
-      invalidateCachePattern('*', { namespace: CACHE_KEYS.POSTS_LIST }),
-      invalidateCachePattern('*', { namespace: CACHE_KEYS.POSTS_FOLLOWING }),
+      invalidateCachePattern('*', {
+        namespace: CACHE_KEYS.POSTS_LIST,
+        scanCount: POST_CACHE_SCAN_COUNT,
+      }),
+      invalidateCachePattern('*', {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+        scanCount: POST_CACHE_SCAN_COUNT,
+      }),
     ]);
   }
 
@@ -577,7 +623,33 @@ class CachedDatabaseService {
     );
     await invalidateCachePattern(`${actorId}:*`, {
       namespace: CACHE_KEYS.POSTS_BY_ACTOR,
+      scanCount: POST_CACHE_SCAN_COUNT,
     });
+  }
+
+  /**
+   * Invalidate only the exact balance-dependent cache keys for a user
+   *
+   * @description Balance-scoped invalidation for the wallet callback.
+   * WalletService awaits this on every debit and credit, so it is three
+   * exact key deletes and no pattern scans: the balance entry the display
+   * path reads, the user entry (whose row carries the balance), and the
+   * owner's profile-stats entry, which the profile screen renders next to
+   * the balance. Following-feed and follows entries are unrelated to a
+   * balance change and are left alone — use invalidateUserCache for flows
+   * that genuinely need the broad invalidation (e.g. identifier changes).
+   */
+  async invalidateUserBalanceCache(userId: string) {
+    logger.info(
+      'Invalidating user balance cache',
+      { userId },
+      'CachedDatabaseService'
+    );
+    await Promise.all([
+      invalidateCache(userId, { namespace: CACHE_KEYS.USER_BALANCE }),
+      invalidateCache(userId, { namespace: CACHE_KEYS.USER }),
+      invalidateCache(userId, { namespace: 'user:profile:stats' }),
+    ]);
   }
 
   /**
@@ -719,3 +791,22 @@ class CachedDatabaseService {
 }
 
 export const cachedDb = new CachedDatabaseService();
+
+// Wire the wallet's cache invalidation. WalletService lives in @feed/engine,
+// which cannot import this package (dependency direction is api -> engine),
+// so it invalidates through a callback registered by the cache owner. Every
+// debit/credit (trades, settlement payouts, funding) must drop the cached
+// user/balance entries; without this registration the callback stayed null
+// and the balance display path served the pre-mutation balance until the
+// 30 s TTL expired.
+//
+// The callback is balance-scoped on purpose: it deletes only the exact
+// balance-dependent owner keys. The broad invalidateUserCache also scans
+// `posts:following:<userId>:*` and the global `user:follows:*` namespace,
+// which a wallet mutation has no business evicting — WalletService awaits
+// this callback on every debit and credit, so those scans would run on
+// every trade. Follow/feed invalidation belongs to the follow and post
+// flows, not to the wallet.
+WalletService.setCacheInvalidationCallback((userId) =>
+  cachedDb.invalidateUserBalanceCache(userId)
+);
