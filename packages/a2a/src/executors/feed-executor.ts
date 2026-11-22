@@ -2196,6 +2196,43 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('Chat not found or access denied');
     }
 
+    const chat = await db.chat.findUnique({
+      where: { id: chatId },
+      select: { isGroup: true },
+    });
+    if (!chat) {
+      throw new Error('Chat not found or access denied');
+    }
+
+    // Apply the web and MCP direct-message rules to the active peer.
+    if (!chat.isGroup) {
+      const participants = await db.chatParticipant.findMany({
+        where: { chatId, isActive: true },
+        select: { userId: true },
+      });
+      const recipientId = participants.find((p) => p.userId !== userId)?.userId;
+      if (!recipientId) {
+        throw new Error('Invalid direct message chat');
+      }
+      const [recipient, senderBlockedRecipient, recipientBlockedSender] =
+        await Promise.all([
+          db.user.findUnique({
+            where: { id: recipientId },
+            select: { isActor: true },
+          }),
+          hasBlocked(userId, recipientId),
+          hasBlocked(recipientId, userId),
+        ]);
+      if (recipient?.isActor) {
+        throw new Error(
+          'Cannot send direct messages to NPC actors. Use group chats instead.'
+        );
+      }
+      if (senderBlockedRecipient || recipientBlockedSender) {
+        throw new Error('Cannot send messages to this user');
+      }
+    }
+
     const message = await db.message.create({
       data: {
         id: await generateSnowflakeId(),
