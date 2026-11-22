@@ -29,7 +29,6 @@
  * require passing referrer context through the MCP API key or session.
  */
 
-import type { JsonRpcParams, JsonRpcRequest } from '@feed/a2a';
 import {
   handleAppealBanWithEscrow,
   handleCreateEscrowPayment,
@@ -49,6 +48,7 @@ import {
   RATE_LIMIT_CONFIGS,
   RateLimitError,
   sharePost,
+  updateProfileWithLeaderboardInvalidation,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
@@ -62,6 +62,7 @@ import {
   eq,
   favorites,
   follows,
+  followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
@@ -87,8 +88,10 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
+  getCurrentTrendingTags,
   invalidateAfterPredictionTrade,
   type PredictionSettlementOptions,
   StaticDataRegistry,
@@ -102,6 +105,7 @@ import {
   logger,
   retryIfRetryable,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 
 function buildWalletPort(): WalletPort {
   return {
@@ -125,14 +129,22 @@ function buildWalletPort(): WalletPort {
 
 function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
         relatedId,
-        tx
+        tx,
+        operationId
       ),
   };
 }
@@ -449,6 +461,8 @@ import type {
   GetUserStatsResult,
   GetUserWalletArgs,
   GetUserWalletResult,
+  JsonRpcParams,
+  JsonRpcRequest,
   LeaveChatArgs,
   LeaveChatResult,
   LikeCommentArgs,
@@ -670,6 +684,7 @@ function buildPerpService() {
       minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
     feeProcessor: buildFeeProcessor(),
+    tradingFeeOutbox: createTradingFeeOutboxAdapter(),
   });
 }
 
@@ -1732,7 +1747,18 @@ export async function executeGetPostsByTag(
       and(
         eq(postTags.tagId, tag.id),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, now)
+        lte(posts.timestamp, now),
+        // Exclude test authors in SQL before paginating, so pages
+        // are full — the canonical post query's rule
+        // (DatabaseService.getRecentPosts): 'test-' ids and
+        // isTest-flagged accounts never appear in post lists.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
@@ -1803,19 +1829,15 @@ export async function executeUpdateProfile(
   if (args.username !== undefined) updateData.username = args.username;
   if (args.profileImageUrl !== undefined)
     updateData.profileImageUrl = args.profileImageUrl;
-  const user = await db.user.update({
-    where: { id: agent.userId },
-    data: updateData,
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      bio: true,
-      profileImageUrl: true,
-      reputationPoints: true,
-      virtualBalance: true,
-    },
-  });
+  const user = await updateProfileWithLeaderboardInvalidation(
+    agent.userId,
+    updateData,
+    (client) =>
+      client.user.update({
+        where: { id: agent.userId },
+        data: updateData,
+      })
+  );
   return {
     success: true,
     profile: {
@@ -1840,22 +1862,7 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  const existing = await db.follow.findFirst({
-    where: {
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
-  if (existing) {
-    return { success: true };
-  }
-  await db.follow.create({
-    data: {
-      id: await generateSnowflakeId(),
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
+  await followUserWithBlockCheck(agent.userId, args.userId);
   return { success: true };
 }
 
@@ -2018,6 +2025,15 @@ export async function executeSearchAgents(
           : []),
         { OR: [{ isAgent: true }, { isActor: true }] },
         { isBanned: false },
+        // Test accounts are not real agents or NPCs — every user-facing
+        // surface hides them (the A2A people lookup states the rule
+        // verbatim). A test account carries the isTest flag or a 'test-'
+        // id prefix: NPC User rows are bootstrapped from pack actors
+        // without copying the flag, so both axes are required. The
+        // exclusions run before the limit so hidden accounts cannot
+        // occupy result slots.
+        { isTest: false },
+        { NOT: { id: { startsWith: 'test-' } } },
       ],
     },
     select: {
@@ -2124,7 +2140,7 @@ export async function executeGetUserStats(
  */
 export async function executeGetChats(
   agent: AuthenticatedAgent,
-  _args: GetChatsArgs
+  args: GetChatsArgs
 ): Promise<GetChatsResult> {
   // Get all chats where user is a participant
   const participants = await db.chatParticipant.findMany({
@@ -2135,10 +2151,20 @@ export async function executeGetChats(
     select: { chatId: true },
   });
   const participantChatIds = participants.map((p) => p.chatId);
+  // The tool schema advertises filter: 'all' | 'dms' | 'groups'; apply it
+  // in the chat query so last-message lookups below only run for the
+  // chats actually being returned.
   const chatsList =
     participantChatIds.length > 0
       ? await db.chat.findMany({
-          where: { id: { in: participantChatIds } },
+          where: {
+            id: { in: participantChatIds },
+            ...(args.filter === 'dms'
+              ? { isGroup: false }
+              : args.filter === 'groups'
+                ? { isGroup: true }
+                : {}),
+          },
         })
       : [];
   const chatIds = chatsList.map((c) => c.id);
@@ -2225,7 +2251,9 @@ export async function executeGetChatMessages(
         ? { senderId: { notIn: excludedSenderIds } }
         : {}),
     },
-    orderBy: { createdAt: 'desc' },
+    // Break timestamp ties for deterministic pages over unchanged history.
+    // Concurrent inserts/deletes can still shift offset windows.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: args.limit || 50,
     skip: args.offset || 0,
   });
@@ -2945,19 +2973,10 @@ export async function executeGetTrendingTags(
   _agent: AuthenticatedAgent,
   args: GetTrendingTagsArgs
 ): Promise<GetTrendingTagsResult> {
-  const trendingTagsList = await db.trendingTag.findMany({
-    orderBy: { rank: 'asc' },
-    take: args.limit || 20,
-  });
-  const tagIds = trendingTagsList.map((tt) => tt.tagId);
-  const tagsList = await db.tag.findMany({
-    where: { id: { in: tagIds } },
-    select: { id: true, name: true },
-  });
-  const tagsMap = new Map(tagsList.map((t) => [t.id, t]));
+  const trendingTagsList = await getCurrentTrendingTags(args.limit || 20);
   return {
     tags: trendingTagsList.map((tt) => ({
-      tag: tagsMap.get(tt.tagId)?.name || '',
+      tag: tt.tag.name,
       postCount: tt.postCount,
       trendScore: tt.score || 0,
     })),
@@ -3636,7 +3655,19 @@ export async function executeGetFavoritePosts(
       and(
         inArray(posts.authorId, favoritedUserIds),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, new Date())
+        lte(posts.timestamp, new Date()),
+        // Apply the web feed's test-author rule (DatabaseService
+        // .getRecentPosts): test accounts — the isTest flag or a
+        // 'test-' id prefix — must not leak into the favorites feed
+        // either, even when the agent favorited them. Excluded in SQL
+        // before paginating, so pages stay full.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp))

@@ -13,6 +13,7 @@ import {
   db,
   eq,
   favorites,
+  follows,
   inArray,
   markets,
   notifications,
@@ -26,6 +27,7 @@ import { generateSnowflakeId } from '@feed/shared';
 import * as notificationService from '../../api/src/services/notification-service';
 import {
   executeCreateComment,
+  executeFollowUser,
   executeGetFavoritePosts,
   executeGetMarketPrices,
   executeGetMarkets,
@@ -35,7 +37,10 @@ import {
   executeLikeComment,
   executeLikePost,
   executeMarkNotificationsRead,
+  executeTool,
 } from '../../mcp/src/handlers/tool-handlers';
+import type { UpdateProfileResult } from '../../mcp/src/types/mcp';
+import { assertDisposableAgentFollowDatabase } from './helpers/agent-follow-database';
 
 const userIds: string[] = [];
 const likePostIds: string[] = [];
@@ -52,6 +57,7 @@ const privateWalletAddress = `0x${Array.from(
 let agentUserId: string;
 let otherUserId: string;
 let privateUserId: string;
+const followPeers: string[] = [];
 let postId: string;
 let deletedPostId: string;
 let marketId: string;
@@ -254,6 +260,15 @@ describe('MCP tool handlers', () => {
 
   afterAll(async () => {
     try {
+      if (!userIds.length) return;
+      await db
+        .delete(follows)
+        .where(
+          and(
+            eq(follows.followerId, agentUserId),
+            inArray(follows.followingId, followPeers)
+          )
+        );
       await db
         .delete(notifications)
         .where(inArray(notifications.userId, userIds));
@@ -338,6 +353,56 @@ describe('MCP tool handlers', () => {
         .from(users)
         .where(eq(users.id, agentUserId))
     ).toHaveLength(1);
+  });
+
+  it('rejects follows in either block direction and allows a clean follow', async () => {
+    await assertDisposableAgentFollowDatabase();
+    async function createFollowPeer() {
+      const id = await createUser();
+      followPeers.push(id);
+      return id;
+    }
+    const blockedByAgentId = await createFollowPeer();
+    const blockerOfAgentId = await createFollowPeer();
+    const cleanFollowId = await createFollowPeer();
+    const insertedBlocks = await db
+      .insert(userBlocks)
+      .values([
+        {
+          id: await generateSnowflakeId(),
+          blockerId: agentUserId,
+          blockedId: blockedByAgentId,
+        },
+        {
+          id: await generateSnowflakeId(),
+          blockerId: blockerOfAgentId,
+          blockedId: agentUserId,
+        },
+      ])
+      .returning({ id: userBlocks.id });
+    blockIds.push(...insertedBlocks.map((row) => row.id));
+    await expect(
+      executeFollowUser(agent(), { userId: blockedByAgentId })
+    ).rejects.toThrow('Cannot follow this user');
+    await expect(
+      executeFollowUser(agent(), { userId: blockerOfAgentId })
+    ).rejects.toThrow('Cannot follow this user');
+
+    const blockedRows = await db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(eq(follows.followerId, agentUserId));
+    expect(blockedRows).toHaveLength(0);
+
+    const result = await executeFollowUser(agent(), {
+      userId: cleanFollowId,
+    });
+    expect(result.success).toBe(true);
+    const cleanRows = await db
+      .select({ id: follows.id })
+      .from(follows)
+      .where(eq(follows.followerId, agentUserId));
+    expect(cleanRows).toHaveLength(1);
   });
 
   it('counts real unread notifications and reports rows actually marked', async () => {
@@ -691,5 +756,43 @@ describe('MCP tool handlers', () => {
     expect(
       await db.select().from(comments).where(eq(comments.postId, deletedPostId))
     ).toHaveLength(0);
+  });
+
+  it('validates update_profile with the shared profile schema', async () => {
+    const [before] = await db
+      .select({
+        username: users.username,
+        displayName: users.displayName,
+        profileImageUrl: users.profileImageUrl,
+      })
+      .from(users)
+      .where(eq(users.id, agentUserId));
+
+    const invalidArgs: Record<string, string>[] = [
+      { username: 'no spaces allowed' },
+      { username: 'ab' },
+      { displayName: 'x'.repeat(101) },
+      { profileImageUrl: 'javascript:alert(1)' },
+    ];
+    for (const args of invalidArgs) {
+      // assert.rejects fails cleanly if the call resolves; bun's expect().rejects hangs instead.
+      await assert.rejects(executeTool('update_profile', args, agent()));
+    }
+    const [afterRejected] = await db
+      .select({
+        username: users.username,
+        displayName: users.displayName,
+        profileImageUrl: users.profileImageUrl,
+      })
+      .from(users)
+      .where(eq(users.id, agentUserId));
+    expect(afterRejected).toEqual(before);
+
+    const ok = (await executeTool(
+      'update_profile',
+      { displayName: '  MCP Tester  ' },
+      agent()
+    )) as UpdateProfileResult;
+    expect(ok.profile.displayName).toBe('MCP Tester');
   });
 });

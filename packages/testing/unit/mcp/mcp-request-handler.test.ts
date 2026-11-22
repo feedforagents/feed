@@ -22,3 +22,52 @@ describe('MCPRequestHandler auth context', () => {
     expect(call.error?.message).toBe('Authentication required');
   });
 });
+
+describe('MCPRequestHandler capability negotiation', () => {
+  // The request a client sends for each optional server capability it sees
+  // in the initialize result (MCP spec, server features and utilities).
+  const capabilityRequests: Record<
+    string,
+    { method: string; params?: Record<string, string> }
+  > = {
+    logging: { method: 'logging/setLevel', params: { level: 'debug' } },
+    resources: { method: 'resources/list' },
+    prompts: { method: 'prompts/list' },
+    tools: { method: MCPMethod.TOOLS_LIST },
+  };
+
+  it('serves the request a client sends for every capability it advertises', async () => {
+    const handler = new MCPRequestHandler();
+    const init = await handler.handle({
+      jsonrpc: '2.0',
+      id: 1,
+      method: MCPMethod.INITIALIZE,
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'inspector-cli', version: '2.16.0' },
+      },
+    });
+    const advertised = Object.keys(
+      (init.result as { capabilities: Record<string, unknown> }).capabilities
+    );
+    expect(advertised).toContain('tools');
+
+    let id = 2;
+    for (const capability of advertised) {
+      const request = capabilityRequests[capability];
+      if (!request)
+        throw new Error(`no client request known for ${capability}`);
+      const response = await handler.handle({
+        jsonrpc: '2.0',
+        id: id++,
+        method: request.method,
+        params: request.params,
+      });
+      expect({ capability, error: response.error }).toEqual({
+        capability,
+        error: undefined,
+      });
+    }
+  });
+});

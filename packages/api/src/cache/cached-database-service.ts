@@ -52,6 +52,9 @@ import {
   invalidateCachePattern,
 } from './cache-service';
 
+// Large post-list namespaces benefit from fewer Redis SCAN round trips.
+const POST_CACHE_SCAN_COUNT = 1000;
+
 /** Keep cursor text and viewer policy in separate, unambiguous key fields. */
 function postFeedCacheKey(
   limit: number,
@@ -60,21 +63,25 @@ function postFeedCacheKey(
   authorId?: string
 ): string {
   const isCursor = typeof cursorOrOffset === 'string';
+  // Keep all policy variants under the same actor invalidation prefix.
+  const prefix = authorId === undefined ? '' : `${authorId}:`;
   if (!visibility) {
-    const prefix = authorId === undefined ? '' : `${authorId}:`;
     return isCursor
       ? `${prefix}${limit}:cursor:${cursorOrOffset}`
       : `${prefix}${limit}:offset:${cursorOrOffset || 0}`;
   }
-  return JSON.stringify([
-    'post-visibility-v1',
-    authorId ?? null,
-    limit,
-    isCursor ? 'cursor' : 'offset',
-    cursorOrOffset ?? 0,
-    [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
-    visibility.excludeDeadReposts === true,
-  ]);
+  return (
+    prefix +
+    JSON.stringify([
+      'post-visibility-v1',
+      authorId ?? null,
+      limit,
+      isCursor ? 'cursor' : 'offset',
+      cursorOrOffset ?? 0,
+      [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
+      visibility.excludeDeadReposts === true,
+    ])
+  );
 }
 
 /**
@@ -153,25 +160,51 @@ class CachedDatabaseService {
     userId: string,
     followedIds: string[],
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    excludedAuthorIds?: string[]
   ): Promise<Post[]> {
     const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${userId}:${limit}:cursor:${cursorOrOffset}`
-      : `${userId}:${limit}:offset:${cursorOrOffset || 0}`;
+    // The viewer's moderation exclusions shape the result, so they are
+    // part of the cache key: a page cut for one exclusion set must
+    // never be served to the same viewer under a different one.
+    const excludedSuffix =
+      excludedAuthorIds && excludedAuthorIds.length > 0
+        ? `:excl:${[...excludedAuthorIds].sort().join(',')}`
+        : '';
+    const cacheKey =
+      (isCursor
+        ? `${userId}:${limit}:cursor:${cursorOrOffset}`
+        : `${userId}:${limit}:offset:${cursorOrOffset || 0}`) + excludedSuffix;
 
     return getCacheOrFetch(
       cacheKey,
       async () => {
-        // First, filter out test users from followedIds
-        const testUsers = await db
-          .select({ id: users.id })
-          .from(users)
-          .where(and(inArray(users.id, followedIds), eq(users.isTest, true)));
+        // Authors the viewer must not see (blocked, muted, or blocking
+        // them) are dropped before the page is cut. Filtering a fetched
+        // page afterwards lets their newest posts spend the limit and
+        // strands the visible posts behind them.
+        const excludedAuthorIdSet = new Set(excludedAuthorIds ?? []);
+        const candidateIds = followedIds.filter(
+          (id) => !excludedAuthorIdSet.has(id)
+        );
+
+        // First, filter out test users from the candidate ids. Test
+        // authors come in two shapes — a users row flagged isTest and
+        // an id starting with 'test-' — and the canonical
+        // getRecentPosts excludes both before paginating.
+        const testUsers =
+          candidateIds.length > 0
+            ? await db
+                .select({ id: users.id })
+                .from(users)
+                .where(
+                  and(inArray(users.id, candidateIds), eq(users.isTest, true))
+                )
+            : [];
 
         // Get test actors from static registry
         const testActorIds = StaticDataRegistry.getAllActors()
-          .filter((a) => a.isTest && followedIds.includes(a.id))
+          .filter((a) => a.isTest && candidateIds.includes(a.id))
           .map((a) => a.id);
 
         const testAuthorIds = new Set([
@@ -179,9 +212,9 @@ class CachedDatabaseService {
           ...testActorIds,
         ]);
 
-        // Remove test users from followedIds
-        const nonTestFollowedIds = followedIds.filter(
-          (id) => !testAuthorIds.has(id)
+        // Remove test users from the candidate ids
+        const nonTestFollowedIds = candidateIds.filter(
+          (id) => !testAuthorIds.has(id) && !id.startsWith('test-')
         );
 
         const cursor = isCursor ? (cursorOrOffset as string) : undefined;
@@ -393,11 +426,18 @@ class CachedDatabaseService {
             .from(userActorFollows)
             .where(eq(userActorFollows.userId, userId)),
 
-          // Count positions
+          // Count open positions. The profile route documents this
+          // number as the number of open positions, and the profile's
+          // positions list counts open prediction positions as exactly
+          // the 'active' ones — closed and resolved positions belong
+          // to its closed view — so the header applies the same filter
+          // or it keeps counting positions after they end.
           db
             .select({ count: count() })
             .from(positions)
-            .where(eq(positions.userId, userId)),
+            .where(
+              and(eq(positions.userId, userId), eq(positions.status, 'active'))
+            ),
 
           // Count comments
           db
@@ -561,8 +601,14 @@ class CachedDatabaseService {
   async invalidatePostsCache() {
     logger.info('Invalidating posts cache', undefined, 'CachedDatabaseService');
     await Promise.all([
-      invalidateCachePattern('*', { namespace: CACHE_KEYS.POSTS_LIST }),
-      invalidateCachePattern('*', { namespace: CACHE_KEYS.POSTS_FOLLOWING }),
+      invalidateCachePattern('*', {
+        namespace: CACHE_KEYS.POSTS_LIST,
+        scanCount: POST_CACHE_SCAN_COUNT,
+      }),
+      invalidateCachePattern('*', {
+        namespace: CACHE_KEYS.POSTS_FOLLOWING,
+        scanCount: POST_CACHE_SCAN_COUNT,
+      }),
     ]);
   }
 
@@ -577,6 +623,7 @@ class CachedDatabaseService {
     );
     await invalidateCachePattern(`${actorId}:*`, {
       namespace: CACHE_KEYS.POSTS_BY_ACTOR,
+      scanCount: POST_CACHE_SCAN_COUNT,
     });
   }
 
