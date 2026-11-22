@@ -721,7 +721,14 @@ async function handleDisputeClosed(
     return { success: true }; // Don't retry - no deduction to reverse
   }
 
-  const amountUSD = dispute.amount / 100; // Stripe uses cents
+  // Give back no more than the purchase credited, with the same cap as
+  // handleDisputeCreated. Otherwise a legacy purchase (112 units for a $1.13
+  // charge) loses 112 to the dispute and gets 113 back when it is won.
+  const recreditUnits = Math.min(
+    usdToBalanceUnits(dispute.amount / 100),
+    Number(originalPurchase.amount)
+  );
+  const amountUSD = recreditUnits / 100;
 
   logger.info(
     'Re-crediting trading balance after winning dispute',

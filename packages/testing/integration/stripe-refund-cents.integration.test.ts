@@ -1,7 +1,9 @@
 /**
  * POST /api/stripe/webhook (charge.refunded) against a real database: a full
  * refund must take back exactly the balance units the purchase credited,
- * including a legacy purchase written with the old floor conversion.
+ * including a legacy purchase written with the old floor conversion. A
+ * dispute takes back at most the credited units, and winning it gives back
+ * the same amount (charge.dispute.created, charge.dispute.closed).
  *
  * Checkout charges Math.round(amountUSD * 100) cents and fundPurchase credits
  * usdToBalanceUnits(amountUSD) = one unit per charged cent (#1606). The refund
@@ -238,17 +240,19 @@ async function sendRefund(
   expect(response.status).toBe(200);
 }
 
+// `won` sends charge.dispute.closed with status won for the same dispute.
 async function sendDispute(
   setup: OwnedSetup,
   paymentIntentId: string,
-  amountCents: number
+  amountCents: number,
+  won = false
 ) {
-  const eventId = `evt_test_dispute_${paymentIntentId}_${amountCents}`;
+  const eventId = `evt_test_dispute_${won ? 'won' : 'created'}_${paymentIntentId}_${amountCents}`;
   setup.relatedIds.push(eventId);
   const payload = JSON.stringify({
     id: eventId,
     object: 'event',
-    type: 'charge.dispute.created',
+    type: won ? 'charge.dispute.closed' : 'charge.dispute.created',
     data: {
       object: {
         id: `dp_test_${paymentIntentId}`,
@@ -256,7 +260,7 @@ async function sendDispute(
         amount: amountCents,
         charge: `ch_test_${paymentIntentId}`,
         reason: 'fraudulent',
-        status: 'needs_response',
+        status: won ? 'won' : 'needs_response',
       },
     },
   });
@@ -344,6 +348,21 @@ describe('charge.dispute.created takes back at most the credited balance units',
     await sendDispute(setup, paymentIntentId, 113);
 
     expect(funded - (await balanceOf(userId))).toBe(112);
+  });
+
+  it('a won dispute on a legacy purchase gives back what the dispute took', async () => {
+    const { setup, userId, paymentIntentId } = await seedLegacyPurchase(
+      113,
+      112,
+      500
+    );
+    const funded = await balanceOf(userId);
+
+    await sendDispute(setup, paymentIntentId, 113);
+    expect(funded - (await balanceOf(userId))).toBe(112);
+
+    await sendDispute(setup, paymentIntentId, 113, true);
+    expect(await balanceOf(userId)).toBe(funded);
   });
 });
 
