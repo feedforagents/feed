@@ -222,13 +222,13 @@ afterAll(async () => {
   await deleteOwnedQuestions();
 });
 
-async function requestEvents(): Promise<{
+async function requestEvents(limit?: number): Promise<{
   status: number;
   events: Array<{ id: string; date: string; time?: string }>;
 }> {
-  const response = await GET(
-    new NextRequest('http://localhost/api/feed/widgets/upcoming-events')
-  );
+  const url = new URL('http://localhost/api/feed/widgets/upcoming-events');
+  if (limit !== undefined) url.searchParams.set('limit', String(limit));
+  const response = await GET(new NextRequest(url));
   const body = (await response.json()) as UpcomingEventsResponse;
   return { status: response.status, events: body.events ?? [] };
 }
@@ -248,5 +248,11 @@ describe('Upcoming events widget orders by real date across the year boundary', 
     // the third soonest — is evicted from the top three.
     expect(events.map((event) => event.date)).toEqual(expectedDates);
     expect(events.some((event) => event.id === questionIds[3])).toBe(false);
+  });
+
+  it('returns only the soonest event when limit is one', async () => {
+    const { status, events } = await requestEvents(1);
+    expect(status).toBe(200);
+    expect(events.map((event) => event.date)).toEqual(['Dec 29']);
   });
 });

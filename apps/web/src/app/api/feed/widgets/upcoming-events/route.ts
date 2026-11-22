@@ -82,7 +82,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     limit: searchParams.get('limit') || '10',
     timeframe: searchParams.get('timeframe') || '7d',
   };
-  UpcomingEventsQuerySchema.parse(queryParams);
+  const { limit } = UpcomingEventsQuerySchema.parse(queryParams);
+  const eventLimit = Math.min(limit, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
 
   // Optional auth - upcoming events are public but RLS still applies
   const authUser = await optionalAuth(request).catch(() => null);
@@ -372,7 +373,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .sort(
               (a, b) => (sortTimes.get(a.id) ?? 0) - (sortTimes.get(b.id) ?? 0)
             )
-            .slice(0, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
+            .slice(0, eventLimit);
 
           return sortedEvents;
         })
@@ -658,7 +659,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .sort(
               (a, b) => (sortTimes.get(a.id) ?? 0) - (sortTimes.get(b.id) ?? 0)
             )
-            .slice(0, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
+            .slice(0, eventLimit);
 
           return sortedEvents;
         });
