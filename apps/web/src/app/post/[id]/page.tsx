@@ -183,22 +183,30 @@ export default function PostPage({ params }: PostPageProps) {
         originalPost: postData.originalPost || null,
       });
 
-      // Seed the interaction store with fresh API counts. Reposts are
-      // tracked under the original post id (matches InteractionBar).
-      const interactionPostId = postData.originalPostId || postId;
-      const store = useInteractionStore.getState();
-      const storeData = store.postInteractions.get(interactionPostId);
-      const updatedInteractions = new Map(store.postInteractions);
-      updatedInteractions.set(interactionPostId, {
+      // Reconcile the interaction store with the fresh API payload, like
+      // InteractionBar does through syncPostInteraction. The payload is
+      // authoritative for like/share state: preserving a persisted
+      // isLiked/isShared here would freeze the button at toggle-time
+      // values, and the subscribe mirror below would launder the stale
+      // flags into the post state before InteractionBar ever sees the
+      // server values. Simple reposts are tracked under the original
+      // post id (matches InteractionBar); quote posts track their own
+      // id. A mutation in flight for this post skips the sync, so its
+      // own result stays authoritative.
+      const isSimpleRepost =
+        postData.isRepost && !postData.isQuote && !postData.quoteComment;
+      const interactionPostId =
+        isSimpleRepost && postData.originalPostId
+          ? postData.originalPostId
+          : postId;
+      useInteractionStore.getState().syncPostInteraction({
         postId: interactionPostId,
         likeCount: postData.likeCount ?? 0,
         commentCount: postData.commentCount ?? 0,
         shareCount: postData.shareCount ?? 0,
-        // Preserve existing isLiked/isShared from store, don't overwrite with API
-        isLiked: storeData?.isLiked ?? postData.isLiked ?? false,
-        isShared: storeData?.isShared ?? postData.isShared ?? false,
+        isLiked: postData.isLiked ?? false,
+        isShared: postData.isShared ?? false,
       });
-      useInteractionStore.setState({ postInteractions: updatedInteractions });
 
       setLoadState('ready');
     };
@@ -212,8 +220,17 @@ export default function PostPage({ params }: PostPageProps) {
   }, [postId, router, reloadKey]);
 
   // Mirror interaction-store changes into the post. Must use the same id the
-  // store is written under (original id for reposts).
-  const interactionPostId = post?.originalPostId || postId;
+  // store is written under: the original id for simple reposts only
+  // (matches InteractionBar — quote posts track their own id, so using the
+  // original id here would overwrite the quote's state with the original
+  // post's store entry).
+  const interactionPostId =
+    post?.isRepost &&
+    !post?.isQuote &&
+    !post?.quoteComment &&
+    post?.originalPostId
+      ? post.originalPostId
+      : postId;
   useEffect(() => {
     const unsubscribe = useInteractionStore.subscribe((state) => {
       const storeData = state.postInteractions.get(interactionPostId);
