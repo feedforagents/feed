@@ -465,8 +465,14 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
         }
 
         // A failed moderation reload must not fall through to the next
-        // batch unfiltered: close the stream instead.
+        // batch unfiltered: close the stream instead. The loop exit alone
+        // does not close the response — without an explicit close the
+        // stream stays open with no more data (heartbeats come only from
+        // the loop) and the client never reconnects.
         if (batchExclusionsFailed) {
+          isControllerClosed = true;
+          request.signal.removeEventListener('abort', abortListener);
+          controller.close();
           break;
         }
       }

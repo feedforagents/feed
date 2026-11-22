@@ -68,6 +68,19 @@ jobs:
           --shm-size=1gb
         ports:
           - 5432:5432
+      # The SSE integration suites need a real Redis: sse-chat-moderation
+      # connects the in-process route through the shared client and
+      # sse-empty-streams hits the live server. Without this service the
+      # shared client has nothing to connect to and both suites 503.
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
 
     steps:
       - uses: actions/checkout@v4
@@ -214,6 +227,9 @@ jobs:
           echo "✅ Production server is ready"
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+          # The SSE suites need a real Redis (see the redis service above);
+          # without it the live server's realtime client stays disabled.
+          REDIS_URL: redis://localhost:6379
           # Set DEPLOYMENT_ENV=localnet to skip strict testnet/mainnet validation in CI
           DEPLOYMENT_ENV: localnet
           # NODE_ENV=test so integration tests can use x-dev-user-id headers
@@ -259,6 +275,10 @@ jobs:
           POSTGRES_SERVICE_CONTAINER_ID: ${{ job.services.postgres.id }}
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
           DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+          # The SSE suites need the redis service above: sse-chat-moderation
+          # connects the shared client in-process and sse-empty-streams
+          # un-skips on REDIS_URL and hits the live server.
+          REDIS_URL: redis://localhost:6379
           TEST_API_URL: http://localhost:3000
           PLAYWRIGHT_BASE_URL: http://localhost:3000
           PRIVY_APP_ID: ${{ secrets.PRIVY_APP_ID || secrets.NEXT_PUBLIC_PRIVY_APP_ID || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'cl_ci_fork_dummy') || '' }}

@@ -59,6 +59,7 @@ import { NextRequest } from 'next/server';
 
 let broadcastChatMessage: typeof import('@feed/api').broadcastChatMessage;
 let issueRealtimeToken: typeof import('@feed/api').issueRealtimeToken;
+let closeRedis: typeof import('@feed/api').closeRedis;
 let GET: typeof import('../../../apps/web/src/app/api/sse/events/route').GET;
 
 let viewerId: string;
@@ -238,7 +239,9 @@ beforeAll(async () => {
   // local Redis; afterAll restores the test value. Bracket notation: the
   // typed process.env forbids direct assignment (TS2540).
   (process.env as Record<string, string>)['NODE_ENV'] = 'development';
-  ({ broadcastChatMessage, issueRealtimeToken } = await import('@feed/api'));
+  ({ broadcastChatMessage, issueRealtimeToken, closeRedis } = await import(
+    '@feed/api'
+  ));
   ({ GET } = await import('../../../apps/web/src/app/api/sse/events/route'));
 
   // One id per variable (not a 9-way destructure of a general array):
@@ -402,6 +405,11 @@ afterAll(async () => {
   (process.env as Record<string, string>)['NODE_ENV'] = 'test';
   await viewerConn?.stop().catch(() => {});
   await otherConn?.stop().catch(() => {});
+  // Tear the shared realtime client down: later suites in this same
+  // process assert getRedisClient() is null / isRedisAvailable() is false
+  // (widget-markets-*), so a connected client left behind would fail
+  // them by run order.
+  await closeRedis?.().catch(() => {});
   // Delete only the fixture stages whose INSERT succeeded, in dependency
   // order, by the exact ids this suite minted.
   if (seeded.has('participants')) {
