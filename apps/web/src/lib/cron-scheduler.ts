@@ -74,6 +74,19 @@ const ADDITIONAL_CRONS: CronSchedule[] = [
   },
 ];
 
+const LOCALNET_CRONS: CronSchedule[] = [
+  {
+    path: '/api/cron/npc-tick?mode=groups',
+    schedule: '*/2 * * * *',
+    description: 'NPC group interactions',
+  },
+  {
+    path: '/api/cron/world-facts?mode=headlines',
+    schedule: '*/5 * * * *',
+    description: 'RSS and parody headlines',
+  },
+];
+
 /**
  * Check if a cron should run based on its schedule and current time
  */
@@ -131,16 +144,34 @@ function matchesCronField(field: string, value: number): boolean {
   return parseInt(field, 10) === value;
 }
 
+async function readCronOutcome(
+  response: Response
+): Promise<'triggered' | 'failed' | 'skipped'> {
+  if (!response.ok) return 'failed';
+  if (response.headers.get('content-type')?.startsWith('application/json')) {
+    try {
+      const body: unknown = await response.json();
+      if (body && typeof body === 'object') {
+        if ('success' in body && body.success === false) return 'failed';
+        if ('skipped' in body && body.skipped === true) return 'skipped';
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+  // Keep reporting successful deliveries that have no explicit job outcome.
+  return 'triggered';
+}
+
 /**
  * Trigger additional crons that should run at the current time.
  * Called from game-tick to ensure all crons run even on staging.
  */
-export async function triggerScheduledCrons(): Promise<{
+export async function triggerScheduledCrons(now = new Date()): Promise<{
   triggered: string[];
   failed: string[];
   skipped: string[];
 }> {
-  const now = new Date();
   const triggered: string[] = [];
   const failed: string[] = [];
   const skipped: string[] = [];
@@ -148,6 +179,8 @@ export async function triggerScheduledCrons(): Promise<{
   // Get base URL for internal API calls
   const baseUrl = getBaseUrl();
 
+  const localnet = process.env.DEPLOYMENT_ENV === 'localnet';
+  const localnetCrons = localnet ? LOCALNET_CRONS : [];
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret) {
     logger.warn(
@@ -158,14 +191,14 @@ export async function triggerScheduledCrons(): Promise<{
     return {
       triggered: [],
       failed: [],
-      skipped: ADDITIONAL_CRONS.map((c) => c.path),
+      skipped: [...ADDITIONAL_CRONS, ...localnetCrons].map((c) => c.path),
     };
   }
 
-  for (const cron of ADDITIONAL_CRONS) {
+  async function trigger(cron: CronSchedule, timeoutMs: number, report = true) {
     if (!shouldRunCron(cron.schedule, now)) {
-      skipped.push(cron.path);
-      continue;
+      if (report) skipped.push(cron.path);
+      return;
     }
 
     try {
@@ -180,20 +213,31 @@ export async function triggerScheduledCrons(): Promise<{
         headers: {
           Authorization: `Bearer ${cronSecret}`,
           'User-Agent': 'feed-internal-cron-scheduler/1.0',
+          ...(localnet
+            ? { 'X-Cloudflare-Cron-Time': String(now.getTime()) }
+            : {}),
         },
         // Don't wait too long for each cron
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
 
-      if (response.ok) {
-        triggered.push(cron.path);
+      const outcome = await readCronOutcome(response);
+      if (outcome === 'triggered') {
+        if (report) triggered.push(cron.path);
         logger.info(
           `✓ Cron triggered successfully: ${cron.path}`,
           { status: response.status },
           'CronScheduler'
         );
+      } else if (outcome === 'skipped') {
+        if (report) skipped.push(cron.path);
+        logger.info(
+          `Cron skipped: ${cron.path}`,
+          { status: response.status },
+          'CronScheduler'
+        );
       } else {
-        failed.push(cron.path);
+        if (report) failed.push(cron.path);
         logger.warn(
           `✗ Cron failed: ${cron.path}`,
           { status: response.status, statusText: response.statusText },
@@ -201,7 +245,7 @@ export async function triggerScheduledCrons(): Promise<{
         );
       }
     } catch (error) {
-      failed.push(cron.path);
+      if (report) failed.push(cron.path);
       logger.error(
         `✗ Cron error: ${cron.path}`,
         { error: error instanceof Error ? error.message : String(error) },
@@ -209,6 +253,28 @@ export async function triggerScheduledCrons(): Promise<{
       );
     }
   }
+
+  // The local game-tick route calls this scheduler after sending its response.
+  const recoveryRun = localnet
+    ? trigger(
+        {
+          path: '/api/cron/markets-recovery',
+          schedule: '* * * * *',
+          description: 'Market recovery',
+        },
+        840_000,
+        false
+      )
+    : undefined;
+
+  // Slow auxiliary work starts independently of the legacy schedule.
+  const localnetRuns = Promise.all(
+    localnetCrons.map((cron) => trigger(cron, 110_000))
+  );
+  for (const cron of ADDITIONAL_CRONS) {
+    await trigger(cron, 30_000);
+  }
+  await Promise.all([localnetRuns, recoveryRun]);
 
   logger.info(
     'Internal cron scheduler complete',

@@ -298,6 +298,78 @@ describe('perp preview enforces the exposure cap', () => {
     }
   });
 
+  for (const scenario of [
+    {
+      name: 'add uses the existing leverage for the exposure cap',
+      // 900,000 + 40,000 × 2 fits. Using the requested 20× would refuse it.
+      existing: { size: 20_000, leverage: 2 },
+      otherSize: 43_000,
+      order: { side: 'long', size: 40_000, leverage: 20 },
+      preview: { previewType: 'add', size: 40_000, leverage: 2 },
+      execution: {
+        rebalanceType: 'add',
+        side: 'long',
+        size: 60_000,
+        leverage: 2,
+      },
+    },
+    {
+      name: 'flip excludes the closing leg from the exposure cap',
+      // 990,000 + 20,000 would refuse it. Closing the old leg frees 200,000.
+      existing: { size: 10_000, leverage: 20 },
+      otherSize: 39_500,
+      order: { side: 'short', size: 11_000, leverage: 20 },
+      preview: { previewType: 'flip', size: 1000, leverage: 20 },
+      execution: {
+        rebalanceType: 'flip',
+        side: 'short',
+        size: 1000,
+        leverage: 20,
+      },
+    },
+  ] as const) {
+    test(scenario.name, async () => {
+      const userId = await createUser('50000');
+      const target = ticker('PEXPP');
+      const other = ticker('PEXPQ');
+      const previousTestAuth = process.env.ALLOW_TEST_PRIVY_DID_AUTH;
+      process.env.ALLOW_TEST_PRIVY_DID_AUTH = 'true';
+      try {
+        await createMarket(target);
+        await createMarket(other);
+        const service = createPerpMarketService({ withPriceImpact: true });
+        await service.openPosition({
+          userId,
+          ticker: target,
+          side: 'long',
+          ...scenario.existing,
+        });
+        await service.openPosition({
+          userId,
+          ticker: other,
+          side: 'long',
+          size: scenario.otherSize,
+          leverage: 20,
+        });
+        const { side, size, leverage } = scenario.order;
+        const quoted = await preview(userId, target, side, size, leverage);
+        expect(quoted.status).toBe(200);
+        expect(quoted.body).toMatchObject({ preview: scenario.preview });
+        const placed = await service.openPosition({
+          userId,
+          ticker: target,
+          ...scenario.order,
+        });
+        expect(placed).toMatchObject(scenario.execution);
+      } finally {
+        await cleanup(userId, [target, other]);
+        if (previousTestAuth === undefined)
+          delete process.env.ALLOW_TEST_PRIVY_DID_AUTH;
+        else process.env.ALLOW_TEST_PRIVY_DID_AUTH = previousTestAuth;
+      }
+    });
+  }
+
   test('fresh open at the 50-position limit is rejected by the preview', async () => {
     const userId = await createUser('10000');
     const t51 = ticker('PEXPE');

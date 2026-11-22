@@ -6,6 +6,7 @@ interface Env {
   APP_ORIGIN: string;
   CRON_SECRET: string;
   CRON_ENABLED: string;
+  DEPLOYMENT_ENV?: string;
 }
 
 async function readOutcome(response: Response) {
@@ -33,7 +34,10 @@ export default {
   async scheduled(event: ScheduledController, env: Env) {
     if (env.CRON_ENABLED !== 'true') return;
     if (!env.CRON_SECRET) throw new Error('CRON_SECRET is required');
-    const batch = dueJobs(event.scheduledTime).map(({ path }) => ({
+    const batch = dueJobs(
+      event.scheduledTime,
+      env.DEPLOYMENT_ENV === 'localnet'
+    ).map(({ path }) => ({
       body: { path, scheduledTime: event.scheduledTime },
     }));
     if (batch.length) await env.JOBS.sendBatch(batch);
@@ -46,7 +50,10 @@ export default {
         message.retry({ delaySeconds: 300 });
         continue;
       }
-      if (!env.CRON_SECRET || !isCronJob(message.body)) {
+      if (
+        !env.CRON_SECRET ||
+        !isCronJob(message.body, env.DEPLOYMENT_ENV === 'localnet')
+      ) {
         throw new Error('Invalid cron configuration or queue message');
       }
       const { path, scheduledTime } = message.body;
