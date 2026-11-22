@@ -1,3 +1,4 @@
+import { scheduledInferenceFetch } from '@feed/db';
 import { getSurplusConfig } from '@feed/shared';
 /**
  * Trending Grouping Service
@@ -57,6 +58,7 @@ if (hasApiKey) {
     baseURL:
       getSurplusConfig()?.baseURL ||
       (useGroq ? groqBaseURL : 'https://api.openai.com/v1'),
+    fetch: scheduledInferenceFetch,
     timeout: LLM_TIMEOUT_MS,
     maxRetries: 0,
   });

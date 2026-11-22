@@ -25,6 +25,7 @@ import { logger } from '../shared/logger';
 // Import services
 import { populateIdentityMapOnRuntime } from './agent-identity-map';
 import { multiStepExecutor } from './MultiStepExecutor';
+import type { NpcMarketClue } from './npc-market-clue';
 import type { ActionTraceResult } from './templates/multi-step-decision';
 import { requireContextNumber } from './utils/context-validation';
 
@@ -325,7 +326,8 @@ export class AutonomousCoordinator {
     runtime: IAgentRuntime,
     recordTrajectories = false,
     isNpc = true,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    marketClue?: NpcMarketClue
   ): Promise<AutonomousTickResult> {
     signal?.throwIfAborted();
     const actor = StaticDataRegistry.getActor(agentUserId);
@@ -608,7 +610,8 @@ export class AutonomousCoordinator {
         agentUserId,
         runtime,
         isNpc,
-        signal
+        signal,
+        marketClue
       );
 
       // Map multi-step results to standard format
