@@ -31,6 +31,7 @@ import {
   actorState,
   and,
   db,
+  dbWrite,
   eq,
   isNull,
   type JsonValue,
@@ -905,14 +906,20 @@ export class TradeExecutionService {
     const positionId = decision.positionId;
 
     // Try perpPositions first (new system for perp trades)
-    const [perpPosition] = await db
+    const [perpPosition] = await dbWrite
       .select()
       .from(perpPositions)
       .where(eq(perpPositions.id, positionId))
       .limit(1);
 
-    if (perpPosition && !perpPosition.closedAt) {
-      // Use PerpMarketService to close perp position
+    if (perpPosition) {
+      if (perpPosition.userId !== actorId) {
+        throw new Error('Not your position');
+      }
+      // A closed canonical row cannot fall back to a stale legacy mirror.
+      if (perpPosition.closedAt) {
+        throw new Error(`Position already closed: ${positionId}`);
+      }
       return this.closePerpPositionViaService(decision, actorId, perpPosition);
     }
 
