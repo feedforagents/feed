@@ -16,6 +16,7 @@ import {
   verifyStagingDeploymentContext,
 } from './prepare-staging-fee-schema';
 import { materializeBaselineAdditiveMigrations } from './staging-fee-migration-subset';
+import { phase0Inspection, phase0RuntimeInput } from './staging-fee-schema';
 import {
   BASELINE_ADDITIVE_MIGRATIONS,
   BASELINE_ADDITIVE_TABLES,
@@ -85,6 +86,94 @@ const originalHistory = STAGING_ORIGINAL_MIGRATIONS.map(({ hash, when }) => ({
   hash,
   when,
 }));
+it('reports only boolean Phase 0 runtime inputs from GitHub', () => {
+  expect(phase0RuntimeInput(['true', 'false', 'true'])).toEqual({
+    gameStartPaused: true,
+    canonicalDailyBudgetUsd100: false,
+    requestBoundPresent: true,
+  });
+  expect(() => phase0RuntimeInput([])).toThrow('invalid_phase0_runtime_checks');
+  expect(() => phase0RuntimeInput(['false', '100', 'false'])).toThrow(
+    'invalid_phase0_runtime_checks'
+  );
+});
+it('distinguishes missing or altered Phase 0 schema from exact catalog evidence', () => {
+  const budget = {
+    kind: 'r',
+    rls: false,
+    appAccess: true,
+    columns: [
+      ['id', 'text', true, null],
+      ['boundMicroUsd', 'bigint', true, null],
+      ['createdAt', 'timestamp with time zone', true, 'now()'],
+      ['costMicroUsd', 'bigint', false, null],
+      ['settledAt', 'timestamp with time zone', false, null],
+    ],
+    constraints: [
+      'CHECK (("boundMicroUsd" > 0))',
+      'CHECK (((("settledAt" IS NULL) AND ("costMicroUsd" IS NULL)) OR (("settledAt" IS NOT NULL) AND ("costMicroUsd" IS NOT NULL) AND ("costMicroUsd" >= 0))))',
+      'PRIMARY KEY (id)',
+    ],
+    indexes: {
+      scheduled_inference_settled_at_idx:
+        'CREATE INDEX scheduled_inference_settled_at_idx ON public."ScheduledInferenceReservation" USING btree ("settledAt")',
+      scheduled_inference_bound_violation_idx:
+        'CREATE INDEX scheduled_inference_bound_violation_idx ON public."ScheduledInferenceReservation" USING btree (id) WHERE ("costMicroUsd" > "boundMicroUsd")',
+    },
+  };
+  const recovery = {
+    kind: 'r',
+    rls: false,
+    appAccess: true,
+    columns: [
+      ['questionId', 'text', true, null],
+      ['resolutionDate', 'timestamp without time zone', true, null],
+      ['outcome', 'boolean', true, null],
+      ['nextAttemptAt', 'timestamp with time zone', false, null],
+      ['draft', 'jsonb', false, null],
+    ],
+    constraints: [
+      'FOREIGN KEY ("questionId") REFERENCES "Question"(id) ON DELETE CASCADE',
+      'PRIMARY KEY ("questionId")',
+    ],
+  };
+  const ready = {
+    tablePresent: true,
+    catalogMatches: true,
+    appRoleAccess: true,
+  };
+  const details = phase0Inspection({
+    ScheduledInferenceReservation: budget,
+    PredictionResolutionWork: recovery,
+  });
+  expect(details).toEqual({
+    migration0007: ready,
+    migration0008: ready,
+  });
+  expect(
+    phase0Inspection({
+      ScheduledInferenceReservation: { kind: null },
+      PredictionResolutionWork: {
+        ...recovery,
+        appAccess: false,
+        constraints: recovery.constraints.map((constraint) =>
+          constraint.replace(' ON DELETE CASCADE', '')
+        ),
+      },
+    })
+  ).toEqual({
+    migration0007: {
+      tablePresent: false,
+      catalogMatches: false,
+      appRoleAccess: false,
+    },
+    migration0008: {
+      tablePresent: true,
+      catalogMatches: false,
+      appRoleAccess: false,
+    },
+  });
+});
 const additiveHistory = BASELINE_ADDITIVE_MIGRATIONS.map(({ hash, when }) => ({
   hash,
   when,

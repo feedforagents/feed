@@ -54,6 +54,20 @@ Show both throttle levels and reconcile confirmed Surplus charges for the
 same acceptance window against the budget. Record local timing and visibility
 evidence with its inference provider and settings.
 
+**November 2026 Phase 0 acceptance (maintainer approved):** The completed
+ai-laptop window supplies the required 24-hour evidence under the
+[D-25 exception](prd.md#d-25-spend-enforcement). It delivered 3,927 of 3,941
+scheduled ticks on time (99.64%), refreshed the signed-out feed, markets, and
+articles, and reported $1.582627 in OpenRouter bridge charges. The bridge's
+conservative shutdown total, including preflights and unsettled requests, was
+$5.032563 against the $100 ceiling. The disposable PostgreSQL suite verified
+concurrent admission, both throttle levels, UTC rollover, and overrun
+suspension. [Closeout evidence](https://github.com/feedforagents/feed/pull/2012#evidence).
+
+Begin Phase 1 after staging confirms both manual schemas. Reconcile Surplus
+charges and verify the provider-backed request maximum and effective cap
+before enabling hosted paid inference or market recovery.
+
 ## Phase 1 — Remove (shrinks the surface before rebuilding)
 
 Order matters because of cross-imports (PRD F5, F9).

@@ -19,9 +19,11 @@ const clockStep = mock(
     marketsUpdated: 0,
   })
 );
-const lookahead = mock(async () => {
-  throw new Error('The minute clock must not use lookahead');
-});
+const lookahead = mock<typeof import('@feed/engine').checkLookaheadStatus>(
+  async () => {
+    throw new Error('The minute clock must not use lookahead');
+  }
+);
 
 const actualDb = await import('@feed/db');
 mock.module('@feed/db', () => ({
@@ -49,7 +51,6 @@ const actualFeedApi = await import('@feed/api');
 mock.module('@feed/api', () => ({
   ...actualFeedApi,
   acquireGenerationLock: async () => true,
-  recordCronExecution: () => undefined,
   relayCronToStaging: relayCronToStagingMock,
   releaseGenerationLock: async () => undefined,
   withErrorHandling:
@@ -88,7 +89,7 @@ describe('game-tick cron auth', () => {
   });
 });
 
-describe('localnet game clock', () => {
+describe('game clock execution', () => {
   const env = new Map<string, string | undefined>();
   const settings = {
     CRON_SECRET: 'test-game-clock-secret',
@@ -104,6 +105,7 @@ describe('localnet game clock', () => {
     }
     clockStep.mockClear();
     lookahead.mockClear();
+    actualFeedApi.cronMetrics.reset();
     lastTick.mockReturnValue(null);
   });
 
@@ -112,6 +114,7 @@ describe('localnet game clock', () => {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
+    actualFeedApi.cronMetrics.reset();
   });
 
   function request(time: number) {
@@ -144,5 +147,26 @@ describe('localnet game clock', () => {
     });
     expect(clockStep).not.toHaveBeenCalled();
     expect(lookahead).not.toHaveBeenCalled();
+  });
+
+  test('records hosted game ticks when the lookahead buffer is sufficient', async () => {
+    process.env.DEPLOYMENT_ENV = 'staging';
+    const now = Date.now();
+    lookahead.mockResolvedValueOnce({
+      minutesAhead: 30,
+      latestTimestamp: new Date(now + 30 * 60_000),
+      needsGeneration: false,
+    });
+
+    const response = await GET(request(now));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      success: true,
+      bufferSufficient: true,
+    });
+    expect(actualFeedApi.cronMetrics.getJobStats('game-tick')).toMatchObject({
+      successfulExecutions: 1,
+      lastSuccess: expect.any(Date),
+    });
   });
 });

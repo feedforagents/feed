@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { maxSafeBuy } from '@feed/core/markets/prediction/client';
+import {
+  maxSafeBuy,
+  PredictionPricing,
+} from '@feed/core/markets/prediction/client';
+import { FEE_CONFIG } from '../config/fees';
 import {
   buildPerpMarketSnapshot,
   buildPredictionMarketSnapshot,
@@ -103,7 +107,8 @@ describe('market-context-helpers', () => {
   });
 
   it('exposes maxSafeBet derived from pool depth', () => {
-    // Balanced $10k pool: maxSafeBet ≈ $2,460 net / 0.99 ≈ $2,484 gross
+    // Balanced $10k pool: maxSafeBet ≈ $2,460 net / 0.999 ≈ $2,462 gross
+    // at the canonical 0.1% trading fee
     const snapshot = buildPredictionMarketSnapshot({
       id: 'market-4',
       question: 'Will X happen?',
@@ -118,7 +123,7 @@ describe('market-context-helpers', () => {
   });
 
   it('maxSafeBet is lower for skewed markets (minority side is constrained)', () => {
-    // 80% YES market (Y=2000, N=8000) — NO buyers are binding constraint (~$1210)
+    // 80% YES market (Y=2000, N=8000) — NO buyers are binding constraint (~$1199)
     const snapshot80pct = buildPredictionMarketSnapshot({
       id: 'market-5',
       question: 'Will X happen?',
@@ -162,10 +167,10 @@ describe('market-context-helpers', () => {
 // maxSafeBuy unit tests
 // ---------------------------------------------------------------------------
 describe('maxSafeBuy — CPMM max trade formula', () => {
-  it('balanced $10k pool: max gross ≈ $2,484', () => {
+  it('balanced $10k pool: max gross ≈ $2,462 at the canonical 0.1% fee', () => {
     const result = maxSafeBuy(5000, 5000);
-    expect(result).toBeGreaterThanOrEqual(2400);
-    expect(result).toBeLessThanOrEqual(2600);
+    expect(result).toBeGreaterThanOrEqual(2450);
+    expect(result).toBeLessThanOrEqual(2470);
   });
 
   it('larger pool allows proportionally larger trades', () => {
@@ -185,6 +190,42 @@ describe('maxSafeBuy — CPMM max trade formula', () => {
     const max80Yes = maxSafeBuy(2000, 8000); // 80% YES market
     const max80No = maxSafeBuy(8000, 2000); // 20% YES (80% NO) market
     expect(max80Yes).toBe(max80No); // symmetric by design
+  });
+
+  it('a maxSafeBet-sized buy stays within the 19ppt cap on either side at the canonical fee', () => {
+    // The bound is only safe when computed with the fee the trader
+    // actually pays (FEE_CONFIG.TRADING_FEE_RATE, 0.1%). A bound computed
+    // with a larger fee grosses the net amount up too far, so the
+    // executed trade moves odds past the cap maxSafeBuy promises.
+    const pools: Array<[number, number]> = [
+      [5000, 5000],
+      [2000, 8000],
+      [8000, 2000],
+      [50000, 50000],
+    ];
+    for (const [yesShares, noShares] of pools) {
+      const maxBet = maxSafeBuy(yesShares, noShares);
+      for (const side of ['yes', 'no'] as const) {
+        const fill = PredictionPricing.calculateBuyWithFees(
+          yesShares,
+          noShares,
+          side,
+          maxBet,
+          FEE_CONFIG.TRADING_FEE_RATE
+        );
+        const currentYesPrice = noShares / (yesShares + noShares);
+        const shift = Math.abs(fill.newYesPrice - currentYesPrice);
+        // 1e-9 absorbs binary float noise; the overshoot this guards
+        // against is ~0.13ppt, eight orders of magnitude larger.
+        expect(shift).toBeLessThanOrEqual(0.19 + 1e-9);
+      }
+    }
+  });
+
+  it('defaults to the canonical trading fee rate', () => {
+    expect(maxSafeBuy(5000, 5000)).toBe(
+      maxSafeBuy(5000, 5000, FEE_CONFIG.TRADING_FEE_RATE)
+    );
   });
 
   it('zero pool returns zero', () => {

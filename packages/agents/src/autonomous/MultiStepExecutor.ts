@@ -97,17 +97,17 @@ import { requireContextNumber } from './utils/context-validation';
 // Helpers
 // =============================================================================
 
-const DEFAULT_RATE_LIMIT_WAIT_MS = 2_000;
-const MAX_RATE_LIMIT_WAIT_MS = 5_000;
+const DEFAULT_PROVIDER_RETRY_WAIT_MS = 2_000;
+const MAX_PROVIDER_RETRY_WAIT_MS = 5_000;
 
-function getRateLimitWaitMs(retryAfter?: string): number {
+function getProviderRetryWaitMs(retryAfter?: string): number {
   const hint = retryAfter?.trim();
-  if (!hint) return DEFAULT_RATE_LIMIT_WAIT_MS;
+  if (!hint) return DEFAULT_PROVIDER_RETRY_WAIT_MS;
   if (/^\d+(?:\.\d+)?$/.test(hint)) return Math.ceil(Number(hint) * 1_000);
 
   const retryAt = Date.parse(hint);
   return Number.isNaN(retryAt)
-    ? DEFAULT_RATE_LIMIT_WAIT_MS
+    ? DEFAULT_PROVIDER_RETRY_WAIT_MS
     : Math.max(0, retryAt - Date.now());
 }
 
@@ -268,7 +268,7 @@ export class MultiStepExecutor {
     }
     const startTime = Date.now();
     const trace: ActionTraceResult[] = [];
-    const rateLimitRetry = { used: false };
+    const providerRetry = { used: false };
 
     logger.info(
       `[MultiStep] Starting multi-step execution for agent ${agentUserId}`,
@@ -499,7 +499,7 @@ ${describeNpcMarketClue(offeredMarketClue)}`
           systemPrompt,
           {
             feedback: validationFeedback,
-            rateLimitRetry,
+            providerRetry,
             signal,
           }
         );
@@ -1091,7 +1091,7 @@ ${describeNpcMarketClue(offeredMarketClue)}`
   }
 
   /**
-   * Get an LLM decision, with bounded retries for invalid JSON and rate limits.
+   * Get an LLM decision with bounded JSON correction and provider retries.
    */
   private async getDecision(
     prompt: string,
@@ -1100,12 +1100,12 @@ ${describeNpcMarketClue(offeredMarketClue)}`
     systemPrompt?: string,
     options?: {
       feedback?: string;
-      rateLimitRetry?: { used: boolean };
+      providerRetry?: { used: boolean };
       signal?: AbortSignal;
     }
   ): Promise<{ decision: MultiStepDecision; rawResponse: string } | null> {
     const maxRetries = 3;
-    const { feedback, rateLimitRetry, signal } = options ?? {};
+    const { feedback, providerRetry, signal } = options ?? {};
 
     const system = systemPrompt
       ? `${systemPrompt}\n\nIMPORTANT: Output valid JSON only. No markdown, no explanations, and no <think> tags. The first character of your reply must be "{" and the last character must be "}".`
@@ -1140,23 +1140,28 @@ ${describeNpcMarketClue(offeredMarketClue)}`
       };
       const response = await callAgentLLM(request).catch(async (error) => {
         if (
-          !rateLimitRetry ||
-          rateLimitRetry.used ||
+          !providerRetry ||
+          providerRetry.used ||
           !APICallError.isInstance(error) ||
-          error.statusCode !== 429
+          (error.statusCode !== 429 && error.statusCode !== 502)
         ) {
           throw error;
         }
-        const delayMs = getRateLimitWaitMs(
+        const delayMs = getProviderRetryWaitMs(
           error.responseHeaders?.['retry-after']
         );
-        if (delayMs > MAX_RATE_LIMIT_WAIT_MS) throw error;
+        if (delayMs > MAX_PROVIDER_RETRY_WAIT_MS) throw error;
 
         signal?.throwIfAborted();
-        rateLimitRetry.used = true;
+        providerRetry.used = true;
         logger.warn(
-          '[MultiStep] Retrying rate-limited NPC decision',
-          { agentUserId: runtime.agentId, iteration, delayMs },
+          '[MultiStep] Retrying NPC decision after provider rejection',
+          {
+            agentUserId: runtime.agentId,
+            iteration,
+            statusCode: error.statusCode,
+            delayMs,
+          },
           'MultiStepExecutor'
         );
         await waitForRetry(delayMs, undefined, { signal });
