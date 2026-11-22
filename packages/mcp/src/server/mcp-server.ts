@@ -34,18 +34,13 @@ export function getMCPServerInfo(): Implementation {
  * Get server capabilities
  */
 export function getServerCapabilities(): ServerCapabilities {
+  // Advertise only what MCPRequestHandler serves. Clients act on each
+  // declared capability: MCP Inspector sends logging/setLevel after
+  // initialize and aborts on Method not found.
   return {
     tools: {
       listChanged: false, // We don't support dynamic tool list changes yet
     },
-    resources: {
-      subscribe: false,
-      listChanged: false,
-    },
-    prompts: {
-      listChanged: false,
-    },
-    logging: {},
   };
 }
 
@@ -125,21 +120,23 @@ export function getAvailableTools(): MCPTool[] {
     },
     {
       name: 'get_positions',
-      description: 'Get all open positions',
+      description:
+        'Get open prediction and perpetual positions. Pagination applies only to predictions; open perpetual positions are returned in full.',
       inputSchema: {
         type: 'object',
         properties: {
           marketId: {
             type: 'string',
-            description: 'Filter by specific market ID',
+            description:
+              'Filter by prediction market ID; omits perpetual positions',
           },
           limit: {
             type: 'number',
-            description: 'Limit number of results',
+            description: 'Limit prediction results only (default: all)',
           },
           offset: {
             type: 'number',
-            description: 'Pagination offset',
+            description: 'Prediction pagination offset only',
           },
         },
       },

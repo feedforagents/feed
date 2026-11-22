@@ -26,12 +26,14 @@ import {
   getDbInstance,
   inArray,
   isNull,
-  lt,
+  like,
   lte,
   markets,
   not,
   type Post,
+  type PostFeedVisibilityOptions,
   positions,
+  postCursorConditions,
   posts,
   reactions,
   tags,
@@ -39,7 +41,7 @@ import {
   userActorFollows,
   users,
 } from '@feed/db';
-import { StaticDataRegistry } from '@feed/engine';
+import { StaticDataRegistry, WalletService } from '@feed/engine';
 import { logger, resolveUserIdentifierKind } from '@feed/shared';
 import {
   CACHE_KEYS,
@@ -49,6 +51,35 @@ import {
   invalidateCache,
   invalidateCachePattern,
 } from './cache-service';
+
+/** Keep cursor text and viewer policy in separate, unambiguous key fields. */
+function postFeedCacheKey(
+  limit: number,
+  cursorOrOffset: string | number | undefined,
+  visibility: PostFeedVisibilityOptions | undefined,
+  authorId?: string
+): string {
+  const isCursor = typeof cursorOrOffset === 'string';
+  // Keep all policy variants under the same actor invalidation prefix.
+  const prefix = authorId === undefined ? '' : `${authorId}:`;
+  if (!visibility) {
+    return isCursor
+      ? `${prefix}${limit}:cursor:${cursorOrOffset}`
+      : `${prefix}${limit}:offset:${cursorOrOffset || 0}`;
+  }
+  return (
+    prefix +
+    JSON.stringify([
+      'post-visibility-v1',
+      authorId ?? null,
+      limit,
+      isCursor ? 'cursor' : 'offset',
+      cursorOrOffset ?? 0,
+      [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
+      visibility.excludeDeadReposts === true,
+    ])
+  );
+}
 
 /**
  * Cached Database Service Class
@@ -71,16 +102,14 @@ class CachedDatabaseService {
    */
   async getRecentPosts(
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    visibility?: PostFeedVisibilityOptions
   ): Promise<Post[]> {
-    const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${limit}:cursor:${cursorOrOffset}`
-      : `${limit}:offset:${cursorOrOffset || 0}`;
+    const cacheKey = postFeedCacheKey(limit, cursorOrOffset, visibility);
 
     return getCacheOrFetch(
       cacheKey,
-      () => getDbInstance().getRecentPosts(limit, cursorOrOffset),
+      () => getDbInstance().getRecentPosts(limit, cursorOrOffset, visibility),
       {
         namespace: CACHE_KEYS.POSTS_LIST,
         ttl: DEFAULT_TTLS.POSTS_LIST,
@@ -94,16 +123,25 @@ class CachedDatabaseService {
   async getPostsByActor(
     authorId: string,
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    visibility?: PostFeedVisibilityOptions
   ): Promise<Post[]> {
-    const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${authorId}:${limit}:cursor:${cursorOrOffset}`
-      : `${authorId}:${limit}:offset:${cursorOrOffset || 0}`;
+    const cacheKey = postFeedCacheKey(
+      limit,
+      cursorOrOffset,
+      visibility,
+      authorId
+    );
 
     return getCacheOrFetch(
       cacheKey,
-      () => getDbInstance().getPostsByActor(authorId, limit, cursorOrOffset),
+      () =>
+        getDbInstance().getPostsByActor(
+          authorId,
+          limit,
+          cursorOrOffset,
+          visibility
+        ),
       {
         namespace: CACHE_KEYS.POSTS_BY_ACTOR,
         ttl: DEFAULT_TTLS.POSTS_BY_ACTOR,
@@ -119,25 +157,51 @@ class CachedDatabaseService {
     userId: string,
     followedIds: string[],
     limit = 100,
-    cursorOrOffset?: string | number
+    cursorOrOffset?: string | number,
+    excludedAuthorIds?: string[]
   ): Promise<Post[]> {
     const isCursor = typeof cursorOrOffset === 'string';
-    const cacheKey = isCursor
-      ? `${userId}:${limit}:cursor:${cursorOrOffset}`
-      : `${userId}:${limit}:offset:${cursorOrOffset || 0}`;
+    // The viewer's moderation exclusions shape the result, so they are
+    // part of the cache key: a page cut for one exclusion set must
+    // never be served to the same viewer under a different one.
+    const excludedSuffix =
+      excludedAuthorIds && excludedAuthorIds.length > 0
+        ? `:excl:${[...excludedAuthorIds].sort().join(',')}`
+        : '';
+    const cacheKey =
+      (isCursor
+        ? `${userId}:${limit}:cursor:${cursorOrOffset}`
+        : `${userId}:${limit}:offset:${cursorOrOffset || 0}`) + excludedSuffix;
 
     return getCacheOrFetch(
       cacheKey,
       async () => {
-        // First, filter out test users from followedIds
-        const testUsers = await db
-          .select({ id: users.id })
-          .from(users)
-          .where(and(inArray(users.id, followedIds), eq(users.isTest, true)));
+        // Authors the viewer must not see (blocked, muted, or blocking
+        // them) are dropped before the page is cut. Filtering a fetched
+        // page afterwards lets their newest posts spend the limit and
+        // strands the visible posts behind them.
+        const excludedAuthorIdSet = new Set(excludedAuthorIds ?? []);
+        const candidateIds = followedIds.filter(
+          (id) => !excludedAuthorIdSet.has(id)
+        );
+
+        // First, filter out test users from the candidate ids. Test
+        // authors come in two shapes — a users row flagged isTest and
+        // an id starting with 'test-' — and the canonical
+        // getRecentPosts excludes both before paginating.
+        const testUsers =
+          candidateIds.length > 0
+            ? await db
+                .select({ id: users.id })
+                .from(users)
+                .where(
+                  and(inArray(users.id, candidateIds), eq(users.isTest, true))
+                )
+            : [];
 
         // Get test actors from static registry
         const testActorIds = StaticDataRegistry.getAllActors()
-          .filter((a) => a.isTest && followedIds.includes(a.id))
+          .filter((a) => a.isTest && candidateIds.includes(a.id))
           .map((a) => a.id);
 
         const testAuthorIds = new Set([
@@ -145,9 +209,9 @@ class CachedDatabaseService {
           ...testActorIds,
         ]);
 
-        // Remove test users from followedIds
-        const nonTestFollowedIds = followedIds.filter(
-          (id) => !testAuthorIds.has(id)
+        // Remove test users from the candidate ids
+        const nonTestFollowedIds = candidateIds.filter(
+          (id) => !testAuthorIds.has(id) && !id.startsWith('test-')
         );
 
         const cursor = isCursor ? (cursorOrOffset as string) : undefined;
@@ -163,18 +227,21 @@ class CachedDatabaseService {
         ];
 
         if (cursor) {
-          conditions.push(lt(posts.timestamp, new Date(cursor)));
+          conditions.push(...(await postCursorConditions(cursor)));
           conditions.push(lte(posts.timestamp, now));
         } else {
           conditions.push(lte(posts.timestamp, now));
         }
 
-        // Query posts from database (only from non-test users)
+        // Query posts from database (only from non-test users). The id
+        // tiebreaker makes the order total: posts can share a timestamp
+        // (it defaults to the transaction timestamp, and batch creation
+        // stamps one value onto many rows).
         const result = await db
           .select()
           .from(posts)
           .where(and(...conditions))
-          .orderBy(desc(posts.timestamp))
+          .orderBy(desc(posts.timestamp), desc(posts.id))
           .limit(limit)
           .offset(cursor ? 0 : offset);
 
@@ -303,11 +370,22 @@ class CachedDatabaseService {
           reactionsResult,
           postCountResult,
         ] = await Promise.all([
-          // Count followers (users following this user)
+          // Count followers (users following this user). The followers
+          // list hides test and banned accounts, so the count joins the
+          // follower's user row and applies the same membership, or the
+          // header number disagrees with the list on the same screen.
           db
             .select({ count: count() })
             .from(follows)
-            .where(eq(follows.followingId, userId)),
+            .innerJoin(users, eq(follows.followerId, users.id))
+            .where(
+              and(
+                eq(follows.followingId, userId),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            ),
 
           // Count NPC followers (FollowStatus rows the engine writes when
           // an NPC follows this user). The followers list merges these rows
@@ -324,11 +402,20 @@ class CachedDatabaseService {
               )
             ),
 
-          // Count following (users this user follows)
+          // Count following (users this user follows), with the same
+          // hidden-tier membership as the following list.
           db
             .select({ count: count() })
             .from(follows)
-            .where(eq(follows.followerId, userId)),
+            .innerJoin(users, eq(follows.followingId, users.id))
+            .where(
+              and(
+                eq(follows.followerId, userId),
+                eq(users.isTest, false),
+                eq(users.isBanned, false),
+                not(like(users.id, 'test-%'))
+              )
+            ),
 
           // Count actor follows
           db
@@ -336,11 +423,18 @@ class CachedDatabaseService {
             .from(userActorFollows)
             .where(eq(userActorFollows.userId, userId)),
 
-          // Count positions
+          // Count open positions. The profile route documents this
+          // number as the number of open positions, and the profile's
+          // positions list counts open prediction positions as exactly
+          // the 'active' ones — closed and resolved positions belong
+          // to its closed view — so the header applies the same filter
+          // or it keeps counting positions after they end.
           db
             .select({ count: count() })
             .from(positions)
-            .where(eq(positions.userId, userId)),
+            .where(
+              and(eq(positions.userId, userId), eq(positions.status, 'active'))
+            ),
 
           // Count comments
           db
@@ -354,11 +448,21 @@ class CachedDatabaseService {
             .from(reactions)
             .where(eq(reactions.userId, userId)),
 
-          // Count posts
+          // Count posts the profile list can show: not soft-deleted and
+          // already published. getPostsByActor applies the same two
+          // filters and the actor stats route counts actor posts the
+          // same way, so the header number agrees with the list on the
+          // same profile screen and never hints at a scheduled post.
           db
             .select({ count: count() })
             .from(posts)
-            .where(eq(posts.authorId, userId)),
+            .where(
+              and(
+                eq(posts.authorId, userId),
+                isNull(posts.deletedAt),
+                lte(posts.timestamp, new Date())
+              )
+            ),
         ]);
 
         const followers =
@@ -514,6 +618,31 @@ class CachedDatabaseService {
   }
 
   /**
+   * Invalidate only the exact balance-dependent cache keys for a user
+   *
+   * @description Balance-scoped invalidation for the wallet callback.
+   * WalletService awaits this on every debit and credit, so it is three
+   * exact key deletes and no pattern scans: the balance entry the display
+   * path reads, the user entry (whose row carries the balance), and the
+   * owner's profile-stats entry, which the profile screen renders next to
+   * the balance. Following-feed and follows entries are unrelated to a
+   * balance change and are left alone — use invalidateUserCache for flows
+   * that genuinely need the broad invalidation (e.g. identifier changes).
+   */
+  async invalidateUserBalanceCache(userId: string) {
+    logger.info(
+      'Invalidating user balance cache',
+      { userId },
+      'CachedDatabaseService'
+    );
+    await Promise.all([
+      invalidateCache(userId, { namespace: CACHE_KEYS.USER_BALANCE }),
+      invalidateCache(userId, { namespace: CACHE_KEYS.USER }),
+      invalidateCache(userId, { namespace: 'user:profile:stats' }),
+    ]);
+  }
+
+  /**
    * Invalidate cache for user
    */
   async invalidateUserCache(userId: string) {
@@ -652,3 +781,22 @@ class CachedDatabaseService {
 }
 
 export const cachedDb = new CachedDatabaseService();
+
+// Wire the wallet's cache invalidation. WalletService lives in @feed/engine,
+// which cannot import this package (dependency direction is api -> engine),
+// so it invalidates through a callback registered by the cache owner. Every
+// debit/credit (trades, settlement payouts, funding) must drop the cached
+// user/balance entries; without this registration the callback stayed null
+// and the balance display path served the pre-mutation balance until the
+// 30 s TTL expired.
+//
+// The callback is balance-scoped on purpose: it deletes only the exact
+// balance-dependent owner keys. The broad invalidateUserCache also scans
+// `posts:following:<userId>:*` and the global `user:follows:*` namespace,
+// which a wallet mutation has no business evicting — WalletService awaits
+// this callback on every debit and credit, so those scans would run on
+// every trade. Follow/feed invalidation belongs to the follow and post
+// flows, not to the wallet.
+WalletService.setCacheInvalidationCallback((userId) =>
+  cachedDb.invalidateUserBalanceCache(userId)
+);

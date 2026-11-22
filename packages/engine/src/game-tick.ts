@@ -16,6 +16,7 @@ import {
   count,
   db,
   getDbInstance as dbService,
+  dbWrite,
   desc,
   eq,
   games,
@@ -25,12 +26,14 @@ import {
   type JsonValue,
   markets as marketsSchema,
   organizationState,
+  ownsPredictionRecoveryLease,
   perpMarketSnapshots,
   perpPositions,
   pools,
   positions,
   posts,
   postTags,
+  predictionResolutionWork,
   questions as questionsSchema,
   sql,
   tags,
@@ -193,9 +196,11 @@ export interface GameTickResult {
 /** Executes a complete game tick (content, markets, questions, system updates). */
 export async function executeGameTick(
   skipContentGeneration = false,
-  skip = new Set<string>()
+  skip = new Set<string>(),
+  scheduledAt?: Date
 ): Promise<GameTickResult> {
   const fastMode = process.env.FEED_TRUST_CORPUS_FAST_MODE === 'true';
+  const scheduledGeneration = skip.has('scheduled-generation');
   const timestamp = new Date();
   const startedAt = Date.now();
   const budgetMs = Number(process.env.GAME_TICK_BUDGET_MS || 180000); // 3 minutes default
@@ -310,18 +315,15 @@ export async function executeGameTick(
     }
     tracer?.endNode('bootstrap-content', { skipped: fastMode });
 
-    // Initialize LLM client for game tick operations
-    // Priority: Groq > Claude > OpenAI
-    const llmClient = FeedLLMClient.forGameTick();
-    const stats = llmClient.getStats();
-    logger.info(
-      'LLM client initialized for game tick operations',
-      {
-        provider: stats.provider,
-        model: stats.model,
-      },
-      'GameTick'
-    );
+    const llmClient = scheduledGeneration ? null : FeedLLMClient.forGameTick();
+    if (llmClient) {
+      const { provider, model } = llmClient.getStats();
+      logger.info(
+        'LLM client initialized for game tick operations',
+        { provider, model },
+        'GameTick'
+      );
+    }
 
     // Get active questions from database
     tracer?.startNode('questions-load', { fastMode });
@@ -353,7 +355,12 @@ export async function executeGameTick(
       activeCount: activeQuestions.length,
       fastMode,
     });
-    if (activeQuestions.length === 0 && Date.now() < deadline && !fastMode) {
+    if (
+      llmClient &&
+      activeQuestions.length === 0 &&
+      Date.now() < deadline &&
+      !fastMode
+    ) {
       logger.info(
         'First tick detected - generating initial questions',
         {},
@@ -412,7 +419,7 @@ export async function executeGameTick(
       skipContentGeneration,
       fastMode,
     });
-    if (!skipContentGeneration && !fastMode) {
+    if (llmClient && !skipContentGeneration && !fastMode) {
       // Generate world events based on active questions
       // Pass llmClient to enable breaking article generation for high-impact events
       // Shuffle active questions before slicing to rotate which questions get events
@@ -497,7 +504,7 @@ export async function executeGameTick(
     const currentActiveCount =
       currentActiveQuestions.length - result.questionsResolved;
     tracer?.startNode('question-topup', { currentActiveCount, fastMode });
-    if (currentActiveCount < 10 && !fastMode) {
+    if (llmClient && currentActiveCount < 10 && !fastMode) {
       const shouldForceGeneration = currentActiveCount <= 0;
       if (Date.now() < deadline || shouldForceGeneration) {
         if (shouldForceGeneration && Date.now() >= deadline) {
@@ -609,14 +616,9 @@ export async function executeGameTick(
       'GameTick'
     );
 
-    await db
-      .update(games)
-      .set({
-        lastTickAt: timestamp,
-        updatedAt: timestamp,
-        currentDay: currentDay ?? 1,
-      })
-      .where(eq(games.isContinuous, true));
+    if (!scheduledGeneration) {
+      await advanceGameClock(timestamp, currentDay);
+    }
     tracer?.endNode('game-state-update', { currentDay });
 
     tracer?.startNode('widget-caches', { fastMode });
@@ -669,9 +671,9 @@ export async function executeGameTick(
     tracer?.endNode('reputation-sync', { synced: result.reputationSynced });
 
     // ==========================================================================
-    // WORLD FACTS - process RSS + parodies inline if no cron is running
+    // WORLD FACTS - legacy inline RSS owner
     // ==========================================================================
-    if (!fastMode) {
+    if (!fastMode && !scheduledGeneration) {
       try {
         const feedResult = await rssFeedService.fetchAllFeeds();
         if (feedResult.stored > 0) {
@@ -735,7 +737,12 @@ export async function executeGameTick(
       shouldEvolve: shouldEvolveRelationships,
       fastMode,
     });
-    if (shouldEvolveRelationships && Date.now() < deadline && !fastMode) {
+    if (
+      llmClient &&
+      shouldEvolveRelationships &&
+      Date.now() < deadline &&
+      !fastMode
+    ) {
       logger.info('Evolving NPC relationships...', undefined, 'GameTick');
       const relationshipEngine = new RelationshipEvolutionEngine(llmClient);
       const relationshipsUpdated =
@@ -772,7 +779,9 @@ export async function executeGameTick(
     const skipNpcGroupDynamics =
       process.env.FEED_SKIP_NPC_GROUP_DYNAMICS === 'true' ||
       process.env.FEED_TRUST_CORPUS_FAST_MODE === 'true';
-    if (skipNpcGroupDynamics || fastMode) {
+    if (scheduledGeneration) {
+      tracer?.skipNode('group-dynamics', 'scheduled-generation');
+    } else if (skipNpcGroupDynamics || fastMode) {
       logger.info(
         'Skipping NPC group dynamics for this tick',
         {
@@ -1042,6 +1051,10 @@ export async function executeGameTick(
       throw error;
     }
 
+    if (scheduledGeneration) {
+      await advanceGameClock(timestamp, currentDay, scheduledAt);
+    }
+
     // Finalize DAG trace
     tracer?.startNode('token-stats-finalize', {});
 
@@ -1086,6 +1099,21 @@ export async function executeGameTick(
       }
     }
   }
+}
+
+async function advanceGameClock(
+  timestamp: Date,
+  currentDay: number | undefined,
+  scheduledAt = timestamp
+) {
+  await db
+    .update(games)
+    .set({
+      lastTickAt: scheduledAt,
+      updatedAt: timestamp,
+      currentDay: currentDay ?? 1,
+    })
+    .where(eq(games.isContinuous, true));
 }
 
 async function refreshPerpQuoteStates(): Promise<number> {
@@ -1492,27 +1520,46 @@ async function generateNewQuestions(
 }
 
 /**
- * Resolve question payouts
+ * Resolve question payouts. Market recovery publishes its prepared proof in
+ * the same transaction and returns true only when it settles the market.
  */
 export async function resolveQuestionPayouts(
-  questionNumber: number
-): Promise<void> {
-  const [question] = await db
+  questionNumber: number,
+  recovery?: {
+    resolutionDate: Date;
+    outcome: boolean;
+    description: string;
+    confidence: number;
+    proof: typeof posts.$inferInsert;
+    published?: boolean;
+    leaseOwner?: string;
+    marketId?: string;
+  }
+): Promise<boolean> {
+  const read = recovery ? dbWrite : db;
+  const [question] = await read
     .select()
     .from(questionsSchema)
     .where(eq(questionsSchema.questionNumber, questionNumber))
     .limit(1);
 
-  if (!question) return;
+  if (!question) return false;
 
-  // Try to find market by question id first, then by question text
-  let [market] = await db
+  // Recovery uses the market selected by the due-work query.
+  let [market] = await read
     .select()
     .from(marketsSchema)
-    .where(eq(marketsSchema.id, question.id))
+    .where(
+      eq(
+        marketsSchema.id,
+        recovery
+          ? (recovery.marketId ?? question.marketId ?? question.id)
+          : question.id
+      )
+    )
     .limit(1);
 
-  if (!market) {
+  if (!market && !recovery) {
     [market] = await db
       .select()
       .from(marketsSchema)
@@ -1520,7 +1567,7 @@ export async function resolveQuestionPayouts(
       .limit(1);
   }
 
-  if (!market) return;
+  if (!market) return false;
 
   if (market.resolved) {
     logger.info(
@@ -1528,10 +1575,10 @@ export async function resolveQuestionPayouts(
       { marketId: market.id, questionNumber },
       'GameTick'
     );
-    return;
+    return false;
   }
 
-  const winningSide = question.outcome;
+  const winningSide = recovery?.outcome ?? question.outcome;
   const resolutionTimestamp = new Date();
 
   const marketId = market.id;
@@ -1539,10 +1586,97 @@ export async function resolveQuestionPayouts(
   let totalPayout = 0;
   let positionsSettled = 0;
 
-  await withPredictionSettlement(
+  const settled = await withPredictionSettlement(
     marketId,
     { system: 'game_tick_prediction_resolve' },
     async (coreService, tx) => {
+      // The pre-lock check above can go stale while another resolver (the
+      // admin route) holds the settlement lock. Re-read under the lock so
+      // this tick never rewrites the question of a market it did not settle
+      // (#1954 fixed the admin side of the same race).
+      const [current] = await tx
+        .select({
+          resolved: marketsSchema.resolved,
+          endDate: marketsSchema.endDate,
+          question: marketsSchema.question,
+        })
+        .from(marketsSchema)
+        .where(eq(marketsSchema.id, marketId))
+        .limit(1);
+      if (!current || current.resolved) return false;
+
+      let reviewAt = resolutionTimestamp;
+      let reviewedBy = 'system';
+      const proofUrl = recovery ? `/article/${recovery.proof.id}` : undefined;
+      if (recovery) {
+        if (
+          recovery.leaseOwner !== undefined &&
+          !(await ownsPredictionRecoveryLease(tx, recovery.leaseOwner))
+        ) {
+          return false;
+        }
+        const [eligible] = await tx
+          .select({
+            marketId: questionsSchema.marketId,
+            text: questionsSchema.text,
+            status: questionsSchema.status,
+            outcome: questionsSchema.outcome,
+            resolutionDate: questionsSchema.resolutionDate,
+            requiresManualReview: questionsSchema.requiresManualReview,
+            reviewStatus: questionsSchema.resolutionReviewStatus,
+            reviewedAt: questionsSchema.resolutionReviewedAt,
+            reviewedBy: questionsSchema.resolutionReviewedBy,
+            proofUrl: questionsSchema.resolutionProofUrl,
+          })
+          .from(questionsSchema)
+          .where(eq(questionsSchema.id, question.id))
+          .for('update');
+        if (
+          !eligible ||
+          (eligible.marketId !== null
+            ? eligible.marketId !== marketId
+            : marketId !== question.id && eligible.text !== current.question) ||
+          eligible.status !== 'active' ||
+          eligible.outcome !== recovery.outcome ||
+          eligible.resolutionDate.getTime() !==
+            recovery.resolutionDate.getTime() ||
+          eligible.resolutionDate > resolutionTimestamp ||
+          current.endDate > resolutionTimestamp ||
+          (eligible.requiresManualReview &&
+            (eligible.reviewStatus === null ||
+              eligible.reviewStatus === 'pending'))
+        ) {
+          return false;
+        }
+        if (eligible.reviewStatus === 'approved') {
+          reviewAt = eligible.reviewedAt ?? resolutionTimestamp;
+          reviewedBy = eligible.reviewedBy ?? 'system';
+        }
+        if (recovery.published) {
+          if (eligible.proofUrl !== proofUrl) return false;
+          const [published] = await tx
+            .select({ id: posts.id })
+            .from(posts)
+            .where(
+              and(
+                eq(posts.id, recovery.proof.id),
+                eq(posts.type, 'proof'),
+                isNull(posts.deletedAt)
+              )
+            )
+            .for('key share');
+          if (!published) return false;
+        } else {
+          await tx.insert(posts).values({
+            ...recovery.proof,
+            type: 'proof',
+            relatedQuestion: questionNumber,
+            timestamp: resolutionTimestamp,
+            createdAt: resolutionTimestamp,
+          });
+        }
+      }
+
       // Estimate positions settled for logging (coreService updates all positions for the market)
       // Use COUNT(*) instead of SELECT to avoid loading all position IDs into memory
       // Note: count(*) returns bigint in Postgres; we parse as string to avoid overflow
@@ -1556,8 +1690,10 @@ export async function resolveQuestionPayouts(
         marketId,
         winningSide: winningSide ? 'yes' : 'no',
         resolvedAt: resolutionTimestamp,
-        resolutionDescription: question.resolutionDescription ?? undefined,
-        resolutionProofUrl: question.resolutionProofUrl ?? undefined,
+        resolutionDescription:
+          recovery?.description ?? question.resolutionDescription ?? undefined,
+        resolutionProofUrl:
+          proofUrl ?? question.resolutionProofUrl ?? undefined,
       });
 
       await tx
@@ -1565,8 +1701,15 @@ export async function resolveQuestionPayouts(
         .set({
           status: 'resolved',
           resolvedOutcome: winningSide,
-          resolutionReviewedAt: resolutionTimestamp,
-          resolutionReviewedBy: 'system',
+          resolutionReviewedAt: reviewAt,
+          resolutionReviewedBy: reviewedBy,
+          ...(recovery
+            ? {
+                resolutionDescription: recovery.description,
+                resolutionProofUrl: proofUrl,
+                resolutionConfidence: recovery.confidence,
+              }
+            : {}),
           updatedAt: resolutionTimestamp,
         })
         .where(eq(questionsSchema.id, question.id));
@@ -1581,6 +1724,12 @@ export async function resolveQuestionPayouts(
           updatedAt: resolutionTimestamp,
         })
         .where(eq(timeframedMarkets.questionId, question.id));
+      if (recovery) {
+        await tx
+          .delete(predictionResolutionWork)
+          .where(eq(predictionResolutionWork.questionId, question.id));
+      }
+      return true;
     },
     {
       wallet: (tx, afterCommit) => {
@@ -1610,11 +1759,32 @@ export async function resolveQuestionPayouts(
     }
   );
 
+  // The tick lost the race to another resolver: the market, question and
+  // payouts already belong to the winner. Do not rewrite them with this
+  // tick's outcome — including reputation, which is outcome-sensitive.
+  if (!settled) {
+    logger.info(
+      'Market no longer eligible for this payout',
+      { marketId, questionNumber },
+      'GameTick'
+    );
+    return false;
+  }
+
   // Update reputation in database (no longer requires deployer key or on-chain calls)
-  await ReputationService.updateReputationForResolvedMarket({
-    marketId: marketId,
-    outcome: winningSide,
-  });
+  try {
+    await ReputationService.updateReputationForResolvedMarket({
+      marketId: marketId,
+      outcome: winningSide,
+    });
+  } catch (error) {
+    if (!recovery) throw error;
+    logger.warn(
+      'Prediction recovery payout committed without a reputation update',
+      { marketId, questionNumber, error: formatError(error) },
+      'GameTick'
+    );
+  }
 
   logger.info(
     'Resolved prediction market payouts',
@@ -1627,6 +1797,7 @@ export async function resolveQuestionPayouts(
     },
     'GameTick'
   );
+  return true;
 }
 
 /**
@@ -2473,7 +2644,7 @@ export async function simulateMarketVolatility(options?: {
 async function processNarrativeArcs(
   activeQuestions: Array<{ id: string }>,
   dayNumber: number,
-  llmClient: FeedLLMClient,
+  llmClient: FeedLLMClient | null,
   clock: { gameStartedAt: Date | null; now: Date }
 ): Promise<{
   arcsProcessed: number;

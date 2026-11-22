@@ -260,28 +260,24 @@ try {
   assert.equal((await stored(bOld)).deletedAt, null);
   passed('non-owner-and-non-admin-refusal');
 
-  assert.ok((await cachedDb.getRecentPosts(100)).some(({ id }) => id === aMid));
+  assert.ok((await list()).includes(aMid));
   assert.ok((await list(undefined, true)).includes(aMid));
   assert.ok((await list(authorA)).includes(aMid));
   assert.equal((await remove(aMid, authorA)).status, 200);
   assert.ok((await stored(aMid)).deletedAt);
   assert.deepEqual(await list(authorA), [aNew, aOld]);
-  assert.ok(
-    !(await cachedDb.getRecentPosts(100)).some(({ id }) => id === aMid)
-  );
+  assert.ok(!(await list()).includes(aMid));
   assert.ok(!(await list(undefined, true)).includes(aMid));
   passed('author-delete-all-cache-families');
 
   assert.ok((await list(authorB)).includes(bOld));
-  assert.ok((await cachedDb.getRecentPosts(100)).some(({ id }) => id === bOld));
+  assert.ok((await list()).includes(bOld));
   assert.ok((await list(undefined, true)).includes(bOld));
   assert.equal((await hide(bOld, admin)).status, 200);
   assert.ok((await stored(bOld)).deletedAt);
   assert.equal((await auditFor(bOld)).length, 1);
   assert.deepEqual(await list(authorB), [bNew]);
-  assert.ok(
-    !(await cachedDb.getRecentPosts(100)).some(({ id }) => id === bOld)
-  );
+  assert.ok(!(await list()).includes(bOld));
   assert.ok(!(await list(undefined, true)).includes(bOld));
   passed('admin-hide-all-cache-families-and-audit');
 

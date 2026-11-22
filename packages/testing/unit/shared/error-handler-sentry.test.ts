@@ -22,9 +22,10 @@ let ValidationError: new (message: string) => Error;
 let setDefaultErrorCapture: ErrorHandlerModule['setDefaultErrorCapture'];
 let successResponse: ErrorHandlerModule['successResponse'];
 let withErrorHandling: ErrorHandlerModule['withErrorHandling'];
+const withScheduledInferenceBudget = mock(async (run: () => unknown) => run());
 
-function createRequest(): import('next/server').NextRequest {
-  return new Request('http://localhost/api/test', {
+function createRequest(path = '/api/test'): import('next/server').NextRequest {
+  return new Request(`http://localhost${path}`, {
     method: 'POST',
     headers: {
       'x-user-id': 'user-123',
@@ -36,6 +37,7 @@ function createRequest(): import('next/server').NextRequest {
 describe('withErrorHandling + default Sentry capture', () => {
   beforeAll(async () => {
     mock.module('@feed/db', () => ({
+      withScheduledInferenceBudget,
       DatabaseError: class DatabaseError extends Error {
         code?: string;
       },
@@ -112,6 +114,23 @@ describe('withErrorHandling + default Sentry capture', () => {
 
   afterAll(() => {
     mock.restore();
+  });
+
+  it('uses the shared budget for scheduled inference URLs with a trailing slash', async () => {
+    const priorBudget = process.env.NPC_LLM_DAILY_BUDGET_USD;
+    process.env.NPC_LLM_DAILY_BUDGET_USD = '100';
+    try {
+      const handler = withErrorHandling(() => new Response('ok'));
+      await handler(createRequest('/api/cron/npc-tick'));
+      await handler(createRequest('/api/cron/npc-tick/?mode=groups'));
+      expect(withScheduledInferenceBudget).toHaveBeenCalledTimes(2);
+      expect((await handler(createRequest('/api/posts'))).status).toBe(200);
+      expect(withScheduledInferenceBudget).toHaveBeenCalledTimes(2);
+    } finally {
+      if (priorBudget === undefined)
+        delete process.env.NPC_LLM_DAILY_BUDGET_USD;
+      else process.env.NPC_LLM_DAILY_BUDGET_USD = priorBudget;
+    }
   });
 
   it('captures unexpected errors through the global capture callback', async () => {
