@@ -5,6 +5,9 @@
  */
 
 import {
+  ChatMessageContentSchema,
+  CreateCommentSchema,
+  CreatePostSchema,
   isPointsAmount,
   JsonValueSchema,
   LEADERBOARD_SCOPES,
@@ -202,7 +205,7 @@ const GetPostArgsSchema = z.object({
 }) satisfies z.ZodType<GetPostArgs>;
 
 const CreatePostArgsSchema = z.object({
-  content: z.string().min(1).max(5000),
+  content: CreatePostSchema.shape.content,
   mediaUrl: z.string().url().optional(),
 }) satisfies z.ZodType<CreatePostArgs>;
 
@@ -232,7 +235,7 @@ const GetCommentsArgsSchema = z.object({
 
 const CreateCommentArgsSchema = z.object({
   postId: z.string().min(1),
-  content: z.string().min(1).max(2000),
+  content: CreateCommentSchema.shape.content,
 }) satisfies z.ZodType<CreateCommentArgs>;
 
 const DeleteCommentArgsSchema = z.object({
@@ -311,7 +314,7 @@ const GetChatMessagesArgsSchema = z.object({
 
 const SendMessageArgsSchema = z.object({
   chatId: z.string().min(1),
-  content: z.string().min(1).max(5000),
+  content: ChatMessageContentSchema,
 }) satisfies z.ZodType<SendMessageArgs>;
 
 const CreateGroupArgsSchema = z.object({
