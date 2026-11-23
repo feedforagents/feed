@@ -1,296 +1,210 @@
 /**
- * MCP get_comments and A2A social.get_comments against a real database:
- * both must apply the same read-time viewer moderation filter as the web
- * comment list (GET /api/posts/[id]/comments).
- *
- * The web list excludes comments whose author the viewer blocked or muted,
- * or who blocked the viewer — "as the post feeds, favorites feed,
- * notifications and user search do". The MCP and A2A comment reads scoped
- * their queries only to the post and the soft-delete flag, so an agent
- * reading a thread received every comment the website hides, including
- * comments from accounts the viewer had blocked or muted.
+ * Authorized comment pages follow the web's thread visibility before limiting
+ * results. A verified disposable database owns every fixture row.
  */
-
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import {
-  comments,
-  db,
-  inArray,
-  posts,
-  userBlocks,
-  userMutes,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { FeedAgentExecutor } from '../../a2a/src/executors/feed-executor';
-import { executeGetComments } from '../../mcp/src/handlers/tool-handlers';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-let viewerId: string;
-let authorId: string;
-let normalId: string;
-let blockedId: string;
-let mutedId: string;
-let blockerId: string;
-let postId: string;
-let normalCommentId: string;
-let ownCommentId: string;
-let blockedCommentId: string;
-let mutedCommentId: string;
-let blockerCommentId: string;
-let deletedCommentId: string;
+const cases = [
+  'MCP omits accounts outside the viewer moderation policy',
+  'MCP fills the page with the newest visible comments',
+  'MCP retains the visible thread for a viewer with no moderation',
+  'A2A omits accounts outside the viewer moderation policy',
+  'A2A fills the page with the oldest visible comments',
+  'A2A retains the visible thread for a viewer with no moderation',
+  'Anonymous A2A retains every reachable non-deleted comment',
+  'Agent reads omit descendants of a hidden author or deleted parent',
+  'MCP refreshes thread visibility after unblocking and unmuting',
+] as const;
 
-const allUserIds: string[] = [];
-const allCommentIds: string[] = [];
-
-async function mcpComments(userId: string, limit: number) {
-  return executeGetComments(
-    { agentId: 'test-agent', userId },
-    { postId, limit }
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks agent comment visibility in disposable PostgreSQL', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'mcp-a2a-get-comments-viewer-moderation',
+      file: 'packages/testing/integration/mcp-a2a-get-comments-viewer-moderation.integration.test.ts',
+      cases: [...cases],
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  const { comments, db, eq, inArray, posts, userBlocks, userMutes, users } =
+    await import('@feed/db');
+  const { FeedAgentExecutor } = await import(
+    '../../a2a/src/executors/feed-executor'
   );
-}
+  const { executeGetComments } = await import(
+    '../../mcp/src/handlers/tool-handlers'
+  );
 
-async function a2aComments(userId: string, limit: number) {
-  return (await FeedAgentExecutor.executeDirectly(
-    'social.get_comments',
-    { postId, limit },
-    userId
-  )) as unknown as { comments: Array<{ id: string }> };
-}
+  const viewerId = randomUUID();
+  const authorId = randomUUID();
+  const normalId = randomUUID();
+  const blockedId = randomUUID();
+  const mutedId = randomUUID();
+  const blockerId = randomUUID();
+  const postId = randomUUID();
+  const normalCommentId = randomUUID();
+  const ownCommentId = randomUUID();
+  const blockedCommentId = randomUUID();
+  const mutedCommentId = randomUUID();
+  const blockerCommentId = randomUUID();
+  const deletedCommentId = randomUUID();
+  const blockedReplyId = randomUUID();
+  const blockedGrandchildId = randomUUID();
+  const deletedReplyId = randomUUID();
+  const blockIds = [randomUUID(), randomUUID()] as const;
+  const muteId = randomUUID();
 
-beforeAll(async () => {
-  [
-    viewerId,
-    authorId,
-    normalId,
-    blockedId,
-    mutedId,
-    blockerId,
-    postId,
+  const canonicalOrder = [
     normalCommentId,
     ownCommentId,
     blockedCommentId,
     mutedCommentId,
     blockerCommentId,
-    deletedCommentId,
-  ] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-  allUserIds.push(viewerId, authorId, normalId, blockedId, mutedId, blockerId);
-  allCommentIds.push(
-    normalCommentId,
-    ownCommentId,
-    blockedCommentId,
-    mutedCommentId,
-    blockerCommentId,
-    deletedCommentId
-  );
+    blockedReplyId,
+    blockedGrandchildId,
+  ];
+  const noModerationNewest = [...canonicalOrder].reverse();
 
-  const now = new Date();
-  const at = (secondsAgo: number) =>
-    new Date(now.getTime() - secondsAgo * 1000);
-
-  await db.insert(users).values(
-    allUserIds.map((id, i) => ({
-      id,
-      username: `gc-mod-${i}-${id}`,
-      displayName: `GC Fixture ${i}`,
-      updatedAt: now,
-    }))
-  );
-
-  await db.insert(posts).values({
-    id: postId,
-    authorId,
-    content: 'GC moderation fixture post',
-    timestamp: at(3600),
+  const a2aResult = z.object({
+    comments: z.array(z.object({ id: z.string() })),
   });
 
-  // Oldest first: normal, viewer-own, blocked, muted, blocker, deleted.
-  await db.insert(comments).values([
-    {
-      id: normalCommentId,
-      postId,
-      authorId: normalId,
-      content: 'Normal comment that must stay visible',
-      createdAt: at(50),
-      updatedAt: now,
-    },
-    {
-      id: ownCommentId,
-      postId,
-      authorId: viewerId,
-      content: 'Viewer own comment that must stay visible',
-      createdAt: at(40),
-      updatedAt: now,
-    },
-    {
-      id: blockedCommentId,
-      postId,
-      authorId: blockedId,
-      content: 'Blocked actor comment that must stay hidden',
-      createdAt: at(30),
-      updatedAt: now,
-    },
-    {
-      id: mutedCommentId,
-      postId,
-      authorId: mutedId,
-      content: 'Muted actor comment that must stay hidden',
-      createdAt: at(20),
-      updatedAt: now,
-    },
-    {
-      id: blockerCommentId,
-      postId,
-      authorId: blockerId,
-      content: 'Blocking actor comment that must stay hidden',
-      createdAt: at(10),
-      updatedAt: now,
-    },
-    {
-      id: deletedCommentId,
-      postId,
-      authorId: normalId,
-      content: 'Soft-deleted comment that must stay hidden',
-      createdAt: at(5),
-      updatedAt: now,
-      deletedAt: now,
-    },
-  ]);
+  async function mcpIds(userId: string, limit = 50) {
+    const result = await executeGetComments(
+      { agentId: 'comment-visibility-test', userId },
+      { postId, limit }
+    );
+    return result.comments.map((comment) => comment.id);
+  }
 
-  // The viewer blocked one author, muted another, and is blocked by a third
-  // — the three sets the web comment list excludes at read time.
-  const [blockRowA, blockRowB, muteRow] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-  await db.insert(userBlocks).values([
-    { id: blockRowA, blockerId: viewerId, blockedId },
-    { id: blockRowB, blockerId, blockedId: viewerId },
-  ]);
-  await db
-    .insert(userMutes)
-    .values([{ id: muteRow, muterId: viewerId, mutedId }]);
-});
+  async function a2aIds(userId: string, limit = 50) {
+    const result = await FeedAgentExecutor.executeDirectly(
+      'social.get_comments',
+      { postId, limit },
+      userId
+    );
+    return a2aResult.parse(result).comments.map((comment) => comment.id);
+  }
 
-afterAll(async () => {
-  await db.delete(comments).where(inArray(comments.id, allCommentIds));
-  await db.delete(posts).where(inArray(posts.id, [postId]));
-  await db.delete(userBlocks).where(inArray(userBlocks.blockerId, allUserIds));
-  await db.delete(userBlocks).where(inArray(userBlocks.blockedId, allUserIds));
-  await db.delete(userMutes).where(inArray(userMutes.muterId, allUserIds));
-  await db.delete(users).where(inArray(users.id, allUserIds));
-});
+  beforeAll(async () => {
+    const now = new Date();
+    const at = (secondsAgo: number) =>
+      new Date(now.getTime() - secondsAgo * 1000);
 
-describe('MCP get_comments viewer moderation', () => {
-  it('hides comments from muted, blocked, and blocking authors', async () => {
-    const result = await mcpComments(viewerId, 50);
-    const ids = result.comments.map((c) => c.id);
+    await db.transaction(async (tx) => {
+      await tx
+        .insert(users)
+        .values(
+          [viewerId, authorId, normalId, blockedId, mutedId, blockerId].map(
+            (id) => ({ id, username: `comment-${id}`, updatedAt: now })
+          )
+        );
+      await tx.insert(posts).values({
+        id: postId,
+        authorId,
+        content: 'Agent comment visibility fixture',
+        timestamp: at(3600),
+      });
+
+      function comment(
+        id: string,
+        authorId: string,
+        secondsAgo: number,
+        parentCommentId: string | null = null,
+        deletedAt: Date | null = null
+      ) {
+        return {
+          id,
+          postId,
+          authorId,
+          parentCommentId,
+          deletedAt,
+          content: `Fixture comment ${id}`,
+          createdAt: at(secondsAgo),
+          updatedAt: now,
+        };
+      }
+
+      await tx
+        .insert(comments)
+        .values([
+          comment(normalCommentId, normalId, 50),
+          comment(ownCommentId, viewerId, 40, normalCommentId),
+          comment(blockedCommentId, blockedId, 30),
+          comment(mutedCommentId, mutedId, 20),
+          comment(blockerCommentId, blockerId, 10),
+          comment(deletedCommentId, normalId, 5, null, now),
+          comment(deletedReplyId, normalId, 4, deletedCommentId),
+          comment(blockedReplyId, normalId, 3, blockedCommentId),
+          comment(blockedGrandchildId, viewerId, 2, blockedReplyId),
+        ]);
+      await tx.insert(userBlocks).values([
+        { id: blockIds[0], blockerId: viewerId, blockedId },
+        { id: blockIds[1], blockerId, blockedId: viewerId },
+      ]);
+      await tx
+        .insert(userMutes)
+        .values({ id: muteId, muterId: viewerId, mutedId });
+    });
+  });
+
+  test(cases[0], async () => {
+    const ids = await mcpIds(viewerId);
     expect(ids).toContain(normalCommentId);
     expect(ids).toContain(ownCommentId);
-    expect(ids).not.toContain(blockedCommentId);
-    expect(ids).not.toContain(mutedCommentId);
-    expect(ids).not.toContain(blockerCommentId);
-    expect(ids).not.toContain(deletedCommentId);
-    expect(JSON.stringify(result.comments)).not.toContain('must stay hidden');
+    for (const id of [blockedCommentId, mutedCommentId, blockerCommentId]) {
+      expect(ids).not.toContain(id);
+    }
   });
 
-  it('applies moderation before the limit so hidden rows do not consume slots', async () => {
-    // Newest-first: the two newest rows are the blocker and muted comments.
-    const result = await mcpComments(viewerId, 2);
-    expect(result.comments.map((c) => c.id)).toEqual([
-      ownCommentId,
-      normalCommentId,
-    ]);
+  test(cases[1], async () => {
+    expect(await mcpIds(viewerId, 2)).toEqual([ownCommentId, normalCommentId]);
   });
 
-  it('shows every non-deleted comment to a viewer with no moderation relationships', async () => {
-    const result = await mcpComments(authorId, 50);
-    expect(result.comments.map((c) => c.id).sort()).toEqual(
-      [
-        normalCommentId,
-        ownCommentId,
-        blockedCommentId,
-        mutedCommentId,
-        blockerCommentId,
-      ].sort()
-    );
+  test(cases[2], async () => {
+    expect(await mcpIds(authorId)).toEqual(noModerationNewest);
   });
-});
 
-describe('A2A social.get_comments viewer moderation', () => {
-  it('hides comments from muted, blocked, and blocking authors', async () => {
-    const result = await a2aComments(viewerId, 50);
-    const ids = result.comments.map((c) => c.id);
+  test(cases[3], async () => {
+    const ids = await a2aIds(viewerId);
     expect(ids).toContain(normalCommentId);
     expect(ids).toContain(ownCommentId);
-    expect(ids).not.toContain(blockedCommentId);
-    expect(ids).not.toContain(mutedCommentId);
-    expect(ids).not.toContain(blockerCommentId);
-    expect(ids).not.toContain(deletedCommentId);
-    expect(JSON.stringify(result.comments)).not.toContain('must stay hidden');
+    for (const id of [blockedCommentId, mutedCommentId, blockerCommentId]) {
+      expect(ids).not.toContain(id);
+    }
   });
 
-  it('applies moderation before the limit so hidden rows do not consume slots', async () => {
-    // Oldest-first: with a limit of 3 the unfiltered page would include the
-    // blocked comment; the filtered page holds only the two visible rows.
-    const result = await a2aComments(viewerId, 3);
-    expect(result.comments.map((c) => c.id)).toEqual([
-      normalCommentId,
-      ownCommentId,
-    ]);
+  test(cases[4], async () => {
+    expect(await a2aIds(viewerId, 3)).toEqual([normalCommentId, ownCommentId]);
   });
 
-  it('shows every non-deleted comment to a viewer with no moderation relationships', async () => {
-    const result = await a2aComments(authorId, 50);
-    expect(result.comments.map((c) => c.id).sort()).toEqual(
-      [
-        normalCommentId,
-        ownCommentId,
-        blockedCommentId,
-        mutedCommentId,
-        blockerCommentId,
-      ].sort()
-    );
+  test(cases[5], async () => {
+    expect(await a2aIds(authorId)).toEqual(canonicalOrder);
   });
 
-  it('leaves anonymous reads unfiltered, matching the web comment list', async () => {
-    const result = await a2aComments('', 50);
-    expect(result.comments.map((c) => c.id).sort()).toEqual(
-      [
-        normalCommentId,
-        ownCommentId,
-        blockedCommentId,
-        mutedCommentId,
-        blockerCommentId,
-      ].sort()
-    );
+  test(cases[6], async () => {
+    expect(await a2aIds('')).toEqual(canonicalOrder);
   });
-});
 
-describe('get_comments moderation is read-time', () => {
-  it('refreshes moderation immediately after unblocking and unmuting', async () => {
-    await db
-      .delete(userBlocks)
-      .where(inArray(userBlocks.blockerId, allUserIds));
-    await db
-      .delete(userBlocks)
-      .where(inArray(userBlocks.blockedId, allUserIds));
-    await db.delete(userMutes).where(inArray(userMutes.muterId, allUserIds));
-    const result = await mcpComments(viewerId, 50);
-    expect(result.comments).toHaveLength(5);
+  test(cases[7], async () => {
+    for (const ids of await Promise.all([mcpIds(viewerId), a2aIds(viewerId)])) {
+      for (const id of [blockedReplyId, blockedGrandchildId, deletedReplyId]) {
+        expect(ids).not.toContain(id);
+      }
+    }
   });
-});
+
+  test(cases[8], async () => {
+    await db.transaction(async (tx) => {
+      await tx.delete(userBlocks).where(inArray(userBlocks.id, [...blockIds]));
+      await tx.delete(userMutes).where(eq(userMutes.id, muteId));
+    });
+    expect(await mcpIds(viewerId)).toEqual(noModerationNewest);
+  });
+}

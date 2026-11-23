@@ -46,10 +46,13 @@ import {
   sql,
   users,
 } from '@feed/db';
+import { npcTrades } from '@feed/db/schema';
 import {
+  createNpcPerpSettlement,
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
   createPerpSettlement,
+  createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
   type GeneratedTag,
@@ -66,6 +69,7 @@ import { floorPoints, isPureRepost } from '@feed/shared';
 import { agentPnLService } from '../services/AgentPnLService';
 import { logger } from '../shared/logger';
 import { generateSnowflakeId } from '../shared/snowflake';
+import type { NpcMarketClue } from './npc-market-clue';
 import { topicDiversityService } from './TopicDiversityService';
 import { resolvePerpTicker } from './utils/resolvePerpTicker';
 
@@ -268,11 +272,14 @@ export interface DirectTradeResult {
 }
 
 export interface DirectPostParams {
+  marketClue?: NpcMarketClue;
   agentUserId: string;
   content: string;
 }
 
 export interface DirectPostResult {
+  marketClueStatus?: 'published' | 'duplicate' | 'stale';
+  rejection?: 'post-diversity';
   success: boolean;
   postId?: string;
   error?: string;
@@ -325,6 +332,7 @@ export interface DirectRepostResult {
   success: boolean;
   repostId?: string;
   quotePostId?: string;
+  alreadyReposted?: boolean;
   error?: string;
 }
 
@@ -615,6 +623,66 @@ function predictionSettlementOptions(
   };
 }
 
+/**
+ * Mirror an executed NPC prediction trade into NPCTrade, the record the
+ * market detail screen reads: its tradeCount and its trades feed union
+ * BalanceTransaction rows with NPCTrade rows, and NPC trades pay from the
+ * actorState wallet, so they never produce a BalanceTransaction row.
+ * TradeExecutionService writes this mirror for the NPC trades it executes;
+ * without the same mirror here, an autonomous-loop trade moves the price
+ * and opens or closes a real position while the market screen counts and
+ * lists no trade at all. A failed mirror must not fail the committed
+ * trade, so errors are logged, not thrown.
+ */
+async function recordNpcPredictionTrade(params: {
+  npcActorId: string;
+  marketId: string;
+  action: string;
+  side: 'YES' | 'NO';
+  amount: number;
+  price: number;
+  reason?: string;
+}): Promise<void> {
+  try {
+    await db.insert(npcTrades).values({
+      id: await generateSnowflakeId(),
+      npcActorId: params.npcActorId,
+      poolId: null,
+      marketType: 'prediction',
+      marketId: params.marketId,
+      action: params.action,
+      side: params.side,
+      amount: params.amount,
+      price: params.price,
+      sentiment: null,
+      reason: params.reason ?? null,
+    });
+  } catch (error) {
+    logger.error(
+      '[DIRECT_TRADE] Failed to mirror NPC prediction trade into NPCTrade',
+      {
+        agentUserId: params.npcActorId,
+        marketId: params.marketId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
+    return;
+  }
+  // Settlement invalidates before this best-effort mirror exists. Clear any
+  // feed repopulated in that interval, as TradeExecutionService does.
+  await invalidateAfterPredictionTrade(params.marketId).catch((error) => {
+    logger.warn(
+      'NPC prediction mirror cache invalidation failed',
+      {
+        marketId: params.marketId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
+  });
+}
+
 async function executePredictionTrade(params: {
   agentUserId: string;
   marketId: string;
@@ -647,17 +715,36 @@ async function executePredictionTrade(params: {
   );
 
   // Record in AgentTrade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'prediction',
-    marketId,
-    action: 'open',
-    side: sideLabel,
-    amount,
-    price: result.avgPrice,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'prediction',
+      marketId,
+      action: 'open',
+      side: sideLabel,
+      amount,
+      price: result.avgPrice,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
+
+  if (isNpc) {
+    await recordNpcPredictionTrade({
+      npcActorId: agentUserId,
+      marketId,
+      action: side,
+      side: isBuyYes ? 'YES' : 'NO',
+      amount,
+      price: result.avgPrice,
+      reason: reasoning,
+    });
+  }
 
   const sharesRounded = Math.round(result.shares * 100) / 100;
 
@@ -753,18 +840,37 @@ async function executePredictionSell(params: {
   );
 
   // Record in AgentTrade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'prediction',
-    marketId,
-    action: 'close',
-    side: sideLabel,
-    amount: sellResult.netProceeds ?? 0,
-    price: sellResult.avgPrice,
-    pnl: sellResult.pnl,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'prediction',
+      marketId,
+      action: 'close',
+      side: sideLabel,
+      amount: sellResult.netProceeds ?? 0,
+      price: sellResult.avgPrice,
+      pnl: sellResult.pnl,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
+
+  if (isNpc) {
+    await recordNpcPredictionTrade({
+      npcActorId: agentUserId,
+      marketId,
+      action: side,
+      side: isSellYes ? 'YES' : 'NO',
+      amount: sellResult.netProceeds ?? 0,
+      price: sellResult.avgPrice ?? 0,
+      reason: reasoning,
+    });
+  }
 
   logger.info(
     `[DirectExecutor] Prediction sell executed: ${isSellYes ? 'YES' : 'NO'} on market ${marketId}`,
@@ -801,22 +907,13 @@ async function executePerpTrade(params: {
 
   const perpSide = side === 'open_long' ? 'long' : 'short';
 
-  // Get org for price (search through all orgs by ticker)
-  const allOrgs = StaticDataRegistry.getAllOrganizations();
-  const org = allOrgs.find((o) => o.ticker === ticker);
-  const currentPrice = org?.initialPrice ?? 100;
-
   const walletAdapter = createPerpWalletAdapter(isNpc);
 
   const service = new PerpMarketService({
-    settlement: createPerpSettlement({
-      system: isNpc ? 'npc_perp_trade' : undefined,
-      wallet: isNpc
-        ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-        : undefined,
-    }),
+    settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: walletAdapter,
+    cache: createPerpTradesCachePort(),
     fees: {
       tradingFeeRate: 0.001,
       platformShare: 0.5,
@@ -826,28 +923,92 @@ async function executePerpTrade(params: {
     priceImpact: createPerpPriceImpactPort(),
   });
 
-  await service.openPosition({
+  const openResult = await service.openPosition({
     userId: agentUserId,
     ticker,
     side: perpSide,
     size: amount,
     leverage: 1,
   });
-  // Record trade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'perp',
-    ticker,
-    action: 'open',
-    side: perpSide,
-    amount,
-    price: currentPrice,
-    reasoning,
-  });
+
+  // Record what the service actually did. openPosition opens a fresh
+  // position, adds to one, reduces or closes an opposite one, or flips it;
+  // each leg is recorded at the price it executed at. The result carries
+  // those prices; never substitute a quote or the position's average entry.
+  const rebalanceType = openResult.rebalanceType;
+  const closedSide: 'long' | 'short' = perpSide === 'long' ? 'short' : 'long';
+  const recordClosedLeg = async (closedSize: number) => {
+    if (openResult.exitPrice == null || openResult.realizedPnL == null) {
+      throw new Error(
+        `[DirectExecutor] openPosition (${rebalanceType}) did not return the closed leg: exitPrice=${openResult.exitPrice}, realizedPnL=${openResult.realizedPnL}`
+      );
+    }
+    await agentPnLService
+      .recordTrade({
+        agentId: agentUserId,
+        userId: agentManagedBy,
+        marketType: 'perp',
+        ticker,
+        action: 'close',
+        side: closedSide,
+        amount: closedSize,
+        price: openResult.exitPrice,
+        pnl: openResult.realizedPnL,
+        reasoning,
+      })
+      .catch((error: Error) => {
+        logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+          agentUserId,
+          error: error.message,
+        });
+      });
+  };
+  const recordOpenedLeg = async (openedSize: number) => {
+    if (openResult.fillPrice == null) {
+      throw new Error(
+        `[DirectExecutor] openPosition (${rebalanceType ?? 'open'}) did not return a fill price`
+      );
+    }
+    await agentPnLService
+      .recordTrade({
+        agentId: agentUserId,
+        userId: agentManagedBy,
+        marketType: 'perp',
+        ticker,
+        action: 'open',
+        side: perpSide,
+        amount: openedSize,
+        price: openResult.fillPrice,
+        reasoning,
+      })
+      .catch((error: Error) => {
+        logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+          agentUserId,
+          error: error.message,
+        });
+      });
+  };
+
+  if (rebalanceType === 'reduce' || rebalanceType === 'close') {
+    // Opposite-side trade not larger than the position: only a close leg,
+    // for the size that was closed.
+    await recordClosedLeg(openResult.size);
+  } else if (rebalanceType === 'flip') {
+    // The previous position closed in full, then the remainder opened.
+    if (openResult.previousSize == null) {
+      throw new Error(
+        '[DirectExecutor] openPosition (flip) did not return previousSize'
+      );
+    }
+    await recordClosedLeg(openResult.previousSize);
+    await recordOpenedLeg(openResult.size);
+  } else {
+    // Fresh open or add: the requested size opened at its own fill.
+    await recordOpenedLeg(amount);
+  }
 
   logger.info(
-    `[DirectExecutor] Perp trade executed: ${perpSide} $${amount} on ${ticker}`,
+    `[DirectExecutor] Perp trade executed: ${perpSide} $${amount} on ${ticker} (${rebalanceType ?? 'open'})`,
     undefined,
     'DirectExecutors'
   );
@@ -895,14 +1056,10 @@ async function executeClosePerpPosition(params: {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
     const service = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: isNpc ? 'npc_perp_trade' : undefined,
-        wallet: isNpc
-          ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-          : undefined,
-      }),
+      settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: 0.001,
         platformShare: 0.5,
@@ -941,18 +1098,25 @@ async function executeClosePerpPosition(params: {
   const { realizedPnL, size, exitPrice } = closeResult;
 
   // Record trade
-  await agentPnLService.recordTrade({
-    agentId: agentUserId,
-    userId: agentManagedBy,
-    marketType: 'perp',
-    ticker,
-    action: 'close',
-    side: existingPosition.side as 'long' | 'short',
-    amount: size,
-    price: exitPrice,
-    pnl: realizedPnL,
-    reasoning,
-  });
+  await agentPnLService
+    .recordTrade({
+      agentId: agentUserId,
+      userId: agentManagedBy,
+      marketType: 'perp',
+      ticker,
+      action: 'close',
+      side: existingPosition.side as 'long' | 'short',
+      amount: size,
+      price: exitPrice,
+      pnl: realizedPnL,
+      reasoning,
+    })
+    .catch((error: Error) => {
+      logger.error('[DIRECT_TRADE] Failed to record trade analytics', {
+        agentUserId,
+        error: error.message,
+      });
+    });
 
   logger.info(
     `[DirectExecutor] Perp position closed: ${existingPosition.side} $${size} on ${ticker} (P&L: ${realizedPnL >= 0 ? '+' : ''}$${realizedPnL.toFixed(2)})`,
@@ -978,7 +1142,7 @@ async function executeClosePerpPosition(params: {
 export async function executeDirectPost(
   params: DirectPostParams
 ): Promise<DirectPostResult> {
-  const { agentUserId, content } = params;
+  const { agentUserId, content, marketClue } = params;
 
   if (!content || content.trim().length < 5) {
     return { success: false, error: 'Content too short' };
@@ -1005,6 +1169,7 @@ export async function executeDirectPost(
 
     return {
       success: false,
+      rejection: 'post-diversity',
       error: `Content rejected: ${diversityIssues[0]}`,
     };
   }
@@ -1050,6 +1215,7 @@ export async function executeDirectPost(
           );
           return {
             success: false,
+            rejection: 'post-diversity',
             error: 'Content too similar to a recent post by another NPC',
           };
         }
@@ -1072,21 +1238,52 @@ export async function executeDirectPost(
   const postId = await generateSnowflakeId();
   const now = new Date();
 
-  await db.insert(posts).values({
+  const post = {
     id: postId,
     content: cleanContent,
     authorId: agentUserId,
     timestamp: now,
     createdAt: now,
-  });
+  };
+  if (marketClue) {
+    const { publishNpcMarketClue } = await import('./npc-market-clue');
+    const marketClueStatus = await publishNpcMarketClue(marketClue, post);
+    if (marketClueStatus !== 'published') {
+      return { success: true, marketClueStatus };
+    }
+  } else {
+    await db.insert(posts).values(post);
+  }
 
   // Record topic coverage for future diversity checks
-  topicDiversityService.recordTopicCoverage(agentUserId, cleanContent);
+  topicDiversityService.recordTopicCoverage(
+    agentUserId,
+    cleanContent,
+    undefined,
+    post.timestamp
+  );
 
-  // Generate and store tags
-  const tags: GeneratedTag[] = await generateTagsFromPost(cleanContent);
-  if (tags.length > 0) {
-    await storeTagsForPost(postId, tags);
+  // Generate and store tags. Tagging is best-effort: the post is already
+  // committed, so a tag-generation or tag-storage failure must not report
+  // the post as failed (which would invite a duplicate retry on the next
+  // tick). Matches plugin-agent-core create-post, which fire-and-forgets
+  // tagging for the same reason.
+  let tags: GeneratedTag[] = [];
+  try {
+    tags = await generateTagsFromPost(cleanContent);
+    if (tags.length > 0) {
+      await storeTagsForPost(postId, tags);
+    }
+  } catch (error) {
+    logger.warn(
+      `[DirectExecutor] Failed to tag post ${postId}`,
+      {
+        agentUserId,
+        postId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
   }
 
   logger.info(
@@ -1117,6 +1314,7 @@ export async function executeDirectPost(
   return {
     success: true,
     postId,
+    ...(marketClue && { marketClueStatus: 'published' }),
   };
 }
 
@@ -1920,14 +2118,22 @@ export async function executeDirectRepost(
       success: true,
       repostId: shareId,
       quotePostId,
+      alreadyReposted: false,
     };
   } catch (error) {
     // Handle unique constraint violation (concurrent repost)
     // Check error code for PostgreSQL (23505) or Prisma (P2002)
     const errorCode = (error as { code?: string }).code;
+    // Drizzle wraps the PostgreSQL error in its query error's cause.
+    const cause = error instanceof Error ? error.cause : undefined;
+    const causeCode =
+      typeof cause === 'object' && cause !== null && 'code' in cause
+        ? cause.code
+        : undefined;
     const isUniqueConstraint =
       errorCode === '23505' ||
       errorCode === 'P2002' ||
+      causeCode === '23505' ||
       (error as Error).message?.includes('unique constraint');
 
     if (isUniqueConstraint) {
@@ -1945,7 +2151,13 @@ export async function executeDirectRepost(
         );
       }
 
-      return { success: true, repostId: share.id };
+      logger.info(
+        `[DirectExecutor] Post already reposted: ${targetPostId} -> existing share ${share.id}`,
+        { agentUserId },
+        'DirectExecutors'
+      );
+
+      return { success: true, repostId: share.id, alreadyReposted: true };
     }
     throw error;
   }

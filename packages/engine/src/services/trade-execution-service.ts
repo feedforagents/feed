@@ -31,6 +31,7 @@ import {
   actorState,
   and,
   db,
+  dbWrite,
   eq,
   isNull,
   type JsonValue,
@@ -56,7 +57,7 @@ import { FeeService } from './fee-service';
 import { NpcTradeRateLimiter } from './npc-trade-rate-limiter';
 import { createNpcWalletAdapter } from './npc-wallet-adapter';
 import { createPerpPriceImpactPort } from './perp-price-impact-port';
-import { createPerpSettlement } from './perp-settlement';
+import { createNpcPerpSettlement } from './perp-settlement';
 import {
   type PredictionSettlementOptions,
   withPredictionSettlement,
@@ -66,7 +67,10 @@ import {
   StaticDataRegistry,
   type StaticOrganization,
 } from './static-data-registry';
-import { invalidateAfterPredictionTrade } from './trade-cache-invalidation';
+import {
+  createPerpTradesCachePort,
+  invalidateAfterPredictionTrade,
+} from './trade-cache-invalidation';
 
 type PredictionTradeBroadcast = {
   type: 'prediction_trade';
@@ -95,6 +99,8 @@ type PredictionResolutionBroadcast = {
   version?: string;
   marketId: string;
   winningSide: 'yes' | 'no';
+  yesPrice: number;
+  noPrice: number;
   yesShares: number;
   noShares: number;
   liquidity?: number;
@@ -513,12 +519,10 @@ export class TradeExecutionService {
     // Use PerpMarketService for consistency with user trades
     // This ensures NPC positions get funding and liquidation applied
     const perpService = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: 'npc_perp_trade',
-        wallet: (userId, tx) => createNpcWalletAdapter(userId, tx),
-      }),
+      settlement: createNpcPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -899,14 +903,20 @@ export class TradeExecutionService {
     const positionId = decision.positionId;
 
     // Try perpPositions first (new system for perp trades)
-    const [perpPosition] = await db
+    const [perpPosition] = await dbWrite
       .select()
       .from(perpPositions)
       .where(eq(perpPositions.id, positionId))
       .limit(1);
 
-    if (perpPosition && !perpPosition.closedAt) {
-      // Use PerpMarketService to close perp position
+    if (perpPosition) {
+      if (perpPosition.userId !== actorId) {
+        throw new Error('Not your position');
+      }
+      // A closed canonical row cannot fall back to a stale legacy mirror.
+      if (perpPosition.closedAt) {
+        throw new Error(`Position already closed: ${positionId}`);
+      }
       return this.closePerpPositionViaService(decision, actorId, perpPosition);
     }
 
@@ -985,7 +995,15 @@ export class TradeExecutionService {
 
     // Calculate trading fee (0.1% on position size)
     const feeCalc = FeeService.calculateFee(position.size);
-    const grossReturn = position.size + realizedPnL;
+    // Legacy perp rows store the notional size, but the capital at risk is
+    // the margin (size / leverage): returning the full notional would mint
+    // size * (1 - 1/leverage) of balance that was never debited. At 1x (or
+    // unset) leverage the margin equals the size, so unleveraged closes are
+    // unchanged.
+    const effectiveLeverage =
+      position.leverage && position.leverage > 0 ? position.leverage : 1;
+    const margin = position.size / effectiveLeverage;
+    const grossReturn = margin + realizedPnL;
     const netReturn = Math.max(0, grossReturn - feeCalc.feeAmount);
 
     // Execute in transaction
@@ -1028,6 +1046,15 @@ export class TradeExecutionService {
       if (credited.length === 0) {
         throw new Error(`Actor not found: ${actorId}`);
       }
+
+      await FeeService.recordTradingFee(
+        actorId,
+        'perp_close',
+        Math.min(feeCalc.feeAmount, floorPoints(Math.max(0, grossReturn))),
+        positionId,
+        position.ticker ?? undefined,
+        tx
+      );
 
       // Record trade (poolId is optional now)
       await tx.insert(npcTrades).values({
@@ -1082,12 +1109,10 @@ export class TradeExecutionService {
     }
   ): Promise<ExecutedTrade> {
     const perpService = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: 'npc_perp_trade',
-        wallet: (userId, tx) => createNpcWalletAdapter(userId, tx),
-      }),
+      settlement: createNpcPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,

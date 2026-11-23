@@ -12,6 +12,18 @@ export interface PredictionMarketTerminalState extends PredictionMarket {
   noProbability?: number;
 }
 
+/**
+ * The "Scenario N" label for a prediction market, or null when the market
+ * has no recorded scenario — callers render nothing rather than a label
+ * with an empty or undefined value.
+ */
+export function predictionScenarioLabel(
+  market: Pick<PredictionMarket, 'scenario'> | null | undefined
+): string | null {
+  if (!market || market.scenario == null) return null;
+  return `Scenario ${market.scenario}`;
+}
+
 export interface PredictionMarketLiveState {
   marketId: string;
   yesShares: number;

@@ -140,6 +140,7 @@ import {
   db,
   eq,
   inArray,
+  isNull,
   posts,
   reactions,
   shares,
@@ -150,6 +151,7 @@ import { IdParamSchema, logger, UpdateCommentSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 // Max reply count to return (for efficiency)
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 import { MAX_REPLY_COUNT } from '@/lib/constants';
 
 // Max parent chain depth to prevent infinite loops
@@ -159,7 +161,10 @@ const MAX_PARENT_DEPTH = 50;
  * Get full parent chain for a comment (oldest first)
  * Returns array of parent comments from root to immediate parent
  */
-async function getParentChain(commentId: string | null): Promise<
+async function getParentChain(
+  commentId: string | null,
+  excludedAuthorIds: ReadonlySet<string>
+): Promise<
   {
     id: string;
     content: string;
@@ -187,6 +192,7 @@ async function getParentChain(commentId: string | null): Promise<
         authorId: comments.authorId,
         createdAt: comments.createdAt,
         parentCommentId: comments.parentCommentId,
+        deletedAt: comments.deletedAt,
       })
       .from(comments)
       .where(eq(comments.id, currentParentId))
@@ -194,7 +200,13 @@ async function getParentChain(commentId: string | null): Promise<
 
     if (!parent) break;
 
-    parents.unshift(parent); // Add to beginning (oldest first)
+    // Soft-deleted (moderated) parents are hidden: skip their content but
+    // keep walking so a visible grandparent can still be shown. Parents by
+    // authors the viewer must not see (blocked, muted, or blocking the
+    // viewer) are skipped the same way.
+    if (!parent.deletedAt && !excludedAuthorIds.has(parent.authorId)) {
+      parents.unshift(parent); // Add to beginning (oldest first)
+    }
     currentParentId = parent.parentCommentId;
     depth++;
   }
@@ -208,7 +220,8 @@ async function getParentChain(commentId: string | null): Promise<
  * Caps at MAX_REPLY_COUNT for performance
  */
 async function countAllRepliesBatch(
-  commentIds: string[]
+  commentIds: string[],
+  excludedAuthorIds: ReadonlySet<string>
 ): Promise<Map<string, number>> {
   const countMap = new Map<string, number>();
 
@@ -220,17 +233,29 @@ async function countAllRepliesBatch(
   // For each comment, do BFS to count all nested replies
   for (const rootId of commentIds) {
     let count = 0;
+    let visitedCount = 0;
     let currentLevel = [rootId];
 
     // BFS through reply tree, but stop at MAX_REPLY_COUNT
-    while (currentLevel.length > 0 && count < MAX_REPLY_COUNT) {
-      // Get all direct replies to current level comments
+    while (currentLevel.length > 0 && visitedCount < MAX_REPLY_COUNT) {
+      // Walk through hidden parents to count their still-visible descendants.
+      // Keep the existing traversal budget, including hidden rows, so an
+      // all-hidden chain cannot cause unbounded database work. Replies by
+      // authors the viewer must not see are walked through the same way
+      // but never counted.
       const replies = await db
-        .select({ id: comments.id })
+        .select({
+          id: comments.id,
+          deletedAt: comments.deletedAt,
+          authorId: comments.authorId,
+        })
         .from(comments)
         .where(inArray(comments.parentCommentId, currentLevel));
 
-      count += replies.length;
+      visitedCount += replies.length;
+      count += replies.filter(
+        (reply) => !reply.deletedAt && !excludedAuthorIds.has(reply.authorId)
+      ).length;
 
       // Cap at max
       if (count >= MAX_REPLY_COUNT) {
@@ -263,6 +288,16 @@ export const GET = withErrorHandling(
     const user = await optionalAuth(request);
     const canonicalUserId = user ? getCanonicalUserId(user) : undefined;
 
+    // Apply the viewer's moderation policy, as the post feeds, favorites
+    // feed, notifications and user search do: replies and ancestors by
+    // authors the viewer blocked or muted — or who blocked the viewer —
+    // are not returned or counted. Anonymous reads have no moderation set
+    // and stay unfiltered. The permalink target itself stays reachable:
+    // a block is a browsing filter, not a deletion.
+    const excludedAuthorIds: ReadonlySet<string> = canonicalUserId
+      ? await loadViewerExcludedAuthorIds(canonicalUserId)
+      : new Set<string>();
+
     // Find the comment
     const [comment] = await db
       .select()
@@ -270,7 +305,9 @@ export const GET = withErrorHandling(
       .where(eq(comments.id, commentId))
       .limit(1);
 
-    if (!comment) {
+    if (!comment || comment.deletedAt) {
+      // Soft-deleted (moderated) comments must never be returned; treat
+      // them exactly like comments that do not exist.
       throw new NotFoundError('Comment', commentId);
     }
 
@@ -346,7 +383,9 @@ export const GET = withErrorHandling(
           db
             .select({ count: count() })
             .from(comments)
-            .where(eq(comments.postId, post.id)),
+            .where(
+              and(eq(comments.postId, post.id), isNull(comments.deletedAt))
+            ),
           db
             .select({ count: count() })
             .from(shares)
@@ -399,11 +438,20 @@ export const GET = withErrorHandling(
       .limit(1);
 
     // Get direct replies to this comment
-    const directReplies = await db
-      .select()
-      .from(comments)
-      .where(eq(comments.parentCommentId, commentId))
-      .orderBy(asc(comments.createdAt));
+    // (soft-deleted (moderated) replies must never be returned, and
+    // neither are replies by authors the viewer must not see)
+    const directReplies = (
+      await db
+        .select()
+        .from(comments)
+        .where(
+          and(
+            eq(comments.parentCommentId, commentId),
+            isNull(comments.deletedAt)
+          )
+        )
+        .orderBy(asc(comments.createdAt))
+    ).filter((reply) => !excludedAuthorIds.has(reply.authorId));
 
     // Get author IDs for replies
     const replyAuthorIds = [...new Set(directReplies.map((r) => r.authorId))];
@@ -465,7 +513,7 @@ export const GET = withErrorHandling(
 
     // Get full parent chain (oldest to newest, excluding current comment)
     const parentChainRaw = comment.parentCommentId
-      ? await getParentChain(comment.parentCommentId)
+      ? await getParentChain(comment.parentCommentId, excludedAuthorIds)
       : [];
 
     // Get author info for all parents
@@ -498,13 +546,18 @@ export const GET = withErrorHandling(
       };
     });
 
-    // Get immediate parent for "Replying to" indicator
+    // A visible ancestor is not necessarily the immediate parent after moderation.
+    // Do not attribute a reply to its grandparent when its actual parent is hidden.
     const parentComment =
-      parentChain.length > 0 ? parentChain[parentChain.length - 1] : null;
+      parentChain.find((parent) => parent.id === comment.parentCommentId) ??
+      null;
 
     // Get total reply counts for main comment and all direct replies (batched)
     const allIdsToCount = [commentId, ...directReplies.map((r) => r.id)];
-    const replyCountMap = await countAllRepliesBatch(allIdsToCount);
+    const replyCountMap = await countAllRepliesBatch(
+      allIdsToCount,
+      excludedAuthorIds
+    );
 
     // Format main comment
     const formattedComment = {
