@@ -136,7 +136,10 @@ runs:
       shell: bash
       run: |
         inventory=$(mktemp)
-        if find .turbo/cache -printf '%D:%i:%s:%C@ %p\0' > "$inventory"; then
+        if find .turbo/cache -regextype posix-extended \
+          \( -type f -regex '\.turbo/cache/[0-9a-f]{16}-manifest\.json' \) -prune -o \
+          \( -type d -printf '%p %y:%m\0' -o -printf '%p %y:%m:%D:%i:%s:%C@\0' \) |
+          LC_ALL=C sort -z > "$inventory"; then
           echo "path=$inventory" >> "$GITHUB_OUTPUT"
         fi
     - id: gen-seed
