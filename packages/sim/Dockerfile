@@ -36,7 +36,6 @@ COPY packages/crypto-browserify/package.json packages/crypto-browserify/
 COPY packages/db/package.json packages/db/
 COPY packages/engine/package.json packages/engine/
 COPY packages/examples/package.json packages/examples/
-COPY packages/examples/feed-typescript-agent/package.json packages/examples/feed-typescript-agent/
 COPY packages/examples/harness/package.json packages/examples/harness/
 COPY packages/examples/local-a2a-server/package.json packages/examples/local-a2a-server/
 COPY packages/mcp/package.json packages/mcp/

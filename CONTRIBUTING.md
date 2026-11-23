@@ -193,7 +193,9 @@ These variables are not read by the application runtime. They control tests.
 | `RUN_CLOUDFLARE_CONNECTION_TESTS` | Runs live Cloudflare connection checks | Cloudflare integration test |
 | `LINEAR_TEST` | `true` runs the Linear API test | `linear-api` integration test |
 | `FEED_A2A_API_KEY` | Server key for A2A and MCP (`X-Feed-Api-Key`) | Agent client tests against non-local hosts |
-| `FEED_API_URL`, `FEED_API_KEY`, `AGENT0_*` | Example agent settings | `packages/examples/feed-typescript-agent` (see its `.env.example`) |
+| `FEED_API_URL` | Optional Feed server URL | LangGraph end-to-end test |
+| `FEED_API_KEY` | API key supplied to the production harness client | [`packages/examples/harness/README.md`](packages/examples/harness/README.md) |
+| `AGENT0_*` | Optional Agent0 integration settings | `.env.example` and `scripts/validate-env.ts` |
 
 Localhost requests to `/api/a2a` and `/api/mcp` skip the API-key check when
 `NODE_ENV` is not `production`.
