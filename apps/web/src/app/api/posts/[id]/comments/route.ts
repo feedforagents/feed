@@ -95,6 +95,7 @@ import {
   asc,
   comments,
   count,
+  createCommentWithParentCheck,
   db,
   eq,
   hasBlocked,
@@ -479,25 +480,28 @@ export const POST = withErrorHandling(
     const now = new Date();
     const commentId = await generateSnowflakeId();
 
-    const [newComment] = await db
-      .insert(comments)
-      .values({
-        id: commentId,
-        content: content.trim(),
-        postId,
-        authorId: canonicalUserId,
-        parentCommentId: parentCommentId || null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
-
-    if (!newComment) {
+    const result = await createCommentWithParentCheck({
+      id: commentId,
+      content: content.trim(),
+      postId,
+      authorId: canonicalUserId,
+      parentCommentId: parentCommentId || null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (
+      result.status === 'parent-missing' ||
+      result.status === 'parent-deleted'
+    ) {
+      throw new NotFoundError('Parent comment', parentCommentId!);
+    }
+    if (result.status === 'parent-post-mismatch') {
       throw new BusinessLogicError(
-        'Failed to create comment',
-        'COMMENT_CREATION_FAILED'
+        'Parent comment does not belong to this post',
+        'PARENT_COMMENT_MISMATCH'
       );
     }
+    const newComment = result.comment;
 
     // Get user info for response
     const [commentUser] = await db

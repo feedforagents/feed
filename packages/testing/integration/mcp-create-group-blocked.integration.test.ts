@@ -1,159 +1,159 @@
-/**
- * MCP group creation must not direct-add a member with a block relationship
- * to the creator. MCP create_group adds members straight into GroupMember
- * + ChatParticipant with no block check at all. A blocked user ends up in
- * the same room with no invite to decline. (The web group creation route
- * still direct-adds blocked agents; this PR closes the MCP side only.)
- *
- * MCP only: the A2A half of this fix was dropped — A2A is outside the
- * current MVP scope (maintainer decision on #1888).
- *
- * Requires DATABASE_URL pointing at a disposable local database with schema
- * applied (e.g. feed_f6r2).
- */
-
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+/** PRD §§8.1, 12 / MVP Phases 3 and 5: honor blocks on the legacy MCP group writer. */
+import { afterAll, describe, expect, test } from 'bun:test';
 import {
-  chatParticipants,
-  chats,
-  db,
-  eq,
-  groupMembers,
-  groups,
-  inArray,
-  userBlocks,
-  users,
-} from '@feed/db';
-import { executeCreateGroup } from '../../mcp/src/handlers/tool-handlers';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const createdUserIds: string[] = [];
-const createdBlockIds: string[] = [];
-const createdChatIds: string[] = [];
-const createdGroupIds: string[] = [];
+const suite = 'MCP create_group membership moderation';
+const cases = {
+  creatorBlock: 'excludes a member the creator blocked',
+  memberBlock: 'excludes a member who blocked the creator',
+  eligibility:
+    'keeps eligible members and skips duplicates, missing and banned users',
+};
 
-async function createUser(
-  overrides: Partial<typeof users.$inferInsert> = {}
-): Promise<string> {
-  const id = overrides.id ?? crypto.randomUUID();
-  await db.insert(users).values({
-    id,
-    username: `f6_${id.slice(-10)}`,
-    isActor: false,
-    updatedAt: new Date(),
-    ...overrides,
-  });
-  createdUserIds.push(id);
-  return id;
-}
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks MCP group creation in a leased PostgreSQL database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'mcp-create-group-blocked',
+      file: 'packages/testing/integration/mcp-create-group-blocked.integration.test.ts',
+      cases: Object.values(cases).map((name) => `${suite} > ${name}`),
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
 
-async function blockUser(blockerId: string, blockedId: string) {
-  const id = crypto.randomUUID();
-  await db.insert(userBlocks).values({ id, blockerId, blockedId });
-  createdBlockIds.push(id);
-}
+  const { generateApiKey, hashApiKey } = await import('@feed/api');
+  const {
+    chatParticipants,
+    chats,
+    dbWrite,
+    eq,
+    groupMembers,
+    userApiKeys,
+    userBlocks,
+    userMutes,
+    users,
+  } = await import('@feed/db');
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { NextRequest } = await import('next/server');
+  const { POST } = await import('../../../apps/web/src/app/api/mcp/route');
 
-const agentFor = (userId: string) =>
-  ({ agentId: 'agent', userId }) as Parameters<typeof executeCreateGroup>[0];
-
-async function mcpGroupMembers(
-  creatorId: string,
-  memberIds: string[]
-): Promise<{ chatId: string; groupId: string }> {
-  const result = await executeCreateGroup(agentFor(creatorId), {
-    name: 'f6 mcp blocked',
-    memberIds,
-  });
-  createdChatIds.push(result.chatId);
-  const chat = await db.query.chats.findFirst({
-    where: (c, { eq: eqOp }) => eqOp(c.id, result.chatId),
-  });
-  const groupId = chat?.groupId ?? '';
-  if (groupId) createdGroupIds.push(groupId);
-  return { chatId: result.chatId, groupId };
-}
-
-async function participantIds(chatId: string): Promise<string[]> {
-  const rows = await db
-    .select({ userId: chatParticipants.userId })
-    .from(chatParticipants)
-    .where(eq(chatParticipants.chatId, chatId));
-  return rows.map((r) => r.userId).sort();
-}
-
-async function memberIds(groupId: string): Promise<string[]> {
-  const rows = await db
-    .select({ userId: groupMembers.userId })
-    .from(groupMembers)
-    .where(eq(groupMembers.groupId, groupId));
-  return rows.map((r) => r.userId).sort();
-}
-
-beforeAll(async () => {
-  const url = new URL(process.env.DATABASE_URL ?? '');
-  if (
-    !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ||
-    !/^\/feed_f6r2$/.test(url.pathname) ||
-    url.search ||
-    url.hash ||
-    process.env.DATABASE_READ_REPLICA_URL
-  )
-    throw new Error(
-      'Blocked group fixture requires DATABASE_URL=feed_f6r2 on localhost'
+  const [creatorId, blockedId, blockerId, eligibleId, bannedId, missingId] =
+    await Promise.all([
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+    ]);
+  const apiKey = generateApiKey();
+  const keyId = await generateSnowflakeId();
+  await dbWrite.transaction(async (tx) => {
+    await tx.insert(users).values(
+      [creatorId, blockedId, blockerId, eligibleId, bannedId].map((id) => ({
+        id,
+        username: `group-fixture-${id}`,
+        isBanned: id === bannedId,
+        updatedAt: new Date(),
+      }))
     );
-});
-
-describe('MCP create_group with a block relationship', () => {
-  it('does not add a member the creator blocked', async () => {
-    const creator = await createUser();
-    const blocked = await createUser();
-    await blockUser(creator, blocked);
-    const { chatId, groupId } = await mcpGroupMembers(creator, [blocked]);
-    expect(await participantIds(chatId)).toEqual([creator]);
-    expect(await memberIds(groupId)).toEqual([creator]);
+    await tx.insert(userBlocks).values([
+      { id: crypto.randomUUID(), blockerId: creatorId, blockedId },
+      { id: crypto.randomUUID(), blockerId, blockedId: creatorId },
+    ]);
+    await tx.insert(userMutes).values({
+      id: crypto.randomUUID(),
+      muterId: creatorId,
+      mutedId: eligibleId,
+    });
+    await tx.insert(userApiKeys).values({
+      id: keyId,
+      userId: creatorId,
+      keyHash: hashApiKey(apiKey),
+      name: 'Group moderation fixture',
+    });
   });
 
-  it('does not add a member who blocked the creator', async () => {
-    const creator = await createUser();
-    const blocker = await createUser();
-    await blockUser(blocker, creator);
-    const { chatId, groupId } = await mcpGroupMembers(creator, [blocker]);
-    expect(await participantIds(chatId)).toEqual([creator]);
-    expect(await memberIds(groupId)).toEqual([creator]);
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      if (new URL(request.url).pathname !== '/api/mcp') {
+        return new Response(null, { status: 404 });
+      }
+      const headers = new Headers(request.headers);
+      headers.set('host', 'group-moderation.test');
+      return POST(new NextRequest(request, { headers }));
+    },
   });
+  afterAll(() => server.stop(true));
 
-  it('still adds a real member with no block', async () => {
-    const creator = await createUser();
-    const member = await createUser();
-    const { chatId, groupId } = await mcpGroupMembers(creator, [member]);
-    expect(await participantIds(chatId)).toEqual([creator, member].sort());
-    expect(await memberIds(groupId)).toEqual([creator, member].sort());
-  });
+  async function expectMembership(
+    requestId: string,
+    memberIds: string[],
+    expected: string[]
+  ) {
+    const response = await fetch(new URL('/api/mcp', server.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Feed-Api-Key': apiKey },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId,
+        method: 'tools/call',
+        params: {
+          name: 'create_group',
+          arguments: { name: 'Group moderation fixture', memberIds },
+        },
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      error?: { message?: string };
+      result?: { isError: boolean; content: Array<{ text: string }> };
+    };
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBe(false);
+    const result = JSON.parse(body.result?.content[0]?.text ?? '') as {
+      success: boolean;
+      chatId: string;
+    };
+    expect(result.success).toBe(true);
+    const [chat] = await dbWrite
+      .select({ groupId: chats.groupId })
+      .from(chats)
+      .where(eq(chats.id, result.chatId));
+    if (!chat?.groupId) throw new Error('Missing persisted group chat');
 
-  afterAll(async () => {
-    if (createdChatIds.length > 0) {
-      await db
-        .delete(chatParticipants)
-        .where(inArray(chatParticipants.chatId, createdChatIds));
-      await db.delete(chats).where(inArray(chats.id, createdChatIds));
-    }
-    if (createdGroupIds.length > 0) {
-      await db
-        .delete(groupMembers)
-        .where(inArray(groupMembers.groupId, createdGroupIds));
-      await db.delete(groups).where(inArray(groups.id, createdGroupIds));
-    }
-    if (createdBlockIds.length > 0) {
-      await db
-        .delete(userBlocks)
-        .where(inArray(userBlocks.id, createdBlockIds));
-    }
-    if (createdUserIds.length > 0) {
-      await db.delete(users).where(inArray(users.id, createdUserIds));
-    }
-    const leftoverUsers = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(inArray(users.id, createdUserIds));
-    expect(leftoverUsers).toEqual([]);
+    const [participants, members] = await Promise.all([
+      dbWrite
+        .select({ userId: chatParticipants.userId })
+        .from(chatParticipants)
+        .where(eq(chatParticipants.chatId, result.chatId)),
+      dbWrite
+        .select({ userId: groupMembers.userId })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupId, chat.groupId)),
+    ]);
+    expect(participants.map((row) => row.userId).sort()).toEqual(expected);
+    expect(members.map((row) => row.userId).sort()).toEqual(expected);
+  }
+
+  describe(suite, () => {
+    test(cases.creatorBlock, () =>
+      expectMembership('creator-block', [blockedId], [creatorId])
+    );
+    test(cases.memberBlock, () =>
+      expectMembership('member-block', [blockerId], [creatorId])
+    );
+    test(cases.eligibility, () =>
+      expectMembership(
+        'eligible-members',
+        [creatorId, eligibleId, eligibleId, bannedId, missingId],
+        [creatorId, eligibleId].sort()
+      )
+    );
   });
-});
+}

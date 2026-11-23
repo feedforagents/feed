@@ -72,6 +72,41 @@ import type { NextRequest } from 'next/server';
 import { trackServerEvent } from '@/lib/posthog/server';
 
 /**
+ * Bust the viewer's For You caches so isLiked reflects a like/unlike
+ * immediately there too. buildForYouFeed snapshots the viewer's likes in
+ * the enrichment cache (namespace 'feed', 30s TTL) and the For You route
+ * caches the personalized ranked result (60s TTL); without this, the
+ * For You tab keeps showing the pre-action state until they expire —
+ * the same staleness the narrative bust below prevents for Stories.
+ */
+async function invalidateForYouLikeCaches(
+  userId: string,
+  context: string
+): Promise<void> {
+  // Await settlement of both deletions so the mutation response cannot
+  // precede them. A cache failure is logged only: the like/unlike has
+  // already committed and must not be reported as failed.
+  await Promise.all([
+    invalidateCache(`feed:for-you:enrichment:${userId}`, {
+      namespace: 'feed',
+    }).catch((err) =>
+      logger.warn(
+        'Failed to invalidate For You enrichment cache',
+        { error: err, userId },
+        context
+      )
+    ),
+    invalidateCache(`feed:for-you:ranked:v2:${userId}`).catch((err) =>
+      logger.warn(
+        'Failed to invalidate For You ranked cache',
+        { error: err, userId },
+        context
+      )
+    ),
+  ]);
+}
+
+/**
  * POST /api/posts/[id]/like
  * Like a post
  */
@@ -200,7 +235,7 @@ export const POST = withErrorHandling(
 
     // Bust the narrative enrichment cache so isLiked reflects immediately
     // (without this, the user sees isLiked: false for up to 30s in Stories)
-    invalidateCache(narrativeEnrichmentKey(canonicalUserId), {
+    await invalidateCache(narrativeEnrichmentKey(canonicalUserId), {
       namespace: 'feed',
     }).catch((err) =>
       logger.warn(
@@ -208,6 +243,11 @@ export const POST = withErrorHandling(
         { error: err, userId: canonicalUserId },
         'POST /api/posts/[id]/like'
       )
+    );
+
+    await invalidateForYouLikeCaches(
+      canonicalUserId,
+      'POST /api/posts/[id]/like'
     );
 
     logger.info(
@@ -294,7 +334,7 @@ export const DELETE = withErrorHandling(
       namespace: CACHE_KEYS.POST,
     });
 
-    invalidateCache(narrativeEnrichmentKey(canonicalUserId), {
+    await invalidateCache(narrativeEnrichmentKey(canonicalUserId), {
       namespace: 'feed',
     }).catch((err) =>
       logger.warn(
@@ -302,6 +342,11 @@ export const DELETE = withErrorHandling(
         { error: err, userId: canonicalUserId },
         'DELETE /api/posts/[id]/like'
       )
+    );
+
+    await invalidateForYouLikeCaches(
+      canonicalUserId,
+      'DELETE /api/posts/[id]/like'
     );
 
     logger.info(

@@ -73,7 +73,9 @@ export function ChatViewHeader({
           <div className="-mt-0.5 flex items-center gap-2 md:mt-0">
             {chatDetails.chat.isGroup && (
               <span className="text-muted-foreground text-xs">
-                {chatDetails.participants.length} participants
+                {chatDetails.chat.memberCount ??
+                  chatDetails.participants.length}{' '}
+                participants
               </span>
             )}
             {/* SSE status */}

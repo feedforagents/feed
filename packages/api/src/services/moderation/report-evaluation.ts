@@ -9,15 +9,20 @@
 
 import {
   and,
+  chats,
   count,
   db,
   desc,
+  dmAcceptances,
   eq,
   gte,
+  inArray,
   isNull,
   messages,
+  or,
   posts,
   reports,
+  sql,
   users,
 } from '@feed/db';
 import { logger } from '@feed/shared';
@@ -165,9 +170,12 @@ export async function evaluateReport(
 }
 
 /**
- * Collect all relevant context for a report
+ * Collect all relevant context for a report.
+ *
+ * Exported for integration tests (report-evaluation-actor-dm); the
+ * evaluation entry point remains evaluateReport.
  */
-async function collectReportContext(
+export async function collectReportContext(
   reportId: string
 ): Promise<ReportContext | null> {
   const [report] = await db
@@ -225,9 +233,35 @@ async function collectReportContext(
   const reporterId = report.reporterId;
   const reportedId = report.reportedUserId;
 
-  // Find DM chat between reporter and reported
-  const sortedIds = [reporterId, reportedId].sort();
-  const chatId = `dm-${sortedIds.join('-')}`;
+  const pair = [reporterId, reportedId];
+  const legacyChatId = `dm-${[...pair].sort().join('-')}`;
+  // Snowflake DMs record their two users at creation. This association
+  // survives leaving a chat, which removes the active participant row.
+  const acceptedDms = db
+    .select({ chatId: dmAcceptances.chatId })
+    .from(dmAcceptances)
+    .innerJoin(chats, eq(chats.id, dmAcceptances.chatId))
+    .where(
+      and(
+        eq(chats.isGroup, false),
+        eq(dmAcceptances.status, 'accepted'),
+        or(
+          and(
+            eq(dmAcceptances.userId, reporterId),
+            eq(dmAcceptances.otherUserId, reportedId)
+          ),
+          and(
+            eq(dmAcceptances.userId, reportedId),
+            eq(dmAcceptances.otherUserId, reporterId)
+          )
+        )
+      )
+    );
+  const evidenceChatIds = sql`(
+    SELECT ${legacyChatId}::text
+    UNION
+    ${acceptedDms}
+  )`;
 
   const chatMessages = await db
     .select({
@@ -237,7 +271,12 @@ async function collectReportContext(
       createdAt: messages.createdAt,
     })
     .from(messages)
-    .where(eq(messages.chatId, chatId))
+    .where(
+      and(
+        inArray(messages.chatId, evidenceChatIds),
+        inArray(messages.senderId, pair)
+      )
+    )
     .orderBy(desc(messages.createdAt))
     .limit(50);
 

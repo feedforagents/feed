@@ -34,6 +34,10 @@ export {
   multiStepExecutor,
 } from './MultiStepExecutor';
 export {
+  getNpcMarketCluePublication,
+  selectDueNpcMarketClue,
+} from './npc-market-clue';
+export {
   type PredictionMarketForTopic,
   TopicDiversityService,
   topicDiversityService,
