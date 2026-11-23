@@ -432,6 +432,7 @@ tool runs, any other the spec cache of the root, each workspace package and each
 lockfile and the commit. A job tries both key layouts for its own name and current lockfile, then tries the current
 layout for another lockfile. Selftest jobs on pull requests first try an archive for that pull request and lockfile.
 A successful replay of the entire fixture task can reuse that archive when setup leaves the cached evaluator intact.
+Fixture jobs also restore their pull request’s Turbo archive before the shared fallback. A full replay keeps that archive if its contents stayed unchanged and no files need pruning.
 Each entry is named by the tools and inputs that produced it, so a job reads only the entries that still apply.
 Nightly jobs restore the pinned Quint evaluator and run with fresh verification
 results.
