@@ -7,6 +7,7 @@ import {
   list,
   object,
   requireCondition,
+  STAGING_FUNDING_MIGRATION,
   STAGING_ORIGINAL_MIGRATIONS,
 } from './staging-fee-schema-policy';
 
@@ -16,21 +17,22 @@ function readOriginalMigrationSource(root: string) {
     JSON.parse(readFileSync(join(source, 'meta/_journal.json'), 'utf8'))
   );
   const entries = list(journal.entries).map(object);
+  const pins =
+    entries.length === STAGING_ORIGINAL_MIGRATIONS.length + 1
+      ? [...STAGING_ORIGINAL_MIGRATIONS, STAGING_FUNDING_MIGRATION]
+      : STAGING_ORIGINAL_MIGRATIONS;
   requireCondition(
     journal.version === '7' &&
       journal.dialect === 'postgresql' &&
-      entries.length === 6 &&
+      entries.length === pins.length &&
       JSON.stringify(
         readdirSync(source)
           .filter((name) => name.endsWith('.sql'))
           .sort()
-      ) ===
-        JSON.stringify(
-          STAGING_ORIGINAL_MIGRATIONS.map((pin) => `${pin.tag}.sql`).sort()
-        ),
+      ) === JSON.stringify(pins.map((pin) => `${pin.tag}.sql`).sort()),
     'unsupported_additive_source'
   );
-  return STAGING_ORIGINAL_MIGRATIONS.map((pin) => {
+  return pins.map((pin) => {
     const entry = entries[pin.index];
     requireCondition(
       entry?.idx === pin.index &&
@@ -72,7 +74,10 @@ export function materializeBaselineAdditiveMigrations(
   directory: string
 ): string {
   const originals = readOriginalMigrationSource(root);
-  const selected = BASELINE_ADDITIVE_MIGRATIONS.map((pin) => {
+  const pins = originals[STAGING_FUNDING_MIGRATION.index]
+    ? [...BASELINE_ADDITIVE_MIGRATIONS, STAGING_FUNDING_MIGRATION]
+    : BASELINE_ADDITIVE_MIGRATIONS;
+  const selected = pins.map((pin) => {
     const file = originals[pin.index];
     requireCondition(file !== undefined, 'unsupported_additive_source');
     return file;
