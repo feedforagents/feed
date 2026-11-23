@@ -60,6 +60,7 @@ import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   acquireUserBlockPairLock,
   and,
+  count,
   db,
   dbWrite,
   desc,
@@ -80,6 +81,9 @@ import {
   not,
   notExists,
   notInArray,
+  notifications,
+  notificationTargetVisibilityCondition,
+  or,
   perpMarketSnapshots,
   posts,
   postTags,
@@ -2653,18 +2657,25 @@ export async function executeGetUnreadCount(
     ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
   ];
 
-  const unreadCount = await db.notification.count({
-    where: {
-      userId: agent.userId,
-      read: false,
-      ...(excludedActorIds.length > 0
-        ? {
-            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
-          }
-        : {}),
-    },
-  });
-  return { unreadCount };
+  const moderationCondition =
+    excludedActorIds.length > 0
+      ? or(
+          isNull(notifications.actorId),
+          notInArray(notifications.actorId, excludedActorIds)
+        )
+      : undefined;
+  const [row] = await db
+    .select({ value: count() })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, agent.userId),
+        eq(notifications.read, false),
+        moderationCondition,
+        notificationTargetVisibilityCondition()
+      )
+    );
+  return { unreadCount: row?.value ?? 0 };
 }
 
 // ============================================================================
@@ -2687,21 +2698,32 @@ export async function executeGetNotifications(
     ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
   ];
 
-  const notificationsList = await db.notification.findMany({
-    where: {
-      userId: agent.userId,
-      // Match web notification visibility before taking the requested window.
-      // Existing notifications must disappear after a block or mute; system
-      // notifications have no actor and remain visible.
-      ...(excludedActorIds.length > 0
-        ? {
-            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
-          }
-        : {}),
-    },
-    orderBy: { createdAt: 'desc' },
-    take: args.limit || 100,
-  });
+  // Apply both visibility rules inside the page query, before its limit.
+  const moderationCondition =
+    excludedActorIds.length > 0
+      ? or(
+          isNull(notifications.actorId),
+          notInArray(notifications.actorId, excludedActorIds)
+        )
+      : undefined;
+  const notificationsList = await db
+    .select({
+      id: notifications.id,
+      type: notifications.type,
+      message: notifications.message,
+      read: notifications.read,
+      createdAt: notifications.createdAt,
+    })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, agent.userId),
+        moderationCondition,
+        notificationTargetVisibilityCondition()
+      )
+    )
+    .orderBy(desc(notifications.createdAt), desc(notifications.id))
+    .limit(args.limit || 100);
   return {
     notifications: notificationsList.map((n) => ({
       id: n.id,
