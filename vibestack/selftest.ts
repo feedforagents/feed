@@ -3561,35 +3561,43 @@ function eachCheck() {
 }
 
 function theCommandLine() {
-  test("a concurrent verifier install retries once without duplicating the check JSON stream", { skip: process.platform === "win32" }, async () => {
+  test("concurrent verifier installs during simulation and tests retry without duplicating the check JSON stream", { skip: process.platform === "win32" }, async () => {
     for (const changedModel of [false, true]) {
-      const root = toolchain(oneRule("value", "A value", "pure val answer = 42"), "quint", "lsc");
+      const root = toolchain(changedModel ? oneRule("value", "A value", "pure val answer = 42") : fixtures(["door"]), "quint", "lsc");
       const shim = path.join(root, "node_modules/.bin/quint");
       fs.unlinkSync(shim);
       fs.copyFileSync(path.join(nodeModules, ".bin/quint"), shim);
+      if (!changedModel) fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({
+        packageManager: JSON.parse(PACKAGE["package.json"]).packageManager,
+        scripts: { test: "node -e \"const fs = require('node:fs'); if (!fs.existsSync('.second-install-tests')) fs.linkSync('node_modules/.bin/quint', '.second-install-tests')\"" },
+      }));
       const retry = await exec(process.execPath, ["--input-type=module", "--eval", `
         import assert from "node:assert/strict";
         import fs from "node:fs";
         import path from "node:path";
         import { main } from "./vibestack/pipeline.ts";
         const attempts = new Set();
+        let linked = false;
+        const link = () => {
+          fs.linkSync("node_modules/.bin/quint", "second-install-quint");
+          linked = true;
+        };
         const { mkdirSync } = fs;
         fs.mkdirSync = (dir, ...args) => {
           if (typeof dir === "string" && path.basename(dir).startsWith("run-")) attempts.add(dir);
+          if (!linked && typeof dir === "string" && dir.split(path.sep).includes("door.inv.step")) link();
           return mkdirSync(dir, ...args);
         };
         const { log } = console;
-        let linked = false;
         console.log = (line) => {
-          if (JSON.parse(line).stage === "model" && !linked) {
-            linked = true;
-            fs.linkSync("node_modules/.bin/quint", "second-install-quint");
-            if (${changedModel}) fs.renameSync("spec/value.md", "spec/renamed.md");
+          if (${changedModel} && JSON.parse(line).stage === "model" && !linked) {
+            link();
+            fs.renameSync("spec/value.md", "spec/renamed.md");
           }
           log(line);
         };
         await main(["check", "--json"]);
-        assert.equal(attempts.size, ${changedModel ? 3 : 2});
+        assert.equal(attempts.size, 3);
       `], root);
       assert.equal(retry.status, 1, retry.stdout + retry.stderr);
       const rows = retry.stdout.trimEnd().split("\n").map((line) => JSON.parse(line));
@@ -3599,6 +3607,7 @@ function theCommandLine() {
       } else {
         assert.equal(retry.stderr, "");
         assert.deepEqual(rows.slice(0, -1), rows.at(-1).results);
+        for (const stage of ["always", "tests"]) assert.ok(rows.some((r: Result) => r.stage === stage && r.ok), retry.stdout);
         assert.ok(rows.at(-1).results.some((r: Result) => r.stage === "proof" && r.ok), retry.stdout);
       }
       assert.equal(rows.filter((row) => row.stage === "model").length, 1);
