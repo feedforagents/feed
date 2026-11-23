@@ -8,6 +8,7 @@
  * Returns all trades for a perpetual futures market with pagination and Redis
  * caching (30s TTL). Includes perp positions and balance transactions. Includes
  * NPC/agent trades with reasoning.
+ * Open perps report stored mark P&L less accrued funding, before close costs.
  *
  * @openapi
  * /api/markets/perps/trades/{ticker}:
@@ -352,13 +353,6 @@ export const GET = withErrorHandling(
         leverage: pos.leverage,
         entryPrice: Number(pos.entryPrice),
         currentPrice: Number(pos.currentPrice),
-        // Open rows show the P&L the close will actually realize: the
-        // stored mark PnL net of accrued funding (settlement is
-        // realizedPnL = pnl - fundingPaid, PerpMarketService close
-        // paths). The stored value is price-only, so the feed overstated
-        // it by exactly fundingPaid. Closed rows show no P&L in the feed
-        // ("Position closed"), so their stored values pass through
-        // untouched.
         unrealizedPnL: pos.closedAt
           ? Number(pos.unrealizedPnL)
           : Number(pos.unrealizedPnL) - Number(pos.fundingPaid ?? 0),

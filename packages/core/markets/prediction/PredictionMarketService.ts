@@ -779,25 +779,26 @@ export class PredictionMarketService {
     if (market.resolved) {
       throw new BadRequestError('Market has resolved');
     }
-    if (this.now() > market.endDate) {
-      throw new BadRequestError('Market expired');
-    }
-    if (market.liquidity <= 0) {
-      throw new BadRequestError('Market has no liquidity');
-    }
+    this.assertMarketBeforeClose(market);
   }
 
   /**
    * Assert market allows position exits (sells).
-   * Users can sell on expired markets to close positions before resolution.
-   * Allows selling on cancelled/deactivated markets (resolved but no outcome determined).
-   * Only blocks if market has fully resolved with a determined outcome.
+   * Before the scheduled close, legacy deactivated markets can allow exits
+   * when they have no outcome and the position is still active.
    */
   private assertMarketActiveForSell(market: PredictionMarketRecord) {
     if (market.resolved && market.resolution !== null) {
       throw new BadRequestError(
         'Market has resolved with outcome - positions are auto-settled'
       );
+    }
+    this.assertMarketBeforeClose(market);
+  }
+
+  private assertMarketBeforeClose(market: PredictionMarketRecord) {
+    if (this.now() >= market.endDate) {
+      throw new BadRequestError('Market expired');
     }
     if (market.liquidity <= 0) {
       throw new BadRequestError('Market has no liquidity');

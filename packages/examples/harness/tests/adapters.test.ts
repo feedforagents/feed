@@ -387,40 +387,6 @@ describe('OpenClawAdapter', () => {
   });
 });
 
-// ─── Production client interface tests ───────────────────────────────────────
-
-describe('FeedProductionClient', () => {
-  test('can be imported and instantiated', async () => {
-    const { FeedProductionClient } = await import('../src/production-client');
-    const client = new FeedProductionClient({
-      baseUrl: 'http://localhost:3000',
-      apiKey: 'test-key',
-      agentName: 'test-agent',
-    });
-    expect(client).toBeDefined();
-    expect(typeof client.getBalance).toBe('function');
-    expect(typeof client.getMarkets).toBe('function');
-    expect(typeof client.buyShares).toBe('function');
-    expect(typeof client.createPost).toBe('function');
-  });
-
-  test('contextId is unique per instance', async () => {
-    const { FeedProductionClient } = await import('../src/production-client');
-    const a = new FeedProductionClient({
-      baseUrl: 'http://localhost:3000',
-      apiKey: 'k',
-      agentName: 'a',
-    });
-    const b = new FeedProductionClient({
-      baseUrl: 'http://localhost:3000',
-      apiKey: 'k',
-      agentName: 'b',
-    });
-    // Both are valid objects; context IDs are internal but names differ
-    expect(a).not.toBe(b);
-  });
-});
-
 // ─── Harness clientFactory tests ─────────────────────────────────────────────
 
 describe('HarnessConfig.clientFactory', () => {

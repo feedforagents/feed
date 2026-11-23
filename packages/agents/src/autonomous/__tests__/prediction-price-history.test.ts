@@ -91,21 +91,34 @@ const walletGetBalance = mock(async () => ({ balance: 10000 }));
 
 const mockTxDb = {
   select: mock(() => ({
-    from: mock((table: unknown) => ({
-      where: mock(() => ({
-        limit: mock(async () => {
-          if (table === markets) return [marketRow];
-          if (table === positions) return positionRow ? [positionRow] : [];
-          return [];
-        }),
-        orderBy: mock(() => ({
-          limit: mock(async () => {
-            if (table === positions) return positionRow ? [positionRow] : [];
-            return [];
-          }),
+    from: mock((table: unknown) => {
+      const rowsForTable = () => {
+        if (table === markets) return [marketRow];
+        if (table === positions) return positionRow ? [positionRow] : [];
+        if (table === questions)
+          return [{ id: marketRow.id, scenarioId: null }];
+        return [];
+      };
+      return {
+        where: mock(() => ({
+          limit: mock(async () => rowsForTable()),
+          orderBy: mock(() => ({
+            limit: mock(async () => {
+              if (table === positions) return positionRow ? [positionRow] : [];
+              return [];
+            }),
+          })),
+          // The real query builder is awaitable: awaiting where()
+          // resolves to the selected rows. The adapter's batched
+          // question lookup (withScenarios) awaits it directly instead
+          // of chaining limit(), so the fixture must honor that
+          // contract rather than hand back the builder object.
+          then: (resolve: (rows: unknown) => void) => {
+            resolve(rowsForTable());
+          },
         })),
-      })),
-    })),
+      };
+    }),
   })),
   update: mock((table: unknown) => ({
     set: mock((updates: Record<string, unknown>) => ({
@@ -153,15 +166,25 @@ const mockTxDb = {
 
 const mockDb = {
   select: mock(() => ({
-    from: mock((table: unknown) => ({
-      where: mock(() => ({
-        limit: mock(async () => {
-          if (table === users) return [userRow];
-          if (table === markets) return [marketRow];
-          return [];
-        }),
-      })),
-    })),
+    from: mock((table: unknown) => {
+      const rowsForTable = () => {
+        if (table === users) return [userRow];
+        if (table === markets) return [marketRow];
+        if (table === questions)
+          return [{ id: marketRow.id, scenarioId: null }];
+        return [];
+      };
+      return {
+        where: mock(() => ({
+          limit: mock(async () => rowsForTable()),
+          // See mockTxDb: awaiting where() must resolve to the
+          // selected rows, as the real query builder does.
+          then: (resolve: (rows: unknown) => void) => {
+            resolve(rowsForTable());
+          },
+        })),
+      };
+    }),
   })),
 };
 

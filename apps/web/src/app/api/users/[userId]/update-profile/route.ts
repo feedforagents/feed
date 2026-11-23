@@ -93,6 +93,7 @@ import {
   ReputationService,
   requireUserByIdentifier,
   successResponse,
+  updateProfileWithLeaderboardInvalidation,
   withErrorHandling,
 } from '@feed/api';
 import { and, db, eq, ne, sql, users } from '@feed/db';
@@ -266,27 +267,34 @@ export const POST = withErrorHandling(
           : undefined,
     };
 
-    const [updatedUser] = await db
-      .update(users)
-      .set(updateData)
-      .where(eq(users.id, canonicalUserId))
-      .returning({
-        id: users.id,
-        username: users.username,
-        displayName: users.displayName,
-        bio: users.bio,
-        profileImageUrl: users.profileImageUrl,
-        coverImageUrl: users.coverImageUrl,
-        profileComplete: users.profileComplete,
-        hasUsername: users.hasUsername,
-        hasBio: users.hasBio,
-        hasProfileImage: users.hasProfileImage,
-        reputationPoints: users.reputationPoints,
-        referralCount: users.referralCount,
-        referralCode: users.referralCode,
-        usernameChangedAt: users.usernameChangedAt,
-        privyId: users.privyId,
-      });
+    const updatedUser = await updateProfileWithLeaderboardInvalidation(
+      canonicalUserId,
+      updateData,
+      async (client) => {
+        const [user] = await client
+          .update(users)
+          .set(updateData)
+          .where(eq(users.id, canonicalUserId))
+          .returning({
+            id: users.id,
+            username: users.username,
+            displayName: users.displayName,
+            bio: users.bio,
+            profileImageUrl: users.profileImageUrl,
+            coverImageUrl: users.coverImageUrl,
+            profileComplete: users.profileComplete,
+            hasUsername: users.hasUsername,
+            hasBio: users.hasBio,
+            hasProfileImage: users.hasProfileImage,
+            reputationPoints: users.reputationPoints,
+            referralCount: users.referralCount,
+            referralCode: users.referralCode,
+            usernameChangedAt: users.usernameChangedAt,
+            privyId: users.privyId,
+          });
+        return user;
+      }
+    );
 
     // Refresh identifier caches after any profile update because these caches now
     // store full user rows, not just identifiers.
