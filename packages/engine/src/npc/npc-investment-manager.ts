@@ -119,6 +119,7 @@ export class NPCInvestmentManager {
         entryPrice: perpPositions.entryPrice,
         currentPrice: perpPositions.currentPrice,
         unrealizedPnL: perpPositions.unrealizedPnL,
+        fundingPaid: perpPositions.fundingPaid,
         leverage: perpPositions.leverage,
         realizedPnL: perpPositions.realizedPnL,
         closedAt: perpPositions.closedAt,
@@ -202,8 +203,16 @@ export class NPCInvestmentManager {
       return sum + Number.parseFloat(pos.unrealizedPnL?.toString() || '0');
     }, 0);
 
+    // Stored perp unrealizedPnL is price-only: funding accrues into
+    // fundingPaid and settles into realizedPnL only at close, so an open
+    // perp reports its mark P&L less accrued funding — the same rule the
+    // perp trades route applies (staging c1bd8a80).
     const perpUnrealizedPnL = openPerpPositions.reduce((sum, pos) => {
-      return sum + Number.parseFloat(pos.unrealizedPnL?.toString() || '0');
+      return (
+        sum +
+        Number.parseFloat(pos.unrealizedPnL?.toString() || '0') -
+        Number.parseFloat(pos.fundingPaid?.toString() || '0')
+      );
     }, 0);
 
     const unrealizedPnL = poolUnrealizedPnL + perpUnrealizedPnL;

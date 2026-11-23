@@ -25,6 +25,9 @@ export type FallbackPerpRow = {
   leverage: number | null;
   unrealizedPnL: number | null;
   realizedPnL: number | null;
+  // Accrued funding on an open perp; null when the row predates the column
+  // or the caller did not select it.
+  fundingPaid?: number | null;
   closedAt: Date | null;
 };
 
@@ -136,7 +139,10 @@ export function buildFallbackMetricsByPool<TPool extends { id: string }>(
 
     if (isOpen) {
       metrics.totalInvested += getPositionExposure(perp.size, perp.leverage);
-      metrics.unrealizedPnL += Number(perp.unrealizedPnL ?? 0);
+      // Stored perp unrealizedPnL is price-only; net accrued funding, as
+      // the live metrics path does.
+      metrics.unrealizedPnL +=
+        Number(perp.unrealizedPnL ?? 0) - Number(perp.fundingPaid ?? 0);
       metrics.positionCount += 1;
       continue;
     }

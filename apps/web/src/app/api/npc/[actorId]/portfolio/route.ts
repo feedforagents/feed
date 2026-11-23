@@ -139,6 +139,7 @@ export const GET = withErrorHandling(async function GET(
         entryPrice: true,
         currentPrice: true,
         unrealizedPnL: true,
+        fundingPaid: true,
         leverage: true,
         openedAt: true,
         closedAt: true,
@@ -178,7 +179,10 @@ export const GET = withErrorHandling(async function GET(
         size: Number(pos.size),
         entryPrice: Number(pos.entryPrice),
         currentPrice: Number(pos.currentPrice),
-        unrealizedPnL: Number(pos.unrealizedPnL),
+        // Stored mark P&L is price-only; an open perp reports it less
+        // accrued funding, as the perp trades route does (c1bd8a80).
+        unrealizedPnL:
+          Number(pos.unrealizedPnL) - Number(pos.fundingPaid ?? 0),
         leverage: pos.leverage,
         createdAt: toISO(pos.openedAt),
         openedAt: pos.openedAt,

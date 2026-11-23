@@ -179,6 +179,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
             leverage: perpPositions.leverage,
             unrealizedPnL: perpPositions.unrealizedPnL,
             realizedPnL: perpPositions.realizedPnL,
+            fundingPaid: perpPositions.fundingPaid,
             closedAt: perpPositions.closedAt,
           })
           .from(perpPositions)
