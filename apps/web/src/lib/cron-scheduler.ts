@@ -208,13 +208,19 @@ export async function triggerScheduledCrons(now = new Date()): Promise<{
         'CronScheduler'
       );
 
+      // Funding validates the exact UTC boundary, even if the tick starts
+      // partway through the due minute.
+      const isFundingJob = cron.path === '/api/cron/perp-funding';
+      const scheduledTime = isFundingJob
+        ? Math.floor(now.getTime() / 60_000) * 60_000
+        : now.getTime();
       const response = await fetch(`${baseUrl}${cron.path}`, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${cronSecret}`,
           'User-Agent': 'feed-internal-cron-scheduler/1.0',
-          ...(localnet
-            ? { 'X-Cloudflare-Cron-Time': String(now.getTime()) }
+          ...(localnet || isFundingJob
+            ? { 'X-Cloudflare-Cron-Time': String(scheduledTime) }
             : {}),
         },
         // Don't wait too long for each cron
