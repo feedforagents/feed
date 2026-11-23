@@ -302,7 +302,12 @@ export class PredictionPricing {
  *
  * @param yesShares - current YES shares in pool
  * @param noShares  - current NO shares in pool
- * @param feeRate   - trading fee rate (default 0.01 = 1%)
+ * @param feeRate   - trading fee rate (default 0.001 = 0.1%, the canonical
+ *                    rate in FEE_CONFIG.TRADING_FEE_RATE, PRD §9.1). The
+ *                    bound is only safe when computed with the fee the
+ *                    trader actually pays: a larger fee grosses the net
+ *                    amount up too far and the executed trade moves odds
+ *                    past capPpt.
  * @param capPpt    - max allowed odds shift in probability units (default 0.19 = 19ppt,
  *                    leaving a 1ppt safety margin below the 20ppt per-trade hard cap)
  * @returns max gross amount (floor) the caller should place in one trade
@@ -310,7 +315,7 @@ export class PredictionPricing {
 export function maxSafeBuy(
   yesShares: number,
   noShares: number,
-  feeRate = 0.01,
+  feeRate = 0.001,
   capPpt = 0.19
 ): number {
   const k = yesShares * noShares;

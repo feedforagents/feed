@@ -292,9 +292,12 @@ async function cleanFixtures(
 
 afterAll(() => cleanFixtures(ownedUsers, ownedPosts, ownedReactions));
 
-async function fetchTrending(signedIn: boolean): Promise<TrendingPost[]> {
+async function fetchTrending(
+  signedIn: boolean,
+  query?: string
+): Promise<TrendingPost[]> {
   const request = new NextRequest(
-    'http://localhost/api/feed/widgets/trending-posts',
+    `http://localhost/api/feed/widgets/trending-posts${query ?? ''}`,
     { headers: signedIn ? { Authorization: `Bearer ${token}` } : undefined }
   );
   // Tokens are valid only inside the five-minute synthetic window and the
@@ -326,6 +329,10 @@ describe('Trending posts widget excludes test authors', () => {
       expect(ids).not.toContain(deletedPostId);
       expect(ids).not.toContain(futurePostId);
       expect([...ids].sort()).toEqual([normalPostId, noUserPostId].sort());
+    });
+    it(`honors the requested limit after ranking visible posts (${mode})`, async () => {
+      const result = await fetchTrending(signedIn, '?limit=1');
+      expect(result.map((post) => post.id)).toEqual([noUserPostId]);
     });
     it(`keeps engagement and author metadata for visible posts (${mode})`, async () => {
       const result = await fetchTrending(signedIn);

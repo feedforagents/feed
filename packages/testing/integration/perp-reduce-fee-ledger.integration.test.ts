@@ -7,18 +7,27 @@
  * stubbed; the routes, fee service and database run for real.
  */
 import { afterAll, expect, mock, test } from 'bun:test';
+import { createStewardTestToken } from './helpers/steward-auth';
 import {
-  runIsolatedPerpReduceFeeCases,
-  verifyPerpReduceFeeChildLease,
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
 } from './helpers/sub-market-isolation';
 
-if (!process.env.FEED_PERP_REDUCE_FEE_CHILD) {
+const CASE =
+  'reduce through the open route charges and records the canonical fee on the ordered size';
+
+if (!process.env.FEED_SUB_MARKET_CHILD) {
   test('runs the perp reduce fee case in a leased fresh database', async () => {
-    await runIsolatedPerpReduceFeeCases();
+    await runIsolatedSubMarketCases({
+      name: 'perp-reduce-fee',
+      file: 'packages/testing/integration/perp-reduce-fee-ledger.integration.test.ts',
+      cases: [CASE],
+      manualTradingFeeIndex: true,
+    });
   }, 300_000);
 } else {
   // No application client may be imported before positive child ownership.
-  await verifyPerpReduceFeeChildLease();
+  await verifySubMarketChildLease();
   mock.module('server-only', () => ({}));
   const {
     balanceTransactions,
@@ -47,39 +56,42 @@ if (!process.env.FEED_PERP_REDUCE_FEE_CHILD) {
   async function post(
     route: (request: InstanceType<typeof NextRequest>) => Promise<Response>,
     path: string,
-    userId: string,
+    token: string,
     body: Record<string, unknown>
   ) {
-    const previous = process.env.ALLOW_TEST_PRIVY_DID_AUTH;
-    process.env.ALLOW_TEST_PRIVY_DID_AUTH = 'true';
-    try {
-      const response = await route(
-        new NextRequest(`http://localhost${path}`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-forwarded-for': '198.19.0.1',
-            authorization: `Bearer steward:test:${userId}`,
-          },
-          body: JSON.stringify(body),
-        })
-      );
-      const json = await response.json();
-      expect(response.status, JSON.stringify(json)).toBeLessThan(300);
-      return json;
-    } finally {
-      if (previous === undefined) delete process.env.ALLOW_TEST_PRIVY_DID_AUTH;
-      else process.env.ALLOW_TEST_PRIVY_DID_AUTH = previous;
-    }
+    const requestId = crypto.randomUUID();
+    const response = await route(
+      new NextRequest(`http://localhost${path}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '198.19.0.1',
+          'x-request-id': requestId,
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+      })
+    );
+    const json = await response.json();
+    console.info('Perp reduction response', {
+      requestId,
+      path,
+      status: response.status,
+    });
+    expect(response.status, JSON.stringify(json)).toBeLessThan(300);
+    return json;
   }
 
-  test('reduce through the open route charges and records the canonical fee on the ordered size', async () => {
-    const userId = `reduce-fee-${crypto.randomUUID()}`;
+  test(CASE, async () => {
+    const userId = crypto.randomUUID();
+    const stewardId = `reduce-fee-${userId}`;
+    const token = await createStewardTestToken(stewardId);
     const ticker = 'REDUCEFEE';
     await db.transaction(async (tx) => {
       await tx.insert(users).values({
         id: userId,
-        username: userId,
+        username: stewardId,
+        stewardId,
         virtualBalance: String(START_BALANCE),
         totalDeposited: String(START_BALANCE),
         lifetimePnL: '0',
@@ -108,7 +120,7 @@ if (!process.env.FEED_PERP_REDUCE_FEE_CHILD) {
       });
     });
 
-    const opened = await post(openRoute, '/api/markets/perps/open', userId, {
+    const opened = await post(openRoute, '/api/markets/perps/open', token, {
       ticker,
       side: 'long',
       size: 116,
@@ -120,16 +132,21 @@ if (!process.env.FEED_PERP_REDUCE_FEE_CHILD) {
     const { preview } = await post(
       previewRoute,
       '/api/markets/perps/preview',
-      userId,
+      token,
       order
     );
     expect(preview.rebalanceType).toBe('reduce');
 
     // 116 * (30.01 / 116) is 30.009999999999998: settling that size floors
     // to 30.00 and charges 0.03, not the canonical fee on 30.01.
-    const reduced = await post(openRoute, '/api/markets/perps/open', userId, {
+    const reduced = await post(openRoute, '/api/markets/perps/open', token, {
       ...order,
       orderType: 'market',
+    });
+    console.info('Perp reduction fees', {
+      orderedSize: order.size,
+      preview: preview.estimatedFee,
+      execution: reduced.fee.amount,
     });
     expect(reduced.position.rebalanceType).toBe('reduce');
     expect(reduced.fee.amount).toBe(0.04);
