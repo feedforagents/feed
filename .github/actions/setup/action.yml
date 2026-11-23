@@ -297,29 +297,14 @@ runs:
       with:
         path: ~/.quint/rust-evaluator-${{ steps.quint-evaluator.outputs.version }}
         key: ${{ steps.quint-cache.outputs.cache-primary-key }}
-    # Shard A runs Bombadil with full Chromium. The workspace also needs the
-    # headless shell for Playwright journeys. The other isolated shards use neither.
     - name: Install Chromium
       if: inputs.verification == 'true' && inputs.job != 'selftest-b' && inputs.job != 'selftest-rest'
-      env:
-        FULL_CHROMIUM_ONLY: ${{ inputs.job == 'selftest-a' }}
       run: |
-        args=(chromium)
-        [[ "$FULL_CHROMIUM_ONLY" != true ]] || args+=(--no-shell)
-        pnpm exec playwright install "${args[@]}"
-        probe() {
-          node --input-type=module <<'JS'
-        import { chromium } from "playwright";
-        async function check(options) {
-          const browser = await chromium.launch({ timeout: 10_000, ...options });
-          await browser.close();
+        node --input-type=module - "${{ inputs.job == 'selftest-a' }}" "${{ inputs.cache-verification == 'true' }}" <<'JS'
+        import { hostedCachedFixture, installChromium } from "./vibestack/selftests/install.ts";
+        const [fullOnly, cacheVerification] = process.argv.slice(2);
+        if (fullOnly !== "true" || cacheVerification !== "true" || !hostedCachedFixture()) {
+          await installChromium(fullOnly === "true");
         }
-        await check({ executablePath: chromium.executablePath() });
-        if (process.env.FULL_CHROMIUM_ONLY !== "true") await check({});
         JS
-        }
-        if ! probe; then
-          pnpm exec playwright install-deps chromium
-          probe
-        fi
       shell: bash

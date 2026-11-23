@@ -423,8 +423,9 @@ The task entry point disables Turbo telemetry. On a shared machine, each `selfte
 Studio tests. In CI, the verify job owns those integration tests. Each dedicated shard runs with Turbo's
 `--only` after setup has built the toolchain. Its cache key covers its own declared source inputs.
 Verification and release install the headless shell for Playwright and full
-Chromium for Bombadil. In CI and nightly runs, shard A installs full Chromium
-for its Bombadil journey, and the other tool shards run without a browser.
+Chromium for Bombadil. In CI, shard A installs full Chromium when its Bombadil
+journey runs. Its nightly job installs it during setup. The other tool shards
+run without a browser.
 Release runs the prerequisite tasks once, then uses the same isolated shard keys as CI.
 Pull requests read shared results; only branch pushes receive the publishing
 credential, protected by the `turbo-cache-publish` environment's branch
