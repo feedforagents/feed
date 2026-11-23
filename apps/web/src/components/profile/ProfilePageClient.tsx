@@ -8,7 +8,6 @@ import {
   type FeedPost,
   getBannerImageUrl,
   isUsername,
-  logger,
   type Organization,
   POST_TYPES,
 } from '@feed/shared';
@@ -30,10 +29,8 @@ import { ModerationMenu } from '@/components/moderation/ModerationMenu';
 import { PostCard } from '@/components/posts/PostCard';
 import { FollowListModal } from '@/components/profile/FollowListModal';
 import { OnChainBadge } from '@/components/profile/OnChainBadge';
-import {
-  type ProfileReply,
-  ProfileReplyCard,
-} from '@/components/profile/ProfileReplyCard';
+import { ProfileReplyCard } from '@/components/profile/ProfileReplyCard';
+import { useActorReplies } from '@/components/profile/useActorReplies';
 import { Avatar } from '@/components/shared/Avatar';
 import { EmptyState } from '@/components/shared/EmptyState';
 import { PageContainer } from '@/components/shared/PageContainer';
@@ -184,8 +181,21 @@ export function ProfilePageClient({
     }>
   >([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
-  const [replies, setReplies] = useState<ProfileReply[]>([]);
-  const [loadingReplies, setLoadingReplies] = useState(false);
+  const {
+    replies,
+    loading: loadingReplies,
+    loadingMore: loadingMoreReplies,
+    hasMore: hasMoreReplies,
+    loadFailed: loadFailedReplies,
+    loadMore: loadMoreReplies,
+    clearLoadFailed: clearLoadFailedReplies,
+  } = useActorReplies(actorInfo?.id ?? null, tab === 'replies');
+  // Callback ref held in state (not a plain ref): when the sentinel
+  // unmounts on a tab switch and mounts again, the state change re-runs
+  // the observer effect, so the new sentinel gets observed. A plain ref
+  // would keep watching the detached node and paging would stop for good.
+  const [loadMoreRepliesEl, setLoadMoreRepliesEl] =
+    useState<HTMLDivElement | null>(null);
 
   const handleMessageClick = async () => {
     if (!authenticated || !actorInfo?.id || isCreatingDM || !user?.id) return;
@@ -624,49 +634,34 @@ export function ProfilePageClient({
   }, [routeKey, actorInfo?.id]);
 
   useEffect(() => {
-    if (tab !== 'replies') return;
-    if (!actorInfo?.id) return;
-
-    const controller = new AbortController();
-
-    const loadReplies = async () => {
-      setLoadingReplies(true);
-      try {
-        const token = await getAccessToken();
-        const headers: HeadersInit = { 'Content-Type': 'application/json' };
-        if (token) {
-          headers.Authorization = `Bearer ${token}`;
+    const target = loadMoreRepliesEl;
+    if (!target) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        if (!entry.isIntersecting) {
+          // The sentinel left the viewport: a failed continuation may be
+          // retried when the visitor scrolls back down to it.
+          clearLoadFailedReplies();
+          return;
         }
-
-        const response = await fetch(
-          `/api/users/${encodeURIComponent(actorInfo.id)}/posts?type=replies`,
-          { headers, signal: controller.signal }
-        );
-        if (response.ok) {
-          const data = (await response.json()) as {
-            data?: { items?: ProfileReply[] };
-            items?: ProfileReply[];
-          };
-          const items = data?.data?.items ?? data?.items ?? [];
-          setReplies(items);
+        if (hasMoreReplies && !loadingMoreReplies && !loadFailedReplies) {
+          void loadMoreReplies();
         }
-      } catch (error) {
-        if (error instanceof Error && error.name !== 'AbortError') {
-          logger.error(
-            'Failed to fetch replies',
-            error instanceof Error ? error : { error },
-            'ProfilePageClient'
-          );
-        }
-      } finally {
-        setLoadingReplies(false);
-      }
-    };
-
-    void loadReplies();
-
-    return () => controller.abort();
-  }, [tab, actorInfo?.id, getAccessToken]);
+      },
+      { rootMargin: '200px' }
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [
+    loadMoreRepliesEl,
+    hasMoreReplies,
+    loadingMoreReplies,
+    loadFailedReplies,
+    loadMoreReplies,
+    clearLoadFailedReplies,
+  ]);
 
   const gameStorePosts = useMemo(() => {
     const posts: Array<{
@@ -1120,6 +1115,15 @@ export function ProfilePageClient({
                           }
                         />
                       ))}
+                      {hasMoreReplies && (
+                        <div ref={setLoadMoreRepliesEl} className="py-8">
+                          {loadingMoreReplies && (
+                            <div className="flex items-center justify-center">
+                              <div className="h-8 w-8 animate-spin rounded-full border-primary border-b-2" />
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )
                 ) : loadingPosts ? (
