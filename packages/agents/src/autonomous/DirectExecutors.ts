@@ -28,6 +28,7 @@ import {
   chatParticipants,
   chats,
   comments,
+  createCommentWithParentCheck,
   db,
   desc,
   dmAcceptances,
@@ -1376,20 +1377,6 @@ export async function executeDirectComment(
         error: `Already replied to this comment`,
       };
     }
-
-    // Verify parent comment exists
-    const [parentComment] = await db
-      .select({ id: comments.id })
-      .from(comments)
-      .where(eq(comments.id, parentCommentId))
-      .limit(1);
-
-    if (!parentComment) {
-      return {
-        success: false,
-        error: `Parent comment not found: ${parentCommentId}`,
-      };
-    }
   } else {
     // Top-level comment - check if agent already commented on this post
     const [existingComment] = await db
@@ -1426,7 +1413,7 @@ export async function executeDirectComment(
   const commentId = await generateSnowflakeId();
   const now = new Date();
 
-  await db.insert(comments).values({
+  const result = await createCommentWithParentCheck({
     id: commentId,
     content: cleanContent,
     postId,
@@ -1435,6 +1422,16 @@ export async function executeDirectComment(
     createdAt: now,
     updatedAt: now,
   });
+
+  if (result.status !== 'created') {
+    return {
+      success: false,
+      error:
+        result.status === 'parent-post-mismatch'
+          ? 'Parent comment does not belong to this post'
+          : `Parent comment not found: ${parentCommentId}`,
+    };
+  }
 
   logger.info(
     `[DirectExecutor] Comment created: ${commentId}`,
