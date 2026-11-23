@@ -1409,20 +1409,43 @@ export async function executeGetPost(
   );
 
   const { data } = result;
-  if (
-    !data ||
-    typeof data !== 'object' ||
-    Array.isArray(data) ||
-    typeof data.commentCount !== 'number'
-  ) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
     return result;
   }
-  const commentCount = await countVisiblePostComments(
-    args.postId,
-    agent.userId,
-    data.commentCount
-  );
-  return { ...result, data: { ...data, commentCount } };
+
+  const post = { ...data };
+  if (typeof post.commentCount === 'number') {
+    post.commentCount = await countVisiblePostComments(
+      args.postId,
+      agent.userId,
+      post.commentCount
+    );
+  }
+
+  // The anonymous detail fetch can include an original excluded for this viewer.
+  const original = post.originalPost;
+  if (
+    original &&
+    typeof original === 'object' &&
+    !Array.isArray(original) &&
+    typeof original.authorId === 'string'
+  ) {
+    const [blocked, muted] = await Promise.all([
+      getFilteredUserIds(agent.userId),
+      getMutedUserIds(agent.userId),
+    ]);
+    if (
+      blocked.includes(original.authorId) ||
+      muted.includes(original.authorId)
+    ) {
+      delete post.isRepost;
+      delete post.isQuote;
+      delete post.quoteComment;
+      delete post.originalPostId;
+      delete post.originalPost;
+    }
+  }
+  return { ...result, data: post };
 }
 
 /**
