@@ -109,7 +109,17 @@ export class ReputationService {
       'ReputationService'
     );
 
+    // Score at most once per (userId, side) so re-entering after a closed
+    // position cannot multiply per-row resolution reputation updates.
+    const seenUserSides = new Set<string>();
+
     for (const position of positionsData) {
+      const userSideKey = `${position.userId}:${position.side ? 'yes' : 'no'}`;
+      if (seenUserSides.has(userSideKey)) {
+        continue;
+      }
+      seenUserSides.add(userSideKey);
+
       const user = userMap.get(position.userId);
       if (!user) {
         results.push({
