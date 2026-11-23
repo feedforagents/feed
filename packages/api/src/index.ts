@@ -230,6 +230,7 @@ export {
 // Services
 export * from './services';
 export {
+  countReachablePostComments,
   countVisiblePostComments,
   listVisiblePostComments,
 } from './services/post-comments-service';

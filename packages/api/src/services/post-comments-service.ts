@@ -85,6 +85,18 @@ export async function listVisiblePostComments(
     .orderBy(orderBy(comments.createdAt), orderBy(comments.id));
 }
 
+/** Count the reachable comment tree using already resolved author exclusions. */
+export async function countReachablePostComments(
+  postId: string,
+  excludedIds: string[]
+): Promise<number> {
+  const [result] = await db.execute<{ count: string }>(sql`
+    ${reachablePostComments(postId, excludedIds)}
+    SELECT count(*)::text AS count FROM visible_comments
+  `);
+  return Number(result?.count ?? 0);
+}
+
 /** Count the same visible tree as the comment list, without returning its rows. */
 export async function countVisiblePostComments(
   postId: string,
@@ -95,9 +107,5 @@ export async function countVisiblePostComments(
   // The public post detail already counted all branches this viewer can see.
   if (excludedIds.length === 0) return anonymousCount;
 
-  const [result] = await db.execute<{ count: string }>(sql`
-    ${reachablePostComments(postId, excludedIds)}
-    SELECT count(*)::text AS count FROM visible_comments
-  `);
-  return Number(result?.count ?? 0);
+  return countReachablePostComments(postId, excludedIds);
 }

@@ -126,6 +126,7 @@
 import {
   AuthorizationError,
   authenticate,
+  countReachablePostComments,
   getCanonicalUserId,
   NotFoundError,
   optionalAuth,
@@ -373,7 +374,7 @@ export const GET = withErrorHandling(
     let postIsShared = false;
 
     if (post) {
-      const [[likeCountResult], [commentCountResult], [shareCountResult]] =
+      const [[likeCountResult], visibleCommentCount, [shareCountResult]] =
         await Promise.all([
           db
             .select({ count: count() })
@@ -381,12 +382,7 @@ export const GET = withErrorHandling(
             .where(
               and(eq(reactions.postId, post.id), eq(reactions.type, 'like'))
             ),
-          db
-            .select({ count: count() })
-            .from(comments)
-            .where(
-              and(eq(comments.postId, post.id), isNull(comments.deletedAt))
-            ),
+          countReachablePostComments(post.id, [...excludedAuthorIds]),
           db
             .select({ count: count() })
             .from(shares)
@@ -394,7 +390,7 @@ export const GET = withErrorHandling(
         ]);
 
       postLikeCount = Number(likeCountResult?.count ?? 0);
-      postCommentCount = Number(commentCountResult?.count ?? 0);
+      postCommentCount = visibleCommentCount;
       postShareCount = Number(shareCountResult?.count ?? 0);
 
       if (canonicalUserId) {

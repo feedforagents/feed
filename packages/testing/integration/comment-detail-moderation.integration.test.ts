@@ -199,8 +199,8 @@ describe('GET /api/comments/[id] moderation visibility', () => {
     expect(detail.comment.id).toBe(visibleCommentId);
     expect(detail.replies.map((r) => r.id)).toEqual([visibleReplyId]);
     expect(detail.comment.replyCount).toBe(2);
-    // Four visible rows remain, including the visible grandchild.
-    expect(detail.post?.commentCount).toBe(4);
+    // Only the visible root and its visible reply are reachable.
+    expect(detail.post?.commentCount).toBe(2);
   });
 
   it('does not leak a soft-deleted parent through the parent chain', async () => {

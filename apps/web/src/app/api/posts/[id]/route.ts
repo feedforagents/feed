@@ -69,6 +69,7 @@ import {
   authenticate,
   BusinessLogicError,
   cachedDb,
+  countReachablePostComments,
   getCanonicalUserId,
   NotFoundError,
   publicRateLimit,
@@ -86,6 +87,7 @@ import {
   posts,
   reactions,
   shares,
+  sql,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -121,8 +123,16 @@ export const GET = withErrorHandling(
     const now = new Date();
 
     // Get post from database
-    const [post] = await db
-      .select()
+    const [row] = await db
+      .select({
+        post: posts,
+        hasComments: sql<boolean>`EXISTS (${db
+          .select({ id: comments.id })
+          .from(comments)
+          .where(
+            and(eq(comments.postId, posts.id), isNull(comments.deletedAt))
+          )})`,
+      })
       .from(posts)
       .where(
         and(
@@ -138,9 +148,10 @@ export const GET = withErrorHandling(
 
     // Unknown (or not-yet-published) IDs are simply not found. This route
     // never creates posts on read.
-    if (!post) {
+    if (!row) {
       throw new NotFoundError('Post', postId);
     }
+    const { post, hasComments } = row;
 
     // Check if post is deleted
     if (post.deletedAt) {
@@ -150,69 +161,34 @@ export const GET = withErrorHandling(
       );
     }
 
-    // Get counts
-    const [[likeCountResult], commentRows, [shareCountResult]] =
-      await Promise.all([
-        db
-          .select({ count: count() })
-          .from(reactions)
-          .where(and(eq(reactions.postId, postId), eq(reactions.type, 'like'))),
-        db
-          .select({
-            id: comments.id,
-            authorId: comments.authorId,
-            parentCommentId: comments.parentCommentId,
-          })
-          .from(comments)
-          .where(and(eq(comments.postId, postId), isNull(comments.deletedAt))),
-        db
-          .select({ count: count() })
-          .from(shares)
-          .where(eq(shares.postId, postId)),
-      ]);
+    // Comments and embedded reposts use the same viewer exclusions.
+    const exclusions =
+      canonicalUserId && (hasComments || post.originalPostId)
+        ? loadViewerExcludedAuthorIds(canonicalUserId)
+        : Promise.resolve(undefined);
+    const [
+      [likeCountResult],
+      commentCount,
+      [shareCountResult],
+      excludedAuthorIds,
+    ] = await Promise.all([
+      db
+        .select({ count: count() })
+        .from(reactions)
+        .where(and(eq(reactions.postId, postId), eq(reactions.type, 'like'))),
+      hasComments
+        ? exclusions.then((ids) =>
+            countReachablePostComments(postId, ids ? [...ids] : [])
+          )
+        : 0,
+      db
+        .select({ count: count() })
+        .from(shares)
+        .where(eq(shares.postId, postId)),
+      exclusions,
+    ]);
 
     const likeCount = Number(likeCountResult?.count ?? 0);
-    // Count only the comments the comment list below can actually show.
-    // That list omits replies whose parent is not visible (e.g. a parent
-    // soft-deleted by moderation takes its whole subtree out of the tree),
-    // so count the comments reachable from a top-level comment, mirroring
-    // the tree rule in GET /api/posts/[id]/comments.
-    //
-    // The signed viewer's moderation set is loaded once and used in two
-    // places: comments by authors the viewer blocked or muted — or who
-    // blocked the viewer — are excluded from the tree (their replies go
-    // with them because the hidden parent is unreachable from the root),
-    // and an embedded repost original by an excluded author is never
-    // exposed by the metadata block below. This is the same
-    // loadViewerExcludedAuthorIds definition every other surface uses.
-    // Anonymous reads have no moderation set and stay unfiltered, exactly
-    // like the list route.
-    const excludedAuthorIds =
-      canonicalUserId && (commentRows.length > 0 || post.originalPostId)
-        ? await loadViewerExcludedAuthorIds(canonicalUserId)
-        : undefined;
-    let visibleCommentRows = commentRows;
-    if (excludedAuthorIds?.size) {
-      visibleCommentRows = commentRows.filter(
-        (row) => !excludedAuthorIds.has(row.authorId)
-      );
-    }
-    const childrenByParent = new Map<string | null, string[]>();
-    for (const row of visibleCommentRows) {
-      const siblings = childrenByParent.get(row.parentCommentId);
-      if (siblings) siblings.push(row.id);
-      else childrenByParent.set(row.parentCommentId, [row.id]);
-    }
-    let commentCount = 0;
-    const stack = [...(childrenByParent.get(null) ?? [])];
-    const visited = new Set<string>();
-    while (stack.length > 0) {
-      const id = stack.pop();
-      if (id === undefined || visited.has(id)) continue;
-      visited.add(id);
-      commentCount += 1;
-      stack.push(...(childrenByParent.get(id) ?? []));
-    }
     const shareCount = Number(shareCountResult?.count ?? 0);
 
     // Get user interactions
