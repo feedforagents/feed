@@ -79,7 +79,11 @@ beforeAll(async () => {
       id,
       username: `tpc${id}`,
       displayName: 'Trending count fixture',
-      isTest: true,
+      // Ordinary accounts: this suite measures comment-count moderation,
+      // and the widget excludes test accounts (isTest / 'test-' id) from
+      // its candidate window, so a test-flagged author would hide the
+      // fixture posts entirely.
+      isTest: false,
       updatedAt: now,
       stewardId: id === viewerId ? `trending-${viewerId}` : null,
     }))

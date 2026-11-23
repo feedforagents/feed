@@ -28,6 +28,7 @@ import {
 import { invalidateWalletBalance } from '@/stores/walletBalanceStore';
 import type { DisplayPerpPosition } from '@/types/markets';
 import { fetchClosedPositionsSnapshot } from './closed-positions-pages';
+import { closedPredictionWon } from './closed-prediction-outcome';
 
 interface PositionsTabProps {
   userId: string;
@@ -202,9 +203,10 @@ export function PositionsTab({ userId }: PositionsTabProps) {
   const filteredClosedPredictions = useMemo(() => {
     let filtered = closedPredictions;
 
-    if (outcomeFilter === 'won') filtered = filtered.filter((p) => p.pnl >= 0);
+    if (outcomeFilter === 'won')
+      filtered = filtered.filter((p) => closedPredictionWon(p));
     else if (outcomeFilter === 'lost')
-      filtered = filtered.filter((p) => p.pnl < 0);
+      filtered = filtered.filter((p) => !closedPredictionWon(p));
 
     return filtered;
   }, [closedPredictions, outcomeFilter]);
@@ -802,7 +804,7 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                 // prediction
                 const position = item.data;
                 const pnl = position.pnl;
-                const won = pnl >= 0;
+                const won = closedPredictionWon(position);
                 const costBasis = position.shares * position.avgPrice;
                 const pnlPercent =
                   costBasis !== 0 ? (pnl / costBasis) * 100 : 0;
@@ -843,7 +845,7 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                         <div
                           className={cn(
                             'font-semibold text-sm',
-                            won ? 'text-emerald-500' : 'text-red-500'
+                            pnl >= 0 ? 'text-emerald-500' : 'text-red-500'
                           )}
                         >
                           {pnl >= 0 ? '+' : ''}
@@ -852,7 +854,7 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                         <div
                           className={cn(
                             'text-xs',
-                            won ? 'text-emerald-500' : 'text-red-500'
+                            pnl >= 0 ? 'text-emerald-500' : 'text-red-500'
                           )}
                         >
                           {pnl >= 0 ? '+' : ''}

@@ -20,6 +20,7 @@ import {
 import { db, rssFeedSources } from '@feed/db';
 import { FeedLLMClient, ParodyHeadlineGenerator } from '@feed/engine';
 import { generateSnowflakeId } from '@feed/shared';
+import * as embeddingClient from '../../../engine/src/llm/embedding-client';
 import { characterMappingService } from '../../../engine/src/services/character-mapping-service';
 
 // Skip tests if DATABASE_URL is not set
@@ -240,7 +241,14 @@ describeTests('ParodyHeadlineGenerator', () => {
 
     expect(headlines).toHaveLength(1);
 
+    // Exercise persistence and the unavailable-embedding fallback. Live
+    // inference is a separate check from this deterministic fixture.
+    const getEmbedding = spyOn(
+      embeddingClient,
+      'getEmbedding'
+    ).mockResolvedValue(null);
     const parodies = await generator.processHeadlines(headlines);
+    expect(getEmbedding).toHaveBeenCalledTimes(2);
 
     expect(parodies).toBeDefined();
     expect(Array.isArray(parodies)).toBe(true);

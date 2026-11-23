@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   type FeeSchemaState,
   inspectOrPrepareFeeSchema,
+  phase0Inspection,
   verifyChecks,
   verifyCommit,
 } from './staging-fee-schema';
@@ -88,6 +89,7 @@ export async function main() {
       ca,
       mode: 'prepare',
       allowStagingBaselineAdditive: true,
+      includePhase0: true,
       beforeWrite: async (state) => {
         verifyStagingAppRowAccess(state);
         await checkpoint();
@@ -115,7 +117,8 @@ export async function main() {
             database: app.database,
           })
         ),
-        historyEntries: state.historyLength,
+        historyEntries: state.historyLength + Number(state.fundingReady),
+        fundingLedgerReady: state.fundingReady,
         historyLineage:
           state.historyLength === 4 ? 'baseline-additive' : 'canonical',
         deferredRemovals: state.historyLength === 4 ? ['0001', '0002'] : [],
@@ -127,6 +130,7 @@ export async function main() {
         appRoleGrants: state.row.grants,
         appRoleFlags: state.row.roleFlags,
         rowSecurity: state.row.rowSecurity,
+        phase0Schema: phase0Inspection(object(state.row.phase0Tables)),
       })
     );
   } finally {

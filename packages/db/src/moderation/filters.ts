@@ -5,10 +5,11 @@
  * Used to exclude blocked or muted users from feeds and search results.
  */
 
+import { generateSnowflakeId } from '@feed/shared';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Transaction } from '../db';
-import { db } from '../db';
-import { userBlocks, userMutes } from '../schema';
+import { db, withTransaction } from '../db';
+import { follows, userBlocks, userMutes } from '../schema';
 
 /**
  * Get list of user IDs that the current user has blocked.
@@ -119,6 +120,31 @@ export async function acquireUserBlockPairLock(
   await tx.execute(
     sql`SELECT pg_advisory_xact_lock(hashtext(${'user-block-pair:' + first + ':' + second}))`
   );
+}
+
+/** Create an agent follow under the same pair lock used by block writers. */
+export async function followUserWithBlockCheck(
+  followerId: string,
+  followingId: string
+): Promise<boolean> {
+  return withTransaction(async (tx) => {
+    await acquireUserBlockPairLock(tx, followerId, followingId);
+    const [targetBlockedMe, iBlockedTarget] = await Promise.all([
+      hasBlocked(followingId, followerId, tx),
+      hasBlocked(followerId, followingId, tx),
+    ]);
+    if (targetBlockedMe || iBlockedTarget) {
+      throw new Error('Cannot follow this user');
+    }
+    const [created] = await tx
+      .insert(follows)
+      .values({ id: await generateSnowflakeId(), followerId, followingId })
+      .onConflictDoNothing({
+        target: [follows.followerId, follows.followingId],
+      })
+      .returning({ id: follows.id });
+    return Boolean(created);
+  });
 }
 
 /**
