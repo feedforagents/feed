@@ -11,10 +11,12 @@ import {
   inArray,
   isNotNull,
   isNull,
+  like,
   lt,
   lte,
   markets,
   not,
+  notExists,
   positions,
   posts,
   questions,
@@ -361,6 +363,25 @@ function pickLeadPosts(
     .slice(0, 1);
 }
 
+/**
+ * The test-author exclusion every sibling feed applies
+ * (DatabaseService.getRecentPosts excludes test authors in SQL, the
+ * stories pipeline does the same, and the following feed filters out
+ * test users): a post is hidden when its author's user row has
+ * isTest = true or its author id starts with 'test-'. Built fresh per query.
+ */
+function excludeTestAuthors() {
+  return and(
+    not(like(posts.authorId, 'test-%')),
+    notExists(
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+    )
+  );
+}
+
 async function loadBaseCandidates(): Promise<BaseForYouResult> {
   const now = new Date();
   const cutoff = new Date(now.getTime() - FEED_POST_WINDOW_MS);
@@ -384,6 +405,7 @@ async function loadBaseCandidates(): Promise<BaseForYouResult> {
     .where(
       and(
         isNull(posts.deletedAt),
+        excludeTestAuthors(),
         gte(posts.timestamp, cutoff),
         lte(posts.timestamp, now),
         isNull(posts.commentOnPostId),
@@ -786,7 +808,8 @@ async function loadBaseCandidates(): Promise<BaseForYouResult> {
     const questionNumber = Number.parseInt(storyKey, 10);
     const meta = questionMetaMap.get(questionNumber);
 
-    if (meta?.status === 'resolved') continue;
+    // Skip closed questions: resolved, or voided by an admin (cancelled).
+    if (meta?.status === 'resolved' || meta?.status === 'cancelled') continue;
     if (meta?.resolutionDate && meta.resolutionDate <= now) continue;
 
     const baseScore = calculateStoryScore(
@@ -829,6 +852,13 @@ async function loadBaseCandidates(): Promise<BaseForYouResult> {
   for (const [storyKey, storyPosts] of storyPostMap) {
     if (storyKey === GENERAL_STORY_KEY) continue;
     if (storyPosts.length <= 1) continue;
+
+    // Closed questions are skipped as stories above; their posts must not
+    // leak back into the feed as standalone cards either.
+    const spillMeta = questionMetaMap.get(Number.parseInt(storyKey, 10));
+    if (spillMeta?.status === 'resolved' || spillMeta?.status === 'cancelled')
+      continue;
+    if (spillMeta?.resolutionDate && spillMeta.resolutionDate <= now) continue;
 
     const sorted = [...storyPosts].sort((a, b) => {
       const aEng = a.likeCount + a.commentCount * 2 + a.shareCount * 3;
