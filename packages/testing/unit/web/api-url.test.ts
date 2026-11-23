@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 
 /**
  * Tests for the apiUrl() utility that resolves relative API paths
- * to absolute URLs for cross-origin mobile support.
+ * to absolute URLs for cross-origin requests.
  *
  * The function reads NEXT_PUBLIC_API_URL at module load time, so we
  * need to set the env var BEFORE importing. We use dynamic import
@@ -40,7 +40,7 @@ describe('apiUrl', () => {
     }
   });
 
-  describe('when NEXT_PUBLIC_API_URL is not set (web mode)', () => {
+  describe('when NEXT_PUBLIC_API_URL is not set', () => {
     it('returns relative paths unchanged', async () => {
       const apiUrl = await importApiUrl(undefined);
       expect(apiUrl('/api/posts')).toBe('/api/posts');
@@ -69,7 +69,7 @@ describe('apiUrl', () => {
     });
   });
 
-  describe('when NEXT_PUBLIC_API_URL is set (mobile mode)', () => {
+  describe('when NEXT_PUBLIC_API_URL is set', () => {
     it('prepends base URL to relative paths', async () => {
       const apiUrl = await importApiUrl('https://play.feed.fun');
       expect(apiUrl('/api/posts')).toBe('https://play.feed.fun/api/posts');
