@@ -91,6 +91,7 @@ import {
   inArray,
   isNull,
   lte,
+  notExists,
   posts,
   reactions,
   shares,
@@ -98,8 +99,10 @@ import {
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger, toISO } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
+import { loadViewerExcludedAuthorIds } from '../_lib/viewer-moderation';
 
 const QuerySchema = z.object({
   limit: z.coerce.number().min(1).max(100).default(50),
@@ -134,6 +137,22 @@ interface HotPost {
 interface HotPostWithUserStatus extends HotPost {
   isLiked: boolean;
   isShared: boolean;
+}
+
+/**
+ * Cached hot candidate: a HotPost plus the author of the post it reposts or
+ * quotes, so the per-viewer moderation filter can also drop reposts/quotes
+ * of excluded authors (the policy `filterStoriesForViewer` applies to the
+ * stories snapshot). Internal to the cache; stripped before responding.
+ */
+interface HotCandidate extends HotPost {
+  originalAuthorId: string | null;
+}
+
+/** Strip the internal moderation field before a candidate is responded. */
+function toHotPost(candidate: HotCandidate): HotPost {
+  const { originalAuthorId, ...post } = candidate;
+  return post;
 }
 
 // Age penalty: 0.5 points deducted per hour old
@@ -247,8 +266,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     limit: searchParams.get('limit') || '50',
   });
 
-  // Cache key includes limit but not user (engagement data is the same for all)
-  const cacheKey = `feed:hot:v1:${params.limit}`;
+  // The cache holds the shared scored candidate list (engagement data is
+  // the same for all). The limit and the per-viewer moderation filter are
+  // applied per request, after the snapshot is fetched.
+  const cacheKey = 'feed:hot:v2';
 
   const result = await getCacheOrFetch(
     cacheKey,
@@ -269,6 +290,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           fullContent: posts.fullContent,
           category: posts.category,
           imageUrl: posts.imageUrl,
+          originalPostId: posts.originalPostId,
         })
         .from(posts)
         .where(
@@ -278,7 +300,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             lte(posts.timestamp, now),
             // Exclude comments/replies - only top-level posts
             isNull(posts.commentOnPostId),
-            isNull(posts.parentCommentId)
+            isNull(posts.parentCommentId),
+            // Test authors are excluded in SQL before the candidate window,
+            // the same rule every sibling post list applies (main feed,
+            // following feed, single-tag page, grouped trending): accounts
+            // flagged isTest in the users table and author ids starting with
+            // 'test-'. Filtering after the fetch would let test posts crowd
+            // real posts out of the MAX_CANDIDATE_POSTS window and out of the
+            // public /feed/rss output this route also serves. Authors with no
+            // user row (NPC actors, organizations) are not test authors and
+            // stay visible.
+            notLike(posts.authorId, 'test-%'),
+            notExists(
+              db
+                .select({ id: users.id })
+                .from(users)
+                .where(
+                  and(eq(users.id, posts.authorId), eq(users.isTest, true))
+                )
+            )
           )
         )
         .orderBy(desc(posts.timestamp))
@@ -287,7 +327,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       if (recentPosts.length === 0) {
         return {
           posts: [],
-          postIds: [],
         };
       }
 
@@ -349,6 +388,26 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         .where(inArray(users.id, authorIds));
 
       const userMap = new Map(authorUsers.map((u) => [u.id, u]));
+
+      // Resolve the authors of reposted/quoted originals so the per-viewer
+      // moderation filter can drop reposts of excluded authors as well.
+      const originalIds = [
+        ...new Set(
+          recentPosts
+            .map((p) => p.originalPostId)
+            .filter((id): id is string => Boolean(id))
+        ),
+      ];
+      const originalAuthorMap = new Map<string, string>();
+      if (originalIds.length > 0) {
+        const originals = await db
+          .select({ id: posts.id, authorId: posts.authorId })
+          .from(posts)
+          .where(inArray(posts.id, originalIds));
+        for (const original of originals) {
+          originalAuthorMap.set(original.id, original.authorId);
+        }
+      }
 
       // Calculate hot score for each post and format
       const scoredPosts = recentPosts.map((post) => {
@@ -412,18 +471,18 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           commentCount,
           shareCount,
           hotScore: Math.round(hotScore * 100) / 100, // Round to 2 decimal places
+          originalAuthorId: post.originalPostId
+            ? (originalAuthorMap.get(post.originalPostId) ?? null)
+            : null,
         };
       });
 
-      // Sort by hot score descending
+      // Sort by hot score descending. The per-viewer moderation filter and
+      // the limit are applied per request, after this shared snapshot.
       scoredPosts.sort((a, b) => b.hotScore - a.hotScore);
 
-      // Take top N
-      const topPosts = scoredPosts.slice(0, params.limit);
-
       return {
-        posts: topPosts,
-        postIds: topPosts.map((p) => p.id),
+        posts: scoredPosts,
       };
     },
     {
@@ -432,20 +491,41 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     }
   );
 
+  // The snapshot is shared by all viewers: apply this viewer's block/mute
+  // policy before paging, the same policy the stories feed applies with
+  // filterStoriesForViewer and the for-you feed applies before paging.
+  // Anonymous requests keep the unfiltered public snapshot.
+  const excludedAuthorIds = user?.userId
+    ? await loadViewerExcludedAuthorIds(user.userId)
+    : new Set<string>();
+  const visibleCandidates =
+    excludedAuthorIds.size > 0
+      ? result.posts.filter(
+          (post) =>
+            !excludedAuthorIds.has(post.authorId) &&
+            !(
+              post.originalAuthorId &&
+              excludedAuthorIds.has(post.originalAuthorId)
+            )
+        )
+      : result.posts;
+  const topPosts = visibleCandidates.slice(0, params.limit).map(toHotPost);
+  const topPostIds = topPosts.map((p) => p.id);
+
   // If user is authenticated, add their like/share status
   // NOTE: User-specific data (isLiked/isShared) bypasses cache on every authenticated request.
   // For high-traffic scenarios, consider: per-user cache with shorter TTL, client-side
   // optimistic updates, or bloom filter pre-filtering. Current approach is fine for moderate traffic.
-  let postsWithUserStatus: HotPost[] | HotPostWithUserStatus[] = result.posts;
+  let postsWithUserStatus: HotPost[] | HotPostWithUserStatus[] = topPosts;
 
-  if (user?.userId && result.postIds.length > 0) {
+  if (user?.userId && topPostIds.length > 0) {
     const [userLikes, userShares] = await Promise.all([
       db
         .select({ postId: reactions.postId })
         .from(reactions)
         .where(
           and(
-            inArray(reactions.postId, result.postIds),
+            inArray(reactions.postId, topPostIds),
             eq(reactions.userId, user.userId),
             eq(reactions.type, 'like')
           )
@@ -455,7 +535,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         .from(shares)
         .where(
           and(
-            inArray(shares.postId, result.postIds),
+            inArray(shares.postId, topPostIds),
             eq(shares.userId, user.userId)
           )
         ),
@@ -464,7 +544,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     const likedPostIds = new Set(userLikes.map((l) => l.postId));
     const sharedPostIds = new Set(userShares.map((s) => s.postId));
 
-    postsWithUserStatus = result.posts.map((post: HotPost) => ({
+    postsWithUserStatus = topPosts.map((post: HotPost) => ({
       ...post,
       isLiked: likedPostIds.has(post.id),
       isShared: sharedPostIds.has(post.id),

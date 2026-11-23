@@ -204,6 +204,35 @@ interface ActiveMarket {
   affiliatedActorIds: string[] | null;
 }
 
+async function printHistory(
+  db: ReturnType<typeof getRawDrizzle>,
+  days: number
+): Promise<void> {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const resolved = await db
+    .select({ category: timeframedMarkets.category })
+    .from(timeframedMarkets)
+    .where(
+      and(
+        eq(timeframedMarkets.isResolved, true),
+        gte(timeframedMarkets.resolvedAt, since)
+      )
+    );
+
+  console.log(
+    `\nHistory (last ${days} days): ${resolved.length} resolved markets`
+  );
+  const histCats = new Map<string, number>();
+  for (const r of resolved) {
+    histCats.set(r.category, (histCats.get(r.category) ?? 0) + 1);
+  }
+  for (const [cat, count] of Array.from(histCats.entries()).sort(
+    (a, b) => b[1] - a[1]
+  )) {
+    console.log(`  ${cat}: ${count}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -245,7 +274,11 @@ async function main() {
   console.log(`Active Markets: ${total}\n`);
 
   if (total === 0) {
-    console.log('No active markets found. Nothing to report.');
+    if (historyDays > 0) {
+      await printHistory(db, historyDays);
+    } else {
+      console.log('No active markets found. Nothing to report.');
+    }
     return;
   }
 
@@ -424,36 +457,8 @@ async function main() {
     }
   }
 
-  // ----- History trend (if requested) -----
   if (historyDays > 0) {
-    const since = new Date(Date.now() - historyDays * 24 * 60 * 60 * 1000);
-    const resolved = await db
-      .select({
-        id: timeframedMarkets.id,
-        category: timeframedMarkets.category,
-        topicKey: timeframedMarkets.topicKey,
-        resolvedAt: timeframedMarkets.resolvedAt,
-      })
-      .from(timeframedMarkets)
-      .where(
-        and(
-          eq(timeframedMarkets.isResolved, true),
-          gte(timeframedMarkets.resolvedAt, since)
-        )
-      );
-
-    console.log(
-      `\nHistory (last ${historyDays} days): ${resolved.length} resolved markets`
-    );
-    const histCats = new Map<string, number>();
-    for (const r of resolved) {
-      histCats.set(r.category, (histCats.get(r.category) ?? 0) + 1);
-    }
-    for (const [cat, count] of Array.from(histCats.entries()).sort(
-      (a, b) => b[1] - a[1]
-    )) {
-      console.log(`  ${cat}: ${count}`);
-    }
+    await printHistory(db, historyDays);
   }
 
   console.log(`\n${ok('Report complete.')}\n`);

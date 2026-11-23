@@ -5,10 +5,10 @@
  * Similar to X/Twitter trending topics
  */
 
-import { db, desc, trendingTags } from '@feed/db';
 import { logger } from '@feed/shared';
 import {
   getCurrentTrendingTags,
+  getLatestTrendingCalculation,
   getRelatedTags,
   getTagStatistics,
   storeTrendingTags,
@@ -21,11 +21,7 @@ const TRENDING_WINDOW_DAYS = 7; // Look at last 7 days
  * Check if we should recalculate trending tags
  */
 export async function shouldRecalculateTrending(): Promise<boolean> {
-  const [lastCalculation] = await db
-    .select({ calculatedAt: trendingTags.calculatedAt })
-    .from(trendingTags)
-    .orderBy(desc(trendingTags.calculatedAt))
-    .limit(1);
+  const lastCalculation = await getLatestTrendingCalculation();
 
   if (!lastCalculation) {
     return true; // Never calculated before
@@ -98,15 +94,6 @@ export async function calculateTrendingTags(): Promise<void> {
 
   // Get tag statistics
   const tagStats = await getTagStatistics(windowStart, windowEnd);
-
-  if (tagStats.length === 0) {
-    logger.info(
-      'No tags to calculate trending for',
-      undefined,
-      'TrendingCalculationService'
-    );
-    return;
-  }
 
   logger.debug(
     'Retrieved tag statistics',

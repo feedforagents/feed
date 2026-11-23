@@ -1,3 +1,4 @@
+import { scheduledInferenceFetch } from '@feed/db';
 import { getSurplusConfig } from '@feed/shared';
 import { z } from 'zod';
 
@@ -35,7 +36,7 @@ export async function generateSurplusImage(options: {
   const model = options.reference
     ? process.env.SURPLUS_IMAGE_EDIT_MODEL || 'nano-banana-2-edit'
     : process.env.SURPLUS_IMAGE_MODEL || 'venice-z-image-turbo';
-  const response = await fetch(
+  const response = await scheduledInferenceFetch(
     `${config.baseURL}/images/${options.reference ? 'edits' : 'generations'}`,
     {
       method: 'POST',

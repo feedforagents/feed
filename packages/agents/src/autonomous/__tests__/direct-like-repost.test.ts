@@ -173,6 +173,7 @@ mock.module('@feed/engine', () => ({
   generateTagsFromPost: mock(async () => []),
   invalidateAfterPredictionTrade: mock(async () => undefined),
   PredictionPricing: {},
+  createNpcPerpSettlement: mock(() => ({})),
   createNpcWalletAdapter: mock(() => ({})),
   createPerpPriceImpactPort: mock(() => ({})),
   createPerpSettlement: mock(() => ({})),
