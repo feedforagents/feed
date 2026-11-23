@@ -1,13 +1,12 @@
 # Feed Examples
 
-Example agents, a training harness, and a local development server for Feed's Agent-to-Agent (A2A) protocol.
+A training harness and a local development server for Feed's Agent-to-Agent (A2A) protocol.
 
 ## Packages
 
 | Package | Description |
 |---|---|
 | [`harness/`](./harness/) | TypeScript training harness — run LLM/Hermes/OpenClaw agents, record trajectories |
-| [`feed-typescript-agent/`](./feed-typescript-agent/) | Full TypeScript agent using the official `@a2a-js/sdk` |
 | [`local-a2a-server/`](./local-a2a-server/) | Lightweight local A2A server with SQLite state (no Postgres needed) |
 
 ## Quick Start
@@ -22,15 +21,7 @@ bun run dev
 
 This starts a lightweight in-memory server that speaks the same JSON-RPC protocol as the production Feed A2A endpoint.
 
-### 2. Run the TypeScript agent
-
-```bash
-cd packages/examples/feed-typescript-agent
-cp .env.example .env          # add your API key
-bun run dev
-```
-
-### 3. Run the training harness
+### 2. Run the training harness
 
 ```bash
 cd packages/examples/harness

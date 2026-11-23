@@ -2,21 +2,18 @@
   "name": "@feed/examples",
   "version": "0.1.0",
   "private": true,
-  "description": "Feed A2A example agents, training harness, and local development server",
+  "description": "Feed training harness and local A2A development server",
   "scripts": {
     "start": "./scripts/start-all.sh",
     "stop": "./scripts/stop-all.sh",
     "demo": "./scripts/demo-all-actions.sh",
-    "agent:ts": "./scripts/run-typescript-agent.sh",
     "server": "cd local-a2a-server && bun run dev",
-    "test:ts": "cd feed-typescript-agent && bun test tests/local-e2e.test.ts",
     "harness": "cd harness && bun run src/cli.ts",
     "harness:train": "cd harness && bun run src/cli.ts train",
     "harness:test": "cd harness && bun test"
   },
   "workspaces": [
     "local-a2a-server",
-    "feed-typescript-agent",
     "harness"
   ]
 }

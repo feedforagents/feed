@@ -204,7 +204,7 @@ Cloudflare Workers observability provides deployment logs. PostHog remains the p
 | `packages/pack-default` | Default NPC and organization content pack (actors, orgs) |
 | `packages/sim` | Standalone simulation CLI |
 | `packages/testing` | Shared test utilities, integration helpers |
-| `packages/examples` | TypeScript example agent, local A2A server, and training harness |
+| `packages/examples` | Local A2A server and training harness |
 
 ---
 
