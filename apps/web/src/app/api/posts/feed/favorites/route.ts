@@ -99,6 +99,7 @@ import {
   inArray,
   isNull,
   lte,
+  postFeedVisibilityConditions,
   posts,
   reactions,
   shares,
@@ -192,7 +193,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         and(
           inArray(posts.authorId, favoritedUserIds),
           isNull(posts.deletedAt),
-          lte(posts.timestamp, now)
+          lte(posts.timestamp, now),
+          // A simple repost is only its original: when the viewer blocked
+          // or muted the original author, the repost must not surface
+          // here. The main feed applies the same rule in SQL before the
+          // page is cut (postFeedVisibilityConditions,
+          // excludeModeratedReposts); quotes keep their row.
+          ...postFeedVisibilityConditions({
+            excludedAuthorIds: [...excludedAuthorIds],
+            excludeDeadReposts: true,
+            excludeModeratedReposts: true,
+          })
         )
       )
       // Order by id as a tiebreaker: posts can share a createdAt (it
@@ -218,7 +229,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         and(
           inArray(posts.authorId, favoritedUserIds),
           isNull(posts.deletedAt),
-          lte(posts.timestamp, now)
+          lte(posts.timestamp, now),
+          // A simple repost is only its original: when the viewer blocked
+          // or muted the original author, the repost must not surface
+          // here. The main feed applies the same rule in SQL before the
+          // page is cut (postFeedVisibilityConditions,
+          // excludeModeratedReposts); quotes keep their row.
+          ...postFeedVisibilityConditions({
+            excludedAuthorIds: [...excludedAuthorIds],
+            excludeDeadReposts: true,
+            excludeModeratedReposts: true,
+          })
         )
       );
     const totalCount = countResult[0]?.value ?? 0;
