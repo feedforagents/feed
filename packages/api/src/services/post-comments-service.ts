@@ -14,25 +14,18 @@ import {
   sql,
 } from '@feed/db';
 
-/**
- * Select one flat page of the comment tree visible on the web. A reply can
- * enter the page only through a visible root and a continuous chain of
- * visible parents on this post.
- */
-export async function listVisiblePostComments(
-  postId: string,
-  viewerId: string | undefined,
-  limit: number,
-  direction: 'asc' | 'desc'
-) {
-  const exclusions = viewerId
-    ? await Promise.all([
-        getBlockedUserIds(viewerId),
-        getMutedUserIds(viewerId),
-        getBlockedByUserIds(viewerId),
-      ])
-    : [];
-  const excludedIds = [...new Set(exclusions.flat())];
+async function excludedCommentAuthors(viewerId: string | undefined) {
+  if (!viewerId) return [];
+  const exclusions = await Promise.all([
+    getBlockedUserIds(viewerId),
+    getMutedUserIds(viewerId),
+    getBlockedByUserIds(viewerId),
+  ]);
+  return [...new Set(exclusions.flat())];
+}
+
+// A comment is reachable only through visible parents rooted on this post.
+function reachablePostComments(postId: string, excludedIds: string[]) {
   const eligible = and(
     eq(comments.postId, postId),
     isNull(comments.deletedAt),
@@ -40,12 +33,9 @@ export async function listVisiblePostComments(
       ? notInArray(comments.authorId, excludedIds)
       : undefined
   );
-  const order = direction === 'asc' ? sql`ASC` : sql`DESC`;
-  const orderBy = direction === 'asc' ? asc : desc;
-
-  // Materialize this post's eligible rows so the recursive join never scans
-  // unrelated comments. Load content only for the selected page.
-  const pageIds = sql`(
+  // Materialize the post's eligible rows once so a wide thread cannot make
+  // the recursive join traverse the global parent-comment index.
+  return sql`
     WITH RECURSIVE eligible_comments AS MATERIALIZED (
       SELECT ${comments.id}, ${comments.createdAt}, ${comments.parentCommentId}
       FROM ${comments}
@@ -60,6 +50,23 @@ export async function listVisiblePostComments(
       FROM eligible_comments child
       JOIN visible_comments parent ON child."parentCommentId" = parent.id
     )
+  `;
+}
+
+/** Select one flat page of the comment tree visible on the web. */
+export async function listVisiblePostComments(
+  postId: string,
+  viewerId: string | undefined,
+  limit: number,
+  direction: 'asc' | 'desc'
+) {
+  const excludedIds = await excludedCommentAuthors(viewerId);
+  const order = direction === 'asc' ? sql`ASC` : sql`DESC`;
+  const orderBy = direction === 'asc' ? asc : desc;
+
+  // Traverse only IDs and timestamps. Load content only for the selected page.
+  const pageIds = sql`(
+    ${reachablePostComments(postId, excludedIds)}
     SELECT id FROM visible_comments
     ORDER BY "createdAt" ${order}, id ${order}
     LIMIT ${limit}
@@ -76,4 +83,21 @@ export async function listVisiblePostComments(
     .from(comments)
     .where(and(eq(comments.postId, postId), inArray(comments.id, pageIds)))
     .orderBy(orderBy(comments.createdAt), orderBy(comments.id));
+}
+
+/** Count the same visible tree as the comment list, without returning its rows. */
+export async function countVisiblePostComments(
+  postId: string,
+  viewerId: string,
+  anonymousCount: number
+): Promise<number> {
+  const excludedIds = await excludedCommentAuthors(viewerId);
+  // The public post detail already counted all branches this viewer can see.
+  if (excludedIds.length === 0) return anonymousCount;
+
+  const [result] = await db.execute<{ count: string }>(sql`
+    ${reachablePostComments(postId, excludedIds)}
+    SELECT count(*)::text AS count FROM visible_comments
+  `);
+  return Number(result?.count ?? 0);
 }

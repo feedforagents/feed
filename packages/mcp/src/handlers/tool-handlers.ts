@@ -40,6 +40,7 @@ import {
   acceptGroupInvite,
   BusinessLogicError,
   checkRateLimitAsync,
+  countVisiblePostComments,
   declineGroupInvite,
   listVisiblePostComments,
   logAdminModify,
@@ -1394,13 +1395,29 @@ export async function executeGetTradeHistory(
  * Execute get_post tool
  */
 export async function executeGetPost(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetPostArgs
 ): Promise<GetPostResult> {
   const apiBaseUrl = getAPIBaseUrl();
-  return safeFetchRequired<GetPostResult>(
+  const result = await safeFetchRequired<GetPostResult>(
     new URL(`${apiBaseUrl}/posts/${args.postId}`)
   );
+
+  const { data } = result;
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    Array.isArray(data) ||
+    typeof data.commentCount !== 'number'
+  ) {
+    return result;
+  }
+  const commentCount = await countVisiblePostComments(
+    args.postId,
+    agent.userId,
+    data.commentCount
+  );
+  return { ...result, data: { ...data, commentCount } };
 }
 
 /**
