@@ -2051,9 +2051,17 @@ export async function executeGetFollowing(
  * Execute search_users tool
  */
 export async function executeSearchUsers(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: SearchUsersArgs
 ): Promise<SearchUsersResult> {
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+
+  const excludedUserIds = [...blockedIds, ...mutedIds, ...blockedByIds];
+
   const usersList = await db.user.findMany({
     where: {
       // Match the web people search (GET /api/users/search) and the A2A
@@ -2069,6 +2077,7 @@ export async function executeSearchUsers(
         { username: { contains: args.query, mode: 'insensitive' } },
         { displayName: { contains: args.query, mode: 'insensitive' } },
       ],
+      ...(excludedUserIds.length > 0 ? { id: { notIn: excludedUserIds } } : {}),
     },
     take: args.limit || 20,
     select: {
