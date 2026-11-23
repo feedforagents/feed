@@ -17,14 +17,12 @@ import { z } from 'zod';
 import type {
   AcceptGroupInviteArgs,
   AppealBanArgs,
-  AppealBanWithEscrowArgs,
   BlockUserArgs,
   BuySharesArgs,
   CheckBlockStatusArgs,
   CheckMuteStatusArgs,
   ClosePositionArgs,
   CreateCommentArgs,
-  CreateEscrowPaymentArgs,
   CreateGroupArgs,
   CreatePostArgs,
   DeclineGroupInviteArgs,
@@ -70,7 +68,6 @@ import type {
   LeaveChatArgs,
   LikeCommentArgs,
   LikePostArgs,
-  ListEscrowPaymentsArgs,
   MarkNotificationsReadArgs,
   MuteUserArgs,
   OpenPositionArgs,
@@ -78,7 +75,6 @@ import type {
   PaymentRequestArgs,
   PlaceBetArgs,
   QueryFeedArgs,
-  RefundEscrowPaymentArgs,
   ReportPostArgs,
   ReportUserArgs,
   ResolveMarketArgs,
@@ -93,7 +89,6 @@ import type {
   UnlikePostArgs,
   UnmuteUserArgs,
   UpdateProfileArgs,
-  VerifyEscrowPaymentArgs,
 } from '../types/mcp';
 
 const GetMarketsArgsSchema = z.object({
@@ -462,45 +457,10 @@ const CheckMuteStatusArgsSchema = z.object({
   userId: z.string().min(1),
 }) satisfies z.ZodType<CheckMuteStatusArgs>;
 
-// Moderation Escrow - Validation Schemas
-const CreateEscrowPaymentArgsSchema = z.object({
-  recipientId: z.string().min(1),
-  amountUSD: z.number().positive(),
-  reason: z.string().optional(),
-  recipientWalletAddress: z.string().min(1),
-}) satisfies z.ZodType<CreateEscrowPaymentArgs>;
-
-const VerifyEscrowPaymentArgsSchema = z.object({
-  escrowId: z.string().min(1),
-  txHash: z.string().min(1),
-  fromAddress: z.string().min(1),
-  toAddress: z.string().min(1),
-  amount: z.string().min(1),
-}) satisfies z.ZodType<VerifyEscrowPaymentArgs>;
-
-const RefundEscrowPaymentArgsSchema = z.object({
-  escrowId: z.string().min(1),
-  refundTxHash: z.string().min(1),
-  reason: z.string().optional(),
-}) satisfies z.ZodType<RefundEscrowPaymentArgs>;
-
-const ListEscrowPaymentsArgsSchema = z.object({
-  recipientId: z.string().optional(),
-  adminId: z.string().optional(),
-  status: z.enum(['pending', 'paid', 'refunded', 'expired']).optional(),
-  limit: z.number().int().positive().max(100).optional().default(50),
-  offset: z.number().int().nonnegative().optional().default(0),
-}) satisfies z.ZodType<ListEscrowPaymentsArgs>;
-
 // Ban Appeals - Validation Schemas
 const AppealBanArgsSchema = z.object({
   reason: z.string().min(10).max(2000),
 }) satisfies z.ZodType<AppealBanArgs>;
-
-const AppealBanWithEscrowArgsSchema = z.object({
-  reason: z.string().min(10).max(2000),
-  escrowPaymentTxHash: z.string().min(1),
-}) satisfies z.ZodType<AppealBanWithEscrowArgs>;
 
 // Favorites - Validation Schemas
 const FavoriteProfileArgsSchema = z.object({
@@ -811,40 +771,9 @@ export function validateCheckMuteStatusArgs(
   return CheckMuteStatusArgsSchema.parse(args);
 }
 
-// Validation Functions - Moderation Escrow
-export function validateCreateEscrowPaymentArgs(
-  args: unknown
-): CreateEscrowPaymentArgs {
-  return CreateEscrowPaymentArgsSchema.parse(args);
-}
-
-export function validateVerifyEscrowPaymentArgs(
-  args: unknown
-): VerifyEscrowPaymentArgs {
-  return VerifyEscrowPaymentArgsSchema.parse(args);
-}
-
-export function validateRefundEscrowPaymentArgs(
-  args: unknown
-): RefundEscrowPaymentArgs {
-  return RefundEscrowPaymentArgsSchema.parse(args);
-}
-
-export function validateListEscrowPaymentsArgs(
-  args: unknown
-): ListEscrowPaymentsArgs {
-  return ListEscrowPaymentsArgsSchema.parse(args);
-}
-
 // Validation Functions - Ban Appeals
 export function validateAppealBanArgs(args: unknown): AppealBanArgs {
   return AppealBanArgsSchema.parse(args);
-}
-
-export function validateAppealBanWithEscrowArgs(
-  args: unknown
-): AppealBanWithEscrowArgs {
-  return AppealBanWithEscrowArgsSchema.parse(args);
 }
 
 // Validation Functions - Favorites

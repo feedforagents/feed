@@ -30,13 +30,6 @@
  */
 
 import {
-  handleAppealBanWithEscrow,
-  handleCreateEscrowPayment,
-  handleListEscrowPayments,
-  handleRefundEscrowPayment,
-  handleVerifyEscrowPayment,
-} from '@feed/a2a';
-import {
   acceptGroupInvite,
   BusinessLogicError,
   broadcastToChannel,
@@ -377,8 +370,6 @@ import type {
   AcceptGroupInviteResult,
   AppealBanArgs,
   AppealBanResult,
-  AppealBanWithEscrowArgs,
-  AppealBanWithEscrowResult,
   AuthenticatedAgent,
   BlockUserArgs,
   BlockUserResult,
@@ -392,8 +383,6 @@ import type {
   ClosePositionResult,
   CreateCommentArgs,
   CreateCommentResult,
-  CreateEscrowPaymentArgs,
-  CreateEscrowPaymentResult,
   CreateGroupArgs,
   CreateGroupResult,
   CreatePostArgs,
@@ -477,16 +466,12 @@ import type {
   GetUserStatsResult,
   GetUserWalletArgs,
   GetUserWalletResult,
-  JsonRpcParams,
-  JsonRpcRequest,
   LeaveChatArgs,
   LeaveChatResult,
   LikeCommentArgs,
   LikeCommentResult,
   LikePostArgs,
   LikePostResult,
-  ListEscrowPaymentsArgs,
-  ListEscrowPaymentsResult,
   MarkNotificationsReadArgs,
   MarkNotificationsReadResult,
   MCPToolResult,
@@ -502,8 +487,6 @@ import type {
   PlaceBetResult,
   QueryFeedArgs,
   QueryFeedResult,
-  RefundEscrowPaymentArgs,
-  RefundEscrowPaymentResult,
   ReportPostArgs,
   ReportPostResult,
   ReportUserArgs,
@@ -532,20 +515,16 @@ import type {
   UnmuteUserResult,
   UpdateProfileArgs,
   UpdateProfileResult,
-  VerifyEscrowPaymentArgs,
-  VerifyEscrowPaymentResult,
 } from '../types/mcp';
 import {
   validateAcceptGroupInviteArgs,
   validateAppealBanArgs,
-  validateAppealBanWithEscrowArgs,
   validateBlockUserArgs,
   validateBuySharesArgs,
   validateCheckBlockStatusArgs,
   validateCheckMuteStatusArgs,
   validateClosePositionArgs,
   validateCreateCommentArgs,
-  validateCreateEscrowPaymentArgs,
   validateCreateGroupArgs,
   validateCreatePostArgs,
   validateDeclineGroupInviteArgs,
@@ -591,7 +570,6 @@ import {
   validateLeaveChatArgs,
   validateLikeCommentArgs,
   validateLikePostArgs,
-  validateListEscrowPaymentsArgs,
   validateMarkNotificationsReadArgs,
   validateMuteUserArgs,
   validateOpenPositionArgs,
@@ -599,7 +577,6 @@ import {
   validatePaymentRequestArgs,
   validatePlaceBetArgs,
   validateQueryFeedArgs,
-  validateRefundEscrowPaymentArgs,
   validateReportPostArgs,
   validateReportUserArgs,
   validateResolveMarketArgs,
@@ -614,7 +591,6 @@ import {
   validateUnlikePostArgs,
   validateUnmuteUserArgs,
   validateUpdateProfileArgs,
-  validateVerifyEscrowPaymentArgs,
 } from '../utils/tool-args-validation';
 
 /**
@@ -3623,123 +3599,6 @@ export async function executeCheckMuteStatus(
 }
 
 // ============================================================================
-// Moderation Escrow - Handlers
-// ============================================================================
-
-/**
- * Execute create_escrow_payment tool
- */
-export async function executeCreateEscrowPayment(
-  agent: AuthenticatedAgent,
-  args: CreateEscrowPaymentArgs
-): Promise<CreateEscrowPaymentResult> {
-  const request: JsonRpcRequest = {
-    jsonrpc: '2.0',
-    method: 'a2a.createEscrowPayment',
-    params: {
-      recipientId: args.recipientId,
-      amountUSD: args.amountUSD,
-      reason: args.reason,
-      recipientWalletAddress: args.recipientWalletAddress,
-    } as JsonRpcParams,
-    id: 1,
-  };
-  const response = await handleCreateEscrowPayment(agent.agentId, request);
-  if (response.error) {
-    throw new Error(response.error.message);
-  }
-  if (!response.result) {
-    throw new Error('No result in response');
-  }
-  return response.result as unknown as CreateEscrowPaymentResult;
-}
-
-/**
- * Execute verify_escrow_payment tool
- */
-export async function executeVerifyEscrowPayment(
-  agent: AuthenticatedAgent,
-  args: VerifyEscrowPaymentArgs
-): Promise<VerifyEscrowPaymentResult> {
-  const request: JsonRpcRequest = {
-    jsonrpc: '2.0',
-    method: 'a2a.verifyEscrowPayment',
-    params: {
-      escrowId: args.escrowId,
-      txHash: args.txHash,
-      fromAddress: args.fromAddress,
-      toAddress: args.toAddress,
-      amount: args.amount,
-    } as JsonRpcParams,
-    id: 1,
-  };
-  const response = await handleVerifyEscrowPayment(agent.agentId, request);
-  if (response.error) {
-    throw new Error(response.error.message);
-  }
-  if (!response.result) {
-    throw new Error('No result in response');
-  }
-  return response.result as unknown as VerifyEscrowPaymentResult;
-}
-
-/**
- * Execute refund_escrow_payment tool
- */
-export async function executeRefundEscrowPayment(
-  agent: AuthenticatedAgent,
-  args: RefundEscrowPaymentArgs
-): Promise<RefundEscrowPaymentResult> {
-  const request: JsonRpcRequest = {
-    jsonrpc: '2.0',
-    method: 'a2a.refundEscrowPayment',
-    params: {
-      escrowId: args.escrowId,
-      refundTxHash: args.refundTxHash,
-      reason: args.reason,
-    } as JsonRpcParams,
-    id: 1,
-  };
-  const response = await handleRefundEscrowPayment(agent.agentId, request);
-  if (response.error) {
-    throw new Error(response.error.message);
-  }
-  if (!response.result) {
-    throw new Error('No result in response');
-  }
-  return response.result as unknown as RefundEscrowPaymentResult;
-}
-
-/**
- * Execute list_escrow_payments tool
- */
-export async function executeListEscrowPayments(
-  agent: AuthenticatedAgent,
-  args: ListEscrowPaymentsArgs
-): Promise<ListEscrowPaymentsResult> {
-  const request: JsonRpcRequest = {
-    jsonrpc: '2.0',
-    method: 'a2a.listEscrowPayments',
-    params: {
-      recipientId: args.recipientId,
-      adminId: args.adminId,
-      status: args.status,
-      limit: args.limit,
-      offset: args.offset,
-    } as JsonRpcParams,
-    id: 1,
-  };
-  const response = await handleListEscrowPayments(agent.agentId, request);
-  if (response.error) {
-    throw new Error(response.error.message);
-  }
-  if (!response.result) {
-    throw new Error('No result in response');
-  }
-  return response.result as unknown as ListEscrowPaymentsResult;
-}
-
-// ============================================================================
 // Ban Appeals - Handlers
 // ============================================================================
 
@@ -3803,32 +3662,6 @@ export async function executeAppealBan(
       'Appeal submitted for strict review. Please note: full AI evaluation is only available via the web interface.',
     appealStatus: 'strict_review',
   };
-}
-
-/**
- * Execute appeal_ban_with_escrow tool
- */
-export async function executeAppealBanWithEscrow(
-  agent: AuthenticatedAgent,
-  args: AppealBanWithEscrowArgs
-): Promise<AppealBanWithEscrowResult> {
-  const request: JsonRpcRequest = {
-    jsonrpc: '2.0',
-    method: 'a2a.appealBanWithEscrow',
-    params: {
-      reason: args.reason,
-      escrowPaymentTxHash: args.escrowPaymentTxHash,
-    } as JsonRpcParams,
-    id: 1,
-  };
-  const response = await handleAppealBanWithEscrow(agent.agentId, request);
-  if (response.error) {
-    throw new Error(response.error.message);
-  }
-  if (!response.result) {
-    throw new Error('No result in response');
-  }
-  return response.result as unknown as AppealBanWithEscrowResult;
 }
 
 // ============================================================================
@@ -4305,31 +4138,10 @@ export async function executeTool(
       const validatedArgs = validateCheckMuteStatusArgs(args);
       return await executeCheckMuteStatus(agent, validatedArgs);
     }
-    // Moderation Escrow
-    case 'create_escrow_payment': {
-      const validatedArgs = validateCreateEscrowPaymentArgs(args);
-      return await executeCreateEscrowPayment(agent, validatedArgs);
-    }
-    case 'verify_escrow_payment': {
-      const validatedArgs = validateVerifyEscrowPaymentArgs(args);
-      return await executeVerifyEscrowPayment(agent, validatedArgs);
-    }
-    case 'refund_escrow_payment': {
-      const validatedArgs = validateRefundEscrowPaymentArgs(args);
-      return await executeRefundEscrowPayment(agent, validatedArgs);
-    }
-    case 'list_escrow_payments': {
-      const validatedArgs = validateListEscrowPaymentsArgs(args);
-      return await executeListEscrowPayments(agent, validatedArgs);
-    }
     // Ban Appeals
     case 'appeal_ban': {
       const validatedArgs = validateAppealBanArgs(args);
       return await executeAppealBan(agent, validatedArgs);
-    }
-    case 'appeal_ban_with_escrow': {
-      const validatedArgs = validateAppealBanWithEscrowArgs(args);
-      return await executeAppealBanWithEscrow(agent, validatedArgs);
     }
     // Favorites
     case 'favorite_profile': {

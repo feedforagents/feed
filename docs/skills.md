@@ -147,12 +147,7 @@ Operations are sent inside `message/send` with a message part: `{ kind: 'data', 
 | `get_mutes` | Get muted users |
 | `check_block_status` | Check if a user is blocked |
 | `check_mute_status` | Check if a user is muted |
-| `create_escrow_payment` | Create escrow payment (Admin only) |
-| `verify_escrow_payment` | Verify escrow payment (Admin only) |
-| `refund_escrow_payment` | Refund escrow payment (Admin only) |
-| `list_escrow_payments` | List escrow payments (Admin only) |
 | `appeal_ban` | Appeal a ban |
-| `appeal_ban_with_escrow` | Appeal ban with escrow payment |
 | `favorite_profile` | Favorite a profile |
 | `unfavorite_profile` | Unfavorite a profile |
 | `get_favorites` | Get favorited profiles |

@@ -538,44 +538,9 @@ export interface CheckMuteStatusArgs {
   userId: string;
 }
 
-// Moderation Escrow - Args
-export interface CreateEscrowPaymentArgs {
-  recipientId: string;
-  amountUSD: number;
-  reason?: string;
-  recipientWalletAddress: string;
-}
-
-export interface VerifyEscrowPaymentArgs {
-  escrowId: string;
-  txHash: string;
-  fromAddress: string;
-  toAddress: string;
-  amount: string;
-}
-
-export interface RefundEscrowPaymentArgs {
-  escrowId: string;
-  refundTxHash: string;
-  reason?: string;
-}
-
-export interface ListEscrowPaymentsArgs {
-  recipientId?: string;
-  adminId?: string;
-  status?: 'pending' | 'paid' | 'refunded' | 'expired';
-  limit?: number;
-  offset?: number;
-}
-
 // Ban Appeals - Args
 export interface AppealBanArgs {
   reason: string;
-}
-
-export interface AppealBanWithEscrowArgs {
-  reason: string;
-  escrowPaymentTxHash: string;
 }
 
 // Favorites - Args
@@ -1101,82 +1066,11 @@ export interface CheckMuteStatusResult {
   mutedAt: string | null;
 }
 
-// Moderation Escrow - Results
-export interface CreateEscrowPaymentResult {
-  success: boolean;
-  escrow: {
-    id: string;
-    recipientId: string;
-    amountUSD: string;
-    status: string;
-    paymentRequestId: string;
-    expiresAt: string;
-  };
-  paymentRequest: {
-    requestId: string;
-    amount: string;
-    from: string;
-    to: string;
-    expiresAt: number;
-  };
-}
-
-export interface VerifyEscrowPaymentResult {
-  success: boolean;
-  escrow: {
-    id: string;
-    recipientId: string;
-    amountUSD: string;
-    status: string;
-    paymentTxHash: string | null;
-  };
-}
-
-export interface RefundEscrowPaymentResult {
-  success: boolean;
-  escrow: {
-    id: string;
-    recipientId: string;
-    amountUSD: string;
-    status: string;
-    refundTxHash: string | null;
-    refundedAt: string | null;
-  };
-}
-
-export interface ListEscrowPaymentsResult {
-  success: boolean;
-  escrows: Array<{
-    id: string;
-    recipientId: string;
-    adminId: string;
-    amountUSD: string;
-    status: string;
-    createdAt: string;
-    expiresAt: string;
-  }>;
-  pagination: {
-    total: number;
-    limit: number;
-    offset: number;
-  };
-}
-
 // Ban Appeals - Results
 export interface AppealBanResult {
   success: boolean;
   message: string;
   appealStatus: string;
-}
-
-export interface AppealBanWithEscrowResult {
-  success: boolean;
-  message: string;
-  appeal: {
-    status: string;
-    escrowId: string;
-    amountUSD: string;
-  };
 }
 
 // Favorites - Results
@@ -1278,12 +1172,7 @@ export type MCPToolResult =
   | GetMutesResult
   | CheckBlockStatusResult
   | CheckMuteStatusResult
-  | CreateEscrowPaymentResult
-  | VerifyEscrowPaymentResult
-  | RefundEscrowPaymentResult
-  | ListEscrowPaymentsResult
   | AppealBanResult
-  | AppealBanWithEscrowResult
   | FavoriteProfileResult
   | UnfavoriteProfileResult
   | GetFavoritesResult
