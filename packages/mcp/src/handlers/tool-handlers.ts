@@ -41,6 +41,7 @@ import {
   BusinessLogicError,
   checkRateLimitAsync,
   declineGroupInvite,
+  listVisiblePostComments,
   logAdminModify,
   NotFoundError,
   notifyCommentOnPost,
@@ -1563,17 +1564,15 @@ export async function executeSharePost(
  * Execute get_comments tool
  */
 export async function executeGetComments(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetCommentsArgs
 ): Promise<GetCommentsResult> {
-  const commentsList = await db.comment.findMany({
-    where: {
-      postId: args.postId,
-      deletedAt: null,
-    },
-    orderBy: { createdAt: 'desc' },
-    take: args.limit || 50,
-  });
+  const commentsList = await listVisiblePostComments(
+    args.postId,
+    agent.userId,
+    args.limit || 50,
+    'desc'
+  );
   const commentIds = commentsList.map((c) => c.id);
   const reactionsList = await db.reaction.findMany({
     where: {

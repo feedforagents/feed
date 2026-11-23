@@ -229,6 +229,7 @@ export {
 } from './redis';
 // Services
 export * from './services';
+export { listVisiblePostComments } from './services/post-comments-service';
 export {
   exportObject,
   exportRows,

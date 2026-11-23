@@ -23,6 +23,7 @@ import {
   sharePost as canonicalSharePost,
   checkRateLimitAsync,
   declineGroupInvite,
+  listVisiblePostComments,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -641,7 +642,7 @@ export class FeedAgentExecutor implements AgentExecutor {
       case 'social.share_post':
         return this.sharePost(command.params, context);
       case 'social.get_comments':
-        return this.getComments(command.params);
+        return this.getComments(command.params, context);
       case 'social.create_comment':
         return this.createComment(command.params, context);
       case 'social.delete_comment':
@@ -1080,24 +1081,19 @@ export class FeedAgentExecutor implements AgentExecutor {
   }
 
   private async getComments(
-    params: Record<string, JsonValue>
+    params: Record<string, JsonValue>,
+    context: RequestContext
   ): Promise<ExecutorOperationResult> {
     const postId = String(params.postId ?? '');
     if (!postId) throw new Error('postId is required');
 
     const limit = this.parsePositiveInt(params.limit, 50, 100);
-
-    const comments = await db.comment.findMany({
-      where: { postId, deletedAt: null },
-      orderBy: { createdAt: 'asc' },
-      take: limit,
-      select: {
-        id: true,
-        content: true,
-        authorId: true,
-        createdAt: true,
-      },
-    });
+    const comments = await listVisiblePostComments(
+      postId,
+      context.contextId?.trim(),
+      limit,
+      'asc'
+    );
 
     // Get like counts for all comments in a single aggregated query
     const commentIds = comments.map((c) => c.id);
