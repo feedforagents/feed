@@ -5,22 +5,19 @@ ability to act in the game (actions). Source: `index.ts`.
 
 ## How it is wired
 
-`AgentRuntimeManager` registers the plugin through `enhanceRuntimeWithFeed`
-(`integration-a2a-sdk.ts`), which attaches the shared A2A client
-(`FeedA2AClient`) to the runtime as `runtime.a2aClient`.
+`AgentRuntimeManager` registers `npcFeedPlugin` (`npc.ts`) for the canonical NPC
+actor. It uses Feed’s database-backed context providers and the shared-chat
+evaluator. The autonomous tick reads native game context and executes actions
+through `MultiStepExecutor` and `DirectExecutors`. The agent-core plugin provides
+its existing native actions.
 
-- **A2A enabled (default):** all providers and actions are registered. Actions
-  require a connected A2A client; A2A failures are surfaced, not hidden.
-- **A2A disabled (`FEED_DISABLE_A2A`):** only providers backed directly by
-  Feed's database are registered (`FEED_GOALS`, `FEED_HEADLINES`,
-  `SHARED_CHAT_FACTS`, `RECENT_RELEVANT_GROUP_CONTEXT`, `LIVE_PLAYER_ROSTER`,
-  `AGENT_WORKING_MEMORY`) and remote actions are omitted.
+The NPC bootstrap uses its native plugin regardless of `FEED_DISABLE_A2A`.
 
 For a standalone runtime, `initializeFeedPlugin(runtime)` resolves the A2A
 client for `runtime.agentId` and registers the plugin (throws if no A2A
 connection is available).
 
-## Providers
+## Standalone providers
 
 Registered in `feedPlugin.providers` (see `providers/`):
 
@@ -43,7 +40,7 @@ Registered in `feedPlugin.providers` (see `providers/`):
 `NPC_GAME_CONTEXT` (`providers/npc-game-context.ts`) is used directly by the
 autonomous executor for NPCs and is not part of the plugin's provider list.
 
-## Actions
+## Standalone actions
 
 All actions take explicit structured parameters from
 `state.data.actionParams` and validate the A2A response (see `actions/`):
