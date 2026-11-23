@@ -181,6 +181,20 @@ export const POST = withErrorHandling(
         );
       }
 
+      // Replies use the same rule against the parent comment author: a reply
+      // under a comment whose author blocked the replier (or vice versa) is
+      // refused, just like a comment on a blocking post author's post.
+      const [parentBlocked, parentBlockedMe] = await Promise.all([
+        hasBlocked(parentComment.authorId, user.userId, dbClient),
+        hasBlocked(user.userId, parentComment.authorId, dbClient),
+      ]);
+      if (parentBlocked || parentBlockedMe) {
+        throw new BusinessLogicError(
+          'Cannot comment on this post',
+          'BLOCKED_USER'
+        );
+      }
+
       const now = new Date();
       const result = await createCommentWithParentCheck(
         {
