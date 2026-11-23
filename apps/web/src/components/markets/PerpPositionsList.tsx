@@ -1,7 +1,7 @@
 'use client';
 
 import {
-  calculateUnrealizedPnL,
+  calculateNetUnrealizedPnL,
   cn,
   formatCurrency,
   logger,
@@ -90,11 +90,12 @@ export function PerpPositionsList({
       positions.map((position) => {
         const livePrice = livePrices.get(position.ticker)?.price;
         const currentPrice = livePrice ?? position.currentPrice;
-        const { pnl, pnlPercent } = calculateUnrealizedPnL(
+        const { pnl, pnlPercent } = calculateNetUnrealizedPnL(
           position.entryPrice,
           currentPrice,
           position.side,
-          position.size
+          position.size,
+          position.fundingPaid
         );
         const liquidationDistance =
           position.side === 'long'

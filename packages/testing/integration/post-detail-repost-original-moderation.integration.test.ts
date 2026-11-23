@@ -1,198 +1,162 @@
-/**
- * GET /api/posts/[id] must not expose a repost's original post when the
- * original's author is in the viewer's moderation exclusion set (blocked,
- * muted, or blocked the viewer). A simple repost's visible content *is* the
- * original, so returning the original in full is full exposure.
- *
- * The route already loads `loadViewerExcludedAuthorIds` for the comment tree
- * (the same definition the feed lists, profile list (#1940), MCP get_post
- * (#1960) and trending widget (#1934) use), but the repost metadata block
- * never consulted it — the excluded author's original post came back in full
- * for a signed-in viewer. Anonymous reads have no moderation set and stay
- * unfiltered.
- *
- * Treatment at the head mirrors the route's own deleted-original behaviour:
- * an original that must not be exposed produces no repost metadata at all
- * (no isRepost/isQuote/quoteComment/originalPostId/originalPost keys); the
- * quote's own commentary survives in `content`.
- *
- * Real DB, real route handler, no mocks.
- *
- * Run with: DISABLE_RATE_LIMITING=true STEWARD_JWT_SECRET=<any non-empty value>
- *   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_postdetail
- *   DIRECT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_postdetail
- *   TZ=UTC bun test ./post-detail-repost-original-moderation.integration.test.ts
- *   --preload ./preload.ts
- */
-
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-import { closeDatabase, db, inArray, posts, userBlocks, users } from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
+/** Retained public post detail and signed viewer moderation (PRD §§6.1/12). */
+import { afterAll, expect, mock, test } from 'bun:test';
 import { NextRequest } from 'next/server';
 import { createStewardTestToken } from './helpers/steward-auth';
+import {
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-let POST_GET: typeof import('../../../apps/web/src/app/api/posts/[id]/route').GET;
-
-const webBearer = async (userId: string) =>
-  `Bearer ${await createStewardTestToken(userId)}`;
-
-const OWNER = 'pdmod-owner';
-const VIEWER = 'pdmod-viewer';
-const NORMAL = 'pdmod-normal';
-const BLOCKED = 'pdmod-blocked';
-
-const postIds: string[] = [];
-const blockIds: string[] = [];
-
-let OB = ''; // original by BLOCKED
-let ON = ''; // original by NORMAL
-let SRB = ''; // owner simple repost of OB
-let QB = ''; // owner quote of OB
-let SRN = ''; // owner simple repost of ON
-
-type PostDetail = {
-  id?: string;
-  content?: string | null;
-  isRepost?: boolean;
-  isQuote?: boolean;
-  quoteComment?: string | null;
-  originalPostId?: string;
-  originalPost?: {
-    id: string;
-    content: string;
-    authorId: string;
-  } | null;
+const cases = {
+  simple: 'a signed viewer gets an empty shell for an excluded repost original',
+  quote: 'a signed viewer keeps quote commentary when the original is excluded',
+  visible: 'a signed viewer still sees an eligible repost original',
+  public: 'a signed-out reader still sees the public repost original',
 };
 
-async function insertUser(id: string) {
-  await db.insert(users).values({
-    id,
-    username: id.replace(/[^a-z0-9-]/g, ''),
-    displayName: id,
-    stewardId: id,
-    isTest: false,
-    isBanned: false,
-    updatedAt: new Date(),
-  });
-}
-
-async function insertPost(
-  id: string,
-  authorId: string,
-  content: string,
-  originalPostId: string | null,
-  at: Date
-) {
-  await db.insert(posts).values({
-    id,
-    content,
-    authorId,
-    originalPostId,
-    timestamp: at,
-    createdAt: at,
-  });
-  postIds.push(id);
-}
-
-async function fetchPost(
-  postId: string,
-  viewerId: string | null
-): Promise<{ status: number; body: PostDetail }> {
-  const headers: Record<string, string> = {};
-  if (viewerId) headers.authorization = await webBearer(viewerId);
-  const request = new NextRequest(
-    new Request(`http://localhost/api/posts/${postId}`, {
-      method: 'GET',
-      headers,
-    })
-  );
-  const response = await POST_GET(request, {
-    params: Promise.resolve({ id: postId }),
-  });
-  const payload = (await response.json().catch(() => null)) as
-    | ({ data?: PostDetail } & PostDetail)
-    | null;
-  return {
-    status: response.status,
-    body: payload?.data ?? payload ?? {},
-  };
-}
-
-describe('post detail repost original moderation', () => {
-  beforeAll(async () => {
-    mock.module('server-only', () => ({}));
-    ({ GET: POST_GET } = await import(
-      '../../../apps/web/src/app/api/posts/[id]/route'
-    ));
-    for (const id of [OWNER, VIEWER, NORMAL, BLOCKED]) {
-      await insertUser(id);
-    }
-
-    const now = new Date();
-    const earlier = new Date(now.getTime() - 3_600_000);
-
-    [OB, ON, SRB, QB, SRN] = await Promise.all([
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-    ]);
-    await insertPost(OB, BLOCKED, 'pdmod original by blocked', null, earlier);
-    await insertPost(ON, NORMAL, 'pdmod original by normal', null, earlier);
-    await insertPost(SRB, OWNER, '', OB, now);
-    await insertPost(QB, OWNER, 'pdmod quote of blocked', OB, now);
-    await insertPost(SRN, OWNER, '', ON, now);
-
-    // Viewer blocked BLOCKED.
-    const blockId = await generateSnowflakeId();
-    await db.insert(userBlocks).values({
-      id: blockId,
-      blockerId: VIEWER,
-      blockedId: BLOCKED,
-      createdAt: now,
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks post detail moderation in a leased database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'post-detail-repost-original-moderation',
+      file: 'packages/testing/integration/post-detail-repost-original-moderation.integration.test.ts',
+      cases: Object.values(cases),
     });
-    blockIds.push(blockId);
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  mock.module('server-only', () => ({}));
+  const { db, posts, userBlocks, users } = await import('@feed/db');
+  const { GET } = await import(
+    '../../../apps/web/src/app/api/posts/[id]/route'
+  );
+  const owner = crypto.randomUUID();
+  const viewer = crypto.randomUUID();
+  const excluded = crypto.randomUUID();
+  const visible = crypto.randomUUID();
+  const excludedPost = crypto.randomUUID();
+  const visiblePost = crypto.randomUUID();
+  const simple = crypto.randomUUID();
+  const quote = crypto.randomUUID();
+  const normal = crypto.randomUUID();
+  const viewerClaim = `repost-detail-${viewer}`;
+  const token = await createStewardTestToken(viewerClaim);
+  const excludedText = 'Excluded original fixture';
+  const visibleText = 'Visible original fixture';
+  const quoteText = 'Quote commentary fixture';
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    await tx.insert(users).values(
+      [owner, viewer, excluded, visible].map((id) => ({
+        id,
+        username: `repost-detail-${id}`,
+        displayName: `Repost fixture ${id.slice(0, 8)}`,
+        stewardId: id === viewer ? viewerClaim : null,
+        updatedAt: now,
+      }))
+    );
+    await tx.insert(posts).values(
+      [
+        { id: excludedPost, authorId: excluded, content: excludedText },
+        { id: visiblePost, authorId: visible, content: visibleText },
+        {
+          id: simple,
+          authorId: owner,
+          originalPostId: excludedPost,
+          content: '',
+        },
+        {
+          id: quote,
+          authorId: owner,
+          originalPostId: excludedPost,
+          content: quoteText,
+        },
+        {
+          id: normal,
+          authorId: owner,
+          originalPostId: visiblePost,
+          content: '',
+        },
+      ].map((post) => ({ ...post, timestamp: now, createdAt: now }))
+    );
+    await tx.insert(userBlocks).values({
+      id: crypto.randomUUID(),
+      blockerId: viewer,
+      blockedId: excluded,
+    });
   });
 
-  afterAll(async () => {
-    await db.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
-    await db.delete(posts).where(inArray(posts.id, postIds));
-    await db
-      .delete(users)
-      .where(inArray(users.id, [OWNER, VIEWER, NORMAL, BLOCKED]));
-    await closeDatabase();
-  }, 10_000);
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      const id = new URL(request.url).pathname.match(
+        /^\/api\/posts\/([^/]+)$/
+      )?.[1];
+      return id && request.method === 'GET'
+        ? GET(new NextRequest(request), { params: Promise.resolve({ id }) })
+        : new Response(null, { status: 404 });
+    },
+  });
+  afterAll(() => server.stop(true));
 
-  it('viewer: a simple repost of a blocked original exposes no original', async () => {
-    const { status, body } = await fetchPost(SRB, VIEWER);
-    expect(status).toBe(200);
-    expect(body.originalPost).toBeUndefined();
-    expect(body.isRepost).toBeUndefined();
-    expect(JSON.stringify(body)).not.toContain('pdmod original by blocked');
+  async function post(postId: string, signed = true) {
+    const requestId = crypto.randomUUID();
+    const response = await fetch(new URL(`/api/posts/${postId}`, server.url), {
+      headers: {
+        'x-request-id': requestId,
+        ...(signed ? { authorization: `Bearer ${token}` } : {}),
+      },
+    });
+    expect(response.status).toBe(200);
+    type Detail = {
+      content?: string | null;
+      isRepost?: boolean;
+      originalPost?: { authorId: string; content: string };
+    };
+    const payload = (await response.json()) as { data?: Detail } & Detail;
+    const detail = payload.data ?? payload;
+    console.info('Repost detail response', {
+      requestId,
+      postId,
+      signed,
+      status: response.status,
+      hasOriginal: !!detail.originalPost,
+    });
+    return detail;
+  }
+
+  test(cases.simple, async () => {
+    const detail = await post(simple);
+    expect(detail.content).toBe('');
+    expect(detail.originalPost).toBeUndefined();
+    expect(detail.isRepost).toBeUndefined();
+    expect(JSON.stringify(detail)).not.toContain(excludedText);
   });
 
-  it('viewer: a quote of a blocked original keeps its commentary but exposes no original', async () => {
-    const { status, body } = await fetchPost(QB, VIEWER);
-    expect(status).toBe(200);
-    expect(body.content).toBe('pdmod quote of blocked');
-    expect(body.originalPost).toBeUndefined();
-    expect(body.isRepost).toBeUndefined();
-    expect(JSON.stringify(body)).not.toContain('pdmod original by blocked');
+  test(cases.quote, async () => {
+    const detail = await post(quote);
+    expect(detail.content).toBe(quoteText);
+    expect(detail.originalPost).toBeUndefined();
+    expect(detail.isRepost).toBeUndefined();
+    expect(JSON.stringify(detail)).not.toContain(excludedText);
   });
 
-  it('viewer: a repost of a normal original still embeds the original', async () => {
-    const { status, body } = await fetchPost(SRN, VIEWER);
-    expect(status).toBe(200);
-    expect(body.isRepost).toBe(true);
-    expect(body.originalPost?.content).toBe('pdmod original by normal');
-    expect(body.originalPost?.authorId).toBe(NORMAL);
+  test(cases.visible, async () => {
+    const detail = await post(normal);
+    expect(detail.isRepost).toBe(true);
+    expect(detail.originalPost).toMatchObject({
+      authorId: visible,
+      content: visibleText,
+    });
   });
 
-  it('anonymous: the same simple repost stays unfiltered', async () => {
-    const { status, body } = await fetchPost(SRB, null);
-    expect(status).toBe(200);
-    expect(body.isRepost).toBe(true);
-    expect(body.originalPost?.content).toBe('pdmod original by blocked');
+  test(cases.public, async () => {
+    const detail = await post(simple, false);
+    expect(detail.isRepost).toBe(true);
+    expect(detail.originalPost).toMatchObject({
+      authorId: excluded,
+      content: excludedText,
+    });
   });
-});
+}

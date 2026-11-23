@@ -68,6 +68,7 @@ import {
   addPublicReadHeaders,
   authenticate,
   BusinessLogicError,
+  cachedDb,
   getCanonicalUserId,
   NotFoundError,
   publicRateLimit,
@@ -186,11 +187,12 @@ export const GET = withErrorHandling(
     // loadViewerExcludedAuthorIds definition every other surface uses.
     // Anonymous reads have no moderation set and stay unfiltered, exactly
     // like the list route.
-    const excludedAuthorIds: ReadonlySet<string> = canonicalUserId
-      ? await loadViewerExcludedAuthorIds(canonicalUserId)
-      : new Set<string>();
+    const excludedAuthorIds =
+      canonicalUserId && (commentRows.length > 0 || post.originalPostId)
+        ? await loadViewerExcludedAuthorIds(canonicalUserId)
+        : undefined;
     let visibleCommentRows = commentRows;
-    if (excludedAuthorIds.size > 0) {
+    if (excludedAuthorIds?.size) {
       visibleCommentRows = commentRows.filter(
         (row) => !excludedAuthorIds.has(row.authorId)
       );
@@ -295,9 +297,7 @@ export const GET = withErrorHandling(
       // renders as an empty shell rather than carrying the excluded
       // author's content. Anonymous reads have no moderation set and stay
       // unfiltered.
-      const originalIsExcluded =
-        !!originalPost && excludedAuthorIds.has(originalPost.authorId);
-      if (originalPost && !originalIsExcluded) {
+      if (originalPost && !excludedAuthorIds?.has(originalPost.authorId)) {
         const isQuote = post.content && post.content.length > 0;
 
         // Get original post author
@@ -463,6 +463,9 @@ export const DELETE = withErrorHandling(
       .update(posts)
       .set({ deletedAt: new Date() })
       .where(eq(posts.id, postId));
+
+    await cachedDb.invalidatePostsCache();
+    await cachedDb.invalidateActorPostsCache(post.authorId);
 
     logger.info(
       'Post soft deleted',

@@ -48,6 +48,10 @@ import {
 } from './db';
 
 export * from './balance-transaction-classification';
+export {
+  createCommentWithParentCheck,
+  deleteCommentSubtree,
+} from './comment-threads';
 /**
  * Re-export unique relation types from model-types.
  *
@@ -71,6 +75,13 @@ export type {
   UserWithAgentRelations,
   UserWithMetrics,
 } from './model-types';
+export {
+  listDuePredictionRecoveryMarkets,
+  ownsPredictionRecoveryLease,
+  PREDICTION_RECOVERY_LEASE_ID,
+  readPredictionRecoveryHealth,
+} from './prediction-resolution-work';
+export * from './scheduled-inference-budget';
 // Re-export types
 export * from './types';
 export {
@@ -147,6 +158,8 @@ export {
 } from './helpers';
 // Re-export moderation filters
 export * from './moderation/filters';
+// Re-export notification target visibility
+export * from './notification-target-visibility';
 export {
   decodePostCursor,
   encodePostCursor,
