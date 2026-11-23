@@ -17,15 +17,6 @@ const mockDb = {
       })),
     })),
   })),
-  insert: mock(() => ({
-    values: mock(() => ({
-      onConflictDoNothing: mock(() => ({
-        returning: mock(async () =>
-          shouldCreateFollow ? [{ id: 'follow-1' }] : []
-        ),
-      })),
-    })),
-  })),
   delete: mock(() => ({
     where: mock(() => ({
       returning: mock(async () => deleteReturningRows),
@@ -47,10 +38,12 @@ mock.module('@feed/db', () => ({
   desc: (column: unknown) => column,
   dmAcceptances: {},
   eq: (a: unknown, b: unknown) => ({ a, b }),
+  followUserWithBlockCheck: mock(async () => shouldCreateFollow),
   follows: { id: 'id', followerId: 'followerId', followingId: 'followingId' },
   groupMembers: {},
   groups: {},
   gte: (...args: unknown[]) => args,
+  hasBlocked: mock(async () => false),
   inArray: (...args: unknown[]) => args,
   isNull: (...args: unknown[]) => args,
   messages: {},

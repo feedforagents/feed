@@ -28,6 +28,8 @@ const splitCase =
   'splitting a close into partial closes never credits more than the proceeds of each leg';
 const addFlipCase =
   'adding to and flipping a position books the rounding of every opening charge';
+const liquidationCase =
+  'an agent partial close and liquidation reconcile the persisted wallet and P&L';
 const legacyCase =
   'a legacy subcent full close settles floored cents and zero fee';
 
@@ -42,6 +44,7 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
         ),
         splitCase,
         addFlipCase,
+        liquidationCase,
         legacyCase,
       ],
     });
@@ -58,7 +61,7 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     perpPositions,
     users,
   } = await import('@feed/db');
-  const { WalletService } = await import('@feed/engine');
+  const { PriceUpdateService, WalletService } = await import('@feed/engine');
   const { floorPoints, isPointsAmount } = await import('@feed/shared');
   const { createPerpMarketService } = await import(
     '../../../apps/web/src/app/api/markets/perps/_adapters'
@@ -168,6 +171,14 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     );
   }
 
+  async function assertReconciled(uid: string, remainingMargin = 0) {
+    const pnl = hundredths(
+      (await balanceOf(uid)) - STARTING_BALANCE + remainingMargin
+    );
+    assert.equal(await lifetimePnLOf(uid), pnl);
+    return pnl;
+  }
+
   for (const { size, leverage, exit } of roundTrips) {
     for (const side of sides) {
       test(roundTripCase(side, size, leverage), async () => {
@@ -252,6 +263,7 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
           0,
           (leg.marginPaid ?? 0) + (leg.realizedPnL ?? 0) - leg.feePaid
         );
+        if (percentage === 0.5) await assertReconciled(uid, 16.67);
       }
 
       const rows = [
@@ -269,7 +281,7 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
       }
       assertBooked(
         bookedPnL(),
-        (await balanceOf(uid)) - STARTING_BALANCE,
+        await assertReconciled(uid),
         'split round trip'
       );
     });
@@ -278,15 +290,18 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
   test(addFlipCase, async () => {
     await withFixture('add-flip', async (uid, ticker, bookedPnL) => {
       const service = createPerpMarketService({ withPriceImpact: true });
-      const trade = (side: 'long' | 'short', size: number) =>
-        service.openPosition({ userId: uid, ticker, side, size, leverage: 3 });
+      const trade = (side: 'long' | 'short', size: number, leverage = 3) =>
+        service.openPosition({ userId: uid, ticker, side, size, leverage });
 
       await trade('long', 10);
-      const added = await trade('long', 11);
+      await assertReconciled(uid, 3.33);
+      const added = await trade('long', 10);
       assert.equal(added.rebalanceType, 'add');
+      await assertReconciled(uid, 6.67);
       await setPrice(ticker, 101.37);
-      const flipped = await trade('short', 35);
+      const flipped = await trade('short', 35, 7);
       assert.equal(flipped.rebalanceType, 'flip');
+      await assertReconciled(uid, 2.14);
       await setPrice(ticker, 99.17);
       const closed = await service.closePosition({
         userId: uid,
@@ -294,11 +309,55 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
       });
       assert.equal(closed.fullyClosed, true);
 
-      const balanceChange = hundredths(
-        (await balanceOf(uid)) - STARTING_BALANCE
-      );
+      const balanceChange = await assertReconciled(uid);
       assertBooked(bookedPnL(), balanceChange, 'open, add, flip and close');
-      assert.equal(await lifetimePnLOf(uid), balanceChange);
+    });
+  });
+
+  test(liquidationCase, async () => {
+    await withFixture('agent-liquidation', async (uid, ticker, bookedPnL) => {
+      await db.update(users).set({ isAgent: true }).where(eq(users.id, uid));
+      const service = createPerpMarketService({ withPriceImpact: true });
+      const { positionId, liquidationPrice } = await service.openPosition({
+        userId: uid,
+        ticker,
+        side: 'long',
+        size: 100,
+        leverage: 3,
+      });
+      await setPrice(ticker, 101.37);
+      await service.closePosition({ userId: uid, positionId, percentage: 0.5 });
+      await db
+        .update(perpPositions)
+        .set({ fundingPaid: -5.781 })
+        .where(eq(perpPositions.id, positionId));
+      const balanceBeforeLiquidation = await balanceOf(uid);
+      await PriceUpdateService.applyUpdates([
+        {
+          organizationId: ticker,
+          newPrice: liquidationPrice - 0.1,
+          source: 'system',
+        },
+      ]);
+
+      const credits = await ledger(uid, 'perp_liquidation');
+      assert.equal(credits.length, 1);
+      const credited = Number(credits[0]?.amount);
+      assert.ok(credited > 0);
+      assert.equal(
+        hundredths((await balanceOf(uid)) - balanceBeforeLiquidation),
+        credited
+      );
+      const [closed] = await db
+        .select({ closedAt: perpPositions.closedAt })
+        .from(perpPositions)
+        .where(eq(perpPositions.id, positionId));
+      assert.ok(closed?.closedAt);
+      assertBooked(
+        bookedPnL(),
+        await assertReconciled(uid),
+        'agent liquidation'
+      );
     });
   });
 
