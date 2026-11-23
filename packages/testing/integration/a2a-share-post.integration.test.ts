@@ -1,7 +1,14 @@
 /** Retained A2A shares must use the canonical web/MCP service (PRD §12).
  * These real HTTP requests use owned per-user keys, not a server bypass.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'bun:test';
 import assert from 'node:assert/strict';
 import { generateApiKey, hashApiKey } from '@feed/api';
 import {
@@ -434,7 +441,59 @@ afterAll(async () => {
   await cleanup();
 });
 
+// share_post shares the website's per-account limit (SHARE_POST, 5 per
+// minute, refused attempts included), so each case acts as its own agent.
+async function useFreshAgent() {
+  const raw = generateApiKey();
+  const setup = await db.transaction(async (tx) => {
+    const id = await newId();
+    const [agent] = await tx
+      .insert(users)
+      .values({
+        id,
+        username: `a2ashare_${id}`,
+        displayName: `Share fixture ${id}`,
+        isActor: false,
+        updatedAt: new Date(),
+      })
+      .returning({
+        id: users.id,
+        canonical: sql<string>`to_jsonb(${users})::text`,
+      });
+    assert.ok(agent);
+    const [key] = await tx
+      .insert(userApiKeys)
+      .values({
+        id: await newId(),
+        userId: agent.id,
+        keyHash: hashApiKey(raw),
+        name: 'Owned A2A share fixture',
+        expiresAt: new Date(Date.now() + 3600000),
+      })
+      .returning({
+        id: userApiKeys.id,
+        canonical: sql<string>`to_jsonb(${userApiKeys})::text`,
+      });
+    assert.ok(key);
+    const [block] = await tx
+      .insert(userBlocks)
+      .values({ id: await newId(), blockerId, blockedId: agent.id })
+      .returning({
+        id: userBlocks.id,
+        canonical: sql<string>`to_jsonb(${userBlocks})::text`,
+      });
+    assert.ok(block);
+    return { agent, key, block };
+  });
+  owned.users.set(setup.agent.id, setup.agent.canonical);
+  owned.userApiKeys.set(setup.key.id, setup.key.canonical);
+  owned.userBlocks.set(setup.block.id, setup.block.canonical);
+  agentId = setup.agent.id;
+  apiKey = raw;
+}
+
 describe('A2A social.share_post real authenticated HTTP', () => {
+  beforeEach(useFreshAgent);
   it('creates the quote post in the agent feed and notifies the author', async () => {
     const postId = await createPost();
     const { task, data } = await share(postId, 'worth reading');
