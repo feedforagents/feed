@@ -65,7 +65,11 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import { db } from '@feed/db';
-import { NPCInvestmentManager, StaticDataRegistry } from '@feed/engine';
+import {
+  NPCInvestmentManager,
+  type RebalanceAction,
+  StaticDataRegistry,
+} from '@feed/engine';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
@@ -171,7 +175,7 @@ export const POST = withErrorHandling(
         strategy
       );
 
-      const results = [];
+      const results: { action: RebalanceAction; success: boolean }[] = [];
       for (const action of actions) {
         await NPCInvestmentManager.executeRebalanceAction(
           actor.id,

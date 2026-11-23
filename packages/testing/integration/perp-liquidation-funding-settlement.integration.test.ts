@@ -1,197 +1,237 @@
-/**
- * PRD §9.3 / MVP Phase 6: a liquidation settles accrued funding with the
- * position, wallet and P&L in one transaction.
- */
+/** PRD §§9.1/9.3 / MVP Phase 6: liquidate against the owning wallet. */
 import { expect, test } from 'bun:test';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
-  balanceTransactions,
-  db,
-  eq,
-  organizationState,
-  perpMarketSnapshots,
-  perpPositions,
-  pointsTransactions,
-  stockPrices,
-  users,
-} from '@feed/db';
-import {
-  createPerpSettlement,
-  createUserWalletAdapter,
-  FEE_CONFIG,
-} from '@feed/engine';
-import { generateSnowflakeId } from '@feed/shared';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const cases = [
-  // A long that received 5 pts of funding keeps that rebate as equity.
-  { name: 'credits an accrued funding rebate', fundingPaid: -5 },
-  // A long that owes funding cannot lose more than its margin.
-  { name: 'caps owed funding at the margin', fundingPaid: 5 },
-] as const;
+const mixedWalletCase =
+  'settles cent-precision funding in the owning wallet and retries a rolled-back NPC liquidation';
 
-for (const { name, fundingPaid } of cases) {
-  for (const failFirstCredit of [false, true]) {
-    test(`liquidation ${name}${failFirstCredit ? ' after a failed wallet write' : ''}`, async () => {
-      const userId = await generateSnowflakeId(),
-        ticker = `LIQFUND${userId}`;
-      let armed = false;
-      let walletWrites = 0;
-      try {
-        await db.insert(users).values({
-          id: userId,
-          username: `liq-fund-${userId}`,
-          virtualBalance: '10000',
-          totalDeposited: '10000',
-          lifetimePnL: '0',
-          updatedAt: new Date(),
-        });
-        await db.insert(organizationState).values({
-          id: ticker,
-          currentPrice: 100,
-          basePrice: 100,
-          updatedAt: new Date(),
-        });
-        await db.insert(perpMarketSnapshots).values({
-          ticker,
-          organizationId: ticker,
-          currentPrice: 100,
-          high24h: 100,
-          low24h: 100,
-          openInterest: 0,
-          volume24h: 0,
-          fundingRate: {
-            ticker,
-            rate: 0,
-            predictedRate: 0,
-            nextFundingTime: new Date().toISOString(),
-          },
-        });
-        const service = new PerpMarketService({
-          db: new PerpDbAdapter(),
-          wallet: createUserWalletAdapter(),
-          settlement: createPerpSettlement({
-            wallet: (_owner, tx, afterCommit) => {
-              const real = createUserWalletAdapter(tx, afterCommit);
-              // Fault injection at the wallet boundary only: the first
-              // liquidation wallet write fails, every later one is real.
-              const fail = () => {
-                if (!armed) return;
-                walletWrites++;
-                if (failFirstCredit && walletWrites === 1)
-                  throw new Error('Owned wallet outage');
-              };
-              return {
-                ...real,
-                credit: async (params) => {
-                  fail();
-                  return real.credit(params);
-                },
-                recordPnL: async (params) => {
-                  fail();
-                  return real.recordPnL(params);
-                },
-              };
-            },
-          }),
-          fees: {
-            tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
-            platformShare: FEE_CONFIG.PLATFORM_SHARE,
-            referrerShare: FEE_CONFIG.REFERRER_SHARE,
-            minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
-          },
-        });
-        const opened = await service.openPosition({
-          userId,
-          ticker,
-          side: 'long',
-          size: 100,
-          leverage: 10,
-        });
-        // Opening debits the wallet through the same settlement port; arm
-        // the fault only for the liquidation.
-        armed = true;
-        await db
-          .update(perpPositions)
-          .set({ fundingPaid })
-          .where(eq(perpPositions.id, opened.positionId));
-        const [before] = await db
-          .select()
-          .from(perpPositions)
-          .where(eq(perpPositions.id, opened.positionId));
-        const [ownerBefore] = await db
-          .select()
-          .from(users)
-          .where(eq(users.id, userId));
-        expect(before && ownerBefore).toBeTruthy();
-
-        const trigger = Number((before!.liquidationPrice - 0.1).toFixed(2));
-        const margin = before!.size / before!.leverage;
-        const pnl =
-          ((trigger - before!.entryPrice) / before!.entryPrice) * before!.size;
-        const realized = Math.max(pnl - fundingPaid, -margin);
-        const equity = Math.max(0, margin + realized);
-
-        const first = await service.applyPriceUpdates({ [ticker]: trigger });
-        if (failFirstCredit) {
-          // The failed write rolls the whole liquidation back: the position
-          // stays open, so the next tick can settle it.
-          expect(first.liquidations).toBe(0);
-          expect(first.errors.length).toBe(1);
-          const [still] = await db
-            .select()
-            .from(perpPositions)
-            .where(eq(perpPositions.id, opened.positionId));
-          expect(still!.closedAt).toBeNull();
-          const retry = await service.applyPriceUpdates({ [ticker]: trigger });
-          expect(retry.liquidations).toBe(1);
-        } else {
-          expect(first.liquidations).toBe(1);
-        }
-
-        const [closed] = await db
-          .select()
-          .from(perpPositions)
-          .where(eq(perpPositions.id, opened.positionId));
-        const [owner] = await db
-          .select()
-          .from(users)
-          .where(eq(users.id, userId));
-        expect(closed!.closedAt).not.toBeNull();
-        expect(closed!.realizedPnL).toBeCloseTo(realized, 6);
-        expect(Number(owner!.virtualBalance)).toBeCloseTo(
-          Number(ownerBefore!.virtualBalance) + equity,
-          2
-        );
-        expect(Number(owner!.lifetimePnL)).toBeCloseTo(
-          Number(ownerBefore!.lifetimePnL) + realized,
-          2
-        );
-        const credits = (
-          await db
-            .select()
-            .from(balanceTransactions)
-            .where(eq(balanceTransactions.userId, userId))
-        ).filter((row) => row.type === 'perp_liquidation');
-        expect(credits).toHaveLength(equity > 0 ? 1 : 0);
-      } finally {
-        await db
-          .delete(pointsTransactions)
-          .where(eq(pointsTransactions.userId, userId));
-        await db
-          .delete(balanceTransactions)
-          .where(eq(balanceTransactions.userId, userId));
-        await db.delete(perpPositions).where(eq(perpPositions.userId, userId));
-        await db
-          .delete(stockPrices)
-          .where(eq(stockPrices.organizationId, ticker));
-        await db
-          .delete(perpMarketSnapshots)
-          .where(eq(perpMarketSnapshots.ticker, ticker));
-        await db
-          .delete(organizationState)
-          .where(eq(organizationState.id, ticker));
-        await db.delete(users).where(eq(users.id, userId));
-      }
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('runs perp liquidation funding in a leased database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'perp-liquidation-funding',
+      file: 'packages/testing/integration/perp-liquidation-funding-settlement.integration.test.ts',
+      cases: [mixedWalletCase],
     });
-  }
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  const {
+    actorState,
+    and,
+    balanceTransactions,
+    db,
+    eq,
+    organizationState,
+    perpMarketSnapshots,
+    perpPositions,
+    users,
+  } = await import('@feed/db');
+  const { FEE_CONFIG } = await import('../../engine/src/config/fees');
+  const { createNpcWalletAdapter } = await import(
+    '../../engine/src/services/npc-wallet-adapter'
+  );
+  const { createNpcPerpSettlement, createPerpSettlement } = await import(
+    '../../engine/src/services/perp-settlement'
+  );
+  const { PriceUpdateService } = await import(
+    '../../engine/src/services/price-update-service'
+  );
+  const { createUserWalletAdapter } = await import(
+    '../../engine/src/services/user-wallet-adapter'
+  );
+  const { generateSnowflakeId } = await import('@feed/shared');
+
+  test(mixedWalletCase, async () => {
+    const playerId = await generateSnowflakeId();
+    const payerId = await generateSnowflakeId();
+    const npcId = await generateSnowflakeId();
+    const ticker = `LIQFUND${playerId}`;
+    const updatedAt = new Date();
+    await db.insert(users).values(
+      [playerId, payerId, npcId].map((id) => ({
+        id,
+        username: `liq-fund-${id}`,
+        isActor: id === npcId,
+        virtualBalance: '10000',
+        totalDeposited: '10000',
+        updatedAt,
+      }))
+    );
+    await db.insert(actorState).values({
+      id: npcId,
+      tradingBalance: '20000',
+      updatedAt,
+    });
+    await db.insert(organizationState).values({
+      id: ticker,
+      currentPrice: 100,
+      basePrice: 100,
+      updatedAt,
+    });
+    await db.insert(perpMarketSnapshots).values({
+      ticker,
+      organizationId: ticker,
+      currentPrice: 100,
+      high24h: 100,
+      low24h: 100,
+      openInterest: 0,
+      volume24h: 0,
+      fundingRate: {
+        ticker,
+        rate: 0,
+        predictedRate: 0,
+        nextFundingTime: updatedAt.toISOString(),
+      },
+    });
+
+    const dbAdapter = new PerpDbAdapter();
+    const fees = {
+      tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
+      platformShare: FEE_CONFIG.PLATFORM_SHARE,
+      referrerShare: FEE_CONFIG.REFERRER_SHARE,
+      minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
+    };
+    const playerService = new PerpMarketService({
+      db: dbAdapter,
+      wallet: createUserWalletAdapter(),
+      settlement: createPerpSettlement(),
+      fees,
+    });
+    const npcService = new PerpMarketService({
+      db: dbAdapter,
+      wallet: createNpcWalletAdapter(npcId),
+      settlement: createNpcPerpSettlement(),
+      fees,
+    });
+    const order = { ticker, side: 'long' as const, size: 100, leverage: 10 };
+    const player = await playerService.openPosition({
+      ...order,
+      userId: playerId,
+    });
+    const payer = await playerService.openPosition({
+      ...order,
+      userId: payerId,
+    });
+    const npc = await npcService.openPosition({ ...order, userId: npcId });
+
+    const rebate = -5.781;
+    for (const { positionId, values } of [
+      // Give the player an exact-cent settlement at the 89.10 mark.
+      {
+        positionId: player.positionId,
+        values: { fundingPaid: -5.28, entryPrice: 100, liquidationPrice: 90 },
+      },
+      { positionId: payer.positionId, values: { fundingPaid: 5 } },
+      { positionId: npc.positionId, values: { fundingPaid: rebate } },
+    ]) {
+      await db
+        .update(perpPositions)
+        .set(values)
+        .where(eq(perpPositions.id, positionId));
+    }
+
+    async function readUser(id: string) {
+      const [owner] = await db.select().from(users).where(eq(users.id, id));
+      if (!owner) throw new Error(`Fixture user missing: ${id}`);
+      return owner;
+    }
+
+    const playerBefore = await readUser(playerId);
+    const payerBefore = await readUser(payerId);
+    const mark = 89.1;
+    const sweep = () =>
+      PriceUpdateService.applyUpdates([
+        { organizationId: ticker, newPrice: mark, source: 'system' },
+      ]);
+    const readMarket = async () =>
+      (await dbAdapter.listMarkets()).find(
+        (market) => market.ticker === ticker
+      );
+    // A bootstrapped NPC's shadow user remains while its actual wallet is
+    // unavailable. Removing only this fixture row makes the live credit fail.
+    const [npcWallet] = await db
+      .delete(actorState)
+      .where(eq(actorState.id, npcId))
+      .returning();
+    if (!npcWallet) throw new Error('Fixture NPC wallet missing');
+
+    function expectedCredit(entryPrice: number) {
+      const margin = order.size / order.leverage;
+      const equity =
+        margin + ((mark - entryPrice) / entryPrice) * order.size - rebate;
+      return Math.floor(equity * 100) / 100;
+    }
+
+    await sweep();
+    const playerClosed = await dbAdapter.getPositionById(player.positionId);
+    const payerClosed = await dbAdapter.getPositionById(payer.positionId);
+    const npcOpen = await dbAdapter.getPositionById(npc.positionId);
+    const market = await readMarket();
+    expect(playerClosed?.closedAt).toBeInstanceOf(Date);
+    expect(payerClosed?.closedAt).toBeInstanceOf(Date);
+    expect((await readUser(npcId)).virtualBalance).toBe('10000.00');
+    expect(npcOpen?.closedAt).toBeUndefined();
+    expect(npcOpen?.realizedPnL ?? 0).toBe(0);
+    expect(npcOpen?.fundingPaid).toBe(rebate);
+    expect(market?.openInterest).toBe(order.size);
+
+    const margin = order.size / order.leverage;
+    const playerCredit = 4.38;
+    expect(playerClosed?.realizedPnL).toBeCloseTo(playerCredit - margin, 10);
+    const playerAfter = await readUser(playerId);
+    expect(Number(playerAfter.virtualBalance)).toBeCloseTo(
+      Number(playerBefore.virtualBalance) + playerCredit,
+      10
+    );
+    expect(Number(playerAfter.lifetimePnL)).toBeCloseTo(
+      Number(playerBefore.lifetimePnL) + playerCredit - margin,
+      10
+    );
+
+    const payerAfter = await readUser(payerId);
+    expect(payerClosed?.realizedPnL).toBe(-margin);
+    expect(payerAfter.virtualBalance).toBe(payerBefore.virtualBalance);
+    expect(Number(payerAfter.lifetimePnL)).toBe(
+      Number(payerBefore.lifetimePnL) - margin
+    );
+
+    await db.insert(actorState).values(npcWallet);
+    await sweep();
+    await sweep();
+    const npcClosed = await dbAdapter.getPositionById(npc.positionId);
+    const [npcWalletAfter] = await db
+      .select()
+      .from(actorState)
+      .where(eq(actorState.id, npcId));
+    const npcCredit = expectedCredit(npc.entryPrice);
+    expect(npcCredit).toBeGreaterThan(0);
+    expect(npcClosed?.closedAt).toBeInstanceOf(Date);
+    expect(npcClosed?.realizedPnL).toBeCloseTo(npcCredit - margin, 10);
+    expect(npcClosed?.fundingPaid).toBe(rebate);
+    expect(Number(npcWalletAfter?.tradingBalance)).toBeCloseTo(
+      Number(npcWallet.tradingBalance) + npcCredit,
+      10
+    );
+    const npcShadowAfter = await readUser(npcId);
+    expect(npcShadowAfter.virtualBalance).toBe('10000.00');
+    expect(Number(npcShadowAfter.lifetimePnL)).toBe(0);
+    expect((await readMarket())?.openInterest).toBe(0);
+    expect(await readUser(playerId)).toEqual(playerAfter);
+    expect(await readUser(payerId)).toEqual(payerAfter);
+    const credits = await db
+      .select()
+      .from(balanceTransactions)
+      .where(
+        and(
+          eq(balanceTransactions.userId, playerId),
+          eq(balanceTransactions.type, 'perp_liquidation')
+        )
+      );
+    expect(credits).toHaveLength(1);
+    expect(Number(credits[0]?.amount)).toBe(playerCredit);
+  });
 }

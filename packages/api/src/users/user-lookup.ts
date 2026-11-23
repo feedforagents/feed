@@ -368,6 +368,22 @@ export async function findTargetByIdentifier(
     };
   }
 
+  // Organization profile reads use the organization ID. Resolve a missing
+  // identifier to its registered shadow actor without changing User or actor
+  // precedence, or rewriting existing follow relationships.
+  const organization = StaticDataRegistry.getOrganization(identifier);
+  if (organization) {
+    const orgActor = StaticDataRegistry.getActor(`org-${organization.id}`);
+    if (orgActor) {
+      return {
+        user: null,
+        actor: orgActor,
+        targetId: orgActor.id,
+        isActor: true,
+      };
+    }
+  }
+
   // Neither found
   return {
     user: null,

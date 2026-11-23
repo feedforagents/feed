@@ -208,10 +208,19 @@ export const POST = withErrorHandling(
 
       // Use transaction to ensure atomic updates of market, positions, questions, and timeframedMarkets
       const resolvedAt = new Date();
-      await withPredictionSettlement(
+      const settled = await withPredictionSettlement(
         marketId,
         { system: 'admin_prediction_resolve' },
         async (service, tx) => {
+          // The check above can go stale while another resolver (the game
+          // tick) holds the settlement lock. Re-read under the lock so this
+          // request never rewrites the question of a market it did not settle.
+          const [current] = await tx
+            .select({ resolved: markets.resolved })
+            .from(markets)
+            .where(eq(markets.id, marketId))
+            .limit(1);
+          if (!current || current.resolved) return false;
           await service.resolve({
             marketId,
             winningSide: resolution ? 'yes' : 'no',
@@ -240,9 +249,17 @@ export const POST = withErrorHandling(
               updatedAt: resolvedAt,
             })
             .where(eq(timeframedMarkets.questionId, marketId));
+          return true;
         },
         serviceOptions(marketId)
       );
+      if (!settled) {
+        return errorResponse(
+          'Market already resolved',
+          'ALREADY_RESOLVED',
+          409
+        );
+      }
 
       let notificationsCreated = 0;
 
@@ -309,22 +326,58 @@ export const POST = withErrorHandling(
       }
       // Compare-and-set: only extend a market that is still unresolved and
       // still has the end date this decision was based on.
+      // The cron resolves on questions.resolutionDate, not markets.endDate,
+      // so the question and timeframe rows must move together — otherwise
+      // the market still resolves on the original date while the UI shows
+      // the extended one.
+      //
+      // The question update is filtered on status = 'active', so a
+      // question that is no longer active (or missing) must fail the
+      // extend instead of letting the market and timeframe dates move
+      // alone: the three rows move together or not at all.
+      const QUESTION_NOT_ACTIVE = 'QUESTION_NOT_ACTIVE';
       const extended = await db
-        .update(markets)
-        .set({
-          endDate: newEnd,
-          updatedAt: new Date(),
+        .transaction(async (tx) => {
+          const rows = await tx
+            .update(markets)
+            .set({
+              endDate: newEnd,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(markets.id, marketId),
+                eq(markets.resolved, false),
+                eq(markets.endDate, market.endDate)
+              )
+            )
+            .returning({ id: markets.id });
+          if (rows.length === 0) return rows;
+          const movedQuestions = await tx
+            .update(questions)
+            .set({ resolutionDate: newEnd, updatedAt: new Date() })
+            .where(
+              and(eq(questions.id, marketId), eq(questions.status, 'active'))
+            )
+            .returning({ id: questions.id });
+          if (movedQuestions.length === 0) {
+            // Throwing rolls the market update back with it.
+            throw new Error(QUESTION_NOT_ACTIVE);
+          }
+          await tx
+            .update(timeframedMarkets)
+            .set({ endTime: newEnd, updatedAt: new Date() })
+            .where(eq(timeframedMarkets.questionId, marketId));
+          return rows;
         })
-        .where(
-          and(
-            eq(markets.id, marketId),
-            eq(markets.resolved, false),
-            eq(markets.endDate, market.endDate)
-          )
-        )
-        .returning({ id: markets.id });
+        .catch((error: unknown) => {
+          if (error instanceof Error && error.message === QUESTION_NOT_ACTIVE) {
+            return null;
+          }
+          throw error;
+        });
 
-      if (extended.length === 0) {
+      if (extended === null || extended.length === 0) {
         return errorResponse(
           'Market changed concurrently; reload and retry',
           'MARKET_CONFLICT',

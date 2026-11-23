@@ -32,6 +32,7 @@ mock.module('server-only', () => ({}));
 import { and, balanceTransactions, db, eq, sql, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
+import { fixtureRowJson } from './helpers/fixture-row-json';
 
 type FundingResponse = {
   transactions: Array<{
@@ -133,7 +134,7 @@ async function cleanup(receipt: Ownership) {
       await db.delete(users).where(
         and(
           eq(users.id, row.id),
-          sql`to_jsonb(${users}) = to_jsonb(jsonb_populate_record(NULL::"User", ${JSON.stringify(row)}::jsonb))`,
+          sql`to_jsonb(${users}) = to_jsonb(jsonb_populate_record(NULL::"User", ${fixtureRowJson('User', row)}::jsonb))`,
           // A failed or unowned ledger row must keep its parent alive.
           sql`NOT EXISTS (SELECT 1 FROM ${balanceTransactions} WHERE ${balanceTransactions.userId} = ${row.id})`
         )
