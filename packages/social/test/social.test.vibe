@@ -1,0 +1,587 @@
+// spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"; spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"
+import { assert, it } from "@effect/vitest"
+import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import {
+  RealtimeBus,
+  SocialFailure,
+  assertAllowedChatKind,
+  blockAccount,
+  createDirectChat,
+  createNpcAlphaInvite,
+  createPost,
+  createUserGroupChat,
+  deletePost,
+  followAccount,
+  getArticle,
+  getChatMessages,
+  getPostThread,
+  getProfile,
+  getUnreadNotificationCount,
+  inviteToUserGroupChat,
+  leaveGroupChat,
+  likePost,
+  listAlphaInvites,
+  listArticles,
+  listChats,
+  listFeedPosts,
+  listFollowers,
+  listFollowing,
+  listNotifications,
+  markNotificationsRead,
+  muteAccount,
+  reactToMessage,
+  realtimeBusLayer,
+  reportTarget,
+  repostPost,
+  respondAlphaInvite,
+  sendChatMessage,
+  unblockAccount,
+  unfollowAccount,
+  unlikePost,
+  unmuteAccount,
+  unrepostPost
+} from "../src/index.vibe"
+
+effect function check(run: () => void) {
+  try Effect.try(run)
+}
+
+effect function queryStore(sql: string, params: ReadonlyArray<unknown> = []) {
+  const store = try Store
+  return try store.transaction((tx) => tx.query(sql, params))
+}
+
+effect function expectSocialCode<A>(program: A!(SocialFailure | StoreFailure)!Store): string!StoreFailure!Store {
+  const attempt = effect {
+    try program
+    return "accepted"
+  }
+  return attempt catch effect (err) => {
+    if (err instanceof SocialFailure) return err.code
+    throw err
+  }
+}
+
+effect function expectStoreFailure<A>(program: A!StoreFailure!Store): boolean!never!Store {
+  const attempt = effect {
+    try program
+    return false
+  }
+  return attempt catch effect (err) => {
+    if (err instanceof StoreFailure) return true
+    return false
+  }
+}
+
+effect function withSocialWorld<A, E>(body: A!E!(Store | RealtimeBus)) {
+  try TestClock.setTime(1_760_000_000_000)
+  provide localStoreLayer({ kind: "pglite", file: undefined }), realtimeBusLayer {
+    try migrateFeedSchema()
+    try seedFeedWorld()
+    return try body
+  }
+}
+
+effect function seedAccount(
+  accountId: string,
+  handle: string,
+  displayName: string,
+  balanceCents = 10_000,
+  uiMode: "game" | "social" = "game"
+) {
+  const now = try Clock.currentTimeMillis
+  try queryStore(
+    "INSERT INTO feed_accounts (account_id, handle, display_name, bio, ui_mode, balance_cents, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
+    [accountId, handle, displayName, `${displayName} bio`, uiMode, balanceCents, now]
+  )
+}
+
+effect function seedGrant(accountId: string, clientName: string) {
+  const now = try Clock.currentTimeMillis
+  try queryStore(
+    "INSERT INTO feed_agent_grants (grant_id, account_id, client_id, client_name, scopes, status, created_at, last_used_at, revoked_at) VALUES ($1, $2, $3, $4, 'feed:read feed:write', 'active', $5, $5, NULL)",
+    [`grant-${accountId}`, accountId, `client-${accountId}`, clientName, now]
+  )
+}
+
+it.effect(
+  'posts with grant attribution, replies, quotes, likes, reposts, deletes, mode projection, and proof filtering (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
+    try seedAccount("bob", "bob", "Bob Trader", 20_000, "game")
+    try seedGrant("alice", "Claude")
+
+    const prefix = "Shipping #ai thesis on $NVDAI "
+    const content280 = `${prefix}${"x".repeat(280 - prefix.length)}`
+    const content281 = `${content280}!`
+
+    const emptyCode = try expectSocialCode(createPost({ authorId: "alice", authorKind: "user", content: "   " }))
+    const overLimitCode = try expectSocialCode(createPost({ authorId: "alice", authorKind: "user", content: content281, viaClientName: "Claude" }))
+    const spoofedGrantCode = try expectSocialCode(createPost({ authorId: "alice", authorKind: "user", content: "Spoofed client", viaClientName: "ChatGPT" }))
+
+    const root = try createPost({
+      authorId: "alice",
+      authorKind: "user",
+      content: content280,
+      marketId: "seed-market-1",
+      ticker: "nvdai",
+      viaClientName: "Claude"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+
+    const reply = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Threaded reply to @alice on #ai",
+      replyToPostId: root.id
+    })
+    try TestClock.adjust(Duration.seconds(1))
+
+    const quote = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Quoting the benchmark callout",
+      quotePostId: root.id
+    })
+
+    const threadBeforeDelete = try getPostThread(root.id, "alice", "game")
+    const replyThread = try getPostThread(reply.id, "alice", "game")
+
+    const liked = try likePost("bob", root.id)
+    const unliked = try unlikePost("bob", root.id)
+    const reliked = try likePost("bob", root.id)
+    const reposted = try repostPost("bob", root.id)
+    const unreposted = try unrepostPost("bob", root.id)
+    const rereposted = try repostPost("bob", root.id)
+
+    const gameFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+    const socialFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "social", limit: 50 })
+
+    const gameRoot = gameFeed.items.find((p) => p.id === root.id)
+    const socialRoot = socialFeed.items.find((p) => p.id === root.id)
+    const gameQuote = gameFeed.items.find((p) => p.id === quote.id)
+    const socialQuote = socialFeed.items.find((p) => p.id === quote.id)
+    const gameNpc = gameFeed.items.find((p) => p.id === "seed-post-1")
+    const socialNpc = socialFeed.items.find((p) => p.id === "seed-post-1")
+
+    const nonAuthorDeleteCode = try expectSocialCode(deletePost("alice", reply.id))
+    const deletedReply = try deletePost("bob", reply.id)
+    const deletedLookupCode = try expectSocialCode(getPostThread(reply.id, "alice", "game"))
+    const threadAfterDelete = try getPostThread(root.id, "alice", "game")
+
+    const proofTime = try Clock.currentTimeMillis
+    try queryStore(
+      "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, true, $7)",
+      ["proof-article-1", "Resolution Proof", "Private until settled", "Settled proof body", "the-new-york-taimes", "seed-market-1", proofTime]
+    )
+    const unreleasedList = try listArticles(50, "game")
+    const unreleasedGetCode = try expectSocialCode(getArticle("proof-article-1", "game"))
+
+    try queryStore(
+      "UPDATE feed_prediction_markets SET status = 'resolved', resolved_outcome = 'YES', resolved_at = $1 WHERE id = $2",
+      [proofTime + 1_000, "seed-market-1"]
+    )
+    const releasedList = try listArticles(50, "game")
+    const releasedGame = try getArticle("proof-article-1", "game")
+    const releasedSocial = try getArticle("proof-article-1", "social")
+
+    try check(() => assert.deepStrictEqual({
+      rejections: [emptyCode, overLimitCode, spoofedGrantCode, nonAuthorDeleteCode, deletedLookupCode, unreleasedGetCode],
+      rootLength: root.content.length,
+      threadCounts: [threadBeforeDelete.post.replyCount, threadBeforeDelete.replies.map((r) => r.id), replyThread.parentPost?.id, threadAfterDelete.post.replyCount, threadAfterDelete.replies.length],
+      engagement: [liked.likeCount, unliked.likeCount, reliked.liked, reposted.repostCount, unreposted.repostCount, rereposted.reposted],
+      deletedReply,
+      gameRoot: gameRoot === undefined ? undefined : {
+        viaClientName: gameRoot.viaClientName,
+        marketId: gameRoot.marketId,
+        ticker: gameRoot.ticker,
+        cashtags: gameRoot.cashtags,
+        hashtags: gameRoot.hashtags,
+        showTradeEmbed: gameRoot.showTradeEmbed,
+        linkCashtags: gameRoot.linkCashtags,
+        likeCount: gameRoot.likeCount,
+        repostCount: gameRoot.repostCount,
+        replyCount: gameRoot.replyCount
+      },
+      socialRoot: socialRoot === undefined ? undefined : {
+        viaClientName: socialRoot.viaClientName,
+        marketId: socialRoot.marketId,
+        ticker: socialRoot.ticker,
+        cashtags: socialRoot.cashtags,
+        hashtags: socialRoot.hashtags,
+        showTradeEmbed: socialRoot.showTradeEmbed,
+        linkCashtags: socialRoot.linkCashtags
+      },
+      quoteModes: [
+        gameQuote?.quotePost?.marketId,
+        gameQuote?.quotePost?.ticker,
+        gameQuote?.quotePost?.showTradeEmbed,
+        socialQuote?.quotePost?.marketId,
+        socialQuote?.quotePost?.ticker,
+        socialQuote?.quotePost?.cashtags,
+        socialQuote?.quotePost?.showTradeEmbed
+      ],
+      npcModes: [
+        gameNpc?.isParody,
+        gameNpc?.parodyLabel,
+        gameNpc?.ticker,
+        socialNpc?.isParody,
+        socialNpc?.parodyLabel,
+        socialNpc?.ticker,
+        socialNpc?.marketId,
+        socialNpc?.cashtags
+      ],
+      proofVisibility: [
+        unreleasedList.some((a) => a.id === "proof-article-1"),
+        releasedList.some((a) => a.id === "proof-article-1"),
+        releasedGame.isResolutionProof,
+        releasedGame.relatedMarketId,
+        releasedSocial.isResolutionProof,
+        releasedSocial.relatedMarketId
+      ]
+    }, {
+      rejections: ["InvalidInput", "InvalidInput", "Forbidden", "Forbidden", "NotFound", "NotFound"],
+      rootLength: 280,
+      threadCounts: [1, [reply.id], root.id, 0, 0],
+      engagement: [1, 0, true, 1, 0, true],
+      deletedReply: { postId: reply.id, deleted: true },
+      gameRoot: {
+        viaClientName: "Claude",
+        marketId: "seed-market-1",
+        ticker: "NVDAI",
+        cashtags: ["NVDAI"],
+        hashtags: ["ai"],
+        showTradeEmbed: true,
+        linkCashtags: true,
+        likeCount: 1,
+        repostCount: 1,
+        replyCount: 1
+      },
+      socialRoot: {
+        viaClientName: "Claude",
+        marketId: null,
+        ticker: null,
+        cashtags: [],
+        hashtags: ["ai"],
+        showTradeEmbed: false,
+        linkCashtags: false
+      },
+      quoteModes: ["seed-market-1", "NVDAI", true, null, null, [], false],
+      npcModes: [true, "AI parody", "TSLAI", true, "AI parody", null, null, []],
+      proofVisibility: [false, true, true, "seed-market-1", true, null]
+    }))
+  })
+)
+
+it.effect(
+  'follows, notifications, read clearing, mutes, reports, blocks, and profile balance visibility (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
+    try seedAccount("bob", "bob", "Bob Trader", 45_000, "game")
+    try seedGrant("alice", "Claude")
+
+    const followBob = try followAccount("alice", "bob")
+    const followAlice = try followAccount("bob", "alice")
+    const followNpc = try followAccount("alice", "ailon-musk")
+    const unfollowNpc = try unfollowAccount("alice", "ailon-musk")
+
+    const bobPost = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Bob market update $TSLAI",
+      marketId: "seed-market-3",
+      ticker: "TSLAI"
+    })
+
+    const followingWithBob = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50 })
+    const bobNotifsBefore = try listNotifications("bob")
+    const bobUnreadBefore = try getUnreadNotificationCount("bob")
+    const followNotifId = bobNotifsBefore[0]?.id ?? ""
+    const bobMarked = try markNotificationsRead("bob", [followNotifId])
+    const bobNotifsAfter = try listNotifications("bob")
+
+    const notifNow = try Clock.currentTimeMillis
+    try queryStore(
+      "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ($1, $2, 'market_resolved', NULL, NULL, 'seed-market-1', 'Market settled', 'Resolved YES', true, NULL, $3)",
+      ["game-notif-1", "alice", notifNow + 100]
+    )
+    const aliceNotifsGame = try listNotifications("alice", 50, "game")
+    const aliceNotifsSocial = try listNotifications("alice", 50, "social")
+    const aliceUnreadGame = try getUnreadNotificationCount("alice", "game")
+    const aliceUnreadSocial = try getUnreadNotificationCount("alice", "social")
+
+    const selfGameProfile = try getProfile("alice", "alice", "game")
+    const selfSocialProfile = try getProfile("alice", "alice", "social")
+    const otherViewerProfile = try getProfile("alice", "bob", "game")
+
+    const muted = try muteAccount("alice", "bob")
+    const followingWhileMuted = try listFollowing("alice", "alice")
+    const feedWhileMuted = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50 })
+    const unmuted = try unmuteAccount("alice", "bob")
+    const feedAfterUnmute = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50 })
+
+    const postReport = try reportTarget({
+      reporterId: "alice",
+      targetKind: "post",
+      targetId: bobPost.id,
+      reason: "Misleading trade claim"
+    })
+    const duplicateReportCode = try expectSocialCode(reportTarget({
+      reporterId: "alice",
+      targetKind: "post",
+      targetId: bobPost.id,
+      reason: "Duplicate filing"
+    }))
+    const selfReportCode = try expectSocialCode(reportTarget({
+      reporterId: "bob",
+      targetKind: "post",
+      targetId: bobPost.id,
+      reason: "Self report"
+    }))
+    const accountReport = try reportTarget({
+      reporterId: "alice",
+      targetKind: "account",
+      targetId: "bob",
+      reason: "Harassment"
+    })
+
+    const dmBeforeBlock = try createDirectChat("alice", "bob")
+    try sendChatMessage({ senderId: "alice", senderKind: "user", chatId: dmBeforeBlock.id, content: "Before block" })
+
+    const blocked = try blockAccount("alice", "bob")
+    const aliceFollowingAfterBlock = try listFollowing("alice", "alice")
+    const bobFollowingAfterBlock = try listFollowing("bob", "bob")
+    const aliceFollowersAfterBlock = try listFollowers("alice", "alice")
+    const bobFollowersAfterBlock = try listFollowers("bob", "bob")
+    const latestAfterBlock = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+    const followingAfterBlock = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50 })
+    const blockedThreadCode = try expectSocialCode(getPostThread(bobPost.id, "alice", "game"))
+    const blockedFollowCode = try expectSocialCode(followAccount("bob", "alice"))
+    const bobChatsWhileBlocked = try listChats("bob")
+    const blockedDmSendCode = try expectSocialCode(sendChatMessage({
+      senderId: "bob",
+      senderKind: "user",
+      chatId: dmBeforeBlock.id,
+      content: "Blocked DM"
+    }))
+    const blockedCreateDmCode = try expectSocialCode(createDirectChat("bob", "alice"))
+    const bobNotifsWhileBlocked = try listNotifications("bob")
+
+    const unblocked = try unblockAccount("alice", "bob")
+    const latestAfterUnblock = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+
+    try check(() => assert.deepStrictEqual({
+      follows: [followBob.following, followAlice.following, followNpc.following, unfollowNpc.following],
+      followingFeedHasBob: followingWithBob.items.some((p) => p.id === bobPost.id),
+      bobNotifs: [
+        bobNotifsBefore.map((n) => [n.kind, n.actorId, n.isRead]),
+        bobUnreadBefore,
+        bobMarked,
+        bobNotifsAfter.map((n) => [n.isRead, n.readAt !== null])
+      ],
+      socialNotifs: [
+        aliceNotifsGame.length,
+        aliceNotifsSocial.map((n) => n.kind),
+        aliceUnreadGame,
+        aliceUnreadSocial
+      ],
+      balances: [
+        selfGameProfile.balanceCents,
+        selfGameProfile.activeAgentClientName,
+        selfSocialProfile.balanceCents,
+        otherViewerProfile.balanceCents,
+        otherViewerProfile.uiMode
+      ],
+      muting: [
+        muted.muted,
+        followingWhileMuted.map((f) => f.id),
+        feedWhileMuted.items.some((p) => p.id === bobPost.id),
+        unmuted.muted,
+        feedAfterUnmute.items.some((p) => p.id === bobPost.id)
+      ],
+      reports: [
+        [postReport.status, postReport.targetKind, postReport.targetId],
+        [accountReport.status, accountReport.targetKind, accountReport.targetId],
+        duplicateReportCode,
+        selfReportCode
+      ],
+      blocking: [
+        blocked.blocked,
+        aliceFollowingAfterBlock.length,
+        bobFollowingAfterBlock.length,
+        aliceFollowersAfterBlock.length,
+        bobFollowersAfterBlock.length,
+        latestAfterBlock.items.some((p) => p.id === bobPost.id),
+        followingAfterBlock.items.some((p) => p.id === bobPost.id),
+        blockedThreadCode,
+        blockedFollowCode,
+        bobChatsWhileBlocked.find((c) => c.id === dmBeforeBlock.id)?.isBlocked,
+        blockedDmSendCode,
+        blockedCreateDmCode,
+        bobNotifsWhileBlocked.length,
+        unblocked.blocked,
+        latestAfterUnblock.items.some((p) => p.id === bobPost.id)
+      ]
+    }, {
+      follows: [true, true, true, false],
+      followingFeedHasBob: true,
+      bobNotifs: [
+        [["follow", "alice", false]],
+        1,
+        { markedCount: 1, unreadCount: 0 },
+        [[true, true]]
+      ],
+      socialNotifs: [2, ["follow"], 2, 1],
+      balances: [12_500, "Claude", null, null, null],
+      muting: [true, ["bob"], false, false, true],
+      reports: [
+        ["open", "post", bobPost.id],
+        ["open", "account", "bob"],
+        "Conflict",
+        "InvalidInput"
+      ],
+      blocking: [true, 0, 0, 0, 0, false, false, "Blocked", "Blocked", true, "Blocked", "Blocked", 0, false, true]
+    }))
+  })
+)
+
+it.effect(
+  'DMs, user groups, reactions, retired team chat refusal, and NPC alpha invites (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 10_000, "game")
+    try seedAccount("bob", "bob", "Bob Trader", 10_000, "game")
+    try seedAccount("carol", "carol", "Carol Analyst", 10_000, "game")
+
+    const dm = try createDirectChat("alice", "bob")
+    const dmReused = try createDirectChat("bob", "alice")
+    const dmMsg1 = try sendChatMessage({ senderId: "alice", senderKind: "user", chatId: dm.id, content: "DM hello $NVDAI" })
+    try TestClock.adjust(Duration.seconds(1))
+    const dmMsg2 = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: dm.id, content: "DM reply" })
+    const dmReact = try reactToMessage({ accountId: "bob", messageId: dmMsg1.id, emoji: "🔥" })
+    const dmMsgsForBob = try getChatMessages("bob", dm.id)
+    const dmMsgsForAlice = try getChatMessages("alice", dm.id)
+
+    const group = try createUserGroupChat("alice", "Trading Desk", ["bob"])
+    const invitedCarol = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    const groupMsg = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: group.id, content: "Group signal" })
+    const groupReact = try reactToMessage({ accountId: "carol", messageId: groupMsg.id, emoji: "👀" })
+    const groupMsgs = try getChatMessages("alice", group.id)
+    const carolLeft = try leaveGroupChat("carol", group.id)
+    const carolAfterLeaveCode = try expectSocialCode(getChatMessages("carol", group.id))
+
+    const helperTeamCode = try expectSocialCode(assertAllowedChatKind("team"))
+    const createTeamCode = try expectSocialCode(createUserGroupChat("alice", "Retired Team", ["bob"], "team"))
+    const rawTeamRefused = try expectStoreFailure(queryStore(
+      "INSERT INTO feed_chats (id, kind, name, created_by, tier, created_at) VALUES ('retired-team', 'team', 'Team', 'alice', NULL, 1)"
+    ))
+    const teamChatRows = try queryStore("SELECT id FROM feed_chats WHERE kind = 'team'")
+
+    const alphaInvite = try createNpcAlphaInvite({
+      actorId: "ailon-musk",
+      targetAccountId: "alice",
+      tier: "inner_circle"
+    })
+    const pendingBefore = try listAlphaInvites("alice")
+    const aliceNotifs = try listNotifications("alice")
+    const unacceptedReadCode = try expectSocialCode(getChatMessages("alice", alphaInvite.chatId))
+    const chatsBeforeAccept = try listChats("alice")
+
+    const acceptedInvite = try respondAlphaInvite({
+      accountId: "alice",
+      inviteId: alphaInvite.id,
+      accept: true
+    })
+    const pendingAfter = try listAlphaInvites("alice")
+    const chatsAfterAccept = try listChats("alice")
+    const npcAlphaMsg = try sendChatMessage({
+      senderId: "ailon-musk",
+      senderKind: "npc",
+      chatId: alphaInvite.chatId,
+      content: "Orbital alpha signal"
+    })
+    const alphaMsgs = try getChatMessages("alice", alphaInvite.chatId)
+    const acceptedAlphaChat = chatsAfterAccept.find((c) => c.id === alphaInvite.chatId)
+
+    try check(() => assert.deepStrictEqual({
+      dm: [
+        dm.kind,
+        dm.memberCount,
+        dmReused.id === dm.id,
+        dmReact.added,
+        dmMsgsForBob.map((m) => [m.id, m.reactions]),
+        dmMsgsForAlice[0]?.reactions
+      ],
+      group: [
+        group.kind,
+        group.title,
+        group.memberCount,
+        invitedCarol.added,
+        groupReact.added,
+        groupMsgs[0]?.reactions,
+        carolLeft.left,
+        carolAfterLeaveCode
+      ],
+      retiredTeam: [helperTeamCode, createTeamCode, rawTeamRefused, teamChatRows.length],
+      alpha: [
+        alphaInvite.status,
+        alphaInvite.actorId,
+        alphaInvite.tier,
+        pendingBefore.map((i) => i.id),
+        aliceNotifs.map((n) => [n.kind, n.actorId, n.isRead]),
+        unacceptedReadCode,
+        chatsBeforeAccept.some((c) => c.id === alphaInvite.chatId),
+        acceptedInvite.status,
+        acceptedInvite.respondedAt !== null,
+        pendingAfter.length,
+        acceptedAlphaChat === undefined ? undefined : {
+          kind: acceptedAlphaChat.kind,
+          tier: acceptedAlphaChat.tier,
+          members: acceptedAlphaChat.members.map((m) => [m.memberId, m.memberKind, m.role]).sort()
+        },
+        alphaMsgs.map((m) => [m.id, m.senderId, m.senderKind, m.content])
+      ]
+    }, {
+      dm: [
+        "direct",
+        2,
+        true,
+        true,
+        [
+          [dmMsg1.id, [{ emoji: "🔥", count: 1, reactedByViewer: true }]],
+          [dmMsg2.id, []]
+        ],
+        [{ emoji: "🔥", count: 1, reactedByViewer: false }]
+      ],
+      group: [
+        "user_group",
+        "Trading Desk",
+        2,
+        true,
+        true,
+        [{ emoji: "👀", count: 1, reactedByViewer: false }],
+        true,
+        "Forbidden"
+      ],
+      retiredTeam: ["TeamChatRetired", "TeamChatRetired", true, 0],
+      alpha: [
+        "pending",
+        "ailon-musk",
+        "inner_circle",
+        [alphaInvite.id],
+        [["group_invite", "ailon-musk", false]],
+        "Forbidden",
+        false,
+        "accepted",
+        true,
+        0,
+        {
+          kind: "npc_alpha",
+          tier: "inner_circle",
+          members: [["ailon-musk", "npc", "owner"], ["alice", "user", "member"]]
+        },
+        [[npcAlphaMsg.id, "ailon-musk", "npc", "Orbital alpha signal"]]
+      ]
+    }))
+  })
+)

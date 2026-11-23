@@ -1,0 +1,754 @@
+// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"
+import { Store, StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+import { BPS_DENOMINATOR, buyNetAfterFee, canonicalTradingFee, sellNetProceeds } from "../gen/shared__money.effect.vibe"
+import {
+  MAX_ODDS_MOVE_BPS,
+  MIN_TRADE_CENTS,
+  ODDS_HARD_CEILING_BPS,
+  ODDS_HARD_FLOOR_BPS,
+  absInt,
+  buyNextNoReserve,
+  buyNextYesReserve,
+  buySharesBought,
+  cpmmSellGrossUnits,
+  yesOddsBps,
+  type Side
+} from "../gen/markets__prediction.effect.vibe"
+import {
+  MarketFailure,
+  assertSafePositiveInt,
+  ceilDivProduct,
+  creditActorBalance,
+  debitActorBalance,
+  insertLedgerEntry,
+  insertTradeRecord,
+  marketFail,
+  newMarketId,
+  normalizeViaClient,
+  optionalInt,
+  optionalText,
+  requiredText,
+  type MarketActorKind
+} from "./shared.vibe"
+import { listPerpPositionsIn, type PerpPositionView } from "./spot-perp.vibe"
+
+export type PredictionMarketStatus = "open" | "expired" | "awaiting_proof" | "manual_hold" | "resolved" | "cancelled"
+export type PredictionSide = "yes" | "no"
+
+export interface PredictionMarketView {
+  readonly id: string
+  readonly slotIndex: number | null
+  readonly question: string
+  readonly description: string
+  readonly category: string
+  readonly timeframe: string
+  readonly phase: string
+  readonly yesShares: number
+  readonly noShares: number
+  readonly yesPriceBps: number
+  readonly noPriceBps: number
+  readonly yesPrice: number
+  readonly noPrice: number
+  readonly liquidityCents: number
+  readonly status: PredictionMarketStatus
+  readonly resolvedOutcome: PredictionSide | null
+  readonly resolutionProof: string | null
+  readonly resolutionArticleId: string | null
+  readonly expiresAt: number
+  readonly resolvedAt: number | null
+  readonly createdAt: number
+}
+
+export interface PredictionPositionView {
+  readonly marketId: string
+  readonly question: string
+  readonly marketStatus: PredictionMarketStatus
+  readonly holderId: string
+  readonly holderKind: MarketActorKind
+  readonly side: PredictionSide
+  readonly shares: number
+  readonly costBasisCents: number
+  readonly settledAt: number | null
+  readonly payoutCents: number
+  readonly yesPriceBps: number
+  readonly noPriceBps: number
+  readonly estimatedValueCents: number
+}
+
+export interface TradeReceipt {
+  readonly tradeId: string
+  readonly marketId: string
+  readonly actorId: string
+  readonly actorKind: MarketActorKind
+  readonly action: "buy" | "sell"
+  readonly side: PredictionSide
+  readonly shares: number
+  readonly notionalCents: number
+  readonly feeCents: number
+  readonly netCents: number
+  readonly priceCents: number
+  readonly balanceAfterCents: number
+  readonly yesPriceBps: number
+  readonly noPriceBps: number
+  readonly market: PredictionMarketView
+  readonly createdAt: number
+}
+
+export interface BuyPredictionInput {
+  readonly actorId: string
+  readonly actorKind: MarketActorKind
+  readonly marketId: string
+  readonly side: PredictionSide
+  readonly amountCents: number
+  readonly viaClientName?: string
+}
+
+export interface SellPredictionInput {
+  readonly actorId: string
+  readonly actorKind: MarketActorKind
+  readonly marketId: string
+  readonly side: PredictionSide
+  readonly shares: number
+  readonly viaClientName?: string
+}
+
+export interface ResolvePredictionInput {
+  readonly marketId: string
+  readonly outcome?: PredictionSide
+  readonly proofArticleId?: string
+  readonly proofSummary?: string
+  readonly approveHold?: boolean
+}
+
+export interface ResolvePredictionResult {
+  readonly marketId: string
+  readonly status: "resolved"
+  readonly outcome: PredictionSide
+  readonly positionsSettled: number
+  readonly totalPayoutCents: number
+  readonly alreadyResolved: boolean
+}
+
+export interface CancelPredictionResult {
+  readonly marketId: string
+  readonly status: "cancelled"
+  readonly positionsRefunded: number
+  readonly totalRefundedCents: number
+  readonly alreadyCancelled: boolean
+}
+
+export interface UserPositionsView {
+  readonly accountId: string
+  readonly predictionPositions: ReadonlyArray<PredictionPositionView>
+  readonly perpPositions: ReadonlyArray<PerpPositionView>
+}
+
+const publicMarketColumns = `
+  id,
+  slot_index,
+  question,
+  description,
+  category,
+  timeframe,
+  phase,
+  yes_shares,
+  no_shares,
+  liquidity_cents,
+  status,
+  resolved_outcome,
+  resolution_proof,
+  resolution_article_id,
+  expires_at,
+  resolved_at,
+  created_at
+`
+
+function parsePredictionStatus(value: unknown): PredictionMarketStatus {
+  const text = requiredText(value, "open")
+  switch (text) {
+    case "open":
+    case "expired":
+    case "awaiting_proof":
+    case "manual_hold":
+    case "resolved":
+    case "cancelled":
+      return text
+    default:
+      return "open"
+  }
+}
+
+function parsePredictionSide(value: unknown): PredictionSide | null {
+  const text = toText(value)?.toUpperCase()
+  if (text === "YES") return "yes"
+  if (text === "NO") return "no"
+  return null
+}
+
+function toSpecSide(side: PredictionSide): Side {
+  return side === "yes" ? "Yes" : "No"
+}
+
+function toDbSide(side: PredictionSide): "YES" | "NO" {
+  return side === "yes" ? "YES" : "NO"
+}
+
+effect function validateSide(side: PredictionSide): void!MarketFailure {
+  if (side !== "yes" && side !== "no") {
+    throw marketFail("INVALID_SIDE", "Prediction side must be 'yes' or 'no'")
+  }
+}
+
+function bigIntSqrt(n: bigint): bigint {
+  if (n <= 0n) return 0n
+  let x = n
+  let y = (x + 1n) >> 1n
+  while (y < x) {
+    x = y
+    y = (x + n / x) >> 1n
+  }
+  return x
+}
+
+function safeBuyStep(yesShares: number, noShares: number, side: PredictionSide, netCents: number) {
+  if (yesShares <= 90_000_000 && noShares <= 90_000_000 && netCents <= 90_000_000) {
+    const specSide = toSpecSide(side)
+    return {
+      nextYes: buyNextYesReserve(yesShares, noShares, specSide, netCents),
+      nextNo: buyNextNoReserve(yesShares, noShares, specSide, netCents),
+      sharesOut: buySharesBought(yesShares, noShares, specSide, netCents)
+    }
+  }
+  if (side === "yes") {
+    const nextNo = noShares + netCents
+    const nextYes = ceilDivProduct(yesShares, noShares, nextNo)
+    return { nextYes, nextNo, sharesOut: yesShares - nextYes + netCents }
+  }
+  const nextYes = yesShares + netCents
+  const nextNo = ceilDivProduct(yesShares, noShares, nextYes)
+  return { nextYes, nextNo, sharesOut: noShares - nextNo + netCents }
+}
+
+function safeSellGrossCents(yesShares: number, noShares: number, side: PredictionSide, shares: number): number {
+  if (yesShares + noShares + shares <= 30_000_000) {
+    return cpmmSellGrossUnits(yesShares, noShares, toSpecSide(side), shares)
+  }
+  try {
+    const sideR = BigInt(Math.trunc(side === "yes" ? yesShares : noShares))
+    const oppR = BigInt(Math.trunc(side === "yes" ? noShares : yesShares))
+    const s = BigInt(Math.trunc(shares))
+    const total = sideR + oppR + s
+    const diff = sideR + oppR - s
+    const disc = diff * diff + 4n * sideR * s
+    const rootFloor = bigIntSqrt(disc)
+    const rootCeil = rootFloor * rootFloor >= disc ? rootFloor : rootFloor + 1n
+    const denom = total + rootCeil
+    if (denom <= 0n) return 0
+    const raw = Number((2n * s * oppR) / denom)
+    const cap = Math.min(Number(oppR) - 1, shares)
+    return Math.max(0, Math.min(raw, cap))
+  } catch {
+    return 0
+  }
+}
+
+function toPredictionMarketView(row: Row): PredictionMarketView {
+  const yesShares = toInt(row.yes_shares)
+  const noShares = toInt(row.no_shares)
+  const yesPriceBps = yesOddsBps(yesShares, noShares)
+  const noPriceBps = BPS_DENOMINATOR - yesPriceBps
+  const status = parsePredictionStatus(row.status)
+  const isResolved = status === "resolved"
+  return {
+    id: requiredText(row.id),
+    slotIndex: optionalInt(row.slot_index),
+    question: requiredText(row.question),
+    description: requiredText(row.description),
+    category: requiredText(row.category),
+    timeframe: requiredText(row.timeframe),
+    phase: requiredText(row.phase),
+    yesShares,
+    noShares,
+    yesPriceBps,
+    noPriceBps,
+    yesPrice: yesPriceBps / BPS_DENOMINATOR,
+    noPrice: noPriceBps / BPS_DENOMINATOR,
+    liquidityCents: toInt(row.liquidity_cents),
+    status,
+    resolvedOutcome: isResolved ? parsePredictionSide(row.resolved_outcome) : null,
+    resolutionProof: isResolved ? optionalText(row.resolution_proof) : null,
+    resolutionArticleId: isResolved ? optionalText(row.resolution_article_id) : null,
+    expiresAt: toInt(row.expires_at),
+    resolvedAt: optionalInt(row.resolved_at),
+    createdAt: toInt(row.created_at)
+  }
+}
+
+function toPredictionPositionView(row: Row): PredictionPositionView {
+  const yesShares = toInt(row.yes_shares)
+  const noShares = toInt(row.no_shares)
+  const yesPriceBps = yesOddsBps(yesShares, noShares)
+  const noPriceBps = BPS_DENOMINATOR - yesPriceBps
+  const side: PredictionSide = parsePredictionSide(row.side) ?? "yes"
+  const shares = toInt(row.shares)
+  const sidePriceBps = side === "yes" ? yesPriceBps : noPriceBps
+  const status = parsePredictionStatus(row.market_status)
+  const estimatedValueCents = status === "resolved" || status === "cancelled"
+    ? toInt(row.payout_cents)
+    : Math.floor((shares * sidePriceBps) / BPS_DENOMINATOR)
+  return {
+    marketId: requiredText(row.market_id),
+    question: requiredText(row.question),
+    marketStatus: status,
+    holderId: requiredText(row.holder_id),
+    holderKind: requiredText(row.holder_kind) === "npc" ? "npc" : "user",
+    side,
+    shares,
+    costBasisCents: toInt(row.cost_basis_cents),
+    settledAt: optionalInt(row.settled_at),
+    payoutCents: toInt(row.payout_cents),
+    yesPriceBps,
+    noPriceBps,
+    estimatedValueCents
+  }
+}
+
+export effect function listPredictionMarkets(status?: "open" | "resolved" | "cancelled"): ReadonlyArray<PredictionMarketView>!StoreFailure!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = status === undefined
+      ? try tx.query(`SELECT ${publicMarketColumns} FROM feed_prediction_markets ORDER BY slot_index ASC NULLS LAST, created_at DESC`)
+      : try tx.query(`SELECT ${publicMarketColumns} FROM feed_prediction_markets WHERE status = $1 ORDER BY slot_index ASC NULLS LAST, created_at DESC`, [status])
+    return rows.map(toPredictionMarketView)
+  })
+}
+
+export effect function getPredictionMarket(marketId: string): PredictionMarketView!(MarketFailure | StoreFailure)!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(`SELECT ${publicMarketColumns} FROM feed_prediction_markets WHERE id = $1`, [marketId])
+    if (rows.length === 0) {
+      throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${marketId}`)
+    }
+    return toPredictionMarketView(rows[0]!)
+  })
+}
+
+effect function lockOpenPredictionMarket(tx: Tx, marketId: string, now: number): Row!(MarketFailure | StoreFailure) {
+  const marketRows = try tx.query(
+    `SELECT ${publicMarketColumns} FROM feed_prediction_markets WHERE id = $1 FOR UPDATE`,
+    [marketId]
+  )
+  if (marketRows.length === 0) {
+    throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${marketId}`)
+  }
+  const market = marketRows[0]!
+  const status = parsePredictionStatus(market.status)
+  const expiresAt = toInt(market.expires_at)
+  if (status !== "open" || now >= expiresAt) {
+    throw marketFail("MARKET_CLOSED", "Prediction market is closed for trading")
+  }
+  return market
+}
+
+export effect function buyPredictionShares(input: BuyPredictionInput): TradeReceipt!(MarketFailure | StoreFailure)!Store {
+  try validateSide(input.side)
+  try assertSafePositiveInt(input.amountCents, "INVALID_AMOUNT", "Trade amountCents must be a positive integer")
+  if (input.amountCents < MIN_TRADE_CENTS) {
+    throw marketFail("INVALID_AMOUNT", `Minimum trade amount is ${MIN_TRADE_CENTS} cents`)
+  }
+  const viaClientName = normalizeViaClient(input.viaClientName)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const market = try lockOpenPredictionMarket(tx, input.marketId, now)
+    const yesShares = toInt(market.yes_shares)
+    const noShares = toInt(market.no_shares)
+    const feeCents = canonicalTradingFee(input.amountCents)
+    const netCents = buyNetAfterFee(input.amountCents)
+    if (netCents <= 0) {
+      throw marketFail("INVALID_AMOUNT", "Trade amount too small after trading fee")
+    }
+    const oldOdds = yesOddsBps(yesShares, noShares)
+    const { nextYes, nextNo, sharesOut } = safeBuyStep(yesShares, noShares, input.side, netCents)
+    const newOdds = yesOddsBps(nextYes, nextNo)
+    if (nextYes <= 0 || nextNo <= 0 || sharesOut <= 0) {
+      throw marketFail("INSUFFICIENT_LIQUIDITY", "Pool reserves cannot satisfy buy order")
+    }
+    if (newOdds < ODDS_HARD_FLOOR_BPS || newOdds > ODDS_HARD_CEILING_BPS || absInt(newOdds - oldOdds) > MAX_ODDS_MOVE_BPS) {
+      throw marketFail("PRICE_IMPACT_EXCEEDED", "Trade exceeds maximum allowed odds impact or liquidity bounds")
+    }
+    const balanceAfterCents = try debitActorBalance(tx, input.actorId, input.actorKind, input.amountCents, feeCents, now)
+    const updatedMarkets = try tx.query(
+      `UPDATE feed_prediction_markets
+       SET yes_shares = $2, no_shares = $3, liquidity_cents = liquidity_cents + $4
+       WHERE id = $1
+       RETURNING ${publicMarketColumns}`,
+      [input.marketId, nextYes, nextNo, netCents]
+    )
+    const dbSide = toDbSide(input.side)
+    try tx.query(
+      `INSERT INTO feed_prediction_positions (market_id, holder_id, holder_kind, side, shares, cost_basis_cents, settled_at, payout_cents)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, 0)
+       ON CONFLICT (market_id, holder_id, side) DO UPDATE
+       SET shares = feed_prediction_positions.shares + EXCLUDED.shares,
+           cost_basis_cents = feed_prediction_positions.cost_basis_cents + EXCLUDED.cost_basis_cents,
+           settled_at = NULL`,
+      [input.marketId, input.actorId, input.actorKind, dbSide, sharesOut, input.amountCents]
+    )
+    const priceCents = Math.max(1, Math.min(100, Math.round((netCents * 100) / sharesOut)))
+    const tradeId = newMarketId()
+    try insertTradeRecord(tx, {
+      tradeId,
+      traderId: input.actorId,
+      traderKind: input.actorKind,
+      marketKind: "prediction",
+      marketRef: input.marketId,
+      side: input.side === "yes" ? "buy_yes" : "buy_no",
+      notionalCents: input.amountCents,
+      feeCents,
+      sharesOrSize: sharesOut,
+      priceCents,
+      viaClientName,
+      createdAt: now
+    })
+    try insertLedgerEntry(tx, {
+      ledgerId: newMarketId(),
+      accountId: input.actorId,
+      kind: "prediction_buy",
+      deltaCents: 0 - input.amountCents,
+      balanceAfterCents,
+      refId: tradeId,
+      createdAt: now
+    })
+    const marketView = toPredictionMarketView(updatedMarkets[0]!)
+    return {
+      tradeId,
+      marketId: input.marketId,
+      actorId: input.actorId,
+      actorKind: input.actorKind,
+      action: "buy",
+      side: input.side,
+      shares: sharesOut,
+      notionalCents: input.amountCents,
+      feeCents,
+      netCents,
+      priceCents,
+      balanceAfterCents,
+      yesPriceBps: marketView.yesPriceBps,
+      noPriceBps: marketView.noPriceBps,
+      market: marketView,
+      createdAt: now
+    }
+  })
+}
+
+export effect function sellPredictionShares(input: SellPredictionInput): TradeReceipt!(MarketFailure | StoreFailure)!Store {
+  try validateSide(input.side)
+  try assertSafePositiveInt(input.shares, "INVALID_SHARES", "Shares to sell must be a positive integer")
+  const viaClientName = normalizeViaClient(input.viaClientName)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const market = try lockOpenPredictionMarket(tx, input.marketId, now)
+    const dbSide = toDbSide(input.side)
+    const posRows = try tx.query(
+      `SELECT shares, cost_basis_cents, settled_at
+       FROM feed_prediction_positions
+       WHERE market_id = $1 AND holder_id = $2 AND side = $3
+       FOR UPDATE`,
+      [input.marketId, input.actorId, dbSide]
+    )
+    if (posRows.length === 0 || posRows[0]!.settled_at !== null) {
+      throw marketFail("INSUFFICIENT_SHARES", "No active prediction position to sell")
+    }
+    const heldShares = toInt(posRows[0]!.shares)
+    const prevCost = toInt(posRows[0]!.cost_basis_cents)
+    if (heldShares < input.shares) {
+      throw marketFail("INSUFFICIENT_SHARES", "Insufficient shares to sell")
+    }
+    const yesShares = toInt(market.yes_shares)
+    const noShares = toInt(market.no_shares)
+    const liquidityCents = toInt(market.liquidity_cents)
+    const settledCents = safeSellGrossCents(yesShares, noShares, input.side, input.shares)
+    if (settledCents <= 0) {
+      throw marketFail("INVALID_AMOUNT", "Sale proceeds round to zero cents")
+    }
+    if (settledCents > liquidityCents) {
+      throw marketFail("INSUFFICIENT_LIQUIDITY", "Sale exceeds available market liquidity")
+    }
+    const nextYes = input.side === "yes" ? yesShares + input.shares - settledCents : yesShares - settledCents
+    const nextNo = input.side === "yes" ? noShares - settledCents : noShares + input.shares - settledCents
+    if (nextYes <= 0 || nextNo <= 0) {
+      throw marketFail("INSUFFICIENT_LIQUIDITY", "Sale would deplete pool reserves")
+    }
+    const feeCents = canonicalTradingFee(settledCents)
+    const netCreditCents = sellNetProceeds(settledCents)
+    const remainingShares = heldShares - input.shares
+    const remainingCost = remainingShares <= 0 ? 0 : Math.floor((prevCost * remainingShares) / heldShares)
+    const updatedMarkets = try tx.query(
+      `UPDATE feed_prediction_markets
+       SET yes_shares = $2, no_shares = $3, liquidity_cents = liquidity_cents - $4
+       WHERE id = $1
+       RETURNING ${publicMarketColumns}`,
+      [input.marketId, nextYes, nextNo, settledCents]
+    )
+    try tx.query(
+      `UPDATE feed_prediction_positions
+       SET shares = $4, cost_basis_cents = $5
+       WHERE market_id = $1 AND holder_id = $2 AND side = $3`,
+      [input.marketId, input.actorId, dbSide, remainingShares, remainingCost]
+    )
+    const balanceAfterCents = try creditActorBalance(tx, input.actorId, input.actorKind, netCreditCents, feeCents, now)
+    const priceCents = Math.max(0, Math.min(100, Math.floor((settledCents * 100) / input.shares)))
+    const tradeId = newMarketId()
+    try insertTradeRecord(tx, {
+      tradeId,
+      traderId: input.actorId,
+      traderKind: input.actorKind,
+      marketKind: "prediction",
+      marketRef: input.marketId,
+      side: input.side === "yes" ? "sell_yes" : "sell_no",
+      notionalCents: settledCents,
+      feeCents,
+      sharesOrSize: input.shares,
+      priceCents,
+      viaClientName,
+      createdAt: now
+    })
+    try insertLedgerEntry(tx, {
+      ledgerId: newMarketId(),
+      accountId: input.actorId,
+      kind: "prediction_sell",
+      deltaCents: netCreditCents,
+      balanceAfterCents,
+      refId: tradeId,
+      createdAt: now
+    })
+    const marketView = toPredictionMarketView(updatedMarkets[0]!)
+    return {
+      tradeId,
+      marketId: input.marketId,
+      actorId: input.actorId,
+      actorKind: input.actorKind,
+      action: "sell",
+      side: input.side,
+      shares: input.shares,
+      notionalCents: settledCents,
+      feeCents,
+      netCents: netCreditCents,
+      priceCents,
+      balanceAfterCents,
+      yesPriceBps: marketView.yesPriceBps,
+      noPriceBps: marketView.noPriceBps,
+      market: marketView,
+      createdAt: now
+    }
+  })
+}
+
+export effect function resolvePredictionMarket(input: ResolvePredictionInput): ResolvePredictionResult!(MarketFailure | StoreFailure)!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const marketRows = try tx.query(
+      "SELECT id, status, secret_outcome, resolved_outcome FROM feed_prediction_markets WHERE id = $1 FOR UPDATE",
+      [input.marketId]
+    )
+    if (marketRows.length === 0) {
+      throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${input.marketId}`)
+    }
+    const market = marketRows[0]!
+    const status = parsePredictionStatus(market.status)
+    if (status === "resolved") {
+      return {
+        marketId: input.marketId,
+        status: "resolved",
+        outcome: parsePredictionSide(market.resolved_outcome) ?? "yes",
+        positionsSettled: 0,
+        totalPayoutCents: 0,
+        alreadyResolved: true
+      }
+    }
+    if (status === "cancelled") {
+      throw marketFail("MARKET_CANCELLED", "Cancelled market cannot be resolved")
+    }
+    if (status === "manual_hold" && !input.approveHold) {
+      throw marketFail("MANUAL_HOLD", "Market is on manual review hold")
+    }
+    const secretOutcome = parsePredictionSide(market.secret_outcome)
+    const winningSide = input.approveHold && input.outcome !== undefined
+      ? input.outcome
+      : secretOutcome ?? input.outcome ?? null
+    if (winningSide === null) {
+      throw marketFail("MISSING_OUTCOME", "Market has no outcome to resolve")
+    }
+    const winningDbSide = toDbSide(winningSide)
+    const positions = try tx.query(
+      `SELECT holder_id, holder_kind, side, shares
+       FROM feed_prediction_positions
+       WHERE market_id = $1 AND settled_at IS NULL
+       ORDER BY holder_id ASC, side ASC
+       FOR UPDATE`,
+      [input.marketId]
+    )
+    let positionsSettled = 0
+    let totalPayoutCents = 0
+    for (const pos of positions) {
+      const holderId = requiredText(pos.holder_id)
+      const holderKind: MarketActorKind = requiredText(pos.holder_kind) === "npc" ? "npc" : "user"
+      const posSide = requiredText(pos.side)
+      const shares = toInt(pos.shares)
+      const payoutCents = posSide === winningDbSide ? shares : 0
+      const updated = try tx.query(
+        `UPDATE feed_prediction_positions
+         SET settled_at = $4, payout_cents = $5
+         WHERE market_id = $1 AND holder_id = $2 AND side = $3 AND settled_at IS NULL
+         RETURNING shares`,
+        [input.marketId, holderId, posSide, now, payoutCents]
+      )
+      if (updated.length === 0) continue
+      positionsSettled += 1
+      if (payoutCents > 0) {
+        const balanceAfterCents = try creditActorBalance(tx, holderId, holderKind, payoutCents, 0, now)
+        try insertLedgerEntry(tx, {
+          ledgerId: `pred_resolve:${input.marketId}:${holderId}:${posSide}`,
+          accountId: holderId,
+          kind: "prediction_resolution",
+          deltaCents: payoutCents,
+          balanceAfterCents,
+          refId: input.marketId,
+          createdAt: now
+        })
+        totalPayoutCents += payoutCents
+      }
+    }
+    try tx.query(
+      `UPDATE feed_prediction_markets
+       SET status = 'resolved',
+           phase = 'resolved',
+           resolved_outcome = $2,
+           resolution_proof = COALESCE($3, resolution_proof),
+           resolution_article_id = COALESCE($4, resolution_article_id),
+           liquidity_cents = GREATEST(0, liquidity_cents - $5),
+           resolved_at = $6
+       WHERE id = $1`,
+      [input.marketId, winningDbSide, input.proofSummary ?? null, input.proofArticleId ?? null, totalPayoutCents, now]
+    )
+    return {
+      marketId: input.marketId,
+      status: "resolved",
+      outcome: winningSide,
+      positionsSettled,
+      totalPayoutCents,
+      alreadyResolved: false
+    }
+  })
+}
+
+export effect function cancelPredictionMarket(marketId: string): CancelPredictionResult!(MarketFailure | StoreFailure)!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const marketRows = try tx.query(
+      "SELECT id, status FROM feed_prediction_markets WHERE id = $1 FOR UPDATE",
+      [marketId]
+    )
+    if (marketRows.length === 0) {
+      throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${marketId}`)
+    }
+    const status = parsePredictionStatus(marketRows[0]!.status)
+    if (status === "cancelled") {
+      return {
+        marketId,
+        status: "cancelled",
+        positionsRefunded: 0,
+        totalRefundedCents: 0,
+        alreadyCancelled: true
+      }
+    }
+    if (status === "resolved") {
+      throw marketFail("ALREADY_RESOLVED", "Resolved market cannot be cancelled")
+    }
+    const positions = try tx.query(
+      `SELECT holder_id, holder_kind, side, cost_basis_cents
+       FROM feed_prediction_positions
+       WHERE market_id = $1 AND settled_at IS NULL
+       ORDER BY holder_id ASC, side ASC
+       FOR UPDATE`,
+      [marketId]
+    )
+    let positionsRefunded = 0
+    let totalRefundedCents = 0
+    for (const pos of positions) {
+      const holderId = requiredText(pos.holder_id)
+      const holderKind: MarketActorKind = requiredText(pos.holder_kind) === "npc" ? "npc" : "user"
+      const posSide = requiredText(pos.side)
+      const refundCents = toInt(pos.cost_basis_cents)
+      const updated = try tx.query(
+        `UPDATE feed_prediction_positions
+         SET settled_at = $4, payout_cents = $5
+         WHERE market_id = $1 AND holder_id = $2 AND side = $3 AND settled_at IS NULL
+         RETURNING shares`,
+        [marketId, holderId, posSide, now, refundCents]
+      )
+      if (updated.length === 0) continue
+      positionsRefunded += 1
+      if (refundCents > 0) {
+        const balanceAfterCents = try creditActorBalance(tx, holderId, holderKind, refundCents, 0, now)
+        try insertLedgerEntry(tx, {
+          ledgerId: `pred_cancel:${marketId}:${holderId}:${posSide}`,
+          accountId: holderId,
+          kind: "prediction_cancel",
+          deltaCents: refundCents,
+          balanceAfterCents,
+          refId: marketId,
+          createdAt: now
+        })
+        totalRefundedCents += refundCents
+      }
+    }
+    try tx.query(
+      `UPDATE feed_prediction_markets
+       SET status = 'cancelled',
+           phase = 'cancelled',
+           resolved_outcome = NULL,
+           liquidity_cents = GREATEST(0, liquidity_cents - $2),
+           resolved_at = $3
+       WHERE id = $1`,
+      [marketId, totalRefundedCents, now]
+    )
+    return {
+      marketId,
+      status: "cancelled",
+      positionsRefunded,
+      totalRefundedCents,
+      alreadyCancelled: false
+    }
+  })
+}
+
+export effect function getUserPositions(accountId: string): UserPositionsView!StoreFailure!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const predRows = try tx.query(
+      `SELECT
+         p.*,
+         m.question,
+         m.status AS market_status,
+         m.yes_shares,
+         m.no_shares
+       FROM feed_prediction_positions p
+       JOIN feed_prediction_markets m ON m.id = p.market_id
+       WHERE p.holder_id = $1 AND p.settled_at IS NULL AND p.shares > 0
+       ORDER BY m.expires_at ASC, p.market_id ASC`,
+      [accountId]
+    )
+    const perpPositions = try listPerpPositionsIn(tx, accountId)
+    return {
+      accountId,
+      predictionPositions: predRows.map(toPredictionPositionView),
+      perpPositions
+    }
+  })
+}

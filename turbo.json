@@ -28,10 +28,20 @@
     },
     "@repo/ui#gen": {
       "dependsOn": [
-        "//#gen"
+        "//#gen",
+        "@repo/design-system#build"
       ],
       "outputs": [
         "generated/**"
+      ]
+    },
+    "@repo/ui#storybook:build": {
+      "dependsOn": [
+        "@repo/design-system#build",
+        "@repo/ui#gen"
+      ],
+      "outputs": [
+        "storybook-static/**"
       ]
     },
     "build": {
@@ -164,6 +174,8 @@
         "*",
         "!.git",
         "!*.md",
+        "!docs/**",
+        "!vendor/**",
         "vibestack/**",
         "!vibestack/{examples,studio}/**",
         "!vibestack/selftests/{docs,examples}.ts",
@@ -181,135 +193,20 @@
         "VIBESTACK_QUINT_EVALUATOR"
       ]
     },
-    "//#selftest:tools:a": {
-      "dependsOn": [
-        "//#build",
-        "//#test",
-        "vibestack-studio#typecheck",
-        "vibestack-studio#test",
-        "vibestack-studio#test:browser"
-      ],
-      "inputs": [
-        "vibestack/**",
-        "!vibestack/examples/{assistant,dashboard,fullstack}/**",
-        "!vibestack/selftests/{docs,examples}.ts",
-        "!**/{node_modules,dist,.vibe,.cache,.spec-cache,.turbo,generated,storybook-static,__traces__}/**",
-        "!**/.DS_Store",
-        "!vibestack/{studio,examples}/**/gen/**",
-        ".agents/**",
-        "AGENTS.md",
-        "SPEC.md",
-        "LICENSE",
-        "package.json",
-        "pnpm-lock.yaml",
-        "turbo.json",
-        "tsconfig.json",
-        "tsconfig.build.json"
-      ],
-      "outputs": [],
-      "env": [
-        "VIBESTACK_QUINT_EVALUATOR"
-      ]
-    },
-    "//#selftest:tools:b": {
-      "dependsOn": [
-        "//#build",
-        "//#test",
-        "vibestack-studio#typecheck",
-        "vibestack-studio#test",
-        "vibestack-studio#test:browser"
-      ],
-      "inputs": [
-        "vibestack/**",
-        "!vibestack/examples/{assistant,dashboard,fullstack}/**",
-        "!vibestack/selftests/{docs,examples}.ts",
-        "!**/{node_modules,dist,.vibe,.cache,.spec-cache,.turbo,generated,storybook-static,__traces__}/**",
-        "!**/.DS_Store",
-        "!vibestack/{studio,examples}/**/gen/**",
-        ".agents/**",
-        "AGENTS.md",
-        "SPEC.md",
-        "LICENSE",
-        "package.json",
-        "pnpm-lock.yaml",
-        "turbo.json",
-        "tsconfig.json",
-        "tsconfig.build.json"
-      ],
-      "outputs": [],
-      "env": [
-        "VIBESTACK_QUINT_EVALUATOR"
-      ]
-    },
-    "//#selftest:tools:rest": {
-      "dependsOn": [
-        "//#build",
-        "//#test",
-        "vibestack-studio#typecheck",
-        "vibestack-studio#test",
-        "vibestack-studio#test:browser"
-      ],
-      "inputs": [
-        ".gitignore",
-        "eslint.config.js",
-        "vibestack/**",
-        "!vibestack/examples/{assistant,dashboard,fullstack}/**",
-        "!vibestack/selftests/{docs,examples}.ts",
-        "!**/{node_modules,dist,.vibe,.cache,.spec-cache,.turbo,generated,storybook-static,__traces__}/**",
-        "!**/.DS_Store",
-        "!{apps,packages,vibestack/studio,vibestack/examples}/**/gen/**",
-        "apps/**",
-        "packages/**",
-        ".agents/**",
-        "AGENTS.md",
-        "SPEC.md",
-        "README.md",
-        "LICENSE",
-        "spec/**",
-        "package.json",
-        "pnpm-lock.yaml",
-        "turbo.json",
-        "tsconfig.json",
-        "tsconfig.build.json"
-      ],
-      "outputs": [],
-      "env": [
-        "VIBESTACK_QUINT_EVALUATOR"
-      ]
-    },
-    "//#selftest:docs": {
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "!.claude/worktrees/**",
-        "!**/{node_modules,dist,.vibe,.cache,.spec-cache,.turbo,generated,storybook-static,__traces__}/**",
-        "!{apps,packages,vibestack/studio,vibestack/examples}/**/gen/**"
-      ],
-      "outputs": []
-    },
-    "//#selftest:examples": {
-      "inputs": [
-        "vibestack/**",
-        "!vibestack/selftest.ts",
-        "!vibestack/selftests/{docs,tools}.ts",
-        "!vibestack/{studio,fixtures}/**",
-        "!vibestack/{testing,stories,design}/test/**",
-        "!**/{node_modules,dist,.vibe,.cache,.spec-cache,.turbo,generated,storybook-static,__traces__}/**",
-        "!**/.DS_Store",
-        "!{apps,packages,vibestack/studio,vibestack/examples}/**/gen/**",
-        "package.json"
-      ],
-      "outputs": [
-        "vibestack/examples/*/.spec-cache/tests-*.json.{gz,zst}"
-      ],
-      "env": [
-        "VIBESTACK_QUINT_EVALUATOR"
-      ]
-    },
     "//#check": {
       "dependsOn": [
         "//#build",
         "//#typecheck",
         "//#test",
+        "@repo/design-system#build",
+        "@repo/ui#build",
+        "@repo/pack-default#build",
+        "@repo/db#build",
+        "@repo/markets#build",
+        "@repo/social#build",
+        "@repo/auth#build",
+        "@repo/engine#build",
+        "@repo/mcp#build",
         "@repo/app#build",
         "@repo/app#typecheck",
         "@repo/app#test",
@@ -320,6 +217,14 @@
     "//#lint:js": {
       "dependsOn": [
         "@repo/design-system#build",
+        "@repo/ui#typecheck",
+        "@repo/pack-default#typecheck",
+        "@repo/db#typecheck",
+        "@repo/markets#typecheck",
+        "@repo/social#typecheck",
+        "@repo/auth#typecheck",
+        "@repo/engine#typecheck",
+        "@repo/mcp#typecheck",
         "@repo/app#typecheck",
         "vibestack-studio#typecheck"
       ],
@@ -328,6 +233,7 @@
         "packages/**",
         "vibestack/**",
         "!vibestack/examples/**",
+        "!vendor/**",
         "!**/{node_modules,dist,.vibe,.cache,.spec-cache,.turbo,generated,storybook-static}/**",
         "!**/.DS_Store",
         "!{apps,packages,vibestack/studio}/**/gen/**",
@@ -343,6 +249,7 @@
       "inputs": [
         "**/*.css",
         "!.claude/**",
+        "!vendor/**",
         "!**/{node_modules,dist,.vibe,.cache,.spec-cache,.turbo,generated,storybook-static}/**",
         "!**/.DS_Store",
         "!{apps,packages,vibestack/studio}/**/gen/**",
@@ -360,6 +267,7 @@
         "packages/**",
         "vibestack/**",
         "!vibestack/examples/**",
+        "!vendor/**",
         "!**/{node_modules,dist,.vibe,.cache,.spec-cache,.turbo,generated,storybook-static}/**",
         "!**/.DS_Store",
         "!{apps,packages,vibestack/studio}/**/gen/**",
@@ -442,7 +350,8 @@
     },
     "@repo/ui#build": {
       "dependsOn": [
-        "^build"
+        "^build",
+        "gen"
       ],
       "inputs": [
         "package.json",
@@ -454,7 +363,8 @@
     },
     "@repo/ui#typecheck": {
       "dependsOn": [
-        "^build"
+        "^build",
+        "gen"
       ],
       "outputs": [
         ".vibe/declarations/**"

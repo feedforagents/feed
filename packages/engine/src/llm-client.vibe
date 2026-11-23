@@ -1,0 +1,332 @@
+// spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"
+import { parseJsonModelRecord, readEnv } from "@elizaos/core"
+import { actors, organizations } from "@repo/pack-default"
+import { type Store, type StoreFailure } from "@repo/db"
+import { HttpClientRequest } from "effect/http"
+import { type PromptId, PromptCatalog } from "./prompts.vibe"
+import { EngineFailure, executeHttpWithTimeout, hashString, resolveClockNow, sanitizeText } from "./shared.vibe"
+import { confirmLlmSpend, markLlmSpendUncertain, reserveLlmBudget } from "./spend-budget.vibe"
+import { type ThrottleLevel } from "../gen/engine__spendBudget.effect.vibe"
+
+export type LlmProviderKind = "surplus" | "openrouter" | "openai" | "ollama" | "offline-fallback"
+
+export interface CompletionRequest {
+  readonly promptId?: PromptId
+  readonly system?: string
+  readonly user: string
+  readonly maxTokens?: number
+  readonly temperature?: number
+  readonly jsonMode?: boolean
+  readonly nowMs?: number
+  readonly allowOfflineFallback?: boolean
+  readonly estimatedMicros?: number
+  readonly actorId?: string
+}
+
+export interface CompletionResult {
+  readonly text: string
+  readonly provider: LlmProviderKind
+  readonly model: string
+  readonly attemptId: string
+  readonly usedFallback: boolean
+  readonly actualMicros: number
+  readonly throttleLevel: ThrottleLevel
+}
+
+interface LlmProviderConfig {
+  readonly provider: LlmProviderKind
+  readonly endpoint: string
+  readonly apiKey: string
+  readonly model: string
+}
+
+function resolveLlmProviderConfig(): LlmProviderConfig {
+  const surplusUrl = readEnv("SURPLUS_BASE_URL")?.trim()
+  if (surplusUrl && surplusUrl.length > 0) {
+    return {
+      provider: "surplus",
+      endpoint: `${surplusUrl.replace(/\/+$/, "")}/chat/completions`,
+      apiKey: readEnv("SURPLUS_API_KEY") ?? readEnv("OPENAI_API_KEY") ?? "",
+      model: readEnv("SURPLUS_MODEL") ?? readEnv("LLM_MODEL") ?? "gpt-4o-mini",
+    }
+  }
+  const openrouterKey = readEnv("OPENROUTER_API_KEY")?.trim()
+  if (openrouterKey && openrouterKey.length > 0) {
+    return {
+      provider: "openrouter",
+      endpoint: "https://openrouter.ai/api/v1/chat/completions",
+      apiKey: openrouterKey,
+      model: readEnv("OPENROUTER_MODEL") ?? readEnv("LLM_MODEL") ?? "openai/gpt-4o-mini",
+    }
+  }
+  const openaiKey = readEnv("OPENAI_API_KEY")?.trim()
+  if (openaiKey && openaiKey.length > 0) {
+    return {
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1/chat/completions",
+      apiKey: openaiKey,
+      model: readEnv("OPENAI_MODEL") ?? readEnv("LLM_MODEL") ?? "gpt-4o-mini",
+    }
+  }
+  const ollamaUrl = readEnv("OLLAMA_BASE_URL")?.trim()
+  if (ollamaUrl && ollamaUrl.length > 0) {
+    return {
+      provider: "ollama",
+      endpoint: `${ollamaUrl.replace(/\/+$/, "")}/v1/chat/completions`,
+      apiKey: "",
+      model: readEnv("OLLAMA_MODEL") ?? readEnv("LLM_MODEL") ?? "llama3.2",
+    }
+  }
+  return { provider: "offline-fallback", endpoint: "", apiKey: "", model: "deterministic-local" }
+}
+
+function extractField(text: string, label: string): string {
+  const regex = new RegExp(`^${label}:\\s*(.+)$`, "im")
+  const match = regex.exec(text)
+  return match?.[1]?.trim() ?? ""
+}
+
+function extractCsvField(text: string, label: string): ReadonlyArray<string> {
+  const raw = extractField(text, label)
+  if (raw.length === 0 || raw === "(none)") return []
+  return raw.split(",").map((part) => part.trim()).filter((part) => part.length > 0)
+}
+
+function deterministicMarketFallback(user: string, seed: number): string {
+  const timeframe = extractField(user, "Timeframe") || "1d"
+  const slot = extractField(user, "Slot Index") || "0"
+  const orgPool = organizations.filter((o) => Boolean(o.ticker))
+  const org = orgPool[seed % Math.max(1, orgPool.length)]
+  const actor = actors[seed % Math.max(1, actors.length)]
+  const ticker = org?.ticker ?? "NVDAI"
+  const templates = [
+    `Will ${org?.name ?? ticker} announce a $${ticker} catalyst before the ${timeframe} window closes?`,
+    `Will ${actor?.name ?? "Solon"} push $${ticker} orderbook flow higher during this ${timeframe} epoch?`,
+    `Will $${ticker} finish the ${timeframe} slot above consensus expectations?`,
+  ]
+  const question = templates[(seed + Number(slot || 0)) % templates.length] ?? templates[0]!
+  return JSON.stringify({
+    question,
+    description: `Slot ${slot} (${timeframe}) catalyst tracker around ${org?.name ?? ticker} and Fed-universe liquidity flows.`,
+    category: seed % 2 === 0 ? "tech" : "markets",
+    secretOutcome: seed % 2 === 0 ? "YES" : "NO",
+  })
+}
+
+function deterministicDecisionFallback(user: string, seed: number): string {
+  const tickers = extractCsvField(user, "Available Tickers")
+  const marketIds = extractCsvField(user, "Available Market IDs")
+  const replyIds = extractCsvField(user, "Available Reply Post IDs")
+  const chatIds = extractCsvField(user, "Available Alpha Chat IDs")
+  const ticker = tickers[seed % Math.max(1, tickers.length)]
+  const marketId = marketIds[seed % Math.max(1, marketIds.length)]
+  const replyToPostId = replyIds[seed % Math.max(1, replyIds.length)]
+  const chatId = chatIds[seed % Math.max(1, chatIds.length)]
+  const actions: Array<Record<string, unknown>> = []
+  if (ticker) {
+    actions.push({ kind: "SPOT_TRADE", ticker, side: seed % 3 === 0 ? "sell" : "buy", quoteCents: 2_500 + (seed % 4) * 500 })
+  }
+  if (ticker && seed % 2 === 0) {
+    actions.push({ kind: "PERP_TRADE", ticker, side: seed % 4 === 0 ? "short" : "long", collateralCents: 2_500, leverage: 2 + (seed % 3) })
+  }
+  if (marketId) {
+    actions.push({ kind: "PREDICTION_TRADE", marketId, side: seed % 2 === 0 ? "yes" : "no", amountCents: 1_500 })
+  }
+  if (replyToPostId && seed % 3 === 1) {
+    actions.push({
+      kind: "CREATE_REPLY",
+      replyToPostId,
+      content: sanitizeText(`Watching ${ticker ?? "orderflow"} closely on this setup — liquidity looks coiled.`, 240),
+    })
+  } else {
+    actions.push({
+      kind: "CREATE_POST",
+      content: sanitizeText(
+        ticker
+          ? `Orderbook depth on $${ticker} looks mispriced against current prediction odds.`
+          : "Desk positioning feels crowded ahead of the next narrative turn.",
+        240,
+      ),
+      ...(ticker ? { ticker } : {}),
+      ...(marketId ? { marketId } : {}),
+    })
+  }
+  if (chatId && seed % 2 === 1) {
+    actions.push({
+      kind: "SEND_GROUP_MESSAGE",
+      chatId,
+      content: sanitizeText(`Desk note: tracking ${ticker ?? "index"} skew ahead of the next window.`, 240),
+    })
+  }
+  actions.push({ kind: "INVITE_ALPHA" })
+  return JSON.stringify({ actions: actions.slice(0, 4) })
+}
+
+function buildDeterministicFallback(request: CompletionRequest): string {
+  const seed = hashString(`${request.promptId ?? "generic"}:${request.actorId ?? ""}:${request.user}`)
+  switch (request.promptId) {
+    case "marketQuestion":
+      return deterministicMarketFallback(request.user, seed)
+    case "resolutionArticle": {
+      const outcome = extractField(request.user, "Confirmed Resolution Outcome") || "YES"
+      const question = extractField(request.user, "Question") || "Prediction market settlement"
+      return JSON.stringify({
+        title: `Settlement Wire: ${sanitizeText(question, 90)} resolves ${outcome}`,
+        summary: `Final wire verification confirms ${outcome} for "${sanitizeText(question, 120)}".`,
+        body: `Verified market telemetry and closing orderbook audit confirmed the final resolution outcome of ${outcome} for "${question}". Settlement payouts were distributed according to share holdings at lock.`,
+      })
+    }
+    case "feedArticle": {
+      const orgName = extractField(request.user, "Media Organization") || "The Feed Wire"
+      return JSON.stringify({
+        title: `Inside the Tape: Volatility Spikes Across Feed Index Names`,
+        summary: `${sanitizeText(orgName, 40)} examines surging retail and desk volume across rolling markets.`,
+        body: `${orgName} sources report brisk two-way positioning as traders reprice short-dated narrative contracts and spot-linked perpetuals across major Feed tickers.`,
+      })
+    }
+    case "worldFactsConsolidation":
+      return JSON.stringify({
+        facts: [
+          { factText: "Rolling prediction volume remains concentrated in 15m and 1h catalyst slots.", category: "markets" },
+          { factText: "Spot desk flows continue anchoring 20x perp mark pricing across flagship tickers.", category: "perp" },
+        ],
+      })
+    case "npcTradingDecision":
+      return deterministicDecisionFallback(request.user, seed)
+    case "rssParodyRewrite": {
+      const headline = extractField(request.user, "Original Headline") || "Tech valuations climb on AI capex"
+      return sanitizeText(`Solon's OpenLie claims "${headline}" is actually a 4D liquidity catalyst`, 155)
+    }
+    case "cluePost": {
+      const question = extractField(request.user, "Market Question") || "the active catalyst"
+      const phase = extractField(request.user, "Narrative Phase") || "opening"
+      return sanitizeText(`Desk chatter heating up during ${phase} window around "${sanitizeText(question, 100)}" — spreads still wide.`, 240)
+    }
+    case "alphaGroupMessage": {
+      const chatName = extractField(request.user, "Chat") || "Alpha Desk"
+      return sanitizeText(`[${chatName}] Watching spot-to-perp basis tighten ahead of next market turn.`, 240)
+    }
+    case "orgPost": {
+      const orgName = extractField(request.user, "Organization") || "Feed Corp"
+      return sanitizeText(`${orgName} update: systems humming at peak theatrical velocity while critics watch the tape.`, 240)
+    }
+    case "replyPost":
+      return sanitizeText("Interesting read — check the spot pool depth before pressing leverage here.", 230)
+    default:
+      return sanitizeText(
+        request.jsonMode
+          ? JSON.stringify({ status: "ok", note: "deterministic-local" })
+          : "Keeping dry powder ready while spot and prediction odds diverge.",
+        240,
+      )
+  }
+}
+
+function resolveSystemPrompt(request: CompletionRequest): string {
+  if (request.system && request.system.trim().length > 0) return request.system
+  if (request.promptId) return PromptCatalog[request.promptId].system
+  return "You are an autonomous narrative and trading agent in Feed."
+}
+
+effect function sendChatCompletionHttp(config: LlmProviderConfig, request: CompletionRequest, resolvedSystem: string): { readonly content: string; readonly actualMicros: number }!EngineFailure {
+  const maxTokens = Math.max(32, Math.min(2000, request.maxTokens ?? 256))
+  const temperature = request.temperature ?? 0.7
+  const headers: Record<string, string> = { "content-type": "application/json" }
+  if (config.apiKey.length > 0) headers.authorization = `Bearer ${config.apiKey}`
+  const bodyObj: Record<string, unknown> = {
+    model: config.model,
+    messages: [
+      { role: "system", content: resolvedSystem },
+      { role: "user", content: request.user },
+    ],
+    max_tokens: maxTokens,
+    temperature,
+    ...(request.jsonMode ? { response_format: { type: "json_object" } } : {}),
+  }
+  const req = HttpClientRequest.post(config.endpoint).pipe(
+    HttpClientRequest.setHeaders(headers),
+    HttpClientRequest.bodyText(JSON.stringify(bodyObj), "application/json"),
+  )
+  const response = try executeHttpWithTimeout(
+    req,
+    "25 seconds",
+    "LLM_UNAVAILABLE",
+    `LLM request to ${config.provider} failed or timed out.`,
+  )
+  if (response.status < 200 || response.status >= 300) {
+    throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: `LLM provider ${config.provider} returned HTTP ${response.status}.` })
+  }
+  const payload = response.json catch effect (cause) => {
+    throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: "LLM response body was not valid JSON.", cause })
+  }
+  const parsed = parseJsonModelRecord(typeof payload === "string" ? payload : JSON.stringify(payload))
+  if (!parsed || !Array.isArray(parsed.choices) || parsed.choices.length === 0) {
+    throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: "LLM response missing choices." })
+  }
+  const firstChoice = parsed.choices[0] as Record<string, unknown>
+  const message = firstChoice.message as Record<string, unknown> | undefined
+  const rawContent = typeof message?.content === "string" ? message.content.trim() : ""
+  if (rawContent.length === 0) {
+    throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: "LLM response choice contained empty content." })
+  }
+  const usage = parsed.usage as Record<string, unknown> | undefined
+  const promptTokens = typeof usage?.prompt_tokens === "number" ? Math.max(0, usage.prompt_tokens) : Math.ceil((resolvedSystem.length + request.user.length) / 4)
+  const completionTokens = typeof usage?.completion_tokens === "number" ? Math.max(0, usage.completion_tokens) : Math.ceil(rawContent.length / 4)
+  const actualMicros = Math.max(100, promptTokens * 2 + completionTokens * 6)
+  return { content: rawContent, actualMicros }
+}
+
+export effect function generateCompletion(request: CompletionRequest): CompletionResult!(EngineFailure | StoreFailure)!Store {
+  const nowMs = try resolveClockNow(request.nowMs)
+  const config = resolveLlmProviderConfig()
+  const resolvedSystem = resolveSystemPrompt(request)
+  const maxTokens = Math.max(32, Math.min(2000, request.maxTokens ?? 256))
+  const estimatedMicros = request.estimatedMicros ?? Math.max(10_000, Math.ceil((resolvedSystem.length + request.user.length) / 4 + maxTokens) * 20)
+  const reservation = try reserveLlmBudget({
+    estimatedMicros,
+    provider: config.provider,
+    model: config.model,
+    nowMs,
+  })
+  if (config.provider === "offline-fallback") {
+    const fallbackText = buildDeterministicFallback(request)
+    try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
+    return {
+      text: fallbackText,
+      provider: "offline-fallback",
+      model: config.model,
+      attemptId: reservation.attemptId,
+      usedFallback: true,
+      actualMicros: 0,
+      throttleLevel: reservation.throttleLevel,
+    }
+  }
+  const live = sendChatCompletionHttp(config, request, resolvedSystem) catch effect (err) => {
+    try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
+    if (request.allowOfflineFallback !== false) {
+      return null
+    }
+    throw err
+  }
+  if (live === null) {
+    return {
+      text: buildDeterministicFallback(request),
+      provider: "offline-fallback",
+      model: config.model,
+      attemptId: reservation.attemptId,
+      usedFallback: true,
+      actualMicros: 0,
+      throttleLevel: reservation.throttleLevel,
+    }
+  }
+  try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: live.actualMicros, nowMs })
+  return {
+    text: live.content,
+    provider: config.provider,
+    model: config.model,
+    attemptId: reservation.attemptId,
+    usedFallback: false,
+    actualMicros: live.actualMicros,
+    throttleLevel: reservation.throttleLevel,
+  }
+}

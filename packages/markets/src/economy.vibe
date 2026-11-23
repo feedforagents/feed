@@ -1,0 +1,787 @@
+// spec/markets/economy.md, "Story: Verify account and claim initial grant once"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
+import { Store, StoreFailure, toInt, toText, type Tx } from "@repo/db"
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
+import {
+  equityCents,
+  isWashingtonBlocked,
+  netProfitCents,
+  packCents,
+  packPts,
+  packUsd,
+  type GeoCheck,
+  type PlayerLedger,
+  type PurchasePack
+} from "../gen/markets__economy.effect.vibe"
+import { positionEquityAtMark } from "../gen/markets__spotPerp.effect.vibe"
+import {
+  MarketFailure,
+  marketFail,
+  newMarketId,
+  optionalText,
+  parseJsonBody,
+  requiredText,
+  toSpecPerpPosition
+} from "./shared.vibe"
+
+export type PackId = "pack_5" | "pack_20" | "pack_50"
+
+export interface PointPack {
+  readonly id: PackId
+  readonly specPack: PurchasePack
+  readonly name: string
+  readonly usd: number
+  readonly amountCentsUsd: number
+  readonly points: number
+  readonly pointsCents: number
+}
+
+export interface AccountEconomyView {
+  readonly accountId: string
+  readonly handle: string
+  readonly displayName: string
+  readonly verified: boolean
+  readonly uiMode: "game" | "social"
+  readonly balanceCents: number
+  readonly positionValueCents: number
+  readonly equityCents: number
+  readonly startingGrantCents: number
+  readonly purchasedCents: number
+  readonly totalFeesPaidCents: number
+  readonly netProfitCents: number
+}
+
+export interface PointLedgerEntry {
+  readonly id: string
+  readonly accountId: string
+  readonly kind: string
+  readonly deltaCents: number
+  readonly balanceAfterCents: number
+  readonly refId: string | null
+  readonly createdAt: number
+}
+
+export interface CreateStripeCheckoutInput {
+  readonly accountId: string
+  readonly packId: string
+  readonly billingState?: string
+  readonly requestCountry?: string
+  readonly ipRegion?: string
+  readonly successUrl: string
+  readonly cancelUrl: string
+  readonly stripeSecretKey?: string
+}
+
+export interface StripeCheckoutSessionView {
+  readonly purchaseId: string
+  readonly sessionId: string
+  readonly checkoutUrl: string
+  readonly pack: PointPack
+  readonly status: "pending"
+  readonly createdAt: number
+}
+
+export interface HandleStripeWebhookInput {
+  readonly rawBody: string
+  readonly signature?: string
+  readonly webhookSecret?: string
+}
+
+export interface StripeWebhookResult {
+  readonly received: boolean
+  readonly processed: boolean
+  readonly alreadyCompleted: boolean
+  readonly eventType: string
+  readonly accountId: string | null
+  readonly sessionId: string | null
+  readonly creditedCents: number
+  readonly balanceAfterCents: number | null
+}
+
+export interface LeaderboardEntry {
+  readonly rank: number
+  readonly accountId: string
+  readonly handle: string
+  readonly displayName: string
+  readonly avatarUrl: string | null
+  readonly balanceCents: number
+  readonly positionValueCents: number
+  readonly equityCents: number
+  readonly startingGrantCents: number
+  readonly purchasedCents: number
+  readonly netProfitCents: number
+  readonly volumeCents: number
+  readonly tradeCount: number
+  readonly wins: number
+  readonly settledCount: number
+  readonly winRate: number
+}
+
+module stripeSdk {
+  import Stripe from "stripe"
+
+  export interface SdkCheckoutRequest {
+    readonly secretKey: string
+    readonly accountId: string
+    readonly packId: string
+    readonly packName: string
+    readonly usdAmountCents: number
+    readonly points: number
+    readonly pointsCents: number
+    readonly successUrl: string
+    readonly cancelUrl: string
+  }
+
+  export interface SdkCheckoutSession {
+    readonly id: string
+    readonly url: string | null
+  }
+
+  /** @throws {unknown} */
+  export async function createCheckoutViaSdk(input: SdkCheckoutRequest): Promise<SdkCheckoutSession> {
+    const client = new Stripe(input.secretKey, {
+      httpClient: Stripe.createFetchHttpClient(),
+      maxNetworkRetries: 1,
+      timeout: 6000
+    })
+    const session = await client.checkout.sessions.create({
+      mode: "payment",
+      client_reference_id: input.accountId,
+      success_url: input.successUrl,
+      cancel_url: input.cancelUrl,
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: "usd",
+            unit_amount: input.usdAmountCents,
+            product_data: {
+              name: input.packName,
+              description: `${input.points} virtual game points (no cash value)`
+            }
+          }
+        }
+      ],
+      metadata: {
+        accountId: input.accountId,
+        packId: input.packId,
+        pointsCents: String(input.pointsCents)
+      }
+    })
+    return { id: session.id, url: session.url }
+  }
+}
+import { createCheckoutViaSdk, type SdkCheckoutRequest, type SdkCheckoutSession } from stripeSdk
+
+module webCrypto {
+  /** @throws {never} */
+  export async function verifyStripeHmac(
+    rawBody: string,
+    signatureHeader: string,
+    webhookSecret: string,
+    nowMs: number
+  ): Promise<boolean> {
+    try {
+      if (!signatureHeader || !webhookSecret) return false
+      const fields = signatureHeader.split(",").map((part) => {
+        const eq = part.indexOf("=")
+        return eq === -1 ? ["", ""] as const : [part.slice(0, eq).trim(), part.slice(eq + 1).trim()] as const
+      })
+      const timestamps = fields.filter(([key]) => key === "t").map(([, val]) => val)
+      const signatures = fields.filter(([key]) => key === "v1").map(([, val]) => val)
+      if (timestamps.length !== 1 || signatures.length === 0) return false
+      const timestamp = timestamps[0]
+      if (timestamp === undefined || !/^\d{1,12}$/.test(timestamp)) return false
+      if (Math.abs(nowMs - Number(timestamp) * 1000) > 300_000) return false
+      const encoder = new TextEncoder()
+      const key = await globalThis.crypto.subtle.importKey(
+        "raw",
+        encoder.encode(webhookSecret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      )
+      const mac = await globalThis.crypto.subtle.sign(
+        "HMAC",
+        key,
+        encoder.encode(`${timestamp}.${rawBody}`)
+      )
+      const expectedHex = Array.from(new Uint8Array(mac), (byte) => byte.toString(16).padStart(2, "0")).join("")
+      const expectedBytes = encoder.encode(expectedHex)
+      return signatures.some((candidate) => {
+        const candidateBytes = encoder.encode(candidate.toLowerCase())
+        if (candidateBytes.length !== expectedBytes.length) return false
+        let diff = 0
+        for (let i = 0; i < expectedBytes.length; i++) {
+          diff |= (candidateBytes[i] ?? 0) ^ (expectedBytes[i] ?? 0)
+        }
+        return diff === 0
+      })
+    } catch {
+      return false
+    }
+  }
+}
+import { verifyStripeHmac } from webCrypto
+
+const StripeSessionResponse = Schema.Struct({
+  id: Schema.String,
+  url: Schema.optionalKey(Schema.NullOr(Schema.String))
+})
+
+const StripeWebhookPayload = Schema.Struct({
+  id: Schema.String,
+  type: Schema.String,
+  data: Schema.Struct({
+    object: Schema.Record(Schema.String, Schema.Unknown)
+  })
+})
+
+function buildPack(id: PackId, specPack: PurchasePack, name: string): PointPack {
+  const usd = packUsd(specPack)
+  return {
+    id,
+    specPack,
+    name,
+    usd,
+    amountCentsUsd: usd * 100,
+    points: packPts(specPack),
+    pointsCents: packCents(specPack)
+  }
+}
+
+const pointPacks: ReadonlyArray<PointPack> = [
+  buildPack("pack_5", "Pack5", "500 pts Pack"),
+  buildPack("pack_20", "Pack20", "2,000 pts Pack"),
+  buildPack("pack_50", "Pack50", "5,000 pts Pack")
+]
+
+export function listPointPacks(): ReadonlyArray<PointPack> {
+  return pointPacks
+}
+
+effect function resolvePack(packId: string): PointPack!MarketFailure {
+  const normalized = packId.trim().toLowerCase()
+  switch (normalized) {
+    case "pack_5":
+    case "pack5":
+    case "5":
+    case "500":
+      return pointPacks[0]!
+    case "pack_20":
+    case "pack20":
+    case "20":
+    case "2000":
+      return pointPacks[1]!
+    case "pack_50":
+    case "pack50":
+    case "50":
+    case "5000":
+      return pointPacks[2]!
+    default:
+      throw marketFail("INVALID_PACK", `Unknown point pack: ${packId}`)
+  }
+}
+
+function resolvePackByUsdAmount(amountTotal: unknown): PointPack | undefined {
+  const amount = toInt(amountTotal)
+  return pointPacks.find((pack) => pack.amountCentsUsd === amount)
+}
+
+function isWashingtonRegion(region: string | undefined, country: string | undefined): boolean {
+  if (region === undefined) return false
+  const norm = region.trim().toUpperCase()
+  if (norm === "") return false
+  if (norm === "US-WA" || norm === "WASHINGTON") return true
+  if (norm === "WA") {
+    const countryNorm = country?.trim().toUpperCase()
+    return countryNorm === undefined || countryNorm === "" || countryNorm === "US" || countryNorm === "USA"
+  }
+  return false
+}
+
+function buildLedger(
+  accountId: string,
+  verified: boolean,
+  cashCents: number,
+  positionValueCents: number,
+  startingGrantCents: number,
+  purchasedCents: number
+): PlayerLedger {
+  return {
+    id: accountId,
+    verified,
+    grantClaimed: verified,
+    cashCents,
+    positionValueCents,
+    startingGrantCents,
+    purchasedCents
+  }
+}
+
+export effect function getAccountEconomy(accountId: string): AccountEconomyView!(MarketFailure | StoreFailure)!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const accountRows = try tx.query(
+      `SELECT account_id, handle, display_name, phone_verified_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents
+       FROM feed_accounts
+       WHERE account_id = $1`,
+      [accountId]
+    )
+    if (accountRows.length === 0) {
+      throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
+    }
+    const acct = accountRows[0]!
+    const predRows = try tx.query(
+      `SELECT COALESCE(SUM(cost_basis_cents), 0) AS total_cost
+       FROM feed_prediction_positions
+       WHERE holder_id = $1 AND holder_kind = 'user' AND settled_at IS NULL AND shares > 0`,
+      [accountId]
+    )
+    const perpRows = try tx.query(
+      `SELECT p.holder_id, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
+       FROM feed_perp_positions p
+       JOIN feed_perp_markets m ON m.ticker = p.ticker
+       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.status = 'open'`,
+      [accountId]
+    )
+    let perpValueCents = 0
+    for (const row of perpRows) {
+      const equity = positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents))
+      perpValueCents += Math.max(0, equity)
+    }
+    const positionValueCents = toInt(predRows[0]?.total_cost) + perpValueCents
+    const balanceCents = toInt(acct.balance_cents)
+    const startingGrantCents = toInt(acct.starting_grant_cents)
+    const purchasedCents = toInt(acct.purchased_cents)
+    const verified = acct.phone_verified_at !== null
+    const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents, purchasedCents)
+    return {
+      accountId,
+      handle: requiredText(acct.handle),
+      displayName: requiredText(acct.display_name),
+      verified,
+      uiMode: requiredText(acct.ui_mode) === "social" ? "social" : "game",
+      balanceCents,
+      positionValueCents,
+      equityCents: equityCents(ledger),
+      startingGrantCents,
+      purchasedCents,
+      totalFeesPaidCents: toInt(acct.total_fees_paid_cents),
+      netProfitCents: netProfitCents(ledger)
+    }
+  })
+}
+
+export effect function getPointLedger(accountId: string, limit = 50): ReadonlyArray<PointLedgerEntry>!StoreFailure!Store {
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at
+       FROM feed_point_ledger
+       WHERE account_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT $2`,
+      [accountId, safeLimit]
+    )
+    return rows.map((row) => ({
+      id: requiredText(row.id),
+      accountId: requiredText(row.account_id),
+      kind: requiredText(row.kind),
+      deltaCents: toInt(row.delta_cents),
+      balanceAfterCents: toInt(row.balance_after_cents),
+      refId: optionalText(row.ref_id),
+      createdAt: toInt(row.created_at)
+    }))
+  })
+}
+
+effect function createCheckoutViaHttpClient(
+  client: HttpClient.HttpClient,
+  input: SdkCheckoutRequest
+): SdkCheckoutSession!MarketFailure {
+  const form = new URLSearchParams([
+    ["mode", "payment"],
+    ["client_reference_id", input.accountId],
+    ["success_url", input.successUrl],
+    ["cancel_url", input.cancelUrl],
+    ["line_items[0][quantity]", "1"],
+    ["line_items[0][price_data][currency]", "usd"],
+    ["line_items[0][price_data][unit_amount]", String(input.usdAmountCents)],
+    ["line_items[0][price_data][product_data][name]", input.packName],
+    ["line_items[0][price_data][product_data][description]", `${input.points} virtual game points (no cash value)`],
+    ["metadata[accountId]", input.accountId],
+    ["metadata[packId]", input.packId],
+    ["metadata[pointsCents]", String(input.pointsCents)]
+  ]).toString()
+  const request = HttpClientRequest.post("https://api.stripe.com/v1/checkout/sessions").pipe(
+    HttpClientRequest.bearerToken(input.secretKey),
+    HttpClientRequest.acceptJson,
+    HttpClientRequest.bodyText(form, "application/x-www-form-urlencoded")
+  )
+  const response = Effect.provideService(client.execute(request), FetchHttpClient.RequestInit, { redirect: "manual" }) catch effect (cause) => {
+    throw marketFail("STRIPE_UNAVAILABLE", "Failed to reach Stripe Checkout API", cause)
+  }
+  const text = response.text catch effect (cause) => {
+    throw marketFail("STRIPE_UNAVAILABLE", "Failed to read Stripe Checkout response", cause)
+  }
+  if (response.status < 200 || response.status >= 300) {
+    throw marketFail("STRIPE_ERROR", `Stripe Checkout rejected request (${response.status})`)
+  }
+  const parsedJson = try parseJsonBody(text, "STRIPE_INVALID_RESPONSE", "Stripe Checkout returned invalid JSON")
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(StripeSessionResponse)(parsedJson))
+  if (decoded === undefined) {
+    throw marketFail("STRIPE_INVALID_RESPONSE", "Stripe Checkout returned unexpected session shape")
+  }
+  return { id: decoded.id, url: decoded.url ?? null }
+}
+
+export effect function createStripeCheckoutSession(
+  input: CreateStripeCheckoutInput
+): StripeCheckoutSessionView!(MarketFailure | StoreFailure)!Store {
+  const pack = try resolvePack(input.packId)
+  if (!input.successUrl.trim() || !input.cancelUrl.trim()) {
+    throw marketFail("INVALID_REDIRECT_URL", "successUrl and cancelUrl are required")
+  }
+  const geo: GeoCheck = {
+    billingWashington: isWashingtonRegion(input.billingState, input.requestCountry),
+    ipWashington: isWashingtonRegion(input.ipRegion, input.requestCountry)
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  if (isWashingtonBlocked(geo)) {
+    try store.transaction(effect (tx: Tx) => {
+      const accountRows = try tx.query("SELECT account_id FROM feed_accounts WHERE account_id = $1", [input.accountId])
+      if (accountRows.length > 0) {
+        const blockId = newMarketId()
+        try tx.query(
+          `INSERT INTO feed_stripe_purchases
+           (id, account_id, stripe_session_id, pack_usd, points_cents, status, billing_state, ip_region, created_at, completed_at)
+           VALUES ($1, $2, $3, $4, $5, 'blocked_wa', $6, $7, $8, NULL)`,
+          [blockId, input.accountId, `blocked_wa:${blockId}`, pack.usd, pack.pointsCents, input.billingState ?? null, input.ipRegion ?? null, now]
+        )
+      }
+    })
+    throw marketFail("REGION_BLOCKED", "Point purchases are unavailable in Washington State. Free play remains open.")
+  }
+  const secretKey = input.stripeSecretKey?.trim() ?? ""
+  if (secretKey === "") {
+    throw marketFail("STRIPE_UNCONFIGURED", "Stripe secret key is not configured")
+  }
+  try store.transaction(effect (tx: Tx) => {
+    const accountRows = try tx.query("SELECT account_id FROM feed_accounts WHERE account_id = $1", [input.accountId])
+    if (accountRows.length === 0) {
+      throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${input.accountId}`)
+    }
+  })
+  const sdkRequest: SdkCheckoutRequest = {
+    secretKey,
+    accountId: input.accountId,
+    packId: pack.id,
+    packName: pack.name,
+    usdAmountCents: pack.amountCentsUsd,
+    points: pack.points,
+    pointsCents: pack.pointsCents,
+    successUrl: input.successUrl,
+    cancelUrl: input.cancelUrl
+  }
+  const maybeClient = try Effect.serviceOption(HttpClient.HttpClient)
+  const session = Option.isSome(maybeClient)
+    ? try createCheckoutViaHttpClient(maybeClient.value, sdkRequest)
+    : try tryPromise({
+        try: () => createCheckoutViaSdk(sdkRequest),
+        catch: (cause) => marketFail("STRIPE_ERROR", "Stripe Checkout session creation failed", cause)
+      })
+  if (!session.url) {
+    throw marketFail("STRIPE_INVALID_RESPONSE", "Stripe Checkout session did not return a URL")
+  }
+  const purchaseId = newMarketId()
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `INSERT INTO feed_stripe_purchases
+       (id, account_id, stripe_session_id, pack_usd, points_cents, status, billing_state, ip_region, created_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NULL)`,
+      [purchaseId, input.accountId, session.id, pack.usd, pack.pointsCents, input.billingState ?? null, input.ipRegion ?? null, now]
+    )
+  })
+  return {
+    purchaseId,
+    sessionId: session.id,
+    checkoutUrl: session.url,
+    pack,
+    status: "pending",
+    createdAt: now
+  }
+}
+
+function readMetaString(metadata: unknown, key: string): string | undefined {
+  if (metadata === null || typeof metadata !== "object") return undefined
+  const record = metadata as Record<string, unknown>
+  return toText(record[key])
+}
+
+effect function alreadyCompletedWebhookResult(
+  tx: Tx,
+  eventType: string,
+  accountId: string,
+  sessionId: string
+): StripeWebhookResult!StoreFailure {
+  const acctRows = try tx.query("SELECT balance_cents FROM feed_accounts WHERE account_id = $1", [accountId])
+  return {
+    received: true,
+    processed: true,
+    alreadyCompleted: true,
+    eventType,
+    accountId,
+    sessionId,
+    creditedCents: 0,
+    balanceAfterCents: acctRows.length > 0 ? toInt(acctRows[0]?.balance_cents) : null
+  }
+}
+
+export effect function handleStripeWebhook(
+  input: HandleStripeWebhookInput
+): StripeWebhookResult!(MarketFailure | StoreFailure)!Store {
+  const webhookSecret = input.webhookSecret?.trim() ?? ""
+  if (webhookSecret === "") {
+    throw marketFail("WEBHOOK_UNCONFIGURED", "Stripe webhook secret is not configured")
+  }
+  const signature = input.signature?.trim() ?? ""
+  if (signature === "") {
+    throw marketFail("INVALID_SIGNATURE", "Missing Stripe webhook signature")
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const verified = try tryPromise({
+    try: () => verifyStripeHmac(input.rawBody, signature, webhookSecret, now),
+    catch: () => marketFail("INVALID_SIGNATURE", "Stripe webhook signature check failed")
+  })
+  if (!verified) {
+    throw marketFail("INVALID_SIGNATURE", "Invalid Stripe webhook signature")
+  }
+  const parsedJson = try parseJsonBody(input.rawBody, "INVALID_WEBHOOK_PAYLOAD", "Webhook body is not valid JSON")
+  const event = Option.getOrUndefined(Schema.decodeUnknownOption(StripeWebhookPayload)(parsedJson))
+  if (event === undefined) {
+    throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Webhook body does not match Stripe event shape")
+  }
+  if (event.type !== "checkout.session.completed" && event.type !== "checkout.session.async_payment_succeeded") {
+    return {
+      received: true,
+      processed: false,
+      alreadyCompleted: false,
+      eventType: event.type,
+      accountId: null,
+      sessionId: null,
+      creditedCents: 0,
+      balanceAfterCents: null
+    }
+  }
+  const sessionObj = event.data.object
+  const sessionId = toText(sessionObj.id)
+  const paymentStatus = toText(sessionObj.payment_status)
+  if (!sessionId) {
+    throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Checkout session missing id")
+  }
+  if (paymentStatus !== "paid") {
+    return {
+      received: true,
+      processed: false,
+      alreadyCompleted: false,
+      eventType: event.type,
+      accountId: null,
+      sessionId,
+      creditedCents: 0,
+      balanceAfterCents: null
+    }
+  }
+  return try store.transaction(effect (tx: Tx) => {
+    const existingRows = try tx.query(
+      "SELECT id, account_id, points_cents, status FROM feed_stripe_purchases WHERE stripe_session_id = $1 FOR UPDATE",
+      [sessionId]
+    )
+    let accountId = ""
+    let pointsCents = 0
+    if (existingRows.length > 0) {
+      const existing = existingRows[0]!
+      accountId = requiredText(existing.account_id)
+      const status = requiredText(existing.status)
+      if (status === "blocked_wa") {
+        throw marketFail("REGION_BLOCKED", "Purchase was blocked in Washington")
+      }
+      if (status === "completed") {
+        return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
+      }
+      pointsCents = toInt(existing.points_cents)
+      const updatedPurchase = try tx.query(
+        "UPDATE feed_stripe_purchases SET status = 'completed', completed_at = $2 WHERE stripe_session_id = $1 AND status = 'pending' RETURNING id",
+        [sessionId, now]
+      )
+      if (updatedPurchase.length === 0) {
+        return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
+      }
+    } else {
+      const metaAccount = readMetaString(sessionObj.metadata, "accountId") ?? toText(sessionObj.client_reference_id)
+      const metaPackId = readMetaString(sessionObj.metadata, "packId")
+      const resolvedPack = metaPackId !== undefined ? try resolvePack(metaPackId) : resolvePackByUsdAmount(sessionObj.amount_total)
+      if (!metaAccount || resolvedPack === undefined) {
+        throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Checkout session missing accountId or recognized point pack")
+      }
+      accountId = metaAccount
+      pointsCents = resolvedPack.pointsCents
+      const inserted = try tx.query(
+        `INSERT INTO feed_stripe_purchases
+         (id, account_id, stripe_session_id, pack_usd, points_cents, status, billing_state, ip_region, created_at, completed_at)
+         VALUES ($1, $2, $3, $4, $5, 'completed', NULL, NULL, $6, $6)
+         ON CONFLICT (stripe_session_id) DO NOTHING
+         RETURNING id`,
+        [newMarketId(), accountId, sessionId, resolvedPack.usd, pointsCents, now]
+      )
+      if (inserted.length === 0) {
+        return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
+      }
+    }
+    const acctLock = try tx.query(
+      "SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE",
+      [accountId]
+    )
+    if (acctLock.length === 0) {
+      throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
+    }
+    const updatedAccount = try tx.query(
+      `UPDATE feed_accounts
+       SET balance_cents = balance_cents + $2,
+           purchased_cents = purchased_cents + $2,
+           updated_at = $3
+       WHERE account_id = $1
+       RETURNING balance_cents`,
+      [accountId, pointsCents, now]
+    )
+    const balanceAfterCents = toInt(updatedAccount[0]!.balance_cents)
+    try tx.query(
+      `INSERT INTO feed_point_ledger (id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at)
+       VALUES ($1, $2, 'stripe_purchase', $3, $4, $5, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [`stripe_purchase:${sessionId}`, accountId, pointsCents, balanceAfterCents, sessionId, now]
+    )
+    return {
+      received: true,
+      processed: true,
+      alreadyCompleted: false,
+      eventType: event.type,
+      accountId,
+      sessionId,
+      creditedCents: pointsCents,
+      balanceAfterCents
+    }
+  })
+}
+
+export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntry>!StoreFailure!Store {
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const accounts = try tx.query(
+      `SELECT account_id, handle, display_name, avatar_url, phone_verified_at, balance_cents, starting_grant_cents, purchased_cents
+       FROM feed_accounts`
+    )
+    const predValues = try tx.query(
+      `SELECT holder_id, COALESCE(SUM(cost_basis_cents), 0) AS total_cost
+       FROM feed_prediction_positions
+       WHERE holder_kind = 'user' AND settled_at IS NULL AND shares > 0
+       GROUP BY holder_id`
+    )
+    const predMap = new Map<string, number>()
+    for (const row of predValues) {
+      predMap.set(requiredText(row.holder_id), toInt(row.total_cost))
+    }
+    const perpRows = try tx.query(
+      `SELECT p.holder_id, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
+       FROM feed_perp_positions p
+       JOIN feed_perp_markets m ON m.ticker = p.ticker
+       WHERE p.holder_kind = 'user' AND p.status = 'open'`
+    )
+    const perpMap = new Map<string, number>()
+    for (const row of perpRows) {
+      const holderId = requiredText(row.holder_id)
+      const equity = Math.max(0, positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents)))
+      perpMap.set(holderId, (perpMap.get(holderId) ?? 0) + equity)
+    }
+    const volumeRows = try tx.query(
+      `SELECT trader_id, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
+       FROM feed_trades
+       WHERE trader_kind = 'user'
+       GROUP BY trader_id`
+    )
+    const volumeMap = new Map<string, { readonly volumeCents: number; readonly tradeCount: number }>()
+    for (const row of volumeRows) {
+      volumeMap.set(requiredText(row.trader_id), {
+        volumeCents: toInt(row.volume_cents),
+        tradeCount: toInt(row.trade_count)
+      })
+    }
+    const predStatsRows = try tx.query(
+      `SELECT
+         holder_id,
+         COUNT(*) AS settled_count,
+         SUM(CASE WHEN payout_cents > cost_basis_cents THEN 1 ELSE 0 END) AS wins
+       FROM feed_prediction_positions
+       WHERE holder_kind = 'user' AND settled_at IS NOT NULL
+       GROUP BY holder_id`
+    )
+    const perpStatsRows = try tx.query(
+      `SELECT
+         holder_id,
+         COUNT(*) AS settled_count,
+         SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins
+       FROM feed_perp_positions
+       WHERE holder_kind = 'user' AND status IN ('closed', 'liquidated')
+       GROUP BY holder_id`
+    )
+    const statsMap = new Map<string, { wins: number; settledCount: number }>()
+    for (const row of [...predStatsRows, ...perpStatsRows]) {
+      const holderId = requiredText(row.holder_id)
+      const prev = statsMap.get(holderId) ?? { wins: 0, settledCount: 0 }
+      statsMap.set(holderId, {
+        wins: prev.wins + toInt(row.wins),
+        settledCount: prev.settledCount + toInt(row.settled_count)
+      })
+    }
+    const scored = accounts.map((acct) => {
+      const accountId = requiredText(acct.account_id)
+      const balanceCents = toInt(acct.balance_cents)
+      const startingGrantCents = toInt(acct.starting_grant_cents)
+      const purchasedCents = toInt(acct.purchased_cents)
+      const positionValueCents = (predMap.get(accountId) ?? 0) + (perpMap.get(accountId) ?? 0)
+      const verified = acct.phone_verified_at !== null
+      const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents, purchasedCents)
+      const vol = volumeMap.get(accountId) ?? { volumeCents: 0, tradeCount: 0 }
+      const stat = statsMap.get(accountId) ?? { wins: 0, settledCount: 0 }
+      return {
+        accountId,
+        handle: requiredText(acct.handle),
+        displayName: requiredText(acct.display_name),
+        avatarUrl: optionalText(acct.avatar_url),
+        balanceCents,
+        positionValueCents,
+        equityCents: equityCents(ledger),
+        startingGrantCents,
+        purchasedCents,
+        netProfitCents: netProfitCents(ledger),
+        volumeCents: vol.volumeCents,
+        tradeCount: vol.tradeCount,
+        wins: stat.wins,
+        settledCount: stat.settledCount,
+        winRate: stat.settledCount === 0 ? 0 : stat.wins / stat.settledCount
+      }
+    })
+    scored.sort((a, b) => {
+      if (b.netProfitCents !== a.netProfitCents) return b.netProfitCents - a.netProfitCents
+      if (b.volumeCents !== a.volumeCents) return b.volumeCents - a.volumeCents
+      return a.accountId.localeCompare(b.accountId)
+    })
+    return scored.slice(0, safeLimit).map((entry, idx) => ({
+      rank: idx + 1,
+      ...entry
+    }))
+  })
+}

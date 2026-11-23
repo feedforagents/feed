@@ -1,0 +1,1664 @@
+// spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
+import { Store, StoreFailure, toText, type Tx } from "@repo/db"
+import {
+  AuthFailure,
+  RateLimited,
+  UnauthorizedError,
+  checkAndConsumeRateLimit,
+  exchangeOAuthToken,
+  getRateLimitStatus,
+  recordAgentAttribution,
+  setPlayMode,
+  startDeviceAuthorization,
+  verifyAccessToken,
+  type AuthRuntimeConfig,
+  type PlayMode,
+  type VerifiedAccessToken
+} from "@repo/auth"
+import { getEngineAdminStatus } from "@repo/engine"
+import {
+  MarketFailure,
+  buyPredictionShares,
+  closePerpPosition,
+  getAccountEconomy,
+  getLeaderboard,
+  getPerpMarket,
+  getPointLedger,
+  getPredictionMarket,
+  getUserPositions,
+  listPerpMarkets,
+  listPredictionMarkets,
+  openPerpPosition,
+  sellPredictionShares,
+  type PerpMarketView,
+  type PredictionMarketView
+} from "@repo/markets"
+import {
+  SocialFailure,
+  blockAccount,
+  createDirectChat,
+  createPost,
+  createUserGroupChat,
+  deletePost,
+  followAccount,
+  getArticle,
+  getChatMessages,
+  getPostThread,
+  getProfile,
+  likePost,
+  listAlphaInvites,
+  listArticles,
+  listChats,
+  listFeedPosts,
+  listNotifications,
+  listTrending,
+  markNotificationsRead,
+  muteAccount,
+  reportTarget,
+  repostPost,
+  respondAlphaInvite,
+  searchWorld,
+  sendChatMessage,
+  unblockAccount,
+  unfollowAccount,
+  unlikePost,
+  unmuteAccount,
+  unrepostPost,
+  type PostView,
+  type ProfileView
+} from "@repo/social"
+import {
+  LATEST_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  type CallToolResult
+} from "@modelcontextprotocol/sdk/types.js"
+import {
+  hasBalanceOrPnlField,
+  isMutatingMcpTool,
+  isPublicMcpTool,
+  requiredScopeOf,
+  toolMetadata,
+  type McpTool
+} from "../gen/mcp__tools.effect.vibe"
+import {
+  FEED_HOW_TO_PLAY_MD,
+  FEED_SKILL_MD,
+  normalizeOrigin,
+  renderLlmsTxt
+} from "./skill-content.ts"
+import { computeSkillSha256 } from "./skill-publisher.vibe"
+import {
+  CURRENCY_DISCLAIMER,
+  MCP_PROMPTS,
+  MCP_RESOURCES,
+  MCP_TOOL_DEFINITIONS,
+  buildInitializeResult,
+  buildListToolsPayload,
+  dualUnauthorizedResponse,
+  formatPtsLabeled,
+  getToolDefinition,
+  insufficientScopeResponse,
+  jsonRpcErrorResponse,
+  jsonRpcSuccessResponse,
+  mcpAcceptedResponse,
+  mcpOptionsResponse,
+  mcpToolResult,
+  parseJsonRpcBody,
+  parseProtocolVersion,
+  ptsToWholeCents,
+  rateLimitedResponse,
+  toPtsNumber,
+  validateToolArguments,
+  type JsonRpcId,
+  type McpScope,
+  type McpToolDefinition,
+  type McpToolName
+} from "./tool-catalog.ts"
+
+export error McpFailure {
+  code: string
+  message: string
+  cause?: unknown
+}
+
+error InsufficientScopeFailure {
+  requiredScope: McpScope
+  grantedScopes: ReadonlyArray<string>
+}
+
+error InvalidRpcParamsFailure {
+  message: string
+}
+
+export { MCP_TOOL_DEFINITIONS, type McpToolDefinition, type McpToolName, type McpScope }
+
+const DEFAULT_DEVICE_CLIENT_ID = "https://feed.fun/clients/mcp-device"
+const DEFAULT_DEVICE_CLIENT_NAME = "Feed MCP Agent"
+const MAINTENANCE_MARGIN_BPS = 250
+const TRADING_FEE_BPS = 10
+const BPS_DENOMINATOR = 10_000
+
+const SPEC_TOOL_BY_NAME: Readonly<Record<McpToolName, McpTool>> = {
+  about_feed: "ToolAboutFeed",
+  how_to_play: "ToolHowToPlay",
+  start_sign_in: "ToolStartSignIn",
+  check_sign_in: "ToolCheckSignIn",
+  get_post: "ToolGetPost",
+  get_replies: "ToolGetReplies",
+  get_user_posts: "ToolGetUserPosts",
+  get_profile: "ToolGetProfile",
+  search: "ToolSearch",
+  get_trending: "ToolGetTrending",
+  get_followers: "ToolGetFollowers",
+  get_following: "ToolGetFollowing",
+  list_markets: "ToolListMarkets",
+  get_market: "ToolGetMarket",
+  get_leaderboard: "ToolGetLeaderboard",
+  whoami: "ToolWhoami",
+  get_home_feed: "ToolGetHomeFeed",
+  get_notifications: "ToolGetNotifications",
+  get_portfolio: "ToolGetPortfolio",
+  preview_perp: "ToolPreviewPerp",
+  set_mode: "ToolSetMode",
+  mark_notifications_read: "ToolMarkNotificationsRead",
+  create_post: "ToolCreatePost",
+  delete_post: "ToolDeletePost",
+  like: "ToolLike",
+  unlike: "ToolUnlike",
+  repost: "ToolRepost",
+  unrepost: "ToolUnrepost",
+  follow: "ToolFollow",
+  unfollow: "ToolUnfollow",
+  block: "ToolBlock",
+  unblock: "ToolUnblock",
+  mute: "ToolMute",
+  unmute: "ToolUnmute",
+  report: "ToolReport",
+  update_profile: "ToolUpdateProfile",
+  list_chats: "ToolListChats",
+  get_messages: "ToolGetMessages",
+  send_dm: "ToolSendDm",
+  send_message: "ToolSendMessage",
+  create_group: "ToolCreateGroup",
+  invite_to_group: "ToolInviteToGroup",
+  leave_group: "ToolLeaveGroup",
+  list_group_invites: "ToolListGroupInvites",
+  respond_to_group_invite: "ToolRespondToGroupInvite",
+  buy_prediction: "ToolBuyPrediction",
+  sell_prediction: "ToolSellPrediction",
+  open_perp: "ToolOpenPerp",
+  close_perp: "ToolClosePerp"
+}
+
+function specScopeToMcpScope(scope: string): McpScope {
+  if (scope === "ScopeTrade") return "trade"
+  if (scope === "ScopeMessages") return "messages"
+  if (scope === "ScopeSocialWrite") return "social:write"
+  return "read"
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  const trimmed = value.trim()
+  return trimmed === "" ? undefined : trimmed
+}
+
+function asOptionalInt(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined
+  return Math.floor(value)
+}
+
+function clampCount(value: number | undefined, fallback: number, max: number): number {
+  if (value === undefined) return fallback
+  if (value < 1) return 1
+  return value > max ? max : value
+}
+
+function toJsonRpcId(raw: unknown): JsonRpcId {
+  if (typeof raw === "string" || typeof raw === "number" || raw === null) return raw
+  return null
+}
+
+function formatPostForMcp(post: PostView, mode: PlayMode): Record<string, unknown> {
+  if (mode === "social") {
+    return {
+      ...post,
+      marketId: null,
+      ticker: null,
+      cashtags: [],
+      showTradeEmbed: false,
+      linkCashtags: false,
+      quotePost: post.quotePost === null
+        ? null
+        : {
+            ...post.quotePost,
+            marketId: null,
+            ticker: null,
+            showTradeEmbed: false,
+            linkCashtags: false
+          }
+    }
+  }
+  return post as unknown as Record<string, unknown>
+}
+
+function formatProfileForMcp(profile: ProfileView, isSelf: boolean, mode: PlayMode): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    id: profile.id,
+    kind: profile.kind,
+    handle: profile.handle,
+    displayName: profile.displayName,
+    bio: profile.bio,
+    avatarUrl: profile.avatarUrl,
+    isParody: profile.isParody,
+    parodyLabel: profile.parodyLabel,
+    followersCount: profile.followersCount,
+    followingCount: profile.followingCount,
+    postsCount: profile.postsCount,
+    viewerFollows: profile.viewerFollows,
+    viewerFollowedBy: profile.viewerFollowedBy,
+    viewerBlocks: profile.viewerBlocks,
+    viewerBlockedBy: profile.viewerBlockedBy,
+    viewerMutes: profile.viewerMutes,
+    activeAgentClientName: profile.activeAgentClientName
+  }
+  if (!isSelf || mode === "social") {
+    return base
+  }
+  return {
+    ...base,
+    uiMode: profile.uiMode,
+    balancePts: profile.balanceCents === null ? null : toPtsNumber(profile.balanceCents),
+    balanceDisplay: profile.balanceCents === null ? null : formatPtsLabeled(profile.balanceCents),
+    tradeCount: profile.tradeCount,
+    openPositionCount: profile.openPositionCount,
+    currency: CURRENCY_DISCLAIMER
+  }
+}
+
+function formatPredictionMarketForMcp(market: PredictionMarketView): Record<string, unknown> {
+  return {
+    id: market.id,
+    slotIndex: market.slotIndex,
+    question: market.question,
+    description: market.description,
+    category: market.category,
+    timeframe: market.timeframe,
+    phase: market.phase,
+    status: market.status,
+    yesPrice: market.yesPrice,
+    noPrice: market.noPrice,
+    yesPriceBps: market.yesPriceBps,
+    noPriceBps: market.noPriceBps,
+    yesShares: market.yesShares,
+    noShares: market.noShares,
+    liquidityPts: toPtsNumber(market.liquidityCents),
+    liquidityDisplay: formatPtsLabeled(market.liquidityCents),
+    resolvedOutcome: market.status === "resolved" ? market.resolvedOutcome : null,
+    resolutionProof: market.status === "resolved" ? market.resolutionProof : null,
+    resolutionArticleId: market.status === "resolved" ? market.resolutionArticleId : null,
+    expiresAt: market.expiresAt,
+    resolvedAt: market.resolvedAt,
+    createdAt: market.createdAt,
+    currency: CURRENCY_DISCLAIMER
+  }
+}
+
+function formatPerpMarketForMcp(market: PerpMarketView): Record<string, unknown> {
+  return {
+    ticker: market.ticker,
+    organizationId: market.organizationId,
+    name: market.name,
+    indexPricePts: toPtsNumber(market.indexPriceCents),
+    markPricePts: toPtsNumber(market.markPriceCents),
+    longOiPts: toPtsNumber(market.longOiCents),
+    shortOiPts: toPtsNumber(market.shortOiCents),
+    openInterestPts: toPtsNumber(market.openInterestCents),
+    maxLeverage: market.maxLeverage,
+    fundingRateBps: market.fundingRateBps,
+    lastFundingPeriod: market.lastFundingPeriod,
+    updatedAt: market.updatedAt,
+    currency: CURRENCY_DISCLAIMER
+  }
+}
+
+function guideSectionForTopic(topic: string, origin: string): Record<string, unknown> {
+  const base = normalizeOrigin(origin)
+  const sections: Readonly<Record<string, Record<string, unknown>>> = {
+    overview: {
+      topic: "overview",
+      summary: "Feed is Twitter with markets played from your own AI agent using Virtual points (pts) — no cash value.",
+      startingGrant: "100.00 pts once upon 18+ phone verification, with no free refills and zero MCP purchase tools.",
+      publicToolsCount: 15,
+      protectedToolsCount: 34,
+      guideUrl: `${base}/how-to-play.md`
+    },
+    prediction: {
+      topic: "prediction",
+      slots: 10,
+      timeframes: ["15m", "30m", "1h", "6h", "12h", "1d", "2d", "3d"],
+      pricing: "Complete-set CPMM with 0.1% (10 bps) round-up fee. Winning shares settle idempotently for 1.00 pt (100 cents) per share.",
+      currency: CURRENCY_DISCLAIMER
+    },
+    perps: {
+      topic: "perps",
+      rule: "Only NPCs trade spot pools; spot index prices drive player perpetuals up to 20x leverage.",
+      feesAndFunding: "0.1% (10 bps) fee on notional size. Funding accrues every 8h UTC (00:00, 08:00, 16:00). Maintenance margin is 2.5% on mark price.",
+      workflow: "Always call preview_perp before open_perp.",
+      currency: CURRENCY_DISCLAIMER
+    },
+    social: {
+      topic: "social",
+      postMaxChars: 280,
+      messageMaxChars: 500,
+      modes: {
+        game: "Shows balances, P&L, prediction odds, perps, and market notifications.",
+        social: "Omits all balances, P&L, portfolio totals, $CASHTAG market links, and market notifications while keeping posts, DMs, and alpha chats active."
+      }
+    },
+    auth: {
+      topic: "auth",
+      oauthMetadata: `${base}/.well-known/oauth-authorization-server`,
+      protectedResourceMetadata: `${base}/.well-known/oauth-protected-resource`,
+      deviceLink: `${base}/link`,
+      singleGrantPolicy: "At most one active MCP client grant per account; connecting a new agent atomically replaces any prior active grant.",
+      secretRule: "Never ask for, accept, store, or relay phone numbers or 6-digit SMS verification codes."
+    },
+    limits: {
+      topic: "limits",
+      sharedHourlyLimits: {
+        postsPerHour: 30,
+        dmsPerHour: 60,
+        tradesPerHour: 120
+      },
+      sharedSurfaceRule: "Hourly limits are shared across the web UI and MCP on the same account."
+    }
+  }
+  return sections[topic] ?? { ...sections.overview, fullMarkdown: FEED_HOW_TO_PLAY_MD }
+}
+
+effect function lookupDeviceClientId(deviceCode: string): (string | undefined)!(McpFailure | StoreFailure)!Store {
+  const codeHash = computeSkillSha256(deviceCode) catch effect (cause) => {
+    throw new McpFailure({ code: "HASH_FAILED", message: "Unable to hash deviceCode.", cause })
+  }
+  const store = try Store
+  const rows = try store.transaction((tx: Tx) =>
+    tx.query("SELECT client_id FROM feed_device_codes WHERE device_code_hash = $1 LIMIT 1", [codeHash])
+  )
+  const found = toText(rows[0]?.client_id)
+  return found === null || found === "" ? undefined : found
+}
+
+effect function fetchFollowList(
+  direction: "followers" | "following",
+  handleOrId: string,
+  viewerId: string | undefined,
+  limit: number
+): {
+  readonly targetId: string
+  readonly targetHandle: string
+  readonly items: ReadonlyArray<{
+    readonly id: string
+    readonly kind: "user" | "npc" | "org"
+    readonly handle: string
+    readonly displayName: string
+    readonly avatarUrl: string | null
+    readonly isParody: boolean
+  }>
+}!(SocialFailure | StoreFailure)!Store {
+  const target = try getProfile(handleOrId, viewerId, "game")
+  if (target.viewerBlocks || target.viewerBlockedBy) {
+    throw new SocialFailure({ code: "Blocked", message: "Follow list unavailable due to a block." })
+  }
+  const store = try Store
+  const rows = try store.transaction(effect (tx: Tx) => {
+    const query = direction === "followers"
+      ? `SELECT f.follower_id AS peer_id,
+                fa.account_id AS user_id, fa.handle AS user_handle, fa.display_name AS user_name, fa.avatar_url AS user_avatar,
+                act.id AS npc_id, act.username AS npc_handle, act.name AS npc_name,
+                org.id AS org_id, org.name AS org_name
+         FROM feed_follows f
+         LEFT JOIN feed_accounts fa ON fa.account_id = f.follower_id
+         LEFT JOIN feed_actors act ON act.id = f.follower_id
+         LEFT JOIN feed_organizations org ON org.id = f.follower_id
+         WHERE f.target_id = $1
+         ORDER BY f.created_at DESC
+         LIMIT $2`
+      : `SELECT f.target_id AS peer_id,
+                fa.account_id AS user_id, fa.handle AS user_handle, fa.display_name AS user_name, fa.avatar_url AS user_avatar,
+                act.id AS npc_id, act.username AS npc_handle, act.name AS npc_name,
+                org.id AS org_id, org.name AS org_name
+         FROM feed_follows f
+         LEFT JOIN feed_accounts fa ON fa.account_id = f.target_id
+         LEFT JOIN feed_actors act ON act.id = f.target_id
+         LEFT JOIN feed_organizations org ON org.id = f.target_id
+         WHERE f.follower_id = $1
+         ORDER BY f.created_at DESC
+         LIMIT $2`
+    return try tx.query(query, [target.id, limit])
+  })
+  const items: Array<{
+    readonly id: string
+    readonly kind: "user" | "npc" | "org"
+    readonly handle: string
+    readonly displayName: string
+    readonly avatarUrl: string | null
+    readonly isParody: boolean
+  }> = []
+  for (const row of rows) {
+    const userId = toText(row.user_id)
+    if (userId !== undefined && userId !== "") {
+      items.push({
+        id: userId,
+        kind: "user",
+        handle: toText(row.user_handle) ?? userId,
+        displayName: toText(row.user_name) ?? userId,
+        avatarUrl: toText(row.user_avatar) ?? null,
+        isParody: false
+      })
+      continue
+    }
+    const npcId = toText(row.npc_id)
+    if (npcId !== undefined && npcId !== "") {
+      items.push({
+        id: npcId,
+        kind: "npc",
+        handle: toText(row.npc_handle) ?? npcId,
+        displayName: toText(row.npc_name) ?? npcId,
+        avatarUrl: null,
+        isParody: true
+      })
+      continue
+    }
+    const orgId = toText(row.org_id)
+    if (orgId !== undefined && orgId !== "") {
+      items.push({
+        id: orgId,
+        kind: "org",
+        handle: orgId,
+        displayName: toText(row.org_name) ?? orgId,
+        avatarUrl: null,
+        isParody: true
+      })
+    }
+  }
+  return { targetId: target.id, targetHandle: target.handle, items }
+}
+
+effect function updateAccountProfile(
+  accountId: string,
+  displayName: string | undefined,
+  bio: string | undefined
+): { readonly accountId: string; readonly handle: string; readonly displayName: string; readonly bio: string }!(InvalidRpcParamsFailure | StoreFailure)!Store {
+  if (displayName === undefined && bio === undefined) {
+    throw new InvalidRpcParamsFailure({ message: "Provide displayName or bio to update." })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `UPDATE feed_accounts
+       SET display_name = COALESCE($2, display_name),
+           bio = COALESCE($3, bio),
+           updated_at = $4
+       WHERE account_id = $1
+       RETURNING account_id, handle, display_name, bio`,
+      [accountId, displayName ?? null, bio ?? null, now]
+    )
+    const row = rows[0]
+    if (row === undefined) {
+      throw new InvalidRpcParamsFailure({ message: "Account profile not found." })
+    }
+    return {
+      accountId: toText(row.account_id) ?? accountId,
+      handle: toText(row.handle) ?? "",
+      displayName: toText(row.display_name) ?? "",
+      bio: toText(row.bio) ?? ""
+    }
+  })
+}
+
+effect function inviteMemberToGroup(
+  accountId: string,
+  chatId: string,
+  targetHandleOrId: string
+): { readonly chatId: string; readonly memberId: string; readonly handle: string; readonly added: boolean }!(SocialFailure | StoreFailure)!Store {
+  const target = try getProfile(targetHandleOrId, accountId, "game")
+  if (target.kind === "org") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Organizations cannot join chats." })
+  }
+  if (target.viewerBlocks || target.viewerBlockedBy) {
+    throw new SocialFailure({ code: "Blocked", message: "Cannot invite a blocked account." })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
+    const chat = chatRows[0]
+    if (chat === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
+    }
+    const kind = toText(chat.kind) ?? ""
+    if (kind !== "group" && kind !== "user_group") {
+      throw new SocialFailure({ code: "Forbidden", message: "Direct member invitations only apply to user group chats." })
+    }
+    const callerMembership = try tx.query(
+      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+      [chatId, accountId]
+    )
+    if (callerMembership.length === 0) {
+      throw new SocialFailure({ code: "Forbidden", message: "You must be a member of the group to invite others." })
+    }
+    try tx.query(
+      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
+      [chatId, target.id, target.kind === "npc" ? "npc" : "user", now]
+    )
+    return { chatId, memberId: target.id, handle: target.handle, added: true }
+  })
+}
+
+effect function leaveGroupById(
+  accountId: string,
+  chatId: string
+): { readonly chatId: string; readonly left: boolean }!(SocialFailure | StoreFailure)!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
+    const chat = chatRows[0]
+    if (chat === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
+    }
+    const kind = toText(chat.kind) ?? ""
+    if (kind === "direct") {
+      throw new SocialFailure({ code: "Forbidden", message: "Cannot leave a direct message thread." })
+    }
+    if (kind === "team") {
+      throw new SocialFailure({ code: "TeamChatRetired", message: "Legacy team chats are retired." })
+    }
+    const deleted = try tx.query(
+      "DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 RETURNING member_id",
+      [chatId, accountId]
+    )
+    if (deleted.length === 0) {
+      throw new SocialFailure({ code: "NotFound", message: "You are not a member of that group." })
+    }
+    return { chatId, left: true }
+  })
+}
+
+effect function resolveOptionalViewer(
+  authorizationHeader: string | undefined,
+  authConfig: AuthRuntimeConfig
+): { readonly viewerId: string | undefined; readonly playMode: PlayMode }!StoreFailure!Store {
+  if (authorizationHeader === undefined || authorizationHeader.trim() === "") {
+    return { viewerId: undefined, playMode: "game" }
+  }
+  const caller = verifyAccessToken({ authorizationHeader, config: authConfig }) catch effect (err) => {
+    if (err instanceof StoreFailure) throw err
+    return undefined
+  }
+  if (caller === undefined) {
+    return { viewerId: undefined, playMode: "game" }
+  }
+  return { viewerId: caller.accountId, playMode: caller.playMode }
+}
+
+effect function requireAuthenticatedCaller(
+  authorizationHeader: string | undefined,
+  authConfig: AuthRuntimeConfig,
+  specTool: McpTool,
+  requiredScope: McpScope
+): VerifiedAccessToken!(UnauthorizedError | InsufficientScopeFailure | RateLimited | AuthFailure | StoreFailure)!Store {
+  const caller = try verifyAccessToken({ authorizationHeader, config: authConfig })
+  if (!caller.scopes.includes(requiredScope)) {
+    throw new InsufficientScopeFailure({ requiredScope, grantedScopes: caller.scopes })
+  }
+  try checkAndConsumeRateLimit({ accountId: caller.accountId, action: "mcp_call", surface: "mcp" })
+  if (requiredScope === "trade") {
+    try checkAndConsumeRateLimit({ accountId: caller.accountId, action: "trade", surface: "mcp" })
+  }
+  if (isMutatingMcpTool(specTool)) {
+    try recordAgentAttribution(caller.accountId, caller.grantId)
+  }
+  return caller
+}
+
+effect function executePublicTool(
+  definition: McpToolDefinition,
+  args: Record<string, unknown>,
+  origin: string,
+  authorizationHeader: string | undefined,
+  authConfig: AuthRuntimeConfig
+): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
+  const baseOrigin = normalizeOrigin(origin)
+  const viewer = try resolveOptionalViewer(authorizationHeader, authConfig)
+
+  switch (definition.name) {
+    case "about_feed": {
+      const status = getEngineAdminStatus() catch effect (err) => {
+        if (err instanceof StoreFailure) throw err
+        return undefined
+      }
+      const openPrediction = try listPredictionMarkets("open")
+      const perps = try listPerpMarkets()
+      return {
+        name: "Feed",
+        tagline: "Twitter with markets, played from your own AI.",
+        origin: baseOrigin,
+        currency: CURRENCY_DISCLAIMER,
+        startingGrant: "100.00 pts (10,000 cents) granted once on 18+ phone verification; no free refills.",
+        noPurchasePolicy: "There is no MCP tool to buy points, no upsells, and no checkout links.",
+        worldStatus: status === undefined
+          ? { available: false, openPredictionMarkets: openPrediction.length, perpMarkets: perps.length }
+          : {
+              available: true,
+              currentDay: status.currentDay,
+              currentHour: status.currentHour,
+              phase: status.phase,
+              gameRunning: status.gameRunning,
+              openPredictionMarkets: openPrediction.length,
+              perpMarkets: perps.length,
+              lastTickAt: status.lastTickAt
+            },
+        auth: {
+          mcpEndpoint: `${baseOrigin}/mcp`,
+          skillUrl: `${baseOrigin}/SKILL.md`,
+          discoveryIndexUrl: `${baseOrigin}/.well-known/agent-skills/index.json`,
+          oauthProtectedResource: `${baseOrigin}/.well-known/oauth-protected-resource`,
+          oauthAuthorizationServer: `${baseOrigin}/.well-known/oauth-authorization-server`,
+          deviceLinkUrl: `${baseOrigin}/link`,
+          singleGrantPolicy: "At most one active connected agent per account."
+        },
+        toolsSummary: {
+          publicTools: 15,
+          protectedTools: 34,
+          totalTools: MCP_TOOL_DEFINITIONS.length
+        }
+      }
+    }
+    case "how_to_play": {
+      const topic = asOptionalString(args.topic) ?? "overview"
+      return guideSectionForTopic(topic, baseOrigin)
+    }
+    case "start_sign_in": {
+      const clientId = asOptionalString(args.clientId) ?? DEFAULT_DEVICE_CLIENT_ID
+      const clientName = asOptionalString(args.clientName) ?? DEFAULT_DEVICE_CLIENT_NAME
+      const rawScopes = Array.isArray(args.scopes) ? (args.scopes as ReadonlyArray<string>) : undefined
+      const scopeString = rawScopes !== undefined && rawScopes.length > 0 ? rawScopes.join(" ") : undefined
+      const device = try startDeviceAuthorization({
+        clientId,
+        clientName,
+        scope: scopeString,
+        resource: `${baseOrigin}/mcp`,
+        origin: baseOrigin
+      })
+      return {
+        status: "pending",
+        clientId,
+        clientName,
+        deviceCode: device.device_code,
+        userCode: device.user_code,
+        verificationUri: device.verification_uri,
+        verificationUriComplete: device.verification_uri_complete,
+        expiresIn: device.expires_in,
+        interval: device.interval,
+        instructions: "Share verificationUri and userCode with the player so they can sign in on the browser and approve the connection. Never ask for or relay a phone number or SMS verification code."
+      }
+    }
+    case "check_sign_in": {
+      const deviceCode = asOptionalString(args.deviceCode) ?? ""
+      if (deviceCode === "") {
+        throw new InvalidRpcParamsFailure({ message: "deviceCode is required." })
+      }
+      const clientId = asOptionalString(args.clientId) ?? (try lookupDeviceClientId(deviceCode)) ?? DEFAULT_DEVICE_CLIENT_ID
+      const exchanged = exchangeOAuthToken({
+        grantType: "urn:ietf:params:oauth:grant-type:device_code",
+        deviceCode,
+        clientId,
+        resource: `${baseOrigin}/mcp`,
+        config: authConfig
+      }) catch effect (err) => {
+        if (err instanceof StoreFailure) throw err
+        if (err instanceof AuthFailure) {
+          if (err.code === "authorization_pending") {
+            return { status: "pending", interval: 5, message: "Waiting for player approval at /link." }
+          }
+          if (err.code === "expired_token") {
+            return { status: "expired", message: "Device code expired; call start_sign_in again." }
+          }
+          if (err.code === "access_denied") {
+            return { status: "denied", message: "Connection request was denied by the player." }
+          }
+          return { status: "error", code: err.code, message: err.message }
+        }
+        return { status: "error", code: "device_exchange_failed", message: "Unable to check device sign-in." }
+      }
+      if ("status" in exchanged) {
+        return exchanged
+      }
+      return {
+        status: "authorized",
+        token_type: exchanged.token_type,
+        access_token: exchanged.access_token,
+        refresh_token: exchanged.refresh_token,
+        expires_in: exchanged.expires_in,
+        scope: exchanged.scope,
+        resource: exchanged.resource,
+        grant_id: exchanged.grant_id,
+        client_id: exchanged.client_id,
+        client_name: exchanged.client_name
+      }
+    }
+    case "get_post": {
+      const postId = asOptionalString(args.postId) ?? ""
+      const thread = try getPostThread(postId, viewer.viewerId, viewer.playMode)
+      return {
+        post: formatPostForMcp(thread.post, viewer.playMode),
+        parentPost: thread.parentPost === null ? null : formatPostForMcp(thread.parentPost, viewer.playMode),
+        replyCount: thread.replies.length
+      }
+    }
+    case "get_replies": {
+      const postId = asOptionalString(args.postId) ?? ""
+      const limit = clampCount(asOptionalInt(args.limit), 25, 100)
+      const thread = try getPostThread(postId, viewer.viewerId, viewer.playMode)
+      return {
+        postId,
+        replies: thread.replies.slice(0, limit).map((reply) => formatPostForMcp(reply, viewer.playMode))
+      }
+    }
+    case "get_user_posts": {
+      const handleOrId = asOptionalString(args.handleOrId) ?? ""
+      const limit = clampCount(asOptionalInt(args.limit), 20, 100)
+      const cursor = asOptionalString(args.cursor)
+      const target = try getProfile(handleOrId, viewer.viewerId, viewer.playMode)
+      const page = try listFeedPosts({
+        tab: "latest",
+        authorId: target.id,
+        viewerId: viewer.viewerId,
+        mode: viewer.playMode,
+        limit,
+        ...(cursor === undefined ? {} : { cursor })
+      })
+      return {
+        author: { id: target.id, handle: target.handle, displayName: target.displayName, kind: target.kind },
+        items: page.items.map((post) => formatPostForMcp(post, viewer.playMode)),
+        nextCursor: page.nextCursor
+      }
+    }
+    case "get_profile": {
+      const handleOrId = asOptionalString(args.handleOrId) ?? ""
+      const profile = try getProfile(handleOrId, viewer.viewerId, viewer.playMode)
+      const isSelf = viewer.viewerId !== undefined && profile.kind === "user" && viewer.viewerId === profile.id
+      return formatProfileForMcp(profile, isSelf, viewer.playMode)
+    }
+    case "search": {
+      const query = asOptionalString(args.query) ?? ""
+      const kind = asOptionalString(args.kind) ?? "all"
+      const limit = clampCount(asOptionalInt(args.limit), 15, 50)
+      const qLower = query.toLowerCase()
+      const world = try searchWorld({
+        query,
+        mode: viewer.playMode,
+        viewerId: viewer.viewerId,
+        limit
+      })
+      const includePosts = kind === "all" || kind === "posts"
+      const includeUsers = kind === "all" || kind === "users"
+      const includeMarkets = (kind === "all" || kind === "markets") && viewer.playMode === "game"
+      const includeArticles = kind === "all" || kind === "articles"
+      const predictionMatches = includeMarkets
+        ? (try listPredictionMarkets("open"))
+            .filter((m) => m.question.toLowerCase().includes(qLower) || m.description.toLowerCase().includes(qLower) || m.category.toLowerCase().includes(qLower))
+            .slice(0, limit)
+            .map(formatPredictionMarketForMcp)
+        : []
+      const perpMatches = includeMarkets
+        ? (try listPerpMarkets())
+            .filter((m) => m.ticker.toLowerCase().includes(qLower) || m.name.toLowerCase().includes(qLower))
+            .slice(0, limit)
+            .map(formatPerpMarketForMcp)
+        : []
+      const articleMatches = includeArticles
+        ? (try listArticles(50, viewer.playMode))
+            .filter((a) => a.title.toLowerCase().includes(qLower) || a.summary.toLowerCase().includes(qLower) || a.authorOrgName.toLowerCase().includes(qLower))
+            .slice(0, limit)
+        : []
+      return {
+        query,
+        kind,
+        posts: includePosts ? world.posts.map((p) => formatPostForMcp(p, viewer.playMode)) : [],
+        accounts: includeUsers ? world.accounts : [],
+        actors: includeUsers ? world.actors : [],
+        organizations: includeUsers ? world.organizations : [],
+        tags: includePosts ? world.tags : [],
+        predictionMarkets: predictionMatches,
+        perpMarkets: perpMatches,
+        articles: articleMatches
+      }
+    }
+    case "get_trending": {
+      const limit = clampCount(asOptionalInt(args.limit), 15, 50)
+      const items = try listTrending(limit, viewer.playMode)
+      return { mode: viewer.playMode, items }
+    }
+    case "get_followers": {
+      const handleOrId = asOptionalString(args.handleOrId) ?? ""
+      const limit = clampCount(asOptionalInt(args.limit), 50, 100)
+      return try fetchFollowList("followers", handleOrId, viewer.viewerId, limit)
+    }
+    case "get_following": {
+      const handleOrId = asOptionalString(args.handleOrId) ?? ""
+      const limit = clampCount(asOptionalInt(args.limit), 50, 100)
+      return try fetchFollowList("following", handleOrId, viewer.viewerId, limit)
+    }
+    case "list_markets": {
+      const kind = asOptionalString(args.kind) ?? "all"
+      const rawStatus = asOptionalString(args.status) ?? "open"
+      const limit = clampCount(asOptionalInt(args.limit), 25, 100)
+      const statusParam = rawStatus === "open" ? "open" : rawStatus === "resolved" ? "resolved" : undefined
+      const prediction = kind === "all" || kind === "prediction"
+        ? (try listPredictionMarkets(statusParam)).slice(0, limit).map(formatPredictionMarketForMcp)
+        : []
+      const perp = kind === "all" || kind === "perp"
+        ? (try listPerpMarkets()).slice(0, limit).map(formatPerpMarketForMcp)
+        : []
+      return {
+        currency: CURRENCY_DISCLAIMER,
+        predictionMarkets: prediction,
+        perpMarkets: perp
+      }
+    }
+    case "get_market": {
+      const marketId = asOptionalString(args.marketId) ?? ""
+      const kind = asOptionalString(args.kind)
+      const articles = try listArticles(50, viewer.playMode)
+      if (kind === "perp") {
+        const perp = try getPerpMarket(marketId.toUpperCase())
+        const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perp.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
+        return {
+          kind: "perp",
+          market: formatPerpMarketForMcp(perp),
+          relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
+          relatedArticles: []
+        }
+      }
+      const maybePred = getPredictionMarket(marketId) catch effect (err) => {
+        if (err instanceof StoreFailure) throw err
+        return undefined
+      }
+      if (maybePred !== undefined && kind !== "perp") {
+        const relatedPosts = try listFeedPosts({ tab: "latest", marketId: maybePred.id, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
+        const resolutionArticle = maybePred.status === "resolved" && maybePred.resolutionArticleId !== null
+          ? (getArticle(maybePred.resolutionArticleId, viewer.playMode) catch effect (err) => {
+              if (err instanceof StoreFailure) throw err
+              return null
+            })
+          : null
+        return {
+          kind: "prediction",
+          market: formatPredictionMarketForMcp(maybePred),
+          relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
+          relatedArticles: articles.filter((a) => a.relatedMarketId === maybePred.id),
+          resolutionArticle
+        }
+      }
+      const perpFallback = try getPerpMarket(marketId.toUpperCase())
+      const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perpFallback.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
+      return {
+        kind: "perp",
+        market: formatPerpMarketForMcp(perpFallback),
+        relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
+        relatedArticles: []
+      }
+    }
+    case "get_leaderboard": {
+      const metric = asOptionalString(args.metric) ?? "net_profit"
+      const limit = clampCount(asOptionalInt(args.limit), 25, 100)
+      const entries = [...(try getLeaderboard(100))]
+      if (metric === "win_rate") {
+        entries.sort((a, b) => b.winRate - a.winRate || b.netProfitCents - a.netProfitCents)
+      } else if (metric === "volume") {
+        entries.sort((a, b) => b.volumeCents - a.volumeCents || b.netProfitCents - a.netProfitCents)
+      }
+      return {
+        metric,
+        currency: CURRENCY_DISCLAIMER,
+        rankingRule: "Ordered by net profit (equity - starting grant - purchased points), never raw point balance.",
+        entries: entries.slice(0, limit).map((entry, idx) => {
+          const investedCents = entry.startingGrantCents + entry.purchasedCents
+          const returnPct = investedCents > 0 ? Math.round((entry.netProfitCents / investedCents) * 10_000) / 100 : 0
+          return {
+            rank: metric === "net_profit" ? entry.rank : idx + 1,
+            accountId: entry.accountId,
+            handle: entry.handle,
+            displayName: entry.displayName,
+            netProfitPts: toPtsNumber(entry.netProfitCents),
+            netProfitDisplay: formatPtsLabeled(entry.netProfitCents),
+            equityPts: toPtsNumber(entry.equityCents),
+            volumePts: toPtsNumber(entry.volumeCents),
+            returnPct,
+            winRate: entry.winRate,
+            tradeCount: entry.tradeCount
+          }
+        })
+      }
+    }
+    default:
+      throw new McpFailure({ code: "INVALID_PUBLIC_TOOL", message: `Unsupported public tool: ${definition.name}` })
+  }
+}
+
+effect function executeProtectedTool(
+  definition: McpToolDefinition,
+  args: Record<string, unknown>,
+  caller: VerifiedAccessToken
+): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
+  const mode = caller.playMode
+
+  switch (definition.name) {
+    case "whoami": {
+      const profile = try getProfile(caller.accountId, caller.accountId, mode)
+      const rateLimits = try getRateLimitStatus(caller.accountId)
+      const baseWhoami: Record<string, unknown> = {
+        accountId: caller.accountId,
+        handle: profile.handle,
+        displayName: profile.displayName,
+        playMode: mode,
+        activeGrant: {
+          grantId: caller.grantId,
+          clientId: caller.clientId,
+          clientName: caller.clientName,
+          scopes: caller.scopes
+        },
+        rateLimits
+      }
+      if (mode === "social") {
+        return {
+          ...baseWhoami,
+          financialFieldsOmittedInSocialMode: true
+        }
+      }
+      const economy = try getAccountEconomy(caller.accountId)
+      return {
+        ...baseWhoami,
+        currency: CURRENCY_DISCLAIMER,
+        balancePts: toPtsNumber(economy.balanceCents),
+        balanceDisplay: formatPtsLabeled(economy.balanceCents),
+        positionValuePts: toPtsNumber(economy.positionValueCents),
+        equityPts: toPtsNumber(economy.equityCents),
+        netProfitPts: toPtsNumber(economy.netProfitCents)
+      }
+    }
+    case "get_home_feed": {
+      const rawTab = asOptionalString(args.tab) ?? "latest"
+      const tab = rawTab === "for_you" ? "top" : rawTab === "following" ? "following" : rawTab === "top" ? "top" : "latest"
+      const cursor = asOptionalString(args.cursor)
+      const limit = clampCount(asOptionalInt(args.limit), 25, 100)
+      const page = try listFeedPosts({
+        tab,
+        viewerId: caller.accountId,
+        mode,
+        limit,
+        ...(cursor === undefined ? {} : { cursor })
+      })
+      return {
+        tab,
+        mode,
+        items: page.items.map((p) => formatPostForMcp(p, mode)),
+        nextCursor: page.nextCursor
+      }
+    }
+    case "get_notifications": {
+      const unreadOnly = args.unreadOnly === true
+      const limit = clampCount(asOptionalInt(args.limit), 30, 100)
+      const all = try listNotifications(caller.accountId, limit, mode)
+      const items = unreadOnly ? all.filter((n) => !n.isRead) : all
+      return { mode, items }
+    }
+    case "get_portfolio": {
+      if (mode === "social") {
+        return {
+          accountId: caller.accountId,
+          playMode: "social",
+          financialFieldsOmittedInSocialMode: true,
+          message: "Balances, open positions, and P&L are omitted in Social mode. Open positions continue running safely; switch via set_mode({ mode: \"game\" }) only if the user explicitly wants Game mode.",
+          currency: CURRENCY_DISCLAIMER
+        }
+      }
+      const ledgerLimit = clampCount(asOptionalInt(args.ledgerLimit), 20, 50)
+      const economy = try getAccountEconomy(caller.accountId)
+      const positions = try getUserPositions(caller.accountId)
+      const ledger = try getPointLedger(caller.accountId, ledgerLimit)
+      return {
+        accountId: caller.accountId,
+        playMode: "game",
+        currency: CURRENCY_DISCLAIMER,
+        balancePts: toPtsNumber(economy.balanceCents),
+        balanceDisplay: formatPtsLabeled(economy.balanceCents),
+        positionValuePts: toPtsNumber(economy.positionValueCents),
+        equityPts: toPtsNumber(economy.equityCents),
+        startingGrantPts: toPtsNumber(economy.startingGrantCents),
+        netProfitPts: toPtsNumber(economy.netProfitCents),
+        totalFeesPaidPts: toPtsNumber(economy.totalFeesPaidCents),
+        predictionPositions: positions.predictionPositions.map((p) => ({
+          marketId: p.marketId,
+          question: p.question,
+          status: p.marketStatus,
+          side: p.side,
+          shares: p.shares,
+          costBasisPts: toPtsNumber(p.costBasisCents),
+          estimatedValuePts: toPtsNumber(p.estimatedValueCents),
+          payoutPts: toPtsNumber(p.payoutCents),
+          yesPriceBps: p.yesPriceBps,
+          noPriceBps: p.noPriceBps
+        })),
+        perpPositions: positions.perpPositions.map((p) => ({
+          id: p.id,
+          ticker: p.ticker,
+          side: p.side,
+          status: p.status,
+          leverage: p.leverage,
+          marginPts: toPtsNumber(p.marginCents),
+          sizePts: toPtsNumber(p.sizeCents),
+          entryPricePts: toPtsNumber(p.entryPriceCents),
+          markPricePts: toPtsNumber(p.markPriceCents),
+          unrealizedPnlPts: toPtsNumber(p.unrealizedPnlCents),
+          equityPts: toPtsNumber(p.equityCents),
+          liquidationPricePts: toPtsNumber(p.liquidationPriceCents),
+          accruedFundingPts: toPtsNumber(p.accruedFundingCents)
+        })),
+        recentLedger: ledger.map((entry) => ({
+          id: entry.id,
+          kind: entry.kind,
+          deltaPts: toPtsNumber(entry.deltaCents),
+          balanceAfterPts: toPtsNumber(entry.balanceAfterCents),
+          refId: entry.refId,
+          createdAt: entry.createdAt
+        }))
+      }
+    }
+    case "preview_perp": {
+      const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
+      const side = args.side === "short" ? "short" : "long"
+      const leverage = asOptionalInt(args.leverage) ?? 1
+      const collateralCents = ptsToWholeCents(Number(args.collateralPts))
+      if (collateralCents === undefined) {
+        throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
+      }
+      const market = try getPerpMarket(ticker)
+      if (leverage < 1 || leverage > market.maxLeverage) {
+        throw new InvalidRpcParamsFailure({ message: `Leverage must be between 1 and ${market.maxLeverage}.` })
+      }
+      const sizeCents = collateralCents * leverage
+      const estimatedFeeCents = Math.ceil((sizeCents * TRADING_FEE_BPS) / BPS_DENOMINATOR)
+      const maintenanceRatio = MAINTENANCE_MARGIN_BPS / BPS_DENOMINATOR
+      const moveAllowance = 1 / leverage - maintenanceRatio
+      const rawLiqCents = side === "long"
+        ? Math.round(market.markPriceCents * (1 - moveAllowance))
+        : Math.round(market.markPriceCents * (1 + moveAllowance))
+      const estimatedLiqCents = Math.max(0, rawLiqCents)
+      return {
+        previewOnly: true,
+        ticker: market.ticker,
+        side,
+        leverage,
+        collateralPts: toPtsNumber(collateralCents),
+        notionalSizePts: toPtsNumber(sizeCents),
+        estimatedFeePts: toPtsNumber(estimatedFeeCents),
+        totalDebitPts: toPtsNumber(collateralCents + estimatedFeeCents),
+        entryMarkPricePts: toPtsNumber(market.markPriceCents),
+        indexPricePts: toPtsNumber(market.indexPriceCents),
+        estimatedLiquidationPricePts: toPtsNumber(estimatedLiqCents),
+        fundingRateBps: market.fundingRateBps,
+        currency: CURRENCY_DISCLAIMER
+      }
+    }
+    case "set_mode": {
+      const targetMode: PlayMode = args.mode === "social" ? "social" : "game"
+      const updated = try setPlayMode(caller.accountId, targetMode)
+      return {
+        playMode: updated.playMode,
+        message: updated.playMode === "social"
+          ? "Switched to Social mode: balances, P&L, $CASHTAG market links, and market notifications are now hidden."
+          : "Switched to Game mode: balances, P&L, prediction odds, and perpetual quotes are now visible."
+      }
+    }
+    case "mark_notifications_read": {
+      const notificationIds = Array.isArray(args.notificationIds)
+        ? (args.notificationIds as ReadonlyArray<string>)
+        : undefined
+      return try markNotificationsRead(caller.accountId, notificationIds)
+    }
+    case "create_post": {
+      const content = String(args.content ?? "")
+      const created = try createPost({
+        authorId: caller.accountId,
+        authorKind: "user",
+        content,
+        replyToPostId: asOptionalString(args.replyToPostId) ?? null,
+        quotePostId: asOptionalString(args.quotePostId) ?? null,
+        marketId: asOptionalString(args.marketId) ?? null,
+        ticker: asOptionalString(args.ticker) ?? null,
+        viaClientName: caller.clientName
+      })
+      return { post: formatPostForMcp(created, mode), viaClientName: caller.clientName }
+    }
+    case "delete_post":
+      return try deletePost(caller.accountId, asOptionalString(args.postId) ?? "")
+    case "like":
+      return try likePost(caller.accountId, asOptionalString(args.postId) ?? "")
+    case "unlike":
+      return try unlikePost(caller.accountId, asOptionalString(args.postId) ?? "")
+    case "repost":
+      return try repostPost(caller.accountId, asOptionalString(args.postId) ?? "")
+    case "unrepost":
+      return try unrepostPost(caller.accountId, asOptionalString(args.postId) ?? "")
+    case "follow":
+      return try followAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
+    case "unfollow":
+      return try unfollowAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
+    case "block":
+      return try blockAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
+    case "unblock":
+      return try unblockAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
+    case "mute":
+      return try muteAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
+    case "unmute":
+      return try unmuteAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
+    case "report": {
+      const targetKind = args.targetKind === "account" ? "account" : "post"
+      const targetId = asOptionalString(args.targetId) ?? ""
+      const reason = String(args.reason ?? "")
+      return try reportTarget({ reporterId: caller.accountId, targetKind, targetId, reason })
+    }
+    case "update_profile":
+      return try updateAccountProfile(caller.accountId, asOptionalString(args.displayName), typeof args.bio === "string" ? args.bio : undefined)
+    case "list_chats": {
+      const limit = clampCount(asOptionalInt(args.limit), 50, 100)
+      const chats = try listChats(caller.accountId)
+      return { chats: chats.slice(0, limit) }
+    }
+    case "get_messages": {
+      const chatId = asOptionalString(args.chatId) ?? ""
+      const limit = clampCount(asOptionalInt(args.limit), 50, 100)
+      const messages = try getChatMessages(caller.accountId, chatId, limit)
+      return { chatId, messages }
+    }
+    case "send_dm": {
+      const recipientHandleOrId = asOptionalString(args.recipientHandleOrId) ?? ""
+      const content = String(args.content ?? "")
+      const chat = try createDirectChat(caller.accountId, recipientHandleOrId)
+      const message = try sendChatMessage({
+        senderId: caller.accountId,
+        senderKind: "user",
+        chatId: chat.id,
+        content,
+        viaClientName: caller.clientName
+      })
+      return { chatId: chat.id, message, viaClientName: caller.clientName }
+    }
+    case "send_message": {
+      const chatId = asOptionalString(args.chatId) ?? ""
+      const content = String(args.content ?? "")
+      const message = try sendChatMessage({
+        senderId: caller.accountId,
+        senderKind: "user",
+        chatId,
+        content,
+        viaClientName: caller.clientName
+      })
+      return { chatId, message, viaClientName: caller.clientName }
+    }
+    case "create_group": {
+      const title = String(args.title ?? "")
+      const memberHandles = Array.isArray(args.memberHandles) ? (args.memberHandles as ReadonlyArray<string>) : []
+      const chat = try createUserGroupChat(caller.accountId, title, memberHandles)
+      return { chat }
+    }
+    case "invite_to_group":
+      return try inviteMemberToGroup(
+        caller.accountId,
+        asOptionalString(args.chatId) ?? "",
+        asOptionalString(args.targetHandleOrId) ?? ""
+      )
+    case "leave_group":
+      return try leaveGroupById(caller.accountId, asOptionalString(args.chatId) ?? "")
+    case "list_group_invites": {
+      const invites = try listAlphaInvites(caller.accountId)
+      return { invites }
+    }
+    case "respond_to_group_invite": {
+      const inviteId = asOptionalString(args.inviteId) ?? ""
+      const accept = args.accept === true
+      const invite = try respondAlphaInvite({ accountId: caller.accountId, inviteId, accept })
+      return { invite }
+    }
+    case "buy_prediction": {
+      const marketId = asOptionalString(args.marketId) ?? ""
+      const side = args.side === "no" ? "no" : "yes"
+      const amountCents = ptsToWholeCents(Number(args.amountPts))
+      if (amountCents === undefined) {
+        throw new InvalidRpcParamsFailure({ message: "amountPts must equal at least 0.01 pt (1 cent)." })
+      }
+      const receipt = try buyPredictionShares({
+        actorId: caller.accountId,
+        actorKind: "user",
+        marketId,
+        side,
+        amountCents,
+        viaClientName: caller.clientName
+      })
+      return {
+        tradeId: receipt.tradeId,
+        marketId: receipt.marketId,
+        action: receipt.action,
+        side: receipt.side,
+        shares: receipt.shares,
+        notionalPts: toPtsNumber(receipt.notionalCents),
+        feePts: toPtsNumber(receipt.feeCents),
+        netPts: toPtsNumber(receipt.netCents),
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        viaClientName: caller.clientName,
+        currency: CURRENCY_DISCLAIMER,
+        ...(mode === "social"
+          ? { financialFieldsOmittedInSocialMode: true }
+          : {
+              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
+              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
+            })
+      }
+    }
+    case "sell_prediction": {
+      const marketId = asOptionalString(args.marketId) ?? ""
+      const side = args.side === "no" ? "no" : "yes"
+      const shares = asOptionalInt(args.shares) ?? 0
+      const receipt = try sellPredictionShares({
+        actorId: caller.accountId,
+        actorKind: "user",
+        marketId,
+        side,
+        shares,
+        viaClientName: caller.clientName
+      })
+      return {
+        tradeId: receipt.tradeId,
+        marketId: receipt.marketId,
+        action: receipt.action,
+        side: receipt.side,
+        shares: receipt.shares,
+        notionalPts: toPtsNumber(receipt.notionalCents),
+        feePts: toPtsNumber(receipt.feeCents),
+        netPts: toPtsNumber(receipt.netCents),
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        viaClientName: caller.clientName,
+        currency: CURRENCY_DISCLAIMER,
+        ...(mode === "social"
+          ? { financialFieldsOmittedInSocialMode: true }
+          : {
+              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
+              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
+            })
+      }
+    }
+    case "open_perp": {
+      const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
+      const side = args.side === "short" ? "short" : "long"
+      const leverage = asOptionalInt(args.leverage) ?? 1
+      const collateralCents = ptsToWholeCents(Number(args.collateralPts))
+      if (collateralCents === undefined) {
+        throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
+      }
+      const receipt = try openPerpPosition({
+        ownerId: caller.accountId,
+        ownerKind: "user",
+        ticker,
+        side,
+        collateralCents,
+        leverage,
+        viaClientName: caller.clientName
+      })
+      return {
+        tradeId: receipt.tradeId,
+        positionId: receipt.positionId,
+        ticker,
+        side,
+        leverage: receipt.leverage,
+        collateralPts: toPtsNumber(receipt.collateralCents),
+        sizePts: toPtsNumber(receipt.sizeCents),
+        feePts: toPtsNumber(receipt.feeCents),
+        executionPricePts: toPtsNumber(receipt.executionPriceCents),
+        liquidationPricePts: toPtsNumber(receipt.position.liquidationPriceCents),
+        viaClientName: caller.clientName,
+        currency: CURRENCY_DISCLAIMER,
+        ...(mode === "social"
+          ? { financialFieldsOmittedInSocialMode: true }
+          : {
+              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
+              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
+            })
+      }
+    }
+    case "close_perp": {
+      const positionId = asOptionalString(args.positionId) ?? ""
+      const receipt = try closePerpPosition({
+        ownerId: caller.accountId,
+        positionId,
+        viaClientName: caller.clientName
+      })
+      return {
+        tradeId: receipt.tradeId,
+        positionId: receipt.positionId,
+        ticker: receipt.ticker,
+        side: receipt.side,
+        sizePts: toPtsNumber(receipt.sizeCents),
+        exitPricePts: toPtsNumber(receipt.exitPriceCents),
+        feePts: toPtsNumber(receipt.feeCents),
+        viaClientName: caller.clientName,
+        currency: CURRENCY_DISCLAIMER,
+        ...(mode === "social"
+          ? { financialFieldsOmittedInSocialMode: true }
+          : {
+              realizedPnlPts: toPtsNumber(receipt.realizedPnlCents),
+              netCreditPts: toPtsNumber(receipt.netCreditCents),
+              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
+              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
+            })
+      }
+    }
+    default:
+      throw new McpFailure({ code: "INVALID_PROTECTED_TOOL", message: `Unsupported protected tool: ${definition.name}` })
+  }
+}
+
+function readResourceText(uri: string, origin: string): { readonly mimeType: string; readonly text: string } | undefined {
+  const base = normalizeOrigin(origin)
+  switch (uri) {
+    case "feed://skill.md":
+      return { mimeType: "text/markdown", text: FEED_SKILL_MD }
+    case "feed://how-to-play.md":
+      return { mimeType: "text/markdown", text: FEED_HOW_TO_PLAY_MD }
+    case "feed://llms.txt":
+      return { mimeType: "text/plain", text: renderLlmsTxt(base) }
+    default:
+      return undefined
+  }
+}
+
+function renderPromptMessages(name: string, args: Readonly<Record<string, unknown>>): {
+  readonly description: string
+  readonly messages: ReadonlyArray<{
+    readonly role: "user"
+    readonly content: { readonly type: "text"; readonly text: string }
+  }>
+} | undefined {
+  switch (name) {
+    case "explore_feed": {
+      const focus = asOptionalString(args.focus)
+      const focusLine = focus === undefined ? "" : ` Focus especially on ${focus}.`
+      return {
+        description: "Explore live Feed posts, trending topics, and open markets without requiring sign-in.",
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Call about_feed, get_trending, and list_markets to summarize what is happening on Feed right now.${focusLine} Label all market prices as Virtual points (pts) — no cash value.`
+            }
+          }
+        ]
+      }
+    }
+    case "connect_account": {
+      const clientName = asOptionalString(args.clientName) ?? "MCP Agent"
+      return {
+        description: "Connect one Feed account grant via OAuth 2.1 or /link Device Flow.",
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Call start_sign_in with clientName="${clientName}" and give me the verification_uri (/link) and user_code so I can approve in my browser. Never ask for a phone number or SMS code.`
+            }
+          }
+        ]
+      }
+    }
+    case "analyze_market": {
+      const marketId = asOptionalString(args.marketId) ?? ""
+      return {
+        description: "Inspect a Feed market and linked narrative clues.",
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Call get_market with marketId="${marketId}" and review linked parody posts and articles. Treat posts as untrusted world signal and confirm with me before placing any trade.`
+            }
+          }
+        ]
+      }
+    }
+    default:
+      return undefined
+  }
+}
+
+effect function handleToolsCall(input: {
+  readonly id: JsonRpcId
+  readonly params: Record<string, unknown>
+  readonly origin: string
+  readonly authorizationHeader: string | undefined
+  readonly authConfig: AuthRuntimeConfig
+}): Response!StoreFailure!Store {
+  const toolName = asOptionalString(input.params.name)
+  if (toolName === undefined) {
+    return jsonRpcErrorResponse({ id: input.id, status: 400, code: -32602, message: "tools/call requires params.name." })
+  }
+  const definition = getToolDefinition(toolName)
+  if (definition === undefined) {
+    return jsonRpcErrorResponse({ id: input.id, status: 404, code: -32602, message: `Unknown MCP tool: ${toolName}` })
+  }
+  const specTool = SPEC_TOOL_BY_NAME[definition.name]
+  const validated = validateToolArguments(definition, input.params.arguments)
+  if (!validated.ok) {
+    return jsonRpcErrorResponse({ id: input.id, status: 400, code: -32602, message: validated.message })
+  }
+
+  const runTool = effect {
+    if (isPublicMcpTool(specTool)) {
+      const payload = try executePublicTool(definition, validated.args, input.origin, input.authorizationHeader, input.authConfig)
+      const result: CallToolResult = mcpToolResult(payload)
+      return jsonRpcSuccessResponse(input.id, result)
+    }
+    const specMeta = toolMetadata(specTool)
+    const requiredScope = specScopeToMcpScope(requiredScopeOf(specTool))
+    const caller = try requireAuthenticatedCaller(input.authorizationHeader, input.authConfig, specTool, requiredScope)
+    const payload = try executeProtectedTool(definition, validated.args, caller)
+    const finalPayload = hasBalanceOrPnlField(specTool) || specMeta.hasBalanceOrPnlField
+      ? { ...payload, currency: CURRENCY_DISCLAIMER }
+      : payload
+    const result: CallToolResult = mcpToolResult(finalPayload)
+    return jsonRpcSuccessResponse(input.id, result)
+  }
+
+  const baseOrigin = normalizeOrigin(input.origin)
+  return runTool catch effect (err) => {
+    if (err instanceof StoreFailure) throw err
+    if (err instanceof UnauthorizedError) {
+      const reason = err.code === "missing_token"
+        ? "missing_token"
+        : err.code === "token_revoked"
+          ? "revoked_token"
+          : "invalid_token"
+      return dualUnauthorizedResponse({
+        id: input.id,
+        origin: baseOrigin,
+        message: err.message,
+        reason
+      })
+    }
+    if (err instanceof InsufficientScopeFailure) {
+      return insufficientScopeResponse({
+        id: input.id,
+        origin: baseOrigin,
+        requiredScope: err.requiredScope,
+        grantedScopes: err.grantedScopes
+      })
+    }
+    if (err instanceof RateLimited) {
+      return rateLimitedResponse({
+        id: input.id,
+        action: err.action ?? "mcp_call",
+        retryAfterSeconds: err.retryAfterSeconds,
+        message: err.message
+      })
+    }
+    if (err instanceof AuthFailure) {
+      if (!isPublicMcpTool(specTool) && err.status === 401) {
+        return dualUnauthorizedResponse({
+          id: input.id,
+          origin: baseOrigin,
+          message: err.message,
+          reason: "invalid_token"
+        })
+      }
+      const result: CallToolResult = mcpToolResult({ error: err.code, message: err.message }, true)
+      return jsonRpcSuccessResponse(input.id, result)
+    }
+    if (err instanceof InvalidRpcParamsFailure) {
+      return jsonRpcErrorResponse({ id: input.id, status: 400, code: -32602, message: err.message })
+    }
+    if (err instanceof MarketFailure) {
+      if (err.code === "INSUFFICIENT_POINTS") {
+        const result: CallToolResult = mcpToolResult(
+          {
+            error: "insufficient_points",
+            message: "Insufficient virtual points (pts — no cash value) for this order. No point purchases or refills are available via MCP.",
+            currency: CURRENCY_DISCLAIMER
+          },
+          true
+        )
+        return jsonRpcSuccessResponse(input.id, result)
+      }
+      const result: CallToolResult = mcpToolResult(
+        { error: err.code, message: err.message, currency: CURRENCY_DISCLAIMER },
+        true
+      )
+      return jsonRpcSuccessResponse(input.id, result)
+    }
+    if (err instanceof SocialFailure) {
+      if (err.code === "RateLimited") {
+        return rateLimitedResponse({
+          id: input.id,
+          action: "social",
+          retryAfterSeconds: 60,
+          message: err.message
+        })
+      }
+      const result: CallToolResult = mcpToolResult({ error: err.code, message: err.message }, true)
+      return jsonRpcSuccessResponse(input.id, result)
+    }
+    const result: CallToolResult = mcpToolResult(
+      { error: "mcp_tool_error", message: err instanceof McpFailure ? err.message : "MCP tool call failed." },
+      true
+    )
+    return jsonRpcSuccessResponse(input.id, result)
+  }
+}
+
+export effect function handleMcpRequest(input: {
+  readonly request: Request
+  readonly origin: string
+  readonly authConfig: AuthRuntimeConfig
+}): Response!(McpFailure | StoreFailure)!Store {
+  const method = input.request.method.toUpperCase()
+  if (method === "OPTIONS") {
+    return mcpOptionsResponse()
+  }
+  if (method !== "POST") {
+    return jsonRpcErrorResponse({
+      id: null,
+      status: 405,
+      code: -32000,
+      message: "Method not allowed. Send Streamable HTTP JSON-RPC over POST /mcp.",
+      extraHeaders: { allow: "POST, OPTIONS" }
+    })
+  }
+
+  const rawText = try tryPromise({
+    try: () => input.request.text(),
+    catch: (cause) => new McpFailure({ code: "INVALID_REQUEST", message: "Unable to read HTTP request body.", cause })
+  })
+  const parsed = parseJsonRpcBody(rawText)
+  if (!parsed.ok) {
+    return jsonRpcErrorResponse({ id: null, status: 400, code: -32700, message: parsed.message })
+  }
+  const rpc = parsed.body
+  if (rpc.jsonrpc !== "2.0" || typeof rpc.method !== "string") {
+    return jsonRpcErrorResponse({
+      id: toJsonRpcId(rpc.id),
+      status: 400,
+      code: -32600,
+      message: "Invalid JSON-RPC 2.0 request envelope."
+    })
+  }
+  if (rpc.id === undefined) {
+    return mcpAcceptedResponse()
+  }
+
+  const id = toJsonRpcId(rpc.id)
+  const params = typeof rpc.params === "object" && rpc.params !== null && !Array.isArray(rpc.params)
+    ? (rpc.params as Record<string, unknown>)
+    : {}
+  const baseOrigin = normalizeOrigin(input.origin)
+
+  switch (rpc.method) {
+    case "initialize": {
+      const requested = typeof params.protocolVersion === "string" ? params.protocolVersion : LATEST_PROTOCOL_VERSION
+      const negotiated = SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : parseProtocolVersion(requested)
+      return jsonRpcSuccessResponse(id, buildInitializeResult(negotiated, baseOrigin))
+    }
+    case "ping":
+      return jsonRpcSuccessResponse(id, {})
+    case "tools/list":
+      return jsonRpcSuccessResponse(id, buildListToolsPayload())
+    case "resources/list":
+      return jsonRpcSuccessResponse(id, { resources: MCP_RESOURCES })
+    case "resources/read": {
+      const uri = asOptionalString(params.uri)
+      const resource = uri === undefined ? undefined : readResourceText(uri, baseOrigin)
+      if (resource === undefined || uri === undefined) {
+        return jsonRpcErrorResponse({ id, status: 404, code: -32602, message: `Unknown resource URI: ${uri ?? ""}` })
+      }
+      return jsonRpcSuccessResponse(id, { contents: [{ uri, mimeType: resource.mimeType, text: resource.text }] })
+    }
+    case "prompts/list":
+      return jsonRpcSuccessResponse(id, { prompts: MCP_PROMPTS })
+    case "prompts/get": {
+      const promptName = asOptionalString(params.name) ?? ""
+      const promptArgs = typeof params.arguments === "object" && params.arguments !== null && !Array.isArray(params.arguments)
+        ? (params.arguments as Record<string, unknown>)
+        : {}
+      const prompt = renderPromptMessages(promptName, promptArgs)
+      if (prompt === undefined) {
+        return jsonRpcErrorResponse({ id, status: 404, code: -32602, message: `Unknown prompt: ${promptName}` })
+      }
+      return jsonRpcSuccessResponse(id, prompt)
+    }
+    case "tools/call": {
+      const authorizationHeader = input.request.headers.get("authorization") ?? undefined
+      return try handleToolsCall({
+        id,
+        params,
+        origin: baseOrigin,
+        authorizationHeader,
+        authConfig: input.authConfig
+      })
+    }
+    default:
+      return jsonRpcErrorResponse({ id, status: 404, code: -32601, message: `Unsupported MCP method: ${rpc.method}` })
+  }
+}

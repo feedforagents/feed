@@ -1,0 +1,222 @@
+// spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
+import { StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+import { fundingPeriodFromSeconds } from "../gen/shared__time.effect.vibe"
+import type { PerpPosition } from "../gen/markets__spotPerp.effect.vibe"
+
+export error MarketFailure { code: string; message: string; cause?: unknown }
+
+export type MarketActorKind = "user" | "npc"
+
+module webIds {
+  /** @throws {never} */
+  export function randomId(): string {
+    return globalThis.crypto.randomUUID()
+  }
+}
+import { randomId } from webIds
+
+export function newMarketId(): string {
+  return randomId()
+}
+
+export function marketFail(code: string, message: string, cause?: unknown): MarketFailure {
+  return cause === undefined ? new MarketFailure({ code, message }) : new MarketFailure({ code, message, cause })
+}
+
+export function normalizeViaClient(viaClientName?: string): string | null {
+  if (viaClientName === undefined) return null
+  const trimmed = viaClientName.trim()
+  return trimmed === "" ? null : trimmed
+}
+
+export effect function assertSafePositiveInt(value: number, code: string, message: string): void!MarketFailure {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw marketFail(code, message)
+  }
+}
+
+export effect function parseJsonBody(text: string, code: string, message: string): unknown!MarketFailure {
+  return try Effect.try({
+    try: () => JSON.parse(text) as unknown,
+    catch: () => marketFail(code, message)
+  })
+}
+
+export function toSpecPerpPosition(row: Row): PerpPosition {
+  const createdAt = toInt(row.created_at)
+  return {
+    posId: 1,
+    owner: requiredText(row.holder_id),
+    perpSide: requiredText(row.side) === "SHORT" ? "Short" : "Long",
+    sizeCents: toInt(row.size_cents),
+    leverage: toInt(row.leverage),
+    marginCents: toInt(row.margin_cents),
+    entryPriceCents: toInt(row.entry_price_cents),
+    openedPeriod: fundingPeriodFromSeconds(Math.floor(createdAt / 1000)),
+    lastFundingPeriod: toInt(row.last_funding_period),
+    fundingPaidCents: toInt(row.accrued_funding_cents)
+  }
+}
+
+export function ceilDivProduct(a: number, b: number, denom: number): number {
+  if (denom <= 0 || !Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(denom)) return 0
+  try {
+    const bigA = BigInt(Math.trunc(a))
+    const bigB = BigInt(Math.trunc(b))
+    const bigD = BigInt(Math.trunc(denom))
+    const num = bigA * bigB
+    const quo = num >= 0n ? (num + bigD - 1n) / bigD : num / bigD
+    return Number(quo)
+  } catch {
+    return 0
+  }
+}
+
+export effect function lockActorBalance(
+  tx: Tx,
+  actorId: string,
+  actorKind: MarketActorKind
+): number!(MarketFailure | StoreFailure) {
+  if (actorKind === "user") {
+    const rows = try tx.query(
+      "SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE",
+      [actorId]
+    )
+    if (rows.length === 0) {
+      throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${actorId}`)
+    }
+    return toInt(rows[0].balance_cents)
+  }
+  const rows = try tx.query(
+    "SELECT balance_cents FROM feed_actors WHERE id = $1 FOR UPDATE",
+    [actorId]
+  )
+  if (rows.length === 0) {
+    throw marketFail("ACTOR_NOT_FOUND", `NPC actor not found: ${actorId}`)
+  }
+  return toInt(rows[0].balance_cents)
+}
+
+export effect function debitActorBalance(
+  tx: Tx,
+  actorId: string,
+  actorKind: MarketActorKind,
+  amountCents: number,
+  feeCents: number,
+  now: number
+): number!(MarketFailure | StoreFailure) {
+  const balance = try lockActorBalance(tx, actorId, actorKind)
+  if (balance < amountCents) {
+    throw marketFail("INSUFFICIENT_POINTS", "Insufficient points balance")
+  }
+  if (actorKind === "user") {
+    const updated = try tx.query(
+      "UPDATE feed_accounts SET balance_cents = balance_cents - $2, total_fees_paid_cents = total_fees_paid_cents + $3, updated_at = $4 WHERE account_id = $1 RETURNING balance_cents",
+      [actorId, amountCents, feeCents, now]
+    )
+    return toInt(updated[0].balance_cents)
+  }
+  const updated = try tx.query(
+    "UPDATE feed_actors SET balance_cents = balance_cents - $2 WHERE id = $1 RETURNING balance_cents",
+    [actorId, amountCents]
+  )
+  return toInt(updated[0].balance_cents)
+}
+
+export effect function creditActorBalance(
+  tx: Tx,
+  actorId: string,
+  actorKind: MarketActorKind,
+  creditCents: number,
+  feeCents: number,
+  now: number
+): number!(MarketFailure | StoreFailure) {
+  try lockActorBalance(tx, actorId, actorKind)
+  if (actorKind === "user") {
+    const updated = try tx.query(
+      "UPDATE feed_accounts SET balance_cents = balance_cents + $2, total_fees_paid_cents = total_fees_paid_cents + $3, updated_at = $4 WHERE account_id = $1 RETURNING balance_cents",
+      [actorId, creditCents, feeCents, now]
+    )
+    return toInt(updated[0].balance_cents)
+  }
+  const updated = try tx.query(
+    "UPDATE feed_actors SET balance_cents = balance_cents + $2 WHERE id = $1 RETURNING balance_cents",
+    [actorId, creditCents]
+  )
+  return toInt(updated[0].balance_cents)
+}
+
+export interface TradeInsertInput {
+  readonly tradeId: string
+  readonly traderId: string
+  readonly traderKind: MarketActorKind
+  readonly marketKind: "prediction" | "spot" | "perp"
+  readonly marketRef: string
+  readonly side: string
+  readonly notionalCents: number
+  readonly feeCents: number
+  readonly sharesOrSize: number
+  readonly priceCents: number
+  readonly viaClientName: string | null
+  readonly createdAt: number
+}
+
+export effect function insertTradeRecord(tx: Tx, input: TradeInsertInput): void!StoreFailure {
+  try tx.query(
+    "INSERT INTO feed_trades (id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, via_client_name, idempotency_key, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12)",
+    [
+      input.tradeId,
+      input.traderId,
+      input.traderKind,
+      input.marketKind,
+      input.marketRef,
+      input.side,
+      input.notionalCents,
+      input.feeCents,
+      input.sharesOrSize,
+      input.priceCents,
+      input.viaClientName,
+      input.createdAt
+    ]
+  )
+}
+
+export interface LedgerInsertInput {
+  readonly ledgerId: string
+  readonly accountId: string
+  readonly kind: string
+  readonly deltaCents: number
+  readonly balanceAfterCents: number
+  readonly refId: string
+  readonly createdAt: number
+}
+
+export effect function insertLedgerEntry(tx: Tx, input: LedgerInsertInput): boolean!StoreFailure {
+  const inserted = try tx.query(
+    "INSERT INTO feed_point_ledger (id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING RETURNING id",
+    [
+      input.ledgerId,
+      input.accountId,
+      input.kind,
+      input.deltaCents,
+      input.balanceAfterCents,
+      input.refId,
+      input.createdAt
+    ]
+  )
+  return inserted.length === 1
+}
+
+export function requiredText(value: unknown, fallback = ""): string {
+  return toText(value) ?? fallback
+}
+
+export function optionalText(value: unknown): string | null {
+  return toText(value) ?? null
+}
+
+export function optionalInt(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const parsed = toInt(value)
+  return Number.isNaN(parsed) ? null : parsed
+}

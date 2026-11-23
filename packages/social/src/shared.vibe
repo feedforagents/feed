@@ -1,0 +1,373 @@
+// spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"
+import { toInt, toText, type Row, type Tx, type StoreFailure } from "@repo/db"
+import { canCreateNotification, type AccountModeration, type BlockRecord, type ModerationState, type NotificationKind } from "../gen/social__moderation.effect.vibe"
+import type { PresentationMode as PostsPresentationMode } from "../gen/social__posts.effect.vibe"
+import { publishFeedEvent, type FeedRealtimeEvent } from "./realtime.vibe"
+
+export error SocialFailure {
+  code: string
+  message: string
+  cause?: unknown
+}
+
+export type SocialPresentationMode = "game" | "social"
+
+export type SubjectKind = "user" | "npc" | "org"
+
+export interface ResolvedSubject {
+  readonly id: string
+  readonly kind: SubjectKind
+  readonly handle: string
+  readonly displayName: string
+  readonly avatarUrl: string | null
+  readonly uiMode: SocialPresentationMode
+}
+
+export interface SubjectProfile {
+  readonly id: string
+  readonly kind: SubjectKind
+  readonly handle: string
+  readonly displayName: string
+  readonly avatarUrl: string | null
+}
+
+export interface SubjectRef {
+  readonly id: string
+  readonly kind: SubjectKind
+}
+
+export interface NotificationSeed {
+  readonly accountId: string
+  readonly kind: string
+  readonly actorId: string | null
+  readonly postId: string | null
+  readonly marketId: string | null
+  readonly title: string
+  readonly body: string
+  readonly isGameOnly: boolean
+  readonly createdAt: number
+}
+
+const HOUR_MS = 3_600_000
+
+module web {
+  /** @throws {never} */
+  export function uuid(): string {
+    return globalThis.crypto.randomUUID()
+  }
+}
+import { uuid } from web
+
+export function freshId(): string {
+  return uuid()
+}
+
+export function safeInt(value: unknown, fallback = 0): number {
+  const parsed = toInt(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+export function clampLimit(limit: number | undefined, fallback: number, max: number): number {
+  if (limit === undefined || !Number.isFinite(limit)) return fallback
+  const floored = Math.floor(limit)
+  if (floored < 1) return 1
+  return floored > max ? max : floored
+}
+
+export function normalizeOptionalText(value: string | undefined): string | null {
+  if (value === undefined) return null
+  const trimmed = value.trim()
+  return trimmed === "" ? null : trimmed
+}
+
+export function toSpecMode(mode: SocialPresentationMode | undefined): PostsPresentationMode {
+  return mode === "social" ? "SocialMode" : "GameMode"
+}
+
+export function toSpecNotificationKind(kind: string, isGameOnly: boolean): NotificationKind {
+  if (kind === "pnl_digest") return "PnLDigest"
+  if (kind === "market_resolved" || isGameOnly) return "MarketResolved"
+  if (kind === "mention") return "SocialMention"
+  if (kind === "like") return "SocialLike"
+  if (kind === "follow") return "SocialFollow"
+  if (kind === "group_invite") return "GroupInvite"
+  return "SocialReply"
+}
+
+export function escapeLikePattern(raw: string): string {
+  return raw.replace(/[\\%_]/g, (match) => `\\${match}`)
+}
+
+export function extractHashtags(text: string): string[] {
+  const seen = new Set<string>()
+  const pattern = /(?:^|[^a-zA-Z0-9_])#([a-zA-Z0-9_]{2,40})\b/g
+  for (const match of text.matchAll(pattern)) {
+    const tag = match[1]
+    if (tag !== undefined) seen.add(tag.toLowerCase())
+  }
+  return [...seen]
+}
+
+export function extractCashtags(text: string, explicitTicker?: string | null): string[] {
+  const seen = new Set<string>()
+  if (explicitTicker !== undefined && explicitTicker !== null && explicitTicker.trim() !== "") {
+    seen.add(explicitTicker.trim().toUpperCase())
+  }
+  const pattern = /(?:^|[^a-zA-Z0-9_$])\$([a-zA-Z][a-zA-Z0-9_]{0,11})\b/g
+  for (const match of text.matchAll(pattern)) {
+    const tag = match[1]
+    if (tag !== undefined) seen.add(tag.toUpperCase())
+  }
+  return [...seen]
+}
+
+export function extractMentionHandles(text: string): string[] {
+  const seen = new Set<string>()
+  const pattern = /(?:^|[^a-zA-Z0-9_])@([a-zA-Z0-9_.-]{2,40})\b/g
+  for (const match of text.matchAll(pattern)) {
+    const handle = match[1]
+    if (handle !== undefined) seen.add(handle.toLowerCase())
+  }
+  return [...seen]
+}
+
+function subjectFromAccountRow(row: Row): ResolvedSubject {
+  const mode = toText(row.ui_mode) === "social" ? "social" : "game"
+  return {
+    id: toText(row.account_id) ?? "",
+    kind: "user",
+    handle: toText(row.handle) ?? "",
+    displayName: toText(row.display_name) ?? "",
+    avatarUrl: toText(row.avatar_url) ?? null,
+    uiMode: mode
+  }
+}
+
+function subjectFromActorRow(row: Row): ResolvedSubject {
+  return {
+    id: toText(row.id) ?? "",
+    kind: "npc",
+    handle: toText(row.username) ?? "",
+    displayName: toText(row.name) ?? "",
+    avatarUrl: null,
+    uiMode: "game"
+  }
+}
+
+function subjectFromOrgRow(row: Row): ResolvedSubject {
+  const id = toText(row.id) ?? ""
+  return {
+    id,
+    kind: "org",
+    handle: id,
+    displayName: toText(row.name) ?? "",
+    avatarUrl: null,
+    uiMode: "game"
+  }
+}
+
+effect function findUserOrNpcTx(tx: Tx, handleOrId: string): (ResolvedSubject | undefined)!(SocialFailure | StoreFailure) {
+  const cleaned = handleOrId.trim().replace(/^@/, "")
+  if (cleaned === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Account handle or ID is required" })
+  }
+  const accountRows = try tx.query(
+    "SELECT account_id, handle, display_name, avatar_url, ui_mode FROM feed_accounts WHERE account_id = $1 OR lower(handle) = lower($1) LIMIT 1",
+    [cleaned]
+  )
+  const accountRow = accountRows[0]
+  if (accountRow !== undefined) return subjectFromAccountRow(accountRow)
+  const actorRows = try tx.query(
+    "SELECT id, name, username FROM feed_actors WHERE id = $1 OR lower(username) = lower($1) LIMIT 1",
+    [cleaned]
+  )
+  const actorRow = actorRows[0]
+  return actorRow === undefined ? undefined : subjectFromActorRow(actorRow)
+}
+
+export effect function resolveUserOrNpcTx(tx: Tx, handleOrId: string): ResolvedSubject!(SocialFailure | StoreFailure) {
+  const found = try findUserOrNpcTx(tx, handleOrId)
+  if (found !== undefined) return found
+  throw new SocialFailure({ code: "NotFound", message: `Account not found: ${handleOrId.trim()}` })
+}
+
+export effect function resolveSubjectTx(tx: Tx, handleOrId: string): ResolvedSubject!(SocialFailure | StoreFailure) {
+  const found = try findUserOrNpcTx(tx, handleOrId)
+  if (found !== undefined) return found
+  const cleaned = handleOrId.trim().replace(/^@/, "")
+  const orgRows = try tx.query(
+    "SELECT id, name FROM feed_organizations WHERE id = $1 OR lower(ticker) = lower($1) LIMIT 1",
+    [cleaned]
+  )
+  const orgRow = orgRows[0]
+  if (orgRow !== undefined) return subjectFromOrgRow(orgRow)
+  throw new SocialFailure({ code: "NotFound", message: `Profile not found: ${cleaned}` })
+}
+
+export effect function ensureAuthorExistsTx(tx: Tx, authorId: string, authorKind: SubjectKind): void!(SocialFailure | StoreFailure) {
+  if (authorId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Author ID is required" })
+  }
+  const rows = authorKind === "user"
+    ? try tx.query("SELECT account_id AS id FROM feed_accounts WHERE account_id = $1 LIMIT 1", [authorId])
+    : authorKind === "npc"
+      ? try tx.query("SELECT id FROM feed_actors WHERE id = $1 LIMIT 1", [authorId])
+      : try tx.query("SELECT id FROM feed_organizations WHERE id = $1 LIMIT 1", [authorId])
+  if (rows.length === 0) {
+    throw new SocialFailure({ code: "NotFound", message: `Author not found: ${authorId}` })
+  }
+}
+
+export effect function readViewerUiModeTx(tx: Tx, viewerId: string | undefined): SocialPresentationMode!StoreFailure {
+  if (viewerId === undefined || viewerId.trim() === "") return "game"
+  const rows = try tx.query("SELECT ui_mode FROM feed_accounts WHERE account_id = $1 LIMIT 1", [viewerId])
+  return toText(rows[0]?.ui_mode) === "social" ? "social" : "game"
+}
+
+export effect function isBlockedBetweenTx(tx: Tx, a: string, b: string): boolean!StoreFailure {
+  if (a === "" || b === "" || a === b) return false
+  const rows = try tx.query(
+    "SELECT 1 FROM feed_blocks WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1) LIMIT 1",
+    [a, b]
+  )
+  return rows.length > 0
+}
+
+export effect function consumeHourlyRateLimitTx(
+  tx: Tx,
+  scopeKey: string,
+  limit: number,
+  now: number
+): void!(SocialFailure | StoreFailure) {
+  const windowStart = Math.floor(now / HOUR_MS) * HOUR_MS
+  try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [scopeKey])
+  const existing = try tx.query("SELECT window_start, count FROM feed_rate_limits WHERE scope_key = $1 FOR UPDATE", [scopeKey])
+  const row = existing[0]
+  if (row === undefined) {
+    try tx.query(
+      "INSERT INTO feed_rate_limits (scope_key, window_start, count) VALUES ($1, $2, 1)",
+      [scopeKey, windowStart]
+    )
+    return
+  }
+  const recordedStart = safeInt(row.window_start, 0)
+  const recordedCount = safeInt(row.count, 0)
+  if (recordedStart < windowStart) {
+    try tx.query(
+      "UPDATE feed_rate_limits SET window_start = $2, count = 1 WHERE scope_key = $1",
+      [scopeKey, windowStart]
+    )
+    return
+  }
+  if (recordedCount >= limit) {
+    throw new SocialFailure({ code: "RateLimited", message: "Hourly action limit exceeded" })
+  }
+  try tx.query(
+    "UPDATE feed_rate_limits SET count = count + 1 WHERE scope_key = $1",
+    [scopeKey]
+  )
+}
+
+export effect function insertNotificationTx(
+  tx: Tx,
+  seed: NotificationSeed
+): (FeedRealtimeEvent | undefined)!StoreFailure {
+  const accountRows = try tx.query("SELECT account_id FROM feed_accounts WHERE account_id = $1 LIMIT 1", [seed.accountId])
+  if (accountRows.length === 0) return undefined
+  const blocked = seed.actorId === null ? false : try isBlockedBetweenTx(tx, seed.accountId, seed.actorId)
+  const specKind = toSpecNotificationKind(seed.kind, seed.isGameOnly)
+  const accounts: AccountModeration[] = [
+    { id: seed.accountId, mode: "GameMode", openPositionCount: 0, unreadCount: 0 },
+    ...(seed.actorId !== null && seed.actorId !== seed.accountId
+      ? [{ id: seed.actorId, mode: "GameMode" as const, openPositionCount: 0, unreadCount: 0 }]
+      : [])
+  ]
+  const blocks: BlockRecord[] = blocked && seed.actorId !== null
+    ? [{ blockerId: seed.accountId, blockedId: seed.actorId }]
+    : []
+  const modState: ModerationState = {
+    accounts,
+    blocks,
+    mutes: [],
+    follows: [],
+    reports: [],
+    notifications: [],
+    lastReportId: 0,
+    lastNotificationId: 0,
+    blocksClearedFollowsCount: 0
+  }
+  if (!canCreateNotification(modState, seed.accountId, seed.actorId ?? "", specKind, "system")) {
+    return undefined
+  }
+  const id = freshId()
+  try tx.query(
+    "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)",
+    [id, seed.accountId, seed.kind, seed.actorId, seed.postId, seed.marketId, seed.title, seed.body, seed.isGameOnly, seed.createdAt]
+  )
+  return {
+    type: "notification.created",
+    notificationId: id,
+    accountId: seed.accountId,
+    kind: seed.kind,
+    isGameOnly: seed.isGameOnly
+  }
+}
+
+export effect function loadSubjectProfilesMapTx(
+  tx: Tx,
+  refs: ReadonlyArray<SubjectRef>
+): Map<string, SubjectProfile>!StoreFailure {
+  const userIds = [...new Set(refs.filter((r) => r.kind === "user" && r.id !== "").map((r) => r.id))]
+  const npcIds = [...new Set(refs.filter((r) => r.kind === "npc" && r.id !== "").map((r) => r.id))]
+  const orgIds = [...new Set(refs.filter((r) => r.kind === "org" && r.id !== "").map((r) => r.id))]
+  const profiles = new Map<string, SubjectProfile>()
+  if (userIds.length > 0) {
+    const userRows = try tx.query(
+      "SELECT account_id, handle, display_name, avatar_url FROM feed_accounts WHERE account_id = ANY($1)",
+      [userIds]
+    )
+    for (const row of userRows) {
+      const id = toText(row.account_id) ?? ""
+      profiles.set(`user:${id}`, {
+        id,
+        kind: "user",
+        handle: toText(row.handle) ?? id,
+        displayName: toText(row.display_name) ?? (toText(row.handle) ?? id),
+        avatarUrl: toText(row.avatar_url) ?? null
+      })
+    }
+  }
+  if (npcIds.length > 0) {
+    const npcRows = try tx.query("SELECT id, username, name FROM feed_actors WHERE id = ANY($1)", [npcIds])
+    for (const row of npcRows) {
+      const id = toText(row.id) ?? ""
+      profiles.set(`npc:${id}`, {
+        id,
+        kind: "npc",
+        handle: toText(row.username) ?? id,
+        displayName: toText(row.name) ?? id,
+        avatarUrl: null
+      })
+    }
+  }
+  if (orgIds.length > 0) {
+    const orgRows = try tx.query("SELECT id, name FROM feed_organizations WHERE id = ANY($1)", [orgIds])
+    for (const row of orgRows) {
+      const id = toText(row.id) ?? ""
+      profiles.set(`org:${id}`, {
+        id,
+        kind: "org",
+        handle: id,
+        displayName: toText(row.name) ?? id,
+        avatarUrl: null
+      })
+    }
+  }
+  return profiles
+}
+
+export effect function emitAfterCommit(events: ReadonlyArray<FeedRealtimeEvent>): void!! {
+  for (const event of events) {
+    try publishFeedEvent(event)
+  }
+}

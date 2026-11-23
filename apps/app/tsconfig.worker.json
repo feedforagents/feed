@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "outDir": "dist/server",
+    "rootDir": "src/server",
+    "rootDirs": [
+      "src/server",
+      ".vibe/declarations/src/server"
+    ],
+    "noEmitOnError": true,
+    "rewriteRelativeImportExtensions": true,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src/server/worker.vibe",
+    "src/server/router.vibe",
+    "src/server/config.vibe"
+  ]
+}

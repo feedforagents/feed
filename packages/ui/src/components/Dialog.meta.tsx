@@ -1,8 +1,7 @@
 import { expect, screen, userEvent, waitFor } from "storybook/test";
 import type { ComponentMeta } from "vibestack/stories";
 import { Button } from "./Button.tsx";
-import { CardFooter } from "./Card.tsx";
-import { DialogClose, DialogContent, type DialogProps, DialogTitle, DialogTrigger } from "./Dialog.tsx";
+import { DialogClose, DialogContent, DialogDescription, DialogFooter, type DialogProps, DialogTitle, DialogTrigger } from "./Dialog.tsx";
 
 const children = (
   <>
@@ -11,12 +10,13 @@ const children = (
     </DialogTrigger>
     <DialogContent>
       <DialogTitle>Delete the order?</DialogTitle>
-      <CardFooter>
+      <DialogDescription>This action cannot be undone.</DialogDescription>
+      <DialogFooter>
         <DialogClose asChild>
           <Button variant="outline">Keep</Button>
         </DialogClose>
         <Button variant="destructive">Delete</Button>
-      </CardFooter>
+      </DialogFooter>
     </DialogContent>
   </>
 );
@@ -25,9 +25,7 @@ export const meta: ComponentMeta<DialogProps> = {
   args: { children },
   examples: { Open: { defaultOpen: true } },
   play: {
-    // Opened from the keyboard, it takes focus; Escape and the close button dismiss it, and focus goes back to the trigger.
     Default: async () => {
-      // Focus goes back a moment after the dialog closes.
       const trigger = screen.getByRole("button", { name: "Delete" });
       trigger.focus();
       await userEvent.keyboard("{Enter}");

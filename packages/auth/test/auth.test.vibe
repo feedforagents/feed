@@ -1,0 +1,560 @@
+// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts"; spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
+import { assert, it } from "@effect/vitest"
+import { TestClock } from "effect/testing"
+import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld, toInt, toText, type Tx } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import {
+  AuthFailure,
+  DEFAULT_ALLOWED_COUNTRIES,
+  RateLimited,
+  UnauthorizedError,
+  approveDeviceAuthorization,
+  authenticateSessionCookie,
+  checkAndConsumeRateLimit,
+  completePhoneOnboarding,
+  createAuthorizationCode,
+  deleteAccountSelfServe,
+  exchangeOAuthToken,
+  getAccountProfile,
+  getActiveAgentGrant,
+  getLoopbackCode,
+  getRateLimitStatus,
+  hashReviewerPassword,
+  normalizeResource,
+  recordAgentAttribution,
+  registerDynamicClient,
+  signInReviewerPassword,
+  signOutEverywhere,
+  startDeviceAuthorization,
+  startPhoneVerification,
+  verifyAccessToken,
+  verifyPhoneCode,
+  type AuthRuntimeConfig
+} from "../src/index.vibe"
+
+module node {
+  import { createHash } from "node:crypto"
+
+  /** @throws {never} */
+  export function pkceChallengeS256(verifier: string): string {
+    return createHash("sha256").update(verifier, "utf8").digest("base64url")
+  }
+}
+import { pkceChallengeS256 } from node
+
+const localnetConfig: AuthRuntimeConfig = {
+  digestKey: "dev-digest-key-change-in-production-32-bytes",
+  oauthSigningSecret: "dev-oauth-signing-secret-change-in-prod-32-bytes",
+  smsMode: "loopback",
+  allowedCountries: DEFAULT_ALLOWED_COUNTRIES,
+  publicAppUrl: "http://localhost:5173"
+}
+
+const NINETY_DAYS_MS = 90 * 86_400_000
+const FIFTEEN_MINUTES_MS = 15 * 60_000
+
+effect function check(run: () => void) {
+  try Effect.try(run)
+}
+
+effect function withFeedStore<A, E>(body: A!E!Store) {
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    try seedFeedWorld()
+    return try body
+  }
+}
+
+effect function sqlQuery(sql: string, params: ReadonlyArray<unknown> = []) {
+  const store = try Store
+  return try store.transaction((tx: Tx) => tx.query(sql, params))
+}
+
+function failureCode(err: unknown): string {
+  if (err instanceof AuthFailure) return err.code
+  if (err instanceof UnauthorizedError) return err.code
+  if (err instanceof RateLimited) return `rate_limited:${err.action ?? ""}`
+  if (err instanceof StoreFailure) return `store_failure:${err.operation}`
+  return String(err)
+}
+
+effect function refusedCode<A, E, R>(program: A!E!R): string!!R {
+  return effect {
+    const value = try program
+    return `unexpected_success:${JSON.stringify(value)}`
+  } catch (err) => failureCode(err)
+}
+
+function rateLimitDetail(err: unknown): { readonly tag: string; readonly action: string | undefined; readonly retryAfterPositive: boolean } {
+  if (err instanceof RateLimited) {
+    return { tag: err._tag, action: err.action, retryAfterPositive: err.retryAfterSeconds >= 1 }
+  }
+  return { tag: failureCode(err), action: undefined, retryAfterPositive: false }
+}
+
+effect function expectRateLimited<A, E, R>(program: A!E!R) {
+  return effect {
+    const value = try program
+    return { tag: `unexpected_success:${JSON.stringify(value)}`, action: undefined as string | undefined, retryAfterPositive: false }
+  } catch (err) => rateLimitDetail(err)
+}
+
+function cookiePairOf(setCookieHeader: string): string {
+  return setCookieHeader.split(";")[0] ?? setCookieHeader
+}
+
+effect function verifyBearer(accessToken: string, expectedResource?: string) {
+  return try verifyAccessToken({
+    authorizationHeader: `Bearer ${accessToken}`,
+    config: localnetConfig,
+    ...(expectedResource === undefined ? {} : { expectedResource })
+  })
+}
+
+effect function onboardViaPhone(phoneE164: string, username: string) {
+  try startPhoneVerification({ phoneE164, config: localnetConfig })
+  const code = getLoopbackCode(phoneE164, localnetConfig)
+  if (code === undefined) {
+    return try Effect.die(`Missing loopback code for ${phoneE164}`)
+  }
+  const verified = try verifyPhoneCode({ phoneE164, code, config: localnetConfig })
+  if (!verified.needsOnboarding) {
+    return try Effect.die(`Expected onboarding state for ${phoneE164}`)
+  }
+  return try completePhoneOnboarding({
+    pendingToken: verified.pendingToken,
+    username,
+    accepted18Plus: true,
+    acceptedTerms: true,
+    config: localnetConfig
+  })
+}
+
+effect function provisionReviewerAccount(handle: string, password: string) {
+  const passwordHash = try hashReviewerPassword(password)
+  const now = try Clock.currentTimeMillis
+  const accountId = `rev-${handle}`
+  const organizationId = `org-${handle}`
+  const stateJson = JSON.stringify({
+    status: "Active",
+    userId: accountId,
+    organizationId,
+    identities: []
+  })
+  const store = try Store
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      "INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ($1, $2, 0, $3)",
+      [organizationId, handle, now]
+    )
+    try tx.query(
+      `INSERT INTO accounts
+         (key, state, revision, organization_id, status, email, phone, name, sessions_revoked_before, devices_revoked_before, device_epoch, created_at, updated_at)
+       VALUES ($1, $2::jsonb, 1, $3, 'active', NULL, NULL, $4, 1, 0, 0, $5, $5)`,
+      [accountId, stateJson, organizationId, handle, now]
+    )
+    try tx.query(
+      `INSERT INTO feed_accounts
+         (account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
+       VALUES ($1, $2, $3, '', NULL, NULL, NULL, NULL, $4, 'game', 0, 0, 0, 0, false, true, $5, $4, $4)`,
+      [accountId, handle, handle, now, passwordHash]
+    )
+  })
+  return accountId
+}
+
+it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out everywhere, and 30-day deletion cooldown (spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code"; spec/auth/phone.md, "Codes expire in 10 minutes, lock after 5 wrong attempts, and verify without leaking secrets"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Onboarding requires username, 18+ self-attestation, and Terms, and issues 100 pts once per verified phone"; spec/auth/phone.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the phone hash for 30 days"; spec/auth/phone.md, "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts"; spec/auth/phone.md, "Username and password sign-in is admitted solely when `isReviewer` is true (D-29)")', () => effect {
+  try TestClock.setTime(Date.now())
+  try withFeedStore(effect {
+    const phone = "+14155550101"
+    const disallowedCountry = try refusedCode(startPhoneVerification({ phoneE164: "+74951234567", config: localnetConfig }))
+    const started = try startPhoneVerification({ phoneE164: phone, config: localnetConfig })
+    const lockedCode = getLoopbackCode(phone, localnetConfig)
+    if (lockedCode === undefined) return try Effect.die("Missing initial loopback code")
+    const wrongCode = lockedCode === "000000" ? "111111" : "000000"
+    const attemptResults: string[] = []
+    for (let i = 0; i < 5; i += 1) {
+      attemptResults.push(try refusedCode(verifyPhoneCode({ phoneE164: phone, code: wrongCode, config: localnetConfig })))
+    }
+    const rightAfterLock = try refusedCode(verifyPhoneCode({ phoneE164: phone, code: lockedCode, config: localnetConfig }))
+    const rapidResend = try refusedCode(startPhoneVerification({ phoneE164: phone, config: localnetConfig }))
+
+    try TestClock.adjust("31 seconds")
+    try startPhoneVerification({ phoneE164: phone, config: localnetConfig })
+    const secondCode = getLoopbackCode(phone, localnetConfig)
+    if (secondCode === undefined) return try Effect.die("Missing second loopback code")
+    const verified = try verifyPhoneCode({ phoneE164: phone, code: secondCode, config: localnetConfig })
+    if (!verified.needsOnboarding) return try Effect.die("Expected needsOnboarding=true")
+
+    const underageRefusal = try refusedCode(completePhoneOnboarding({
+      pendingToken: verified.pendingToken,
+      username: "alice",
+      accepted18Plus: false,
+      acceptedTerms: true,
+      config: localnetConfig
+    }))
+    const onboarded = try completePhoneOnboarding({
+      pendingToken: verified.pendingToken,
+      username: "alice",
+      accepted18Plus: true,
+      acceptedTerms: true,
+      config: localnetConfig
+    })
+    const initialCookie = cookiePairOf(onboarded.sessionCookieHeader)
+    const authedInitial = try authenticateSessionCookie(initialCookie, localnetConfig)
+
+    const nonReviewerRefused = try refusedCode(signInReviewerPassword({
+      usernameOrId: "alice",
+      password: "reviewer-pass-123",
+      config: localnetConfig
+    }))
+    try provisionReviewerAccount("reviewer_demo", "reviewer-pass-123")
+    const wrongReviewerPass = try refusedCode(signInReviewerPassword({
+      usernameOrId: "reviewer_demo",
+      password: "wrong-password-1",
+      config: localnetConfig
+    }))
+    const reviewerSignedIn = try signInReviewerPassword({
+      usernameOrId: "reviewer_demo",
+      password: "reviewer-pass-123",
+      config: localnetConfig
+    })
+    const reviewerSession = try authenticateSessionCookie(cookiePairOf(reviewerSignedIn.sessionCookieHeader), localnetConfig)
+
+    const signedOut = try signOutEverywhere(onboarded.account.accountId)
+    const afterSignOut = try authenticateSessionCookie(initialCookie, localnetConfig)
+
+    try TestClock.adjust("31 seconds")
+    try startPhoneVerification({ phoneE164: phone, config: localnetConfig })
+    const reauthCode = getLoopbackCode(phone, localnetConfig)
+    if (reauthCode === undefined) return try Effect.die("Missing re-auth loopback code")
+    const reauthed = try verifyPhoneCode({ phoneE164: phone, code: reauthCode, config: localnetConfig })
+    if (reauthed.needsOnboarding) return try Effect.die("Expected existing account sign-in")
+    const reauthedCookie = cookiePairOf(reauthed.sessionCookieHeader)
+    const deleted = try deleteAccountSelfServe({
+      accountId: onboarded.account.accountId,
+      cookieHeader: reauthedCookie,
+      config: localnetConfig
+    })
+    const afterDeleteSession = try authenticateSessionCookie(reauthedCookie, localnetConfig)
+    const profileAfterDelete = try refusedCode(getAccountProfile(onboarded.account.accountId))
+    const cooldownBlocked = try refusedCode(startPhoneVerification({ phoneE164: phone, config: localnetConfig }))
+
+    try TestClock.adjust("30 days")
+    try startPhoneVerification({ phoneE164: phone, config: localnetConfig })
+    const postCooldownCode = getLoopbackCode(phone, localnetConfig)
+    if (postCooldownCode === undefined) return try Effect.die("Missing post-cooldown loopback code")
+    const postCooldownVerified = try verifyPhoneCode({ phoneE164: phone, code: postCooldownCode, config: localnetConfig })
+
+    try check(() => assert.deepStrictEqual(
+      {
+        disallowedCountry,
+        startedLast2: started.last2,
+        codeFormat: /^\d{6}$/.test(lockedCode),
+        attemptResults,
+        rightAfterLock,
+        rapidResend,
+        verifiedOnboarding: [verified.needsOnboarding, verified.last2],
+        underageRefusal,
+        onboardedGrant: [
+          onboarded.account.handle,
+          onboarded.account.balanceCents,
+          onboarded.account.startingGrantCents,
+          onboarded.account.purchasedCents,
+          authedInitial?.accountId === onboarded.account.accountId,
+          authedInitial?.balanceCents,
+          authedInitial?.sessionsEpoch
+        ],
+        reviewer: [
+          nonReviewerRefused,
+          wrongReviewerPass,
+          reviewerSignedIn.account.isReviewer,
+          reviewerSession?.handle,
+          reviewerSession?.isReviewer
+        ],
+        signOut: [signedOut.sessionsEpoch, afterSignOut],
+        deletion: [
+          deleted.deleted,
+          deleted.cooldownEndsAt > 0,
+          afterDeleteSession,
+          profileAfterDelete,
+          cooldownBlocked
+        ],
+        postCooldownOnboarding: postCooldownVerified.needsOnboarding
+      },
+      {
+        disallowedCountry: "country_not_allowed",
+        startedLast2: "01",
+        codeFormat: true,
+        attemptResults: ["invalid_code", "invalid_code", "invalid_code", "invalid_code", "challenge_locked"],
+        rightAfterLock: "challenge_locked",
+        rapidResend: "rate_limited:sms_send",
+        verifiedOnboarding: [true, "01"],
+        underageRefusal: "attestation_required",
+        onboardedGrant: ["alice", 10_000, 10_000, 0, true, 10_000, 1],
+        reviewer: ["reviewer_signin_refused", "reviewer_signin_refused", true, "reviewer_demo", true],
+        signOut: [2, null],
+        deletion: [true, true, null, "account_not_found", "phone_cooldown"],
+        postCooldownOnboarding: true
+      }
+    ))
+  })
+})
+
+it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 8628 single-agent replacement, refresh rotation, and reuse revocation (spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"; spec/auth/oauth.md, "Authorization requires PKCE S256, code flow, normalized resource, and preserves 400+ character state across one 4-scope consent screen"; spec/auth/oauth.md, "Rotating refresh tokens cap grants at 90 days and revoke the entire grant family on reuse"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/auth/oauth.md, "Exchanging an approved device code issues tokens and atomically replaces any prior connected agent"; spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/agentGrant.md, "Connecting a new agent atomically revokes any prior active grant")', () => effect {
+  try TestClock.setTime(Date.now())
+  try withFeedStore(effect {
+    const onboarded = try onboardViaPhone("+14155550102", "bob")
+    const accountId = onboarded.account.accountId
+
+    const badRedirect = try refusedCode(registerDynamicClient({
+      clientName: "Insecure Client",
+      redirectUris: ["http://evil.example/cb"]
+    }))
+    const redirectUriA = "https://claude.ai/api/mcp/auth_callback"
+    const clientA = try registerDynamicClient({
+      clientName: "Claude Desktop",
+      redirectUris: [redirectUriA],
+      scope: "read social:write messages trade"
+    })
+    const verifierA = `verifier-claude-${"v".repeat(32)}`
+    const challengeA = pkceChallengeS256(verifierA)
+    const state420 = "s".repeat(420)
+
+    const plainRefused = try refusedCode(createAuthorizationCode({
+      accountId,
+      clientId: clientA.client_id,
+      redirectUri: redirectUriA,
+      codeChallenge: challengeA,
+      codeChallengeMethod: "plain",
+      responseType: "code",
+      state: state420,
+      resource: "https://feed.fun/mcp/"
+    }))
+    const badResource = try refusedCode(createAuthorizationCode({
+      accountId,
+      clientId: clientA.client_id,
+      redirectUri: redirectUriA,
+      codeChallenge: challengeA,
+      codeChallengeMethod: "S256",
+      responseType: "code",
+      state: state420,
+      resource: "https://evil.example/mcp"
+    }))
+
+    const authCode = try createAuthorizationCode({
+      accountId,
+      clientId: clientA.client_id,
+      redirectUri: redirectUriA,
+      codeChallenge: challengeA,
+      codeChallengeMethod: "S256",
+      responseType: "code",
+      scope: "read social:write messages trade",
+      state: state420,
+      resource: "https://feed.fun/mcp/"
+    })
+    const wrongVerifier = try refusedCode(exchangeOAuthToken({
+      grantType: "authorization_code",
+      code: authCode.code,
+      codeVerifier: `wrong-verifier-${"w".repeat(32)}`,
+      clientId: clientA.client_id,
+      redirectUri: redirectUriA,
+      resource: "https://feed.fun/mcp/",
+      config: localnetConfig
+    }))
+    const tokenA = try exchangeOAuthToken({
+      grantType: "authorization_code",
+      code: authCode.code,
+      codeVerifier: verifierA,
+      clientId: clientA.client_id,
+      redirectUri: redirectUriA,
+      resource: "https://feed.fun/mcp/",
+      config: localnetConfig
+    })
+    const tokenARows = try sqlQuery(
+      "SELECT token_kind, expires_at FROM feed_oauth_tokens WHERE grant_id = $1 ORDER BY token_kind ASC",
+      [tokenA.grant_id]
+    )
+    const tokenALifetimeDelta = toInt(tokenARows[1]?.expires_at) - toInt(tokenARows[0]?.expires_at)
+    const verifiedA = try verifyBearer(tokenA.access_token, "https://feed.fun/mcp/")
+
+    const clientB = try registerDynamicClient({
+      clientName: "Hermes CLI",
+      redirectUris: ["http://127.0.0.1:43123/callback"],
+      scope: "read trade"
+    })
+    const deviceAuth = try startDeviceAuthorization({
+      clientId: clientB.client_id,
+      scope: "read trade",
+      resource: "https://feed.fun/mcp/",
+      origin: "https://feed.fun"
+    })
+    const pendingDeviceExchange = try refusedCode(exchangeOAuthToken({
+      grantType: "urn:ietf:params:oauth:grant-type:device_code",
+      deviceCode: deviceAuth.device_code,
+      clientId: clientB.client_id,
+      resource: "https://feed.fun/mcp/",
+      config: localnetConfig
+    }))
+    const deviceApproved = try approveDeviceAuthorization({
+      accountId,
+      userCode: deviceAuth.user_code,
+      scopes: ["read", "trade"]
+    })
+    const tokenB = try exchangeOAuthToken({
+      grantType: "urn:ietf:params:oauth:grant-type:device_code",
+      deviceCode: deviceAuth.device_code,
+      clientId: clientB.client_id,
+      resource: "https://feed.fun/mcp/",
+      config: localnetConfig
+    })
+
+    const tokenAAfterSwap = try refusedCode(verifyBearer(tokenA.access_token))
+    const attribAAfterSwap = try refusedCode(recordAgentAttribution(accountId, tokenA.grant_id))
+    const verifiedB = try verifyBearer(tokenB.access_token)
+    const attribB = try recordAgentAttribution(accountId, tokenB.grant_id)
+    const grantsAfterSwap = try sqlQuery(
+      "SELECT grant_id, status FROM feed_agent_grants WHERE account_id = $1 ORDER BY created_at ASC",
+      [accountId]
+    )
+    const activeGrantsAfterSwap = grantsAfterSwap.filter((row) => toText(row.status) === "active")
+
+    const rotatedB = try exchangeOAuthToken({
+      grantType: "refresh_token",
+      refreshToken: tokenB.refresh_token,
+      clientId: clientB.client_id,
+      resource: "https://feed.fun/mcp",
+      config: localnetConfig
+    })
+    const verifiedRotatedB = try verifyBearer(rotatedB.access_token)
+
+    const replayedOldRefresh = try refusedCode(exchangeOAuthToken({
+      grantType: "refresh_token",
+      refreshToken: tokenB.refresh_token,
+      clientId: clientB.client_id,
+      config: localnetConfig
+    }))
+    const newRefreshAfterReuse = try refusedCode(exchangeOAuthToken({
+      grantType: "refresh_token",
+      refreshToken: rotatedB.refresh_token,
+      clientId: clientB.client_id,
+      config: localnetConfig
+    }))
+    const accessBAfterReuse = try refusedCode(verifyBearer(tokenB.access_token))
+    const rotatedAccessAfterReuse = try refusedCode(verifyBearer(rotatedB.access_token))
+    const activeGrantAfterReuse = try getActiveAgentGrant(accountId)
+    const unrevokedTokensAfterReuse = try sqlQuery(
+      "SELECT count(*) AS count FROM feed_oauth_tokens WHERE grant_id = $1 AND revoked_at IS NULL",
+      [tokenB.grant_id]
+    )
+    const activeGrantRowsAfterReuse = try sqlQuery(
+      "SELECT count(*) AS count FROM feed_agent_grants WHERE account_id = $1 AND status = 'active'",
+      [accountId]
+    )
+
+    try check(() => assert.deepStrictEqual(
+      {
+        badRedirect,
+        clientAAuthMethod: clientA.token_endpoint_auth_method,
+        enforced: [plainRefused, badResource, wrongVerifier],
+        authCode: [authCode.state.length === 420, authCode.state === state420, authCode.resource],
+        tokenA: [
+          tokenA.token_type, tokenA.expires_in, tokenA.resource, normalizeResource("https://feed.fun/mcp/"),
+          tokenA.refresh_token.startsWith("feed_rt_"), tokenARows.map((row) => toText(row.token_kind)), tokenALifetimeDelta
+        ],
+        verifiedA: [
+          verifiedA.activeGrant, verifiedA.grantId === tokenA.grant_id,
+          verifiedA.clientId === clientA.client_id, verifiedA.clientName, verifiedA.scopes
+        ],
+        deviceFlow: [
+          deviceAuth.verification_uri, deviceAuth.user_code.startsWith("FEED-"),
+          pendingDeviceExchange, deviceApproved.approved, tokenB.grant_id !== tokenA.grant_id, tokenB.resource
+        ],
+        singleAgentReplacement: [
+          tokenAAfterSwap, attribAAfterSwap, verifiedB.activeGrant, verifiedB.clientName, verifiedB.scopes,
+          attribB.viaClientName, grantsAfterSwap.map((row) => toText(row.status)),
+          activeGrantsAfterSwap.length <= 1, activeGrantsAfterSwap.length
+        ],
+        rotationAndReuse: [
+          rotatedB.grant_id === tokenB.grant_id, rotatedB.refresh_token !== tokenB.refresh_token,
+          rotatedB.access_token !== tokenB.access_token, verifiedRotatedB.activeGrant,
+          replayedOldRefresh, newRefreshAfterReuse, accessBAfterReuse, rotatedAccessAfterReuse,
+          activeGrantAfterReuse, toInt(unrevokedTokensAfterReuse[0]?.count), toInt(activeGrantRowsAfterReuse[0]?.count)
+        ]
+      },
+      {
+        badRedirect: "invalid_redirect_uri",
+        clientAAuthMethod: "none",
+        enforced: ["invalid_request", "invalid_target", "invalid_grant"],
+        authCode: [true, true, "https://feed.fun/mcp"],
+        tokenA: ["Bearer", 900, "https://feed.fun/mcp", "https://feed.fun/mcp", true, ["access", "refresh"], NINETY_DAYS_MS - FIFTEEN_MINUTES_MS],
+        verifiedA: [true, true, true, "Claude Desktop", ["read", "social:write", "messages", "trade"]],
+        deviceFlow: ["https://feed.fun/link", true, "authorization_pending", true, true, "https://feed.fun/mcp"],
+        singleAgentReplacement: ["token_revoked", "grant_revoked", true, "Hermes CLI", ["read", "trade"], "Hermes CLI", ["revoked", "active"], true, 1],
+        rotationAndReuse: [true, true, true, true, "reused_revoked", "reused_revoked", "token_revoked", "token_revoked", null, 0, 0]
+      }
+    ))
+  })
+})
+
+it.effect('Web and MCP share one per-account hourly rate-limit budget and exhaustion hits both identically (spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/shared/limits.md, "Web and MCP always see identical capacity, and consuming via one reduces the other")', () => effect {
+  try TestClock.setTime(Date.now())
+  try withFeedStore(effect {
+    const onboarded = try onboardViaPhone("+447700900099", "carol")
+    const accountId = onboarded.account.accountId
+
+    const initialStatus = try getRateLimitStatus(accountId)
+    const firstWeb = try checkAndConsumeRateLimit({ accountId, action: "post", surface: "web" })
+    const secondMcp = try checkAndConsumeRateLimit({ accountId, action: "post", surface: "mcp" })
+
+    let lastUsed = secondMcp.used
+    let lastRemaining = secondMcp.remaining
+    for (let i = 2; i < initialStatus.post.limit; i += 1) {
+      const surface = i % 2 === 0 ? "web" : "mcp"
+      const step = try checkAndConsumeRateLimit({ accountId, action: "post", surface })
+      lastUsed = step.used
+      lastRemaining = step.remaining
+    }
+
+    const exhaustedStatus = try getRateLimitStatus(accountId)
+    const webExhausted = try expectRateLimited(checkAndConsumeRateLimit({ accountId, action: "post", surface: "web" }))
+    const mcpExhausted = try expectRateLimited(checkAndConsumeRateLimit({ accountId, action: "post", surface: "mcp" }))
+
+    const dmWeb = try checkAndConsumeRateLimit({ accountId, action: "dm", surface: "web" })
+    const dmMcp = try checkAndConsumeRateLimit({ accountId, action: "dm", surface: "mcp" })
+
+    try TestClock.adjust("1 hour")
+    const nextHourStatus = try getRateLimitStatus(accountId)
+    const nextHourMcp = try checkAndConsumeRateLimit({ accountId, action: "post", surface: "mcp" })
+    const nextHourWeb = try checkAndConsumeRateLimit({ accountId, action: "post", surface: "web" })
+
+    try check(() => assert.deepStrictEqual(
+      {
+        initialPost: [initialStatus.post.used, initialStatus.post.limit],
+        firstPair: [
+          [firstWeb.surface, firstWeb.used, firstWeb.remaining],
+          [secondMcp.surface, secondMcp.used, secondMcp.remaining]
+        ],
+        atCap: [lastUsed, lastRemaining, exhaustedStatus.post.used],
+        exhausted: [webExhausted, mcpExhausted],
+        dmShared: [[dmWeb.used, dmWeb.remaining], [dmMcp.used, dmMcp.remaining]],
+        afterHourReset: [
+          nextHourStatus.post.used,
+          [nextHourMcp.surface, nextHourMcp.used, nextHourMcp.remaining],
+          [nextHourWeb.surface, nextHourWeb.used, nextHourWeb.remaining]
+        ]
+      },
+      {
+        initialPost: [0, 30],
+        firstPair: [["web", 1, 29], ["mcp", 2, 28]],
+        atCap: [30, 0, 30],
+        exhausted: [
+          { tag: "RateLimited", action: "post", retryAfterPositive: true },
+          { tag: "RateLimited", action: "post", retryAfterPositive: true }
+        ],
+        dmShared: [[1, 59], [2, 58]],
+        afterHourReset: [0, ["mcp", 1, 29], ["web", 2, 28]]
+      }
+    ))
+  })
+})

@@ -1,0 +1,149 @@
+// spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"; spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"
+import { Store, type StoreFailure, type Tx, toInt } from "@repo/db"
+import { RealtimeBus, publishFeedEvent } from "@repo/social"
+import { FetchHttpClient, HttpClient, type HttpClientRequest, type HttpClientResponse } from "effect/http"
+
+export type EngineErrorCode =
+  | "BUDGET_EXCEEDED"
+  | "CLOCK_MODE_INVALID"
+  | "INVALID_ARGUMENT"
+  | "MANUAL_HOLD_INVALID"
+  | "LLM_UNAVAILABLE"
+  | "RSS_FAILED"
+  | "NOT_FOUND"
+  | "RUNTIME_FAILED"
+
+export error EngineFailure {
+  code: EngineErrorCode
+  message: string
+  cause?: unknown
+}
+
+export function floorDiv(value: number, divisor: number): number {
+  return Math.floor(value / divisor)
+}
+
+export function utcDayString(nowMs: number): string {
+  return new Date(nowMs).toISOString().slice(0, 10)
+}
+
+function utcHourOf(nowMs: number): number {
+  return new Date(nowMs).getUTCHours()
+}
+
+export function minuteIndexOf(nowMs: number): number {
+  return Math.floor(nowMs / 60_000)
+}
+
+export function sanitizeText(input: string, maxLen: number): string {
+  const collapsed = input.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/\s+/g, " ").trim()
+  if (collapsed.length <= maxLen) return collapsed
+  if (maxLen <= 3) return collapsed.slice(0, maxLen)
+  return `${collapsed.slice(0, maxLen - 3).trimEnd()}...`
+}
+
+export function hashString(input: string): number {
+  let hash = 2166136261
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+module web {
+  /** @throws {never} */
+  export function uuid(): string {
+    return globalThis.crypto.randomUUID()
+  }
+}
+import { uuid } from web
+
+export function newEngineId(prefix: string): string {
+  return `${prefix}-${uuid()}`
+}
+
+export effect function ensureWorldStateTx(tx: Tx, nowMs: number): void!StoreFailure {
+  try tx.query(
+    `INSERT INTO feed_world_state (singleton, current_day, current_hour, phase, game_running, funding_cutover_period, last_tick_at, updated_at)
+     VALUES (true, 1, $1, 'active', true, 0, $2, $2)
+     ON CONFLICT (singleton) DO NOTHING`,
+    [utcHourOf(nowMs), nowMs],
+  )
+}
+
+export effect function resolveClockNow(nowMs?: number): number!(EngineFailure | StoreFailure)!Store {
+  if (nowMs !== undefined) {
+    if (!Number.isFinite(nowMs) || nowMs < 0) {
+      throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "nowMs must be a finite non-negative timestamp." })
+    }
+    return Math.floor(nowMs)
+  }
+  const wallNow = try Clock.currentTimeMillis
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query("SELECT last_tick_at FROM feed_world_state WHERE singleton = true")
+    const recorded = rows.length > 0 ? toInt(rows[0]?.last_tick_at) : 0
+    return Math.max(wallNow, recorded)
+  })
+}
+
+export effect function recordTickHealth(
+  jobName: string,
+  nowMs: number,
+  status: "ok" | "skipped" | "error",
+  lastError: string | null,
+  pendingCount: number,
+  oldestPendingAt: number | null,
+  durationMs: number,
+): void!StoreFailure!Store {
+  const store = try Store
+  const safeDuration = Math.max(0, Math.floor(durationMs))
+  const safePending = Math.max(0, Math.floor(pendingCount))
+  const successAt = status === "ok" ? nowMs : null
+  const truncatedError = lastError === null ? null : sanitizeText(lastError, 500)
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `INSERT INTO feed_tick_health (job_name, last_run_at, last_success_at, last_status, last_error, pending_count, oldest_pending_at, duration_ms)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (job_name) DO UPDATE SET
+         last_run_at = EXCLUDED.last_run_at,
+         last_success_at = CASE WHEN EXCLUDED.last_status = 'ok' THEN EXCLUDED.last_success_at ELSE feed_tick_health.last_success_at END,
+         last_status = EXCLUDED.last_status,
+         last_error = EXCLUDED.last_error,
+         pending_count = EXCLUDED.pending_count,
+         oldest_pending_at = EXCLUDED.oldest_pending_at,
+         duration_ms = EXCLUDED.duration_ms`,
+      [jobName, nowMs, successAt, status, truncatedError, safePending, oldestPendingAt, safeDuration],
+    )
+  })
+}
+
+export effect function maybePublishFeedEvent(event: Parameters<typeof publishFeedEvent>[0]): void!never!never {
+  const busOpt = try Effect.serviceOption(RealtimeBus)
+  if (Option.isSome(busOpt)) {
+    provide RealtimeBus = busOpt.value {
+      try publishFeedEvent(event)
+    }
+  }
+}
+
+export function advanceDayHour(prevDay: number, baseMs: number, nextMs: number): { readonly nextDay: number; readonly nextHour: number } {
+  const dayDelta = baseMs > 0 ? Math.max(0, floorDiv(nextMs, 86_400_000) - floorDiv(baseMs, 86_400_000)) : 0
+  return { nextDay: prevDay + dayDelta, nextHour: utcHourOf(nextMs) }
+}
+
+export effect function executeHttpWithTimeout(
+  request: HttpClientRequest.HttpClientRequest,
+  duration: "8 seconds" | "25 seconds",
+  failureCode: EngineErrorCode,
+  failureMessage: string,
+): HttpClientResponse.HttpClientResponse!EngineFailure {
+  const existingClient = try Effect.serviceOption(HttpClient.HttpClient)
+  const execEffect = Option.isSome(existingClient)
+    ? existingClient.value.execute(request)
+    : Effect.provide(HttpClient.execute(request), FetchHttpClient.layer)
+  return timeout(execEffect, duration) catch effect (cause) => {
+    throw new EngineFailure({ code: failureCode, message: failureMessage, cause })
+  }
+}

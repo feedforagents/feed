@@ -2,31 +2,42 @@ packages:
   - apps/*
   - packages/*
   - vibestack/studio
+  - vendor/eliza/packages/core
+  - vendor/eliza/packages/cloud
+  - vendor/eliza/packages/agent
 
 # One version of each shared dependency; a package writes "catalog:".
 # Effect and VibeLang are pinned exactly in the root package.json instead,
 # where `spec init` reads them: VibeLang 0.0.13 accepts Effect 4.1.1 only.
 catalog:
+  "@cloudflare/workers-types": ^4.20260429.1
+  "@electric-sql/pglite": ^0.4.6
   "@eslint-react/eslint-plugin": ^5.30.2
   "@eslint/js": ^10.0.1
+  "@modelcontextprotocol/sdk": ^1.12.1
   "@tailwindcss/vite": ^4.3.5
   "@types/node": ^26.6.6
+  "@types/pg": ^8.23.1
   "@types/react": ^19.3.0
   "@types/react-dom": ^19.3.0
   "@vitejs/plugin-react": ^6.3.0
   "@vitest/browser": 5.1.0
   "@vitest/browser-playwright": 5.1.0
   eslint: ^10.14.0
+  eslint-plugin-better-tailwindcss: ^4.11.0
   eslint-plugin-boundaries: ^7.4.3
   eslint-plugin-react-hooks: ^7.1.1
   happy-dom: ^21.0.4
+  jose: 6.2.17
   jscpd: ^5.4.2
   jsdom: ^31.0.1
   knip: ^6.45.1
   madge: ^8.0.0
+  pg: 8.23.1
   playwright: 1.65.0
   react: ^19.3.1
   react-dom: ^19.3.1
+  stripe: 23.1.0
   stylelint: ^18.0.0
   stylelint-config-standard: ^41.0.0
   tailwindcss: ^4.3.5
@@ -35,18 +46,32 @@ catalog:
   typescript-eslint: ^8.72.2
   vite: 8.3.5
   vitest: 5.1.0
-  # The component system: packages/ui, packages/design-system.
+  wrangler: ^4.129.1
+  zod: ^4.6.5
+  # The component system: packages/ui, packages/design-system, packages/storybook.
+  "@fontsource/figtree": ^5.3.0
+  "@radix-ui/react-alert-dialog": ^1.2.1
+  "@radix-ui/react-avatar": ^1.3.1
   "@radix-ui/react-checkbox": ^1.4.1
   "@radix-ui/react-dialog": ^1.3.1
+  "@radix-ui/react-dropdown-menu": ^2.2.1
   "@radix-ui/react-label": ^2.1.17
+  "@radix-ui/react-popover": ^1.3.1
   "@radix-ui/react-progress": ^1.2.1
+  "@radix-ui/react-select": ^2.2.6
+  "@radix-ui/react-separator": ^1.1.8
+  "@radix-ui/react-slider": ^1.6.1
   "@radix-ui/react-slot": ^1.5.0
+  "@radix-ui/react-switch": ^1.4.1
+  "@radix-ui/react-tabs": ^1.1.13
+  "@radix-ui/react-toggle-group": ^1.2.1
+  "@radix-ui/react-tooltip": ^1.2.8
   "@storybook/addon-a11y": 10.6.7
   "@storybook/addon-vitest": 10.6.7
   "@storybook/react-vite": 10.6.7
   class-variance-authority: ^0.7.1
   clsx: ^2.1.1
-  eslint-plugin-better-tailwindcss: ^4.11.0
+  lucide-react: ^1.73.0
   storybook: 10.6.7
   tailwind-merge: ^3.7.0
 

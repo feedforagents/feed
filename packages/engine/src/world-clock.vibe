@@ -1,0 +1,636 @@
+// spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes"; spec/engine/worldClock.md, "Story: Guard perpetual funding cutover across 8-hour UTC periods"; spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
+import { parseJsonModelRecord, readEnv } from "@elizaos/core"
+import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
+import { accruePerpFunding, liquidateEligiblePositions, type MarketFailure } from "@repo/markets"
+import { organizations } from "@repo/pack-default"
+import { createPost, type SocialFailure } from "@repo/social"
+import { HttpClientRequest } from "effect/http"
+import {
+  currentFundingPeriod,
+  isCoreRoute,
+  isRetiredRoute,
+  routeCadenceMinutes,
+  type ClockMode,
+  type RouteName,
+} from "../gen/engine__worldClock.effect.vibe"
+import { runBoundedNpcBatch, type NpcTickBatchSummary } from "./eliza-npc-runtime.vibe"
+import { generateCompletion } from "./llm-client.vibe"
+import {
+  advanceNarrativePhases,
+  ensureRollingMarketSlots,
+  loadPublicWorldSnapshot,
+  publishPhaseClues,
+  recoverExpiredMarkets,
+  type RecoveryRunResult,
+} from "./narrative-arc.vibe"
+import { groundingRosterSummary, renderPrompt } from "./prompts.vibe"
+import {
+  EngineFailure,
+  advanceDayHour,
+  ensureWorldStateTx,
+  executeHttpWithTimeout,
+  hashString,
+  maybePublishFeedEvent,
+  minuteIndexOf,
+  newEngineId,
+  recordTickHealth,
+  resolveClockNow,
+  sanitizeText,
+} from "./shared.vibe"
+import { getDailySpendStatus } from "./spend-budget.vibe"
+
+export interface EngineAdminBudgetStatus {
+  readonly dailyBudgetCents: number
+  readonly confirmedCents: number
+  readonly reservedCents: number
+  readonly carryoverReservedCents: number
+  readonly maxStepsAllowed: number
+  readonly batchFraction: number
+}
+
+export interface EngineAdminStatus {
+  readonly currentDay: number
+  readonly currentHour: number
+  readonly phase: string
+  readonly gameRunning: boolean
+  readonly budget: EngineAdminBudgetStatus
+  readonly pendingResolutions: number
+  readonly manualHoldCount: number
+  readonly lastTickAt: number
+}
+
+export interface MinuteTickResult {
+  readonly nowMs: number
+  readonly skipped: boolean
+  readonly flippedWindows: number
+  readonly newlyExpired: number
+  readonly liquidatedCount: number
+  readonly fundingAccrued: boolean
+}
+
+export interface FastForwardResult {
+  readonly clockMode: ClockMode
+  readonly previousMs: number
+  readonly currentMs: number
+  readonly currentDay: number
+  readonly currentHour: number
+  readonly advancedHours: number
+}
+
+export interface RssRefreshResult {
+  readonly skipped: boolean
+  readonly fetchedCount: number
+  readonly insertedCount: number
+}
+
+function resolveClockMode(): ClockMode {
+  const modeEnv = readEnv("FEED_CLOCK_MODE")?.trim().toLowerCase()
+  if (modeEnv === "realtime") return "ClockRealtime"
+  if (modeEnv === "simulated") return "ClockSimulated"
+  return readEnv("NODE_ENV")?.trim().toLowerCase() === "production" ? "ClockRealtime" : "ClockSimulated"
+}
+
+effect function guardCoreRoute(route: RouteName): void!EngineFailure {
+  if (isRetiredRoute(route) || !isCoreRoute(route)) {
+    throw new EngineFailure({ code: "INVALID_ARGUMENT", message: `Route ${route} is retired and cannot execute.` })
+  }
+}
+
+effect function advanceWorldClockTx(tx: Tx, nowMs: number): {
+  readonly nowMs: number
+  readonly gameRunning: boolean
+  readonly fundingCutoverPeriod: number
+}!StoreFailure {
+  try ensureWorldStateTx(tx, nowMs)
+  const rows = try tx.query(
+    `SELECT current_day, current_hour, game_running, funding_cutover_period, last_tick_at
+     FROM feed_world_state
+     WHERE singleton = true`,
+  )
+  const row = rows[0] ?? {}
+  const prevTickAt = Math.max(0, toInt(row.last_tick_at))
+  const monotonicNow = Math.max(nowMs, prevTickAt)
+  const prevDay = Math.max(1, toInt(row.current_day) || 1)
+  const { nextDay, nextHour } = advanceDayHour(prevDay, prevTickAt, monotonicNow)
+  const gameRunning = row.game_running !== false
+  const fundingCutoverPeriod = Math.max(0, toInt(row.funding_cutover_period))
+  try tx.query(
+    `UPDATE feed_world_state
+     SET current_day = $1, current_hour = $2, last_tick_at = $3, updated_at = $3
+     WHERE singleton = true`,
+    [nextDay, nextHour, monotonicNow],
+  )
+  return { nowMs: monotonicNow, gameRunning, fundingCutoverPeriod }
+}
+
+effect function pendingResolutionStats(): { readonly pendingCount: number; readonly oldestPendingAt: number | null }!StoreFailure!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT COUNT(*) AS cnt, MIN(expires_at) AS oldest
+       FROM feed_prediction_markets
+       WHERE status IN ('expired', 'awaiting_proof')`,
+    )
+    const pendingCount = Math.max(0, toInt(rows[0]?.cnt))
+    const oldestRaw = rows[0]?.oldest
+    return {
+      pendingCount,
+      oldestPendingAt: pendingCount > 0 && oldestRaw !== null && oldestRaw !== undefined ? toInt(oldestRaw) : null,
+    }
+  })
+}
+
+effect function checkAndAccrueFunding(nowMs: number, cutoverPeriod: number): boolean!(StoreFailure | MarketFailure)!Store {
+  if (cutoverPeriod <= 0) return false
+  const currentPeriod = currentFundingPeriod(minuteIndexOf(nowMs))
+  if (currentPeriod < cutoverPeriod) return false
+  const store = try Store
+  const needsAccrual = try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query("SELECT COALESCE(MIN(last_funding_period), $1) AS min_period FROM feed_perp_markets", [currentPeriod])
+    const minPeriod = toInt(rows[0]?.min_period)
+    return minPeriod < currentPeriod
+  })
+  if (!needsAccrual) return false
+  try accruePerpFunding(nowMs)
+  return true
+}
+
+export effect function runMinuteTick(nowMs?: number): MinuteTickResult!(EngineFailure | StoreFailure | MarketFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteGameTick")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const store = try Store
+  const world = try store.transaction(effect (tx: Tx) => try advanceWorldClockTx(tx, resolvedNow))
+  if (!world.gameRunning) {
+    const endWall = try Clock.currentTimeMillis
+    try recordTickHealth("minute-tick", world.nowMs, "skipped", null, 0, null, endWall - startWall)
+    return {
+      nowMs: world.nowMs,
+      skipped: true,
+      flippedWindows: 0,
+      newlyExpired: 0,
+      liquidatedCount: 0,
+      fundingAccrued: false,
+    }
+  }
+  const phaseRes = try advanceNarrativePhases(world.nowMs)
+  const liquidated = liquidateEligiblePositions() catch effect () => []
+  const liquidatedCount = Array.isArray(liquidated)
+    ? liquidated.length
+    : typeof liquidated === "number"
+      ? liquidated
+      : typeof (liquidated as { readonly count?: unknown } | undefined)?.count === "number"
+        ? Number((liquidated as { readonly count?: unknown }).count)
+        : 0
+  const fundingAccrued = checkAndAccrueFunding(world.nowMs, world.fundingCutoverPeriod) catch effect () => false
+  const stats = try pendingResolutionStats()
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("minute-tick", world.nowMs, "ok", null, stats.pendingCount, stats.oldestPendingAt, endWall - startWall)
+  return {
+    nowMs: world.nowMs,
+    skipped: false,
+    flippedWindows: phaseRes.flippedWindows,
+    newlyExpired: phaseRes.newlyExpired,
+    liquidatedCount,
+    fundingAccrued,
+  }
+}
+
+export effect function runGameTick(nowMs?: number): {
+  readonly minute: MinuteTickResult
+  readonly seededMarketIds: ReadonlyArray<string>
+}!(EngineFailure | StoreFailure | MarketFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteGameTick")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const minute = try runMinuteTick(resolvedNow)
+  const store = try Store
+  const vacantCount = try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT COUNT(DISTINCT slot_index) AS occupied
+       FROM feed_prediction_markets
+       WHERE slot_index IS NOT NULL AND status IN ('open', 'expired', 'awaiting_proof', 'manual_hold')`,
+    )
+    return Math.max(0, 10 - toInt(rows[0]?.occupied))
+  })
+  const seededMarketIds = vacantCount > 0 ? try ensureRollingMarketSlots(minute.nowMs) : []
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("game-tick", minute.nowMs, minute.skipped ? "skipped" : "ok", null, 0, null, endWall - startWall)
+  return { minute, seededMarketIds }
+}
+
+export effect function runMarketsTick(nowMs?: number): {
+  readonly flippedWindows: number
+  readonly newlyExpired: number
+  readonly cluesPublished: number
+  readonly seededMarketIds: ReadonlyArray<string>
+}!(EngineFailure | StoreFailure | SocialFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteMarketsTick")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const phaseRes = try advanceNarrativePhases(resolvedNow)
+  const cluesPublished = try publishPhaseClues(resolvedNow)
+  const seededMarketIds = try ensureRollingMarketSlots(resolvedNow)
+  const stats = try pendingResolutionStats()
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("markets-tick", resolvedNow, "ok", null, stats.pendingCount, stats.oldestPendingAt, endWall - startWall)
+  return {
+    flippedWindows: phaseRes.flippedWindows,
+    newlyExpired: phaseRes.newlyExpired,
+    cluesPublished,
+    seededMarketIds,
+  }
+}
+
+export effect function runMarketsRecovery(nowMs?: number): RecoveryRunResult!(EngineFailure | StoreFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteMarketsRecovery")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const recovery = try recoverExpiredMarkets(resolvedNow)
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("markets-recovery", resolvedNow, "ok", null, recovery.pendingCount, recovery.oldestPendingAt, endWall - startWall)
+  return recovery
+}
+
+export effect function runNpcTick(nowMs?: number): NpcTickBatchSummary!(EngineFailure | StoreFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteNpcTick")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const store = try Store
+  const running = try store.transaction(effect (tx: Tx) => {
+    try ensureWorldStateTx(tx, resolvedNow)
+    const rows = try tx.query("SELECT game_running FROM feed_world_state WHERE singleton = true")
+    return rows[0]?.game_running !== false
+  })
+  if (!running) {
+    const endWall = try Clock.currentTimeMillis
+    try recordTickHealth("npc-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+    return { actorsSelected: 0, actorsCompleted: 0, actionsExecuted: 0, maxStepsUsed: 0, throttledBatchSize: 0 }
+  }
+  const summary = try runBoundedNpcBatch(resolvedNow)
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("npc-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
+  return summary
+}
+
+export effect function runOrganizationTick(nowMs?: number): { readonly postsCreated: number }!(EngineFailure | StoreFailure | SocialFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteOrganizationTick")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const store = try Store
+  const context = try store.transaction(effect (tx: Tx) => {
+    const orgRows = try tx.query(
+      `SELECT id, name, ticker, description, post_style
+       FROM feed_organizations
+       WHERE can_be_involved = true
+       ORDER BY id ASC`,
+    )
+    const snapshot = try loadPublicWorldSnapshot(tx)
+    return { orgRows, worldContext: snapshot.worldContext }
+  })
+  if (context.orgRows.length === 0) {
+    const endWall = try Clock.currentTimeMillis
+    try recordTickHealth("organization-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+    return { postsCreated: 0 }
+  }
+  const idx = hashString(`org:${Math.floor(resolvedNow / (routeCadenceMinutes("RouteOrganizationTick") * 60_000))}`) % context.orgRows.length
+  const org = context.orgRows[idx]!
+  const orgId = toText(org.id) ?? ""
+  const orgName = toText(org.name) ?? orgId
+  const ticker = toText(org.ticker) ?? ""
+  const rendered = renderPrompt("orgPost", {
+    orgName,
+    ticker: ticker || "PRIVATE",
+    postStyle: toText(org.post_style) ?? "confident corporate PR",
+    orgDescription: toText(org.description) ?? orgName,
+    worldContext: context.worldContext,
+  })
+  const completion = try generateCompletion({
+    promptId: "orgPost",
+    system: rendered.system,
+    user: rendered.user,
+    maxTokens: rendered.maxTokens,
+    temperature: rendered.temperature,
+    nowMs: resolvedNow,
+  })
+  try createPost({
+    authorId: orgId,
+    authorKind: "org",
+    content: sanitizeText(completion.text, 275),
+    ...(ticker ? { ticker } : {}),
+  })
+  try maybePublishFeedEvent({ type: "org.posted", organizationId: orgId, ticker })
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("organization-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
+  return { postsCreated: 1 }
+}
+
+export effect function runArticleTick(nowMs?: number): { readonly articleId: string | null }!(EngineFailure | StoreFailure | SocialFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteArticleTick")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const store = try Store
+  const data = try store.transaction(effect (tx: Tx) => {
+    const mediaRows = try tx.query(
+      `SELECT id, name, description
+       FROM feed_organizations
+       ORDER BY (CASE WHEN org_type = 'media' THEN 0 ELSE 1 END), id ASC
+       LIMIT 4`,
+    )
+    const snapshot = try loadPublicWorldSnapshot(tx)
+    return { mediaRows, worldContext: snapshot.worldContext }
+  })
+  const fallbackOrg = organizations[0]
+  const chosen = data.mediaRows.length > 0 ? data.mediaRows[hashString(`art:${resolvedNow}`) % data.mediaRows.length]! : null
+  const orgId = toText(chosen?.id) ?? fallbackOrg?.id ?? "feed-wire"
+  const orgName = toText(chosen?.name) ?? fallbackOrg?.name ?? "The Feed Wire"
+  const orgDesc = toText(chosen?.description) ?? fallbackOrg?.description ?? "Feed financial satire wire"
+  const rendered = renderPrompt("feedArticle", {
+    orgName,
+    orgDescription: orgDesc,
+    worldContext: data.worldContext,
+  })
+  const completion = try generateCompletion({
+    promptId: "feedArticle",
+    system: rendered.system,
+    user: rendered.user,
+    maxTokens: rendered.maxTokens,
+    temperature: rendered.temperature,
+    jsonMode: true,
+    nowMs: resolvedNow,
+  })
+  const parsed = parseJsonModelRecord(completion.text)
+  const title = sanitizeText(typeof parsed?.title === "string" ? parsed.title : `${orgName} Market Dispatch`, 180)
+  const summary = sanitizeText(typeof parsed?.summary === "string" ? parsed.summary : "Inside the latest spot and prediction market shifts.", 340)
+  const body = typeof parsed?.body === "string" && parsed.body.trim().length > 0
+    ? parsed.body.trim()
+    : `${orgName} analysts tracked heightened orderflow across rolling Feed markets and leveraged perpetuals.`
+  const articleId = newEngineId("art")
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at)
+       VALUES ($1, $2, $3, $4, $5, NULL, false, $6)`,
+      [articleId, title, summary, body, orgId, resolvedNow],
+    )
+  })
+  try createPost({
+    authorId: orgId,
+    authorKind: "org",
+    content: sanitizeText(`${title} — ${summary}`, 275),
+  })
+  try maybePublishFeedEvent({ type: "article.published", articleId, organizationId: orgId })
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("article-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
+  return { articleId }
+}
+
+export effect function runPerpFundingTick(nowMs?: number): {
+  readonly period: number
+  readonly accrued: boolean
+  readonly cutoverConfigured: boolean
+}!(EngineFailure | StoreFailure | MarketFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RoutePerpFunding")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const period = currentFundingPeriod(minuteIndexOf(resolvedNow))
+  const store = try Store
+  const state = try store.transaction(effect (tx: Tx) => {
+    try ensureWorldStateTx(tx, resolvedNow)
+    const rows = try tx.query("SELECT game_running, funding_cutover_period FROM feed_world_state WHERE singleton = true")
+    const gameRunning = rows[0]?.game_running !== false
+    let cutover = Math.max(0, toInt(rows[0]?.funding_cutover_period))
+    if (cutover === 0) {
+      cutover = period
+      try tx.query("UPDATE feed_world_state SET funding_cutover_period = $1, updated_at = $2 WHERE singleton = true", [cutover, resolvedNow])
+      try tx.query("UPDATE feed_perp_markets SET last_funding_period = $1 WHERE last_funding_period < $1", [cutover])
+    }
+    return { gameRunning, cutover }
+  })
+  if (!state.gameRunning) {
+    const endWall = try Clock.currentTimeMillis
+    try recordTickHealth("perp-funding", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+    return { period, accrued: false, cutoverConfigured: state.cutover > 0 }
+  }
+  const accrued = try checkAndAccrueFunding(resolvedNow, state.cutover)
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("perp-funding", resolvedNow, "ok", null, 0, null, endWall - startWall)
+  return { period, accrued, cutoverConfigured: state.cutover > 0 }
+}
+
+export effect function runWorldFactsTick(nowMs?: number): { readonly factsAdded: number }!(EngineFailure | StoreFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteWorldFacts")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const store = try Store
+  const recentText = try store.transaction(effect (tx: Tx) => {
+    const settled = try tx.query(
+      `SELECT question, resolved_outcome FROM feed_prediction_markets WHERE status = 'resolved' ORDER BY resolved_at DESC NULLS LAST LIMIT 5`,
+    )
+    const posts = try tx.query("SELECT author_id, content FROM feed_posts WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 6")
+    const settledStr = settled.map((r) => `Resolved ${toText(r.resolved_outcome)}: ${toText(r.question)}`).join("\n")
+    const postsStr = posts.map((r) => `@${toText(r.author_id)}: ${sanitizeText(toText(r.content) ?? "", 100)}`).join("\n")
+    return `${settledStr}\n${postsStr}`.trim() || "Initial market trading session active."
+  })
+  const rendered = renderPrompt("worldFactsConsolidation", { recentEvents: recentText })
+  const completion = try generateCompletion({
+    promptId: "worldFactsConsolidation",
+    system: rendered.system,
+    user: rendered.user,
+    maxTokens: rendered.maxTokens,
+    temperature: rendered.temperature,
+    jsonMode: true,
+    nowMs: resolvedNow,
+  })
+  const parsed = parseJsonModelRecord(completion.text)
+  const items = Array.isArray(parsed?.facts) ? parsed.facts.slice(0, 3) : []
+  let factsAdded = 0
+  try store.transaction(effect (tx: Tx) => {
+    for (const item of items) {
+      const rec = item as Record<string, unknown> | null
+      const factText = sanitizeText(typeof rec?.factText === "string" ? rec.factText : "", 220)
+      if (factText.length === 0) continue
+      const category = sanitizeText(typeof rec?.category === "string" ? rec.category : "markets", 40) || "markets"
+      try tx.query(
+        `INSERT INTO feed_world_facts (id, fact_text, category, created_at) VALUES ($1, $2, $3, $4)`,
+        [newEngineId("fact"), factText, category, resolvedNow],
+      )
+      factsAdded += 1
+    }
+  })
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("world-facts", resolvedNow, "ok", null, 0, null, endWall - startWall)
+  return { factsAdded }
+}
+
+function decodeXmlEntities(raw: string): string {
+  return raw
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/<[^>]+>/g, " ")
+}
+
+function extractRssHeadlinesFromXml(xml: string, sourceUrl: string): ReadonlyArray<{ readonly title: string; readonly sourceUrl: string }> {
+  const out: Array<{ readonly title: string; readonly sourceUrl: string }> = []
+  const blockRegex = /<(?:item|entry)\b[^>]*>([\s\S]*?)<\/(?:item|entry)>/gi
+  let match = blockRegex.exec(xml)
+  while (match !== null && out.length < 10) {
+    const titleMatch = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(match[1] ?? "")
+    if (titleMatch?.[1]) {
+      const cleaned = sanitizeText(decodeXmlEntities(titleMatch[1]), 180)
+      if (cleaned.length >= 12) {
+        out.push({ title: cleaned, sourceUrl })
+      }
+    }
+    match = blockRegex.exec(xml)
+  }
+  return out
+}
+
+export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(EngineFailure | StoreFailure)!Store {
+  const startWall = try Clock.currentTimeMillis
+  try guardCoreRoute("RouteRssRefresh")
+  const resolvedNow = try resolveClockNow(nowMs)
+  const cadenceMs = routeCadenceMinutes("RouteRssRefresh") * 60_000
+  const store = try Store
+  const lastRunAt = try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query("SELECT last_run_at FROM feed_tick_health WHERE job_name = 'rss-refresh'")
+    return rows.length > 0 ? toInt(rows[0]?.last_run_at) : 0
+  })
+  if (lastRunAt > 0 && resolvedNow - lastRunAt < cadenceMs) {
+    return { skipped: true, fetchedCount: 0, insertedCount: 0 }
+  }
+  const configuredUrls = (readEnv("FEED_RSS_URLS") ?? "https://hnrss.org/frontpage,https://feeds.arstechnica.com/arstechnica/technology-lab")
+    .split(",")
+    .map((u) => u.trim())
+    .filter((u) => u.startsWith("http"))
+  const collected: Array<{ readonly title: string; readonly sourceUrl: string }> = []
+  for (const url of configuredUrls.slice(0, 3)) {
+    const req = HttpClientRequest.get(url)
+    const response = executeHttpWithTimeout(req, "8 seconds", "RSS_FAILED", `RSS fetch failed for ${url}`) catch effect () => null
+    if (!response || response.status < 200 || response.status >= 300) continue
+    const xml = (response.text catch effect () => "")
+    if (xml.length > 0) {
+      for (const item of extractRssHeadlinesFromXml(xml, url)) {
+        collected.push(item)
+      }
+    }
+  }
+  let insertedCount = 0
+  const rosterHint = groundingRosterSummary()
+  for (const item of collected.slice(0, 5)) {
+    const exists = try store.transaction(effect (tx: Tx) => {
+      const rows = try tx.query("SELECT id FROM feed_rss_headlines WHERE title = $1 LIMIT 1", [item.title])
+      return rows.length > 0
+    })
+    if (exists) continue
+    const rendered = renderPrompt("rssParodyRewrite", { headline: item.title, sourceUrl: item.sourceUrl, rosterHint })
+    const completion = generateCompletion({
+      promptId: "rssParodyRewrite",
+      system: rendered.system,
+      user: rendered.user,
+      maxTokens: rendered.maxTokens,
+      temperature: rendered.temperature,
+      nowMs: resolvedNow,
+    }) catch effect () => null
+    const parody = completion ? sanitizeText(completion.text, 180) : item.title
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_rss_headlines (id, source_url, title, parody_headline, published_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $5)`,
+        [newEngineId("rss"), item.sourceUrl, item.title, parody, resolvedNow],
+      )
+    })
+    insertedCount += 1
+  }
+  const endWall = try Clock.currentTimeMillis
+  try recordTickHealth("rss-refresh", resolvedNow, "ok", null, 0, null, endWall - startWall)
+  return { skipped: false, fetchedCount: collected.length, insertedCount }
+}
+
+export effect function fastForwardSimulatedHours(hours: number): FastForwardResult!(EngineFailure | StoreFailure)!Store {
+  const clockMode = resolveClockMode()
+  if (clockMode !== "ClockSimulated") {
+    throw new EngineFailure({ code: "CLOCK_MODE_INVALID", message: "fastForwardSimulatedHours is only permitted in simulated clock mode." })
+  }
+  if (!Number.isFinite(hours) || hours <= 0) {
+    throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "hours must be a finite positive number." })
+  }
+  const wallNow = try Clock.currentTimeMillis
+  const deltaMs = Math.round(hours * 3_600_000)
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    try ensureWorldStateTx(tx, wallNow)
+    const rows = try tx.query("SELECT current_day, last_tick_at FROM feed_world_state WHERE singleton = true")
+    const prevTickAt = Math.max(0, toInt(rows[0]?.last_tick_at))
+    const baseMs = Math.max(wallNow, prevTickAt)
+    const nextMs = baseMs + deltaMs
+    const prevDay = Math.max(1, toInt(rows[0]?.current_day) || 1)
+    const { nextDay, nextHour } = advanceDayHour(prevDay, baseMs, nextMs)
+    try tx.query(
+      `UPDATE feed_world_state
+       SET current_day = $1, current_hour = $2, last_tick_at = $3, updated_at = $3
+       WHERE singleton = true`,
+      [nextDay, nextHour, nextMs],
+    )
+    return {
+      clockMode,
+      previousMs: baseMs,
+      currentMs: nextMs,
+      currentDay: nextDay,
+      currentHour: nextHour,
+      advancedHours: hours,
+    }
+  })
+}
+
+export effect function getEngineAdminStatus(): EngineAdminStatus!(EngineFailure | StoreFailure)!Store {
+  const nowMs = try resolveClockNow()
+  const spend = try getDailySpendStatus(nowMs)
+  const store = try Store
+  const dbState = try store.transaction(effect (tx: Tx) => {
+    try ensureWorldStateTx(tx, nowMs)
+    const worldRows = try tx.query(
+      `SELECT current_day, current_hour, phase, game_running, last_tick_at
+       FROM feed_world_state
+       WHERE singleton = true`,
+    )
+    const countsRows = try tx.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN status IN ('expired', 'awaiting_proof') THEN 1 ELSE 0 END), 0) AS pending_resolutions,
+         COALESCE(SUM(CASE WHEN status = 'manual_hold' THEN 1 ELSE 0 END), 0) AS manual_hold_count
+       FROM feed_prediction_markets`,
+    )
+    const w = worldRows[0] ?? {}
+    const c = countsRows[0] ?? {}
+    return {
+      currentDay: Math.max(1, toInt(w.current_day) || 1),
+      currentHour: Math.max(0, toInt(w.current_hour)),
+      phase: toText(w.phase) ?? "active",
+      gameRunning: w.game_running !== false,
+      lastTickAt: Math.max(0, toInt(w.last_tick_at)),
+      pendingResolutions: Math.max(0, toInt(c.pending_resolutions)),
+      manualHoldCount: Math.max(0, toInt(c.manual_hold_count)),
+    }
+  })
+  return {
+    currentDay: dbState.currentDay,
+    currentHour: dbState.currentHour,
+    phase: dbState.phase,
+    gameRunning: dbState.gameRunning,
+    budget: {
+      dailyBudgetCents: spend.dailyBudgetCents,
+      confirmedCents: spend.confirmedCents,
+      reservedCents: spend.reservedCents,
+      carryoverReservedCents: spend.carryoverReservedCents,
+      maxStepsAllowed: spend.maxStepsAllowed,
+      batchFraction: spend.batchFraction,
+    },
+    pendingResolutions: dbState.pendingResolutions,
+    manualHoldCount: dbState.manualHoldCount,
+    lastTickAt: dbState.lastTickAt,
+  }
+}

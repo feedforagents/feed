@@ -1,0 +1,1376 @@
+// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code"; spec/auth/phone.md, "Codes expire in 10 minutes, lock after 5 wrong attempts, and verify without leaking secrets"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Onboarding requires username, 18+ self-attestation, and Terms, and issues 100 pts once per verified phone"; spec/auth/phone.md, "Changing phone requires verifying the old phone or support recovery and an unused new number"; spec/auth/phone.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the phone hash for 30 days"; spec/auth/phone.md, "Username and password sign-in is admitted solely when `isReviewer` is true (D-29)"
+import type { CloudEnvironment } from "@elizaos/cloud/profile"
+import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+import { HttpClientRequest } from "effect/http"
+import { SignJWT, jwtVerify } from "jose"
+import {
+  admitPasswordSignIn,
+  canCompleteOnboarding,
+  canDeleteAccount,
+  canRequestPhoneChangeCode,
+  canRequestSignInCode,
+  canSignOutEverywhere,
+  canVerifyCode,
+  codeLifetimeMs,
+  completeOnboarding,
+  countryAllowed,
+  currentDaySends,
+  currentHourSends,
+  declassifyPhoneLast2,
+  deleteAccount,
+  initial,
+  maxCodeAttempts,
+  maxSendsPerDay,
+  maxSendsPerHour,
+  phoneCooldownMs,
+  recentSignInWindowMs,
+  requestPhoneChangeCode,
+  requestSignInCode,
+  resendGapMs,
+  resendGapOk,
+  signInReviewerPassword as stepReviewerSignIn,
+  signOutEverywhere as stepSignOutEverywhere,
+  startingGrantPoints,
+  verifyCode,
+  withinSendRateLimits,
+  type AccountStatus,
+  type CountryEligibility,
+  type PhoneAuth
+} from "../gen/auth__phone.effect.vibe"
+import { revokeActiveAgentGrantInTx } from "./agent-grant.vibe"
+import {
+  constantTimeEqual,
+  hashPassword,
+  hmacSha256Hex,
+  hmacSigningKeyBytes,
+  newUuid,
+  randomBase64Url,
+  randomSixDigitCode,
+  sha256Hex,
+  verifyPassword
+} from "./crypto.vibe"
+import { AuthFailure, RateLimited } from "./errors.vibe"
+import { executeHttpJson } from "./http.vibe"
+import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
+
+export type SmsMode = "loopback" | "twilio"
+export type PlayMode = "game" | "social"
+export type FeedEnvironment = CloudEnvironment | "localnet"
+
+export interface AuthRuntimeConfig {
+  readonly digestKey: string
+  readonly oauthSigningSecret: string
+  readonly smsMode: SmsMode
+  readonly twilioAccountSid?: string | undefined
+  readonly twilioAuthToken?: string | undefined
+  readonly twilioVerifyServiceSid?: string | undefined
+  readonly turnstileSecretKey?: string | undefined
+  readonly allowedCountries: ReadonlyArray<string>
+  readonly publicAppUrl: string
+}
+
+export interface AccountProfile {
+  readonly accountId: string
+  readonly handle: string
+  readonly displayName: string
+  readonly bio: string
+  readonly avatarUrl: string | null
+  readonly phoneHash: string | null
+  readonly phoneLast2: string | null
+  readonly uiMode: PlayMode
+  readonly playMode: PlayMode
+  readonly balanceCents: number
+  readonly startingGrantCents: number
+  readonly purchasedCents: number
+  readonly totalFeesPaidCents: number
+  readonly isAdmin: boolean
+  readonly isReviewer: boolean
+  readonly createdAt: number
+}
+
+export interface SessionIdentity extends Pick<
+  AccountProfile,
+  | "accountId"
+  | "handle"
+  | "displayName"
+  | "bio"
+  | "avatarUrl"
+  | "phoneHash"
+  | "phoneLast2"
+  | "uiMode"
+  | "playMode"
+  | "balanceCents"
+  | "isAdmin"
+  | "isReviewer"
+> {
+  readonly sessionKey: string
+  readonly authAt: number
+  readonly expiresAt: number
+  readonly sessionsEpoch: number
+}
+
+export interface StartPhoneVerificationResult {
+  readonly challengeId: string
+  readonly phoneHash: string
+  readonly last2: string
+  readonly expiresAt: number
+  readonly resendAvailableAt: number
+}
+
+export type VerifyPhoneCodeResult =
+  | {
+      readonly needsOnboarding: false
+      readonly account: AccountProfile
+      readonly sessionToken: string
+      readonly sessionCookieHeader: string
+      readonly expiresAt: number
+    }
+  | {
+      readonly needsOnboarding: true
+      readonly pendingToken: string
+      readonly phoneHash: string
+      readonly last2: string
+    }
+
+export interface AuthenticatedAccountResult {
+  readonly account: AccountProfile
+  readonly sessionToken: string
+  readonly sessionCookieHeader: string
+  readonly expiresAt: number
+}
+
+export const DEFAULT_ALLOWED_COUNTRIES: ReadonlyArray<string> = [
+  "+1",
+  "+44",
+  "+353",
+  "+61",
+  "+64",
+  "+33",
+  "+49",
+  "+31",
+  "+34",
+  "+39",
+  "+46",
+  "+45",
+  "+47",
+  "+358"
+]
+
+const SESSION_SLIDING_MS = 30 * 86_400_000
+const SESSION_ABSOLUTE_MS = 90 * 86_400_000
+const ONBOARDING_TOKEN_TTL_SECONDS = 15 * 60
+const HOUR_MS = 3_600_000
+const DAY_MS = 86_400_000
+const IP_SMS_HOURLY_LIMIT = 10
+const STARTING_GRANT_CENTS = startingGrantPoints * 100
+const E164_PATTERN = /^\+[1-9]\d{7,14}$/
+const USERNAME_PATTERN = /^[a-z0-9_]{2,32}$/
+const TWILIO_SID_PATTERN = /^AC[a-fA-F0-9]{32}$/
+const TWILIO_VERIFY_PATTERN = /^VA[a-fA-F0-9]{32}$/
+
+const TurnstileResponse = Schema.Struct({
+  success: Schema.Boolean
+})
+
+const TwilioLookupResponse = Schema.Struct({
+  valid: Schema.optionalKey(Schema.Boolean),
+  country_code: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  line_type_intelligence: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        type: Schema.optionalKey(Schema.NullOr(Schema.String))
+      })
+    )
+  )
+})
+
+const TwilioVerifyResponse = Schema.Struct({
+  status: Schema.String
+})
+
+const PendingOnboardingClaims = Schema.Struct({
+  purpose: Schema.Literal("feed_phone_onboarding"),
+  phoneHash: Schema.String,
+  last2: Schema.String,
+  challengeId: Schema.String
+})
+
+const ChallengeStatePayload = Schema.Struct({
+  purpose: Schema.String,
+  attempts: Schema.Int,
+  phoneLast2: Schema.String
+})
+
+const loopbackCodes = new Map<string, { readonly code: string; readonly expiresAt: number }>()
+
+module runtimeEnv {
+  /** @throws {never} */
+  export function readEnvVar(name: string): string | undefined {
+    const g = globalThis as { readonly process?: { readonly env?: Record<string, string | undefined> } }
+    return g.process?.env?.[name]
+  }
+}
+import { readEnvVar } from runtimeEnv
+
+function isProductionEnv(config: Pick<AuthRuntimeConfig, "publicAppUrl">): boolean {
+  const deploymentEnv = readEnvVar("DEPLOYMENT_ENV")
+  if (deploymentEnv === "production") return true
+  if (deploymentEnv === "staging" || deploymentEnv === "localnet") return false
+  return readEnvVar("NODE_ENV") === "production" && config.publicAppUrl.startsWith("https://")
+}
+
+function normalizePhoneOrUndefined(raw: string): string | undefined {
+  const cleaned = raw.trim().replace(/[\s\-().]/g, "")
+  const withPlus = cleaned.startsWith("00") ? `+${cleaned.slice(2)}` : cleaned
+  return E164_PATTERN.test(withPlus) ? withPlus : undefined
+}
+
+effect function normalizePhoneE164(raw: string): string!AuthFailure {
+  const normalized = normalizePhoneOrUndefined(raw)
+  if (normalized === undefined) {
+    throw new AuthFailure({
+      code: "invalid_phone",
+      message: "Enter a valid phone number in international E.164 format.",
+      status: 400
+    })
+  }
+  return normalized
+}
+
+function extractLast2(phoneE164: string): string {
+  return phoneE164.length >= 2 ? phoneE164.slice(-2) : declassifyPhoneLast2(phoneE164)
+}
+
+function normalizeIpPrefix(ipAddress: string): string {
+  const trimmed = ipAddress.trim()
+  if (trimmed.includes(":")) {
+    const segments = trimmed.split(":").slice(0, 4)
+    return segments.join(":")
+  }
+  return trimmed
+}
+
+function resolveCountryEligibility(phoneE164: string, allowedCountries: ReadonlyArray<string>): CountryEligibility {
+  const list = allowedCountries.length > 0 ? allowedCountries : DEFAULT_ALLOWED_COUNTRIES
+  const matched = list.find((prefix) => prefix.startsWith("+") && phoneE164.startsWith(prefix))
+  if (matched === undefined) return "CountryBlocked"
+  if (matched === "+1") return "CountryUs"
+  if (matched === "+44") return "CountryUk"
+  if (matched === "+353") return "CountryIe"
+  if (matched === "+61") return "CountryAu"
+  if (matched === "+64") return "CountryNz"
+  return "CountryEuEea"
+}
+
+function isBlockedPrefix(phoneE164: string): boolean {
+  const blockedPrefixes = [
+    "+1800", "+1888", "+1877", "+1866", "+1855", "+1844", "+1833", "+1900", "+1976",
+    "+44800", "+44808", "+4490", "+4491", "+4498", "+4484", "+4487",
+    "+3531800", "+35315",
+    "+611800", "+611300", "+61190",
+    "+64800", "+64900"
+  ]
+  return blockedPrefixes.some((prefix) => phoneE164.startsWith(prefix))
+}
+
+function sessionCookieName(publicAppUrl: string): string {
+  return publicAppUrl.startsWith("https://") ? "__Host-feed-session" : "feed-session"
+}
+
+function buildSessionCookieHeader(token: string, maxAgeSeconds: number, publicAppUrl: string): string {
+  const name = sessionCookieName(publicAppUrl)
+  const secure = publicAppUrl.startsWith("https://") ? "; Secure" : ""
+  return `${name}=${token}; Path=/; HttpOnly${secure}; SameSite=Lax; Max-Age=${maxAgeSeconds}`
+}
+
+function parseSessionCookieToken(cookieHeader: string | undefined, httpsOnly: boolean): string | undefined {
+  if (cookieHeader === undefined || cookieHeader.trim() === "") return undefined
+  const pairs = cookieHeader.split(";").map((part) => part.trim())
+  const names = httpsOnly ? ["__Host-feed-session"] : ["__Host-feed-session", "feed-session"]
+  for (const name of names) {
+    const prefix = `${name}=`
+    const found = pairs.find((part) => part.startsWith(prefix))
+    if (found !== undefined) {
+      const value = found.slice(prefix.length).trim()
+      if (value.length >= 20) return value
+    }
+  }
+  return undefined
+}
+
+effect function signingSecretBytes(config: Pick<AuthRuntimeConfig, "oauthSigningSecret">): Uint8Array<ArrayBuffer>!AuthFailure {
+  return try hmacSigningKeyBytes(config.oauthSigningSecret, "auth_not_configured", "Signing secret is not configured.")
+}
+
+effect function twilioAuthCredentials(config: AuthRuntimeConfig): { readonly sid: string; readonly token: string; readonly serviceSid: string }!AuthFailure {
+  const sid = config.twilioAccountSid?.trim() ?? ""
+  const token = config.twilioAuthToken?.trim() ?? ""
+  const serviceSid = config.twilioVerifyServiceSid?.trim() ?? ""
+  if (!TWILIO_SID_PATTERN.test(sid) || token.length === 0 || !TWILIO_VERIFY_PATTERN.test(serviceSid)) {
+    throw new AuthFailure({ code: "sms_provider_unavailable", message: "Twilio Verify is not configured.", status: 503 })
+  }
+  return { sid, token, serviceSid }
+}
+
+effect function lockFeedAccountByIdInTx(tx: Tx, accountId: string): (Row | undefined)!StoreFailure {
+  const rows = try tx.query(
+    `SELECT fa.*, a.status, a.sessions_revoked_before
+     FROM feed_accounts fa
+     JOIN accounts a ON a.key = fa.account_id
+     WHERE fa.account_id = $1 FOR UPDATE`,
+    [accountId]
+  )
+  return rows[0]
+}
+
+effect function ensurePhoneUnusedByOtherInTx(tx: Tx, phoneHash: string, accountId: string): void!(AuthFailure | StoreFailure) {
+  const inUse = try tx.query(
+    "SELECT account_id FROM feed_accounts WHERE phone_hash = $1 AND account_id <> $2",
+    [phoneHash, accountId]
+  )
+  if (inUse.length > 0) {
+    throw new AuthFailure({ code: "phone_in_use", message: "This phone number is already linked to another account.", status: 409 })
+  }
+}
+
+effect function revokeSessionsAndBumpEpochInTx(
+  tx: Tx,
+  accountId: string,
+  currentEpoch: number,
+  now: number,
+  erase = false
+): number!StoreFailure {
+  const nextEpoch = Math.max(1, currentEpoch) + 1
+  if (erase) {
+    try tx.query(
+      "UPDATE accounts SET status = 'erased', phone = NULL, name = NULL, sessions_revoked_before = $2, updated_at = $3 WHERE key = $1",
+      [accountId, nextEpoch, now]
+    )
+  } else {
+    try tx.query(
+      "UPDATE accounts SET sessions_revoked_before = $2, updated_at = $3 WHERE key = $1",
+      [accountId, nextEpoch, now]
+    )
+  }
+  try tx.query(
+    "UPDATE sessions SET live = false, updated_at = $2 WHERE user_id = $1 AND live = true",
+    [accountId, now]
+  )
+  return nextEpoch
+}
+
+function rowToAccountProfile(row: Row): AccountProfile {
+  const uiMode: PlayMode = toText(row.ui_mode) === "social" ? "social" : "game"
+  return {
+    accountId: toText(row.account_id) ?? "",
+    handle: toText(row.handle) ?? "",
+    displayName: toText(row.display_name) ?? "",
+    bio: toText(row.bio) ?? "",
+    avatarUrl: toText(row.avatar_url) ?? null,
+    phoneHash: toText(row.phone_hash) ?? null,
+    phoneLast2: toText(row.phone_last2) ?? null,
+    uiMode,
+    playMode: uiMode,
+    balanceCents: toInt(row.balance_cents),
+    startingGrantCents: toInt(row.starting_grant_cents),
+    purchasedCents: toInt(row.purchased_cents ?? 0),
+    totalFeesPaidCents: toInt(row.total_fees_paid_cents ?? 0),
+    isAdmin: row.is_admin === true,
+    isReviewer: row.is_reviewer === true,
+    createdAt: toInt(row.created_at)
+  }
+}
+
+function phoneAuthFromAccount(row: Row | undefined, now: number): PhoneAuth {
+  if (row === undefined) return { ...initial, now }
+  const accountStatus: AccountStatus = toText(row.status) === "active"
+    ? "AccountActive"
+    : toText(row.status) === "deleting"
+      ? "AccountDeletedCooldown"
+      : "AccountErased"
+  return {
+    ...initial,
+    status: accountStatus,
+    userId: toText(row.account_id) ?? "",
+    username: toText(row.handle) ?? "",
+    isReviewer: row.is_reviewer === true,
+    ageConfirmed: row.age_confirmed_at !== null && row.age_confirmed_at !== undefined,
+    termsAccepted: row.age_confirmed_at !== null && row.age_confirmed_at !== undefined,
+    phoneVerified: row.phone_verified_at !== null && row.phone_verified_at !== undefined,
+    phoneHash: toText(row.phone_hash) ?? "",
+    phoneLast2: toText(row.phone_last2) ?? "",
+    pointsBalance: Math.floor(toInt(row.balance_cents) / 100),
+    startingGrantIssued: toInt(row.starting_grant_cents) > 0,
+    startingGrantCount: toInt(row.starting_grant_cents) > 0 ? 1 : 0,
+    sessionsEpoch: Math.max(1, toInt(row.sessions_revoked_before ?? 1)),
+    lastSignInAt: now,
+    now
+  }
+}
+
+function buildSendRateState(accountState: PhoneAuth, sentTimestamps: ReadonlyArray<number>, now: number): PhoneAuth {
+  if (sentTimestamps.length === 0) return { ...accountState, now }
+  const lastSentAt = sentTimestamps[0]
+  const inHour = sentTimestamps.filter((ts) => ts > now - HOUR_MS)
+  const inDay = sentTimestamps.filter((ts) => ts > now - DAY_MS)
+  return {
+    ...accountState,
+    hasSentBefore: true,
+    lastSentAt,
+    hourWindowStart: inHour.length > 0 ? inHour[inHour.length - 1] : now - HOUR_MS,
+    hourSends: inHour.length,
+    dayWindowStart: inDay.length > 0 ? inDay[inDay.length - 1] : now - DAY_MS,
+    daySends: inDay.length,
+    now
+  }
+}
+
+function pruneLoopbackCodes(now: number): void {
+  for (const [phone, entry] of loopbackCodes.entries()) {
+    if (entry.expiresAt <= now) loopbackCodes.delete(phone)
+  }
+}
+
+export function getLoopbackCode(
+  phoneE164: string,
+  config?: Pick<AuthRuntimeConfig, "smsMode">
+): string | undefined {
+  if (config !== undefined && config.smsMode !== "loopback") return undefined
+  const envMode = readEnvVar("SMS_MODE")
+  if (envMode !== undefined && envMode !== "" && envMode !== "loopback") return undefined
+  const normalized = normalizePhoneOrUndefined(phoneE164)
+  if (normalized === undefined) return undefined
+  const entry = loopbackCodes.get(normalized)
+  if (entry === undefined) return undefined
+  if (entry.expiresAt <= Date.now()) {
+    loopbackCodes.delete(normalized)
+    return undefined
+  }
+  return entry.code
+}
+
+export effect function verifyTurnstile(input: {
+  readonly token?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly config: Pick<AuthRuntimeConfig, "turnstileSecretKey" | "publicAppUrl">
+}): boolean!AuthFailure {
+  const secret = input.config.turnstileSecretKey?.trim() ?? ""
+  if (secret.length === 0) {
+    return !isProductionEnv(input.config)
+  }
+  const token = input.token?.trim() ?? ""
+  if (token.length === 0) return false
+  const form = new URLSearchParams({ secret, response: token })
+  if (input.ipAddress !== undefined && input.ipAddress.trim() !== "") {
+    form.set("remoteip", input.ipAddress.trim())
+  }
+  const request = HttpClientRequest.post("https://challenges.cloudflare.com/turnstile/v0/siteverify").pipe(
+    HttpClientRequest.bodyText(form.toString(), "application/x-www-form-urlencoded")
+  )
+  const response = try executeHttpJson(request, "turnstile_unavailable", "Human verification service unavailable.")
+  if (response.status < 200 || response.status >= 300) return false
+  const decoded = Schema.decodeUnknownOption(TurnstileResponse)(response.body)
+  return Option.isSome(decoded) && decoded.value.success
+}
+
+effect function checkTwilioLookup(phoneE164: string, config: AuthRuntimeConfig): { readonly countryCode: string | null }!AuthFailure {
+  const creds = try twilioAuthCredentials(config)
+  const url = `https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(phoneE164)}?Fields=line_type_intelligence`
+  const request = HttpClientRequest.get(url).pipe(HttpClientRequest.basicAuth(creds.sid, creds.token))
+  const response = try executeHttpJson(request, "sms_provider_unavailable", "Phone verification lookup failed.")
+  if (response.status === 400 || response.status === 404) {
+    throw new AuthFailure({ code: "invalid_phone", message: "Invalid phone number.", status: 400 })
+  }
+  if (response.status < 200 || response.status >= 300) {
+    throw new AuthFailure({ code: "sms_provider_unavailable", message: "Phone verification lookup failed.", status: 502 })
+  }
+  const parsed = Option.getOrUndefined(Schema.decodeUnknownOption(TwilioLookupResponse)(response.body))
+  if (parsed === undefined || parsed.valid === false) {
+    throw new AuthFailure({ code: "invalid_phone", message: "Invalid phone number.", status: 400 })
+  }
+  const lineType = parsed.line_type_intelligence?.type?.toLowerCase() ?? ""
+  if (lineType.includes("voip")) {
+    throw new AuthFailure({ code: "voip_not_allowed", message: "VoIP phone numbers are not allowed.", status: 400 })
+  }
+  if (
+    lineType === "tollfree" ||
+    lineType === "toll_free" ||
+    lineType === "premium" ||
+    lineType === "sharedcost" ||
+    lineType === "shared_cost" ||
+    lineType === "uan" ||
+    lineType === "voicemail" ||
+    lineType === "pager"
+  ) {
+    throw new AuthFailure({ code: "premium_number_blocked", message: "Premium or toll-free numbers are not allowed.", status: 400 })
+  }
+  return { countryCode: parsed.country_code ?? null }
+}
+
+effect function sendTwilioVerify(phoneE164: string, config: AuthRuntimeConfig): void!(AuthFailure | RateLimited) {
+  const creds = try twilioAuthCredentials(config)
+  const form = new URLSearchParams({ To: phoneE164, Channel: "sms" })
+  const request = HttpClientRequest.post(`https://verify.twilio.com/v2/Services/${creds.serviceSid}/Verifications`).pipe(
+    HttpClientRequest.basicAuth(creds.sid, creds.token),
+    HttpClientRequest.bodyText(form.toString(), "application/x-www-form-urlencoded")
+  )
+  const response = try executeHttpJson(request, "sms_provider_unavailable", "SMS delivery failed.")
+  if (response.status === 429) {
+    throw new RateLimited({ message: "Too many SMS verification requests.", retryAfterSeconds: 60, action: "sms_send" })
+  }
+  if (response.status < 200 || response.status >= 300) {
+    throw new AuthFailure({ code: "sms_provider_unavailable", message: "Unable to send verification SMS.", status: 502 })
+  }
+}
+
+effect function checkTwilioVerifyCode(phoneE164: string, code: string, config: AuthRuntimeConfig): boolean!(AuthFailure | RateLimited) {
+  const creds = try twilioAuthCredentials(config)
+  const form = new URLSearchParams({ To: phoneE164, Code: code })
+  const request = HttpClientRequest.post(`https://verify.twilio.com/v2/Services/${creds.serviceSid}/VerificationCheck`).pipe(
+    HttpClientRequest.basicAuth(creds.sid, creds.token),
+    HttpClientRequest.bodyText(form.toString(), "application/x-www-form-urlencoded")
+  )
+  const response = try executeHttpJson(request, "sms_provider_unavailable", "SMS verification check failed.")
+  if (response.status === 429) {
+    throw new RateLimited({ message: "Too many verification attempts.", retryAfterSeconds: 60, action: "sms_send" })
+  }
+  if (response.status === 400 || response.status === 404) return false
+  if (response.status < 200 || response.status >= 300) {
+    throw new AuthFailure({ code: "sms_provider_unavailable", message: "SMS verification service unavailable.", status: 502 })
+  }
+  const parsed = Option.getOrUndefined(Schema.decodeUnknownOption(TwilioVerifyResponse)(response.body))
+  return parsed?.status === "approved"
+}
+
+effect function issueSessionInTx(
+  tx: Tx,
+  accountId: string,
+  sessionsEpoch: number,
+  config: AuthRuntimeConfig,
+  now: number
+): { readonly sessionToken: string; readonly sessionCookieHeader: string; readonly expiresAt: number }!(AuthFailure | StoreFailure) {
+  const sessionToken = `feed_sess_${randomBase64Url(32)}`
+  const refreshToken = `feed_sref_${randomBase64Url(32)}`
+  const accessDigest = try sha256Hex(sessionToken)
+  const refreshDigest = try sha256Hex(refreshToken)
+  const sessionKey = newUuid()
+  const accessExpiresAt = now + SESSION_SLIDING_MS
+  const refreshExpiresAt = now + SESSION_ABSOLUTE_MS
+  const stateJson = JSON.stringify({ epoch: sessionsEpoch })
+  try tx.query(
+    `INSERT INTO sessions
+       (key, state, revision, user_id, access_digest, refresh_digest, live, access_expires_at, refresh_expires_at, auth_at, step_up_at, mfa_at, updated_at)
+     VALUES ($1, $2::jsonb, 1, $3, $4, $5, true, $6, $7, $8, 0, 0, $8)`,
+    [sessionKey, stateJson, accountId, accessDigest, refreshDigest, accessExpiresAt, refreshExpiresAt, now]
+  )
+  return {
+    sessionToken,
+    sessionCookieHeader: buildSessionCookieHeader(sessionToken, Math.floor(SESSION_SLIDING_MS / 1000), config.publicAppUrl),
+    expiresAt: accessExpiresAt
+  }
+}
+
+effect function sendPhoneChallenge(input: {
+  readonly phoneE164: string
+  readonly purposeKey: "sign-in" | "feed_phone_change"
+  readonly accountId: string | null
+  readonly oldPhoneVerifiedOrRecovery: boolean
+  readonly turnstileToken?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const normalizedPhone = try normalizePhoneE164(input.phoneE164)
+  const turnstilePassed = try verifyTurnstile({
+    token: input.turnstileToken,
+    ipAddress: input.ipAddress,
+    config: input.config
+  })
+  if (!turnstilePassed) {
+    throw new AuthFailure({ code: "turnstile_failed", message: "Human verification failed.", status: 400 })
+  }
+  const country = resolveCountryEligibility(normalizedPhone, input.config.allowedCountries)
+  const isPremiumOrTollFree = isBlockedPrefix(normalizedPhone)
+  if (!countryAllowed(country)) {
+    throw new AuthFailure({ code: "country_not_allowed", message: "Phone country is not supported yet.", status: 400 })
+  }
+  if (isPremiumOrTollFree) {
+    throw new AuthFailure({ code: "premium_number_blocked", message: "Premium or toll-free numbers are not allowed.", status: 400 })
+  }
+  const phoneHash = try hmacSha256Hex(input.config.digestKey, normalizedPhone)
+  const last2 = extractLast2(normalizedPhone)
+  const ipScopeKey = input.ipAddress !== undefined && input.ipAddress.trim() !== ""
+    ? `sms_ip:${try hmacSha256Hex(input.config.digestKey, normalizeIpPrefix(input.ipAddress))}`
+    : undefined
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    const cooldownRows = try tx.query(
+      "SELECT expires_at FROM feed_phone_cooldowns WHERE phone_hash = $1",
+      [phoneHash]
+    )
+    if (cooldownRows[0] !== undefined) {
+      const expiresAt = toInt(cooldownRows[0].expires_at)
+      if (expiresAt > now) {
+        throw new AuthFailure({
+          code: "phone_cooldown",
+          message: "This phone number is in a 30-day deletion cooldown.",
+          status: 403
+        })
+      }
+      try tx.query("DELETE FROM feed_phone_cooldowns WHERE phone_hash = $1", [phoneHash])
+    }
+    let baseState: PhoneAuth = { ...initial, now }
+    if (input.purposeKey === "feed_phone_change") {
+      if (input.accountId === null || input.accountId === "") {
+        throw new AuthFailure({ code: "unauthorized", message: "Account is required.", status: 401 })
+      }
+      const existingRow = try lockFeedAccountByIdInTx(tx, input.accountId)
+      if (existingRow === undefined) {
+        throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
+      }
+      baseState = phoneAuthFromAccount(existingRow, now)
+      try ensurePhoneUnusedByOtherInTx(tx, phoneHash, input.accountId)
+      if (!canRequestPhoneChangeCode(
+        baseState,
+        phoneHash,
+        country,
+        false,
+        false,
+        turnstilePassed,
+        true,
+        input.oldPhoneVerifiedOrRecovery,
+        true
+      )) {
+        throw new AuthFailure({ code: "phone_change_refused", message: "Cannot change phone number for this account.", status: 400 })
+      }
+    } else {
+      const accountRows = try tx.query(
+        `SELECT fa.*, a.status, a.sessions_revoked_before
+         FROM feed_accounts fa
+         JOIN accounts a ON a.key = fa.account_id
+         WHERE fa.phone_hash = $1 FOR UPDATE`,
+        [phoneHash]
+      )
+      baseState = phoneAuthFromAccount(accountRows[0], now)
+      if (!canRequestSignInCode(baseState, phoneHash, country, false, false, turnstilePassed, true)) {
+        throw new AuthFailure({ code: "phone_signin_refused", message: "Cannot request verification code for this account.", status: 403 })
+      }
+    }
+    const recentRows = try tx.query(
+      "SELECT sent_at FROM code_challenges WHERE method = 'sms' AND destination_digest = $1 AND sent_at > $2 ORDER BY sent_at DESC",
+      [phoneHash, now - DAY_MS]
+    )
+    const sentTimestamps = recentRows.map((row) => toInt(row.sent_at)).filter((ts) => Number.isSafeInteger(ts))
+    const rateState = buildSendRateState(baseState, sentTimestamps, now)
+    if (!withinSendRateLimits(rateState)) {
+      if (!resendGapOk(rateState)) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((rateState.lastSentAt + resendGapMs - now) / 1000))
+        throw new RateLimited({ message: "Wait 30 seconds before requesting another code.", retryAfterSeconds, action: "sms_send" })
+      }
+      if (currentHourSends(rateState) >= maxSendsPerHour) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((rateState.hourWindowStart + HOUR_MS - now) / 1000))
+        throw new RateLimited({ message: "Hourly verification code limit reached.", retryAfterSeconds, action: "sms_send" })
+      }
+      const retryAfterSeconds = Math.max(1, Math.ceil((rateState.dayWindowStart + DAY_MS - now) / 1000))
+      throw new RateLimited({ message: "Daily verification code limit reached.", retryAfterSeconds, action: "sms_send" })
+    }
+    if (ipScopeKey !== undefined) {
+      try consumeRateLimitWindowInTx(tx, {
+        scopeKey: ipScopeKey,
+        limit: IP_SMS_HOURLY_LIMIT,
+        windowMs: HOUR_MS,
+        action: "sms_send",
+        message: "Too many SMS requests from this IP address.",
+        now
+      })
+    }
+  })
+  if (input.config.smsMode === "twilio") {
+    const lookup = try checkTwilioLookup(normalizedPhone, input.config)
+    if (normalizedPhone.startsWith("+1") && lookup.countryCode !== null && lookup.countryCode !== "US" && lookup.countryCode !== "CA") {
+      throw new AuthFailure({ code: "country_not_allowed", message: "Phone country is not supported yet.", status: 400 })
+    }
+    try sendTwilioVerify(normalizedPhone, input.config)
+  }
+  const challengeId = newUuid()
+  const issuedCode = input.config.smsMode === "loopback" ? randomSixDigitCode() : "000000"
+  const sendNow = try Clock.currentTimeMillis
+  if (input.purposeKey === "feed_phone_change") {
+    requestPhoneChangeCode({ ...initial, status: "AccountActive", phoneHash, now: sendNow }, normalizedPhone, phoneHash, issuedCode, country, false, false, turnstilePassed, true, input.oldPhoneVerifiedOrRecovery, true)
+  } else {
+    requestSignInCode({ ...initial, now: sendNow }, normalizedPhone, phoneHash, issuedCode, country, false, false, turnstilePassed, true)
+  }
+  const codeDigest = input.config.smsMode === "loopback"
+    ? try hmacSha256Hex(input.config.digestKey, `${challengeId}:${issuedCode}`)
+    : try hmacSha256Hex(input.config.digestKey, `${challengeId}:twilio`)
+  const expiresAt = sendNow + codeLifetimeMs
+  const stateJson = JSON.stringify({
+    purpose: input.purposeKey === "sign-in" ? "feed_phone_signin" : "feed_phone_change",
+    attempts: 0,
+    maxAttempts: maxCodeAttempts,
+    phoneLast2: last2
+  })
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      "UPDATE code_challenges SET phase = 'superseded', revision = revision + 1 WHERE method = 'sms' AND purpose_key = $1 AND destination_digest = $2 AND phase = 'open'",
+      [input.purposeKey, phoneHash]
+    )
+    try tx.query(
+      `INSERT INTO code_challenges
+         (key, state, revision, method, purpose_key, user_id, client_id, destination_digest, code_digest, code_challenge, phase, sent_at, expires_at)
+       VALUES ($1, $2::jsonb, 1, 'sms', $3, $4, 'feed-web', $5, $6, '', 'open', $7, $8)`,
+      [challengeId, stateJson, input.purposeKey, input.accountId, phoneHash, codeDigest, sendNow, expiresAt]
+    )
+  })
+  if (input.config.smsMode === "loopback") {
+    pruneLoopbackCodes(sendNow)
+    loopbackCodes.set(normalizedPhone, { code: issuedCode, expiresAt })
+  }
+  return {
+    challengeId,
+    phoneHash,
+    last2,
+    expiresAt,
+    resendAvailableAt: sendNow + resendGapMs
+  }
+}
+
+type ChallengeVerifyOutcome<A> =
+  | { readonly ok: true; readonly value: A }
+  | { readonly ok: false; readonly failure: AuthFailure }
+
+effect function verifyChallengeStepInTx<A>(
+  tx: Tx,
+  params: {
+    readonly challengeId: string
+    readonly phoneHash: string
+    readonly last2: string
+    readonly purposeKey: "sign-in" | "feed_phone_change"
+    readonly accountId: string | null
+    readonly codeMatches: boolean
+    readonly now: number
+  },
+  onMatched: (tx: Tx, meta: { readonly challengeId: string; readonly phoneHash: string; readonly last2: string; readonly now: number }) => A!(AuthFailure | StoreFailure)
+): ChallengeVerifyOutcome<A>!(AuthFailure | StoreFailure) {
+  const lockedRows = try tx.query(
+    "SELECT key, state, phase, sent_at, expires_at FROM code_challenges WHERE key = $1 FOR UPDATE",
+    [params.challengeId]
+  )
+  const row = lockedRows[0]
+  if (row === undefined || toText(row.phase) !== "open") {
+    return { ok: false, failure: new AuthFailure({ code: "challenge_not_found", message: "Verification challenge is no longer active.", status: 401 }) }
+  }
+  const rowExpiresAt = toInt(row.expires_at)
+  const parsedState = Option.getOrUndefined(Schema.decodeUnknownOption(ChallengeStatePayload)(row.state))
+  const attempts = parsedState?.attempts ?? 0
+  if (params.now >= rowExpiresAt) {
+    try tx.query("UPDATE code_challenges SET phase = 'expired', revision = revision + 1 WHERE key = $1", [params.challengeId])
+    return { ok: false, failure: new AuthFailure({ code: "code_expired", message: "Verification code expired. Request a new code.", status: 401 }) }
+  }
+  const specState: PhoneAuth = {
+    ...initial,
+    status: params.purposeKey === "feed_phone_change" ? "AccountActive" : "AccountUnregistered",
+    challengeStatus: attempts >= maxCodeAttempts ? "ChallengeLocked" : "ChallengeOpen",
+    challengePurpose: params.purposeKey === "feed_phone_change" ? "PurposeChangePhone" : "PurposeSignIn",
+    pendingPhoneHash: params.phoneHash,
+    pendingPhoneLast2: params.last2,
+    codeSentAt: toInt(row.sent_at),
+    codeExpiresAt: rowExpiresAt,
+    codeAttempts: attempts,
+    now: params.now
+  }
+  if (!canVerifyCode(specState, params.codeMatches, params.accountId ?? "pending-user")) {
+    try tx.query("UPDATE code_challenges SET phase = 'locked', revision = revision + 1 WHERE key = $1", [params.challengeId])
+    return { ok: false, failure: new AuthFailure({ code: "challenge_locked", message: "Too many incorrect attempts. Request a new code.", status: 429 }) }
+  }
+  const stepped = verifyCode(specState, params.codeMatches, params.accountId ?? "pending-user")
+  if (!params.codeMatches) {
+    const nextAttempts = stepped.state.codeAttempts
+    const locked = stepped.state.challengeStatus === "ChallengeLocked"
+    const nextStateJson = JSON.stringify({
+      purpose: parsedState?.purpose ?? "feed_phone_signin",
+      attempts: nextAttempts,
+      maxAttempts: maxCodeAttempts,
+      phoneLast2: params.last2
+    })
+    try tx.query(
+      "UPDATE code_challenges SET phase = $2, state = $3::jsonb, revision = revision + 1 WHERE key = $1",
+      [params.challengeId, locked ? "locked" : "open", nextStateJson]
+    )
+    return {
+      ok: false,
+      failure: locked
+        ? new AuthFailure({ code: "challenge_locked", message: "Too many incorrect attempts. Request a new code.", status: 429 })
+        : new AuthFailure({ code: "invalid_code", message: "Incorrect verification code.", status: 401 })
+    }
+  }
+  try tx.query("UPDATE code_challenges SET phase = 'consumed', revision = revision + 1 WHERE key = $1", [params.challengeId])
+  const value = try onMatched(tx, { challengeId: params.challengeId, phoneHash: params.phoneHash, last2: params.last2, now: params.now })
+  return { ok: true, value }
+}
+
+effect function verifyPhoneChallenge<A>(
+  input: {
+    readonly phoneE164: string
+    readonly code: string
+    readonly purposeKey: "sign-in" | "feed_phone_change"
+    readonly accountId: string | null
+    readonly config: AuthRuntimeConfig
+  },
+  onMatched: (tx: Tx, meta: { readonly challengeId: string; readonly phoneHash: string; readonly last2: string; readonly now: number }) => A!(AuthFailure | StoreFailure)
+): A!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const normalizedPhone = try normalizePhoneE164(input.phoneE164)
+  const trimmedCode = input.code.trim()
+  if (!/^\d{6}$/.test(trimmedCode)) {
+    throw new AuthFailure({ code: "invalid_code", message: "Enter the 6-digit verification code.", status: 400 })
+  }
+  const phoneHash = try hmacSha256Hex(input.config.digestKey, normalizedPhone)
+  const last2 = extractLast2(normalizedPhone)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const latestRows = try store.transaction((tx: Tx) =>
+    tx.query(
+      `SELECT key, state, code_digest, phase, sent_at, expires_at
+       FROM code_challenges
+       WHERE method = 'sms' AND purpose_key = $1 AND destination_digest = $2
+         AND ($3::text IS NULL OR user_id = $3)
+       ORDER BY sent_at DESC
+       LIMIT 1`,
+      [input.purposeKey, phoneHash, input.accountId]
+    )
+  )
+  const latest = latestRows[0]
+  if (latest === undefined || toText(latest.phase) !== "open") {
+    if (toText(latest?.phase) === "locked") {
+      throw new AuthFailure({ code: "challenge_locked", message: "Too many incorrect attempts. Request a new code.", status: 429 })
+    }
+    throw new AuthFailure({ code: "challenge_not_found", message: "No active verification challenge found. Request a new code.", status: 401 })
+  }
+  const challengeId = toText(latest.key) ?? ""
+  const expiresAt = toInt(latest.expires_at)
+  if (now >= expiresAt) {
+    try store.transaction((tx: Tx) =>
+      tx.query("UPDATE code_challenges SET phase = 'expired', revision = revision + 1 WHERE key = $1 AND phase = 'open'", [challengeId])
+    )
+    loopbackCodes.delete(normalizedPhone)
+    throw new AuthFailure({ code: "code_expired", message: "Verification code expired. Request a new code.", status: 401 })
+  }
+  let codeMatches = false
+  if (input.config.smsMode === "twilio") {
+    codeMatches = try checkTwilioVerifyCode(normalizedPhone, trimmedCode, input.config)
+  } else {
+    const candidateDigest = try hmacSha256Hex(input.config.digestKey, `${challengeId}:${trimmedCode}`)
+    codeMatches = constantTimeEqual(candidateDigest, toText(latest.code_digest) ?? "")
+  }
+  const outcome = try store.transaction(effect (tx: Tx) =>
+    try verifyChallengeStepInTx(
+      tx,
+      {
+        challengeId,
+        phoneHash,
+        last2,
+        purposeKey: input.purposeKey,
+        accountId: input.accountId,
+        codeMatches,
+        now
+      },
+      onMatched
+    )
+  )
+  if (!outcome.ok) {
+    if (outcome.failure.code === "challenge_locked" || outcome.failure.code === "code_expired") {
+      loopbackCodes.delete(normalizedPhone)
+    }
+    throw outcome.failure
+  }
+  loopbackCodes.delete(normalizedPhone)
+  return outcome.value
+}
+
+export effect function startPhoneVerification(input: {
+  readonly phoneE164: string
+  readonly turnstileToken?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  return try sendPhoneChallenge({
+    phoneE164: input.phoneE164,
+    purposeKey: "sign-in",
+    accountId: null,
+    oldPhoneVerifiedOrRecovery: true,
+    turnstileToken: input.turnstileToken,
+    ipAddress: input.ipAddress,
+    config: input.config
+  })
+}
+
+export effect function verifyPhoneCode(input: {
+  readonly phoneE164: string
+  readonly code: string
+  readonly config: AuthRuntimeConfig
+}): VerifyPhoneCodeResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const verified = try verifyPhoneChallenge(
+    {
+      phoneE164: input.phoneE164,
+      code: input.code,
+      purposeKey: "sign-in",
+      accountId: null,
+      config: input.config
+    },
+    effect (tx: Tx, meta) => {
+      const existingRows = try tx.query(
+        `SELECT fa.*, a.status, a.sessions_revoked_before
+         FROM feed_accounts fa
+         JOIN accounts a ON a.key = fa.account_id
+         WHERE fa.phone_hash = $1 FOR UPDATE`,
+        [meta.phoneHash]
+      )
+      const existing = existingRows[0]
+      if (existing === undefined) {
+        return { kind: "onboarding" as const, meta }
+      }
+      if (toText(existing.status) !== "active") {
+        throw new AuthFailure({ code: "account_inactive", message: "Account is not active.", status: 403 })
+      }
+      if (existing.is_reviewer === true) {
+        throw new AuthFailure({ code: "reviewer_password_only", message: "Reviewer accounts must use reviewer sign-in.", status: 403 })
+      }
+      const accountId = toText(existing.account_id) ?? ""
+      const epoch = Math.max(1, toInt(existing.sessions_revoked_before))
+      try tx.query("UPDATE feed_accounts SET phone_verified_at = $2, updated_at = $2 WHERE account_id = $1", [accountId, meta.now])
+      const session = try issueSessionInTx(tx, accountId, epoch, input.config, meta.now)
+      return {
+        kind: "signed_in" as const,
+        account: rowToAccountProfile(existing),
+        ...session
+      }
+    }
+  )
+  if (verified.kind === "signed_in") {
+    return {
+      needsOnboarding: false,
+      account: verified.account,
+      sessionToken: verified.sessionToken,
+      sessionCookieHeader: verified.sessionCookieHeader,
+      expiresAt: verified.expiresAt
+    }
+  }
+  const secret = try signingSecretBytes(input.config)
+  const pendingToken = try tryPromise({
+    try: () =>
+      new SignJWT({
+        purpose: "feed_phone_onboarding",
+        phoneHash: verified.meta.phoneHash,
+        last2: verified.meta.last2,
+        challengeId: verified.meta.challengeId
+      })
+        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+        .setIssuedAt(Math.floor(verified.meta.now / 1000))
+        .setExpirationTime(Math.floor(verified.meta.now / 1000) + ONBOARDING_TOKEN_TTL_SECONDS)
+        .sign(secret),
+    catch: () => new AuthFailure({ code: "crypto_error", message: "Failed to sign onboarding token.", status: 500 })
+  })
+  return {
+    needsOnboarding: true,
+    pendingToken,
+    phoneHash: verified.meta.phoneHash,
+    last2: verified.meta.last2
+  }
+}
+
+export effect function completePhoneOnboarding(input: {
+  readonly pendingToken: string
+  readonly username: string
+  readonly accepted18Plus: boolean
+  readonly acceptedTerms: boolean
+  readonly bio?: string | undefined
+  readonly displayName?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
+  if (!input.accepted18Plus || !input.acceptedTerms) {
+    throw new AuthFailure({
+      code: "attestation_required",
+      message: "You must confirm you are 18+ and accept the Terms of Service.",
+      status: 400
+    })
+  }
+  const username = input.username.trim().toLowerCase()
+  if (!USERNAME_PATTERN.test(username)) {
+    throw new AuthFailure({
+      code: "invalid_username",
+      message: "Username must be 2-32 lowercase letters, numbers, or underscores.",
+      status: 400
+    })
+  }
+  const secret = try signingSecretBytes(input.config)
+  const verifiedJwt = try tryPromise({
+    try: () => jwtVerify(input.pendingToken, secret, { algorithms: ["HS256"] }),
+    catch: () => new AuthFailure({ code: "invalid_onboarding_token", message: "Onboarding session expired. Verify your phone again.", status: 401 })
+  })
+  const claims = Option.getOrUndefined(Schema.decodeUnknownOption(PendingOnboardingClaims)(verifiedJwt.payload))
+  if (claims === undefined || claims.phoneHash === "") {
+    throw new AuthFailure({ code: "invalid_onboarding_token", message: "Invalid onboarding token.", status: 401 })
+  }
+  const bio = (input.bio ?? "").trim().slice(0, 280)
+  const displayName = (input.displayName?.trim() ?? "") !== "" ? input.displayName!.trim().slice(0, 80) : username
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:onboard:${claims.phoneHash}`])
+    const cooldownRows = try tx.query("SELECT expires_at FROM feed_phone_cooldowns WHERE phone_hash = $1", [claims.phoneHash])
+    if (cooldownRows[0] !== undefined && toInt(cooldownRows[0].expires_at) > now) {
+      throw new AuthFailure({ code: "phone_cooldown", message: "This phone number is in a 30-day deletion cooldown.", status: 403 })
+    }
+    const existingPhone = try tx.query("SELECT account_id FROM feed_accounts WHERE phone_hash = $1 FOR UPDATE", [claims.phoneHash])
+    if (existingPhone.length > 0) {
+      throw new AuthFailure({ code: "account_exists", message: "An account for this phone number already exists.", status: 409 })
+    }
+    const existingHandle = try tx.query("SELECT account_id FROM feed_accounts WHERE LOWER(handle) = $1 FOR UPDATE", [username])
+    if (existingHandle.length > 0) {
+      throw new AuthFailure({ code: "username_taken", message: "That username is already taken.", status: 409 })
+    }
+    const accountId = newUuid()
+    const organizationId = newUuid()
+    const pendingState: PhoneAuth = {
+      ...initial,
+      status: "AccountPendingOnboarding",
+      userId: accountId,
+      phoneVerified: true,
+      phoneHash: claims.phoneHash,
+      phoneLast2: claims.last2,
+      sessionsEpoch: 1,
+      lastSignInAt: now,
+      now
+    }
+    if (!canCompleteOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)) {
+      throw new AuthFailure({ code: "onboarding_refused", message: "Cannot complete onboarding.", status: 400 })
+    }
+    completeOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)
+    try tx.query(
+      "INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ($1, $2, 0, $3)",
+      [organizationId, displayName, now]
+    )
+    const cloudAccountState = JSON.stringify({
+      status: "Active",
+      userId: accountId,
+      organizationId,
+      identities: [{ method: "PhoneSignIn", subject: claims.phoneHash }]
+    })
+    try tx.query(
+      `INSERT INTO accounts
+         (key, state, revision, organization_id, status, email, phone, name, sessions_revoked_before, devices_revoked_before, device_epoch, created_at, updated_at)
+       VALUES ($1, $2::jsonb, 1, $3, 'active', NULL, NULL, $4, 1, 0, 0, $5, $5)`,
+      [accountId, cloudAccountState, organizationId, displayName, now]
+    )
+    const insertedRows = try tx.query(
+      `INSERT INTO feed_accounts
+         (account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $7, 'game', $8, $8, 0, 0, false, false, NULL, $7, $7)
+       RETURNING *`,
+      [accountId, username, displayName, bio, claims.phoneHash, claims.last2, now, STARTING_GRANT_CENTS]
+    )
+    try tx.query(
+      `INSERT INTO feed_point_ledger
+         (id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at)
+       VALUES ($1, $2, 'starting_grant', $3, $3, $4, $5)`,
+      [newUuid(), accountId, STARTING_GRANT_CENTS, claims.challengeId, now]
+    )
+    const session = try issueSessionInTx(tx, accountId, 1, input.config, now)
+    return {
+      account: rowToAccountProfile(insertedRows[0]),
+      ...session
+    }
+  })
+}
+
+export effect function hashReviewerPassword(password: string): string!AuthFailure {
+  if (password.length < 8) {
+    throw new AuthFailure({ code: "weak_password", message: "Reviewer password must be at least 8 characters.", status: 400 })
+  }
+  return try hashPassword(password)
+}
+
+export effect function signInReviewerPassword(input: {
+  readonly usernameOrId: string
+  readonly password: string
+  readonly config: AuthRuntimeConfig
+}): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
+  const identifier = input.usernameOrId.trim().toLowerCase()
+  if (identifier === "" || input.password.length === 0) {
+    throw new AuthFailure({ code: "reviewer_signin_refused", message: "Invalid reviewer credentials.", status: 401 })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT fa.*, a.status, a.sessions_revoked_before
+       FROM feed_accounts fa
+       JOIN accounts a ON a.key = fa.account_id
+       WHERE LOWER(fa.handle) = $1 OR fa.account_id = $2
+       FOR UPDATE`,
+      [identifier, input.usernameOrId.trim()]
+    )
+    const row = rows[0]
+    if (row === undefined || toText(row.status) !== "active" || row.is_reviewer !== true) {
+      throw new AuthFailure({ code: "reviewer_signin_refused", message: "Invalid reviewer credentials.", status: 401 })
+    }
+    const storedHash = toText(row.reviewer_password_hash) ?? ""
+    if (storedHash === "") {
+      throw new AuthFailure({ code: "reviewer_signin_refused", message: "Invalid reviewer credentials.", status: 401 })
+    }
+    const passwordMatches = try verifyPassword(input.password, storedHash, input.config.digestKey)
+    const state = phoneAuthFromAccount(row, now)
+    if (!admitPasswordSignIn(state, toText(row.handle) ?? "", passwordMatches)) {
+      throw new AuthFailure({ code: "reviewer_signin_refused", message: "Invalid reviewer credentials.", status: 401 })
+    }
+    stepReviewerSignIn(state, toText(row.handle) ?? "", passwordMatches)
+    const accountId = toText(row.account_id) ?? ""
+    const epoch = Math.max(1, toInt(row.sessions_revoked_before))
+    try annotateLogs(logInfo("reviewer_sign_in_audited"), { accountId, auditedAt: now })
+    const session = try issueSessionInTx(tx, accountId, epoch, input.config, now)
+    return {
+      account: rowToAccountProfile(row),
+      ...session
+    }
+  })
+}
+
+export effect function requestPhoneChange(input: {
+  readonly accountId: string
+  readonly newPhoneE164: string
+  readonly turnstileToken?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly oldPhoneVerifiedOrRecovery?: boolean | undefined
+  readonly config: AuthRuntimeConfig
+}): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  return try sendPhoneChallenge({
+    phoneE164: input.newPhoneE164,
+    purposeKey: "feed_phone_change",
+    accountId: input.accountId,
+    oldPhoneVerifiedOrRecovery: input.oldPhoneVerifiedOrRecovery ?? true,
+    turnstileToken: input.turnstileToken,
+    ipAddress: input.ipAddress,
+    config: input.config
+  })
+}
+
+export effect function confirmPhoneChange(input: {
+  readonly accountId: string
+  readonly newPhoneE164: string
+  readonly code: string
+  readonly config: AuthRuntimeConfig
+}): AuthenticatedAccountResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  return try verifyPhoneChallenge(
+    {
+      phoneE164: input.newPhoneE164,
+      code: input.code,
+      purposeKey: "feed_phone_change",
+      accountId: input.accountId,
+      config: input.config
+    },
+    effect (tx: Tx, meta) => {
+      const row = try lockFeedAccountByIdInTx(tx, input.accountId)
+      if (row === undefined || toText(row.status) !== "active" || row.is_reviewer === true) {
+        throw new AuthFailure({ code: "phone_change_refused", message: "Account is not eligible for phone change.", status: 403 })
+      }
+      try ensurePhoneUnusedByOtherInTx(tx, meta.phoneHash, input.accountId)
+      const updated = try tx.query(
+        "UPDATE feed_accounts SET phone_hash = $2, phone_last2 = $3, phone_verified_at = $4, updated_at = $4 WHERE account_id = $1 RETURNING *",
+        [input.accountId, meta.phoneHash, meta.last2, meta.now]
+      )
+      const nextEpoch = try revokeSessionsAndBumpEpochInTx(tx, input.accountId, toInt(row.sessions_revoked_before), meta.now)
+      const session = try issueSessionInTx(tx, input.accountId, nextEpoch, input.config, meta.now)
+      return {
+        account: rowToAccountProfile(updated[0]),
+        ...session
+      }
+    }
+  )
+}
+
+export effect function signOutEverywhere(accountId: string): { readonly sessionsEpoch: number }!(AuthFailure | StoreFailure)!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const row = try lockFeedAccountByIdInTx(tx, accountId)
+    if (row === undefined || toText(row.status) !== "active") {
+      throw new AuthFailure({ code: "account_not_found", message: "Active account not found.", status: 404 })
+    }
+    const state = phoneAuthFromAccount(row, now)
+    if (!canSignOutEverywhere(state)) {
+      throw new AuthFailure({ code: "signout_refused", message: "Cannot sign out this account.", status: 400 })
+    }
+    stepSignOutEverywhere(state)
+    const nextEpoch = try revokeSessionsAndBumpEpochInTx(tx, accountId, toInt(row.sessions_revoked_before), now)
+    return { sessionsEpoch: nextEpoch }
+  })
+}
+
+export effect function authenticateSessionCookie(
+  cookieHeader: string | undefined,
+  config?: Pick<AuthRuntimeConfig, "publicAppUrl">
+): (SessionIdentity | null)!StoreFailure!Store {
+  const token = parseSessionCookieToken(cookieHeader, config?.publicAppUrl.startsWith("https://") ?? false)
+  if (token === undefined) return null
+  const digest = sha256Hex(token) catch () => ""
+  if (digest === "") return null
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT s.key AS session_key, s.state AS session_state, s.live, s.access_expires_at, s.refresh_expires_at, s.auth_at,
+              a.status AS account_status, a.sessions_revoked_before,
+              fa.*
+       FROM sessions s
+       JOIN accounts a ON a.key = s.user_id
+       JOIN feed_accounts fa ON fa.account_id = a.key
+       WHERE s.access_digest = $1`,
+      [digest]
+    )
+    const row = rows[0]
+    if (row === undefined) return null
+    if (row.live !== true || toText(row.account_status) !== "active") return null
+    const accessExpiresAt = toInt(row.access_expires_at)
+    const refreshExpiresAt = toInt(row.refresh_expires_at)
+    if (now >= accessExpiresAt || now >= refreshExpiresAt) return null
+    const sessionState = row.session_state as { readonly epoch?: unknown } | undefined
+    const tokenEpoch = toInt(sessionState?.epoch)
+    const accountEpoch = Math.max(1, toInt(row.sessions_revoked_before))
+    if (!Number.isSafeInteger(tokenEpoch) || tokenEpoch !== accountEpoch) return null
+    const sessionKey = toText(row.session_key) ?? ""
+    const extendedExpiry = Math.min(now + SESSION_SLIDING_MS, refreshExpiresAt)
+    if (extendedExpiry - accessExpiresAt > 3_600_000) {
+      try tx.query(
+        "UPDATE sessions SET access_expires_at = $2, updated_at = $3 WHERE key = $1",
+        [sessionKey, extendedExpiry, now]
+      )
+    }
+    const profile = rowToAccountProfile(row)
+    return {
+      accountId: profile.accountId,
+      sessionKey,
+      handle: profile.handle,
+      displayName: profile.displayName,
+      bio: profile.bio,
+      avatarUrl: profile.avatarUrl,
+      phoneHash: profile.phoneHash,
+      phoneLast2: profile.phoneLast2,
+      uiMode: profile.uiMode,
+      playMode: profile.playMode,
+      balanceCents: profile.balanceCents,
+      isAdmin: profile.isAdmin,
+      isReviewer: profile.isReviewer,
+      authAt: toInt(row.auth_at),
+      expiresAt: extendedExpiry,
+      sessionsEpoch: accountEpoch
+    }
+  })
+}
+
+export effect function deleteAccountSelfServe(input: {
+  readonly accountId: string
+  readonly authAt?: number | undefined
+  readonly sessionAuthAt?: number | undefined
+  readonly cookieHeader?: string | undefined
+  readonly config?: AuthRuntimeConfig | undefined
+}): { readonly deleted: true; readonly cooldownEndsAt: number }!(AuthFailure | StoreFailure)!Store {
+  let signedInAt = input.authAt ?? input.sessionAuthAt
+  if (signedInAt === undefined && input.cookieHeader !== undefined && input.config !== undefined) {
+    const session = try authenticateSessionCookie(input.cookieHeader, input.config)
+    if (session === null || session.accountId !== input.accountId) {
+      throw new AuthFailure({ code: "unauthorized", message: "Active session required.", status: 401 })
+    }
+    signedInAt = session.authAt
+  }
+  const now = try Clock.currentTimeMillis
+  if (signedInAt === undefined || !Number.isSafeInteger(signedInAt) || now - signedInAt > recentSignInWindowMs) {
+    throw new AuthFailure({
+      code: "recent_signin_required",
+      message: "Please sign in again within the last 10 minutes before deleting your account.",
+      status: 403
+    })
+  }
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const row = try lockFeedAccountByIdInTx(tx, input.accountId)
+    if (row === undefined || toText(row.status) !== "active") {
+      throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
+    }
+    const specState: PhoneAuth = { ...phoneAuthFromAccount(row, now), lastSignInAt: signedInAt }
+    if (!canDeleteAccount(specState)) {
+      throw new AuthFailure({
+        code: "delete_refused",
+        message: "Account cannot be deleted without a recent phone sign-in.",
+        status: 403
+      })
+    }
+    deleteAccount(specState)
+    try revokeActiveAgentGrantInTx(tx, input.accountId, now)
+    const phoneHash = toText(row.phone_hash)
+    const cooldownEndsAt = now + phoneCooldownMs
+    if (phoneHash !== undefined && phoneHash !== "") {
+      try tx.query(
+        `INSERT INTO feed_phone_cooldowns (phone_hash, released_at, expires_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (phone_hash) DO UPDATE
+         SET released_at = EXCLUDED.released_at, expires_at = EXCLUDED.expires_at`,
+        [phoneHash, now, cooldownEndsAt]
+      )
+      try tx.query("DELETE FROM code_challenges WHERE destination_digest = $1", [phoneHash])
+    }
+    try revokeSessionsAndBumpEpochInTx(tx, input.accountId, toInt(row.sessions_revoked_before), now, true)
+    try tx.query(
+      `UPDATE feed_accounts
+       SET handle = $2, display_name = 'Deleted User', bio = '', avatar_url = NULL,
+           phone_hash = NULL, phone_last2 = NULL, phone_verified_at = NULL, updated_at = $3
+       WHERE account_id = $1`,
+      [input.accountId, `deleted_${input.accountId}`, now]
+    )
+    try tx.query("DELETE FROM code_challenges WHERE user_id = $1", [input.accountId])
+    try tx.query("DELETE FROM feed_oauth_codes WHERE account_id = $1", [input.accountId])
+    try tx.query(
+      "UPDATE feed_device_codes SET status = 'denied' WHERE account_id = $1 AND status IN ('pending', 'approved')",
+      [input.accountId]
+    )
+    return { deleted: true as const, cooldownEndsAt }
+  })
+}
+
+export effect function getAccountProfile(accountId: string): AccountProfile!(AuthFailure | StoreFailure)!Store {
+  const store = try Store
+  const rows = try store.transaction((tx: Tx) =>
+    tx.query(
+      `SELECT fa.*
+       FROM feed_accounts fa
+       JOIN accounts a ON a.key = fa.account_id
+       WHERE fa.account_id = $1 AND a.status = 'active'`,
+      [accountId]
+    )
+  )
+  if (rows[0] === undefined) {
+    throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
+  }
+  return rowToAccountProfile(rows[0])
+}
+
+export effect function setPlayMode(accountId: string, mode: PlayMode): { readonly playMode: PlayMode }!(AuthFailure | StoreFailure)!Store {
+  if (mode !== "game" && mode !== "social") {
+    throw new AuthFailure({ code: "invalid_mode", message: "Play mode must be game or social.", status: 400 })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `UPDATE feed_accounts fa
+       SET ui_mode = $2, updated_at = $3
+       FROM accounts a
+       WHERE fa.account_id = $1 AND a.key = fa.account_id AND a.status = 'active'
+       RETURNING fa.ui_mode`,
+      [accountId, mode, now]
+    )
+    if (rows[0] === undefined) {
+      throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
+    }
+    return { playMode: toText(rows[0].ui_mode) === "social" ? "social" : "game" }
+  })
+}

@@ -7,8 +7,14 @@ export const cnFor = (groups: Record<string, unknown>) => {
   const twMerge = extendTailwindMerge({
     extend: {
       theme: {
-        text: names("text"), radius: names("rounded"), shadow: names("shadow"), blur: names("blur"), animate: names("animate"),
-        "font-weight": names("weight"), leading: names("leading"), tracking: names("tracking"),
+        text: names("text"),
+        radius: names("rounded"),
+        shadow: names("shadow"),
+        blur: names("blur"),
+        animate: names("animate"),
+        "font-weight": names("weight"),
+        leading: names("leading"),
+        tracking: names("tracking"),
       },
       classGroups: { z: [{ z: names("z") }] },
     },
@@ -16,8 +22,10 @@ export const cnFor = (groups: Record<string, unknown>) => {
   return (...inputs: ClassValue[]) => twMerge(clsx(inputs));
 };
 
-/** Joins class names; a later Tailwind utility replaces an earlier one it conflicts with. */
 export const cn = cnFor(tokens);
 
-/** The ring every control shows under keyboard focus. */
 export const focusRing = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+export const inactive = "disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50";
+
+export const target = "relative after:absolute after:top-1/2 after:left-1/2 after:size-full after:min-h-11 after:min-w-11 after:-translate-1/2";

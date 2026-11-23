@@ -1,0 +1,67 @@
+// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"
+export {
+  MarketFailure,
+  type MarketActorKind
+} from "./shared.vibe"
+
+export {
+  buyPredictionShares,
+  cancelPredictionMarket,
+  getPredictionMarket,
+  getUserPositions,
+  listPredictionMarkets,
+  resolvePredictionMarket,
+  sellPredictionShares,
+  type BuyPredictionInput,
+  type CancelPredictionResult,
+  type PredictionMarketStatus,
+  type PredictionMarketView,
+  type PredictionPositionView,
+  type PredictionSide,
+  type ResolvePredictionInput,
+  type ResolvePredictionResult,
+  type SellPredictionInput,
+  type TradeReceipt,
+  type UserPositionsView
+} from "./prediction.vibe"
+
+export {
+  accruePerpFunding,
+  closePerpPosition,
+  executeNpcSpotTrade,
+  getPerpMarket,
+  liquidateEligiblePositions,
+  listPerpMarkets,
+  listPerpPositions,
+  openPerpPosition,
+  type ClosePerpInput,
+  type ClosePerpReceipt,
+  type FundingAccrualSummary,
+  type LiquidationSweepSummary,
+  type NpcSpotTradeInput,
+  type OpenPerpInput,
+  type OpenPerpReceipt,
+  type PerpMarketView,
+  type PerpPositionStatus,
+  type PerpPositionView,
+  type PerpSide,
+  type SpotTradeReceipt
+} from "./spot-perp.vibe"
+
+export {
+  createStripeCheckoutSession,
+  getAccountEconomy,
+  getLeaderboard,
+  getPointLedger,
+  handleStripeWebhook,
+  listPointPacks,
+  type AccountEconomyView,
+  type CreateStripeCheckoutInput,
+  type HandleStripeWebhookInput,
+  type LeaderboardEntry,
+  type PackId,
+  type PointLedgerEntry,
+  type PointPack,
+  type StripeCheckoutSessionView,
+  type StripeWebhookResult
+} from "./economy.vibe"

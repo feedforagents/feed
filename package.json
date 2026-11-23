@@ -6,13 +6,17 @@
     "node": ">=26"
   },
   "scripts": {
-    "dev": "turbo run dev //#studio",
+    "dev": "turbo run dev --filter=@repo/app //#studio",
+    "dev:app": "pnpm --filter @repo/app dev",
+    "dev:web": "pnpm --filter @repo/app dev:web",
+    "dev:server": "pnpm --filter @repo/app dev:server",
+    "storybook": "pnpm --filter @repo/ui storybook",
     "studio": "node vibestack/spec.ts studio",
     "check": "node vibestack/spec.ts check",
     "gen": "node vibestack/spec.ts gen",
+    "eliza:gen": "node vendor/eliza/vibestack/spec.ts gen --owner core vendor/eliza && node vendor/eliza/vibestack/spec.ts gen --owner cloud vendor/eliza && node vendor/eliza/vibestack/spec.ts gen --owner agent vendor/eliza && pnpm --filter @elizaos/core build && pnpm --filter @elizaos/cloud exec vibelang -p tsconfig.build.json && node -e \"const fs=require('node:fs'),path=require('node:path');for(const f of fs.globSync('vendor/eliza/packages/cloud/src/**/*.sql')){const d='vendor/eliza/packages/cloud/dist/'+path.relative('vendor/eliza/packages/cloud',f);fs.mkdirSync(path.dirname(d),{recursive:true});fs.copyFileSync(f,d);}\" && pnpm --filter @elizaos/agent build",
     "accept": "node vibestack/spec.ts accept",
     "new": "node vibestack/spec.ts new",
-    "demo": "pnpm -C vibestack/examples/order demo",
     "selftest": "node vibestack/spec.ts tasks //#selftest:tools:a //#selftest:tools:b //#selftest:tools:rest //#selftest:docs //#selftest:examples",
     "selftest:tools:a": "node --test --test-name-pattern=\"^the tools each check catches its own kind of mistake in shard a \" vibestack/selftest.ts",
     "selftest:tools:b": "node --test --test-name-pattern=\"^the tools each check catches its own kind of mistake in shard b \" vibestack/selftest.ts",
@@ -20,52 +24,36 @@
     "selftest:docs": "node --test --test-name-pattern=\"^the documents name what exists \" vibestack/selftests/docs.ts",
     "selftest:examples": "node --test --test-name-pattern=\"^the standalone examples \" vibestack/selftests/examples.ts",
     "build": "node vibestack/spec.ts tasks vibestack-studio#build && node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && vibelang -p tsconfig.build.json && node -e \"fs.chmodSync('dist/spec.js', 0o755); fs.mkdirSync('dist/proof', { recursive: true }); fs.copyFileSync('vibestack/proof/lib.dfy', 'dist/proof/lib.dfy'); fs.cpSync('vibestack/std', 'dist/std', { recursive: true }); fs.copyFileSync('vibestack/conformance.ts', 'dist/conformance.ts')\" && node vibestack/studio/pack-page.ts",
+    "build:all": "node vibestack/spec.ts tasks build --filter='!@elizaos/*'",
     "pnpm:devPreinstall": "node vibestack/skill-links.ts",
     "prepare": "node vibestack/spec.ts gen --install --skip-gen-on-pack //#build",
     "prepack": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
     "test": "vitest run",
-    "test:browser": "node vibestack/spec.ts tasks test:browser",
-    "test:models": "node vibestack/spec.ts tasks check",
+    "test:all": "node vibestack/spec.ts tasks test --filter='!@elizaos/*'",
+    "test:browser": "node vibestack/spec.ts tasks test:browser --filter='!@elizaos/*'",
+    "test:models": "node vibestack/spec.ts tasks check --filter='!@elizaos/*'",
     "typecheck": "vibelang --noEmit -p tsconfig.json",
+    "typecheck:all": "node vibestack/spec.ts tasks typecheck --filter='!@elizaos/*'",
     "lint": "node vibestack/spec.ts tasks //#lint:js //#lint:css",
     "lint:js": "eslint . --max-warnings 0",
     "lint:css": "stylelint \"**/*.css\" --allow-empty-input",
     "analyze": "knip && madge --circular vibestack packages apps && jscpd .",
-    "quick": "node vibestack/spec.ts tasks typecheck test //#lint:js //#lint:css",
-    "verify": "node vibestack/spec.ts tasks build typecheck test test:browser check //#lint:js //#lint:css //#analyze //#selftest:tools:a //#selftest:tools:b //#selftest:tools:rest //#selftest:docs //#selftest:examples",
+    "quick": "node vibestack/spec.ts tasks typecheck test //#lint:js //#lint:css --filter='!@elizaos/*'",
+    "verify": "node vibestack/spec.ts tasks build typecheck test test:browser check //#lint:js //#lint:css //#analyze --filter='!@elizaos/*'",
+    "deploy:staging": "pnpm --filter @repo/app deploy:staging",
+    "deploy:production": "pnpm --filter @repo/app deploy:production",
     "all": "node vibestack/spec.ts tasks"
   },
   "version": "0.1.0",
-  "description": "Stories, rules and Quint in a Markdown spec tree; verified TypeScript out.",
+  "description": "Feed (feed.fun) — Twitter with markets, played from your own AI, built on Vibestack.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lalalune/vibestack.git"
+    "url": "https://github.com/feedforagents/feed.git"
   },
-  "homepage": "https://github.com/lalalune/vibestack#readme",
-  "bugs": "https://github.com/lalalune/vibestack/issues",
-  "keywords": [
-    "formal-verification",
-    "quint",
-    "dafny",
-    "typescript",
-    "specification",
-    "state-machine",
-    "ai-agents"
-  ],
   "bin": {
     "spec": "dist/spec.js"
   },
-  "files": [
-    "dist",
-    ".agents/skills",
-    "vibestack/reference/typereferences.md",
-    ".agents/claude-settings.json",
-    "README.md",
-    "AGENTS.md",
-    "SPEC.md",
-    "LICENSE"
-  ],
   "dependencies": {
     "@antithesishq/bombadil": "0.7.10",
     "@effect/platform-node": "4.1.1",
@@ -77,6 +65,7 @@
     "vibelang-runtime": "0.0.13"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
     "@effect/vitest": "4.1.1",
     "@eslint-react/eslint-plugin": "catalog:",
     "@eslint/js": "catalog:",
@@ -102,6 +91,7 @@
     "vibelang-vite": "0.0.13",
     "vite": "8.3.5",
     "vitest": "5.1.0",
+    "wrangler": "catalog:",
     "yaml": "2.9.1"
   },
   "peerDependencies": {

@@ -1,79 +1,137 @@
-import { Layer, ManagedRuntime } from "effect";
-import * as KeyValueStore from "effect/persistence/KeyValueStore";
+// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import { page, userEvent } from "vitest/browser";
-import type { Machine } from "../gen/app.effect.vibe";
-import { useMachine } from "../gen/app.react.ts";
-import { App } from "../src/App.tsx";
-import { greeter } from "../src/greeter.vibe";
-import { linkTo } from "../src/link.ts";
+import { App } from "../src/web/App.tsx";
 
-const opened: { root: Root; runtime: ManagedRuntime.ManagedRuntime<Machine, unknown> }[] = [];
-function SharedGreeting({ runtime }: Pick<(typeof opened)[number], "runtime">) {
-  const { state } = useMachine(runtime);
-  if (!state) throw new Error("A child lost the machine snapshot its parent already read");
-  return <output aria-label="Shared greetings">{state.count}</output>;
-}
-
-function OpenedApp({ runtime, search }: Pick<(typeof opened)[number], "runtime"> & { search: string }) {
-  const { state } = useMachine(runtime);
-  return <><App runtime={runtime} search={search} />{state && <SharedGreeting runtime={runtime} />}</>;
-}
-
+const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
+const originalFetch = globalThis.fetch;
+const originalEventSource = globalThis.EventSource;
 
-/** The page opened at `search`, over the browser's own localStorage, as main.tsx opens it. */
-async function open(search = "") {
-  for (const { root } of opened) await act(() => Promise.resolve(root.unmount()));
-  const runtime = ManagedRuntime.make(Layer.provide(greeter, KeyValueStore.layerStorage(() => localStorage)));
-  const root = createRoot(document.body.appendChild(document.createElement("div")));
-  opened.push({ root, runtime });
-  await act(() => Promise.resolve(root.render(<OpenedApp runtime={runtime} search={search} />)));
+const SAMPLE_POSTS = [
+  {
+    id: "browser-post-1",
+    authorId: "ailon-musk",
+    authorKind: "npc",
+    authorHandle: "ailonmusk",
+    authorDisplayName: "AIlon Musk",
+    avatarUrl: null,
+    isParody: true,
+    parodyLabel: "AI parody",
+    content: "Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.",
+    replyToPostId: null,
+    quotePostId: null,
+    viaClientName: null,
+    marketId: "seed-market-1",
+    ticker: "XTRPC",
+    cashtags: ["XTRPC"],
+    hashtags: [],
+    likeCount: 14,
+    repostCount: 3,
+    replyCount: 1,
+    likedByViewer: false,
+    repostedByViewer: false,
+    createdAt: Date.now() - 60_000,
+  },
+];
+
+const SAMPLE_MARKETS = {
+  predictions: [
+    {
+      id: "seed-market-1",
+      slotIndex: 0,
+      question: "Will OpenAGI ship Strawberry-9000 before Friday?",
+      description: "Virtual prediction market",
+      category: "tech",
+      timeframe: "1d",
+      phase: "opening",
+      yesShares: 500,
+      noShares: 500,
+      liquidityCents: 100_000,
+      yesProbabilityBps: 5000,
+      noProbabilityBps: 5000,
+      status: "open",
+      resolvedOutcome: null,
+      resolutionProof: null,
+      resolutionArticleId: null,
+      expiresAt: Date.now() + 3_600_000,
+      resolvedAt: null,
+      createdAt: Date.now() - 300_000,
+    },
+  ],
+  perps: [],
+  positions: [],
+  economy: null,
+};
+
+function installMockNetwork() {
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return Response.json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/feed") return Response.json(SAMPLE_POSTS);
+    if (path === "/api/markets") return Response.json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return Response.json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return Response.json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return Response.json({ packs: [] });
+    if (path === "/api/skills/hosts") return Response.json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return Response.json({});
+  }) as typeof fetch;
+
+  class StubEventSource {
+    close() {}
+  }
+  globalThis.EventSource = StubEventSource as unknown as typeof EventSource;
 }
 
-beforeAll(() => { environment.IS_REACT_ACT_ENVIRONMENT = true; });
-afterEach(async () => {
-  for (const { root, runtime } of opened.splice(0)) { await act(() => Promise.resolve(root.unmount())); await runtime.dispose(); }
-  localStorage.clear();
+beforeAll(() => {
+  environment.IS_REACT_ACT_ENVIRONMENT = true;
 });
-afterAll(() => { environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment; });
 
-const storedGreeter = (): unknown => JSON.parse(localStorage.getItem("greeter") ?? "null");
+afterEach(async () => {
+  for (const root of opened.splice(0)) {
+    await act(() => Promise.resolve(root.unmount()));
+  }
+  globalThis.fetch = originalFetch;
+  globalThis.EventSource = originalEventSource;
+  window.history.replaceState(null, "", "/");
+});
 
-/** Fills localStorage until it takes no more, as a browser's quota does. */
-function fill() {
-  for (let size = 1 << 22; size > 0; size >>= 1)
-    for (let i = 0; ; i++) try { localStorage.setItem(`fill${size}.${i}`, "x".repeat(size)); } catch { break; }
-}
+afterAll(() => {
+  environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+});
 
-// spec/app/index.md, "Story: Say hello"
-// A link greets its name once, however often it is opened: typed after a second opening, Ada is the second greeting.
-// Greeting disables the button that was clicked, and a browser then drops its focus: the page hands it to the name, so
-// the next one is typed at once. The greeter is in the browser's own localStorage, at its quota in the end.
-it("Say hello from a link, then one name after another, until the store is full", async () => {
-  await open(linkTo("Ada"));
-  await expect.poll(storedGreeter).toEqual({ name: "Ada", count: 1 });
-  await expect.element(page.getByRole("status", { name: "Shared greetings" })).toHaveTextContent("1");
-  // spec/app/index.md, "Every step says hello to the name it greeted, once"; spec/app/words.md, "A page says hello to a name"
-  await expect.element(page.getByRole("status").filter({ hasText: "Hello, Ada!" })).toBeInTheDocument();
-  // spec/app/index.md, "Only a name that is not empty can be greeted, and a link greets only a name not greeted last"
-  await open(linkTo("Ada"));
+it('Visitors browse Feed without a login wall, toggle SocialMode to hide Markets, and open JoinSheet on demand (spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+  installMockNetwork();
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
 
-  const name = page.getByRole("textbox", { name: "Name" }), greet = page.getByRole("button", { name: "Greet" });
-  await act(() => userEvent.type(name, "Ada"));
-  await act(() => userEvent.click(greet));
-  await expect.poll(storedGreeter).toEqual({ name: "Ada", count: 2 });
-  await expect.poll(() => document.activeElement).toBe(name.element());
-  await expect.element(greet).toBeDisabled();
-  await act(() => userEvent.keyboard("Grace{Enter}"));
-  await expect.poll(storedGreeter).toEqual({ name: "Grace", count: 3 });
-  await expect.element(page.getByRole("status", { name: "Shared greetings" })).toHaveTextContent("3");
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
 
-  fill();
-  await act(() => userEvent.keyboard("Margaret{Enter}"));
-  await expect.element(page.getByRole("alert")).toBeVisible();
-  expect(storedGreeter()).toEqual({ name: "Grace", count: 3 });
+  const marketsButton = page.getByRole("button", { name: "Markets" }).first();
+  await act(() => userEvent.click(marketsButton));
+  await expect.element(page.getByText("Will OpenAGI ship Strawberry-9000 before Friday?")).toBeInTheDocument();
+
+  const modeSwitch = page.getByRole("switch", { name: "Social mode" });
+  await act(() => userEvent.click(modeSwitch));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  expect(document.querySelectorAll('nav button').length).toBeGreaterThan(0);
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await expect.element(page.getByRole("dialog")).toBeInTheDocument();
+  await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
 });

@@ -1,0 +1,209 @@
+// spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"
+import { readEnv } from "@elizaos/core"
+import { Store, type StoreFailure, type Tx, toInt } from "@repo/db"
+import {
+  baseNpcBatch,
+  budgetMicros,
+  dailyBudgetCents,
+  microsPerCent,
+  normalMaxSteps,
+  throttleFor,
+  throttledMaxSteps,
+  type ThrottleLevel,
+} from "../gen/engine__spendBudget.effect.vibe"
+import { EngineFailure, floorDiv, newEngineId, resolveClockNow, utcDayString } from "./shared.vibe"
+
+export interface SpendStatus {
+  readonly utcDay: string
+  readonly dailyBudgetCents: number
+  readonly budgetMicros: number
+  readonly confirmedCents: number
+  readonly reservedCents: number
+  readonly carryoverReservedCents: number
+  readonly committedCents: number
+  readonly committedMicros: number
+  readonly remainingCents: number
+  readonly remainingMicros: number
+  readonly activeReservations: number
+  readonly uncertainReservations: number
+  readonly throttleLevel: ThrottleLevel
+  readonly maxStepsAllowed: number
+  readonly effectiveBatchSize: number
+  readonly batchFraction: number
+}
+
+export interface BudgetReservation {
+  readonly attemptId: string
+  readonly utcDay: string
+  readonly reservedMicros: number
+  readonly throttleLevel: ThrottleLevel
+  readonly maxStepsAllowed: number
+  readonly effectiveBatchSize: number
+  readonly batchFraction: number
+}
+
+export interface ReserveBudgetInput {
+  readonly attemptId?: string
+  readonly estimatedMicros: number
+  readonly provider: string
+  readonly model: string
+  readonly nowMs?: number
+}
+
+export interface ConfirmSpendInput {
+  readonly attemptId: string
+  readonly actualMicros: number
+  readonly nowMs?: number
+}
+
+export interface MarkUncertainInput {
+  readonly attemptId: string
+  readonly nowMs?: number
+}
+
+function resolveBudgetConfig(): { readonly budgetCents: number; readonly budgetMicrosLimit: number } {
+  const raw = readEnv("NPC_LLM_DAILY_BUDGET_USD")
+  if (raw !== undefined) {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      const budgetCents = Math.max(1, Math.round(parsed * 100))
+      return { budgetCents, budgetMicrosLimit: budgetCents * microsPerCent }
+    }
+  }
+  return { budgetCents: dailyBudgetCents, budgetMicrosLimit: budgetMicros }
+}
+
+function buildSpendStatus(
+  utcDay: string,
+  confirmedMicros: number,
+  todayReservedMicros: number,
+  carryoverReservedMicros: number,
+  activeReservations: number,
+  uncertainReservations: number,
+): SpendStatus {
+  const { budgetCents, budgetMicrosLimit } = resolveBudgetConfig()
+  const committedMicros = confirmedMicros + todayReservedMicros + carryoverReservedMicros
+  const committedCents = Math.ceil(committedMicros / microsPerCent)
+  const throttleLevel = throttleFor(committedCents, budgetCents)
+  const maxSteps = throttleLevel === "ThrottleHalfBatchTwoSteps" ? throttledMaxSteps : normalMaxSteps
+  const batchFraction = throttleLevel === "ThrottleNormal" ? 1 : 0.5
+  const effectiveBatchSize = throttleLevel === "ThrottleNormal" ? baseNpcBatch : Math.max(1, floorDiv(baseNpcBatch, 2))
+  const remainingMicros = Math.max(0, budgetMicrosLimit - committedMicros)
+  return {
+    utcDay,
+    dailyBudgetCents: budgetCents,
+    budgetMicros: budgetMicrosLimit,
+    confirmedCents: Math.ceil(confirmedMicros / microsPerCent),
+    reservedCents: Math.ceil(todayReservedMicros / microsPerCent),
+    carryoverReservedCents: Math.ceil(carryoverReservedMicros / microsPerCent),
+    committedCents,
+    committedMicros,
+    remainingCents: floorDiv(remainingMicros, microsPerCent),
+    remainingMicros,
+    activeReservations,
+    uncertainReservations,
+    throttleLevel,
+    maxStepsAllowed: maxSteps,
+    effectiveBatchSize,
+    batchFraction,
+  }
+}
+
+effect function querySpendStatusTx(tx: Tx, utcDay: string): SpendStatus!StoreFailure {
+  const rows = try tx.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN status = 'settled' AND utc_day = $1 THEN COALESCE(actual_micros, 0) ELSE 0 END), 0) AS confirmed_micros,
+       COALESCE(SUM(CASE WHEN status IN ('reserved', 'uncertain') AND utc_day = $1 THEN reserved_micros ELSE 0 END), 0) AS today_reserved_micros,
+       COALESCE(SUM(CASE WHEN status IN ('reserved', 'uncertain') AND utc_day <> $1 THEN reserved_micros ELSE 0 END), 0) AS carryover_reserved_micros,
+       COALESCE(SUM(CASE WHEN status = 'reserved' THEN 1 ELSE 0 END), 0) AS active_reservations,
+       COALESCE(SUM(CASE WHEN status = 'uncertain' THEN 1 ELSE 0 END), 0) AS uncertain_reservations
+     FROM feed_llm_spend_reservations
+     WHERE utc_day = $1 OR status IN ('reserved', 'uncertain')`,
+    [utcDay],
+  )
+  const row = rows[0] ?? {}
+  return buildSpendStatus(
+    utcDay,
+    Math.max(0, toInt(row.confirmed_micros)),
+    Math.max(0, toInt(row.today_reserved_micros)),
+    Math.max(0, toInt(row.carryover_reserved_micros)),
+    Math.max(0, toInt(row.active_reservations)),
+    Math.max(0, toInt(row.uncertain_reservations)),
+  )
+}
+
+export effect function getDailySpendStatus(nowMs?: number): SpendStatus!(EngineFailure | StoreFailure)!Store {
+  const resolvedNow = try resolveClockNow(nowMs)
+  const utcDay = utcDayString(resolvedNow)
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => try querySpendStatusTx(tx, utcDay))
+}
+
+export effect function reserveLlmBudget(input: ReserveBudgetInput): BudgetReservation!(EngineFailure | StoreFailure)!Store {
+  if (!Number.isFinite(input.estimatedMicros) || input.estimatedMicros <= 0) {
+    throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "estimatedMicros must be positive." })
+  }
+  const estimatedMicros = Math.ceil(input.estimatedMicros)
+  const resolvedNow = try resolveClockNow(input.nowMs)
+  const utcDay = utcDayString(resolvedNow)
+  const attemptId = input.attemptId && input.attemptId.trim().length > 0 ? input.attemptId.trim() : newEngineId("llm")
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(2525001)")
+    const status = try querySpendStatusTx(tx, utcDay)
+    if (status.committedMicros + estimatedMicros > status.budgetMicros) {
+      throw new EngineFailure({
+        code: "BUDGET_EXCEEDED",
+        message: `Daily LLM budget exhausted: committed ${status.committedMicros} + requested ${estimatedMicros} > limit ${status.budgetMicros}.`,
+      })
+    }
+    try tx.query(
+      `INSERT INTO feed_llm_spend_reservations (attempt_id, utc_day, reserved_micros, actual_micros, status, provider, model, created_at, updated_at)
+       VALUES ($1, $2, $3, NULL, 'reserved', $4, $5, $6, $6)`,
+      [attemptId, utcDay, estimatedMicros, input.provider, input.model, resolvedNow],
+    )
+    const after = try querySpendStatusTx(tx, utcDay)
+    return {
+      attemptId,
+      utcDay,
+      reservedMicros: estimatedMicros,
+      throttleLevel: after.throttleLevel,
+      maxStepsAllowed: after.maxStepsAllowed,
+      effectiveBatchSize: after.effectiveBatchSize,
+      batchFraction: after.batchFraction,
+    }
+  })
+}
+
+export effect function confirmLlmSpend(input: ConfirmSpendInput): void!(EngineFailure | StoreFailure)!Store {
+  if (input.attemptId.trim().length === 0 || !Number.isFinite(input.actualMicros) || input.actualMicros < 0) {
+    throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "confirmLlmSpend requires a valid attemptId and non-negative actualMicros." })
+  }
+  const resolvedNow = try resolveClockNow(input.nowMs)
+  const actualMicros = Math.round(input.actualMicros)
+  const store = try Store
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `UPDATE feed_llm_spend_reservations
+       SET status = 'settled', actual_micros = $2, updated_at = $3
+       WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain')`,
+      [input.attemptId.trim(), actualMicros, resolvedNow],
+    )
+  })
+}
+
+export effect function markLlmSpendUncertain(input: MarkUncertainInput): void!(EngineFailure | StoreFailure)!Store {
+  if (input.attemptId.trim().length === 0) {
+    throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "markLlmSpendUncertain requires a non-empty attemptId." })
+  }
+  const resolvedNow = try resolveClockNow(input.nowMs)
+  const store = try Store
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `UPDATE feed_llm_spend_reservations
+       SET status = 'uncertain', updated_at = $2
+       WHERE attempt_id = $1 AND status = 'reserved'`,
+      [input.attemptId.trim(), resolvedNow],
+    )
+  })
+}

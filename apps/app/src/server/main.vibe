@@ -1,0 +1,269 @@
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
+import * as NodeRuntime from "@effect/platform-node/NodeRuntime"
+import * as NodeServices from "@effect/platform-node/NodeServices"
+import { localStoreLayer } from "@repo/db/node"
+import { migrateFeedSchema, parseStoreLocation, seedFeedWorld, type Store, type StoreFailure } from "@repo/db"
+import { realtimeBusLayer, type RealtimeBus } from "@repo/social"
+import { parseAppServerConfig, processEnvRecord, type AppServerConfig } from "./config.vibe"
+import { resolveOptionalRouteResponse, runScheduledTicks } from "./router.vibe"
+
+const SERVER_DIR = import.meta.dirname
+
+module node {
+  import fs from "node:fs"
+  import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http"
+  import path from "node:path"
+  import type { AppServerConfig } from "./config.vibe"
+
+  /** @throws {never} */
+  export function ensurePgliteParentDir(file: string): void {
+    if (file === "" || file.startsWith("idb://") || file.startsWith("memory://")) return
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+  }
+
+  function contentTypeForPath(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase()
+    switch (ext) {
+      case ".html":
+        return "text/html; charset=utf-8"
+      case ".js":
+      case ".mjs":
+        return "application/javascript; charset=utf-8"
+      case ".css":
+        return "text/css; charset=utf-8"
+      case ".json":
+        return "application/json; charset=utf-8"
+      case ".svg":
+        return "image/svg+xml"
+      case ".png":
+        return "image/png"
+      case ".jpg":
+      case ".jpeg":
+        return "image/jpeg"
+      case ".webp":
+        return "image/webp"
+      case ".ico":
+        return "image/x-icon"
+      case ".woff2":
+        return "font/woff2"
+      case ".txt":
+        return "text/plain; charset=utf-8"
+      case ".md":
+        return "text/markdown; charset=utf-8"
+      default:
+        return "application/octet-stream"
+    }
+  }
+
+  function tryServeStaticAsset(serverDir: string, method: string, pathname: string): Response | undefined {
+    if (method !== "GET" && method !== "HEAD") return undefined
+    const distWebRoot = path.resolve(serverDir, "../../dist/web")
+    if (!fs.existsSync(distWebRoot)) return undefined
+    let cleanPath = pathname
+    try {
+      cleanPath = decodeURIComponent(pathname)
+    } catch {
+      cleanPath = pathname
+    }
+    const relative = cleanPath === "/" ? "index.html" : cleanPath.replace(/^\/+/, "")
+    const candidate = path.resolve(distWebRoot, relative)
+    const allowedPrefix = `${distWebRoot}${path.sep}`
+    if (candidate !== distWebRoot && !candidate.startsWith(allowedPrefix)) {
+      return undefined
+    }
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      const bytes = method === "HEAD" ? null : fs.readFileSync(candidate)
+      const isImmutable = cleanPath.startsWith("/assets/")
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "content-type": contentTypeForPath(candidate),
+          "cache-control": isImmutable ? "public, max-age=31536000, immutable" : "no-cache"
+        }
+      })
+    }
+    if (cleanPath.startsWith("/api/") || cleanPath === "/mcp") {
+      return undefined
+    }
+    const indexPath = path.join(distWebRoot, "index.html")
+    if (!fs.existsSync(indexPath)) return undefined
+    const htmlBytes = method === "HEAD" ? null : fs.readFileSync(indexPath)
+    return new Response(htmlBytes, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-cache"
+      }
+    })
+  }
+
+  async function readNodeRequestBody(req: IncomingMessage): Promise<Uint8Array | undefined> {
+    const method = (req.method ?? "GET").toUpperCase()
+    if (method === "GET" || method === "HEAD") return undefined
+    const chunks: Buffer[] = []
+    for await (const chunk of req) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk))
+    }
+    return chunks.length === 0 ? undefined : Buffer.concat(chunks)
+  }
+
+  function toWebHeaders(rawHeaders: IncomingMessage["headers"]): Headers {
+    const headers = new Headers()
+    for (const [key, value] of Object.entries(rawHeaders)) {
+      if (Array.isArray(value)) {
+        for (const item of value) headers.append(key, item)
+      } else if (typeof value === "string") {
+        headers.set(key, value)
+      }
+    }
+    return headers
+  }
+
+  async function writeWebResponse(res: ServerResponse, response: Response, method: string): Promise<void> {
+    const headerEntries: Record<string, string | string[]> = {}
+    const setCookies: string[] = []
+    response.headers.forEach((value, key) => {
+      if (key.toLowerCase() === "set-cookie") {
+        setCookies.push(value)
+      } else {
+        headerEntries[key] = value
+      }
+    })
+    if (setCookies.length > 0) {
+      headerEntries["set-cookie"] = setCookies
+    }
+    res.writeHead(response.status, headerEntries)
+    if (method === "HEAD" || response.body === null) {
+      res.end()
+      return
+    }
+    const reader = response.body.getReader()
+    try {
+      for (;;) {
+        const part = await reader.read()
+        if (part.done) break
+        if (!res.writableEnded && part.value !== undefined) {
+          res.write(part.value)
+        }
+      }
+    } finally {
+      reader.releaseLock()
+      if (!res.writableEnded) res.end()
+    }
+  }
+
+  /** @throws {unknown} */
+  export async function startNodeHttpServer(
+    config: AppServerConfig,
+    serverDir: string,
+    handler: (request: Request) => Promise<Response | undefined>
+  ): Promise<{ readonly server: Server; readonly port: number }> {
+    const server = http.createServer((req, res) => {
+      void (async () => {
+        const method = (req.method ?? "GET").toUpperCase()
+        const hostHeader = req.headers.host ?? `${config.host}:${config.port}`
+        const url = new URL(req.url ?? "/", `http://${hostHeader}`)
+        const abortController = new AbortController()
+        res.on("close", () => {
+          if (!res.writableEnded) abortController.abort()
+        })
+        try {
+          const bodyBytes = await readNodeRequestBody(req)
+          const bodyInit = bodyBytes === undefined ? undefined : new Blob([Uint8Array.from(bodyBytes)])
+          const webRequest = new Request(url.toString(), {
+            method,
+            headers: toWebHeaders(req.headers),
+            signal: abortController.signal,
+            ...(bodyInit === undefined ? {} : { body: bodyInit })
+          })
+          const apiResponse = await handler(webRequest)
+          const finalResponse = apiResponse ?? tryServeStaticAsset(serverDir, method, url.pathname) ?? new Response(
+            JSON.stringify({
+              error: "not_found",
+              code: "not_found",
+              message: "Route not found."
+            }),
+            { status: 404, headers: { "content-type": "application/json; charset=utf-8" } }
+          )
+          await writeWebResponse(res, finalResponse, method)
+        } catch (err) {
+          if (!res.headersSent) {
+            res.writeHead(500, { "content-type": "application/json; charset=utf-8" })
+          }
+          if (!res.writableEnded) {
+            res.end(JSON.stringify({
+              error: "internal_error",
+              message: err instanceof Error ? err.message : "Unhandled server error"
+            }))
+          }
+        }
+      })()
+    })
+    const boundPort = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(config.port, config.host, () => {
+        server.off("error", reject)
+        const address = server.address()
+        resolve(typeof address === "object" && address !== null ? address.port : config.port)
+      })
+    })
+    return { server, port: boundPort }
+  }
+
+  /** @throws {never} */
+  export function closeNodeHttpServer(server: Server): Promise<void> {
+    return new Promise((resolve) => {
+      server.close(() => resolve())
+    })
+  }
+}
+import { closeNodeHttpServer, ensurePgliteParentDir, startNodeHttpServer } from node
+
+effect function bootstrapWorld(): void!StoreFailure!Store {
+  try migrateFeedSchema()
+  try seedFeedWorld()
+}
+
+effect function tickDaemonLoop(): void!!(Store | RealtimeBus) {
+  let cycle = 0
+  try repeat(
+    effect {
+      cycle += 1
+      try runScheduledTicks(cycle)
+    },
+    Schedule.spaced("60 seconds")
+  )
+}
+
+effect function startLocalFeedServer() {
+  const config = parseAppServerConfig(processEnvRecord(), "http://localhost:5173")
+  const location = try parseStoreLocation(config.databaseUrl)
+  if (location.kind === "pglite" && location.file !== undefined) {
+    ensurePgliteParentDir(location.file)
+  }
+  const appLayer = Layer.provideMerge(
+    Layer.mergeAll(localStoreLayer(location), realtimeBusLayer),
+    NodeServices.layer
+  )
+  const runtime = try acquireRelease(
+    sync(() => ManagedRuntime.make(appLayer)),
+    (rt) => promise(() => rt.dispose())
+  )
+  try promise(() => runtime.runPromise(bootstrapWorld()))
+  if (config.gameStart === "run") {
+    try acquireRelease(
+      sync(() => runtime.runFork(tickDaemonLoop())),
+      (fiber) => Fiber.interrupt(fiber)
+    )
+  }
+  const listening = try acquireRelease(
+    tryPromise(() =>
+      startNodeHttpServer(config, SERVER_DIR, (request) => runtime.runPromise(resolveOptionalRouteResponse(request, config)))
+    ),
+    ({ server }) => promise(() => closeNodeHttpServer(server))
+  )
+  try Console.log(`Feed server listening on http://${config.host}:${listening.port} (${config.deploymentEnv}, sms=${config.auth.smsMode})`)
+  try never
+}
+
+NodeRuntime.runMain(Effect.scoped(startLocalFeedServer()))

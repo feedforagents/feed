@@ -1,0 +1,487 @@
+// spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"
+import {
+  AgentRuntime,
+  createCharacter,
+  parseJsonModelRecord,
+  stringToUuid,
+  type Action,
+  type ActionResult,
+  type Character,
+  type Memory,
+  type Plugin,
+  type Provider,
+  type State,
+  type UUID,
+} from "@elizaos/core"
+import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
+import {
+  buyPredictionShares,
+  executeNpcSpotTrade,
+  listPerpMarkets,
+  listPerpPositions,
+  listPredictionMarkets,
+  openPerpPosition,
+} from "@repo/markets"
+import { actors, type PackActor } from "@repo/pack-default"
+import { RealtimeBus, createNpcAlphaInvite, createPost, listFeedPosts, sendChatMessage } from "@repo/social"
+import { minAlphaEngagement } from "../gen/engine__npcLoop.effect.vibe"
+import { generateCompletion } from "./llm-client.vibe"
+import { buildWorldContext, formatFeedDiversityHint, renderPrompt, validateNpcTradingDecision } from "./prompts.vibe"
+import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, resolveClockNow, sanitizeText } from "./shared.vibe"
+import { getDailySpendStatus } from "./spend-budget.vibe"
+
+interface DbActorRow {
+  readonly id: string
+  readonly name: string
+  readonly username: string
+  readonly tier: string
+  readonly description: string
+  readonly systemPrompt: string
+  readonly balanceCents: number
+}
+
+export interface NpcTickBatchSummary {
+  readonly actorsSelected: number
+  readonly actorsCompleted: number
+  readonly actionsExecuted: number
+  readonly maxStepsUsed: number
+  readonly throttledBatchSize: number
+}
+
+type StoreEffectRunner = <A, E>(eff: A!E!Store) => Promise<A>
+
+function asParamRecord(options: unknown, message: Memory): Record<string, unknown> {
+  const opt = options as { readonly parameters?: unknown } | undefined
+  if (opt?.parameters && typeof opt.parameters === "object" && !Array.isArray(opt.parameters)) {
+    return opt.parameters as Record<string, unknown>
+  }
+  const contentData = (message.content as { readonly data?: unknown } | undefined)?.data
+  if (contentData && typeof contentData === "object" && !Array.isArray(contentData)) {
+    return contentData as Record<string, unknown>
+  }
+  return {}
+}
+
+function safeElizaUuid(seed: string): UUID {
+  try {
+    return stringToUuid(seed)
+  } catch {
+    return seed as UUID
+  }
+}
+
+function toJsonParamRecord(source: Record<string, unknown>): Record<string, string | number | boolean | null> {
+  const out: Record<string, string | number | boolean | null> = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean" ||
+      value === null
+    ) {
+      out[key] = value
+    }
+  }
+  return out
+}
+
+function buildNpcCharacter(actor: DbActorRow, packActor: PackActor | undefined): Character {
+  return createCharacter({
+    id: safeElizaUuid(`feed-npc:${actor.id}`),
+    name: actor.name,
+    username: actor.username,
+    system: packActor?.system ?? actor.systemPrompt,
+    bio: packActor ? [...packActor.bio, ...packActor.lore] : [actor.description],
+    topics: packActor ? [...packActor.topics] : ["markets", "predictions", "perps"],
+    adjectives: packActor ? [...packActor.adjectives] : ["sharp", "opinionated"],
+    style: packActor
+      ? {
+          all: [...packActor.style.all],
+          chat: [...packActor.style.chat],
+          post: [...packActor.style.post],
+        }
+      : { all: ["concise", "market-focused"], chat: ["direct"], post: ["punchy"] },
+    settings: {
+      temperature: packActor?.settings.temperature ?? 0.75,
+      maxTokens: packActor?.settings.maxTokens ?? 480,
+    },
+  })
+}
+
+effect function loadNpcProviderSnapshot(actor: DbActorRow): {
+  readonly worldFactsText: string
+  readonly marketsText: string
+  readonly postsText: string
+  readonly portfolioText: string
+  readonly worldContext: string
+  readonly diversityHint: string
+  readonly tickers: ReadonlyArray<string>
+  readonly marketIds: ReadonlyArray<string>
+  readonly replyPostIds: ReadonlyArray<string>
+  readonly chatIds: ReadonlyArray<string>
+}!StoreFailure!Store {
+  const store = try Store
+  const dbSnap = try store.transaction(effect (tx: Tx) => {
+    const stateRows = try tx.query("SELECT current_day, current_hour, phase FROM feed_world_state WHERE singleton = true")
+    const facts = try tx.query("SELECT fact_text FROM feed_world_facts ORDER BY created_at DESC LIMIT 6")
+    const headlines = try tx.query("SELECT COALESCE(parody_headline, title) AS headline FROM feed_rss_headlines ORDER BY published_at DESC LIMIT 5")
+    const predPositions = try tx.query(
+      `SELECT market_id, side, shares, cost_basis_cents
+       FROM feed_prediction_positions
+       WHERE holder_id = $1 AND holder_kind = 'npc' AND shares > 0`,
+      [actor.id],
+    )
+    const chatRows = try tx.query(
+      `SELECT c.id, c.name
+       FROM feed_chats c
+       JOIN feed_chat_members m ON m.chat_id = c.id
+       WHERE m.member_id = $1 AND m.member_kind = 'npc' AND c.kind = 'npc_alpha'
+       ORDER BY c.created_at DESC
+       LIMIT 5`,
+      [actor.id],
+    )
+    return { stateRow: stateRows[0] ?? {}, facts, headlines, predPositions, chatRows }
+  })
+  const openMarketsRaw = listPredictionMarkets("open") catch effect () => []
+  const perpMarketsRaw = listPerpMarkets() catch effect () => []
+  const perpPositionsRaw = listPerpPositions(actor.id) catch effect () => []
+  const feedPage = listFeedPosts({ tab: "latest", mode: "game", limit: 10 }) catch effect () => ({ items: [] })
+  const feedItems = Array.isArray(feedPage)
+    ? (feedPage as ReadonlyArray<Record<string, unknown>>)
+    : Array.isArray((feedPage as { readonly items?: unknown }).items)
+      ? (feedPage as { readonly items: ReadonlyArray<Record<string, unknown>> }).items
+      : []
+  const markets = (Array.isArray(openMarketsRaw) ? openMarketsRaw : []).map((m) => {
+    const row = m as Record<string, unknown>
+    const yes = Math.max(1, toInt(row.yesShares ?? row.yes_shares))
+    const no = Math.max(1, toInt(row.noShares ?? row.no_shares))
+    return {
+      id: toText(row.id) ?? "",
+      question: toText(row.question) ?? "",
+      category: toText(row.category) ?? "markets",
+      timeframe: toText(row.timeframe) ?? "1d",
+      phase: toText(row.phase) ?? "opening",
+      yesProbPct: Math.round((no * 100) / (yes + no)),
+      expiresAt: toInt(row.expiresAt ?? row.expires_at),
+    }
+  }).filter((m) => m.id.length > 0)
+  const perps = (Array.isArray(perpMarketsRaw) ? perpMarketsRaw : []).map((p) => {
+    const row = p as Record<string, unknown>
+    return {
+      ticker: toText(row.ticker) ?? "",
+      markPriceCents: toInt(row.markPriceCents ?? row.mark_price_cents),
+      indexPriceCents: toInt(row.indexPriceCents ?? row.index_price_cents),
+      fundingRateBps: toInt(row.fundingRateBps ?? row.funding_rate_bps),
+    }
+  }).filter((p) => p.ticker.length > 0)
+  const recentPosts = feedItems.map((p) => ({
+    id: toText(p.id) ?? "",
+    authorId: toText(p.authorId ?? p.author_id) ?? "",
+    authorKind: toText(p.authorKind ?? p.author_kind) ?? "npc",
+    content: toText(p.content) ?? "",
+  })).filter((p) => p.id.length > 0)
+  const predSummary = dbSnap.predPositions.map((r) => `${toText(r.market_id)}:${toText(r.side)}(${toInt(r.shares)})`).join(", ") || "none"
+  const perpList = Array.isArray(perpPositionsRaw) ? perpPositionsRaw : []
+  const portfolioText = `Cash: $${(actor.balanceCents / 100).toFixed(2)} | Prediction Positions: ${predSummary} | Open Perps: ${perpList.length}`
+  const factsLines = dbSnap.facts.map((r) => toText(r.fact_text) ?? "").filter((s) => s.length > 0)
+  const headlineLines = dbSnap.headlines.map((r) => toText(r.headline) ?? "").filter((s) => s.length > 0)
+  const worldContext = buildWorldContext({
+    currentDay: Math.max(1, toInt(dbSnap.stateRow.current_day) || 1),
+    currentHour: Math.max(0, toInt(dbSnap.stateRow.current_hour)),
+    phase: toText(dbSnap.stateRow.phase) ?? "active",
+    worldFacts: factsLines,
+    parodyHeadlines: headlineLines,
+    openMarkets: markets,
+    perpMarkets: perps,
+    recentPosts,
+    actorSummary: portfolioText,
+  })
+  return {
+    worldFactsText: [...factsLines, ...headlineLines].join(" | ") || "No breaking world facts.",
+    marketsText: markets.map((m) => `${m.id} (${m.yesProbPct}% YES): ${m.question}`).join(" | ") || "No open markets.",
+    postsText: recentPosts.slice(0, 6).map((p) => `@${p.authorId}: ${sanitizeText(p.content, 80)}`).join(" | ") || "Feed empty.",
+    portfolioText,
+    worldContext,
+    diversityHint: formatFeedDiversityHint(recentPosts),
+    tickers: perps.map((p) => p.ticker),
+    marketIds: markets.map((m) => m.id),
+    replyPostIds: recentPosts.filter((p) => p.authorId !== actor.id).map((p) => p.id),
+    chatIds: dbSnap.chatRows.map((c) => toText(c.id) ?? "").filter((id) => id.length > 0),
+  }
+}
+
+function buildNpcProviders(actor: DbActorRow, runWithStore: StoreEffectRunner): Provider[] {
+  const provider = (name: string, description: string, select: (snap: {
+    readonly worldFactsText: string
+    readonly marketsText: string
+    readonly postsText: string
+    readonly portfolioText: string
+  }) => string): Provider => ({
+    name,
+    description,
+    dynamic: true,
+    get: async (_runtime, _message, _state) => {
+      const snap = await runWithStore(loadNpcProviderSnapshot(actor))
+      const text = select(snap)
+      return { text, values: { [name]: text }, data: { actorId: actor.id } }
+    },
+  })
+  return [
+    provider("WORLD_FACTS", "Canonical world facts and satirical headlines", (s) => s.worldFactsText),
+    provider("TRENDING_MARKETS", "Open prediction markets and spot/perp quotes", (s) => s.marketsText),
+    provider("RECENT_POSTS", "Recent Feed posts from NPCs and users", (s) => s.postsText),
+    provider("ACTOR_PORTFOLIO", "Current NPC cash, prediction shares, and open perps", (s) => s.portfolioText),
+  ]
+}
+
+effect function findEligibleAlphaTargetTx(tx: Tx, actorId: string): (string | null)!StoreFailure {
+  const rows = try tx.query(
+    `SELECT eng.account_id, SUM(eng.score) AS engagement_score
+     FROM (
+       SELECT l.account_id AS account_id, 1 AS score
+       FROM feed_post_likes l
+       JOIN feed_posts p ON p.id = l.post_id
+       WHERE p.author_id = $1 AND p.author_kind = 'npc'
+       UNION ALL
+       SELECT r.account_id AS account_id, 1 AS score
+       FROM feed_post_reposts r
+       JOIN feed_posts p ON p.id = r.post_id
+       WHERE p.author_id = $1 AND p.author_kind = 'npc'
+       UNION ALL
+       SELECT reply.author_id AS account_id, 1 AS score
+       FROM feed_posts reply
+       JOIN feed_posts p ON p.id = reply.reply_to_post_id
+       WHERE p.author_id = $1 AND p.author_kind = 'npc' AND reply.author_kind = 'user' AND reply.deleted_at IS NULL
+     ) eng
+     JOIN feed_accounts a ON a.account_id = eng.account_id
+     WHERE NOT EXISTS (
+       SELECT 1 FROM feed_group_invites gi
+       WHERE gi.invited_account_id = eng.account_id AND gi.invited_by_npc_id = $1 AND gi.status IN ('pending', 'accepted')
+     )
+     GROUP BY eng.account_id
+     HAVING SUM(eng.score) >= $2
+     ORDER BY engagement_score DESC, eng.account_id ASC
+     LIMIT 1`,
+    [actorId, minAlphaEngagement],
+  )
+  return rows.length > 0 ? (toText(rows[0]?.account_id) ?? null) : null
+}
+
+function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner): Action[] {
+  const wrap = (
+    name: string,
+    description: string,
+    eff: (params: Record<string, unknown>) => ActionResult!(EngineFailure | StoreFailure | unknown)!Store,
+  ): Action => ({
+    name,
+    description,
+    validate: async () => true,
+    handler: async (_runtime, message, _state, options) => {
+      const params = asParamRecord(options, message)
+      try {
+        return await runWithStore(eff(params))
+      } catch (err) {
+        return { success: false, text: err instanceof Error ? err.message : `${name} skipped`, data: { action: name } }
+      }
+    },
+  })
+  return [
+    wrap("SPOT_TRADE", "Execute an NPC spot pool swap moving index price", effect (p) => {
+      const ticker = String(p.ticker ?? "")
+      const side = p.side === "sell" ? "sell" : "buy"
+      const quoteCents = Math.max(100, Math.round(Number(p.quoteCents ?? 2500)))
+      try executeNpcSpotTrade({ actorId: actor.id, ticker, side, quoteCents })
+      try maybePublishFeedEvent({ type: "market.spot", actorId: actor.id, ticker, side, quoteCents })
+      return { success: true, text: `Spot ${side} ${quoteCents}c ${ticker}`, data: { ticker, side, quoteCents } }
+    }),
+    wrap("PERP_TRADE", "Open a leveraged NPC perpetual position", effect (p) => {
+      const ticker = String(p.ticker ?? "")
+      const side = p.side === "short" ? "short" : "long"
+      const collateralCents = Math.max(500, Math.round(Number(p.collateralCents ?? 2500)))
+      const leverage = Math.max(1, Math.min(20, Math.round(Number(p.leverage ?? 3))))
+      try openPerpPosition({ ownerId: actor.id, ownerKind: "npc", ticker, side, collateralCents, leverage, viaClientName: "eliza-npc" })
+      return { success: true, text: `Perp ${side} ${leverage}x ${ticker}`, data: { ticker, side, collateralCents, leverage } }
+    }),
+    wrap("PREDICTION_TRADE", "Trade prediction market YES/NO shares", effect (p) => {
+      const marketId = String(p.marketId ?? "")
+      const side = p.side === "no" ? "no" : "yes"
+      const amountCents = Math.max(100, Math.round(Number(p.amountCents ?? 1500)))
+      try buyPredictionShares({ actorId: actor.id, actorKind: "npc", marketId, side, amountCents, viaClientName: "eliza-npc" })
+      return { success: true, text: `Prediction ${side} ${amountCents}c on ${marketId}`, data: { marketId, side, amountCents } }
+    }),
+    wrap("CREATE_POST", "Publish a Feed social post as the NPC", effect (p) => {
+      const content = sanitizeText(String(p.content ?? ""), 275)
+      if (content.length === 0) return { success: false, text: "Empty post" }
+      const marketId = typeof p.marketId === "string" ? p.marketId : undefined
+      const ticker = typeof p.ticker === "string" ? p.ticker : undefined
+      try createPost({ authorId: actor.id, authorKind: "npc", content, ...(marketId ? { marketId } : {}), ...(ticker ? { ticker } : {}) })
+      return { success: true, text: content, data: { marketId, ticker } }
+    }),
+    wrap("CREATE_REPLY", "Reply to an existing Feed post", effect (p) => {
+      const replyToPostId = String(p.replyToPostId ?? "")
+      const content = sanitizeText(String(p.content ?? ""), 260)
+      if (!replyToPostId || !content) return { success: false, text: "Invalid reply" }
+      try createPost({ authorId: actor.id, authorKind: "npc", content, replyToPostId })
+      return { success: true, text: content, data: { replyToPostId } }
+    }),
+    wrap("SEND_GROUP_MESSAGE", "Send a message in an NPC alpha group chat", effect (p) => {
+      const chatId = String(p.chatId ?? "")
+      const content = sanitizeText(String(p.content ?? ""), 275)
+      if (!chatId || !content) return { success: false, text: "Invalid chat message" }
+      try sendChatMessage({ senderId: actor.id, senderKind: "npc", chatId, content })
+      return { success: true, text: content, data: { chatId } }
+    }),
+    wrap("INVITE_ALPHA", "Invite a qualifying engaged human user to NPC alpha group", effect () => {
+      const store = try Store
+      const targetAccountId = try store.transaction(effect (tx: Tx) => try findEligibleAlphaTargetTx(tx, actor.id))
+      if (!targetAccountId) {
+        return { success: false, text: "No human user has reached engagement threshold." }
+      }
+      try createNpcAlphaInvite({ actorId: actor.id, targetAccountId, tier: actor.tier })
+      try maybePublishFeedEvent({ type: "alpha.invite", actorId: actor.id, targetAccountId })
+      return { success: true, text: `Invited ${targetAccountId} to alpha`, data: { targetAccountId } }
+    }),
+  ]
+}
+
+function createFeedNpcPlugin(actor: DbActorRow, runWithStore: StoreEffectRunner): Plugin {
+  return {
+    name: `@repo/engine/npc-${actor.id}`,
+    description: `Feed autonomous actions and world context for ${actor.name}`,
+    providers: buildNpcProviders(actor, runWithStore),
+    actions: buildNpcActions(actor, runWithStore),
+  }
+}
+
+effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: number): number!(EngineFailure | StoreFailure)!Store {
+  const store = try Store
+  const busOpt = try Effect.serviceOption(RealtimeBus)
+  const runWithStore: StoreEffectRunner = <A, E>(eff: A!E!Store) => {
+    const layer = Option.isSome(busOpt)
+      ? Layer.mergeAll(Layer.succeed(Store, store), Layer.succeed(RealtimeBus, busOpt.value))
+      : Layer.succeed(Store, store)
+    return runPromise(Effect.provide(eff, layer))
+  }
+  const packActor = actors.find((a) => a.id === actor.id || a.username === actor.username)
+  const character = buildNpcCharacter(actor, packActor)
+  const plugin = createFeedNpcPlugin(actor, runWithStore)
+  const agentUuid = safeElizaUuid(`feed-npc:${actor.id}`)
+  const runtime = try Effect.try({
+    try: () => new AgentRuntime({ character, agentId: agentUuid }),
+    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Failed creating AgentRuntime for ${actor.id}`, cause }),
+  })
+  try tryPromise({
+    try: () => runtime.registerPlugin(plugin),
+    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Failed registering Feed NPC plugin for ${actor.id}`, cause }),
+  })
+  const triggerMemory: Memory = {
+    id: safeElizaUuid(newEngineId("mem")),
+    entityId: agentUuid,
+    agentId: agentUuid,
+    roomId: safeElizaUuid("feed-world-room"),
+    content: { text: "Observe Feed markets and social posts, then plan bounded actions." },
+  }
+  const composedState: State = try tryPromise({
+    try: () => runtime.composeState(triggerMemory, ["WORLD_FACTS", "TRENDING_MARKETS", "RECENT_POSTS", "ACTOR_PORTFOLIO"], true, true),
+    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Failed composing state for ${actor.id}`, cause }),
+  })
+  const snap = try loadNpcProviderSnapshot(actor)
+  const rendered = renderPrompt("npcTradingDecision", {
+    actorId: actor.id,
+    actorName: actor.name,
+    actorPersona: sanitizeText(packActor?.personality ?? actor.description, 200),
+    tradingStyle: packActor?.feed.tradingStyle ?? "balanced catalyst trader",
+    maxSteps: String(maxSteps),
+    tickers: snap.tickers.join(", ") || "(none)",
+    marketIds: snap.marketIds.join(", ") || "(none)",
+    replyPostIds: snap.replyPostIds.slice(0, 6).join(", ") || "(none)",
+    chatIds: snap.chatIds.join(", ") || "(none)",
+    portfolio: snap.portfolioText,
+    worldContext: sanitizeText(composedState.text || snap.worldContext, 1800),
+    diversityHint: snap.diversityHint,
+  })
+  const completion = try generateCompletion({
+    promptId: "npcTradingDecision",
+    system: rendered.system,
+    user: rendered.user,
+    maxTokens: rendered.maxTokens,
+    temperature: rendered.temperature,
+    jsonMode: true,
+    nowMs,
+    actorId: actor.id,
+  })
+  const parsed = parseJsonModelRecord(completion.text)
+  const decisions = validateNpcTradingDecision(parsed, maxSteps, snap.tickers, snap.marketIds, snap.replyPostIds, snap.chatIds)
+  let actionsExecuted = 0
+  const actionMap = new Map((plugin.actions ?? []).map((act) => [act.name, act]))
+  for (const decision of decisions) {
+    if (actionsExecuted >= maxSteps) break
+    const action = actionMap.get(decision.kind)
+    if (!action) continue
+    const params = toJsonParamRecord(decision as unknown as Record<string, unknown>)
+    const actionMemory: Memory = {
+      id: safeElizaUuid(newEngineId("act")),
+      entityId: agentUuid,
+      agentId: agentUuid,
+      roomId: safeElizaUuid("feed-world-room"),
+      content: { text: decision.kind, data: params },
+    }
+    const result = try tryPromise({
+      try: () => Promise.resolve(action.handler(runtime, actionMemory, composedState, { parameters: params })),
+      catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `NPC action ${decision.kind} failed`, cause }),
+    })
+    if ((result as ActionResult | undefined)?.success) {
+      actionsExecuted += 1
+    }
+  }
+  return actionsExecuted
+}
+
+export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(EngineFailure | StoreFailure)!Store {
+  const resolvedNow = try resolveClockNow(nowMs)
+  const spendStatus = try getDailySpendStatus(resolvedNow)
+  const batchLimit = Math.max(1, spendStatus.effectiveBatchSize)
+  const maxSteps = Math.max(1, spendStatus.maxStepsAllowed)
+  const store = try Store
+  const allActors = try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT id, name, username, tier, description, system_prompt, balance_cents
+       FROM feed_actors
+       ORDER BY id ASC`,
+    )
+    return rows.map((row) => ({
+      id: toText(row.id) ?? "",
+      name: toText(row.name) ?? "",
+      username: toText(row.username) ?? "",
+      tier: toText(row.tier) ?? "C_TIER",
+      description: toText(row.description) ?? "",
+      systemPrompt: toText(row.system_prompt) ?? "",
+      balanceCents: toInt(row.balance_cents),
+    })).filter((a) => a.id.length > 0)
+  })
+  if (allActors.length === 0) {
+    return { actorsSelected: 0, actorsCompleted: 0, actionsExecuted: 0, maxStepsUsed: maxSteps, throttledBatchSize: batchLimit }
+  }
+  const startOffset = hashString(`npc-batch:${Math.floor(resolvedNow / 120_000)}`) % allActors.length
+  const selectedCount = Math.min(batchLimit, allActors.length)
+  const batch: DbActorRow[] = []
+  for (let i = 0; i < selectedCount; i++) {
+    batch.push(allActors[(startOffset + i) % allActors.length]!)
+  }
+  let actorsCompleted = 0
+  let actionsExecuted = 0
+  for (const actor of batch) {
+    const executed = runSingleNpcTurn(actor, maxSteps, resolvedNow) catch effect () => null
+    if (executed !== null) {
+      actorsCompleted += 1
+      actionsExecuted += executed
+    }
+  }
+  return {
+    actorsSelected: batch.length,
+    actorsCompleted,
+    actionsExecuted,
+    maxStepsUsed: maxSteps,
+    throttledBatchSize: batchLimit,
+  }
+}

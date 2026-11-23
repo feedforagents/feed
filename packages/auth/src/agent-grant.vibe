@@ -1,0 +1,278 @@
+// spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/agentGrant.md, "Connecting a new agent atomically revokes any prior active grant"
+import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+import {
+  canConnectAgent,
+  canRecordAgentAction,
+  canRevokeAgent,
+  connectAgent,
+  hasAnyScope,
+  initial,
+  recordAgentAction,
+  revokeAgent,
+  viaClientNameFor,
+  type AccountAgentSlot,
+  type OptionAgentGrant,
+  type ScopeSet
+} from "../gen/auth__agentGrant.effect.vibe"
+import { newUuid } from "./crypto.vibe"
+import { AuthFailure } from "./errors.vibe"
+
+export const AGENT_SCOPES = ["read", "social:write", "messages", "trade"] as const
+export type AgentScope = (typeof AGENT_SCOPES)[number]
+
+export interface ActiveAgentGrant {
+  readonly grantId: string
+  readonly accountId: string
+  readonly clientId: string
+  readonly clientName: string
+  readonly scopes: ReadonlyArray<AgentScope>
+  readonly scopeSet: ScopeSet
+  readonly status: "active"
+  readonly createdAt: number
+  readonly lastUsedAt: number
+}
+
+export interface ConnectAgentGrantResult extends ActiveAgentGrant {
+  readonly revokedPriorGrantId: string | null
+}
+
+export interface ConnectSingleAgentGrantInput {
+  readonly tx?: Tx
+  readonly accountId: string
+  readonly clientId: string
+  readonly clientName: string
+  readonly scopes: ReadonlyArray<string> | string
+  readonly ttlSeconds?: number
+}
+
+export interface RevokeAgentGrantResult {
+  readonly revoked: boolean
+  readonly grantId: string | null
+}
+
+function buildScopeResult(
+  seen: ReadonlySet<AgentScope>
+): { readonly scopes: ReadonlyArray<AgentScope>; readonly scopeSet: ScopeSet } {
+  const scopes = AGENT_SCOPES.filter((scope) => seen.has(scope))
+  const scopeSet: ScopeSet = {
+    read: seen.has("read"),
+    socialWrite: seen.has("social:write"),
+    messages: seen.has("messages"),
+    trade: seen.has("trade")
+  }
+  return { scopes, scopeSet }
+}
+
+export effect function parseAgentScopes(
+  rawScopes: ReadonlyArray<string> | string | undefined,
+  defaultAll = false
+): { readonly scopes: ReadonlyArray<AgentScope>; readonly scopeSet: ScopeSet; readonly scopeString: string }!AuthFailure {
+  const tokens = rawScopes === undefined
+    ? []
+    : typeof rawScopes === "string"
+      ? rawScopes.trim().split(/\s+/).filter((token) => token.length > 0)
+      : rawScopes.map((token) => token.trim()).filter((token) => token.length > 0)
+  if (tokens.length === 0 && defaultAll) {
+    return {
+      scopes: [...AGENT_SCOPES],
+      scopeSet: { read: true, socialWrite: true, messages: true, trade: true },
+      scopeString: AGENT_SCOPES.join(" ")
+    }
+  }
+  const seen = new Set<AgentScope>()
+  for (const token of tokens) {
+    if (token !== "read" && token !== "social:write" && token !== "messages" && token !== "trade") {
+      throw new AuthFailure({ code: "invalid_scope", message: `Unsupported scope: ${token}`, status: 400 })
+    }
+    seen.add(token)
+  }
+  const { scopes, scopeSet } = buildScopeResult(seen)
+  if (!hasAnyScope(scopeSet)) {
+    throw new AuthFailure({ code: "invalid_scope", message: "At least one scope must be granted.", status: 400 })
+  }
+  return { scopes, scopeSet, scopeString: scopes.join(" ") }
+}
+
+function decodeStoredScopes(raw: string): { readonly scopes: ReadonlyArray<AgentScope>; readonly scopeSet: ScopeSet } {
+  const seen = new Set<AgentScope>()
+  for (const token of raw.trim().split(/\s+/)) {
+    if (token === "read" || token === "social:write" || token === "messages" || token === "trade") {
+      seen.add(token)
+    }
+  }
+  return buildScopeResult(seen)
+}
+
+function rowToGrant(row: Row): ActiveAgentGrant {
+  const { scopes, scopeSet } = decodeStoredScopes(toText(row.scopes) ?? "")
+  return {
+    grantId: toText(row.grant_id) ?? "",
+    accountId: toText(row.account_id) ?? "",
+    clientId: toText(row.client_id) ?? "",
+    clientName: toText(row.client_name) ?? "",
+    scopes,
+    scopeSet,
+    status: "active",
+    createdAt: toInt(row.created_at),
+    lastUsedAt: toInt(row.last_used_at)
+  }
+}
+
+function slotFromGrant(accountId: string, grant: ActiveAgentGrant | null, now: number): AccountAgentSlot {
+  if (grant === null) return { ...initial, accountId, now }
+  const activeGrant: OptionAgentGrant = {
+    tag: "GrantActive",
+    grantId: grant.grantId,
+    clientName: grant.clientName,
+    scopes: grant.scopeSet,
+    connectedAt: grant.createdAt,
+    lastUsedAt: grant.lastUsedAt
+  }
+  return {
+    ...initial,
+    accountId,
+    activeGrant,
+    activeGrantCount: 1,
+    now
+  }
+}
+
+export effect function getActiveAgentGrant(accountId: string): (ActiveAgentGrant | null)!StoreFailure!Store {
+  const store = try Store
+  const rows = try store.transaction((tx: Tx) =>
+    tx.query(
+      "SELECT grant_id, account_id, client_id, client_name, scopes, created_at, last_used_at FROM feed_agent_grants WHERE account_id = $1 AND status = 'active' LIMIT 1",
+      [accountId]
+    )
+  )
+  return rows[0] === undefined ? null : rowToGrant(rows[0])
+}
+
+export effect function connectSingleAgentGrantInTx(
+  tx: Tx,
+  input: Omit<ConnectSingleAgentGrantInput, "tx">,
+  now: number
+): ConnectAgentGrantResult!(AuthFailure | StoreFailure) {
+  const clientId = input.clientId.trim()
+  const clientName = input.clientName.trim()
+  if (input.accountId === "" || clientId === "" || clientName === "") {
+    throw new AuthFailure({ code: "invalid_request", message: "Account and client details are required.", status: 400 })
+  }
+  const { scopes, scopeSet, scopeString } = try parseAgentScopes(input.scopes)
+  const accountRows = try tx.query(
+    "SELECT fa.account_id FROM feed_accounts fa JOIN accounts a ON a.key = fa.account_id WHERE fa.account_id = $1 AND a.status = 'active' FOR UPDATE",
+    [input.accountId]
+  )
+  if (accountRows.length === 0) {
+    throw new AuthFailure({ code: "account_not_found", message: "Account is not active.", status: 404 })
+  }
+  const priorRows = try tx.query(
+    "SELECT grant_id, account_id, client_id, client_name, scopes, created_at, last_used_at FROM feed_agent_grants WHERE account_id = $1 AND status = 'active' FOR UPDATE",
+    [input.accountId]
+  )
+  const prior = priorRows[0] === undefined ? null : rowToGrant(priorRows[0])
+  const slot = slotFromGrant(input.accountId, prior, now)
+  const grantId = newUuid()
+  if (!canConnectAgent(slot, input.accountId, grantId, clientName, scopeSet)) {
+    throw new AuthFailure({ code: "grant_refused", message: "Cannot connect agent grant.", status: 400 })
+  }
+  connectAgent(slot, input.accountId, grantId, clientName, scopeSet)
+  if (prior !== null) {
+    try tx.query(
+      "UPDATE feed_agent_grants SET status = 'revoked', revoked_at = $2 WHERE account_id = $1 AND status = 'active'",
+      [input.accountId, now]
+    )
+    try tx.query(
+      "UPDATE feed_oauth_tokens SET revoked_at = $2 WHERE account_id = $1 AND revoked_at IS NULL",
+      [input.accountId, now]
+    )
+  }
+  try tx.query(
+    `INSERT INTO feed_agent_grants
+       (grant_id, account_id, client_id, client_name, scopes, status, created_at, last_used_at, revoked_at)
+     VALUES ($1, $2, $3, $4, $5, 'active', $6, $6, NULL)`,
+    [grantId, input.accountId, clientId, clientName, scopeString, now]
+  )
+  return {
+    grantId,
+    accountId: input.accountId,
+    clientId,
+    clientName,
+    scopes,
+    scopeSet,
+    status: "active",
+    createdAt: now,
+    lastUsedAt: now,
+    revokedPriorGrantId: prior?.grantId ?? null
+  }
+}
+
+export effect function connectSingleAgentGrant(input: ConnectSingleAgentGrantInput): ConnectAgentGrantResult!(AuthFailure | StoreFailure)!Store {
+  const now = try Clock.currentTimeMillis
+  if (input.tx !== undefined) {
+    return try connectSingleAgentGrantInTx(input.tx, input, now)
+  }
+  const store = try Store
+  return try store.transaction((tx: Tx) => connectSingleAgentGrantInTx(tx, input, now))
+}
+
+export effect function revokeActiveAgentGrantInTx(
+  tx: Tx,
+  accountId: string,
+  now: number
+): RevokeAgentGrantResult!StoreFailure {
+  const rows = try tx.query(
+    "SELECT grant_id, account_id, client_id, client_name, scopes, created_at, last_used_at FROM feed_agent_grants WHERE account_id = $1 AND status = 'active' FOR UPDATE",
+    [accountId]
+  )
+  if (rows[0] === undefined) return { revoked: false, grantId: null }
+  const active = rowToGrant(rows[0])
+  const slot = slotFromGrant(accountId, active, now)
+  if (!canRevokeAgent(slot, accountId, active.grantId)) return { revoked: false, grantId: null }
+  revokeAgent(slot, accountId, active.grantId)
+  try tx.query(
+    "UPDATE feed_agent_grants SET status = 'revoked', revoked_at = $2 WHERE grant_id = $1 AND status = 'active'",
+    [active.grantId, now]
+  )
+  try tx.query(
+    "UPDATE feed_oauth_tokens SET revoked_at = $2 WHERE grant_id = $1 AND revoked_at IS NULL",
+    [active.grantId, now]
+  )
+  return { revoked: true, grantId: active.grantId }
+}
+
+export effect function revokeActiveAgentGrant(accountId: string): RevokeAgentGrantResult!StoreFailure!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction((tx: Tx) => revokeActiveAgentGrantInTx(tx, accountId, now))
+}
+
+export effect function recordAgentAttribution(accountId: string, grantId: string): { readonly viaClientName: string }!(AuthFailure | StoreFailure)!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      "SELECT grant_id, account_id, client_id, client_name, scopes, created_at, last_used_at, status FROM feed_agent_grants WHERE account_id = $1 AND grant_id = $2 FOR UPDATE",
+      [accountId, grantId]
+    )
+    const row = rows[0]
+    if (row === undefined || toText(row.status) !== "active") {
+      throw new AuthFailure({ code: "grant_revoked", message: "Agent grant is not active.", status: 401 })
+    }
+    const grant = rowToGrant(row)
+    const slot = slotFromGrant(accountId, grant, now)
+    if (!canRecordAgentAction(slot, accountId, grant.grantId, grant.clientName)) {
+      throw new AuthFailure({ code: "grant_revoked", message: "Agent grant is not active.", status: 401 })
+    }
+    const stepped = recordAgentAction(slot, accountId, grant.grantId, grant.clientName)
+    const viaClientName = viaClientNameFor(stepped.state, grant.grantId)
+    if (viaClientName === "") {
+      throw new AuthFailure({ code: "grant_revoked", message: "Agent grant is not active.", status: 401 })
+    }
+    try tx.query(
+      "UPDATE feed_agent_grants SET last_used_at = $2 WHERE grant_id = $1 AND account_id = $3 AND status = 'active'",
+      [grant.grantId, now, accountId]
+    )
+    return { viaClientName }
+  })
+}

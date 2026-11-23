@@ -1,0 +1,248 @@
+// spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"; spec/mcp/skill.md, "One canonical source renders all discovery documents and `index.json` SHA-256 digests"; spec/mcp/skill.md, "All 9 Join-sheet host launchers degrade to copy-prompt until device-verified"
+import {
+  type AgentHost,
+  type CanonicalSource,
+  type DirectoryPolicy,
+  type LaunchKind,
+  canPublishSkillBundle,
+  cleanPolicy,
+  defaultHostLaunchKind,
+  directoryPolicyForHost,
+  initial,
+  publishSkillBundle,
+  resolvedHostLaunch
+} from "../gen/mcp__skill.effect.vibe"
+import {
+  type AgentHostId,
+  type AgentHostLink,
+  FEED_HOW_TO_PLAY_MD,
+  FEED_SKILL_DESCRIPTION,
+  FEED_SKILL_MD,
+  buildAgentLinks,
+  normalizeOrigin,
+  renderLlmsTxt
+} from "./skill-content.ts"
+
+export error SkillDigestError { cause: unknown }
+
+export error SkillPublishInvalid { reason: string }
+
+module webCrypto {
+  /** @throws {unknown} */
+  export async function sha256Hex(text: string): Promise<string> {
+    const bytes = new TextEncoder().encode(text)
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes)
+    return Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("")
+  }
+
+  /** @throws {never} */
+  export function makeResponse(body: BodyInit | null, init?: ResponseInit): Response {
+    return new Response(body, init)
+  }
+}
+import { makeResponse, sha256Hex } from webCrypto
+
+export interface SkillDiscoveryEntry {
+  readonly name: "feed"
+  readonly type: "skill-md"
+  readonly description: string
+  readonly url: string
+  readonly digest: `sha256:${string}`
+}
+
+export interface SkillDiscoveryIndex {
+  readonly $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json"
+  readonly skills: readonly [SkillDiscoveryEntry]
+}
+
+export interface PublishedAgentHost extends AgentHostLink {
+  readonly specHost: AgentHost
+  readonly directoryPolicy: DirectoryPolicy
+  readonly defaultLaunchKind: LaunchKind
+  readonly resolvedLaunchKind: LaunchKind
+}
+
+export interface SkillHostsPayload {
+  readonly origin: string
+  readonly skillUrl: string
+  readonly mcpUrl: string
+  readonly digest: `sha256:${string}`
+  readonly hosts: ReadonlyArray<PublishedAgentHost>
+}
+
+const SPEC_HOST_BY_ID: Readonly<Record<AgentHostId, AgentHost>> = {
+  chatgpt: "HostChatGPT",
+  claude: "HostClaude",
+  gemini: "HostGemini",
+  grok: "HostGrok",
+  perplexity: "HostPerplexity",
+  muse: "HostMuse",
+  hermes: "HostHermes",
+  openclaw: "HostOpenClaw",
+  cursor: "HostCursor"
+}
+
+const SKILL_ROUTES = new Set<string>([
+  "/SKILL.md",
+  "/.well-known/agent-skills/feed/SKILL.md",
+  "/.well-known/agent-skills/index.json",
+  "/llms.txt",
+  "/how-to-play.md",
+  "/api/skills/hosts"
+])
+
+const PUBLIC_HEADERS: Readonly<Record<string, string>> = {
+  "cache-control": "public, max-age=300",
+  "access-control-allow-origin": "*",
+  "x-content-type-options": "nosniff"
+}
+
+const NO_STORE_HEADERS: Readonly<Record<string, string>> = {
+  "cache-control": "no-store",
+  "access-control-allow-origin": "*",
+  "x-content-type-options": "nosniff"
+}
+
+export effect function computeSkillSha256(content: string = FEED_SKILL_MD): string!SkillDigestError {
+  return try tryPromise({
+    try: () => sha256Hex(content),
+    catch: (cause) => new SkillDigestError({ cause })
+  })
+}
+
+effect function publishDigest(digestHex: string): string!SkillPublishInvalid {
+  const source: CanonicalSource = {
+    sourceCommit: "0000000000000000000000000000000000000000",
+    sourceDigest: digestHex,
+    mcpUrl: "https://feed.fun/mcp",
+    sourcePolicy: cleanPolicy
+  }
+  if (!canPublishSkillBundle(initial, source)) {
+    throw new SkillPublishInvalid({ reason: "canonical skill source failed spec publishability checks" })
+  }
+  return publishSkillBundle(initial, source).state.published.indexSha256
+}
+
+export effect function getSkillDiscoveryIndex(origin: string): SkillDiscoveryIndex!(SkillDigestError | SkillPublishInvalid) {
+  const base = normalizeOrigin(origin)
+  const rawDigest = try computeSkillSha256(FEED_SKILL_MD)
+  const verifiedDigest = try publishDigest(rawDigest)
+  return {
+    $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+    skills: [
+      {
+        name: "feed",
+        type: "skill-md",
+        description: FEED_SKILL_DESCRIPTION,
+        url: `${base}/SKILL.md`,
+        digest: `sha256:${verifiedDigest}`
+      }
+    ]
+  }
+}
+
+export function resolvePublishedHosts(
+  origin: string,
+  verifiedHosts?: ReadonlySet<AgentHostId>
+): ReadonlyArray<PublishedAgentHost> {
+  return buildAgentLinks(origin).map((link) => {
+    const specHost = SPEC_HOST_BY_ID[link.id]
+    const verifiedOnDevice = verifiedHosts === undefined ? link.href !== null : verifiedHosts.has(link.id)
+    const resolvedLaunchKind = resolvedHostLaunch(specHost, verifiedOnDevice)
+    const degraded = resolvedLaunchKind === "CopyPromptFallback"
+    return {
+      ...link,
+      href: degraded ? null : link.href,
+      copyPromptFallback: degraded || link.copyPromptFallback,
+      specHost,
+      directoryPolicy: directoryPolicyForHost(specHost),
+      defaultLaunchKind: defaultHostLaunchKind(specHost),
+      resolvedLaunchKind
+    }
+  })
+}
+
+function textResponse(
+  body: string,
+  contentType: string,
+  method: string,
+  extraHeaders: Readonly<Record<string, string>> = {}
+): Response {
+  const headers = { ...PUBLIC_HEADERS, "content-type": contentType, ...extraHeaders }
+  return method === "HEAD" ? makeResponse(null, { status: 200, headers }) : makeResponse(body, { status: 200, headers })
+}
+
+function parseVerifiedParam(url: URL): ReadonlySet<AgentHostId> | undefined {
+  const raw = url.searchParams.get("verified")
+  if (raw === null) return undefined
+  const allowed = new Set<AgentHostId>()
+  for (const part of raw.split(",")) {
+    const trimmed = part.trim() as AgentHostId
+    if (Object.hasOwn(SPEC_HOST_BY_ID, trimmed)) allowed.add(trimmed)
+  }
+  return allowed
+}
+
+export effect function handleSkillRoute(
+  request: Request,
+  origin: string
+): (Response | undefined)!(SkillDigestError | SkillPublishInvalid) {
+  const url = new URL(request.url)
+  const pathname = url.pathname
+  if (!SKILL_ROUTES.has(pathname)) return undefined
+
+  if (request.method === "OPTIONS") {
+    return makeResponse(null, {
+      status: 204,
+      headers: {
+        ...PUBLIC_HEADERS,
+        "access-control-allow-methods": "GET, HEAD, OPTIONS",
+        "access-control-allow-headers": "Content-Type"
+      }
+    })
+  }
+
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return makeResponse(JSON.stringify({ error: "method_not_allowed" }), {
+      status: 405,
+      headers: {
+        ...NO_STORE_HEADERS,
+        allow: "GET, HEAD, OPTIONS",
+        "content-type": "application/json; charset=utf-8"
+      }
+    })
+  }
+
+  const base = normalizeOrigin(origin)
+  const index = try getSkillDiscoveryIndex(base)
+  const digestHeader = index.skills[0].digest
+  const hex = digestHeader.slice("sha256:".length)
+  const etag = `"${digestHeader}"`
+
+  switch (pathname) {
+    case "/SKILL.md":
+    case "/.well-known/agent-skills/feed/SKILL.md":
+      return textResponse(FEED_SKILL_MD, "text/markdown; charset=utf-8", request.method, { etag })
+    case "/.well-known/agent-skills/index.json":
+      return textResponse(`${JSON.stringify(index, null, 2)}\n`, "application/json; charset=utf-8", request.method, { etag })
+    case "/llms.txt":
+      return textResponse(renderLlmsTxt(base, hex), "text/plain; charset=utf-8", request.method, { etag })
+    case "/how-to-play.md":
+      return textResponse(FEED_HOW_TO_PLAY_MD, "text/markdown; charset=utf-8", request.method)
+    case "/api/skills/hosts": {
+      const verified = parseVerifiedParam(url)
+      const payload: SkillHostsPayload = {
+        origin: base,
+        skillUrl: `${base}/SKILL.md`,
+        mcpUrl: `${base}/mcp`,
+        digest: digestHeader,
+        hosts: resolvePublishedHosts(base, verified)
+      }
+      return textResponse(`${JSON.stringify(payload, null, 2)}\n`, "application/json; charset=utf-8", request.method)
+    }
+    default:
+      return undefined
+  }
+}

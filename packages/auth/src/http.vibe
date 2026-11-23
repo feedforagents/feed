@@ -1,0 +1,35 @@
+// spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"
+import { FetchHttpClient, HttpClient, type HttpClientRequest } from "effect/http"
+import { AuthFailure } from "./errors.vibe"
+
+export effect function executeHttpJson(
+  request: HttpClientRequest.HttpClientRequest,
+  errorCode: string,
+  errorMessage: string,
+  redirect: "manual" | "error" = "error",
+  maxBytes = 65_536
+): { readonly status: number; readonly body: unknown }!AuthFailure {
+  const run = effect {
+    const response = try HttpClient.execute(request)
+    const text = try response.text
+    if (text.length > maxBytes) {
+      throw new AuthFailure({ code: errorCode, message: "Upstream response exceeded size limit.", status: 502 })
+    }
+    let parsed: unknown = undefined
+    if (text.trim().length > 0) {
+      parsed = try Effect.try({
+        try: () => JSON.parse(text) as unknown,
+        catch: () => new AuthFailure({ code: errorCode, message: errorMessage, status: 502 })
+      })
+    }
+    return { status: response.status, body: parsed }
+  }
+  const executed = Effect.provide(
+    Effect.provideService(run, FetchHttpClient.RequestInit, { redirect }),
+    FetchHttpClient.layer
+  )
+  return timeout(executed, "8 seconds") catch effect (failure) => {
+    if (failure instanceof AuthFailure) throw failure
+    throw new AuthFailure({ code: errorCode, message: errorMessage, status: 502 })
+  }
+}

@@ -1,0 +1,1043 @@
+// spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"
+import { Store, StoreFailure, toText, type Row, type Tx } from "@repo/db"
+import {
+  canAddReaction,
+  canCreateGroup,
+  canInviteAlphaGroup,
+  canInviteMember,
+  canLeaveGroup,
+  canRespondInvite,
+  canSendMessage,
+  initial as initialMessagingState,
+  maxActiveNpcAlphaGroups,
+  maxMessageChars,
+  type Account as SpecAccount,
+  type BlockPair,
+  type Chat as SpecChat,
+  type ChatMember as SpecChatMember,
+  type ChatMessage as SpecChatMessage,
+  type ChatType as SpecChatType,
+  type MessagingState,
+  type PendingInvite as SpecPendingInvite
+} from "../gen/social__messaging.effect.vibe"
+import { type FeedRealtimeEvent } from "./realtime.vibe"
+import {
+  clampLimit,
+  consumeHourlyRateLimitTx,
+  emitAfterCommit,
+  freshId,
+  insertNotificationTx,
+  isBlockedBetweenTx,
+  loadSubjectProfilesMapTx,
+  normalizeOptionalText,
+  resolveUserOrNpcTx,
+  safeInt,
+  SocialFailure,
+  type SubjectProfile
+} from "./shared.vibe"
+
+export type ChatKind = "direct" | "user_group" | "npc_alpha"
+
+export type ChatSenderKind = "user" | "npc"
+
+export type ChatMemberRole = "owner" | "admin" | "member"
+
+export interface ChatMemberView {
+  readonly memberId: string
+  readonly memberKind: ChatSenderKind
+  readonly handle: string
+  readonly displayName: string
+  readonly avatarUrl: string | null
+  readonly role: ChatMemberRole
+  readonly joinedAt: number
+}
+
+export interface ChatSummaryView {
+  readonly id: string
+  readonly kind: ChatKind
+  readonly title: string
+  readonly memberCount: number
+  readonly lastMessageAt: number | null
+  readonly lastMessagePreview: string | null
+  readonly createdBy: string
+  readonly tier: string | null
+  readonly members: ReadonlyArray<ChatMemberView>
+  readonly isBlocked: boolean
+  readonly createdAt: number
+}
+
+export type ChatView = ChatSummaryView
+
+export interface MessageReactionSummary {
+  readonly emoji: string
+  readonly count: number
+  readonly reactedByViewer: boolean
+}
+
+export interface ChatMessageView {
+  readonly id: string
+  readonly chatId: string
+  readonly senderId: string
+  readonly senderKind: ChatSenderKind
+  readonly senderHandle: string
+  readonly senderDisplayName: string
+  readonly viaClientName: string | null
+  readonly content: string
+  readonly reactions: ReadonlyArray<MessageReactionSummary>
+  readonly createdAt: number
+}
+
+export interface AlphaInviteView {
+  readonly id: string
+  readonly chatId: string
+  readonly actorId: string
+  readonly actorHandle: string
+  readonly actorDisplayName: string
+  readonly chatTitle: string
+  readonly invitedAccountId: string
+  readonly tier: string | null
+  readonly status: "pending" | "accepted" | "declined"
+  readonly respondedAt: number | null
+  readonly createdAt: number
+}
+
+export interface SendChatMessageInput {
+  readonly senderId: string
+  readonly senderKind: ChatSenderKind
+  readonly chatId: string
+  readonly content: string
+  readonly viaClientName?: string | null
+}
+
+export interface ReactToMessageInput {
+  readonly accountId: string
+  readonly messageId: string
+  readonly emoji: string
+}
+
+export interface ReactToMessageResult {
+  readonly messageId: string
+  readonly chatId: string
+  readonly accountId: string
+  readonly emoji: string
+  readonly added: boolean
+}
+
+export interface RespondAlphaInviteInput {
+  readonly accountId: string
+  readonly inviteId: string
+  readonly accept: boolean
+}
+
+export interface CreateNpcAlphaInviteInput {
+  readonly actorId: string
+  readonly targetAccountId: string
+  readonly tier?: string | null
+}
+
+export interface InviteToUserGroupInput {
+  readonly accountId: string
+  readonly chatId: string
+  readonly targetHandleOrId: string
+}
+
+export interface LeaveGroupResult {
+  readonly chatId: string
+  readonly accountId: string
+  readonly left: boolean
+}
+
+const DMS_PER_HOUR_LIMIT = 60
+
+function dbKindToChatKind(dbKind: unknown): ChatKind | undefined {
+  const raw = toText(dbKind)
+  if (raw === "direct") return "direct"
+  if (raw === "group" || raw === "user_group") return "user_group"
+  if (raw === "npc_alpha") return "npc_alpha"
+  return undefined
+}
+
+function chatKindToSpecType(kind: ChatKind): SpecChatType {
+  if (kind === "direct") return "Direct"
+  if (kind === "user_group") return "UserGroup"
+  return "NpcAlpha"
+}
+
+function toMemberRole(raw: unknown): ChatMemberRole {
+  const role = toText(raw)
+  return role === "owner" ? "owner" : role === "admin" ? "admin" : "member"
+}
+
+function toSenderKind(raw: unknown): ChatSenderKind {
+  return toText(raw) === "npc" ? "npc" : "user"
+}
+
+function toInviteStatus(raw: unknown): "pending" | "accepted" | "declined" {
+  const status = toText(raw)
+  return status === "accepted" ? "accepted" : status === "declined" ? "declined" : "pending"
+}
+
+export effect function assertAllowedChatKind(kind: string): ChatKind!SocialFailure {
+  const normalized = kind.trim().toLowerCase()
+  if (normalized === "team" || normalized === "teamchat") {
+    const _refused = canCreateGroup(initialMessagingState, "TeamChat", "alice")
+    throw new SocialFailure({
+      code: "TeamChatRetired",
+      message: "Team chats are permanently retired and not supported"
+    })
+  }
+  if (normalized === "direct") return "direct"
+  if (normalized === "user_group" || normalized === "group") return "user_group"
+  if (normalized === "npc_alpha") return "npc_alpha"
+  throw new SocialFailure({ code: "InvalidInput", message: `Unsupported chat kind: ${kind}` })
+}
+
+effect function loadParticipantProfilesTx(
+  tx: Tx,
+  rows: ReadonlyArray<Row>
+): Map<string, SubjectProfile>!StoreFailure {
+  return try loadSubjectProfilesMapTx(
+    tx,
+    rows.map((r) => ({
+      kind: toSenderKind(r.member_kind ?? r.sender_kind),
+      id: toText(r.member_id ?? r.sender_id) ?? ""
+    }))
+  )
+}
+
+effect function loadChatHeaderTx(
+  tx: Tx,
+  chatId: string
+): { readonly kind: ChatKind; readonly createdBy: string }!(SocialFailure | StoreFailure) {
+  const chatRows = try tx.query("SELECT id, kind, created_by FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
+  const chatRow = chatRows[0]
+  if (chatRow === undefined) {
+    throw new SocialFailure({ code: "NotFound", message: "Chat not found" })
+  }
+  const kind = dbKindToChatKind(chatRow.kind)
+  if (kind === undefined) {
+    throw new SocialFailure({ code: "TeamChatRetired", message: "Unsupported or retired chat kind" })
+  }
+  return { kind, createdBy: toText(chatRow.created_by) ?? "" }
+}
+
+effect function loadChatMembersTx(tx: Tx, chatId: string): ReadonlyArray<Row>!StoreFailure {
+  return try tx.query("SELECT member_id, member_kind, role FROM feed_chat_members WHERE chat_id = $1", [chatId])
+}
+
+function toSpecAccounts(memberRows: ReadonlyArray<Row>): SpecAccount[] {
+  return memberRows.map((m) => ({
+    id: toText(m.member_id) ?? "",
+    role: toSenderKind(m.member_kind) === "npc" ? "NpcActor" : "HumanUser"
+  }))
+}
+
+function toSpecChatMembers(memberRows: ReadonlyArray<Row>): SpecChatMember[] {
+  return memberRows.map((m) => ({
+    chatId: 1,
+    userId: toText(m.member_id) ?? "",
+    role: toMemberRole(m.role) === "owner" ? "Owner" : "Member",
+    active: true,
+    joinedViaInvite: false,
+    hasRead: true
+  }))
+}
+
+effect function hydrateChatsTx(
+  tx: Tx,
+  chatRows: ReadonlyArray<Row>,
+  viewerId: string
+): ReadonlyArray<ChatSummaryView>!StoreFailure {
+  if (chatRows.length === 0) return []
+  const chatIds = chatRows.map((r) => toText(r.id) ?? "").filter(Boolean)
+  const memberRows = try tx.query(
+    "SELECT chat_id, member_id, member_kind, role, joined_at FROM feed_chat_members WHERE chat_id = ANY($1) ORDER BY joined_at ASC",
+    [chatIds]
+  )
+  const profiles = try loadParticipantProfilesTx(tx, memberRows)
+  const membersByChat = new Map<string, ChatMemberView[]>()
+  for (const row of memberRows) {
+    const cid = toText(row.chat_id) ?? ""
+    const memberId = toText(row.member_id) ?? ""
+    const memberKind = toSenderKind(row.member_kind)
+    const profile = profiles.get(`${memberKind}:${memberId}`)
+    const view: ChatMemberView = {
+      memberId,
+      memberKind,
+      handle: profile?.handle ?? memberId,
+      displayName: profile?.displayName ?? memberId,
+      avatarUrl: profile?.avatarUrl ?? null,
+      role: toMemberRole(row.role),
+      joinedAt: safeInt(row.joined_at, 0)
+    }
+    const bucket = membersByChat.get(cid)
+    if (bucket === undefined) membersByChat.set(cid, [view])
+    else bucket.push(view)
+  }
+  const latestMsgRows = try tx.query(
+    "SELECT DISTINCT ON (chat_id) chat_id, body, created_at FROM feed_messages WHERE chat_id = ANY($1) ORDER BY chat_id, created_at DESC, id DESC",
+    [chatIds]
+  )
+  const latestByChat = new Map<string, { readonly body: string; readonly createdAt: number }>()
+  for (const row of latestMsgRows) {
+    const cid = toText(row.chat_id) ?? ""
+    latestByChat.set(cid, {
+      body: toText(row.body) ?? "",
+      createdAt: safeInt(row.created_at, 0)
+    })
+  }
+  const summaries: ChatSummaryView[] = []
+  for (const row of chatRows) {
+    const kind = dbKindToChatKind(row.kind)
+    if (kind === undefined) continue
+    const id = toText(row.id) ?? ""
+    const members = membersByChat.get(id) ?? []
+    const last = latestByChat.get(id)
+    const rawName = toText(row.name) ?? null
+    const peer = members.find((m) => m.memberId !== viewerId)
+    const fallbackTitle = kind === "direct" ? (peer?.displayName ?? peer?.handle ?? "Direct Message") : "Group Chat"
+    const isBlocked = kind === "direct" && peer !== undefined ? try isBlockedBetweenTx(tx, viewerId, peer.memberId) : false
+    summaries.push({
+      id,
+      kind,
+      title: rawName !== null && rawName !== "" ? rawName : fallbackTitle,
+      memberCount: members.length,
+      lastMessageAt: last?.createdAt ?? null,
+      lastMessagePreview: last?.body ?? null,
+      createdBy: toText(row.created_by) ?? "",
+      tier: toText(row.tier) ?? null,
+      members,
+      isBlocked,
+      createdAt: safeInt(row.created_at, 0)
+    })
+  }
+  return summaries.sort((a, b) => (b.lastMessageAt ?? b.createdAt) - (a.lastMessageAt ?? a.createdAt))
+}
+
+export effect function listChats(accountId: string): ReadonlyArray<ChatSummaryView>!(SocialFailure | StoreFailure)!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const account = try resolveUserOrNpcTx(tx, accountId)
+    const chatRows = try tx.query(
+      "SELECT c.* FROM feed_chats c INNER JOIN feed_chat_members m ON m.chat_id = c.id WHERE m.member_id = $1 AND c.kind IN ('direct', 'group', 'npc_alpha')",
+      [account.id]
+    )
+    return try hydrateChatsTx(tx, chatRows, account.id)
+  })
+}
+
+export effect function getChatMessages(
+  accountId: string,
+  chatId: string,
+  limit?: number
+): ReadonlyArray<ChatMessageView>!(SocialFailure | StoreFailure)!Store {
+  if (chatId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
+  }
+  const effectiveLimit = clampLimit(limit, 50, 200)
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const account = try resolveUserOrNpcTx(tx, accountId)
+    try loadChatHeaderTx(tx, chatId)
+    const membershipRows = try tx.query(
+      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+      [chatId, account.id]
+    )
+    if (membershipRows.length === 0) {
+      throw new SocialFailure({ code: "Forbidden", message: "Not a member of this chat" })
+    }
+    const messageRows = try tx.query(
+      "SELECT * FROM (SELECT * FROM feed_messages WHERE chat_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2) recent ORDER BY created_at ASC, id ASC",
+      [chatId, effectiveLimit]
+    )
+    if (messageRows.length === 0) return []
+    const profiles = try loadParticipantProfilesTx(tx, messageRows)
+    const msgIds = messageRows.map((r) => toText(r.id) ?? "").filter(Boolean)
+    const reactionRows = try tx.query(
+      "SELECT message_id, account_id, emoji FROM feed_message_reactions WHERE message_id = ANY($1) ORDER BY created_at ASC",
+      [msgIds]
+    )
+    const reactionsByMsg = new Map<string, Map<string, { count: number; viewerReacted: boolean }>>()
+    for (const row of reactionRows) {
+      const mid = toText(row.message_id) ?? ""
+      const emoji = toText(row.emoji) ?? ""
+      const reactor = toText(row.account_id) ?? ""
+      let emojiMap = reactionsByMsg.get(mid)
+      if (emojiMap === undefined) {
+        emojiMap = new Map()
+        reactionsByMsg.set(mid, emojiMap)
+      }
+      const prev = emojiMap.get(emoji) ?? { count: 0, viewerReacted: false }
+      emojiMap.set(emoji, {
+        count: prev.count + 1,
+        viewerReacted: prev.viewerReacted || reactor === account.id
+      })
+    }
+    return messageRows.map((row) => {
+      const mid = toText(row.id) ?? ""
+      const senderId = toText(row.sender_id) ?? ""
+      const senderKind = toSenderKind(row.sender_kind)
+      const profile = profiles.get(`${senderKind}:${senderId}`)
+      const emojiMap = reactionsByMsg.get(mid)
+      const reactions: MessageReactionSummary[] = emojiMap === undefined
+        ? []
+        : [...emojiMap.entries()].map(([emoji, meta]) => ({
+            emoji,
+            count: meta.count,
+            reactedByViewer: meta.viewerReacted
+          }))
+      return {
+        id: mid,
+        chatId,
+        senderId,
+        senderKind,
+        senderHandle: profile?.handle ?? senderId,
+        senderDisplayName: profile?.displayName ?? senderId,
+        viaClientName: toText(row.via_client_name) ?? null,
+        content: toText(row.body) ?? "",
+        reactions,
+        createdAt: safeInt(row.created_at, 0)
+      }
+    })
+  })
+}
+
+export effect function createDirectChat(
+  accountId: string,
+  targetHandleOrId: string
+): ChatSummaryView!(SocialFailure | StoreFailure)!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const actor = try resolveUserOrNpcTx(tx, accountId)
+    const target = try resolveUserOrNpcTx(tx, targetHandleOrId)
+    if (actor.id === target.id) {
+      throw new SocialFailure({ code: "InvalidInput", message: "Cannot create a direct chat with yourself" })
+    }
+    if (try isBlockedBetweenTx(tx, actor.id, target.id)) {
+      throw new SocialFailure({ code: "Blocked", message: "Cannot create a direct chat with a blocked account" })
+    }
+    const pairKey = [actor.id, target.id].sort().join(":")
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`dm:${pairKey}`])
+    const existing = try tx.query(
+      "SELECT c.* FROM feed_chats c INNER JOIN feed_chat_members m1 ON m1.chat_id = c.id AND m1.member_id = $1 INNER JOIN feed_chat_members m2 ON m2.chat_id = c.id AND m2.member_id = $2 WHERE c.kind = 'direct' LIMIT 1",
+      [actor.id, target.id]
+    )
+    if (existing.length > 0) {
+      const hydrated = try hydrateChatsTx(tx, existing, actor.id)
+      const first = hydrated[0]
+      if (first !== undefined) return first
+    }
+    const chatId = freshId()
+    try tx.query(
+      "INSERT INTO feed_chats (id, kind, name, created_by, tier, created_at) VALUES ($1, 'direct', NULL, $2, NULL, $3)",
+      [chatId, actor.id, now]
+    )
+    try tx.query(
+      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4), ($1, $5, $6, 'member', $4)",
+      [chatId, actor.id, actor.kind === "npc" ? "npc" : "user", now, target.id, target.kind === "npc" ? "npc" : "user"]
+    )
+    const createdRows = try tx.query("SELECT * FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
+    const chats = try hydrateChatsTx(tx, createdRows, actor.id)
+    const created = chats[0]
+    if (created === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: "Created direct chat missing" })
+    }
+    return created
+  })
+}
+
+export effect function createUserGroupChat(
+  accountId: string,
+  title: string,
+  memberHandles: ReadonlyArray<string>,
+  kindOverride?: string
+): ChatSummaryView!(SocialFailure | StoreFailure)!Store {
+  if (kindOverride !== undefined) {
+    const checkedKind = try assertAllowedChatKind(kindOverride)
+    if (checkedKind !== "user_group") {
+      throw new SocialFailure({
+        code: checkedKind === "direct" ? "InvalidInput" : "Forbidden",
+        message: checkedKind === "direct" ? "Use createDirectChat for direct chats" : "Only NPC actors can create alpha groups"
+      })
+    }
+  }
+  const cleanTitle = title.trim()
+  if (cleanTitle === "" || cleanTitle.length > 100) {
+    throw new SocialFailure({ code: "InvalidInput", message: "Group title must be between 1 and 100 characters" })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const owner = try resolveUserOrNpcTx(tx, accountId)
+    const specAccounts: SpecAccount[] = [{ id: owner.id, role: owner.kind === "npc" ? "NpcActor" : "HumanUser" }]
+    const specState: MessagingState = {
+      ...initialMessagingState,
+      accounts: specAccounts
+    }
+    if (!canCreateGroup(specState, "UserGroup", owner.id)) {
+      throw new SocialFailure({ code: "Forbidden", message: "Group creation refused by messaging specification" })
+    }
+    const membersToAdd = new Map<string, { readonly id: string; readonly kind: ChatSenderKind }>()
+    for (const handle of memberHandles) {
+      if (handle.trim() === "") continue
+      const member = try resolveUserOrNpcTx(tx, handle)
+      if (member.id === owner.id) continue
+      if (try isBlockedBetweenTx(tx, owner.id, member.id)) {
+        throw new SocialFailure({ code: "Blocked", message: `Cannot add blocked account ${member.handle} to group` })
+      }
+      membersToAdd.set(member.id, { id: member.id, kind: member.kind === "npc" ? "npc" : "user" })
+    }
+    const chatId = freshId()
+    try tx.query(
+      "INSERT INTO feed_chats (id, kind, name, created_by, tier, created_at) VALUES ($1, 'group', $2, $3, NULL, $4)",
+      [chatId, cleanTitle, owner.id, now]
+    )
+    try tx.query(
+      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'owner', $4)",
+      [chatId, owner.id, owner.kind === "npc" ? "npc" : "user", now]
+    )
+    for (const member of membersToAdd.values()) {
+      try tx.query(
+        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
+        [chatId, member.id, member.kind, now]
+      )
+    }
+    const createdRows = try tx.query("SELECT * FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
+    const chats = try hydrateChatsTx(tx, createdRows, owner.id)
+    const created = chats[0]
+    if (created === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: "Created group chat missing" })
+    }
+    return created
+  })
+}
+
+export effect function sendChatMessage(input: SendChatMessageInput): ChatMessageView!(SocialFailure | StoreFailure)!Store {
+  if (input.content.trim() === "" || input.content.length > maxMessageChars) {
+    throw new SocialFailure({
+      code: "InvalidInput",
+      message: `Message content must be between 1 and ${maxMessageChars} characters`
+    })
+  }
+  if (input.chatId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
+  }
+  const viaClientName = normalizeOptionalText(input.viaClientName ?? undefined)
+  if (input.senderKind !== "user" && viaClientName !== null) {
+    throw new SocialFailure({ code: "Forbidden", message: "Non-user senders cannot specify viaClientName" })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const committed = try store.transaction(effect (tx: Tx) => {
+    const sender = try resolveUserOrNpcTx(tx, input.senderId)
+    if ((input.senderKind === "npc" && sender.kind !== "npc") || (input.senderKind === "user" && sender.kind !== "user")) {
+      throw new SocialFailure({ code: "InvalidInput", message: "Sender kind does not match account" })
+    }
+    if (input.senderKind === "user") {
+      if (viaClientName !== null) {
+        const grantRows = try tx.query(
+          "SELECT client_name FROM feed_agent_grants WHERE account_id = $1 AND status = 'active' LIMIT 1",
+          [sender.id]
+        )
+        if (toText(grantRows[0]?.client_name) !== viaClientName) {
+          throw new SocialFailure({ code: "Forbidden", message: "Active connected agent grant does not match viaClientName" })
+        }
+      }
+      try consumeHourlyRateLimitTx(tx, `social:dm:${sender.id}`, DMS_PER_HOUR_LIMIT, now)
+    }
+    const chat = try loadChatHeaderTx(tx, input.chatId)
+    const kind = chat.kind
+    const memberRows = try loadChatMembersTx(tx, input.chatId)
+    const isMember = memberRows.some((m) => toText(m.member_id) === sender.id)
+    if (!isMember) {
+      throw new SocialFailure({ code: "Forbidden", message: "Not a member of this chat" })
+    }
+    const peer = memberRows.find((m) => toText(m.member_id) !== sender.id)
+    const peerId = toText(peer?.member_id) ?? ""
+    const blockedDirect = kind === "direct" && peerId !== "" ? try isBlockedBetweenTx(tx, sender.id, peerId) : false
+    if (blockedDirect) {
+      throw new SocialFailure({ code: "Blocked", message: "Cannot send message in a blocked direct chat" })
+    }
+    const specAccounts = toSpecAccounts(memberRows)
+    const specChat: SpecChat = {
+      id: 1,
+      chatType: chatKindToSpecType(kind),
+      ownerId: chat.createdBy,
+      peerA: kind === "direct" ? sender.id : "",
+      peerB: kind === "direct" ? peerId : ""
+    }
+    const specMembers = toSpecChatMembers(memberRows)
+    const specBlocks: BlockPair[] = blockedDirect ? [{ blockerId: sender.id, blockedId: peerId }] : []
+    const specState: MessagingState = {
+      ...initialMessagingState,
+      accounts: specAccounts,
+      chats: [specChat],
+      members: specMembers,
+      blocks: specBlocks,
+      lastChatId: 1
+    }
+    if (!canSendMessage(specState, 1, input.content.length, sender.id)) {
+      throw new SocialFailure({ code: "Forbidden", message: "Message refused by messaging rules" })
+    }
+    const messageId = freshId()
+    try tx.query(
+      "INSERT INTO feed_messages (id, chat_id, sender_id, sender_kind, via_client_name, body, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+      [messageId, input.chatId, sender.id, input.senderKind, viaClientName, input.content, now]
+    )
+    const message: ChatMessageView = {
+      id: messageId,
+      chatId: input.chatId,
+      senderId: sender.id,
+      senderKind: input.senderKind,
+      senderHandle: sender.handle,
+      senderDisplayName: sender.displayName,
+      viaClientName,
+      content: input.content,
+      reactions: [],
+      createdAt: now
+    }
+    const events: FeedRealtimeEvent[] = [
+      {
+        type: "chat.message",
+        chatId: input.chatId,
+        messageId,
+        senderId: sender.id,
+        senderKind: input.senderKind,
+        createdAt: now
+      }
+    ]
+    return { message, events }
+  })
+  try emitAfterCommit(committed.events)
+  return committed.message
+}
+
+export effect function reactToMessage(input: ReactToMessageInput): ReactToMessageResult!(SocialFailure | StoreFailure)!Store {
+  const emoji = input.emoji.trim()
+  if (emoji === "" || emoji.length > 32) {
+    throw new SocialFailure({ code: "InvalidInput", message: "Emoji must be between 1 and 32 characters" })
+  }
+  if (input.messageId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Message ID is required" })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const committed = try store.transaction(effect (tx: Tx) => {
+    const account = try resolveUserOrNpcTx(tx, input.accountId)
+    const msgRows = try tx.query(
+      "SELECT m.id, m.chat_id, m.sender_id, m.body, c.kind, c.created_by FROM feed_messages m INNER JOIN feed_chats c ON c.id = m.chat_id WHERE m.id = $1 LIMIT 1",
+      [input.messageId]
+    )
+    const msgRow = msgRows[0]
+    if (msgRow === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: "Message not found" })
+    }
+    const chatId = toText(msgRow.chat_id) ?? ""
+    const kind = dbKindToChatKind(msgRow.kind)
+    if (kind === undefined) {
+      throw new SocialFailure({ code: "TeamChatRetired", message: "Unsupported or retired chat kind" })
+    }
+    const memberRows = try loadChatMembersTx(tx, chatId)
+    if (!memberRows.some((m) => toText(m.member_id) === account.id)) {
+      throw new SocialFailure({ code: "Forbidden", message: "Not a member of this chat" })
+    }
+    const peerId = toText(memberRows.find((m) => toText(m.member_id) !== account.id)?.member_id) ?? ""
+    const blockedDirect = kind === "direct" && peerId !== "" ? try isBlockedBetweenTx(tx, account.id, peerId) : false
+    if (blockedDirect) {
+      throw new SocialFailure({ code: "Blocked", message: "Cannot react in a blocked direct chat" })
+    }
+    const existingReaction = try tx.query(
+      "SELECT 1 FROM feed_message_reactions WHERE message_id = $1 AND account_id = $2 AND emoji = $3 LIMIT 1",
+      [input.messageId, account.id, emoji]
+    )
+    const events: FeedRealtimeEvent[] = []
+    if (existingReaction.length === 0) {
+      const specAccounts: SpecAccount[] = [{ id: account.id, role: account.kind === "npc" ? "NpcActor" : "HumanUser" }]
+      const specChat: SpecChat = {
+        id: 1,
+        chatType: chatKindToSpecType(kind),
+        ownerId: toText(msgRow.created_by) ?? "",
+        peerA: kind === "direct" ? account.id : "",
+        peerB: kind === "direct" ? peerId : ""
+      }
+      const specMembers: SpecChatMember[] = [{
+        chatId: 1,
+        userId: account.id,
+        role: "Member",
+        active: true,
+        joinedViaInvite: false,
+        hasRead: true
+      }]
+      const specMessage: SpecChatMessage = {
+        id: 1,
+        chatId: 1,
+        senderId: toText(msgRow.sender_id) ?? account.id,
+        textLen: Math.max(1, (toText(msgRow.body) ?? "x").length)
+      }
+      const specState: MessagingState = {
+        ...initialMessagingState,
+        accounts: specAccounts,
+        chats: [specChat],
+        members: specMembers,
+        messages: [specMessage],
+        lastChatId: 1,
+        lastMessageId: 1
+      }
+      if (!canAddReaction(specState, 1, emoji, account.id)) {
+        throw new SocialFailure({ code: "Forbidden", message: "Reaction refused by messaging rules" })
+      }
+      try tx.query(
+        "INSERT INTO feed_message_reactions (message_id, account_id, emoji, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT (message_id, account_id, emoji) DO NOTHING",
+        [input.messageId, account.id, emoji, now]
+      )
+      events.push({ type: "chat.reaction", chatId, messageId: input.messageId, accountId: account.id, emoji })
+    }
+    return {
+      result: { messageId: input.messageId, chatId, accountId: account.id, emoji, added: true },
+      events
+    }
+  })
+  try emitAfterCommit(committed.events)
+  return committed.result
+}
+
+function rowToAlphaInvite(row: Row): AlphaInviteView {
+  const respondedAt = row.responded_at === null || row.responded_at === undefined ? null : safeInt(row.responded_at, 0)
+  return {
+    id: toText(row.id) ?? "",
+    chatId: toText(row.chat_id) ?? "",
+    actorId: toText(row.invited_by_npc_id) ?? "",
+    actorHandle: toText(row.actor_username) ?? (toText(row.invited_by_npc_id) ?? ""),
+    actorDisplayName: toText(row.actor_name) ?? (toText(row.invited_by_npc_id) ?? ""),
+    chatTitle: toText(row.chat_name) ?? "Alpha Group",
+    invitedAccountId: toText(row.invited_account_id) ?? "",
+    tier: toText(row.chat_tier) ?? null,
+    status: toInviteStatus(row.status),
+    respondedAt,
+    createdAt: safeInt(row.created_at, 0)
+  }
+}
+
+export effect function listAlphaInvites(accountId: string): ReadonlyArray<AlphaInviteView>!(SocialFailure | StoreFailure)!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const account = try resolveUserOrNpcTx(tx, accountId)
+    const rows = try tx.query(
+      "SELECT i.id, i.chat_id, i.invited_account_id, i.invited_by_npc_id, i.status, i.created_at, i.responded_at, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_npc_id WHERE i.invited_account_id = $1 AND i.status = 'pending' AND c.kind = 'npc_alpha' AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = i.invited_by_npc_id) OR (b.blocker_id = i.invited_by_npc_id AND b.blocked_id = $1)) ORDER BY i.created_at DESC",
+      [account.id]
+    )
+    return rows.map(rowToAlphaInvite)
+  })
+}
+
+export effect function respondAlphaInvite(input: RespondAlphaInviteInput): AlphaInviteView!(SocialFailure | StoreFailure)!Store {
+  if (input.inviteId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Invite ID is required" })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const committed = try store.transaction(effect (tx: Tx) => {
+    const account = try resolveUserOrNpcTx(tx, input.accountId)
+    const inviteRows = try tx.query(
+      "SELECT i.*, c.kind AS chat_kind, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_npc_id WHERE i.id = $1 FOR UPDATE OF i",
+      [input.inviteId]
+    )
+    const inviteRow = inviteRows[0]
+    if (inviteRow === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: "Alpha group invite not found" })
+    }
+    const invitedAccountId = toText(inviteRow.invited_account_id) ?? ""
+    if (invitedAccountId !== account.id) {
+      throw new SocialFailure({ code: "Forbidden", message: "Invite belongs to another account" })
+    }
+    if (toText(inviteRow.status) !== "pending") {
+      throw new SocialFailure({ code: "Conflict", message: "Invite has already been responded to" })
+    }
+    const chatId = toText(inviteRow.chat_id) ?? ""
+    const inviterId = toText(inviteRow.invited_by_npc_id) ?? ""
+    const blocked = try isBlockedBetweenTx(tx, account.id, inviterId)
+    if (input.accept && blocked) {
+      throw new SocialFailure({ code: "Blocked", message: "Cannot accept invite from a blocked actor" })
+    }
+    const activeAlphaCount = safeInt((try tx.query(
+      "SELECT count(*) AS count FROM feed_chat_members m INNER JOIN feed_chats c ON c.id = m.chat_id WHERE m.member_id = $1 AND c.kind = 'npc_alpha'",
+      [account.id]
+    ))[0]?.count, 0)
+    if (input.accept && activeAlphaCount >= maxActiveNpcAlphaGroups) {
+      throw new SocialFailure({
+        code: "AlphaLimitReached",
+        message: `Maximum active alpha groups (${maxActiveNpcAlphaGroups}) reached`
+      })
+    }
+    const existingMemberRows = try tx.query(
+      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+      [chatId, account.id]
+    )
+    const alreadyMember = existingMemberRows.length > 0
+    const specChats: SpecChat[] = []
+    const specMembers: SpecChatMember[] = []
+    for (let i = 0; i < activeAlphaCount; i += 1) {
+      const gid = i + 2
+      specChats.push({ id: gid, chatType: "NpcAlpha", ownerId: inviterId, peerA: "", peerB: "" })
+      specMembers.push({ chatId: gid, userId: account.id, role: "Member", active: true, joinedViaInvite: true, hasRead: false })
+    }
+    specChats.push({ id: 1, chatType: "NpcAlpha", ownerId: inviterId, peerA: "", peerB: "" })
+    if (alreadyMember) {
+      specMembers.push({ chatId: 1, userId: account.id, role: "Member", active: true, joinedViaInvite: true, hasRead: false })
+    }
+    const specPending: SpecPendingInvite = {
+      id: 1,
+      chatId: 1,
+      invitedUserId: account.id,
+      invitedBy: inviterId,
+      isAlpha: true
+    }
+    const specState: MessagingState = {
+      ...initialMessagingState,
+      accounts: [
+        { id: account.id, role: "HumanUser" },
+        { id: inviterId, role: "NpcActor" }
+      ],
+      chats: specChats,
+      members: specMembers,
+      pendingInvites: [specPending],
+      blocks: blocked ? [{ blockerId: account.id, blockedId: inviterId }] : [],
+      lastChatId: specChats.length,
+      lastInviteId: 1
+    }
+    if (!canRespondInvite(specState, 1, input.accept ? "Accept" : "Decline", account.id)) {
+      throw new SocialFailure({ code: "Forbidden", message: "Invite response refused by messaging rules" })
+    }
+    const nextStatus = input.accept ? "accepted" : "declined"
+    try tx.query(
+      "UPDATE feed_group_invites SET status = $2, responded_at = $3 WHERE id = $1",
+      [input.inviteId, nextStatus, now]
+    )
+    if (input.accept) {
+      try tx.query(
+        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, 'user', 'member', $3) ON CONFLICT (chat_id, member_id) DO NOTHING",
+        [chatId, account.id, now]
+      )
+    }
+    const updatedView: AlphaInviteView = {
+      ...rowToAlphaInvite(inviteRow),
+      status: nextStatus,
+      respondedAt: now
+    }
+    const events: FeedRealtimeEvent[] = [
+      {
+        type: "chat.invite",
+        inviteId: updatedView.id,
+        chatId,
+        invitedAccountId: account.id,
+        invitedByNpcId: inviterId,
+        status: nextStatus
+      }
+    ]
+    return { invite: updatedView, events }
+  })
+  try emitAfterCommit(committed.events)
+  return committed.invite
+}
+
+export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): AlphaInviteView!(SocialFailure | StoreFailure)!Store {
+  if (input.actorId.trim() === "" || input.targetAccountId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Actor ID and target account ID are required" })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const committed = try store.transaction(effect (tx: Tx) => {
+    const actorRows = try tx.query(
+      "SELECT id, username, name, tier FROM feed_actors WHERE id = $1 LIMIT 1",
+      [input.actorId]
+    )
+    const actorRow = actorRows[0]
+    if (actorRow === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: `NPC actor not found: ${input.actorId}` })
+    }
+    const actorId = toText(actorRow.id) ?? input.actorId
+    const actorUsername = toText(actorRow.username) ?? actorId
+    const actorName = toText(actorRow.name) ?? actorId
+    const actorTier = normalizeOptionalText(input.tier ?? undefined) ?? toText(actorRow.tier) ?? null
+    const targetRows = try tx.query(
+      "SELECT account_id FROM feed_accounts WHERE account_id = $1 LIMIT 1",
+      [input.targetAccountId]
+    )
+    if (targetRows.length === 0) {
+      throw new SocialFailure({ code: "NotFound", message: `Target account not found: ${input.targetAccountId}` })
+    }
+    if (try isBlockedBetweenTx(tx, actorId, input.targetAccountId)) {
+      throw new SocialFailure({ code: "Blocked", message: "Cannot invite a blocked account" })
+    }
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`alpha:${actorId}`])
+    const existingChatRows = actorTier === null
+      ? try tx.query("SELECT id, name, tier FROM feed_chats WHERE kind = 'npc_alpha' AND created_by = $1 ORDER BY created_at ASC LIMIT 1", [actorId])
+      : try tx.query("SELECT id, name, tier FROM feed_chats WHERE kind = 'npc_alpha' AND created_by = $1 AND tier = $2 ORDER BY created_at ASC LIMIT 1", [actorId, actorTier])
+    let chatId = toText(existingChatRows[0]?.id)
+    let chatTitle = toText(existingChatRows[0]?.name) ?? `${actorName} Alpha`
+    let chatTier = toText(existingChatRows[0]?.tier) ?? actorTier
+    const specAccounts: SpecAccount[] = [
+      { id: actorId, role: "NpcActor" },
+      { id: input.targetAccountId, role: "HumanUser" }
+    ]
+    if (chatId === undefined) {
+      const createState: MessagingState = { ...initialMessagingState, accounts: specAccounts }
+      if (!canCreateGroup(createState, "NpcAlpha", actorId)) {
+        throw new SocialFailure({ code: "Forbidden", message: "Only NPC actors can create alpha groups" })
+      }
+      chatId = freshId()
+      chatTitle = `${actorName} Alpha`
+      chatTier = actorTier
+      try tx.query(
+        "INSERT INTO feed_chats (id, kind, name, created_by, tier, created_at) VALUES ($1, 'npc_alpha', $2, $3, $4, $5)",
+        [chatId, chatTitle, actorId, chatTier, now]
+      )
+      try tx.query(
+        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, 'npc', 'owner', $3)",
+        [chatId, actorId, now]
+      )
+    }
+    const existingMember = try tx.query(
+      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+      [chatId, input.targetAccountId]
+    )
+    if (existingMember.length > 0) {
+      throw new SocialFailure({ code: "Conflict", message: "Account is already a member of this alpha group" })
+    }
+    const existingInviteRows = try tx.query(
+      "SELECT i.*, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_npc_id WHERE i.chat_id = $1 AND i.invited_account_id = $2 AND i.status = 'pending' LIMIT 1",
+      [chatId, input.targetAccountId]
+    )
+    if (existingInviteRows[0] !== undefined) {
+      return { invite: rowToAlphaInvite(existingInviteRows[0]), events: [] as FeedRealtimeEvent[] }
+    }
+    const inviteState: MessagingState = {
+      ...initialMessagingState,
+      accounts: specAccounts,
+      chats: [{ id: 1, chatType: "NpcAlpha", ownerId: actorId, peerA: "", peerB: "" }],
+      members: [{ chatId: 1, userId: actorId, role: "Owner", active: true, joinedViaInvite: false, hasRead: true }],
+      lastChatId: 1
+    }
+    if (!canInviteAlphaGroup(inviteState, 1, input.targetAccountId, actorId)) {
+      throw new SocialFailure({ code: "Forbidden", message: "Alpha group invite refused by messaging rules" })
+    }
+    const inviteId = freshId()
+    try tx.query(
+      "INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_npc_id, status, created_at, responded_at) VALUES ($1, $2, $3, $4, 'pending', $5, NULL)",
+      [inviteId, chatId, input.targetAccountId, actorId, now]
+    )
+    const invite: AlphaInviteView = {
+      id: inviteId,
+      chatId,
+      actorId,
+      actorHandle: actorUsername,
+      actorDisplayName: actorName,
+      chatTitle,
+      invitedAccountId: input.targetAccountId,
+      tier: chatTier,
+      status: "pending",
+      respondedAt: null,
+      createdAt: now
+    }
+    const events: FeedRealtimeEvent[] = [
+      {
+        type: "chat.invite",
+        inviteId,
+        chatId,
+        invitedAccountId: input.targetAccountId,
+        invitedByNpcId: actorId,
+        status: "pending"
+      }
+    ]
+    const notifEvent = try insertNotificationTx(tx, {
+      accountId: input.targetAccountId,
+      kind: "group_invite",
+      actorId,
+      postId: null,
+      marketId: null,
+      title: "Alpha group invite",
+      body: `${actorName} invited you to ${chatTitle}`,
+      isGameOnly: false,
+      createdAt: now
+    })
+    if (notifEvent !== undefined) events.push(notifEvent)
+    return { invite, events }
+  })
+  try emitAfterCommit(committed.events)
+  return committed.invite
+}
+
+export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): { readonly chatId: string; readonly memberId: string; readonly added: boolean }!(SocialFailure | StoreFailure)!Store {
+  if (input.chatId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const inviter = try resolveUserOrNpcTx(tx, input.accountId)
+    const target = try resolveUserOrNpcTx(tx, input.targetHandleOrId)
+    const chat = try loadChatHeaderTx(tx, input.chatId)
+    if (chat.kind !== "user_group") {
+      throw new SocialFailure({ code: "Forbidden", message: "Direct invitations only apply to user groups" })
+    }
+    const memberRows = try loadChatMembersTx(tx, input.chatId)
+    if (try isBlockedBetweenTx(tx, inviter.id, target.id)) {
+      throw new SocialFailure({ code: "Blocked", message: "Cannot invite a blocked account" })
+    }
+    const already = memberRows.some((m) => toText(m.member_id) === target.id)
+    if (already) {
+      return { chatId: input.chatId, memberId: target.id, added: true }
+    }
+    const targetAccount: SpecAccount = {
+      id: target.id,
+      role: target.kind === "npc" ? "NpcActor" : "HumanUser"
+    }
+    const specAccounts: SpecAccount[] = [
+      { id: inviter.id, role: inviter.kind === "npc" ? "NpcActor" : "HumanUser" },
+      ...(target.id === inviter.id ? [] : [targetAccount])
+    ]
+    const specMembers = toSpecChatMembers(memberRows)
+    const specState: MessagingState = {
+      ...initialMessagingState,
+      accounts: specAccounts,
+      chats: [{ id: 1, chatType: "UserGroup", ownerId: chat.createdBy || inviter.id, peerA: "", peerB: "" }],
+      members: specMembers,
+      lastChatId: 1
+    }
+    if (!canInviteMember(specState, 1, target.id, inviter.id)) {
+      throw new SocialFailure({ code: "Forbidden", message: "Group invitation refused by messaging rules" })
+    }
+    try tx.query(
+      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
+      [input.chatId, target.id, target.kind === "npc" ? "npc" : "user", now]
+    )
+    return { chatId: input.chatId, memberId: target.id, added: true }
+  })
+}
+
+export effect function leaveGroupChat(accountId: string, chatId: string): LeaveGroupResult!(SocialFailure | StoreFailure)!Store {
+  if (chatId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
+  }
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const account = try resolveUserOrNpcTx(tx, accountId)
+    const chat = try loadChatHeaderTx(tx, chatId)
+    const memberRows = try loadChatMembersTx(tx, chatId)
+    const specAccounts: SpecAccount[] = [{ id: account.id, role: account.kind === "npc" ? "NpcActor" : "HumanUser" }]
+    const specMembers = toSpecChatMembers(memberRows)
+    const specState: MessagingState = {
+      ...initialMessagingState,
+      accounts: specAccounts,
+      chats: [{ id: 1, chatType: chatKindToSpecType(chat.kind), ownerId: chat.createdBy, peerA: "", peerB: "" }],
+      members: specMembers,
+      lastChatId: 1
+    }
+    if (!canLeaveGroup(specState, 1, account.id)) {
+      throw new SocialFailure({ code: "Forbidden", message: "Cannot leave this chat" })
+    }
+    try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, account.id])
+    return { chatId, accountId: account.id, left: true }
+  })
+}

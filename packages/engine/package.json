@@ -1,0 +1,36 @@
+{
+  "name": "@repo/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=26"
+  },
+  "exports": {
+    ".": "./src/index.vibe"
+  },
+  "scripts": {
+    "typecheck": "vibelang --noEmit -p .",
+    "build": "vibelang -p tsconfig.build.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@elizaos/core": "workspace:*",
+    "@repo/db": "workspace:*",
+    "@repo/markets": "workspace:*",
+    "@repo/pack-default": "workspace:*",
+    "@repo/social": "workspace:*",
+    "effect": "4.1.1",
+    "vibelang-runtime": "0.0.13"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.1.1",
+    "@electric-sql/pglite": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vibelang": "0.0.13",
+    "vibestack": "workspace:*",
+    "vitest": "catalog:"
+  }
+}

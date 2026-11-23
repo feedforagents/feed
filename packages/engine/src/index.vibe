@@ -1,0 +1,71 @@
+// spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
+export { EngineFailure, type EngineErrorCode } from "./shared.vibe"
+export {
+  PromptCatalog,
+  buildWorldContext,
+  formatFeedDiversityHint,
+  groundingRosterSummary,
+  renderPrompt,
+  renderTemplate,
+  validateNpcTradingDecision,
+  type NpcDecisionAction,
+  type PromptDefinition,
+  type PromptId,
+  type RenderedPrompt,
+  type WorldContextInput,
+  type WorldContextMarketItem,
+  type WorldContextPerpItem,
+  type WorldContextPostItem,
+} from "./prompts.vibe"
+export {
+  confirmLlmSpend,
+  getDailySpendStatus,
+  markLlmSpendUncertain,
+  reserveLlmBudget,
+  type BudgetReservation,
+  type ConfirmSpendInput,
+  type MarkUncertainInput,
+  type ReserveBudgetInput,
+  type SpendStatus,
+} from "./spend-budget.vibe"
+export {
+  generateCompletion,
+  type CompletionRequest,
+  type CompletionResult,
+  type LlmProviderKind,
+} from "./llm-client.vibe"
+export {
+  ROLLING_SLOT_TIMEFRAMES,
+  advanceNarrativePhases,
+  approveManualHold,
+  ensureRollingMarketSlots,
+  overrideManualHold,
+  publishPhaseClues,
+  recoverExpiredMarkets,
+  type ManualResolutionResult,
+  type PhaseAdvanceResult,
+  type RecoveryRunResult,
+} from "./narrative-arc.vibe"
+export {
+  runBoundedNpcBatch,
+  type NpcTickBatchSummary,
+} from "./eliza-npc-runtime.vibe"
+export {
+  fastForwardSimulatedHours,
+  getEngineAdminStatus,
+  runArticleTick,
+  runGameTick,
+  runMarketsRecovery,
+  runMarketsTick,
+  runMinuteTick,
+  runNpcTick,
+  runOrganizationTick,
+  runPerpFundingTick,
+  runRssRefreshTick,
+  runWorldFactsTick,
+  type EngineAdminBudgetStatus,
+  type EngineAdminStatus,
+  type FastForwardResult,
+  type MinuteTickResult,
+  type RssRefreshResult,
+} from "./world-clock.vibe"

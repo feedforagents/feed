@@ -1,0 +1,145 @@
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"
+import { DEFAULT_ALLOWED_COUNTRIES, type AuthRuntimeConfig } from "@repo/auth"
+
+type DeploymentEnvironment = "localnet" | "staging" | "production"
+
+export interface AppServerConfig {
+  readonly port: number
+  readonly host: string
+  readonly databaseUrl: string
+  readonly deploymentEnv: DeploymentEnvironment
+  readonly publicAppUrl: string
+  readonly publicApiUrl: string
+  readonly gameStart: "run" | "paused"
+  readonly cronSecret: string
+  readonly stripeSecretKey: string | undefined
+  readonly stripeWebhookSecret: string | undefined
+  readonly auth: AuthRuntimeConfig
+}
+
+module runtimeEnv {
+  /** @throws {never} */
+  export function processEnvRecord(): Readonly<Record<string, string | undefined>> {
+    const g = globalThis as { readonly process?: { readonly env?: Record<string, string | undefined> } }
+    return g.process?.env ?? {}
+  }
+
+  /** @throws {never} */
+  export function syncProcessEnv(bindings: Readonly<Record<string, unknown>>): void {
+    const g = globalThis as { readonly process?: { env?: Record<string, string | undefined> } }
+    if (g.process === undefined) return
+    const target = g.process.env ?? {}
+    g.process.env = target
+    for (const [key, value] of Object.entries(bindings)) {
+      if (typeof value === "string" && target[key] === undefined) {
+        target[key] = value
+      }
+    }
+  }
+}
+import { processEnvRecord, syncProcessEnv } from runtimeEnv
+
+export { processEnvRecord, syncProcessEnv }
+
+const LOCAL_DEV_DIGEST_KEY = "dev-digest-key-change-in-production-32-bytes"
+const LOCAL_DEV_OAUTH_SECRET = "dev-oauth-signing-secret-change-in-prod-32-bytes"
+
+function trimmed(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const next = value.trim()
+  return next === "" ? undefined : next
+}
+
+function stripTrailingSlashes(url: string): string {
+  return url.replace(/\/+$/, "")
+}
+
+function parsePort(raw: string | undefined): number {
+  const value = trimmed(raw)
+  if (value === undefined || !/^\d{1,5}$/.test(value)) return 8787
+  const numeric = Number(value)
+  return numeric >= 1 && numeric <= 65535 ? numeric : 8787
+}
+
+function parseAllowedCountries(raw: string | undefined): ReadonlyArray<string> {
+  const value = trimmed(raw)
+  if (value === undefined) return DEFAULT_ALLOWED_COUNTRIES
+  const parsed = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "")
+  return parsed.length > 0 ? parsed : DEFAULT_ALLOWED_COUNTRIES
+}
+
+function parseDeploymentEnv(raw: string | undefined, publicAppUrl: string): DeploymentEnvironment {
+  const normalized = trimmed(raw)?.toLowerCase()
+  if (normalized === "production") return "production"
+  if (normalized === "staging") return "staging"
+  if (normalized === "localnet" || normalized === "development" || normalized === "dev") return "localnet"
+  if (publicAppUrl === "https://feed.fun" || publicAppUrl === "https://www.feed.fun") return "production"
+  if (publicAppUrl.startsWith("https://")) return "staging"
+  return "localnet"
+}
+
+export function stringEnvRecord(raw: Readonly<Record<string, unknown>>): Record<string, string | undefined> {
+  const record: Record<string, string | undefined> = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === "string") {
+      record[key] = value
+    }
+  }
+  return record
+}
+
+export function parseAppServerConfig(
+  env: Readonly<Record<string, string | undefined>>,
+  fallbackOrigin = "http://localhost:5173"
+): AppServerConfig {
+  const port = parsePort(env.PORT)
+  const host = trimmed(env.HOST) ?? "127.0.0.1"
+  const rawAppUrl = trimmed(env.PUBLIC_APP_URL) ?? fallbackOrigin
+  const publicAppUrl = stripTrailingSlashes(rawAppUrl)
+  const publicApiUrl = stripTrailingSlashes(trimmed(env.PUBLIC_API_URL) ?? publicAppUrl)
+  const deploymentEnv = parseDeploymentEnv(env.DEPLOYMENT_ENV, publicAppUrl)
+  const rawSmsMode = trimmed(env.SMS_MODE)?.toLowerCase()
+  const smsMode: "loopback" | "twilio" = rawSmsMode === "twilio"
+    ? "twilio"
+    : rawSmsMode === "loopback"
+      ? "loopback"
+      : deploymentEnv === "localnet"
+        ? "loopback"
+        : "twilio"
+  const digestKey = trimmed(env.AUTH_DIGEST_KEY)
+    ?? (deploymentEnv === "localnet" ? LOCAL_DEV_DIGEST_KEY : "")
+  const oauthSigningSecret = trimmed(env.OAUTH_SIGNING_SECRET)
+    ?? (deploymentEnv === "localnet" ? LOCAL_DEV_OAUTH_SECRET : "")
+  const databaseUrl = trimmed(env.DATABASE_URL) ?? "pglite:.pglite/feed"
+  const rawGameStart = trimmed(env.GAME_START)?.toLowerCase()
+  const gameStart: "run" | "paused" = rawGameStart === "paused" || rawGameStart === "pause" || rawGameStart === "false"
+    ? "paused"
+    : "run"
+
+  return {
+    port,
+    host,
+    databaseUrl,
+    deploymentEnv,
+    publicAppUrl,
+    publicApiUrl,
+    gameStart,
+    cronSecret: trimmed(env.CRON_SECRET) ?? "",
+    stripeSecretKey: trimmed(env.STRIPE_SECRET_KEY),
+    stripeWebhookSecret: trimmed(env.STRIPE_WEBHOOK_SECRET),
+    auth: {
+      digestKey,
+      oauthSigningSecret,
+      smsMode,
+      twilioAccountSid: trimmed(env.TWILIO_ACCOUNT_SID),
+      twilioAuthToken: trimmed(env.TWILIO_AUTH_TOKEN),
+      twilioVerifyServiceSid: trimmed(env.TWILIO_VERIFY_SERVICE_SID),
+      turnstileSecretKey: trimmed(env.TURNSTILE_SECRET_KEY),
+      allowedCountries: parseAllowedCountries(env.SMS_ALLOWED_COUNTRIES),
+      publicAppUrl
+    }
+  }
+}

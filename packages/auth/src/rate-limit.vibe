@@ -1,0 +1,153 @@
+// spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/shared/limits.md, "Web and MCP always see identical capacity, and consuming via one reduces the other"
+import { Store, type StoreFailure, toInt, toText, type Tx } from "@repo/db"
+import { RateLimited } from "./errors.vibe"
+
+export type RateLimitActionKind = "post" | "trade" | "dm" | "sms_send" | "mcp_call"
+export type RateLimitSurface = "web" | "mcp"
+
+export interface CheckRateLimitInput {
+  readonly accountId: string
+  readonly action: RateLimitActionKind
+  readonly surface: RateLimitSurface
+}
+
+export interface RateLimitConsumeResult {
+  readonly allowed: true
+  readonly action: RateLimitActionKind
+  readonly surface: RateLimitSurface
+  readonly used: number
+  readonly limit: number
+  readonly remaining: number
+  readonly resetAt: number
+}
+
+export interface ActionQuotaStatus {
+  readonly used: number
+  readonly limit: number
+  readonly resetAt: number
+}
+
+export type RateLimitStatus = Readonly<Record<string, ActionQuotaStatus>>
+
+const HOUR_MS = 3_600_000
+
+const ACTION_HOURLY_LIMITS: Readonly<Record<RateLimitActionKind, number>> = {
+  post: 30,
+  dm: 60,
+  trade: 120,
+  sms_send: 10,
+  mcp_call: 600
+}
+
+function accountScopeKey(accountId: string, action: RateLimitActionKind): string {
+  return `${accountId}:${action}`
+}
+
+export effect function consumeRateLimitWindowInTx(
+  tx: Tx,
+  input: {
+    readonly scopeKey: string
+    readonly limit: number
+    readonly windowMs: number
+    readonly action?: string
+    readonly message: string
+    readonly now: number
+  }
+): { readonly used: number; readonly limit: number; readonly remaining: number; readonly resetAt: number }!(RateLimited | StoreFailure) {
+  const windowStart = Math.floor(input.now / input.windowMs) * input.windowMs
+  const resetAt = windowStart + input.windowMs
+  const rows = try tx.query(
+    `INSERT INTO feed_rate_limits (scope_key, window_start, count)
+     VALUES ($1, $2, 1)
+     ON CONFLICT (scope_key) DO UPDATE
+     SET count = CASE
+           WHEN feed_rate_limits.window_start < EXCLUDED.window_start THEN 1
+           ELSE feed_rate_limits.count + 1
+         END,
+         window_start = CASE
+           WHEN feed_rate_limits.window_start < EXCLUDED.window_start THEN EXCLUDED.window_start
+           ELSE feed_rate_limits.window_start
+         END
+     WHERE feed_rate_limits.window_start < EXCLUDED.window_start
+        OR feed_rate_limits.count < $3
+     RETURNING count`,
+    [input.scopeKey, windowStart, input.limit]
+  )
+  if (rows.length === 0) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((resetAt - input.now) / 1000))
+    throw new RateLimited({
+      message: input.message,
+      retryAfterSeconds,
+      ...(input.action === undefined ? {} : { action: input.action })
+    })
+  }
+  const used = toInt(rows[0]?.count)
+  return {
+    used,
+    limit: input.limit,
+    remaining: Math.max(0, input.limit - used),
+    resetAt
+  }
+}
+
+export effect function checkAndConsumeRateLimit(input: CheckRateLimitInput): RateLimitConsumeResult!(RateLimited | StoreFailure)!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const limit = ACTION_HOURLY_LIMITS[input.action]
+  const result = try store.transaction((tx: Tx) =>
+    consumeRateLimitWindowInTx(tx, {
+      scopeKey: accountScopeKey(input.accountId, input.action),
+      limit,
+      windowMs: HOUR_MS,
+      action: input.action,
+      message: `Hourly ${input.action} rate limit exceeded.`,
+      now
+    })
+  )
+  return {
+    allowed: true,
+    action: input.action,
+    surface: input.surface,
+    used: result.used,
+    limit: result.limit,
+    remaining: result.remaining,
+    resetAt: result.resetAt
+  }
+}
+
+export effect function getRateLimitStatus(accountId: string): RateLimitStatus!StoreFailure!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const windowHour = Math.floor(now / HOUR_MS)
+  const windowStart = windowHour * HOUR_MS
+  const resetAt = windowStart + HOUR_MS
+  const actions: ReadonlyArray<RateLimitActionKind> = ["post", "dm", "trade", "sms_send", "mcp_call"]
+  const keys = actions.map((action) => accountScopeKey(accountId, action))
+  const rows = try store.transaction((tx: Tx) =>
+    tx.query(
+      "SELECT scope_key, window_start, count FROM feed_rate_limits WHERE scope_key = ANY($1::text[])",
+      [keys]
+    )
+  )
+  const counts = new Map<string, number>()
+  for (const row of rows) {
+    const key = toText(row.scope_key)
+    const rowWindow = toInt(row.window_start)
+    const count = toInt(row.count)
+    if (key !== undefined && rowWindow >= windowStart && Number.isSafeInteger(count)) {
+      counts.set(key, count)
+    }
+  }
+  const quotaFor = (action: RateLimitActionKind): ActionQuotaStatus => ({
+    used: counts.get(accountScopeKey(accountId, action)) ?? 0,
+    limit: ACTION_HOURLY_LIMITS[action],
+    resetAt
+  })
+  return {
+    post: quotaFor("post"),
+    dm: quotaFor("dm"),
+    trade: quotaFor("trade"),
+    sms_send: quotaFor("sms_send"),
+    mcp_call: quotaFor("mcp_call")
+  }
+}

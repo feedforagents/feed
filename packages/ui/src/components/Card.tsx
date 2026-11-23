@@ -6,7 +6,10 @@ export type CardProps = ComponentProps<"div"> & {
   /** Renders the single child element with the card's styles, for a card that is a link as a whole. */
   asChild?: boolean;
 };
+export type CardHeaderProps = ComponentProps<"div">;
 export type CardTitleProps = ComponentProps<"h3">;
+export type CardDescriptionProps = ComponentProps<"p">;
+export type CardContentProps = ComponentProps<"div">;
 
 /** A surface that groups what belongs to one thing. */
 export function Card({ asChild = false, className, ...props }: CardProps) {
@@ -14,9 +17,24 @@ export function Card({ asChild = false, className, ...props }: CardProps) {
   return <Comp className={cn("flex flex-col gap-4 rounded-lg border border-border bg-card p-6 text-card-foreground shadow-sm", className)} {...props} />;
 }
 
+/** The top header section of a `Card`. */
+export function CardHeader({ className, ...props }: CardHeaderProps) {
+  return <div className={cn("flex flex-col gap-1.5", className)} {...props} />;
+}
+
 /** The name of what a `Card` holds. */
 export function CardTitle({ className, ...props }: CardTitleProps) {
   return <h3 className={cn("text-base leading-none font-semibold", className)} {...props} />;
+}
+
+/** Secondary summary text under a `CardTitle`. */
+export function CardDescription({ className, ...props }: CardDescriptionProps) {
+  return <p className={cn("text-sm text-muted-foreground", className)} {...props} />;
+}
+
+/** The main body of a `Card`. */
+export function CardContent({ className, ...props }: CardContentProps) {
+  return <div className={cn("flex flex-col gap-3", className)} {...props} />;
 }
 
 /** The actions of a `Card`, in a row at its end. */

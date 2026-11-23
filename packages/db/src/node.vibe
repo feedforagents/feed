@@ -1,0 +1,49 @@
+import {
+  Store as CloudStore,
+  storeLayer as cloudStoreLayer,
+  type StoreFailure as CloudStoreFailure,
+  type Tx as CloudTx
+} from "@elizaos/cloud/store"
+import { Store, StoreFailure, type StoreLocation, type Tx } from "./worker.vibe"
+
+export { cloudStoreLayer as storeLayer }
+
+function adaptTx(tx: CloudTx): Tx {
+  return {
+    query: (sql, params) =>
+      effect {
+        return tx.query(sql, params) catch effect (err: CloudStoreFailure) => {
+          throw new StoreFailure({ operation: err.operation, cause: err.cause })
+        }
+      },
+    script: (sql) =>
+      effect {
+        return tx.script(sql) catch effect (err: CloudStoreFailure) => {
+          throw new StoreFailure({ operation: err.operation, cause: err.cause })
+        }
+      }
+  }
+}
+
+export function localStoreLayer(location: StoreLocation): Layer.Layer<Store | CloudStore, CloudStoreFailure> {
+  const base = cloudStoreLayer(location)
+  const adapted = Layer.effect(Store, effect {
+    const cloud = try CloudStore
+    const shape: Store.Shape = {
+      location: cloud.location,
+      transaction: <A, E, R>(body: (tx: Tx) => A!E!R) =>
+        effect {
+          return cloud.transaction((tx) => body(adaptTx(tx))) catch effect (err: CloudStoreFailure | E) => {
+            if (err instanceof StoreFailure) throw err
+            const maybeFailure = err as { readonly _tag?: string; readonly operation?: string; readonly cause?: unknown }
+            if (maybeFailure && maybeFailure._tag === "StoreFailure") {
+              throw new StoreFailure({ operation: maybeFailure.operation ?? "query", cause: maybeFailure.cause })
+            }
+            throw err as E
+          }
+        }
+    }
+    return shape
+  }).pipe(Layer.provide(base))
+  return Layer.merge(base, adapted)
+}

@@ -1,0 +1,319 @@
+import { actors, organizations } from "@repo/pack-default"
+import { FEED_BASELINE_SQL, FEED_SCHEMA_VERSION } from "./schema.sql.ts"
+import {
+  INITIAL_ARTICLES,
+  INITIAL_MARKETS,
+  INITIAL_POSTS,
+  INITIAL_WORLD_FACTS,
+  buildInsertBatch,
+  initialOrgPriceCents,
+  serializeActorPersonality,
+  type BatchQuery
+} from "./seed-data.ts"
+
+export { FEED_BASELINE_SQL, FEED_SCHEMA_VERSION }
+
+export type Row = Readonly<Record<string, unknown>>
+
+export type StoreLocation =
+  | { readonly kind: "pg"; readonly url: string }
+  | { readonly kind: "pglite"; readonly file: string | undefined }
+
+export error StoreFailure { operation: string; cause: unknown }
+
+export error StoreLocationInvalid { input: string }
+
+export interface Tx {
+  query(sql: string, params?: ReadonlyArray<unknown>): ReadonlyArray<Row>!StoreFailure
+  script(sql: string): void!StoreFailure
+}
+
+export service Store {
+  static readonly key = "@elizaos/cloud/store/Store"
+  readonly location: StoreLocation | { readonly kind: "connected-pg" }
+  transaction<A, E, R>(body: (tx: Tx) => A!E!R): A!(E | StoreFailure)!R
+}
+
+export function toInt(value: unknown): number {
+  return typeof value === "number"
+    ? value
+    : typeof value === "bigint"
+      ? Number(value)
+      : typeof value === "string" && /^-?\d+$/.test(value)
+        ? Number(value)
+        : Number.NaN
+}
+
+export function toText(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined
+}
+
+export effect function parseStoreLocation(input: string): StoreLocation!StoreLocationInvalid {
+  if (input === "pglite") return { kind: "pglite", file: undefined }
+  if (input.startsWith("pglite:") && input.length > "pglite:".length) {
+    return { kind: "pglite", file: input.slice("pglite:".length) }
+  }
+  if (input.startsWith("postgres://") || input.startsWith("postgresql://")) {
+    return { kind: "pg", url: input }
+  }
+  throw new StoreLocationInvalid({ input })
+}
+
+module pgWorker {
+  import { Client, types } from "pg"
+  import type { Row } from "./worker.vibe"
+
+  /** @throws {RangeError} */
+  function safeInteger(text: string): number {
+    const value = BigInt(text)
+    if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) {
+      throw new RangeError(`int8 ${text} is outside the safe range`)
+    }
+    return Number(value)
+  }
+
+  const safeIntegerTypes = {
+    getTypeParser: (oid: number, format?: Parameters<typeof types.getTypeParser>[1]): unknown =>
+      oid === 20 ? safeInteger : types.getTypeParser(oid, format)
+  }
+
+  export interface WorkerPgConnection {
+    query(sql: string, params: ReadonlyArray<unknown>): Promise<ReadonlyArray<Row>>
+    script(sql: string): Promise<void>
+    close(): Promise<void>
+  }
+
+  export async function connectWorkerPg(connectionString: string): Promise<WorkerPgConnection> {
+    if (connectionString.trim() === "") throw new Error("worker database connection string is empty")
+    const client = new Client({
+      connectionString,
+      connectionTimeoutMillis: 5000,
+      statement_timeout: 15000,
+      types: safeIntegerTypes
+    })
+    try {
+      await client.connect()
+    } catch (cause) {
+      await client.end().catch(() => undefined)
+      throw cause
+    }
+    return {
+      query: async (sql, params) => (await client.query(sql, [...params])).rows as ReadonlyArray<Row>,
+      script: async (sql) => { await client.query(sql) },
+      close: async () => { await client.end().catch(() => undefined) }
+    }
+  }
+}
+import { connectWorkerPg, type WorkerPgConnection } from pgWorker
+
+effect function foreign<A>(operation: string, run: () => Promise<A>): A!StoreFailure {
+  return try tryPromise({ try: run, catch: (cause) => new StoreFailure({ operation, cause }) })
+}
+
+function workerTx(connection: WorkerPgConnection): Tx {
+  return {
+    query: (sql, params = []) => foreign("query", () => connection.query(sql, params)),
+    script: (sql) => foreign("script", () => connection.script(sql))
+  }
+}
+
+export function workerDbStore(connectionString: string): Layer.Layer<Store, StoreFailure> {
+  return Layer.effect(Store, effect {
+    const connection = try acquireRelease(
+      Effect.tryPromise({
+        try: () => connectWorkerPg(connectionString),
+        catch: (cause) => new StoreFailure({ operation: "open", cause })
+      }),
+      (opened) => Effect.ignore(foreign("close", () => opened.close()))
+    )
+    const permits = try Semaphore.make(1)
+    const tx = workerTx(connection)
+    const shape: Store.Shape = {
+      location: { kind: "connected-pg" },
+      transaction: <A, E, R>(body: (tx: Tx) => A!E!R) => permits.withPermits(1)(
+        acquireUseRelease(
+          foreign("begin", () => connection.query("BEGIN", [])),
+          effect () => {
+            const value = try body(tx)
+            try foreign("commit", () => connection.query("COMMIT", []))
+            return value
+          },
+          effect (_begun, exit) => {
+            if (Exit.isFailure(exit)) {
+              foreign("rollback", () => connection.query("ROLLBACK", [])) catch () => undefined
+            }
+          }
+        )
+      )
+    }
+    return shape
+  })
+}
+
+export effect function migrateFeedSchema(): void!StoreFailure!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(4242002)")
+    try tx.script(FEED_BASELINE_SQL)
+    try tx.query(
+      "INSERT INTO feed_world_state (singleton, current_day, current_hour, phase, game_running, funding_cutover_period, last_tick_at, updated_at) VALUES (true, 1, 0, 'active', true, 0, 0, $1) ON CONFLICT (singleton) DO NOTHING",
+      [now]
+    )
+  })
+}
+
+effect function runBatch(tx: Tx, batch: BatchQuery | undefined): void!StoreFailure {
+  if (batch !== undefined) try tx.query(batch.sql, batch.params)
+}
+
+export effect function seedFeedWorld(): void!StoreFailure!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(4242003)")
+    const existing = toInt((try tx.query("SELECT count(*) AS count FROM feed_actors"))[0]?.count)
+    if (existing > 0) return
+    try tx.query(
+      "INSERT INTO feed_world_state (singleton, current_day, current_hour, phase, game_running, funding_cutover_period, last_tick_at, updated_at) VALUES (true, 1, 0, 'active', true, 0, 0, $1) ON CONFLICT (singleton) DO NOTHING",
+      [now]
+    )
+    try runBatch(tx, buildInsertBatch(
+      "feed_actors",
+      ["id", "name", "username", "tier", "description", "system_prompt", "personality_json", "balance_cents", "created_at"],
+      actors.map((actor) => [
+        actor.id,
+        actor.name,
+        actor.username,
+        actor.tier,
+        actor.description,
+        actor.system,
+        serializeActorPersonality(actor),
+        10_000_000,
+        now
+      ]),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+    try runBatch(tx, buildInsertBatch(
+      "feed_organizations",
+      ["id", "name", "ticker", "org_type", "description", "post_style", "can_be_involved", "initial_price_cents", "created_at"],
+      organizations.map((org) => [
+        org.id,
+        org.name,
+        org.ticker ?? null,
+        org.type,
+        org.description,
+        org.postStyle ?? "",
+        org.canBeInvolved,
+        initialOrgPriceCents(org),
+        now
+      ]),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+    const tradeableOrgs = organizations.flatMap((org) => {
+      const priceCents = initialOrgPriceCents(org)
+      return org.ticker && priceCents !== null && priceCents > 0 ? [{ org, ticker: org.ticker, priceCents }] : []
+    })
+    try runBatch(tx, buildInsertBatch(
+      "feed_spot_pools",
+      ["ticker", "organization_id", "base_reserve", "quote_reserve_cents", "index_price_cents", "updated_at"],
+      tradeableOrgs.map(({ org, ticker, priceCents }) => [
+        ticker,
+        org.id,
+        10_000,
+        10_000 * priceCents,
+        priceCents,
+        now
+      ]),
+      "ON CONFLICT (ticker) DO NOTHING"
+    ))
+    try runBatch(tx, buildInsertBatch(
+      "feed_perp_markets",
+      ["ticker", "index_price_cents", "mark_price_cents", "long_oi_cents", "short_oi_cents", "max_leverage", "funding_rate_bps", "last_funding_period", "updated_at"],
+      tradeableOrgs.map(({ ticker, priceCents }) => [
+        ticker,
+        priceCents,
+        priceCents,
+        0,
+        0,
+        20,
+        0,
+        0,
+        now
+      ]),
+      "ON CONFLICT (ticker) DO NOTHING"
+    ))
+    try runBatch(tx, buildInsertBatch(
+      "feed_prediction_markets",
+      ["id", "slot_index", "question", "description", "category", "timeframe", "phase", "yes_shares", "no_shares", "liquidity_cents", "secret_outcome", "status", "resolved_outcome", "resolution_proof", "resolution_article_id", "expires_at", "resolved_at", "created_at"],
+      INITIAL_MARKETS.map((market) => [
+        market.id,
+        market.slotIndex,
+        market.question,
+        market.description,
+        market.category,
+        market.timeframe,
+        market.phase,
+        market.yesShares,
+        market.noShares,
+        market.liquidityCents,
+        market.secretOutcome,
+        "open",
+        null,
+        null,
+        null,
+        now + market.durationMs,
+        null,
+        now - market.createdAgoMs
+      ]),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+    try runBatch(tx, buildInsertBatch(
+      "feed_posts",
+      ["id", "author_id", "author_kind", "content", "reply_to_post_id", "quote_post_id", "via_client_name", "market_id", "ticker", "like_count", "repost_count", "reply_count", "deleted_at", "created_at"],
+      INITIAL_POSTS.map((post) => [
+        post.id,
+        post.authorId,
+        post.authorKind,
+        post.content,
+        post.replyToPostId,
+        null,
+        null,
+        post.marketId,
+        post.ticker,
+        post.likeCount,
+        post.repostCount,
+        post.replyCount,
+        null,
+        now - post.createdAgoMs
+      ]),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+    try runBatch(tx, buildInsertBatch(
+      "feed_articles",
+      ["id", "title", "summary", "body", "author_org_id", "related_market_id", "is_resolution_proof", "published_at"],
+      INITIAL_ARTICLES.map((article) => [
+        article.id,
+        article.title,
+        article.summary,
+        article.body,
+        article.authorOrgId,
+        article.relatedMarketId,
+        false,
+        now - article.publishedAgoMs
+      ]),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+    try runBatch(tx, buildInsertBatch(
+      "feed_world_facts",
+      ["id", "fact_text", "category", "created_at"],
+      INITIAL_WORLD_FACTS.map((fact) => [
+        fact.id,
+        fact.factText,
+        fact.category,
+        now - fact.createdAgoMs
+      ]),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+  })
+}

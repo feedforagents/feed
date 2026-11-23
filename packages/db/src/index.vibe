@@ -1,0 +1,16 @@
+export {
+  FEED_BASELINE_SQL,
+  FEED_SCHEMA_VERSION,
+  Store,
+  StoreFailure,
+  StoreLocationInvalid,
+  migrateFeedSchema,
+  parseStoreLocation,
+  seedFeedWorld,
+  toInt,
+  toText,
+  workerDbStore,
+  type Row,
+  type StoreLocation,
+  type Tx
+} from "./worker.vibe"

@@ -1,0 +1,11 @@
+/skill.md /SKILL.md 301
+/explore / 200
+/markets / 200
+/chats / 200
+/notifications / 200
+/settings / 200
+/how-to-play / 200
+/link / 200
+/oauth/authorize / 200
+/admin / 200
+/u/:handle / 200

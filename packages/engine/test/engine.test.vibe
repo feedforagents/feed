@@ -1,0 +1,413 @@
+// spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"; spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"; spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"
+import { assert, it } from "@effect/vitest"
+import { Store, migrateFeedSchema, seedFeedWorld, toInt, toText, type Tx } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { TestClock } from "effect/testing"
+import {
+  EngineFailure,
+  approveManualHold,
+  confirmLlmSpend,
+  fastForwardSimulatedHours,
+  getDailySpendStatus,
+  getEngineAdminStatus,
+  markLlmSpendUncertain,
+  overrideManualHold,
+  reserveLlmBudget,
+  runMarketsRecovery,
+  runMarketsTick,
+  runMinuteTick,
+  runNpcTick,
+} from "../src/index.vibe"
+
+module nodeEnv {
+  import process from "node:process"
+
+  /** @throws {never} */
+  export function applyEnvOverrides(overrides: Readonly<Record<string, string>>): Readonly<Record<string, string | undefined>> {
+    const previous: Record<string, string | undefined> = {}
+    for (const [key, value] of Object.entries(overrides)) {
+      previous[key] = process.env[key]
+      process.env[key] = value
+    }
+    return previous
+  }
+
+  /** @throws {never} */
+  export function restoreEnvSnapshot(previous: Readonly<Record<string, string | undefined>>): void {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+  }
+}
+import { applyEnvOverrides, restoreEnvSnapshot } from nodeEnv
+
+const OFFLINE_ENGINE_ENV: Readonly<Record<string, string>> = {
+  SURPLUS_BASE_URL: "",
+  SURPLUS_API_KEY: "",
+  OPENROUTER_API_KEY: "",
+  OPENAI_API_KEY: "",
+  OLLAMA_BASE_URL: "",
+  NPC_LLM_DAILY_BUDGET_USD: "",
+  FEED_CLOCK_MODE: "simulated",
+}
+
+function failureCode(err: { readonly _tag: string }): string {
+  return err instanceof EngineFailure ? err.code : err._tag
+}
+
+effect function check(run: () => void) {
+  try Effect.try(run)
+}
+
+effect function queryRows(sql: string, params: ReadonlyArray<unknown> = []) {
+  const store = try Store
+  return try store.transaction((tx: Tx) => tx.query(sql, params))
+}
+
+effect function withEnvOverrides<A, E, R>(overrides: Readonly<Record<string, string>>, body: A!E!R) {
+  return try scoped(effect {
+    try acquireRelease(
+      sync(() => applyEnvOverrides(overrides)),
+      (saved) => sync(() => restoreEnvSnapshot(saved)),
+    )
+    return try body
+  })
+}
+
+effect function withSeededEngine<A, E>(initialTimeMs: number, body: A!E!Store) {
+  return try scoped(effect {
+    try TestClock.setTime(initialTimeMs)
+    try acquireRelease(
+      sync(() => applyEnvOverrides(OFFLINE_ENGINE_ENV)),
+      (saved) => sync(() => restoreEnvSnapshot(saved)),
+    )
+    provide localStoreLayer({ kind: "pglite", file: undefined }) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+      return try body
+    }
+  })
+}
+
+it.effect('Minute ticks advance time without LLM reservations and simulated fast-forward stays monotonic (spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"; spec/engine/worldClock.md, "The minute tick advances the clock, flips signal windows, and tracks pending recovery age"; spec/engine/worldClock.md, "Simulated clock fast-forward is restricted to simulated mode"; spec/engine/index.md, "Minute ticks advance committed time without calling an LLM or spending budget")', () => scoped(effect {
+  const startMs = Date.UTC(2026, 10, 23, 10, 30, 0)
+  try withSeededEngine(startMs, effect {
+    const firstTick = try runMinuteTick()
+    try TestClock.adjust("1 minute")
+    const secondTick = try runMinuteTick()
+    const reservationsAfterTick = try queryRows("SELECT COUNT(*) AS cnt FROM feed_llm_spend_reservations")
+    const spendAfterTick = try getDailySpendStatus()
+    const healthAfterTick = (try queryRows(
+      `SELECT job_name, last_run_at, last_success_at, last_status, last_error, pending_count, oldest_pending_at
+       FROM feed_tick_health
+       WHERE job_name = 'minute-tick'`,
+    ))[0] ?? {}
+
+    const sameDayJump = try fastForwardSimulatedHours(4)
+    const nextDayJump = try fastForwardSimulatedHours(12)
+    const realtimeBlocked = try withEnvOverrides({ FEED_CLOCK_MODE: "realtime" }, Effect.flip(fastForwardSimulatedHours(1)))
+    const tickAfterJump = try runMinuteTick()
+    const worldRow = (try queryRows("SELECT current_day, current_hour, last_tick_at FROM feed_world_state WHERE singleton = true"))[0] ?? {}
+    const reservationsAfterAll = try queryRows("SELECT COUNT(*) AS cnt FROM feed_llm_spend_reservations")
+    const healthAfterJump = (try queryRows(
+      `SELECT last_run_at, last_success_at, last_status, pending_count, oldest_pending_at
+       FROM feed_tick_health
+       WHERE job_name = 'minute-tick'`,
+    ))[0] ?? {}
+
+    try check(() => {
+      assert.strictEqual(firstTick.skipped, false)
+      assert.strictEqual(firstTick.nowMs, startMs)
+      assert.strictEqual(secondTick.skipped, false)
+      assert.strictEqual(secondTick.nowMs, startMs + 60_000)
+      assert.strictEqual(toInt(reservationsAfterTick[0]?.cnt), 0)
+      assert.strictEqual(spendAfterTick.confirmedCents, 0)
+      assert.strictEqual(spendAfterTick.reservedCents, 0)
+      assert.strictEqual(spendAfterTick.activeReservations, 0)
+      assert.deepStrictEqual(
+        [
+          toText(healthAfterTick.job_name),
+          toInt(healthAfterTick.last_run_at),
+          toInt(healthAfterTick.last_success_at),
+          toText(healthAfterTick.last_status),
+          healthAfterTick.last_error,
+          toInt(healthAfterTick.pending_count),
+          healthAfterTick.oldest_pending_at,
+        ],
+        ["minute-tick", startMs + 60_000, startMs + 60_000, "ok", null, 0, null],
+      )
+      assert.deepStrictEqual(
+        {
+          clockMode: sameDayJump.clockMode,
+          previousMs: sameDayJump.previousMs,
+          currentMs: sameDayJump.currentMs,
+          currentDay: sameDayJump.currentDay,
+          currentHour: sameDayJump.currentHour,
+          advancedHours: sameDayJump.advancedHours,
+        },
+        {
+          clockMode: "ClockSimulated",
+          previousMs: startMs + 60_000,
+          currentMs: startMs + 60_000 + 4 * 3_600_000,
+          currentDay: 1,
+          currentHour: 14,
+          advancedHours: 4,
+        },
+      )
+      assert.deepStrictEqual(
+        {
+          clockMode: nextDayJump.clockMode,
+          previousMs: nextDayJump.previousMs,
+          currentMs: nextDayJump.currentMs,
+          currentDay: nextDayJump.currentDay,
+          currentHour: nextDayJump.currentHour,
+          advancedHours: nextDayJump.advancedHours,
+        },
+        {
+          clockMode: "ClockSimulated",
+          previousMs: sameDayJump.currentMs,
+          currentMs: sameDayJump.currentMs + 12 * 3_600_000,
+          currentDay: 2,
+          currentHour: 2,
+          advancedHours: 12,
+        },
+      )
+      assert.strictEqual(failureCode(realtimeBlocked), "CLOCK_MODE_INVALID")
+      assert.strictEqual(tickAfterJump.nowMs, nextDayJump.currentMs)
+      assert.isTrue(tickAfterJump.newlyExpired > 0)
+      assert.strictEqual(toInt(worldRow.current_day), 2)
+      assert.strictEqual(toInt(worldRow.current_hour), 2)
+      assert.strictEqual(toInt(worldRow.last_tick_at), nextDayJump.currentMs)
+      assert.strictEqual(toInt(reservationsAfterAll[0]?.cnt), 0)
+      assert.strictEqual(toInt(healthAfterJump.last_run_at), nextDayJump.currentMs)
+      assert.strictEqual(toInt(healthAfterJump.last_success_at), nextDayJump.currentMs)
+      assert.strictEqual(toText(healthAfterJump.last_status), "ok")
+      assert.isTrue(toInt(healthAfterJump.pending_count) > 0)
+      assert.isNotNull(healthAfterJump.oldest_pending_at)
+    })
+  })
+}))
+
+it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncertain spend across UTC rollover (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Dispatch reserves a known upper bound atomically or refuses when headroom is insufficient"; spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation"; spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds"; spec/engine/spendBudget.md, "UTC day rollover carries unsettled prior-day reservations into new-day headroom")', () => scoped(effect {
+  const day1Ms = Date.UTC(2026, 10, 23, 12, 0, 0)
+  const day2Ms = day1Ms + 86_400_000
+  try withSeededEngine(day1Ms, effect {
+    const initialStatus = try getDailySpendStatus(day1Ms)
+    const under80 = try reserveLlmBudget({
+      attemptId: "budget-under-80",
+      estimatedMicros: 50_000_000,
+      provider: "openai",
+      model: "gpt-4o-mini",
+      nowMs: day1Ms,
+    })
+    try confirmLlmSpend({ attemptId: under80.attemptId, actualMicros: 45_000_000, nowMs: day1Ms + 1_000 })
+    const afterUnder80 = try getDailySpendStatus(day1Ms + 1_000)
+
+    const at80 = try reserveLlmBudget({
+      attemptId: "budget-at-80",
+      estimatedMicros: 36_000_000,
+      provider: "openai",
+      model: "gpt-4o-mini",
+      nowMs: day1Ms + 2_000,
+    })
+    try confirmLlmSpend({ attemptId: at80.attemptId, actualMicros: 35_000_000, nowMs: day1Ms + 3_000 })
+    const after80 = try getDailySpendStatus(day1Ms + 3_000)
+
+    const at90 = try reserveLlmBudget({
+      attemptId: "budget-at-90",
+      estimatedMicros: 12_000_000,
+      provider: "openai",
+      model: "gpt-4o-mini",
+      nowMs: day1Ms + 4_000,
+    })
+    const overBudgetError = try Effect.flip(
+      reserveLlmBudget({
+        attemptId: "budget-over-cap",
+        estimatedMicros: 10_000_000,
+        provider: "openai",
+        model: "gpt-4o-mini",
+        nowMs: day1Ms + 4_500,
+      }),
+    )
+    try markLlmSpendUncertain({ attemptId: at90.attemptId, nowMs: day1Ms + 5_000 })
+    const day1Uncertain = try getDailySpendStatus(day1Ms + 5_000)
+
+    try TestClock.adjust("1 day")
+    const day2Carryover = try getDailySpendStatus(day2Ms)
+    try confirmLlmSpend({ attemptId: at90.attemptId, actualMicros: 10_000_000, nowMs: day2Ms + 1_000 })
+    const day2Reconciled = try getDailySpendStatus(day2Ms + 1_000)
+
+    try check(() => {
+      assert.strictEqual(initialStatus.utcDay, "2026-11-23")
+      assert.strictEqual(initialStatus.dailyBudgetCents, 10_000)
+      assert.strictEqual(initialStatus.maxStepsAllowed, 4)
+      assert.strictEqual(initialStatus.batchFraction, 1)
+      assert.strictEqual(under80.throttleLevel, "ThrottleNormal")
+      assert.strictEqual(under80.maxStepsAllowed, 4)
+      assert.strictEqual(under80.effectiveBatchSize, 10)
+      assert.strictEqual(under80.batchFraction, 1)
+      assert.strictEqual(afterUnder80.confirmedCents, 4_500)
+      assert.strictEqual(afterUnder80.reservedCents, 0)
+      assert.strictEqual(afterUnder80.throttleLevel, "ThrottleNormal")
+      assert.strictEqual(afterUnder80.maxStepsAllowed, 4)
+      assert.strictEqual(at80.throttleLevel, "ThrottleHalfBatch")
+      assert.strictEqual(at80.batchFraction, 0.5)
+      assert.strictEqual(at80.effectiveBatchSize, 5)
+      assert.strictEqual(at80.maxStepsAllowed, 4)
+      assert.strictEqual(after80.confirmedCents, 8_000)
+      assert.strictEqual(after80.batchFraction, 0.5)
+      assert.strictEqual(after80.maxStepsAllowed, 4)
+      assert.strictEqual(at90.throttleLevel, "ThrottleHalfBatchTwoSteps")
+      assert.strictEqual(at90.batchFraction, 0.5)
+      assert.strictEqual(at90.maxStepsAllowed, 2)
+      assert.strictEqual(failureCode(overBudgetError), "BUDGET_EXCEEDED")
+      assert.strictEqual(day1Uncertain.confirmedCents, 8_000)
+      assert.strictEqual(day1Uncertain.reservedCents, 1_200)
+      assert.strictEqual(day1Uncertain.uncertainReservations, 1)
+      assert.strictEqual(day1Uncertain.maxStepsAllowed, 2)
+      assert.strictEqual(day2Carryover.utcDay, "2026-11-24")
+      assert.strictEqual(day2Carryover.confirmedCents, 0)
+      assert.strictEqual(day2Carryover.reservedCents, 0)
+      assert.strictEqual(day2Carryover.carryoverReservedCents, 1_200)
+      assert.strictEqual(day2Carryover.committedCents, 1_200)
+      assert.strictEqual(day2Carryover.remainingCents, 8_800)
+      assert.strictEqual(day2Carryover.uncertainReservations, 1)
+      assert.strictEqual(day2Reconciled.confirmedCents, 0)
+      assert.strictEqual(day2Reconciled.carryoverReservedCents, 0)
+      assert.strictEqual(day2Reconciled.uncertainReservations, 0)
+      assert.strictEqual(day2Reconciled.remainingCents, 10_000)
+    })
+  })
+}))
+
+it.effect('NPC ticks drive spot markets and posts while markets emit idempotent clues and replace manual holds (spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/npcLoop.md, "Each NPC tick starts with a budget-enforced step cap and loops ObserveFeed -> Decide -> Act"; spec/engine/npcLoop.md, "Only NPC actors execute spot trades (moving the index price) and alpha invites"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Clues require a matching active phase and a persisted unique clue key"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/narrativeArc.md, "Only admins may approve or resolve markets on manual hold"; spec/engine/narrativeArc.md, "Resolved slots are replaced independently with a fresh market epoch")', () => scoped(effect {
+  const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
+  try withSeededEngine(liveNow, effect {
+    const humanAccountId = "human-account-observer"
+    try queryRows(
+      `INSERT INTO feed_accounts (account_id, handle, display_name, balance_cents, starting_grant_cents, created_at, updated_at)
+       VALUES ($1, $2, $3, 50000, 50000, $4, $4)`,
+      [humanAccountId, "humanobserver", "Human Observer", liveNow],
+    )
+    const initialSpotRows = try queryRows("SELECT ticker, quote_reserve_cents, index_price_cents FROM feed_spot_pools ORDER BY ticker ASC")
+    const initialReserveByTicker = new Map(initialSpotRows.map((r) => [toText(r.ticker) ?? "", toInt(r.quote_reserve_cents)]))
+    const initialNpcPostCount = toInt((try queryRows("SELECT COUNT(*) AS cnt FROM feed_posts WHERE author_kind = 'npc'"))[0]?.cnt)
+
+    const npcSummary = try runNpcTick(liveNow)
+    const tradeRows = try queryRows("SELECT trader_id, trader_kind, market_kind, market_ref FROM feed_trades")
+    const spotTrades = tradeRows.filter((r) => toText(r.market_kind) === "spot")
+    const humanTrades = tradeRows.filter((r) => toText(r.trader_id) === humanAccountId || toText(r.trader_kind) === "user")
+    const postCountAfterNpc = toInt((try queryRows("SELECT COUNT(*) AS cnt FROM feed_posts WHERE author_kind = 'npc'"))[0]?.cnt)
+    const humanPostCount = toInt((try queryRows("SELECT COUNT(*) AS cnt FROM feed_posts WHERE author_id = $1", [humanAccountId]))[0]?.cnt)
+    const postPoolRows = try queryRows(
+      `SELECT s.ticker, s.quote_reserve_cents, s.index_price_cents AS spot_index, p.index_price_cents AS perp_index
+       FROM feed_spot_pools s
+       JOIN feed_perp_markets p ON p.ticker = s.ticker
+       ORDER BY s.ticker ASC`,
+    )
+    const spotReserveChanged = postPoolRows.some((r) => initialReserveByTicker.get(toText(r.ticker) ?? "") !== toInt(r.quote_reserve_cents))
+    const perpSyncedWithSpot = postPoolRows.every((r) => toInt(r.spot_index) === toInt(r.perp_index))
+
+    const clueTick1 = try runMarketsTick(liveNow)
+    const cluesAfterPass1 = try queryRows("SELECT clue_key, post_id FROM feed_npc_market_clues ORDER BY clue_key ASC")
+    const pass1Keys = cluesAfterPass1.map((r) => toText(r.clue_key) ?? "")
+    const clueTick2 = try runMarketsTick(liveNow)
+    const cluesAfterPass2 = try queryRows("SELECT clue_key FROM feed_npc_market_clues")
+    const pass1Dupes = pass1Keys.filter((k) => cluesAfterPass2.filter((r) => toText(r.clue_key) === k).length !== 1)
+    if (clueTick2.cluesPublished > 0) {
+      for (let i = 0; i < 4; i++) {
+        const nextTick = try runMarketsTick(liveNow)
+        if (nextTick.cluesPublished === 0) break
+      }
+    }
+    const clueCountBeforeFinal = toInt((try queryRows("SELECT COUNT(*) AS cnt FROM feed_npc_market_clues"))[0]?.cnt)
+    const finalIdempotentTick = try runMarketsTick(liveNow)
+    const clueTotalsAfterFinal = (try queryRows("SELECT COUNT(*) AS cnt, COUNT(DISTINCT clue_key) AS distinct_cnt FROM feed_npc_market_clues"))[0] ?? {}
+
+    const approveMarketId = "seed-market-9"
+    const overrideMarketId = "seed-market-10"
+    try queryRows(
+      `UPDATE feed_prediction_markets
+       SET status = 'expired', phase = 'expired', expires_at = $2
+       WHERE id = $1`,
+      [approveMarketId, liveNow - 5_000],
+    )
+    try queryRows(
+      `INSERT INTO feed_prediction_resolution_work (market_id, attempts, last_error, next_retry_at, updated_at)
+       VALUES ($1, 3, 'retry cap reached', $2, $2)
+       ON CONFLICT (market_id) DO UPDATE SET attempts = 3, next_retry_at = $2, updated_at = $2`,
+      [approveMarketId, liveNow - 1_000],
+    )
+    try queryRows(
+      `UPDATE feed_prediction_markets
+       SET status = 'expired', phase = 'expired', secret_outcome = NULL, expires_at = $2
+       WHERE id = $1`,
+      [overrideMarketId, liveNow - 5_000],
+    )
+    const recovery = try runMarketsRecovery(liveNow)
+    const adminWhileHeld = try getEngineAdminStatus()
+    const emptyOverrideReasonErr = try Effect.flip(overrideManualHold(overrideMarketId, "yes", "   "))
+    const approved = try approveManualHold(approveMarketId)
+    const overridden = try overrideManualHold(overrideMarketId, "yes", "Official press release confirms outcome")
+    const openSlotRows = try queryRows(
+      `SELECT id, slot_index, status
+       FROM feed_prediction_markets
+       WHERE status = 'open'
+       ORDER BY slot_index ASC`,
+    )
+    const settledRows = try queryRows(
+      `SELECT id, status, resolved_outcome, resolution_article_id
+       FROM feed_prediction_markets
+       WHERE id IN ($1, $2)
+       ORDER BY id ASC`,
+      [approveMarketId, overrideMarketId],
+    )
+    const proofArticles = try queryRows(
+      `SELECT id, related_market_id, is_resolution_proof
+       FROM feed_articles
+       WHERE id IN ($1, $2)`,
+      [approved.articleId, overridden.articleId],
+    )
+    const adminAfterSettle = try getEngineAdminStatus()
+
+    try check(() => {
+      assert.isTrue(npcSummary.actorsSelected > 0)
+      assert.strictEqual(npcSummary.actorsCompleted, npcSummary.actorsSelected)
+      assert.isTrue(npcSummary.actionsExecuted > 0)
+      assert.strictEqual(npcSummary.maxStepsUsed, 4)
+      assert.strictEqual(npcSummary.throttledBatchSize, 10)
+      assert.isTrue(spotTrades.length > 0)
+      assert.isTrue(spotReserveChanged)
+      assert.isTrue(perpSyncedWithSpot)
+      assert.strictEqual(humanTrades.length, 0)
+      assert.isTrue(postCountAfterNpc > initialNpcPostCount)
+      assert.strictEqual(humanPostCount, 0)
+      assert.isTrue(clueTick1.cluesPublished > 0)
+      assert.strictEqual(cluesAfterPass1.length, clueTick1.cluesPublished)
+      assert.isTrue(cluesAfterPass1.every((r) => (toText(r.post_id) ?? "").length > 0))
+      assert.deepStrictEqual(pass1Dupes, [])
+      assert.strictEqual(finalIdempotentTick.cluesPublished, 0)
+      assert.strictEqual(toInt(clueTotalsAfterFinal.cnt), clueCountBeforeFinal)
+      assert.strictEqual(toInt(clueTotalsAfterFinal.cnt), toInt(clueTotalsAfterFinal.distinct_cnt))
+      assert.strictEqual(recovery.manualHolds, 2)
+      assert.strictEqual(adminWhileHeld.manualHoldCount, 2)
+      assert.strictEqual(failureCode(emptyOverrideReasonErr), "INVALID_ARGUMENT")
+      assert.strictEqual(approved.marketId, approveMarketId)
+      assert.strictEqual(approved.outcome, "yes")
+      assert.isNotNull(approved.replacementMarketId)
+      assert.strictEqual(overridden.marketId, overrideMarketId)
+      assert.strictEqual(overridden.outcome, "yes")
+      assert.isNotNull(overridden.replacementMarketId)
+      assert.strictEqual(openSlotRows.length, 10)
+      assert.deepStrictEqual(openSlotRows.map((r) => toInt(r.slot_index)), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+      assert.isTrue(settledRows.every((r) => toText(r.status) === "resolved" && toText(r.resolved_outcome) === "YES"))
+      assert.strictEqual(proofArticles.length, 2)
+      assert.isTrue(proofArticles.every((r) => r.is_resolution_proof === true))
+      assert.strictEqual(adminAfterSettle.manualHoldCount, 0)
+    })
+  })
+}), 60_000)

@@ -4,21 +4,38 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev:web": "vite",
+    "dev:server": "node --import vibelang/register src/server/main.vibe",
+    "dev": "node -e \"import('node:child_process').then(({spawn})=>{const opts={stdio:'inherit',env:process.env};const srv=spawn('pnpm',['run','dev:server'],opts);const web=spawn('pnpm',['run','dev:web'],opts);const stop=(code=0)=>{srv.kill('SIGTERM');web.kill('SIGTERM');process.exit(code)};process.on('SIGINT',()=>stop(0));process.on('SIGTERM',()=>stop(0));srv.on('exit',(code)=>stop(code??1));web.on('exit',(code)=>stop(code??1));})\"",
+    "start": "pnpm run build:web && node --import vibelang/register src/server/main.vibe",
+    "build:web": "vite build --outDir dist/web",
+    "build:worker": "vibelang -p tsconfig.worker.json",
+    "build": "pnpm run build:web && pnpm run build:worker",
     "typecheck": "vibelang --noEmit -p .",
     "test": "vitest run",
-    "test:browser": "vitest run --project browser"
+    "test:browser": "vitest run --project browser",
+    "deploy:staging": "pnpm run build && wrangler deploy --config wrangler.staging.jsonc",
+    "deploy:production": "pnpm run build && wrangler deploy --config wrangler.production.jsonc"
   },
   "dependencies": {
+    "@effect/platform-node": "4.1.1",
+    "@repo/auth": "workspace:*",
+    "@repo/db": "workspace:*",
     "@repo/design-system": "workspace:*",
+    "@repo/engine": "workspace:*",
+    "@repo/markets": "workspace:*",
+    "@repo/mcp": "workspace:*",
+    "@repo/pack-default": "workspace:*",
+    "@repo/social": "workspace:*",
     "@repo/ui": "workspace:*",
     "effect": "4.1.1",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "vibelang-runtime": "0.0.13"
   },
   "devDependencies": {
     "@antithesishq/bombadil": "0.7.10",
+    "@cloudflare/workers-types": "catalog:",
     "@effect/vitest": "4.1.1",
     "@tailwindcss/vite": "catalog:",
     "@types/node": "catalog:",
@@ -34,6 +51,7 @@
     "vibelang-vite": "0.0.13",
     "vibestack": "workspace:*",
     "vite": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
   }
 }

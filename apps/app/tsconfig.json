@@ -2,6 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "allowArbitraryExtensions": true,
+    "resolveJsonModule": true,
     "jsx": "react-jsx",
     "lib": [
       "es2024",

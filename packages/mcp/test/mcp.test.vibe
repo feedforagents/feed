@@ -1,0 +1,662 @@
+// spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"; spec/mcp/skill.md, "One canonical source renders all discovery documents and `index.json` SHA-256 digests"; spec/mcp/skill.md, "All 9 Join-sheet host launchers degrade to copy-prompt until device-verified"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
+import { assert, it } from "@effect/vitest"
+import { TestClock } from "effect/testing"
+import { Store, migrateFeedSchema, seedFeedWorld, type Tx } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import {
+  DEFAULT_ALLOWED_COUNTRIES,
+  approveDeviceAuthorization,
+  completePhoneOnboarding,
+  createAuthorizationCode,
+  exchangeOAuthToken,
+  getActiveAgentGrant,
+  getLoopbackCode,
+  registerDynamicClient,
+  startPhoneVerification,
+  verifyPhoneCode,
+  type AuthRuntimeConfig
+} from "@repo/auth"
+import { createPost, listFeedPosts } from "@repo/social"
+import {
+  getSkillDiscoveryIndex,
+  handleMcpRequest,
+  handleSkillRoute,
+  type SkillDiscoveryIndex,
+  type SkillHostsPayload
+} from "../src/index.vibe"
+
+module node {
+  import { readFileSync } from "node:fs"
+  import { fileURLToPath } from "node:url"
+
+  /** @throws {unknown} */
+  export function readDiskSkillBytes(skillUrl: URL): Uint8Array {
+    const skillPath = fileURLToPath(skillUrl)
+    return new Uint8Array(readFileSync(skillPath))
+  }
+
+  /** @throws {never} */
+  export function makeWebRequest(url: string, init?: RequestInit): Request {
+    return new Request(url, init)
+  }
+
+  /** @throws {unknown} */
+  export async function readResponseBytes(response: Response): Promise<Uint8Array> {
+    return new Uint8Array(await response.arrayBuffer())
+  }
+
+  /** @throws {unknown} */
+  export async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", copy)
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+  }
+
+  /** @throws {unknown} */
+  export async function pkceS256Challenge(verifier: string): Promise<string> {
+    const encoded = new TextEncoder().encode(verifier)
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", encoded)
+    let binary = ""
+    const view = new Uint8Array(digest)
+    for (let index = 0; index < view.length; index += 1) {
+      binary += String.fromCharCode(view[index] ?? 0)
+    }
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+  }
+
+  /** @throws {never} */
+  export function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+    if (left.byteLength !== right.byteLength) return false
+    for (let index = 0; index < left.byteLength; index += 1) {
+      if (left[index] !== right[index]) return false
+    }
+    return true
+  }
+}
+import { bytesEqual, makeWebRequest, pkceS256Challenge, readDiskSkillBytes, readResponseBytes, sha256HexBytes } from node
+
+const DISK_SKILL_URL = new URL("../../../skills/feed/SKILL.md", import.meta.url)
+
+const TEST_ORIGIN = "https://feed.fun"
+
+const EXPECTED_HOST_IDS = [
+  "chatgpt",
+  "claude",
+  "cursor",
+  "gemini",
+  "grok",
+  "hermes",
+  "muse",
+  "openclaw",
+  "perplexity"
+] as const
+
+const SOCIAL_REDACTED_PORTFOLIO_KEYS = [
+  "balancePts",
+  "balanceDisplay",
+  "positionValuePts",
+  "equityPts",
+  "startingGrantPts",
+  "netProfitPts",
+  "totalFeesPaidPts",
+  "predictionPositions",
+  "perpPositions",
+  "recentLedger"
+] as const
+
+const SOCIAL_REDACTED_WHOAMI_KEYS = [
+  "balancePts",
+  "balanceDisplay",
+  "positionValuePts",
+  "equityPts",
+  "netProfitPts"
+] as const
+
+const FORBIDDEN_PHONE_FIELD = /^(?:phone|phone_?number|tel|telephone|mobile|sms_?code|otp|otp_?code|verification_?code|passcode)$/i
+const FORBIDDEN_PURCHASE_NAME = /(?:buy_?points|purchase|checkout|stripe|top_?up|refill|upsell)/i
+
+interface McpCallResult {
+  readonly status: number
+  readonly headers: Headers
+  readonly body: Record<string, unknown>
+}
+
+interface ToolSchemaSummary {
+  readonly name: string
+  readonly title: string
+  readonly description: string
+  readonly inputSchema: {
+    readonly type: string
+    readonly properties: Readonly<Record<string, unknown>>
+    readonly additionalProperties: boolean
+  }
+  readonly annotations: {
+    readonly readOnlyHint: boolean
+    readonly destructiveHint: boolean
+    readonly openWorldHint: boolean
+  }
+}
+
+function testAuthConfig(): AuthRuntimeConfig {
+  return {
+    digestKey: "test-digest-key-at-least-32-bytes-long",
+    oauthSigningSecret: "test-oauth-signing-secret-32-bytes-long",
+    smsMode: "loopback",
+    allowedCountries: DEFAULT_ALLOWED_COUNTRIES,
+    publicAppUrl: "http://127.0.0.1:8787"
+  }
+}
+
+effect function check(run: () => void) {
+  try Effect.try(run)
+}
+
+effect function requireSkillResponse(pathAndQuery: string, method = "GET") {
+  const response = try handleSkillRoute(makeWebRequest(`${TEST_ORIGIN}${pathAndQuery}`, { method }), TEST_ORIGIN)
+  if (response === undefined) {
+    return try Effect.die(`Expected handleSkillRoute to match ${pathAndQuery}`)
+  }
+  return response
+}
+
+effect function callMcp(body: unknown, authConfig: AuthRuntimeConfig, token?: string) {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream"
+  }
+  if (token !== undefined) {
+    headers.authorization = `Bearer ${token}`
+  }
+  const request = makeWebRequest(`${TEST_ORIGIN}/mcp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body)
+  })
+  const response = try handleMcpRequest({ request, origin: TEST_ORIGIN, authConfig })
+  const parsed = (try tryPromise(() => response.json() as Promise<unknown>)) as Record<string, unknown>
+  return { status: response.status, headers: response.headers, body: parsed } satisfies McpCallResult
+}
+
+effect function callMcpTool(
+  id: number,
+  name: string,
+  args: Record<string, unknown>,
+  authConfig: AuthRuntimeConfig,
+  token?: string
+) {
+  return try callMcp(
+    {
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name, arguments: args }
+    },
+    authConfig,
+    token
+  )
+}
+
+function unwrapToolPayload(res: McpCallResult): Record<string, unknown> {
+  assert.strictEqual(res.status, 200)
+  const result = res.body.result as {
+    readonly isError?: boolean
+    readonly structuredContent?: Record<string, unknown>
+  } | undefined
+  assert.isDefined(result)
+  assert.notStrictEqual(result?.isError, true)
+  assert.isDefined(result?.structuredContent)
+  return result?.structuredContent ?? {}
+}
+
+effect function onboardPhoneUser(
+  phoneE164: string,
+  username: string,
+  displayName: string,
+  authConfig: AuthRuntimeConfig
+) {
+  try startPhoneVerification({ phoneE164, config: authConfig })
+  const code = getLoopbackCode(phoneE164, authConfig)
+  try check(() => assert.isString(code))
+  const verified = try verifyPhoneCode({
+    phoneE164,
+    code: code ?? "",
+    config: authConfig
+  })
+  try check(() => assert.strictEqual(verified.needsOnboarding, true))
+  if (!verified.needsOnboarding) {
+    return try Effect.die("Expected fresh phone number to require onboarding")
+  }
+  return try completePhoneOnboarding({
+    pendingToken: verified.pendingToken,
+    username,
+    accepted18Plus: true,
+    acceptedTerms: true,
+    displayName,
+    config: authConfig
+  })
+}
+
+effect function connectOAuthGrant(input: {
+  readonly accountId: string
+  readonly clientName: string
+  readonly redirectUri: string
+  readonly scope: string
+  readonly state: string
+  readonly verifier: string
+  readonly authConfig: AuthRuntimeConfig
+}) {
+  const client = try registerDynamicClient({
+    clientName: input.clientName,
+    redirectUris: [input.redirectUri],
+    scope: "read social:write messages trade"
+  })
+  const challenge = try tryPromise(() => pkceS256Challenge(input.verifier))
+  const authCode = try createAuthorizationCode({
+    accountId: input.accountId,
+    clientId: client.client_id,
+    clientName: client.client_name,
+    redirectUri: input.redirectUri,
+    codeChallenge: challenge,
+    codeChallengeMethod: "S256",
+    responseType: "code",
+    scope: input.scope,
+    state: input.state,
+    resource: `${TEST_ORIGIN}/mcp`,
+    origin: TEST_ORIGIN
+  })
+  return try exchangeOAuthToken({
+    grantType: "authorization_code",
+    code: authCode.code,
+    codeVerifier: input.verifier,
+    clientId: client.client_id,
+    redirectUri: input.redirectUri,
+    resource: `${TEST_ORIGIN}/mcp`,
+    config: input.authConfig
+  })
+}
+
+effect function seedGameNotifications(accountId: string) {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at)
+       VALUES
+         ($1, $3, 'market_resolved', NULL, NULL, 'seed-market-1', 'Market resolved', 'Prediction market settled.', true, NULL, $4),
+         ($2, $3, 'pnl_digest', NULL, NULL, NULL, 'Daily P&L', 'Your virtual points summary.', true, NULL, $5)`,
+      [`notif-market-${accountId}`, `notif-pnl-${accountId}`, accountId, now + 1, now + 2]
+    )
+  })
+}
+
+function assertToolCatalogClean(tools: ReadonlyArray<ToolSchemaSummary>): void {
+  assert.strictEqual(tools.length, 49)
+  for (const tool of tools) {
+    assert.isAtMost(tool.name.length, 64)
+    assert.match(tool.name, /^[a-zA-Z0-9_-]+$/)
+    assert.isAbove(tool.title.length, 0)
+    assert.isBoolean(tool.annotations.readOnlyHint)
+    assert.isBoolean(tool.annotations.destructiveHint)
+    assert.isBoolean(tool.annotations.openWorldHint)
+    assert.strictEqual(tool.inputSchema.type, "object")
+    assert.strictEqual(tool.inputSchema.additionalProperties, false)
+    assert.strictEqual(FORBIDDEN_PURCHASE_NAME.test(tool.name), false)
+    for (const propName of Object.keys(tool.inputSchema.properties)) {
+      assert.strictEqual(FORBIDDEN_PHONE_FIELD.test(propName), false)
+      assert.strictEqual(/phone|sms|otp|passcode|packId|checkoutUrl/i.test(propName), false)
+    }
+  }
+}
+
+function assertDual401(res: McpCallResult, expectedReason: "missing_token" | "revoked_token"): void {
+  assert.strictEqual(res.status, 401)
+  const wwwAuth = res.headers.get("www-authenticate") ?? ""
+  assert.include(wwwAuth, `resource_metadata="${TEST_ORIGIN}/.well-known/oauth-protected-resource"`)
+  const errorObj = res.body.error as {
+    readonly code?: number
+    readonly _meta?: Readonly<Record<string, unknown>>
+    readonly data?: {
+      readonly reason?: string
+      readonly resource_metadata?: string
+      readonly _meta?: Readonly<Record<string, unknown>>
+    }
+  } | undefined
+  assert.isDefined(errorObj)
+  assert.strictEqual(errorObj?.code, -32001)
+  assert.strictEqual(errorObj?.data?.reason, expectedReason)
+  assert.strictEqual(errorObj?.data?.resource_metadata, `${TEST_ORIGIN}/.well-known/oauth-protected-resource`)
+  const topMeta = errorObj?._meta?.["mcp/www_authenticate"]
+  const dataMeta = errorObj?.data?._meta?.["mcp/www_authenticate"]
+  assert.deepStrictEqual(topMeta, [wwwAuth])
+  assert.deepStrictEqual(dataMeta, [wwwAuth])
+}
+
+function assertHostsPayload(
+  payload: SkillHostsPayload,
+  expectedDigest: string,
+  expectedUnverifiedAll: boolean,
+  expectedVerifiedOnly?: ReadonlySet<string>
+): void {
+  assert.strictEqual(payload.origin, TEST_ORIGIN)
+  assert.strictEqual(payload.skillUrl, `${TEST_ORIGIN}/SKILL.md`)
+  assert.strictEqual(payload.mcpUrl, `${TEST_ORIGIN}/mcp`)
+  assert.strictEqual(payload.digest, expectedDigest)
+  const sortedIds = payload.hosts.map((host) => host.id).sort()
+  assert.deepStrictEqual(sortedIds, [...EXPECTED_HOST_IDS])
+  for (const host of payload.hosts) {
+    if (expectedUnverifiedAll) {
+      assert.strictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
+      assert.strictEqual(host.href, null)
+      assert.strictEqual(host.copyPromptFallback, true)
+      continue
+    }
+    if (expectedVerifiedOnly !== undefined) {
+      const isVerified = expectedVerifiedOnly.has(host.id)
+      if (!isVerified) {
+        assert.strictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
+        assert.strictEqual(host.href, null)
+        assert.strictEqual(host.copyPromptFallback, true)
+      } else {
+        assert.notStrictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
+        assert.isString(host.href)
+        assert.strictEqual(host.copyPromptFallback, false)
+      }
+      continue
+    }
+    if (host.id === "gemini" || host.id === "perplexity") {
+      assert.strictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
+      assert.strictEqual(host.href, null)
+      assert.strictEqual(host.copyPromptFallback, true)
+    } else {
+      assert.notStrictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
+      assert.isString(host.href)
+      assert.strictEqual(host.copyPromptFallback, false)
+    }
+    if (host.id === "openclaw" || host.id === "hermes") {
+      assert.strictEqual(host.resolvedLaunchKind, "CliOrSchemeInstall")
+      assert.isString(host.cliCommand)
+    }
+    if (host.id === "claude" || host.id === "muse" || host.id === "openclaw") {
+      assert.strictEqual(host.directoryPolicy, "DirectoryListedAtLaunch")
+    } else if (host.id === "chatgpt") {
+      assert.strictEqual(host.directoryPolicy, "DirectoryHeldFor18Plus")
+    } else {
+      assert.strictEqual(host.directoryPolicy, "CustomConnectorOnly")
+    }
+  }
+}
+
+effect function assertSocialModeRedaction(
+  accountHandle: string,
+  authConfig: AuthRuntimeConfig,
+  token: string
+) {
+  const whoamiSocial = unwrapToolPayload(try callMcpTool(31, "whoami", {}, authConfig, token))
+  const portfolioSocial = unwrapToolPayload(try callMcpTool(32, "get_portfolio", {}, authConfig, token))
+  const notifsSocial = unwrapToolPayload(try callMcpTool(33, "get_notifications", { limit: 20 }, authConfig, token))
+  const feedSocial = unwrapToolPayload(try callMcpTool(34, "get_home_feed", { tab: "latest", limit: 20 }, authConfig, token))
+  const profileSocial = unwrapToolPayload(try callMcpTool(35, "get_profile", { handleOrId: accountHandle }, authConfig, token))
+  try check(() => {
+    assert.strictEqual(whoamiSocial.playMode, "social")
+    assert.strictEqual(whoamiSocial.financialFieldsOmittedInSocialMode, true)
+    for (const key of SOCIAL_REDACTED_WHOAMI_KEYS) {
+      assert.strictEqual(Object.hasOwn(whoamiSocial, key), false)
+    }
+    assert.strictEqual(portfolioSocial.playMode, "social")
+    assert.strictEqual(portfolioSocial.financialFieldsOmittedInSocialMode, true)
+    for (const key of SOCIAL_REDACTED_PORTFOLIO_KEYS) {
+      assert.strictEqual(Object.hasOwn(portfolioSocial, key), false)
+    }
+    const notifItems = (notifsSocial.items ?? []) as ReadonlyArray<{
+      readonly kind: string
+      readonly isGameOnly: boolean
+    }>
+    assert.strictEqual(notifsSocial.mode, "social")
+    assert.strictEqual(notifItems.some((item) => item.kind === "mention"), true)
+    assert.strictEqual(notifItems.some((item) => item.kind === "market_resolved" || item.kind === "pnl_digest" || item.isGameOnly), false)
+    const feedItems = (feedSocial.items ?? []) as ReadonlyArray<{
+      readonly marketId: string | null
+      readonly ticker: string | null
+      readonly cashtags: ReadonlyArray<string>
+      readonly showTradeEmbed: boolean
+      readonly linkCashtags: boolean
+    }>
+    assert.strictEqual(feedSocial.mode, "social")
+    assert.isAbove(feedItems.length, 0)
+    for (const item of feedItems) {
+      assert.strictEqual(item.marketId, null)
+      assert.strictEqual(item.ticker, null)
+      assert.deepStrictEqual(item.cashtags, [])
+      assert.strictEqual(item.showTradeEmbed, false)
+      assert.strictEqual(item.linkCashtags, false)
+    }
+    for (const key of ["balancePts", "balanceDisplay", "tradeCount", "openPositionCount"]) {
+      assert.strictEqual(Object.hasOwn(profileSocial, key), false)
+    }
+  })
+}
+
+it.effect('Serve canonical SKILL.md, well-known discovery index with matching SHA-256, llms.txt, how-to-play, and all 9 host launchers (spec/mcp/skill.md, "One canonical source renders all discovery documents and `index.json` SHA-256 digests"; spec/mcp/skill.md, "All 9 Join-sheet host launchers degrade to copy-prompt until device-verified")', () => effect {
+  const skillRes = try requireSkillResponse("/SKILL.md")
+  const mirrorRes = try requireSkillResponse("/.well-known/agent-skills/feed/SKILL.md")
+  const unknownRouteRes = try handleSkillRoute(makeWebRequest(`${TEST_ORIGIN}/not-a-skill-route`), TEST_ORIGIN)
+  const indexRes = try requireSkillResponse("/.well-known/agent-skills/index.json")
+  const llmsRes = try requireSkillResponse("/llms.txt")
+  const howToPlayRes = try requireSkillResponse("/how-to-play.md")
+  const hostsDefaultRes = try requireSkillResponse("/api/skills/hosts")
+  const hostsUnverifiedRes = try requireSkillResponse("/api/skills/hosts?verified=")
+  const hostsSelectiveRes = try requireSkillResponse("/api/skills/hosts?verified=claude,openclaw")
+  const directIndex = try getSkillDiscoveryIndex(TEST_ORIGIN)
+  const diskBytes = try Effect.try(() => readDiskSkillBytes(DISK_SKILL_URL))
+  const skillBytes = try tryPromise(() => readResponseBytes(skillRes))
+  const mirrorBytes = try tryPromise(() => readResponseBytes(mirrorRes))
+  const actualHex = try tryPromise(() => sha256HexBytes(skillBytes))
+  const expectedDigest = `sha256:${actualHex}`
+  const indexPayload = (try tryPromise(() => indexRes.json() as Promise<unknown>)) as SkillDiscoveryIndex
+  const llmsText = try tryPromise(() => llmsRes.text())
+  const howToPlayText = try tryPromise(() => howToPlayRes.text())
+  const hostsDefault = (try tryPromise(() => hostsDefaultRes.json() as Promise<unknown>)) as SkillHostsPayload
+  const hostsUnverified = (try tryPromise(() => hostsUnverifiedRes.json() as Promise<unknown>)) as SkillHostsPayload
+  const hostsSelective = (try tryPromise(() => hostsSelectiveRes.json() as Promise<unknown>)) as SkillHostsPayload
+  try check(() => {
+    assert.isUndefined(unknownRouteRes)
+    assert.strictEqual(skillRes.status, 200)
+    assert.strictEqual(mirrorRes.status, 200)
+    assert.strictEqual(indexRes.status, 200)
+    assert.strictEqual(llmsRes.status, 200)
+    assert.strictEqual(howToPlayRes.status, 200)
+    assert.strictEqual(hostsDefaultRes.status, 200)
+    assert.strictEqual(bytesEqual(skillBytes, diskBytes), true)
+    assert.strictEqual(bytesEqual(mirrorBytes, diskBytes), true)
+    assert.match(actualHex, /^[0-9a-f]{64}$/)
+    assert.strictEqual(skillRes.headers.get("etag"), `"${expectedDigest}"`)
+    assert.strictEqual(indexRes.headers.get("etag"), `"${expectedDigest}"`)
+    assert.strictEqual(indexPayload.$schema, "https://schemas.agentskills.io/discovery/0.2.0/schema.json")
+    assert.strictEqual(indexPayload.skills.length, 1)
+    assert.strictEqual(indexPayload.skills[0].name, "feed")
+    assert.strictEqual(indexPayload.skills[0].type, "skill-md")
+    assert.strictEqual(indexPayload.skills[0].url, `${TEST_ORIGIN}/SKILL.md`)
+    assert.strictEqual(indexPayload.skills[0].digest, expectedDigest)
+    assert.deepStrictEqual(indexPayload, directIndex)
+    assert.include(llmsText, `${TEST_ORIGIN}/SKILL.md`)
+    assert.include(llmsText, `${TEST_ORIGIN}/.well-known/agent-skills/index.json`)
+    assert.include(llmsText, `SHA-256: ${actualHex}`)
+    assert.include(howToPlayText, "# How to play Feed")
+    assert.include(howToPlayText, "Virtual points have no cash value")
+    assertHostsPayload(hostsDefault, expectedDigest, false)
+    assertHostsPayload(hostsUnverified, expectedDigest, true)
+    assertHostsPayload(hostsSelective, expectedDigest, false, new Set(["claude", "openclaw"]))
+  })
+})
+
+it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no-phone schemas, and dual 401 challenge on unauthenticated protected call (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30")', () => effect {
+  try TestClock.setTime(Date.now())
+  const authConfig = testAuthConfig()
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    try seedFeedWorld()
+    const initRes = try callMcp(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "vitest-mcp", version: "1.0.0" }
+        }
+      },
+      authConfig
+    )
+    const listRes = try callMcp({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, authConfig)
+    const aboutRes = try callMcpTool(3, "about_feed", {}, authConfig)
+    const postRes = try callMcpTool(4, "get_post", { postId: "seed-post-1" }, authConfig)
+    const searchRes = try callMcpTool(5, "search", { query: "Cybercab", kind: "posts", limit: 10 }, authConfig)
+    const trendingRes = try callMcpTool(6, "get_trending", { limit: 10 }, authConfig)
+    const marketsRes = try callMcpTool(7, "list_markets", { kind: "all", status: "open", limit: 10 }, authConfig)
+    const unauthPostRes = try callMcpTool(8, "create_post", { content: "Unauthenticated post" }, authConfig)
+    try check(() => {
+      assert.strictEqual(initRes.status, 200)
+      const initResult = initRes.body.result as {
+        readonly protocolVersion?: string
+        readonly serverInfo?: { readonly name?: string }
+      } | undefined
+      assert.strictEqual(initResult?.protocolVersion, "2025-11-25")
+      assert.strictEqual(initResult?.serverInfo?.name, "feed")
+      assert.strictEqual(listRes.status, 200)
+      const listResult = listRes.body.result as { readonly tools?: ReadonlyArray<ToolSchemaSummary> } | undefined
+      assertToolCatalogClean(listResult?.tools ?? [])
+      const aboutPayload = unwrapToolPayload(aboutRes)
+      assert.deepStrictEqual(aboutPayload.toolsSummary, { publicTools: 15, protectedTools: 34, totalTools: 49 })
+      const postPayload = unwrapToolPayload(postRes)
+      const post = postPayload.post as { readonly id?: string; readonly isParody?: boolean } | undefined
+      assert.strictEqual(post?.id, "seed-post-1")
+      assert.strictEqual(post?.isParody, true)
+      const searchPayload = unwrapToolPayload(searchRes)
+      assert.isAbove(((searchPayload.posts ?? []) as ReadonlyArray<unknown>).length, 0)
+      const trendingPayload = unwrapToolPayload(trendingRes)
+      assert.isAbove(((trendingPayload.items ?? []) as ReadonlyArray<unknown>).length, 0)
+      const marketsPayload = unwrapToolPayload(marketsRes)
+      assert.strictEqual((marketsPayload.predictionMarkets as ReadonlyArray<unknown>).length, 10)
+      assert.isAbove((marketsPayload.perpMarkets as ReadonlyArray<unknown>).length, 0)
+      assert.strictEqual(marketsPayload.currency, "Virtual points (pts) — no cash value")
+      assertDual401(unauthPostRes, "missing_token")
+    })
+  }
+})
+
+it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribution, and Social mode redaction end to end (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution")', () => effect {
+  try TestClock.setTime(Date.now())
+  const authConfig = testAuthConfig()
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    try seedFeedWorld()
+    const alice = try onboardPhoneUser("+14155550101", "alice_mcp", "Alice MCP", authConfig)
+    const bob = try onboardPhoneUser("+14155550102", "bob_social", "Bob Social", authConfig)
+    try createPost({
+      authorId: bob.account.accountId,
+      authorKind: "user",
+      content: "Welcome @alice_mcp to Feed!"
+    })
+    try seedGameNotifications(alice.account.accountId)
+    const token1 = try connectOAuthGrant({
+      accountId: alice.account.accountId,
+      clientName: "Claude Desktop",
+      redirectUri: "http://127.0.0.1:4100/callback",
+      scope: "read social:write",
+      state: "state_claude_desktop_01",
+      verifier: "pkce_verifier_claude_desktop_0123456789abcdef0123456789",
+      authConfig
+    })
+    const createdRes = try callMcpTool(
+      11,
+      "create_post",
+      { content: "Checking $NVDAI odds via Claude!", ticker: "NVDAI" },
+      authConfig,
+      token1.access_token
+    )
+    const createdPayload = unwrapToolPayload(createdRes)
+    const createdPost = createdPayload.post as { readonly id: string; readonly viaClientName: string | null }
+    const feedPage = try listFeedPosts({ tab: "latest", authorId: alice.account.accountId })
+    const forbiddenTradeRes = try callMcpTool(
+      12,
+      "buy_prediction",
+      { marketId: "seed-market-1", side: "yes", amountPts: 5 },
+      authConfig,
+      token1.access_token
+    )
+    const startDeviceRes = try callMcpTool(
+      13,
+      "start_sign_in",
+      { clientName: "Hermes Agent", scopes: ["read", "social:write", "messages", "trade"] },
+      authConfig
+    )
+    const startDevicePayload = unwrapToolPayload(startDeviceRes)
+    const userCode = String(startDevicePayload.userCode ?? "")
+    const deviceCode = String(startDevicePayload.deviceCode ?? "")
+    const pendingDevicePayload = unwrapToolPayload(try callMcpTool(23, "check_sign_in", { deviceCode }, authConfig))
+    try approveDeviceAuthorization({ accountId: alice.account.accountId, userCode })
+    const checkDeviceRes = try callMcpTool(14, "check_sign_in", { deviceCode }, authConfig)
+    const token2 = unwrapToolPayload(checkDeviceRes)
+    const token2Access = String(token2.access_token ?? "")
+    const activeGrant = try getActiveAgentGrant(alice.account.accountId)
+    const revokedOldRes = try callMcpTool(15, "whoami", {}, authConfig, token1.access_token)
+    const tradeRes = try callMcpTool(
+      16,
+      "buy_prediction",
+      { marketId: "seed-market-1", side: "yes", amountPts: 10 },
+      authConfig,
+      token2Access
+    )
+    const whoamiGame = unwrapToolPayload(try callMcpTool(17, "whoami", {}, authConfig, token2Access))
+    const portfolioGame = unwrapToolPayload(try callMcpTool(18, "get_portfolio", {}, authConfig, token2Access))
+    const notifsGame = unwrapToolPayload(try callMcpTool(19, "get_notifications", { limit: 20 }, authConfig, token2Access))
+    const setSocialRes = unwrapToolPayload(try callMcpTool(20, "set_mode", { mode: "social" }, authConfig, token2Access))
+    try assertSocialModeRedaction("alice_mcp", authConfig, token2Access)
+    const setGameBackRes = unwrapToolPayload(try callMcpTool(21, "set_mode", { mode: "game" }, authConfig, token2Access))
+    const portfolioRestored = unwrapToolPayload(try callMcpTool(22, "get_portfolio", {}, authConfig, token2Access))
+    try check(() => {
+      assert.strictEqual(createdPayload.viaClientName, "Claude Desktop")
+      assert.strictEqual(createdPost.viaClientName, "Claude Desktop")
+      assert.strictEqual(feedPage.items[0]?.id, createdPost.id)
+      assert.strictEqual(feedPage.items[0]?.viaClientName, "Claude Desktop")
+      assert.strictEqual(feedPage.items[0]?.linkCashtags, true)
+      assert.strictEqual(pendingDevicePayload.status, "pending")
+      assert.strictEqual(forbiddenTradeRes.status, 403)
+      assert.include(forbiddenTradeRes.headers.get("www-authenticate") ?? "", 'error="insufficient_scope"')
+      assert.include(forbiddenTradeRes.headers.get("www-authenticate") ?? "", 'scope="trade"')
+      const err403 = forbiddenTradeRes.body.error as {
+        readonly code?: number
+        readonly data?: { readonly error?: string; readonly requiredScope?: string; readonly grantedScopes?: ReadonlyArray<string> }
+      }
+      assert.strictEqual(err403.code, -32003)
+      assert.strictEqual(err403.data?.error, "insufficient_scope")
+      assert.strictEqual(err403.data?.requiredScope, "trade")
+      assert.deepStrictEqual(err403.data?.grantedScopes, ["read", "social:write"])
+      assert.strictEqual(token2.status, "authorized")
+      assert.strictEqual(token2.scope, "read social:write messages trade")
+      assert.strictEqual(token2.client_name, "Hermes Agent")
+      assert.notStrictEqual(token2.grant_id, token1.grant_id)
+      assert.strictEqual(activeGrant?.grantId, token2.grant_id)
+      assert.strictEqual(activeGrant?.clientName, "Hermes Agent")
+      assertDual401(revokedOldRes, "revoked_token")
+      const tradePayload = unwrapToolPayload(tradeRes)
+      assert.strictEqual(tradePayload.viaClientName, "Hermes Agent")
+      assert.strictEqual(tradePayload.balanceAfterPts, 90)
+      assert.strictEqual(whoamiGame.playMode, "game")
+      assert.strictEqual(Object.hasOwn(whoamiGame, "balancePts"), true)
+      assert.strictEqual(whoamiGame.balancePts, 90)
+      assert.strictEqual(portfolioGame.playMode, "game")
+      assert.strictEqual(Object.hasOwn(portfolioGame, "balancePts"), true)
+      assert.strictEqual(Object.hasOwn(portfolioGame, "netProfitPts"), true)
+      assert.strictEqual((portfolioGame.predictionPositions as ReadonlyArray<unknown>).length, 1)
+      const gameKinds = ((notifsGame.items ?? []) as ReadonlyArray<{ readonly kind: string }>).map((n) => n.kind)
+      assert.includeMembers(gameKinds, ["mention", "market_resolved", "pnl_digest"])
+      assert.strictEqual(setSocialRes.playMode, "social")
+      assert.strictEqual(setGameBackRes.playMode, "game")
+      assert.strictEqual(portfolioRestored.balancePts, 90)
+      assert.strictEqual((portfolioRestored.predictionPositions as ReadonlyArray<unknown>).length, 1)
+    })
+  }
+})

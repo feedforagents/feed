@@ -1,0 +1,206 @@
+// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"
+import { AuthFailure } from "./errors.vibe"
+
+module web {
+  const encoder = new TextEncoder()
+
+  function toHex(bytes: Uint8Array): string {
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
+  }
+
+  function fromHex(hex: string): Uint8Array<ArrayBuffer> | undefined {
+    if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) return undefined
+    const out = new Uint8Array(hex.length / 2)
+    for (let i = 0; i < out.length; i++) {
+      out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+    }
+    return out
+  }
+
+  function toBase64Url(bytes: Uint8Array): string {
+    let binary = ""
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i])
+    }
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+  }
+
+  async function derivePbkdf2Hex(password: string, salt: Uint8Array<ArrayBuffer>, iterations: number): Promise<string> {
+    const keyMaterial = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"])
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations, hash: "SHA-256" }, keyMaterial, 256)
+    return toHex(new Uint8Array(bits))
+  }
+
+  /** @throws {never} */
+  export function newUuid(): string {
+    return crypto.randomUUID()
+  }
+
+  /** @throws {never} */
+  export function randomHex(byteLength: number): string {
+    const bytes = new Uint8Array(byteLength)
+    crypto.getRandomValues(bytes)
+    return toHex(bytes)
+  }
+
+  /** @throws {never} */
+  export function randomBase64Url(byteLength: number): string {
+    const bytes = new Uint8Array(byteLength)
+    crypto.getRandomValues(bytes)
+    return toBase64Url(bytes)
+  }
+
+  /** @throws {never} */
+  export function randomDigits(modulus: number, width: number): string {
+    const limit = Math.floor(0x1_0000_0000 / modulus) * modulus
+    const buf = new Uint32Array(1)
+    for (;;) {
+      crypto.getRandomValues(buf)
+      if (buf[0] < limit) {
+        return String(buf[0] % modulus).padStart(width, "0")
+      }
+    }
+  }
+
+  /** @throws {never} */
+  export function constantTimeEqual(left: string, right: string): boolean {
+    const a = encoder.encode(left)
+    const b = encoder.encode(right)
+    let diff = a.length ^ b.length
+    const len = a.length < b.length ? a.length : b.length
+    for (let i = 0; i < len; i++) {
+      diff |= a[i] ^ b[i]
+    }
+    return diff === 0
+  }
+
+  /** @throws {unknown} */
+  export async function sha256HexAsync(input: string): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", encoder.encode(input))
+    return toHex(new Uint8Array(digest))
+  }
+
+  /** @throws {unknown} */
+  export async function sha256Base64UrlAsync(input: string): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", encoder.encode(input))
+    return toBase64Url(new Uint8Array(digest))
+  }
+
+  /** @throws {unknown} */
+  export async function hmacSha256HexAsync(secret: string, input: string): Promise<string> {
+    if (secret.length === 0) throw new Error("digestKey must not be empty")
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    )
+    const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(input))
+    return toHex(new Uint8Array(sig))
+  }
+
+  /** @throws {unknown} */
+  export async function hashPasswordAsync(password: string): Promise<string> {
+    const iterations = 100_000
+    const salt = new Uint8Array(16)
+    crypto.getRandomValues(salt)
+    const derived = await derivePbkdf2Hex(password, salt, iterations)
+    return `pbkdf2_sha256$${iterations}$${toHex(salt)}$${derived}`
+  }
+
+  /** @throws {unknown} */
+  export async function verifyPasswordAsync(password: string, storedHash: string, digestKey: string): Promise<boolean> {
+    const parts = storedHash.split("$")
+    if (parts[0] === "pbkdf2_sha256" && parts.length === 4) {
+      const iterations = Number(parts[1])
+      const salt = fromHex(parts[2])
+      if (!Number.isSafeInteger(iterations) || iterations < 1 || iterations > 1_000_000 || salt === undefined) return false
+      const derived = await derivePbkdf2Hex(password, salt, iterations)
+      return constantTimeEqual(derived, parts[3])
+    }
+    if (parts[0] === "hmac_sha256" && parts.length === 3) {
+      const computed = await hmacSha256HexAsync(digestKey, `${parts[1]}:${password}`)
+      return constantTimeEqual(computed, parts[2])
+    }
+    if (parts[0] === "sha256" && parts.length === 3) {
+      const computed = await sha256HexAsync(`${parts[1]}:${password}`)
+      return constantTimeEqual(computed, parts[2])
+    }
+    return false
+  }
+}
+
+import {
+  constantTimeEqual,
+  hashPasswordAsync,
+  hmacSha256HexAsync,
+  newUuid,
+  randomBase64Url,
+  randomDigits,
+  randomHex,
+  sha256Base64UrlAsync,
+  sha256HexAsync,
+  verifyPasswordAsync
+} from web
+
+export {
+  constantTimeEqual,
+  newUuid,
+  randomBase64Url,
+  randomHex
+}
+
+export function randomSixDigitCode(): string {
+  return randomDigits(1_000_000, 6)
+}
+
+export function randomFourDigits(): string {
+  return randomDigits(10_000, 4)
+}
+
+export effect function sha256Hex(input: string): string!AuthFailure {
+  return try tryPromise({
+    try: () => sha256HexAsync(input),
+    catch: () => new AuthFailure({ code: "crypto_error", message: "Hashing failed.", status: 500 })
+  })
+}
+
+export effect function sha256Base64Url(input: string): string!AuthFailure {
+  return try tryPromise({
+    try: () => sha256Base64UrlAsync(input),
+    catch: () => new AuthFailure({ code: "crypto_error", message: "PKCE digest failed.", status: 500 })
+  })
+}
+
+export effect function hmacSha256Hex(secret: string, input: string): string!AuthFailure {
+  return try tryPromise({
+    try: () => hmacSha256HexAsync(secret, input),
+    catch: () => new AuthFailure({ code: "crypto_error", message: "HMAC computation failed.", status: 500 })
+  })
+}
+
+export effect function hashPassword(password: string): string!AuthFailure {
+  return try tryPromise({
+    try: () => hashPasswordAsync(password),
+    catch: () => new AuthFailure({ code: "crypto_error", message: "Password hashing failed.", status: 500 })
+  })
+}
+
+export effect function verifyPassword(password: string, storedHash: string, digestKey: string): boolean!AuthFailure {
+  return try tryPromise({
+    try: () => verifyPasswordAsync(password, storedHash, digestKey),
+    catch: () => new AuthFailure({ code: "crypto_error", message: "Password verification failed.", status: 500 })
+  })
+}
+
+export effect function hmacSigningKeyBytes(
+  secret: string,
+  code = "auth_not_configured",
+  message = "Signing secret is not configured."
+): Uint8Array<ArrayBuffer>!AuthFailure {
+  if (secret.trim().length === 0) {
+    throw new AuthFailure({ code, message, status: 500 })
+  }
+  return new TextEncoder().encode(secret)
+}

@@ -1,0 +1,56 @@
+name: deploy
+
+on:
+  push:
+    branches: [staging, main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Cloudflare Workers target environment
+        type: choice
+        options: [staging, production]
+        required: true
+      dry_run:
+        description: Bundle and validate without uploading to Cloudflare
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  deploy:
+    name: Deploy feed.fun (${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+    env:
+      TARGET_ENV: ${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: ./.github/actions/setup
+        with:
+          job: deploy-${{ env.TARGET_ENV }}
+          verification: "false"
+      - name: Generate specs and build @repo/app (SPA + Worker)
+        run: |
+          pnpm --filter @repo/design-system build
+          pnpm gen
+          pnpm --filter @repo/app build
+      - name: Deploy Worker + Assets to Cloudflare
+        run: |
+          flags=()
+          if [[ "${{ inputs.dry_run }}" == "true" || -z "$CLOUDFLARE_API_TOKEN" ]]; then
+            flags+=(--dry-run)
+          fi
+          pnpm --filter @repo/app exec wrangler deploy --config "wrangler.${TARGET_ENV}.jsonc" "${flags[@]}"

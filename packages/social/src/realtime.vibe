@@ -1,0 +1,177 @@
+// spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"
+export type FeedRealtimeEvent =
+  | {
+      readonly type: "post.created"
+      readonly postId: string
+      readonly authorId: string
+      readonly authorKind: "user" | "npc" | "org"
+      readonly replyToPostId: string | null
+      readonly quotePostId: string | null
+      readonly createdAt: number
+    }
+  | {
+      readonly type: "post.deleted"
+      readonly postId: string
+      readonly authorId: string
+    }
+  | {
+      readonly type: "post.engagement"
+      readonly postId: string
+      readonly kind: "like" | "unlike" | "repost" | "unrepost"
+      readonly accountId: string
+      readonly likeCount: number
+      readonly repostCount: number
+    }
+  | {
+      readonly type: "chat.message"
+      readonly chatId: string
+      readonly messageId: string
+      readonly senderId: string
+      readonly senderKind: "user" | "npc"
+      readonly createdAt: number
+    }
+  | {
+      readonly type: "chat.reaction"
+      readonly chatId: string
+      readonly messageId: string
+      readonly accountId: string
+      readonly emoji: string
+    }
+  | {
+      readonly type: "chat.invite"
+      readonly inviteId: string
+      readonly chatId: string
+      readonly invitedAccountId: string
+      readonly invitedByNpcId: string
+      readonly status: "pending" | "accepted" | "declined"
+    }
+  | {
+      readonly type: "notification.created"
+      readonly notificationId: string
+      readonly accountId: string
+      readonly kind: string
+      readonly isGameOnly: boolean
+    }
+  | {
+      readonly type: "world.tick"
+      readonly kind: "market" | "world" | "article"
+      readonly refId: string
+      readonly createdAt: number
+    }
+  | {
+      readonly type: "market.spot"
+      readonly actorId: string
+      readonly ticker: string
+      readonly side: "buy" | "sell"
+      readonly quoteCents: number
+    }
+  | {
+      readonly type: "market.clue"
+      readonly marketId: string
+      readonly actorId: string
+      readonly phase: string
+    }
+  | {
+      readonly type: "market.resolved"
+      readonly marketId: string
+      readonly outcome: "yes" | "no"
+      readonly articleId: string
+    }
+  | {
+      readonly type: "alpha.invite"
+      readonly actorId: string
+      readonly targetAccountId: string
+    }
+  | {
+      readonly type: "org.posted"
+      readonly organizationId: string
+      readonly ticker: string
+    }
+  | {
+      readonly type: "article.published"
+      readonly articleId: string
+      readonly organizationId: string
+    }
+
+export interface SseStreamOptions {
+  readonly signal?: AbortSignal
+  readonly keepalive?: boolean
+}
+
+export interface SseResponseOptions extends SseStreamOptions {
+  readonly filter?: (event: FeedRealtimeEvent) => boolean
+}
+
+const encoder = new TextEncoder()
+
+module web {
+  /** @throws {never} */
+  export function sseResponse(body: ReadableStream<Uint8Array>): Response {
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive"
+      }
+    })
+  }
+}
+import { sseResponse } from web
+
+export service RealtimeBus {
+  static readonly key = "@repo/social/RealtimeBus"
+  publish(event: FeedRealtimeEvent): boolean!!
+  subscribe(): Stream.Stream<FeedRealtimeEvent>
+}
+
+export const realtimeBusLayer: Layer.Layer<RealtimeBus> = Layer.effect(RealtimeBus, effect {
+  const pubsub = try PubSub.unbounded<FeedRealtimeEvent>()
+  const shape: RealtimeBus.Shape = {
+    publish: (event) => PubSub.publish(pubsub, event),
+    subscribe: () => Stream.fromPubSub(pubsub)
+  }
+  return shape
+})
+
+export effect function publishFeedEvent(event: FeedRealtimeEvent): boolean!! {
+  const maybeBus = try Effect.serviceOption(RealtimeBus)
+  if (Option.isSome(maybeBus)) {
+    return try maybeBus.value.publish(event)
+  }
+  return false
+}
+
+export effect function subscribeFeedEvents(): Stream.Stream<FeedRealtimeEvent>!! {
+  const maybeBus = try Effect.serviceOption(RealtimeBus)
+  return Option.isSome(maybeBus) ? maybeBus.value.subscribe() : Stream.empty
+}
+
+export function encodeSseEvent(event: FeedRealtimeEvent): Uint8Array {
+  return encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+}
+
+export function toSseReadableStream(
+  events: Stream.Stream<FeedRealtimeEvent>,
+  options: SseStreamOptions = {}
+): ReadableStream<Uint8Array> {
+  const initialFrame = Stream.make(encoder.encode(": connected\n\n"))
+  const eventFrames = Stream.map(events, encodeSseEvent)
+  const payload = options.keepalive === false
+    ? eventFrames
+    : Stream.merge(eventFrames, Stream.map(Stream.tick("25 seconds"), () => encoder.encode(": keepalive\n\n")))
+  const bytes = Stream.concat(initialFrame, payload)
+  return options.signal === undefined
+    ? Stream.toReadableStream(bytes)
+    : Stream.toReadableStreamWith(bytes, Context.empty(), { signal: options.signal })
+}
+
+export effect function createSseResponse(options: SseResponseOptions = {}): Response!! {
+  const events = try subscribeFeedEvents()
+  const filtered = options.filter === undefined ? events : Stream.filter(events, options.filter)
+  const streamOptions: SseStreamOptions = {
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.keepalive === undefined ? {} : { keepalive: options.keepalive })
+  }
+  return sseResponse(toSseReadableStream(filtered, streamOptions))
+}

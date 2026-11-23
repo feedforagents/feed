@@ -1,0 +1,45 @@
+// spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"
+export {
+  FEED_HOW_TO_PLAY_MD,
+  FEED_LLMS_TXT,
+  FEED_SKILL_DESCRIPTION,
+  FEED_SKILL_MD,
+  buildAgentLinks,
+  normalizeOrigin,
+  renderLlmsTxt,
+  type AgentHostId,
+  type AgentHostLink,
+  type HostLaunchKind
+} from "./skill-content.ts"
+
+export {
+  SkillDigestError,
+  SkillPublishInvalid,
+  computeSkillSha256,
+  getSkillDiscoveryIndex,
+  handleSkillRoute,
+  resolvePublishedHosts,
+  type PublishedAgentHost,
+  type SkillDiscoveryEntry,
+  type SkillDiscoveryIndex,
+  type SkillHostsPayload
+} from "./skill-publisher.vibe"
+
+export {
+  CURRENCY_DISCLAIMER,
+  LATEST_MCP_PROTOCOL_VERSION,
+  MCP_PROMPTS,
+  MCP_RESOURCES,
+  type McpPromptDefinition,
+  type McpResourceDefinition,
+  type McpToolScope
+} from "./tool-catalog.ts"
+
+export {
+  MCP_TOOL_DEFINITIONS,
+  McpFailure,
+  handleMcpRequest,
+  type McpScope,
+  type McpToolDefinition,
+  type McpToolName
+} from "./server.vibe"

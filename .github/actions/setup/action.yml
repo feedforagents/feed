@@ -229,6 +229,7 @@ runs:
         fi
         if [[ $PUBLISH_GEN_SEED == true ]]; then export TURBO_RUN_SUMMARY=true; fi
         pnpm install --frozen-lockfile
+        if [[ -d vendor/eliza/packages/core/src ]]; then pnpm eliza:gen; fi
     - id: publish-gen-seed
       if: inputs.verification == 'true' && steps.gen-seed.outputs.prefix != ''
       continue-on-error: true

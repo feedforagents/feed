@@ -1,0 +1,362 @@
+// spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
+import { actors, correlations, manifest, organizations } from "@repo/pack-default"
+import { sanitizeText } from "./shared.vibe"
+
+export type PromptId =
+  | "ambientPost"
+  | "commentary"
+  | "replyPost"
+  | "orgPost"
+  | "marketQuestion"
+  | "cluePost"
+  | "resolutionArticle"
+  | "npcTradingDecision"
+  | "alphaGroupMessage"
+  | "rssParodyRewrite"
+  | "feedArticle"
+  | "worldFactsConsolidation"
+
+export interface PromptDefinition {
+  readonly id: PromptId
+  readonly description: string
+  readonly maxTokens: number
+  readonly temperature: number
+  readonly jsonMode: boolean
+  readonly system: string
+  readonly user: string
+}
+
+export interface RenderedPrompt {
+  readonly id: PromptId
+  readonly system: string
+  readonly user: string
+  readonly maxTokens: number
+  readonly temperature: number
+  readonly jsonMode: boolean
+}
+
+export interface WorldContextMarketItem {
+  readonly id: string
+  readonly question: string
+  readonly category: string
+  readonly timeframe: string
+  readonly phase: string
+  readonly yesProbPct: number
+  readonly expiresAt: number
+}
+
+export interface WorldContextPerpItem {
+  readonly ticker: string
+  readonly markPriceCents: number
+  readonly indexPriceCents: number
+  readonly fundingRateBps: number
+}
+
+export interface WorldContextPostItem {
+  readonly id: string
+  readonly authorId: string
+  readonly authorKind: string
+  readonly content: string
+}
+
+export interface WorldContextInput {
+  readonly currentDay: number
+  readonly currentHour: number
+  readonly phase: string
+  readonly worldFacts: ReadonlyArray<string>
+  readonly parodyHeadlines: ReadonlyArray<string>
+  readonly openMarkets: ReadonlyArray<WorldContextMarketItem>
+  readonly perpMarkets: ReadonlyArray<WorldContextPerpItem>
+  readonly recentPosts: ReadonlyArray<WorldContextPostItem>
+  readonly actorSummary?: string
+}
+
+export type NpcDecisionAction =
+  | { readonly kind: "SPOT_TRADE"; readonly ticker: string; readonly side: "buy" | "sell"; readonly quoteCents: number }
+  | { readonly kind: "PERP_TRADE"; readonly ticker: string; readonly side: "long" | "short"; readonly collateralCents: number; readonly leverage: number }
+  | { readonly kind: "PREDICTION_TRADE"; readonly marketId: string; readonly side: "yes" | "no"; readonly amountCents: number }
+  | { readonly kind: "CREATE_POST"; readonly content: string; readonly marketId?: string; readonly ticker?: string }
+  | { readonly kind: "CREATE_REPLY"; readonly replyToPostId: string; readonly content: string }
+  | { readonly kind: "SEND_GROUP_MESSAGE"; readonly chatId: string; readonly content: string }
+  | { readonly kind: "INVITE_ALPHA" }
+
+export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
+  ambientPost: {
+    id: "ambientPost",
+    description: "Organic in-character Feed post under 280 chars",
+    maxTokens: 160,
+    temperature: 0.85,
+    jsonMode: false,
+    system: "You write sharp, believable social posts inside the satirical Silicon Valley trading world of Feed. Stay strictly in character, never leak secret market outcomes, and keep output under 260 characters as plain text only.",
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nVoice: {{actorVoice}}\nWorld Context:\n{{worldContext}}\nDiversity Guidance:\n{{diversityHint}}\nWrite one short standalone Feed post reacting to current markets or headlines.",
+  },
+  commentary: {
+    id: "commentary",
+    description: "NPC analytical or contrarian commentary on a live catalyst",
+    maxTokens: 180,
+    temperature: 0.8,
+    jsonMode: false,
+    system: "You write punchy trader and founder commentary inside Feed. Speak concretely about tickers, prediction odds, or headlines without generic filler. Output plain text under 260 characters.",
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nCatalyst: {{catalyst}}\nWorld Context:\n{{worldContext}}\nWrite one commentary post.",
+  },
+  replyPost: {
+    id: "replyPost",
+    description: "Direct reply to a feed post or thread",
+    maxTokens: 160,
+    temperature: 0.8,
+    jsonMode: false,
+    system: "You reply directly to another post on Feed in character. Reference the specific claim or ticker you are responding to. Output plain text under 250 characters.",
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nReplying to @{{targetAuthor}}: {{targetContent}}\nWorld Context:\n{{worldContext}}\nWrite your direct reply.",
+  },
+  orgPost: {
+    id: "orgPost",
+    description: "Official Feed post from a satirical tech/finance organization",
+    maxTokens: 160,
+    temperature: 0.75,
+    jsonMode: false,
+    system: "You author official press releases, metrics brags, or damage-control statements for a fictional Feed organization. Output plain text under 260 characters.",
+    user: "Organization: {{orgName}} ({{ticker}})\nStyle: {{postStyle}}\nDescription: {{orgDescription}}\nWorld Context:\n{{worldContext}}\nWrite one organization post.",
+  },
+  marketQuestion: {
+    id: "marketQuestion",
+    description: "Create one crisp binary prediction market for a rolling slot",
+    maxTokens: 280,
+    temperature: 0.7,
+    jsonMode: true,
+    system: "You design binary YES/NO prediction markets for Feed's satirical Silicon Valley economy. Return strict JSON: {\"question\": string, \"description\": string, \"category\": string, \"secretOutcome\": \"YES\" | \"NO\"}. Questions must be specific, timely for the slot timeframe, and different from existing active questions.",
+    user: "Slot Index: {{slotIndex}}\nTimeframe: {{timeframe}}\nExisting Active Questions:\n{{existingQuestions}}\nWorld Context:\n{{worldContext}}\nGenerate one new binary prediction market.",
+  },
+  cluePost: {
+    id: "cluePost",
+    description: "Phase-aware public narrative clue without revealing secret outcome",
+    maxTokens: 180,
+    temperature: 0.8,
+    jsonMode: false,
+    system: "You write an atmospheric phase-aware market observation from an NPC in Feed. Reflect the tension of the narrative phase (opening rumors, mid debate, or climax crunch) WITHOUT stating a guaranteed YES or NO outcome or claiming private settlement knowledge. Keep under 260 characters.",
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nVoice: {{actorVoice}}\nMarket Question: {{question}}\nCategory: {{category}}\nNarrative Phase: {{phase}}\nWorld Context:\n{{worldContext}}\nWrite one subtle clue post.",
+  },
+  resolutionArticle: {
+    id: "resolutionArticle",
+    description: "Journalistic proof article prepared after market expiry",
+    maxTokens: 480,
+    temperature: 0.5,
+    jsonMode: true,
+    system: "You write investigative wire dispatches confirming why an expired Feed prediction market resolved YES or NO. Return strict JSON: {\"title\": string, \"summary\": string, \"body\": string}. Ground every claim in the provided outcome and world context.",
+    user: "Market ID: {{marketId}}\nQuestion: {{question}}\nDescription: {{description}}\nConfirmed Resolution Outcome: {{resolvedOutcome}}\nWorld Context:\n{{worldContext}}\nWrite the resolution proof article JSON.",
+  },
+  npcTradingDecision: {
+    id: "npcTradingDecision",
+    description: "Bounded JSON turn plan over Feed actions and trades",
+    maxTokens: 520,
+    temperature: 0.65,
+    jsonMode: true,
+    system: "You are an autonomous NPC agent inside Feed deciding up to {{maxSteps}} concrete actions for this tick. Return strict JSON: {\"actions\": [...]}. Allowed action objects: SPOT_TRADE ({kind:\"SPOT_TRADE\",ticker,side:\"buy\"|\"sell\",quoteCents}), PERP_TRADE ({kind:\"PERP_TRADE\",ticker,side:\"long\"|\"short\",collateralCents,leverage}), PREDICTION_TRADE ({kind:\"PREDICTION_TRADE\",marketId,side:\"yes\"|\"no\",amountCents}), CREATE_POST ({kind:\"CREATE_POST\",content,marketId?,ticker?}), CREATE_REPLY ({kind:\"CREATE_REPLY\",replyToPostId,content}), SEND_GROUP_MESSAGE ({kind:\"SEND_GROUP_MESSAGE\",chatId,content}), INVITE_ALPHA ({kind:\"INVITE_ALPHA\"}). Use only listed IDs and tickers.",
+    user: "Actor: {{actorName}} ({{actorId}})\nPersona: {{actorPersona}}\nTrading Style: {{tradingStyle}}\nMax Steps: {{maxSteps}}\nAvailable Tickers: {{tickers}}\nAvailable Market IDs: {{marketIds}}\nAvailable Reply Post IDs: {{replyPostIds}}\nAvailable Alpha Chat IDs: {{chatIds}}\nActor Portfolio:\n{{portfolio}}\nWorld Context:\n{{worldContext}}\nDiversity Guidance:\n{{diversityHint}}\nOutput your JSON action list.",
+  },
+  alphaGroupMessage: {
+    id: "alphaGroupMessage",
+    description: "Private NPC alpha group chatter",
+    maxTokens: 160,
+    temperature: 0.85,
+    jsonMode: false,
+    system: "You send candid insider-style desk notes inside a private NPC alpha group chat in Feed. Never fabricate private resolution outcomes; discuss flows, orderbook skew, and catalysts. Under 260 chars.",
+    user: "Actor: {{actorName}}\nChat: {{chatName}}\nWorld Context:\n{{worldContext}}\nWrite one short alpha group message.",
+  },
+  rssParodyRewrite: {
+    id: "rssParodyRewrite",
+    description: "Rewrite a real headline into Feed satirical universe parody",
+    maxTokens: 120,
+    temperature: 0.8,
+    jsonMode: false,
+    system: "You rewrite real-world tech and finance headlines into crisp satirical headlines set in Feed's parody Silicon Valley universe ({{rosterHint}}). Output a single headline line under 160 characters with no quotes.",
+    user: "Original Headline: {{headline}}\nSource: {{sourceUrl}}\nWrite the satirical Feed parody headline.",
+  },
+  feedArticle: {
+    id: "feedArticle",
+    description: "Satirical investigative market feature article",
+    maxTokens: 520,
+    temperature: 0.75,
+    jsonMode: true,
+    system: "You write satirical business journalism for a Feed news organization. Return strict JSON: {\"title\": string, \"summary\": string, \"body\": string}. Keep tone sharp and specific.",
+    user: "Media Organization: {{orgName}} ({{orgDescription}})\nWorld Context:\n{{worldContext}}\nWrite one market feature article JSON.",
+  },
+  worldFactsConsolidation: {
+    id: "worldFactsConsolidation",
+    description: "Distill recent game events into concise canonical world facts",
+    maxTokens: 320,
+    temperature: 0.4,
+    jsonMode: true,
+    system: "You consolidate recent Feed market outcomes and major headlines into short factual memory bullets for actors. Return strict JSON: {\"facts\": [{\"factText\": string, \"category\": string}]}.",
+    user: "Recent Events:\n{{recentEvents}}\nReturn up to 3 concise world facts.",
+  },
+}
+
+export function renderTemplate(template: string, vars: Readonly<Record<string, string>>): string {
+  return template.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, key: string) => vars[key] ?? "")
+}
+
+export function renderPrompt(id: PromptId, vars: Readonly<Record<string, string>>): RenderedPrompt {
+  const def = PromptCatalog[id]
+  return {
+    id: def.id,
+    system: renderTemplate(def.system, vars),
+    user: renderTemplate(def.user, vars),
+    maxTokens: def.maxTokens,
+    temperature: def.temperature,
+    jsonMode: def.jsonMode,
+  }
+}
+
+export function groundingRosterSummary(): string {
+  const sampleActors = actors.slice(0, 6).map((a) => `${a.name} (@${a.username})`).join(", ")
+  const sampleOrgs = organizations.filter((o) => o.ticker).slice(0, 6).map((o) => `${o.name} [$${o.ticker}]`).join(", ")
+  const sampleCorr = correlations.slice(0, 2).map((c) => `${c.orgId}->${c.relatedOrgId}`).join(", ")
+  return `Pack ${manifest.id}: Actors [${sampleActors}]; Tickers [${sampleOrgs}]; Links [${sampleCorr}]`
+}
+
+export function buildWorldContext(input: WorldContextInput): string {
+  const sections: string[] = [
+    `World Clock: Day ${input.currentDay}, Hour ${String(input.currentHour).padStart(2, "0")}:00 UTC (Phase: ${input.phase})`,
+    groundingRosterSummary(),
+  ]
+  if (input.worldFacts.length > 0) {
+    sections.push(`World Facts:\n${input.worldFacts.slice(0, 6).map((f) => `- ${sanitizeText(f, 160)}`).join("\n")}`)
+  }
+  if (input.parodyHeadlines.length > 0) {
+    sections.push(`Recent Parody Headlines:\n${input.parodyHeadlines.slice(0, 5).map((h) => `- ${sanitizeText(h, 140)}`).join("\n")}`)
+  }
+  if (input.openMarkets.length > 0) {
+    sections.push(
+      `Open Prediction Markets:\n${input.openMarkets.slice(0, 10).map((m) => `- [${m.id}] (${m.timeframe}/${m.phase}, YES ${m.yesProbPct}%) ${sanitizeText(m.question, 140)}`).join("\n")}`,
+    )
+  }
+  if (input.perpMarkets.length > 0) {
+    sections.push(
+      `Perp & Spot Tickers:\n${input.perpMarkets.slice(0, 8).map((p) => `- ${p.ticker}: mark $${(p.markPriceCents / 100).toFixed(2)}, index $${(p.indexPriceCents / 100).toFixed(2)}, funding ${p.fundingRateBps}bps`).join("\n")}`,
+    )
+  }
+  if (input.recentPosts.length > 0) {
+    sections.push(
+      `Recent Feed Posts:\n${input.recentPosts.slice(0, 8).map((post) => `- [${post.id}] ${post.authorId}: ${sanitizeText(post.content, 140)}`).join("\n")}`,
+    )
+  }
+  if (input.actorSummary && input.actorSummary.trim().length > 0) {
+    sections.push(`Portfolio & Focus:\n${input.actorSummary.trim()}`)
+  }
+  return sections.join("\n\n")
+}
+
+export function formatFeedDiversityHint(recentPosts: ReadonlyArray<{ readonly authorId: string; readonly content: string }>): string {
+  if (recentPosts.length === 0) {
+    return "Feed is fresh; introduce a crisp angle referencing a live ticker or market."
+  }
+  const openers = recentPosts
+    .slice(0, 6)
+    .map((post) => sanitizeText(post.content, 48).split(" ").slice(0, 4).join(" "))
+    .filter((snippet) => snippet.length > 0)
+  const recentAuthors = [...new Set(recentPosts.slice(0, 6).map((p) => p.authorId))].join(", ")
+  return `Avoid repeating recent openers (${openers.join(" | ")}) or echoing ${recentAuthors}; offer a distinct price/catalyst claim.`
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+}
+
+function asPositiveInt(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback
+  return Math.max(min, Math.min(max, Math.round(value)))
+}
+
+function asNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null
+}
+
+function parseTradeDecision(
+  item: Record<string, unknown>,
+  kind: string,
+  tickers: Set<string>,
+  marketIds: Set<string>,
+): NpcDecisionAction | null {
+  if (kind === "SPOT_TRADE") {
+    const ticker = asNonEmptyString(item.ticker)?.toUpperCase() ?? ""
+    const side = item.side === "sell" ? "sell" : "buy"
+    if (!tickers.has(ticker)) return null
+    return { kind: "SPOT_TRADE", ticker, side, quoteCents: asPositiveInt(item.quoteCents, 2_500, 100, 50_000) }
+  }
+  if (kind === "PERP_TRADE") {
+    const ticker = asNonEmptyString(item.ticker)?.toUpperCase() ?? ""
+    const side = item.side === "short" ? "short" : "long"
+    if (!tickers.has(ticker)) return null
+    return { kind: "PERP_TRADE", ticker, side, collateralCents: asPositiveInt(item.collateralCents, 2_500, 500, 50_000), leverage: asPositiveInt(item.leverage, 3, 1, 20) }
+  }
+  if (kind === "PREDICTION_TRADE") {
+    const marketId = asNonEmptyString(item.marketId) ?? ""
+    const side = item.side === "no" ? "no" : "yes"
+    if (!marketIds.has(marketId)) return null
+    return { kind: "PREDICTION_TRADE", marketId, side, amountCents: asPositiveInt(item.amountCents, 2_000, 100, 25_000) }
+  }
+  return null
+}
+
+function parseSocialDecision(
+  item: Record<string, unknown>,
+  kind: string,
+  tickers: Set<string>,
+  marketIds: Set<string>,
+  replyIds: Set<string>,
+  chatIds: Set<string>,
+): NpcDecisionAction | null {
+  if (kind === "INVITE_ALPHA") return { kind: "INVITE_ALPHA" }
+  const rawContent = asNonEmptyString(item.content)
+  if (rawContent === null) return null
+  const content = sanitizeText(rawContent, 275)
+  if (kind === "CREATE_POST") {
+    const marketId = asNonEmptyString(item.marketId)
+    const ticker = asNonEmptyString(item.ticker)?.toUpperCase()
+    return {
+      kind: "CREATE_POST",
+      content,
+      ...(marketId && marketIds.has(marketId) ? { marketId } : {}),
+      ...(ticker && tickers.has(ticker) ? { ticker } : {}),
+    }
+  }
+  if (kind === "CREATE_REPLY") {
+    const replyToPostId = asNonEmptyString(item.replyToPostId)
+    if (!replyToPostId || !replyIds.has(replyToPostId)) return null
+    return { kind: "CREATE_REPLY", replyToPostId, content }
+  }
+  if (kind === "SEND_GROUP_MESSAGE") {
+    const chatId = asNonEmptyString(item.chatId)
+    if (!chatId || !chatIds.has(chatId)) return null
+    return { kind: "SEND_GROUP_MESSAGE", chatId, content }
+  }
+  return null
+}
+
+export function validateNpcTradingDecision(
+  raw: unknown,
+  maxSteps: number,
+  availableTickers: ReadonlyArray<string>,
+  availableMarketIds: ReadonlyArray<string>,
+  replyTargetIds: ReadonlyArray<string> = [],
+  chatIds: ReadonlyArray<string> = [],
+): ReadonlyArray<NpcDecisionAction> {
+  const root = asRecord(raw)
+  const rawActions = root && Array.isArray(root.actions) ? root.actions : Array.isArray(raw) ? raw : []
+  const cap = Math.max(0, Math.min(4, Math.floor(maxSteps)))
+  const tickerSet = new Set(availableTickers.map((t) => t.toUpperCase()))
+  const marketSet = new Set(availableMarketIds)
+  const replySet = new Set(replyTargetIds)
+  const chatSet = new Set(chatIds)
+  const out: NpcDecisionAction[] = []
+  for (const entry of rawActions) {
+    if (out.length >= cap) break
+    const item = asRecord(entry)
+    if (!item) continue
+    const kind = asNonEmptyString(item.kind)
+    if (!kind) continue
+    const parsed = parseTradeDecision(item, kind, tickerSet, marketSet) ?? parseSocialDecision(item, kind, tickerSet, marketSet, replySet, chatSet)
+    if (parsed !== null) out.push(parsed)
+  }
+  return out
+}

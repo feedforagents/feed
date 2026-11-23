@@ -1,6 +1,6 @@
 # Design system
 
-One accent on quiet neutrals. Color carries meaning; position and weight carry hierarchy.
+One electric-blue (`#0066FF`-inspired) accent on crisp X-style light and dark neutrals. Color carries meaning; position and weight carry hierarchy.
 
 - **Surfaces.** `background` is the page, `card` a raised panel, `popover` anything floating. `muted` and
   `secondary` are quiet fills, `accent` the hover and selection fill.
@@ -25,7 +25,7 @@ is unavoidable, such as a chart series or third-party markup, say why on the lin
 this prose into tokens. To change the design, describe it, and have the change written as a list in a file:
 
 ```json
-[{ "path": "color.light.primary", "value": "oklch(0.45 0.2 277)", "reason": "deeper accent" }]
+[{ "path": "color.light.primary", "value": "oklch(0.45 0.21 262)", "reason": "deeper accent" }]
 ```
 
 - `node ../../vibestack/design/cli.ts apply changes.json` refuses an unknown path, an invalid value or a
@@ -36,28 +36,28 @@ this prose into tokens. To change the design, describe it, and have the change w
 <!-- tokens:start -->
 | Color | Light | Dark |
 | --- | --- | --- |
-| `background` | oklch(0.976 0.001 286.4) | oklch(0.17 0.006 285.7) |
-| `foreground` | oklch(0.21 0.006 285.9) | oklch(0.944 0.005 286.3) |
-| `card` | oklch(1 0 0) | oklch(0.206 0.008 285.7) |
-| `card-foreground` | oklch(0.21 0.006 285.9) | oklch(0.944 0.005 286.3) |
-| `popover` | oklch(1 0 0) | oklch(0.206 0.008 285.7) |
-| `popover-foreground` | oklch(0.21 0.006 285.9) | oklch(0.944 0.005 286.3) |
-| `primary` | oklch(0.511 0.23 277) | oklch(0.682 0.173 282.3) |
-| `primary-foreground` | oklch(1 0 0) | oklch(0.17 0.006 285.7) |
-| `secondary` | oklch(0.959 0.004 286.3) | oklch(0.25 0.011 285.6) |
-| `secondary-foreground` | oklch(0.21 0.006 285.9) | oklch(0.944 0.005 286.3) |
-| `muted` | oklch(0.959 0.004 286.3) | oklch(0.25 0.011 285.6) |
-| `muted-foreground` | oklch(0.532 0.017 285.8) | oklch(0.709 0.016 286) |
-| `accent` | oklch(0.958 0.02 279.9) | oklch(0.276 0.072 281.7) |
-| `accent-foreground` | oklch(0.21 0.006 285.9) | oklch(0.944 0.005 286.3) |
-| `destructive` | oklch(0.577 0.215 27.3) | oklch(0.711 0.166 22.2) |
-| `destructive-foreground` | oklch(1 0 0) | oklch(0.17 0.006 285.7) |
-| `border` | oklch(0.92 0.004 286.3) | oklch(0.288 0.013 285.6) |
-| `input` | oklch(0.64 0.012 286.1) | oklch(0.52 0.014 285.7) |
-| `ring` | oklch(0.511 0.23 277) | oklch(0.682 0.173 282.3) |
-| `ok` | oklch(0.527 0.137 150.1) | oklch(0.8 0.182 151.7) |
-| `warn` | oklch(0.555 0.146 49) | oklch(0.837 0.164 84.4) |
-| `info` | oklch(0.5 0.13 255) | oklch(0.82 0.09 253) |
+| `background` | oklch(0.99 0.002 260) | oklch(0.145 0.006 260) |
+| `foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
+| `card` | oklch(1 0 0) | oklch(0.185 0.008 260) |
+| `card-foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
+| `popover` | oklch(1 0 0) | oklch(0.195 0.009 260) |
+| `popover-foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
+| `primary` | oklch(0.495 0.226 262) | oklch(0.68 0.168 262) |
+| `primary-foreground` | oklch(1 0 0) | oklch(0.145 0.006 260) |
+| `secondary` | oklch(0.955 0.006 255) | oklch(0.235 0.012 260) |
+| `secondary-foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
+| `muted` | oklch(0.955 0.006 255) | oklch(0.235 0.012 260) |
+| `muted-foreground` | oklch(0.48 0.018 255) | oklch(0.72 0.015 260) |
+| `accent` | oklch(0.948 0.022 260) | oklch(0.26 0.065 262) |
+| `accent-foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
+| `destructive` | oklch(0.545 0.215 26) | oklch(0.7 0.175 24) |
+| `destructive-foreground` | oklch(1 0 0) | oklch(0.145 0.006 260) |
+| `border` | oklch(0.908 0.007 255) | oklch(0.275 0.012 260) |
+| `input` | oklch(0.62 0.014 255) | oklch(0.515 0.015 260) |
+| `ring` | oklch(0.495 0.226 262) | oklch(0.68 0.168 262) |
+| `ok` | oklch(0.52 0.125 155) | oklch(0.78 0.165 155) |
+| `warn` | oklch(0.545 0.134 55) | oklch(0.82 0.155 78) |
+| `info` | oklch(0.52 0.11 235) | oklch(0.78 0.112 232) |
 
 | Token | Value |
 | --- | --- |

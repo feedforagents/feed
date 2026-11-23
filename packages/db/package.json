@@ -1,0 +1,36 @@
+{
+  "name": "@repo/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=26"
+  },
+  "exports": {
+    ".": "./src/index.vibe",
+    "./worker": "./src/worker.vibe",
+    "./node": "./src/node.vibe",
+    "./schema": "./src/schema.sql.ts"
+  },
+  "scripts": {
+    "typecheck": "vibelang --noEmit -p .",
+    "build": "vibelang -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.1.1",
+    "@electric-sql/pglite": "catalog:",
+    "@elizaos/cloud": "workspace:*",
+    "@repo/pack-default": "workspace:*",
+    "effect": "4.1.1",
+    "pg": "catalog:",
+    "vibelang-runtime": "0.0.13"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/pg": "catalog:",
+    "typescript": "catalog:",
+    "vibelang": "0.0.13",
+    "vibestack": "workspace:*"
+  }
+}

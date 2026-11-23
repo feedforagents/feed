@@ -1,0 +1,1199 @@
+// spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"; spec/auth/oauth.md, "Authorization requires PKCE S256, code flow, normalized resource, and preserves 400+ character state across one 4-scope consent screen"; spec/auth/oauth.md, "Rotating refresh tokens cap grants at 90 days and revoke the entire grant family on reuse"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/auth/oauth.md, "Exchanging an approved device code issues tokens and atomically replaces any prior connected agent"
+import { Store, type StoreFailure, toInt, toText, type Tx } from "@repo/db"
+import { HttpClientRequest } from "effect/http"
+import { SignJWT, jwtVerify } from "jose"
+import {
+  accessTokenLifetimeMs,
+  approveConsent,
+  approveDeviceFlow,
+  canApproveConsent,
+  canApproveDeviceFlow,
+  canExchangeAuthCode,
+  canExchangeDeviceCode,
+  canRefreshOAuthToken,
+  canRegisterClient,
+  canRevokeOAuthGrant,
+  canStartAuthorization,
+  canStartDeviceFlow,
+  canonicalDeviceUri,
+  canonicalIssuer,
+  canonicalMcpResource,
+  deviceCodeLifetimeMs,
+  emptyFamily,
+  exchangeAuthCode,
+  exchangeDeviceCode,
+  idleAuth,
+  idleDeviceAuth,
+  initial,
+  isRefreshReuse,
+  maxGrantLifetimeMs,
+  normalizeResource as specNormalizeResource,
+  redirectAllowed,
+  refreshOAuthToken,
+  registerClient,
+  resourceAllowed,
+  revokeOAuthGrant,
+  startAuthorization,
+  startDeviceFlow,
+  type OAuthState,
+  type RedirectKind
+} from "../gen/auth__oauth.effect.vibe"
+import type { ScopeSet } from "../gen/auth__agentGrant.effect.vibe"
+import {
+  AGENT_SCOPES,
+  connectSingleAgentGrantInTx,
+  parseAgentScopes,
+  type AgentScope
+} from "./agent-grant.vibe"
+import {
+  constantTimeEqual,
+  hmacSigningKeyBytes,
+  newUuid,
+  randomBase64Url,
+  randomFourDigits,
+  randomHex,
+  sha256Base64Url,
+  sha256Hex
+} from "./crypto.vibe"
+import { AuthFailure, UnauthorizedError } from "./errors.vibe"
+import { executeHttpJson } from "./http.vibe"
+import type { AuthRuntimeConfig, PlayMode } from "./phone-auth.vibe"
+
+export interface VerifiedAccessToken {
+  readonly accountId: string
+  readonly grantId: string
+  readonly clientId: string
+  readonly clientName: string
+  readonly scopes: ReadonlyArray<AgentScope>
+  readonly playMode: PlayMode
+  readonly activeGrant: true
+}
+
+export interface OAuthTokenResponse {
+  readonly access_token: string
+  readonly token_type: "Bearer"
+  readonly expires_in: number
+  readonly refresh_token: string
+  readonly scope: string
+  readonly resource: string
+  readonly grant_id: string
+  readonly client_id: string
+  readonly client_name: string
+}
+
+export interface RegisteredOAuthClient {
+  readonly client_id: string
+  readonly client_name: string
+  readonly redirect_uris: ReadonlyArray<string>
+  readonly client_uri: string | null
+  readonly token_endpoint_auth_method: "none"
+  readonly grant_types: ReadonlyArray<string>
+  readonly response_types: ReadonlyArray<string>
+  readonly scope: string
+  readonly client_id_issued_at: number
+}
+
+export interface ClientMetadataDocument {
+  readonly clientId: string
+  readonly clientName: string
+  readonly redirectUris: ReadonlyArray<string>
+  readonly clientUri: string | null
+  readonly isCimd: true
+}
+
+export interface AuthorizationCodeResult {
+  readonly code: string
+  readonly state: string
+  readonly iss: string
+  readonly redirectUri: string
+  readonly resource: string
+  readonly scope: string
+  readonly expiresAt: number
+}
+
+export interface DeviceAuthorizationResponse {
+  readonly device_code: string
+  readonly user_code: string
+  readonly verification_uri: string
+  readonly verification_uri_complete: string
+  readonly expires_in: number
+  readonly interval: number
+}
+
+export interface DeviceApprovalResult {
+  readonly approved: boolean
+  readonly userCode: string
+  readonly clientId: string
+  readonly clientName: string
+  readonly scopes?: ReadonlyArray<AgentScope>
+}
+
+const AUTH_CODE_LIFETIME_MS = 10 * 60_000
+const PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/
+const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/
+const SUPPORTED_GRANTS = [
+  "authorization_code",
+  "refresh_token",
+  "urn:ietf:params:oauth:grant-type:device_code"
+] as const
+
+const CimdSchema = Schema.Struct({
+  client_id: Schema.String,
+  client_name: Schema.String,
+  redirect_uris: Schema.Array(Schema.String),
+  token_endpoint_auth_method: Schema.optionalKey(Schema.String),
+  client_uri: Schema.optionalKey(Schema.String)
+})
+
+const RedirectUrisSchema = Schema.Array(Schema.String)
+
+function normalizeOrigin(rawOrigin: string): string {
+  const trimmed = rawOrigin.trim()
+  try {
+    return new URL(trimmed).origin
+  } catch {
+    return trimmed.replace(/\/+$/, "")
+  }
+}
+
+export function normalizeResource(raw: string): string {
+  const stripped = raw.trim().replace(/\/+$/, "")
+  return specNormalizeResource(stripped)
+}
+
+function isAllowedResource(rawResource: string, origin?: string): boolean {
+  const normalized = normalizeResource(rawResource)
+  if (resourceAllowed(normalized)) return true
+  if (origin !== undefined && origin.trim() !== "") {
+    return normalized === normalizeResource(`${normalizeOrigin(origin)}/mcp`)
+  }
+  return false
+}
+
+function isDisallowedRemoteHost(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  if (
+    host === "localhost" ||
+    host === "::1" ||
+    host === "[::1]" ||
+    !host.includes(".") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  ) {
+    return true
+  }
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) {
+    return true
+  }
+  const match172 = /^172\.(\d+)\./.exec(host)
+  if (match172 !== null) {
+    const second = Number(match172[1])
+    if (second >= 16 && second <= 31) return true
+  }
+  return false
+}
+
+function classifyRedirectUri(rawUri: string): RedirectKind {
+  let url: URL
+  try {
+    url = new URL(rawUri)
+  } catch {
+    return "RedirectOther"
+  }
+  if (url.hash !== "" || url.username !== "" || url.password !== "") {
+    return "RedirectOther"
+  }
+  const host = url.hostname.toLowerCase()
+  if (url.protocol === "http:") {
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1"
+      ? "RedirectLoopback"
+      : "RedirectOther"
+  }
+  if (url.protocol === "https:") {
+    return isDisallowedRemoteHost(host) ? "RedirectOther" : "RedirectHostedCallback"
+  }
+  return "RedirectOther"
+}
+
+effect function oauthSigningKey(config: Pick<AuthRuntimeConfig, "oauthSigningSecret">): Uint8Array<ArrayBuffer>!AuthFailure {
+  return try hmacSigningKeyBytes(config.oauthSigningSecret, "auth_not_configured", "OAuth signing secret is not configured.")
+}
+
+interface ActiveTokenStateInput {
+  readonly accountId: string
+  readonly grantId: string
+  readonly clientId: string
+  readonly clientName: string
+  readonly scopeString: string
+  readonly resource: string
+  readonly generation: number
+  readonly grantExpiresAt: number
+  readonly now: number
+}
+
+effect function buildActiveTokenState(
+  input: ActiveTokenStateInput
+): { readonly oauthState: OAuthState; readonly scopeSet: ScopeSet }!AuthFailure {
+  const { scopeSet } = try parseAgentScopes(input.scopeString)
+  const oauthState: OAuthState = {
+    ...initial,
+    now: input.now,
+    agentSlot: {
+      accountId: input.accountId,
+      activeGrant: {
+        tag: "GrantActive",
+        grantId: input.grantId,
+        clientName: input.clientName,
+        scopes: scopeSet,
+        connectedAt: input.now,
+        lastUsedAt: input.now
+      },
+      activeGrantCount: 1,
+      historyRevokedIds: [],
+      lastAttribution: { hasAction: false, viaClientName: "", actionGrantId: "" },
+      now: input.now
+    },
+    tokenFamily: {
+      ...emptyFamily,
+      familyGrantId: input.grantId,
+      familyAccountId: input.accountId,
+      familyClientId: input.clientId,
+      familyClientName: input.clientName,
+      familyStatus: "FamilyActive",
+      generation: input.generation,
+      audience: input.resource,
+      familyScopes: scopeSet,
+      pkceVerified: true,
+      authAt: input.grantExpiresAt - maxGrantLifetimeMs,
+      issuedAt: input.now,
+      accessExpiresAt: Math.min(input.now + accessTokenLifetimeMs, input.grantExpiresAt),
+      grantExpiresAt: input.grantExpiresAt
+    }
+  }
+  return { oauthState, scopeSet }
+}
+
+effect function ensureEligibleAccountInTx(tx: Tx, accountId: string): void!(AuthFailure | StoreFailure) {
+  const accountRows = try tx.query(
+    `SELECT fa.account_id, fa.phone_verified_at, fa.is_reviewer, a.status
+     FROM feed_accounts fa
+     JOIN accounts a ON a.key = fa.account_id
+     WHERE fa.account_id = $1`,
+    [accountId]
+  )
+  const accountRow = accountRows[0]
+  const accountEligible = accountRow !== undefined &&
+    toText(accountRow.status) === "active" &&
+    (accountRow.phone_verified_at !== null || accountRow.is_reviewer === true)
+  if (!accountEligible) {
+    throw new AuthFailure({ code: "access_denied", message: "Account must be active and verified.", status: 403 })
+  }
+}
+
+effect function revokeTokenFamilyAndGrantInTx(
+  tx: Tx,
+  familyId: string,
+  grantId: string,
+  now: number
+): void!StoreFailure {
+  try tx.query(
+    "UPDATE feed_oauth_tokens SET revoked_at = $2 WHERE (family_id = $1 OR grant_id = $3) AND revoked_at IS NULL",
+    [familyId, now, grantId]
+  )
+  try tx.query(
+    "UPDATE feed_agent_grants SET status = 'revoked', revoked_at = $2 WHERE grant_id = $1 AND status = 'active'",
+    [grantId, now]
+  )
+}
+
+effect function mintOAuthTokenPairInTx(
+  tx: Tx,
+  input: ActiveTokenStateInput & {
+    readonly familyId: string
+    readonly config: AuthRuntimeConfig
+  }
+): OAuthTokenResponse!(AuthFailure | StoreFailure) {
+  const accessExpiresAt = Math.min(input.now + accessTokenLifetimeMs, input.grantExpiresAt)
+  const expiresIn = Math.max(1, Math.floor((accessExpiresAt - input.now) / 1000))
+  const issuedAtSec = Math.floor(input.now / 1000)
+  const expSec = issuedAtSec + expiresIn
+  const issuer = normalizeOrigin(input.config.publicAppUrl)
+  const jti = newUuid()
+  const key = try oauthSigningKey(input.config)
+  const accessToken = try tryPromise({
+    try: () =>
+      new SignJWT({
+        grant_id: input.grantId,
+        client_id: input.clientId,
+        client_name: input.clientName,
+        scope: input.scopeString,
+        gen: input.generation
+      })
+        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+        .setIssuer(issuer)
+        .setAudience(input.resource)
+        .setSubject(input.accountId)
+        .setJti(jti)
+        .setIssuedAt(issuedAtSec)
+        .setExpirationTime(expSec)
+        .sign(key),
+    catch: () => new AuthFailure({ code: "crypto_error", message: "Failed to sign access token.", status: 500 })
+  })
+  const refreshToken = `feed_rt_${randomBase64Url(36)}`
+  const accessHash = try sha256Hex(accessToken)
+  const refreshHash = try sha256Hex(refreshToken)
+  try tx.query(
+    `INSERT INTO feed_oauth_tokens
+       (token_hash, grant_id, account_id, token_kind, family_id, generation, scope, resource, expires_at, spent_at, revoked_at)
+     VALUES
+       ($1, $3, $4, 'access', $5, $6, $7, $8, $9, NULL, NULL),
+       ($2, $3, $4, 'refresh', $5, $6, $7, $8, $10, NULL, NULL)`,
+    [
+      accessHash,
+      refreshHash,
+      input.grantId,
+      input.accountId,
+      input.familyId,
+      input.generation,
+      input.scopeString,
+      input.resource,
+      accessExpiresAt,
+      input.grantExpiresAt
+    ]
+  )
+  return {
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: expiresIn,
+    refresh_token: refreshToken,
+    scope: input.scopeString,
+    resource: input.resource,
+    grant_id: input.grantId,
+    client_id: input.clientId,
+    client_name: input.clientName
+  }
+}
+
+export function oauthAuthorizationServerMetadata(origin: string) {
+  const base = normalizeOrigin(origin)
+  return {
+    issuer: base,
+    authorization_endpoint: `${base}/oauth/authorize`,
+    token_endpoint: `${base}/oauth/token`,
+    revocation_endpoint: `${base}/oauth/revoke`,
+    registration_endpoint: `${base}/oauth/register`,
+    device_authorization_endpoint: `${base}/oauth/device/code`,
+    scopes_supported: [...AGENT_SCOPES],
+    response_types_supported: ["code"],
+    grant_types_supported: [...SUPPORTED_GRANTS],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["none"],
+    client_id_metadata_document_supported: true,
+    authorization_response_iss_parameter_supported: true,
+    service_documentation: `${base}/SKILL.md`
+  }
+}
+
+export function oauthProtectedResourceMetadata(origin: string) {
+  const base = normalizeOrigin(origin)
+  return {
+    resource: `${base}/mcp`,
+    authorization_servers: [base],
+    scopes_supported: [...AGENT_SCOPES],
+    bearer_methods_supported: ["header"],
+    resource_name: "Feed MCP",
+    resource_documentation: `${base}/SKILL.md`
+  }
+}
+
+effect function registerAndSaveOAuthClient(input: {
+  readonly clientId: string
+  readonly clientName: string
+  readonly redirectUris: ReadonlyArray<string>
+  readonly clientUri: string | null
+  readonly isCimd: boolean
+}): number!(AuthFailure | StoreFailure)!Store {
+  if (input.redirectUris.length === 0) {
+    throw new AuthFailure({ code: "invalid_redirect_uri", message: "At least one redirect_uri is required.", status: 400 })
+  }
+  const redirectKinds = input.redirectUris.map((uri) => classifyRedirectUri(uri))
+  if (redirectKinds.some((kind) => !redirectAllowed(kind))) {
+    throw new AuthFailure({ code: "invalid_redirect_uri", message: "Redirect URIs must use HTTPS or RFC 8252 loopback HTTP.", status: 400 })
+  }
+  const clientKind = input.isCimd ? "ClientCimd" : "ClientDcr"
+  if (!canRegisterClient(initial, input.clientId, input.clientName, clientKind, redirectKinds[0], "AuthMethodNone")) {
+    throw new AuthFailure({ code: "invalid_client_metadata", message: "Client registration refused.", status: 400 })
+  }
+  registerClient(initial, input.clientId, input.clientName, clientKind, redirectKinds[0], "AuthMethodNone")
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction((tx: Tx) =>
+    tx.query(
+      `INSERT INTO feed_oauth_clients
+         (client_id, client_name, redirect_uris, client_uri, is_cimd, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (client_id) DO UPDATE
+       SET client_name = EXCLUDED.client_name,
+           redirect_uris = EXCLUDED.redirect_uris,
+           client_uri = EXCLUDED.client_uri,
+           is_cimd = EXCLUDED.is_cimd`,
+      [input.clientId, input.clientName, JSON.stringify(input.redirectUris), input.clientUri, input.isCimd, now]
+    )
+  )
+  return now
+}
+
+export effect function registerDynamicClient(input: {
+  readonly clientName: string
+  readonly redirectUris: ReadonlyArray<string>
+  readonly clientUri?: string | undefined
+  readonly tokenEndpointAuthMethod?: string | undefined
+  readonly grantTypes?: ReadonlyArray<string> | undefined
+  readonly responseTypes?: ReadonlyArray<string> | undefined
+  readonly scope?: string | undefined
+}): RegisteredOAuthClient!(AuthFailure | StoreFailure)!Store {
+  const clientName = input.clientName.trim()
+  if (clientName.length === 0 || clientName.length > 128) {
+    throw new AuthFailure({ code: "invalid_client_metadata", message: "client_name must be 1-128 characters.", status: 400 })
+  }
+  if ((input.tokenEndpointAuthMethod ?? "none") !== "none") {
+    throw new AuthFailure({ code: "invalid_client_metadata", message: "Only public clients with token_endpoint_auth_method=none are supported.", status: 400 })
+  }
+  if (input.responseTypes !== undefined && input.responseTypes.some((rt) => rt !== "code")) {
+    throw new AuthFailure({ code: "invalid_client_metadata", message: "Only response_type=code is supported.", status: 400 })
+  }
+  if (input.grantTypes !== undefined && input.grantTypes.some((gt) => !SUPPORTED_GRANTS.includes(gt as (typeof SUPPORTED_GRANTS)[number]))) {
+    throw new AuthFailure({ code: "invalid_client_metadata", message: "Unsupported grant_type requested.", status: 400 })
+  }
+  const { scopeString } = try parseAgentScopes(input.scope, true)
+  const clientId = `feed_client_${randomHex(16)}`
+  const clientUri = input.clientUri?.trim() ?? null
+  const now = try registerAndSaveOAuthClient({
+    clientId,
+    clientName,
+    redirectUris: input.redirectUris,
+    clientUri,
+    isCimd: false
+  })
+  return {
+    client_id: clientId,
+    client_name: clientName,
+    redirect_uris: [...input.redirectUris],
+    client_uri: clientUri,
+    token_endpoint_auth_method: "none",
+    grant_types: [...(input.grantTypes ?? SUPPORTED_GRANTS)],
+    response_types: [...(input.responseTypes ?? ["code"])],
+    scope: scopeString,
+    client_id_issued_at: Math.floor(now / 1000)
+  }
+}
+
+export effect function fetchClientMetadata(clientIdUrl: string): ClientMetadataDocument!(AuthFailure | StoreFailure)!Store {
+  const url = try Effect.try({
+    try: () => new URL(clientIdUrl.trim()),
+    catch: () => new AuthFailure({ code: "invalid_client", message: "CIMD client_id must be a valid HTTPS URL.", status: 400 })
+  })
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.hash !== "" ||
+    url.pathname === "/" ||
+    isDisallowedRemoteHost(url.hostname)
+  ) {
+    throw new AuthFailure({ code: "invalid_client", message: "CIMD client_id must be a public HTTPS document URL.", status: 400 })
+  }
+  const request = HttpClientRequest.get(url.href).pipe(HttpClientRequest.setHeader("accept", "application/json"))
+  const response = try executeHttpJson(request, "invalid_client", "Unable to fetch client metadata document.", "error")
+  if (response.status < 200 || response.status >= 300) {
+    throw new AuthFailure({ code: "invalid_client", message: "Client metadata endpoint returned an error.", status: 400 })
+  }
+  const parsed = Option.getOrUndefined(Schema.decodeUnknownOption(CimdSchema)(response.body))
+  if (parsed === undefined || parsed.client_id !== url.href) {
+    throw new AuthFailure({ code: "invalid_client_metadata", message: "Client metadata document client_id mismatch.", status: 400 })
+  }
+  const clientName = parsed.client_name.trim()
+  if (clientName === "") {
+    throw new AuthFailure({ code: "invalid_client_metadata", message: "Client metadata requires client_name.", status: 400 })
+  }
+  if (parsed.token_endpoint_auth_method !== undefined && parsed.token_endpoint_auth_method !== "none") {
+    throw new AuthFailure({ code: "invalid_client_metadata", message: "Only public clients with token_endpoint_auth_method=none are supported.", status: 400 })
+  }
+  try registerAndSaveOAuthClient({
+    clientId: parsed.client_id,
+    clientName,
+    redirectUris: parsed.redirect_uris,
+    clientUri: parsed.client_uri ?? null,
+    isCimd: true
+  })
+  return {
+    clientId: parsed.client_id,
+    clientName,
+    redirectUris: [...parsed.redirect_uris],
+    clientUri: parsed.client_uri ?? null,
+    isCimd: true
+  }
+}
+
+export effect function createAuthorizationCode(input: {
+  readonly accountId: string
+  readonly clientId: string
+  readonly clientName?: string | undefined
+  readonly redirectUri: string
+  readonly codeChallenge: string
+  readonly codeChallengeMethod: string
+  readonly responseType?: string | undefined
+  readonly scope?: string | undefined
+  readonly state: string
+  readonly resource: string
+  readonly origin?: string | undefined
+}): AuthorizationCodeResult!(AuthFailure | StoreFailure)!Store {
+  if (input.responseType !== undefined && input.responseType !== "code") {
+    throw new AuthFailure({ code: "unsupported_response_type", message: "Only response_type=code is supported.", status: 400 })
+  }
+  if (input.codeChallengeMethod !== "S256" || !PKCE_CHALLENGE_PATTERN.test(input.codeChallenge)) {
+    throw new AuthFailure({ code: "invalid_request", message: "PKCE S256 code_challenge is required.", status: 400 })
+  }
+  if (input.state.length < 1 || input.state.length > 4096) {
+    throw new AuthFailure({ code: "invalid_request", message: "state parameter is required.", status: 400 })
+  }
+  const normalizedRes = normalizeResource(input.resource)
+  if (!isAllowedResource(normalizedRes, input.origin)) {
+    throw new AuthFailure({ code: "invalid_target", message: "Resource must match this MCP server.", status: 400 })
+  }
+  const redirectKind = classifyRedirectUri(input.redirectUri)
+  if (!redirectAllowed(redirectKind)) {
+    throw new AuthFailure({ code: "invalid_redirect_uri", message: "Redirect URI is not allowed.", status: 400 })
+  }
+  const { scopeSet, scopeString } = try parseAgentScopes(input.scope, true)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const code = `feed_code_${randomBase64Url(32)}`
+  const codeHash = try sha256Hex(code)
+  const expiresAt = now + AUTH_CODE_LIFETIME_MS
+  return try store.transaction(effect (tx: Tx) => {
+    const clientRows = try tx.query(
+      "SELECT client_id, client_name, redirect_uris FROM feed_oauth_clients WHERE client_id = $1",
+      [input.clientId]
+    )
+    const clientRow = clientRows[0]
+    if (clientRow === undefined) {
+      throw new AuthFailure({ code: "invalid_client", message: "Unknown OAuth client.", status: 400 })
+    }
+    const rawUris = Effect.try(() => JSON.parse(toText(clientRow.redirect_uris) ?? "[]") as unknown) catch () => []
+    const allowedUris = Option.getOrUndefined(Schema.decodeUnknownOption(RedirectUrisSchema)(rawUris)) ?? []
+    if (!allowedUris.includes(input.redirectUri)) {
+      throw new AuthFailure({ code: "invalid_redirect_uri", message: "redirect_uri is not registered for this client.", status: 400 })
+    }
+    try ensureEligibleAccountInTx(tx, input.accountId)
+    const resolvedClientName = (toText(clientRow.client_name) ?? input.clientName ?? "").trim()
+    const oauthState: OAuthState = {
+      ...initial,
+      now,
+      registeredClients: [{
+        regClientId: input.clientId,
+        regClientName: resolvedClientName,
+        regKind: "ClientDcr",
+        regRedirectKind: redirectKind,
+        regAuthMethod: "AuthMethodNone"
+      }]
+    }
+    if (!canStartAuthorization(oauthState, input.clientId, redirectKind, "PkceS256", "CodeFlow", canonicalMcpResource, input.state.length)) {
+      throw new AuthFailure({ code: "invalid_request", message: "Authorization parameters refused.", status: 400 })
+    }
+    const started = startAuthorization(oauthState, input.clientId, redirectKind, "PkceS256", "CodeFlow", canonicalMcpResource, input.state.length)
+    if (!canApproveConsent(started.state, input.accountId, true, scopeSet, code)) {
+      throw new AuthFailure({ code: "access_denied", message: "Consent refused.", status: 403 })
+    }
+    approveConsent(started.state, input.accountId, true, scopeSet, code)
+    try tx.query(
+      `INSERT INTO feed_oauth_codes
+         (code_hash, client_id, account_id, redirect_uri, scope, resource, code_challenge, expires_at, consumed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)`,
+      [codeHash, input.clientId, input.accountId, input.redirectUri, scopeString, normalizedRes, input.codeChallenge, expiresAt]
+    )
+    return {
+      code,
+      state: input.state,
+      iss: normalizeOrigin(input.origin ?? canonicalIssuer),
+      redirectUri: input.redirectUri,
+      resource: normalizedRes,
+      scope: scopeString,
+      expiresAt
+    }
+  })
+}
+
+interface ExchangeTokenInput {
+  readonly grantType: string
+  readonly code?: string | undefined
+  readonly codeVerifier?: string | undefined
+  readonly clientId?: string | undefined
+  readonly redirectUri?: string | undefined
+  readonly refreshToken?: string | undefined
+  readonly deviceCode?: string | undefined
+  readonly resource?: string | undefined
+  readonly config: AuthRuntimeConfig
+}
+
+type TokenExchangeOutcome =
+  | { readonly ok: true; readonly value: OAuthTokenResponse }
+  | { readonly ok: false; readonly failure: AuthFailure }
+
+effect function issueAgentGrantAndTokensInTx(
+  tx: Tx,
+  input: {
+    readonly accountId: string
+    readonly clientId: string
+    readonly clientName: string
+    readonly scopeString: string
+    readonly resource: string
+    readonly config: AuthRuntimeConfig
+    readonly now: number
+  }
+): OAuthTokenResponse!(AuthFailure | StoreFailure) {
+  const grant = try connectSingleAgentGrantInTx(
+    tx,
+    { accountId: input.accountId, clientId: input.clientId, clientName: input.clientName, scopes: input.scopeString },
+    input.now
+  )
+  return try mintOAuthTokenPairInTx(tx, {
+    accountId: input.accountId,
+    grantId: grant.grantId,
+    clientId: input.clientId,
+    clientName: input.clientName,
+    scopeString: input.scopeString,
+    resource: input.resource,
+    familyId: newUuid(),
+    generation: 1,
+    grantExpiresAt: input.now + maxGrantLifetimeMs,
+    config: input.config,
+    now: input.now
+  })
+}
+
+effect function exchangeAuthCodeInTx(
+  tx: Tx,
+  input: ExchangeTokenInput,
+  now: number
+): TokenExchangeOutcome!(AuthFailure | StoreFailure) {
+  const code = input.code?.trim() ?? ""
+  const verifier = input.codeVerifier?.trim() ?? ""
+  const clientId = input.clientId?.trim() ?? ""
+  const redirectUri = input.redirectUri?.trim() ?? ""
+  if (code === "" || clientId === "" || redirectUri === "" || !PKCE_VERIFIER_PATTERN.test(verifier)) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_request", message: "Missing authorization_code parameters.", status: 400 }) }
+  }
+  const codeHash = try sha256Hex(code)
+  const codeRows = try tx.query(
+    `SELECT c.code_hash, c.client_id, c.account_id, c.redirect_uri, c.scope, c.resource, c.code_challenge, c.expires_at, c.consumed_at,
+            cl.client_name
+     FROM feed_oauth_codes c
+     LEFT JOIN feed_oauth_clients cl ON cl.client_id = c.client_id
+     WHERE c.code_hash = $1 FOR UPDATE OF c`,
+    [codeHash]
+  )
+  const row = codeRows[0]
+  if (row === undefined || row.consumed_at !== null || now >= toInt(row.expires_at)) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Authorization code is invalid or expired.", status: 400 }) }
+  }
+  if (toText(row.client_id) !== clientId || toText(row.redirect_uri) !== redirectUri) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Client or redirect_uri mismatch.", status: 400 }) }
+  }
+  const storedResource = toText(row.resource) ?? canonicalMcpResource
+  if (input.resource !== undefined && normalizeResource(input.resource) !== storedResource) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_target", message: "Resource indicator mismatch.", status: 400 }) }
+  }
+  const computedChallenge = try sha256Base64Url(verifier)
+  const verifierMatches = constantTimeEqual(computedChallenge, toText(row.code_challenge) ?? "")
+  const accountId = toText(row.account_id) ?? ""
+  const clientName = toText(row.client_name) ?? clientId
+  const scopeString = toText(row.scope) ?? "read"
+  const { scopeSet } = try parseAgentScopes(scopeString)
+  const redirectKind = classifyRedirectUri(redirectUri)
+  const oauthState: OAuthState = {
+    ...initial,
+    now,
+    pendingAuth: {
+      ...idleAuth,
+      authPhase: "AuthCodeIssued",
+      reqClientId: clientId,
+      reqClientName: clientName,
+      reqRedirectKind: redirectKind,
+      reqPkceMethod: "PkceS256",
+      reqResponseMode: "CodeFlow",
+      reqResource: canonicalMcpResource,
+      reqStateLen: 1,
+      authAccountId: accountId,
+      authCode: code,
+      authGrantedScopes: scopeSet,
+      authCodeExpiresAt: toInt(row.expires_at)
+    }
+  }
+  if (!canExchangeAuthCode(oauthState, code, clientId, redirectKind, canonicalMcpResource, verifierMatches, "pending-grant")) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "PKCE verification failed.", status: 400 }) }
+  }
+  exchangeAuthCode(oauthState, code, clientId, redirectKind, canonicalMcpResource, verifierMatches, "pending-grant")
+  try tx.query("UPDATE feed_oauth_codes SET consumed_at = $2 WHERE code_hash = $1", [codeHash, now])
+  const tokenResp = try issueAgentGrantAndTokensInTx(tx, {
+    accountId,
+    clientId,
+    clientName,
+    scopeString,
+    resource: storedResource,
+    config: input.config,
+    now
+  })
+  return { ok: true, value: tokenResp }
+}
+
+effect function exchangeRefreshTokenInTx(
+  tx: Tx,
+  input: ExchangeTokenInput,
+  now: number
+): TokenExchangeOutcome!(AuthFailure | StoreFailure) {
+  const refreshToken = input.refreshToken?.trim() ?? ""
+  if (refreshToken === "") {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_request", message: "refresh_token is required.", status: 400 }) }
+  }
+  const tokenHash = try sha256Hex(refreshToken)
+  const rows = try tx.query(
+    `SELECT t.token_hash, t.grant_id, t.account_id, t.family_id, t.generation, t.scope, t.resource, t.expires_at, t.spent_at, t.revoked_at,
+            g.client_id, g.client_name, g.status AS grant_status,
+            a.status AS account_status
+     FROM feed_oauth_tokens t
+     JOIN feed_agent_grants g ON g.grant_id = t.grant_id
+     JOIN accounts a ON a.key = t.account_id
+     WHERE t.token_hash = $1 AND t.token_kind = 'refresh'
+     FOR UPDATE OF t, g`,
+    [tokenHash]
+  )
+  const row = rows[0]
+  if (row === undefined) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Invalid refresh token.", status: 400 }) }
+  }
+  const storedClientId = toText(row.client_id) ?? ""
+  if (input.clientId !== undefined && input.clientId.trim() !== "" && input.clientId.trim() !== storedClientId) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Client ID mismatch.", status: 400 }) }
+  }
+  const storedResource = toText(row.resource) ?? canonicalMcpResource
+  if (input.resource !== undefined && normalizeResource(input.resource) !== storedResource) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_target", message: "Resource mismatch.", status: 400 }) }
+  }
+  const grantId = toText(row.grant_id) ?? ""
+  const familyId = toText(row.family_id) ?? ""
+  const accountId = toText(row.account_id) ?? ""
+  const clientName = toText(row.client_name) ?? storedClientId
+  const scopeString = toText(row.scope) ?? "read"
+  const grantExpiresAt = toInt(row.expires_at)
+  const presentedGen = toInt(row.generation)
+  const activeGenRows = try tx.query(
+    "SELECT MAX(generation) AS max_gen FROM feed_oauth_tokens WHERE family_id = $1 AND token_kind = 'refresh'",
+    [familyId]
+  )
+  const currentGen = Math.max(presentedGen, toInt(activeGenRows[0]?.max_gen ?? presentedGen))
+  const { oauthState } = try buildActiveTokenState({
+    accountId,
+    grantId,
+    clientId: storedClientId,
+    clientName,
+    scopeString,
+    resource: canonicalMcpResource,
+    generation: currentGen,
+    grantExpiresAt,
+    now
+  })
+  const stateWithStatus: OAuthState = row.revoked_at !== null || toText(row.grant_status) !== "active"
+    ? { ...oauthState, tokenFamily: { ...oauthState.tokenFamily, familyStatus: "FamilyRevoked" } }
+    : oauthState
+  const reuseDetected = row.spent_at !== null || row.revoked_at !== null || isRefreshReuse(stateWithStatus.tokenFamily, grantId, presentedGen, now)
+  if (reuseDetected) {
+    try revokeTokenFamilyAndGrantInTx(tx, familyId, grantId, now)
+    return {
+      ok: false,
+      failure: new AuthFailure({ code: "reused_revoked", message: "Refresh token reuse detected; agent grant revoked.", status: 400 })
+    }
+  }
+  if (toText(row.account_status) !== "active" || toText(row.grant_status) !== "active" || now >= grantExpiresAt) {
+    try revokeTokenFamilyAndGrantInTx(tx, familyId, grantId, now)
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Grant expired or revoked.", status: 400 }) }
+  }
+  if (!canRefreshOAuthToken(stateWithStatus, grantId, presentedGen)) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Refresh token cannot be rotated.", status: 400 }) }
+  }
+  const stepped = refreshOAuthToken(stateWithStatus, grantId, presentedGen)
+  try tx.query("UPDATE feed_oauth_tokens SET spent_at = $2 WHERE token_hash = $1", [tokenHash, now])
+  try tx.query("UPDATE feed_agent_grants SET last_used_at = $2 WHERE grant_id = $1", [grantId, now])
+  const tokenResp = try mintOAuthTokenPairInTx(tx, {
+    accountId,
+    grantId,
+    clientId: storedClientId,
+    clientName,
+    scopeString,
+    resource: storedResource,
+    familyId,
+    generation: stepped.state.tokenFamily.generation,
+    grantExpiresAt,
+    config: input.config,
+    now
+  })
+  return { ok: true, value: tokenResp }
+}
+
+effect function exchangeDeviceCodeInTx(
+  tx: Tx,
+  input: ExchangeTokenInput,
+  now: number
+): TokenExchangeOutcome!(AuthFailure | StoreFailure) {
+  const deviceCode = input.deviceCode?.trim() ?? ""
+  const clientId = input.clientId?.trim() ?? ""
+  if (deviceCode === "" || clientId === "") {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_request", message: "device_code and client_id are required.", status: 400 }) }
+  }
+  const deviceCodeHash = try sha256Hex(deviceCode)
+  const rows = try tx.query(
+    "SELECT device_code_hash, user_code, client_id, client_name, scope, status, account_id, expires_at FROM feed_device_codes WHERE device_code_hash = $1 FOR UPDATE",
+    [deviceCodeHash]
+  )
+  const row = rows[0]
+  if (row === undefined || toText(row.client_id) !== clientId) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Invalid device_code.", status: 400 }) }
+  }
+  if (now >= toInt(row.expires_at)) {
+    return { ok: false, failure: new AuthFailure({ code: "expired_token", message: "Device code expired.", status: 400 }) }
+  }
+  const status = toText(row.status)
+  if (status === "pending") {
+    return { ok: false, failure: new AuthFailure({ code: "authorization_pending", message: "Authorization pending.", status: 400 }) }
+  }
+  if (status === "denied") {
+    return { ok: false, failure: new AuthFailure({ code: "access_denied", message: "Authorization denied.", status: 400 }) }
+  }
+  if (status !== "approved") {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Device code already used.", status: 400 }) }
+  }
+  const accountId = toText(row.account_id) ?? ""
+  const clientName = toText(row.client_name) ?? clientId
+  const scopeString = toText(row.scope) ?? "read"
+  const { scopeSet } = try parseAgentScopes(scopeString)
+  const resource = input.resource !== undefined
+    ? normalizeResource(input.resource)
+    : normalizeResource(`${normalizeOrigin(input.config.publicAppUrl)}/mcp`)
+  if (!isAllowedResource(resource, input.config.publicAppUrl)) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_target", message: "Resource mismatch.", status: 400 }) }
+  }
+  const oauthState: OAuthState = {
+    ...initial,
+    now,
+    deviceAuth: {
+      ...idleDeviceAuth,
+      deviceStatus: "DeviceApproved",
+      deviceCode,
+      userCode: toText(row.user_code) ?? "",
+      verificationUri: canonicalDeviceUri,
+      deviceClientId: clientId,
+      deviceClientName: clientName,
+      deviceResource: canonicalMcpResource,
+      deviceAccountId: accountId,
+      deviceScopes: scopeSet,
+      deviceExpiresAt: toInt(row.expires_at)
+    }
+  }
+  if (!canExchangeDeviceCode(oauthState, deviceCode, clientId, "pending-grant")) {
+    return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Device code cannot be exchanged.", status: 400 }) }
+  }
+  exchangeDeviceCode(oauthState, deviceCode, clientId, "pending-grant")
+  try tx.query("UPDATE feed_device_codes SET status = 'consumed' WHERE device_code_hash = $1", [deviceCodeHash])
+  const tokenResp = try issueAgentGrantAndTokensInTx(tx, {
+    accountId,
+    clientId,
+    clientName,
+    scopeString,
+    resource,
+    config: input.config,
+    now
+  })
+  return { ok: true, value: tokenResp }
+}
+
+export effect function exchangeOAuthToken(
+  input: ExchangeTokenInput
+): OAuthTokenResponse!(AuthFailure | StoreFailure)!Store {
+  if (
+    input.grantType !== "authorization_code" &&
+    input.grantType !== "refresh_token" &&
+    input.grantType !== "urn:ietf:params:oauth:grant-type:device_code"
+  ) {
+    throw new AuthFailure({ code: "unsupported_grant_type", message: `Unsupported grant_type: ${input.grantType}`, status: 400 })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const outcome = try store.transaction(effect (tx: Tx) => {
+    if (input.grantType === "authorization_code") return try exchangeAuthCodeInTx(tx, input, now)
+    if (input.grantType === "refresh_token") return try exchangeRefreshTokenInTx(tx, input, now)
+    return try exchangeDeviceCodeInTx(tx, input, now)
+  })
+  if (!outcome.ok) throw outcome.failure
+  return outcome.value
+}
+
+export effect function revokeOAuthToken(input: {
+  readonly token: string
+  readonly config?: AuthRuntimeConfig | undefined
+}): { readonly revoked: true }!(AuthFailure | StoreFailure)!Store {
+  const token = input.token.trim()
+  if (token === "") return { revoked: true }
+  const tokenHash = try sha256Hex(token)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT t.family_id, t.grant_id, t.account_id, g.client_id, g.client_name, g.scopes, t.resource, t.generation, t.expires_at
+       FROM feed_oauth_tokens t
+       JOIN feed_agent_grants g ON g.grant_id = t.grant_id
+       WHERE t.token_hash = $1 FOR UPDATE OF t, g`,
+      [tokenHash]
+    )
+    const row = rows[0]
+    if (row === undefined) return { revoked: true as const }
+    const familyId = toText(row.family_id) ?? ""
+    const grantId = toText(row.grant_id) ?? ""
+    const accountId = toText(row.account_id) ?? ""
+    const { oauthState } = try buildActiveTokenState({
+      accountId,
+      grantId,
+      clientId: toText(row.client_id) ?? "",
+      clientName: toText(row.client_name) ?? "Agent",
+      scopeString: toText(row.scopes) ?? "read",
+      resource: canonicalMcpResource,
+      generation: toInt(row.generation),
+      grantExpiresAt: toInt(row.expires_at),
+      now
+    })
+    if (canRevokeOAuthGrant(oauthState, accountId, grantId)) {
+      revokeOAuthGrant(oauthState, accountId, grantId)
+    }
+    try revokeTokenFamilyAndGrantInTx(tx, familyId, grantId, now)
+    return { revoked: true as const }
+  })
+}
+
+export effect function verifyAccessToken(input: {
+  readonly authorizationHeader: string | undefined
+  readonly config: AuthRuntimeConfig
+  readonly expectedResource?: string | undefined
+}): VerifiedAccessToken!(UnauthorizedError | AuthFailure | StoreFailure)!Store {
+  const match = /^\s*Bearer\s+([^\s]+)\s*$/i.exec(input.authorizationHeader ?? "")
+  const token = match?.[1]
+  if (token === undefined || token === "") {
+    throw new UnauthorizedError({ code: "missing_token", message: "Bearer access token is required." })
+  }
+  const key = try oauthSigningKey(input.config)
+  const expectedIssuer = normalizeOrigin(input.config.publicAppUrl)
+  const expectedAudiences = input.expectedResource !== undefined
+    ? [normalizeResource(input.expectedResource)]
+    : [canonicalMcpResource, normalizeResource(`${expectedIssuer}/mcp`)]
+  const verified = try tryPromise({
+    try: () =>
+      jwtVerify(token, key, {
+        algorithms: ["HS256"],
+        issuer: expectedIssuer,
+        audience: expectedAudiences
+      }),
+    catch: () => new UnauthorizedError({ code: "invalid_token", message: "Access token is invalid or expired." })
+  })
+  const payload = verified.payload
+  const accountId = typeof payload.sub === "string" ? payload.sub : ""
+  const grantId = typeof payload.grant_id === "string" ? payload.grant_id : ""
+  if (accountId === "" || grantId === "") {
+    throw new UnauthorizedError({ code: "invalid_token", message: "Access token is missing required claims." })
+  }
+  const tokenHash = try sha256Hex(token)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT t.revoked_at, t.expires_at,
+              g.status AS grant_status, g.client_id, g.client_name, g.scopes AS grant_scopes,
+              fa.account_id, fa.ui_mode,
+              a.status AS account_status
+       FROM feed_oauth_tokens t
+       JOIN feed_agent_grants g ON g.grant_id = t.grant_id
+       JOIN feed_accounts fa ON fa.account_id = t.account_id
+       JOIN accounts a ON a.key = fa.account_id
+       WHERE t.token_hash = $1
+         AND t.token_kind = 'access'
+         AND t.grant_id = $2
+         AND t.account_id = $3`,
+      [tokenHash, grantId, accountId]
+    )
+    const row = rows[0]
+    if (
+      row === undefined ||
+      row.revoked_at !== null ||
+      now >= toInt(row.expires_at) ||
+      toText(row.grant_status) !== "active" ||
+      toText(row.account_status) !== "active"
+    ) {
+      throw new UnauthorizedError({ code: "token_revoked", message: "Access token or agent grant has been revoked." })
+    }
+    const { scopes } = try parseAgentScopes(toText(row.grant_scopes) ?? "")
+    const playMode: PlayMode = toText(row.ui_mode) === "social" ? "social" : "game"
+    return {
+      accountId: toText(row.account_id) ?? accountId,
+      grantId,
+      clientId: toText(row.client_id) ?? "",
+      clientName: toText(row.client_name) ?? "",
+      scopes,
+      playMode,
+      activeGrant: true as const
+    }
+  })
+}
+
+export effect function startDeviceAuthorization(input: {
+  readonly clientId: string
+  readonly clientName?: string | undefined
+  readonly scope?: string | undefined
+  readonly resource?: string | undefined
+  readonly origin: string
+}): DeviceAuthorizationResponse!(AuthFailure | StoreFailure)!Store {
+  const clientId = input.clientId.trim()
+  if (clientId === "") {
+    throw new AuthFailure({ code: "invalid_client", message: "client_id is required.", status: 400 })
+  }
+  const baseOrigin = normalizeOrigin(input.origin)
+  const resource = normalizeResource(input.resource ?? `${baseOrigin}/mcp`)
+  if (!isAllowedResource(resource, baseOrigin)) {
+    throw new AuthFailure({ code: "invalid_target", message: "Resource must match this MCP server.", status: 400 })
+  }
+  const { scopeSet, scopeString } = try parseAgentScopes(input.scope, true)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const deviceCode = `feed_dev_${randomBase64Url(24)}`
+  const deviceCodeHash = try sha256Hex(deviceCode)
+  const verificationUri = `${baseOrigin}/link`
+  const expiresAt = now + deviceCodeLifetimeMs
+  return try store.transaction(effect (tx: Tx) => {
+    const clientRows = try tx.query(
+      "SELECT client_id, client_name FROM feed_oauth_clients WHERE client_id = $1",
+      [clientId]
+    )
+    const clientName = (toText(clientRows[0]?.client_name) ?? input.clientName ?? "").trim()
+    if (clientName === "") {
+      throw new AuthFailure({ code: "invalid_client", message: "Unknown OAuth client.", status: 400 })
+    }
+    let userCode = ""
+    let inserted = false
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = `FEED-${randomFourDigits()}`
+      const oauthState: OAuthState = {
+        ...initial,
+        now,
+        registeredClients: [{
+          regClientId: clientId,
+          regClientName: clientName,
+          regKind: "ClientDcr",
+          regRedirectKind: "RedirectLoopback",
+          regAuthMethod: "AuthMethodNone"
+        }]
+      }
+      if (!canStartDeviceFlow(oauthState, clientId, canonicalMcpResource, scopeSet, deviceCode, candidate)) {
+        throw new AuthFailure({ code: "invalid_request", message: "Device authorization refused.", status: 400 })
+      }
+      startDeviceFlow(oauthState, clientId, canonicalMcpResource, scopeSet, deviceCode, candidate)
+      const rows = try tx.query(
+        `INSERT INTO feed_device_codes
+           (device_code_hash, user_code, client_id, client_name, scope, status, account_id, expires_at, interval_sec)
+         VALUES ($1, $2, $3, $4, $5, 'pending', NULL, $6, 5)
+         ON CONFLICT (user_code) DO NOTHING
+         RETURNING user_code`,
+        [deviceCodeHash, candidate, clientId, clientName, scopeString, expiresAt]
+      )
+      if (rows.length > 0) {
+        userCode = candidate
+        inserted = true
+        break
+      }
+    }
+    if (!inserted) {
+      throw new AuthFailure({ code: "device_code_unavailable", message: "Unable to allocate device user_code.", status: 503 })
+    }
+    return {
+      device_code: deviceCode,
+      user_code: userCode,
+      verification_uri: verificationUri,
+      verification_uri_complete: `${verificationUri}?user_code=${encodeURIComponent(userCode)}`,
+      expires_in: Math.floor(deviceCodeLifetimeMs / 1000),
+      interval: 5
+    }
+  })
+}
+
+export effect function approveDeviceAuthorization(input: {
+  readonly accountId: string
+  readonly userCode: string
+  readonly scopes?: ReadonlyArray<string> | string | undefined
+  readonly deny?: boolean | undefined
+}): DeviceApprovalResult!(AuthFailure | StoreFailure)!Store {
+  const userCode = input.userCode.trim().toUpperCase()
+  if (userCode === "") {
+    throw new AuthFailure({ code: "invalid_user_code", message: "Enter a valid pairing code.", status: 400 })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      "SELECT device_code_hash, user_code, client_id, client_name, scope, status, expires_at FROM feed_device_codes WHERE user_code = $1 FOR UPDATE",
+      [userCode]
+    )
+    const row = rows[0]
+    if (row === undefined) {
+      throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code not found.", status: 404 })
+    }
+    if (now >= toInt(row.expires_at)) {
+      throw new AuthFailure({ code: "expired_token", message: "Pairing code expired.", status: 400 })
+    }
+    if (toText(row.status) !== "pending") {
+      throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code has already been used.", status: 400 })
+    }
+    const clientId = toText(row.client_id) ?? ""
+    const clientName = toText(row.client_name) ?? ""
+    const deviceCodeHash = toText(row.device_code_hash) ?? ""
+    if (input.deny === true) {
+      try tx.query(
+        "UPDATE feed_device_codes SET status = 'denied', account_id = $2 WHERE device_code_hash = $1",
+        [deviceCodeHash, input.accountId]
+      )
+      return { approved: false, userCode, clientId, clientName }
+    }
+    try ensureEligibleAccountInTx(tx, input.accountId)
+    const { scopes, scopeSet, scopeString } = try parseAgentScopes(input.scopes ?? (toText(row.scope) ?? ""), true)
+    const oauthState: OAuthState = {
+      ...initial,
+      now,
+      deviceAuth: {
+        ...idleDeviceAuth,
+        deviceStatus: "DevicePending",
+        deviceCode: deviceCodeHash,
+        userCode,
+        verificationUri: canonicalDeviceUri,
+        deviceClientId: clientId,
+        deviceClientName: clientName,
+        deviceResource: canonicalMcpResource,
+        deviceAccountId: "",
+        deviceScopes: scopeSet,
+        deviceExpiresAt: toInt(row.expires_at)
+      }
+    }
+    if (!canApproveDeviceFlow(oauthState, userCode, input.accountId, true, scopeSet)) {
+      throw new AuthFailure({ code: "access_denied", message: "Device authorization approval refused.", status: 403 })
+    }
+    approveDeviceFlow(oauthState, userCode, input.accountId, true, scopeSet)
+    try tx.query(
+      "UPDATE feed_device_codes SET status = 'approved', account_id = $2, scope = $3 WHERE device_code_hash = $1",
+      [deviceCodeHash, input.accountId, scopeString]
+    )
+    return { approved: true, userCode, clientId, clientName, scopes }
+  })
+}

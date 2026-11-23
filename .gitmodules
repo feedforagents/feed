@@ -1,0 +1,4 @@
+[submodule "vendor/eliza"]
+	path = vendor/eliza
+	url = https://github.com/elizaOS/eliza.git
+	branch = vibestack

@@ -1,0 +1,23 @@
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"
+import { type Event as AppEvent, Machine as AppMachine, machine as appMachine } from "../../gen/app.effect.vibe"
+import { type Event as NavEvent, Machine as NavMachine, machine as navMachine } from "../../gen/app__navigation.effect.vibe"
+import { type Event as OnboardingEvent, Machine as OnboardingMachine, machine as onboardingMachine } from "../../gen/app__onboarding.effect.vibe"
+
+export const appLayer = appMachine()
+export const navLayer = navMachine()
+export const onboardingLayer = onboardingMachine()
+
+export effect function dispatchApp(event: AppEvent) {
+  const m = try AppMachine
+  return m.send(event) catch () => undefined
+}
+
+export effect function dispatchNav(event: NavEvent) {
+  const m = try NavMachine
+  return m.send(event) catch () => undefined
+}
+
+export effect function dispatchOnboarding(event: OnboardingEvent) {
+  const m = try OnboardingMachine
+  return m.send(event) catch () => undefined
+}

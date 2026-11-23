@@ -1,0 +1,70 @@
+// spec/auth/index.md, "Authentication and single-agent authorization"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
+export { AuthFailure, RateLimited, UnauthorizedError } from "./errors.vibe"
+export {
+  DEFAULT_ALLOWED_COUNTRIES,
+  authenticateSessionCookie,
+  completePhoneOnboarding,
+  confirmPhoneChange,
+  deleteAccountSelfServe,
+  getAccountProfile,
+  getLoopbackCode,
+  hashReviewerPassword,
+  requestPhoneChange,
+  setPlayMode,
+  signInReviewerPassword,
+  signOutEverywhere,
+  startPhoneVerification,
+  verifyPhoneCode,
+  verifyTurnstile,
+  type AccountProfile,
+  type AuthRuntimeConfig,
+  type AuthenticatedAccountResult,
+  type FeedEnvironment,
+  type PlayMode,
+  type SessionIdentity,
+  type SmsMode,
+  type StartPhoneVerificationResult,
+  type VerifyPhoneCodeResult
+} from "./phone-auth.vibe"
+export {
+  AGENT_SCOPES,
+  connectSingleAgentGrant,
+  getActiveAgentGrant,
+  recordAgentAttribution,
+  revokeActiveAgentGrant,
+  type ActiveAgentGrant,
+  type AgentScope,
+  type ConnectAgentGrantResult,
+  type ConnectSingleAgentGrantInput,
+  type RevokeAgentGrantResult
+} from "./agent-grant.vibe"
+export {
+  approveDeviceAuthorization,
+  createAuthorizationCode,
+  exchangeOAuthToken,
+  fetchClientMetadata,
+  normalizeResource,
+  oauthAuthorizationServerMetadata,
+  oauthProtectedResourceMetadata,
+  registerDynamicClient,
+  revokeOAuthToken,
+  startDeviceAuthorization,
+  verifyAccessToken,
+  type AuthorizationCodeResult,
+  type ClientMetadataDocument,
+  type DeviceApprovalResult,
+  type DeviceAuthorizationResponse,
+  type OAuthTokenResponse,
+  type RegisteredOAuthClient,
+  type VerifiedAccessToken
+} from "./oauth-server.vibe"
+export {
+  checkAndConsumeRateLimit,
+  getRateLimitStatus,
+  type ActionQuotaStatus,
+  type CheckRateLimitInput,
+  type RateLimitActionKind,
+  type RateLimitConsumeResult,
+  type RateLimitStatus,
+  type RateLimitSurface
+} from "./rate-limit.vibe"

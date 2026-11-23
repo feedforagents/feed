@@ -1,0 +1,153 @@
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
+import { migrateFeedSchema, seedFeedWorld, workerDbStore, type Store, type StoreFailure } from "@repo/db/worker"
+import { RealtimeBus, realtimeBusLayer } from "@repo/social"
+import { parseAppServerConfig, stringEnvRecord, syncProcessEnv } from "./config.vibe"
+import { resolveOptionalRouteResponse, runScheduledTicks } from "./router.vibe"
+
+module web {
+  /** @throws {never} */
+  export function makeResponse(body: BodyInit | null, init?: ResponseInit): Response {
+    return new Response(body, init)
+  }
+}
+import { makeResponse } from web
+
+export interface WorkerHyperdrive {
+  readonly connectionString: string
+}
+
+export interface WorkerAssets {
+  fetch(request: Request): Promise<Response>
+}
+
+export interface WorkerExecutionContext {
+  waitUntil(promise: Promise<unknown>): void
+  passThroughOnException?(): void
+}
+
+export interface WorkerScheduledController {
+  readonly cron: string
+  readonly scheduledTime: number
+}
+
+export interface WorkerEnv extends Readonly<Record<string, unknown>> {
+  readonly HYPERDRIVE?: WorkerHyperdrive | undefined
+  readonly DATABASE_URL?: string | undefined
+  readonly ASSETS?: WorkerAssets | undefined
+  readonly DEPLOYMENT_ENV?: string | undefined
+  readonly PUBLIC_APP_URL?: string | undefined
+  readonly PUBLIC_API_URL?: string | undefined
+  readonly SMS_MODE?: string | undefined
+  readonly SMS_ALLOWED_COUNTRIES?: string | undefined
+  readonly AUTH_DIGEST_KEY?: string | undefined
+  readonly AUTH_SEALING_KEY?: string | undefined
+  readonly OAUTH_SIGNING_SECRET?: string | undefined
+  readonly TWILIO_ACCOUNT_SID?: string | undefined
+  readonly TWILIO_AUTH_TOKEN?: string | undefined
+  readonly TWILIO_VERIFY_SERVICE_SID?: string | undefined
+  readonly TURNSTILE_SECRET_KEY?: string | undefined
+  readonly STRIPE_SECRET_KEY?: string | undefined
+  readonly STRIPE_WEBHOOK_SECRET?: string | undefined
+  readonly CRON_SECRET?: string | undefined
+  readonly GAME_START?: string | undefined
+}
+
+const isolateBootstrap = new Map<string, Promise<void>>()
+let isolateBusRuntime: ManagedRuntime.ManagedRuntime<RealtimeBus, never> | undefined
+
+function connectionStringForEnv(env: WorkerEnv): string | undefined {
+  const hyperdriveUrl = env.HYPERDRIVE?.connectionString?.trim()
+  if (hyperdriveUrl !== undefined && hyperdriveUrl !== "") return hyperdriveUrl
+  const directUrl = env.DATABASE_URL?.trim()
+  return directUrl !== undefined && directUrl !== "" ? directUrl : undefined
+}
+
+effect function bootstrapDatabase(): void!StoreFailure!Store {
+  try migrateFeedSchema()
+  try seedFeedWorld()
+}
+
+function ensureBootstrapped(connectionString: string, dbLayer: Layer.Layer<Store, StoreFailure>): Promise<void> {
+  const existing = isolateBootstrap.get(connectionString)
+  if (existing !== undefined) return existing
+  const pending = Effect.runPromise(Effect.provide(bootstrapDatabase(), dbLayer)).catch((err) => {
+    isolateBootstrap.delete(connectionString)
+    return Promise.reject(err)
+  })
+  isolateBootstrap.set(connectionString, pending)
+  return pending
+}
+
+effect function readBusService(): RealtimeBus.Shape!!RealtimeBus {
+  return try RealtimeBus
+}
+
+async function sharedRealtimeBusLayer(): Promise<Layer.Layer<RealtimeBus>> {
+  isolateBusRuntime ??= ManagedRuntime.make(realtimeBusLayer)
+  const bus = await isolateBusRuntime.runPromise(readBusService())
+  return Layer.succeed(RealtimeBus, bus)
+}
+
+async function workerRuntimeLayer(env: WorkerEnv): Promise<Layer.Layer<Store | RealtimeBus, StoreFailure>> {
+  const connectionString = connectionStringForEnv(env)
+  if (connectionString === undefined) {
+    throw new Error("HYPERDRIVE or DATABASE_URL binding is required.")
+  }
+  const dbLayer = workerDbStore(connectionString)
+  await ensureBootstrapped(connectionString, dbLayer)
+  const busLayer = await sharedRealtimeBusLayer()
+  return Layer.mergeAll(dbLayer, busLayer)
+}
+
+function workerJsonError(status: number, code: string, message: string): Response {
+  return makeResponse(
+    JSON.stringify({ error: code, code, message }),
+    {
+      status,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store"
+      }
+    }
+  )
+}
+
+export default {
+  async fetch(request: Request, env: WorkerEnv, _ctx: WorkerExecutionContext): Promise<Response> {
+    syncProcessEnv(env)
+    const fallbackOrigin = new URL(request.url).origin
+    const config = parseAppServerConfig(stringEnvRecord(env), fallbackOrigin)
+    const url = new URL(request.url)
+    const isApiOrMcp = url.pathname.startsWith("/api/") || url.pathname === "/mcp" || url.pathname.startsWith("/oauth/") || url.pathname.startsWith("/.well-known/") || url.pathname === "/SKILL.md" || url.pathname === "/skill.md" || url.pathname === "/llms.txt" || url.pathname === "/how-to-play.md"
+    if (!isApiOrMcp && env.ASSETS !== undefined && (request.method === "GET" || request.method === "HEAD")) {
+      return env.ASSETS.fetch(request)
+    }
+    try {
+      const appLayer = await workerRuntimeLayer(env)
+      const handled = await Effect.runPromise(
+        Effect.provide(resolveOptionalRouteResponse(request, config), appLayer)
+      )
+      if (handled !== undefined) return handled
+      if (env.ASSETS !== undefined) {
+        return env.ASSETS.fetch(request)
+      }
+      return workerJsonError(404, "not_found", "Route not found.")
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Database unavailable."
+      return workerJsonError(503, "service_unavailable", message)
+    }
+  },
+
+  scheduled(controller: WorkerScheduledController, env: WorkerEnv, ctx: WorkerExecutionContext): void {
+    syncProcessEnv(env)
+    const config = parseAppServerConfig(stringEnvRecord(env), "https://feed.fun")
+    if (config.gameStart !== "run") return
+    const cycle = Math.max(1, Math.floor(controller.scheduledTime / 60_000))
+    ctx.waitUntil(
+      (async () => {
+        const appLayer = await workerRuntimeLayer(env)
+        await Effect.runPromise(Effect.provide(runScheduledTicks(cycle), appLayer))
+      })()
+    )
+  }
+}

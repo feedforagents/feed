@@ -1,0 +1,66 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "feed-web-production",
+  "main": "dist/server/worker.js",
+  "compatibility_date": "2026-10-10",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "feed.fun",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.feed.fun",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./dist/web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/api/*",
+      "/mcp",
+      "/oauth/*",
+      "/.well-known/*",
+      "/SKILL.md",
+      "/skill.md",
+      "/llms.txt",
+      "/how-to-play.md"
+    ]
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "localConnectionString": "postgresql://feed:feed_dev_password@localhost:5433/feed",
+      "id": "5d4f76cda3ea4a12990460442c657442"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "UPLOADS",
+      "bucket_name": "feed-uploads-production"
+    }
+  ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "limits": {
+    "cpu_ms": 300000
+  },
+  "vars": {
+    "DEPLOYMENT_ENV": "production",
+    "PUBLIC_APP_URL": "https://feed.fun",
+    "PUBLIC_API_URL": "https://feed.fun",
+    "SMS_MODE": "twilio",
+    "SURPLUS_BASE_URL": "https://api.surplusintelligence.ai/v1",
+    "SURPLUS_MODEL": "gpt-4o-mini",
+    "NPC_LLM_DAILY_BUDGET_USD": "100",
+    "NPC_MAX_STEPS_PER_TICK": "4"
+  },
+  "minify": true
+}
