@@ -20,6 +20,13 @@ describe('MCP Parity Surface', () => {
     expect(toolNames.has('resolve_market')).toBe(true);
   });
 
+  it('retains appeals without exposing escrow tools', () => {
+    const toolNames = getAvailableTools().map(({ name }) => name);
+
+    expect(toolNames).toContain('appeal_ban');
+    expect(toolNames.filter((name) => name.includes('escrow'))).toEqual([]);
+  });
+
   it('accepts mediaUrl on create_post arguments', () => {
     const args = validateCreatePostArgs({
       content: 'Post with media',

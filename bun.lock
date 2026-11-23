@@ -415,7 +415,6 @@
       "name": "@feed/mcp",
       "version": "0.1.0",
       "dependencies": {
-        "@feed/a2a": "workspace:*",
         "@feed/core": "workspace:*",
         "@feed/engine": "workspace:*",
         "@feed/shared": "workspace:*",
@@ -426,7 +425,6 @@
         "typescript": "^5.9.3",
       },
       "peerDependencies": {
-        "@feed/a2a": "workspace:*",
         "@feed/api": "workspace:*",
         "@feed/db": "workspace:*",
         "@feed/engine": "workspace:*",

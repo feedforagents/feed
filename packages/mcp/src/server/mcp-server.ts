@@ -935,76 +935,6 @@ export function getAvailableTools(): MCPTool[] {
         required: ['userId'],
       },
     },
-    // Moderation Escrow
-    {
-      name: 'create_escrow_payment',
-      description: 'Create escrow payment (Admin only)',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          recipientId: { type: 'string', description: 'Recipient user ID' },
-          amountUSD: { type: 'number', description: 'Amount in USD' },
-          reason: { type: 'string', description: 'Reason for escrow' },
-          recipientWalletAddress: {
-            type: 'string',
-            description: 'Recipient wallet address',
-          },
-        },
-        required: ['recipientId', 'amountUSD', 'recipientWalletAddress'],
-      },
-    },
-    {
-      name: 'verify_escrow_payment',
-      description: 'Verify escrow payment (Admin only)',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          escrowId: { type: 'string', description: 'Escrow ID' },
-          txHash: { type: 'string', description: 'Transaction hash' },
-          fromAddress: { type: 'string', description: 'From address' },
-          toAddress: { type: 'string', description: 'To address' },
-          amount: { type: 'string', description: 'Amount in wei' },
-        },
-        required: ['escrowId', 'txHash', 'fromAddress', 'toAddress', 'amount'],
-      },
-    },
-    {
-      name: 'refund_escrow_payment',
-      description: 'Refund escrow payment (Admin only)',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          escrowId: { type: 'string', description: 'Escrow ID' },
-          refundTxHash: {
-            type: 'string',
-            description: 'Refund transaction hash',
-          },
-          reason: { type: 'string', description: 'Refund reason' },
-        },
-        required: ['escrowId', 'refundTxHash'],
-      },
-    },
-    {
-      name: 'list_escrow_payments',
-      description: 'List escrow payments (Admin only)',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          recipientId: {
-            type: 'string',
-            description: 'Filter by recipient ID',
-          },
-          adminId: { type: 'string', description: 'Filter by admin ID' },
-          status: {
-            type: 'string',
-            enum: ['pending', 'paid', 'refunded', 'expired'],
-            description: 'Filter by status',
-          },
-          limit: { type: 'number', description: 'Number of results' },
-          offset: { type: 'number', description: 'Pagination offset' },
-        },
-      },
-    },
     // Ban Appeals
     {
       name: 'appeal_ban',
@@ -1018,24 +948,6 @@ export function getAvailableTools(): MCPTool[] {
           },
         },
         required: ['reason'],
-      },
-    },
-    {
-      name: 'appeal_ban_with_escrow',
-      description: 'Appeal ban with escrow payment',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          reason: {
-            type: 'string',
-            description: 'Appeal reason (10-2000 characters)',
-          },
-          escrowPaymentTxHash: {
-            type: 'string',
-            description: 'Escrow payment transaction hash',
-          },
-        },
-        required: ['reason', 'escrowPaymentTxHash'],
       },
     },
     // Favorites
