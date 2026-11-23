@@ -178,18 +178,13 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // If this is a staked appeal, verify stake or escrow payment
   if (stakeTxHash && !user.appealStaked) {
-    // First check if this is an escrow payment
+    // First check if this is an escrow payment. No relation is loaded here:
+    // the Drizzle schema has no `User` relation on moderation escrows (the
+    // relations are `recipient` / `admin` / `refundedByUser`), and the
+    // included user fields were never read below, so requesting them threw
+    // while building the query and every staked appeal answered 500.
     const escrow = await db.moderationEscrow.findUnique({
       where: { paymentTxHash: stakeTxHash },
-      include: {
-        User: {
-          select: {
-            id: true,
-            appealStaked: true,
-            appealStakeTxHash: true,
-          },
-        },
-      },
     });
 
     if (escrow) {
