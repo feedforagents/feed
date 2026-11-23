@@ -82,6 +82,7 @@ import {
   notificationTargetVisibilityCondition,
   or,
   perpMarketSnapshots,
+  postFeedVisibilityConditions,
   posts,
   postTags,
   questions,
@@ -3814,6 +3815,16 @@ export async function executeGetFavoritePosts(
         inArray(posts.authorId, favoritedUserIds),
         isNull(posts.deletedAt),
         lte(posts.timestamp, new Date()),
+        // A simple repost is only its original: when the viewer blocked
+        // or muted the original author, the repost must not surface
+        // here. The web favorites feed applies the same rule in SQL
+        // before the page is cut (postFeedVisibilityConditions,
+        // excludeModeratedReposts); quotes keep their row.
+        ...postFeedVisibilityConditions({
+          excludedAuthorIds: [...excludedAuthorIds],
+          excludeDeadReposts: true,
+          excludeModeratedReposts: true,
+        })
         // Apply the web feed's test-author rule (DatabaseService
         // .getRecentPosts): test accounts — the isTest flag or a
         // 'test-' id prefix — must not leak into the favorites feed
