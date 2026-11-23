@@ -79,12 +79,14 @@
 
 import { authenticate, successResponse, withErrorHandling } from '@feed/api';
 import {
+  chatParticipants,
   db,
   eq,
   feedbacks,
   followStatuses,
   groupInvites,
   groupMembers,
+  messageReactions,
   or,
   poolDeposits,
   reactions,
@@ -188,8 +190,21 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     // without this the likes keep counting on posts and comments forever.
     await tx.delete(reactions).where(eq(reactions.userId, userId));
 
+    // Chat reaction counts read this table directly, which has no User FK.
+    await tx
+      .delete(messageReactions)
+      .where(eq(messageReactions.userId, userId));
+
     // Delete group memberships
     await tx.delete(groupMembers).where(eq(groupMembers.userId, userId));
+
+    // Delete chat participants (group chats and DMs). The chat detail
+    // route lists every participant row, so a deleted account otherwise
+    // stays in every chat's member list as an 'Unknown' entry. Messages
+    // the user sent are kept, matching group-post history retention.
+    await tx
+      .delete(chatParticipants)
+      .where(eq(chatParticipants.userId, userId));
 
     // Delete group invites (both received and sent)
     await tx

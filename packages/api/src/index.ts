@@ -230,6 +230,10 @@ export {
 // Services
 export * from './services';
 export {
+  countVisiblePostComments,
+  listVisiblePostComments,
+} from './services/post-comments-service';
+export {
   exportObject,
   exportRows,
   streamExport,

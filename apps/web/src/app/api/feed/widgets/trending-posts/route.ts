@@ -81,21 +81,27 @@
 
 import { optionalAuth, successResponse, withErrorHandling } from '@feed/api';
 import {
+  aliasedTable,
   and,
   asPublic,
   asUser,
   desc,
   eq,
   gte,
+  inArray,
   isNull,
   lte,
   notExists,
+  postFeedVisibilityConditions,
   posts as postsTable,
   users as usersTable,
 } from '@feed/db';
 import { logger, TrendingPostsQuerySchema, toISO } from '@feed/shared';
 import { notLike } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '../../_lib/viewer-moderation';
+
+const originalPost = aliasedTable(postsTable, 'trending_original');
 
 interface TrendingPost {
   id: string;
@@ -149,6 +155,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Optional auth - trending posts are public but RLS still applies
   const authUser = await optionalAuth(request).catch(() => null);
+  const excludedAuthorIds = authUser?.userId
+    ? [...(await loadViewerExcludedAuthorIds(authUser.userId))]
+    : [];
 
   // Get posts, interactions, and users with RLS
   const { posts, allReactions, allComments, allShares, users } =
@@ -167,6 +176,21 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                 gte(postsTable.timestamp, oneDayAgo),
                 lte(postsTable.timestamp, now), // ✅ No future posts
                 isNull(postsTable.deletedAt), // Filter out deleted posts
+                // Filter the author and any reposted or quoted author before the candidate limit.
+                ...postFeedVisibilityConditions({ excludedAuthorIds }),
+                excludedAuthorIds.length > 0
+                  ? notExists(
+                      db
+                        .select({ id: originalPost.id })
+                        .from(originalPost)
+                        .where(
+                          and(
+                            eq(originalPost.id, postsTable.originalPostId),
+                            inArray(originalPost.authorId, excludedAuthorIds)
+                          )
+                        )
+                    )
+                  : undefined,
                 // Test authors are excluded in SQL before the 100-post
                 // candidate window, the same rule every sibling post list
                 // applies (main feed, following feed, single-tag page,

@@ -138,6 +138,7 @@ import {
   comments,
   count,
   db,
+  deleteCommentSubtree,
   eq,
   inArray,
   isNull,
@@ -737,56 +738,18 @@ export const DELETE = withErrorHandling(
     const user = await authenticate(request);
     const { id: commentId } = IdParamSchema.parse(await context.params);
 
-    // Find comment
-    const [comment] = await db
-      .select()
-      .from(comments)
-      .where(eq(comments.id, commentId))
-      .limit(1);
-
-    if (!comment) {
+    const result = await deleteCommentSubtree(commentId, user.userId);
+    if (result.status === 'not-found') {
       throw new NotFoundError('Comment', commentId);
     }
-
-    // Check if user is the author
-    if (comment.authorId !== user.userId) {
+    if (result.status === 'forbidden') {
       throw new AuthorizationError(
         'You can only delete your own comments',
         'comment',
         'delete'
       );
     }
-
-    // Get reply count before deletion
-    const [replyCountResult] = await db
-      .select({ count: count() })
-      .from(comments)
-      .where(eq(comments.parentCommentId, commentId));
-    const repliesCount = Number(replyCountResult?.count ?? 0);
-
-    // Delete reactions on replies first
-    const replies = await db
-      .select({ id: comments.id })
-      .from(comments)
-      .where(eq(comments.parentCommentId, commentId));
-
-    const replyIds = replies.map((r) => r.id);
-
-    if (replyIds.length > 0) {
-      // Delete reactions on replies
-      for (const replyId of replyIds) {
-        await db.delete(reactions).where(eq(reactions.commentId, replyId));
-      }
-    }
-
-    // Delete replies
-    await db.delete(comments).where(eq(comments.parentCommentId, commentId));
-
-    // Delete reactions on the main comment
-    await db.delete(reactions).where(eq(reactions.commentId, commentId));
-
-    // Delete the main comment
-    await db.delete(comments).where(eq(comments.id, commentId));
+    const { repliesCount } = result;
 
     logger.info(
       'Comment deleted successfully',

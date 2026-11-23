@@ -679,8 +679,8 @@ export async function runIsolatedClosedPredictionPositionsCases(
   await runIsolatedCases('closed-prediction-positions', fixture);
 }
 
-export async function runIsolatedMcpPerpFeeCases() {
-  await runIsolatedCases('mcp-perp-fee');
+export async function runIsolatedMcpPerpFeeCases(fixture?: IsolatedFixture) {
+  await runIsolatedCases('mcp-perp-fee', fixture);
 }
 
 export async function runIsolatedTradeHistoryCase() {
@@ -699,6 +699,7 @@ interface IsolatedFixture {
   name: string;
   file: string;
   cases: string[];
+  manualTradingFeeIndex?: boolean;
 }
 
 async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
@@ -946,7 +947,8 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
       balance ||
       closedPositions ||
       mcpFee ||
-      tradeHistory
+      tradeHistory ||
+      fixture?.manualTradingFeeIndex
     ) {
       phase = 'manual-idempotency-index';
       const actual = await identity(admin);

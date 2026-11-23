@@ -40,7 +40,9 @@ import {
   acceptGroupInvite,
   BusinessLogicError,
   checkRateLimitAsync,
+  countVisiblePostComments,
   declineGroupInvite,
+  listVisiblePostComments,
   logAdminModify,
   NotFoundError,
   notifyCommentOnPost,
@@ -60,6 +62,7 @@ import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   acquireUserBlockPairLock,
   and,
+  count,
   db,
   dbWrite,
   desc,
@@ -69,6 +72,7 @@ import {
   followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
+  getFilteredUserIds,
   getMutedUserIds,
   groupMembers,
   hasBlocked,
@@ -79,10 +83,15 @@ import {
   markets,
   not,
   notExists,
+  notInArray,
+  notifications,
+  notificationTargetVisibilityCondition,
+  or,
   perpMarketSnapshots,
   posts,
   postTags,
   questions,
+  sql,
   timeframedMarkets,
   userBlocks,
   users,
@@ -335,6 +344,7 @@ async function checkMcpRateLimit(
     | 'transfer'
     | 'post'
     | 'share_post'
+    | 'send_message'
 ): Promise<void> {
   const configMap: Record<
     string,
@@ -347,6 +357,7 @@ async function checkMcpRateLimit(
     transfer: RATE_LIMIT_CONFIGS.DEFAULT, // Use default for transfers
     post: RATE_LIMIT_CONFIGS.CREATE_POST,
     share_post: RATE_LIMIT_CONFIGS.SHARE_POST,
+    send_message: RATE_LIMIT_CONFIGS.SEND_MESSAGE,
   };
   const config = configMap[operation];
   if (!config) return;
@@ -1026,6 +1037,15 @@ export async function executeQueryFeed(
     relatedQuestion = question.questionNumber;
   }
 
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const now = new Date();
   // Filter in SQL before the limit without requiring NPC authors to have Users.
   const feedPosts = await db
@@ -1049,6 +1069,9 @@ export async function executeQueryFeed(
         ),
         relatedQuestion !== undefined
           ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined,
+        excludedAuthorIds.length > 0
+          ? notInArray(posts.authorId, excludedAuthorIds)
           : undefined
       )
     )
@@ -1381,13 +1404,52 @@ export async function executeGetTradeHistory(
  * Execute get_post tool
  */
 export async function executeGetPost(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetPostArgs
 ): Promise<GetPostResult> {
   const apiBaseUrl = getAPIBaseUrl();
-  return safeFetchRequired<GetPostResult>(
+  const result = await safeFetchRequired<GetPostResult>(
     new URL(`${apiBaseUrl}/posts/${args.postId}`)
   );
+
+  const { data } = result;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return result;
+  }
+
+  const post = { ...data };
+  if (typeof post.commentCount === 'number') {
+    post.commentCount = await countVisiblePostComments(
+      args.postId,
+      agent.userId,
+      post.commentCount
+    );
+  }
+
+  // The anonymous detail fetch can include an original excluded for this viewer.
+  const original = post.originalPost;
+  if (
+    original &&
+    typeof original === 'object' &&
+    !Array.isArray(original) &&
+    typeof original.authorId === 'string'
+  ) {
+    const [blocked, muted] = await Promise.all([
+      getFilteredUserIds(agent.userId),
+      getMutedUserIds(agent.userId),
+    ]);
+    if (
+      blocked.includes(original.authorId) ||
+      muted.includes(original.authorId)
+    ) {
+      delete post.isRepost;
+      delete post.isQuote;
+      delete post.quoteComment;
+      delete post.originalPostId;
+      delete post.originalPost;
+    }
+  }
+  return { ...result, data: post };
 }
 
 /**
@@ -1552,17 +1614,15 @@ export async function executeSharePost(
  * Execute get_comments tool
  */
 export async function executeGetComments(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetCommentsArgs
 ): Promise<GetCommentsResult> {
-  const commentsList = await db.comment.findMany({
-    where: {
-      postId: args.postId,
-      deletedAt: null,
-    },
-    orderBy: { createdAt: 'desc' },
-    take: args.limit || 50,
-  });
+  const commentsList = await listVisiblePostComments(
+    args.postId,
+    agent.userId,
+    args.limit || 50,
+    'desc'
+  );
   const commentIds = commentsList.map((c) => c.id);
   const reactionsList = await db.reaction.findMany({
     where: {
@@ -1947,32 +2007,37 @@ export async function executeGetFollowers(
   _agent: AuthenticatedAgent,
   args: GetFollowersArgs
 ): Promise<GetFollowersResult> {
-  const followersList = await db.follow.findMany({
-    where: { followingId: args.userId },
-    take: args.limit || 50,
-    orderBy: { createdAt: 'desc' },
-  });
-  const followerIds = followersList.map((f) => f.followerId);
-  const usersList = await db.user.findMany({
-    where: { id: { in: followerIds } },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      profileImageUrl: true,
-    },
-  });
-  const usersMap = new Map(usersList.map((u) => [u.id, u]));
+  // Same population as the website follow lists: the follower must be a
+  // real user who is not a test account (isTest flag or 'test-' id) and
+  // not banned. Joining users applies that filter before the limit, so
+  // excluded or dangling follow rows cannot consume page slots or
+  // surface as null-username entries.
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      profileImageUrl: users.profileImageUrl,
+    })
+    .from(follows)
+    .innerJoin(users, eq(users.id, follows.followerId))
+    .where(
+      and(
+        eq(follows.followingId, args.userId),
+        eq(users.isTest, false),
+        eq(users.isBanned, false),
+        sql`${users.id} NOT LIKE 'test-%'`
+      )
+    )
+    .orderBy(desc(follows.createdAt), desc(follows.id))
+    .limit(args.limit || 50);
   return {
-    followers: followersList.map((f) => {
-      const user = usersMap.get(f.followerId);
-      return {
-        id: f.followerId,
-        username: user?.username || null,
-        displayName: user?.displayName || null,
-        profileImageUrl: user?.profileImageUrl || null,
-      };
-    }),
+    followers: rows.map((user) => ({
+      id: user.id,
+      username: user.username || null,
+      displayName: user.displayName || null,
+      profileImageUrl: user.profileImageUrl || null,
+    })),
   };
 }
 
@@ -1983,32 +2048,34 @@ export async function executeGetFollowing(
   _agent: AuthenticatedAgent,
   args: GetFollowingArgs
 ): Promise<GetFollowingResult> {
-  const followingList = await db.follow.findMany({
-    where: { followerId: args.userId },
-    take: args.limit || 50,
-    orderBy: { createdAt: 'desc' },
-  });
-  const followingIds = followingList.map((f) => f.followingId);
-  const usersList = await db.user.findMany({
-    where: { id: { in: followingIds } },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      profileImageUrl: true,
-    },
-  });
-  const usersMap = new Map(usersList.map((u) => [u.id, u]));
+  // Same population as the website follow lists, mirrored on the
+  // followed side: see executeGetFollowers.
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      profileImageUrl: users.profileImageUrl,
+    })
+    .from(follows)
+    .innerJoin(users, eq(users.id, follows.followingId))
+    .where(
+      and(
+        eq(follows.followerId, args.userId),
+        eq(users.isTest, false),
+        eq(users.isBanned, false),
+        sql`${users.id} NOT LIKE 'test-%'`
+      )
+    )
+    .orderBy(desc(follows.createdAt), desc(follows.id))
+    .limit(args.limit || 50);
   return {
-    following: followingList.map((f) => {
-      const user = usersMap.get(f.followingId);
-      return {
-        id: f.followingId,
-        username: user?.username || null,
-        displayName: user?.displayName || null,
-        profileImageUrl: user?.profileImageUrl || null,
-      };
-    }),
+    following: rows.map((user) => ({
+      id: user.id,
+      username: user.username || null,
+      displayName: user.displayName || null,
+      profileImageUrl: user.profileImageUrl || null,
+    })),
   };
 }
 
@@ -2016,9 +2083,17 @@ export async function executeGetFollowing(
  * Execute search_users tool
  */
 export async function executeSearchUsers(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: SearchUsersArgs
 ): Promise<SearchUsersResult> {
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+
+  const excludedUserIds = [...blockedIds, ...mutedIds, ...blockedByIds];
+
   const usersList = await db.user.findMany({
     where: {
       // Match the web people search (GET /api/users/search) and the A2A
@@ -2034,6 +2109,7 @@ export async function executeSearchUsers(
         { username: { contains: args.query, mode: 'insensitive' } },
         { displayName: { contains: args.query, mode: 'insensitive' } },
       ],
+      ...(excludedUserIds.length > 0 ? { id: { notIn: excludedUserIds } } : {}),
     },
     take: args.limit || 20,
     select: {
@@ -2334,6 +2410,10 @@ export async function executeSendMessage(
   agent: AuthenticatedAgent,
   args: SendMessageArgs
 ): Promise<SendMessageResult> {
+  // Same per-account budget as POST /api/chats/[id]/message, so MCP clients
+  // and the website share one message limit.
+  await checkMcpRateLimit(agent.userId, 'send_message');
+
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
     select: { id: true, isGroup: true, name: true },
@@ -2395,8 +2475,8 @@ export async function executeSendMessage(
     },
   });
 
-  // The message has committed. A notification outage must not tell the
-  // caller that the message failed and invite a duplicate retry.
+  // Deliver in-app notifications only (PRD D-28). The message has already
+  // committed, so a notification failure must not invite a duplicate retry.
   const recipientUserIds = participants
     .map((participant) => participant.userId)
     .filter((userId) => userId !== agent.userId);
@@ -2407,7 +2487,8 @@ export async function executeSendMessage(
         agent.userId,
         args.chatId,
         chat.name || 'Group Chat',
-        message.content
+        message.content,
+        { sendEmail: false }
       );
     } else {
       const [recipientUserId] = recipientUserIds;
@@ -2416,7 +2497,8 @@ export async function executeSendMessage(
           recipientUserId,
           agent.userId,
           args.chatId,
-          message.content
+          message.content,
+          { sendEmail: false }
         );
       }
     }
@@ -2451,9 +2533,27 @@ export async function executeCreateGroup(
   const groupId = await generateSnowflakeId();
 
   // Deduplicate memberIds and exclude the owner (agent.userId)
-  const uniqueMemberIds = [...new Set(args.memberIds)].filter(
+  const requestedMemberIds = [...new Set(args.memberIds)].filter(
     (id) => id !== agent.userId
   );
+
+  // Membership rows have no User foreign key. Check existence, bans and
+  // bilateral blocks on the primary before adding members.
+  let uniqueMemberIds = requestedMemberIds;
+  if (requestedMemberIds.length > 0) {
+    const [validMembers, excludedMembers] = await Promise.all([
+      dbWrite.user.findMany({
+        where: { id: { in: requestedMemberIds }, isBanned: false },
+        select: { id: true },
+      }),
+      getFilteredUserIds(agent.userId, dbWrite),
+    ]);
+    const validMemberIdSet = new Set(validMembers.map((member) => member.id));
+    const excludedMemberIdSet = new Set(excludedMembers);
+    uniqueMemberIds = requestedMemberIds.filter(
+      (id) => validMemberIdSet.has(id) && !excludedMemberIdSet.has(id)
+    );
+  }
 
   // Create Group
   await db.group.create({
@@ -2629,18 +2729,25 @@ export async function executeGetUnreadCount(
     ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
   ];
 
-  const unreadCount = await db.notification.count({
-    where: {
-      userId: agent.userId,
-      read: false,
-      ...(excludedActorIds.length > 0
-        ? {
-            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
-          }
-        : {}),
-    },
-  });
-  return { unreadCount };
+  const moderationCondition =
+    excludedActorIds.length > 0
+      ? or(
+          isNull(notifications.actorId),
+          notInArray(notifications.actorId, excludedActorIds)
+        )
+      : undefined;
+  const [row] = await db
+    .select({ value: count() })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, agent.userId),
+        eq(notifications.read, false),
+        moderationCondition,
+        notificationTargetVisibilityCondition()
+      )
+    );
+  return { unreadCount: row?.value ?? 0 };
 }
 
 // ============================================================================
@@ -2663,21 +2770,32 @@ export async function executeGetNotifications(
     ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
   ];
 
-  const notificationsList = await db.notification.findMany({
-    where: {
-      userId: agent.userId,
-      // Match web notification visibility before taking the requested window.
-      // Existing notifications must disappear after a block or mute; system
-      // notifications have no actor and remain visible.
-      ...(excludedActorIds.length > 0
-        ? {
-            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
-          }
-        : {}),
-    },
-    orderBy: { createdAt: 'desc' },
-    take: args.limit || 100,
-  });
+  // Apply both visibility rules inside the page query, before its limit.
+  const moderationCondition =
+    excludedActorIds.length > 0
+      ? or(
+          isNull(notifications.actorId),
+          notInArray(notifications.actorId, excludedActorIds)
+        )
+      : undefined;
+  const notificationsList = await db
+    .select({
+      id: notifications.id,
+      type: notifications.type,
+      message: notifications.message,
+      read: notifications.read,
+      createdAt: notifications.createdAt,
+    })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, agent.userId),
+        moderationCondition,
+        notificationTargetVisibilityCondition()
+      )
+    )
+    .orderBy(desc(notifications.createdAt), desc(notifications.id))
+    .limit(args.limit || 100);
   return {
     notifications: notificationsList.map((n) => ({
       id: n.id,
@@ -2750,10 +2868,21 @@ export async function executeGetGroupInvites(
   agent: AuthenticatedAgent,
   _args: GetGroupInvitesArgs
 ): Promise<GetGroupInvitesResult> {
+  // Use the same viewer moderation exclusions as query_feed and search_agents.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedInviterIds = [...blockedIds, ...mutedIds, ...blockedByIds];
+
   const invitesList = await db.groupInvite.findMany({
     where: {
       invitedUserId: agent.userId,
       status: 'pending',
+      ...(excludedInviterIds.length > 0
+        ? { invitedBy: { notIn: excludedInviterIds } }
+        : {}),
     },
   });
 
@@ -3261,6 +3390,16 @@ export async function executeMuteUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot mute yourself');
   }
+  // Match POST /api/users/[userId]/mute: the target must exist. UserMute
+  // has no foreign key, so an unchecked mute of an unknown ID would leave
+  // a phantom row in the caller's mute list.
+  const targetUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!targetUser) {
+    throw new Error(`User ${args.userId} not found`);
+  }
   const existing = await db.userMute.findFirst({
     where: {
       muterId: agent.userId,
@@ -3303,6 +3442,19 @@ export async function executeReportUser(
   agent: AuthenticatedAgent,
   args: ReportUserArgs
 ): Promise<ReportUserResult> {
+  if (args.userId === agent.userId) {
+    throw new Error('Cannot report yourself');
+  }
+  // Match POST /api/moderation/reports: the reported user must exist.
+  // Report has no foreign key, so an unchecked report of an unknown ID
+  // would land in the admin moderation queue as a phantom pending report.
+  const reportedUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!reportedUser) {
+    throw new Error(`User ${args.userId} not found`);
+  }
   const reportId = await generateSnowflakeId();
   await db.report.create({
     data: {
@@ -3325,6 +3477,17 @@ export async function executeReportPost(
   agent: AuthenticatedAgent,
   args: ReportPostArgs
 ): Promise<ReportPostResult> {
+  // reports.reportedPostId has no foreign key, so an unchecked report
+  // would become an orphan row in the moderation queue. The web report
+  // route (POST /api/moderation/reports) looks the post up first and
+  // answers 404 when it does not exist; do the same here.
+  const post = await db.post.findUnique({
+    where: { id: args.postId },
+    select: { id: true },
+  });
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
   const reportId = await generateSnowflakeId();
   await db.report.create({
     data: {
@@ -3752,12 +3915,30 @@ export async function executeGetFavoritePosts(
   // Query directly as the authenticated agent. The HTTP favorites route
   // authenticates the caller, so calling it with an X-User-Id header always
   // returned an empty list.
+  // Favorites never bypass the viewer's block/mute policy: drop
+  // favorited authors the viewer blocked or muted, and authors who
+  // blocked the viewer — the web favorites feed's rule (GET
+  // /api/posts/feed/favorites, loadViewerExcludedAuthorIds) and the
+  // A2A getFavoritePosts rule. Filter before paginating so excluded
+  // authors never consume page slots.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = new Set([
+    ...blockedIds,
+    ...mutedIds,
+    ...blockedByIds,
+  ]);
   const favoritedUserIds = (
     await db
       .select({ targetUserId: favorites.targetUserId })
       .from(favorites)
       .where(eq(favorites.userId, agent.userId))
-  ).map((row) => row.targetUserId);
+  )
+    .map((row) => row.targetUserId)
+    .filter((id: string) => !excludedAuthorIds.has(id));
   if (favoritedUserIds.length === 0) {
     return { posts: [] };
   }

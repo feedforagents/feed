@@ -7,7 +7,7 @@ import type {
   AfterCommitScheduler,
   WalletPort,
 } from '@feed/core/markets/shared';
-import { dbWrite, sql, type Transaction } from '@feed/db';
+import { actorState, dbWrite, sql, type Transaction, users } from '@feed/db';
 import { logger } from '@feed/shared';
 import { FeeService } from './fee-service';
 import { createNpcWalletAdapter } from './npc-wallet-adapter';
@@ -24,7 +24,7 @@ export function createPerpSettlement(
       userId: string,
       tx: Transaction,
       afterCommit: AfterCommitScheduler
-    ) => WalletPort;
+    ) => WalletPort | Promise<WalletPort>;
   } = {}
 ): PerpSettlementPort {
   return {
@@ -42,7 +42,7 @@ export function createPerpSettlement(
           sql`SELECT pg_advisory_xact_lock(hashtext(${'perp-exposure:' + userId}))`
         );
         const wallet =
-          options.wallet?.(userId, tx, afterCommit) ??
+          (await options.wallet?.(userId, tx, afterCommit)) ??
           createUserWalletAdapter(tx, afterCommit);
         return operation(
           new PerpDbAdapter(tx),
@@ -65,6 +65,27 @@ export function createPerpSettlement(
       return result;
     },
   };
+}
+
+export function createPerpLiquidationSettlement(): PerpSettlementPort {
+  return createPerpSettlement({
+    system: 'perp_price_sweep',
+    wallet: async (userId, tx, afterCommit) => {
+      // ActorState backs NPC trades even when the shadow user row is missing
+      // or predates isActor. A known NPC with no wallet must fail on credit.
+      const [owner] = await tx.execute<{ isNpc: boolean }>(sql`
+        SELECT (
+          EXISTS (SELECT 1 FROM ${actorState} WHERE ${actorState.id} = ${userId})
+          OR EXISTS (
+            SELECT 1 FROM ${users} WHERE ${users.id} = ${userId} AND ${users.isActor}
+          )
+        ) AS "isNpc"
+      `);
+      return owner?.isNpc
+        ? createNpcWalletAdapter(userId, tx)
+        : createUserWalletAdapter(tx, afterCommit);
+    },
+  });
 }
 
 export function createNpcPerpSettlement(): PerpSettlementPort {
