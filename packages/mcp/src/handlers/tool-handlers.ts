@@ -3824,7 +3824,7 @@ export async function executeGetFavoritePosts(
           excludedAuthorIds: [...excludedAuthorIds],
           excludeDeadReposts: true,
           excludeModeratedReposts: true,
-        })
+        }),
         // Apply the web feed's test-author rule (DatabaseService
         // .getRecentPosts): test accounts — the isTest flag or a
         // 'test-' id prefix — must not leak into the favorites feed
