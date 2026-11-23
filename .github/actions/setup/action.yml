@@ -77,12 +77,18 @@ runs:
         named="spec-${{ runner.os }}-${{ runner.arch }}-${JOB}-"
         prefix="${named}${lock}-"
         legacy="spec-${{ runner.os }}-${{ runner.arch }}-${lock}-${JOB}-"
-        key="${prefix}${{ github.sha }}-${{ github.run_attempt }}"
+        pr_prefix=
+        if [[ $JOB == selftest-* && $GITHUB_EVENT_NAME == pull_request && $GITHUB_REF =~ ^refs/pull/([1-9][0-9]*)/merge$ ]]; then
+          pr_prefix="${named}pr-${BASH_REMATCH[1]}-${lock}-"
+        fi
+        key="${pr_prefix:-$prefix}${{ github.sha }}-${{ github.run_attempt }}"
         [[ $key == spec-*-"$JOB"-*-${{ github.sha }}-${{ github.run_attempt }} ]] || { echo "::error::Malformed spec cache key '$key'"; exit 1; }
         {
           echo "restore<<EOF"
+          if [[ -n $pr_prefix ]]; then printf '%s\n' "$pr_prefix"; fi
           printf '%s\n' "$prefix" "$legacy" "$named"
           echo "EOF"
+          echo "pr-lock-prefix=$pr_prefix"
           echo "lock-prefix=$prefix"
           echo "legacy-lock-prefix=$legacy"
           echo "key=$key"
@@ -179,11 +185,13 @@ runs:
         PUBLISH_GEN_SEED: ${{ inputs.verification == 'true' && steps.gen-seed.outputs.prefix != '' }}
         REMEMBER_RESTORED_EVALUATORS: >-
           ${{ startsWith(inputs.job, 'selftest-') &&
-              github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
               steps.restore-spec-cache.outcome == 'success' && steps.restore-spec-cache.outputs.cache-matched-key != '' &&
-              steps.spec-cache.outputs.lock-prefix != '' && steps.spec-cache.outputs.legacy-lock-prefix != '' &&
-              (startsWith(steps.restore-spec-cache.outputs.cache-matched-key, steps.spec-cache.outputs.lock-prefix) ||
-               startsWith(steps.restore-spec-cache.outputs.cache-matched-key, steps.spec-cache.outputs.legacy-lock-prefix)) }}
+              ((github.event_name == 'pull_request' && steps.spec-cache.outputs.pr-lock-prefix != '' &&
+                startsWith(steps.restore-spec-cache.outputs.cache-matched-key, steps.spec-cache.outputs.pr-lock-prefix)) ||
+               (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+                steps.spec-cache.outputs.lock-prefix != '' && steps.spec-cache.outputs.legacy-lock-prefix != '' &&
+                (startsWith(steps.restore-spec-cache.outputs.cache-matched-key, steps.spec-cache.outputs.lock-prefix) ||
+                 startsWith(steps.restore-spec-cache.outputs.cache-matched-key, steps.spec-cache.outputs.legacy-lock-prefix)))) }}
       run: |
         if [[ $REMEMBER_RESTORED_EVALUATORS == true ]]; then
           {
