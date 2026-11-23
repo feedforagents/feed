@@ -62,17 +62,7 @@ import {
   PredictionDbAdapter as CorePredictionDbAdapter,
   PredictionMarketService as CorePredictionMarketService,
 } from '@feed/core/markets/prediction';
-import {
-  and,
-  db,
-  desc,
-  eq,
-  gte,
-  questions,
-  tags,
-  trendingTags,
-  worldEvents,
-} from '@feed/db';
+import { and, db, desc, eq, gte, questions, worldEvents } from '@feed/db';
 import {
   generateSnowflakeId,
   type JsonValue,
@@ -94,6 +84,7 @@ import {
   validateCoherence,
 } from './services/content-grounding-validator';
 import { getPredictionMarketInitialization } from './services/prediction-market-profiles';
+import { getCurrentTrendingTags } from './services/tag-service';
 
 /**
  * Wrapper around filterIncoherent that logs when items are filtered out.
@@ -844,7 +835,12 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
     question: Question,
     _actors: SelectedActor[],
     _organizations: Organization[],
-    recentEvents: DayTimeline[]
+    recentEvents: ReadonlyArray<{
+      events: ReadonlyArray<
+        Pick<WorldEvent, 'description' | 'relatedQuestion'>
+      >;
+    }>,
+    options: { recordWorldImpact?: boolean } = {}
   ): Promise<string> {
     // Get context from recent events related to this question
     const relatedEvents = recentEvents
@@ -896,8 +892,9 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
       throw new Error('Resolution event must be a nonempty string');
     }
 
-    // Assess world impact
-    await this.assessAndRecordWorldImpact(question, eventDescription);
+    if (options.recordWorldImpact !== false) {
+      await this.assessAndRecordWorldImpact(question, eventDescription);
+    }
 
     return eventDescription;
   }
@@ -905,7 +902,7 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
   /**
    * Assess if a resolution event changes the world and record it if so
    */
-  private async assessAndRecordWorldImpact(
+  async assessAndRecordWorldImpact(
     question: Question,
     resolutionEvent: string
   ): Promise<void> {
@@ -1166,20 +1163,7 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
             type: o.type,
           }))
       ),
-      // Get trending topics for context (with manual join for tags)
-      db
-        .select({
-          id: trendingTags.id,
-          tagId: trendingTags.tagId,
-          score: trendingTags.score,
-          tagName: tags.name,
-          tagDisplayName: tags.displayName,
-          tagCategory: tags.category,
-        })
-        .from(trendingTags)
-        .leftJoin(tags, eq(trendingTags.tagId, tags.id))
-        .orderBy(desc(trendingTags.score))
-        .limit(10),
+      getCurrentTrendingTags(10),
       // Get market metrics for metrics-based question generation (BAB-5)
       MarketMetricsService.gatherMetrics(24),
     ]);
@@ -1251,7 +1235,7 @@ ${s.involvedOrganizations?.length ? `Organizations: ${s.involvedOrganizations.jo
       trendingTagsList.length > 0
         ? `TRENDING: ${trendingTagsList
             .slice(0, 5)
-            .map((tt) => tt.tagDisplayName || tt.tagName || 'Unknown')
+            .map((tt) => tt.tag.displayName || tt.tag.name)
             .join(', ')}`
         : '';
 
@@ -1787,16 +1771,7 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
             description: o.description,
           }))
       ),
-      // Get trending topics
-      db
-        .select({
-          tagName: tags.name,
-          tagDisplayName: tags.displayName,
-        })
-        .from(trendingTags)
-        .leftJoin(tags, eq(trendingTags.tagId, tags.id))
-        .orderBy(desc(trendingTags.score))
-        .limit(8),
+      getCurrentTrendingTags(8),
     ]);
 
     // Build context strings
@@ -1825,7 +1800,7 @@ XML: <response><questions><question><text>...</text><resolutionCriteria>...</res
     const orgsContext = `COMPANIES: ${organizationsList.map((o) => o.name).join(', ')}`;
     const trendingContext =
       trendingTagsList.length > 0
-        ? `TRENDING: ${trendingTagsList.map((t) => t.tagDisplayName || t.tagName).join(', ')}`
+        ? `TRENDING: ${trendingTagsList.map((t) => t.tag.displayName || t.tag.name).join(', ')}`
         : '';
 
     // Timeframe-specific guidance

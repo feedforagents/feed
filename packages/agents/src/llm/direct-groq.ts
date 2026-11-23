@@ -12,6 +12,7 @@
 
 import { createGroq } from '@ai-sdk/groq';
 import type { IAgentRuntime } from '@elizaos/core';
+import { scheduledInferenceFetch } from '@feed/db';
 import { GROQ_MODELS, getAgentLLMBridge, getSurplusConfig } from '@feed/shared';
 import { generateText } from 'ai';
 import {
@@ -105,7 +106,11 @@ export function createAgentGroq(runtime?: IAgentRuntime) {
   if (surplus) {
     return createGroq({
       apiKey: surplus.apiKey,
-      fetch: runtime?.fetch ?? undefined,
+      fetch: Object.assign(
+        (input: RequestInfo | URL, options?: RequestInit) =>
+          scheduledInferenceFetch(input, options, runtime?.fetch ?? undefined),
+        { preconnect: fetch.preconnect }
+      ),
       baseURL: surplus.baseURL,
     });
   }
@@ -142,6 +147,7 @@ export async function callGroqDirect(params: {
   purpose?: 'action' | 'reasoning' | 'evaluation' | 'response' | 'other';
   actionType?: string;
   runtime?: IAgentRuntime; // Pass runtime to access settings
+  signal?: AbortSignal;
 }): Promise<string> {
   if (typeof params.prompt !== 'string' || !params.prompt.trim()) {
     throw new Error('Agent LLM prompt is required');
@@ -186,6 +192,8 @@ export async function callGroqDirect(params: {
     params.maxTokens && params.maxTokens < 500 ? 20000 : 60000
   ); // Shorter timeout for small outputs
 
+  params.signal?.throwIfAborted();
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const result = await generateText({
     model: groq.languageModel(model),
     prompt: params.prompt,
@@ -196,7 +204,9 @@ export async function callGroqDirect(params: {
       ? { providerOptions: { groq: { reasoningEffort: 'none' } } }
       : {}),
     maxRetries: 0, // Every request is observable; callers own explicit retries.
-    abortSignal: AbortSignal.timeout(timeoutMs),
+    abortSignal: params.signal
+      ? AbortSignal.any([params.signal, timeoutSignal])
+      : timeoutSignal,
     experimental_telemetry: { isEnabled: false },
   }).catch((error: Error) => {
     if (trajectoryLogger && stepId) {

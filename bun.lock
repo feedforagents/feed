@@ -578,6 +578,7 @@
         "feed": "./cli/index.ts",
       },
       "dependencies": {
+        "@feed/core": "workspace:*",
         "@feed/db": "workspace:*",
         "@feed/engine": "workspace:*",
         "@feed/shared": "workspace:*",
