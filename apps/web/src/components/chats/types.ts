@@ -68,6 +68,8 @@ export interface ChatParticipant {
   displayName: string;
   username?: string;
   profileImageUrl?: string;
+  /** False for departed members, who stay listed only so their old messages keep a name. */
+  isActive?: boolean;
 }
 
 export interface ChatDetails {
@@ -77,6 +79,12 @@ export interface ChatDetails {
     isGroup: boolean;
     createdAt: string;
     updatedAt: string;
+    /**
+     * Current member count (active participant rows). The participants
+     * array is a name-resolution list that also keeps departed members,
+     * so its length is not the roster size.
+     */
+    memberCount?: number;
     otherUser?: {
       id: string;
       displayName: string | null;

@@ -4,9 +4,9 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
+import { drainTradingFeeOutboxBatch } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
-import { drainTradingFeeOutboxBatch } from '@/lib/services/trading-fee-outbox';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
