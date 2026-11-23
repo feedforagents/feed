@@ -418,7 +418,7 @@ describe('PredictionMarketService', () => {
     ).rejects.toThrow(/expired/);
   });
 
-  it('should allow sells on expired but unresolved markets', async () => {
+  it('should block sells on expired but unresolved markets', async () => {
     // First buy a position while market is active
     await service.buy({
       userId: 'u1',
@@ -434,14 +434,10 @@ describe('PredictionMarketService', () => {
       endDate: new Date(Date.now() - 1000),
     });
 
-    // User should still be able to close their position
-    const result = await service.sell({
-      userId: 'u1',
-      marketId: 'm1',
-      shares: pos!.shares,
-    });
-    expect(result.positionClosed).toBe(true);
-    expect(result.netProceeds).toBeGreaterThan(0);
+    await expect(
+      service.sell({ userId: 'u1', marketId: 'm1', shares: pos!.shares })
+    ).rejects.toThrow(/expired/);
+    expect(await db.getPosition('u1', 'm1', 'yes')).toEqual(pos);
   });
 
   it('should block sells on resolved markets with outcome', async () => {
@@ -927,12 +923,13 @@ describe('PredictionMarketService input boundaries (D17)', () => {
     expect(result.shares).toBeCloseTo(0.01);
   });
 
-  it('uses the injected clock for buy expiry', async () => {
-    const { service: expired } = makeService(
-      new Date('2031-01-01T00:00:00.000Z')
-    );
+  it('closes buys and sells at the exact scheduled time', async () => {
+    const { service: expired } = makeService(baseMarket.endDate);
     await expect(
       expired.buy({ userId: 'u1', marketId: 'mb', side: 'yes', amount: 10 })
+    ).rejects.toThrow('Market expired');
+    await expect(
+      expired.sell({ userId: 'u1', marketId: 'mb', shares: 1 })
     ).rejects.toThrow('Market expired');
   });
 });

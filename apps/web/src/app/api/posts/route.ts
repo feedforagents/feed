@@ -681,12 +681,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ...blockedByIds,
     ]);
 
-    // Get posts from followed users/actors with caching
+    // Get posts from followed users/actors with caching. The viewer's
+    // moderation exclusions go into the page query itself, so hidden
+    // authors cannot spend the limit and strand visible posts behind
+    // them; the in-memory filter below stays as a second guard.
     const postsResult = await cachedDb.getPostsForFollowing(
       userId,
       allFollowedIds,
       limit,
-      cursor
+      cursor,
+      [...excludedUserIds]
     );
 
     // Filter out posts from blocked/muted users
@@ -800,8 +804,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       originals.forEach((p) => followingOriginalPostsMap.set(p.id, p));
     }
 
+    const visibleFollowingPosts = filteredPosts.filter((post) => {
+      const original = post.originalPostId
+        ? followingOriginalPostsMap.get(post.originalPostId)
+        : undefined;
+      return (
+        post.content !== '' ||
+        !original ||
+        !excludedUserIds.has(original.authorId)
+      );
+    });
+
     // Format following posts synchronously using lookup maps
-    const formattedFollowingPosts = filteredPosts.map((post: Post) => {
+    const formattedFollowingPosts = visibleFollowingPosts.map((post: Post) => {
       const originalPost = post.originalPostId
         ? (followingOriginalPostsMap.get(post.originalPostId) ?? null)
         : null;
@@ -809,9 +824,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const user = post.authorId ? userMap.get(post.authorId) : undefined;
 
       // Build repost metadata from originalPost if it exists (clean, no text parsing)
-      // An original by an author the viewer must not see is never exposed
-      // here — the row keeps its own content and renders without repost
-      // metadata, the same treatment a deleted original gets in this path.
+      // Keep quote commentary without embedding an excluded original.
       const repostMetadata: Record<string, unknown> = {};
       if (
         postsWithOriginal.originalPostId &&
@@ -920,6 +933,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const feedVisibility: PostFeedVisibilityOptions = {
     excludedAuthorIds: viewerExcludedAuthorIds,
     excludeDeadReposts: true,
+    excludeModeratedReposts: true,
   };
 
   // Get posts from database with cursor-based pagination

@@ -1,290 +1,266 @@
-/**
- * GET /api/posts must not expose a simple repost's original post when the
- * original's author is in the viewer's moderation exclusion set (blocked,
- * muted, or blocked the viewer). A simple repost's visible content *is* the
- * original, so returning the original in full is full exposure.
- *
- * The SQL visibility conditions (`postFeedVisibilityConditions`) excluded
- * only posts *authored by* excluded authors; a simple repost whose ORIGINAL
- * author is excluded passed the SQL filter, consumed a page slot, and was
- * embedded in full by both feed paths. The profile post list (#1940), the
- * single-post route (#1962), the MCP get_post tool (#1960) and the trending
- * widget (#1934) already apply the exclusion set to embedded originals.
- *
- * Fix: the SQL conditions now exclude simple reposts of excluded-author
- * originals before the page is cut (so hidden rows never consume page
- * slots — the same reason the dead-repost subplan exists), and both render
- * paths omit the embedded original: the recent path drops the simple
- * repost row and renders a quote with `originalPost: null`; the following
- * path (which renders dead originals as blank rows) omits the repost
- * metadata entirely. Anonymous reads have no moderation set and stay
- * unfiltered.
- *
- * Real DB, real route handler, no mocks.
- *
- * Run with: DISABLE_RATE_LIMITING=true STEWARD_JWT_SECRET=<any non-empty value>
- *   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_feedmod
- *   DIRECT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_feedmod
- *   TZ=UTC bun test ./feed-repost-original-moderation.integration.test.ts
- *   --preload ./preload.ts
- */
-
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-import {
-  closeDatabase,
-  db,
-  eq,
-  follows,
-  inArray,
-  posts,
-  userBlocks,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
+/** Recent and Following repost visibility before pagination. PRD §12, MVP Phase 5. */
+import { expect, mock, test } from 'bun:test';
 import { NextRequest } from 'next/server';
-import { createStewardTestToken } from './helpers/steward-auth';
+import {
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-let POSTS_GET: typeof import('../../../apps/web/src/app/api/posts/route').GET;
-
-const webBearer = async (userId: string) =>
-  `Bearer ${await createStewardTestToken(userId)}`;
-
-const OWNER = 'fdmod-owner';
-const VIEWER = 'fdmod-viewer';
-const NORMAL = 'fdmod-normal';
-const BLOCKED = 'fdmod-blocked';
-
-const postIds: string[] = [];
-const blockIds: string[] = [];
-
-let OB = ''; // original by BLOCKED
-let ON = ''; // original by NORMAL
-let V1 = ''; // owner own post 1
-let H1 = ''; // owner simple repost of OB
-let V2 = ''; // owner own post 2
-let Q1 = ''; // owner quote of OB
-let R1 = ''; // owner simple repost of ON
-
-type FeedPost = {
-  id?: string;
-  content?: string | null;
-  isRepost?: boolean;
-  isQuote?: boolean;
-  originalPostId?: string;
-  originalPost?: {
-    id: string;
-    content: string;
-    authorId: string;
-  } | null;
+const cases = {
+  recent: 'fills recent, actor and type pages without excluded reposts',
+  following:
+    'fills Following pages and retains quote commentary through the cursor walk',
+  public: 'keeps visible originals for anonymous and unaffected viewers',
 };
 
-type FeedResponse = {
-  success?: boolean;
-  posts?: FeedPost[];
-  limit?: number;
-  cursor?: string | null;
-  hasMore?: boolean;
-  source?: string;
-};
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks main feed moderation on disposable PostgreSQL', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'feed-repost-original-moderation',
+      file: 'packages/testing/integration/feed-repost-original-moderation.integration.test.ts',
+      cases: Object.values(cases),
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  process.env.STEWARD_JWT_SECRET = crypto.randomUUID();
+  mock.module('server-only', () => ({}));
 
-async function insertUser(id: string) {
-  await db.insert(users).values({
-    id,
-    username: id.replace(/[^a-z0-9-]/g, ''),
-    displayName: id,
-    stewardId: id,
-    isTest: false,
-    isBanned: false,
-    updatedAt: new Date(),
-  });
-}
-
-async function insertPost(
-  id: string,
-  authorId: string,
-  content: string,
-  originalPostId: string | null,
-  at: Date
-) {
-  await db.insert(posts).values({
-    id,
-    content,
-    authorId,
-    originalPostId,
-    timestamp: at,
-    createdAt: at,
-  });
-  postIds.push(id);
-}
-
-async function getFeed(
-  viewerId: string | null,
-  limit: number,
-  cursor?: string
-): Promise<FeedResponse> {
-  const headers: Record<string, string> = {};
-  if (viewerId) headers.authorization = await webBearer(viewerId);
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (cursor) params.set('cursor', cursor);
-  const request = new NextRequest(
-    new Request(`http://localhost/api/posts?${params}`, {
-      method: 'GET',
-      headers,
-    })
+  const { CACHE_KEYS, getCache, optionalAuth, setCache } = await import(
+    '@feed/api'
   );
-  const response = await POSTS_GET(request);
-  expect(response.status).toBe(200);
-  return (await response.json()) as FeedResponse;
-}
+  const {
+    comments,
+    dbWrite,
+    desc,
+    follows,
+    inArray,
+    posts,
+    userBlocks,
+    userMutes,
+    users,
+  } = await import('@feed/db');
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { GET } = await import('../../../apps/web/src/app/api/posts/route');
+  const { createStewardTestToken } = await import('./helpers/steward-auth');
 
-async function getFollowing(
-  viewerId: string,
-  limit: number
-): Promise<FeedResponse> {
-  const headers: Record<string, string> = {};
-  headers.authorization = await webBearer(viewerId);
-  const request = new NextRequest(
-    new Request(
-      `http://localhost/api/posts?following=true&userId=${viewerId}&limit=${limit}`,
-      { method: 'GET', headers }
-    )
-  );
-  const response = await POSTS_GET(request);
-  expect(response.status).toBe(200);
-  return (await response.json()) as FeedResponse;
-}
+  const now = new Date();
+  const older = new Date(now.getTime() - 3_600_000);
 
-describe('feed repost original moderation', () => {
-  beforeAll(async () => {
-    mock.module('server-only', () => ({}));
-    ({ GET: POSTS_GET } = await import(
-      '../../../apps/web/src/app/api/posts/route'
-    ));
-    for (const id of [OWNER, VIEWER, NORMAL, BLOCKED]) {
-      await insertUser(id);
-    }
+  async function seedUser(role: string) {
+    const id = await generateSnowflakeId();
+    const stewardId = `feed-repost-${role}`;
+    await dbWrite.insert(users).values({
+      id,
+      username: stewardId,
+      stewardId,
+      updatedAt: now,
+    });
+    return { id, stewardId };
+  }
 
-    const now = new Date();
-    const earlier = new Date(now.getTime() - 3_600_000);
+  const owner = await seedUser('owner');
+  const viewer = await seedUser('viewer');
+  const normal = await seedUser('normal');
+  const blocked = await seedUser('blocked');
+  const muted = await seedUser('muted');
+  const blocking = await seedUser('blocking');
 
-    [OB, ON, V1, H1, V2, Q1, R1] = await Promise.all([
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-      generateSnowflakeId(),
-      generateSnowflakeId(),
+  const originals = [
+    { id: 'normal-original', authorId: normal.id },
+    { id: 'blocked-original', authorId: blocked.id },
+    { id: 'muted-original', authorId: muted.id },
+    { id: 'blocking-original', authorId: blocking.id },
+  ];
+  const postsFromOwner = [
+    { id: 'first-post', content: 'Visible first page' },
+    { id: 'blocked-repost', content: '', originalPostId: 'blocked-original' },
+    { id: 'second-post', content: 'Visible second page' },
+    { id: 'muted-repost', content: '', originalPostId: 'muted-original' },
+    { id: 'third-post', content: 'Visible third page' },
+    { id: 'blocking-repost', content: '', originalPostId: 'blocking-original' },
+    {
+      id: 'blocked-quote',
+      content: 'Visible quote commentary',
+      originalPostId: 'blocked-original',
+    },
+    { id: 'normal-repost', content: '', originalPostId: 'normal-original' },
+  ];
+  await dbWrite.transaction(async (tx) => {
+    await tx.insert(follows).values({
+      id: 'viewer-follows-owner',
+      followerId: viewer.id,
+      followingId: owner.id,
+    });
+    await tx.insert(userBlocks).values([
+      { id: 'outgoing', blockerId: viewer.id, blockedId: blocked.id },
+      { id: 'incoming', blockerId: blocking.id, blockedId: viewer.id },
     ]);
-    await insertPost(OB, BLOCKED, 'fdmod original by blocked', null, earlier);
-    await insertPost(ON, NORMAL, 'fdmod original by normal', null, earlier);
-    await insertPost(V1, OWNER, 'fdmod own post 1', null, now);
-    await insertPost(H1, OWNER, '', OB, new Date(now.getTime() - 1000));
-    await insertPost(
-      V2,
-      OWNER,
-      'fdmod own post 2',
-      null,
-      new Date(now.getTime() - 2000)
-    );
-    await insertPost(
-      Q1,
-      OWNER,
-      'fdmod quote of blocked',
-      OB,
-      new Date(now.getTime() - 3000)
-    );
-    await insertPost(R1, OWNER, '', ON, new Date(now.getTime() - 4000));
-
-    // Viewer blocked BLOCKED, and follows OWNER for the following feed.
-    const blockId = await generateSnowflakeId();
-    await db.insert(userBlocks).values({
-      id: blockId,
-      blockerId: VIEWER,
-      blockedId: BLOCKED,
-      createdAt: now,
-    });
-    blockIds.push(blockId);
-    await db.insert(follows).values({
-      id: await generateSnowflakeId(),
-      followerId: VIEWER,
-      followingId: OWNER,
-      createdAt: now,
-    });
+    await tx
+      .insert(userMutes)
+      .values({ id: 'mute', muterId: viewer.id, mutedId: muted.id });
+    await tx.insert(posts).values([
+      ...originals.map((row, index) => ({
+        ...row,
+        content: `Fixture original ${row.id}`,
+        timestamp: new Date(older.getTime() - index * 1000),
+      })),
+      ...postsFromOwner.map((row, index) => ({
+        ...row,
+        authorId: owner.id,
+        timestamp: new Date(now.getTime() - (index + 1) * 1000),
+      })),
+    ]);
+    const comment = {
+      postId: 'second-post',
+      authorId: normal.id,
+      content: 'Fixture comment',
+      updatedAt: now,
+    };
+    await tx.insert(comments).values([
+      { ...comment, id: 'live-comment' },
+      { ...comment, id: 'deleted-comment', deletedAt: now },
+    ]);
   });
 
-  afterAll(async () => {
-    await db.delete(follows).where(eq(follows.followerId, VIEWER));
-    await db.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
-    await db.delete(posts).where(inArray(posts.id, postIds));
-    await db
-      .delete(users)
-      .where(inArray(users.id, [OWNER, VIEWER, NORMAL, BLOCKED]));
-    await closeDatabase();
-  }, 10_000);
+  // A deployment may retain pages selected under the old moderation rules.
+  // Warm both prior cache keys with real fixture rows before checking the new pages.
+  const oldPage = await dbWrite
+    .select()
+    .from(posts)
+    .where(inArray(posts.id, ['first-post', 'blocked-repost']))
+    .orderBy(desc(posts.timestamp));
+  const excluded = [blocked.id, muted.id, blocking.id].sort();
+  const oldRecentKey = JSON.stringify([
+    'post-visibility-v1',
+    null,
+    2,
+    'offset',
+    0,
+    excluded,
+    true,
+  ]);
+  const oldFollowingKey = `${viewer.id}:2:offset:0:excl:${excluded.join(',')}`;
+  for (const [key, namespace] of [
+    [oldRecentKey, CACHE_KEYS.POSTS_LIST],
+    [oldFollowingKey, CACHE_KEYS.POSTS_FOLLOWING],
+  ] as const) {
+    await setCache(key, oldPage, { namespace, ttl: 60 });
+    expect(await getCache(key, { namespace })).toHaveLength(2);
+  }
 
-  it('viewer: hidden reposts do not consume page slots', async () => {
-    const page1 = await getFeed(VIEWER, 2);
-    expect(page1.posts?.map((p) => p.id)).toEqual([V1, V2]);
-    expect(page1.hasMore).toBe(true);
-  });
+  type FeedPage = {
+    posts: {
+      id: string;
+      content: string;
+      commentCount?: number;
+      originalPost?: { id: string; authorId: string } | null;
+    }[];
+    source?: string;
+    cursor?: string | null;
+    hasMore?: boolean;
+    nextCursor?: string | null;
+  };
 
-  it('viewer: paging through limit=1 visits every visible row exactly once', async () => {
-    const seen: string[] = [];
-    let cursor: string | undefined;
-    for (let page = 0; page < 8; page += 1) {
-      const result = await getFeed(VIEWER, 1, cursor);
-      for (const post of result.posts ?? []) {
-        expect(seen).not.toContain(post.id);
-        seen.push(post.id as string);
-      }
-      if (!result.hasMore || !result.cursor) break;
-      cursor = result.cursor;
+  async function feed(
+    user: typeof viewer | null,
+    query: Record<string, string>
+  ) {
+    const url = new URL('http://localhost/api/posts');
+    url.search = new URLSearchParams(query).toString();
+    const headers = new Headers();
+    if (user) {
+      headers.set(
+        'authorization',
+        `Bearer ${await createStewardTestToken(user.stewardId)}`
+      );
     }
-    // The recent feed is global: the normal author's original (ON) is a
-    // visible row too; the blocked author's original (OB) is not.
-    expect(seen).toEqual([V1, V2, Q1, R1, ON]);
+    const request = new NextRequest(url, { headers });
+    expect((await optionalAuth(request))?.userId ?? null).toBe(
+      user?.id ?? null
+    );
+    const response = await GET(request);
+    expect(response.status).toBe(200);
+    return (await response.json()) as FeedPage;
+  }
+
+  const ownerFeed = [
+    'first-post',
+    'second-post',
+    'third-post',
+    'blocked-quote',
+    'normal-repost',
+  ];
+
+  async function walk(query: Record<string, string>, expected: string[]) {
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page <= expected.length; page++) {
+      const response = await feed(viewer, {
+        ...query,
+        limit: '1',
+        ...(cursor ? { cursor } : {}),
+      });
+      seen.push(...response.posts.map(({ id }) => id));
+      cursor =
+        response.source === 'following'
+          ? (response.nextCursor ?? null)
+          : response.hasMore
+            ? (response.cursor ?? null)
+            : null;
+      if (!cursor) break;
+    }
+    expect(cursor).toBeNull();
+    expect(seen).toEqual(expected);
+  }
+
+  test(cases.recent, async () => {
+    const selectors: Record<string, string>[] = [
+      {},
+      { actorId: owner.id },
+      { type: 'post' },
+    ];
+    for (const filters of selectors) {
+      const first = await feed(viewer, { ...filters, limit: '2' });
+      expect(first.posts.map(({ id }) => id)).toEqual(ownerFeed.slice(0, 2));
+      expect(first.hasMore).toBe(true);
+    }
+    await walk({}, [...ownerFeed, 'normal-original']);
+    const full = await feed(viewer, { limit: '10' });
+    expect(full.posts.find(({ id }) => id === 'blocked-quote')).toMatchObject({
+      content: 'Visible quote commentary',
+      originalPost: null,
+    });
   });
 
-  it('viewer: a quote of a blocked original keeps its row with a null original', async () => {
-    const page = await getFeed(VIEWER, 3);
-    const quote = page.posts?.find((p) => p.id === Q1);
-    expect(quote).toBeDefined();
-    expect(quote?.content).toBe('fdmod quote of blocked');
-    expect(quote?.originalPost).toBeNull();
-    expect(JSON.stringify(page)).not.toContain('fdmod original by blocked');
-  });
-
-  it('viewer: a repost of a normal original still embeds the original', async () => {
-    const page = await getFeed(VIEWER, 10);
-    const repost = page.posts?.find((p) => p.id === R1);
-    expect(repost?.isRepost).toBe(true);
-    expect(repost?.originalPost?.content).toBe('fdmod original by normal');
-    expect(repost?.originalPost?.authorId).toBe(NORMAL);
-  });
-
-  it('anonymous: the same page stays unfiltered', async () => {
-    const page = await getFeed(null, 5);
-    const hidden = page.posts?.find((p) => p.id === H1);
-    expect(hidden?.isRepost).toBe(true);
-    expect(hidden?.originalPost?.content).toBe('fdmod original by blocked');
-    expect(page.posts?.map((p) => p.id)).toEqual([V1, H1, V2, Q1, R1]);
-  });
-
-  it('viewer following feed: no blocked original is exposed', async () => {
-    const page = await getFollowing(VIEWER, 10);
-    expect(page.source).toBe('following');
-    const body = JSON.stringify(page);
-    expect(body).not.toContain('fdmod original by blocked');
-    // The quote keeps its own commentary; the simple repost of a blocked
-    // original renders without repost metadata; the normal original is
-    // still embedded.
-    const quote = page.posts?.find((p) => p.id === Q1);
-    expect(quote?.content).toBe('fdmod quote of blocked');
+  test(cases.following, async () => {
+    const filters = { following: 'true', userId: viewer.id };
+    const first = await feed(viewer, { ...filters, limit: '2' });
+    expect(first.source).toBe('following');
+    expect(first.posts.map(({ id }) => id)).toEqual(ownerFeed.slice(0, 2));
+    expect(first.posts[1]?.commentCount).toBe(1);
+    expect(first.nextCursor).toBeTruthy();
+    await walk(filters, ownerFeed);
+    const full = await feed(viewer, { ...filters, limit: '10' });
+    const quote = full.posts.find(({ id }) => id === 'blocked-quote');
+    expect(quote?.content).toBe('Visible quote commentary');
     expect(quote?.originalPost).toBeUndefined();
-    const hidden = page.posts?.find((p) => p.id === H1);
-    expect(hidden?.originalPost).toBeUndefined();
-    const repost = page.posts?.find((p) => p.id === R1);
-    expect(repost?.originalPost?.content).toBe('fdmod original by normal');
+    expect(
+      full.posts.find(({ id }) => id === 'normal-repost')?.originalPost
+    ).toMatchObject({ id: 'normal-original', authorId: normal.id });
   });
-});
+
+  test(cases.public, async () => {
+    for (const user of [null, normal]) {
+      const first = await feed(user, { limit: '2' });
+      expect(first.posts.map(({ id }) => id)).toEqual([
+        'first-post',
+        'blocked-repost',
+      ]);
+      expect(first.posts[1]?.originalPost).toMatchObject({
+        id: 'blocked-original',
+        authorId: blocked.id,
+      });
+    }
+  });
+}
