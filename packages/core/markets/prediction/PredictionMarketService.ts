@@ -218,10 +218,19 @@ export class PredictionMarketService {
       );
     }
 
-    // Hard floor/ceiling: reject any trade that pushes odds to extreme values.
+    // Hard floor/ceiling: reject only a trade that pushes odds further
+    // from the center. A buy that unwinds an already-extreme market
+    // back toward 50% must still be allowed — otherwise nobody can buy
+    // the cheap side of a market that entered the band before this
+    // guard existed (or was pushed there by unguarded sells), and the
+    // market cannot be corrected from the buy side until resolution.
+    // This mirrors the sell-side carve-out in sell().
+    const worsens =
+      Math.abs(calc.newYesPrice - 0.5) > Math.abs(currentYesOdds - 0.5);
     if (
-      calc.newYesPrice < ODDS_HARD_FLOOR ||
-      calc.newYesPrice > ODDS_HARD_CEILING
+      worsens &&
+      (calc.newYesPrice < ODDS_HARD_FLOOR ||
+        calc.newYesPrice > ODDS_HARD_CEILING)
     ) {
       throw new BadRequestError(
         `Trade would push YES odds to ${(calc.newYesPrice * 100).toFixed(1)}% — market is too thin for this trade size.`
