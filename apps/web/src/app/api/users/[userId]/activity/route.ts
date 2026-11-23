@@ -139,11 +139,19 @@ export const GET = withErrorHandling(
 
     // Fetch trades from balanceTransactions (individual trade events)
     if (type === 'all' || type === 'trade') {
+      // Every trade event type the market services write to the balance
+      // ledger. Perp adds, partial closes, and flips record their balance
+      // movement under their own types (perp_add_to_position,
+      // perp_partial_close, perp_flip_position); leaving them out hides
+      // those trades from the feed entirely.
       const tradeTypes = [
         'pred_buy',
         'pred_sell',
         'perp_open',
         'perp_close',
+        'perp_partial_close',
+        'perp_add_to_position',
+        'perp_flip_position',
         'perp_liquidation',
       ];
 
