@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import {
   calculateRawPriceFromHoldings,
   calculateTradeImpact,
+  floorPoints,
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
 import type { WalletPort } from '../../shared/common';
@@ -363,20 +364,23 @@ describe('PerpMarketService', () => {
     expect(m.openInterest).toBeCloseTo(0, 4);
     expect(m.volume24h).toBeCloseTo(200, 4); // open + close size
 
+    // PRD §9.1: the 10.10 open charge is already whole hundredths; the close
+    // proceeds settle rounded down to a hundredth.
+    const credited = floorPoints(
+      (close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid
+    );
     const balance = await wallet.getBalance('u1');
     const expectedBalance =
-      10_000 -
-      (open.marginPaid! + open.feePaid) +
-      ((close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid);
+      10_000 - (open.marginPaid! + open.feePaid) + credited;
     expect(balance.balance).toBeCloseTo(expectedBalance, 4);
 
     // PnL should include fees:
-    // - perp_open records -openFee
+    // - perp_open records -(charge - margin): the fee plus any charge rounding
     // - perp_close records (netSettlement - marginPaid) which includes close fee
     const pnls = wallet.getPnLs('u1');
     const totalPnL = pnls.reduce((sum, p) => sum + p.pnl, 0);
     expect(totalPnL).toBeCloseTo(
-      close.realizedPnL! - open.feePaid - close.feePaid,
+      credited - (close.marginPaid ?? 0) - open.feePaid,
       4
     );
   });
@@ -401,19 +405,67 @@ describe('PerpMarketService', () => {
       ((open.entryPrice - close.exitPrice!) / open.entryPrice) * 100;
     expect(close.realizedPnL).toBeCloseTo(expectedPnl, 4);
 
+    const credited = floorPoints(
+      (close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid
+    );
     const balance = await wallet.getBalance('u1');
     const expectedBalance =
-      10_000 -
-      (open.marginPaid! + open.feePaid) +
-      ((close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid);
+      10_000 - (open.marginPaid! + open.feePaid) + credited;
     expect(balance.balance).toBeCloseTo(expectedBalance, 4);
 
     const pnls = wallet.getPnLs('u1');
     const totalPnL = pnls.reduce((sum, p) => sum + p.pnl, 0);
     expect(totalPnL).toBeCloseTo(
-      close.realizedPnL! - open.feePaid - close.feePaid,
+      credited - (close.marginPaid ?? 0) - open.feePaid,
       4
     );
+  });
+
+  it('never rounds close proceeds up when the tail is just below a hundredth', async () => {
+    // PRD §9.1: proceeds round down. A tail a billionth below a hundredth is
+    // a real amount, not noise, and must not be credited as that hundredth.
+    const roundTrip = async (fundingPaid: number) => {
+      const localDb = new InMemoryPerpDb([baseMarket]);
+      const localWallet = new InMemoryWallet(10_000);
+      const local = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            localDb.transaction((tx) => operation(tx, localWallet)),
+        },
+        db: localDb,
+        wallet: localWallet,
+        fees: feeConfig,
+      });
+      const opened = await local.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      await localDb.updateOpenPosition(opened.positionId, { fundingPaid });
+      const before = (await localWallet.getBalance('u1')).balance;
+      const closed = await local.closePosition({
+        userId: 'u1',
+        positionId: opened.positionId,
+      });
+      const credited = (await localWallet.getBalance('u1')).balance - before;
+      const proceeds =
+        (closed.marginPaid ?? 0) + closed.realizedPnL! - closed.feePaid;
+      return { credited, proceeds };
+    };
+
+    // Learn the unrounded proceeds, then charge funding that leaves them a
+    // billionth below the hundredth at or under that amount.
+    const reference = await roundTrip(0);
+    const hundredth = floorPoints(reference.proceeds);
+    const { credited, proceeds } = await roundTrip(
+      reference.proceeds - (hundredth - 1e-9)
+    );
+
+    expect(proceeds).toBeLessThan(hundredth);
+    expect(hundredth - proceeds).toBeLessThan(1e-8);
+    expect(credited).toBeCloseTo(hundredth - 0.01, 9);
   });
 
   it('calculates realized PnL from notional size while leverage only affects margin', async () => {
