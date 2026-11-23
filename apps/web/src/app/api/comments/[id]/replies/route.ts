@@ -95,6 +95,7 @@ import {
   comments,
   createCommentWithParentCheck,
   eq,
+  hasBlocked,
   posts,
   users,
 } from '@feed/db';
@@ -150,6 +151,7 @@ export const POST = withErrorHandling(
       const [parentPost] = await dbClient
         .select({
           id: posts.id,
+          authorId: posts.authorId,
           timestamp: posts.timestamp,
           deletedAt: posts.deletedAt,
         })
@@ -164,6 +166,18 @@ export const POST = withErrorHandling(
         throw new BusinessLogicError(
           'Cannot reply to deleted content',
           'CONTENT_DELETED'
+        );
+      }
+
+      // Apply the same bilateral post-author rule as the post comments route.
+      const [blockedByAuthor, blockedAuthor] = await Promise.all([
+        hasBlocked(parentPost.authorId, user.userId, dbClient),
+        hasBlocked(user.userId, parentPost.authorId, dbClient),
+      ]);
+      if (blockedByAuthor || blockedAuthor) {
+        throw new BusinessLogicError(
+          'Cannot comment on this post',
+          'BLOCKED_USER'
         );
       }
 
