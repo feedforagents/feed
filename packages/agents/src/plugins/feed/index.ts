@@ -1,5 +1,6 @@
 /**
- * Feed plugin for Eliza agents.
+ * Standalone Feed compatibility plugin for Eliza agents.
+ * Hosted NPC runtimes register the native plugin in npc.ts.
  *
  * - Providers: read context for the agent (some via the A2A client, some
  *   directly from Feed's database; see `feedPlugin.providers`).
@@ -56,8 +57,7 @@ export * from './services';
 export type { FeedRuntime } from './types';
 
 /**
- * Feed Plugin Export. Usually registered by AgentRuntimeManager through
- * `enhanceRuntimeWithFeed`; see the module header for the provider/action split.
+ * Standalone Feed plugin. See the module header for the provider/action split.
  */
 export const feedPlugin: Plugin = {
   name: 'feed',
@@ -105,8 +105,7 @@ export const feedPlugin: Plugin = {
 };
 
 /**
- * Initialize the plugin with an A2A client (manual setup for standalone
- * runtimes; AgentRuntimeManager normally does this). The A2A client is
+ * Initialize the standalone plugin with an A2A client. The A2A client is
  * resolved from the agent's identity via `initializeAgentA2AClient`.
  *
  * Throws if no A2A connection can be established.

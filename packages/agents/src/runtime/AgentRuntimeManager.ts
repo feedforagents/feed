@@ -34,18 +34,14 @@ import {
   StaticDataRegistry,
 } from '@feed/engine';
 import { GROQ_MODELS, type PackActor } from '@feed/shared';
-import { feedPlugin } from '../plugins/feed';
-import { enhanceRuntimeWithFeed } from '../plugins/feed/integration';
+import { npcFeedPlugin } from '../plugins/feed/npc';
 import { groqPlugin } from '../plugins/groq';
 import { agentCorePlugin } from '../plugins/plugin-agent-core/src';
 // TODO: experiencePlugin disabled due to missing plugin implementation
 // Re-enable when plugin-experience is properly implemented and exports valid Plugin
 // import { experiencePlugin } from '../plugins/plugin-experience/src';
 import { trajectoryLoggerPlugin } from '../plugins/plugin-trajectory-logger/src';
-import {
-  wrapPluginActions,
-  wrapPluginProviders,
-} from '../plugins/plugin-trajectory-logger/src/action-interceptor';
+import { wrapPluginProviders } from '../plugins/plugin-trajectory-logger/src/action-interceptor';
 import { TrajectoryLoggerService } from '../plugins/plugin-trajectory-logger/src/TrajectoryLoggerService';
 import { agentRegistry } from '../services/agent-registry.service';
 import { logger } from '../shared/logger';
@@ -501,7 +497,9 @@ export class AgentRuntimeManager {
       agentId
     );
 
-    await this.enhanceWithFeed(runtime, agentId, trajectoryLogger);
+    await runtime.registerPlugin(
+      wrapPluginProviders(npcFeedPlugin, trajectoryLogger)
+    );
 
     // Store trajectory logger reference on runtime
     runtime.trajectoryLogger = trajectoryLogger;
@@ -592,33 +590,6 @@ export class AgentRuntimeManager {
 
     trajectoryLoggers.set(runtimeId, service);
     return service;
-  }
-
-  /**
-   * Enhance runtime with Feed plugin (wrapped for trajectory logging)
-   */
-  private async enhanceWithFeed(
-    runtime: AgentRuntime,
-    agentId: string,
-    trajectoryLogger: TrajectoryLoggerService
-  ): Promise<void> {
-    // Wrap Feed plugin BEFORE registering (so wrapped version is used)
-    let wrappedFeedPlugin = feedPlugin;
-    if (feedPlugin.actions) {
-      wrappedFeedPlugin = wrapPluginActions(
-        wrappedFeedPlugin,
-        trajectoryLogger
-      );
-    }
-    if (feedPlugin.providers) {
-      wrappedFeedPlugin = wrapPluginProviders(
-        wrappedFeedPlugin,
-        trajectoryLogger
-      );
-    }
-
-    // Enhance with wrapped Feed plugin
-    await enhanceRuntimeWithFeed(runtime, agentId, wrappedFeedPlugin);
   }
 
   /**
