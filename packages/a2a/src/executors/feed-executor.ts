@@ -1286,9 +1286,18 @@ export class FeedAgentExecutor implements AgentExecutor {
     const status = params.status ?? 'active';
     if (status !== 'active' && status !== 'resolved')
       throw new Error('Invalid prediction market status');
+    // Active means open for trading: unresolved and not past its deadline.
+    // An expired market stays unresolved until settlement runs, but trading
+    // on it is closed. Same predicate as MCP get_markets, the website list
+    // (PredictionDbAdapter) and the agent plugin (predictionStatusCondition).
+    // At the exact deadline instant a listed market is not buyable: the buy
+    // guard refuses at now >= endDate.
     const markets = await db.market.findMany({
       take: limit,
-      where: { resolved: status === 'resolved' },
+      where:
+        status === 'active'
+          ? { resolved: false, endDate: { gte: new Date() } }
+          : { resolved: true },
       orderBy: { createdAt: 'desc' },
     });
     return {
