@@ -32,13 +32,11 @@ import {
   eq,
   gte,
   inArray,
-  isNotNull,
   isNull,
   lt,
   lte,
   markets,
   not,
-  positions,
   posts,
   questions,
   reactions,
@@ -50,6 +48,10 @@ import { StaticDataRegistry } from '@feed/engine';
 import type { ArcStateType, NarrativePost, NarrativeStory } from '@feed/shared';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import {
+  loadUserActiveStoryPositions,
+  storyHasUserPosition,
+} from '../_lib/user-positions';
 import { compareFeedStories } from '../feed-cursor';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
 import {
@@ -128,6 +130,7 @@ const USER_ENRICHMENT_TTL_S = 30;
 interface UserEnrichmentCache {
   likedPostIds: string[];
   sharedPostIds: string[];
+  positionMarketIds?: string[];
   positionQuestionIds: number[];
 }
 
@@ -749,9 +752,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   if (user?.userId) {
     const userId = user.userId;
-    const questionNumbersInResult = result.stories
-      .map((s) => s.questionNumber)
-      .filter((n): n is number => n !== null);
 
     try {
       const enrichCacheKey = narrativeEnrichmentKey(userId);
@@ -790,19 +790,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                   )
                 )
             : Promise.resolve([]),
-          questionNumbersInResult.length > 0
-            ? db
-                .select({ questionId: positions.questionId })
-                .from(positions)
-                .where(
-                  and(
-                    eq(positions.userId, userId),
-                    eq(positions.status, 'active'),
-                    isNotNull(positions.questionId),
-                    inArray(positions.questionId, questionNumbersInResult)
-                  )
-                )
-            : Promise.resolve([]),
+          loadUserActiveStoryPositions(userId, result.stories),
         ]);
 
         enrichment = {
@@ -812,6 +800,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           sharedPostIds: userShares
             .map((s) => s.postId)
             .filter((id): id is string => id !== null),
+          positionMarketIds: userPositions.map((p) => p.marketId),
           positionQuestionIds: userPositions
             .map((p) => p.questionId)
             .filter((id): id is number => id !== null),
@@ -835,13 +824,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
       const likedSet = new Set(enrichment.likedPostIds);
       const sharedSet = new Set(enrichment.sharedPostIds);
-      const positionSet = new Set(enrichment.positionQuestionIds);
+      const positionIndex = {
+        marketIds: new Set(enrichment.positionMarketIds ?? []),
+        questionNumbers: new Set(enrichment.positionQuestionIds),
+      };
 
       finalStories = result.stories.map((story) => ({
         ...story,
-        hasUserPosition:
-          story.questionNumber !== null &&
-          positionSet.has(story.questionNumber),
+        hasUserPosition: storyHasUserPosition(story, positionIndex),
         posts: story.posts.map((post) => ({
           ...post,
           isLiked: likedSet.has(post.id),
