@@ -68,18 +68,35 @@ describe('extractFirstJsonObject', () => {
       parameters: {},
     };
     const raw = JSON.stringify(decision);
+    const pretty = JSON.stringify(decision, null, 2);
 
     expect(extractFirstJsonObject(`Using {schema}: ${raw}`)).toBe(raw);
     expect(extractFirstJsonObject(`Draft {unclosed prefix\n${raw}`)).toBe(raw);
-    expect(extractFirstJsonObject(`{ outer wrapper ${raw} }`)).toBe(raw);
+    expect(extractFirstJsonObject(`\`\`\`json\n${pretty}\n\`\`\``)).toBe(
+      pretty
+    );
   });
 
-  test('falls back to the first balanced object when no valid JSON object exists', () => {
+  test('does not descend into a truncated or malformed outer JSON object to run a nested object', () => {
+    const truncatedOuter =
+      '{"thought":"compared two options","rejected":{"thought":"buy","action":"TRADE","parameters":{"marketId":"m1","marketType":"prediction","side":"buy_yes","amount":500}},"action":"WAIT","parameters":{"reason":"too ris';
+    expect(extractFirstJsonObject(truncatedOuter)).toBeNull();
+
+    const malformedOuter =
+      '{"decision":{"thought":"sell","action":"TRADE","parameters":{"marketId":"m1","marketType":"prediction","side":"sell_yes","amount":0}}, oops}';
+    expect(extractFirstJsonObject(malformedOuter)).toBe(malformedOuter);
+    expect(() => parseDecisionJson(malformedOuter)).toThrow(SyntaxError);
+  });
+
+  test('preserves malformed-JSON fallback, empty objects, and linear-time failure on repeated braces', () => {
     expect(extractFirstJsonObject('{"action":}')).toBe('{"action":}');
-    expect(extractFirstJsonObject('{first invalid} {second invalid}')).toBe(
-      '{first invalid}'
-    );
+    expect(extractFirstJsonObject('{}')).toBe('{}');
     expect(extractFirstJsonObject('{"action":"POST"')).toBeNull();
     expect(extractFirstJsonObject('plain text only')).toBeNull();
+
+    const startedAt = performance.now();
+    expect(extractFirstJsonObject('{'.repeat(100_000))).toBeNull();
+    expect(extractFirstJsonObject('{"'.repeat(50_000))).toBeNull();
+    expect(performance.now() - startedAt).toBeLessThan(250);
   });
 });

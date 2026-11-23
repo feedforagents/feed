@@ -48,6 +48,14 @@ function findBalancedJsonObject(
   return null;
 }
 
+function isJsonObjectStart(text: string, braceIndex: number): boolean {
+  let cursor = braceIndex + 1;
+  while (cursor < text.length && /\s/.test(text[cursor] ?? '')) {
+    cursor += 1;
+  }
+  return text[cursor] === '"' || text[cursor] === '}';
+}
+
 /**
  * Extract the first balanced JSON object from an arbitrary model response.
  * This is more reliable than a greedy regex when models emit thinking tags,
@@ -55,29 +63,14 @@ function findBalancedJsonObject(
  */
 export function extractFirstJsonObject(response: string): string | null {
   const cleaned = stripThinkBlocks(response);
-  let firstBalanced: string | null = null;
 
   for (let index = 0; index < cleaned.length; index++) {
-    if (cleaned[index] !== '{') {
-      continue;
-    }
-
-    const candidate = findBalancedJsonObject(cleaned, index);
-    if (!candidate) {
-      continue;
-    }
-
-    firstBalanced ??= candidate;
-
-    try {
-      JSON.parse(candidate);
-      return candidate;
-    } catch {
-      // Continue scanning in case an earlier brace region was prose or non-JSON code.
+    if (cleaned[index] === '{' && isJsonObjectStart(cleaned, index)) {
+      return findBalancedJsonObject(cleaned, index);
     }
   }
 
-  return firstBalanced;
+  return null;
 }
 
 export class DecisionValidationError extends Error {}
