@@ -1,13 +1,7 @@
 name: ci
 
-# Every run is the tasks of `pnpm verify`, the tools' own self-test included,
-# split over jobs that run side by side: the self-test of the tools in three,
-# the root check's simulations in four shards, and everything else in one,
-# which starts once the shards have simulated and checks with what they found.
-# Turborepo and spec skip what the change does not reach, from the cache of the
-# last run. The fixed normal profile is the
-# same locally and in CI. The self-test also installs and checks each
-# standalone example.
+# The tool project runs its root checks alongside the three self-test jobs.
+# Consumer verification can precompute root simulations on four runners.
 on:
   pull_request:
     branches: [main]
@@ -96,7 +90,7 @@ jobs:
         continue-on-error: true
         run: node vibestack/spec.ts tasks '@repo/ui#gen'
       - id: simulations
-        if: matrix.name == 'verify'
+        if: matrix.name == 'verify' && github.repository != 'lalalune/vibestack'
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
@@ -292,6 +286,7 @@ jobs:
           include-hidden-files: true
 
   vibestack-precompute-simulations:
+    if: github.repository != 'lalalune/vibestack'
     name: simulate-${{ matrix.shard }}
     runs-on: ubuntu-latest
     strategy:
