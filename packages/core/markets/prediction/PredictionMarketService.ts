@@ -5,7 +5,7 @@ import {
   NotFoundError,
 } from '@feed/shared';
 import Decimal from 'decimal.js-light';
-import { PredictionPricing } from './pricing';
+import { PredictionPricing, sharesAtPositionScale } from './pricing';
 import type {
   PredictionBuyInput,
   PredictionCancelInput,
@@ -24,9 +24,6 @@ import type {
 const DEFAULT_LIQUIDITY = 10_000;
 const MIN_SHARES = 0.01;
 const MIN_TRADE_AMOUNT = 1;
-// Position.shares is numeric(18, 6). Binary subtraction can land just below
-// the minimum lot for a quantity the column persists on a hundredth boundary.
-const POSITION_SHARE_SCALE = 6;
 
 /**
  * Maximum absolute odds shift (in probability units, 0–1) allowed in a single
@@ -74,13 +71,6 @@ function pointsDifference(a: number, b: number): number {
   return new Decimal(a)
     .minus(b)
     .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-    .toNumber();
-}
-
-function sharesAtPositionScale(shares: number): number {
-  if (!Number.isFinite(shares)) return 0;
-  return new Decimal(shares)
-    .toDecimalPlaces(POSITION_SHARE_SCALE, Decimal.ROUND_HALF_UP)
     .toNumber();
 }
 
@@ -274,6 +264,12 @@ export class PredictionMarketService {
           }
     );
 
+    // The database returns the stored share precision. Report the fill as
+    // the persisted delta so clients can use it in a subsequent sale.
+    const filledShares = new Decimal(position.shares)
+      .minus(existingPos?.shares ?? 0)
+      .toNumber();
+
     await this.recordSnapshot({
       marketId,
       yesPrice: calc.newYesPrice,
@@ -298,7 +294,7 @@ export class PredictionMarketService {
         actorId: userId,
         action: 'buy',
         side,
-        shares: calc.sharesBought,
+        shares: filledShares,
         amount,
         price: calc.avgPrice,
         source: tradeSource,
@@ -322,7 +318,7 @@ export class PredictionMarketService {
       positionId: position.id,
       marketId,
       side,
-      shares: calc.sharesBought,
+      shares: filledShares,
       avgPrice: calc.avgPrice,
       totalCost: amount,
       feePaid: calc.fee,
@@ -783,25 +779,26 @@ export class PredictionMarketService {
     if (market.resolved) {
       throw new BadRequestError('Market has resolved');
     }
-    if (this.now() > market.endDate) {
-      throw new BadRequestError('Market expired');
-    }
-    if (market.liquidity <= 0) {
-      throw new BadRequestError('Market has no liquidity');
-    }
+    this.assertMarketBeforeClose(market);
   }
 
   /**
    * Assert market allows position exits (sells).
-   * Users can sell on expired markets to close positions before resolution.
-   * Allows selling on cancelled/deactivated markets (resolved but no outcome determined).
-   * Only blocks if market has fully resolved with a determined outcome.
+   * Before the scheduled close, legacy deactivated markets can allow exits
+   * when they have no outcome and the position is still active.
    */
   private assertMarketActiveForSell(market: PredictionMarketRecord) {
     if (market.resolved && market.resolution !== null) {
       throw new BadRequestError(
         'Market has resolved with outcome - positions are auto-settled'
       );
+    }
+    this.assertMarketBeforeClose(market);
+  }
+
+  private assertMarketBeforeClose(market: PredictionMarketRecord) {
+    if (this.now() >= market.endDate) {
+      throw new BadRequestError('Market expired');
     }
     if (market.liquidity <= 0) {
       throw new BadRequestError('Market has no liquidity');

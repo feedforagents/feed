@@ -8,6 +8,7 @@ import {
   PERP_MARKET_CONFIG,
   ValidationError,
 } from '@feed/shared';
+import Decimal from 'decimal.js-light';
 import {
   evolveSyntheticPerpQuoteState,
   getSyntheticPerpExecutionPrice,
@@ -27,6 +28,7 @@ import type {
 } from './types';
 import {
   getOpenPerpPositionIntegrityIssue,
+  getPerpMarketOrderSizeLimit,
   isOpenPerpPositionStateValid,
   MAX_PERP_USER_EXPOSURE,
 } from './utils';
@@ -79,6 +81,7 @@ type FlipPositionTransactionResult = {
   previousEntryPrice: number;
   newOpenInterest: number;
   volume24h: number;
+  closeFeeRecorded: boolean;
 };
 
 /** PRD §9.3 item 8 [D-17b]: max leverage is 20x. */
@@ -96,9 +99,73 @@ function effectiveMaxLeverage(market: { maxLeverage?: number | null }): number {
     DEFAULT_MAX_LEVERAGE
   );
 }
+
+/**
+ * PRD §9.1 settlement precision: the wallet stores hundredths, and margin is
+ * size / leverage, so a perp cash leg usually has a sub-hundredth tail that the
+ * numeric balance column would round to the nearest hundredth, sometimes in
+ * the trader's favor. Settle each leg explicitly in the house's favor instead:
+ * a charge rounds up and proceeds round down. The sums are taken in decimal so
+ * binary noise (0.2 + 0.01 = 0.21000000000000002) cannot add a hundredth.
+ * Previews use the same helpers so they quote the amount that will settle.
+ */
+function settlePerpCharge(size: number, leverage: number, fee: number): number {
+  return new Decimal(size)
+    .div(leverage)
+    .plus(fee)
+    .toDecimalPlaces(2, Decimal.ROUND_CEIL)
+    .toNumber();
+}
+
+// An inexact intermediate sum rounds toward negative infinity, so no step
+// before the floor can raise a credit.
+const ProceedsDecimal = Decimal.clone({
+  precision: 40,
+  rounding: Decimal.ROUND_FLOOR,
+});
+
+function settlePerpProceeds(
+  marginPaid: number,
+  realizedPnL: number,
+  fee: number
+): number {
+  // The floorPoints rule for every close size, with no tolerance before the
+  // floor: a tail below a hundredth is never rounded up, because a real tail
+  // cannot be told apart from binary noise.
+  const proceeds = new ProceedsDecimal(marginPaid).plus(realizedPnL).minus(fee);
+  return proceeds.isNegative()
+    ? 0
+    : proceeds.toDecimalPlaces(2, Decimal.ROUND_FLOOR).toNumber();
+}
+
+type PerpMargin = Pick<PerpPositionRecord, 'size' | 'leverage'>;
+
+function perpMarginAtCentPrecision(position: PerpMargin | undefined) {
+  return position
+    ? new Decimal(position.size)
+        .div(position.leverage)
+        .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+    : 0;
+}
+
+/**
+ * Cash and lifetime P&L are stored in hundredths. Take the difference of the
+ * position's rounded margins so repeated adds and closes carry or release the
+ * same total margin as the whole position. A full round trip books its exact
+ * balance change.
+ */
+function settlePerpPnL(
+  cashChange: number,
+  before: PerpMargin | undefined,
+  after?: PerpMargin
+): number {
+  return new Decimal(cashChange)
+    .plus(perpMarginAtCentPrecision(after))
+    .minus(perpMarginAtCentPrecision(before))
+    .toNumber();
+}
+
 const DEFAULT_MIN_ORDER_SIZE = 10;
-const MIN_MAX_POSITION_SIZE = 10_000;
-const OPEN_INTEREST_LIMIT_RATIO = 0.1;
 const FUNDING_PERIOD_HOURS = 8;
 const BASE_FUNDING_RATE = 0.01; // 1% APR base
 const MAX_FUNDING_RATE = 0.5; // 50% APR cap
@@ -560,6 +627,7 @@ export class PerpMarketService {
     }
 
     const market = await this.getRequiredMarket(input.ticker);
+    this.assertPreviewMinimumOrderSize(market, input.size);
     const maxLeverage = effectiveMaxLeverage(market);
     if (input.leverage > maxLeverage) {
       throw new Error(`Invalid leverage (1-${maxLeverage})`);
@@ -590,14 +658,65 @@ export class PerpMarketService {
       input.ticker
     );
 
+    // Legacy subcent positions can still be quoted for an exact full close.
+    const isLegacyFullClose =
+      existingPosition &&
+      input.side !== existingPosition.side &&
+      input.size === existingPosition.size &&
+      input.size < 0.01;
+    if (!isLegacyFullClose) {
+      this.assertPreviewMinimumOrderSize(market, input.size);
+    }
+
     if (!existingPosition) {
+      // Same account-level rejection as openPosition: the exposure cap and
+      // the max-positions limit, so the preview never quotes an order the
+      // open flow would refuse.
+      await this.assertUserExposure(
+        this.db,
+        input.userId,
+        input.size * input.leverage,
+        undefined,
+        true
+      );
       return this.buildOpenExecutionPreview(market, input);
     }
 
     this.assertOpenPositionIntegrity(existingPosition);
 
     if (existingPosition.side === input.side) {
+      // Same exposure check as addToPosition (the add inherits the
+      // existing position's leverage).
+      await this.assertUserExposure(
+        this.db,
+        input.userId,
+        input.size * existingPosition.leverage
+      );
+      // Same leverage-cap rejection as addToPosition: an add inherits the
+      // existing position's leverage, so a legacy position already above
+      // the market cap cannot grow even when the add itself requests an
+      // at-cap leverage. ValidationError (not a plain Error like the
+      // execution path throws) so the preview route answers 400, like the
+      // other preview refusals.
+      if (existingPosition.leverage > maxLeverage) {
+        throw new ValidationError(
+          `Cannot add to a position above the leverage cap (existing ${existingPosition.leverage}x exceeds ${maxLeverage}x); close or reduce it first`
+        );
+      }
       return this.buildAddPreview(market, existingPosition, input);
+    }
+
+    if (input.size > existingPosition.size) {
+      // Flip only: the new leg's exposure, excluding the leg being closed
+      // — the same check the flip leg in reduceOrFlipPosition runs. A
+      // reduce or an exact close adds no exposure and stays quotable.
+      await this.assertUserExposure(
+        this.db,
+        input.userId,
+        (input.size - existingPosition.size) *
+          Math.min(input.leverage, maxLeverage),
+        existingPosition.id
+      );
     }
 
     return this.buildOppositeSidePreview(market, existingPosition, input);
@@ -642,13 +761,6 @@ export class PerpMarketService {
       throw new Error(`Invalid leverage (1-${maxLeverage})`);
     }
 
-    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
-    if (size > maxPositionSize) {
-      throw new Error(
-        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
-      );
-    }
-
     // Check for existing position on same ticker → rebalance instead of rejecting
     const existingPosition = await this.db.getOpenPositionByUserAndTicker(
       input.userId,
@@ -673,6 +785,13 @@ export class PerpMarketService {
       }
     }
 
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
+    if (size > maxPositionSize) {
+      throw new Error(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
+
     const entryQuote = this.getOpenExecutionQuote(market, side, size);
     const entryPrice = entryQuote.executionPrice;
 
@@ -688,7 +807,7 @@ export class PerpMarketService {
     if (maxSlippage !== undefined && maxSlippage > 0) {
       this.assertWithinSlippage(
         await this.expectedOpenFill(market, side, size, entryPrice),
-        market.markPrice,
+        market.markPrice ?? market.currentPrice,
         maxSlippage
       );
     }
@@ -699,7 +818,7 @@ export class PerpMarketService {
     );
     const marginRequired = size / leverage;
     const fee = this.calculateFee(size);
-    const totalCost = marginRequired + fee;
+    const totalCost = settlePerpCharge(size, leverage, fee);
 
     const now = this.deps.clock?.now() ?? new Date();
     const { position, marketTotals, balance } = await this.deps.settlement.run(
@@ -750,7 +869,7 @@ export class PerpMarketService {
 
         await wallet.recordPnL({
           userId: input.userId,
-          pnl: -fee,
+          pnl: settlePerpPnL(-totalCost, undefined, position),
           reason: 'perp_open',
           relatedId: position.id,
         });
@@ -841,7 +960,7 @@ export class PerpMarketService {
   async closePosition(input: PerpCloseInput): Promise<PerpTradeResult> {
     const settlement = await this.deps.settlement.run(
       input.userId,
-      async (tx, wallet) => {
+      async (tx, wallet, recordCloseFee) => {
         const position = await tx.lockOpenPositionById(input.positionId);
         if (!position) {
           throw new Error(
@@ -916,10 +1035,11 @@ export class PerpMarketService {
         const cappedRealizedPnL = Math.max(realizedPnL, -marginPaid);
         const grossSettlement = marginPaid + cappedRealizedPnL;
         const fee = this.calculateFee(closeSize);
-        const netSettlement =
-          closeSize >= 0 && closeSize < 0.01
-            ? floorPoints(Math.max(0, grossSettlement - fee))
-            : Math.max(0, grossSettlement - fee);
+        const netSettlement = settlePerpProceeds(
+          marginPaid,
+          cappedRealizedPnL,
+          fee
+        );
         const now = this.deps.clock?.now() ?? new Date();
 
         if (isFullClose) {
@@ -970,17 +1090,30 @@ export class PerpMarketService {
 
         await wallet.recordPnL({
           userId: input.userId,
-          pnl: netSettlement - marginPaid,
+          pnl: settlePerpPnL(
+            netSettlement,
+            position,
+            isFullClose
+              ? undefined
+              : { size: remainingSize, leverage: position.leverage }
+          ),
           reason,
           relatedId: position.id,
         });
 
+        // Losses can leave fewer whole cents than the nominal fee.
+        const collectedFee = recordCloseFee
+          ? Math.min(fee, floorPoints(grossSettlement))
+          : fee;
+        await recordCloseFee?.(position.id, position.ticker, collectedFee);
+
         return {
           balance: (await wallet.getBalance(input.userId)).balance,
+          closeFeeRecorded: Boolean(recordCloseFee),
           closeImpact,
           closeSize,
           exitPrice,
-          fee,
+          fee: collectedFee,
           isFullClose,
           marginPaid,
           marketTotals,
@@ -999,16 +1132,18 @@ export class PerpMarketService {
     // A2A path has no waitUntil/after to finish a detached promise if the
     // invocation ends first. processFeeWithRetry never throws (failures are
     // logged, then enqueued), so awaiting it cannot fail the committed trade.
-    await this.processFeeWithRetry(
-      {
-        userId: input.userId,
-        amount: settlement.closeSize,
-        type: 'perp_close',
-        relatedId: settlement.position.ticker,
-        positionId: settlement.position.id,
-      },
-      { ticker: settlement.position.ticker }
-    );
+    if (!settlement.closeFeeRecorded) {
+      await this.processFeeWithRetry(
+        {
+          userId: input.userId,
+          amount: settlement.closeSize,
+          type: 'perp_close',
+          relatedId: settlement.position.ticker,
+          positionId: settlement.position.id,
+        },
+        { ticker: settlement.position.ticker }
+      );
+    }
 
     // Apply market-level post-close impact after settlement to keep the close
     // path fail-safe (position is already settled if this step fails).
@@ -1166,51 +1301,83 @@ export class PerpMarketService {
         shouldLiquidate(markPrice, position.liquidationPrice, position.side)
       ) {
         try {
-          const outcome = await this.db.transaction(async (tx) => {
-            const current = await tx.lockOpenPositionById(position.id);
-            // Already closed concurrently (e.g. by the user): nothing to settle.
-            if (!current) return null;
-            if (
-              !shouldLiquidate(
-                markPrice,
-                current.liquidationPrice,
-                current.side
-              )
-            ) {
-              return { liquidated: false as const, current };
-            }
+          // The position, market totals, P&L and any remaining equity commit
+          // in one transaction: a failed wallet write rolls the liquidation
+          // back, so the still-open position is settled on a later tick.
+          const outcome = await this.deps.settlement.run(
+            position.userId,
+            async (tx, wallet) => {
+              const current = await tx.lockOpenPositionById(position.id);
+              // Already closed concurrently (e.g. by the user): nothing to settle.
+              if (!current) return null;
+              if (
+                !shouldLiquidate(
+                  markPrice,
+                  current.liquidationPrice,
+                  current.side
+                )
+              ) {
+                return { liquidated: false as const, current };
+              }
 
-            // Remaining margin is what the liquidation takes: the current
-            // size, on top of whatever earlier partial closes already settled.
-            const marginLoss = current.size / current.leverage;
-            const closed = await tx.closePosition(current.id, {
-              currentPrice: newPrice,
-              closedAt: now,
-              realizedPnL: (current.realizedPnL ?? 0) - marginLoss,
-              unrealizedPnL: 0,
-              unrealizedPnLPercent: 0,
-            });
-            if (!closed) return null;
-
-            if (market) {
-              // OI decreases by the remaining notional (size), not leveraged
-              // exposure. Apply as a delta so multiple liquidations on one
-              // market accumulate.
-              await tx.applyMarketDeltas(current.ticker, {
-                openInterest: -current.size,
+              // Remaining margin is what the liquidation takes: the current
+              // size, on top of whatever earlier partial closes already
+              // settled. Accrued funding affects the mark-price P&L, and
+              // any equity settles at cent precision. Use decimal arithmetic
+              // before flooring so exact cents aren't lost to binary rounding.
+              const marginLoss = new Decimal(current.size).div(
+                current.leverage
+              );
+              const signedSize =
+                current.side === 'long' ? current.size : -current.size;
+              const pnl = new Decimal(markPrice)
+                .minus(current.entryPrice)
+                .times(signedSize)
+                .div(current.entryPrice);
+              const remaining = marginLoss.plus(pnl).minus(current.fundingPaid);
+              const settled = remaining.isPositive()
+                ? remaining.toDecimalPlaces(2, Decimal.ROUND_FLOOR)
+                : new Decimal(0);
+              const equity = settled.toNumber();
+              const realizedPnL = settled.minus(marginLoss).toNumber();
+              const closed = await tx.closePosition(current.id, {
+                currentPrice: newPrice,
+                closedAt: now,
+                realizedPnL: (current.realizedPnL ?? 0) + realizedPnL,
+                unrealizedPnL: 0,
+                unrealizedPnLPercent: 0,
               });
+              if (!closed) return null;
+
+              if (market) {
+                // OI decreases by the remaining notional (size), not leveraged
+                // exposure. Apply as a delta so multiple liquidations on one
+                // market accumulate.
+                await tx.applyMarketDeltas(current.ticker, {
+                  openInterest: -current.size,
+                });
+              }
+              if (equity > 0) {
+                await wallet.credit({
+                  userId: current.userId,
+                  amount: equity,
+                  reason: 'perp_liquidation',
+                  description: `Liquidation ${current.leverage}x ${current.side} ${current.ticker}`,
+                  relatedId: current.id,
+                });
+              }
+              await wallet.recordPnL({
+                userId: current.userId,
+                pnl: settlePerpPnL(equity, current),
+                reason: 'perp_liquidation',
+                relatedId: current.id,
+              });
+              return { liquidated: true as const, current };
             }
-            return { liquidated: true as const, current, marginLoss };
-          });
+          );
 
           if (outcome === null) continue;
           if (outcome.liquidated) {
-            await this.deps.wallet.recordPnL({
-              userId: outcome.current.userId,
-              pnl: -outcome.marginLoss,
-              reason: 'perp_liquidation',
-              relatedId: outcome.current.id,
-            });
             summary.liquidations++;
             await this.invalidateCaches(outcome.current.ticker);
             continue;
@@ -1630,7 +1797,7 @@ export class PerpMarketService {
     }
 
     // Check max position size
-    const maxPositionSize = this.calculateMaxPositionSize(market.openInterest);
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
     const newTotalSize = existing.size + addedSize;
     if (newTotalSize > maxPositionSize) {
       throw new Error(
@@ -1647,7 +1814,7 @@ export class PerpMarketService {
           addedSize,
           currentPrice
         ),
-        market.markPrice,
+        market.markPrice ?? market.currentPrice,
         input.maxSlippage
       );
     }
@@ -1656,7 +1823,7 @@ export class PerpMarketService {
     const effectiveLeverage = existing.leverage;
     const marginRequired = addedSize / effectiveLeverage;
     const fee = this.calculateFee(addedSize);
-    const totalCost = marginRequired + fee;
+    const totalCost = settlePerpCharge(addedSize, effectiveLeverage, fee);
 
     const now = this.deps.clock?.now() ?? new Date();
 
@@ -1747,7 +1914,10 @@ export class PerpMarketService {
 
           await wallet.recordPnL({
             userId: input.userId,
-            pnl: -fee,
+            pnl: settlePerpPnL(-totalCost, freshPosition, {
+              size: actualNewSize,
+              leverage: effectiveLeverage,
+            }),
             reason: 'perp_add_to_position',
             relatedId: existing.id,
           });
@@ -1915,6 +2085,12 @@ export class PerpMarketService {
       if (inverseSize < minOrderSize) {
         throw new ValidationError(`Order size below minimum (${minOrderSize})`);
       }
+      const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
+      if (inverseSize > maxPositionSize) {
+        throw new ValidationError(
+          `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+        );
+      }
       // Slippage protection for both legs against the fills the flip will
       // execute at, checked before any funds move (same as a fresh open).
       if (maxSlippage !== undefined && maxSlippage > 0) {
@@ -1951,7 +2127,7 @@ export class PerpMarketService {
             inverseQuote,
             existing.side === 'long' ? -existing.size : existing.size
           ),
-          market.markPrice,
+          market.markPrice ?? market.currentPrice,
           maxSlippage
         );
       }
@@ -1959,7 +2135,7 @@ export class PerpMarketService {
       const flipResult =
         await this.deps.settlement.run<FlipPositionTransactionResult>(
           input.userId,
-          async (tx, wallet) => {
+          async (tx, wallet, recordCloseFee) => {
             // Row-lock the position being flipped so a concurrent close/flip
             // cannot settle it twice.
             const position = await tx.lockOpenPositionById(existing.id);
@@ -2026,10 +2202,11 @@ export class PerpMarketService {
             // and the liquidation cap (Math.max(..., -marginLoss)).
             const cappedRealizedPnL = Math.max(realizedPnL, -closeMarginPaid);
             const grossSettlement = closeMarginPaid + cappedRealizedPnL;
-            const netSettlement =
-              position.size >= 0 && position.size < 0.01
-                ? floorPoints(Math.max(0, grossSettlement - closeFee))
-                : Math.max(0, grossSettlement - closeFee);
+            const netSettlement = settlePerpProceeds(
+              closeMarginPaid,
+              cappedRealizedPnL,
+              closeFee
+            );
 
             await tx.closePosition(position.id, {
               currentPrice: exitPrice,
@@ -2057,7 +2234,11 @@ export class PerpMarketService {
             );
             const marginRequired = inverseSize / effectiveLeverage;
             const openFee = this.calculateFee(inverseSize);
-            const totalCost = marginRequired + openFee;
+            const totalCost = settlePerpCharge(
+              inverseSize,
+              effectiveLeverage,
+              openFee
+            );
 
             // Create new position using transaction
             const newPosition = await tx.upsertPosition({
@@ -2087,7 +2268,11 @@ export class PerpMarketService {
             });
 
             // Settle the wallet and P&L in the same transaction as both legs.
-            const walletNet = netSettlement - totalCost;
+            // Both legs are whole hundredths; subtract in decimal so the net
+            // wallet movement stays exact.
+            const walletNet = new Decimal(netSettlement)
+              .minus(totalCost)
+              .toNumber();
             const walletDescription = `Flip ${position.leverage}x ${position.side} to ${effectiveLeverage}x ${tradeSide} ${position.ticker}`;
             if (walletNet > 0) {
               await wallet.credit({
@@ -2107,20 +2292,24 @@ export class PerpMarketService {
               });
             }
 
-            // Net realized PnL for the flip operation:
-            // - Close leg: settlement minus returned margin (includes any fee actually collected)
-            // - Open leg: fee is realized immediately
-            const netClosePnL = netSettlement - closeMarginPaid;
-            const netFlipPnL = netClosePnL - openFee;
             await wallet.recordPnL({
               userId: input.userId,
-              pnl: netFlipPnL,
+              pnl: settlePerpPnL(walletNet, position, newPosition),
               reason: 'perp_flip_position',
               relatedId: position.id,
             });
 
+            const collectedCloseFee = recordCloseFee
+              ? Math.min(closeFee, floorPoints(grossSettlement))
+              : closeFee;
+            await recordCloseFee?.(
+              position.id,
+              position.ticker,
+              collectedCloseFee
+            );
+
             // Return result data for use after transaction commits
-            const totalFees = closeFee + openFee;
+            const totalFees = collectedCloseFee + openFee;
             return {
               positionId: newPosition.id,
               balance: (await wallet.getBalance(input.userId)).balance,
@@ -2132,6 +2321,7 @@ export class PerpMarketService {
               liquidationPrice,
               marginPaid: marginRequired,
               feePaid: totalFees,
+              closeFeeRecorded: Boolean(recordCloseFee),
               exitPrice,
               realizedPnL: cappedRealizedPnL,
               isRebalance: true,
@@ -2147,17 +2337,20 @@ export class PerpMarketService {
       // Fee bookkeeping for close + open legs (retries + optional outbox).
       // Awaited — not fire-and-forget — so both legs' fee intents are
       // durable before success is reported (see openPosition).
+      const recordCloseAfterCommit = flipResult.closeFeeRecorded
+        ? undefined
+        : this.processFeeWithRetry(
+            {
+              userId: input.userId,
+              amount: existing.size,
+              type: 'perp_close',
+              relatedId: existing.ticker,
+              positionId: existing.id,
+            },
+            { ticker: existing.ticker }
+          );
       await Promise.all([
-        this.processFeeWithRetry(
-          {
-            userId: input.userId,
-            amount: existing.size,
-            type: 'perp_close',
-            relatedId: existing.ticker,
-            positionId: existing.id,
-          },
-          { ticker: existing.ticker }
-        ),
+        recordCloseAfterCommit,
         this.processFeeWithRetry(
           {
             userId: input.userId,
@@ -2232,11 +2425,6 @@ export class PerpMarketService {
     }
   }
 
-  private calculateMaxPositionSize(openInterest: number): number {
-    const fromOi = openInterest * OPEN_INTEREST_LIMIT_RATIO;
-    return Math.max(fromOi, MIN_MAX_POSITION_SIZE);
-  }
-
   private async getRequiredMarket(ticker: string): Promise<PerpMarketRecord> {
     const normalizedTicker = ticker.toUpperCase();
     const markets = await this.db.listMarkets();
@@ -2249,10 +2437,26 @@ export class PerpMarketService {
     return market;
   }
 
+  private assertPreviewMinimumOrderSize(
+    market: PerpMarketRecord,
+    size: number
+  ) {
+    const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
+    if (size < minOrderSize) {
+      throw new ValidationError(`Order size below minimum (${minOrderSize})`);
+    }
+  }
+
   private async buildOpenExecutionPreview(
     market: PerpMarketRecord,
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
   ): Promise<PerpOpenExecutionPreview> {
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
+    if (input.size > maxPositionSize) {
+      throw new ValidationError(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
     const execution = this.getOpenExecutionQuote(
       market,
       input.side,
@@ -2318,7 +2522,7 @@ export class PerpMarketService {
       liquidityRegime: getSyntheticPerpQuoteState(market).liquidityRegime,
       marginRequired,
       estimatedFee,
-      totalRequired: marginRequired + estimatedFee,
+      totalRequired: settlePerpCharge(input.size, input.leverage, estimatedFee),
       liquidationPrice,
       liquidationDistancePercent,
     };
@@ -2330,6 +2534,13 @@ export class PerpMarketService {
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
   ): Promise<PerpOpenExecutionPreview> {
     const addedSize = input.size;
+    const resultingSize = existing.size + addedSize;
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
+    if (resultingSize > maxPositionSize) {
+      throw new ValidationError(
+        `Total position size would exceed market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
     const effectiveLeverage = existing.leverage;
     const execution = this.getOpenExecutionQuote(
       market,
@@ -2359,7 +2570,6 @@ export class PerpMarketService {
       10_000;
     const quoteImpactBps =
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
-    const resultingSize = existing.size + addedSize;
     const averagedEntryPrice = blendEntryPrice(
       existing.size,
       existing.entryPrice,
@@ -2402,7 +2612,11 @@ export class PerpMarketService {
       liquidityRegime: getSyntheticPerpQuoteState(market).liquidityRegime,
       marginRequired,
       estimatedFee,
-      totalRequired: marginRequired + estimatedFee,
+      totalRequired: settlePerpCharge(
+        addedSize,
+        effectiveLeverage,
+        estimatedFee
+      ),
       resultingSize,
       resultingSide: existing.side,
       liquidationPrice,
@@ -2492,6 +2706,17 @@ export class PerpMarketService {
       });
     }
 
+    const inverseSize = input.size - existing.size;
+    const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
+    if (inverseSize < minOrderSize) {
+      throw new ValidationError(`Order size below minimum (${minOrderSize})`);
+    }
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
+    if (inverseSize > maxPositionSize) {
+      throw new ValidationError(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
     const closeExecution = this.getCloseExecutionQuote(
       market,
       existing.side,
@@ -2507,11 +2732,6 @@ export class PerpMarketService {
       existing.size,
       closeExecution
     );
-    const inverseSize = input.size - existing.size;
-    const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
-    if (inverseSize < minOrderSize) {
-      throw new ValidationError(`Order size below minimum (${minOrderSize})`);
-    }
     const effectiveLeverage = Math.min(
       input.leverage,
       effectiveMaxLeverage(market)
@@ -2546,17 +2766,16 @@ export class PerpMarketService {
       existing.side,
       existing.size
     );
-    const closeMarginPaid = existing.size / existing.leverage;
     const closeFee = this.calculateFee(existing.size);
     const realizedPnL = closePnl - existing.fundingPaid;
-    const grossSettlement = closeMarginPaid + realizedPnL;
-    const estimatedCloseSettlement =
-      existing.size >= 0 && existing.size < 0.01
-        ? floorPoints(Math.max(0, grossSettlement - closeFee))
-        : Math.max(0, grossSettlement - closeFee);
+    const estimatedCloseSettlement = settlePerpProceeds(
+      existing.size / existing.leverage,
+      realizedPnL,
+      closeFee
+    );
     const marginRequired = inverseSize / effectiveLeverage;
     const openFee = this.calculateFee(inverseSize);
-    const openCost = marginRequired + openFee;
+    const openCost = settlePerpCharge(inverseSize, effectiveLeverage, openFee);
     const liquidationPrice = calculateLiquidationPrice(
       openExecutionPrice,
       input.side,
@@ -2591,7 +2810,10 @@ export class PerpMarketService {
       liquidityRegime: getSyntheticPerpQuoteState(market).liquidityRegime,
       marginRequired,
       estimatedFee: closeFee + openFee,
-      totalRequired: Math.max(0, openCost - estimatedCloseSettlement),
+      totalRequired: Math.max(
+        0,
+        new Decimal(openCost).minus(estimatedCloseSettlement).toNumber()
+      ),
       resultingSize: inverseSize,
       resultingSide: input.side,
       estimatedClosePrice: closeExitPrice,
@@ -2632,13 +2854,12 @@ export class PerpMarketService {
     const closePercentage = closeSize / existing.size;
     const proportionalFunding = existing.fundingPaid * closePercentage;
     const realizedPnL = closePnl - proportionalFunding;
-    const closeMarginPaid = closeSize / existing.leverage;
     const closeFee = this.calculateFee(closeSize);
-    const grossSettlement = closeMarginPaid + realizedPnL;
-    const estimatedCloseSettlement =
-      closeSize >= 0 && closeSize < 0.01
-        ? floorPoints(Math.max(0, grossSettlement - closeFee))
-        : Math.max(0, grossSettlement - closeFee);
+    const estimatedCloseSettlement = settlePerpProceeds(
+      closeSize / existing.leverage,
+      realizedPnL,
+      closeFee
+    );
     const quotedPrice =
       existing.side === 'long'
         ? closeExecution.bidPrice

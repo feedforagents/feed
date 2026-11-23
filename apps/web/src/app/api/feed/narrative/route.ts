@@ -34,10 +34,12 @@ import {
   inArray,
   isNotNull,
   isNull,
+  like,
   lt,
   lte,
   markets,
   not,
+  notExists,
   positions,
   posts,
   questions,
@@ -50,6 +52,10 @@ import { StaticDataRegistry } from '@feed/engine';
 import type { ArcStateType, NarrativePost, NarrativeStory } from '@feed/shared';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import {
+  filterStoriesForViewer,
+  loadViewerExcludedAuthorIds,
+} from '../_lib/viewer-moderation';
 import { compareFeedStories } from '../feed-cursor';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
 import {
@@ -131,6 +137,25 @@ interface UserEnrichmentCache {
   positionQuestionIds: number[];
 }
 
+/**
+ * The test-author exclusion every sibling feed applies
+ * (DatabaseService.getRecentPosts excludes test authors in SQL, the
+ * stories pipeline does the same, and the following feed filters out
+ * test users): a post is hidden when its author's user row has
+ * isTest = true or its author id starts with 'test-'. Built fresh per query.
+ */
+function excludeTestAuthors() {
+  return and(
+    not(like(posts.authorId, 'test-%')),
+    notExists(
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+    )
+  );
+}
+
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const {
     error: rateLimitErr,
@@ -166,6 +191,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         .where(
           and(
             isNull(posts.deletedAt),
+            excludeTestAuthors(),
             gte(posts.timestamp, cutoff),
             lte(posts.timestamp, now),
             isNull(posts.commentOnPostId),
@@ -533,8 +559,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           (questionNumber !== null ? `Story #${questionNumber}` : 'General');
         const arcState = meta?.arcState ?? null;
 
-        // Skip resolved questions — no remaining tension
-        if (meta?.status === 'resolved') continue;
+        // Skip closed questions — resolved or admin-voided (cancelled)
+        // questions have no remaining tension
+        if (meta?.status === 'resolved' || meta?.status === 'cancelled')
+          continue;
         // Skip questions whose deadline has passed even if status hasn't updated yet
         if (meta?.resolutionDate && meta.resolutionDate <= now) continue;
 
@@ -866,6 +894,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         'NarrativeFeedAPI'
       );
     }
+  }
+
+  // The story snapshot above is a shared global cache: apply this viewer's
+  // block/mute policy per request, the same way the stories and For You
+  // surfaces do. This stays outside the enrichment try/catch so a moderation
+  // lookup failure propagates instead of serving the unfiltered snapshot.
+  if (user?.userId) {
+    finalStories = filterStoriesForViewer(
+      finalStories,
+      await loadViewerExcludedAuthorIds(user.userId)
+    );
   }
 
   const response = successResponse({

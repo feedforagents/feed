@@ -1,416 +1,234 @@
-/**
- * MCP `get_post` (executeGetPost) must apply the viewer's moderation policy
- * to the original post embedded in a repost/quote.
- *
- * executeGetPost is a thin proxy: it fetches GET /api/posts/[id] anonymously
- * (no auth is forwarded — #1878's comment says so outright), so even after
- * the web route hides non-exposable originals for signed readers, the MCP
- * result still carries the full original. The handler therefore strips the
- * repost metadata itself, for the viewer who called it — the same rule the
- * web route, feed, stories, profile posts list (F15-01, #1940) and SSE
- * (F10-01) apply to embedded originals, and the same post-fetch pattern
- * #1878 uses for get_post's commentCount.
- *
- * This test calls the real handler, which fetches the real dev server
- * (http://localhost:3000, serving this worktree against feed_f39r3), against
- * the real database. No mocks.
- *
- * Run with the dev server up:
- *   redis-server --port 6379 --save '' --appendonly no
- *   DATABASE_URL=postgres://postgres:postgres@localhost:5432/feed_f39r3
- *   DIRECT_DATABASE_URL=postgres://postgres:postgres@localhost:5432/feed_f39r3
- *   DISABLE_RATE_LIMITING=true NODE_ENV=development bun x next dev -p 3000
- * Then:
- *   DISABLE_RATE_LIMITING=true
- *   DATABASE_URL=postgres://postgres:postgres@localhost:5432/feed_f39r3
- *   DIRECT_DATABASE_URL=postgres://postgres:postgres@localhost:5432/feed_f39r3
- *   TZ=UTC bun test integration/mcp-get-post-repost-original-viewer-moderation.integration.test.ts
- *   --preload ./integration/preload.ts
- */
-
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-
+/** MCP get_post follows viewer moderation. PRD §§8.1/12, MVP Phase 3. */
+import { afterAll, expect, mock, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import {
-  closeDatabase,
-  db,
-  inArray,
-  posts,
-  userBlocks,
-  userMutes,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { executeGetPost } from '../../mcp/src/handlers/tool-handlers';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-type PostData = {
-  id: string;
-  content?: string | null;
-  authorId?: string;
-  isRepost?: boolean;
-  originalPost?: {
-    id: string;
-    content: string;
-    authorId: string;
-  } | null;
+const cases = {
+  excluded:
+    'omits embedded originals for outgoing blocks, incoming blocks and mutes',
+  quote: 'keeps a quote body while omitting its excluded original',
+  visible: 'keeps visible originals for unaffected viewers',
 };
 
-function ownership() {
-  return {
-    users: new Set<string>(),
-    posts: new Set<string>(),
-    blocks: new Set<string>(),
-    mutes: new Set<string>(),
-  };
-}
-type Ownership = ReturnType<typeof ownership>;
-const owned = ownership();
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks MCP repost details on disposable PostgreSQL', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'mcp-get-post-original-moderation',
+      file: 'packages/testing/integration/mcp-get-post-repost-original-viewer-moderation.integration.test.ts',
+      cases: Object.values(cases),
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  mock.module('server-only', () => ({}));
 
-let viewerId: string;
-let otherViewerId: string;
-let reposterId: string;
-let blockedAuthorId: string;
-let mutedAuthorId: string;
-let blockerAuthorId: string;
-let okAuthorId: string;
+  const { generateApiKey, hashApiKey } = await import('@feed/api');
+  const { dbWrite, posts, userApiKeys, userBlocks, userMutes, users } =
+    await import('@feed/db');
+  const { getAPIBaseUrl } = await import('@feed/shared');
+  const { NextRequest } = await import('next/server');
+  const { GET: detailGET } = await import(
+    '../../../apps/web/src/app/api/posts/[id]/route'
+  );
+  const { POST: mcpPOST } = await import(
+    '../../../apps/web/src/app/api/mcp/route'
+  );
 
-let origBlockedId: string;
-let origMutedId: string;
-let origBlockerId: string;
-let origOkId: string;
-let repostBlockedId: string;
-let repostMutedId: string;
-let repostBlockerId: string;
-let repostOkId: string;
-let quoteBlockedId: string;
-let viewerRepostBlockedId: string;
+  const viewerId = randomUUID();
+  const bystanderId = randomUUID();
+  const authorId = randomUUID();
+  const blockedId = randomUUID();
+  const mutedId = randomUUID();
+  const blockingId = randomUUID();
+  const viewerKey = generateApiKey();
+  const bystanderKey = generateApiKey();
+  const quoteContent = 'Commentary remains visible';
+  const now = new Date();
+  const timestamp = new Date(now.getTime() - 60_000);
 
-async function fetchPost(postId: string, userId: string) {
-  const result = await executeGetPost({ agentId: 'agent', userId } as never, {
-    postId,
+  function original(author: string) {
+    return {
+      id: randomUUID(),
+      authorId: author,
+      content: 'Fixture original',
+      timestamp,
+    };
+  }
+
+  function repost(originalPostId: string, author: string, content = '') {
+    return {
+      id: randomUUID(),
+      authorId: author,
+      content,
+      originalPostId,
+      timestamp,
+    };
+  }
+
+  const normalOriginal = original(authorId);
+  const blockedOriginal = original(blockedId);
+  const mutedOriginal = original(mutedId);
+  const blockingOriginal = original(blockingId);
+  const normalRepost = repost(normalOriginal.id, bystanderId);
+  const blockedRepost = repost(blockedOriginal.id, bystanderId);
+  const mutedRepost = repost(mutedOriginal.id, viewerId);
+  const blockingRepost = repost(blockingOriginal.id, bystanderId);
+  const quote = repost(blockedOriginal.id, viewerId, quoteContent);
+
+  await dbWrite.transaction(async (tx) => {
+    await tx.insert(users).values(
+      [viewerId, bystanderId, authorId, blockedId, mutedId, blockingId].map(
+        (id) => ({
+          id,
+          username: id,
+          updatedAt: now,
+        })
+      )
+    );
+    await tx.insert(userApiKeys).values([
+      { id: randomUUID(), userId: viewerId, keyHash: hashApiKey(viewerKey) },
+      {
+        id: randomUUID(),
+        userId: bystanderId,
+        keyHash: hashApiKey(bystanderKey),
+      },
+    ]);
+    await tx.insert(userBlocks).values([
+      { id: randomUUID(), blockerId: viewerId, blockedId },
+      { id: randomUUID(), blockerId: blockingId, blockedId: viewerId },
+    ]);
+    await tx.insert(userMutes).values({
+      id: randomUUID(),
+      muterId: viewerId,
+      mutedId,
+    });
+    await tx
+      .insert(posts)
+      .values([
+        normalOriginal,
+        blockedOriginal,
+        mutedOriginal,
+        blockingOriginal,
+        normalRepost,
+        blockedRepost,
+        mutedRepost,
+        blockingRepost,
+        quote,
+      ]);
   });
-  const data = (result as unknown as { data: PostData }).data;
-  return data;
-}
 
-async function cleanup(receipts: Ownership) {
-  const actions = [
-    {
-      ids: receipts.blocks,
-      remove: () =>
-        db
-          .delete(userBlocks)
-          .where(inArray(userBlocks.id, [...receipts.blocks]))
-          .returning({ id: userBlocks.id }),
+  const fixturePostIds = new Set<string>([
+    normalRepost.id,
+    blockedRepost.id,
+    mutedRepost.id,
+    blockingRepost.id,
+    quote.id,
+  ]);
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === '/api/mcp') {
+        const headers = new Headers(request.headers);
+        headers.set('host', 'mcp-original.test');
+        return mcpPOST(new NextRequest(request, { headers }));
+      }
+      const postId = path.replace(/^\/api\/posts\//, '');
+      if (fixturePostIds.has(postId)) {
+        return detailGET(new NextRequest(request), {
+          params: Promise.resolve({ id: postId }),
+        });
+      }
+      return new Response(null, { status: 404 });
     },
-    {
-      ids: receipts.mutes,
-      remove: () =>
-        db
-          .delete(userMutes)
-          .where(inArray(userMutes.id, [...receipts.mutes]))
-          .returning({ id: userMutes.id }),
-    },
-    {
-      ids: receipts.posts,
-      remove: () =>
-        db
-          .delete(posts)
-          .where(inArray(posts.id, [...receipts.posts]))
-          .returning({ id: posts.id }),
-    },
-    {
-      ids: receipts.users,
-      remove: () =>
-        db
-          .delete(users)
-          .where(inArray(users.id, [...receipts.users]))
-          .returning({ id: users.id }),
-    },
-  ];
-  const failures: Error[] = [];
-  for (const { ids, remove } of actions) {
-    if (ids.size === 0) continue;
-    try {
-      for (const row of await remove()) ids.delete(row.id);
-    } catch (error) {
-      failures.push(error instanceof Error ? error : new Error(String(error)));
+  });
+  afterAll(() => server.stop(true));
+  process.env.NEXT_PUBLIC_APP_URL = server.url.origin;
+  expect(getAPIBaseUrl()).toBe(`${server.url.origin}/api`);
+
+  const toolResult = z.object({
+    result: z.object({
+      isError: z.boolean().optional(),
+      content: z.array(z.object({ text: z.string() })),
+    }),
+  });
+  const postResult = z.object({
+    data: z.object({
+      id: z.string(),
+      content: z.string(),
+      commentCount: z.number(),
+      originalPostId: z.string().optional(),
+      originalPost: z
+        .object({ id: z.string(), authorId: z.string() })
+        .optional(),
+      isRepost: z.boolean().optional(),
+      isQuote: z.union([z.boolean(), z.literal('')]).optional(),
+      quoteComment: z.string().nullable().optional(),
+    }),
+  });
+
+  async function getPost(postId: string, key: string) {
+    const response = await fetch(new URL('/api/mcp', server.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Feed-Api-Key': key },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: postId,
+        method: 'tools/call',
+        params: { name: 'get_post', arguments: { postId } },
+      }),
+    });
+    expect(response.status).toBe(200);
+    const result = toolResult.parse(await response.json()).result;
+    expect(result.isError).not.toBe(true);
+    return postResult.parse(JSON.parse(result.content[0]?.text ?? '')).data;
+  }
+
+  function expectHidden(post: z.infer<typeof postResult>['data']) {
+    for (const key of [
+      'originalPost',
+      'originalPostId',
+      'quoteComment',
+      'isQuote',
+      'isRepost',
+    ] as const) {
+      expect(post[key]).toBeUndefined();
     }
   }
-  if (Object.values(receipts).some((ids) => ids.size > 0))
-    failures.push(
-      new Error('Owned MCP repost-original identities remain after cleanup')
-    );
-  if (failures.length)
-    throw new AggregateError(
-      failures,
-      'Owned MCP repost-original cleanup failed'
-    );
+
+  test(cases.excluded, async () => {
+    for (const post of [blockedRepost, mutedRepost, blockingRepost]) {
+      const result = await getPost(post.id, viewerKey);
+      expect(result).toMatchObject({
+        id: post.id,
+        content: '',
+        commentCount: 0,
+      });
+      expectHidden(result);
+    }
+  });
+
+  test(cases.quote, async () => {
+    const result = await getPost(quote.id, viewerKey);
+    expect(result).toMatchObject({ id: quote.id, content: quoteContent });
+    expectHidden(result);
+  });
+
+  test(cases.visible, async () => {
+    expect(await getPost(normalRepost.id, viewerKey)).toMatchObject({
+      isRepost: true,
+      originalPostId: normalOriginal.id,
+      originalPost: { id: normalOriginal.id, authorId },
+    });
+    expect(await getPost(blockedRepost.id, bystanderKey)).toMatchObject({
+      isRepost: true,
+      originalPostId: blockedOriginal.id,
+      originalPost: { id: blockedOriginal.id, authorId: blockedId },
+    });
+  });
 }
-
-beforeAll(async () => {
-  [
-    viewerId,
-    otherViewerId,
-    reposterId,
-    blockedAuthorId,
-    mutedAuthorId,
-    blockerAuthorId,
-    okAuthorId,
-    origBlockedId,
-    origMutedId,
-    origBlockerId,
-    origOkId,
-    repostBlockedId,
-    repostMutedId,
-    repostBlockerId,
-    repostOkId,
-    quoteBlockedId,
-    viewerRepostBlockedId,
-  ] = await Promise.all([
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-    generateSnowflakeId(),
-  ]);
-
-  const now = new Date();
-  const earlier = new Date(now.getTime() - 60_000);
-
-  const insertedUsers = await db
-    .insert(users)
-    .values([
-      {
-        id: viewerId,
-        username: `f39mv-${viewerId}`,
-        displayName: 'MCP Repost Original Viewer',
-        updatedAt: now,
-      },
-      {
-        id: otherViewerId,
-        username: `f39mo-${otherViewerId}`,
-        displayName: 'MCP Repost Original Other Viewer',
-        updatedAt: now,
-      },
-      {
-        id: reposterId,
-        username: `f39mr-${reposterId}`,
-        displayName: 'MCP Repost Original Reposter',
-        updatedAt: now,
-      },
-      {
-        id: blockedAuthorId,
-        username: `f39mb-${blockedAuthorId}`,
-        displayName: 'MCP Blocked Original Author',
-        updatedAt: now,
-      },
-      {
-        id: mutedAuthorId,
-        username: `f39mm-${mutedAuthorId}`,
-        displayName: 'MCP Muted Original Author',
-        updatedAt: now,
-      },
-      {
-        id: blockerAuthorId,
-        username: `f39mk-${blockerAuthorId}`,
-        displayName: 'MCP Blocking Original Author',
-        updatedAt: now,
-      },
-      {
-        id: okAuthorId,
-        username: `f39mok-${okAuthorId}`,
-        displayName: 'MCP Visible Original Author',
-        updatedAt: now,
-      },
-    ])
-    .returning({ id: users.id });
-  for (const row of insertedUsers) owned.users.add(row.id);
-
-  const insertedOriginals = await db
-    .insert(posts)
-    .values([
-      {
-        id: origBlockedId,
-        content: 'f39m-secret-blocked-original-content',
-        authorId: blockedAuthorId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-      {
-        id: origMutedId,
-        content: 'f39m-secret-muted-original-content',
-        authorId: mutedAuthorId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-      {
-        id: origBlockerId,
-        content: 'f39m-secret-blocker-original-content',
-        authorId: blockerAuthorId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-      {
-        id: origOkId,
-        content: 'f39m-visible-ok-original-content',
-        authorId: okAuthorId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-    ])
-    .returning({ id: posts.id });
-  for (const row of insertedOriginals) owned.posts.add(row.id);
-
-  const insertedReposts = await db
-    .insert(posts)
-    .values([
-      {
-        id: repostBlockedId,
-        content: '',
-        authorId: reposterId,
-        originalPostId: origBlockedId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-      {
-        id: repostMutedId,
-        content: '',
-        authorId: reposterId,
-        originalPostId: origMutedId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-      {
-        id: repostBlockerId,
-        content: '',
-        authorId: reposterId,
-        originalPostId: origBlockerId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-      {
-        id: repostOkId,
-        content: '',
-        authorId: reposterId,
-        originalPostId: origOkId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-      {
-        id: quoteBlockedId,
-        content: 'f39m-my-take-on-the-blocked-post',
-        authorId: reposterId,
-        originalPostId: origBlockedId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-      {
-        id: viewerRepostBlockedId,
-        content: '',
-        authorId: viewerId,
-        originalPostId: origBlockedId,
-        timestamp: earlier,
-        createdAt: earlier,
-      },
-    ])
-    .returning({ id: posts.id });
-  for (const row of insertedReposts) owned.posts.add(row.id);
-
-  const [viewerBlockId, viewerBlockerBlockId, viewerMuteId] = await Promise.all(
-    [generateSnowflakeId(), generateSnowflakeId(), generateSnowflakeId()]
-  );
-  const insertedBlocks = await db
-    .insert(userBlocks)
-    .values([
-      { id: viewerBlockId, blockerId: viewerId, blockedId: blockedAuthorId },
-      {
-        id: viewerBlockerBlockId,
-        blockerId: blockerAuthorId,
-        blockedId: viewerId,
-      },
-    ])
-    .returning({ id: userBlocks.id });
-  for (const row of insertedBlocks) owned.blocks.add(row.id);
-  const insertedMutes = await db
-    .insert(userMutes)
-    .values({ id: viewerMuteId, muterId: viewerId, mutedId: mutedAuthorId })
-    .returning({ id: userMutes.id });
-  for (const row of insertedMutes) owned.mutes.add(row.id);
-});
-
-afterAll(async () => {
-  await cleanup(owned);
-  await closeDatabase();
-});
-
-describe('MCP get_post repost original viewer moderation', () => {
-  it('hides the original of a simple repost by a blocked author', async () => {
-    const data = await fetchPost(repostBlockedId, viewerId);
-    expect(data.originalPost).toBeUndefined();
-    expect(data.isRepost).toBeUndefined();
-    expect(JSON.stringify(data)).not.toContain(
-      'f39m-secret-blocked-original-content'
-    );
-  });
-
-  it('hides the original of a simple repost by a muted author', async () => {
-    const data = await fetchPost(repostMutedId, viewerId);
-    expect(data.originalPost).toBeUndefined();
-    expect(JSON.stringify(data)).not.toContain(
-      'f39m-secret-muted-original-content'
-    );
-  });
-
-  it('hides the original of a simple repost by an author who blocked the viewer', async () => {
-    const data = await fetchPost(repostBlockerId, viewerId);
-    expect(data.originalPost).toBeUndefined();
-    expect(JSON.stringify(data)).not.toContain(
-      'f39m-secret-blocker-original-content'
-    );
-  });
-
-  it('hides the original of a quote of a blocked author but keeps the quote text', async () => {
-    const data = await fetchPost(quoteBlockedId, viewerId);
-    expect(data.content).toBe('f39m-my-take-on-the-blocked-post');
-    expect(data.originalPost).toBeUndefined();
-    expect(JSON.stringify(data)).not.toContain(
-      'f39m-secret-blocked-original-content'
-    );
-  });
-
-  it('hides the original even when the viewer is the reposter', async () => {
-    const data = await fetchPost(viewerRepostBlockedId, viewerId);
-    expect(data.originalPost).toBeUndefined();
-    expect(JSON.stringify(data)).not.toContain(
-      'f39m-secret-blocked-original-content'
-    );
-  });
-
-  it('keeps the original of a repost by a visible author', async () => {
-    const data = await fetchPost(repostOkId, viewerId);
-    expect(data.isRepost).toBe(true);
-    expect(data.originalPost?.id).toBe(origOkId);
-    expect(data.originalPost?.content).toBe('f39m-visible-ok-original-content');
-  });
-
-  it('an unrelated viewer still sees the original', async () => {
-    const data = await fetchPost(repostBlockedId, otherViewerId);
-    expect(data.isRepost).toBe(true);
-    expect(data.originalPost?.id).toBe(origBlockedId);
-    expect(data.originalPost?.content).toBe(
-      'f39m-secret-blocked-original-content'
-    );
-  });
-});

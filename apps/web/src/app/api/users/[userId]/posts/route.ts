@@ -100,6 +100,7 @@ import {
   isNull,
   lte,
   ne,
+  notInArray,
   or,
   posts,
   reactions,
@@ -114,6 +115,7 @@ import {
   UserPostsQuerySchema,
 } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 
 /**
  * GET /api/users/[userId]/posts
@@ -159,6 +161,18 @@ export const GET = withErrorHandling(
     const { type, page, limit } = UserPostsQuerySchema.parse(queryParams);
 
     if (type === 'replies') {
+      // Apply the viewer's moderation policy, as the post feeds, favorites
+      // feed, notifications, user search and the post comment list do:
+      // content by authors the viewer blocked or muted — or who blocked
+      // the viewer — is not returned or counted. The profile owner's own
+      // replies are the target of this page and stay listed; what the
+      // policy governs here is the embedded context (parent post, parent
+      // comment) and the reply counts. Anonymous reads have no moderation
+      // set and stay unfiltered.
+      const excludedAuthorIds: ReadonlySet<string> = user
+        ? await loadViewerExcludedAuthorIds(user.userId)
+        : new Set<string>();
+
       // Get user's comments (replies), one validated page at a time.
       // `total` is the full visible reply count, not the page length, so
       // callers can page past the first 100 replies.
@@ -222,7 +236,13 @@ export const GET = withErrorHandling(
           )
         );
 
-      const postsMap = new Map(postsData.map((p) => [p.id, p]));
+      // A parent post by an author the viewer must not see is never
+      // exposed either; the reply renders with post: null instead, like
+      // for a deleted or future parent.
+      const exposablePostsData = postsData.filter(
+        (p) => !excludedAuthorIds.has(p.authorId)
+      );
+      const postsMap = new Map(exposablePostsData.map((p) => [p.id, p]));
 
       // Fetch parent comments (for replies to comments)
       let parentCommentsMap = new Map<
@@ -250,7 +270,13 @@ export const GET = withErrorHandling(
             )
           );
 
-        parentCommentsMap = new Map(parentCommentsData.map((c) => [c.id, c]));
+        // Same rule for parent comments: one by an author the viewer
+        // must not see renders as parentComment: null, like a deleted one.
+        parentCommentsMap = new Map(
+          parentCommentsData
+            .filter((c) => !excludedAuthorIds.has(c.authorId))
+            .map((c) => [c.id, c])
+        );
       }
 
       // Fetch like counts for comments
@@ -272,7 +298,9 @@ export const GET = withErrorHandling(
         likeCountsResult.map((r) => [r.commentId, Number(r.count)])
       );
 
-      // Fetch reply counts for comments
+      // Fetch reply counts for comments. Child replies by authors the
+      // viewer must not see are never counted, matching the comment
+      // detail route's reply counting.
       const replyCountsResult = await db
         .select({
           parentCommentId: comments.parentCommentId,
@@ -282,7 +310,10 @@ export const GET = withErrorHandling(
         .where(
           and(
             inArray(comments.parentCommentId, commentIds),
-            isNull(comments.deletedAt)
+            isNull(comments.deletedAt),
+            ...(excludedAuthorIds.size > 0
+              ? [notInArray(comments.authorId, [...excludedAuthorIds])]
+              : [])
           )
         )
         .groupBy(comments.parentCommentId);
@@ -390,7 +421,10 @@ export const GET = withErrorHandling(
               .where(
                 and(
                   inArray(comments.parentCommentId, parentCommentIds),
-                  isNull(comments.deletedAt)
+                  isNull(comments.deletedAt),
+                  ...(excludedAuthorIds.size > 0
+                    ? [notInArray(comments.authorId, [...excludedAuthorIds])]
+                    : [])
                 )
               )
               .groupBy(comments.parentCommentId),
@@ -478,7 +512,7 @@ export const GET = withErrorHandling(
       ];
       const allAuthorIds = [
         ...new Set([
-          ...postsData.map((p) => p.authorId),
+          ...exposablePostsData.map((p) => p.authorId),
           ...parentCommentAuthorIds,
         ]),
       ];
@@ -605,6 +639,14 @@ export const GET = withErrorHandling(
     }
     // Get user's posts - filter out future posts
     const now = new Date();
+    // Viewer moderation applies before paging: a simple repost whose
+    // original author the viewer must not see is excluded in SQL, so
+    // hidden rows never consume page slots — the same reason the
+    // deleted-original EXISTS subplan below exists. Anonymous reads
+    // have no moderation set and stay unfiltered.
+    const excludedAuthorIds: ReadonlySet<string> = user
+      ? await loadViewerExcludedAuthorIds(user.userId)
+      : new Set<string>();
     // Simple reposts of a deleted or future original are hidden below, so
     // exclude them here too; otherwise they would take up rows of a page.
     // A scalar lookup on the unique original id avoids hashing every visible
@@ -629,7 +671,19 @@ export const GET = withErrorHandling(
                   and(
                     eq(originalPost.id, posts.originalPostId),
                     isNull(originalPost.deletedAt),
-                    lte(originalPost.timestamp, now)
+                    lte(originalPost.timestamp, now),
+                    // A simple repost of an original by an author the
+                    // viewer must not see is excluded here, before the
+                    // page is cut. Quotes pass via the content branch
+                    // above and keep their row, rendering with
+                    // originalPost: null below.
+                    ...(excludedAuthorIds.size > 0
+                      ? [
+                          notInArray(originalPost.authorId, [
+                            ...excludedAuthorIds,
+                          ]),
+                        ]
+                      : [])
                   )
                 )
                 .limit(1)
@@ -871,11 +925,26 @@ export const GET = withErrorHandling(
     }
 
     // Filter out reposts where the original post is deleted
+    // An original by an author the viewer must not see is never
+    // exposed either — the same rule the replies branch applies to
+    // embedded parents (#1829) and the feed lists apply to authors
+    // and original authors. Anonymous reads have no moderation set
+    // and stay unfiltered. The profile owner's own posts are the
+    // target of this page and stay listed; what the policy governs
+    // here is the embedded original.
     const validPosts = userPosts.filter((post) => {
       if (post.originalPostId) {
         const originalPost = originalPostsMap.get(post.originalPostId);
         const hasOriginalPost = originalPost && !originalPost.deletedAt;
         const isQuote = post.content && post.content.length > 0;
+
+        // A simple repost of a non-exposable original is dropped
+        // (its whole content is the original); a quote keeps the
+        // owner's commentary and renders originalPost: null below —
+        // the same treatment as a deleted original.
+        if (originalPost && excludedAuthorIds.has(originalPost.authorId)) {
+          return !!isQuote;
+        }
 
         // For quote posts, keep them even if original is deleted (user has commentary)
         // For simple reposts, filter out if original is deleted
@@ -916,7 +985,11 @@ export const GET = withErrorHandling(
         const originalPost = originalPostsMap.get(post.originalPostId);
 
         // If original post exists and is not deleted
-        if (originalPost && !originalPost.deletedAt) {
+        if (
+          originalPost &&
+          !originalPost.deletedAt &&
+          !excludedAuthorIds.has(originalPost.authorId)
+        ) {
           // Get original post author info
           const originalUser = originalUserAuthorsMap.get(
             originalPost.authorId
@@ -967,7 +1040,8 @@ export const GET = withErrorHandling(
           };
         }
 
-        // If original post is deleted but this is a quote post, return with null originalPost
+        // If original post is deleted (or by an author the viewer must
+        // not see) but this is a quote post, return with null originalPost
         if (isQuote) {
           return {
             ...basePost,
