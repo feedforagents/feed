@@ -85,8 +85,6 @@ export { AgentHarness, runHarness } from './harness';
 // ─── Simulation Adapter (offline, no server needed) ──────────────────────────
 export type { SimulationConfig, SimulationTickResult } from './offline-adapter';
 export { OfflineGameAdapter, SimulationAdapter } from './offline-adapter';
-export type { FeedProductionClientConfig } from './production-client';
-export { FeedProductionClient } from './production-client';
 export type {
   GameState,
   SimulationEngineInterface,
