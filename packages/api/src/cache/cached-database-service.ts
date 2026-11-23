@@ -34,6 +34,7 @@ import {
   type PostFeedVisibilityOptions,
   positions,
   postCursorConditions,
+  postFeedVisibilityConditions,
   posts,
   reactions,
   tags,
@@ -73,13 +74,14 @@ function postFeedCacheKey(
   return (
     prefix +
     JSON.stringify([
-      'post-visibility-v1',
+      'post-visibility-v2',
       authorId ?? null,
       limit,
       isCursor ? 'cursor' : 'offset',
       cursorOrOffset ?? 0,
       [...new Set(visibility.excludedAuthorIds ?? [])].sort(),
       visibility.excludeDeadReposts === true,
+      visibility.excludeModeratedReposts === true,
     ])
   );
 }
@@ -169,7 +171,7 @@ class CachedDatabaseService {
     // never be served to the same viewer under a different one.
     const excludedSuffix =
       excludedAuthorIds && excludedAuthorIds.length > 0
-        ? `:excl:${[...excludedAuthorIds].sort().join(',')}`
+        ? `:excl:v2:${[...excludedAuthorIds].sort().join(',')}`
         : '';
     const cacheKey =
       (isCursor
@@ -227,6 +229,10 @@ class CachedDatabaseService {
         const conditions = [
           inArray(posts.authorId, nonTestFollowedIds),
           isNull(posts.deletedAt),
+          ...postFeedVisibilityConditions({
+            excludedAuthorIds,
+            excludeModeratedReposts: true,
+          }),
         ];
 
         if (cursor) {

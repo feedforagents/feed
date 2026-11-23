@@ -98,6 +98,8 @@ export async function postCursorConditions(rawCursor: string): Promise<SQL[]> {
 export interface PostFeedVisibilityOptions {
   /** Authors the viewer must not see (blocked, muted, or blocking them). */
   excludedAuthorIds?: string[];
+  /** Skip simple reposts whose original author is excluded. Quotes keep their row. */
+  excludeModeratedReposts?: boolean;
   /**
    * Exclude simple reposts whose original post is soft-deleted or gone.
    * Quote posts (non-empty content) are kept, matching the posts route,
@@ -117,6 +119,15 @@ export function postFeedVisibilityConditions(
   const excludedAuthorIds = options?.excludedAuthorIds;
   if (excludedAuthorIds && excludedAuthorIds.length > 0) {
     conditions.push(notInArray(posts.authorId, excludedAuthorIds));
+    if (options?.excludeModeratedReposts) {
+      const excludedOriginalAuthors = sql.join(
+        excludedAuthorIds.map((authorId) => sql`${authorId}`),
+        sql`, `
+      );
+      conditions.push(
+        sql`NOT (${posts.originalPostId} IS NOT NULL AND ${posts.content} = '' AND EXISTS (SELECT 1 FROM "Post" AS "feed_excluded_original" WHERE "feed_excluded_original"."id" = ${posts.originalPostId} AND "feed_excluded_original"."authorId" IN (${excludedOriginalAuthors})))`
+      );
+    }
   }
   if (options?.excludeDeadReposts) {
     conditions.push(
