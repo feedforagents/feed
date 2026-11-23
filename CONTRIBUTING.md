@@ -414,8 +414,11 @@ configured scopes are in `knip.config.js`, `.madgerc`, `.jscpd.json` and
 | A `v*` tag (`release.yml`) | Build, `pnpm pack`, the prerequisites and `pnpm selftest --only --concurrency=1` read from the shared cache, and the tarball attached to a GitHub release |
 
 This repository runs its six root specs in the ordinary check. Consumer
-workflows using the four simulation jobs assign modules by file hash and
-download the new simulation receipts before their ordinary check.
+workflows using the four simulation jobs assign modules by file hash. A complete
+shard transfers its simulation and imported typecheck receipts. An incomplete
+shard transfers the new simulation aggregates it produced and reports its failures.
+The ordinary check keeps its restored receipts, imports missing keys on which the
+shards agree, and computes the rest.
 
 The precompute jobs skip the root install's build and generation only during
 the canonical `ci.yml` preparation in its workspace. Other workflows, manual
