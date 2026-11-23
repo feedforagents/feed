@@ -227,23 +227,27 @@ export class PredictionMarketService {
     });
 
     const existingPos = await this.db.getPosition(userId, marketId, side);
+    const activePos =
+      existingPos && (!existingPos.status || existingPos.status === 'active')
+        ? existingPos
+        : null;
     const position = await this.db.upsertPosition(
-      existingPos
+      activePos
         ? {
-            ...existingPos,
-            shares: existingPos.shares + calc.sharesBought,
+            ...activePos,
+            shares: activePos.shares + calc.sharesBought,
             cashCostBasis: new Decimal(
               calculatePredictionCashCostBasis(
-                existingPos,
+                activePos,
                 this.deps.fees.tradingFeeRate
               )
             )
               .plus(amount)
               .toNumber(),
             avgPrice:
-              (existingPos.avgPrice * existingPos.shares +
+              (activePos.avgPrice * activePos.shares +
                 calc.avgPrice * calc.sharesBought) /
-              (existingPos.shares + calc.sharesBought),
+              (activePos.shares + calc.sharesBought),
             status: 'active',
             updatedAt: this.now(),
           }
@@ -267,7 +271,7 @@ export class PredictionMarketService {
     // The database returns the stored share precision. Report the fill as
     // the persisted delta so clients can use it in a subsequent sale.
     const filledShares = new Decimal(position.shares)
-      .minus(existingPos?.shares ?? 0)
+      .minus(activePos?.shares ?? 0)
       .toNumber();
 
     await this.recordSnapshot({
