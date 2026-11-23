@@ -134,7 +134,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     limit: searchParams.get('limit') ?? undefined,
     category: searchParams.get('category') ?? undefined,
   };
-  BreakingNewsQuerySchema.parse(queryParams);
+  const parsedQuery = BreakingNewsQuerySchema.parse(queryParams);
+  // The documented `limit` bounds the response. Without an explicit parameter
+  // the widget keeps its configured item cap, so existing no-parameter callers
+  // (and the sidebar widget) see no behavior change. The budget is shared by
+  // both branches below: the per-source top-N picks, the fallback loops that
+  // stop early once the budget is met, and the final slice.
+  const itemLimit = searchParams.has('limit')
+    ? parsedQuery.limit
+    : FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS;
 
   // Optional auth - breaking news is public but RLS still applies
   const authUser = await optionalAuth(request).catch(() => null);
@@ -378,7 +386,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
           // 4. Fallback: If we don't have enough items, get ANY recent posts from actors
           // Only show posts up to current time (prevent future access)
-          if (items.length < FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS) {
+          if (items.length < itemLimit) {
             const excludeIds = items.map((item) => item.id);
             const whereConditions = [
               lte(posts.timestamp, currentTime), // ✅ No future posts
@@ -398,8 +406,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               .limit(20);
 
             for (const post of fallbackPosts) {
-              if (items.length >= FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS)
-                break;
+              if (items.length >= itemLimit) break;
               const actor = actorsMap.get(post.authorId);
               if (!actor) continue;
 
@@ -433,7 +440,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
           // 5. Final fallback: Get ANY recent world events if still not enough
           // Only show events up to current time (prevent future access)
-          if (items.length < FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS) {
+          if (items.length < itemLimit) {
             const allRecentEvents = await db
               .select()
               .from(worldEvents)
@@ -447,8 +454,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               .limit(10);
 
             for (const event of allRecentEvents) {
-              if (items.length >= FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS)
-                break;
+              if (items.length >= itemLimit) break;
 
               // Skip if already included
               if (items.some((item) => item.id === event.id)) continue;
@@ -485,7 +491,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                 new Date(b.timestamp).getTime() -
                 new Date(a.timestamp).getTime()
             )
-            .slice(0, FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS);
+            .slice(0, itemLimit);
 
           return sortedNews;
         })
@@ -725,7 +731,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
           // 4. Fallback: If we don't have enough items, get ANY recent posts from actors
           // Only show posts up to current time (prevent future access)
-          if (items.length < FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS) {
+          if (items.length < itemLimit) {
             const excludeIds = items.map((item) => item.id);
             const whereConditions = [
               lte(posts.timestamp, currentTime), // ✅ No future posts
@@ -745,8 +751,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               .limit(20);
 
             for (const post of fallbackPosts) {
-              if (items.length >= FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS)
-                break;
+              if (items.length >= itemLimit) break;
               const actor = actorsMap.get(post.authorId);
               if (!actor) continue;
 
@@ -780,7 +785,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
           // 5. Final fallback: Get ANY recent world events if still not enough
           // Only show events up to current time (prevent future access)
-          if (items.length < FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS) {
+          if (items.length < itemLimit) {
             const allRecentEvents = await db
               .select()
               .from(worldEvents)
@@ -794,8 +799,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               .limit(10);
 
             for (const event of allRecentEvents) {
-              if (items.length >= FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS)
-                break;
+              if (items.length >= itemLimit) break;
 
               // Skip if already included
               if (items.some((item) => item.id === event.id)) continue;
@@ -832,7 +836,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                 new Date(b.timestamp).getTime() -
                 new Date(a.timestamp).getTime()
             )
-            .slice(0, FEED_WIDGET_CONFIG.MAX_BREAKING_NEWS_ITEMS);
+            .slice(0, itemLimit);
 
           return sortedNews;
         });

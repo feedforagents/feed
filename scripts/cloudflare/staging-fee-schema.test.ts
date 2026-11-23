@@ -16,6 +16,7 @@ import {
   verifyStagingDeploymentContext,
 } from './prepare-staging-fee-schema';
 import { materializeBaselineAdditiveMigrations } from './staging-fee-migration-subset';
+import { phase0Inspection, phase0RuntimeInput } from './staging-fee-schema';
 import {
   BASELINE_ADDITIVE_MIGRATIONS,
   BASELINE_ADDITIVE_TABLES,
@@ -24,6 +25,7 @@ import {
   MIGRATION_HISTORY_SAMPLE_LIMIT,
   physicalFeeSchemaDiagnostics,
   SchemaHold,
+  STAGING_FUNDING_MIGRATION,
   STAGING_ORIGINAL_MIGRATIONS,
   verifyAdditiveColumns,
   verifyAdditiveTargets,
@@ -50,6 +52,11 @@ function captureSchemaHold(run: () => void): SchemaHold {
   throw new Error('Expected a schema HOLD');
 }
 const sourceRoot = resolve(import.meta.dir, '../..');
+const stagingPins = [...STAGING_ORIGINAL_MIGRATIONS, STAGING_FUNDING_MIGRATION];
+const stagingAdditivePins = [
+  ...BASELINE_ADDITIVE_MIGRATIONS,
+  STAGING_FUNDING_MIGRATION,
+];
 function withMigrationSource(
   run: (root: string, output: string) => void
 ): void {
@@ -60,7 +67,7 @@ function withMigrationSource(
   try {
     mkdirSync(join(migrations, 'meta'), { recursive: true, mode: 0o700 });
     mkdirSync(output, { mode: 0o700 });
-    for (const pin of STAGING_ORIGINAL_MIGRATIONS) {
+    for (const pin of stagingPins) {
       copyFileSync(
         join(sourceRoot, 'packages/db/drizzle/migrations', `${pin.tag}.sql`),
         join(migrations, `${pin.tag}.sql`)
@@ -79,6 +86,94 @@ const originalHistory = STAGING_ORIGINAL_MIGRATIONS.map(({ hash, when }) => ({
   hash,
   when,
 }));
+it('reports only boolean Phase 0 runtime inputs from GitHub', () => {
+  expect(phase0RuntimeInput(['true', 'false', 'true'])).toEqual({
+    gameStartPaused: true,
+    canonicalDailyBudgetUsd100: false,
+    requestBoundPresent: true,
+  });
+  expect(() => phase0RuntimeInput([])).toThrow('invalid_phase0_runtime_checks');
+  expect(() => phase0RuntimeInput(['false', '100', 'false'])).toThrow(
+    'invalid_phase0_runtime_checks'
+  );
+});
+it('distinguishes missing or altered Phase 0 schema from exact catalog evidence', () => {
+  const budget = {
+    kind: 'r',
+    rls: false,
+    appAccess: true,
+    columns: [
+      ['id', 'text', true, null],
+      ['boundMicroUsd', 'bigint', true, null],
+      ['createdAt', 'timestamp with time zone', true, 'now()'],
+      ['costMicroUsd', 'bigint', false, null],
+      ['settledAt', 'timestamp with time zone', false, null],
+    ],
+    constraints: [
+      'CHECK (("boundMicroUsd" > 0))',
+      'CHECK (((("settledAt" IS NULL) AND ("costMicroUsd" IS NULL)) OR (("settledAt" IS NOT NULL) AND ("costMicroUsd" IS NOT NULL) AND ("costMicroUsd" >= 0))))',
+      'PRIMARY KEY (id)',
+    ],
+    indexes: {
+      scheduled_inference_settled_at_idx:
+        'CREATE INDEX scheduled_inference_settled_at_idx ON public."ScheduledInferenceReservation" USING btree ("settledAt")',
+      scheduled_inference_bound_violation_idx:
+        'CREATE INDEX scheduled_inference_bound_violation_idx ON public."ScheduledInferenceReservation" USING btree (id) WHERE ("costMicroUsd" > "boundMicroUsd")',
+    },
+  };
+  const recovery = {
+    kind: 'r',
+    rls: false,
+    appAccess: true,
+    columns: [
+      ['questionId', 'text', true, null],
+      ['resolutionDate', 'timestamp without time zone', true, null],
+      ['outcome', 'boolean', true, null],
+      ['nextAttemptAt', 'timestamp with time zone', false, null],
+      ['draft', 'jsonb', false, null],
+    ],
+    constraints: [
+      'FOREIGN KEY ("questionId") REFERENCES "Question"(id) ON DELETE CASCADE',
+      'PRIMARY KEY ("questionId")',
+    ],
+  };
+  const ready = {
+    tablePresent: true,
+    catalogMatches: true,
+    appRoleAccess: true,
+  };
+  const details = phase0Inspection({
+    ScheduledInferenceReservation: budget,
+    PredictionResolutionWork: recovery,
+  });
+  expect(details).toEqual({
+    migration0007: ready,
+    migration0008: ready,
+  });
+  expect(
+    phase0Inspection({
+      ScheduledInferenceReservation: { kind: null },
+      PredictionResolutionWork: {
+        ...recovery,
+        appAccess: false,
+        constraints: recovery.constraints.map((constraint) =>
+          constraint.replace(' ON DELETE CASCADE', '')
+        ),
+      },
+    })
+  ).toEqual({
+    migration0007: {
+      tablePresent: false,
+      catalogMatches: false,
+      appRoleAccess: false,
+    },
+    migration0008: {
+      tablePresent: true,
+      catalogMatches: false,
+      appRoleAccess: false,
+    },
+  });
+});
 const additiveHistory = BASELINE_ADDITIVE_MIGRATIONS.map(({ hash, when }) => ({
   hash,
   when,
@@ -428,24 +523,23 @@ describe('staging fee schema release boundaries', () => {
       'receipted_fee_columns_missing'
     );
   });
-  it('materializes only byte-exact original additive SQL and an out-only normal CLI config', () => {
+  it('materializes the byte-exact additive SQL and funding ledger with an out-only CLI config', () => {
     withMigrationSource((root, output) => {
       const config = materializeBaselineAdditiveMigrations(root, output);
       const directory = join(output, 'migrations');
       expect(readdirSync(directory).sort()).toEqual(
-        [
-          ...BASELINE_ADDITIVE_MIGRATIONS.map((pin) => `${pin.tag}.sql`),
-          'meta',
-        ].sort()
+        [...stagingAdditivePins.map((pin) => `${pin.tag}.sql`), 'meta'].sort()
       );
       const journal = JSON.parse(
         readFileSync(join(directory, 'meta/_journal.json'), 'utf8')
       ) as { entries: { idx: number; tag: string; when: number }[] };
-      expect(journal.entries.map((entry) => entry.idx)).toEqual([0, 3, 4, 5]);
+      expect(journal.entries.map((entry) => entry.idx)).toEqual([
+        0, 3, 4, 5, 6,
+      ]);
       expect(journal.entries.map((entry) => String(entry.when))).toEqual(
-        BASELINE_ADDITIVE_MIGRATIONS.map((pin) => pin.when)
+        stagingAdditivePins.map((pin) => pin.when)
       );
-      for (const pin of BASELINE_ADDITIVE_MIGRATIONS) {
+      for (const pin of stagingAdditivePins) {
         const copy = join(directory, `${pin.tag}.sql`);
         expect(digest(readFileSync(copy, 'utf8'))).toBe(pin.hash);
         expect(
@@ -469,7 +563,7 @@ describe('staging fee schema release boundaries', () => {
     });
   });
   it('holds before materialization for edited selected or skipped originals and extra migration files', () => {
-    for (const pin of STAGING_ORIGINAL_MIGRATIONS) {
+    for (const pin of stagingPins) {
       withMigrationSource((root, output) => {
         const file = join(
           root,
@@ -485,7 +579,7 @@ describe('staging fee schema release boundaries', () => {
     }
     withMigrationSource((root, output) => {
       writeFileSync(
-        join(root, 'packages/db/drizzle/migrations/0006_unreviewed.sql'),
+        join(root, 'packages/db/drizzle/migrations/0007_unreviewed.sql'),
         'SELECT 1;'
       );
       expect(() => materializeBaselineAdditiveMigrations(root, output)).toThrow(

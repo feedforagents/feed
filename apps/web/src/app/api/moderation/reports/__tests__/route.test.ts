@@ -24,7 +24,20 @@ mock.module('@feed/api', () => ({
   withErrorHandling: (handler: (...args: unknown[]) => unknown) => handler,
 }));
 
+// The route runs duplicate detection and the insert inside db.$transaction
+// with a pg_advisory_xact_lock first statement, so the mock transaction
+// mirrors that shape: execute() swallows the lock, report.findFirst reports
+// no recent duplicate, and report.create returns the payload.
+const mockTx = {
+  execute: async () => [],
+  report: {
+    findFirst: async () => null,
+    create: async (args: { data: Record<string, unknown> }) => args.data,
+  },
+};
+
 mock.module('@feed/db', () => ({
+  sql: (strings: TemplateStringsArray) => strings.join(''),
   db: {
     user: {
       findUnique: async () => ({ id: 'target-1', isActor: false }),
@@ -35,6 +48,8 @@ mock.module('@feed/db', () => ({
       create: async (args: { data: Record<string, unknown> }) => args.data,
       update: mockReportUpdate,
     },
+    $transaction: async (callback: (tx: typeof mockTx) => unknown) =>
+      callback(mockTx),
   },
 }));
 

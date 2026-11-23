@@ -80,10 +80,28 @@
  */
 
 import { optionalAuth, successResponse, withErrorHandling } from '@feed/api';
-import { asPublic, asUser } from '@feed/db';
+import {
+  aliasedTable,
+  and,
+  asPublic,
+  asUser,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  notExists,
+  postFeedVisibilityConditions,
+  posts as postsTable,
+  users as usersTable,
+} from '@feed/db';
 import { logger, TrendingPostsQuerySchema, toISO } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { loadViewerExcludedAuthorIds } from '../../_lib/viewer-moderation';
+
+const originalPost = aliasedTable(postsTable, 'trending_original');
 
 interface TrendingPost {
   id: string;
@@ -130,31 +148,72 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     timeframe: searchParams.get('timeframe') || '24h',
     minInteractions: searchParams.get('minInteractions') || '5',
   };
-  TrendingPostsQuerySchema.parse(queryParams);
+  const { limit } = TrendingPostsQuerySchema.parse(queryParams);
   // Get recent posts from last 24 hours
   const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const now = new Date(); // Current time for filtering out future posts
 
   // Optional auth - trending posts are public but RLS still applies
   const authUser = await optionalAuth(request).catch(() => null);
+  const excludedAuthorIds = authUser?.userId
+    ? [...(await loadViewerExcludedAuthorIds(authUser.userId))]
+    : [];
 
   // Get posts, interactions, and users with RLS
-  const { posts, allReactions, allComments, allShares, users, originalAuthorMap } =
+  const { posts, allReactions, allComments, allShares, users } =
     authUser && authUser.userId
       ? await asUser(authUser, async (db) => {
-          const postsList = await db.post.findMany({
-            where: {
-              timestamp: {
-                gte: oneDayAgo,
-                lte: now, // ✅ No future posts
-              },
-              deletedAt: null, // Filter out deleted posts
-            },
-            orderBy: {
-              timestamp: 'desc',
-            },
-            take: 100, // Get more posts to calculate trending from
-          });
+          const postsList = await db
+            .select({
+              id: postsTable.id,
+              content: postsTable.content,
+              authorId: postsTable.authorId,
+              timestamp: postsTable.timestamp,
+            })
+            .from(postsTable)
+            .where(
+              and(
+                gte(postsTable.timestamp, oneDayAgo),
+                lte(postsTable.timestamp, now), // ✅ No future posts
+                isNull(postsTable.deletedAt), // Filter out deleted posts
+                // Filter the author and any reposted or quoted author before the candidate limit.
+                ...postFeedVisibilityConditions({ excludedAuthorIds }),
+                excludedAuthorIds.length > 0
+                  ? notExists(
+                      db
+                        .select({ id: originalPost.id })
+                        .from(originalPost)
+                        .where(
+                          and(
+                            eq(originalPost.id, postsTable.originalPostId),
+                            inArray(originalPost.authorId, excludedAuthorIds)
+                          )
+                        )
+                    )
+                  : undefined,
+                // Test authors are excluded in SQL before the 100-post
+                // candidate window, the same rule every sibling post list
+                // applies (main feed, following feed, single-tag page,
+                // grouped trending). Filtering after the fetch would let
+                // test posts crowd real posts out of the window and into
+                // the top five. Authors with no user row (NPC actors,
+                // organizations) are not test authors and stay visible.
+                notLike(postsTable.authorId, 'test-%'),
+                notExists(
+                  db
+                    .select({ id: usersTable.id })
+                    .from(usersTable)
+                    .where(
+                      and(
+                        eq(usersTable.id, postsTable.authorId),
+                        eq(usersTable.isTest, true)
+                      )
+                    )
+                )
+              )
+            )
+            .orderBy(desc(postsTable.timestamp))
+            .limit(100); // Get more posts to calculate trending from
 
           if (postsList.length === 0) {
             return {
@@ -163,7 +222,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               allComments: [],
               allShares: [],
               users: [],
-              originalAuthorMap: new Map<string, string>(),
             };
           }
 
@@ -194,49 +252,51 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             select: { id: true, username: true, displayName: true },
           });
 
-          // Resolve original authors for reposts/quotes so viewer block/mute
-          // filtering can hide reposts of excluded authors.
-          const originalIds = [
-            ...new Set(
-              postsList
-                .map((p) => p.originalPostId)
-                .filter((id): id is string => id !== null)
-            ),
-          ];
-          const originalAuthors =
-            originalIds.length > 0
-              ? await db.post.findMany({
-                  where: { id: { in: originalIds } },
-                  select: { id: true, authorId: true },
-                })
-              : [];
-          const originalAuthorMap = new Map<string, string>(
-            originalAuthors.map((p) => [p.id, p.authorId])
-          );
-
           return {
             posts: postsList,
             allReactions: reactions,
             allComments: comments,
             allShares: shares,
             users: usersList,
-            originalAuthorMap,
           };
         })
       : await asPublic(async (db) => {
-          const postsList = await db.post.findMany({
-            where: {
-              timestamp: {
-                gte: oneDayAgo,
-                lte: now, // ✅ No future posts
-              },
-              deletedAt: null, // Filter out deleted posts
-            },
-            orderBy: {
-              timestamp: 'desc',
-            },
-            take: 100, // Get more posts to calculate trending from
-          });
+          const postsList = await db
+            .select({
+              id: postsTable.id,
+              content: postsTable.content,
+              authorId: postsTable.authorId,
+              timestamp: postsTable.timestamp,
+            })
+            .from(postsTable)
+            .where(
+              and(
+                gte(postsTable.timestamp, oneDayAgo),
+                lte(postsTable.timestamp, now), // ✅ No future posts
+                isNull(postsTable.deletedAt), // Filter out deleted posts
+                // Test authors are excluded in SQL before the 100-post
+                // candidate window, the same rule every sibling post list
+                // applies (main feed, following feed, single-tag page,
+                // grouped trending). Filtering after the fetch would let
+                // test posts crowd real posts out of the window and into
+                // the top five. Authors with no user row (NPC actors,
+                // organizations) are not test authors and stay visible.
+                notLike(postsTable.authorId, 'test-%'),
+                notExists(
+                  db
+                    .select({ id: usersTable.id })
+                    .from(usersTable)
+                    .where(
+                      and(
+                        eq(usersTable.id, postsTable.authorId),
+                        eq(usersTable.isTest, true)
+                      )
+                    )
+                )
+              )
+            )
+            .orderBy(desc(postsTable.timestamp))
+            .limit(100); // Get more posts to calculate trending from
 
           if (postsList.length === 0) {
             return {
@@ -245,7 +305,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               allComments: [],
               allShares: [],
               users: [],
-              originalAuthorMap: new Map<string, string>(),
             };
           }
 
@@ -276,33 +335,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             select: { id: true, username: true, displayName: true },
           });
 
-          // Resolve original authors for reposts/quotes so viewer block/mute
-          // filtering can hide reposts of excluded authors.
-          const originalIds = [
-            ...new Set(
-              postsList
-                .map((p) => p.originalPostId)
-                .filter((id): id is string => id !== null)
-            ),
-          ];
-          const originalAuthors =
-            originalIds.length > 0
-              ? await db.post.findMany({
-                  where: { id: { in: originalIds } },
-                  select: { id: true, authorId: true },
-                })
-              : [];
-          const originalAuthorMap = new Map<string, string>(
-            originalAuthors.map((p) => [p.id, p.authorId])
-          );
-
           return {
             posts: postsList,
             allReactions: reactions,
             allComments: comments,
             allShares: shares,
             users: usersList,
-            originalAuthorMap,
           };
         });
 
@@ -354,27 +392,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   );
   const userMap = new Map(users.map((u) => [u.id, u]));
 
-  // Apply viewer block/mute filtering before trending scores are computed,
-  // so excluded posts do not take a top-5 slot. Anonymous viewers keep the
-  // unfiltered public snapshot.
-  const excludedAuthorIds = authUser?.userId
-    ? await loadViewerExcludedAuthorIds(authUser.userId)
-    : new Set<string>();
-  const visiblePosts =
-    excludedAuthorIds.size > 0
-      ? posts.filter((post) => {
-          if (excludedAuthorIds.has(post.authorId)) return false;
-          const originalAuthorId = post.originalPostId
-            ? (originalAuthorMap.get(post.originalPostId) ?? null)
-            : null;
-          return !(
-            originalAuthorId && excludedAuthorIds.has(originalAuthorId)
-          );
-        })
-      : posts;
-
   // Calculate trending scores and format posts
-  const trendingPosts: TrendingPost[] = visiblePosts
+  const trendingPosts: TrendingPost[] = posts
     .map((post) => {
       const likeCount = reactionMap.get(post.id) ?? 0;
       const commentCount = commentMap.get(post.id) ?? 0;
@@ -404,7 +423,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     })
     .filter((post) => post.trendingScore > 0) // Only include posts with some engagement
     .sort((a, b) => b.trendingScore - a.trendingScore) // Sort by trending score descending
-    .slice(0, 5); // Top 5 trending posts
+    .slice(0, Math.min(5, limit)); // Keep the widget capped at five posts
 
   logger.info(
     'Trending posts fetched successfully',
