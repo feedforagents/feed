@@ -132,30 +132,6 @@ const agent = createOpenClawAdapter({
 
 JSON-RPC client targeting the local A2A server (`localhost:3001`). Uses Anvil-style private keys for signing. This is the default when no `clientFactory` is provided.
 
-### FeedProductionClient
-
-Official A2A SDK client targeting the real Feed server (`localhost:3000` or `feed.fun`). Uses the `@a2a-js/sdk` `message/send` protocol.
-
-```typescript
-import { FeedProductionClient, runHarness, createLLMAgent, getArchetype } from '@feed/agent-harness';
-
-const client = new FeedProductionClient({
-  baseUrl: 'http://localhost:3000',
-  apiKey: process.env.FEED_API_KEY!,
-});
-
-const result = await runHarness({
-  a2aUrl: 'http://localhost:3000',
-  clientFactory: () => client,
-  agents: [createLLMAgent()],
-  archetypes: [getArchetype('trader')],
-  instancesPerAgent: 1,
-  ticksPerAgent: 10,
-  parallelAgents: 1,
-  recordTrajectories: true,
-});
-```
-
 ### SimulationA2AAdapter (offline)
 
 No server required — uses the engine's `InMemoryStateStore` for a fully local simulation.
