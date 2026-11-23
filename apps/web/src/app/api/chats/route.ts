@@ -162,6 +162,7 @@
 
 import {
   authenticate,
+  BusinessLogicError,
   ReputationService,
   successResponse,
   withErrorHandling,
@@ -176,6 +177,7 @@ import {
   count,
   desc,
   eq,
+  getFilteredUserIds,
   groupMembers,
   groups,
   inArray,
@@ -661,7 +663,41 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const { name, isGroup, participantIds } = ChatCreateSchema.parse(body);
 
   // Create the chat with RLS
+  let addedParticipantCount = 0;
   const chat = await asUser(user, async (dbClient) => {
+    const requestedIds = participantIds ?? [];
+    const blockedIds = new Set(
+      requestedIds.length > 0
+        ? await getFilteredUserIds(user.userId, dbClient)
+        : []
+    );
+
+    if (!isGroup && requestedIds.length > 0) {
+      // Match the dedicated DM route before creating any rows.
+      const [npcTarget] = await dbClient
+        .select({ id: users.id })
+        .from(users)
+        .where(and(inArray(users.id, requestedIds), eq(users.isActor, true)))
+        .limit(1);
+      if (npcTarget) {
+        throw new BusinessLogicError(
+          'Cannot send direct messages to NPC actors. Use group chats to interact with NPCs.',
+          'INVALID_DM_TARGET'
+        );
+      }
+      if (requestedIds.some((id) => blockedIds.has(id))) {
+        throw new BusinessLogicError(
+          'Cannot send messages to this user',
+          'BLOCKED_USER'
+        );
+      }
+    }
+
+    // Keep eligible members in group chats when a block excludes someone.
+    const addableIds = isGroup
+      ? requestedIds.filter((id) => !blockedIds.has(id))
+      : requestedIds;
+
     // Create the chat
     const now = new Date();
     const [newChat] = await dbClient
@@ -687,14 +723,13 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     });
 
     // Add other participants if provided
-    if (participantIds && Array.isArray(participantIds)) {
-      for (const participantId of participantIds) {
-        await dbClient.insert(chatParticipants).values({
-          id: await generateSnowflakeId(),
-          chatId: newChat.id,
-          userId: participantId,
-        });
-      }
+    addedParticipantCount = addableIds.length;
+    for (const participantId of addableIds) {
+      await dbClient.insert(chatParticipants).values({
+        id: await generateSnowflakeId(),
+        chatId: newChat.id,
+        userId: participantId,
+      });
     }
 
     return newChat;
@@ -725,7 +760,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       chatId: chat.id,
       userId: user.userId,
       isGroup,
-      participantCount: (participantIds?.length || 0) + 1,
+      participantCount: addedParticipantCount + 1,
     },
     'POST /api/chats'
   );
