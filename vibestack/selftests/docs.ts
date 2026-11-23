@@ -149,6 +149,8 @@ describe("the documents name what exists", () => {
       fs.cpSync(path.join(project, file), path.join(root, file), { verbatimSymlinks: true });
     }
     await exec("git", ["init", "-q"], root);
+    const staged = await exec("git", ["add", "-A"], root);
+    assert.equal(staged.status, 0, staged.stderr);
     const evaluatorHome = path.join(root, "custom quint home");
     const child = await exec(turbo, ["run", "@repo/kit#test", "--only", "--env-mode=strict", "--cache=local:rw", "--output-logs=full"], root,
       { ...process.env, QUINT_HOME: evaluatorHome, TURBO_TELEMETRY_DISABLED: "1" });
