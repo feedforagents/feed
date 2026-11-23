@@ -172,6 +172,8 @@ export const GET = withErrorHandling(
       resolutionDate: toISOOrNull(market.endDate),
       endDate: toISOOrNull(market.endDate),
       createdDate: toISOOrNull(market.createdAt),
+      // Scenario of the market's question (null when none is linked)
+      scenario: market.scenario ?? null,
       yesShares,
       noShares,
       liquidity: market.liquidity,

@@ -1,128 +1,153 @@
-/**
- * Viewer moderation for MCP search_users.
- *
- * The website people search (GET /api/users/search) and the sibling MCP
- * search_agents tool both drop users the viewer has blocked, users the
- * viewer has muted, and users who have blocked the viewer — the shared
- * @feed/db moderation helpers exist, in their own docstring, to exclude
- * blocked or muted users "from feeds and search results". search_users
- * must apply the same three exclusions before its limit, so a hidden
- * account cannot occupy a result slot either.
- *
- * Requires DATABASE_URL pointing at a disposable database with schema applied.
- */
+/** MCP people search shares web moderation rules (PRD §§8.1–8.2/12, MVP 3/5). */
+import { afterAll, beforeAll, describe, expect, it, test } from 'bun:test';
+import { NextRequest } from 'next/server';
+import {
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { db, inArray, userBlocks, userMutes, users } from '@feed/db';
-import { executeSearchUsers } from '../../mcp/src/handlers/tool-handlers';
+const suite = 'MCP search_users viewer moderation';
+const cases = {
+  eligible: 'keeps global eligibility and display-name matching',
+  block: 'excludes users the viewer has blocked',
+  mute: 'excludes users the viewer has muted',
+  inbound: 'excludes users who have blocked the viewer',
+  limit: 'applies moderation before the result limit',
+};
 
-const token = `s191${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
-const ownedUserIds: string[] = [];
-const ids = new Map<string, string>();
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks MCP people search in a disposable PostgreSQL database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'mcp-search-users-viewer-moderation',
+      file: 'packages/testing/integration/mcp-search-users-viewer-moderation.integration.test.ts',
+      cases: Object.values(cases).map((name) => `${suite} > ${name}`),
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  const { generateApiKey, hashApiKey } = await import('@feed/api');
+  const { closeDatabase, db, userApiKeys, userBlocks, userMutes, users } =
+    await import('@feed/db');
+  const { POST } = await import('../../../apps/web/src/app/api/mcp/route');
 
-function fixtureId(label: string): string {
-  const id = ids.get(label);
-  if (id === undefined) throw new Error(`fixture ${label} was not acquired`);
-  return id;
-}
+  const needle = 'search1885';
+  const caller = 'viewer-1885';
+  const observer = 'observer-1885';
+  const blocked = 'blocked-1885';
+  const muted = 'muted-1885';
+  const blocker = 'blocker-1885';
+  const visible = 'visible-1885';
+  const callerKey = generateApiKey();
+  const observerKey = generateApiKey();
 
-async function createUser(
-  label: string,
-  overrides: Partial<typeof users.$inferInsert>
-): Promise<string> {
-  const id = crypto.randomUUID();
-  const inserted = await db
-    .insert(users)
-    .values({ id, isActor: false, updatedAt: new Date(), ...overrides })
-    .returning({ id: users.id });
-  if (!inserted[0]) throw new Error(`fixture ${label} insert returned no row`);
-  ownedUserIds.push(inserted[0].id);
-  ids.set(label, inserted[0].id);
-  return inserted[0].id;
-}
-
-const agent = () => ({ agentId: 'agent', userId: fixtureId('caller') });
-
-async function search(query: string, limit = 50): Promise<string[]> {
-  const result = await executeSearchUsers(agent(), { query, limit });
-  return result.users.map((u) => u.id);
-}
-
-beforeAll(async () => {
-  await createUser('caller', { username: `caller${token}` });
-  await createUser('blockedByCaller', {
-    username: `${token}blocked`,
-    displayName: 'Blocked By Caller',
-  });
-  await createUser('mutedByCaller', {
-    username: `${token}muted`,
-    displayName: 'Muted By Caller',
-  });
-  await createUser('blockedCaller', {
-    username: `${token}blocker`,
-    displayName: 'Blocked The Caller',
-  });
-  await createUser('control', {
-    username: `${token}control`,
-    displayName: 'No Relation',
-  });
-
-  await db.insert(userBlocks).values([
-    {
-      id: crypto.randomUUID(),
-      blockerId: fixtureId('caller'),
-      blockedId: fixtureId('blockedByCaller'),
-    },
-    {
-      id: crypto.randomUUID(),
-      blockerId: fixtureId('blockedCaller'),
-      blockedId: fixtureId('caller'),
-    },
-  ]);
-  await db.insert(userMutes).values({
-    id: crypto.randomUUID(),
-    muterId: fixtureId('caller'),
-    mutedId: fixtureId('mutedByCaller'),
-  });
-});
-
-afterAll(async () => {
-  await db
-    .delete(userBlocks)
-    .where(inArray(userBlocks.blockerId, ownedUserIds));
-  await db
-    .delete(userBlocks)
-    .where(inArray(userBlocks.blockedId, ownedUserIds));
-  await db.delete(userMutes).where(inArray(userMutes.muterId, ownedUserIds));
-  if (ownedUserIds.length) {
-    await db.delete(users).where(inArray(users.id, ownedUserIds));
-    expect(
-      await db
-        .select({ id: users.id })
-        .from(users)
-        .where(inArray(users.id, ownedUserIds))
-    ).toHaveLength(0);
+  async function search(key: string, limit = 50): Promise<string[]> {
+    const result = await POST(
+      new NextRequest('http://people-search.test/api/mcp', {
+        method: 'POST',
+        headers: {
+          host: 'people-search.test',
+          'content-type': 'application/json',
+          'X-Feed-Api-Key': key,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'search-users-fixture',
+          method: 'tools/call',
+          params: {
+            name: 'search_users',
+            arguments: { query: needle, limit },
+          },
+        }),
+      })
+    );
+    expect(result.status).toBe(200);
+    const body = (await result.json()) as {
+      result?: { isError?: boolean; content?: { text: string }[] };
+    };
+    expect(body.result?.isError).not.toBe(true);
+    const payload = body.result?.content?.[0]?.text;
+    if (!payload) throw new Error('Search returned no MCP result');
+    const data = JSON.parse(payload) as { users: { id: string }[] };
+    return data.users.map((user) => user.id);
   }
-});
 
-describe('MCP search_users viewer moderation', () => {
-  it('returns users with no moderation relation to the viewer', async () => {
-    const found = await search(token);
-    expect(found).toContain(fixtureId('control'));
-  });
+  describe(suite, () => {
+    beforeAll(async () => {
+      const now = new Date();
+      await db.transaction(async (tx) => {
+        await tx.insert(users).values([
+          { id: caller, username: caller, updatedAt: now },
+          { id: observer, username: observer, updatedAt: now },
+          ...[blocked, muted, blocker].map((id) => ({
+            id,
+            username: `${needle}-${id}`,
+            updatedAt: now,
+          })),
+          {
+            id: visible,
+            username: visible,
+            displayName: `Eligible ${needle.toUpperCase()}`,
+            updatedAt: now,
+          },
+          {
+            id: 'banned-1885',
+            username: `${needle}-banned`,
+            isBanned: true,
+            updatedAt: now,
+          },
+          {
+            id: 'flagged-1885',
+            username: `${needle}-flagged`,
+            isTest: true,
+            updatedAt: now,
+          },
+          {
+            id: 'test-prefix-1885',
+            username: `${needle}-prefix`,
+            isTest: false,
+            updatedAt: now,
+          },
+        ]);
+        await tx.insert(userApiKeys).values([
+          { id: caller, userId: caller, keyHash: hashApiKey(callerKey) },
+          { id: observer, userId: observer, keyHash: hashApiKey(observerKey) },
+        ]);
+        await tx.insert(userBlocks).values([
+          { id: blocked, blockerId: caller, blockedId: blocked },
+          { id: blocker, blockerId: blocker, blockedId: caller },
+        ]);
+        await tx.insert(userMutes).values({
+          id: muted,
+          muterId: caller,
+          mutedId: muted,
+        });
+      });
+    });
 
-  it('excludes users the viewer has blocked', async () => {
-    const found = await search(token);
-    expect(found).not.toContain(fixtureId('blockedByCaller'));
-  });
+    afterAll(async () => {
+      await closeDatabase();
+    });
 
-  it('excludes users the viewer has muted', async () => {
-    const found = await search(token);
-    expect(found).not.toContain(fixtureId('mutedByCaller'));
-  });
+    it(cases.eligible, async () => {
+      expect((await search(observerKey)).sort()).toEqual(
+        [blocked, muted, blocker, visible].sort()
+      );
+    });
 
-  it('excludes users who have blocked the viewer', async () => {
-    const found = await search(token);
-    expect(found).not.toContain(fixtureId('blockedCaller'));
+    it(cases.block, async () => {
+      expect(await search(callerKey)).not.toContain(blocked);
+    });
+
+    it(cases.mute, async () => {
+      expect(await search(callerKey)).not.toContain(muted);
+    });
+
+    it(cases.inbound, async () => {
+      expect(await search(callerKey)).not.toContain(blocker);
+    });
+
+    it(cases.limit, async () => {
+      expect(await search(callerKey, 1)).toEqual([visible]);
+    });
   });
-});
+}

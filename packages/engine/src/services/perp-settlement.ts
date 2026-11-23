@@ -1,4 +1,5 @@
 import {
+  type PerpCloseFeeRecorder,
   PerpDbAdapter,
   type PerpSettlementPort,
 } from '@feed/core/markets/perps';
@@ -8,11 +9,17 @@ import type {
 } from '@feed/core/markets/shared';
 import { dbWrite, sql, type Transaction } from '@feed/db';
 import { logger } from '@feed/shared';
+import { FeeService } from './fee-service';
+import { createNpcWalletAdapter } from './npc-wallet-adapter';
 import { createUserWalletAdapter } from './user-wallet-adapter';
 
 export function createPerpSettlement(
   options: {
     system?: string;
+    closeFeeRecorder?: (
+      userId: string,
+      tx: Transaction
+    ) => PerpCloseFeeRecorder;
     wallet?: (
       userId: string,
       tx: Transaction,
@@ -37,7 +44,11 @@ export function createPerpSettlement(
         const wallet =
           options.wallet?.(userId, tx, afterCommit) ??
           createUserWalletAdapter(tx, afterCommit);
-        return operation(new PerpDbAdapter(tx), wallet);
+        return operation(
+          new PerpDbAdapter(tx),
+          wallet,
+          options.closeFeeRecorder?.(userId, tx)
+        );
       });
       for (const effect of effects) {
         try {
@@ -54,4 +65,21 @@ export function createPerpSettlement(
       return result;
     },
   };
+}
+
+export function createNpcPerpSettlement(): PerpSettlementPort {
+  return createPerpSettlement({
+    system: 'npc_perp_trade',
+    wallet: createNpcWalletAdapter,
+    closeFeeRecorder: (userId, tx) => async (positionId, ticker, feeAmount) => {
+      await FeeService.recordTradingFee(
+        userId,
+        'perp_close',
+        feeAmount,
+        positionId,
+        ticker,
+        tx
+      );
+    },
+  });
 }

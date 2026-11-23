@@ -52,12 +52,22 @@ export function decodeCursor(encoded: string): FeedCursor | null {
  * - score < cursor.s, OR
  * - score === cursor.s AND storyKey > cursor.k (lexicographic tiebreaker)
  *
- * Uses binary search for O(log n) performance on large arrays.
+ * The storyKey uniquely identifies the cursor's story, so resolve it exactly
+ * first: pipelines may reorder stories after ranking (spreadNewMarkets
+ * interleaves market cards between higher-scored stories), which breaks the
+ * monotonic (score, storyKey) order the binary search relies on — stories
+ * ranked behind a pulled-forward story would be skipped by every later page.
+ * When the cursor's story is no longer in the snapshot (it changed between
+ * page requests), fall back to the score-based binary search boundary so
+ * paging continues from approximately the same rank.
  */
 export function findCursorIndex(
   stories: NarrativeStory[],
   cursor: FeedCursor
 ): number {
+  const exactIndex = stories.findIndex((story) => story.storyKey === cursor.k);
+  if (exactIndex !== -1) return exactIndex + 1;
+
   let lo = 0;
   let hi = stories.length;
 
