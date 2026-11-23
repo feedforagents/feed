@@ -13,13 +13,16 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { notifyMention } from '@feed/api';
 import {
   and,
   createCommentWithParentCheck,
   db,
   eq,
+  inArray,
   isNull,
   posts,
+  users,
 } from '@feed/db';
 import { CreateCommentSchema } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
@@ -160,6 +163,32 @@ export const createCommentAction: Action = {
       const actionDescription = isReply
         ? `Replied to comment ${parentCommentId}`
         : `Commented on post ${postId}`;
+
+      // Same mention notifications as POST /api/posts/[id]/comments. The
+      // comment already committed, so a notification failure is logged only.
+      try {
+        const mentions = content.match(/@(\w+)/g) || [];
+        const usernames = [
+          ...new Set(mentions.map((m) => m.substring(1))),
+        ];
+        if (usernames.length > 0) {
+          const mentionedUsers = await db
+            .select({ id: users.id })
+            .from(users)
+            .where(inArray(users.username, usernames));
+          await Promise.all(
+            mentionedUsers.map((mentionedUser) =>
+              notifyMention(mentionedUser.id, agentUserId, postId, commentId)
+            )
+          );
+        }
+      } catch (error) {
+        logger.warn('[CREATE_COMMENT] Failed to notify mentioned users', {
+          postId,
+          commentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
 
       logger.info(
         `[CREATE_COMMENT] ${actionDescription}`,

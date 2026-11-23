@@ -15,6 +15,7 @@ import {
   type JsonValue,
   type MessageActivityData,
   notifyGroupChatMessage,
+  notifyMention,
   type PostActivityData,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
@@ -1141,6 +1142,32 @@ async function executeClosePerpPosition(params: {
 // =============================================================================
 
 /**
+ * Notify users named by @username in autonomous agent text, as POST
+ * /api/posts and POST /api/posts/[id]/comments do for website writes.
+ * Best-effort: the write already committed, so a notification failure must
+ * not report the write as failed (which would invite a duplicate retry).
+ */
+async function notifyMentionedUsers(
+  content: string,
+  mentionerUserId: string,
+  postId: string,
+  commentId?: string
+): Promise<void> {
+  const mentions = content.match(/@(\w+)/g) || [];
+  const usernames = [...new Set(mentions.map((m) => m.substring(1)))];
+  if (usernames.length === 0) return;
+  const mentionedUsers = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(inArray(users.username, usernames));
+  await Promise.all(
+    mentionedUsers.map((mentionedUser) =>
+      notifyMention(mentionedUser.id, mentionerUserId, postId, commentId)
+    )
+  );
+}
+
+/**
  * Create a post directly without LLM decision-making.
  * Validates content for diversity before creating.
  */
@@ -1296,6 +1323,22 @@ export async function executeDirectPost(
     { tags: tags.length },
     'DirectExecutors'
   );
+
+  // Same mention notifications as POST /api/posts. The post already
+  // committed, so a notification failure is logged only.
+  try {
+    await notifyMentionedUsers(cleanContent, agentUserId, postId);
+  } catch (error) {
+    logger.warn(
+      `[DirectExecutor] Failed to notify users mentioned in committed post`,
+      {
+        agentUserId,
+        postId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
+  }
 
   // Broadcast activity for real-time UI updates (only for non-NPCs)
   if (!isNpc) {
@@ -1462,6 +1505,23 @@ export async function executeDirectComment(
     undefined,
     'DirectExecutors'
   );
+
+  // Same mention notifications as POST /api/posts/[id]/comments. The
+  // comment already committed, so a notification failure is logged only.
+  try {
+    await notifyMentionedUsers(cleanContent, agentUserId, postId, commentId);
+  } catch (error) {
+    logger.warn(
+      `[DirectExecutor] Failed to notify users mentioned in committed comment`,
+      {
+        agentUserId,
+        postId,
+        commentId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
+  }
 
   // Broadcast activity for real-time UI updates (only for non-NPCs)
   const isNpc = !!StaticDataRegistry.getActor(agentUserId);

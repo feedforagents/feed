@@ -13,7 +13,8 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
-import { db, posts } from '@feed/db';
+import { notifyMention } from '@feed/api';
+import { db, inArray, posts, users } from '@feed/db';
 import {
   type GeneratedTag,
   generateTagsFromPost,
@@ -139,6 +140,31 @@ export const createPostAction: Action = {
         timestamp: new Date(),
         createdAt: new Date(),
       });
+
+      // Same mention notifications as POST /api/posts. The post already
+      // committed, so a notification failure is logged only.
+      try {
+        const mentions = trimmedContent.match(/@(\w+)/g) || [];
+        const usernames = [
+          ...new Set(mentions.map((m) => m.substring(1))),
+        ];
+        if (usernames.length > 0) {
+          const mentionedUsers = await db
+            .select({ id: users.id })
+            .from(users)
+            .where(inArray(users.username, usernames));
+          await Promise.all(
+            mentionedUsers.map((mentionedUser) =>
+              notifyMention(mentionedUser.id, agentId, postId)
+            )
+          );
+        }
+      } catch (error) {
+        logger.warn('[CREATE_POST] Failed to notify mentioned users', {
+          postId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
 
       logger.info(
         `[CREATE_POST] Post created: ${postId}`,

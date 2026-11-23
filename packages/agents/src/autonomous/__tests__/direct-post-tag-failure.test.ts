@@ -90,6 +90,7 @@ mock.module('@feed/api', () => ({
   broadcastToChannel: mock(async () => undefined),
   cachedDb: { invalidateUserCache: mock(async () => undefined) },
   notifyGroupChatMessage: mock(async () => undefined),
+  notifyMention: mock(async () => undefined),
 }));
 
 mock.module('@feed/core/markets/perps', () => ({

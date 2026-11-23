@@ -149,6 +149,7 @@ mock.module('@feed/api', () => ({
     invalidateUserCache: mock(async () => undefined),
   },
   notifyGroupChatMessage: async () => undefined,
+  notifyMention: mock(async () => undefined),
 }));
 
 mock.module('@feed/core/markets/perps', () => ({
