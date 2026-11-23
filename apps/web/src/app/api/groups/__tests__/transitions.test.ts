@@ -12,6 +12,11 @@ class TestApiError extends Error {
 
 type FakeDb = Record<string, unknown>;
 let fakeDb: FakeDb;
+const messageColumns = {
+  id: 'message.id',
+  chatId: 'message.chatId',
+  createdAt: 'message.createdAt',
+};
 
 mock.module('@feed/api', () => ({
   ApiError: TestApiError,
@@ -23,11 +28,15 @@ mock.module('@feed/api', () => ({
 }));
 
 mock.module('@feed/db', () => ({
+  and: (...conditions: string[][]) => conditions,
   asUser: async (_user: unknown, callback: (db: FakeDb) => Promise<unknown>) =>
     callback(fakeDb),
   chatParticipants: {},
+  desc: (column: string) => column,
+  eq: (column: string, value: string) => [column, value],
   generateSnowflakeId: async () => 'id-1',
   groupMembers: {},
+  messages: messageColumns,
   sql: () => undefined,
 }));
 
@@ -169,21 +178,19 @@ describe('group admin role transitions', () => {
 });
 
 describe('group messages query', () => {
-  let findManyCalled: boolean;
+  const cursorWhere = mock((_conditions: string[][]) => ({
+    limit: async () => [],
+  }));
+  const select = mock(() => ({ from: () => ({ where: cursorWhere }) }));
 
   beforeEach(() => {
-    findManyCalled = false;
+    cursorWhere.mockClear();
+    select.mockClear();
     fakeDb = {
       group: { findUnique: async () => ({ id: 'group-1', name: 'G' }) },
       groupMember: { findFirst: async () => ({ id: 'm-self' }) },
       chat: { findFirst: async () => ({ id: 'chat-1', name: 'G' }) },
-      message: {
-        findFirst: async () => null,
-        findMany: async () => {
-          findManyCalled = true;
-          return [];
-        },
-      },
+      select,
       user: { findMany: async () => [] },
     };
   });
@@ -192,14 +199,18 @@ describe('group messages query', () => {
     await expect(
       messages(req('http://localhost/x?limit=abc'), groupParams)
     ).rejects.toMatchObject({ status: 400 });
-    expect(findManyCalled).toBe(false);
+    expect(select).not.toHaveBeenCalled();
   });
 
   it('rejects a cursor that is not in this group chat', async () => {
     await expect(
       messages(req('http://localhost/x?cursor=other-chat-msg'), groupParams)
-    ).rejects.toMatchObject({ status: 400 });
-    expect(findManyCalled).toBe(false);
+    ).rejects.toMatchObject({ status: 400, message: 'Invalid cursor' });
+    expect(cursorWhere).toHaveBeenCalledWith([
+      [messageColumns.id, 'other-chat-msg'],
+      [messageColumns.chatId, 'chat-1'],
+    ]);
+    expect(select).toHaveBeenCalledTimes(1);
   });
 });
 
