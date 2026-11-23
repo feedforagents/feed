@@ -53,6 +53,7 @@ import {
   getRawDrizzle,
   groupMembers,
   hasBlocked,
+  inArray,
   isNull,
   like,
   lte,
@@ -62,6 +63,7 @@ import {
   notifications,
   notificationTargetVisibilityCondition,
   or,
+  postFeedVisibilityConditions,
   posts,
   postTags,
   sql,
@@ -3962,25 +3964,39 @@ export class FeedAgentExecutor implements AgentExecutor {
     // Get posts from favorited users. Only posts up to the current time:
     // future-dated posts are scheduled and must not be exposed early
     // (the web favorites feed applies the same timestamp bound).
-    const posts = await db.post.findMany({
-      where: {
-        authorId: { in: favoritedUserIds },
-        deletedAt: null,
-        timestamp: { lte: new Date() },
-        type: 'post',
-      },
-      take: limit,
-      orderBy: { timestamp: 'desc' },
-      select: {
-        id: true,
-        content: true,
-        authorId: true,
-        timestamp: true,
-      },
-    });
+    // A simple repost is only its original: when the viewer blocked or
+    // muted the original author (or the original author blocked the
+    // viewer), the repost must not surface here — and neither must a
+    // simple repost whose original is soft-deleted or gone. Apply the
+    // same shared visibility set the web favorites feed uses, in SQL
+    // before the page is cut (postFeedVisibilityConditions), so small
+    // limits still fill from eligible posts.
+    const rows = await db
+      .select({
+        id: posts.id,
+        content: posts.content,
+        authorId: posts.authorId,
+        timestamp: posts.timestamp,
+      })
+      .from(posts)
+      .where(
+        and(
+          inArray(posts.authorId, favoritedUserIds),
+          isNull(posts.deletedAt),
+          lte(posts.timestamp, new Date()),
+          eq(posts.type, 'post'),
+          ...postFeedVisibilityConditions({
+            excludedAuthorIds: [...excludedAuthorIds],
+            excludeDeadReposts: true,
+            excludeModeratedReposts: true,
+          })
+        )
+      )
+      .orderBy(desc(posts.timestamp))
+      .limit(limit);
 
     return {
-      posts: posts.map((p) => ({
+      posts: rows.map((p) => ({
         id: p.id,
         content: p.content,
         authorId: p.authorId,
