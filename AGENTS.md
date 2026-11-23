@@ -58,9 +58,12 @@ Feed is registered with [Slop](https://slop.cash). See the
    features, features without an approved PRD and MVP update, busywork tests,
    mock-only proof, placeholder or `TODO` code, unverified claims, duplicate
    PRs, and secrets in commits.
-9. **PR evidence.** Link the issue or requirement. Give the root cause, the fix,
-   real end-to-end evidence, test steps, expected results, and risks. Write in
-   plain English.
+9. **PR evidence.** Complete the [required PR evidence](CONTRIBUTING.md#evidence).
+   Include the exact test results and proof, real runtime logs for non-UI work,
+   video for permitted UI fixes, benchmarks for performance, and physical-device
+   results for deep links and hardware-dependent flows. We close work without
+   proof of a useful change or with complexity for unsupported speculative
+   paths. Slop.cash contributors lose points under the applicable policy.
 10. **Rewards.** GitHub is the authority. Maintainers accept outcomes. Slop
     scores accepted merges. The monthly USDC pool is paid after maintainer
     review. Nothing is guaranteed or held in escrow.

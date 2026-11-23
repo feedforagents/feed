@@ -41,7 +41,10 @@ export async function reserveBridgePort() {
   };
 }
 
-export function spawnBridge(port: number) {
+export function spawnBridge(
+  port: number,
+  databaseUrl = 'postgresql://bridge_test@127.0.0.1:1/bridge_test'
+) {
   const token = randomUUID();
   const base = `http://127.0.0.1:${port}`;
   const child = Bun.spawn(
@@ -65,8 +68,8 @@ export function spawnBridge(port: number) {
         BUN_ENV: 'test',
         TZ: 'UTC',
         CI: 'false',
-        DATABASE_URL: 'postgresql://bridge_test@127.0.0.1:1/bridge_test',
-        DIRECT_DATABASE_URL: 'postgresql://bridge_test@127.0.0.1:1/bridge_test',
+        DATABASE_URL: databaseUrl,
+        DIRECT_DATABASE_URL: databaseUrl,
         DATABASE_READ_REPLICA_URL: '',
         DATABASE_POOL_MAX: '1',
         REDIS_URL: '',
@@ -145,10 +148,10 @@ export function spawnBridge(port: number) {
   };
 }
 
-export async function startBridge() {
+export async function startBridge(databaseUrl?: string) {
   const reservation = await reserveBridgePort();
   await reservation.close();
-  const bridge = spawnBridge(reservation.port);
+  const bridge = spawnBridge(reservation.port, databaseUrl);
   try {
     await bridge.ready();
     return bridge;
