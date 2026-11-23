@@ -22,7 +22,6 @@ const WORKSPACES = [
   'packages/examples/feed-typescript-agent',
   'packages/contracts',
   'apps/cli',
-  'apps/mobile',
   'apps/web',
 ] as const;
 

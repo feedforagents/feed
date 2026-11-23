@@ -17,7 +17,6 @@ services:
       MINIO_SECRET_KEY: feed_dev_password
     ports:
       - "3000:3000"   # Next.js (web)
-      - "3077:3077"   # Next.js (mobile)
       - "8545:8545"   # Hardhat node
       - "4000:4000"   # A2A / agents
     depends_on:
