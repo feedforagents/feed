@@ -285,7 +285,7 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
   )}]::text[]`;
 
   const engagementRows = await db.execute(sql`
-    WITH
+    WITH RECURSIVE
     target_posts AS (
       SELECT unnest(${postIdsArray}) AS post_id
     ),
@@ -296,12 +296,29 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
       WHERE r.type = 'like'
       GROUP BY r."postId"
     ),
-    comment_counts AS (
-      SELECT c."postId" AS post_id, COUNT(*) AS count
+    -- A comment counts only if it is reachable from its post through
+    -- visible parents: replies under a soft-deleted parent are invisible
+    -- on the post detail screen, so the card must not count them either
+    -- (#1994 rule, same as GET /api/posts).
+    eligible_comments AS MATERIALIZED (
+      SELECT c.id, c."postId", c."parentCommentId"
       FROM "Comment" c
       INNER JOIN target_posts tp ON c."postId" = tp.post_id
       WHERE c."deletedAt" IS NULL
-      GROUP BY c."postId"
+    ),
+    visible_comments(id, "postId") AS (
+      SELECT id, "postId"
+      FROM eligible_comments
+      WHERE "parentCommentId" IS NULL
+      UNION ALL
+      SELECT child.id, child."postId"
+      FROM eligible_comments child
+      JOIN visible_comments parent ON child."parentCommentId" = parent.id
+    ),
+    comment_counts AS (
+      SELECT "postId" AS post_id, COUNT(*) AS count
+      FROM visible_comments
+      GROUP BY "postId"
     ),
     share_counts AS (
       SELECT s."postId" AS post_id, COUNT(*) AS count
