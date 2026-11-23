@@ -50,7 +50,7 @@ jobs:
           TASK: ${{ matrix.tasks }}
           JOB: ${{ matrix.name }}
         run: |
-          hash=$(node vibestack/spec.ts tasks "$TASK" --only --dry=json | jq -er --arg task "$TASK" '
+          hash=$(node vibestack/spec.ts tasks "$TASK" --only --dry=json --cache=local:w | jq -er --arg task "$TASK" '
             .tasks | select(length == 1) | .[0]
             | select(.taskId == $task and .resolvedTaskDefinition.cache == true and .resolvedTaskDefinition.outputs == [])
             | .hash
