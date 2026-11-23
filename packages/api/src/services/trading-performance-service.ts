@@ -195,7 +195,7 @@ export class TradingPerformanceService {
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
       LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
       LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false
+      WHERE u."isActor" = false AND u."isAgent" = false AND u."isTest" = false AND u."isBanned" = false AND u."id" NOT LIKE 'test-%'
       ORDER BY "netProfit" DESC, u."createdAt" ASC, u."id" ASC
       LIMIT ${limit} OFFSET ${offset}
     `);
@@ -240,7 +240,7 @@ export class TradingPerformanceService {
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
       LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
       LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false AND u."id" = ${userId}
+      WHERE u."isActor" = false AND u."isAgent" = false AND u."isTest" = false AND u."isBanned" = false AND u."id" NOT LIKE 'test-%' AND u."id" = ${userId}
       LIMIT 1
     `);
 
@@ -278,7 +278,7 @@ export class TradingPerformanceService {
         FROM "User" u
         LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
         LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-        WHERE u."isActor" = false AND u."isAgent" = false
+        WHERE u."isActor" = false AND u."isAgent" = false AND u."isTest" = false AND u."isBanned" = false AND u."id" NOT LIKE 'test-%'
       )
       SELECT COUNT(*)::int AS "count"
       FROM wallet_rows wr

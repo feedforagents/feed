@@ -1,238 +1,171 @@
-/**
- * MCP get_favorite_posts must apply the viewer's moderation policy to the
- * favorites feed.
- *
- * PRD §8.1: "Same business logic as the website. Tools call the same
- * services REST uses (notifications, repost posts, rate limits,
- * moderation), not raw DB writes." The web favorites feed
- * (GET /api/posts/feed/favorites) says "Favorites never bypass the
- * viewer's block/mute policy" and drops favorited authors the viewer
- * blocked or muted, and authors who blocked the viewer, via
- * loadViewerExcludedAuthorIds (blocked + muted + blocked-by) before
- * paginating. A2A getFavoritePosts applies the same three-set filter
- * with the same comment. MCP executeGetFavoritePosts returns posts
- * from every favorited author with no filter at all, so a blocked
- * author's posts keep reaching the agent's favorites feed even though
- * the website hides them from the same viewer:
- *
- * - web favorites feed excludes the three sets (route.ts:158)
- * - A2A getFavoritePosts excludes the three sets (feed-executor.ts)
- * - MCP query_feed (#1863) and search_agents exclude the three sets
- * - the MCP notification list (#1835) and unread count (#1828) do too
- *
- * Real DB, real handler (executeGetFavoritePosts directly).
- * Requires DATABASE_URL pointing at a disposable database with schema applied.
- *
- * Run with: DISABLE_RATE_LIMITING=true
- *   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_f11r2
- *   DIRECT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_f11r2
- *   TZ=UTC bun test integration/mcp-favorite-posts-viewer-moderation.integration.test.ts
- *   --preload ./integration/preload.ts
- */
-
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { generateApiKey, hashApiKey } from '@feed/api';
+/** PRD §§8.1, 12 / MVP Phases 3 and 5: honor moderation on the retained MCP favorites list. */
+import { afterAll, describe, expect, test } from 'bun:test';
 import {
-  dbWrite,
-  eq,
-  favorites,
-  gameOnboarding,
-  inArray,
-  posts,
-  userApiKeys,
-  userBlocks,
-  userMutes,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
-import { executeGetFavoritePosts } from '../../mcp/src/handlers/tool-handlers';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const VIEWER = await generateSnowflakeId();
-const STRANGER = await generateSnowflakeId();
-const AUTH_BLOCKED = await generateSnowflakeId();
-const AUTH_MUTED = await generateSnowflakeId();
-const AUTH_BLOCKER = await generateSnowflakeId();
-const AUTH_OK = await generateSnowflakeId();
+const suite = 'MCP get_favorite_posts viewer moderation';
+const cases = {
+  viewer: 'applies blocks and mutes before paging favorites',
+  stranger: 'shows all favorited authors to an unrelated viewer',
+  http: 'applies the same paging over authenticated MCP HTTP',
+};
 
-const userIds: string[] = [];
-const postIds: string[] = [];
-const favoriteIds: string[] = [];
-const blockIds: string[] = [];
-const muteIds: string[] = [];
-let viewerApiKey = '';
-let viewerApiKeyId = '';
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks MCP favorites in a leased PostgreSQL database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'mcp-favorite-posts-viewer-moderation',
+      file: 'packages/testing/integration/mcp-favorite-posts-viewer-moderation.integration.test.ts',
+      cases: Object.values(cases).map((name) => `${suite} > ${name}`),
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
 
-async function insertUser(id: string) {
-  const rows = await dbWrite
-    .insert(users)
-    .values({
-      id,
-      username: `f11-${id}`,
-      isTest: false,
-      isBanned: false,
-      updatedAt: new Date(),
-    })
-    .returning({ id: users.id });
-  userIds.push(...rows.map((row) => row.id));
-}
+  const { generateApiKey, hashApiKey } = await import('@feed/api');
+  const {
+    dbWrite,
+    favorites,
+    posts,
+    userApiKeys,
+    userBlocks,
+    userMutes,
+    users,
+  } = await import('@feed/db');
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { NextRequest } = await import('next/server');
+  const { POST } = await import('../../../apps/web/src/app/api/mcp/route');
+  const { executeGetFavoritePosts } = await import(
+    '../../mcp/src/handlers/tool-handlers'
+  );
 
-async function insertPost(
-  authorId: string,
-  minutesAgo: number
-): Promise<string> {
-  const id = await generateSnowflakeId();
-  await dbWrite.insert(posts).values({
-    id,
-    content: `f11 post by ${authorId}`,
-    authorId,
-    timestamp: new Date(Date.now() - minutesAgo * 60_000),
-  });
-  postIds.push(id);
-  return id;
-}
-
-async function insertFavorite(userId: string, targetUserId: string) {
-  const id = await generateSnowflakeId();
-  await dbWrite.insert(favorites).values({
-    id,
-    userId,
-    targetUserId,
-    createdAt: new Date(),
-  });
-  favoriteIds.push(id);
-}
-
-async function insertBlock(blockerId: string, blockedId: string) {
-  const id = await generateSnowflakeId();
-  await dbWrite.insert(userBlocks).values({
-    id,
-    blockerId,
-    blockedId,
-    createdAt: new Date(),
-  });
-  blockIds.push(id);
-}
-
-async function insertMute(muterId: string, mutedId: string) {
-  const id = await generateSnowflakeId();
-  await dbWrite.insert(userMutes).values({
-    id,
-    muterId,
-    mutedId,
-    createdAt: new Date(),
-  });
-  muteIds.push(id);
-}
-
-describe('MCP get_favorite_posts viewer moderation', () => {
-  beforeAll(async () => {
-    for (const id of [
-      VIEWER,
-      STRANGER,
-      AUTH_BLOCKED,
-      AUTH_MUTED,
-      AUTH_BLOCKER,
-      AUTH_OK,
-    ]) {
-      await insertUser(id);
-    }
-    // Viewer favorites all four authors; stranger does too (control).
-    for (const [index, author] of [
-      AUTH_BLOCKED,
-      AUTH_MUTED,
-      AUTH_BLOCKER,
-      AUTH_OK,
-    ].entries()) {
-      await insertFavorite(VIEWER, author);
-      await insertFavorite(STRANGER, author);
-      await insertPost(author, index + 1);
-    }
-    // Viewer blocked AUTH_BLOCKED, muted AUTH_MUTED, is blocked by AUTH_BLOCKER.
-    await insertBlock(VIEWER, AUTH_BLOCKED);
-    await insertMute(VIEWER, AUTH_MUTED);
-    await insertBlock(AUTH_BLOCKER, VIEWER);
-    // Per-user API key so the MCP flow over HTTP can authenticate as VIEWER.
-    viewerApiKey = generateApiKey();
-    viewerApiKeyId = await generateSnowflakeId();
-    await dbWrite.insert(userApiKeys).values({
-      id: viewerApiKeyId,
-      userId: VIEWER,
-      keyHash: hashApiKey(viewerApiKey),
-      name: 'f11-http',
+  const [viewerId, strangerId, blockedId, mutedId, blockerId, visibleId] =
+    await Promise.all([
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+      generateSnowflakeId(),
+    ]);
+  const authors = [blockedId, mutedId, blockerId, visibleId];
+  const now = new Date();
+  const fixturePosts = await Promise.all(
+    [...authors, visibleId].map(async (authorId, index) => ({
+      id: await generateSnowflakeId(),
+      authorId,
+      content: 'Favorites moderation fixture',
+      timestamp: new Date(now.getTime() - (index + 1) * 60_000),
+    }))
+  );
+  const visiblePostIds = fixturePosts
+    .filter((post) => post.authorId === visibleId)
+    .map((post) => post.id);
+  const apiKey = generateApiKey();
+  const keyId = await generateSnowflakeId();
+  await dbWrite.transaction(async (tx) => {
+    await tx.insert(users).values(
+      [viewerId, strangerId, ...authors].map((id) => ({
+        id,
+        username: `favorites-${id}`,
+        updatedAt: now,
+      }))
+    );
+    await tx.insert(posts).values(fixturePosts);
+    await tx.insert(favorites).values(
+      [viewerId, strangerId].flatMap((userId) =>
+        authors.map((targetUserId) => ({
+          id: crypto.randomUUID(),
+          userId,
+          targetUserId,
+          createdAt: now,
+        }))
+      )
+    );
+    await tx.insert(userBlocks).values([
+      { id: crypto.randomUUID(), blockerId: viewerId, blockedId },
+      { id: crypto.randomUUID(), blockerId, blockedId: viewerId },
+    ]);
+    await tx.insert(userMutes).values({
+      id: crypto.randomUUID(),
+      muterId: viewerId,
+      mutedId,
+    });
+    await tx.insert(userApiKeys).values({
+      id: keyId,
+      userId: viewerId,
+      keyHash: hashApiKey(apiKey),
+      name: 'Favorites fixture',
     });
   });
 
-  afterAll(async () => {
-    await dbWrite.delete(posts).where(inArray(posts.id, postIds));
-    await dbWrite.delete(favorites).where(inArray(favorites.id, favoriteIds));
-    await dbWrite.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
-    await dbWrite.delete(userMutes).where(inArray(userMutes.id, muteIds));
-    await dbWrite.delete(userApiKeys).where(eq(userApiKeys.id, viewerApiKeyId));
-    // Guard the parent Users delete: remove onboarding rows for the fixture
-    // users explicitly instead of relying on the ON DELETE CASCADE.
-    await dbWrite
-      .delete(gameOnboarding)
-      .where(inArray(gameOnboarding.userId, userIds));
-    await dbWrite.delete(users).where(inArray(users.id, userIds));
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      const headers = new Headers(request.headers);
+      // Select the per-user key flow instead of the loopback dev bypass.
+      headers.set('host', 'favorites-moderation.test');
+      return POST(new NextRequest(request, { headers }));
+    },
   });
+  afterAll(() => server.stop(true));
 
-  it('excludes posts by blocked, muted, and blocking authors for the viewer', async () => {
-    const result = await executeGetFavoritePosts(
-      { agentId: 'agent', userId: VIEWER },
-      { limit: 20 }
-    );
-    const authorIds = result.posts.map((p) => p.authorId);
-    expect(authorIds).toEqual([AUTH_OK]);
-
-    const firstPage = await executeGetFavoritePosts(
-      { agentId: 'agent', userId: VIEWER },
-      { limit: 1 }
-    );
-    expect(firstPage.posts.map((post) => post.authorId)).toEqual([AUTH_OK]);
-  });
-
-  it('shows all favorited authors to an unrelated viewer', async () => {
-    const result = await executeGetFavoritePosts(
-      { agentId: 'agent', userId: STRANGER },
-      { limit: 20 }
-    );
-    const authorIds = result.posts.map((p) => p.authorId).sort();
-    expect(authorIds).toEqual(
-      [AUTH_BLOCKED, AUTH_BLOCKER, AUTH_MUTED, AUTH_OK].sort()
-    );
-  });
-
-  it('returns only the unblocked favorited author over HTTP (POST /api/mcp tools/call)', async () => {
-    const { POST } = await import('../../../apps/web/src/app/api/mcp/route');
-    const request = new NextRequest('https://feed.example/api/mcp', {
-      method: 'POST',
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'tools/call',
-        params: {
-          name: 'get_favorite_posts',
-          arguments: { limit: 20 },
-        },
-        id: 1,
-      }),
-      headers: {
-        'content-type': 'application/json',
-        'X-Feed-Api-Key': viewerApiKey,
-      },
+  describe(suite, () => {
+    test(cases.viewer, async () => {
+      const agent = { agentId: 'agent', userId: viewerId };
+      const full = await executeGetFavoritePosts(agent, { limit: 20 });
+      expect(full.posts.map((post) => post.id)).toEqual(visiblePostIds);
+      const first = await executeGetFavoritePosts(agent, { limit: 1 });
+      expect(first.posts.map((post) => post.id)).toEqual(
+        visiblePostIds.slice(0, 1)
+      );
     });
-    const response = await POST(request);
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      result?: { content?: Array<{ text?: string }>; isError?: boolean };
-      error?: { message?: string };
-    };
-    expect(body.error).toBeUndefined();
-    expect(body.result?.isError).toBe(false);
-    const text = body.result?.content?.[0]?.text ?? '';
-    const payload = JSON.parse(text) as {
-      posts: Array<{ authorId: string }>;
-    };
-    expect(payload.posts.map((post) => post.authorId)).toEqual([AUTH_OK]);
+
+    test(cases.stranger, async () => {
+      const result = await executeGetFavoritePosts(
+        { agentId: 'agent', userId: strangerId },
+        { limit: 20 }
+      );
+      expect(result.posts.map((post) => post.id)).toEqual(
+        fixturePosts.map((post) => post.id)
+      );
+    });
+
+    test(cases.http, async () => {
+      const endpoint = new URL('/api/mcp', server.url);
+      const request = {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'get_favorite_posts',
+            arguments: { limit: 1, offset: 1 },
+          },
+        }),
+      };
+      expect((await fetch(endpoint, request)).status).toBe(401);
+      const response = await fetch(endpoint, {
+        ...request,
+        headers: { ...request.headers, 'X-Feed-Api-Key': apiKey },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        result?: { content?: Array<{ text?: string }>; isError?: boolean };
+        error?: { message?: string };
+      };
+      expect(body.error).toBeUndefined();
+      expect(body.result?.isError).toBe(false);
+      const payload = JSON.parse(body.result?.content?.[0]?.text ?? '') as {
+        posts: Array<{ id: string }>;
+      };
+      expect(payload.posts.map((post) => post.id)).toEqual(
+        visiblePostIds.slice(1, 2)
+      );
+    });
   });
-});
+}

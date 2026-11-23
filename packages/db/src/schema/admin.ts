@@ -1,5 +1,7 @@
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
+  bigint,
+  check,
   decimal,
   doublePrecision,
   index,
@@ -12,6 +14,31 @@ import {
 } from 'drizzle-orm/pg-core';
 import type { JsonValue } from '../types';
 import { users } from './users';
+
+export const scheduledInferenceReservations = pgTable(
+  'ScheduledInferenceReservation',
+  {
+    id: text('id').primaryKey(),
+    boundMicroUsd: bigint('boundMicroUsd', { mode: 'number' }).notNull(),
+    createdAt: timestamp('createdAt', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    costMicroUsd: bigint('costMicroUsd', { mode: 'number' }),
+    settledAt: timestamp('settledAt', { withTimezone: true }),
+  },
+  (row) => [
+    check('scheduled_inference_positive_bound', sql`${row.boundMicroUsd} > 0`),
+    check(
+      'scheduled_inference_settlement_pair',
+      sql`(${row.settledAt} IS NULL AND ${row.costMicroUsd} IS NULL)
+          OR (${row.settledAt} IS NOT NULL AND ${row.costMicroUsd} IS NOT NULL AND ${row.costMicroUsd} >= 0)`
+    ),
+    index('scheduled_inference_settled_at_idx').on(row.settledAt),
+    index('scheduled_inference_bound_violation_idx')
+      .on(row.id)
+      .where(sql`${row.costMicroUsd} > ${row.boundMicroUsd}`),
+  ]
+);
 
 /**
  * Admin role types for RBAC
