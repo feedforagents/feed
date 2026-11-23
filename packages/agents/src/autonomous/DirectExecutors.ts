@@ -2047,13 +2047,18 @@ export async function executeDirectLike(
 
   // Verify post exists
   const [post] = await db
-    .select({ id: posts.id })
+    .select({ id: posts.id, deletedAt: posts.deletedAt })
     .from(posts)
     .where(eq(posts.id, postId))
     .limit(1);
 
   if (!post) {
     return { success: false, error: `Post not found: ${postId}` };
+  }
+
+  // Same rule as the web like route: soft-deleted posts take no new likes.
+  if (post.deletedAt) {
+    return { success: false, error: 'Cannot like deleted post' };
   }
 
   logger.info(
@@ -2113,6 +2118,7 @@ export async function executeDirectRepost(
       authorId: posts.authorId,
       content: posts.content,
       originalPostId: posts.originalPostId,
+      deletedAt: posts.deletedAt,
     })
     .from(posts)
     .where(eq(posts.id, postId))
@@ -2120,6 +2126,11 @@ export async function executeDirectRepost(
 
   if (!post) {
     return { success: false, error: `Post not found: ${postId}` };
+  }
+
+  // Same rule as the web share route: soft-deleted posts take no new shares.
+  if (post.deletedAt) {
+    return { success: false, error: 'Cannot share deleted post' };
   }
 
   let targetPost = post;
@@ -2132,6 +2143,7 @@ export async function executeDirectRepost(
         authorId: posts.authorId,
         content: posts.content,
         originalPostId: posts.originalPostId,
+        deletedAt: posts.deletedAt,
       })
       .from(posts)
       .where(eq(posts.id, post.originalPostId))
@@ -2146,6 +2158,23 @@ export async function executeDirectRepost(
 
     targetPost = resolvedPost;
     targetPostId = resolvedPost.id;
+  }
+
+  // Same rules as the web share route (sharePost): neither side of a
+  // block relationship with the target author can share the post, and a
+  // soft-deleted target post takes no new shares. The checks run against
+  // the resolved original post for pure reposts.
+  const [targetAuthorBlockedAgent, agentBlockedTargetAuthor] =
+    await Promise.all([
+      hasBlocked(targetPost.authorId, agentUserId),
+      hasBlocked(agentUserId, targetPost.authorId),
+    ]);
+  if (targetAuthorBlockedAgent || agentBlockedTargetAuthor) {
+    return { success: false, error: 'Cannot share this post' };
+  }
+
+  if (targetPost.deletedAt) {
+    return { success: false, error: 'Cannot share deleted post' };
   }
 
   // Don't let agents repost their own content
