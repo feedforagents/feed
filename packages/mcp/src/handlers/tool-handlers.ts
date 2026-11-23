@@ -70,6 +70,7 @@ import {
   followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
+  getFilteredUserIds,
   getMutedUserIds,
   groupMembers,
   hasBlocked,
@@ -2463,23 +2464,21 @@ export async function executeCreateGroup(
     (id) => id !== agent.userId
   );
 
-  // Only members that exist and are not banned can join (the web group
-  // creation route applies the same rule: "Verify users exist and are not
-  // banned"). ChatParticipant and GroupMember have no foreign key to User,
-  // so an unchecked ID would become a permanent orphan membership row.
+  // Membership rows have no User foreign key. Check existence, bans and
+  // bilateral blocks on the primary before adding members.
   let uniqueMemberIds = requestedMemberIds;
   if (requestedMemberIds.length > 0) {
-    // Base membership writes on current eligibility from the primary.
-    const validMembers = await dbWrite.user.findMany({
-      where: {
-        id: { in: requestedMemberIds },
-        isBanned: false,
-      },
-      select: { id: true },
-    });
-    const validMemberIdSet = new Set(validMembers.map((u) => u.id));
-    uniqueMemberIds = requestedMemberIds.filter((id) =>
-      validMemberIdSet.has(id)
+    const [validMembers, excludedMembers] = await Promise.all([
+      dbWrite.user.findMany({
+        where: { id: { in: requestedMemberIds }, isBanned: false },
+        select: { id: true },
+      }),
+      getFilteredUserIds(agent.userId, dbWrite),
+    ]);
+    const validMemberIdSet = new Set(validMembers.map((member) => member.id));
+    const excludedMemberIdSet = new Set(excludedMembers);
+    uniqueMemberIds = requestedMemberIds.filter(
+      (id) => validMemberIdSet.has(id) && !excludedMemberIdSet.has(id)
     );
   }
 

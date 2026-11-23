@@ -17,8 +17,11 @@ import { follows, userBlocks, userMutes } from '../schema';
  * @param userId - Current user's ID
  * @returns Array of blocked user IDs
  */
-export async function getBlockedUserIds(userId: string): Promise<string[]> {
-  const blocks = await db
+export async function getBlockedUserIds(
+  userId: string,
+  database: Pick<Transaction, 'select'> = db
+): Promise<string[]> {
+  const blocks = await database
     .select({ blockedId: userBlocks.blockedId })
     .from(userBlocks)
     .where(eq(userBlocks.blockerId, userId));
@@ -32,8 +35,11 @@ export async function getBlockedUserIds(userId: string): Promise<string[]> {
  * @param userId - Current user's ID
  * @returns Array of user IDs who have blocked the current user
  */
-export async function getBlockedByUserIds(userId: string): Promise<string[]> {
-  const blocks = await db
+export async function getBlockedByUserIds(
+  userId: string,
+  database: Pick<Transaction, 'select'> = db
+): Promise<string[]> {
+  const blocks = await database
     .select({ blockerId: userBlocks.blockerId })
     .from(userBlocks)
     .where(eq(userBlocks.blockedId, userId));
@@ -57,16 +63,19 @@ export async function getMutedUserIds(userId: string): Promise<string[]> {
 }
 
 /**
- * Get all user IDs that should be filtered from the current user's feed.
- * Includes users blocked by the current user and users who have blocked the current user.
+ * Get user IDs with a block relationship in either direction.
+ * Pass the primary reader when the result controls a write.
  *
  * @param userId - Current user's ID
- * @returns Array of user IDs to filter from feeds
+ * @returns Array of user IDs in either block direction
  */
-export async function getFilteredUserIds(userId: string): Promise<string[]> {
+export async function getFilteredUserIds(
+  userId: string,
+  database: Pick<Transaction, 'select'> = db
+): Promise<string[]> {
   const [blockedByMe, blockedMe] = await Promise.all([
-    getBlockedUserIds(userId),
-    getBlockedByUserIds(userId),
+    getBlockedUserIds(userId, database),
+    getBlockedByUserIds(userId, database),
   ]);
 
   return [...new Set([...blockedByMe, ...blockedMe])];
