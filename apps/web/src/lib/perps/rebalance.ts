@@ -25,7 +25,7 @@ export function getPerpRebalanceInfo(params: {
     };
   }
 
-  if (requestedSize < existingPosition.size) {
+  if (existingPosition.size - requestedSize >= 0.01) {
     return {
       type: 'reduce',
       newSize: existingPosition.size - requestedSize,

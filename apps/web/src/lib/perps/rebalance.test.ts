@@ -51,6 +51,50 @@ describe('perp rebalance helpers', () => {
     });
   });
 
+  it('classifies opposite trades within 0.01 below or above existing size as close', () => {
+    expect(
+      getPerpRebalanceInfo({
+        existingPosition: { side: 'long', size: 100 },
+        nextSide: 'short',
+        requestedSize: 99.995,
+      })
+    ).toEqual({
+      type: 'close',
+      newSize: 0,
+    });
+
+    expect(
+      getPerpRebalanceInfo({
+        existingPosition: { side: 'long', size: 100 },
+        nextSide: 'short',
+        requestedSize: 100.005,
+      })
+    ).toEqual({
+      type: 'close',
+      newSize: 0,
+    });
+  });
+
+  it('keeps opposite trades leaving at least 0.01 remaining as reduce', () => {
+    const exactBoundary = getPerpRebalanceInfo({
+      existingPosition: { side: 'long', size: 0.02 },
+      nextSide: 'short',
+      requestedSize: 0.01,
+    });
+    expect(exactBoundary).toEqual({
+      type: 'reduce',
+      newSize: 0.01,
+    });
+
+    const nearFullReduce = getPerpRebalanceInfo({
+      existingPosition: { side: 'long', size: 100 },
+      nextSide: 'short',
+      requestedSize: 99.99,
+    });
+    expect(nearFullReduce?.type).toBe('reduce');
+    expect(nearFullReduce?.newSize).toBeCloseTo(0.01, 10);
+  });
+
   it('classifies larger opposite trades as flip', () => {
     expect(
       getPerpRebalanceInfo({
