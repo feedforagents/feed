@@ -7,14 +7,20 @@ import {
   and,
   db,
   eq,
+  gt,
   isNotNull,
   isNull,
   type MarketCategory,
+  ownsPredictionRecoveryLease,
   questions,
   sql,
+  timeframedMarketRoles,
   timeframedMarkets,
 } from '@feed/db';
-import { mapGranularToDbTimeframe } from './market-timeframes';
+import {
+  getCurrentArcState,
+  mapGranularToDbTimeframe,
+} from './market-timeframes';
 import { getPredictionMarketInitialization } from './prediction-market-profiles';
 
 export const MAX_SUB_MARKETS = 10;
@@ -34,6 +40,7 @@ export function getMaxSubMarketDuration(
 
 interface SubMarketWrite {
   parentId: string;
+  leaseOwner?: string;
   category: MarketCategory;
   questionId: string;
   questionNumber: number;
@@ -45,6 +52,8 @@ interface SubMarketWrite {
   timeframe: '15m' | '30m' | '1h';
   topic: { topicKey: string; topicLabel: string; date: Date };
   arcState: ArcStateType;
+  /** Assigned roles to persist when localnet is enabled. */
+  roles?: { insiderActorIds: string[]; deceiverActorIds: string[] };
   affiliatedActorIds: string[];
   affiliatedOrgIds: string[];
   gameId: string;
@@ -53,17 +62,29 @@ interface SubMarketWrite {
 
 /** Commit a prepared sub-market only while its parent and the global cap allow it. */
 export async function writeSubMarket(input: SubMarketWrite): Promise<boolean> {
+  const localnet = process.env.DEPLOYMENT_ENV === 'localnet';
+  const roles = localnet ? input.roles : undefined;
+
   return db.transaction(async (tx) => {
     // All sub-market creators must share this lock. Inference happens before it.
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtext(${'markets-tick:sub-market-cap'}))`
     );
+    if (
+      input.leaseOwner &&
+      !(await ownsPredictionRecoveryLease(tx, input.leaseOwner))
+    ) {
+      return false;
+    }
+
+    const now = new Date();
     const [countResult] = await tx
       .select({ count: sql<number>`count(*)::int` })
       .from(timeframedMarkets)
       .where(
         and(
           eq(timeframedMarkets.isActive, true),
+          gt(timeframedMarkets.endTime, now),
           isNotNull(timeframedMarkets.parentMarketId)
         )
       );
@@ -86,7 +107,6 @@ export async function writeSubMarket(input: SubMarketWrite): Promise<boolean> {
       .for('update');
     if (!parent) return false;
 
-    const now = new Date();
     const maxDuration = getMaxSubMarketDuration(parent.endTime, now.getTime());
     if (maxDuration === null || input.durationMs > maxDuration) return false;
     const resolutionDate = new Date(now.getTime() + input.durationMs);
@@ -135,10 +155,11 @@ export async function writeSubMarket(input: SubMarketWrite): Promise<boolean> {
       dayNumber: input.dayNumber,
     });
 
+    const timeframe = mapGranularToDbTimeframe(input.timeframe);
     await tx.insert(timeframedMarkets).values({
       id: input.timeframedMarketId,
       questionId: input.questionId,
-      timeframe: mapGranularToDbTimeframe(input.timeframe),
+      timeframe,
       granularTimeframe: input.timeframe,
       category: input.category,
       topicKey: input.topic.topicKey,
@@ -148,11 +169,19 @@ export async function writeSubMarket(input: SubMarketWrite): Promise<boolean> {
       rootMarketId: parent.rootMarketId ?? input.parentId,
       startTime: now,
       endTime: resolutionDate,
-      arcState: input.arcState,
+      arcState: localnet
+        ? getCurrentArcState(now, resolutionDate, timeframe, now)
+        : input.arcState,
       arcStateEnteredAt: now,
       affiliatedActorIds: input.affiliatedActorIds,
       affiliatedOrgIds: input.affiliatedOrgIds,
     });
+    if (roles) {
+      await tx.insert(timeframedMarketRoles).values({
+        timeframedMarketId: input.timeframedMarketId,
+        ...roles,
+      });
+    }
     return true;
   });
 }

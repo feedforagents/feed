@@ -5,9 +5,13 @@
  */
 
 import {
+  ChatMessageContentSchema,
+  CreateCommentSchema,
+  CreatePostSchema,
   isPointsAmount,
   JsonValueSchema,
   LEADERBOARD_SCOPES,
+  UpdateUserSchema,
 } from '@feed/shared';
 import { z } from 'zod';
 import type {
@@ -174,7 +178,9 @@ const OpenPositionArgsSchema = z.object({
   ticker: z.string().min(1),
   side: z.enum(['LONG', 'SHORT']),
   amount: z.number().positive(),
-  leverage: z.number().min(1).max(20),
+  // PerpPosition.leverage is an integer column and the HTTP open route
+  // (PerpOpenPositionSchema) accepts whole-number leverage only.
+  leverage: z.number().int().min(1).max(20),
 }) satisfies z.ZodType<OpenPositionArgs>;
 
 const GetMarketPricesArgsSchema = z.object({
@@ -201,8 +207,7 @@ const GetPostArgsSchema = z.object({
 }) satisfies z.ZodType<GetPostArgs>;
 
 const CreatePostArgsSchema = z.object({
-  content: z.string().min(1).max(5000),
-  type: z.enum(['post', 'article']).optional().default('post'),
+  content: CreatePostSchema.shape.content,
   mediaUrl: z.string().url().optional(),
 }) satisfies z.ZodType<CreatePostArgs>;
 
@@ -232,7 +237,7 @@ const GetCommentsArgsSchema = z.object({
 
 const CreateCommentArgsSchema = z.object({
   postId: z.string().min(1),
-  content: z.string().min(1).max(2000),
+  content: CreateCommentSchema.shape.content,
 }) satisfies z.ZodType<CreateCommentArgs>;
 
 const DeleteCommentArgsSchema = z.object({
@@ -254,11 +259,12 @@ const GetUserProfileArgsSchema = z.object({
   userId: z.string().min(1),
 }) satisfies z.ZodType<GetUserProfileArgs>;
 
-const UpdateProfileArgsSchema = z.object({
-  displayName: z.string().optional(),
-  bio: z.string().max(500).optional(),
-  username: z.string().optional(),
-  profileImageUrl: z.string().optional(),
+// Same validation as the HTTP profile update route and A2A.
+const UpdateProfileArgsSchema = UpdateUserSchema.pick({
+  displayName: true,
+  bio: true,
+  username: true,
+  profileImageUrl: true,
 }) satisfies z.ZodType<UpdateProfileArgs>;
 
 const FollowUserArgsSchema = z.object({
@@ -310,7 +316,7 @@ const GetChatMessagesArgsSchema = z.object({
 
 const SendMessageArgsSchema = z.object({
   chatId: z.string().min(1),
-  content: z.string().min(1).max(5000),
+  content: ChatMessageContentSchema,
 }) satisfies z.ZodType<SendMessageArgs>;
 
 const CreateGroupArgsSchema = z.object({

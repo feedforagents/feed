@@ -13,7 +13,14 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
-import { and, comments, db, eq, isNull, posts } from '@feed/db';
+import {
+  and,
+  createCommentWithParentCheck,
+  db,
+  eq,
+  isNull,
+  posts,
+} from '@feed/db';
 import { CreateCommentSchema } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 import { generateSnowflakeId } from '../../../../shared/snowflake';
@@ -120,39 +127,11 @@ export const createCommentAction: Action = {
         };
       }
 
-      // If replying to a comment, verify it exists
-      if (parentCommentId) {
-        const [parentComment] = await db
-          .select({ id: comments.id, postId: comments.postId })
-          .from(comments)
-          .where(
-            and(eq(comments.id, parentCommentId), isNull(comments.deletedAt))
-          )
-          .limit(1);
-
-        if (!parentComment) {
-          return {
-            success: false,
-            text: `Parent comment not found or deleted. Use CHECK_POST_DETAIL to see available comments.`,
-            error: 'Parent comment not found',
-          };
-        }
-
-        // Verify the comment belongs to the same post
-        if (parentComment.postId !== postId) {
-          return {
-            success: false,
-            text: `Parent comment does not belong to the specified post.`,
-            error: 'Comment/post mismatch',
-          };
-        }
-      }
-
       // Create the comment
       const commentId = await generateSnowflakeId();
       const now = new Date();
 
-      await db.insert(comments).values({
+      const result = await createCommentWithParentCheck({
         id: commentId,
         content: content,
         postId,
@@ -161,6 +140,21 @@ export const createCommentAction: Action = {
         createdAt: now,
         updatedAt: now,
       });
+
+      if (result.status === 'parent-post-mismatch') {
+        return {
+          success: false,
+          text: 'Parent comment does not belong to the specified post.',
+          error: 'Comment/post mismatch',
+        };
+      }
+      if (result.status !== 'created') {
+        return {
+          success: false,
+          text: 'Parent comment not found or deleted. Use CHECK_POST_DETAIL to see available comments.',
+          error: 'Parent comment not found',
+        };
+      }
 
       const isReply = !!parentCommentId;
       const actionDescription = isReply

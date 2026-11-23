@@ -69,13 +69,42 @@ const mapPosition = (
 export class PredictionDbAdapter implements PredictionDbPort {
   constructor(private readonly client: DbClient = db) {}
 
+  /**
+   * Attach each market's scenario. The scenario lives on the market's
+   * question (questions.scenarioId) — a market is created from exactly one
+   * question under the same id — so one batched lookup by id fills it in.
+   * Markets without a linked question keep `scenario` unset.
+   */
+  private async withScenarios(
+    records: PredictionMarketRecord[]
+  ): Promise<PredictionMarketRecord[]> {
+    if (records.length === 0) return records;
+    const rows = await this.client
+      .select({ id: questions.id, scenarioId: questions.scenarioId })
+      .from(questions)
+      .where(
+        inArray(
+          questions.id,
+          records.map((r) => r.id)
+        )
+      );
+    const byId = new Map(rows.map((r) => [r.id, r.scenarioId]));
+    for (const record of records) {
+      const scenario = byId.get(record.id);
+      if (scenario != null) record.scenario = scenario;
+    }
+    return records;
+  }
+
   async getMarketById(id: string): Promise<PredictionMarketRecord | null> {
     const [m] = await this.client
       .select()
       .from(markets)
       .where(eq(markets.id, id))
       .limit(1);
-    return m ? mapMarket(m) : null;
+    if (!m) return null;
+    const [record] = await this.withScenarios([mapMarket(m)]);
+    return record ?? null;
   }
 
   async getMarketsByIds(ids: string[]): Promise<PredictionMarketRecord[]> {
@@ -84,7 +113,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
       .select()
       .from(markets)
       .where(inArray(markets.id, ids));
-    return ms.map(mapMarket);
+    return this.withScenarios(ms.map(mapMarket));
   }
 
   /**
@@ -126,7 +155,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
       options?.limit != null
         ? await base.limit(options.limit).offset(options.offset ?? 0)
         : await base;
-    return rows.map(mapMarket);
+    return this.withScenarios(rows.map(mapMarket));
   }
 
   async listUserPositions(userId: string): Promise<PredictionPositionRecord[]> {
@@ -154,6 +183,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
       return {
         id: byId.id,
         questionNumber: byId.questionNumber ?? undefined,
+        scenarioId: byId.scenarioId,
         text: byId.text,
         status: (byId.status as QuestionRecord['status']) ?? 'active',
         resolutionDate: byId.resolutionDate,
@@ -181,6 +211,7 @@ export class PredictionDbAdapter implements PredictionDbPort {
       ? {
           id: q.id,
           questionNumber: q.questionNumber ?? undefined,
+          scenarioId: q.scenarioId,
           text: q.text,
           status: (q.status as QuestionRecord['status']) ?? 'active',
           resolutionDate: q.resolutionDate,
@@ -248,7 +279,9 @@ export class PredictionDbAdapter implements PredictionDbPort {
         .where(eq(questions.id, question.id))
         .returning({ id: questions.id });
       if (!linked) throw new Error(`Question not found: ${question.id}`);
-      return mapMarket(market);
+      const record = mapMarket(market);
+      if (question.scenarioId != null) record.scenario = question.scenarioId;
+      return record;
     });
   }
 

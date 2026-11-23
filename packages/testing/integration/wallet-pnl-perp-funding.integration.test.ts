@@ -18,7 +18,7 @@ import {
   createUserWalletAdapter,
   FEE_CONFIG,
 } from '@feed/engine';
-import { generateSnowflakeId } from '@feed/shared';
+import { floorPoints, generateSnowflakeId } from '@feed/shared';
 import { sql } from 'drizzle-orm';
 import { NextRequest } from 'next/server';
 
@@ -819,21 +819,24 @@ async function runSettlementCase(params: {
     const after = await readMetricsViaHttp(ownerId);
     expect(after.unrealizedPnL).toBe(0);
     expect(after.currentPnL).toBeCloseTo(after.lifetimePnL, 8);
-    // Lifetime P&L moved by the recorded settlement P&L (realizedPnL net
-    // of the genuine close fee): no second funding deduction appears in
-    // the reader after the close. The stored lifetime P&L is rounded to
-    // cents by the wallet service, so the comparison is at cent precision
-    // — still far tighter than any funding amount in these cases.
-    expect(after.lifetimePnL - lifetimeBefore).toBeCloseTo(
-      closedRealizedPnL - closed.feePaid,
-      2
+    // Book the exact cent credit less the remaining position's cent margin.
+    // The reader must carry that booked P&L through without applying funding again.
+    const margin = closed.marginPaid ?? Number.NaN;
+    const settledCredit = floorPoints(
+      Math.max(0, margin + closedRealizedPnL - closed.feePaid)
+    );
+    const marginCents = Math.round(margin * 100);
+    expect(Math.round((after.lifetimePnL - lifetimeBefore) * 100)).toBe(
+      Math.round(settledCredit * 100) - marginCents
     );
 
     const ledger = await db
       .select()
       .from(balanceTransactions)
       .where(eq(balanceTransactions.userId, ownerId));
-    expect(ledger.filter((row) => row.type === 'perp_close')).toHaveLength(1);
+    const closeRows = ledger.filter((row) => row.type === 'perp_close');
+    expect(closeRows).toHaveLength(1);
+    expect(Number(closeRows[0]?.amount)).toBe(settledCredit);
 
     // The persisted hourly snapshot carries the same post-close metrics.
     // snapshotAllUserPnlMetrics is a global producer: on a shared database
