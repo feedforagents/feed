@@ -177,6 +177,12 @@ export const STAGING_ORIGINAL_MIGRATIONS = [
     when: '1794307141641',
   },
 ] as const;
+export const STAGING_FUNDING_MIGRATION = {
+  index: 6,
+  tag: '0006_perp_funding_period_accrual',
+  hash: '8a335fb10eb0b3ed95048b10a3c5051f52e143a81158c89fdc85f9137097747a',
+  when: '1794955977560',
+} as const;
 export const BASELINE_ADDITIVE_MIGRATIONS = [
   STAGING_ORIGINAL_MIGRATIONS[0],
   STAGING_ORIGINAL_MIGRATIONS[3],

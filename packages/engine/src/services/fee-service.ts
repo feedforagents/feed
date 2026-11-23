@@ -27,6 +27,7 @@ import {
   canonicalTradingFee,
   floorPoints,
   generateSnowflakeId,
+  isPointsAmount,
   logger,
 } from '@feed/shared';
 import type { SQL } from 'drizzle-orm';
@@ -219,16 +220,41 @@ export class FeeService {
     existingTx?: TransactionContext,
     operationId?: string
   ): Promise<FeeDistributionResult> {
-    const feeCalc = FeeService.calculateFee(tradeAmount);
+    return FeeService.recordTradingFee(
+      userId,
+      tradeType,
+      FeeService.calculateFee(tradeAmount).feeAmount,
+      tradeId,
+      marketId,
+      existingTx,
+      operationId
+    );
+  }
+
+  /** Record a fee already collected by the settlement. */
+  static async recordTradingFee(
+    userId: string,
+    tradeType: FeeType,
+    feeAmount: number,
+    tradeId?: string,
+    marketId?: string,
+    existingTx?: TransactionContext,
+    operationId?: string
+  ): Promise<FeeDistributionResult> {
+    if (!isPointsAmount(feeAmount)) {
+      throw new Error(
+        'Collected trading fee must be a nonnegative whole-cent amount'
+      );
+    }
 
     // Skip if fee is below minimum
-    if (feeCalc.feeAmount < FEE_CONFIG.MIN_FEE_AMOUNT) {
+    if (feeAmount < FEE_CONFIG.MIN_FEE_AMOUNT) {
       logger.debug(
-        `Fee ${feeCalc.feeAmount} below minimum, skipping`,
+        `Fee ${feeAmount} below minimum, skipping`,
         {
           userId,
           tradeType,
-          tradeAmount,
+          feeAmount,
         },
         'FeeService'
       );
@@ -273,7 +299,7 @@ export class FeeService {
       // and D-18 says points cannot be transferred between users.
       const referrerPaid = 0;
       const referrerId = null;
-      const platformReceived = Number(feeCalc.feeAmount.toFixed(2));
+      const platformReceived = Number(feeAmount.toFixed(2));
 
       await tx.insert(tradingFees).values({
         id: await generateSnowflakeId(),
@@ -281,7 +307,7 @@ export class FeeService {
         tradeType,
         tradeId: tradeId || null,
         marketId: marketId || null,
-        feeAmount: new Decimal(feeCalc.feeAmount).toString(),
+        feeAmount: new Decimal(feeAmount).toString(),
         platformFee: new Decimal(platformReceived).toString(),
         referrerFee: new Decimal(referrerPaid).toString(),
         referrerId,
@@ -300,7 +326,7 @@ export class FeeService {
       await tx
         .update(users)
         .set({
-          totalFeesPaid: sql`COALESCE(${users.totalFeesPaid}, 0) + ${feeCalc.feeAmount}`,
+          totalFeesPaid: sql`COALESCE(${users.totalFeesPaid}, 0) + ${feeAmount}`,
         })
         .where(eq(users.id, userId));
 
@@ -313,7 +339,7 @@ export class FeeService {
       }
 
       return {
-        feeCharged: feeCalc.feeAmount,
+        feeCharged: feeAmount,
         referrerPaid,
         platformReceived,
         referrerId,
