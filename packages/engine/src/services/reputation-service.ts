@@ -9,7 +9,7 @@
  * propagation handled by the ReputationBridge in @feed/agents.
  */
 
-import { db, eq, inArray, positions, sql, users } from '@feed/db';
+import { and, db, eq, gt, inArray, positions, sql, users } from '@feed/db';
 import { logger } from '@feed/shared';
 
 // =============================================================================
@@ -80,7 +80,13 @@ export class ReputationService {
         shares: positions.shares,
       })
       .from(positions)
-      .where(eq(positions.marketId, resolution.marketId));
+      .where(
+        and(
+          eq(positions.marketId, resolution.marketId),
+          eq(positions.status, 'resolved'),
+          gt(positions.shares, '0')
+        )
+      );
 
     if (positionsData.length === 0) {
       logger.info(
