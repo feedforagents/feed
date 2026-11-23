@@ -68,4 +68,29 @@ describe('buildPredictionUserPositionSnapshot maxPayout', () => {
       buildPredictionUserPositionSnapshot(position({ shares: 0.001 }), market)
     ).toBeNull();
   });
+
+  it('uses persisted cashCostBasis instead of re-estimating gross cost from avgPrice', () => {
+    const buy = PredictionPricing.calculateBuyWithFees(
+      market.yesShares,
+      market.noShares,
+      'yes',
+      1,
+      0.001
+    );
+    const snapshot = buildPredictionUserPositionSnapshot(
+      position({
+        shares: buy.sharesBought,
+        avgPrice: buy.avgPrice,
+        cashCostBasis: 1,
+      }),
+      {
+        ...market,
+        yesShares: buy.newYesShares,
+        noShares: buy.newNoShares,
+      }
+    );
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.costBasis).toBe(1);
+    expect(snapshot!.unrealizedPnL).toBeCloseTo(snapshot!.currentValue - 1, 10);
+  });
 });

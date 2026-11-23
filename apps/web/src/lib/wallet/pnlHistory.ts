@@ -198,6 +198,26 @@ export function buildScopedPnlHistoryPoints(params: {
   return downsampled;
 }
 
+export function calculatePredictionRowUnrealizedPnL(row: {
+  shares: unknown;
+  avgPrice: unknown;
+  cashCostBasis: unknown;
+  side: boolean;
+  yesShares: unknown;
+  noShares: unknown;
+}): number {
+  return calculatePredictionPositionSnapshot({
+    shares: toNumber(row.shares),
+    avgPrice: toNumber(row.avgPrice),
+    cashCostBasis:
+      row.cashCostBasis == null ? undefined : toNumber(row.cashCostBasis),
+    side: row.side ? 'yes' : 'no',
+    yesShares: toNumber(row.yesShares),
+    noShares: toNumber(row.noShares),
+    feeRate: FEE_CONFIG.TRADING_FEE_RATE,
+  }).unrealizedPnL;
+}
+
 /**
  * Compute canonical current P&L metrics for the requested users.
  */
@@ -282,6 +302,7 @@ export async function loadCurrentUserPnlMetrics(
         userId: positions.userId,
         shares: positions.shares,
         avgPrice: positions.avgPrice,
+        cashCostBasis: positions.cashCostBasis,
         side: positions.side,
         yesShares: markets.yesShares,
         noShares: markets.noShares,
@@ -303,16 +324,7 @@ export async function loadCurrentUserPnlMetrics(
       const metrics = metricsByUserId.get(canonicalUserId);
       if (!metrics) continue;
 
-      const snapshot = calculatePredictionPositionSnapshot({
-        shares: toNumber(row.shares),
-        avgPrice: toNumber(row.avgPrice),
-        side: row.side ? 'yes' : 'no',
-        yesShares: toNumber(row.yesShares),
-        noShares: toNumber(row.noShares),
-        feeRate: FEE_CONFIG.TRADING_FEE_RATE,
-      });
-
-      metrics.unrealizedPnL += snapshot.unrealizedPnL;
+      metrics.unrealizedPnL += calculatePredictionRowUnrealizedPnL(row);
       metrics.currentPnL = metrics.lifetimePnL + metrics.unrealizedPnL;
     }
   }
