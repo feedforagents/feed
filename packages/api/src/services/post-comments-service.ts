@@ -43,17 +43,22 @@ export async function listVisiblePostComments(
   const order = direction === 'asc' ? sql`ASC` : sql`DESC`;
   const orderBy = direction === 'asc' ? asc : desc;
 
-  // Traverse only IDs and timestamps. Load content only for the selected page.
+  // Materialize this post's eligible rows so the recursive join never scans
+  // unrelated comments. Load content only for the selected page.
   const pageIds = sql`(
-    WITH RECURSIVE visible_comments(id, "createdAt") AS (
-      SELECT ${comments.id}, ${comments.createdAt}
+    WITH RECURSIVE eligible_comments AS MATERIALIZED (
+      SELECT ${comments.id}, ${comments.createdAt}, ${comments.parentCommentId}
       FROM ${comments}
-      WHERE ${eligible} AND ${comments.parentCommentId} IS NULL
-      UNION ALL
-      SELECT ${comments.id}, ${comments.createdAt}
-      FROM ${comments}
-      JOIN visible_comments ON ${comments.parentCommentId} = visible_comments.id
       WHERE ${eligible}
+    ),
+    visible_comments(id, "createdAt") AS (
+      SELECT id, "createdAt"
+      FROM eligible_comments
+      WHERE "parentCommentId" IS NULL
+      UNION ALL
+      SELECT child.id, child."createdAt"
+      FROM eligible_comments child
+      JOIN visible_comments parent ON child."parentCommentId" = parent.id
     )
     SELECT id FROM visible_comments
     ORDER BY "createdAt" ${order}, id ${order}
