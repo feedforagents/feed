@@ -48,6 +48,10 @@ import {
 } from './db';
 
 export * from './balance-transaction-classification';
+export {
+  createCommentWithParentCheck,
+  deleteCommentSubtree,
+} from './comment-threads';
 /**
  * Re-export unique relation types from model-types.
  *
