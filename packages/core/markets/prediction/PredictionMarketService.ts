@@ -388,22 +388,36 @@ export class PredictionMarketService {
 
     // Price impact guard: same limits as buys (PRD §9.2 quote parity).
     // A single sell must not swing odds farther than a single buy may.
+    // A full-position exit is exempt from the per-trade cap: the same
+    // shares sold in two legs reach the identical end state (same odds,
+    // same proceeds to the cent), so the cap only refuses the
+    // one-request form — and the NPC full-exit path, the autonomous
+    // agent close path and the web one-click sell all sell the whole
+    // position in one call with no partial path.
     const currentTotal = market.yesShares + market.noShares;
     const currentYesOdds =
       currentTotal > 0 ? market.noShares / currentTotal : 0.5;
     const oddsShift = Math.abs(calc.newYesPrice - currentYesOdds);
     const maxAllowed = input.maxOddsMove ?? MAX_ODDS_MOVE_PER_TRADE;
+    const isFullExit = shares >= pos.shares - 1e-9;
 
-    if (oddsShift > maxAllowed) {
+    if (!isFullExit && oddsShift > maxAllowed) {
       throw new BadRequestError(
         `Trade would move odds by ${(oddsShift * 100).toFixed(1)}ppt (max ${(maxAllowed * 100).toFixed(0)}ppt). Reduce trade size or split into smaller orders.`
       );
     }
 
-    // Hard floor/ceiling: reject any trade that pushes odds to extreme values.
+    // Hard floor/ceiling: reject only a trade that pushes odds further
+    // from the center. A sell that unwinds an already-extreme market
+    // back toward 50% must still be allowed — otherwise holders of a
+    // market that entered the band before this guard existed are frozen
+    // until resolution.
+    const worsens =
+      Math.abs(calc.newYesPrice - 0.5) > Math.abs(currentYesOdds - 0.5);
     if (
-      calc.newYesPrice < ODDS_HARD_FLOOR ||
-      calc.newYesPrice > ODDS_HARD_CEILING
+      worsens &&
+      (calc.newYesPrice < ODDS_HARD_FLOOR ||
+        calc.newYesPrice > ODDS_HARD_CEILING)
     ) {
       throw new BadRequestError(
         `Trade would push YES odds to ${(calc.newYesPrice * 100).toFixed(1)}% — market is too thin for this trade size.`

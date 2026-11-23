@@ -446,4 +446,86 @@ describe('PredictionMarketService — sell odds guards', () => {
       })
     ).rejects.toThrow(/thin|extreme|floor|ceiling|push YES odds/i);
   });
+
+  test('sell unwinding an extreme market toward the center succeeds', async () => {
+    // Pool 100/9900 → YES at 99.0%. Selling 500 YES moves odds to 98.89%
+    // (toward 50%), so the ceiling must not block it — the holders of a
+    // market that entered the band before this guard existed need an exit.
+    const service = makeService(
+      {
+        yesShares: 100,
+        noShares: 9900,
+        liquidity: 10_000,
+      },
+      makePosition('yes', 500)
+    );
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 500,
+      })
+    ).resolves.toBeDefined();
+  });
+
+  test('sell pushing an extreme market further out is still rejected', async () => {
+    // Same 100/9900 pool. Selling 50 NO moves YES to 99.01% (away from
+    // 50%), so the ceiling still rejects it.
+    const service = makeService(
+      {
+        yesShares: 100,
+        noShares: 9900,
+        liquidity: 10_000,
+      },
+      makePosition('no', 50)
+    );
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 50,
+      })
+    ).rejects.toThrow(/thin|extreme|floor|ceiling|push YES odds/i);
+  });
+
+  test('full-position exit above the 20ppt cap succeeds', async () => {
+    // Pool 2000/6000 → YES at 75%. Selling the whole 5000-share position
+    // moves odds -32.14ppt; the same shares sold in two legs reach the
+    // identical end state, so a one-request full exit must not fail.
+    const service = makeService(
+      {
+        yesShares: 2000,
+        noShares: 6000,
+        liquidity: 10_000,
+      },
+      makePosition('yes', 5000)
+    );
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 5000,
+      })
+    ).resolves.toBeDefined();
+  });
+
+  test('partial sell above the 20ppt cap is still rejected', async () => {
+    // Same 5000-share sell, but the holder owns 6000 shares — it is a
+    // partial sell, so the cap still applies.
+    const service = makeService(
+      {
+        yesShares: 2000,
+        noShares: 6000,
+        liquidity: 10_000,
+      },
+      makePosition('yes', 6000)
+    );
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 5000,
+      })
+    ).rejects.toThrow(/move odds by/i);
+  });
 });
