@@ -22,15 +22,98 @@ export interface XMLParseResult {
   thinkingContent?: string;
 }
 
+const XML_DECLARATION_PREFIX = /^<\?xml[\s\S]*?\?>\s*/i;
+
+interface CdataStore {
+  blocks: string[];
+  prefix: string;
+}
+
+function decodeXMLEntities(text: string): string {
+  if (!text.includes('&')) return text;
+  return text.replace(
+    /&(?:amp|lt|gt|quot|apos|#(\d+)|#x([0-9a-fA-F]+));/g,
+    (match, dec?: string, hex?: string) => {
+      if (dec !== undefined) {
+        const cp = Number.parseInt(dec, 10);
+        return Number.isFinite(cp) &&
+          cp > 0 &&
+          cp <= 0x10ffff &&
+          (cp < 0xd800 || cp > 0xdfff)
+          ? String.fromCodePoint(cp)
+          : match;
+      }
+      if (hex !== undefined) {
+        const cp = Number.parseInt(hex, 16);
+        return Number.isFinite(cp) &&
+          cp > 0 &&
+          cp <= 0x10ffff &&
+          (cp < 0xd800 || cp > 0xdfff)
+          ? String.fromCodePoint(cp)
+          : match;
+      }
+      switch (match) {
+        case '&amp;':
+          return '&';
+        case '&lt;':
+          return '<';
+        case '&gt;':
+          return '>';
+        case '&quot;':
+          return '"';
+        case '&apos;':
+          return "'";
+        default:
+          return match;
+      }
+    }
+  );
+}
+
+function extractCdataSections(xml: string): { xml: string; cdata: CdataStore } {
+  const blocks: string[] = [];
+  if (!xml.includes('<![CDATA[')) {
+    return { xml, cdata: { blocks, prefix: '' } };
+  }
+  let prefix = '__XML_CDATA_';
+  while (xml.includes(prefix)) {
+    prefix += '_';
+  }
+  const replaced = xml.replace(
+    /<!\[CDATA\[([\s\S]*?)\]\]>/g,
+    (_match, body: string) => {
+      const idx = blocks.length;
+      blocks.push(body);
+      return `${prefix}${idx}__`;
+    }
+  );
+  if (replaced.includes('<![CDATA[')) {
+    throw new Error('Truncated XML: unclosed CDATA section');
+  }
+  return { xml: replaced, cdata: { blocks, prefix } };
+}
+
+function decodeLeafText(text: string, cdata: CdataStore): string {
+  const decoded = decodeXMLEntities(text);
+  if (cdata.blocks.length === 0 || !decoded.includes(cdata.prefix)) {
+    return decoded;
+  }
+  const tokenRegex = new RegExp(`${cdata.prefix}(\\d+)__`, 'g');
+  return decoded.replace(
+    tokenRegex,
+    (_match, index: string) => cdata.blocks[Number(index)] ?? ''
+  );
+}
+
 /**
  * Extract XML from text that may contain prose/reasoning
  * Handles cases where LLM outputs reasoning text before/after XML
  */
 export function extractXMLFromText(content: string): string {
-  const cleaned = content.trim();
+  const cleaned = content.trim().replace(XML_DECLARATION_PREFIX, '');
   // Never extract a complete child from a truncated XML document.
   if (cleaned.startsWith('<')) {
-    const root = cleaned.match(/^<([\w-]+)(?:\s|>)/)?.[1];
+    const root = cleaned.match(/^<([A-Za-z_][\w-]*)(?:\s|>)/)?.[1];
     if (!root) return cleaned;
     const closing = `</${root}>`;
     const end = cleaned.lastIndexOf(closing);
@@ -47,7 +130,7 @@ export function extractXMLFromText(content: string): string {
   }
 
   // Fallback: Try to find ANY XML block (more permissive, non-greedy)
-  const anyXmlMatch = cleaned.match(/<([\w-]+)[\s>][\s\S]*?<\/\1>/);
+  const anyXmlMatch = cleaned.match(/<([A-Za-z_][\w-]*)[\s>][\s\S]*?<\/\1>/);
   if (anyXmlMatch) {
     return anyXmlMatch[0];
   }
@@ -65,7 +148,9 @@ export function extractXMLFromText(content: string): string {
   const startIndex = cleaned.indexOf('<');
   if (startIndex !== -1) {
     // Find the root tag name
-    const tagMatch = cleaned.substring(startIndex).match(/<([\w-]+)[\s>]/);
+    const tagMatch = cleaned
+      .substring(startIndex)
+      .match(/<([A-Za-z_][\w-]*)[\s>]/);
     if (tagMatch && tagMatch[1]) {
       const tagName = tagMatch[1];
       const closingTag = `</${tagName}>`;
@@ -213,11 +298,16 @@ export function repairTruncatedXML(xml: string): string {
  * Works in both Node.js and browser environments
  */
 export function parseXMLToObject(xml: string): JsonValue {
-  const cleaned = xml
-    .trim()
-    .replace(/<([\w-]+)(?:\s[^<>]*?)?\s*\/>/g, '<$1></$1>');
+  const withoutDecl = xml.trim().replace(XML_DECLARATION_PREFIX, '');
+  const { xml: withoutCdata, cdata } = extractCdataSections(withoutDecl);
+  const cleaned = withoutCdata.replace(
+    /<([A-Za-z_][\w-]*)(?:\s[^<>]*?)?\s*\/>/g,
+    '<$1></$1>'
+  );
   const stack: string[] = [];
-  for (const tag of cleaned.matchAll(/<(\/?)([\w-]+)(?:\s[^<>]*?)?>/g)) {
+  for (const tag of cleaned.matchAll(
+    /<(\/?)([A-Za-z_][\w-]*)(?:\s[^<>]*?)?>/g
+  )) {
     const name = tag[2]!;
     if (tag[1]) {
       if (stack.pop() !== name)
@@ -228,7 +318,7 @@ export function parseXMLToObject(xml: string): JsonValue {
     throw new Error(`Truncated XML: unclosed ${stack.join(', ')}`);
 
   // Find root element
-  const rootMatch = cleaned.match(/<([\w-]+)[^>]*>([\s\S]*)<\/\1>/);
+  const rootMatch = cleaned.match(/<([A-Za-z_][\w-]*)[^>]*>([\s\S]*)<\/\1>/);
   if (!rootMatch || !rootMatch[1] || rootMatch[2] === undefined) {
     throw new Error('No root element found in XML');
   }
@@ -236,13 +326,13 @@ export function parseXMLToObject(xml: string): JsonValue {
   const content = rootMatch[2];
 
   // Parse the content
-  return parseXMLContent(content);
+  return parseXMLContent(content, cdata);
 }
 
 /**
  * Parse XML content recursively
  */
-function parseXMLContent(content: string): JsonValue {
+function parseXMLContent(content: string, cdata: CdataStore): JsonValue {
   const trimmed = content.trim();
 
   // Check if it's just text content (no child tags)
@@ -254,12 +344,12 @@ function parseXMLContent(content: string): JsonValue {
     const num = Number(trimmed);
     // Check for finite numbers only (excludes NaN, Infinity, -Infinity)
     if (Number.isFinite(num) && trimmed === String(num)) return num;
-    return trimmed;
+    return decodeLeafText(trimmed, cdata);
   }
 
   // Parse child elements
   const children: Record<string, JsonValue | JsonValue[]> = {};
-  const tagRegex = /<([\w-]+)[^>]*>([\s\S]*?)<\/\1>/g;
+  const tagRegex = /<([A-Za-z_][\w-]*)[^>]*>([\s\S]*?)<\/\1>/g;
   let match;
 
   while ((match = tagRegex.exec(content)) !== null) {
@@ -274,8 +364,8 @@ function parseXMLContent(content: string): JsonValue {
       /(?:id|ticker)$/i.test(tagName) &&
       !tagContent.includes('<') &&
       tagContent.trim() !== 'null'
-        ? tagContent.trim()
-        : parseXMLContent(tagContent);
+        ? decodeLeafText(tagContent.trim(), cdata)
+        : parseXMLContent(tagContent, cdata);
 
     // Handle multiple elements with same tag name (arrays)
     const existing = children[tagName];
@@ -288,9 +378,9 @@ function parseXMLContent(content: string): JsonValue {
     }
   }
 
-  // If no children found, return text content
+  // If no children found, preserve raw leaf text (e.g. unescaped comparison operators)
   if (Object.keys(children).length === 0) {
-    const textContent = trimmed.replace(/<[^>]+>/g, '').trim();
+    const textContent = decodeLeafText(trimmed, cdata).trim();
     if (textContent) {
       return textContent;
     }
