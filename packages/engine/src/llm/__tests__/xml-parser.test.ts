@@ -283,5 +283,37 @@ That should work!`;
         },
       });
     });
+
+    test('should fail closed on invalid wrapper tag names instead of lifting inner decisions', () => {
+      for (const wrapper of ['1_rejected', '-alt']) {
+        const xml = `<decisions><decision><npcId>a</npcId><action>wait</action></decision><${wrapper}><decision><npcId>b</npcId><action>buy_yes</action></decision></${wrapper}></decisions>`;
+        const result = parseXML(xml);
+        expect(result.success).toBe(false);
+      }
+    });
+
+    test('should not expand entity-encoded CDATA placeholders across fields', () => {
+      const xml =
+        '<decision><reasoning><![CDATA[secret-other]]></reasoning><marketId>&#95;_XML_CDATA_0__</marketId><sameLeaf><![CDATA[secret-other]]> &#95;_XML_CDATA_0__</sameLeaf></decision>';
+      const result = parseXML(xml);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        reasoning: 'secret-other',
+        marketId: '__XML_CDATA_0__',
+        sameLeaf: 'secret-other __XML_CDATA_0__',
+      });
+    });
+
+    test('should fail in linear time on repeated unclosed CDATA openers', () => {
+      const repeated = `<response><fact>${'<![CDATA['.repeat(12000)}</fact></response>`;
+      const start = performance.now();
+      const result = parseXML(repeated);
+      const elapsedMs = performance.now() - start;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('CDATA');
+      expect(elapsedMs).toBeLessThan(200);
+    });
   });
 });

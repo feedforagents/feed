@@ -71,38 +71,55 @@ function decodeXMLEntities(text: string): string {
 }
 
 function extractCdataSections(xml: string): { xml: string; cdata: CdataStore } {
+  const openMarker = '<![CDATA[';
+  const closeMarker = ']]>';
   const blocks: string[] = [];
-  if (!xml.includes('<![CDATA[')) {
+  let cursor = xml.indexOf(openMarker);
+  if (cursor === -1) {
     return { xml, cdata: { blocks, prefix: '' } };
   }
   let prefix = '__XML_CDATA_';
   while (xml.includes(prefix)) {
     prefix += '_';
   }
-  const replaced = xml.replace(
-    /<!\[CDATA\[([\s\S]*?)\]\]>/g,
-    (_match, body: string) => {
-      const idx = blocks.length;
-      blocks.push(body);
-      return `${prefix}${idx}__`;
+  const parts: string[] = [];
+  let lastIndex = 0;
+  while (cursor !== -1) {
+    const contentStart = cursor + openMarker.length;
+    const closeIndex = xml.indexOf(closeMarker, contentStart);
+    if (closeIndex === -1) {
+      throw new Error('Truncated XML: unclosed CDATA section');
     }
-  );
-  if (replaced.includes('<![CDATA[')) {
-    throw new Error('Truncated XML: unclosed CDATA section');
+    parts.push(xml.slice(lastIndex, cursor));
+    const idx = blocks.length;
+    blocks.push(xml.slice(contentStart, closeIndex));
+    parts.push(`${prefix}${idx}__`);
+    lastIndex = closeIndex + closeMarker.length;
+    cursor = xml.indexOf(openMarker, lastIndex);
   }
-  return { xml: replaced, cdata: { blocks, prefix } };
+  parts.push(xml.slice(lastIndex));
+  return { xml: parts.join(''), cdata: { blocks, prefix } };
 }
 
 function decodeLeafText(text: string, cdata: CdataStore): string {
-  const decoded = decodeXMLEntities(text);
-  if (cdata.blocks.length === 0 || !decoded.includes(cdata.prefix)) {
-    return decoded;
+  if (cdata.blocks.length === 0 || !text.includes(cdata.prefix)) {
+    return decodeXMLEntities(text);
   }
-  const tokenRegex = new RegExp(`${cdata.prefix}(\\d+)__`, 'g');
-  return decoded.replace(
-    tokenRegex,
-    (_match, index: string) => cdata.blocks[Number(index)] ?? ''
-  );
+  const tokenRegex = new RegExp(`(${cdata.prefix}(\\d+)__)`, 'g');
+  const out: string[] = [];
+  let lastIndex = 0;
+  for (const match of text.matchAll(tokenRegex)) {
+    const matchIndex = match.index ?? 0;
+    if (matchIndex > lastIndex) {
+      out.push(decodeXMLEntities(text.slice(lastIndex, matchIndex)));
+    }
+    out.push(cdata.blocks[Number(match[2])] ?? '');
+    lastIndex = matchIndex + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    out.push(decodeXMLEntities(text.slice(lastIndex)));
+  }
+  return out.join('');
 }
 
 /**
@@ -304,6 +321,9 @@ export function parseXMLToObject(xml: string): JsonValue {
     /<([A-Za-z_][\w-]*)(?:\s[^<>]*?)?\s*\/>/g,
     '<$1></$1>'
   );
+  if (/<\/(?![A-Za-z_])[\w.:-]*>/.test(cleaned)) {
+    throw new Error('Invalid XML closing tag');
+  }
   const stack: string[] = [];
   for (const tag of cleaned.matchAll(
     /<(\/?)([A-Za-z_][\w-]*)(?:\s[^<>]*?)?>/g
