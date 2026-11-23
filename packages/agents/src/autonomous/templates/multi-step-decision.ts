@@ -22,6 +22,7 @@ export interface ActionTraceResult {
       | 'post-diversity'
       | 'prediction-quote-unavailable'
       | 'group-message-chat-unavailable'
+      | 'group-management-group-unavailable'
       | 'social-target-unavailable';
     [key: string]: string | number | boolean | null | undefined;
   };

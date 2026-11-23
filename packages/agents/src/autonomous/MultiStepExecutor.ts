@@ -159,6 +159,8 @@ const PREDICTION_QUOTE_UNAVAILABLE =
   'Prediction buy requires a current quote. Buy only an ID under Available Prediction Markets with a positive safe buy limit, or choose another action.';
 const GROUP_MESSAGE_CHAT_UNAVAILABLE =
   'GROUP_MESSAGE requires a chatId from Your Group Chats. Copy the chatId field exactly as a quoted JSON string, or choose another action if no chat is listed.';
+const GROUP_MANAGEMENT_GROUP_UNAVAILABLE =
+  'This group action requires a groupId from Your Group Chats. Copy the groupId field exactly as a quoted JSON string (never the chatId), or choose another action if no group is listed.';
 const COMMENT_POST_UNAVAILABLE =
   'Your COMMENT target is unavailable. Choose an exact postId from Recent Posts or a different action.';
 const ENGAGEMENT_POST_UNAVAILABLE =
@@ -199,6 +201,13 @@ const UNAVAILABLE_DECISION_TARGETS = new Map<
     {
       rejection: 'group-message-chat-unavailable',
       warning: '[MultiStep] Group message skipped without a current chat',
+    },
+  ],
+  [
+    GROUP_MANAGEMENT_GROUP_UNAVAILABLE,
+    {
+      rejection: 'group-management-group-unavailable',
+      warning: '[MultiStep] Group management skipped without a current group',
     },
   ],
   [COMMENT_POST_UNAVAILABLE, SOCIAL_TARGET_REJECTION],
@@ -558,6 +567,8 @@ ${describeNpcMarketClue(offeredMarketClue)}`
           const hideParameters =
             normalizedAction === Actions.GROUP_MESSAGE ||
             normalizedAction === Actions.REPLY_CHAT ||
+            unavailableTarget?.rejection ===
+              'group-management-group-unavailable' ||
             unavailableTarget?.rejection === 'social-target-unavailable';
           if (decisionAttempt < 2) {
             logger.warn(
@@ -1516,6 +1527,9 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         if (!groupId2 || !userId) {
           return 'Your INVITE_TO_GROUP was invalid because it requires both a groupId and userId.';
         }
+        if (!context.groupChats?.some((chat) => chat.groupId === groupId2)) {
+          return GROUP_MANAGEMENT_GROUP_UNAVAILABLE;
+        }
         return undefined;
       }
 
@@ -1524,6 +1538,9 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         if (!groupId3 || !userId) {
           return 'Your KICK_FROM_GROUP was invalid because it requires both a groupId and userId.';
         }
+        if (!context.groupChats?.some((chat) => chat.groupId === groupId3)) {
+          return GROUP_MANAGEMENT_GROUP_UNAVAILABLE;
+        }
         return undefined;
       }
 
@@ -1531,6 +1548,9 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         const groupId4 = this.coerceParameterText(parameters.groupId);
         if (!groupId4) {
           return 'Your LEAVE_GROUP was invalid because it requires a groupId.';
+        }
+        if (!context.groupChats?.some((chat) => chat.groupId === groupId4)) {
+          return GROUP_MANAGEMENT_GROUP_UNAVAILABLE;
         }
         return undefined;
       }
@@ -2956,6 +2976,10 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             action.result?.rejection === 'prediction-quote-unavailable') ||
           (action.actionType === Actions.GROUP_MESSAGE &&
             action.result?.rejection === 'group-message-chat-unavailable') ||
+          (action.result?.rejection === 'group-management-group-unavailable' &&
+            (action.actionType === Actions.INVITE_TO_GROUP ||
+              action.actionType === Actions.KICK_FROM_GROUP ||
+              action.actionType === Actions.LEAVE_GROUP)) ||
           (action.result?.rejection === 'social-target-unavailable' &&
             (action.actionType === Actions.COMMENT ||
               action.actionType === Actions.REPLY_CHAT ||

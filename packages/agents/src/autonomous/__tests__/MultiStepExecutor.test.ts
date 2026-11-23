@@ -708,6 +708,44 @@ describe('getDecisionValidationError', () => {
     ).toBeUndefined();
   });
 
+  test('rejects group-management targets that are not listed groups', () => {
+    const visibleContext = {
+      ...context,
+      groupChats: [{ id: 'chat-1', groupId: 'group-1', name: 'Squad' }],
+    } as unknown as AgentTickContext;
+    const unlistedTargets: Array<[string, Record<string, unknown>]> = [
+      [Actions.INVITE_TO_GROUP, { groupId: 'group-92', userId: 'user-5' }],
+      [Actions.KICK_FROM_GROUP, { groupId: 'group-92', userId: 'user-5' }],
+      [Actions.LEAVE_GROUP, { groupId: 'group-92' }],
+      // The chat ID / group ID confusion the GROUP_MESSAGE correction exists for.
+      [Actions.INVITE_TO_GROUP, { groupId: 'chat-1', userId: 'user-5' }],
+      [Actions.LEAVE_GROUP, { groupId: 'chat-1' }],
+    ];
+    for (const [action, parameters] of unlistedTargets) {
+      expect(
+        executor['getDecisionValidationError'](
+          action,
+          parameters,
+          visibleContext
+        )
+      ).toContain('Your Group Chats');
+    }
+    expect(
+      executor['getDecisionValidationError'](
+        Actions.LEAVE_GROUP,
+        { groupId: 'group-1' },
+        visibleContext
+      )
+    ).toBeUndefined();
+    expect(
+      executor['getDecisionValidationError'](
+        Actions.INVITE_TO_GROUP,
+        { groupId: 'group-1', userId: 'user-5' },
+        { ...context, groupChats: [] } as unknown as AgentTickContext
+      )
+    ).toContain('Your Group Chats');
+  });
+
   test('a COMMENT with explicit parent intent must use REPLY_COMMENT', () => {
     const visibleContext = {
       ...context,
@@ -1183,6 +1221,104 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
       result: { rejection: 'group-message-chat-unavailable' },
     });
     expect(result.trace[0]?.parameters).toBeUndefined();
+    expect(decision).toHaveBeenCalledTimes(3);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('corrects an INVITE_TO_GROUP that uses a chat ID in place of the group ID', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      false,
+      true
+    );
+    context.groupChats = [
+      {
+        id: '123456789012345678',
+        groupId: '223456789012345678',
+        name: 'Group',
+      },
+    ];
+    const message = {
+      thought: 'Grow the group.',
+      action: Actions.INVITE_TO_GROUP,
+      parameters: {
+        groupId: '123456789012345678',
+        userId: '299999999999999999',
+      },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: message, rawResponse: '{}' })
+      .mockResolvedValueOnce({
+        decision: {
+          ...message,
+          parameters: {
+            ...message.parameters,
+            groupId: '223456789012345678',
+          },
+        },
+        rawResponse: '{}',
+      });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(decision.mock.calls[1]?.[4]?.feedback).toContain('Your Group Chats');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[1]).toBe(Actions.INVITE_TO_GROUP);
+    expect(execute.mock.calls[0]?.[2]).toMatchObject({
+      groupId: '223456789012345678',
+    });
+  });
+
+  test('skips a repeated unknown group-management target and can take another step', async () => {
+    const executor = new MultiStepExecutor(2);
+    const warn = spyOn(logger, 'warn');
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      false,
+      true
+    );
+    context.groupChats = [
+      {
+        id: '123456789012345678',
+        groupId: '223456789012345678',
+        name: 'Group',
+      },
+    ];
+    const message = {
+      thought: 'Remove a participant.',
+      action: Actions.KICK_FROM_GROUP,
+      parameters: {
+        groupId: '299999999999999999',
+        userId: 'target-user',
+        reason: 'Private group reason.',
+      },
+      isFinish: false,
+    };
+    decision
+      .mockResolvedValueOnce({ decision: message, rawResponse: '{}' })
+      .mockResolvedValueOnce({ decision: message, rawResponse: '{}' });
+
+    const result = await executor.execute(actor.id, runtime, true);
+
+    expect(result.success).toBe(true);
+    expect(result.iterations).toBe(2);
+    expect(result.trace[0]).toMatchObject({
+      actionType: Actions.KICK_FROM_GROUP,
+      success: false,
+      result: { rejection: 'group-management-group-unavailable' },
+    });
+    expect(result.trace[0]?.parameters).toBeUndefined();
+    expect(warn.mock.calls[0]?.[1]).not.toHaveProperty('parameters');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(
+      'Private group reason.'
+    );
     expect(decision).toHaveBeenCalledTimes(3);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
