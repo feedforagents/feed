@@ -342,7 +342,7 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
    * Analyze recent interactions and generate relationship updates using LLM
    * This is the KEY method - uses LLM to generate natural text descriptions
    */
-  async analyzeAndUpdateRelationships(): Promise<number> {
+  async analyzeAndUpdateRelationships(signal?: AbortSignal): Promise<number> {
     // In simulation mode, relationships are not persisted to DB
     if (isSimulationMode()) {
       return 0;
@@ -391,6 +391,7 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
 
     // Process each pair
     for (const pair of pairInteractions.values()) {
+      signal?.throwIfAborted();
       const { actor1Id, actor2Id } = pair;
 
       // Get existing relationship (either stored order)
@@ -485,6 +486,7 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
             maxTokens: 200,
             temperature: 0.8,
             promptType: 'relationship_evolve',
+            signal,
           }
         );
 
@@ -518,6 +520,7 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
         continue;
       }
 
+      signal?.throwIfAborted();
       // Update or create relationship
       if (existing) {
         // Update existing

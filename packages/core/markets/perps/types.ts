@@ -315,11 +315,21 @@ export interface MetricsPort {
   increment(name: string, value: number, tags?: Record<string, string>): void;
 }
 
+export type PerpCloseFeeRecorder = (
+  positionId: string,
+  ticker: string,
+  feeAmount: number
+) => Promise<void>;
+
 /** Serialize an owner's exposure check and financial writes in one transaction. */
 export interface PerpSettlementPort {
   run<T>(
     userId: string,
-    operation: (db: PerpDbPort, wallet: WalletPort) => Promise<T>
+    operation: (
+      db: PerpDbPort,
+      wallet: WalletPort,
+      recordCloseFee?: PerpCloseFeeRecorder
+    ) => Promise<T>
   ): Promise<T>;
 }
 

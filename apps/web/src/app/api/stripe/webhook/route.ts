@@ -41,7 +41,11 @@
  * - charge.refunded: Reverse funded balance (Phase 2)
  */
 
-import { TradingBalanceFundingService, withErrorHandling } from '@feed/api';
+import {
+  TradingBalanceFundingService,
+  usdToBalanceUnits,
+  withErrorHandling,
+} from '@feed/api';
 import { and, balanceTransactions, db, eq } from '@feed/db';
 import { logger } from '@feed/shared';
 import { NextResponse } from 'next/server';
@@ -870,8 +874,11 @@ async function handleChargeRefunded(
     0
   );
 
-  // Calculate total refunded balance units based on cumulative USD
-  const totalRefundedPoints = Math.floor(totalRefundedUSD * 100);
+  // Match the purchase cents conversion and cap at the actual legacy credit.
+  const totalRefundedPoints = Math.min(
+    usdToBalanceUnits(totalRefundedUSD),
+    Number(originalTx.amount)
+  );
 
   // Incremental = total cumulative - already processed
   const incrementalPointsToDeduct = totalRefundedPoints - alreadyDeductedPoints;

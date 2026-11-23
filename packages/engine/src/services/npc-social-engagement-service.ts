@@ -8,7 +8,7 @@
  * - Natural randomness with jitter
  */
 
-import { db } from '@feed/db';
+import { createCommentWithParentCheck, db } from '@feed/db';
 import type { JsonValue } from '@feed/shared';
 import {
   generateSnowflakeId,
@@ -751,16 +751,16 @@ export async function processNPCSocialEngagements(
 
           try {
             const commentId = await generateSnowflakeId();
-            await db.comment.create({
-              data: {
-                id: commentId,
-                postId: post.id,
-                authorId: author.id,
-                parentCommentId: root.id,
-                content: authorReply,
-                updatedAt: new Date(),
-              },
+            const authorWrite = await createCommentWithParentCheck({
+              id: commentId,
+              postId: post.id,
+              authorId: author.id,
+              parentCommentId: root.id,
+              content: authorReply,
+              updatedAt: new Date(),
             });
+            if (authorWrite.status !== 'created') continue;
+
             replyCommentsCreated++;
             result.commentsCreated++;
             engagedActors.add(author.id);
@@ -835,16 +835,16 @@ export async function processNPCSocialEngagements(
               if (!replyText) break;
 
               const replyId = await generateSnowflakeId();
-              await db.comment.create({
-                data: {
-                  id: replyId,
-                  postId: post.id,
-                  authorId: speaker.id,
-                  parentCommentId: parent.id,
-                  content: replyText,
-                  updatedAt: new Date(),
-                },
+              const replyWrite = await createCommentWithParentCheck({
+                id: replyId,
+                postId: post.id,
+                authorId: speaker.id,
+                parentCommentId: parent.id,
+                content: replyText,
+                updatedAt: new Date(),
               });
+              if (replyWrite.status !== 'created') break;
+
               replyCommentsCreated++;
               result.commentsCreated++;
               engagedActors.add(speaker.id);

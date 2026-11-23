@@ -1,166 +1,89 @@
-/**
- * Integration Tests: Wallet balance cache invalidation (PRD §9.1)
- *
- * Requires DATABASE_URL pointing at a disposable database with schema
- * applied. Every test returns early when no database is reachable, the
- * convention of this directory.
- *
- * WalletService.setCacheInvalidationCallback had no installer anywhere in the
- * repo, so debit/credit/recordPnL called a no-op and the cached balance row
- * (`user:balance:<id>`, 30s TTL behind GET /api/users/[userId]/balance) kept
- * serving pre-trade values while the buy/sell response already carried the
- * new one. PRD §9.1 requires the books to agree with what the trader was
- * charged. Each case warms the cache through the same cachedDb.getUserBalance
- * path the balance route uses, mutates through the real WalletService, and
- * asserts the very next read already sees the mutation.
- */
-
+/** Committed wallet P&L must reach the cached balance display (PRD §9.1). */
+import { expect, test } from 'bun:test';
 import {
-  afterAll,
-  beforeAll,
-  describe,
-  expect,
-  setDefaultTimeout,
-  test,
-} from 'bun:test';
-import { cachedDb, clearAllCache } from '@feed/api';
-import {
-  balanceTransactions,
-  db,
-  eq,
-  inArray,
-  pointsTransactions,
-  sql,
-  users,
-} from '@feed/db';
-import { WalletService } from '@feed/engine/services/wallet-service';
-import { generateSnowflakeId } from '@feed/shared';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-setDefaultTimeout(30000);
+const standalone = 'standalone P&L write refreshes the cached wallet';
+const settlement = 'settlement refreshes the cached wallet after commit';
 
-let dbAvailable = false;
-const testUserIds: string[] = [];
-
-async function checkDatabaseHealth(): Promise<boolean> {
-  if (!process.env.DATABASE_URL) return false;
-
-  try {
-    await db.execute(sql`SELECT 1`);
-    return true;
-  } catch {
-    return false;
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks wallet P&L cache invalidation in a leased PostgreSQL database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'wallet-pnl-cache-invalidation',
+      file: 'packages/testing/integration/wallet-balance-cache-invalidation.integration.test.ts',
+      cases: [standalone, settlement],
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  if (process.env.FEED_DISABLE_REDIS !== '1' || process.env.REDIS_URL) {
+    throw new Error('Wallet P&L fixture requires a private memory cache');
   }
-}
 
-async function createTestUser(): Promise<string> {
-  const id = await generateSnowflakeId();
-  await db.insert(users).values({
-    id,
-    privyId: `did:privy:test-${id}`,
-    username: `wbalance-${id}`,
-    displayName: 'wbalance',
-    virtualBalance: '1000',
-    totalDeposited: '1000',
-    totalWithdrawn: '0',
-    lifetimePnL: '0.00',
-    reputationPoints: 0,
-    isActor: false,
-    isAgent: false,
-    profileComplete: true,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  });
-  testUserIds.push(id);
-  return id;
-}
+  const { cachedDb } = await import('@feed/api');
+  const { db, users } = await import('@feed/db');
+  const { createPerpSettlement, WalletService } = await import('@feed/engine');
+  const { generateSnowflakeId } = await import('@feed/shared');
 
-async function cachedBalance(userId: string): Promise<{
-  virtualBalance: number;
-  lifetimePnL: number;
-}> {
-  const row = await cachedDb.getUserBalance(userId);
-  return {
-    virtualBalance: Number(row?.virtualBalance),
-    lifetimePnL: Number(row?.lifetimePnL),
-  };
-}
+  async function createUser() {
+    const id = await generateSnowflakeId();
+    await db.insert(users).values({
+      id,
+      username: `test-wallet-pnl-${id}`,
+      virtualBalance: '1000',
+      totalDeposited: '1000',
+      lifetimePnL: '0.00',
+      updatedAt: new Date(),
+    });
+    return id;
+  }
 
-describe('wallet balance cache invalidation', () => {
-  beforeAll(async () => {
-    dbAvailable = await checkDatabaseHealth();
-  });
+  async function displayedWallet(userId: string) {
+    const row = await cachedDb.getUserBalance(userId);
+    if (!row) throw new Error(`Missing wallet balance for ${userId}`);
+    return {
+      balance: Number(row.virtualBalance),
+      lifetimePnL: Number(row.lifetimePnL),
+    };
+  }
 
-  afterAll(async () => {
-    if (!dbAvailable) return;
-    await db
-      .delete(balanceTransactions)
-      .where(inArray(balanceTransactions.userId, testUserIds));
-    await db
-      .delete(pointsTransactions)
-      .where(inArray(pointsTransactions.userId, testUserIds));
-    await db.delete(users).where(inArray(users.id, testUserIds));
-    await clearAllCache();
+  test(standalone, async () => {
+    const userId = await createUser();
+    const before = await displayedWallet(userId);
+    expect(before).toEqual({ balance: 1000, lifetimePnL: 0 });
+
+    const committed = await WalletService.recordPnL(userId, 42, 'test_pnl');
+    const after = await displayedWallet(userId);
+    console.info('Standalone wallet P&L', { userId, before, committed, after });
+    expect(committed.newLifetimePnL).toBe(42);
+    expect(after).toEqual({ balance: 1000, lifetimePnL: 42 });
   });
 
-  test('the balance row is genuinely cached before any mutation runs', async () => {
-    if (!dbAvailable) return;
+  test(settlement, async () => {
+    const userId = await createUser();
+    const before = await displayedWallet(userId);
+    expect(before).toEqual({ balance: 1000, lifetimePnL: 0 });
 
-    const userId = await createTestUser();
-    expect((await cachedBalance(userId)).virtualBalance).toBe(1000);
-
-    // Bypass WalletService so no invalidation hook can run: the next read
-    // must still return the warm value. This is what makes the mutation
-    // cases below depend on the hook rather than on the cache never being
-    // populated in the first place.
-    await db
-      .update(users)
-      .set({ virtualBalance: '777' })
-      .where(eq(users.id, userId));
-    expect((await cachedBalance(userId)).virtualBalance).toBe(1000);
-  });
-
-  test('debit drops the cached balance', async () => {
-    if (!dbAvailable) return;
-
-    const userId = await createTestUser();
-    expect((await cachedBalance(userId)).virtualBalance).toBe(1000);
-
-    await WalletService.debit(
+    const beforeCommit = await createPerpSettlement().run(
       userId,
-      100,
-      'test_debit',
-      'cache invalidation test'
+      async (_positions, wallet) => {
+        await wallet.recordPnL({ userId, pnl: -42, reason: 'perp_close' });
+        // Another reader still sees the old committed row. If the adapter
+        // invalidates early, this read repopulates the cache before commit.
+        return displayedWallet(userId);
+      }
     );
+    expect(beforeCommit).toEqual(before);
 
-    expect((await cachedBalance(userId)).virtualBalance).toBe(900);
-  });
-
-  test('credit drops the cached balance', async () => {
-    if (!dbAvailable) return;
-
-    const userId = await createTestUser();
-    expect((await cachedBalance(userId)).virtualBalance).toBe(1000);
-
-    await WalletService.credit(
+    const afterCommit = await displayedWallet(userId);
+    console.info('Settlement wallet P&L', {
       userId,
-      50,
-      'test_credit',
-      'cache invalidation test'
-    );
-
-    expect((await cachedBalance(userId)).virtualBalance).toBe(1050);
+      before,
+      beforeCommit,
+      afterCommit,
+    });
+    expect(afterCommit).toEqual({ balance: 1000, lifetimePnL: -42 });
   });
-
-  test('recordPnL drops the cached lifetimePnL', async () => {
-    if (!dbAvailable) return;
-
-    const userId = await createTestUser();
-    expect((await cachedBalance(userId)).lifetimePnL).toBe(0);
-
-    await WalletService.recordPnL(userId, 42, 'test_pnl');
-
-    const after = await cachedBalance(userId);
-    expect(after.lifetimePnL).toBe(42);
-    expect(after.virtualBalance).toBe(1000);
-  });
-});
+}
