@@ -34,6 +34,7 @@ import {
   type ProfileReply,
   ProfileReplyCard,
 } from '@/components/profile/ProfileReplyCard';
+import { useActorPosts } from '@/components/profile/useActorPosts';
 import { Avatar } from '@/components/shared/Avatar';
 import { EmptyState } from '@/components/shared/EmptyState';
 import { PageContainer } from '@/components/shared/PageContainer';
@@ -153,37 +154,16 @@ export function ProfilePageClient({
   const isOwnProfileRef = useRef(isOwnProfile);
   isOwnProfileRef.current = isOwnProfile;
   const [isCreatingDM, setIsCreatingDM] = useState(false);
-  const [apiPosts, setApiPosts] = useState<
-    Array<{
-      id: string;
-      content: string;
-      author: string;
-      authorId: string;
-      timestamp: string;
-      authorName?: string;
-      authorUsername?: string | null;
-      authorProfileImageUrl?: string | null;
-      likeCount?: number;
-      commentCount?: number;
-      shareCount?: number;
-      isLiked?: boolean;
-      isShared?: boolean;
-      isRepost?: boolean;
-      isQuote?: boolean;
-      quoteComment?: string | null;
-      originalPostId?: string | null;
-      originalPost?: {
-        id: string;
-        content: string;
-        authorId: string;
-        authorName: string;
-        authorUsername: string | null;
-        authorProfileImageUrl: string | null;
-        timestamp: string;
-      } | null;
-    }>
-  >([]);
-  const [loadingPosts, setLoadingPosts] = useState(false);
+  // Profile posts follow the API cursor past the first 100, like the
+  // Following feed does: the actor branch already returns cursor/hasMore.
+  const {
+    posts: apiPosts,
+    loading: loadingPosts,
+    loadingMore: loadingMorePosts,
+    hasMore: hasMorePosts,
+    loadMore: loadMorePosts,
+  } = useActorPosts(actorInfo?.id ?? null);
+  const loadMorePostsRef = useRef<HTMLDivElement | null>(null);
   const [replies, setReplies] = useState<ProfileReply[]>([]);
   const [loadingReplies, setLoadingReplies] = useState(false);
 
@@ -601,27 +581,20 @@ export function ProfilePageClient({
   }, [actorInfo, optimisticFollowerCount]);
 
   useEffect(() => {
-    const loadPosts = async () => {
-      if (!routeKey) return;
-
-      setLoadingPosts(true);
-      const searchId = actorInfo?.id || routeKey;
-      const response = await fetch(
-        `/api/posts?actorId=${encodeURIComponent(searchId)}&limit=100`
-      );
-      if (response.ok) {
-        const data = (await response.json()) as { posts?: unknown };
-        if (data.posts && Array.isArray(data.posts)) {
-          setApiPosts(data.posts as typeof apiPosts);
+    const target = loadMorePostsRef.current;
+    if (!target) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry?.isIntersecting && hasMorePosts && !loadingMorePosts) {
+          void loadMorePosts();
         }
-      }
-      setLoadingPosts(false);
-    };
-
-    if (actorInfo?.id) {
-      void loadPosts();
-    }
-  }, [routeKey, actorInfo?.id]);
+      },
+      { rootMargin: '200px' }
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMorePosts, loadingMorePosts, loadMorePosts]);
 
   useEffect(() => {
     if (tab !== 'replies') return;
@@ -1179,6 +1152,15 @@ export function ProfilePageClient({
                         />
                       );
                     })}
+                    {hasMorePosts && (
+                      <div ref={loadMorePostsRef} className="py-8">
+                        {loadingMorePosts && (
+                          <div className="flex items-center justify-center">
+                            <div className="h-8 w-8 animate-spin rounded-full border-primary border-b-2" />
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
