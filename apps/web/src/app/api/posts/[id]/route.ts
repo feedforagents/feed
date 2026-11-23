@@ -68,6 +68,7 @@ import {
   addPublicReadHeaders,
   authenticate,
   BusinessLogicError,
+  cachedDb,
   getCanonicalUserId,
   NotFoundError,
   publicRateLimit,
@@ -454,6 +455,9 @@ export const DELETE = withErrorHandling(
       .update(posts)
       .set({ deletedAt: new Date() })
       .where(eq(posts.id, postId));
+
+    await cachedDb.invalidatePostsCache();
+    await cachedDb.invalidateActorPostsCache(post.authorId);
 
     logger.info(
       'Post soft deleted',

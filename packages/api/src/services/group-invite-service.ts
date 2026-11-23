@@ -78,6 +78,19 @@ export async function acceptGroupInvite(
   return asUser(userId, async (db) => {
     const invite = await claimPendingInvite(db, userId, inviteId, 'accepted');
 
+    // Both invite-creating entry points refuse banned users, but a ban can
+    // land after the invite was sent and the ban write does not touch
+    // pending invites. Accept is the step that grants membership, so the
+    // ban is re-checked here; throwing rolls the invite claim back and the
+    // invite stays pending.
+    const acceptingUser = await db.user.findUnique({
+      where: { id: userId },
+      select: { isBanned: true },
+    });
+    if (acceptingUser?.isBanned) {
+      throw new ApiError('Cannot accept a group invite while banned', 400);
+    }
+
     const invitedGroup = await db.group.findUnique({
       where: { id: invite.groupId },
       select: { type: true },

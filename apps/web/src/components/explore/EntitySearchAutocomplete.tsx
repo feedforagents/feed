@@ -124,6 +124,14 @@ interface EntitySearchAutocompleteProps {
   searchType?: 'all' | 'users' | 'actors';
 }
 
+type SuggestionResult = {
+  value: string;
+  searchType: NonNullable<EntitySearchAutocompleteProps['searchType']>;
+  entities: RegistryEntity[];
+};
+
+const EMPTY_SUGGESTIONS: RegistryEntity[] = [];
+
 export function EntitySearchAutocomplete({
   value,
   onChange,
@@ -134,7 +142,12 @@ export function EntitySearchAutocomplete({
   searchType = 'all',
 }: EntitySearchAutocompleteProps) {
   const router = useRouter();
-  const [suggestions, setSuggestions] = useState<RegistryEntity[]>([]);
+  const [result, setResult] = useState<SuggestionResult | null>(null);
+  const isCurrent =
+    result !== null &&
+    result.value === value &&
+    result.searchType === searchType;
+  const suggestions = isCurrent ? result.entities : EMPTY_SUGGESTIONS;
   const [isOpen, setIsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [loading, setLoading] = useState(false);
@@ -147,7 +160,7 @@ export function EntitySearchAutocomplete({
     const controller = new AbortController();
     const fetchSuggestions = async () => {
       if (!value.trim()) {
-        setSuggestions([]);
+        setResult(null);
         setIsOpen(false);
         setSelectedIndex(-1);
         setLoading(false);
@@ -168,7 +181,7 @@ export function EntitySearchAutocomplete({
         );
       } catch {
         if (!controller.signal.aborted) {
-          setSuggestions([]);
+          setResult(null);
           setIsOpen(false);
           setLoading(false);
         }
@@ -179,11 +192,11 @@ export function EntitySearchAutocomplete({
         const data = await response.json();
         if (controller.signal.aborted) return;
         const allEntities = buildAutocompleteEntities(data);
-        setSuggestions(allEntities.slice(0, 10));
+        setResult({ value, searchType, entities: allEntities.slice(0, 10) });
         setIsOpen(true);
         setSelectedIndex(allEntities.length ? 0 : -1);
       } else {
-        setSuggestions([]);
+        setResult(null);
         setIsOpen(false);
         setSelectedIndex(-1);
       }
@@ -232,6 +245,7 @@ export function EntitySearchAutocomplete({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (!isCurrent && event.key !== 'Escape') return;
       if (!isOpen) {
         if (event.key === 'Enter' && suggestions.length > 0 && suggestions[0]) {
           event.preventDefault();
@@ -271,7 +285,7 @@ export function EntitySearchAutocomplete({
           break;
       }
     },
-    [isOpen, suggestions, selectedIndex, navigateToEntity]
+    [isCurrent, isOpen, suggestions, selectedIndex, navigateToEntity]
   );
 
   return (
@@ -312,7 +326,7 @@ export function EntitySearchAutocomplete({
         <button
           onClick={() => {
             onChange('');
-            setSuggestions([]);
+            setResult(null);
             setIsOpen(false);
             setSelectedIndex(-1);
           }}
@@ -330,7 +344,7 @@ export function EntitySearchAutocomplete({
         </button>
       )}
 
-      {isOpen && (
+      {isOpen && (isCurrent || loading) && (
         <div className="absolute top-full right-0 left-0 z-50 mt-2 max-h-[400px] overflow-hidden overflow-y-auto rounded-2xl border border-border bg-card shadow-xl">
           {loading && (
             <div className="px-4 py-6 text-center text-muted-foreground text-sm">

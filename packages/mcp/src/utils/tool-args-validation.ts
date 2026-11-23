@@ -11,6 +11,7 @@ import {
   isPointsAmount,
   JsonValueSchema,
   LEADERBOARD_SCOPES,
+  UpdateUserSchema,
 } from '@feed/shared';
 import { z } from 'zod';
 import type {
@@ -205,7 +206,6 @@ const GetPostArgsSchema = z.object({
 
 const CreatePostArgsSchema = z.object({
   content: CreatePostSchema.shape.content,
-  type: z.enum(['post', 'article']).optional().default('post'),
   mediaUrl: z.string().url().optional(),
 }) satisfies z.ZodType<CreatePostArgs>;
 
@@ -257,11 +257,12 @@ const GetUserProfileArgsSchema = z.object({
   userId: z.string().min(1),
 }) satisfies z.ZodType<GetUserProfileArgs>;
 
-const UpdateProfileArgsSchema = z.object({
-  displayName: z.string().optional(),
-  bio: z.string().max(500).optional(),
-  username: z.string().optional(),
-  profileImageUrl: z.string().optional(),
+// Same validation as the HTTP profile update route and A2A.
+const UpdateProfileArgsSchema = UpdateUserSchema.pick({
+  displayName: true,
+  bio: true,
+  username: true,
+  profileImageUrl: true,
 }) satisfies z.ZodType<UpdateProfileArgs>;
 
 const FollowUserArgsSchema = z.object({
