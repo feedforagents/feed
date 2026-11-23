@@ -19,6 +19,15 @@ export const ACTOR_TIERS = {
  */
 
 /**
+ * Minimum escrow stake for a ban appeal (USD). Shared by the web appeal
+ * route and the A2A escrow handler so both surfaces enforce the same floor
+ * the route copy advertises ("stake $10 for a second review"). Escrows can
+ * be created for any positive amount, so the floor has to be checked here,
+ * not at creation.
+ */
+export const MIN_APPEAL_STAKE_USD = 10;
+
+/**
  * Feed Widget Configuration
  * These thresholds are used for determining what qualifies as breaking news or upcoming events
  */

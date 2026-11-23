@@ -14,7 +14,7 @@ import {
   sql,
   users,
 } from '@feed/db';
-import { logger } from '@feed/shared';
+import { logger, MIN_APPEAL_STAKE_USD } from '@feed/shared';
 import type { SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import {
@@ -29,9 +29,6 @@ import type {
   JsonRpcResult,
 } from '../types/a2a';
 import { ErrorCode } from '../types/a2a';
-
-/** Minimum escrow stake for an appeal (USD). */
-const MIN_APPEAL_STAKE_USD = 10;
 
 function escrowErrorResponse(
   request: JsonRpcRequest,

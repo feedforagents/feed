@@ -52,6 +52,7 @@ mock.module('@feed/engine', () => ({
 
 mock.module('@feed/shared', () => ({
   logger: { info: mock(), warn: mock(), error: mock() },
+  MIN_APPEAL_STAKE_USD: 10,
 }));
 
 const { POST } = await import('../route');

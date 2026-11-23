@@ -80,7 +80,7 @@ import {
 import type { JsonValue } from '@feed/db';
 import { db } from '@feed/db';
 import { WalletService } from '@feed/engine';
-import { logger } from '@feed/shared';
+import { logger, MIN_APPEAL_STAKE_USD } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
@@ -242,6 +242,19 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
             success: false,
             error:
               'This escrow payment has already been used for an appeal by another user',
+          },
+          400
+        );
+      }
+
+      // The stake must meet the advertised minimum, the same floor the A2A
+      // escrow handler enforces. Escrows can be created for any positive
+      // amount, so without this a $1 escrow buys the lenient review.
+      if (Number(escrow.amountUSD) < MIN_APPEAL_STAKE_USD) {
+        return successResponse(
+          {
+            success: false,
+            error: `Appeal stake must be at least $${MIN_APPEAL_STAKE_USD}`,
           },
           400
         );
