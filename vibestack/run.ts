@@ -1,10 +1,9 @@
 // Shared bounded execution for the Quint, TypeScript, test and proof stages.
-import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { addAbortListener } from "node:events";
 import fs from "node:fs";
 import { availableParallelism } from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 
 // --- running tools -------------------------------------------------------------
 
@@ -64,15 +63,45 @@ function processes() {
   return snapshot.status === 0 && !snapshot.error ? processTable(snapshot.stdout) : [];
 }
 
-const execFileAsync = promisify(execFile);
-async function readCounters(command: string, args: string[], signal: AbortSignal) {
-  if (signal.aborted) return "";
-  try {
-    const running = execFileAsync(command, args, { encoding: "utf8", timeout: WATCH, killSignal: "SIGKILL" });
-    const stop = addAbortListener(signal, () => running.child.kill("SIGKILL"));
-    try { return (await running).stdout; }
-    finally { stop[Symbol.dispose](); }
-  } catch { return ""; }
+async function readCounters(command: string, args: string[], stopSignal: AbortSignal) {
+  if (stopSignal.aborted) return "";
+  return new Promise<string>((resolve) => {
+    let child: ChildProcess;
+    try { child = spawn(command, args, { detached: !WINDOWS, stdio: ["ignore", "pipe", "pipe"] }); }
+    catch { resolve(""); return; }
+    endsWithTheCheck(child, "SIGKILL");
+    const chunks: Buffer[] = [];
+    let stdoutBytes = 0, stderrBytes = 0, finished = false;
+    const finish = (value: string) => {
+      if (finished) return;
+      finished = true;
+      cancellation[Symbol.dispose]();
+      chunks.length = 0;
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve(value);
+    };
+    const stop = () => {
+      if (finished) return;
+      finish("");
+      signal(child, "SIGKILL");
+      child.unref();
+    };
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (finished) return;
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > 1 << 20) stop();
+      else chunks.push(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (finished) return;
+      stderrBytes += chunk.length;
+      if (stderrBytes > 1 << 20) stop();
+    });
+    child.on("error", stop);
+    child.once("close", (code) => finish(code === 0 ? Buffer.concat(chunks).toString("utf8") : ""));
+    const cancellation = addAbortListener(stopSignal, stop);
+  });
 }
 
 /** The processes in `table` that `child` started, itself included. */

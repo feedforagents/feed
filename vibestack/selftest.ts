@@ -3868,6 +3868,63 @@ setInterval(() => {}, 60_000);`,
 import { spawn } from "node:child_process";
 const writer = spawn(process.execPath, ["inherited.mjs"], { stdio: ["ignore", process.stdout, process.stderr] });
 writer.once("spawn", () => { fs.writeFileSync("writer.pid", String(writer.pid)); process.exit(0); });`,
+      "accounting-run.ts": read("vibestack/run.ts"),
+      "accounting-hold.mjs": 'process.send("ready");\nsetInterval(() => {}, 60_000);\n',
+      "ps": `#!${process.execPath}
+import fs from "node:fs";
+import { spawn } from "node:child_process";
+const child = spawn(process.execPath, ["accounting-hold.mjs"], { cwd: import.meta.dirname, stdio: ["ignore", process.stdout, process.stderr, "ipc"] });
+child.once("spawn", () => fs.writeFileSync(process.env.ACCOUNTING_MARKER, JSON.stringify([process.pid, child.pid])));
+child.once("message", () => {
+  fs.writeFileSync(process.env.ACCOUNTING_MARKER + ".ready", "");
+  if (process.env.ACCOUNTING_PARENT === "exited") process.exit(0);
+});
+`,
+      "accounting-abort.mjs": `import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { toolCpuSeconds } from "./accounting-run.ts";
+const turn = () => new Promise(resolve => setImmediate(resolve));
+const running = pid => {
+  const row = spawnSync("/bin/ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" });
+  return row.status === 0 && row.stdout.trim() !== "" && !row.stdout.trim().startsWith("Z");
+};
+const until = async ready => {
+  const deadline = performance.now() + 30_000;
+  while (!ready()) { assert.ok(performance.now() < deadline, "accounting helper did not reach its process boundary"); await turn(); }
+};
+fs.chmodSync("ps", 0o755);
+process.env.PATH = import.meta.dirname + path.delimiter + process.env.PATH;
+for (const mode of ["alive", "exited"]) {
+  process.env.ACCOUNTING_PARENT = mode;
+  const marker = path.join(import.meta.dirname, "accounting-" + mode);
+  process.env.ACCOUNTING_MARKER = marker;
+  const verifier = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], { stdio: "ignore" });
+  const closed = once(verifier, "close");
+  const controller = new AbortController();
+  let settled = false, helpers = [];
+  const sampling = toolCpuSeconds([verifier], controller.signal).then(value => { settled = true; return value; });
+  try {
+    await until(() => fs.existsSync(marker + ".ready"));
+    helpers = JSON.parse(fs.readFileSync(marker, "utf8"));
+    if (mode === "exited") await until(() => !running(helpers[0]));
+    else assert.ok(running(helpers[0]), "the accounting parent is still alive");
+    assert.ok(running(helpers[1]), "the accounting descendant holds the inherited output");
+    controller.abort();
+    await turn();
+    assert.ok(settled, mode + ": abort releases accounting without waiting for inherited output to close");
+    await until(() => helpers.every(pid => !running(pid)));
+  } finally {
+    controller.abort();
+    if (!helpers.length && fs.existsSync(marker)) helpers = JSON.parse(fs.readFileSync(marker, "utf8"));
+    for (const pid of [...helpers, verifier.pid]) { try { process.kill(pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; } }
+    await Promise.all([closed, sampling]);
+    await until(() => helpers.every(pid => !running(pid)));
+  }
+}
+`,
       "verifier.mjs": 'import { spawnSync } from "node:child_process";\nprocess.on("message", () => { const child = spawnSync(process.execPath, ["helper.mjs"]); process.send(child.status); });\nprocess.send("ready");\n',
     });
     const verifier = spawn(process.execPath, ["verifier.mjs"], { cwd: root, stdio: ["ignore", "ignore", "inherit", "ipc"] });
@@ -3899,6 +3956,8 @@ writer.once("spawn", () => { fs.writeFileSync("writer.pid", String(writer.pid));
       process.kill(writer, "SIGKILL");
       await outputClosed;
     }
+    const aborted = await exec(process.execPath, ["accounting-abort.mjs"], root);
+    assert.equal(aborted.status, 0, aborted.stderr);
   });
 
   test("a check that is interrupted, or that exits, ends each tool it started and what the tool started, in its process group or out of it, as it ends a tool that writes too much", { skip: process.platform === "win32" }, async () => {
