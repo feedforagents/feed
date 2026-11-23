@@ -1,4 +1,4 @@
-import { and, count, db, eq, users } from '@feed/db';
+import { and, count, db, eq, like, not, users } from '@feed/db';
 import type {
   LeaderboardEntry,
   LeaderboardPosition,
@@ -46,7 +46,21 @@ export class TradingLeaderboardService {
       db
         .select({ count: count() })
         .from(users)
-        .where(and(eq(users.isActor, false), eq(users.isAgent, false))),
+        // Board membership matches the population every user-facing
+        // list uses: human wallets only — no actors, no agents, no test
+        // accounts (isTest flag or a 'test-' id), no banned accounts.
+        // TradingPerformanceService applies the same predicate to the
+        // rows and the position count, so the total, the pages, and a
+        // player's own rank all measure the same membership.
+        .where(
+          and(
+            eq(users.isActor, false),
+            eq(users.isAgent, false),
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        ),
       TradingPerformanceService.getWalletLeaderboardRows(pageSize, skip),
     ]);
 

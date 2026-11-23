@@ -220,6 +220,10 @@ class InMemoryPerpDb implements PerpDbPort {
     return { ...pos };
   }
 
+  async claimFundingPeriod(): Promise<boolean> {
+    throw new Error('Funding is outside this fixture');
+  }
+
   async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
     return fn(this);
   }

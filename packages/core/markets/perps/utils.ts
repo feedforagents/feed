@@ -2,6 +2,10 @@ import type { PerpSide } from './types';
 
 export const MAX_PERP_USER_EXPOSURE = 1_000_000;
 
+export function getPerpMarketOrderSizeLimit(openInterest: number): number {
+  return Math.max(openInterest * 0.1, 10_000);
+}
+
 export function shouldLiquidate(
   currentPrice: number,
   liquidationPrice: number,

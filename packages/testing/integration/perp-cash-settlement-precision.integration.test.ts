@@ -10,205 +10,123 @@
 import { spyOn, test } from 'bun:test';
 import assert from 'node:assert/strict';
 import {
-  and,
-  balanceTransactions,
-  db,
-  eq,
-  inArray,
-  organizationState,
-  perpMarketSnapshots,
-  perpPositions,
-  pointsTransactions,
-  stockPrices,
-  tradingFeeOutbox,
-  tradingFees,
-  users,
-} from '@feed/db';
-import { WalletService } from '@feed/engine';
-import { floorPoints, isPointsAmount } from '@feed/shared';
-import { createPerpMarketService } from '../../../apps/web/src/app/api/markets/perps/_adapters';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const STARTING_BALANCE = 10_000;
+const roundTrips = [
+  { size: 10, leverage: 3, exit: 101.37 },
+  { size: 100, leverage: 3, exit: 98.61 },
+  { size: 10, leverage: 7, exit: 102.05 },
+  { size: 25, leverage: 6, exit: 99.17 },
+] as const;
 
-/** Smallest two-decimal amount that is not below `value`. */
-function ceilPoints(value: number): number {
-  if (isPointsAmount(value)) return value;
-  return Math.round((floorPoints(value) + 0.01) * 100) / 100;
-}
+const sides = ['long', 'short'] as const;
+const roundTripCase = (side: string, size: number, leverage: number) =>
+  `${side} ${size}@${leverage}x open charges and close credits settle to hundredths in the house's favor`;
+const splitCase =
+  'splitting a close into partial closes never credits more than the proceeds of each leg';
+const addFlipCase =
+  'adding to and flipping a position books the rounding of every opening charge';
+const legacyCase =
+  'a legacy subcent full close settles floored cents and zero fee';
 
-async function setPrice(ticker: string, price: number): Promise<void> {
-  await db
-    .update(organizationState)
-    .set({ currentPrice: price, basePrice: price })
-    .where(eq(organizationState.id, ticker));
-  await db
-    .update(perpMarketSnapshots)
-    .set({ currentPrice: price })
-    .where(eq(perpMarketSnapshots.ticker, ticker));
-}
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('runs perp cash settlement in a leased database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'perp-cash-settlement',
+      file: 'packages/testing/integration/perp-cash-settlement-precision.integration.test.ts',
+      cases: [
+        ...roundTrips.flatMap(({ size, leverage }) =>
+          sides.map((side) => roundTripCase(side, size, leverage))
+        ),
+        splitCase,
+        addFlipCase,
+        legacyCase,
+      ],
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  const {
+    and,
+    balanceTransactions,
+    db,
+    eq,
+    organizationState,
+    perpMarketSnapshots,
+    perpPositions,
+    users,
+  } = await import('@feed/db');
+  const { WalletService } = await import('@feed/engine');
+  const { floorPoints, isPointsAmount } = await import('@feed/shared');
+  const { createPerpMarketService } = await import(
+    '../../../apps/web/src/app/api/markets/perps/_adapters'
+  );
 
-async function ledger(uid: string, type: string) {
-  return db
-    .select()
-    .from(balanceTransactions)
-    .where(
-      and(
-        eq(balanceTransactions.userId, uid),
-        eq(balanceTransactions.type, type)
-      )
-    );
-}
+  const STARTING_BALANCE = 10_000;
 
-/** Ledger and fee types the perp service writes for the fixture user. */
-const PERP_TYPES = [
-  'perp_open',
-  'perp_add_to_position',
-  'perp_partial_close',
-  'perp_close',
-  'perp_flip_position',
-];
+  /** Smallest two-decimal amount that is not below `value`. */
+  function ceilPoints(value: number): number {
+    if (isPointsAmount(value)) return value;
+    return Math.round((floorPoints(value) + 0.01) * 100) / 100;
+  }
 
-/** Rows this fixture inserted, as returned by each insert. */
-type Acquired = {
-  userId?: string;
-  organizationId?: string;
-  snapshotTicker?: string;
-};
+  async function setPrice(ticker: string, price: number): Promise<void> {
+    await db
+      .update(organizationState)
+      .set({ currentPrice: price, basePrice: price })
+      .where(eq(organizationState.id, ticker));
+    await db
+      .update(perpMarketSnapshots)
+      .set({ currentPrice: price })
+      .where(eq(perpMarketSnapshots.ticker, ticker));
+  }
 
-/**
- * Removes only what the fixture acquired, in one transaction. A failed or
- * colliding insert acquires nothing, so it authorizes no delete. The owner row
- * is locked first. The fixture's own rows are deleted by owner together with
- * its market or a perp type, and the owner is deleted only if nothing else is
- * attached to it: an unexpected row aborts the transaction and keeps every row.
- */
-async function releaseFixture(acquired: Acquired): Promise<void> {
-  const { userId, organizationId, snapshotTicker } = acquired;
-  await db.transaction(async (tx) => {
-    if (userId) {
-      const [owner] = await tx
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.id, userId))
-        .for('update');
-      assert.equal(owner?.id, userId, 'fixture user is missing at teardown');
-      if (snapshotTicker) {
-        await tx
-          .delete(perpPositions)
-          .where(
-            and(
-              eq(perpPositions.userId, userId),
-              eq(perpPositions.ticker, snapshotTicker)
-            )
-          );
-      }
-      await tx
-        .delete(balanceTransactions)
-        .where(
-          and(
-            eq(balanceTransactions.userId, userId),
-            inArray(balanceTransactions.type, PERP_TYPES)
-          )
-        );
-      await tx
-        .delete(tradingFees)
-        .where(
-          and(
-            eq(tradingFees.userId, userId),
-            inArray(tradingFees.tradeType, PERP_TYPES)
-          )
-        );
-      await tx
-        .delete(tradingFeeOutbox)
-        .where(
-          and(
-            eq(tradingFeeOutbox.userId, userId),
-            inArray(tradingFeeOutbox.tradeType, PERP_TYPES)
-          )
-        );
-      await tx
-        .delete(pointsTransactions)
-        .where(
-          and(
-            eq(pointsTransactions.userId, userId),
-            eq(pointsTransactions.reason, 'trading_pnl')
-          )
-        );
-      const attached = await Promise.all([
-        tx.$count(perpPositions, eq(perpPositions.userId, userId)),
-        tx.$count(balanceTransactions, eq(balanceTransactions.userId, userId)),
-        tx.$count(tradingFees, eq(tradingFees.userId, userId)),
-        tx.$count(tradingFeeOutbox, eq(tradingFeeOutbox.userId, userId)),
-        tx.$count(pointsTransactions, eq(pointsTransactions.userId, userId)),
-      ]);
-      assert.deepEqual(
-        attached,
-        [0, 0, 0, 0, 0],
-        'a row this fixture did not create is attached to its user'
+  async function ledger(uid: string, type: string) {
+    return db
+      .select()
+      .from(balanceTransactions)
+      .where(
+        and(
+          eq(balanceTransactions.userId, uid),
+          eq(balanceTransactions.type, type)
+        )
       );
-      await tx.delete(users).where(eq(users.id, userId));
-    }
-    if (snapshotTicker) {
-      await tx
-        .delete(perpMarketSnapshots)
-        .where(eq(perpMarketSnapshots.ticker, snapshotTicker));
-    }
-    if (organizationId) {
-      await tx
-        .delete(stockPrices)
-        .where(eq(stockPrices.organizationId, organizationId));
-      await tx
-        .delete(organizationState)
-        .where(eq(organizationState.id, organizationId));
-    }
-  });
-}
+  }
 
-/**
- * `bookedPnL` returns the exact sum of the P&L deltas booked for the fixture
- * user. The calls still reach the database; the sum is read from them because
- * the lifetimePnL column rounds each write to a hundredth.
- */
-async function withFixture(
-  label: string,
-  run: (uid: string, ticker: string, bookedPnL: () => number) => Promise<void>
-): Promise<void> {
-  const uid = `perp-cash-${label}-${crypto.randomUUID()}`;
-  const ticker = `PCASH${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
-  const acquired: Acquired = {};
-  const recordPnL = spyOn(WalletService, 'recordPnL');
-  const bookedPnL = () =>
-    recordPnL.mock.calls
-      .filter(([userId]) => userId === uid)
-      .reduce((sum, [, pnl]) => sum + pnl, 0);
-  try {
-    const [user] = await db
-      .insert(users)
-      .values({
+  /**
+   * `bookedPnL` returns the exact sum of the P&L deltas booked for the fixture
+   * user. The calls still reach the database; the sum is read from them because
+   * the lifetimePnL column rounds each write to a hundredth.
+   */
+  async function withFixture(
+    label: string,
+    run: (uid: string, ticker: string, bookedPnL: () => number) => Promise<void>
+  ): Promise<void> {
+    const uid = `perp-cash-${label}-${crypto.randomUUID()}`;
+    const ticker = `PCASH${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+    const recordPnL = spyOn(WalletService, 'recordPnL');
+    const bookedPnL = () =>
+      recordPnL.mock.calls
+        .filter(([userId]) => userId === uid)
+        .reduce((sum, [, pnl]) => sum + pnl, 0);
+    try {
+      await db.insert(users).values({
         id: uid,
         username: uid,
         virtualBalance: String(STARTING_BALANCE),
         totalDeposited: String(STARTING_BALANCE),
         lifetimePnL: '0',
         updatedAt: new Date(),
-      })
-      .returning({ id: users.id });
-    assert.equal(user?.id, uid, 'fixture user was not inserted');
-    acquired.userId = uid;
-    const [organization] = await db
-      .insert(organizationState)
-      .values({
+      });
+      await db.insert(organizationState).values({
         id: ticker,
         currentPrice: 100,
         basePrice: 100,
         updatedAt: new Date(),
-      })
-      .returning({ id: organizationState.id });
-    assert.equal(organization?.id, ticker, 'fixture market was not inserted');
-    acquired.organizationId = ticker;
-    const [snapshot] = await db
-      .insert(perpMarketSnapshots)
-      .values({
+      });
+      await db.insert(perpMarketSnapshots).values({
         ticker,
         organizationId: ticker,
         currentPrice: 100,
@@ -222,175 +140,201 @@ async function withFixture(
           nextFundingTime: new Date().toISOString(),
           predictedRate: 0,
         },
-      })
-      .returning({ ticker: perpMarketSnapshots.ticker });
-    assert.equal(snapshot?.ticker, ticker, 'fixture snapshot was not inserted');
-    acquired.snapshotTicker = ticker;
-    await run(uid, ticker, bookedPnL);
-  } finally {
-    recordPnL.mockRestore();
-    await releaseFixture(acquired);
-  }
-}
-
-async function balanceOf(uid: string): Promise<number> {
-  const [user] = await db.select().from(users).where(eq(users.id, uid));
-  assert.ok(user);
-  return Number(user.virtualBalance);
-}
-
-async function lifetimePnLOf(uid: string): Promise<number> {
-  const [user] = await db.select().from(users).where(eq(users.id, uid));
-  assert.ok(user);
-  return Number(user.lifetimePnL);
-}
-
-const hundredths = (value: number) => Math.round(value * 100) / 100;
-
-function assertBooked(booked: number, balanceChange: number, label: string) {
-  assert.ok(
-    Math.abs(booked - balanceChange) < 1e-9,
-    `${label} booked P&L ${booked} for a balance change of ${balanceChange}`
-  );
-}
-
-const roundTrips = [
-  { size: 10, leverage: 3, exit: 101.37 },
-  { size: 100, leverage: 3, exit: 98.61 },
-  { size: 10, leverage: 7, exit: 102.05 },
-  { size: 25, leverage: 6, exit: 99.17 },
-] as const;
-
-for (const { size, leverage, exit } of roundTrips) {
-  for (const side of ['long', 'short'] as const) {
-    test(`${side} ${size}@${leverage}x open charges and close credits settle to hundredths in the house's favor`, async () => {
-      await withFixture(
-        `rt-${side}-${size}-${leverage}`,
-        async (uid, ticker, bookedPnL) => {
-          const service = createPerpMarketService({ withPriceImpact: true });
-
-          const opened = await service.openPosition({
-            userId: uid,
-            ticker,
-            side,
-            size,
-            leverage,
-          });
-          const owed = (opened.marginPaid ?? 0) + opened.feePaid;
-          const [openRow] = await ledger(uid, 'perp_open');
-          assert.ok(openRow);
-          const charged = -Number(openRow.amount);
-          assert.ok(
-            charged >= owed,
-            `open charged ${charged} for ${owed} owed (margin ${opened.marginPaid} + fee ${opened.feePaid})`
-          );
-          assert.equal(charged, ceilPoints(owed));
-          assert.equal(await balanceOf(uid), STARTING_BALANCE - charged);
-
-          await setPrice(ticker, exit);
-          const closed = await service.closePosition({
-            userId: uid,
-            positionId: opened.positionId,
-          });
-          assert.equal(closed.fullyClosed, true);
-          const proceeds = Math.max(
-            0,
-            (closed.marginPaid ?? 0) +
-              (closed.realizedPnL ?? 0) -
-              closed.feePaid
-          );
-          const [closeRow] = await ledger(uid, 'perp_close');
-          assert.ok(closeRow);
-          const credited = Number(closeRow.amount);
-          assert.ok(
-            credited <= proceeds,
-            `close credited ${credited} for ${proceeds} of proceeds`
-          );
-          assert.equal(credited, floorPoints(proceeds));
-          assert.equal(
-            await balanceOf(uid),
-            hundredths(STARTING_BALANCE - charged + credited)
-          );
-          assertBooked(bookedPnL(), credited - charged, 'round trip');
-          assert.equal(
-            await lifetimePnLOf(uid),
-            hundredths(credited - charged)
-          );
-        }
-      );
-    });
-  }
-}
-
-test('splitting a close into partial closes never credits more than the proceeds of each leg', async () => {
-  await withFixture('split', async (uid, ticker, bookedPnL) => {
-    const service = createPerpMarketService({ withPriceImpact: true });
-    const opened = await service.openPosition({
-      userId: uid,
-      ticker,
-      side: 'long',
-      size: 100,
-      leverage: 3,
-    });
-    await setPrice(ticker, 101.37);
-
-    let totalProceeds = 0;
-    for (const percentage of [0.5, 1]) {
-      const leg = await service.closePosition({
-        userId: uid,
-        positionId: opened.positionId,
-        percentage,
       });
-      totalProceeds += Math.max(
-        0,
-        (leg.marginPaid ?? 0) + (leg.realizedPnL ?? 0) - leg.feePaid
-      );
+      await run(uid, ticker, bookedPnL);
+    } finally {
+      recordPnL.mockRestore();
     }
+  }
 
-    const rows = [
-      ...(await ledger(uid, 'perp_partial_close')),
-      ...(await ledger(uid, 'perp_close')),
-    ];
-    assert.equal(rows.length, 2);
-    const credited = rows.reduce((sum, row) => sum + Number(row.amount), 0);
+  async function balanceOf(uid: string): Promise<number> {
+    const [user] = await db.select().from(users).where(eq(users.id, uid));
+    assert.ok(user);
+    return Number(user.virtualBalance);
+  }
+
+  async function lifetimePnLOf(uid: string): Promise<number> {
+    const [user] = await db.select().from(users).where(eq(users.id, uid));
+    assert.ok(user);
+    return Number(user.lifetimePnL);
+  }
+
+  const hundredths = (value: number) => Math.round(value * 100) / 100;
+
+  function assertBooked(booked: number, balanceChange: number, label: string) {
     assert.ok(
-      credited <= totalProceeds,
-      `split close credited ${credited} for ${totalProceeds} of proceeds`
+      Math.abs(booked - balanceChange) < 1e-9,
+      `${label} booked P&L ${booked} for a balance change of ${balanceChange}`
     );
-    for (const row of rows) {
-      assert.ok(isPointsAmount(Number(row.amount)));
+  }
+
+  for (const { size, leverage, exit } of roundTrips) {
+    for (const side of sides) {
+      test(roundTripCase(side, size, leverage), async () => {
+        await withFixture(
+          `rt-${side}-${size}-${leverage}`,
+          async (uid, ticker, bookedPnL) => {
+            const service = createPerpMarketService({ withPriceImpact: true });
+
+            const opened = await service.openPosition({
+              userId: uid,
+              ticker,
+              side,
+              size,
+              leverage,
+            });
+            const owed = (opened.marginPaid ?? 0) + opened.feePaid;
+            const [openRow] = await ledger(uid, 'perp_open');
+            assert.ok(openRow);
+            const charged = -Number(openRow.amount);
+            assert.ok(
+              charged >= owed,
+              `open charged ${charged} for ${owed} owed (margin ${opened.marginPaid} + fee ${opened.feePaid})`
+            );
+            assert.equal(charged, ceilPoints(owed));
+            assert.equal(await balanceOf(uid), STARTING_BALANCE - charged);
+
+            await setPrice(ticker, exit);
+            const closed = await service.closePosition({
+              userId: uid,
+              positionId: opened.positionId,
+            });
+            assert.equal(closed.fullyClosed, true);
+            const proceeds = Math.max(
+              0,
+              (closed.marginPaid ?? 0) +
+                (closed.realizedPnL ?? 0) -
+                closed.feePaid
+            );
+            const [closeRow] = await ledger(uid, 'perp_close');
+            assert.ok(closeRow);
+            const credited = Number(closeRow.amount);
+            assert.ok(
+              credited <= proceeds,
+              `close credited ${credited} for ${proceeds} of proceeds`
+            );
+            assert.equal(credited, floorPoints(proceeds));
+            assert.equal(
+              await balanceOf(uid),
+              hundredths(STARTING_BALANCE - charged + credited)
+            );
+            assertBooked(bookedPnL(), credited - charged, 'round trip');
+            assert.equal(
+              await lifetimePnLOf(uid),
+              hundredths(credited - charged)
+            );
+          }
+        );
+      });
     }
-    assertBooked(
-      bookedPnL(),
-      (await balanceOf(uid)) - STARTING_BALANCE,
-      'split round trip'
-    );
-  });
-});
+  }
 
-test('adding to and flipping a position books the rounding of every opening charge', async () => {
-  await withFixture('add-flip', async (uid, ticker, bookedPnL) => {
-    const service = createPerpMarketService({ withPriceImpact: true });
-    const trade = (side: 'long' | 'short', size: number) =>
-      service.openPosition({ userId: uid, ticker, side, size, leverage: 3 });
+  test(splitCase, async () => {
+    await withFixture('split', async (uid, ticker, bookedPnL) => {
+      const service = createPerpMarketService({ withPriceImpact: true });
+      const opened = await service.openPosition({
+        userId: uid,
+        ticker,
+        side: 'long',
+        size: 100,
+        leverage: 3,
+      });
+      await setPrice(ticker, 101.37);
 
-    await trade('long', 10);
-    const added = await trade('long', 11);
-    assert.equal(added.rebalanceType, 'add');
-    await setPrice(ticker, 101.37);
-    const flipped = await trade('short', 35);
-    assert.equal(flipped.rebalanceType, 'flip');
-    await setPrice(ticker, 99.17);
-    const closed = await service.closePosition({
-      userId: uid,
-      positionId: flipped.positionId,
+      let totalProceeds = 0;
+      for (const percentage of [0.5, 1]) {
+        const leg = await service.closePosition({
+          userId: uid,
+          positionId: opened.positionId,
+          percentage,
+        });
+        totalProceeds += Math.max(
+          0,
+          (leg.marginPaid ?? 0) + (leg.realizedPnL ?? 0) - leg.feePaid
+        );
+      }
+
+      const rows = [
+        ...(await ledger(uid, 'perp_partial_close')),
+        ...(await ledger(uid, 'perp_close')),
+      ];
+      assert.equal(rows.length, 2);
+      const credited = rows.reduce((sum, row) => sum + Number(row.amount), 0);
+      assert.ok(
+        credited <= totalProceeds,
+        `split close credited ${credited} for ${totalProceeds} of proceeds`
+      );
+      for (const row of rows) {
+        assert.ok(isPointsAmount(Number(row.amount)));
+      }
+      assertBooked(
+        bookedPnL(),
+        (await balanceOf(uid)) - STARTING_BALANCE,
+        'split round trip'
+      );
     });
-    assert.equal(closed.fullyClosed, true);
-
-    assertBooked(
-      bookedPnL(),
-      (await balanceOf(uid)) - STARTING_BALANCE,
-      'open, add, flip and close'
-    );
   });
-});
+
+  test(addFlipCase, async () => {
+    await withFixture('add-flip', async (uid, ticker, bookedPnL) => {
+      const service = createPerpMarketService({ withPriceImpact: true });
+      const trade = (side: 'long' | 'short', size: number) =>
+        service.openPosition({ userId: uid, ticker, side, size, leverage: 3 });
+
+      await trade('long', 10);
+      const added = await trade('long', 11);
+      assert.equal(added.rebalanceType, 'add');
+      await setPrice(ticker, 101.37);
+      const flipped = await trade('short', 35);
+      assert.equal(flipped.rebalanceType, 'flip');
+      await setPrice(ticker, 99.17);
+      const closed = await service.closePosition({
+        userId: uid,
+        positionId: flipped.positionId,
+      });
+      assert.equal(closed.fullyClosed, true);
+
+      const balanceChange = hundredths(
+        (await balanceOf(uid)) - STARTING_BALANCE
+      );
+      assertBooked(bookedPnL(), balanceChange, 'open, add, flip and close');
+      assert.equal(await lifetimePnLOf(uid), balanceChange);
+    });
+  });
+
+  test(legacyCase, async () => {
+    await withFixture('legacy-subcent', async (uid, ticker) => {
+      const positionId = crypto.randomUUID();
+      const size = 0.009;
+      await db
+        .update(perpMarketSnapshots)
+        .set({ openInterest: size })
+        .where(eq(perpMarketSnapshots.ticker, ticker));
+      // Seed an existing legacy position. The new-order minimum still applies.
+      await db.insert(perpPositions).values({
+        id: positionId,
+        userId: uid,
+        ticker,
+        organizationId: ticker,
+        side: 'long',
+        entryPrice: 100,
+        currentPrice: 100,
+        size,
+        leverage: 1,
+        liquidationPrice: 10,
+        unrealizedPnL: 0,
+        unrealizedPnLPercent: 0,
+        fundingPaid: -0.025,
+        lastUpdated: new Date(),
+      });
+      const service = createPerpMarketService();
+      const closed = await service.closePosition({ userId: uid, positionId });
+      const [credit] = await ledger(uid, 'perp_close');
+      assert.equal(closed.fullyClosed, true);
+      assert.equal(closed.feePaid, 0);
+      assert.equal(Number(credit?.amount), 0.03);
+      assert.equal(await balanceOf(uid), STARTING_BALANCE + 0.03);
+      assert.equal(await lifetimePnLOf(uid), 0.02);
+    });
+  });
+}

@@ -48,6 +48,7 @@ import {
 } from '@feed/db';
 import { npcTrades } from '@feed/db/schema';
 import {
+  createNpcPerpSettlement,
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
   createPerpSettlement,
@@ -68,6 +69,7 @@ import { floorPoints, isPureRepost } from '@feed/shared';
 import { agentPnLService } from '../services/AgentPnLService';
 import { logger } from '../shared/logger';
 import { generateSnowflakeId } from '../shared/snowflake';
+import type { NpcMarketClue } from './npc-market-clue';
 import { topicDiversityService } from './TopicDiversityService';
 import { resolvePerpTicker } from './utils/resolvePerpTicker';
 
@@ -270,11 +272,14 @@ export interface DirectTradeResult {
 }
 
 export interface DirectPostParams {
+  marketClue?: NpcMarketClue;
   agentUserId: string;
   content: string;
 }
 
 export interface DirectPostResult {
+  marketClueStatus?: 'published' | 'duplicate' | 'stale';
+  rejection?: 'post-diversity';
   success: boolean;
   postId?: string;
   error?: string;
@@ -905,12 +910,7 @@ async function executePerpTrade(params: {
   const walletAdapter = createPerpWalletAdapter(isNpc);
 
   const service = new PerpMarketService({
-    settlement: createPerpSettlement({
-      system: isNpc ? 'npc_perp_trade' : undefined,
-      wallet: isNpc
-        ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-        : undefined,
-    }),
+    settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: walletAdapter,
     cache: createPerpTradesCachePort(),
@@ -1056,12 +1056,7 @@ async function executeClosePerpPosition(params: {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
     const service = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: isNpc ? 'npc_perp_trade' : undefined,
-        wallet: isNpc
-          ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-          : undefined,
-      }),
+      settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
       cache: createPerpTradesCachePort(),
@@ -1147,7 +1142,7 @@ async function executeClosePerpPosition(params: {
 export async function executeDirectPost(
   params: DirectPostParams
 ): Promise<DirectPostResult> {
-  const { agentUserId, content } = params;
+  const { agentUserId, content, marketClue } = params;
 
   if (!content || content.trim().length < 5) {
     return { success: false, error: 'Content too short' };
@@ -1174,6 +1169,7 @@ export async function executeDirectPost(
 
     return {
       success: false,
+      rejection: 'post-diversity',
       error: `Content rejected: ${diversityIssues[0]}`,
     };
   }
@@ -1219,6 +1215,7 @@ export async function executeDirectPost(
           );
           return {
             success: false,
+            rejection: 'post-diversity',
             error: 'Content too similar to a recent post by another NPC',
           };
         }
@@ -1241,16 +1238,30 @@ export async function executeDirectPost(
   const postId = await generateSnowflakeId();
   const now = new Date();
 
-  await db.insert(posts).values({
+  const post = {
     id: postId,
     content: cleanContent,
     authorId: agentUserId,
     timestamp: now,
     createdAt: now,
-  });
+  };
+  if (marketClue) {
+    const { publishNpcMarketClue } = await import('./npc-market-clue');
+    const marketClueStatus = await publishNpcMarketClue(marketClue, post);
+    if (marketClueStatus !== 'published') {
+      return { success: true, marketClueStatus };
+    }
+  } else {
+    await db.insert(posts).values(post);
+  }
 
   // Record topic coverage for future diversity checks
-  topicDiversityService.recordTopicCoverage(agentUserId, cleanContent);
+  topicDiversityService.recordTopicCoverage(
+    agentUserId,
+    cleanContent,
+    undefined,
+    post.timestamp
+  );
 
   // Generate and store tags. Tagging is best-effort: the post is already
   // committed, so a tag-generation or tag-storage failure must not report
@@ -1303,6 +1314,7 @@ export async function executeDirectPost(
   return {
     success: true,
     postId,
+    ...(marketClue && { marketClueStatus: 'published' }),
   };
 }
 

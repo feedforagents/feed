@@ -14,6 +14,7 @@ import { execFileSync } from 'node:child_process';
 import { getAgentLLMStatus } from '@feed/agents/llm';
 import {
   actorState,
+  and,
   checkDatabaseHealth,
   closeDatabase,
   db,
@@ -23,6 +24,8 @@ import {
   games,
   gte,
   isNotNull,
+  isNull,
+  lte,
   organizationState,
   posts,
   questions,
@@ -94,10 +97,18 @@ async function checkGameStatus(): Promise<void> {
     .from(posts);
   const postCount = Number(postCountResult[0]?.count || 0);
 
+  const now = new Date();
+  const publicationWindowStart = new Date(now.getTime() - 5 * 60 * 1000);
   const recentPostsResult = await db
     .select({ count: drizzleCount() })
     .from(posts)
-    .where(gte(posts.createdAt, new Date(Date.now() - 5 * 60 * 1000)));
+    .where(
+      and(
+        gte(posts.timestamp, publicationWindowStart),
+        lte(posts.timestamp, now),
+        isNull(posts.deletedAt)
+      )
+    );
   const recentPosts = Number(recentPostsResult[0]?.count || 0);
   console.log(`Posts: ${postCount} total, ${recentPosts} in last 5 minutes`);
 

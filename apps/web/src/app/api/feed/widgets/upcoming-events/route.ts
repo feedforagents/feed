@@ -75,6 +75,13 @@ interface UpcomingEvent {
   relatedOrganizationId?: string;
 }
 
+const dayMs = 24 * 60 * 60 * 1000;
+const timeframeDays = {
+  '24h': 1,
+  '7d': FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS,
+  '30d': 30,
+} as const;
+
 export const GET = withErrorHandling(async (request: NextRequest) => {
   // Validate query parameters
   const { searchParams } = new URL(request.url);
@@ -82,7 +89,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     limit: searchParams.get('limit') || '10',
     timeframe: searchParams.get('timeframe') || '7d',
   };
-  UpcomingEventsQuerySchema.parse(queryParams);
+  const { limit, timeframe } = UpcomingEventsQuerySchema.parse(queryParams);
+  const eventLimit = Math.min(limit, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
+  const now = new Date();
+  const window = {
+    gte: now,
+    lte: new Date(now.getTime() + timeframeDays[timeframe] * dayMs),
+  };
 
   // Optional auth - upcoming events are public but RLS still applies
   const authUser = await optionalAuth(request).catch(() => null);
@@ -92,22 +105,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     authUser && authUser.userId
       ? await asUser(authUser, async (db) => {
           const eventsList: UpcomingEvent[] = [];
+          // Ordering key per event id. The date/time strings pushed below are
+          // display-only (month/day, no year), so re-parsing them to sort would
+          // pin every event to 2001 and order January before December across
+          // the year boundary; the source timestamp keeps the true chronology.
+          const sortTimes = new Map<string, number>();
 
           // 1. Get active questions that will resolve soon (within configured days)
           const activeQuestions = await db.question.findMany({
             where: {
               status: 'active',
-              resolutionDate: {
-                gte: new Date(), // Only future resolutions
-                lte: new Date(
-                  Date.now() +
-                    FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS *
-                      24 *
-                      60 *
-                      60 *
-                      1000
-                ),
-              },
+              resolutionDate: window,
             },
             orderBy: {
               resolutionDate: 'asc',
@@ -118,16 +126,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           // Transform questions into upcoming events (hinting but not revealing)
           for (const question of activeQuestions) {
             const resolutionDate = new Date(question.resolutionDate);
-            const now = new Date();
             const daysUntil = Math.ceil(
-              (resolutionDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+              (resolutionDate.getTime() - now.getTime()) / dayMs
             );
-
-            if (
-              daysUntil > FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS ||
-              daysUntil < 0
-            )
-              continue;
 
             // Check if it's happening soon (within configured hours = "LIVE")
             const hoursUntil =
@@ -208,6 +209,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               }
             }
 
+            sortTimes.set(question.id, resolutionDate.getTime());
             eventsList.push({
               id: question.id,
               title,
@@ -232,7 +234,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             by: ['eventType'],
             where: {
               timestamp: {
-                gte: new Date(), // Only future events
+                gte: now, // Only future events
               },
             },
             take: 20,
@@ -275,17 +277,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
           const upcomingWorldEvents = await db.worldEvent.findMany({
             where: {
-              timestamp: {
-                gte: new Date(), // Future events only
-                lte: new Date(
-                  Date.now() +
-                    FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS *
-                      24 *
-                      60 *
-                      60 *
-                      1000
-                ),
-              },
+              timestamp: window,
               visibility: 'public', // Only show public events
               ...(eventTypeFilter.length > 0
                 ? {
@@ -316,7 +308,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             });
 
             const hoursUntil =
-              (eventDate.getTime() - Date.now()) / (1000 * 60 * 60);
+              (eventDate.getTime() - now.getTime()) / (1000 * 60 * 60);
             const isLive =
               hoursUntil <= FEED_WIDGET_CONFIG.LIVE_EVENT_HOURS &&
               hoursUntil >= 0;
@@ -337,6 +329,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             else if (eventTypeLower.includes('conference'))
               title = 'Tech Conference';
 
+            sortTimes.set(event.id, eventDate.getTime());
             eventsList.push({
               id: event.id,
               title,
@@ -358,35 +351,30 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             });
           }
 
-          // Sort by date/time and take top N
+          // Sort by the source timestamp and take top N. Re-parsing the
+          // display strings here would ignore the year (a missing year parses
+          // as 2001), flipping December/January order at the year boundary.
           const sortedEvents = eventsList
-            .sort((a, b) => {
-              const dateA = new Date(`${a.date} ${a.time || ''}`).getTime();
-              const dateB = new Date(`${b.date} ${b.time || ''}`).getTime();
-              return dateA - dateB;
-            })
-            .slice(0, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
+            .sort(
+              (a, b) => (sortTimes.get(a.id) ?? 0) - (sortTimes.get(b.id) ?? 0)
+            )
+            .slice(0, eventLimit);
 
           return sortedEvents;
         })
       : await asPublic(async (db) => {
           const eventsList: UpcomingEvent[] = [];
+          // Ordering key per event id. The date/time strings pushed below are
+          // display-only (month/day, no year), so re-parsing them to sort would
+          // pin every event to 2001 and order January before December across
+          // the year boundary; the source timestamp keeps the true chronology.
+          const sortTimes = new Map<string, number>();
 
           // 1. Get active questions that will resolve soon (within configured days)
           const activeQuestions = await db.question.findMany({
             where: {
               status: 'active',
-              resolutionDate: {
-                gte: new Date(), // Only future resolutions
-                lte: new Date(
-                  Date.now() +
-                    FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS *
-                      24 *
-                      60 *
-                      60 *
-                      1000
-                ),
-              },
+              resolutionDate: window,
             },
             orderBy: {
               resolutionDate: 'asc',
@@ -397,16 +385,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           // Transform questions into upcoming events (hinting but not revealing)
           for (const question of activeQuestions) {
             const resolutionDate = new Date(question.resolutionDate);
-            const now = new Date();
             const daysUntil = Math.ceil(
-              (resolutionDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+              (resolutionDate.getTime() - now.getTime()) / dayMs
             );
-
-            if (
-              daysUntil > FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS ||
-              daysUntil < 0
-            )
-              continue;
 
             // Check if it's happening soon (within configured hours = "LIVE")
             const hoursUntil =
@@ -487,6 +468,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               }
             }
 
+            sortTimes.set(question.id, resolutionDate.getTime());
             eventsList.push({
               id: question.id,
               title,
@@ -511,7 +493,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             by: ['eventType'],
             where: {
               timestamp: {
-                gte: new Date(), // Only future events
+                gte: now, // Only future events
               },
             },
             take: 20,
@@ -554,17 +536,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
           const upcomingWorldEvents = await db.worldEvent.findMany({
             where: {
-              timestamp: {
-                gte: new Date(), // Future events only
-                lte: new Date(
-                  Date.now() +
-                    FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS *
-                      24 *
-                      60 *
-                      60 *
-                      1000
-                ),
-              },
+              timestamp: window,
               visibility: 'public', // Only show public events
               ...(eventTypeFilter.length > 0
                 ? {
@@ -595,7 +567,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             });
 
             const hoursUntil =
-              (eventDate.getTime() - Date.now()) / (1000 * 60 * 60);
+              (eventDate.getTime() - now.getTime()) / (1000 * 60 * 60);
             const isLive =
               hoursUntil <= FEED_WIDGET_CONFIG.LIVE_EVENT_HOURS &&
               hoursUntil >= 0;
@@ -616,6 +588,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             else if (eventTypeLower.includes('conference'))
               title = 'Tech Conference';
 
+            sortTimes.set(event.id, eventDate.getTime());
             eventsList.push({
               id: event.id,
               title,
@@ -637,14 +610,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             });
           }
 
-          // Sort by date/time and take top N
+          // Sort by the source timestamp and take top N. Re-parsing the
+          // display strings here would ignore the year (a missing year parses
+          // as 2001), flipping December/January order at the year boundary.
           const sortedEvents = eventsList
-            .sort((a, b) => {
-              const dateA = new Date(`${a.date} ${a.time || ''}`).getTime();
-              const dateB = new Date(`${b.date} ${b.time || ''}`).getTime();
-              return dateA - dateB;
-            })
-            .slice(0, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
+            .sort(
+              (a, b) => (sortTimes.get(a.id) ?? 0) - (sortTimes.get(b.id) ?? 0)
+            )
+            .slice(0, eventLimit);
 
           return sortedEvents;
         });
