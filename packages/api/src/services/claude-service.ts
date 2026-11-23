@@ -1,3 +1,4 @@
+import { scheduledInferenceFetch } from '@feed/db';
 import OpenAI from 'openai';
 /**
  * Direct Claude (Anthropic) LLM calls
@@ -20,6 +21,7 @@ export async function callClaudeDirect(params: {
     const client = new OpenAI({
       apiKey: surplus.apiKey,
       baseURL: surplus.baseURL,
+      fetch: scheduledInferenceFetch,
     });
     const response = await client.chat.completions.create({
       model: surplus.model,

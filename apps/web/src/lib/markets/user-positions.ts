@@ -240,7 +240,17 @@ export async function getUserPositionsSnapshot({
         resolvedAt: toISOOrNull(position.resolvedAt),
       };
     })
-    .filter((position) => position.shares >= 0.01);
+    // The dust filter guards the open view: an active position below the
+    // minimum lot is not sellable and does not belong in the held list.
+    // Closed and resolved rows are different — selling every share is how
+    // a prediction position closes, and that sale zeroes the row's shares
+    // while its status becomes 'closed' and its realised PnL stays on the
+    // row. Filtering those rows out here would erase every sell-closed
+    // position from the closed view (and from status=all), even though
+    // the query above selected them for exactly that view.
+    .filter(
+      (position) => position.status !== 'active' || position.shares >= 0.01
+    );
 
   const perpStats = {
     totalPositions: mappedPerps.length,

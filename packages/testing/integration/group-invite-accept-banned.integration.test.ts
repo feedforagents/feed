@@ -1,125 +1,100 @@
-/**
- * Group invite accept: a user banned after the invite was sent must not be
- * able to turn the pending invite into group membership / chat access.
- *
- * Both invite-creating entry points refuse banned users up front
- * (POST /api/groups filters `isBanned: false`; POST
- * /api/groups/[groupId]/members returns 400 "Cannot add banned users to
- * groups"), and the ban write itself only flips `users.isBanned` — it does
- * not touch pending invites. Accept is the step that actually grants
- * membership, so it must re-check the ban at grant time.
- *
- * Requires DATABASE_URL pointing at a disposable database with schema applied.
- */
-
-import { afterAll, describe, expect, it } from 'bun:test';
-import { acceptGroupInvite, declineGroupInvite } from '@feed/api';
+/** Group invite acceptance parity. PRD §§8.1/9.5/12, MVP Phases 3/5. */
+import { expect, test } from 'bun:test';
 import {
-  and,
-  chatParticipants,
-  chats,
-  db,
-  eq,
-  groupInvites,
-  groupMembers,
-  groups,
-  inArray,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const created = {
-  users: [] as string[],
-  groups: [] as string[],
-  chats: [] as string[],
-  invites: [] as string[],
-};
+const bannedCase =
+  'refuses accept when the invitee was banned after the invite was sent';
+const validCase = 'still accepts for an invitee who is not banned';
+const declineCase = 'still lets a banned invitee decline the invite';
 
-async function createUser(options?: { isBanned?: boolean }): Promise<string> {
-  const id = await generateSnowflakeId();
-  await db.insert(users).values({
-    id,
-    username: `invb_${id.slice(-10)}`,
-    isActor: false,
-    isBanned: options?.isBanned ?? false,
-    updatedAt: new Date(),
-  });
-  created.users.push(id);
-  return id;
-}
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks group invite acceptance in disposable PostgreSQL', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'group-invite-accept-banned',
+      file: 'packages/testing/integration/group-invite-accept-banned.integration.test.ts',
+      cases: [bannedCase, validCase, declineCase],
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
 
-async function createGroupWithChat(ownerId: string): Promise<{
-  groupId: string;
-  chatId: string;
-}> {
-  const groupId = await generateSnowflakeId();
-  const chatId = await generateSnowflakeId();
-  await db.insert(groups).values({
-    id: groupId,
-    name: `Invite ban test ${groupId}`,
-    type: 'user',
-    ownerId,
-    createdById: ownerId,
-    updatedAt: new Date(),
-  });
-  await db.insert(chats).values({
-    id: chatId,
-    isGroup: true,
-    groupId,
-    updatedAt: new Date(),
-  });
-  created.groups.push(groupId);
-  created.chats.push(chatId);
-  return { groupId, chatId };
-}
+  const { acceptGroupInvite, declineGroupInvite } = await import('@feed/api');
+  const {
+    and,
+    chatParticipants,
+    chats,
+    db,
+    eq,
+    groupInvites,
+    groupMembers,
+    groups,
+    messages,
+    users,
+  } = await import('@feed/db');
+  const { generateSnowflakeId } = await import('@feed/shared');
 
-async function createInvite(
-  groupId: string,
-  invitedUserId: string,
-  invitedBy: string
-): Promise<string> {
-  const id = await generateSnowflakeId();
-  await db
-    .insert(groupInvites)
-    .values({ id, groupId, invitedUserId, invitedBy });
-  created.invites.push(id);
-  return id;
-}
+  async function createUser(options?: { isBanned?: boolean }): Promise<string> {
+    const id = await generateSnowflakeId();
+    await db.insert(users).values({
+      id,
+      username: `invb_${id.slice(-10)}`,
+      isActor: false,
+      isBanned: options?.isBanned ?? false,
+      updatedAt: new Date(),
+    });
+    return id;
+  }
 
-async function banUser(userId: string): Promise<void> {
-  await db
-    .update(users)
-    .set({ isBanned: true, bannedAt: new Date() })
-    .where(eq(users.id, userId));
-}
+  async function createGroupWithChat(ownerId: string): Promise<{
+    groupId: string;
+    chatId: string;
+  }> {
+    const groupId = await generateSnowflakeId();
+    const chatId = await generateSnowflakeId();
+    await db.insert(groups).values({
+      id: groupId,
+      name: `Invite ban test ${groupId}`,
+      type: 'user',
+      ownerId,
+      createdById: ownerId,
+      updatedAt: new Date(),
+    });
+    await db.insert(chats).values({
+      id: chatId,
+      isGroup: true,
+      groupId,
+      updatedAt: new Date(),
+    });
+    return { groupId, chatId };
+  }
 
-describe('group invite accept — banned invitee', () => {
-  afterAll(async () => {
+  async function createInvite(
+    groupId: string,
+    invitedUserId: string,
+    invitedBy: string
+  ): Promise<string> {
+    const id = await generateSnowflakeId();
     await db
-      .delete(groupMembers)
-      .where(inArray(groupMembers.groupId, created.groups));
-    await db
-      .delete(chatParticipants)
-      .where(inArray(chatParticipants.chatId, created.chats));
-    await db
-      .delete(groupInvites)
-      .where(inArray(groupInvites.id, created.invites));
-    await db.delete(chats).where(inArray(chats.id, created.chats));
-    await db.delete(groups).where(inArray(groups.id, created.groups));
-    await db.delete(users).where(inArray(users.id, created.users));
+      .insert(groupInvites)
+      .values({ id, groupId, invitedUserId, invitedBy });
+    return id;
+  }
 
-    const [leftoverUsers, leftoverInvites] = await Promise.all([
-      db.select().from(users).where(inArray(users.id, created.users)),
-      db
-        .select()
-        .from(groupInvites)
-        .where(inArray(groupInvites.id, created.invites)),
-    ]);
-    expect(leftoverUsers).toHaveLength(0);
-    expect(leftoverInvites).toHaveLength(0);
-  });
+  async function banUser(userId: string): Promise<void> {
+    await db
+      .update(users)
+      .set({ isBanned: true, bannedAt: new Date() })
+      .where(eq(users.id, userId));
+  }
 
-  it('refuses accept when the invitee was banned after the invite was sent', async () => {
+  function chatMessages(chatId: string) {
+    return db.select().from(messages).where(eq(messages.chatId, chatId));
+  }
+
+  test(bannedCase, async () => {
     const owner = await createUser();
     const invitee = await createUser();
     const { groupId, chatId } = await createGroupWithChat(owner);
@@ -164,9 +139,10 @@ describe('group invite accept — banned invitee', () => {
         )
       );
     expect(participants).toHaveLength(0);
+    expect(await chatMessages(chatId)).toHaveLength(0);
   });
 
-  it('still accepts for an invitee who is not banned (control)', async () => {
+  test(validCase, async () => {
     const owner = await createUser();
     const invitee = await createUser();
     const { groupId, chatId } = await createGroupWithChat(owner);
@@ -200,9 +176,15 @@ describe('group invite accept — banned invitee', () => {
         )
       );
     expect(participant?.isActive).toBe(true);
+    const joinMessages = await chatMessages(chatId);
+    expect(joinMessages).toHaveLength(1);
+    expect(joinMessages[0]).toMatchObject({
+      senderId: 'system',
+      type: 'system',
+    });
   });
 
-  it('still lets a banned invitee decline the invite', async () => {
+  test(declineCase, async () => {
     const owner = await createUser();
     const invitee = await createUser();
     const { groupId } = await createGroupWithChat(owner);
@@ -225,4 +207,4 @@ describe('group invite accept — banned invitee', () => {
       );
     expect(memberships).toHaveLength(0);
   });
-});
+}
