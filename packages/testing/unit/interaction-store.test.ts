@@ -229,7 +229,9 @@ describe('interactionStore mutations', () => {
     );
     // The store reconciles the header count with GET /api/posts/[id]
     // after the DELETE; here the server agrees with the optimistic value.
-    mockFetch.mockImplementationOnce(() => json({ commentCount: 2 }));
+    mockFetch.mockImplementationOnce(() =>
+      json({ data: { commentCount: 2 } })
+    );
 
     const ok = await useInteractionStore
       .getState()
@@ -268,7 +270,9 @@ describe('interactionStore mutations', () => {
       })
     );
     // GET /api/posts/[id] only counts comments the list can show.
-    mockFetch.mockImplementationOnce(() => json({ commentCount: 1 }));
+    mockFetch.mockImplementationOnce(() =>
+      json({ data: { commentCount: 1 } })
+    );
 
     const ok = await useInteractionStore
       .getState()

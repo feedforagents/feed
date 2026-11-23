@@ -417,12 +417,13 @@ export const useInteractionStore = create<InteractionStore>()(
             // with the server value; if the refetch fails the optimistic
             // value above stands.
             try {
-              const post = await requestJson<{ commentCount?: number }>(
-                `/api/posts/${encodeURIComponent(postId)}`
-              );
-              if (typeof post.commentCount === 'number') {
+              const post = await requestJson<{
+                data?: { commentCount?: number };
+              }>(`/api/posts/${encodeURIComponent(postId)}`);
+              const serverCount = post.data?.commentCount;
+              if (typeof serverCount === 'number') {
                 patchPost(postId, {
-                  commentCount: Math.max(0, post.commentCount),
+                  commentCount: Math.max(0, serverCount),
                 });
               }
             } catch {
