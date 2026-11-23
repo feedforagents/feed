@@ -32,6 +32,7 @@
 import {
   acceptGroupInvite,
   BusinessLogicError,
+  broadcastChatMessage,
   broadcastToChannel,
   checkRateLimitAsync,
   countVisiblePostComments,
@@ -2470,6 +2471,33 @@ export async function executeSendMessage(
       content: args.content,
     },
   });
+
+  // Push the message to open chat windows over SSE, as
+  // POST /api/chats/[id]/message does. While SSE is connected the web chat
+  // does not poll, so without this the recipient sees nothing until reload.
+  // The message has committed, so a delivery failure is logged only.
+  try {
+    await broadcastChatMessage(args.chatId, {
+      id: message.id,
+      content: message.content,
+      chatId: args.chatId,
+      senderId: agent.userId,
+      type: message.type ?? 'user',
+      createdAt: message.createdAt.toISOString(),
+      isDMChat: !chat.isGroup,
+    });
+  } catch (error) {
+    logger.warn(
+      'Failed to broadcast committed message',
+      {
+        chatId: args.chatId,
+        messageId: message.id,
+        userId: agent.userId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'MCP'
+    );
+  }
 
   // Deliver in-app notifications only (PRD D-28). The message has already
   // committed, so a notification failure must not invite a duplicate retry.
