@@ -128,6 +128,41 @@ import type { NextRequest } from 'next/server';
 import { trackServerEvent } from '@/lib/posthog/server';
 
 /**
+ * Bust the viewer's For You caches so isShared reflects a share/unshare
+ * immediately there too. buildForYouFeed snapshots the viewer's shares in
+ * the enrichment cache (namespace 'feed', 30s TTL) and the For You route
+ * caches the personalized ranked result (60s TTL); without this, the
+ * For You tab keeps showing the pre-action state until they expire —
+ * the same staleness the narrative bust prevents for Stories.
+ */
+async function invalidateForYouShareCaches(
+  userId: string,
+  context: string
+): Promise<void> {
+  // Await settlement of both deletions so the mutation response cannot
+  // precede them. A cache failure is logged only: the share/unshare has
+  // already committed and must not be reported as failed.
+  await Promise.all([
+    invalidateCache(`feed:for-you:enrichment:${userId}`, {
+      namespace: 'feed',
+    }).catch((err) =>
+      logger.warn(
+        'Failed to invalidate For You enrichment cache',
+        { error: err, userId },
+        context
+      )
+    ),
+    invalidateCache(`feed:for-you:ranked:v2:${userId}`).catch((err) =>
+      logger.warn(
+        'Failed to invalidate For You ranked cache',
+        { error: err, userId },
+        context
+      )
+    ),
+  ]);
+}
+
+/**
  * POST /api/posts/[id]/share
  *
  * Shares/reposts a post to the user's feed. Creates a repost post and share record.
@@ -183,7 +218,7 @@ export const POST = withErrorHandling(
     });
 
     // Bust the narrative enrichment cache so isShared reflects immediately
-    invalidateCache(narrativeEnrichmentKey(canonicalUserId), {
+    await invalidateCache(narrativeEnrichmentKey(canonicalUserId), {
       namespace: 'feed',
     }).catch((err) =>
       logger.warn(
@@ -191,6 +226,11 @@ export const POST = withErrorHandling(
         { error: err, userId: canonicalUserId },
         'POST /api/posts/[id]/share'
       )
+    );
+
+    await invalidateForYouShareCaches(
+      canonicalUserId,
+      'POST /api/posts/[id]/share'
     );
 
     trackServerEvent(canonicalUserId, 'post_shared', {
@@ -326,6 +366,23 @@ export const DELETE = withErrorHandling(
     logger.info(
       'Invalidated post caches after unshare',
       { postId: shareTargetPostId, requestedPostId: postId },
+      'DELETE /api/posts/[id]/share'
+    );
+
+    // Bust the narrative enrichment cache so isShared reflects immediately,
+    // matching the share path above (the like route busts it on unlike too)
+    await invalidateCache(narrativeEnrichmentKey(canonicalUserId), {
+      namespace: 'feed',
+    }).catch((err) =>
+      logger.warn(
+        'Failed to invalidate narrative enrichment cache on unshare',
+        { error: err, userId: canonicalUserId },
+        'DELETE /api/posts/[id]/share'
+      )
+    );
+
+    await invalidateForYouShareCaches(
+      canonicalUserId,
       'DELETE /api/posts/[id]/share'
     );
 

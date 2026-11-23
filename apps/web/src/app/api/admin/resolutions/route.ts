@@ -9,14 +9,23 @@
  */
 
 import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
-import { and, asc, db, eq, isNull, or, questions } from '@feed/db';
+import {
+  asc,
+  db,
+  isNotNull,
+  predictionResolutionWork,
+  questions,
+  sql,
+} from '@feed/db';
 import { toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { matchingDueDraft, pendingReview } from './review-filters';
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   await requireAdmin(request);
 
-  const pending = await db
+  const localnet = process.env.DEPLOYMENT_ENV === 'localnet';
+  const query = db
     .select({
       id: questions.id,
       questionNumber: questions.questionNumber,
@@ -29,22 +38,20 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       resolutionReviewStatus: questions.resolutionReviewStatus,
       requiresManualReview: questions.requiresManualReview,
       updatedAt: questions.updatedAt,
+      hasPrivateDraft: localnet
+        ? isNotNull(predictionResolutionWork.draft)
+        : sql<boolean>`false`,
     })
-    .from(questions)
-    .where(
-      and(
-        eq(questions.status, 'active'),
-        eq(questions.requiresManualReview, true),
-        or(
-          isNull(questions.resolutionReviewStatus),
-          eq(questions.resolutionReviewStatus, 'pending')
-        )
-      )
-    )
+    .from(questions);
+  const pending = await (localnet
+    ? query.leftJoin(predictionResolutionWork, matchingDueDraft(new Date()))
+    : query
+  )
+    .where(pendingReview)
     .orderBy(asc(questions.resolutionDate), asc(questions.id))
     .limit(200);
 
-  return successResponse({
+  const response = successResponse({
     success: true,
     items: pending.map((q) => ({
       id: q.id,
@@ -52,7 +59,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       text: q.text,
       outcome: q.outcome,
       resolutionDate: toISOOrNull(q.resolutionDate),
-      resolutionProofUrl: q.resolutionProofUrl ?? null,
+      resolutionProofUrl:
+        q.resolutionProofUrl ??
+        (q.hasPrivateDraft
+          ? `/api/admin/resolutions/${encodeURIComponent(q.id)}/proof`
+          : null),
       resolutionDescription: q.resolutionDescription ?? null,
       resolutionConfidence:
         typeof q.resolutionConfidence === 'number'
@@ -64,4 +75,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     })),
     count: pending.length,
   });
+  response.headers.set('Cache-Control', 'private, no-store');
+  return response;
 });

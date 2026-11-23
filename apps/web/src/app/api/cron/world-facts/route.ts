@@ -5,14 +5,9 @@
  * @access Cron (CRON_SECRET required)
  *
  * @description
- * Scheduled cron job that:
- * 1. Fetches RSS feeds from external news sources
- * 2. Generates parody headlines from real news
- * 3. Cleans up old headlines
- * 4. Generates new world facts from game activity (events, markets, questions, actors)
- *
- * Runs twice daily (6 AM and 6 PM UTC) to keep the world context fresh and prevent
- * content repetition across the game. Max execution time: 300s.
+ * Consolidates world facts twice daily at 6 AM and 6 PM UTC. In localnet,
+ * the authenticated ?mode=headlines job owns RSS and parodies on its own
+ * five-minute schedule while the game is running.
  *
  * @openapi
  * /api/cron/world-facts:
@@ -20,7 +15,7 @@
  *     tags:
  *       - Cron
  *     summary: Update world facts
- *     description: Fetches RSS feeds and generates parody headlines (requires CRON_SECRET)
+ *     description: Consolidates world facts (requires CRON_SECRET)
  *     security:
  *       - CronSecret: []
  *     responses:
@@ -37,7 +32,7 @@
  *                   type: integer
  *                 headlinesCleaned:
  *                   type: integer
- *       401:
+ *       403:
  *         description: Invalid or missing CRON_SECRET
  *
  * @example
@@ -52,10 +47,14 @@
  * @see {@link /lib/services/parody-headline-generator} Parody headline generator
  */
 
-import { requireCronAuth, successResponse, withErrorHandling } from '@feed/api';
-import type { ParodyHeadline } from '@feed/db';
 import {
-  createParodyHeadlineGenerator,
+  errorResponse,
+  requireCronAuth,
+  successResponse,
+  withErrorHandling,
+} from '@feed/api';
+import {
+  type DailyTopicContext,
   dailyTopicService,
   FeedLLMClient,
   rssFeedService,
@@ -64,50 +63,28 @@ import {
 } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { refreshHeadlines, runScheduledHeadlines } from './headlines';
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
-  // Security: Verify cron authorization (fail-closed in production)
   requireCronAuth(request, { jobName: 'WorldFactsCron' });
+
+  const mode = request.nextUrl.searchParams.get('mode');
+  if (mode === 'headlines') return runScheduledHeadlines();
+  if (mode !== null) {
+    return errorResponse('Unknown world facts mode', 'INVALID_MODE', 400);
+  }
 
   const startTime = Date.now();
   logger.info('🌍 World facts update started', undefined, 'Cron');
   const failedStages: string[] = [];
+  // Hosted environments retain their existing pipeline until the spend cap is
+  // deployed. The localnet headline schedule is the sole owner in localnet.
+  const headlineStats =
+    process.env.DEPLOYMENT_ENV === 'localnet'
+      ? undefined
+      : await refreshHeadlines(failedStages);
 
-  // Step 1: Fetch all RSS feeds
-  let feedResult = { fetched: 0, stored: 0, errors: 0 };
-  try {
-    logger.info('Fetching RSS feeds...', undefined, 'Cron');
-    feedResult = await rssFeedService.fetchAllFeeds();
-    logger.info(
-      `RSS feeds fetched: ${feedResult.fetched} sources, ${feedResult.stored} new headlines, ${feedResult.errors} errors`,
-      feedResult,
-      'Cron'
-    );
-  } catch (error) {
-    failedStages.push('rss');
-    logger.error('Error fetching RSS feeds', { error }, 'Cron');
-  }
-
-  // Step 2: Transform untransformed headlines into parodies
-  let parodies: ParodyHeadline[] = [];
-  try {
-    logger.info('Generating parody headlines...', undefined, 'Cron');
-    const untransformedHeadlines =
-      await rssFeedService.getUntransformedHeadlines(20); // Process 20 at a time
-
-    const generator = createParodyHeadlineGenerator();
-    parodies = await generator.processHeadlines(untransformedHeadlines);
-    logger.info(
-      `Generated ${parodies.length} parody headlines`,
-      { count: parodies.length },
-      'Cron'
-    );
-  } catch (error) {
-    failedStages.push('parodies');
-    logger.error('Error generating parody headlines', { error }, 'Cron');
-  }
-
-  // Step 3: Clean up old headlines (older than 7 days)
+  // Clean up old headlines (older than 7 days)
   let cleaned = 0;
   try {
     logger.info('Cleaning up old headlines...', undefined, 'Cron');
@@ -122,7 +99,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     logger.error('Error cleaning up old headlines', { error }, 'Cron');
   }
 
-  let dailyTopic = null;
+  let dailyTopic: DailyTopicContext | null = null;
   try {
     dailyTopic = await dailyTopicService.ensureTopicForDate(new Date());
   } catch (error) {
@@ -130,7 +107,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     logger.error('Error selecting daily topic', { error }, 'Cron');
   }
 
-  // Step 4: Generate new world facts from game activity
+  // Generate new world facts from game activity
   // This creates fresh context based on events, markets, questions, and actor activity
   logger.info(
     'Generating new world facts from game activity...',
@@ -154,7 +131,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     logger.error('Error generating world facts', { error }, 'Cron');
   }
 
-  // Step 5: Consolidate similar world facts to reduce context bloat
+  // Consolidate similar world facts to reduce context bloat
   let consolidationResult = { consolidated: 0, archived: 0, skipped: 0 };
   try {
     const llm = FeedLLMClient.forGameTick();
@@ -171,9 +148,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     '✅ World facts update completed',
     {
       duration: `${duration}ms`,
-      feedsFetched: feedResult.fetched,
-      newHeadlines: feedResult.stored,
-      parodiesGenerated: parodies.length,
+      ...headlineStats,
       headlinesCleaned: cleaned,
       dailyTopic: dailyTopic?.topicLabel ?? null,
       worldFactsGenerated: factsResult.generated,
@@ -190,9 +165,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     failedStages,
     duration,
     stats: {
-      feedsFetched: feedResult.fetched,
-      newHeadlines: feedResult.stored,
-      parodiesGenerated: parodies.length,
+      ...headlineStats,
       headlinesCleaned: cleaned,
       dailyTopic,
       worldFactsGenerated: factsResult.generated,

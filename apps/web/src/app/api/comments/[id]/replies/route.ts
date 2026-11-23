@@ -90,7 +90,15 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asUser, comments, eq, hasBlocked, posts, users } from '@feed/db';
+import {
+  asUser,
+  comments,
+  createCommentWithParentCheck,
+  eq,
+  hasBlocked,
+  posts,
+  users,
+} from '@feed/db';
 import {
   CreateCommentSchema,
   generateSnowflakeId,
@@ -122,6 +130,8 @@ export const POST = withErrorHandling(
     const body = await request.json();
     const validatedData = CreateCommentSchema.parse(body);
     const { content } = validatedData;
+
+    const replyId = await generateSnowflakeId();
 
     // Create reply with RLS
     const reply = await asUser(user, async (dbClient) => {
@@ -159,28 +169,21 @@ export const POST = withErrorHandling(
         );
       }
 
-      // Same rule as POST /api/posts/[id]/comments: a reply may not be
-      // posted when the post author and the replier blocked each other.
-      // Without this, a blocked user can keep participating in the
-      // thread — visible to every other reader — through this route
-      // while the top-level route refuses the identical action.
-      const [postBlocked, postBlockedMe] = await Promise.all([
-        hasBlocked(parentPost.authorId, user.userId),
-        hasBlocked(user.userId, parentPost.authorId),
+      // Apply the same bilateral post-author rule as the post comments route.
+      const [blockedByAuthor, blockedAuthor] = await Promise.all([
+        hasBlocked(parentPost.authorId, user.userId, dbClient),
+        hasBlocked(user.userId, parentPost.authorId, dbClient),
       ]);
-      if (postBlocked || postBlockedMe) {
+      if (blockedByAuthor || blockedAuthor) {
         throw new BusinessLogicError(
           'Cannot comment on this post',
           'BLOCKED_USER'
         );
       }
 
-      // Create reply (comment with parentCommentId)
       const now = new Date();
-      const replyId = await generateSnowflakeId();
-      const [newReply] = await dbClient
-        .insert(comments)
-        .values({
+      const result = await createCommentWithParentCheck(
+        {
           id: replyId,
           content: content.trim(),
           postId: parentComment.postId,
@@ -188,8 +191,18 @@ export const POST = withErrorHandling(
           parentCommentId,
           createdAt: now,
           updatedAt: now,
-        })
-        .returning();
+        },
+        dbClient
+      );
+      if (result.status === 'parent-deleted') {
+        throw new BusinessLogicError(
+          'Cannot reply to deleted content',
+          'CONTENT_DELETED'
+        );
+      }
+      if (result.status !== 'created') {
+        throw new NotFoundError('Parent comment', parentCommentId);
+      }
 
       // Fetch author details
       const [author] = await dbClient
@@ -203,7 +216,7 @@ export const POST = withErrorHandling(
         .where(eq(users.id, user.userId))
         .limit(1);
 
-      return { ...newReply, author };
+      return { ...result.comment, author };
     });
 
     logger.info(
