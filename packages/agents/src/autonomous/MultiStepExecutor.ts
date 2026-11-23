@@ -10,6 +10,7 @@
 
 import { setTimeout as waitForRetry } from 'node:timers/promises';
 import type { IAgentRuntime } from '@elizaos/core';
+import { settlePerpCharge } from '@feed/core/markets/perps';
 import {
   actorState,
   agentLogs,
@@ -25,11 +26,16 @@ import {
 } from '@feed/db';
 import {
   countTokensSync,
+  FEE_CONFIG,
   generateWorldContext,
   getSafeContextLimit,
   StaticDataRegistry,
 } from '@feed/engine';
-import { getSurplusConfig, type JsonValue } from '@feed/shared';
+import {
+  canonicalTradingFee,
+  getSurplusConfig,
+  type JsonValue,
+} from '@feed/shared';
 import { APICallError } from 'ai';
 import { type AgentLLMParams, callAgentLLM } from '../llm/agent-llm';
 import { resolveGroqModel } from '../llm/direct-groq';
@@ -1265,6 +1271,12 @@ ${describeNpcMarketClue(offeredMarketClue)}`
         ) {
           return 'TRADE amount must be finite and positive (zero is allowed only to close all holdings).';
         }
+        // Entry trades execute at most the current balance and need at least
+        // 1 point after that cap (executeDirectTrade).
+        const executedAmount = Math.min(amount, context.balance);
+        if (!closing && executedAmount < 1) {
+          return `Entry trades need at least 1 point after capping to your balance of ${context.balance}. Sell or close a position, or choose a different action.`;
+        }
 
         if (parameters.marketType === 'prediction') {
           const knownPredictionMarketIds = new Set([
@@ -1307,6 +1319,46 @@ ${describeNpcMarketClue(offeredMarketClue)}`
             const availableSize = Math.max(0, limit - sameSideSize);
             if (amount > availableSize) {
               return `Requested perp amount exceeds the available size limit of ${availableSize} points on ${marketId}. Reduce the amount or choose another action.`;
+            }
+            const minimum = market?.minOrderSize ?? position?.minOrderSize;
+            if (minimum !== undefined && executedAmount < minimum) {
+              return `Perp orders on ${marketId} need at least ${minimum} points after capping to your balance of ${context.balance}. Increase the amount or choose another action.`;
+            }
+            const flipping =
+              position !== undefined && `open_${position.side}` !== side;
+            // A flip opens the remainder past the held size as a new
+            // position, which must meet the minimum on its own
+            // (PerpMarketService.reduceOrFlipPosition).
+            if (
+              flipping &&
+              minimum !== undefined &&
+              executedAmount > position.size &&
+              executedAmount - position.size < minimum
+            ) {
+              const inverseSize = executedAmount - position.size;
+              return `Your TRADE would close your ${position.side} of ${position.size} points on ${marketId} and open the remaining ${inverseSize} points on the other side, below the minimum order size of ${minimum} points. Close the position exactly, or open at least ${position.size + minimum} points.`;
+            }
+            // Fresh direct orders use 1x, while adds inherit the held leverage.
+            const leverage = position ? position.leverage : 1;
+            if (!flipping && leverage !== undefined) {
+              const openFee =
+                executedAmount < 0.01
+                  ? 0
+                  : Math.max(
+                      canonicalTradingFee(
+                        executedAmount,
+                        FEE_CONFIG.TRADING_FEE_RATE
+                      ),
+                      FEE_CONFIG.MIN_FEE_AMOUNT
+                    );
+              const charge = settlePerpCharge(
+                executedAmount,
+                leverage,
+                openFee
+              );
+              if (charge > context.balance) {
+                return `Perp orders on ${marketId} cost ${charge} points including a ${openFee} point fee, which exceeds your balance of ${context.balance}. Reduce the amount so margin plus fee fits your balance, or choose another action.`;
+              }
             }
           }
         }

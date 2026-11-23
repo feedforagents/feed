@@ -114,7 +114,9 @@ export async function getPredictionMarkets(): Promise<
  */
 export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
   const orgStates = await getDbInstance().getOrganizationsByPrice();
-  const candidates: Array<Omit<PerpMarketContext, 'maxOrderSize'>> = [];
+  const candidates: Array<
+    Omit<PerpMarketContext, 'maxOrderSize' | 'minOrderSize'>
+  > = [];
 
   for (const state of orgStates.slice(0, 8)) {
     const staticOrg = StaticDataRegistry.getOrganization(state.id);
@@ -147,6 +149,7 @@ export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
     .select({
       ticker: perpMarketSnapshots.ticker,
       openInterest: perpMarketSnapshots.openInterest,
+      minOrderSize: perpMarketSnapshots.minOrderSize,
     })
     .from(perpMarketSnapshots)
     .where(
@@ -156,14 +159,17 @@ export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
       )
     );
   const limits = new Map(
-    snapshots.map(({ ticker, openInterest }) => [
+    snapshots.map(({ ticker, openInterest, minOrderSize }) => [
       ticker,
-      getPerpMarketOrderSizeLimit(openInterest),
+      {
+        maxOrderSize: getPerpMarketOrderSizeLimit(openInterest),
+        minOrderSize,
+      },
     ])
   );
   return candidates.flatMap((market) => {
-    const maxOrderSize = limits.get(market.ticker);
-    return maxOrderSize === undefined ? [] : [{ ...market, maxOrderSize }];
+    const limit = limits.get(market.ticker);
+    return limit === undefined ? [] : [{ ...market, ...limit }];
   });
 }
 
@@ -288,12 +294,14 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       ticker: perpPositions.ticker,
       side: perpPositions.side,
       size: perpPositions.size,
+      leverage: perpPositions.leverage,
       entryPrice: perpPositions.entryPrice,
       currentPrice: perpPositions.currentPrice,
       unrealizedPnL: perpPositions.unrealizedPnL,
       unrealizedPnLPercent: perpPositions.unrealizedPnLPercent,
       openedAt: perpPositions.openedAt,
       openInterest: perpMarketSnapshots.openInterest,
+      minOrderSize: perpMarketSnapshots.minOrderSize,
     })
     .from(perpPositions)
     .leftJoin(
@@ -332,10 +340,12 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       ticker: p.ticker,
       side: p.side,
       size: requireContextNumber(p.size, `position ${p.ticker} size`, 0),
+      leverage: p.leverage,
       maxOrderSize:
         p.openInterest === null
           ? undefined
           : getPerpMarketOrderSizeLimit(p.openInterest),
+      minOrderSize: p.minOrderSize ?? undefined,
       pnl: requireContextNumber(
         p.unrealizedPnL,
         `position ${p.ticker} unrealizedPnL`

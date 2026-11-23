@@ -109,7 +109,11 @@ function effectiveMaxLeverage(market: { maxLeverage?: number | null }): number {
  * binary noise (0.2 + 0.01 = 0.21000000000000002) cannot add a hundredth.
  * Previews use the same helpers so they quote the amount that will settle.
  */
-function settlePerpCharge(size: number, leverage: number, fee: number): number {
+export function settlePerpCharge(
+  size: number,
+  leverage: number,
+  fee: number
+): number {
   return new Decimal(size)
     .div(leverage)
     .plus(fee)
