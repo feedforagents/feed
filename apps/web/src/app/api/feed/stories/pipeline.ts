@@ -285,7 +285,7 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
   )}]::text[]`;
 
   const engagementRows = await db.execute(sql`
-    WITH RECURSIVE
+    WITH
     target_posts AS (
       SELECT unnest(${postIdsArray}) AS post_id
     ),
@@ -299,26 +299,27 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
     -- A comment counts only if it is reachable from its post through
     -- visible parents: replies under a soft-deleted parent are invisible
     -- on the post detail screen, so the card must not count them either
-    -- (#1994 rule, same as GET /api/posts).
-    eligible_comments AS MATERIALIZED (
-      SELECT c.id, c."postId", c."parentCommentId"
-      FROM "Comment" c
-      INNER JOIN target_posts tp ON c."postId" = tp.post_id
-      WHERE c."deletedAt" IS NULL
-    ),
-    visible_comments(id, "postId") AS (
-      SELECT id, "postId"
-      FROM eligible_comments
-      WHERE "parentCommentId" IS NULL
-      UNION ALL
-      SELECT child.id, child."postId"
-      FROM eligible_comments child
-      JOIN visible_comments parent ON child."parentCommentId" = parent.id
-    ),
+    -- (#1994 rule, same as GET /api/posts). The walk runs per post
+    -- (LATERAL) so one deep chain cannot rescan the whole pool at
+    -- every recursion level.
     comment_counts AS (
-      SELECT "postId" AS post_id, COUNT(*) AS count
-      FROM visible_comments
-      GROUP BY "postId"
+      SELECT tp.post_id AS post_id, COUNT(visible.id) AS count
+      FROM target_posts tp
+      LEFT JOIN LATERAL (
+        WITH RECURSIVE eligible_comments AS MATERIALIZED (
+          SELECT c.id, c."parentCommentId"
+          FROM "Comment" c
+          WHERE c."postId" = tp.post_id AND c."deletedAt" IS NULL
+        ),
+        visible_comments(id) AS (
+          SELECT id FROM eligible_comments WHERE "parentCommentId" IS NULL
+          UNION ALL
+          SELECT child.id FROM eligible_comments child
+          JOIN visible_comments parent ON child."parentCommentId" = parent.id
+        )
+        SELECT id FROM visible_comments
+      ) visible ON true
+      GROUP BY tp.post_id
     ),
     share_counts AS (
       SELECT s."postId" AS post_id, COUNT(*) AS count
