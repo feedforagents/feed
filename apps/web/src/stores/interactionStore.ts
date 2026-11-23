@@ -363,11 +363,14 @@ export const useInteractionStore = create<InteractionStore>()(
           );
           if (!result.ok) return null;
 
-          if (!parentId) {
-            const current = get().postInteractions.get(postId);
-            if (current) {
-              patchPost(postId, { commentCount: current.commentCount + 1 });
-            }
+          // A reply is a comment on this post too: the server counts it in
+          // the detail header total, so the displayed count must rise by
+          // one for top-level comments and replies alike. Skipping replies
+          // would leave the header one behind the list below it until the
+          // next full reload.
+          const current = get().postInteractions.get(postId);
+          if (current) {
+            patchPost(postId, { commentCount: current.commentCount + 1 });
           }
           return result.value;
         },
