@@ -194,13 +194,6 @@ export function middleware(request: NextRequest) {
     return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
-  // Research / model pilot form: no nav/sidebar (not linked in app).
-  if (pathname === '/research' || pathname.startsWith('/research/')) {
-    const requestHeaders = new Headers(request.headers);
-    requestHeaders.set('x-minimal-layout', '1');
-    return NextResponse.next({ request: { headers: requestHeaders } });
-  }
-
   // User signup onboarding: full-bleed page without sidebar/nav.
   if (pathname === '/onboarding' || pathname.startsWith('/onboarding/')) {
     const requestHeaders = new Headers(request.headers);

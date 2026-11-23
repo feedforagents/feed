@@ -272,8 +272,7 @@ export interface Trajectory {
 /**
  * Optional factory that returns an A2AClientInterface for a given agent
  * instance. When provided, the harness calls this instead of building a
- * default HarnessA2AClient. Use to inject FeedProductionClient or
- * SimulationA2AAdapter per instance.
+ * default HarnessA2AClient. Use to inject a SimulationA2AAdapter per instance.
  */
 export type ClientFactory = (instanceIndex: number) => A2AClientInterface;
 

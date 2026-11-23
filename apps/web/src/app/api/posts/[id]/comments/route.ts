@@ -97,6 +97,7 @@ import {
   count,
   createCommentWithParentCheck,
   db,
+  dbWrite,
   eq,
   hasBlocked,
   inArray,
@@ -433,9 +434,13 @@ export const POST = withErrorHandling(
     }
 
     // If parentCommentId provided, validate it exists and belongs to this post
+    let parentCommentAuthorId: string | undefined;
     if (parentCommentId) {
-      const [parentComment] = await db
-        .select({ id: comments.id, postId: comments.postId })
+      const [parentComment] = await dbWrite
+        .select({
+          postId: comments.postId,
+          authorId: comments.authorId,
+        })
         .from(comments)
         .where(
           and(eq(comments.id, parentCommentId), isNull(comments.deletedAt))
@@ -452,10 +457,12 @@ export const POST = withErrorHandling(
           'PARENT_COMMENT_MISMATCH'
         );
       }
+
+      parentCommentAuthorId = parentComment.authorId;
     }
 
     // Get the post to find the authorId for notifications
-    const [postRecord] = await db
+    const [postRecord] = await dbWrite
       .select({ id: posts.id, authorId: posts.authorId })
       .from(posts)
       .where(eq(posts.id, postId))
@@ -464,11 +471,29 @@ export const POST = withErrorHandling(
     // Check if either user has blocked the other
     if (postRecord) {
       const [isBlocked, hasBlockedMe] = await Promise.all([
-        hasBlocked(postRecord.authorId, canonicalUserId),
-        hasBlocked(canonicalUserId, postRecord.authorId),
+        hasBlocked(postRecord.authorId, canonicalUserId, dbWrite),
+        hasBlocked(canonicalUserId, postRecord.authorId, dbWrite),
       ]);
 
       if (isBlocked || hasBlockedMe) {
+        throw new BusinessLogicError(
+          'Cannot comment on this post',
+          'BLOCKED_USER'
+        );
+      }
+    }
+
+    // Apply the same bilateral rule to the parent author before writing a reply.
+    if (
+      parentCommentAuthorId &&
+      parentCommentAuthorId !== postRecord?.authorId
+    ) {
+      const [parentBlocked, parentBlockedMe] = await Promise.all([
+        hasBlocked(parentCommentAuthorId, canonicalUserId, dbWrite),
+        hasBlocked(canonicalUserId, parentCommentAuthorId, dbWrite),
+      ]);
+
+      if (parentBlocked || parentBlockedMe) {
         throw new BusinessLogicError(
           'Cannot comment on this post',
           'BLOCKED_USER'

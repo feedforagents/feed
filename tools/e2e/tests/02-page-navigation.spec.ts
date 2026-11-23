@@ -341,12 +341,4 @@ test.describe('Page Navigation - Mobile Responsive', () => {
     // Bottom nav may or may not exist depending on implementation
     expect(typeof isVisible).toBe('boolean');
   });
-
-  test('research page loads', async ({ page }) => {
-    await navigateTo(page, ROUTES.RESEARCH);
-    await waitForPageLoad(page);
-    const body = await page.locator('body').textContent();
-    expect(body).toBeTruthy();
-    expect(body!.length).toBeGreaterThan(0);
-  });
 });
