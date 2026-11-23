@@ -420,17 +420,17 @@ beforeAll(async () => {
   // transaction, which holds a pool connection while the count needs
   // another — a signed page with as many posts as the pool (5 in tests)
   // hung. These extra posts carry no comments.
-  const extraPostIds = await Promise.all(
-    Array.from({ length: 18 }, () => generateSnowflakeId())
-  );
-  const extraPostTagIds = await Promise.all(
-    Array.from({ length: 18 }, () => generateSnowflakeId())
+  const extraPostPairs = await Promise.all(
+    Array.from({ length: 18 }, async () => ({
+      postId: await generateSnowflakeId(),
+      postTagId: await generateSnowflakeId(),
+    }))
   );
   const insertedExtraPosts = await db
     .insert(posts)
     .values(
-      extraPostIds.map((id, i) => ({
-        id,
+      extraPostPairs.map(({ postId }, i) => ({
+        id: postId,
         content: `plain tag post ${i}`,
         authorId,
         timestamp: past,
@@ -442,8 +442,8 @@ beforeAll(async () => {
   const insertedExtraPostTags = await db
     .insert(postTags)
     .values(
-      extraPostIds.map((postId, i) => ({
-        id: extraPostTagIds[i],
+      extraPostPairs.map(({ postId, postTagId }) => ({
+        id: postTagId,
         postId,
         tagId,
         createdAt: past,
