@@ -18,13 +18,6 @@
  * unread chat notification, so an agent keeps reporting chat messages
  * its user can never see — and the count keeps rising after a mute.
  *
- * The last cases run the retained caller path itself: the feed plugin's
- * FEED_MESSAGES provider (registered on NPC runtimes in A2A mode) calls
- * FeedA2AClient.getUnreadCount, which maps to messaging.get_unread_count
- * with the account bound into the per-agent client. The client is built
- * exactly as production wiring builds it (real SDK client + the agent
- * card), with the direct same-process transport selected.
- *
  * Fixture ownership: every row this file creates is registered only from
  * the INSERT ... RETURNING result of the statement that created it, per
  * table. Cleanup deletes by those owned row IDs only — never by a
@@ -34,8 +27,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import assert from 'node:assert/strict';
-import { A2AClient } from '@a2a-js/sdk/client';
-import type { IAgentRuntime, Memory, State } from '@elizaos/core';
 import {
   count,
   db,
@@ -47,9 +38,6 @@ import {
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { FeedAgentExecutor } from '../../a2a/src/executors/feed-executor';
-import { feedAgentCard } from '../../a2a/src/feed-agent-card';
-import { FeedA2AClient } from '../../agents/src/plugins/feed/integration-a2a-sdk';
-import { messagesProvider } from '../../agents/src/plugins/feed/providers/messaging';
 
 type UnreadCountResult = { unreadCount: number };
 type NotificationsResult = { unreadCount: number };
@@ -254,63 +242,6 @@ describe('A2A messaging.get_unread_count moderation filter', () => {
       recipientId
     )) as unknown as NotificationsResult;
     expect(result.unreadCount).toBe(4);
-  });
-});
-
-describe('retained FEED_MESSAGES provider path', () => {
-  function buildClient(agentUserId: string) {
-    // Same construction as initializeAgentA2AClient: a real SDK client
-    // over the feed agent card, bound to one agent account. The direct
-    // transport below routes requests to the in-process executor with
-    // that bound account, exactly as a same-process deployment does.
-    const sdk = new A2AClient({
-      ...feedAgentCard,
-      url: 'http://127.0.0.1:9/api/a2a',
-    });
-    return new FeedA2AClient(sdk, agentUserId, {
-      agentUserId,
-      displayName: 'F84 Fixture Agent',
-      cachedAt: Date.now(),
-    });
-  }
-
-  it('serves the moderated count to the bound caller only', async () => {
-    const savedTransport = process.env.FEED_A2A_TRANSPORT;
-    process.env.FEED_A2A_TRANSPORT = 'direct';
-    try {
-      const recipientClient = buildClient(recipientId);
-      expect(recipientClient.isConnected()).toBe(true);
-
-      const direct =
-        (await recipientClient.getUnreadCount()) as unknown as UnreadCountResult;
-      expect(direct.unreadCount).toBe(3);
-
-      // The provider the feed plugin registers for NPC runtimes renders
-      // the same count from the same client.
-      const runtime = {
-        a2aClient: recipientClient,
-      } as unknown as IAgentRuntime;
-      const provided = await messagesProvider.get(
-        runtime,
-        {} as Memory,
-        {} as State
-      );
-      expect(provided.text).toContain('Unread messages: 3');
-
-      // Caller isolation: a client bound to a different account reports
-      // that account's count — identity comes from the bound client,
-      // never from a request parameter.
-      const viewerClient = buildClient(plainViewerId);
-      const viewer =
-        (await viewerClient.getUnreadCount()) as unknown as UnreadCountResult;
-      expect(viewer.unreadCount).toBe(2);
-    } finally {
-      if (savedTransport === undefined) {
-        delete process.env.FEED_A2A_TRANSPORT;
-      } else {
-        process.env.FEED_A2A_TRANSPORT = savedTransport;
-      }
-    }
   });
 });
 

@@ -257,7 +257,7 @@ Feed Instance (local)
 |---|---|---|
 | Agent LLM routing | `packages/agents/src/llm/agent-llm.ts` | Set HUGGINGFACE_MODEL_ENDPOINT |
 | Trajectory logging | `plugin-trajectory-logger` | Enable with recordTrajectories=true |
-| All agent actions | `packages/agents/src/plugins/feed/actions/` | 9 action types, all DB-verified |
+| Native NPC actions | `packages/agents/src/autonomous/DirectExecutors.ts` | Database-backed NPC actions |
 | APOLLO optimizer | `packages/training/python/src/training/` | Tested on H100 |
 | Kondo gate | `kondo-gate` package | Tested at 3% rate |
 | TurboQuant KV cache | `src/training/turboquant.py` | Full implementation |

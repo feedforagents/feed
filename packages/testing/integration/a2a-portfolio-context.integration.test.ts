@@ -17,16 +17,8 @@ import {
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
+import { z } from 'zod';
 import { FeedAgentExecutor } from '../../a2a/src/executors/feed-executor';
-import { resolveGroupChatByName } from '../../agents/src/autonomous/utils/context-gatherers';
-import {
-  chatsContextSchema,
-  organizationMentionsContextSchema,
-  perpetualMarketsContextSchema,
-  predictionMarketsContextSchema,
-  trendingContextSchema,
-  userMentionsContextSchema,
-} from '../../agents/src/plugins/feed/providers/context-contracts';
 import { recentMessagesProvider } from '../../agents/src/plugins/plugin-agent-core/src/providers/recent-messages';
 
 const userId = `portfolio-audit-${crypto.randomUUID()}`;
@@ -158,23 +150,24 @@ test('A2A rejects a nonexistent profile rather than inventing a zero-balance use
   ).rejects.toThrow('does not exist');
 });
 
-test('A2A market responses satisfy the prompt provider contracts', async () => {
-  const predictions = predictionMarketsContextSchema.parse(
-    await FeedAgentExecutor.executeDirectly(
-      'markets.list_prediction',
-      { status: 'active' },
-      userId
-    )
-  );
-  expect(predictions.predictions.length).toBeGreaterThan(0);
-  const perpetuals = perpetualMarketsContextSchema.parse(
+test('A2A lists the persisted prediction market and a perpetuals collection', async () => {
+  const predictions = z
+    .object({ predictions: z.array(z.object({ id: z.string() })) })
+    .parse(
+      await FeedAgentExecutor.executeDirectly(
+        'markets.list_prediction',
+        { status: 'active' },
+        userId
+      )
+    );
+  expect(predictions.predictions.some(({ id }) => id === userId)).toBe(true);
+  expect(
     await FeedAgentExecutor.executeDirectly(
       'markets.list_perpetuals',
       {},
       userId
     )
-  );
-  expect(Array.isArray(perpetuals.perpetuals)).toBe(true);
+  ).toMatchObject({ perpetuals: expect.any(Array) });
 });
 
 test('organization context resolves real names and tickers; user context retains agent identity', async () => {
@@ -200,22 +193,32 @@ test('organization context resolves real names and tickers; user context retains
     .onConflictDoNothing()
     .returning({ id: organizationState.id });
   createdOrgStateIds.push(...inserted.map((row) => row.id));
-  const { organizations } = organizationMentionsContextSchema.parse(
-    await FeedAgentExecutor.executeDirectly(
-      'stats.get_organizations',
-      { limit: 100 },
-      userId
-    )
-  );
+  const { organizations } = z
+    .object({
+      organizations: z.array(
+        z.object({ id: z.string(), name: z.string().min(1) })
+      ),
+    })
+    .parse(
+      await FeedAgentExecutor.executeDirectly(
+        'stats.get_organizations',
+        { limit: 100 },
+        userId
+      )
+    );
   expect(organizations.length).toBeGreaterThan(0);
   expect(organizations.every((org) => org.name !== org.id)).toBe(true);
-  const { users: found } = userMentionsContextSchema.parse(
-    await FeedAgentExecutor.executeDirectly(
-      'users.search',
-      { query: userId },
-      userId
-    )
-  );
+  const { users: found } = z
+    .object({
+      users: z.array(z.object({ id: z.string(), isAgent: z.boolean() })),
+    })
+    .parse(
+      await FeedAgentExecutor.executeDirectly(
+        'users.search',
+        { query: userId },
+        userId
+      )
+    );
   expect(found.find((user) => user.id === visibleAgentId)?.isAgent).toBe(true);
   expect(found.some((user) => user.id === userId)).toBe(false);
 });
@@ -256,7 +259,7 @@ test('notifications include actual unread totals independently of the page limit
   ).toEqual({ unreadCount: 1 });
 });
 
-test('named message destinations require exact, active, unambiguous group membership', async () => {
+test('A2A chat list includes only active memberships with real participants', async () => {
   for (const [suffix, name, isActive] of [
     ['one', 'Alerts_%', true],
     ['inactive', 'Inactive', false],
@@ -283,18 +286,24 @@ test('named message destinations require exact, active, unambiguous group member
       .insert(chatParticipants)
       .values({ id, userId, chatId: id, isActive });
   }
-  expect(await resolveGroupChatByName(userId, 'Alerts_%')).toBe(
-    `${userId}-one`
-  );
-  expect(await resolveGroupChatByName(userId, 'Alerts')).toBeNull();
-  expect(await resolveGroupChatByName(userId, 'Inactive')).toBeNull();
-  await db
-    .update(groups)
-    .set({ name: 'Alerts_%' })
-    .where(eq(groups.id, `${userId}-archive`));
-  await expect(resolveGroupChatByName(userId, 'Alerts_%')).rejects.toThrow(
-    'Ambiguous group name'
-  );
+  const result = z
+    .object({
+      chats: z.array(
+        z.object({
+          id: z.string(),
+          participants: z.array(z.object({ id: z.string() })),
+        })
+      ),
+    })
+    .parse(
+      await FeedAgentExecutor.executeDirectly('messaging.get_chats', {}, userId)
+    );
+  expect(result.chats.map(({ id }) => id).sort()).toEqual([
+    `${userId}-archive`,
+    `${userId}-one`,
+  ]);
+  for (const chat of result.chats)
+    expect(chat.participants).toEqual([{ id: userId }]);
 });
 
 test('reply context includes the unpersisted current message with and without stored history', async () => {
@@ -329,20 +338,6 @@ test('reply context includes the unpersisted current message with and without st
   }
 });
 
-test('chat context returns active participants instead of fabricating zero', async () => {
-  const result = chatsContextSchema.parse(
-    await FeedAgentExecutor.executeDirectly('messaging.get_chats', {}, userId)
-  );
-  expect(result.chats.length).toBe(2);
-  for (const chat of result.chats)
-    expect(chat.participants).toEqual([{ id: userId }]);
-  expect(() =>
-    chatsContextSchema.parse({
-      chats: [{ id: 'missing-members', name: null, isGroup: false }],
-    })
-  ).toThrow();
-});
-
 test('trending context preserves real tag identity and rejects orphaned tags', async () => {
   const now = new Date();
   await db.insert(tags).values({
@@ -361,23 +356,24 @@ test('trending context preserves real tag identity and rejects orphaned tags', a
     windowStart: now,
     windowEnd: now,
   });
-  const result = trendingContextSchema.parse(
+  expect(
     await FeedAgentExecutor.executeDirectly(
       'stats.trending_tags',
       { limit: 1 },
       userId
     )
-  );
-  expect(result.tags).toEqual([
-    {
-      id: userId,
-      name: userId,
-      displayName: 'Audit Tag',
-      category: null,
-      postCount: 0,
-      score: 1000000000,
-    },
-  ]);
+  ).toEqual({
+    tags: [
+      {
+        id: userId,
+        name: userId,
+        displayName: 'Audit Tag',
+        category: null,
+        postCount: 0,
+        score: 1000000000,
+      },
+    ],
+  });
   await db.delete(tags).where(eq(tags.id, userId));
   await expect(
     FeedAgentExecutor.executeDirectly(
@@ -386,7 +382,4 @@ test('trending context preserves real tag identity and rejects orphaned tags', a
       userId
     )
   ).rejects.toThrow('missing its required identity');
-  expect(() =>
-    trendingContextSchema.parse({ tags: [{ name: 'lost-id' }] })
-  ).toThrow();
 });

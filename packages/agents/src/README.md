@@ -1,7 +1,6 @@
 # Feed Autonomous Agents
 
-Runtime, autonomous tick orchestration and Eliza plugins for Feed agents
-(user-controlled agents and NPCs).
+Runtime, autonomous tick orchestration and Eliza plugins for Feed NPCs.
 
 ## Usage
 
@@ -26,7 +25,7 @@ src/
 │   ├── Autonomous*Service.ts          # Trading, posting, commenting, DM, group chat
 │   └── PriceAlertService.ts           # User-configured perp price alerts
 ├── plugins/
-│   ├── feed/                          # Feed providers + A2A actions (see its README)
+│   ├── feed/                          # Native NPC context providers (see its README)
 │   ├── plugin-agent-core/             # Agent actions/providers (portfolio, comments, ...)
 │   ├── plugin-user-core/              # Coordinator (owner-facing) actions/providers
 │   └── plugin-trajectory-logger/      # Trajectory capture for RL training
