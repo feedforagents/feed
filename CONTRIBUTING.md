@@ -262,7 +262,8 @@ The tooling package sets `--skip-gen-on-pack` in its prepare script. A
 generated models, which the tools' tarball does not contain.
 The three tool selftest jobs in `ci.yml` run only the listed `//#build` task and generate their scratch
 projects on demand. The packaged CLI test rebuilds from a clean copy of the
-workspace. Other GitHub Actions jobs use the same strict root
+workspace. The nightly check builds the tools during install and generates the
+application in its nightly task graph. Other GitHub Actions jobs use the same strict root
 `gen` task as verification, so a successful install warms the task cache. A failed generation leaves the
 remaining checks runnable and is retried by verification. Generated stories,
 browser build artifacts, compiler declarations and successful test receipts
