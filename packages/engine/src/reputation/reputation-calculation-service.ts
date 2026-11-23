@@ -249,7 +249,16 @@ export function calculateAverageROI(
 }
 
 /**
- * Update trading performance metrics
+ * Update trading performance metrics.
+ *
+ * Writes per-user trading state (trade counts, win rate, average ROI) to the
+ * `agent_performance_metrics` row and then recalculates reputation. This is
+ * the trading-metrics write half of the reputation system and is exported as
+ * part of the public `@feed/engine` API. The average ROI is computed by
+ * `calculateAverageROI`, which returns a neutral 0 for a zero or invalid
+ * investment base — matching `normalizePnL` and `calculateWinRate` — so a user
+ * with no recorded deposits never writes Infinity/NaN into the not-null
+ * `averageROI` column (which the user data-export route reads back).
  *
  * @param userId - User/agent ID
  * @param pnl - Profit/loss from trade
