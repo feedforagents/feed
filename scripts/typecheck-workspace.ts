@@ -21,7 +21,6 @@ const WORKSPACES = [
   'packages/examples/local-a2a-server',
   'packages/contracts',
   'apps/cli',
-  'apps/mobile',
   'apps/web',
 ] as const;
 
