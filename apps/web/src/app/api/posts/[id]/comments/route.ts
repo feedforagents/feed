@@ -95,7 +95,9 @@ import {
   asc,
   comments,
   count,
+  createCommentWithParentCheck,
   db,
+  dbWrite,
   eq,
   hasBlocked,
   inArray,
@@ -434,9 +436,8 @@ export const POST = withErrorHandling(
     // If parentCommentId provided, validate it exists and belongs to this post
     let parentCommentAuthorId: string | undefined;
     if (parentCommentId) {
-      const [parentComment] = await db
+      const [parentComment] = await dbWrite
         .select({
-          id: comments.id,
           postId: comments.postId,
           authorId: comments.authorId,
         })
@@ -461,7 +462,7 @@ export const POST = withErrorHandling(
     }
 
     // Get the post to find the authorId for notifications
-    const [postRecord] = await db
+    const [postRecord] = await dbWrite
       .select({ id: posts.id, authorId: posts.authorId })
       .from(posts)
       .where(eq(posts.id, postId))
@@ -470,8 +471,8 @@ export const POST = withErrorHandling(
     // Check if either user has blocked the other
     if (postRecord) {
       const [isBlocked, hasBlockedMe] = await Promise.all([
-        hasBlocked(postRecord.authorId, canonicalUserId),
-        hasBlocked(canonicalUserId, postRecord.authorId),
+        hasBlocked(postRecord.authorId, canonicalUserId, dbWrite),
+        hasBlocked(canonicalUserId, postRecord.authorId, dbWrite),
       ]);
 
       if (isBlocked || hasBlockedMe) {
@@ -482,13 +483,14 @@ export const POST = withErrorHandling(
       }
     }
 
-    // Replies use the same rule against the parent comment author: a reply
-    // under a comment whose author blocked the replier (or vice versa) is
-    // refused, just like a comment on a blocking post author's post.
-    if (parentCommentAuthorId) {
+    // Apply the same bilateral rule to the parent author before writing a reply.
+    if (
+      parentCommentAuthorId &&
+      parentCommentAuthorId !== postRecord?.authorId
+    ) {
       const [parentBlocked, parentBlockedMe] = await Promise.all([
-        hasBlocked(parentCommentAuthorId, canonicalUserId),
-        hasBlocked(canonicalUserId, parentCommentAuthorId),
+        hasBlocked(parentCommentAuthorId, canonicalUserId, dbWrite),
+        hasBlocked(canonicalUserId, parentCommentAuthorId, dbWrite),
       ]);
 
       if (parentBlocked || parentBlockedMe) {
@@ -503,25 +505,28 @@ export const POST = withErrorHandling(
     const now = new Date();
     const commentId = await generateSnowflakeId();
 
-    const [newComment] = await db
-      .insert(comments)
-      .values({
-        id: commentId,
-        content: content.trim(),
-        postId,
-        authorId: canonicalUserId,
-        parentCommentId: parentCommentId || null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
-
-    if (!newComment) {
+    const result = await createCommentWithParentCheck({
+      id: commentId,
+      content: content.trim(),
+      postId,
+      authorId: canonicalUserId,
+      parentCommentId: parentCommentId || null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (
+      result.status === 'parent-missing' ||
+      result.status === 'parent-deleted'
+    ) {
+      throw new NotFoundError('Parent comment', parentCommentId!);
+    }
+    if (result.status === 'parent-post-mismatch') {
       throw new BusinessLogicError(
-        'Failed to create comment',
-        'COMMENT_CREATION_FAILED'
+        'Parent comment does not belong to this post',
+        'PARENT_COMMENT_MISMATCH'
       );
     }
+    const newComment = result.comment;
 
     // Get user info for response
     const [commentUser] = await db

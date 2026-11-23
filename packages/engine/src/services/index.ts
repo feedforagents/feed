@@ -86,6 +86,7 @@ export {
   generateTagsForPosts,
   generateTagsFromPost,
   getCurrentTrendingTags,
+  getLatestTrendingCalculation,
   getPostsByTag,
   getRelatedTags,
   getTagStatistics,

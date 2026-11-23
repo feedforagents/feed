@@ -200,6 +200,12 @@ export interface PerpCloseInput {
   positionId: string;
   /** Close only a portion of the position (0-1, e.g., 0.5 = 50%). Defaults to 1 (full close). */
   percentage?: number;
+  /**
+   * Close exactly this size (the order size of an opposite-side reduce).
+   * Takes precedence over `percentage`, so the leg settles and pays its fee
+   * on the ordered amount instead of on size * (size / positionSize).
+   */
+  size?: number;
   /** Override exit price for liquidations or testing. */
   exitPriceOverride?: number;
   /** Maximum slippage tolerance (0-1). Rejects if price moved beyond this. */
@@ -315,11 +321,21 @@ export interface MetricsPort {
   increment(name: string, value: number, tags?: Record<string, string>): void;
 }
 
+export type PerpCloseFeeRecorder = (
+  positionId: string,
+  ticker: string,
+  feeAmount: number
+) => Promise<void>;
+
 /** Serialize an owner's exposure check and financial writes in one transaction. */
 export interface PerpSettlementPort {
   run<T>(
     userId: string,
-    operation: (db: PerpDbPort, wallet: WalletPort) => Promise<T>
+    operation: (
+      db: PerpDbPort,
+      wallet: WalletPort,
+      recordCloseFee?: PerpCloseFeeRecorder
+    ) => Promise<T>
   ): Promise<T>;
 }
 

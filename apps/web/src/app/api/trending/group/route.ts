@@ -344,7 +344,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               db
                 .select({ postId: comments.postId, count: count() })
                 .from(comments)
-                .where(inArray(comments.postId, postIds))
+                .where(
+                  and(
+                    inArray(comments.postId, postIds),
+                    isNull(comments.deletedAt)
+                  )
+                )
                 .groupBy(comments.postId),
               db
                 .select({ postId: shares.postId, count: count() })
@@ -363,7 +368,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               db
                 .select({ postId: comments.postId, count: count() })
                 .from(comments)
-                .where(inArray(comments.postId, postIds))
+                .where(
+                  and(
+                    inArray(comments.postId, postIds),
+                    isNull(comments.deletedAt)
+                  )
+                )
                 .groupBy(comments.postId),
               db
                 .select({ postId: shares.postId, count: count() })

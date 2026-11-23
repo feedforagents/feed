@@ -1,4 +1,36 @@
-import { and, db, gte, isNull, lt, posts, sql } from '@feed/db';
+import {
+  and,
+  db,
+  eq,
+  gte,
+  isNull,
+  like,
+  lt,
+  not,
+  notExists,
+  posts,
+  sql,
+  users,
+} from '@feed/db';
+
+/**
+ * The test-author exclusion every sibling feed applies
+ * (DatabaseService.getRecentPosts excludes test authors in SQL, the
+ * stories pipeline does the same, and the following feed filters out
+ * test users): a post is hidden when its author's user row has
+ * isTest = true or its author id starts with 'test-'. Built fresh per query.
+ */
+function excludeTestAuthors() {
+  return and(
+    not(like(posts.authorId, 'test-%')),
+    notExists(
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+    )
+  );
+}
 
 export interface ForYouCandidatePost {
   id: string;
@@ -56,6 +88,7 @@ async function loadForYouEngagementRankedPosts(
 
   const rankedPostsWhere = and(
     isNull(posts.deletedAt),
+    excludeTestAuthors(),
     gte(posts.timestamp, windowStart),
     lt(posts.timestamp, windowEnd),
     isNull(posts.commentOnPostId),

@@ -297,13 +297,27 @@ if (!process.env.FEED_PREDICTION_FEE_CHILD) {
         feeProcessor: createTradingFeeProcessor(),
         tradingFeeOutbox: createTradingFeeOutboxAdapter(),
       });
-      const quote = await service.previewOrder({
+      const closeOrder = {
         userId: f.id,
         ticker,
         side: 'short',
         size: 0.009,
         leverage: 1,
-      });
+      } as const;
+      const quote = await service.previewOrder(closeOrder);
+      expect(quote.rebalanceType).toBe('close');
+      for (const order of [
+        { ...closeOrder, side: 'long' as const },
+        { ...closeOrder, size: 0.008 },
+        { ...closeOrder, size: 0.0095 },
+      ]) {
+        await expect(service.previewOrder(order)).rejects.toThrow(
+          'Order size below minimum (10)'
+        );
+      }
+      await expect(service.previewOpenPosition(closeOrder)).rejects.toThrow(
+        'Order size below minimum (10)'
+      );
       const closed = await service.closePosition({ userId: f.id, positionId });
       const recorded = await feeRows(f.id);
       const intents = await dbWrite
