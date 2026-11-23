@@ -259,9 +259,10 @@ function firstBreak(domain: any, model: Model, trace: Step[], cite: (def: string
 function lasso(domain: any, model: Model, trace: Step[]): { broken?: { rule: string; from: number; loop: number; end: number; within?: number }; loops: number } {
   standIn(domain, trace);
   const keys = trace.map((s) => JSON.stringify(s.state));
-  const memo = new Map<string, boolean>();
+  const byRule = new Map(model.leadsTo.map((rule) => [rule, new Map<number, boolean>()]));
   const relates = (rule: string, i: number, j: number) => {
-    const at = `${rule} ${i} ${j}`;
+    const memo = byRule.get(rule)!;
+    const at = i * trace.length + j;
     if (!memo.has(at)) memo.set(at, domain[rule](trace[i].state, trace[j].state));
     return memo.get(at)!;
   };
@@ -426,14 +427,14 @@ export function simulation(memory: Memory, spec: Spec, specs: Spec[], model: Mod
         }),
       ]);
       const witnesses = model.sometimes.map((w, i) => ({ w, run: searches[i] }));
-      const runs = [sim, probe, ...searches.filter((run) => run.broken)];
-      if (broke(runs)) return { said, tested };
+      const supplemental = [probe, ...searches.filter((run) => run.broken)];
+      if (broke(supplemental)) return { said, tested };
       if (sim.broken || probe.broken) throw new Error(`the simulator reports a broken rule that no trace shows (${sim.again})`);
       if (!sim.traces.length && !probe.traces.length) {
         say(false, "always", `no table the simulator chose for ${model.opaques.map((o) => o.name).join(", ")} satisfies the laws stated with them, for every value tried: the laws may contradict each other, or define <name>Values to try results that satisfy them`, `      ${sim.again}`);
         return { said, tested };
       }
-      const traces = runs.flatMap((run) => run.traces);
+      const traces = [sim, ...supplemental].flatMap((run) => run.traces);
       // Each guard should allow its event in some reachable state and refuse it in another. One that never allows it
       // makes the event impossible, and every rule then holds of it trivially, so nothing else would notice: that
       // fails, as an unreached `sometimes` goal does. One that never refuses it may restate a rule, guard against
@@ -490,7 +491,7 @@ export function simulation(memory: Memory, spec: Spec, specs: Spec[], model: Mod
       }
       // A `leadsTo` rule is broken by a fair run that never gets where it should: one of these traces, then nothing
       // or a loop for ever (simulate.ts, `lasso`).
-      const runsOf = sim.traces.map((t) => ({ t, ...lasso(domain, model, t) }));
+      const runsOf = model.leadsTo.length ? sim.traces.map((t) => ({ t, ...lasso(domain, model, t) })) : [];
       const live = runsOf.filter((r) => r.broken).sort((x, y) => x.broken!.end - y.broken!.end)[0];
       if (live) {
         const { rule, from, loop, end, within } = live.broken!;
