@@ -29,7 +29,6 @@
  * require passing referrer context through the MCP API key or session.
  */
 
-import type { JsonRpcParams, JsonRpcRequest } from '@feed/a2a';
 import {
   handleAppealBanWithEscrow,
   handleCreateEscrowPayment,
@@ -41,14 +40,19 @@ import {
   acceptGroupInvite,
   BusinessLogicError,
   checkRateLimitAsync,
+  countVisiblePostComments,
   declineGroupInvite,
+  listVisiblePostComments,
   logAdminModify,
   NotFoundError,
+  notifyCommentOnPost,
+  notifyFollow,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
   sharePost,
+  updateProfileWithLeaderboardInvalidation,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
@@ -56,14 +60,17 @@ import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   acquireUserBlockPairLock,
   and,
+  count,
   db,
   dbWrite,
   desc,
   eq,
   favorites,
   follows,
+  followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
+  getFilteredUserIds,
   getMutedUserIds,
   groupMembers,
   hasBlocked,
@@ -74,10 +81,15 @@ import {
   markets,
   not,
   notExists,
+  notInArray,
+  notifications,
+  notificationTargetVisibilityCondition,
+  or,
   perpMarketSnapshots,
   posts,
   postTags,
   questions,
+  sql,
   timeframedMarkets,
   userBlocks,
   users,
@@ -87,8 +99,10 @@ import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
+  getCurrentTrendingTags,
   invalidateAfterPredictionTrade,
   type PredictionSettlementOptions,
   StaticDataRegistry,
@@ -102,6 +116,7 @@ import {
   logger,
   retryIfRetryable,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 
 function buildWalletPort(): WalletPort {
   return {
@@ -125,14 +140,22 @@ function buildWalletPort(): WalletPort {
 
 function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
         relatedId,
-        tx
+        tx,
+        operationId
       ),
   };
 }
@@ -451,6 +474,8 @@ import type {
   GetUserStatsResult,
   GetUserWalletArgs,
   GetUserWalletResult,
+  JsonRpcParams,
+  JsonRpcRequest,
   LeaveChatArgs,
   LeaveChatResult,
   LikeCommentArgs,
@@ -672,6 +697,7 @@ function buildPerpService() {
       minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
     feeProcessor: buildFeeProcessor(),
+    tradingFeeOutbox: createTradingFeeOutboxAdapter(),
   });
 }
 
@@ -1009,6 +1035,15 @@ export async function executeQueryFeed(
     relatedQuestion = question.questionNumber;
   }
 
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const now = new Date();
   // Filter in SQL before the limit without requiring NPC authors to have Users.
   const feedPosts = await db
@@ -1032,10 +1067,17 @@ export async function executeQueryFeed(
         ),
         relatedQuestion !== undefined
           ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined,
+        excludedAuthorIds.length > 0
+          ? notInArray(posts.authorId, excludedAuthorIds)
           : undefined
       )
     )
-    .orderBy(desc(posts.timestamp))
+    // Total order, matching the web feed query
+    // (DatabaseService.getRecentPosts orders by timestamp desc, id desc):
+    // with timestamp alone, posts sharing one timestamp are cut by the
+    // limit in storage order, so the head of a tied block is arbitrary.
+    .orderBy(desc(posts.timestamp), desc(posts.id))
     .limit(args.limit || 20);
 
   return {
@@ -1360,13 +1402,29 @@ export async function executeGetTradeHistory(
  * Execute get_post tool
  */
 export async function executeGetPost(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetPostArgs
 ): Promise<GetPostResult> {
   const apiBaseUrl = getAPIBaseUrl();
-  return safeFetchRequired<GetPostResult>(
+  const result = await safeFetchRequired<GetPostResult>(
     new URL(`${apiBaseUrl}/posts/${args.postId}`)
   );
+
+  const { data } = result;
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    Array.isArray(data) ||
+    typeof data.commentCount !== 'number'
+  ) {
+    return result;
+  }
+  const commentCount = await countVisiblePostComments(
+    args.postId,
+    agent.userId,
+    data.commentCount
+  );
+  return { ...result, data: { ...data, commentCount } };
 }
 
 /**
@@ -1385,7 +1443,6 @@ export async function executeCreatePost(
       id: postId,
       content: args.content.trim(),
       authorId: agent.userId,
-      type: args.type || 'post',
       imageUrl: mediaUrl,
       timestamp: new Date(),
     },
@@ -1532,17 +1589,15 @@ export async function executeSharePost(
  * Execute get_comments tool
  */
 export async function executeGetComments(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetCommentsArgs
 ): Promise<GetCommentsResult> {
-  const commentsList = await db.comment.findMany({
-    where: {
-      postId: args.postId,
-      deletedAt: null,
-    },
-    orderBy: { createdAt: 'desc' },
-    take: args.limit || 50,
-  });
+  const commentsList = await listVisiblePostComments(
+    args.postId,
+    agent.userId,
+    args.limit || 50,
+    'desc'
+  );
   const commentIds = commentsList.map((c) => c.id);
   const reactionsList = await db.reaction.findMany({
     where: {
@@ -1596,6 +1651,18 @@ export async function executeCreateComment(
     throw new NotFoundError('Post (deleted)', args.postId);
   }
 
+  if (post.timestamp > new Date()) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
+  const [authorBlockedCaller, callerBlockedAuthor] = await Promise.all([
+    hasBlocked(post.authorId, agent.userId),
+    hasBlocked(agent.userId, post.authorId),
+  ]);
+  if (authorBlockedCaller || callerBlockedAuthor) {
+    throw new BusinessLogicError('Cannot comment on this post', 'BLOCKED_USER');
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {
@@ -1606,6 +1673,30 @@ export async function executeCreateComment(
       updatedAt: new Date(),
     },
   });
+
+  // The comment has committed. Notification failure must not invite a retry.
+  if (post.authorId !== agent.userId) {
+    try {
+      await notifyCommentOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        comment.id
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed comment',
+        {
+          postId: args.postId,
+          commentId: comment.id,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return {
     success: true,
     commentId: comment.id,
@@ -1734,7 +1825,18 @@ export async function executeGetPostsByTag(
       and(
         eq(postTags.tagId, tag.id),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, now)
+        lte(posts.timestamp, now),
+        // Exclude test authors in SQL before paginating, so pages
+        // are full — the canonical post query's rule
+        // (DatabaseService.getRecentPosts): 'test-' ids and
+        // isTest-flagged accounts never appear in post lists.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
@@ -1805,19 +1907,15 @@ export async function executeUpdateProfile(
   if (args.username !== undefined) updateData.username = args.username;
   if (args.profileImageUrl !== undefined)
     updateData.profileImageUrl = args.profileImageUrl;
-  const user = await db.user.update({
-    where: { id: agent.userId },
-    data: updateData,
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      bio: true,
-      profileImageUrl: true,
-      reputationPoints: true,
-      virtualBalance: true,
-    },
-  });
+  const user = await updateProfileWithLeaderboardInvalidation(
+    agent.userId,
+    updateData,
+    (client) =>
+      client.user.update({
+        where: { id: agent.userId },
+        data: updateData,
+      })
+  );
   return {
     success: true,
     profile: {
@@ -1842,22 +1940,22 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  const existing = await db.follow.findFirst({
-    where: {
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
-  if (existing) {
-    return { success: true };
+  const created = await followUserWithBlockCheck(agent.userId, args.userId);
+  if (created) {
+    try {
+      await notifyFollow(args.userId, agent.userId);
+    } catch (error) {
+      logger.warn(
+        'Failed to notify user of committed follow',
+        {
+          userId: args.userId,
+          followerId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
   }
-  await db.follow.create({
-    data: {
-      id: await generateSnowflakeId(),
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
   return { success: true };
 }
 
@@ -1884,32 +1982,37 @@ export async function executeGetFollowers(
   _agent: AuthenticatedAgent,
   args: GetFollowersArgs
 ): Promise<GetFollowersResult> {
-  const followersList = await db.follow.findMany({
-    where: { followingId: args.userId },
-    take: args.limit || 50,
-    orderBy: { createdAt: 'desc' },
-  });
-  const followerIds = followersList.map((f) => f.followerId);
-  const usersList = await db.user.findMany({
-    where: { id: { in: followerIds } },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      profileImageUrl: true,
-    },
-  });
-  const usersMap = new Map(usersList.map((u) => [u.id, u]));
+  // Same population as the website follow lists: the follower must be a
+  // real user who is not a test account (isTest flag or 'test-' id) and
+  // not banned. Joining users applies that filter before the limit, so
+  // excluded or dangling follow rows cannot consume page slots or
+  // surface as null-username entries.
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      profileImageUrl: users.profileImageUrl,
+    })
+    .from(follows)
+    .innerJoin(users, eq(users.id, follows.followerId))
+    .where(
+      and(
+        eq(follows.followingId, args.userId),
+        eq(users.isTest, false),
+        eq(users.isBanned, false),
+        sql`${users.id} NOT LIKE 'test-%'`
+      )
+    )
+    .orderBy(desc(follows.createdAt), desc(follows.id))
+    .limit(args.limit || 50);
   return {
-    followers: followersList.map((f) => {
-      const user = usersMap.get(f.followerId);
-      return {
-        id: f.followerId,
-        username: user?.username || null,
-        displayName: user?.displayName || null,
-        profileImageUrl: user?.profileImageUrl || null,
-      };
-    }),
+    followers: rows.map((user) => ({
+      id: user.id,
+      username: user.username || null,
+      displayName: user.displayName || null,
+      profileImageUrl: user.profileImageUrl || null,
+    })),
   };
 }
 
@@ -1920,32 +2023,34 @@ export async function executeGetFollowing(
   _agent: AuthenticatedAgent,
   args: GetFollowingArgs
 ): Promise<GetFollowingResult> {
-  const followingList = await db.follow.findMany({
-    where: { followerId: args.userId },
-    take: args.limit || 50,
-    orderBy: { createdAt: 'desc' },
-  });
-  const followingIds = followingList.map((f) => f.followingId);
-  const usersList = await db.user.findMany({
-    where: { id: { in: followingIds } },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      profileImageUrl: true,
-    },
-  });
-  const usersMap = new Map(usersList.map((u) => [u.id, u]));
+  // Same population as the website follow lists, mirrored on the
+  // followed side: see executeGetFollowers.
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      profileImageUrl: users.profileImageUrl,
+    })
+    .from(follows)
+    .innerJoin(users, eq(users.id, follows.followingId))
+    .where(
+      and(
+        eq(follows.followerId, args.userId),
+        eq(users.isTest, false),
+        eq(users.isBanned, false),
+        sql`${users.id} NOT LIKE 'test-%'`
+      )
+    )
+    .orderBy(desc(follows.createdAt), desc(follows.id))
+    .limit(args.limit || 50);
   return {
-    following: followingList.map((f) => {
-      const user = usersMap.get(f.followingId);
-      return {
-        id: f.followingId,
-        username: user?.username || null,
-        displayName: user?.displayName || null,
-        profileImageUrl: user?.profileImageUrl || null,
-      };
-    }),
+    following: rows.map((user) => ({
+      id: user.id,
+      username: user.username || null,
+      displayName: user.displayName || null,
+      profileImageUrl: user.profileImageUrl || null,
+    })),
   };
 }
 
@@ -1953,9 +2058,17 @@ export async function executeGetFollowing(
  * Execute search_users tool
  */
 export async function executeSearchUsers(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: SearchUsersArgs
 ): Promise<SearchUsersResult> {
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+
+  const excludedUserIds = [...blockedIds, ...mutedIds, ...blockedByIds];
+
   const usersList = await db.user.findMany({
     where: {
       // Match the web people search (GET /api/users/search) and the A2A
@@ -1971,6 +2084,7 @@ export async function executeSearchUsers(
         { username: { contains: args.query, mode: 'insensitive' } },
         { displayName: { contains: args.query, mode: 'insensitive' } },
       ],
+      ...(excludedUserIds.length > 0 ? { id: { notIn: excludedUserIds } } : {}),
     },
     take: args.limit || 20,
     select: {
@@ -2135,7 +2249,7 @@ export async function executeGetUserStats(
  */
 export async function executeGetChats(
   agent: AuthenticatedAgent,
-  _args: GetChatsArgs
+  args: GetChatsArgs
 ): Promise<GetChatsResult> {
   // Get all chats where user is a participant
   const participants = await db.chatParticipant.findMany({
@@ -2146,10 +2260,20 @@ export async function executeGetChats(
     select: { chatId: true },
   });
   const participantChatIds = participants.map((p) => p.chatId);
+  // The tool schema advertises filter: 'all' | 'dms' | 'groups'; apply it
+  // in the chat query so last-message lookups below only run for the
+  // chats actually being returned.
   const chatsList =
     participantChatIds.length > 0
       ? await db.chat.findMany({
-          where: { id: { in: participantChatIds } },
+          where: {
+            id: { in: participantChatIds },
+            ...(args.filter === 'dms'
+              ? { isGroup: false }
+              : args.filter === 'groups'
+                ? { isGroup: true }
+                : {}),
+          },
         })
       : [];
   const chatIds = chatsList.map((c) => c.id);
@@ -2236,7 +2360,9 @@ export async function executeGetChatMessages(
         ? { senderId: { notIn: excludedSenderIds } }
         : {}),
     },
-    orderBy: { createdAt: 'desc' },
+    // Break timestamp ties for deterministic pages over unchanged history.
+    // Concurrent inserts/deletes can still shift offset windows.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: args.limit || 50,
     skip: args.offset || 0,
   });
@@ -2340,9 +2466,27 @@ export async function executeCreateGroup(
   const groupId = await generateSnowflakeId();
 
   // Deduplicate memberIds and exclude the owner (agent.userId)
-  const uniqueMemberIds = [...new Set(args.memberIds)].filter(
+  const requestedMemberIds = [...new Set(args.memberIds)].filter(
     (id) => id !== agent.userId
   );
+
+  // Membership rows have no User foreign key. Check existence, bans and
+  // bilateral blocks on the primary before adding members.
+  let uniqueMemberIds = requestedMemberIds;
+  if (requestedMemberIds.length > 0) {
+    const [validMembers, excludedMembers] = await Promise.all([
+      dbWrite.user.findMany({
+        where: { id: { in: requestedMemberIds }, isBanned: false },
+        select: { id: true },
+      }),
+      getFilteredUserIds(agent.userId, dbWrite),
+    ]);
+    const validMemberIdSet = new Set(validMembers.map((member) => member.id));
+    const excludedMemberIdSet = new Set(excludedMembers);
+    uniqueMemberIds = requestedMemberIds.filter(
+      (id) => validMemberIdSet.has(id) && !excludedMemberIdSet.has(id)
+    );
+  }
 
   // Create Group
   await db.group.create({
@@ -2503,10 +2647,40 @@ export async function executeGetUnreadCount(
   agent: AuthenticatedAgent,
   _args: GetUnreadCountArgs
 ): Promise<GetUnreadCountResult> {
-  const unreadCount = await db.notification.count({
-    where: { userId: agent.userId, read: false },
-  });
-  return { unreadCount };
+  // Match the notification read rule on the web and A2A surfaces: actors
+  // the user has blocked or muted, and actors who have blocked the user,
+  // are excluded at read time. The filter has to live at read time —
+  // muting never stops notification creation, and a block placed later
+  // must hide notifications created before it. System notifications have
+  // a null actor and are always kept.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedActorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
+  const moderationCondition =
+    excludedActorIds.length > 0
+      ? or(
+          isNull(notifications.actorId),
+          notInArray(notifications.actorId, excludedActorIds)
+        )
+      : undefined;
+  const [row] = await db
+    .select({ value: count() })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, agent.userId),
+        eq(notifications.read, false),
+        moderationCondition,
+        notificationTargetVisibilityCondition()
+      )
+    );
+  return { unreadCount: row?.value ?? 0 };
 }
 
 // ============================================================================
@@ -2520,11 +2694,41 @@ export async function executeGetNotifications(
   agent: AuthenticatedAgent,
   args: GetNotificationsArgs
 ): Promise<GetNotificationsResult> {
-  const notificationsList = await db.notification.findMany({
-    where: { userId: agent.userId },
-    orderBy: { createdAt: 'desc' },
-    take: args.limit || 100,
-  });
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedActorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
+  // Apply both visibility rules inside the page query, before its limit.
+  const moderationCondition =
+    excludedActorIds.length > 0
+      ? or(
+          isNull(notifications.actorId),
+          notInArray(notifications.actorId, excludedActorIds)
+        )
+      : undefined;
+  const notificationsList = await db
+    .select({
+      id: notifications.id,
+      type: notifications.type,
+      message: notifications.message,
+      read: notifications.read,
+      createdAt: notifications.createdAt,
+    })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, agent.userId),
+        moderationCondition,
+        notificationTargetVisibilityCondition()
+      )
+    )
+    .orderBy(desc(notifications.createdAt), desc(notifications.id))
+    .limit(args.limit || 100);
   return {
     notifications: notificationsList.map((n) => ({
       id: n.id,
@@ -2597,10 +2801,21 @@ export async function executeGetGroupInvites(
   agent: AuthenticatedAgent,
   _args: GetGroupInvitesArgs
 ): Promise<GetGroupInvitesResult> {
+  // Use the same viewer moderation exclusions as query_feed and search_agents.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedInviterIds = [...blockedIds, ...mutedIds, ...blockedByIds];
+
   const invitesList = await db.groupInvite.findMany({
     where: {
       invitedUserId: agent.userId,
       status: 'pending',
+      ...(excludedInviterIds.length > 0
+        ? { invitedBy: { notIn: excludedInviterIds } }
+        : {}),
     },
   });
 
@@ -2941,19 +3156,10 @@ export async function executeGetTrendingTags(
   _agent: AuthenticatedAgent,
   args: GetTrendingTagsArgs
 ): Promise<GetTrendingTagsResult> {
-  const trendingTagsList = await db.trendingTag.findMany({
-    orderBy: { rank: 'asc' },
-    take: args.limit || 20,
-  });
-  const tagIds = trendingTagsList.map((tt) => tt.tagId);
-  const tagsList = await db.tag.findMany({
-    where: { id: { in: tagIds } },
-    select: { id: true, name: true },
-  });
-  const tagsMap = new Map(tagsList.map((t) => [t.id, t]));
+  const trendingTagsList = await getCurrentTrendingTags(args.limit || 20);
   return {
     tags: trendingTagsList.map((tt) => ({
-      tag: tagsMap.get(tt.tagId)?.name || '',
+      tag: tt.tag.name,
       postCount: tt.postCount,
       trendScore: tt.score || 0,
     })),
@@ -3117,6 +3323,16 @@ export async function executeMuteUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot mute yourself');
   }
+  // Match POST /api/users/[userId]/mute: the target must exist. UserMute
+  // has no foreign key, so an unchecked mute of an unknown ID would leave
+  // a phantom row in the caller's mute list.
+  const targetUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!targetUser) {
+    throw new Error(`User ${args.userId} not found`);
+  }
   const existing = await db.userMute.findFirst({
     where: {
       muterId: agent.userId,
@@ -3159,6 +3375,19 @@ export async function executeReportUser(
   agent: AuthenticatedAgent,
   args: ReportUserArgs
 ): Promise<ReportUserResult> {
+  if (args.userId === agent.userId) {
+    throw new Error('Cannot report yourself');
+  }
+  // Match POST /api/moderation/reports: the reported user must exist.
+  // Report has no foreign key, so an unchecked report of an unknown ID
+  // would land in the admin moderation queue as a phantom pending report.
+  const reportedUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!reportedUser) {
+    throw new Error(`User ${args.userId} not found`);
+  }
   const reportId = await generateSnowflakeId();
   await db.report.create({
     data: {
@@ -3181,6 +3410,17 @@ export async function executeReportPost(
   agent: AuthenticatedAgent,
   args: ReportPostArgs
 ): Promise<ReportPostResult> {
+  // reports.reportedPostId has no foreign key, so an unchecked report
+  // would become an orphan row in the moderation queue. The web report
+  // route (POST /api/moderation/reports) looks the post up first and
+  // answers 404 when it does not exist; do the same here.
+  const post = await db.post.findUnique({
+    where: { id: args.postId },
+    select: { id: true },
+  });
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
   const reportId = await generateSnowflakeId();
   await db.report.create({
     data: {
@@ -3608,12 +3848,30 @@ export async function executeGetFavoritePosts(
   // Query directly as the authenticated agent. The HTTP favorites route
   // authenticates the caller, so calling it with an X-User-Id header always
   // returned an empty list.
+  // Favorites never bypass the viewer's block/mute policy: drop
+  // favorited authors the viewer blocked or muted, and authors who
+  // blocked the viewer — the web favorites feed's rule (GET
+  // /api/posts/feed/favorites, loadViewerExcludedAuthorIds) and the
+  // A2A getFavoritePosts rule. Filter before paginating so excluded
+  // authors never consume page slots.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = new Set([
+    ...blockedIds,
+    ...mutedIds,
+    ...blockedByIds,
+  ]);
   const favoritedUserIds = (
     await db
       .select({ targetUserId: favorites.targetUserId })
       .from(favorites)
       .where(eq(favorites.userId, agent.userId))
-  ).map((row) => row.targetUserId);
+  )
+    .map((row) => row.targetUserId)
+    .filter((id: string) => !excludedAuthorIds.has(id));
   if (favoritedUserIds.length === 0) {
     return { posts: [] };
   }
@@ -3632,7 +3890,19 @@ export async function executeGetFavoritePosts(
       and(
         inArray(posts.authorId, favoritedUserIds),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, new Date())
+        lte(posts.timestamp, new Date()),
+        // Apply the web feed's test-author rule (DatabaseService
+        // .getRecentPosts): test accounts — the isTest flag or a
+        // 'test-' id prefix — must not leak into the favorites feed
+        // either, even when the agent favorited them. Excluded in SQL
+        // before paginating, so pages stay full.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp))
