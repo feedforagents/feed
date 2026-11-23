@@ -679,8 +679,8 @@ export async function runIsolatedClosedPredictionPositionsCases(
   await runIsolatedCases('closed-prediction-positions', fixture);
 }
 
-export async function runIsolatedMcpPerpFeeCases() {
-  await runIsolatedCases('mcp-perp-fee');
+export async function runIsolatedMcpPerpFeeCases(fixture?: IsolatedFixture) {
+  await runIsolatedCases('mcp-perp-fee', fixture);
 }
 
 export async function runIsolatedTradeHistoryCase() {
