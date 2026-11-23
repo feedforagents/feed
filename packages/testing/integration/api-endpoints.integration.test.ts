@@ -552,16 +552,6 @@ describe('API Endpoints - Complete Coverage', () => {
       expect(res.status).toBe(200);
     });
 
-    test('GET /api/game/card', async () => {
-      const res = await get('/api/game/card');
-      expect(res.status).toBeLessThan(500);
-    });
-
-    test('GET /api/game/capabilities', async () => {
-      const res = await get('/api/game/capabilities');
-      expect(res.status).toBeLessThan(500);
-    });
-
     test('GET /api/game/guide', async () => {
       const res = await get('/api/game/guide');
       expect(res.status).toBe(200);
@@ -576,6 +566,19 @@ describe('API Endpoints - Complete Coverage', () => {
   // ============================================
   // RETIRED ENDPOINTS
   // ============================================
+  describe('retired A2A discovery aliases', () => {
+    for (const path of [
+      '/.well-known/agent-card',
+      '/api/game/card',
+      '/api/game/capabilities',
+    ]) {
+      test(`GET ${path} returns 404`, async () => {
+        const res = await get(path);
+        expect(res.status).toBe(404);
+      });
+    }
+  });
+
   describe('retired NFT gallery', () => {
     test('GET /api/nft/gallery returns 404', async () => {
       const res = await get('/api/nft/gallery');

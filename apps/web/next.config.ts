@@ -125,10 +125,6 @@ const nextConfig: NextConfig = {
     // Legacy `/assets/agent-monkeys/` and `/assets/user-profiles/` preset URLs are rewritten to `user-pfps` in middleware.ts
     return [
       {
-        source: '/.well-known/agent-card.json',
-        destination: '/api/game/card',
-      },
-      {
         source: '/.well-known/assetlinks.json',
         destination: '/assetlinks.json',
       },
