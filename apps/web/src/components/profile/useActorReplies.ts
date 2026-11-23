@@ -106,9 +106,10 @@ export function useActorReplies(
         setTotal(pageTotal);
         setPage(requestPage);
         setHasMore(
-          pageTotal !== null
-            ? deduped.length < pageTotal
-            : pageItems.length === PAGE_SIZE
+          pageItems.length > 0 &&
+            (pageTotal !== null
+              ? deduped.length < pageTotal
+              : pageItems.length === PAGE_SIZE)
         );
         setLoadFailed(false);
       } catch {
