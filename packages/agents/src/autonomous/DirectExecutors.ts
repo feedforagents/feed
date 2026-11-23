@@ -30,11 +30,13 @@ import {
   comments,
   createCommentWithParentCheck,
   db,
+  dbWrite,
   desc,
   dmAcceptances,
   eq,
   follows,
   followUserWithBlockCheck,
+  getFilteredUserIds,
   groupMembers,
   groups,
   gte,
@@ -2305,20 +2307,26 @@ export async function executeDirectCreateGroup(
     };
   }
 
-  // Validate member IDs exist (if provided)
+  // Validate members on the primary and skip either direction of a block,
+  // matching the web and MCP group creation routes.
   const validMemberIds: string[] = [];
   if (memberIds && memberIds.length > 0) {
     const uniqueIds = [
       ...new Set(memberIds.filter((id) => id !== agentUserId)),
     ];
     if (uniqueIds.length > 0) {
-      const existingUsers = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(sql`${users.id} IN ${uniqueIds}`);
+      const [existingUsers, blockedIds] = await Promise.all([
+        dbWrite
+          .select({ id: users.id })
+          .from(users)
+          .where(inArray(users.id, uniqueIds)),
+        getFilteredUserIds(agentUserId, dbWrite),
+      ]);
       const existingIds = new Set(existingUsers.map((u) => u.id));
+      const blockedMemberIds = new Set(blockedIds);
       for (const id of uniqueIds) {
-        if (existingIds.has(id)) validMemberIds.push(id);
+        if (existingIds.has(id) && !blockedMemberIds.has(id))
+          validMemberIds.push(id);
       }
     }
   }
@@ -2459,6 +2467,15 @@ export async function executeDirectInviteToGroup(
 
   if (!targetUser) {
     return { success: false, error: `User not found: ${cleanTargetId}` };
+  }
+
+  // Check the primary before adding or reactivating a member.
+  const [targetBlockedAgent, agentBlockedTarget] = await Promise.all([
+    hasBlocked(cleanTargetId, agentUserId, dbWrite),
+    hasBlocked(agentUserId, cleanTargetId, dbWrite),
+  ]);
+  if (targetBlockedAgent || agentBlockedTarget) {
+    return { success: false, error: 'Cannot invite this user' };
   }
 
   // Check if already a member (use upsert to handle race conditions)
