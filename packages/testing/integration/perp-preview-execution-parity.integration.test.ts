@@ -15,6 +15,9 @@ import { NextRequest } from 'next/server';
 import { createPerpMarketService } from '../../../apps/web/src/app/api/markets/perps/_adapters';
 import { POST } from '../../../apps/web/src/app/api/markets/perps/preview/route';
 
+const ip = crypto.getRandomValues(new Uint8Array(2));
+const clientIp = `198.19.${ip[0]}.${ip[1]}`;
+
 const cases = [
   { side: 'long', opposite: 'short', size: 3000 },
   { side: 'short', opposite: 'long', size: 3000 },
@@ -77,6 +80,7 @@ for (const { side, opposite, size } of cases) {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
+            'x-forwarded-for': clientIp,
             authorization: `Bearer steward:test:${userId}`,
           },
           body: JSON.stringify({ ticker, side: opposite, size, leverage: 2 }),
