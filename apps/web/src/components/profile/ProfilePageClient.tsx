@@ -161,9 +161,17 @@ export function ProfilePageClient({
     loading: loadingPosts,
     loadingMore: loadingMorePosts,
     hasMore: hasMorePosts,
+    loadFailed: loadFailedPosts,
     loadMore: loadMorePosts,
+    clearLoadFailed: clearLoadFailedPosts,
   } = useActorPosts(actorInfo?.id ?? null);
-  const loadMorePostsRef = useRef<HTMLDivElement | null>(null);
+  // Callback ref held in state (not a plain ref): when the sentinel
+  // unmounts on a tab switch and mounts again, the state change re-runs
+  // the observer effect, so the new sentinel gets observed. A plain ref
+  // would keep watching the detached node and paging would stop for good.
+  const [loadMorePostsEl, setLoadMorePostsEl] = useState<HTMLDivElement | null>(
+    null
+  );
   const [replies, setReplies] = useState<ProfileReply[]>([]);
   const [loadingReplies, setLoadingReplies] = useState(false);
 
@@ -581,12 +589,19 @@ export function ProfilePageClient({
   }, [actorInfo, optimisticFollowerCount]);
 
   useEffect(() => {
-    const target = loadMorePostsRef.current;
+    const target = loadMorePostsEl;
     if (!target) return;
     const observer = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
-        if (entry?.isIntersecting && hasMorePosts && !loadingMorePosts) {
+        if (!entry) return;
+        if (!entry.isIntersecting) {
+          // The sentinel left the viewport: a failed continuation may be
+          // retried when the visitor scrolls back down to it.
+          clearLoadFailedPosts();
+          return;
+        }
+        if (hasMorePosts && !loadingMorePosts && !loadFailedPosts) {
           void loadMorePosts();
         }
       },
@@ -594,7 +609,14 @@ export function ProfilePageClient({
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasMorePosts, loadingMorePosts, loadMorePosts]);
+  }, [
+    loadMorePostsEl,
+    hasMorePosts,
+    loadingMorePosts,
+    loadFailedPosts,
+    loadMorePosts,
+    clearLoadFailedPosts,
+  ]);
 
   useEffect(() => {
     if (tab !== 'replies') return;
@@ -1153,7 +1175,7 @@ export function ProfilePageClient({
                       );
                     })}
                     {hasMorePosts && (
-                      <div ref={loadMorePostsRef} className="py-8">
+                      <div ref={setLoadMorePostsEl} className="py-8">
                         {loadingMorePosts && (
                           <div className="flex items-center justify-center">
                             <div className="h-8 w-8 animate-spin rounded-full border-primary border-b-2" />

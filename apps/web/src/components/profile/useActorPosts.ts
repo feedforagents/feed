@@ -37,7 +37,9 @@ interface UseActorPostsResult {
   loadingMore: boolean;
   hasMore: boolean;
   cursor: string | null;
+  loadFailed: boolean;
   loadMore: () => Promise<void>;
+  clearLoadFailed: () => void;
   refresh: () => Promise<void>;
 }
 
@@ -55,6 +57,7 @@ export function useActorPosts(actorId: string | null): UseActorPostsResult {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const request = useRef<AbortController | null>(null);
 
   const fetchPage = useCallback(
@@ -75,7 +78,13 @@ export function useActorPosts(actorId: string | null): UseActorPostsResult {
         const response = await fetch(`/api/posts?${params}`, {
           signal: controller.signal,
         });
-        if (!response.ok) return;
+        if (!response.ok) {
+          // A failed continuation keeps its cursor, but the auto-load must
+          // not retry it in a tight loop while the sentinel stays in view.
+          // The observer clears this when the sentinel leaves the viewport.
+          if (append) setLoadFailed(true);
+          return;
+        }
         const data = (await response.json()) as {
           posts?: unknown;
           cursor?: string | null;
@@ -96,9 +105,12 @@ export function useActorPosts(actorId: string | null): UseActorPostsResult {
         }
         setCursor(data.cursor ?? null);
         setHasMore(data.hasMore === true);
+        setLoadFailed(false);
       } catch {
         // Keep the last successful page (and its cursor) after a failure,
-        // so the continuation stays retryable.
+        // so the continuation stays retryable. An aborted request (actor
+        // change or unmount) is not a failure.
+        if (append && !controller.signal.aborted) setLoadFailed(true);
       } finally {
         if (request.current === controller) {
           request.current = null;
@@ -114,6 +126,8 @@ export function useActorPosts(actorId: string | null): UseActorPostsResult {
     setPosts([]);
     setCursor(null);
     setHasMore(false);
+    setLoadingMore(false);
+    setLoadFailed(false);
     if (actorId) void fetchPage(null);
     return () => {
       request.current?.abort();
@@ -122,8 +136,9 @@ export function useActorPosts(actorId: string | null): UseActorPostsResult {
   }, [actorId, fetchPage]);
 
   const loadMore = useCallback(async () => {
-    if (cursor !== null) await fetchPage(cursor);
-  }, [cursor, fetchPage]);
+    if (cursor !== null && !loadFailed) await fetchPage(cursor);
+  }, [cursor, fetchPage, loadFailed]);
+  const clearLoadFailed = useCallback(() => setLoadFailed(false), []);
   const refresh = useCallback(() => fetchPage(null), [fetchPage]);
 
   return {
@@ -132,7 +147,9 @@ export function useActorPosts(actorId: string | null): UseActorPostsResult {
     loadingMore,
     hasMore,
     cursor,
+    loadFailed,
     loadMore,
+    clearLoadFailed,
     refresh,
   };
 }

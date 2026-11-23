@@ -173,4 +173,50 @@ describe('useActorPosts cursor pagination', () => {
     expect(failed.cursor).toBe('next');
     expect(failed.hasMore).toBe(true);
   });
+
+  it('does not retry a failed continuation until the failure is cleared', async () => {
+    fetchStub.mockImplementationOnce(async () => page(firstPage, 'next', true));
+    fetchStub.mockImplementationOnce(
+      async () => new Response(null, { status: 503 })
+    );
+    const initial = await loadInitial();
+    await initial.loadMore();
+    const failed = render();
+    expect(failed.loadFailed).toBe(true);
+    expect(fetchStub).toHaveBeenCalledTimes(2);
+    await failed.loadMore();
+    expect(fetchStub).toHaveBeenCalledTimes(2);
+    failed.clearLoadFailed();
+    const cleared = render();
+    expect(cleared.loadFailed).toBe(false);
+    await cleared.loadMore();
+    expect(fetchStub).toHaveBeenCalledTimes(3);
+  });
+
+  it('clears loadingMore when the actor changes mid-continuation', async () => {
+    const initial = await loadInitial();
+    let resolveContinuation!: (value: Response) => void;
+    fetchStub.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveContinuation = resolve;
+        })
+    );
+    const pending = initial.loadMore();
+    expect(render().loadingMore).toBe(true);
+    actorId = 'actor-2';
+    fetchStub.mockImplementationOnce(async () =>
+      page([post('other-actor', 1)], null, false)
+    );
+    render();
+    await flush();
+    const afterSwitch = render();
+    expect(afterSwitch.loadingMore).toBe(false);
+    expect(postIds(afterSwitch)).toEqual(['other-actor']);
+    resolveContinuation(page(nextPage, null, false));
+    await pending;
+    const settled = render();
+    expect(settled.loadingMore).toBe(false);
+    expect(postIds(settled)).toEqual(['other-actor']);
+  });
 });
