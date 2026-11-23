@@ -57,6 +57,7 @@
  */
 
 import {
+  addPrivateReadHeaders,
   addPublicReadHeaders,
   publicRateLimit,
   withErrorHandling,
@@ -247,6 +248,14 @@ export const GET = withErrorHandling(async function GET(
     posts: enrichedPosts,
     total: result.total,
   });
-  if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
+  if (rateLimitInfo) {
+    // The result depends on the viewer's blocks and mutes, so a signed-in
+    // response must not be stored by a shared cache.
+    if (authUser) {
+      addPrivateReadHeaders(res, rateLimitInfo);
+    } else {
+      addPublicReadHeaders(res, rateLimitInfo);
+    }
+  }
   return res;
 });

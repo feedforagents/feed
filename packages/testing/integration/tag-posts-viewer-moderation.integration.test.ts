@@ -15,6 +15,7 @@ const cases = {
   group: 'applies blocks and mutes before the grouped tag window',
   a2a: 'applies blocks and mutes before A2A tag paging',
   others: 'keeps every post for anonymous and unrelated viewers',
+  cache: 'keeps signed-in tag responses out of shared caches',
 };
 
 if (!process.env.FEED_SUB_MARKET_CHILD) {
@@ -79,8 +80,21 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
   });
 
   // Hidden authors hold the newest tagged posts, so on base they fill the
-  // first page and the visible posts only appear after them.
-  const fixture = [
+  // first page and the visible posts only appear after them. The newest row
+  // is a plain repost (empty content) of the blocked author's post by a
+  // visible author, which the feeds hide like the original.
+  const fixture: Array<{
+    id: string;
+    authorId: string;
+    minutesAgo: number;
+    originalPostId?: string;
+  }> = [
+    {
+      id: 'tag-repost-of-blocked',
+      authorId: people.normal,
+      minutesAgo: 0.5,
+      originalPostId: 'tag-blocked-post',
+    },
     { id: 'tag-blocked-post', authorId: people.blocked, minutesAgo: 1 },
     { id: 'tag-muted-post', authorId: people.muted, minutesAgo: 2 },
     { id: 'tag-blocker-post', authorId: people.blocker, minutesAgo: 3 },
@@ -96,10 +110,11 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     updatedAt: new Date(now),
   });
   await dbWrite.insert(posts).values(
-    fixture.map(({ id, authorId, minutesAgo }) => ({
+    fixture.map(({ id, authorId, minutesAgo, originalPostId }) => ({
       id,
       authorId,
-      content: `#${TAG} ${id}`,
+      content: originalPostId ? '' : `#${TAG} ${id}`,
+      originalPostId: originalPostId ?? null,
       timestamp: at(minutesAgo),
     }))
   );
@@ -138,6 +153,23 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
       total: number;
     };
     return { ids: body.posts.map(({ id }) => id), total: body.total };
+  }
+
+  async function webTagCacheControl(userId?: string) {
+    const url = new URL(`http://localhost/api/trending/${TAG}`);
+    const response = await tagPage(await signedRequest(url, userId), {
+      params: Promise.resolve({ tag: TAG }),
+    });
+    expect(response.status).toBe(200);
+    return response.headers.get('cache-control');
+  }
+
+  async function webGroupCacheControl(userId?: string) {
+    const url = new URL('http://localhost/api/trending/group');
+    url.searchParams.set('tags', TAG);
+    const response = await groupPage(await signedRequest(url, userId));
+    expect(response.status).toBe(200);
+    return response.headers.get('cache-control');
   }
 
   async function webGroup(userId?: string, limit = 50) {
@@ -193,11 +225,33 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     });
 
     test(cases.others, async () => {
-      expect(await webTag()).toEqual({ ids: allIds, total: 5 });
-      expect(await webTag(people.stranger)).toEqual({ ids: allIds, total: 5 });
+      expect(await webTag()).toEqual({ ids: allIds, total: allIds.length });
+      expect(await webTag(people.stranger)).toEqual({
+        ids: allIds,
+        total: allIds.length,
+      });
       expect(await webGroup()).toEqual(allIds);
       expect(await webGroup(people.stranger)).toEqual(allIds);
       expect(await a2aTag(people.stranger)).toEqual(allIds);
+    });
+
+    test(cases.cache, async () => {
+      const signedTag = await webTagCacheControl(people.viewer);
+      const signedGroup = await webGroupCacheControl(people.viewer);
+      const anonymousTag = await webTagCacheControl();
+      const anonymousGroup = await webGroupCacheControl();
+      console.log(
+        `TAG_MODERATION cache tag signed=${JSON.stringify(signedTag)} anonymous=${JSON.stringify(anonymousTag)} group signed=${JSON.stringify(signedGroup)} anonymous=${JSON.stringify(anonymousGroup)}`
+      );
+      for (const header of [signedTag, signedGroup]) {
+        expect(header).toContain('private');
+        expect(header).not.toContain('public');
+        expect(header).not.toContain('s-maxage');
+      }
+      for (const header of [anonymousTag, anonymousGroup]) {
+        expect(header).toContain('public');
+        expect(header).toContain('s-maxage');
+      }
     });
   });
 }
