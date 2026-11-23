@@ -67,6 +67,7 @@ import { toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
+import { loadViewerExcludedAuthorIds } from '../../feed/_lib/viewer-moderation';
 
 const TagPostsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
@@ -112,7 +113,16 @@ export const GET = withErrorHandling(async function GET(
     );
   }
 
-  const result = await getPostsByTag(tag, { limit, offset });
+  // Blocked, muted and blocked-by authors are removed before the page and
+  // the total, the same rule as the main and trending feeds.
+  const excludedAuthorIds = authUser?.userId
+    ? [...(await loadViewerExcludedAuthorIds(authUser.userId))]
+    : [];
+  const result = await getPostsByTag(tag, {
+    limit,
+    offset,
+    excludedAuthorIds,
+  });
 
   if (!result.tag) {
     return NextResponse.json(

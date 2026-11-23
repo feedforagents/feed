@@ -25,6 +25,7 @@ import {
   lte,
   ne,
   notExists,
+  postFeedVisibilityConditions,
   posts,
   postTags,
   scheduledInferenceFetch,
@@ -474,9 +475,14 @@ export async function getTagsForPost(postId: string) {
  */
 export async function getPostsByTag(
   tagName: string,
-  options: { limit?: number; offset?: number } = {}
+  options: {
+    limit?: number;
+    offset?: number;
+    /** Authors the viewer blocked or muted, or who blocked the viewer. */
+    excludedAuthorIds?: readonly string[];
+  } = {}
 ) {
-  const { limit = 20, offset = 0 } = options;
+  const { limit = 20, offset = 0, excludedAuthorIds = [] } = options;
 
   const [tag] = await db
     .select()
@@ -492,10 +498,16 @@ export async function getPostsByTag(
   // total so pagination and counts agree. Test authors are excluded the
   // same way every other feed excludes them (main feed, following feed,
   // an actor's own post list): accounts flagged isTest in the users table
-  // and ids starting with 'test-'.
+  // and ids starting with 'test-'. A signed-in viewer's blocked, muted and
+  // blocked-by authors (and plain reposts of their posts) are excluded in
+  // the same query, before the page and the total, as in the main feed.
   const eligible = and(
     eq(postTags.tagId, tag.id),
-    eligibleTaggedPosts(new Date())
+    eligibleTaggedPosts(new Date()),
+    ...postFeedVisibilityConditions({
+      excludedAuthorIds: [...excludedAuthorIds],
+      excludeModeratedReposts: true,
+    })
   );
 
   const [pageRows, totalResult] = await Promise.all([

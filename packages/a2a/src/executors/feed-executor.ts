@@ -62,6 +62,7 @@ import {
   notifications,
   notificationTargetVisibilityCondition,
   or,
+  postFeedVisibilityConditions,
   posts,
   postTags,
   sql,
@@ -690,7 +691,7 @@ export class FeedAgentExecutor implements AgentExecutor {
       case 'stats.trending_tags':
         return this.getTrendingTags(command.params);
       case 'stats.posts_by_tag':
-        return this.getPostsByTag(command.params);
+        return this.getPostsByTag(command.params, context);
       case 'stats.get_organizations':
         return this.getOrganizations(command.params);
       // Messaging operations
@@ -2764,7 +2765,8 @@ export class FeedAgentExecutor implements AgentExecutor {
   }
 
   private async getPostsByTag(
-    params: Record<string, JsonValue>
+    params: Record<string, JsonValue>,
+    context: RequestContext
   ): Promise<PostsByTagResponse> {
     const tagName = typeof params.tag === 'string' ? params.tag.trim() : '';
     if (!tagName) {
@@ -2784,6 +2786,20 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!tag) {
       return { posts: [] };
     }
+
+    // The caller's blocked, muted and blocked-by authors are hidden before
+    // paging, the same rule as the web tag page and MCP query_feed.
+    const viewerId = context.contextId?.trim();
+    const [blockedIds, mutedIds, blockedByIds] = viewerId
+      ? await Promise.all([
+          getBlockedUserIds(viewerId),
+          getMutedUserIds(viewerId),
+          getBlockedByUserIds(viewerId),
+        ])
+      : [[], [], []];
+    const excludedAuthorIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
 
     // Join memberships to posts so eligibility is applied BEFORE
     // limit/offset: paginating the memberships first returns empty pages
@@ -2816,7 +2832,11 @@ export class FeedAgentExecutor implements AgentExecutor {
               .select({ id: users.id })
               .from(users)
               .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
-          )
+          ),
+          ...postFeedVisibilityConditions({
+            excludedAuthorIds,
+            excludeModeratedReposts: true,
+          })
         )
       )
       .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))

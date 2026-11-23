@@ -80,6 +80,7 @@ import {
   isNull,
   lte,
   notExists,
+  postFeedVisibilityConditions,
   posts,
   postTags,
   reactions,
@@ -93,6 +94,7 @@ import { notLike } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
+import { loadViewerExcludedAuthorIds } from '../../feed/_lib/viewer-moderation';
 
 const MAX_GROUP_TAGS = 20;
 const GroupLimitSchema = z.coerce.number().int().min(1).max(100).default(50);
@@ -194,7 +196,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // would let test posts crowd real posts out of the deduplication
   // window below. Authors with no user row (NPC actors, organizations)
   // are not test authors and stay visible.
+  // A signed-in viewer's blocked, muted and blocked-by authors (and plain
+  // reposts of their posts) are excluded before the fetch window too, so
+  // they cannot take the slots of posts the viewer may see.
   const now = new Date();
+  const excludedAuthorIds = authUser?.userId
+    ? [...(await loadViewerExcludedAuthorIds(authUser.userId))]
+    : [];
   const postTagRelations =
     authUser && authUser.userId
       ? await asUser(authUser, async (db) => {
@@ -230,7 +238,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                     .where(
                       and(eq(users.id, posts.authorId), eq(users.isTest, true))
                     )
-                )
+                ),
+                ...postFeedVisibilityConditions({
+                  excludedAuthorIds,
+                  excludeModeratedReposts: true,
+                })
               )
             )
             .orderBy(desc(postTags.createdAt))
