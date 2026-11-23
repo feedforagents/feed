@@ -370,6 +370,7 @@ export interface PerpPositionContext {
   ticker: string;
   side: string;
   size: number;
+  leverage?: number;
   maxOrderSize?: number;
   minOrderSize?: number;
   pnl: number;

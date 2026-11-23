@@ -104,7 +104,27 @@ const TRADE_HISTORY_FILE =
 const TRADE_HISTORY_CASES = [
   'serves the persisted prediction and perp trade history over HTTP',
 ];
+const PREDICTION_SCENARIO_FILE =
+  'packages/testing/integration/prediction-market-scenario.integration.test.ts';
+const PREDICTION_SCENARIO_CASES = [
+  'keeps the recorded scenario across adapter and terminal HTTP reads',
+];
+const STATS_TOTAL_HOOTS_FILE =
+  'packages/testing/integration/stats-total-hoots.integration.test.ts';
+const STATS_TOTAL_HOOTS_CASES = [
+  'Platform stats count only reachable posts > adds only the reachable fixture post to the platform total',
+  'Platform stats count only reachable posts > still moves for content readers can see',
+  'Platform stats count only reachable posts > follows moderation: publishing a scheduled post raises the total, removing one lowers it',
+];
+const CHAT_MENTION_FILE =
+  'packages/testing/integration/chat-mention-participants.integration.test.ts';
+const CHAT_MENTION_CASES = [
+  'GET /api/chats/[id] participants as the mention source > marks departed participants inactive so mentions skip them',
+  'GET /api/chats/[id] participants as the mention source > keeps departed senders listed with names for old messages',
+  'GET /api/chats/[id] participants as the mention source > keeps every active member reachable behind a shared prefix',
+];
 type Suite =
+  | 'prediction-market-scenario'
   | 'sub-market'
   | 'prediction-remainder'
   | 'plugin-perp-fee'
@@ -114,7 +134,9 @@ type Suite =
   | 'balance-display'
   | 'closed-prediction-positions'
   | 'mcp-perp-fee'
-  | 'trade-history';
+  | 'trade-history'
+  | 'stats-total-hoots'
+  | 'chat-mentions';
 type Lease = {
   database: string;
   oid: string;
@@ -619,12 +641,16 @@ async function startOwnedPredictionServer(
   }
 }
 
-export async function runIsolatedSubMarketCases() {
-  await runIsolatedCases('sub-market');
+export async function runIsolatedSubMarketCases(fixture?: IsolatedFixture) {
+  await runIsolatedCases('sub-market', fixture);
 }
 
 export async function runIsolatedPredictionRemainderCases() {
   await runIsolatedCases('prediction-remainder');
+}
+
+export async function runIsolatedPredictionMarketScenarioCase() {
+  await runIsolatedCases('prediction-market-scenario');
 }
 
 export async function runIsolatedPluginPerpFeeCases() {
@@ -647,20 +673,39 @@ export async function runIsolatedBalanceDisplayCases() {
   await runIsolatedCases('balance-display');
 }
 
-export async function runIsolatedClosedPredictionPositionsCases() {
-  await runIsolatedCases('closed-prediction-positions');
+export async function runIsolatedClosedPredictionPositionsCases(
+  fixture?: IsolatedFixture
+) {
+  await runIsolatedCases('closed-prediction-positions', fixture);
 }
 
-export async function runIsolatedMcpPerpFeeCases() {
-  await runIsolatedCases('mcp-perp-fee');
+export async function runIsolatedMcpPerpFeeCases(fixture?: IsolatedFixture) {
+  await runIsolatedCases('mcp-perp-fee', fixture);
 }
 
 export async function runIsolatedTradeHistoryCase() {
   await runIsolatedCases('trade-history');
 }
 
-async function runIsolatedCases(suite: Suite) {
-  // The trade-history fixture uses the original child marker and lease file.
+export async function runIsolatedStatsTotalHootsCases() {
+  await runIsolatedCases('stats-total-hoots');
+}
+
+export async function runIsolatedChatMentionCases() {
+  await runIsolatedCases('chat-mentions');
+}
+
+interface IsolatedFixture {
+  name: string;
+  file: string;
+  cases: string[];
+  manualTradingFeeIndex?: boolean;
+}
+
+async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
+  // Chat mentions, stats and trade history use the original child lease.
+  const chatMentions = suite === 'chat-mentions';
+  const stats = suite === 'stats-total-hoots';
   const tradeHistory = suite === 'trade-history';
   const closedPositions = suite === 'closed-prediction-positions';
   const balance = suite === 'balance-display';
@@ -670,6 +715,8 @@ async function runIsolatedCases(suite: Suite) {
   const prediction = suite === 'prediction-remainder';
   const plugin = suite === 'plugin-perp-fee';
   const mcpFee = suite === 'mcp-perp-fee';
+  const scenario = suite === 'prediction-market-scenario';
+  const scenarioOrClosedPositions = scenario || closedPositions;
   const file = closedPositions
     ? CLOSED_PREDICTION_POSITIONS_FILE
     : balance
@@ -688,7 +735,11 @@ async function runIsolatedCases(suite: Suite) {
                   ? MCP_FEE_FILE
                   : tradeHistory
                     ? TRADE_HISTORY_FILE
-                    : FILE;
+                    : stats
+                      ? STATS_TOTAL_HOOTS_FILE
+                      : chatMentions
+                        ? CHAT_MENTION_FILE
+                        : FILE;
   const cases = closedPositions
     ? CLOSED_PREDICTION_POSITIONS_CASES
     : balance
@@ -707,7 +758,11 @@ async function runIsolatedCases(suite: Suite) {
                   ? MCP_FEE_CASES
                   : tradeHistory
                     ? TRADE_HISTORY_CASES
-                    : CASES;
+                    : stats
+                      ? STATS_TOTAL_HOOTS_CASES
+                      : chatMentions
+                        ? CHAT_MENTION_CASES
+                        : CASES;
   const marker = closedPositions
     ? 'FEED_CLOSED_PREDICTION_POSITIONS_CHILD'
     : balance
@@ -774,8 +829,10 @@ async function runIsolatedCases(suite: Suite) {
   const directory = mkdtempSync(
     join(
       tmpdir(),
-      closedPositions
-        ? 'feed-closed-prediction-positions-'
+      scenarioOrClosedPositions
+        ? scenario
+          ? 'feed-prediction-market-scenario-'
+          : 'feed-closed-prediction-positions-'
         : balance
           ? 'feed-balance-display-'
           : review
@@ -792,7 +849,11 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'feed-mcp-perp-fee-'
                       : tradeHistory
                         ? 'feed-trade-history-'
-                        : 'feed-sub-market-'
+                        : stats
+                          ? 'feed-stats-total-hoots-'
+                          : chatMentions
+                            ? 'feed-chat-mentions-'
+                            : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -860,11 +921,13 @@ async function runIsolatedCases(suite: Suite) {
       [marker]: nonce,
       [leaseVariable]: manifest,
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
+      ...(fixture ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       // Fresh process memory only; never read or invalidate a shared cron cache.
+      ...(scenario ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(review ? { FEED_DISABLE_REDIS: '1' } : {}),
       ...(balance ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(closedPositions ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
-      ...(mcpFee || tradeHistory
+      ...(mcpFee || tradeHistory || stats || chatMentions
         ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' }
         : {}),
     };
@@ -884,7 +947,8 @@ async function runIsolatedCases(suite: Suite) {
       balance ||
       closedPositions ||
       mcpFee ||
-      tradeHistory
+      tradeHistory ||
+      fixture?.manualTradingFeeIndex
     ) {
       phase = 'manual-idempotency-index';
       const actual = await identity(admin);
@@ -937,8 +1001,10 @@ async function runIsolatedCases(suite: Suite) {
         'psql'
       );
     }
-    phase = closedPositions
-      ? 'eight-closed-prediction-position-child-cases'
+    phase = scenarioOrClosedPositions
+      ? scenario
+        ? 'prediction-scenario-http-child-case'
+        : 'eight-closed-prediction-position-child-cases'
       : balance
         ? 'five-balance-display-child-cases'
         : review
@@ -955,9 +1021,19 @@ async function runIsolatedCases(suite: Suite) {
                     ? 'three-mcp-perp-fee-child-cases'
                     : tradeHistory
                       ? 'trade-history-http-child-case'
-                      : 'four-child-cases';
+                      : stats
+                        ? 'three-stats-total-hoots-child-cases'
+                        : chatMentions
+                          ? 'three-chat-mention-child-cases'
+                          : 'four-child-cases';
+    if (fixture) phase = fixture.name + '-child-cases';
     const output = await run(
-      ['test', file, '--timeout', '30000'],
+      [
+        'test',
+        fixture?.file ?? (scenario ? PREDICTION_SCENARIO_FILE : file),
+        '--timeout',
+        '30000',
+      ],
       env,
       join(directory, 'child.log'),
       120000
@@ -965,11 +1041,15 @@ async function runIsolatedCases(suite: Suite) {
     const escape = (text: string) =>
       text.replace(/[$.*+?^{}()|[\]\\]/g, '\\$&');
     const lines = output.split('\n');
-    const passes = cases.map((name) =>
+    const expectedCases =
+      fixture?.cases ?? (scenario ? PREDICTION_SCENARIO_CASES : cases);
+    const passes = expectedCases.map((name) =>
       lines.find((line) =>
         new RegExp(
           '^\\(pass\\) ' +
-            (prediction ||
+            (fixture ||
+            scenario ||
+            prediction ||
             plugin ||
             fee ||
             npc ||
@@ -977,7 +1057,9 @@ async function runIsolatedCases(suite: Suite) {
             balance ||
             closedPositions ||
             mcpFee ||
-            tradeHistory
+            tradeHistory ||
+            stats ||
+            chatMentions
               ? ''
               : 'sub-market transactional creation > ') +
             escape(name) +
@@ -987,18 +1069,22 @@ async function runIsolatedCases(suite: Suite) {
     );
     requireThat(
       passes.every((line) => !!line) &&
-        new RegExp('^\\s*' + cases.length + ' pass\\r?$', 'm').test(output) &&
+        new RegExp('^\\s*' + expectedCases.length + ' pass\\r?$', 'm').test(
+          output
+        ) &&
         /^\s*0 fail\r?$/m.test(output) &&
         !/^\s*[1-9]\d* skip\r?$/m.test(output) &&
         output.includes(
           'Ran ' +
-            cases.length +
-            (cases.length === 1
+            expectedCases.length +
+            (expectedCases.length === 1
               ? ' test across 1 file.'
               : ' tests across 1 file.')
         ),
-      closedPositions
-        ? 'All eight closed prediction position cases must pass without skips'
+      scenarioOrClosedPositions
+        ? scenario
+          ? 'Prediction scenario must pass over real HTTP without skips'
+          : 'All eight closed prediction position cases must pass without skips'
         : balance
           ? 'All five balance display cases must pass without skips'
           : review
@@ -1015,13 +1101,17 @@ async function runIsolatedCases(suite: Suite) {
                       ? 'All three real MCP perp fee cases must pass without skips'
                       : tradeHistory
                         ? 'Trade history must pass over real HTTP without skips'
-                        : 'All four original cases must pass without skips'
+                        : stats
+                          ? 'All three stats cases must pass over HTTP without skips'
+                          : chatMentions
+                            ? 'All three chat mention cases must pass over HTTP without skips'
+                            : 'All four original cases must pass without skips'
     );
     childProof = {
-      pass: cases.length,
+      pass: expectedCases.length,
       skip: 0,
       fail: 0,
-      cases,
+      cases: expectedCases,
       childLog: join(directory, 'child.log'),
     };
     for (const line of passes) console.info('[isolated child] ' + line);
@@ -1157,7 +1247,7 @@ async function runIsolatedCases(suite: Suite) {
                         ? 'ISOLATED_TRADE_HISTORY_RESULT '
                         : 'ISOLATED_SUB_MARKET_RESULT ') +
         JSON.stringify({
-          pass: cases.length,
+          pass: expectedCases.length,
           skip: 0,
           fail: 0,
           database,

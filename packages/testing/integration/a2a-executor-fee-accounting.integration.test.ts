@@ -63,7 +63,7 @@ import {
   FeeService,
   STABILITY_FUND_CONFIG,
 } from '@feed/engine';
-import { generateSnowflakeId } from '@feed/shared';
+import { floorPoints, generateSnowflakeId } from '@feed/shared';
 import {
   createTradingFeeOutboxAdapter,
   drainTradingFeeOutboxBatch,
@@ -863,17 +863,17 @@ describe('perp fee idempotent recovery against real Postgres', () => {
     expect(after.totalFeesPaid - before.totalFeesPaid).toBeCloseTo(0.2, 10);
     expect(after.fund - before.fund).toBeCloseTo(0.06, 6);
     // The close fills at the synthetic execution price (below spot for a
-    // long sell), so realised PnL is negative. The reported realised PnL
-    // is cent-rounded while the wallet moved by the full-precision figure,
-    // so the balance is asserted exactly against the service-reported
-    // balance and to the cent against the reported settlement fields.
+    // long sell), so realised PnL is negative. The proceeds settle rounded
+    // down to a hundredth (PRD §9.1), so the balance is asserted exactly
+    // against the service-reported balance and against the floored sum of
+    // the reported settlement fields.
     assertFiniteNumber(closed.balance);
     expect(after.balance).toBe(closed.balance);
     expect(after.balance).toBeCloseTo(
       before.balance +
-        (closed.marginPaid ?? 0) +
-        (closed.realizedPnL ?? 0) -
-        closed.feePaid,
+        floorPoints(
+          (closed.marginPaid ?? 0) + (closed.realizedPnL ?? 0) - closed.feePaid
+        ),
       2
     );
     const positions = await openPositions(traderId);
@@ -928,19 +928,16 @@ describe('perp fee idempotent recovery against real Postgres', () => {
     const after = await readTraderState(traderId);
     expect(after.totalFeesPaid - before.totalFeesPaid).toBeCloseTo(0.3, 10);
     expect(after.fund - before.fund).toBeCloseTo(0.09, 6);
-    // Close leg returns margin 200 + realised PnL - close fee; flip leg
-    // costs new margin 100 + flip fee. The reported realised PnL is
-    // cent-rounded while the wallet moved by the full-precision figure,
-    // so the balance is asserted exactly against the service-reported
-    // balance and to the cent against the reported fields.
+    // Close leg returns margin 200 + realised PnL - close fee, rounded
+    // down to a hundredth (PRD §9.1); flip leg costs new margin 100 + flip
+    // fee, already whole hundredths. The balance is asserted exactly
+    // against the service-reported balance and against those settled legs.
     assertFiniteNumber(flipped.balance);
     expect(after.balance).toBe(flipped.balance);
     expect(after.balance).toBeCloseTo(
       before.balance +
-        200 +
-        (flipped.realizedPnL ?? 0) -
-        flipped.feePaid -
-        (flipped.marginPaid ?? 0),
+        floorPoints(200 + (flipped.realizedPnL ?? 0) - sum(closeRows)) -
+        ((flipped.marginPaid ?? 0) + sum(flipRows)),
       2
     );
     const positions = await openPositions(traderId);

@@ -10,10 +10,20 @@ import type {
 
 export type PredictionSide = 'yes' | 'no';
 
+/**
+ * Lifecycle slice for the market list. Mirrors the `status` enum of
+ * MarketQuerySchema (GET /api/markets/predictions): ACTIVE is the open
+ * list, RESOLVED settled with an outcome, CANCELLED settled without one
+ * (resolved with a null resolution).
+ */
+export type PredictionMarketStatus = 'ACTIVE' | 'RESOLVED' | 'CANCELLED';
+
 // Domain records (DB-facing)
 export interface QuestionRecord {
   id: string;
   questionNumber?: number;
+  /** Scenario group the question belongs to (questions.scenarioId). */
+  scenarioId?: number;
   text: string;
   status: 'active' | 'resolved' | 'cancelled';
   resolutionDate: Date;
@@ -24,6 +34,12 @@ export interface QuestionRecord {
 export interface PredictionMarketRecord {
   id: string;
   question: string;
+  /**
+   * Scenario of the market's question. A market is created from exactly one
+   * question (same id), so this is that question's scenarioId; absent only
+   * when no question row is linked.
+   */
+  scenario?: number;
   description?: string | null;
   gameId?: string | null;
   dayNumber?: number | null;
@@ -76,9 +92,13 @@ export interface PredictionDbPort {
   listMarkets?(options?: {
     limit?: number;
     offset?: number;
+    /** Lifecycle slice; omitted means the open (ACTIVE) list. */
+    status?: PredictionMarketStatus;
   }): Promise<PredictionMarketRecord[]>;
   /** Active (unresolved) row count; used for pagination metadata. */
   countUnresolvedMarkets?(): Promise<number>;
+  /** Row count for one lifecycle slice; used for pagination metadata. */
+  countMarketsByStatus?(status: PredictionMarketStatus): Promise<number>;
   listUserPositions?(userId: string): Promise<PredictionPositionRecord[]>;
   getQuestion?(idOrNumber: string): Promise<QuestionRecord | null>;
   createMarketFromQuestion(

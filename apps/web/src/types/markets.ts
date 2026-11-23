@@ -97,7 +97,8 @@ export interface PredictionMarket {
   resolutionDate?: string;
   endDate?: string | null;
   resolvedOutcome?: boolean;
-  scenario: number;
+  /** Scenario of the market's question; null when no question is linked. */
+  scenario: number | null;
   yesShares?: number;
   noShares?: number;
   yesProbability?: number;

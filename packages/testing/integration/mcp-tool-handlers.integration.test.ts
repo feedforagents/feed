@@ -39,7 +39,10 @@ import {
   executeMarkNotificationsRead,
   executeTool,
 } from '../../mcp/src/handlers/tool-handlers';
-import type { UpdateProfileResult } from '../../mcp/src/types/mcp';
+import type {
+  CreatePostResult,
+  UpdateProfileResult,
+} from '../../mcp/src/types/mcp';
 import { assertDisposableAgentFollowDatabase } from './helpers/agent-follow-database';
 
 const userIds: string[] = [];
@@ -794,5 +797,21 @@ describe('MCP tool handlers', () => {
       agent()
     )) as UpdateProfileResult;
     expect(ok.profile.displayName).toBe('MCP Tester');
+  });
+
+  it('stores create_post as an ordinary post even when type is article', async () => {
+    const created = (await executeTool(
+      'create_post',
+      { content: 'agent post asking to be an article', type: 'article' },
+      agent()
+    )) as CreatePostResult;
+    postIds.push(created.postId);
+
+    const [row] = await db
+      .select({ type: posts.type, authorId: posts.authorId })
+      .from(posts)
+      .where(eq(posts.id, created.postId));
+    // Articles belong to the news jobs (PRD §8.2 lists text-only create_post).
+    expect(row).toEqual({ type: 'post', authorId: agentUserId });
   });
 });

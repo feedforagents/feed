@@ -10,6 +10,7 @@
 
 import { setTimeout as waitForRetry } from 'node:timers/promises';
 import type { IAgentRuntime } from '@elizaos/core';
+import { settlePerpCharge } from '@feed/core/markets/perps';
 import {
   actorState,
   agentLogs,
@@ -1337,11 +1338,9 @@ ${describeNpcMarketClue(offeredMarketClue)}`
               const inverseSize = executedAmount - position.size;
               return `Your TRADE would close your ${position.side} of ${position.size} points on ${marketId} and open the remaining ${inverseSize} points on the other side, below the minimum order size of ${minimum} points. Close the position exactly, or open at least ${position.size + minimum} points.`;
             }
-            // A new or added position debits its 1x margin plus the open fee
-            // (PerpMarketService.openPosition, fee config from
-            // executePerpTrade), so the capped size alone can exceed the
-            // balance.
-            if (!flipping) {
+            // Fresh direct orders use 1x, while adds inherit the held leverage.
+            const leverage = position ? position.leverage : 1;
+            if (!flipping && leverage !== undefined) {
               const openFee =
                 executedAmount < 0.01
                   ? 0
@@ -1352,8 +1351,13 @@ ${describeNpcMarketClue(offeredMarketClue)}`
                       ),
                       FEE_CONFIG.MIN_FEE_AMOUNT
                     );
-              if (executedAmount + openFee > context.balance) {
-                return `Perp orders on ${marketId} cost the size plus a ${openFee} point fee, which exceeds your balance of ${context.balance}. Reduce the amount so size plus fee fits your balance, or choose another action.`;
+              const charge = settlePerpCharge(
+                executedAmount,
+                leverage,
+                openFee
+              );
+              if (charge > context.balance) {
+                return `Perp orders on ${marketId} cost ${charge} points including a ${openFee} point fee, which exceeds your balance of ${context.balance}. Reduce the amount so margin plus fee fits your balance, or choose another action.`;
               }
             }
           }

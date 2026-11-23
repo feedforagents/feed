@@ -35,6 +35,7 @@ mock.module('@feed/db', () => ({
   groupMembers: {},
   groups: {},
   gte: (...args: unknown[]) => args,
+  hasBlocked: mock(async () => false),
   inArray: (...args: unknown[]) => args,
   isNull: (...args: unknown[]) => args,
   messages: {},
@@ -72,6 +73,7 @@ mock.module('@feed/core/markets/prediction', () => ({
 }));
 
 mock.module('@feed/engine', () => ({
+  createNpcPerpSettlement: mock(() => ({})),
   createNpcWalletAdapter: mock(() => ({})),
   createPerpPriceImpactPort: mock(() => ({})),
   createPerpSettlement: mock(() => ({})),

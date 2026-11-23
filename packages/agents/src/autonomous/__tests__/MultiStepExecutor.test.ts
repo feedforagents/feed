@@ -1397,10 +1397,49 @@ describe('NPC iteration ceiling (PRD D-25)', () => {
     );
     expect(decision).toHaveBeenCalledTimes(2);
     expect(decision.mock.calls[1]?.[4]?.feedback).toContain(
-      'cost the size plus a 0.02 point fee, which exceeds your balance of 20'
+      'cost 20.02 points including a 0.02 point fee, which exceeds your balance of 20'
     );
     expect(execute).toHaveBeenCalledTimes(1);
     expect(execute.mock.calls[0]?.[1]).toBe(Actions.LIKE);
+  });
+
+  test('dispatches an affordable add using the held position leverage', async () => {
+    const executor = new MultiStepExecutor(1);
+    const { context, runtime, decision, execute } = prepare(
+      executor,
+      false,
+      true
+    );
+    context.balance = 10;
+    context.enabledFeatures.push(Features.TRADING);
+    context.openPositions = 1;
+    context.perpMarkets = [nvdaiMarket];
+    context.agentPositions.perps = [
+      {
+        ticker: 'NVDAI',
+        side: 'long',
+        size: 100,
+        leverage: 5,
+        minOrderSize: 10,
+        pnl: 0,
+        pnlPercent: 0,
+        entryPrice: 100,
+        currentPrice: 100,
+        timeHeld: '20m',
+        timeHeldMs: 1_200_000,
+      },
+    ];
+    decision.mockResolvedValueOnce(perpTrade('open_long', 50));
+    expect((await executor.execute(actor.id, runtime, true)).success).toBe(
+      true
+    );
+    expect(decision).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[2]).toMatchObject({
+      marketId: 'NVDAI',
+      side: 'open_long',
+      amount: 50,
+    });
   });
 
   test('gives a perp flip whose new leg is below the minimum the existing correction before dispatch', async () => {

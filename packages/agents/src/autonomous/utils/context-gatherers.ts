@@ -294,6 +294,7 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       ticker: perpPositions.ticker,
       side: perpPositions.side,
       size: perpPositions.size,
+      leverage: perpPositions.leverage,
       entryPrice: perpPositions.entryPrice,
       currentPrice: perpPositions.currentPrice,
       unrealizedPnL: perpPositions.unrealizedPnL,
@@ -339,6 +340,7 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       ticker: p.ticker,
       side: p.side,
       size: requireContextNumber(p.size, `position ${p.ticker} size`, 0),
+      leverage: p.leverage,
       maxOrderSize:
         p.openInterest === null
           ? undefined

@@ -134,8 +134,13 @@ export function FeedClient() {
     addOptimisticPost,
   } = useFeedPosts({ enabled: tab === 'latest' });
 
-  const { posts: followingPosts, loading: followingLoading } =
-    useFollowingPosts({ enabled: tab === 'following' });
+  const {
+    posts: followingPosts,
+    loading: followingLoading,
+    loadingMore: followingLoadingMore,
+    hasMore: followingHasMore,
+    loadMore: loadMoreFollowing,
+  } = useFollowingPosts({ enabled: tab === 'following' });
 
   const {
     topic: storiesTopic,
@@ -296,8 +301,10 @@ export function FeedClient() {
   const handleLoadMore = useCallback(() => {
     if (tab === 'latest' && cursor) {
       void fetchPosts(cursor, true);
+    } else if (tab === 'following') {
+      void loadMoreFollowing();
     }
-  }, [tab, cursor, fetchPosts]);
+  }, [tab, cursor, fetchPosts, loadMoreFollowing]);
 
   // Handle post creation
   const handlePostCreated = useCallback(
@@ -380,7 +387,10 @@ export function FeedClient() {
       );
     }
 
-    if (currentPosts.length === 0) {
+    if (
+      currentPosts.length === 0 &&
+      !(tab === 'following' && followingHasMore)
+    ) {
       if (tab === 'latest') return <EmptyFeed variant="latest" />;
       if (tab === 'following')
         return <EmptyFeed variant="following" isLoading={followingLoading} />;
@@ -402,13 +412,13 @@ export function FeedClient() {
     }
 
     return (
-      // Following is a single-page fetch with no cursor pagination.
-      // (Latest uses MixedFeedList above.)
+      // Following paginates with the same cursor pattern as Latest:
+      // the hook follows the API's nextCursor via loadMore.
       <PostList
         posts={currentPosts}
         actorNames={actorNames}
-        hasMore={false}
-        loadingMore={loadingMore}
+        hasMore={followingHasMore}
+        loadingMore={followingLoadingMore}
         onLoadMore={handleLoadMore}
       />
     );

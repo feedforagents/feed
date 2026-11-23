@@ -122,9 +122,11 @@ bun run steward:init      # first run only: creates the Feed tenant in Steward
 bun run env:validate      # checks the required variables
 ```
 
-`bun install` also runs `scripts/postinstall-agent-frameworks.ts`. This script
-clones Hermes Agent, OpenClaw, elizaOS, and ClawBench into
-`../external-sources/`. Set `FEED_SKIP_AGENT_FRAMEWORKS_BOOTSTRAP=1` to skip it.
+`bun install` does not clone or build the external agent frameworks. To set
+up the optional frameworks for local agent testing or benchmarks, explicitly
+run `bun run agent-frameworks:bootstrap`. This command clones sources into
+`../external-sources/` and requires network access. See the
+[Simulation & Training section](README.md#simulation--training) for details.
 
 ## 6. Environment variables
 
@@ -191,7 +193,7 @@ These variables are not read by the application runtime. They control tests.
 | `RUN_CLOUDFLARE_CONNECTION_TESTS` | Runs live Cloudflare connection checks | Cloudflare integration test |
 | `LINEAR_TEST` | `true` runs the Linear API test | `linear-api` integration test |
 | `FEED_A2A_API_KEY` | Server key for A2A and MCP (`X-Feed-Api-Key`) | Agent client tests against non-local hosts |
-| `FEED_API_URL`, `FEED_API_KEY`, `AGENT0_*` | Example agent settings | `packages/examples/feed-typescript-agent` (see its `.env.example`) |
+| `AGENT0_*` | Optional Agent0 integration settings | `.env.example` and `scripts/validate-env.ts` |
 
 Localhost requests to `/api/a2a` and `/api/mcp` skip the API-key check when
 `NODE_ENV` is not `production`.
@@ -231,9 +233,14 @@ Tests with real LLM calls (required as evidence when behavior depends on an LLM)
 bun run test:integration:live
 ```
 
-This runs the agent action, engine output, full agent tick, full production
-tick, and trading-and-questions integration files with real inference. If the
-output says the tests were skipped, your key or `RUN_LIVE_LLM_TESTS` is missing.
+This runs these integration files with real inference:
+
+- `engine-generation-output.test.ts`
+- `full-agent-tick.test.ts`
+- `full-production-tick.test.ts`
+- `trading-and-questions.integration.test.ts`
+
+If the output says the tests were skipped, your key or `RUN_LIVE_LLM_TESTS` is missing.
 A skipped test is not evidence.
 
 Other suites:

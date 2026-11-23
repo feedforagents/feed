@@ -50,11 +50,7 @@ const tile = svg(
   100,
   100
 );
-for (const path of [
-  'apps/web/public/favicon.svg',
-  'apps/mobile/public/favicon.svg',
-])
-  await save(path, tile);
+await save('apps/web/public/favicon.svg', tile);
 for (const size of [144, 192, 512]) {
   await png(`apps/web/public/icons/icon-${size}.png`, tile, size);
   // Keep the mark inside Android's central safe circle.
@@ -65,17 +61,7 @@ for (const size of [144, 192, 512]) {
   );
   await png(`apps/web/public/icons/icon-maskable-${size}.png`, maskable, size);
 }
-for (const path of [
-  'apps/web/public/icon-1024.png',
-  'apps/mobile/public/icon-1024.png',
-  'apps/mobile/resources/icon-only.png',
-])
-  await png(path, tile, 1024);
-await png(
-  'apps/mobile/resources/icon-foreground.png',
-  svg(`<g transform="translate(20 17) scale(.6)">${mark}</g>`, 100, 100),
-  1024
-);
+await png('apps/web/public/icon-1024.png', tile, 1024);
 await png('apps/web/public/blankpeep.png', svg(mark, 100, 100), 96);
 await png('apps/web/public/blankwithbg.png', tile, 512);
 
@@ -111,12 +97,4 @@ const social = svg(
 );
 await save('apps/web/public/assets/images/og-image.svg', social);
 await png('apps/web/public/assets/images/og-image.png', social);
-const splash = svg(
-  `<rect width="1280" height="853" fill="${ink}"/><g transform="translate(216 290) scale(2.4)" color="${lime}">${lockup()}</g>`,
-  1280,
-  853
-);
-await png('apps/mobile/public/splash.png', splash);
-console.log(
-  'Generated feed logos, browser/mobile icons, splash, and social preview.'
-);
+console.log('Generated Feed logos, web icons, and social preview.');
