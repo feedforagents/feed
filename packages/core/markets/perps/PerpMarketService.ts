@@ -561,6 +561,7 @@ export class PerpMarketService {
     }
 
     const market = await this.getRequiredMarket(input.ticker);
+    this.assertPreviewMinimumOrderSize(market, input.size);
     const maxLeverage = effectiveMaxLeverage(market);
     if (input.leverage > maxLeverage) {
       throw new Error(`Invalid leverage (1-${maxLeverage})`);
@@ -590,6 +591,16 @@ export class PerpMarketService {
       input.userId,
       input.ticker
     );
+
+    // Legacy subcent positions can still be quoted for an exact full close.
+    const isLegacyFullClose =
+      existingPosition &&
+      input.side !== existingPosition.side &&
+      input.size === existingPosition.size &&
+      input.size < 0.01;
+    if (!isLegacyFullClose) {
+      this.assertPreviewMinimumOrderSize(market, input.size);
+    }
 
     if (!existingPosition) {
       // Same account-level rejection as openPosition: the exposure cap and
@@ -2346,10 +2357,26 @@ export class PerpMarketService {
     return market;
   }
 
+  private assertPreviewMinimumOrderSize(
+    market: PerpMarketRecord,
+    size: number
+  ) {
+    const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
+    if (size < minOrderSize) {
+      throw new ValidationError(`Order size below minimum (${minOrderSize})`);
+    }
+  }
+
   private async buildOpenExecutionPreview(
     market: PerpMarketRecord,
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
   ): Promise<PerpOpenExecutionPreview> {
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
+    if (input.size > maxPositionSize) {
+      throw new ValidationError(
+        `Order size exceeds market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
     const execution = this.getOpenExecutionQuote(
       market,
       input.side,
@@ -2427,6 +2454,13 @@ export class PerpMarketService {
     input: Pick<PerpOpenInput, 'ticker' | 'side' | 'size' | 'leverage'>
   ): Promise<PerpOpenExecutionPreview> {
     const addedSize = input.size;
+    const resultingSize = existing.size + addedSize;
+    const maxPositionSize = getPerpMarketOrderSizeLimit(market.openInterest);
+    if (resultingSize > maxPositionSize) {
+      throw new ValidationError(
+        `Total position size would exceed market limit (${maxPositionSize.toLocaleString()})`
+      );
+    }
     const effectiveLeverage = existing.leverage;
     const execution = this.getOpenExecutionQuote(
       market,
@@ -2456,7 +2490,6 @@ export class PerpMarketService {
       10_000;
     const quoteImpactBps =
       (quoteImpactPrice / Math.max(currentPrice, 1)) * 10_000;
-    const resultingSize = existing.size + addedSize;
     const averagedEntryPrice = blendEntryPrice(
       existing.size,
       existing.entryPrice,
