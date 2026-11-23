@@ -557,14 +557,7 @@ async function handleDisputeCreated(
     return { success: true }; // Don't retry - not our transaction
   }
 
-  // Stripe uses cents. As for refunds, do not take back more than the stored
-  // purchase credited: a purchase written before #1606 can hold 112 units
-  // for a $1.13 charge.
-  const disputedUnits = Math.min(
-    usdToBalanceUnits(dispute.amount / 100),
-    Number(originalTx.amount)
-  );
-  const amountUSD = disputedUnits / 100;
+  const amountUSD = dispute.amount / 100; // Stripe uses cents
 
   logger.warn(
     'Processing dispute (chargeback) - deducting points',
@@ -721,14 +714,7 @@ async function handleDisputeClosed(
     return { success: true }; // Don't retry - no deduction to reverse
   }
 
-  // Give back no more than the purchase credited, with the same cap as
-  // handleDisputeCreated. Otherwise a legacy purchase (112 units for a $1.13
-  // charge) loses 112 to the dispute and gets 113 back when it is won.
-  const recreditUnits = Math.min(
-    usdToBalanceUnits(dispute.amount / 100),
-    Number(originalPurchase.amount)
-  );
-  const amountUSD = recreditUnits / 100;
+  const amountUSD = dispute.amount / 100; // Stripe uses cents
 
   logger.info(
     'Re-crediting trading balance after winning dispute',
@@ -888,10 +874,7 @@ async function handleChargeRefunded(
     0
   );
 
-  // Calculate total refunded balance units based on cumulative USD. Use the
-  // same one-unit-per-cent conversion that credits current purchases, but do
-  // not take back more than the stored purchase actually credited. Purchases
-  // written before #1606 can contain 112 units for a $1.13 charge.
+  // Match the purchase cents conversion and cap at the actual legacy credit.
   const totalRefundedPoints = Math.min(
     usdToBalanceUnits(totalRefundedUSD),
     Number(originalTx.amount)

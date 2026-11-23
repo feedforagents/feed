@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
+import { NextRequest } from 'next/server';
+import { GET as runFundingCron } from '../app/api/cron/perp-funding/route';
 import {
   isInternalCronSchedulerEnabled,
   triggerScheduledCrons,
@@ -12,12 +14,59 @@ const saved = {
   ENABLE_INTERNAL_CRON_SCHEDULER: env.ENABLE_INTERNAL_CRON_SCHEDULER,
   NEXT_PUBLIC_APP_URL: env.NEXT_PUBLIC_APP_URL,
   NODE_ENV: env.NODE_ENV,
+  PERP_FUNDING_FIRST_PERIOD: env.PERP_FUNDING_FIRST_PERIOD,
 };
 
 afterEach(() => {
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) delete env[key];
     else env[key] = value;
+  }
+});
+
+it.each([
+  'staging',
+  'localnet',
+])('sends the canonical funding boundary from %s internal scheduling', async (deployment) => {
+  const observed: Array<{
+    timestamp: string | null;
+    status: number;
+    body: object;
+  }> = [];
+  const period = new Date('2026-10-10T00:00:00Z');
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      if (new URL(request.url).pathname !== '/api/cron/perp-funding') {
+        return new Response(null, { status: 204 });
+      }
+      const response = await runFundingCron(new NextRequest(request));
+      observed.push({
+        timestamp: request.headers.get('X-Cloudflare-Cron-Time'),
+        status: response.status,
+        body: await response.clone().json(),
+      });
+      return response;
+    },
+  });
+  env.CRON_SECRET = 'local-funding-fixture';
+  env.DEPLOYMENT_ENV = deployment;
+  env.NEXT_PUBLIC_APP_URL = server.url.origin;
+  // The request must validate the scheduled date before the cutover guard
+  // can return. Keeping the test before cutover prevents all funding writes.
+  env.PERP_FUNDING_FIRST_PERIOD = '2026-10-10T08:00:00Z';
+  try {
+    await triggerScheduledCrons(new Date(period.getTime() + 37_125));
+    expect(observed).toEqual([
+      {
+        timestamp: String(period.getTime()),
+        status: 200,
+        body: { success: true, skipped: 'before-funding-cutover' },
+      },
+    ]);
+  } finally {
+    await server.stop(true);
   }
 });
 

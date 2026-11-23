@@ -23,7 +23,10 @@ import {
   sharePost as canonicalSharePost,
   checkRateLimitAsync,
   declineGroupInvite,
+  notifyReactionOnComment,
+  notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
+  updateProfileWithLeaderboardInvalidation,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
@@ -69,6 +72,7 @@ import {
   createPerpTradesCachePort,
   FEE_CONFIG,
   FeeService,
+  getCurrentTrendingTags,
   type PredictionSettlementOptions,
   StaticDataRegistry,
   WalletService,
@@ -83,6 +87,7 @@ import {
   logger,
   UpdateUserSchema,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import {
   handleAppealBanWithEscrow,
@@ -887,11 +892,17 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     // Check if post exists
     const post = await db.post.findFirst({
-      where: { id: postId, deletedAt: null },
+      where: { id: postId },
     });
 
-    if (!post) {
+    // Unknown or not-yet-published posts cannot be liked (same rule as the
+    // web like route and the MCP like_post tool).
+    const now = new Date();
+    if (!post || post.timestamp > now) {
       throw new Error('Post not found');
+    }
+    if (post.deletedAt) {
+      throw new Error('Cannot like deleted post');
     }
 
     // Prefer request context identity when present (prevents params-based impersonation),
@@ -920,6 +931,24 @@ export class FeedAgentExecutor implements AgentExecutor {
         type: 'like',
       },
     });
+
+    // The like has committed. A notification outage must not tell the caller
+    // that the like failed and invite an unsuccessful retry.
+    if (post.authorId && post.authorId !== userId) {
+      try {
+        await notifyReactionOnPost(post.authorId, userId, postId, 'like');
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed like',
+          {
+            postId,
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'A2A'
+        );
+      }
+    }
 
     return { success: true, message: 'Post liked' };
   }
@@ -1122,6 +1151,14 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('Post not found');
     }
 
+    const [authorBlockedCaller, callerBlockedAuthor] = await Promise.all([
+      hasBlocked(post.authorId, userId),
+      hasBlocked(userId, post.authorId),
+    ]);
+    if (authorBlockedCaller || callerBlockedAuthor) {
+      throw new Error('Cannot comment on this post');
+    }
+
     const commentId = await generateSnowflakeId();
     await db.comment.create({
       data: {
@@ -1216,6 +1253,30 @@ export class FeedAgentExecutor implements AgentExecutor {
         type: 'like',
       },
     });
+
+    // The like has committed. A notification outage must not tell the caller
+    // that the like failed and invite an unsuccessful retry.
+    if (comment.authorId && comment.authorId !== userId) {
+      try {
+        await notifyReactionOnComment(
+          comment.authorId,
+          userId,
+          commentId,
+          comment.postId,
+          'like'
+        );
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed comment like',
+          {
+            commentId,
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'A2A'
+        );
+      }
+    }
 
     return { success: true, message: 'Comment liked' };
   }
@@ -1377,22 +1438,15 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('At least one field to update is required');
     }
 
-    await db.user.update({
-      where: { id: userId },
-      data: updateData,
-    });
-
-    // Fetch the updated user to return clean data
-    const user = await db.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        bio: true,
-        profileImageUrl: true,
-      },
-    });
+    const user = await updateProfileWithLeaderboardInvalidation(
+      userId,
+      updateData,
+      (client) =>
+        client.user.update({
+          where: { id: userId },
+          data: updateData,
+        })
+    );
 
     return {
       success: true,
@@ -2142,6 +2196,43 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('Chat not found or access denied');
     }
 
+    const chat = await db.chat.findUnique({
+      where: { id: chatId },
+      select: { isGroup: true },
+    });
+    if (!chat) {
+      throw new Error('Chat not found or access denied');
+    }
+
+    // Apply the web and MCP direct-message rules to the active peer.
+    if (!chat.isGroup) {
+      const participants = await db.chatParticipant.findMany({
+        where: { chatId, isActive: true },
+        select: { userId: true },
+      });
+      const recipientId = participants.find((p) => p.userId !== userId)?.userId;
+      if (!recipientId) {
+        throw new Error('Invalid direct message chat');
+      }
+      const [recipient, senderBlockedRecipient, recipientBlockedSender] =
+        await Promise.all([
+          db.user.findUnique({
+            where: { id: recipientId },
+            select: { isActor: true },
+          }),
+          hasBlocked(userId, recipientId),
+          hasBlocked(recipientId, userId),
+        ]);
+      if (recipient?.isActor) {
+        throw new Error(
+          'Cannot send direct messages to NPC actors. Use group chats instead.'
+        );
+      }
+      if (senderBlockedRecipient || recipientBlockedSender) {
+        throw new Error('Cannot send messages to this user');
+      }
+    }
+
     const message = await db.message.create({
       data: {
         id: await generateSnowflakeId(),
@@ -2218,7 +2309,7 @@ export class FeedAgentExecutor implements AgentExecutor {
         memberId,
         chatParticipantId: await generateSnowflakeId(),
         groupMemberId: await generateSnowflakeId(),
-        role: memberId === userId ? 'admin' : 'member',
+        role: memberId === userId ? 'owner' : 'member',
       }))
     );
 
@@ -2368,8 +2459,36 @@ export class FeedAgentExecutor implements AgentExecutor {
     context: RequestContext
   ) {
     const userId = requireContextAccountId({}, context);
+
+    // Match the notification list above (and the web chat badge, GET
+    // /api/chats/unread-count): chat notifications whose actor is blocked
+    // by the user, muted by the user, or has blocked the user are excluded
+    // at read time. The filter has to live at read time — muting never
+    // stops notification creation, and a block placed later must hide chat
+    // notifications created before it. System chat notifications have a
+    // null actor and are always kept.
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(userId),
+      getMutedUserIds(userId),
+      getBlockedByUserIds(userId),
+    ]);
+    const excludedActorIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+    const moderationFilter =
+      excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {};
+
     const unreadCount = await db.notification.count({
-      where: { userId, read: false, chatId: { not: null } },
+      where: {
+        userId,
+        read: false,
+        chatId: { not: null },
+        ...moderationFilter,
+      },
     });
     return { unreadCount };
   }
@@ -2599,34 +2718,13 @@ export class FeedAgentExecutor implements AgentExecutor {
   ): Promise<TrendingTagsResponse> {
     const limit = this.parsePositiveInt(params.limit, 10, 50);
 
-    // Get trending tags with their tag info via query
-    const trendingTagsList = await db.trendingTag.findMany({
-      take: limit,
-      orderBy: { score: 'desc' },
+    const trendingTagsList = await getCurrentTrendingTags(limit, {
+      requireIdentity: true,
     });
-
-    // Get tag IDs
-    const tagIds = trendingTagsList.map((tt) => tt.tagId);
-
-    // Fetch actual tag info
-    const tags =
-      tagIds.length > 0
-        ? await db.tag.findMany({
-            where: { id: { in: tagIds } },
-          })
-        : [];
-
-    // Create a map for quick lookup
-    const tagMap = new Map(tags.map((t) => [t.id, t]));
 
     return {
       tags: trendingTagsList.map((tt) => {
-        const tag = tagMap.get(tt.tagId);
-        if (!tag || !tag.name.trim() || !tag.displayName.trim()) {
-          throw new Error(
-            `Trending tag ${tt.tagId} is missing its required identity`
-          );
-        }
+        const tag = tt.tag;
         return {
           id: tag.id,
           name: tag.name,
@@ -2684,7 +2782,18 @@ export class FeedAgentExecutor implements AgentExecutor {
           eq(postTags.tagId, tag.id),
           isNull(posts.deletedAt),
           lte(posts.timestamp, now),
-          eq(posts.type, 'post')
+          eq(posts.type, 'post'),
+          // Exclude test authors in SQL before paginating, so pages
+          // are full — the canonical post query's rule
+          // (DatabaseService.getRecentPosts): 'test-' ids and
+          // isTest-flagged accounts never appear in post lists.
+          notLike(posts.authorId, 'test-%'),
+          notExists(
+            getRawDrizzle()
+              .select({ id: users.id })
+              .from(users)
+              .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+          )
         )
       )
       .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))

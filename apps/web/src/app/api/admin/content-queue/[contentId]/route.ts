@@ -10,6 +10,7 @@
  */
 
 import {
+  cachedDb,
   checkRateLimitAndDuplicates,
   errorResponse,
   logAdminModify,
@@ -101,7 +102,11 @@ export const POST = withErrorHandling(
     if (contentType === 'post') {
       // Handle post moderation
       const [existingPost] = await db
-        .select({ id: posts.id, deletedAt: posts.deletedAt })
+        .select({
+          id: posts.id,
+          authorId: posts.authorId,
+          deletedAt: posts.deletedAt,
+        })
         .from(posts)
         .where(eq(posts.id, contentId))
         .limit(1);
@@ -178,6 +183,10 @@ export const POST = withErrorHandling(
           userAgent,
           metadata: { action: 'hide' },
         });
+
+        // Audit the committed hide before fallible cache I/O.
+        await cachedDb.invalidatePostsCache();
+        await cachedDb.invalidateActorPostsCache(existingPost.authorId);
       }
     } else if (contentType === 'comment') {
       // Handle comment moderation

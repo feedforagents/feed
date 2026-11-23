@@ -283,7 +283,6 @@ export interface GetPostArgs {
 
 export interface CreatePostArgs {
   content: string;
-  type?: 'post' | 'article';
   mediaUrl?: string;
 }
 

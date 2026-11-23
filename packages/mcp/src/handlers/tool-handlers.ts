@@ -29,7 +29,6 @@
  * require passing referrer context through the MCP API key or session.
  */
 
-import type { JsonRpcParams, JsonRpcRequest } from '@feed/a2a';
 import {
   handleAppealBanWithEscrow,
   handleCreateEscrowPayment,
@@ -44,11 +43,14 @@ import {
   declineGroupInvite,
   logAdminModify,
   NotFoundError,
+  notifyCommentOnPost,
+  notifyFollow,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
   sharePost,
+  updateProfileWithLeaderboardInvalidation,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
@@ -75,6 +77,7 @@ import {
   markets,
   not,
   notExists,
+  notInArray,
   perpMarketSnapshots,
   posts,
   postTags,
@@ -91,6 +94,7 @@ import {
   createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
+  getCurrentTrendingTags,
   invalidateAfterPredictionTrade,
   type PredictionSettlementOptions,
   StaticDataRegistry,
@@ -104,6 +108,7 @@ import {
   logger,
   retryIfRetryable,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 
 function buildWalletPort(): WalletPort {
   return {
@@ -459,6 +464,8 @@ import type {
   GetUserStatsResult,
   GetUserWalletArgs,
   GetUserWalletResult,
+  JsonRpcParams,
+  JsonRpcRequest,
   LeaveChatArgs,
   LeaveChatResult,
   LikeCommentArgs,
@@ -1018,6 +1025,15 @@ export async function executeQueryFeed(
     relatedQuestion = question.questionNumber;
   }
 
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const now = new Date();
   // Filter in SQL before the limit without requiring NPC authors to have Users.
   const feedPosts = await db
@@ -1041,10 +1057,17 @@ export async function executeQueryFeed(
         ),
         relatedQuestion !== undefined
           ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined,
+        excludedAuthorIds.length > 0
+          ? notInArray(posts.authorId, excludedAuthorIds)
           : undefined
       )
     )
-    .orderBy(desc(posts.timestamp))
+    // Total order, matching the web feed query
+    // (DatabaseService.getRecentPosts orders by timestamp desc, id desc):
+    // with timestamp alone, posts sharing one timestamp are cut by the
+    // limit in storage order, so the head of a tied block is arbitrary.
+    .orderBy(desc(posts.timestamp), desc(posts.id))
     .limit(args.limit || 20);
 
   return {
@@ -1394,7 +1417,6 @@ export async function executeCreatePost(
       id: postId,
       content: args.content.trim(),
       authorId: agent.userId,
-      type: args.type || 'post',
       imageUrl: mediaUrl,
       timestamp: new Date(),
     },
@@ -1605,6 +1627,18 @@ export async function executeCreateComment(
     throw new NotFoundError('Post (deleted)', args.postId);
   }
 
+  if (post.timestamp > new Date()) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
+  const [authorBlockedCaller, callerBlockedAuthor] = await Promise.all([
+    hasBlocked(post.authorId, agent.userId),
+    hasBlocked(agent.userId, post.authorId),
+  ]);
+  if (authorBlockedCaller || callerBlockedAuthor) {
+    throw new BusinessLogicError('Cannot comment on this post', 'BLOCKED_USER');
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {
@@ -1615,6 +1649,30 @@ export async function executeCreateComment(
       updatedAt: new Date(),
     },
   });
+
+  // The comment has committed. Notification failure must not invite a retry.
+  if (post.authorId !== agent.userId) {
+    try {
+      await notifyCommentOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        comment.id
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed comment',
+        {
+          postId: args.postId,
+          commentId: comment.id,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return {
     success: true,
     commentId: comment.id,
@@ -1743,7 +1801,18 @@ export async function executeGetPostsByTag(
       and(
         eq(postTags.tagId, tag.id),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, now)
+        lte(posts.timestamp, now),
+        // Exclude test authors in SQL before paginating, so pages
+        // are full — the canonical post query's rule
+        // (DatabaseService.getRecentPosts): 'test-' ids and
+        // isTest-flagged accounts never appear in post lists.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
@@ -1814,19 +1883,15 @@ export async function executeUpdateProfile(
   if (args.username !== undefined) updateData.username = args.username;
   if (args.profileImageUrl !== undefined)
     updateData.profileImageUrl = args.profileImageUrl;
-  const user = await db.user.update({
-    where: { id: agent.userId },
-    data: updateData,
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      bio: true,
-      profileImageUrl: true,
-      reputationPoints: true,
-      virtualBalance: true,
-    },
-  });
+  const user = await updateProfileWithLeaderboardInvalidation(
+    agent.userId,
+    updateData,
+    (client) =>
+      client.user.update({
+        where: { id: agent.userId },
+        data: updateData,
+      })
+  );
   return {
     success: true,
     profile: {
@@ -1851,7 +1916,22 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  await followUserWithBlockCheck(agent.userId, args.userId);
+  const created = await followUserWithBlockCheck(agent.userId, args.userId);
+  if (created) {
+    try {
+      await notifyFollow(args.userId, agent.userId);
+    } catch (error) {
+      logger.warn(
+        'Failed to notify user of committed follow',
+        {
+          userId: args.userId,
+          followerId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
   return { success: true };
 }
 
@@ -2129,7 +2209,7 @@ export async function executeGetUserStats(
  */
 export async function executeGetChats(
   agent: AuthenticatedAgent,
-  _args: GetChatsArgs
+  args: GetChatsArgs
 ): Promise<GetChatsResult> {
   // Get all chats where user is a participant
   const participants = await db.chatParticipant.findMany({
@@ -2140,10 +2220,20 @@ export async function executeGetChats(
     select: { chatId: true },
   });
   const participantChatIds = participants.map((p) => p.chatId);
+  // The tool schema advertises filter: 'all' | 'dms' | 'groups'; apply it
+  // in the chat query so last-message lookups below only run for the
+  // chats actually being returned.
   const chatsList =
     participantChatIds.length > 0
       ? await db.chat.findMany({
-          where: { id: { in: participantChatIds } },
+          where: {
+            id: { in: participantChatIds },
+            ...(args.filter === 'dms'
+              ? { isGroup: false }
+              : args.filter === 'groups'
+                ? { isGroup: true }
+                : {}),
+          },
         })
       : [];
   const chatIds = chatsList.map((c) => c.id);
@@ -2230,7 +2320,9 @@ export async function executeGetChatMessages(
         ? { senderId: { notIn: excludedSenderIds } }
         : {}),
     },
-    orderBy: { createdAt: 'desc' },
+    // Break timestamp ties for deterministic pages over unchanged history.
+    // Concurrent inserts/deletes can still shift offset windows.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: args.limit || 50,
     skip: args.offset || 0,
   });
@@ -2493,8 +2585,31 @@ export async function executeGetUnreadCount(
   agent: AuthenticatedAgent,
   _args: GetUnreadCountArgs
 ): Promise<GetUnreadCountResult> {
+  // Match the notification read rule on the web and A2A surfaces: actors
+  // the user has blocked or muted, and actors who have blocked the user,
+  // are excluded at read time. The filter has to live at read time —
+  // muting never stops notification creation, and a block placed later
+  // must hide notifications created before it. System notifications have
+  // a null actor and are always kept.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedActorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const unreadCount = await db.notification.count({
-    where: { userId: agent.userId, read: false },
+    where: {
+      userId: agent.userId,
+      read: false,
+      ...(excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {}),
+    },
   });
   return { unreadCount };
 }
@@ -2510,8 +2625,27 @@ export async function executeGetNotifications(
   agent: AuthenticatedAgent,
   args: GetNotificationsArgs
 ): Promise<GetNotificationsResult> {
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedActorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const notificationsList = await db.notification.findMany({
-    where: { userId: agent.userId },
+    where: {
+      userId: agent.userId,
+      // Match web notification visibility before taking the requested window.
+      // Existing notifications must disappear after a block or mute; system
+      // notifications have no actor and remain visible.
+      ...(excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {}),
+    },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 100,
   });
@@ -2931,19 +3065,10 @@ export async function executeGetTrendingTags(
   _agent: AuthenticatedAgent,
   args: GetTrendingTagsArgs
 ): Promise<GetTrendingTagsResult> {
-  const trendingTagsList = await db.trendingTag.findMany({
-    orderBy: { rank: 'asc' },
-    take: args.limit || 20,
-  });
-  const tagIds = trendingTagsList.map((tt) => tt.tagId);
-  const tagsList = await db.tag.findMany({
-    where: { id: { in: tagIds } },
-    select: { id: true, name: true },
-  });
-  const tagsMap = new Map(tagsList.map((t) => [t.id, t]));
+  const trendingTagsList = await getCurrentTrendingTags(args.limit || 20);
   return {
     tags: trendingTagsList.map((tt) => ({
-      tag: tagsMap.get(tt.tagId)?.name || '',
+      tag: tt.tag.name,
       postCount: tt.postCount,
       trendScore: tt.score || 0,
     })),
@@ -3106,6 +3231,16 @@ export async function executeMuteUser(
 ): Promise<MuteUserResult> {
   if (args.userId === agent.userId) {
     throw new Error('Cannot mute yourself');
+  }
+  // Match POST /api/users/[userId]/mute: the target must exist. UserMute
+  // has no foreign key, so an unchecked mute of an unknown ID would leave
+  // a phantom row in the caller's mute list.
+  const targetUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!targetUser) {
+    throw new Error(`User ${args.userId} not found`);
   }
   const existing = await db.userMute.findFirst({
     where: {
@@ -3622,7 +3757,19 @@ export async function executeGetFavoritePosts(
       and(
         inArray(posts.authorId, favoritedUserIds),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, new Date())
+        lte(posts.timestamp, new Date()),
+        // Apply the web feed's test-author rule (DatabaseService
+        // .getRecentPosts): test accounts — the isTest flag or a
+        // 'test-' id prefix — must not leak into the favorites feed
+        // either, even when the agent favorited them. Excluded in SQL
+        // before paginating, so pages stay full.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp))
