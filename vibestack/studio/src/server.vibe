@@ -12,7 +12,7 @@ import type { Event, Session } from "../gen/index.ts"
 import { promptFor } from "./doc.ts"
 import {
   NODE, PUBLIC, SPEC, checkCommand, createServer, finder, interactive, manifestFile, opener, ownedFiles, buildPage, appScript, servedAt, buildable, buildCommand, componentsOf,
-  planPublish, projectName, readManifest, readTree, skillPath, specStamp, stateFile, studioRoot, verdictOf, type Check, type JobView, type Publish, type Snapshot,
+  planPublish, projectName, readTree, readManifest, skillPath, specStamp, stateFile, studioRoot, verdictOf, type Check, type JobView, type ProjectTree, type Publish, type Snapshot,
 } from "./project.ts"
 
 const DEEPLINK_LIMIT = 5000 // characters of a prompt a claude-cli:// link carries
@@ -77,6 +77,7 @@ const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".j
 /** One project's studio: its session, its jobs, and the HTTP handler its page talks to. Lives as long as the scope. */
 effect function studio(project: Project, agents: Record<string, Agent>) {
   const { root } = project
+  const tree: ProjectTree = { root }
   const files = try FileSystem.FileSystem
   const path = try Path.Path
   const spawner = try ChildProcessSpawner
@@ -206,7 +207,7 @@ effect function studio(project: Project, agents: Record<string, Agent>) {
   effect function snapshot(): Snapshot!(PlatformError.PlatformError | Error) {
     // The specs; what is wrong if they cannot be read.
     const read: Pick<Snapshot, "manifest" | "specs" | "review" | "problem"> =
-      effect { return { manifest: readManifest(root), ...readTree(root) } } catch (e) => ({ problem: e.message, specs: [], review: [] })
+      effect { return { manifest: readManifest(root), ...readTree(tree) } } catch (e) => ({ problem: e.message, specs: [], review: [] })
     const context = { skill: skillPath(root), check: checkCommand(root) }
     const shown = []
     for (const [id, a] of Object.entries(agents)) shown.push({
