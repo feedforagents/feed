@@ -16,7 +16,11 @@
  * The API row is read with status=all: on the base the closed view does
  * not list cancelled rows yet (that is #2036's fix), but status=all
  * already returns them, so the same assertions fail on the base and pass
- * on the fix without depending on #2036.
+ * on the fix without depending on #2036. The voided case also asserts the
+ * `status` field on the tab's exact route query (`?status=all&type=all`):
+ * the tab reads `p.status` from that response, so if the route ever
+ * stopped returning it, every row would parse as null and no voided row
+ * could badge Void.
  */
 import { afterAll, describe, expect, mock, test } from 'bun:test';
 import type { PredictionMarketService } from '@feed/core/markets/prediction';
@@ -149,6 +153,29 @@ if (
     }>;
   }
 
+  // The wallet tab fetches exactly `?status=all&type=all` (positions-tab.tsx
+  // fetchClosedPositionsSnapshot) and reads `p.status` through
+  // parseClosedPredictions. This asserts the same `status` field on that
+  // exact route response — if the route ever stopped returning it, every
+  // row would parse as null and no voided row could badge Void.
+  async function tabSnapshot(userId: string) {
+    const response = await GET(
+      new NextRequest(
+        `http://localhost/api/markets/positions/${userId}?status=all&type=all`
+      ),
+      { params: Promise.resolve({ userId }) }
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    return body.predictions.positions as Array<{
+      id: string;
+      marketId: string;
+      pnl: number | null;
+      outcome: boolean | null;
+      status: string;
+    }>;
+  }
+
   describe('voided prediction result classification', () => {
     test('a voided position is classified as void, not won', async () => {
       const service = makeService();
@@ -175,6 +202,13 @@ if (
       expect(shown).toBeDefined();
       expect(shown?.status).toBe('cancelled');
       expect(shown?.outcome).toBeNull();
+      // Same field, on the tab's exact query (`status=all&type=all`).
+      const tabShown = (await tabSnapshot(userId)).find(
+        (p) => p.marketId === marketId
+      );
+      expect(tabShown).toBeDefined();
+      expect(tabShown?.status).toBe('cancelled');
+      expect(tabShown?.outcome).toBeNull();
       // The defect: on the base this classifies as won ("Won +0.00").
       expect(
         closedPredictionOutcome({
