@@ -64,8 +64,8 @@ export class ContentQualityGate {
     scores.push(structure.score);
     if (!structure.passed) reasons.push(...structure.reasons);
 
-    // 2. Entity allowlist (allow entities already present in the original title)
-    const entity = checkEntityConsistency(parodyTitle, originalTitle);
+    // 2. Entity allowlist
+    const entity = checkEntityConsistency(parodyTitle);
     scores.push(entity.score);
     if (!entity.passed) reasons.push(...entity.reasons);
 

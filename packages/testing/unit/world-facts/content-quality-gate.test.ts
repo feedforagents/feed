@@ -67,29 +67,20 @@ describe('ContentQualityGate.validateParody', () => {
     expect(typeof result.score).toBe('number');
   });
 
-  test('parody allows entities present in originalTitle while still rejecting invented entities', async () => {
+  test('parody still rejects unmapped real names echoed from originalTitle', async () => {
     const original =
-      'Federal Reserve and European Union debate Silicon Valley regulation';
-    const groundedParody =
-      'Federal Reserve and European Union hold emergency Silicon Valley robot regulation summit';
+      'Jerome Powell and Janet Yellen clash with Christine Lagarde over rates';
+    const leakedParody =
+      'JerAIme Powell and Janet Yellen hold robot rate summit with Christine Lagarde';
 
-    const groundedResult = await ContentQualityGate.validateParody(
+    const result = await ContentQualityGate.validateParody(
       original,
-      groundedParody
+      leakedParody
     );
-    expect(groundedResult.passed).toBe(true);
-    expect(groundedResult.reasons).toHaveLength(0);
-
-    const fabricatedParody =
-      'Quantum Harbor and Silver Archive debate regulation after Federal Reserve talk';
-    const fabricatedResult = await ContentQualityGate.validateParody(
-      original,
-      fabricatedParody
+    expect(result.passed).toBe(false);
+    expect(result.reasons.some((r) => r.includes('unknown entities'))).toBe(
+      true
     );
-    expect(fabricatedResult.passed).toBe(false);
-    expect(
-      fabricatedResult.reasons.some((r) => r.includes('unknown entities'))
-    ).toBe(true);
   });
 });
 
@@ -135,9 +126,9 @@ describe('ContentQualityGate.validateWorldFact', () => {
 
   test('world fact with sourceContext allows entities grounded in that source', async () => {
     const source =
-      'Federal Reserve and European Union released joint Silicon Valley banking guidance.';
+      'In-game event recap: Quantum Harbor and Silver Archive settled liquidity disputes at Aurora Exchange.';
     const consolidated =
-      'The Federal Reserve and European Union issued coordinated banking guidance affecting Silicon Valley lenders.';
+      'The Quantum Harbor and Silver Archive settlement reshaped liquidity at Aurora Exchange.';
 
     const groundedResult = await ContentQualityGate.validateWorldFact(
       consolidated,
@@ -147,7 +138,7 @@ describe('ContentQualityGate.validateWorldFact', () => {
     expect(groundedResult.reasons).toHaveLength(0);
 
     const hallucinated =
-      'Quantum Harbor and Silver Archive issued banking guidance alongside the Federal Reserve.';
+      'Velvet Citadel and Obsidian Spire reshaped liquidity alongside Quantum Harbor.';
     const hallucinatedResult = await ContentQualityGate.validateWorldFact(
       hallucinated,
       source

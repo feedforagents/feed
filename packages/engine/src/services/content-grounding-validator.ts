@@ -300,10 +300,6 @@ export function checkEntityConsistency(
   if (sourceText) {
     for (const entity of extractProperNouns(sourceText)) {
       allowed.add(entity.toLowerCase());
-      const stripped = entity.replace(ENTITY_PREFIX_WORDS, '');
-      if (/[ \t]/.test(stripped)) {
-        allowed.add(stripped.toLowerCase());
-      }
     }
   }
 
