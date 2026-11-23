@@ -19,6 +19,7 @@ import {
 } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 
 /**
  * GET /api/groups/invites
@@ -26,6 +27,7 @@ import type { NextRequest } from 'next/server';
  */
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const user = await authenticate(request);
+  const hiddenInviters = await loadViewerExcludedAuthorIds(user.userId);
 
   const invites = await asUser(user, async (db) => {
     // Get pending invites
@@ -39,30 +41,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       },
     });
 
-    // A block or mute hides the invite at read time, mirroring the
-    // notification list (GET /api/notifications) and the unread count.
-    // The notification for a blocked inviter is already suppressed at
-    // creation, but the invite row itself is not — without this filter
-    // the invite still reaches the invitee's list and can be accepted.
-    const [blockedByMe, mutedByMe, blockedMe] = await Promise.all([
-      db.userBlock.findMany({
-        where: { blockerId: user.userId },
-        select: { blockedId: true },
-      }),
-      db.userMute.findMany({
-        where: { muterId: user.userId },
-        select: { mutedId: true },
-      }),
-      db.userBlock.findMany({
-        where: { blockedId: user.userId },
-        select: { blockerId: true },
-      }),
-    ]);
-    const hiddenInviters = new Set([
-      ...blockedByMe.map((row) => row.blockedId),
-      ...mutedByMe.map((row) => row.mutedId),
-      ...blockedMe.map((row) => row.blockerId),
-    ]);
     const visibleInvites = pendingInvites.filter(
       (invite) => !hiddenInviters.has(invite.invitedBy)
     );

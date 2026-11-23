@@ -384,8 +384,8 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
             validMembers.map(async (m) => ({
               id: m.id,
               blocked:
-                (await hasBlocked(user.userId, m.id)) ||
-                (await hasBlocked(m.id, user.userId)),
+                (await hasBlocked(user.userId, m.id, db)) ||
+                (await hasBlocked(m.id, user.userId, db)),
             }))
           );
           const blockedMemberIds = new Set(

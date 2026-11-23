@@ -79,14 +79,24 @@ export async function acceptGroupInvite(
   return asUser(userId, async (db) => {
     const invite = await claimPendingInvite(db, userId, inviteId, 'accepted');
 
-    // A block in either direction bars the accept: the invite must not
-    // pull the invitee into a group with someone they blocked (or who
-    // blocked them). The claim above rolls back with the transaction on
-    // throw, so the invite stays pending.
+    // Both invite-creating entry points refuse banned users, but a ban can
+    // land after the invite was sent and the ban write does not touch
+    // pending invites. Accept is the step that grants membership, so the
+    // ban is re-checked here; throwing rolls the invite claim back and the
+    // invite stays pending.
+    const acceptingUser = await db.user.findUnique({
+      where: { id: userId },
+      select: { isBanned: true },
+    });
+    if (acceptingUser?.isBanned) {
+      throw new ApiError('Cannot accept a group invite while banned', 400);
+    }
+
+    // A rejected acceptance rolls the pending-invite claim back.
     if (invite.invitedBy) {
       const [blockedByMe, blockedMe] = await Promise.all([
-        hasBlocked(userId, invite.invitedBy),
-        hasBlocked(invite.invitedBy, userId),
+        hasBlocked(userId, invite.invitedBy, db),
+        hasBlocked(invite.invitedBy, userId, db),
       ]);
       if (blockedByMe || blockedMe) {
         throw new ApiError('This invite is not available', 403);

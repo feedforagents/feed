@@ -1,415 +1,287 @@
-/**
- * Group invite vs block relationship — through the REAL route handlers.
- *
- * A user who blocked (or was blocked by) the inviter must not receive the
- * group invite: the invite list must not show it, accepting it must fail,
- * and creating it must be rejected. Today none of the three paths checks
- * blocks at all — the invite is created, listed and accepted even though
- * every neighbouring surface refuses contact between blocked users:
- *
- * - DM send rejects when either side blocked
- *   (apps/web/src/app/api/chats/[id]/message/route.ts, BLOCKED_USER)
- * - createNotification skips creation when either side blocked
- *   (packages/api/src/services/notification-service.ts)
- * - the notification list and the unread count hide blocked/muted actors
- *   at read time (apps/web/src/app/api/notifications/route.ts,
- *   apps/web/src/app/api/chats/unread-count/route.ts)
- * - group chat history applies the viewer moderation filter (#1710, merged)
- * - comments/follows between blocked users are rejected (#1822, #1676)
- *
- * The group invite is the one contact path with no block check anywhere:
- * POST /api/groups (memberIds), POST /api/groups/[id]/members, GET
- * /api/groups/invites and acceptGroupInvite all ignore UserBlock.
- *
- * Auth: steward:test:<userId> with ALLOW_TEST_PRIVY_DID_AUTH=true.
- * Run with: DISABLE_RATE_LIMITING=true DATABASE_URL=... TZ=UTC bun test
- *   integration/group-invite-blocked.integration.test.ts
- *   --preload ./integration/preload.ts
- */
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import {
-  chatParticipants,
-  chats,
-  dbWrite,
-  generateSnowflakeId,
-  groupInvites,
-  groupMembers,
-  groups,
-  userBlocks,
-  userMutes,
-  users,
-} from '@feed/db';
-import { eq } from 'drizzle-orm';
+/** Retained group invites and viewer moderation (PRD §12, MVP Phase 5). */
+import { afterAll, expect, test } from 'bun:test';
 import { NextRequest } from 'next/server';
-import { POST as addMember } from '@/app/api/groups/[groupId]/members/route';
-import { POST as acceptInvite } from '@/app/api/groups/invites/[inviteId]/accept/route';
-import { GET as listInvites } from '@/app/api/groups/invites/route';
-import { POST as createGroup } from '@/app/api/groups/route';
+import { createStewardTestToken } from './helpers/steward-auth';
+import {
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-const previousTestAuth = process.env.ALLOW_TEST_PRIVY_DID_AUTH;
+const cases = {
+  invite: 'group members rejects invitations in both block directions',
+  list: 'pending invites are hidden for blocks and mutes',
+  accept: 'blocked acceptance leaves the invite pending and adds no membership',
+  create:
+    'group creation skips blocked humans and agents but adds eligible members',
+  control: 'an unblocked invite can be created, listed and accepted',
+};
 
-const createdUsers: string[] = [];
-const createdGroups: string[] = [];
-const createdChats: string[] = [];
-const createdInvites: string[] = [];
-const createdBlocks: string[] = [];
-const createdMutes: string[] = [];
-
-function authHeaders(userId: string) {
-  return {
-    'Content-Type': 'application/json',
-    authorization: `Bearer steward:test:${userId}`,
-  };
-}
-
-async function createUser(tag: string): Promise<string> {
-  const id = await generateSnowflakeId();
-  await dbWrite.insert(users).values({
-    id,
-    username: `ginv-${tag}-${id.slice(-6)}`,
-    displayName: `GInv ${tag} ${id.slice(-6)}`,
-    isTest: true,
-    updatedAt: new Date(),
-  });
-  createdUsers.push(id);
-  return id;
-}
-
-async function createAgent(tag: string): Promise<string> {
-  const id = await generateSnowflakeId();
-  await dbWrite.insert(users).values({
-    id,
-    username: `ginv-${tag}-${id.slice(-6)}`,
-    displayName: `GInv ${tag} ${id.slice(-6)}`,
-    isAgent: true,
-    isTest: true,
-    updatedAt: new Date(),
-  });
-  createdUsers.push(id);
-  return id;
-}
-
-async function block(blockerId: string, blockedId: string): Promise<void> {
-  const id = await generateSnowflakeId();
-  await dbWrite.insert(userBlocks).values({
-    id,
-    blockerId,
-    blockedId,
-  });
-  createdBlocks.push(id);
-}
-
-async function mute(muterId: string, mutedId: string): Promise<void> {
-  const id = await generateSnowflakeId();
-  await dbWrite.insert(userMutes).values({
-    id,
-    muterId,
-    mutedId,
-  });
-  createdMutes.push(id);
-}
-
-/** Group + chat + owner membership, built the way POST /api/groups does. */
-async function createGroupFixture(ownerId: string, name: string) {
-  const groupId = `ginv-g-${await generateSnowflakeId()}`;
-  const chatId = `ginv-c-${await generateSnowflakeId()}`;
-  const now = new Date();
-  await dbWrite.insert(groups).values({
-    id: groupId,
-    name,
-    type: 'user',
-    ownerId,
-    createdById: ownerId,
-    updatedAt: now,
-  });
-  await dbWrite.insert(chats).values({
-    id: chatId,
-    name,
-    isGroup: true,
-    groupId,
-    createdAt: now,
-    updatedAt: now,
-  });
-  await dbWrite.insert(groupMembers).values({
-    id: await generateSnowflakeId(),
-    groupId,
-    userId: ownerId,
-    role: 'owner',
-    addedBy: ownerId,
-    joinedAt: now,
-    isActive: true,
-    messageCount: 0,
-    qualityScore: 1.0,
-  });
-  await dbWrite.insert(chatParticipants).values({
-    id: await generateSnowflakeId(),
-    chatId,
-    userId: ownerId,
-    joinedAt: now,
-    isActive: true,
-  });
-  createdGroups.push(groupId);
-  createdChats.push(chatId);
-  return { groupId, chatId };
-}
-
-/** Pending invite row, as if created before the block existed. */
-async function insertInvite(
-  groupId: string,
-  invitedUserId: string,
-  invitedBy: string
-): Promise<string> {
-  const inviteId = await generateSnowflakeId();
-  await dbWrite.insert(groupInvites).values({
-    id: inviteId,
-    groupId,
-    invitedUserId,
-    invitedBy,
-    status: 'pending',
-    invitedAt: new Date(),
-  });
-  createdInvites.push(inviteId);
-  return inviteId;
-}
-
-async function inviteViaHandler(
-  groupId: string,
-  inviterId: string,
-  inviteeId: string
-): Promise<Response> {
-  return addMember(
-    new NextRequest(`http://localhost/api/groups/${groupId}/members`, {
-      method: 'POST',
-      headers: authHeaders(inviterId),
-      body: JSON.stringify({ userId: inviteeId }),
-    }),
-    { params: Promise.resolve({ groupId }) }
-  );
-}
-
-async function listInvitesAs(userId: string) {
-  const res = await listInvites(
-    new NextRequest('http://localhost/api/groups/invites', {
-      headers: authHeaders(userId),
-    })
-  );
-  const body = (await res.json()) as {
-    invites: Array<{ inviteId: string; groupId: string }>;
-  };
-  return { status: res.status, invites: body.invites ?? [] };
-}
-
-async function acceptAs(userId: string, inviteId: string): Promise<Response> {
-  return acceptInvite(
-    new NextRequest(`http://localhost/api/groups/invites/${inviteId}/accept`, {
-      method: 'POST',
-      headers: authHeaders(userId),
-    }),
-    { params: Promise.resolve({ inviteId }) }
-  );
-}
-
-async function createGroupViaHandler(
-  creatorId: string,
-  name: string,
-  memberIds: string[]
-): Promise<{
-  status: number;
-  groupId: string;
-  memberCount: number;
-  invitedCount: number;
-}> {
-  const res = await createGroup(
-    new NextRequest('http://localhost/api/groups', {
-      method: 'POST',
-      headers: authHeaders(creatorId),
-      body: JSON.stringify({ name, memberIds }),
-    })
-  );
-  const body = (await res.json()) as {
-    group: { id: string; memberCount: number; invitedCount: number };
-  };
-  createdGroups.push(body.group.id);
-  return {
-    status: res.status,
-    groupId: body.group.id,
-    memberCount: body.group.memberCount,
-    invitedCount: body.group.invitedCount,
-  };
-}
-
-async function isMember(groupId: string, userId: string): Promise<boolean> {
-  const found = await dbWrite.query.groupMembers.findFirst({
-    where: (m, { and, eq: e }) =>
-      and(e(m.groupId, groupId), e(m.userId, userId), e(m.isActive, true)),
-  });
-  return !!found;
-}
-
-beforeAll(() => {
-  process.env.ALLOW_TEST_PRIVY_DID_AUTH = 'true';
-});
-
-afterAll(async () => {
-  process.env.ALLOW_TEST_PRIVY_DID_AUTH = previousTestAuth;
-  // Clean up in reverse dependency order. Fixture ids are unique snowflakes.
-  if (createdInvites.length > 0) {
-    for (const id of createdInvites) {
-      await dbWrite.delete(groupInvites).where(eq(groupInvites.id, id));
-    }
-  }
-  for (const id of createdChats) {
-    await dbWrite
-      .delete(chatParticipants)
-      .where(eq(chatParticipants.chatId, id));
-    await dbWrite.delete(chats).where(eq(chats.id, id));
-  }
-  for (const id of createdGroups) {
-    await dbWrite.delete(groupMembers).where(eq(groupMembers.groupId, id));
-    await dbWrite.delete(groups).where(eq(groups.id, id));
-  }
-  for (const id of createdBlocks) {
-    await dbWrite.delete(userBlocks).where(eq(userBlocks.id, id));
-  }
-  for (const id of createdMutes) {
-    await dbWrite.delete(userMutes).where(eq(userMutes.id, id));
-  }
-  for (const id of createdUsers) {
-    await dbWrite.delete(users).where(eq(users.id, id));
-  }
-});
-
-describe('group invite vs block relationship', () => {
-  it('(a) inviting a user who blocked the inviter is rejected', async () => {
-    const inviter = await createUser('inviter-a');
-    const invitee = await createUser('invitee-a');
-    const { groupId } = await createGroupFixture(inviter, 'ginv-a');
-    await block(invitee, inviter);
-
-    const res = await inviteViaHandler(groupId, inviter, invitee);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(await isMember(groupId, invitee)).toBe(false);
-  });
-
-  it('(b) inviting a user the inviter blocked is rejected', async () => {
-    const inviter = await createUser('inviter-b');
-    const invitee = await createUser('invitee-b');
-    const { groupId } = await createGroupFixture(inviter, 'ginv-b');
-    await block(inviter, invitee);
-
-    const res = await inviteViaHandler(groupId, inviter, invitee);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(await isMember(groupId, invitee)).toBe(false);
-  });
-
-  it('(c) a pre-block invite is hidden from the invites list', async () => {
-    const inviter = await createUser('inviter-c');
-    const invitee = await createUser('invitee-c');
-    const { groupId } = await createGroupFixture(inviter, 'ginv-c');
-    const inviteId = await insertInvite(groupId, invitee, inviter);
-    await block(invitee, inviter);
-
-    const { status, invites } = await listInvitesAs(invitee);
-    expect(status).toBe(200);
-    expect(invites.map((i) => i.inviteId)).not.toContain(inviteId);
-  });
-
-  it('(d) accepting a pre-block invite fails and adds no membership', async () => {
-    const inviter = await createUser('inviter-d');
-    const invitee = await createUser('invitee-d');
-    const { groupId } = await createGroupFixture(inviter, 'ginv-d');
-    const inviteId = await insertInvite(groupId, invitee, inviter);
-    await block(invitee, inviter);
-
-    const res = await acceptAs(invitee, inviteId);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(await isMember(groupId, invitee)).toBe(false);
-  });
-
-  it('(e) a muted inviter’s invite is hidden from the invites list', async () => {
-    const inviter = await createUser('inviter-e');
-    const invitee = await createUser('invitee-e');
-    const { groupId } = await createGroupFixture(inviter, 'ginv-e');
-    const inviteId = await insertInvite(groupId, invitee, inviter);
-    await mute(invitee, inviter);
-
-    const { status, invites } = await listInvitesAs(invitee);
-    expect(status).toBe(200);
-    expect(invites.map((i) => i.inviteId)).not.toContain(inviteId);
-  });
-
-  it('(f) group creation skips a blocked human from invites', async () => {
-    const creator = await createUser('creator-f');
-    const blockedHuman = await createUser('blocked-f');
-    await block(blockedHuman, creator);
-
-    const res = await createGroup(
-      new NextRequest('http://localhost/api/groups', {
-        method: 'POST',
-        headers: authHeaders(creator),
-        body: JSON.stringify({
-          name: 'ginv-f',
-          memberIds: [blockedHuman],
-        }),
-      })
-    );
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      group: { id: string; invitedCount: number };
-    };
-    expect(body.group.invitedCount).toBe(0);
-    const rows = await dbWrite.query.groupInvites.findMany({
-      where: (inv, { eq: e }) => e(inv.groupId, body.group.id),
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks group invites in a leased PostgreSQL database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'group-invite-blocked',
+      file: 'packages/testing/integration/group-invite-blocked.integration.test.ts',
+      cases: Object.values(cases),
     });
-    expect(rows).toHaveLength(0);
-    createdGroups.push(body.group.id);
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  // Group writes and their moderation checks must fit on one connection.
+  process.env.DATABASE_POOL_MAX = '1';
+  const {
+    and,
+    chatParticipants,
+    chats,
+    db,
+    eq,
+    groupInvites,
+    groupMembers,
+    userBlocks,
+    userMutes,
+    users,
+  } = await import('@feed/db');
+  const { POST: addMember } = await import(
+    '../../../apps/web/src/app/api/groups/[groupId]/members/route'
+  );
+  const { POST: acceptInvite } = await import(
+    '../../../apps/web/src/app/api/groups/invites/[inviteId]/accept/route'
+  );
+  const { GET: listInvites } = await import(
+    '../../../apps/web/src/app/api/groups/invites/route'
+  );
+  const { POST: createGroup } = await import(
+    '../../../apps/web/src/app/api/groups/route'
+  );
+
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      const nextRequest = new NextRequest(request);
+      if (pathname === '/api/groups' && request.method === 'POST')
+        return createGroup(nextRequest);
+      if (pathname === '/api/groups/invites' && request.method === 'GET')
+        return listInvites(nextRequest);
+      const groupId = pathname.match(/^\/api\/groups\/([^/]+)\/members$/)?.[1];
+      if (groupId && request.method === 'POST') {
+        return addMember(nextRequest, { params: Promise.resolve({ groupId }) });
+      }
+      const inviteId = pathname.match(
+        /^\/api\/groups\/invites\/([^/]+)\/accept$/
+      )?.[1];
+      if (inviteId && request.method === 'POST') {
+        return acceptInvite(nextRequest, {
+          params: Promise.resolve({ inviteId }),
+        });
+      }
+      return new Response(null, { status: 404 });
+    },
+  });
+  afterAll(() => server.stop(true));
+
+  async function createUser(isAgent = false) {
+    const id = crypto.randomUUID();
+    const stewardId = `lease-group-invite-${id}`;
+    await db.insert(users).values({
+      id,
+      username: `lease-group-${id.slice(0, 8)}`,
+      displayName: 'Group invitation fixture',
+      stewardId,
+      isAgent,
+      updatedAt: new Date(),
+    });
+    return { id, token: await createStewardTestToken(stewardId) };
+  }
+
+  async function request(token: string, route: string, body?: object) {
+    const requestId = crypto.randomUUID();
+    const response = await fetch(new URL(route, server.url), {
+      method: body ? 'POST' : 'GET',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        'x-request-id': requestId,
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    console.info('Group invite response', {
+      requestId,
+      route,
+      status: response.status,
+    });
+    return response;
+  }
+
+  async function group(token: string, memberIds: string[] = []) {
+    const response = await request(token, '/api/groups', {
+      name: 'Invite test group',
+      memberIds,
+    });
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as {
+      group: { id: string; memberCount: number; invitedCount: number };
+    };
+    return result.group;
+  }
+
+  async function invite(token: string, groupId: string, userId: string) {
+    return request(token, `/api/groups/${groupId}/members`, { userId });
+  }
+
+  async function blocked(blockerId: string, blockedId: string) {
+    await db.insert(userBlocks).values({
+      id: crypto.randomUUID(),
+      blockerId,
+      blockedId,
+    });
+  }
+
+  async function invites(groupId: string) {
+    return db
+      .select({ id: groupInvites.id, userId: groupInvites.invitedUserId })
+      .from(groupInvites)
+      .where(eq(groupInvites.groupId, groupId));
+  }
+
+  async function pendingInvite(token: string, groupId: string, userId: string) {
+    const response = await invite(token, groupId, userId);
+    expect(response.status).toBe(200);
+    const rows = await invites(groupId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.userId).toBe(userId);
+    return rows[0]!.id;
+  }
+
+  async function listedInviteIds(token: string) {
+    const response = await request(token, '/api/groups/invites');
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as {
+      invites: { inviteId: string }[];
+    };
+    return result.invites.map(({ inviteId }) => inviteId);
+  }
+
+  async function accept(token: string, inviteId: string) {
+    return request(token, `/api/groups/invites/${inviteId}/accept`, {});
+  }
+
+  async function membership(groupId: string, userId: string) {
+    const [member] = await db
+      .select({ id: groupMembers.id })
+      .from(groupMembers)
+      .where(
+        and(eq(groupMembers.groupId, groupId), eq(groupMembers.userId, userId))
+      );
+    const [participant] = await db
+      .select({ id: chatParticipants.id })
+      .from(chatParticipants)
+      .innerJoin(chats, eq(chats.id, chatParticipants.chatId))
+      .where(
+        and(eq(chats.groupId, groupId), eq(chatParticipants.userId, userId))
+      );
+    return { group: !!member, chat: !!participant };
+  }
+
+  test(cases.invite, async () => {
+    const owner = await createUser();
+    const { id } = await group(owner.token);
+    const blockedByOwner = await createUser();
+    const blockedOwner = await createUser();
+    await blocked(owner.id, blockedByOwner.id);
+    await blocked(blockedOwner.id, owner.id);
+    for (const userId of [blockedByOwner.id, blockedOwner.id]) {
+      expect((await invite(owner.token, id, userId)).status).toBe(400);
+      expect(await membership(id, userId)).toEqual({
+        group: false,
+        chat: false,
+      });
+    }
+    expect(await invites(id)).toEqual([]);
   });
 
-  it('(g) group creation skips a blocked agent from direct add', async () => {
-    const creator = await createUser('creator-g');
-    const blockedAgent = await createAgent('blocked-g');
-    await block(creator, blockedAgent);
-
-    const { status, groupId, memberCount, invitedCount } =
-      await createGroupViaHandler(creator, 'ginv-g', [blockedAgent]);
-    expect(status).toBe(200);
-    expect(memberCount).toBe(1);
-    expect(invitedCount).toBe(0);
-    expect(await isMember(groupId, blockedAgent)).toBe(false);
+  test(cases.list, async () => {
+    const viewer = await createUser();
+    for (const direction of ['outgoing', 'incoming', 'mute']) {
+      const owner = await createUser();
+      const { id } = await group(owner.token);
+      const inviteId = await pendingInvite(owner.token, id, viewer.id);
+      expect(await listedInviteIds(viewer.token)).toContain(inviteId);
+      if (direction === 'mute') {
+        await db.insert(userMutes).values({
+          id: crypto.randomUUID(),
+          muterId: viewer.id,
+          mutedId: owner.id,
+        });
+      } else if (direction === 'outgoing') {
+        await blocked(viewer.id, owner.id);
+      } else {
+        await blocked(owner.id, viewer.id);
+      }
+      expect(await listedInviteIds(viewer.token)).not.toContain(inviteId);
+    }
   });
 
-  it('(h) group creation direct-adds an unblocked agent', async () => {
-    const creator = await createUser('creator-h');
-    const agent = await createAgent('agent-h');
-
-    const { status, groupId, memberCount } = await createGroupViaHandler(
-      creator,
-      'ginv-h',
-      [agent]
-    );
-    expect(status).toBe(200);
-    expect(memberCount).toBe(2);
-    expect(await isMember(groupId, agent)).toBe(true);
+  test(cases.accept, async () => {
+    const owner = await createUser();
+    const viewer = await createUser();
+    const { id } = await group(owner.token);
+    const inviteId = await pendingInvite(owner.token, id, viewer.id);
+    await blocked(viewer.id, owner.id);
+    expect((await accept(viewer.token, inviteId)).status).toBe(403);
+    const [pending] = await db
+      .select({
+        status: groupInvites.status,
+        respondedAt: groupInvites.respondedAt,
+      })
+      .from(groupInvites)
+      .where(eq(groupInvites.id, inviteId));
+    expect(pending).toEqual({ status: 'pending', respondedAt: null });
+    expect(await membership(id, viewer.id)).toEqual({
+      group: false,
+      chat: false,
+    });
   });
 
-  it('(control) an unblocked invite still lists and accepts', async () => {
-    const inviter = await createUser('inviter-g');
-    const invitee = await createUser('invitee-g');
-    const { groupId } = await createGroupFixture(inviter, 'ginv-g');
-
-    const inviteRes = await inviteViaHandler(groupId, inviter, invitee);
-    expect(inviteRes.status).toBe(200);
-    const inviteBody = (await inviteRes.json()) as { invited: boolean };
-    expect(inviteBody.invited).toBe(true);
-
-    const { status, invites } = await listInvitesAs(invitee);
-    expect(status).toBe(200);
-    expect(invites.length).toBeGreaterThan(0);
-    const inviteId = invites.find((i) => i.groupId === groupId)?.inviteId;
-    expect(inviteId).toBeDefined();
-
-    const acceptRes = await acceptAs(invitee, inviteId!);
-    expect(acceptRes.status).toBe(200);
-    expect(await isMember(groupId, invitee)).toBe(true);
+  test(cases.create, async () => {
+    const owner = await createUser();
+    const human = await createUser();
+    const agent = await createUser(true);
+    const eligibleAgent = await createUser(true);
+    const eligibleHuman = await createUser();
+    await blocked(human.id, owner.id);
+    await blocked(owner.id, agent.id);
+    const created = await group(owner.token, [
+      human.id,
+      agent.id,
+      eligibleAgent.id,
+      eligibleHuman.id,
+    ]);
+    expect(created.memberCount).toBe(2);
+    expect(created.invitedCount).toBe(1);
+    expect(await membership(created.id, agent.id)).toEqual({
+      group: false,
+      chat: false,
+    });
+    expect(await membership(created.id, eligibleAgent.id)).toEqual({
+      group: true,
+      chat: true,
+    });
+    expect((await invites(created.id)).map(({ userId }) => userId)).toEqual([
+      eligibleHuman.id,
+    ]);
   });
-});
+
+  test(cases.control, async () => {
+    const owner = await createUser();
+    const viewer = await createUser();
+    const { id } = await group(owner.token);
+    const inviteId = await pendingInvite(owner.token, id, viewer.id);
+    expect(await listedInviteIds(viewer.token)).toContain(inviteId);
+    expect((await accept(viewer.token, inviteId)).status).toBe(200);
+    expect(await membership(id, viewer.id)).toEqual({
+      group: true,
+      chat: true,
+    });
+  });
+}

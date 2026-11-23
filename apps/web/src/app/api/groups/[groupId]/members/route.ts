@@ -207,8 +207,8 @@ export const POST = withErrorHandling(
       // reaches the invitee's list even though its notification is
       // suppressed at creation.
       const [inviterBlocked, inviteeBlocked] = await Promise.all([
-        hasBlocked(user.userId, data.userId),
-        hasBlocked(data.userId, user.userId),
+        hasBlocked(user.userId, data.userId, db),
+        hasBlocked(data.userId, user.userId, db),
       ]);
       if (inviterBlocked || inviteeBlocked) {
         throw new ApiError('Cannot invite this user', 400);

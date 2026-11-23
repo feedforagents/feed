@@ -681,12 +681,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ...blockedByIds,
     ]);
 
-    // Get posts from followed users/actors with caching
+    // Get posts from followed users/actors with caching. The viewer's
+    // moderation exclusions go into the page query itself, so hidden
+    // authors cannot spend the limit and strand visible posts behind
+    // them; the in-memory filter below stays as a second guard.
     const postsResult = await cachedDb.getPostsForFollowing(
       userId,
       allFollowedIds,
       limit,
-      cursor
+      cursor,
+      [...excludedUserIds]
     );
 
     // Filter out posts from blocked/muted users
@@ -765,11 +769,20 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     ]);
 
     // Create maps for quick lookup
-    const reactionMap = new Map(
-      reactionCounts.map((r) => [r.postId, Number(r.count)])
+    // The rows' postId is nullable in the schema (reactions/comments
+    // postId has no .notNull()), so the tuple key carries null even
+    // though the inArray filter only ever returns real post ids.
+    const reactionMap = new Map<string | null, number>(
+      reactionCounts.map((r): [string | null, number] => [
+        r.postId,
+        Number(r.count),
+      ])
     );
-    const commentMap = new Map(
-      commentCounts.map((c) => [c.postId, Number(c.count)])
+    const commentMap = new Map<string | null, number>(
+      commentCounts.map((c): [string | null, number] => [
+        c.postId,
+        Number(c.count),
+      ])
     );
 
     // Fetch original posts for reposts in the following feed.
