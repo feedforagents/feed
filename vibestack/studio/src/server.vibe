@@ -75,9 +75,8 @@ const json = (status: number, body: unknown) => HttpServerResponse.jsonUnsafe(bo
 const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" }
 
 /** One project's studio: its session, its jobs, and the HTTP handler its page talks to. Lives as long as the scope. */
-effect function studio(project: Project, agents: Record<string, Agent>) {
+effect function studio(project: Project, agents: Record<string, Agent>, tree: ProjectTree) {
   const { root } = project
-  const tree: ProjectTree = { root }
   const files = try FileSystem.FileSystem
   const path = try Path.Path
   const spawner = try ChildProcessSpawner
@@ -376,7 +375,7 @@ effect function studio(project: Project, agents: Record<string, Agent>) {
 /** The studio's HTTP server on 127.0.0.1, at `port` or the next free one after it. `open` is the project shown first. */
 export effect function startStudio({ projects, open = projects[0].id, port = 4321, agents = AGENTS }: { projects: Project[]; open?: string; port?: number; agents?: Record<string, Agent> }) {
   const lives = new Map<string, Effect.Success<ReturnType<typeof studio>>>()
-  for (const p of projects) lives.set(p.id, try studio(p, agents))
+  for (const p of projects) lives.set(p.id, try studio(p, agents, { root: p.root }))
   const files = try FileSystem.FileSystem
   const path = try Path.Path
   try tryPromise({ try: () => buildPage(), catch: (e) => new Refused({ status: 500, message: `the page did not build: ${messageOf(e)}` }) })
