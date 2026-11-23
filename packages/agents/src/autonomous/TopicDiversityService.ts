@@ -21,19 +21,16 @@ import { logger } from '../shared/logger';
 // Types
 // =============================================================================
 
-interface TopicCoverage {
-  /** Topic identifier (normalized keywords) */
-  topicKey: string;
-  /** How many times covered in current window (global) */
-  coverageCount: number;
-  /** Last time this topic was posted about */
-  lastPostedAt: Date;
-  /** Agent IDs who have posted about this */
-  coveredByAgents: Set<string>;
-  /** Sample content for similarity checking */
-  sampleContent: string[];
-  /** Coverage count per domain (e.g., 'crypto': 3, 'politics': 2) */
-  domainCoverage: Map<string, number>;
+interface TopicPost {
+  agentId: string;
+  domain: string;
+  content: string;
+  postedAt: number;
+}
+
+interface AgentPhrase {
+  phrase: string;
+  postedAt: number;
 }
 
 interface TopicAssignment {
@@ -72,7 +69,6 @@ const MAX_TOPIC_COVERAGE_GLOBAL = 20;
 /**
  * Max posts per domain about same topic
  * Allows multiple NPCs in same domain to cover a topic from different angles
- * Note: Individual NPCs are also tracked via coveredByAgents Set
  */
 const MAX_TOPIC_COVERAGE_PER_DOMAIN = 5;
 
@@ -117,19 +113,13 @@ export const POSTING_ANGLES = [
 
 export class TopicDiversityService {
   /** In-memory topic coverage tracking */
-  private topicCoverage: Map<string, TopicCoverage> = new Map();
+  private topicCoverage = new Map<string, TopicPost[]>();
 
   /** Agent to assigned topic mapping for current tick batch */
   private agentAssignments: Map<string, TopicAssignment> = new Map();
 
   /** Per-agent phrase tracking to prevent repetitive patterns */
-  private agentPhraseHistory: Map<
-    string,
-    { phrases: string[]; lastUpdated: Date }
-  > = new Map();
-
-  /** Last cleanup timestamp */
-  private lastCleanup = 0;
+  private agentPhraseHistory = new Map<string, AgentPhrase[]>();
 
   /**
    * Extract topic key from content (normalized keywords)
@@ -324,6 +314,7 @@ export class TopicDiversityService {
       return { hasRepetition: false };
     }
 
+    this.cleanupOldEntries();
     const history = this.agentPhraseHistory.get(agentId);
     if (!history) {
       return { hasRepetition: false };
@@ -333,8 +324,8 @@ export class TopicDiversityService {
     for (const phrase of contentPhrases) {
       // Normalize for comparison
       const normalizedPhrase = phrase.replace(/\d+/g, 'N'); // Replace numbers with N for pattern matching
-      for (const historyPhrase of history.phrases) {
-        const normalizedHistory = historyPhrase.replace(/\d+/g, 'N');
+      for (const entry of history) {
+        const normalizedHistory = entry.phrase.replace(/\d+/g, 'N');
         if (normalizedPhrase === normalizedHistory) {
           return { hasRepetition: true, repeatedPhrase: phrase };
         }
@@ -347,68 +338,40 @@ export class TopicDiversityService {
   /**
    * Record phrases used by an agent
    */
-  recordAgentPhrases(agentId: string, content: string): void {
+  recordAgentPhrases(
+    agentId: string,
+    content: string,
+    timestamp = new Date()
+  ): void {
     const phrases = this.extractRepetitivePhrases(content);
-    const existing = this.agentPhraseHistory.get(agentId);
+    if (phrases.length === 0) return;
 
-    if (existing) {
-      // Add new phrases, keep last 20
-      existing.phrases.push(...phrases);
-      if (existing.phrases.length > 20) {
-        existing.phrases = existing.phrases.slice(-20);
-      }
-      existing.lastUpdated = new Date();
-    } else {
-      this.agentPhraseHistory.set(agentId, {
-        phrases,
-        lastUpdated: new Date(),
-      });
-    }
+    this.cleanupOldEntries();
+    const history = this.agentPhraseHistory.get(agentId) ?? [];
+    const postedAt = timestamp.getTime();
+    history.push(...phrases.map((phrase) => ({ phrase, postedAt })));
+    this.agentPhraseHistory.set(agentId, history.slice(-20));
   }
 
-  /**
-   * Record that a topic was covered by an agent
-   * Now tracks domain-level coverage for domain-aware limits
-   */
+  /** Record a committed post and its coverage of a topic. */
   recordTopicCoverage(
     agentId: string,
     content: string,
-    topicKey?: string
+    topicKey?: string,
+    timestamp = new Date()
   ): void {
     this.cleanupOldEntries();
 
     const key = topicKey || this.extractTopicKey(content);
-    const now = new Date();
-    const agentDomain = this.getAgentPrimaryDomain(agentId);
-
-    const existing = this.topicCoverage.get(key);
-    if (existing) {
-      existing.coverageCount++;
-      existing.lastPostedAt = now;
-      existing.coveredByAgents.add(agentId);
-      existing.sampleContent.push(content.substring(0, 200));
-      // Keep only last 10 samples
-      if (existing.sampleContent.length > 10) {
-        existing.sampleContent = existing.sampleContent.slice(-10);
-      }
-      // Track domain coverage
-      const domainCount = existing.domainCoverage.get(agentDomain) ?? 0;
-      existing.domainCoverage.set(agentDomain, domainCount + 1);
-    } else {
-      const domainCoverage = new Map<string, number>();
-      domainCoverage.set(agentDomain, 1);
-      this.topicCoverage.set(key, {
-        topicKey: key,
-        coverageCount: 1,
-        lastPostedAt: now,
-        coveredByAgents: new Set([agentId]),
-        sampleContent: [content.substring(0, 200)],
-        domainCoverage,
-      });
-    }
-
-    // Also record phrase patterns for per-agent tracking
-    this.recordAgentPhrases(agentId, content);
+    const coverage = this.topicCoverage.get(key) ?? [];
+    coverage.push({
+      agentId,
+      domain: this.getAgentPrimaryDomain(agentId),
+      content: content.substring(0, 200),
+      postedAt: timestamp.getTime(),
+    });
+    this.topicCoverage.set(key, coverage);
+    this.recordAgentPhrases(agentId, content, timestamp);
   }
 
   /**
@@ -428,7 +391,7 @@ export class TopicDiversityService {
     if (!coverage) return { canPost: true };
 
     // Block if this agent already posted about it recently
-    if (coverage.coveredByAgents.has(agentId)) {
+    if (coverage.some((post) => post.agentId === agentId)) {
       return {
         canPost: false,
         reason: `You already posted about this topic recently. Try a different angle or topic.`,
@@ -436,7 +399,7 @@ export class TopicDiversityService {
     }
 
     // Block if global limit exceeded
-    if (coverage.coverageCount >= MAX_TOPIC_COVERAGE_GLOBAL) {
+    if (coverage.length >= MAX_TOPIC_COVERAGE_GLOBAL) {
       return {
         canPost: false,
         reason: `This topic is heavily covered. Try something fresh that others haven't posted about.`,
@@ -445,7 +408,9 @@ export class TopicDiversityService {
 
     // Check domain-specific limit
     const agentDomain = this.getAgentPrimaryDomain(agentId);
-    const domainCount = coverage.domainCoverage.get(agentDomain) ?? 0;
+    const domainCount = coverage.filter(
+      (post) => post.domain === agentDomain
+    ).length;
 
     if (domainCount >= MAX_TOPIC_COVERAGE_PER_DOMAIN) {
       // Suggest the agent's other domains or a unique angle
@@ -478,12 +443,12 @@ export class TopicDiversityService {
     this.cleanupOldEntries();
 
     for (const coverage of this.topicCoverage.values()) {
-      for (const sample of coverage.sampleContent) {
-        const similarity = this.calculateSimilarity(content, sample);
+      for (const sample of coverage.slice(-10)) {
+        const similarity = this.calculateSimilarity(content, sample.content);
         if (similarity >= SIMILARITY_THRESHOLD) {
           return {
             isSimilar: true,
-            matchedContent: sample,
+            matchedContent: sample.content,
             similarity,
           };
         }
@@ -558,8 +523,9 @@ export class TopicDiversityService {
       const marketScores = availableMarkets.map((market) => {
         const topicKey = this.extractTopicKey(market.question);
         const coverage = this.topicCoverage.get(topicKey);
-        const globalCount = coverage?.coverageCount ?? 0;
-        const domainCount = coverage?.domainCoverage.get(primaryDomain) ?? 0;
+        const globalCount = coverage?.length ?? 0;
+        const domainCount =
+          coverage?.filter((post) => post.domain === primaryDomain).length ?? 0;
 
         // Higher score = better for this agent
         // Freshness: prefer topics not covered much in their domain
@@ -650,8 +616,13 @@ export class TopicDiversityService {
       .orderBy(desc(posts.timestamp))
       .limit(100);
 
-    for (const post of recentPosts) {
-      this.recordTopicCoverage(post.authorId, post.content);
+    for (const post of recentPosts.reverse()) {
+      this.recordTopicCoverage(
+        post.authorId,
+        post.content,
+        undefined,
+        post.timestamp
+      );
     }
 
     logger.info(
@@ -671,6 +642,7 @@ export class TopicDiversityService {
    * rather than hardcoded suggestions. Now DOMAIN-AWARE for topic limits.
    */
   getDiversityInstructions(agentId: string): string {
+    this.cleanupOldEntries();
     const assignment = this.agentAssignments.get(agentId);
     const agentDomains = this.getAgentDomains(agentId);
     const primaryDomain = agentDomains[0] ?? 'general';
@@ -684,14 +656,20 @@ export class TopicDiversityService {
     // Find topics that are over-covered in this NPC's domain
     const overCoveredInDomain: string[] = [];
     const overCoveredGlobally: string[] = [];
+    const ownTopics: string[] = [];
 
     for (const [key, coverage] of this.topicCoverage.entries()) {
-      const domainCount = coverage.domainCoverage.get(primaryDomain) ?? 0;
+      const domainCount = coverage.filter(
+        (post) => post.domain === primaryDomain
+      ).length;
       if (domainCount >= MAX_TOPIC_COVERAGE_PER_DOMAIN) {
         overCoveredInDomain.push(key);
       }
-      if (coverage.coverageCount >= MAX_TOPIC_COVERAGE_GLOBAL * 0.7) {
+      if (coverage.length >= MAX_TOPIC_COVERAGE_GLOBAL * 0.7) {
         overCoveredGlobally.push(key);
+      }
+      if (coverage.some((post) => post.agentId === agentId)) {
+        ownTopics.push(key);
       }
     }
 
@@ -702,7 +680,10 @@ export class TopicDiversityService {
 ${postStyle ? `Your posting style: ${postStyle}` : ''}
 
 ## Your Domain Expertise: ${agentDomains.join(', ').toUpperCase()}
-Use your unique ${primaryDomain} perspective. Don't just repeat what others say.
+Use your unique ${primaryDomain} perspective. Don't paraphrase recent posts. Give a different subject or a concrete new observation in distinct language. For a due market clue, stay with its question and bring a fresh observation.
+
+## Topics You Recently Posted About (choose something different):
+${ownTopics.length > 0 ? ownTopics.slice(-3).join(', ') : 'None'}
 
 ## What to Do This Tick (pick what feels natural):
 - TRADE on prediction markets or perps
@@ -755,24 +736,21 @@ You could trade this, post about it, or comment on price action.
    * Clean up old entries from the tracker
    */
   private cleanupOldEntries(): void {
-    const now = Date.now();
+    const cutoff = Date.now() - TOPIC_TRACKING_WINDOW_MS;
+    this.pruneHistory(this.topicCoverage, cutoff);
+    this.pruneHistory(this.agentPhraseHistory, cutoff);
+  }
 
-    // Only cleanup every 5 minutes
-    if (now - this.lastCleanup < 5 * 60 * 1000) return;
-
-    this.lastCleanup = now;
-    const cutoff = new Date(now - TOPIC_TRACKING_WINDOW_MS);
-
-    for (const [key, coverage] of this.topicCoverage.entries()) {
-      if (coverage.lastPostedAt < cutoff) {
-        this.topicCoverage.delete(key);
-      }
-    }
-
-    // Also clean up old phrase history (same window)
-    for (const [agentId, history] of this.agentPhraseHistory.entries()) {
-      if (history.lastUpdated < cutoff) {
-        this.agentPhraseHistory.delete(agentId);
+  private pruneHistory<T extends { postedAt: number }>(
+    history: Map<string, T[]>,
+    cutoff: number
+  ): void {
+    for (const [key, entries] of history) {
+      const recent = entries.filter((entry) => entry.postedAt > cutoff);
+      if (recent.length === 0) {
+        history.delete(key);
+      } else if (recent.length < entries.length) {
+        history.set(key, recent);
       }
     }
   }
@@ -785,11 +763,9 @@ You could trade this, post about it, or comment on price action.
     mostCovered: { topic: string; count: number }[];
     agentsWithPhraseHistory: number;
   } {
+    this.cleanupOldEntries();
     const sorted = Array.from(this.topicCoverage.entries())
-      .map(([key, coverage]) => ({
-        topic: key,
-        count: coverage.coverageCount,
-      }))
+      .map(([topic, coverage]) => ({ topic, count: coverage.length }))
       .sort((a, b) => b.count - a.count);
 
     return {

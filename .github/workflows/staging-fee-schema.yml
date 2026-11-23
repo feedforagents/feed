@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       mode:
-        description: Inspect only, or explicitly prepare the reviewed schema
+        description: Inspect fee and Phase 0 readiness, or prepare the reviewed fee schema
         type: choice
         required: true
         default: inspect
@@ -51,4 +51,9 @@ jobs:
           STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
           STAGING_DIRECT_DATABASE_URL: ${{ secrets.STAGING_DIRECT_DATABASE_URL }}
           DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
-        run: bun scripts/cloudflare/staging-fee-schema.ts
+        # Project the runtime inputs to booleans before they reach the runner.
+        run: >-
+          bun scripts/cloudflare/staging-fee-schema.ts
+          '${{ inputs.mode == 'inspect' && contains(fromJSON('["false","0"]'), fromJSON(secrets.CLOUDFLARE_RUNTIME_SECRETS || '{}').GAME_START || '') }}'
+          '${{ inputs.mode == 'inspect' && (fromJSON(secrets.CLOUDFLARE_RUNTIME_SECRETS || '{}').NPC_LLM_DAILY_BUDGET_USD || '') == '100' }}'
+          '${{ inputs.mode == 'inspect' && (fromJSON(secrets.CLOUDFLARE_RUNTIME_SECRETS || '{}').SURPLUS_VERIFIED_MAX_REQUEST_MICRO_USD || '') != '' }}'

@@ -23,6 +23,28 @@ export type PublicResolutionAudit = {
   } | null;
 };
 
+/**
+ * The resolution text, proof link and confidence state the market's hidden
+ * outcome (PRD 9.2: the outcome stays hidden and the proof is shown at
+ * resolution). They are stored before payout, while the proof is generated
+ * and for as long as a low-confidence resolution waits in the admin review
+ * queue, and the market still trades in that window. Show them only once
+ * the market has resolved.
+ */
+export function redactUntilResolved(
+  audit: PublicResolutionAudit,
+  resolved: boolean
+): PublicResolutionAudit {
+  if (resolved) return audit;
+  return {
+    ...audit,
+    resolution: null,
+    confidence: null,
+    description: null,
+    proofUrl: null,
+  };
+}
+
 export async function getPublicResolutionAudit(
   marketId: string
 ): Promise<PublicResolutionAudit | null> {
@@ -80,17 +102,21 @@ export async function getPublicResolutionAudit(
     }
   }
 
-  return {
-    resolution: market.resolution ?? null,
-    resolvedAt: resolvedAt?.toISOString() ?? null,
-    reviewStatus: question?.resolutionReviewStatus ?? null,
-    confidence:
-      typeof question?.resolutionConfidence === 'number'
-        ? question.resolutionConfidence
-        : null,
-    description:
-      question?.resolutionDescription ?? market.resolutionDescription ?? null,
-    proofUrl: question?.resolutionProofUrl ?? market.resolutionProofUrl ?? null,
-    resolvedBy,
-  };
+  return redactUntilResolved(
+    {
+      resolution: market.resolution ?? null,
+      resolvedAt: resolvedAt?.toISOString() ?? null,
+      reviewStatus: question?.resolutionReviewStatus ?? null,
+      confidence:
+        typeof question?.resolutionConfidence === 'number'
+          ? question.resolutionConfidence
+          : null,
+      description:
+        question?.resolutionDescription ?? market.resolutionDescription ?? null,
+      proofUrl:
+        question?.resolutionProofUrl ?? market.resolutionProofUrl ?? null,
+      resolvedBy,
+    },
+    market.resolved === true
+  );
 }

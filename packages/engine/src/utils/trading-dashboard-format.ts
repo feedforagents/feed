@@ -8,6 +8,7 @@
  * without behavioral drift.
  */
 
+import { getPositionExposure } from '../npc/portfolio-metrics';
 import {
   formatTradingStrategyBias,
   getNpcTradingStrategy,
@@ -54,17 +55,33 @@ export function mapPersonalityToArchetype(personality: string): string {
  * Calculate portfolio exposure as a percentage of total equity.
  *
  * Formula: (totalPositionValue / totalEquity) × 100
- * where totalPositionValue = Σ(size + unrealizedPnL)
+ * where totalPositionValue = Σ(position value + unrealizedPnL)
  * and   totalEquity        = cash + totalPositionValue
+ *
+ * A position's value is the capital actually deployed: for prediction
+ * markets that is the cash cost (`size`), but for perps `size` is the
+ * leveraged notional, so the deployed capital is the margin
+ * `|size / leverage|` — the same exposure `getPositionExposure` reports
+ * everywhere else. Summing raw notional overstated a 5x perp's exposure
+ * fivefold in the prompt the LLM trades from.
  *
  * Clamped to [0, 100].
  */
 export function calculatePortfolioExposure(
   balance: number,
-  positions: Pick<NPCPosition, 'size' | 'unrealizedPnL'>[]
+  positions: Pick<
+    NPCPosition,
+    'size' | 'unrealizedPnL' | 'marketType' | 'leverage'
+  >[]
 ): number {
   const totalPositionValue = positions.reduce(
-    (sum, p) => sum + p.size + p.unrealizedPnL,
+    (sum, p) =>
+      sum +
+      getPositionExposure(
+        p.size,
+        p.marketType === 'perp' ? p.leverage : undefined
+      ) +
+      p.unrealizedPnL,
     0
   );
   const totalEquity = balance + totalPositionValue;

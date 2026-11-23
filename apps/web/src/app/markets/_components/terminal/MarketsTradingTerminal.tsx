@@ -28,6 +28,7 @@ import { PerpPositionsList } from '@/components/markets/PerpPositionsList';
 import { PerpPriceChart } from '@/components/markets/PerpPriceChart';
 import { PredictionPositionsList } from '@/components/markets/PredictionPositionsList';
 import { PredictionProbabilityChart } from '@/components/markets/PredictionProbabilityChart';
+import { calculatePredictionBuyQuote } from '@/components/markets/predictionBuyQuote';
 import {
   type BuyPredictionDetails,
   type SellPredictionDetails,
@@ -99,6 +100,7 @@ import {
   isSamePredictionLiveState,
   type PredictionMarketLiveState,
   type PredictionMarketTerminalState,
+  predictionScenarioLabel,
 } from './predictionTerminalState';
 import { TerminalPortfolio } from './TerminalPortfolio';
 import { TerminalSocialFeed } from './TerminalSocialFeed';
@@ -421,7 +423,7 @@ function PredictionMarketHeader({
           <div className="mt-1 whitespace-normal break-words text-muted-foreground text-xs">
             {predictionState?.resolutionDescription?.trim()
               ? predictionState.resolutionDescription
-              : `Scenario ${predictionState?.scenario ?? ''}`}
+              : (predictionScenarioLabel(predictionState) ?? '')}
           </div>
         </div>
         {isCompact ? (
@@ -925,7 +927,7 @@ export function MarketsTradingTerminal({
         key: { kind: 'prediction', id: m.id.toString() },
         kind: 'prediction',
         title: m.text,
-        subtitle: `Scenario ${m.scenario}`,
+        subtitle: predictionScenarioLabel(m) ?? '',
         valuePrimary: `YES ${formatYesPct(yesPct)}`,
         valueSecondary:
           m.status !== 'active'
@@ -1299,12 +1301,11 @@ export function MarketsTradingTerminal({
     if (!predictionEffectiveShares) return null;
     if (predictionAmountNum <= 0) return null;
     try {
-      return PredictionPricing.calculateBuyWithFees(
+      return calculatePredictionBuyQuote(
         predictionEffectiveShares.yesShares,
         predictionEffectiveShares.noShares,
         predictionSide,
-        predictionAmountNum,
-        FEE_CONFIG.TRADING_FEE_RATE
+        predictionAmountNum
       );
     } catch {
       return null;
@@ -1849,17 +1850,20 @@ export function MarketsTradingTerminal({
                 <div className="truncate text-muted-foreground text-xs">
                   {predictionState?.resolutionDescription?.trim()
                     ? predictionState.resolutionDescription
-                    : `Scenario ${predictionState?.scenario ?? ''}${
+                    : [
+                        predictionScenarioLabel(predictionState),
                         formatDate(
                           predictionState?.endDate ??
                             predictionState?.resolutionDate
                         )
-                          ? ` • Ends ${formatDate(
+                          ? `Ends ${formatDate(
                               predictionState?.endDate ??
                                 predictionState?.resolutionDate
                             )}`
-                          : ''
-                      }`}
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' • ')}
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                   <div className="rounded-full bg-blue-500/10 px-2 py-0.5 font-bold text-[10px] text-blue-400 tabular-nums">
@@ -2844,12 +2848,14 @@ export function MarketsTradingTerminal({
             )}
 
             <div className="rounded border border-white/10 bg-muted/10 p-3 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Scenario</span>
-                <span className="font-mono text-foreground tabular-nums">
-                  {predictionState?.scenario ?? '—'}
-                </span>
-              </div>
+              {predictionState?.scenario != null && (
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Scenario</span>
+                  <span className="font-mono text-foreground tabular-nums">
+                    {predictionState.scenario}
+                  </span>
+                </div>
+              )}
               {formatDate(
                 predictionState?.endDate ?? predictionState?.resolutionDate
               ) && (
