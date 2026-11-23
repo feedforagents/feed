@@ -34,18 +34,13 @@ export function getMCPServerInfo(): Implementation {
  * Get server capabilities
  */
 export function getServerCapabilities(): ServerCapabilities {
+  // Advertise only what MCPRequestHandler serves. Clients act on each
+  // declared capability: MCP Inspector sends logging/setLevel after
+  // initialize and aborts on Method not found.
   return {
     tools: {
       listChanged: false, // We don't support dynamic tool list changes yet
     },
-    resources: {
-      subscribe: false,
-      listChanged: false,
-    },
-    prompts: {
-      listChanged: false,
-    },
-    logging: {},
   };
 }
 
@@ -312,12 +307,6 @@ export function getAvailableTools(): MCPTool[] {
           content: {
             type: 'string',
             description: 'Post content (1-5000 characters)',
-          },
-          type: {
-            type: 'string',
-            enum: ['post', 'article'],
-            description: 'Post type',
-            default: 'post',
           },
           mediaUrl: {
             type: 'string',

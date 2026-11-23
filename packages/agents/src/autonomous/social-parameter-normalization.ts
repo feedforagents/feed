@@ -157,31 +157,10 @@ export function normalizeSocialDecisionParameters(
 
   switch (action) {
     case Actions.COMMENT: {
-      const resolvedParentCommentId = resolveCandidateId(
-        nextParameters.parentCommentId,
-        pendingReplies
-      );
-      const parentTarget = resolvedParentCommentId
-        ? pendingReplies.find((reply) => reply.id === resolvedParentCommentId)
-        : undefined;
-      const explicitPostId = resolveCandidateId(
+      const resolvedPostId = resolveCandidateId(
         nextParameters.postId,
         recentPosts
       );
-
-      // A parent comment must belong to the post being commented on; a
-      // mismatched pair is rejected rather than posting under the wrong thread.
-      if (
-        explicitPostId &&
-        parentTarget &&
-        parentTarget.postId !== explicitPostId
-      ) {
-        delete nextParameters.postId;
-        delete nextParameters.parentCommentId;
-        return nextParameters;
-      }
-
-      const resolvedPostId = explicitPostId ?? parentTarget?.postId;
 
       if (resolvedPostId) {
         nextParameters.postId = resolvedPostId;
@@ -189,10 +168,19 @@ export function normalizeSocialDecisionParameters(
         delete nextParameters.postId;
       }
 
-      if (resolvedParentCommentId) {
-        nextParameters.parentCommentId = resolvedParentCommentId;
-      } else if ('parentCommentId' in nextParameters) {
-        delete nextParameters.parentCommentId;
+      // Preserve malformed reply intent for validation. Only REPLY_COMMENT
+      // may resolve a parent, so an invalid reply never becomes top-level.
+      for (const field of ['commentId', 'parentCommentId']) {
+        const parent = nextParameters[field];
+        if (
+          parent == null ||
+          parent === 0 ||
+          parent === 0n ||
+          (typeof parent === 'string' &&
+            PLACEHOLDER_TOKENS.has(normalizeToken(parent)))
+        ) {
+          delete nextParameters[field];
+        }
       }
 
       return nextParameters;

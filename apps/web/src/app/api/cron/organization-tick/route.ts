@@ -427,12 +427,14 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
         >(
           prompt,
           {
-            properties: { post: { type: 'string' } },
+            properties: { post: { type: 'string', pattern: '\\S' } },
             required: ['post'],
           },
           {
             maxTokens: 280,
             temperature: 0.8,
+            format: 'json',
+            promptType: 'organization_post',
           }
         );
 
@@ -664,7 +666,10 @@ The post should:
 
   return `${baseContext}
 
-${typeInstructions[orgType] || typeInstructions.media}`;
+${typeInstructions[orgType] || typeInstructions.media}
+
+Return only a JSON object with a nonempty post string:
+{"post":"your post here"}`;
 }
 
 /**

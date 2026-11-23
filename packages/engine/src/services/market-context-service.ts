@@ -33,6 +33,7 @@ import {
   worldEvents,
 } from '@feed/db';
 import { logger } from '@feed/shared';
+import { FEE_CONFIG } from '../config/fees';
 import {
   getSimulationPrice,
   getSimulationTickers,
@@ -185,7 +186,11 @@ export class MarketContextService {
             liquidityTier: getPredictionMarketLiquidityTier(m.totalVolume),
             urgencyLevel: profile.urgencyLevel,
             eventSensitivity: profile.eventSensitivity,
-            maxSafeBet: maxSafeBuy(simYesShares, simNoShares),
+            maxSafeBet: maxSafeBuy(
+              simYesShares,
+              simNoShares,
+              FEE_CONFIG.TRADING_FEE_RATE
+            ),
           };
         });
 
