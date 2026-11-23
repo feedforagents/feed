@@ -3567,10 +3567,16 @@ function theCommandLine() {
       const shim = path.join(root, "node_modules/.bin/quint");
       fs.unlinkSync(shim);
       fs.copyFileSync(path.join(nodeModules, ".bin/quint"), shim);
-      if (!changedModel) fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({
-        packageManager: JSON.parse(PACKAGE["package.json"]).packageManager,
-        scripts: { test: "node -e \"const fs = require('node:fs'); if (!fs.existsSync('.second-install-tests')) fs.linkSync('node_modules/.bin/quint', '.second-install-tests')\"" },
-      }));
+      if (!changedModel) {
+        const { packageManager } = JSON.parse(read("package.json"));
+        fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ type: "module", packageManager, scripts: { test: "node install-during-tests.mjs" } }));
+        fs.writeFileSync(path.join(root, "install-during-tests.mjs"), `
+          import fs from "node:fs";
+          fs.mkdirSync(".cache", { recursive: true });
+          if (!fs.existsSync(".cache/test-runs")) fs.linkSync("node_modules/.bin/quint", ".cache/second-install-quint");
+          fs.appendFileSync(".cache/test-runs", "ran\\n");
+        `);
+      }
       const retry = await exec(process.execPath, ["--input-type=module", "--eval", `
         import assert from "node:assert/strict";
         import fs from "node:fs";
@@ -3607,7 +3613,8 @@ function theCommandLine() {
       } else {
         assert.equal(retry.stderr, "");
         assert.deepEqual(rows.slice(0, -1), rows.at(-1).results);
-        for (const stage of ["always", "tests"]) assert.ok(rows.some((r: Result) => r.stage === stage && r.ok), retry.stdout);
+        for (const stage of ["always", "tests"]) assert.deepEqual(rows.filter((r) => r.stage === stage).map((r) => r.ok), [true]);
+        assert.equal(read(".cache/test-runs", root), "ran\nran\n");
         assert.ok(rows.at(-1).results.some((r: Result) => r.stage === "proof" && r.ok), retry.stdout);
       }
       assert.equal(rows.filter((row) => row.stage === "model").length, 1);
