@@ -409,9 +409,13 @@ configured scopes are in `knip.config.js`, `.madgerc`, `.jscpd.json` and
 
 | When | Runs |
 |---|---|
-| Pull request or push to `main` | The tasks of `pnpm verify`, with `--continue=dependencies-successful`, over eight jobs: `simulate-1` to `simulate-4` each pass the specs whose files hash to that shard to `precomputeSimulations`, starting from the spec cache `verify` saved; `verify` starts once they finish, adds the simulation results they wrote, not those they restored, to its `.spec-cache`, and runs build, types, tests, browser tests, all checks, ESLint, Stylelint, Knip, Madge, jscpd and the selftest of the documents and the examples; beside them all, `selftest-a`, `selftest-b` and `selftest-rest` each run one `selftest:tools` task |
+| Pull request or push to `main` | `verify` runs build, types, tests, browser tests, all checks, ESLint, Stylelint, Knip, Madge, jscpd and the docs and examples self-tests with `--continue=dependencies-successful`. In parallel, `selftest-a`, `selftest-b` and `selftest-rest` run the three tool self-test tasks. |
 | Nightly | Every check fresh under the fixed nightly profile; saved counterexamples become a pull request into the branch the run checked, or the default branch for a tag run. Beside it, the three `selftest:tools` tasks without the selftest's shared tool runs |
 | A `v*` tag (`release.yml`) | Build, `pnpm pack`, the prerequisites and `pnpm selftest --only --concurrency=1` read from the shared cache, and the tarball attached to a GitHub release |
+
+This repository runs its six root specs in the ordinary check. Consumer
+workflows using the four simulation jobs assign modules by file hash and
+download the new simulation receipts before their ordinary check.
 
 The precompute jobs skip the root install's build and generation only during
 the canonical `ci.yml` preparation in its workspace. Other workflows, manual
