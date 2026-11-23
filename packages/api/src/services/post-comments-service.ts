@@ -99,20 +99,56 @@ export async function countReachablePostComments(
 
 /**
  * Count the reachable comment tree for many posts in one query, keyed by
- * post id. Posts with no reachable comment are absent from the map, so
- * callers default them to 0. This is the list counterpart of
+ * post id. Every requested post appears in the map (0 when it has no
+ * reachable comment). This is the list counterpart of
  * countReachablePostComments: a post card must promise only what the
  * detail screen shows for the same viewer.
+ *
+ * Each post walks only its own eligible rows (LATERAL per-post CTE), so
+ * one deep thread costs (its depth x its rows), not (max depth x the
+ * whole page's rows) — a single 1000-deep chain used to make the
+ * batched walk scan every comment on the page at every depth.
  */
 export async function countReachablePostCommentsForPosts(
   postIds: string[],
   excludedIds: string[]
 ): Promise<Map<string, number>> {
   if (postIds.length === 0) return new Map();
+  // Parameterize the id list once, as in the feed pipelines.
+  const postIdsArray = sql`ARRAY[${sql.join(
+    postIds.map((id) => sql`${id}`),
+    sql`, `
+  )}]::text[]`;
   const rows = await db.execute<{ postId: string; count: string }>(sql`
-    ${reachablePostComments(postIds, excludedIds)}
-    SELECT "postId", count(*)::text AS count FROM visible_comments
-    GROUP BY "postId"
+    WITH target_posts AS (
+      SELECT unnest(${postIdsArray}) AS "postId"
+    )
+    SELECT tp."postId" AS "postId", count(visible.id)::text AS count
+    FROM target_posts tp
+    LEFT JOIN LATERAL (
+      WITH RECURSIVE eligible_comments AS MATERIALIZED (
+        SELECT ${comments.id}, ${comments.createdAt}, ${comments.parentCommentId}
+        FROM ${comments}
+        WHERE ${and(
+          sql`${comments.postId} = tp."postId"`,
+          isNull(comments.deletedAt),
+          excludedIds.length > 0
+            ? notInArray(comments.authorId, excludedIds)
+            : undefined
+        )}
+      ),
+      visible_comments(id, "createdAt") AS (
+        SELECT id, "createdAt"
+        FROM eligible_comments
+        WHERE "parentCommentId" IS NULL
+        UNION ALL
+        SELECT child.id, child."createdAt"
+        FROM eligible_comments child
+        JOIN visible_comments parent ON child."parentCommentId" = parent.id
+      )
+      SELECT id FROM visible_comments
+    ) visible ON true
+    GROUP BY tp."postId"
   `);
   return new Map(rows.map((row) => [row.postId, Number(row.count)]));
 }
