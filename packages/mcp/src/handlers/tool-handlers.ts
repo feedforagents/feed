@@ -2795,10 +2795,21 @@ export async function executeGetGroupInvites(
   agent: AuthenticatedAgent,
   _args: GetGroupInvitesArgs
 ): Promise<GetGroupInvitesResult> {
+  // Use the same viewer moderation exclusions as query_feed and search_agents.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedInviterIds = [...blockedIds, ...mutedIds, ...blockedByIds];
+
   const invitesList = await db.groupInvite.findMany({
     where: {
       invitedUserId: agent.userId,
       status: 'pending',
+      ...(excludedInviterIds.length > 0
+        ? { invitedBy: { notIn: excludedInviterIds } }
+        : {}),
     },
   });
 
