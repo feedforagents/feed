@@ -100,6 +100,19 @@ async function fetchTagCounts(
   return new Map(body.posts.map((post) => [post.id, post.commentCount]));
 }
 
+async function fetchTagResponse(
+  headers: Record<string, string> = {}
+): Promise<Response> {
+  const request = new NextRequest(
+    new Request(`http://localhost/api/trending/${tagName}?limit=20`, {
+      headers,
+    })
+  );
+  return getTagPosts(request, {
+    params: Promise.resolve({ tag: tagName }),
+  });
+}
+
 async function fetchDetailCount(
   targetPostId: string,
   headers: Record<string, string> = {}
@@ -402,6 +415,43 @@ beforeAll(async () => {
     .returning({ id: postTags.id });
   for (const row of insertedPostTags) owned.postTags.add(row.id);
 
+  // Fill the page to the default limit (20 posts): the signed branch used
+  // to run the viewer-adjusted count inside the per-post asUser
+  // transaction, which holds a pool connection while the count needs
+  // another — a signed page with as many posts as the pool (5 in tests)
+  // hung. These extra posts carry no comments.
+  const extraPostIds = await Promise.all(
+    Array.from({ length: 18 }, () => generateSnowflakeId())
+  );
+  const extraPostTagIds = await Promise.all(
+    Array.from({ length: 18 }, () => generateSnowflakeId())
+  );
+  const insertedExtraPosts = await db
+    .insert(posts)
+    .values(
+      extraPostIds.map((id, i) => ({
+        id,
+        content: `plain tag post ${i}`,
+        authorId,
+        timestamp: past,
+        createdAt: past,
+      }))
+    )
+    .returning({ id: posts.id });
+  for (const row of insertedExtraPosts) owned.posts.add(row.id);
+  const insertedExtraPostTags = await db
+    .insert(postTags)
+    .values(
+      extraPostIds.map((postId, i) => ({
+        id: extraPostTagIds[i],
+        postId,
+        tagId,
+        createdAt: past,
+      }))
+    )
+    .returning({ id: postTags.id });
+  for (const row of insertedExtraPostTags) owned.postTags.add(row.id);
+
   // Signed-viewer case: the viewer blocks the author of the visible reply,
   // so for them only the visible top-level comment is reachable.
   const insertedBlocks = await db
@@ -444,4 +494,28 @@ describe('tag feed card comment count', () => {
     expect(counts.get(controlPostId)).toBe(1);
     expect(await fetchDetailCount(mixedPostId, signedViewerHeaders())).toBe(1);
   });
+
+  it('answers a signed full page without hanging (20 posts, pool is 5)', async () => {
+    const timedOut = Symbol('timedOut');
+    const result = await Promise.race([
+      fetchTagResponse(signedViewerHeaders()),
+      new Promise((resolve) => setTimeout(() => resolve(timedOut), 20_000)),
+    ]);
+    if (result === timedOut)
+      throw new Error(
+        'signed tag page did not respond within 20s with 20 posts (pool is 5)'
+      );
+    const response = result as Response;
+    expect(response.status).toBe(200);
+    // Viewer-dependent counts must never sit in a shared cache.
+    expect(response.headers.get('Cache-Control')).toContain('private');
+    const body = (await response.json()) as TagResponse;
+    expect(body.success).toBe(true);
+    expect(body.posts.length).toBe(20);
+    const counts = new Map(
+      body.posts.map((post) => [post.id, post.commentCount])
+    );
+    expect(counts.get(mixedPostId)).toBe(1);
+    expect(counts.get(controlPostId)).toBe(1);
+  }, 25_000);
 });
