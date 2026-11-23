@@ -157,10 +157,18 @@ export const GET = withErrorHandling(
       [followingCount],
       [actorFollowingCount],
     ] = await Promise.all([
+      // Count open positions. The profile header documents this number
+      // as the number of open positions, and the profile's positions
+      // list counts open prediction positions as exactly the 'active'
+      // ones — closed and resolved positions belong to its closed view
+      // — so this route applies the same filter or it keeps counting
+      // positions after they end.
       db
         .select({ count: count() })
         .from(positions)
-        .where(eq(positions.userId, dbUser.id)),
+        .where(
+          and(eq(positions.userId, dbUser.id), eq(positions.status, 'active'))
+        ),
       db
         .select({ count: count() })
         .from(comments)

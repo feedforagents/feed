@@ -70,6 +70,7 @@ const makeChain = (data: unknown[]) => {
   chain.orderBy = noop;
   chain.limit = noop;
   chain.leftJoin = noop;
+  chain.innerJoin = noop;
   // Thenable — called by `await`
   chain.then = (
     resolve: (v: unknown) => unknown,
@@ -106,8 +107,12 @@ const mockDbSelect = mock();
 mock.module('@feed/api', () => ({
   // Bypass cache — call factory directly
   getCacheOrFetch: (_key: string, factory: () => Promise<unknown>) => factory(),
+  getCache: () => Promise.resolve(null),
+  setCache: () => Promise.resolve(),
+  narrativeEnrichmentKey: (id: string) => id,
   // Controlled authentication
-  optionalAuth: () => Promise.resolve(authUser),
+  publicRateLimit: () => Promise.resolve({ error: null, user: authUser }),
+  addPublicReadHeaders: (response: unknown) => response,
   // Return data directly so tests can inspect it without parsing a Response
   successResponse: (data: unknown) => data,
   // Strip error handling wrapper so the handler is called directly
@@ -116,10 +121,11 @@ mock.module('@feed/api', () => ({
 }));
 
 mock.module('@feed/engine', () => ({
-  StaticDataRegistry: { getActor: () => null },
+  StaticDataRegistry: { getActor: () => null, getOrganization: () => null },
 }));
 
 mock.module('@feed/shared', () => ({
+  toISO: (value: Date) => value.toISOString(),
   logger: {
     debug: () => {},
     warn: () => {},
@@ -193,10 +199,14 @@ mock.module('@feed/db', () => ({
   desc: (x: unknown) => x,
   eq: (a: unknown, b: unknown) => [a, b],
   gte: (a: unknown, b: unknown) => [a, b],
+  lt: (a: unknown, b: unknown) => [a, b],
   inArray: (col: unknown, arr: unknown) => ({ col, arr }),
   isNotNull: (col: unknown) => col,
   isNull: (col: unknown) => col,
+  like: (a: unknown, b: unknown) => [a, b],
   lte: (a: unknown, b: unknown) => [a, b],
+  not: (col: unknown) => col,
+  notExists: (query: unknown) => query,
   // sql tagged template — returns a sentinel; db.execute mock ignores it
   sql: Object.assign(
     (_s: TemplateStringsArray, ..._v: unknown[]) => ({ _sql: true }),
@@ -205,6 +215,12 @@ mock.module('@feed/db', () => ({
   posts: postsMock,
   users: usersMock,
   questions: questionsMock,
+  markets: {
+    id: 'markets.id',
+    yesShares: 'markets.yesShares',
+    noShares: 'markets.noShares',
+    createdAt: 'markets.createdAt',
+  },
   reactions: reactionsMock,
   shares: sharesMock,
   arcStates: arcStatesMock,
@@ -306,7 +322,14 @@ describe('GET /api/feed/narrative — integration', () => {
     mockDbExecute.mockClear();
 
     let callIndex = 0;
-    mockDbSelect.mockImplementation(() => {
+    mockDbSelect.mockImplementation((projection: Record<string, unknown>) => {
+      // These cases seed neither market rows nor test authors.
+      if (
+        'marketId' in projection ||
+        (projection.id === usersMock.id && Object.keys(projection).length === 1)
+      ) {
+        return makeChain([]);
+      }
       const data = selectQueue[callIndex] ?? [];
       callIndex++;
       return makeChain(data);

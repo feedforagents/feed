@@ -87,6 +87,8 @@ export interface AgentLLMParams {
   actionType?: string;
   /** Agent runtime for context extraction */
   runtime?: IAgentRuntime;
+  /** Cancel the OpenAI-compatible provider request when the NPC lease ends. */
+  signal?: AbortSignal;
 }
 
 /** OpenAI-compatible usage block as reported by the provider */
@@ -471,6 +473,7 @@ async function logToTrajectory(
  * ```
  */
 export async function callAgentLLM(params: AgentLLMParams): Promise<string> {
+  params.signal?.throwIfAborted();
   if (typeof params.prompt !== 'string' || !params.prompt.trim()) {
     throw new Error('Agent LLM prompt is required');
   }
@@ -529,6 +532,7 @@ export async function callAgentLLM(params: AgentLLMParams): Promise<string> {
         purpose: params.purpose,
         actionType: params.actionType,
         runtime: params.runtime,
+        signal: params.signal,
       });
   }
 }
