@@ -300,7 +300,11 @@ export const POST = withErrorHandling(
 
     // 10. Check for group chat invite chance (only if followed)
     let invitedToChat = false;
-    let chatInfo = null;
+    let chatInfo: {
+      chatId: string;
+      chatName: string;
+      isOwned: boolean;
+    } | null = null;
 
     if (
       followed ||
