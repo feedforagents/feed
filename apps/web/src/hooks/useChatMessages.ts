@@ -1,5 +1,5 @@
 import { logger, type MessageMetadata } from '@feed/shared';
-import { useQueryClient } from '@tanstack/react-query';
+import { skipToken, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   type MessageReactionSummary,
@@ -81,6 +81,13 @@ export enum OptimisticMessageIdPrefix {
   Pending = 'pending-',
   /** Agent/coordinator response in progress (thinking placeholder) */
   Thinking = 'thinking-',
+}
+
+function isOptimisticMessageId(id: string): boolean {
+  return (
+    id.startsWith(OptimisticMessageIdPrefix.Pending) ||
+    id.startsWith(OptimisticMessageIdPrefix.Thinking)
+  );
 }
 
 /**
@@ -176,10 +183,8 @@ export const chatMessagesQueryKey = (chatId: string, userId?: string | null) =>
  * Shape of the data stored in the React Query cache for a chat.
  * Bundles messages with pagination state so they stay in sync.
  *
- * Cache lifetime: Data is written/read via setQueryData/getQueryData (not useQuery).
- * React Query's default gcTime (5 min) applies — unused chat data is garbage-collected
- * 5 minutes after the last component stops referencing it. For frequently-visited chats,
- * data stays alive indefinitely. For cross-session persistence, IndexedDB handles it.
+ * Data is written imperatively and observed by the open chat. IndexedDB
+ * handles cross-session persistence.
  */
 export interface ChatMessagesData {
   messages: ChatMessage[];
@@ -534,7 +539,14 @@ export function useChatMessages(chatId: string | null) {
         const currentData = queryClient.getQueryData<ChatMessagesData>(
           chatMessagesQueryKey(targetChatId, userId)
         );
-        const lastMessage = currentData?.messages?.at(-1);
+        const cachedMessages = currentData?.messages;
+        let anchorIndex = (cachedMessages?.length ?? 0) - 1;
+        let lastMessage = cachedMessages?.[anchorIndex];
+        // Local placeholders do not have a row to use as the server anchor.
+        while (lastMessage && isOptimisticMessageId(lastMessage.id)) {
+          anchorIndex -= 1;
+          lastMessage = cachedMessages?.[anchorIndex];
+        }
         if (!lastMessage) {
           // No cache — do a full reload instead of sync
           hasLoadedRef.current.delete(targetChatId);
@@ -545,12 +557,16 @@ export function useChatMessages(chatId: string | null) {
         const token = await getSafeAccessToken();
         if (!token) return;
 
-        // Paginate until all missed messages are fetched
+        // Paginate until all missed messages are fetched. The position is
+        // the (createdAt, id) pair of the newest held message: advancing
+        // the timestamp alone would skip missed messages that share its
+        // millisecond, so the id travels with it as `afterId`.
         let afterTimestamp = lastMessage.createdAt;
+        let afterId = lastMessage.id;
         const MAX_SYNC_PAGES = 10; // Safety cap to avoid infinite loops
         for (let page = 0; page < MAX_SYNC_PAGES; page++) {
           const response = await fetch(
-            `/api/chats/${targetChatId}?after=${encodeURIComponent(afterTimestamp)}&limit=${CHAT_PAGE_SIZE}`,
+            `/api/chats/${targetChatId}?after=${encodeURIComponent(afterTimestamp)}&afterId=${encodeURIComponent(afterId)}&limit=${CHAT_PAGE_SIZE}`,
             { headers: { Authorization: `Bearer ${token}` } }
           );
           if (!response.ok) return;
@@ -580,6 +596,7 @@ export function useChatMessages(chatId: string | null) {
           const lastNew = newMessages.at(-1);
           if (!lastNew) break;
           afterTimestamp = lastNew.createdAt;
+          afterId = lastNew.id;
         }
       } catch (error) {
         logger.warn(
@@ -637,8 +654,11 @@ export function useChatMessages(chatId: string | null) {
     if (isConnected && chatId) setIsLoading(false);
   }, [isConnected, chatId]);
 
-  // ── Derived state from cache ────────────────────────────────────────
-  const cachedData = getCachedData();
+  // Observe writes from reconnect and SSE without starting another fetch.
+  const { data: cachedData } = useQuery<ChatMessagesData>({
+    queryKey: chatMessagesQueryKey(chatId ?? '', userId),
+    queryFn: skipToken,
+  });
   const messages = cachedData?.messages ?? [];
   const hasMore = cachedData?.hasMore ?? false;
 
@@ -652,9 +672,7 @@ export function useChatMessages(chatId: string | null) {
     if (!chatId || !userId || !cachedData || cachedData.messages.length === 0)
       return;
     const confirmedMessages = cachedData.messages.filter(
-      (m) =>
-        !m.id.startsWith(OptimisticMessageIdPrefix.Pending) &&
-        !m.id.startsWith(OptimisticMessageIdPrefix.Thinking)
+      (message) => !isOptimisticMessageId(message.id)
     );
     if (confirmedMessages.length === lastPersistedCountRef.current) return;
 
@@ -681,9 +699,7 @@ export function useChatMessages(chatId: string | null) {
   // ── Mutation helpers (same interface as before) ─────────────────────
   const addMessage = useCallback(
     (message: ChatMessage) => {
-      const isOptimistic =
-        message.id.startsWith(OptimisticMessageIdPrefix.Pending) ||
-        message.id.startsWith(OptimisticMessageIdPrefix.Thinking);
+      const isOptimistic = isOptimisticMessageId(message.id);
       setCachedData((old) => {
         if (!old)
           return { messages: [message], hasMore: false, nextCursor: null };
