@@ -597,8 +597,9 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
     const arcState = meta?.arcState ?? null;
     const storyTopicKey = meta?.topicKey ?? null;
 
-    // Skip resolved or expired questions
-    if (meta?.status === 'resolved') continue;
+    // Skip questions that are no longer live: resolved, cancelled by an
+    // admin void (all positions refunded), or past their resolution date.
+    if (meta?.status === 'resolved' || meta?.status === 'cancelled') continue;
     if (meta?.resolutionDate && meta.resolutionDate <= now) continue;
 
     const baseScore = calculateStoryScore(
