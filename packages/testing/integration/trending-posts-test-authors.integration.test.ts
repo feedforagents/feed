@@ -320,7 +320,10 @@ describe('Trending posts widget excludes test authors', () => {
   for (const signedIn of [false, true]) {
     const mode = signedIn ? 'signed-in' : 'public';
     it(`returns only eligible fixture posts (${mode})`, async () => {
-      const result = await fetchTrending(signedIn);
+      // minInteractions=0: this suite tests author exclusion, not the
+      // interaction threshold (covered by
+      // trending-posts-min-interactions.integration.test.ts).
+      const result = await fetchTrending(signedIn, '?minInteractions=0');
       const ids = result.map((post) => post.id);
       expect(ids).toContain(normalPostId);
       expect(ids).toContain(noUserPostId);
@@ -331,11 +334,14 @@ describe('Trending posts widget excludes test authors', () => {
       expect([...ids].sort()).toEqual([normalPostId, noUserPostId].sort());
     });
     it(`honors the requested limit after ranking visible posts (${mode})`, async () => {
-      const result = await fetchTrending(signedIn, '?limit=1');
+      const result = await fetchTrending(
+        signedIn,
+        '?limit=1&minInteractions=0'
+      );
       expect(result.map((post) => post.id)).toEqual([noUserPostId]);
     });
     it(`keeps engagement and author metadata for visible posts (${mode})`, async () => {
-      const result = await fetchTrending(signedIn);
+      const result = await fetchTrending(signedIn, '?minInteractions=0');
       const normal = result.find((post) => post.id === normalPostId);
       expect(normal?.likeCount).toBe(3);
       expect(normal?.commentCount).toBe(0);

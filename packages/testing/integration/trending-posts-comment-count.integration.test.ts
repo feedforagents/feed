@@ -165,8 +165,11 @@ afterAll(async () => {
 });
 
 async function fetchTrending(signedIn: boolean): Promise<TrendingPost[]> {
+  // minInteractions=0: this suite tests comment moderation, not the
+  // interaction threshold (covered by
+  // trending-posts-min-interactions.integration.test.ts).
   const request = new NextRequest(
-    'http://localhost/api/feed/widgets/trending-posts',
+    'http://localhost/api/feed/widgets/trending-posts?minInteractions=0',
     { headers: signedIn ? { Authorization: `Bearer ${token}` } : undefined }
   );
   // Tokens are valid only in this five-minute synthetic window, already

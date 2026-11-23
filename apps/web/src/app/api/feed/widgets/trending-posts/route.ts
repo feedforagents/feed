@@ -148,7 +148,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     timeframe: searchParams.get('timeframe') || '24h',
     minInteractions: searchParams.get('minInteractions') || '5',
   };
-  const { limit } = TrendingPostsQuerySchema.parse(queryParams);
+  const { limit, minInteractions } =
+    TrendingPostsQuerySchema.parse(queryParams);
   // Get recent posts from last 24 hours
   const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const now = new Date(); // Current time for filtering out future posts
@@ -421,7 +422,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         trendingScore,
       };
     })
-    .filter((post) => post.trendingScore > 0) // Only include posts with some engagement
+    .filter(
+      (post) =>
+        post.trendingScore > 0 && // Only include posts with some engagement
+        post.likeCount + post.commentCount + post.shareCount >= minInteractions
+    )
     .sort((a, b) => b.trendingScore - a.trendingScore) // Sort by trending score descending
     .slice(0, Math.min(5, limit)); // Keep the widget capped at five posts
 
