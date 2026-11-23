@@ -75,6 +75,13 @@ interface UpcomingEvent {
   relatedOrganizationId?: string;
 }
 
+const dayMs = 24 * 60 * 60 * 1000;
+const timeframeDays = {
+  '24h': 1,
+  '7d': FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS,
+  '30d': 30,
+} as const;
+
 export const GET = withErrorHandling(async (request: NextRequest) => {
   // Validate query parameters
   const { searchParams } = new URL(request.url);
@@ -82,8 +89,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     limit: searchParams.get('limit') || '10',
     timeframe: searchParams.get('timeframe') || '7d',
   };
-  const { limit } = UpcomingEventsQuerySchema.parse(queryParams);
+  const { limit, timeframe } = UpcomingEventsQuerySchema.parse(queryParams);
   const eventLimit = Math.min(limit, FEED_WIDGET_CONFIG.MAX_UPCOMING_EVENTS);
+  const now = new Date();
+  const window = {
+    gte: now,
+    lte: new Date(now.getTime() + timeframeDays[timeframe] * dayMs),
+  };
 
   // Optional auth - upcoming events are public but RLS still applies
   const authUser = await optionalAuth(request).catch(() => null);
@@ -103,17 +115,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           const activeQuestions = await db.question.findMany({
             where: {
               status: 'active',
-              resolutionDate: {
-                gte: new Date(), // Only future resolutions
-                lte: new Date(
-                  Date.now() +
-                    FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS *
-                      24 *
-                      60 *
-                      60 *
-                      1000
-                ),
-              },
+              resolutionDate: window,
             },
             orderBy: {
               resolutionDate: 'asc',
@@ -124,16 +126,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           // Transform questions into upcoming events (hinting but not revealing)
           for (const question of activeQuestions) {
             const resolutionDate = new Date(question.resolutionDate);
-            const now = new Date();
             const daysUntil = Math.ceil(
-              (resolutionDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+              (resolutionDate.getTime() - now.getTime()) / dayMs
             );
-
-            if (
-              daysUntil > FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS ||
-              daysUntil < 0
-            )
-              continue;
 
             // Check if it's happening soon (within configured hours = "LIVE")
             const hoursUntil =
@@ -239,7 +234,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             by: ['eventType'],
             where: {
               timestamp: {
-                gte: new Date(), // Only future events
+                gte: now, // Only future events
               },
             },
             take: 20,
@@ -282,17 +277,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
           const upcomingWorldEvents = await db.worldEvent.findMany({
             where: {
-              timestamp: {
-                gte: new Date(), // Future events only
-                lte: new Date(
-                  Date.now() +
-                    FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS *
-                      24 *
-                      60 *
-                      60 *
-                      1000
-                ),
-              },
+              timestamp: window,
               visibility: 'public', // Only show public events
               ...(eventTypeFilter.length > 0
                 ? {
@@ -323,7 +308,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             });
 
             const hoursUntil =
-              (eventDate.getTime() - Date.now()) / (1000 * 60 * 60);
+              (eventDate.getTime() - now.getTime()) / (1000 * 60 * 60);
             const isLive =
               hoursUntil <= FEED_WIDGET_CONFIG.LIVE_EVENT_HOURS &&
               hoursUntil >= 0;
@@ -389,17 +374,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           const activeQuestions = await db.question.findMany({
             where: {
               status: 'active',
-              resolutionDate: {
-                gte: new Date(), // Only future resolutions
-                lte: new Date(
-                  Date.now() +
-                    FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS *
-                      24 *
-                      60 *
-                      60 *
-                      1000
-                ),
-              },
+              resolutionDate: window,
             },
             orderBy: {
               resolutionDate: 'asc',
@@ -410,16 +385,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           // Transform questions into upcoming events (hinting but not revealing)
           for (const question of activeQuestions) {
             const resolutionDate = new Date(question.resolutionDate);
-            const now = new Date();
             const daysUntil = Math.ceil(
-              (resolutionDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+              (resolutionDate.getTime() - now.getTime()) / dayMs
             );
-
-            if (
-              daysUntil > FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS ||
-              daysUntil < 0
-            )
-              continue;
 
             // Check if it's happening soon (within configured hours = "LIVE")
             const hoursUntil =
@@ -525,7 +493,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             by: ['eventType'],
             where: {
               timestamp: {
-                gte: new Date(), // Only future events
+                gte: now, // Only future events
               },
             },
             take: 20,
@@ -568,17 +536,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
           const upcomingWorldEvents = await db.worldEvent.findMany({
             where: {
-              timestamp: {
-                gte: new Date(), // Future events only
-                lte: new Date(
-                  Date.now() +
-                    FEED_WIDGET_CONFIG.UPCOMING_EVENTS_DAYS *
-                      24 *
-                      60 *
-                      60 *
-                      1000
-                ),
-              },
+              timestamp: window,
               visibility: 'public', // Only show public events
               ...(eventTypeFilter.length > 0
                 ? {
@@ -609,7 +567,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             });
 
             const hoursUntil =
-              (eventDate.getTime() - Date.now()) / (1000 * 60 * 60);
+              (eventDate.getTime() - now.getTime()) / (1000 * 60 * 60);
             const isLive =
               hoursUntil <= FEED_WIDGET_CONFIG.LIVE_EVENT_HOURS &&
               hoursUntil >= 0;
