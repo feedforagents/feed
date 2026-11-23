@@ -838,6 +838,10 @@ export class FeedAgentExecutor implements AgentExecutor {
     params: Record<string, JsonValue>,
     context: RequestContext
   ) {
+    const authorId = requireContextAccountId({}, context);
+    // Same limit as POST /api/posts
+    await this.checkRateLimit(authorId, RATE_LIMIT_CONFIGS.CREATE_POST);
+
     // Validate and sanitize content (checks type, length, profanity, injection)
     const content = this.validateUserContent(params.content, 'Post content');
 
@@ -845,7 +849,7 @@ export class FeedAgentExecutor implements AgentExecutor {
       data: {
         id: await generateSnowflakeId(),
         content,
-        authorId: requireContextAccountId({}, context),
+        authorId,
         timestamp: new Date(),
       },
     });
@@ -1147,6 +1151,10 @@ export class FeedAgentExecutor implements AgentExecutor {
     params: Record<string, JsonValue>,
     context: RequestContext
   ): Promise<ExecutorOperationResult> {
+    const userId = requireContextAccountId({}, context);
+    // Same limit as POST /api/posts/[id]/comments
+    await this.checkRateLimit(userId, RATE_LIMIT_CONFIGS.CREATE_COMMENT);
+
     const postId = String(params.postId ?? '');
     // Validate and sanitize content (checks type, length, profanity, injection)
     const content = this.validateUserContent(
@@ -1156,8 +1164,6 @@ export class FeedAgentExecutor implements AgentExecutor {
     );
 
     if (!postId) throw new Error('postId is required');
-
-    const userId = requireContextAccountId({}, context);
 
     // Verify post exists
     const post = await db.post.findFirst({

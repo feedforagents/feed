@@ -11,7 +11,13 @@ const cases = {
   mcpComment: 'notifies users an MCP create_comment mentions',
   a2aPost: 'notifies users an A2A social.create_post mentions',
   a2aComment: 'notifies users an A2A social.create_comment mentions',
-  outage: 'returns the committed MCP post when the mention notification fails',
+  mcpCommentLimit:
+    'refuses the 11th MCP create_comment in a minute without notifying',
+  a2aPostLimit:
+    'refuses the 4th A2A social.create_post in a minute without notifying',
+  a2aCommentLimit:
+    'refuses the 11th A2A social.create_comment in a minute without notifying',
+  outage: 'returns the committed write when the mention notification fails',
 };
 
 if (!process.env.FEED_SUB_MARKET_CHILD) {
@@ -46,24 +52,40 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
   const reader = 'mention_reader';
   const other = 'mention_other';
   const blocker = 'mention_blocker';
+  // Fresh authors so the limit cases start from an empty window.
+  const mcpLimited = 'mention_mcp_limited';
+  const a2aLimited = 'mention_a2a_limited';
+  const outageAgent = 'mention_outage_agent';
   const commentTarget = 'mention-comment-target';
   const key = generateApiKey();
+  const mcpLimitedKey = generateApiKey();
+  const outageKey = generateApiKey();
   const now = new Date();
 
   await db.transaction(async (tx) => {
     await tx.insert(users).values(
-      [agent, reader, other, blocker].map((id) => ({
-        id,
-        username: id,
-        displayName: id,
-        updatedAt: now,
+      [agent, reader, other, blocker, mcpLimited, a2aLimited, outageAgent].map(
+        (id) => ({
+          id,
+          username: id,
+          displayName: id,
+          updatedAt: now,
+        })
+      )
+    );
+    await tx.insert(userApiKeys).values(
+      (
+        [
+          [agent, key],
+          [mcpLimited, mcpLimitedKey],
+          [outageAgent, outageKey],
+        ] as const
+      ).map(([userId, apiKey]) => ({
+        id: `${userId}-key`,
+        userId,
+        keyHash: hashApiKey(apiKey),
       }))
     );
-    await tx.insert(userApiKeys).values({
-      id: 'mention-notification-key',
-      userId: agent,
-      keyHash: hashApiKey(key),
-    });
     await tx.insert(posts).values({
       id: commentTarget,
       authorId: agent,
@@ -98,10 +120,14 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
   afterAll(() => server.stop(true));
   const endpoint = new URL('/api/mcp', server.url);
 
-  async function callTool(name: string, args: Record<string, string>) {
+  async function callToolRaw(
+    name: string,
+    args: Record<string, string>,
+    apiKey = key
+  ) {
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'X-Feed-Api-Key': key },
+      headers: { 'content-type': 'application/json', 'X-Feed-Api-Key': apiKey },
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: name,
@@ -113,18 +139,27 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     const body = (await response.json()) as {
       result?: { isError?: boolean; content?: { text?: string }[] };
     };
-    expect(body.result?.isError).toBe(false);
-    return JSON.parse(body.result?.content?.[0]?.text ?? '{}') as Record<
-      string,
-      string
-    >;
+    return {
+      isError: body.result?.isError,
+      text: body.result?.content?.[0]?.text ?? '',
+    };
   }
 
-  async function postByContent(content: string) {
+  async function callTool(
+    name: string,
+    args: Record<string, string>,
+    apiKey = key
+  ) {
+    const { isError, text } = await callToolRaw(name, args, apiKey);
+    expect(isError).toBe(false);
+    return JSON.parse(text || '{}') as Record<string, string>;
+  }
+
+  async function postByContent(content: string, authorId = agent) {
     const [row] = await db
       .select({ id: posts.id })
       .from(posts)
-      .where(and(eq(posts.authorId, agent), eq(posts.content, content)));
+      .where(and(eq(posts.authorId, authorId), eq(posts.content, content)));
     expect(row).toBeDefined();
     return row!.id;
   }
@@ -217,6 +252,103 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     );
   });
 
+  // Count the rows and mention notifications one author left behind.
+  async function limitOutcome(label: string, actorId: string) {
+    const count = async (query: Promise<{ value: number }[]>) =>
+      (await query)[0]?.value ?? 0;
+    const postCount = await count(
+      db
+        .select({ value: sql<number>`count(*)::int` })
+        .from(posts)
+        .where(eq(posts.authorId, actorId))
+    );
+    const commentCount = await count(
+      db
+        .select({ value: sql<number>`count(*)::int` })
+        .from(comments)
+        .where(eq(comments.authorId, actorId))
+    );
+    const notified = await count(
+      db
+        .select({ value: sql<number>`count(*)::int` })
+        .from(notifications)
+        .where(
+          and(
+            eq(notifications.type, 'mention'),
+            eq(notifications.actorId, actorId)
+          )
+        )
+    );
+    console.log(
+      `MENTION_RATE_LIMIT ${label} posts=${postCount} comments=${commentCount} mention_notifications=${notified}`
+    );
+    return { postCount, commentCount, notified };
+  }
+
+  test(cases.mcpCommentLimit, async () => {
+    const args = (n: number) => ({
+      postId: commentTarget,
+      content: `MCP limit comment ${n} @${reader}`,
+    });
+    for (let n = 1; n <= 10; n++) {
+      await callTool('create_comment', args(n), mcpLimitedKey);
+    }
+    const refused = await callToolRaw(
+      'create_comment',
+      args(11),
+      mcpLimitedKey
+    );
+    expect(await limitOutcome('mcp_comment', mcpLimited)).toEqual({
+      postCount: 0,
+      commentCount: 10,
+      notified: 10,
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toContain('Rate limit exceeded');
+  });
+
+  test(cases.a2aPostLimit, async () => {
+    for (let n = 1; n <= 3; n++) {
+      await FeedAgentExecutor.executeDirectly(
+        'social.create_post',
+        { content: `A2A limit post ${n} @${reader}` },
+        a2aLimited
+      );
+    }
+    const refused = await FeedAgentExecutor.executeDirectly(
+      'social.create_post',
+      { content: `A2A limit post 4 @${reader}` },
+      a2aLimited
+    ).catch((error: Error) => error);
+    const outcome = await limitOutcome('a2a_post', a2aLimited);
+    expect(refused).toBeInstanceOf(Error);
+    expect(String(refused)).toContain('Rate limit exceeded');
+    expect(outcome).toEqual({ postCount: 3, commentCount: 0, notified: 3 });
+  });
+
+  test(cases.a2aCommentLimit, async () => {
+    const params = (n: number) => ({
+      postId: commentTarget,
+      content: `A2A limit comment ${n} @${reader}`,
+    });
+    for (let n = 1; n <= 10; n++) {
+      await FeedAgentExecutor.executeDirectly(
+        'social.create_comment',
+        params(n),
+        a2aLimited
+      );
+    }
+    const refused = await FeedAgentExecutor.executeDirectly(
+      'social.create_comment',
+      params(11),
+      a2aLimited
+    ).catch((error: Error) => error);
+    const outcome = await limitOutcome('a2a_comment', a2aLimited);
+    expect(refused).toBeInstanceOf(Error);
+    expect(String(refused)).toContain('Rate limit exceeded');
+    expect(outcome).toEqual({ postCount: 3, commentCount: 10, notified: 13 });
+  });
+
   test(cases.outage, async () => {
     // Force every new mention INSERT to fail inside the lease; NOT VALID
     // leaves the rows the earlier cases wrote alone.
@@ -224,10 +356,44 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
       ALTER TABLE "Notification" ADD CONSTRAINT fixture_mention_outage
       CHECK ("type" <> 'mention') NOT VALID
     `);
-    const content = mentionText('MCP outage post');
-    const result = await callTool('create_post', { content });
-    const postId = await postByContent(content);
-    expect(result.postId).toBe(postId);
-    expect(await mentionNotifications(postId)).toEqual([]);
+
+    const mcpPost = mentionText('MCP outage post');
+    const postResult = await callTool(
+      'create_post',
+      { content: mcpPost },
+      outageKey
+    );
+    const mcpPostId = await postByContent(mcpPost, outageAgent);
+    expect(postResult.postId).toBe(mcpPostId);
+
+    const mcpComment = mentionText('MCP outage comment');
+    const commentResult = await callTool(
+      'create_comment',
+      { postId: commentTarget, content: mcpComment },
+      outageKey
+    );
+    expect(commentResult.commentId).toBe(await commentByContent(mcpComment));
+
+    const a2aPost = mentionText('A2A outage post');
+    await FeedAgentExecutor.executeDirectly(
+      'social.create_post',
+      { content: a2aPost },
+      outageAgent
+    );
+    await postByContent(a2aPost, outageAgent);
+
+    const a2aComment = mentionText('A2A outage comment');
+    await FeedAgentExecutor.executeDirectly(
+      'social.create_comment',
+      { postId: commentTarget, content: a2aComment },
+      outageAgent
+    );
+    await commentByContent(a2aComment);
+
+    expect(await limitOutcome('outage', outageAgent)).toEqual({
+      postCount: 2,
+      commentCount: 2,
+      notified: 0,
+    });
   });
 }

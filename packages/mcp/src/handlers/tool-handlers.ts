@@ -345,6 +345,7 @@ async function checkMcpRateLimit(
     | 'close_position'
     | 'transfer'
     | 'post'
+    | 'comment'
     | 'share_post'
     | 'send_message'
 ): Promise<void> {
@@ -358,6 +359,7 @@ async function checkMcpRateLimit(
     close_position: RATE_LIMIT_CONFIGS.CLOSE_POSITION,
     transfer: RATE_LIMIT_CONFIGS.DEFAULT, // Use default for transfers
     post: RATE_LIMIT_CONFIGS.CREATE_POST,
+    comment: RATE_LIMIT_CONFIGS.CREATE_COMMENT,
     share_post: RATE_LIMIT_CONFIGS.SHARE_POST,
     send_message: RATE_LIMIT_CONFIGS.SEND_MESSAGE,
   };
@@ -1689,6 +1691,8 @@ export async function executeCreateComment(
   agent: AuthenticatedAgent,
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
+  await checkMcpRateLimit(agent.userId, 'comment');
+
   const post = await dbWrite.post.findFirst({
     where: { id: args.postId },
   });
