@@ -98,15 +98,6 @@ test.describe('Core Pages', () => {
     expect(page.url()).toContain('/reputation');
   });
 
-  test('registry page loads', async ({ page }) => {
-    await navigateTo(page, ROUTES.REGISTRY);
-    await waitForPageLoad(page);
-    // Registry may redirect to /admin?tab=registry or /registry
-    expect(
-      page.url().includes('/registry') || page.url().includes('tab=registry')
-    ).toBe(true);
-  });
-
   test('game page loads', async ({ page }) => {
     await navigateTo(page, ROUTES.GAME);
     await waitForPageLoad(page);
@@ -350,16 +341,6 @@ test.describe('Share Pages', () => {
     );
     await waitForPageLoad(page);
     // Should load without crashing (may show error for invalid user)
-    const body = await page.locator('body').textContent();
-    expect(body?.length).toBeGreaterThan(50);
-  });
-
-  test('share referral page loads', async ({ page }) => {
-    await page.setViewportSize(VIEWPORTS.DESKTOP);
-    await page.goto(
-      `${process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3000'}/share/referral/test-user-id`
-    );
-    await waitForPageLoad(page);
     const body = await page.locator('body').textContent();
     expect(body?.length).toBeGreaterThan(50);
   });

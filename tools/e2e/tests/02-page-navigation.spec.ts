@@ -56,14 +56,6 @@ test.describe('Page Navigation - Public Pages', () => {
     expect(body!.length).toBeGreaterThan(0);
   });
 
-  test('registry page loads', async ({ page }) => {
-    await navigateTo(page, ROUTES.REGISTRY);
-    await waitForPageLoad(page);
-    const body = await page.locator('body').textContent();
-    expect(body).toBeTruthy();
-    expect(body!.length).toBeGreaterThan(0);
-  });
-
   test('game page loads', async ({ page }) => {
     await navigateTo(page, ROUTES.GAME);
     await waitForPageLoad(page);

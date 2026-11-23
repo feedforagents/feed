@@ -31,7 +31,6 @@ export const ROUTES = {
   NOTIFICATIONS: '/notifications',
   REWARDS: '/rewards',
   REPUTATION: '/reputation',
-  REGISTRY: '/registry',
 
   // Settings
   SETTINGS: '/settings',
@@ -71,7 +70,6 @@ export const ROUTES = {
 
   // Share
   SHARE_PNL: (userId: string) => `/share/pnl/${userId}`,
-  SHARE_REFERRAL: (userId: string) => `/share/referral/${userId}`,
 
   // API docs
   API_DOCS: '/api-docs',
@@ -88,7 +86,6 @@ export const PUBLIC_ROUTES = [
   ROUTES.FEED,
   ROUTES.MARKETS,
   ROUTES.LEADERBOARD,
-  ROUTES.REGISTRY,
   ROUTES.REPUTATION,
   ROUTES.PROFILE,
   ROUTES.API_DOCS,
