@@ -225,6 +225,30 @@ export async function updateGameMetrics(
 }
 
 /**
+ * Calculate the lifetime average ROI as a ratio (lifetimePnL / totalInvested).
+ *
+ * The ROI base is the user's total deposits. When that base is zero or
+ * invalid — for example an agent funded only with a welcome bonus and no
+ * recorded deposits, or a null column read back through `parseFloat` as NaN —
+ * the ratio is undefined. Return a neutral 0 instead of NaN/Infinity so the
+ * not-null `averageROI` column and the user data export stay clean. This
+ * mirrors the neutral handling already used in this module: `normalizePnL`
+ * returns 0.5 for a zero base and `calculateWinRate` returns 0 with no trades.
+ *
+ * @param lifetimePnL - User's lifetime PnL
+ * @param totalInvested - User's total deposits (the ROI base)
+ * @returns lifetimePnL / totalInvested, or 0 when the base is zero/invalid
+ */
+export function calculateAverageROI(
+  lifetimePnL: number,
+  totalInvested: number
+): number {
+  if (!Number.isFinite(totalInvested) || totalInvested <= 0) return 0;
+  if (!Number.isFinite(lifetimePnL)) return 0;
+  return lifetimePnL / totalInvested;
+}
+
+/**
  * Update trading performance metrics
  *
  * @param userId - User/agent ID
@@ -301,7 +325,7 @@ export async function updateTradingMetrics(
   const winRate = calculateWinRate(newProfitableTrades, newTotalTrades);
 
   // Calculate average ROI (simplified - would need full trade history for accuracy)
-  const avgROI = lifetimePnLNum / totalInvested;
+  const avgROI = calculateAverageROI(lifetimePnLNum, totalInvested);
 
   // Update metrics
   await db
