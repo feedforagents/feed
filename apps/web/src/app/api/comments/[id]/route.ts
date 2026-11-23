@@ -138,6 +138,7 @@ import {
   comments,
   count,
   db,
+  deleteCommentSubtree,
   eq,
   inArray,
   isNull,
@@ -151,6 +152,7 @@ import { IdParamSchema, logger, UpdateCommentSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 // Max reply count to return (for efficiency)
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 import { MAX_REPLY_COUNT } from '@/lib/constants';
 
 // Max parent chain depth to prevent infinite loops
@@ -160,7 +162,10 @@ const MAX_PARENT_DEPTH = 50;
  * Get full parent chain for a comment (oldest first)
  * Returns array of parent comments from root to immediate parent
  */
-async function getParentChain(commentId: string | null): Promise<
+async function getParentChain(
+  commentId: string | null,
+  excludedAuthorIds: ReadonlySet<string>
+): Promise<
   {
     id: string;
     content: string;
@@ -197,8 +202,10 @@ async function getParentChain(commentId: string | null): Promise<
     if (!parent) break;
 
     // Soft-deleted (moderated) parents are hidden: skip their content but
-    // keep walking so a visible grandparent can still be shown.
-    if (!parent.deletedAt) {
+    // keep walking so a visible grandparent can still be shown. Parents by
+    // authors the viewer must not see (blocked, muted, or blocking the
+    // viewer) are skipped the same way.
+    if (!parent.deletedAt && !excludedAuthorIds.has(parent.authorId)) {
       parents.unshift(parent); // Add to beginning (oldest first)
     }
     currentParentId = parent.parentCommentId;
@@ -214,7 +221,8 @@ async function getParentChain(commentId: string | null): Promise<
  * Caps at MAX_REPLY_COUNT for performance
  */
 async function countAllRepliesBatch(
-  commentIds: string[]
+  commentIds: string[],
+  excludedAuthorIds: ReadonlySet<string>
 ): Promise<Map<string, number>> {
   const countMap = new Map<string, number>();
 
@@ -233,14 +241,22 @@ async function countAllRepliesBatch(
     while (currentLevel.length > 0 && visitedCount < MAX_REPLY_COUNT) {
       // Walk through hidden parents to count their still-visible descendants.
       // Keep the existing traversal budget, including hidden rows, so an
-      // all-hidden chain cannot cause unbounded database work.
+      // all-hidden chain cannot cause unbounded database work. Replies by
+      // authors the viewer must not see are walked through the same way
+      // but never counted.
       const replies = await db
-        .select({ id: comments.id, deletedAt: comments.deletedAt })
+        .select({
+          id: comments.id,
+          deletedAt: comments.deletedAt,
+          authorId: comments.authorId,
+        })
         .from(comments)
         .where(inArray(comments.parentCommentId, currentLevel));
 
       visitedCount += replies.length;
-      count += replies.filter((reply) => !reply.deletedAt).length;
+      count += replies.filter(
+        (reply) => !reply.deletedAt && !excludedAuthorIds.has(reply.authorId)
+      ).length;
 
       // Cap at max
       if (count >= MAX_REPLY_COUNT) {
@@ -272,6 +288,16 @@ export const GET = withErrorHandling(
     // Optional authentication (to show liked status for logged-in users)
     const user = await optionalAuth(request);
     const canonicalUserId = user ? getCanonicalUserId(user) : undefined;
+
+    // Apply the viewer's moderation policy, as the post feeds, favorites
+    // feed, notifications and user search do: replies and ancestors by
+    // authors the viewer blocked or muted — or who blocked the viewer —
+    // are not returned or counted. Anonymous reads have no moderation set
+    // and stay unfiltered. The permalink target itself stays reachable:
+    // a block is a browsing filter, not a deletion.
+    const excludedAuthorIds: ReadonlySet<string> = canonicalUserId
+      ? await loadViewerExcludedAuthorIds(canonicalUserId)
+      : new Set<string>();
 
     // Find the comment
     const [comment] = await db
@@ -413,14 +439,20 @@ export const GET = withErrorHandling(
       .limit(1);
 
     // Get direct replies to this comment
-    // (soft-deleted (moderated) replies must never be returned)
-    const directReplies = await db
-      .select()
-      .from(comments)
-      .where(
-        and(eq(comments.parentCommentId, commentId), isNull(comments.deletedAt))
-      )
-      .orderBy(asc(comments.createdAt));
+    // (soft-deleted (moderated) replies must never be returned, and
+    // neither are replies by authors the viewer must not see)
+    const directReplies = (
+      await db
+        .select()
+        .from(comments)
+        .where(
+          and(
+            eq(comments.parentCommentId, commentId),
+            isNull(comments.deletedAt)
+          )
+        )
+        .orderBy(asc(comments.createdAt))
+    ).filter((reply) => !excludedAuthorIds.has(reply.authorId));
 
     // Get author IDs for replies
     const replyAuthorIds = [...new Set(directReplies.map((r) => r.authorId))];
@@ -482,7 +514,7 @@ export const GET = withErrorHandling(
 
     // Get full parent chain (oldest to newest, excluding current comment)
     const parentChainRaw = comment.parentCommentId
-      ? await getParentChain(comment.parentCommentId)
+      ? await getParentChain(comment.parentCommentId, excludedAuthorIds)
       : [];
 
     // Get author info for all parents
@@ -523,7 +555,10 @@ export const GET = withErrorHandling(
 
     // Get total reply counts for main comment and all direct replies (batched)
     const allIdsToCount = [commentId, ...directReplies.map((r) => r.id)];
-    const replyCountMap = await countAllRepliesBatch(allIdsToCount);
+    const replyCountMap = await countAllRepliesBatch(
+      allIdsToCount,
+      excludedAuthorIds
+    );
 
     // Format main comment
     const formattedComment = {
@@ -703,79 +738,18 @@ export const DELETE = withErrorHandling(
     const user = await authenticate(request);
     const { id: commentId } = IdParamSchema.parse(await context.params);
 
-    // The whole subtree removal runs in one transaction, and every row
-    // the walk visits is locked (FOR UPDATE) as it is reached. The
-    // reply-creation route locks its parent row the same way before
-    // inserting, so the two routes serialize on the parent row: a reply
-    // that wins the lock commits before the walk reaches its parent
-    // and is collected, and a reply that loses the lock finds its
-    // parent gone and fails with 404. Without the shared lock, a reply
-    // inserted after the walk passed its parent would survive as an
-    // orphan. A failure anywhere inside the transaction rolls the
-    // subtree removal back instead of leaving a half-deleted thread.
-    const repliesCount = await db.transaction(async (tx) => {
-      // Lock the root first: the author check and the walk below both
-      // run inside this boundary.
-      const [comment] = await tx
-        .select()
-        .from(comments)
-        .where(eq(comments.id, commentId))
-        .limit(1)
-        .for('update');
-
-      if (!comment) {
-        throw new NotFoundError('Comment', commentId);
-      }
-
-      // Check if user is the author
-      if (comment.authorId !== user.userId) {
-        throw new AuthorizationError(
-          'You can only delete your own comments',
-          'comment',
-          'delete'
-        );
-      }
-
-      // Collect every descendant reply, not only the direct ones: the
-      // cascade documented above removes the whole subtree. A descendant
-      // left behind would keep a parentCommentId pointing at a deleted
-      // comment while staying readable and reply-able through the flat
-      // read paths (MCP/A2A comment lists, the comment detail route).
-      const descendantIds: string[] = [];
-      const visited = new Set<string>([commentId]);
-      let frontier = [commentId];
-      while (frontier.length > 0) {
-        // Lock each level as it is reached: a concurrent reply insert
-        // must lock its parent first, so it either commits before this
-        // level is read (and is collected) or blocks until this
-        // transaction commits (and then finds its parent gone).
-        const children = await tx
-          .select({ id: comments.id })
-          .from(comments)
-          .where(inArray(comments.parentCommentId, frontier))
-          .for('update');
-        frontier = [];
-        for (const child of children) {
-          if (visited.has(child.id)) continue;
-          visited.add(child.id);
-          descendantIds.push(child.id);
-          frontier.push(child.id);
-        }
-      }
-
-      // Delete reactions on the main comment and all of its replies
-      await tx
-        .delete(reactions)
-        .where(inArray(reactions.commentId, [commentId, ...descendantIds]));
-
-      // Delete all replies, then the main comment
-      if (descendantIds.length > 0) {
-        await tx.delete(comments).where(inArray(comments.id, descendantIds));
-      }
-      await tx.delete(comments).where(eq(comments.id, commentId));
-
-      return descendantIds.length;
-    });
+    const result = await deleteCommentSubtree(commentId, user.userId);
+    if (result.status === 'not-found') {
+      throw new NotFoundError('Comment', commentId);
+    }
+    if (result.status === 'forbidden') {
+      throw new AuthorizationError(
+        'You can only delete your own comments',
+        'comment',
+        'delete'
+      );
+    }
+    const { repliesCount } = result;
 
     logger.info(
       'Comment deleted successfully',
