@@ -7,8 +7,16 @@
  * zero guard). Postgres `double precision` accepts `Infinity`, so the bad value
  * was persisted verbatim and later corrupted to `null` in the JSON data export.
  *
- * Run:
- *   bun test packages/testing/integration/reputation-average-roi.integration.test.ts
+ * Red/green reproduction (identical input, `totalDeposited=0`, `lifetimePnL=100`):
+ *   - on the unguarded base: the stored `averageROI` is `Infinity`, so the
+ *     `Number.isFinite` assertion fails (this is the defect);
+ *   - with the fix: the stored `averageROI` is `0` and the assertion passes.
+ * A funded user (`totalDeposited=1000`, `lifetimePnL=500`) stores `0.5` in both
+ * cases, confirming only the zero-base path changes.
+ *
+ * Requires a real database (skips via `shouldSkipDatabaseTests()` otherwise):
+ *   DATABASE_URL=postgresql://user:pass@host/feed bun test \
+ *     packages/testing/integration/reputation-average-roi.integration.test.ts
  */
 import { afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { agentPerformanceMetrics, db, eq, users } from '@feed/db';
