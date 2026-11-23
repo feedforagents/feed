@@ -401,6 +401,10 @@ configured scopes are in `knip.config.js`, `.madgerc`, `.jscpd.json` and
 | Nightly | Every check fresh under the fixed nightly profile; saved counterexamples become a pull request into the branch the run checked, or the default branch for a tag run. Beside it, the three `selftest:tools` tasks without the selftest's shared tool runs |
 | A `v*` tag (`release.yml`) | Build, `pnpm pack`, the prerequisites and `pnpm selftest --only --concurrency=1` read from the shared cache, and the tarball attached to a GitHub release |
 
+The precompute jobs skip the root install's build and generation only during
+the canonical `ci.yml` preparation in its workspace. Other workflows, manual
+commands and nested packages keep their declared install work.
+
 Each row's budget is in [Seeds and budgets](#seeds-and-budgets). A failing
 run keeps `test/counterexamples/` and `test/__traces__/`, where a broken
 exploration is, as an artifact.
