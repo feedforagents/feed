@@ -1,12 +1,12 @@
 # @feed/agent-harness
 
-A framework for running autonomous agents against Feed's prediction markets. Records agent trajectories for training, benchmarking, and ScamBench evaluation.
+Run agent decisions against Feed's in-memory simulation and record trajectories for local evaluation.
 
 ## Overview
 
-The harness connects any `TrainableAgent` implementation to Feed's A2A (Agent-to-Agent) protocol and runs it through a configurable loop of ticks. Each tick:
+The harness runs a `TrainableAgent` in a configurable loop. Each step:
 
-1. Gathers context (portfolio, markets, feed) from the A2A server.
+1. Gathers context (portfolio, markets, feed) from the simulation.
 2. Asks the agent to decide an action.
 3. Executes the action.
 4. Records the step with a reward signal.
@@ -15,37 +15,24 @@ At the end of the run, trajectories are saved as JSON files for downstream train
 
 ## Prerequisites
 
-```bash
-# From the feed repo root
-bun install
-bun run agent-frameworks:bootstrap   # clones Hermes, OpenClaw, ElizaOS, ClawBench
-```
-
-You'll need one of:
-- `GROQ_API_KEY` — fastest, free tier available
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-
-And one of:
-- **Local A2A server** at `localhost:3001` (`bun run dev` in `packages/examples/local-a2a-server`)
-- **Full Feed dev stack** at `localhost:3000` (`bun run dev` from repo root)
+Install dependencies with `bun install` at the repo root. The built-in CLI agents run locally without credentials. `LLMAgent` requires a configured Groq, OpenAI, or Anthropic key. Use `bun run agent-frameworks:bootstrap` when running a framework adapter that needs sources outside this repository.
 
 ## Quick Start
 
 ```typescript
 import {
   runHarness,
-  createLLMAgent,
+  archetypeAgent,
   getArchetype,
 } from '@feed/agent-harness';
 
 const result = await runHarness({
-  a2aUrl: 'http://localhost:3001',
-  agents: [createLLMAgent({ provider: 'groq' })],
+  agents: [archetypeAgent],
   archetypes: [getArchetype('trader'), getArchetype('degen')],
   instancesPerAgent: 1,
   ticksPerAgent: 20,
   parallelAgents: 4,
+  tickInterval: 0,
   recordTrajectories: true,
   outputDir: './trajectories',
 });
@@ -57,8 +44,8 @@ Or use the CLI:
 
 ```bash
 # From this directory
-bun run train -- --archetypes trader,degen --ticks 20
-bun run test:agents -- --a2a-url http://localhost:3001
+bun run train --archetypes trader,degen --ticks 3
+bun run test:agents --agent random --ticks 1
 ```
 
 ## Agents
@@ -126,41 +113,9 @@ const agent = createOpenClawAdapter({
 });
 ```
 
-## A2A Clients
+## Simulation
 
-### HarnessA2AClient (default)
-
-JSON-RPC client targeting the local A2A server (`localhost:3001`). Uses Anvil-style private keys for signing. This is the default when no `clientFactory` is provided.
-
-### SimulationA2AAdapter (offline)
-
-No server required — uses the engine's `InMemoryStateStore` for a fully local simulation.
-
-```typescript
-import {
-  SimulationA2AAdapter,
-  SimulationAdapter,
-  runHarness,
-  createLLMAgent,
-  getArchetype,
-} from '@feed/agent-harness';
-
-let idx = 0;
-
-const result = await runHarness({
-  a2aUrl: '',                  // unused in offline mode
-  clientFactory: () => {
-    const engine = new SimulationAdapter({ numPredictionMarkets: 5, numAgents: 20 });
-    return new SimulationA2AAdapter(engine, `agent-${idx++}`);
-  },
-  agents: [createLLMAgent()],
-  archetypes: [getArchetype('trader')],
-  instancesPerAgent: 1,
-  ticksPerAgent: 10,
-  parallelAgents: 2,
-  recordTrajectories: true,
-});
-```
+`runHarness` starts a separate `SimulationAdapter` for each instance. For seeded runs, supply `clientFactory: (index) => new SimulationAdapter({ seed: 42 + index })`. The adapter uses virtual balances and simplified social interactions. A harness loop records agent steps against that state.
 
 ## Archetypes
 
@@ -214,16 +169,9 @@ A trajectory file:
 
 These are the inputs to the Python ScamBench training pipeline — see `packages/training/SCAMBENCH_RUNBOOK.md`.
 
-## ScamBench Integration
+## Feed-native training
 
-The harness is the TypeScript entry point for collecting Feed-native trajectories for ScamBench:
-
-1. **Generate trajectories** using `LLMAgent` or `HermesAdapter` against the real dev server.
-2. **Export** with `scripts/export-trust-experiment-trajectories.ts`.
-3. **Train** via `packages/training/python/scripts/train_local.py`.
-4. **Benchmark** via `packages/training/python/scripts/run_scambench_local.py`.
-
-See `packages/training/SCAMBENCH_RUNBOOK.md` for the full pipeline.
+Use the [ScamBench runbook](../../training/SCAMBENCH_RUNBOOK.md) for Feed-native trajectory collection, training, and benchmarking. The [Python training bridge](../../training/book/src/training-pipeline/modes.md) supports the online and hybrid training modes.
 
 ## CLI Reference
 
@@ -231,17 +179,16 @@ See `packages/training/SCAMBENCH_RUNBOOK.md` for the full pipeline.
 bun run dev -- [command] [options]
 
 Commands:
-  train           Run a full training session (default)
-  test            Run a quick 3-tick test
+  train           Run offline training
+  test            Run a quick offline test
   list-archetypes List all available archetypes
   list-agents     List available built-in agents
 
 Options:
-  --a2a-url       A2A server URL (default: http://localhost:3001)
-  --archetypes    Comma-separated archetype IDs (default: trader,degen,analyst)
+  --archetypes    Comma-separated archetype IDs (default: trader,degen)
   --ticks         Ticks per agent (default: 10)
-  --parallel      Max parallel agents (default: 5)
-  --output-dir    Directory for trajectory output (default: ./trajectories)
+  --parallel      Max parallel agents (default: 4)
+  --output        Directory for trajectory output (default: ./trajectories)
 ```
 
 ## Implementing a Custom Agent

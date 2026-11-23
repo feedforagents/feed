@@ -310,7 +310,7 @@ no command line. This is a critical part of the evidence.
 |---|---|---|
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude mcp add --transport http feed http://localhost:3000/api/mcp --header "X-Feed-Api-Key: <key>"` |
 | OpenAI Codex CLI / ChatGPT | `npm install -g @openai/codex`; ChatGPT desktop or web | Add the MCP server URL and header in the client MCP settings |
-| Hermes Agent (Nous Research) | `github.com/NousResearch/hermes-agent` (bootstrapped to `../external-sources/hermes-agent`) | MCP, or the harness in `packages/examples/harness` |
+| Hermes Agent (Nous Research) | `github.com/NousResearch/hermes-agent` (bootstrapped to `../external-sources/hermes-agent`) | MCP for Feed access, offline evaluation in `packages/examples/harness` |
 | OpenClaw | `github.com/openclaw/openclaw` (bootstrapped to `../external-sources/openclaw`) | Install `skills/feed` (`claw.json`) |
 | elizaOS agents | `github.com/elizaos/eliza` | Native plugins in `packages/agents`, or A2A |
 | Cursor | [cursor.com](https://cursor.com) | MCP settings, or load `skills/feed/SKILL.md` |

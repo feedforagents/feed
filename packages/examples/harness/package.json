@@ -9,11 +9,11 @@
     "test": "bun test",
     "dev": "bun run src/cli.ts",
     "train": "bun run src/cli.ts train",
-    "test:agents": "bun run src/cli.ts test"
+    "test:agents": "bun run src/cli.ts test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@feed/engine": "workspace:*",
-    "ethers": "^6.16.0",
     "dotenv": "^16.4.7"
   },
   "devDependencies": {

@@ -73,7 +73,7 @@ describe('HermesAdapter', () => {
 
     let threw = false;
     try {
-      await adapter.initialize({ a2aUrl: '', privateKey: '0x0' });
+      await adapter.initialize({});
     } catch (e) {
       threw = true;
       expect((e as Error).message).toMatch(/bootstrap|venv|not found/i);
@@ -242,16 +242,16 @@ describe('OpenClawAdapter', () => {
       openClawBin: '',
     });
 
-    let threw = false;
+    const originalPath = process.env.PATH;
     try {
-      await adapter.initialize({ a2aUrl: '', privateKey: '0x0' });
-    } catch (e) {
-      threw = true;
-      expect((e as Error).message).toMatch(
-        /openclaw|binary|not found|install/i
+      process.env.PATH = '/nonexistent/path';
+      await expect(adapter.initialize({})).rejects.toThrow(
+        'OpenClaw binary not found'
       );
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
     }
-    expect(threw).toBe(true);
   });
 
   test('decide returns HOLD when max failures exceeded', async () => {
@@ -390,7 +390,7 @@ describe('OpenClawAdapter', () => {
 // ─── Harness clientFactory tests ─────────────────────────────────────────────
 
 describe('HarnessConfig.clientFactory', () => {
-  test('clientFactory is used instead of HarnessA2AClient', async () => {
+  test('clientFactory overrides the offline default', async () => {
     const { runHarness } = await import('../src/harness');
     const { randomAgent } = await import('../src/agents/random-agent');
     const { getArchetype } = await import('../src/archetypes');
@@ -431,7 +431,6 @@ describe('HarnessConfig.clientFactory', () => {
     };
 
     const result = await runHarness({
-      a2aUrl: 'http://unused',
       agents: [randomAgent],
       archetypes: [getArchetype('trader')],
       instancesPerAgent: 1,
@@ -501,7 +500,6 @@ describe('HarnessConfig.clientFactory', () => {
     };
 
     const result = await runHarness({
-      a2aUrl: 'http://unused',
       agents: [randomAgent],
       archetypes: [getArchetype('degen')],
       instancesPerAgent: 1,

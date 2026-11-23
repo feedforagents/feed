@@ -59,7 +59,7 @@ function mockFetch(response: unknown, ok = true, status = 200) {
 describe('LLMAgent - response parsing via decide()', () => {
   test('parses clean JSON response', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'test-key' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const apiResp = {
       choices: [
@@ -92,7 +92,7 @@ describe('LLMAgent - response parsing via decide()', () => {
 
   test('parses JSON wrapped in markdown code fences', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'test-key' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const apiResp = {
       choices: [
@@ -116,7 +116,7 @@ describe('LLMAgent - response parsing via decide()', () => {
 
   test('falls back to HOLD on invalid JSON', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'test-key' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const apiResp = {
       choices: [{ message: { content: 'I think we should hold for now.' } }],
@@ -132,7 +132,7 @@ describe('LLMAgent - response parsing via decide()', () => {
 
   test('falls back to HOLD on API error', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'bad-key' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const origFetch = globalThis.fetch;
     globalThis.fetch = mock(async () => ({
@@ -149,16 +149,16 @@ describe('LLMAgent - response parsing via decide()', () => {
 
   test('falls back to HOLD after maxFailures exceeded', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'bad-key' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const failFetch = mock(async () => ({
       ok: false,
       status: 500,
       text: async () => 'Server Error',
-    })) as unknown as typeof fetch;
+    }));
 
     const origFetch = globalThis.fetch;
-    globalThis.fetch = failFetch;
+    globalThis.fetch = failFetch as unknown as typeof fetch;
 
     // Exhaust the 3-failure limit
     await agent.decide(ctx); // fail 1
@@ -166,10 +166,9 @@ describe('LLMAgent - response parsing via decide()', () => {
     await agent.decide(ctx); // fail 3
 
     // Now fetch should NOT be called again (agent is in permanent HOLD)
-    const callsBefore = (failFetch as ReturnType<typeof mock>).mock.calls
-      .length;
+    const callsBefore = failFetch.mock.calls.length;
     const decision = await agent.decide(ctx); // should HOLD without calling fetch
-    const callsAfter = (failFetch as ReturnType<typeof mock>).mock.calls.length;
+    const callsAfter = failFetch.mock.calls.length;
 
     globalThis.fetch = origFetch;
 
@@ -179,7 +178,7 @@ describe('LLMAgent - response parsing via decide()', () => {
 
   test('uses Anthropic /messages endpoint not /chat/completions', async () => {
     const agent = createLLMAgent({ provider: 'anthropic', apiKey: 'test-key' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     let capturedUrl = '';
     const origFetch = globalThis.fetch;
@@ -228,7 +227,7 @@ describe('LLMAgent - interface', () => {
 
     let threw = false;
     try {
-      await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+      await agent.initialize({});
     } catch (e) {
       threw = true;
       expect((e as Error).message).toMatch(/API key/i);
@@ -245,7 +244,7 @@ describe('LLMAgent - interface', () => {
 
   test('cleanup is a no-op', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'k' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
     await expect(agent.cleanup()).resolves.toBeUndefined();
   });
 });
@@ -327,7 +326,7 @@ describe('LLMAgent - execute()', () => {
 
   test('BUY_YES with LLM-specified marketId uses that market', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'k' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const client = makeClient();
     const result = await agent.execute!(
@@ -345,7 +344,7 @@ describe('LLMAgent - execute()', () => {
 
   test('BUY_NO without marketId picks best market', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'k' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const client = makeClient();
     const result = await agent.execute!(
@@ -359,7 +358,7 @@ describe('LLMAgent - execute()', () => {
 
   test('BUY_YES returns failure when balance < 1', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'k' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const client = makeClient({
       getBalance: async () => ({ balance: 0.5, currency: 'USD' }),
@@ -375,7 +374,7 @@ describe('LLMAgent - execute()', () => {
 
   test('SELL_SHARES sells highest-pnl position', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'k' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const client = makeClient();
     const result = await agent.execute!(
@@ -389,7 +388,7 @@ describe('LLMAgent - execute()', () => {
 
   test('SELL_SHARES returns failure when no positions', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'k' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const client = makeClient({
       getPositions: async () => ({ positions: [] }),
@@ -404,7 +403,7 @@ describe('LLMAgent - execute()', () => {
 
   test('CREATE_POST uses LLM-provided content', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'k' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const client = makeClient();
     const result = await agent.execute!(
@@ -421,7 +420,7 @@ describe('LLMAgent - execute()', () => {
 
   test('VIEW_FEED returns success without API call', async () => {
     const agent = createLLMAgent({ provider: 'groq', apiKey: 'k' });
-    await agent.initialize({ a2aUrl: '', privateKey: '0x0' });
+    await agent.initialize({});
 
     const client = makeClient();
     const result = await agent.execute!(

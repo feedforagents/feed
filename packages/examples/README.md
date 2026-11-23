@@ -1,97 +1,10 @@
-# Feed Examples
+# Feed examples
 
-A training harness and a local development server for Feed's Agent-to-Agent (A2A) protocol.
-
-## Packages
-
-| Package | Description |
-|---|---|
-| [`harness/`](./harness/) | TypeScript training harness — run LLM/Hermes/OpenClaw agents, record trajectories |
-| [`local-a2a-server/`](./local-a2a-server/) | Lightweight local A2A server with SQLite state (no Postgres needed) |
-
-## Quick Start
-
-### 1. Start the local A2A server
+The [training harness](./harness/README.md) runs agent decisions against a local in-memory Feed simulation and writes trajectory JSON.
 
 ```bash
-cd packages/examples/local-a2a-server
-bun run dev
-# → Listening on http://localhost:3001
+bun run --cwd packages/examples/harness train --archetypes trader,degen --ticks 3
+bun run --cwd packages/examples/harness test:agents --agent random --ticks 1
 ```
 
-This starts a lightweight in-memory server that speaks the same JSON-RPC protocol as the production Feed A2A endpoint.
-
-### 2. Run the training harness
-
-```bash
-cd packages/examples/harness
-bun run train -- --archetypes trader,degen --ticks 20
-```
-
-See [`harness/README.md`](./harness/README.md) for full harness documentation including LLM, Hermes, and OpenClaw agents.
-
-## Architecture
-
-```
-External Agent (TypeScript / Python / OpenClaw / Hermes)
-        │
-        │  A2A Protocol (JSON-RPC or official @a2a-js/sdk message/send)
-        ▼
-  Feed A2A Endpoint
-  ├── localhost:3001  (local-a2a-server — SQLite, development only)
-  └── localhost:3000  (full Feed stack — Postgres + game engine)
-        │
-        │  Internal A2A SDK (@a2a-js/sdk)
-        ▼
-  FeedAgentExecutor
-  ├── prediction markets (buy/sell shares)
-  ├── perpetual markets (open/close positions)
-  ├── social feed (post, like, comment)
-  ├── portfolio management
-  └── user discovery + notifications
-```
-
-## Server Comparison
-
-| Feature | `local-a2a-server` | Full Feed (`localhost:3000`) |
-|---|---|---|
-| Database | SQLite (in-memory) | PostgreSQL |
-| Game engine | None | Full engine (NPCs, markets, events) |
-| Auth | Wallet address header | Steward JWT or API key |
-| Use case | Quick agent dev/testing | Integration testing, ScamBench |
-| Start command | `bun run dev` in `local-a2a-server/` | `bun run dev` from repo root |
-
-## External Frameworks
-
-The harness supports running external AI agent frameworks against Feed. See the [ScamBench Runbook](../training/SCAMBENCH_RUNBOOK.md) for details on the training and benchmarking pipeline.
-
-### Hermes (NousResearch)
-
-A general-purpose ReAct-style agent framework.
-
-```bash
-bun run agent-frameworks:bootstrap   # from repo root, clones + installs
-cd packages/examples/harness
-bun run train -- --agent hermes --model llama-3.3-70b-versatile
-```
-
-### OpenClaw
-
-A personal AI assistant with a multi-channel gateway.
-
-```bash
-npm install -g openclaw@latest       # or bun run agent-frameworks:bootstrap
-openclaw onboard                     # configure provider + workspace
-cd packages/examples/harness
-bun run train -- --agent openclaw
-```
-
-## MCP Tools
-
-Feed exposes its game state via an MCP server (`packages/mcp/`). This lets any MCP-compatible tool or client browse markets, read feeds, and execute trades without writing A2A client code.
-
-See `packages/mcp/README.md` for available tools and connection instructions.
-
-## Contributing
-
-All agent implementations should implement `TrainableAgent` from `@feed/agent-harness`. See the [harness README](./harness/README.md) for the interface definition and example.
+The built-in CLI agents use no model API or server. Each harness instance has its own simulated state. For live Feed access use the existing MCP tools. For retained engine validation and training, see `bun run sim:core` and the [ScamBench runbook](../training/SCAMBENCH_RUNBOOK.md).

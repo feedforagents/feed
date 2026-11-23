@@ -8,8 +8,7 @@
  * import { runHarness, archetypeAgent, getArchetype } from '@feed/agent-harness';
  *
  * const result = await runHarness({
- *   a2aUrl: 'http://localhost:3001',
- *   agents: [archetypeAgent],
+ * *   agents: [archetypeAgent],
  *   archetypes: [getArchetype('trader'), getArchetype('degen')],
  *   instancesPerAgent: 2,
  *   ticksPerAgent: 10,
@@ -24,10 +23,7 @@
  * Agent Training Harness
  *
  * A framework for running and training agents against Feed's prediction
- * markets. Supports multiple backends:
- *   - Local A2A server (localhost:3001, JSON-RPC)
- *   - Production server (localhost:3000 or feed.fun, official A2A SDK)
- *   - Offline simulation (no server required, uses engine's InMemoryStateStore)
+ * markets in an in-memory simulation.
  *
  * Built-in agents:
  *   - RandomAgent        — stochastic baseline
@@ -43,8 +39,7 @@
  * import { runHarness, createLLMAgent, getArchetype } from '@feed/agent-harness';
  *
  * const result = await runHarness({
- *   a2aUrl: 'http://localhost:3001',
- *   agents: [createLLMAgent({ provider: 'groq' })],
+ * *   agents: [createLLMAgent({ provider: 'groq' })],
  *   archetypes: [getArchetype('trader')],
  *   instancesPerAgent: 1,
  *   ticksPerAgent: 10,
@@ -55,8 +50,6 @@
  * ```
  */
 
-// ─── A2A Clients ─────────────────────────────────────────────────────────────
-export { HarnessA2AClient } from './a2a-client';
 export type { HermesAdapterConfig } from './adapters/hermes-adapter';
 // ─── External Framework Adapters ─────────────────────────────────────────────
 export { createHermesAdapter, HermesAdapter } from './adapters/hermes-adapter';
@@ -85,15 +78,9 @@ export { AgentHarness, runHarness } from './harness';
 // ─── Simulation Adapter (offline, no server needed) ──────────────────────────
 export type { SimulationConfig, SimulationTickResult } from './offline-adapter';
 export { OfflineGameAdapter, SimulationAdapter } from './offline-adapter';
-export type {
-  GameState,
-  SimulationEngineInterface,
-} from './simulation-adapter';
-export { SimulationA2AAdapter } from './simulation-adapter';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type {
-  A2AClientInterface,
   ActionResult,
   ActionType,
   AgentConfig,
@@ -102,6 +89,7 @@ export type {
   ArchetypeConfig,
   ArchetypeTraits,
   ClientFactory,
+  HarnessClient,
   HarnessConfig,
   HarnessResult,
   Market,

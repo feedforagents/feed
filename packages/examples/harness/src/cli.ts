@@ -17,8 +17,6 @@ import { getAllArchetypes, getArchetype } from './archetypes';
 import { runHarness } from './harness';
 import type { ArchetypeConfig, TrainableAgent } from './types';
 
-const A2A_URL = process.env.A2A_URL || 'http://localhost:3001';
-
 // Available agents
 const AGENTS: Record<string, TrainableAgent> = {
   random: randomAgent,
@@ -80,7 +78,7 @@ async function runTrain(args: string[]) {
   });
 
   console.log('\n🎯 Training Configuration:');
-  console.log(`   A2A URL: ${A2A_URL}`);
+  console.log('   Mode: offline simulation');
   console.log(`   Agents: ${agentIds.join(', ')}`);
   console.log(`   Archetypes: ${archetypes.map((a) => a.id).join(', ')}`);
   console.log(`   Instances per combo: ${instancesArg}`);
@@ -89,7 +87,6 @@ async function runTrain(args: string[]) {
   console.log(`   Output: ${outputArg}`);
 
   const result = await runHarness({
-    a2aUrl: A2A_URL,
     agents,
     archetypes,
     instancesPerAgent: parseInt(instancesArg),
@@ -148,7 +145,6 @@ async function runTest(args: string[]) {
   console.log(`\n🧪 Testing ${agent.name}...`);
 
   const result = await runHarness({
-    a2aUrl: A2A_URL,
     agents: [agent],
     archetypes: [getArchetype('trader')], // Use trader as test archetype
     instancesPerAgent: 1,
@@ -229,8 +225,6 @@ EXAMPLES:
   bun run src/cli.ts list-archetypes
   bun run src/cli.ts list-agents
 
-ENVIRONMENT:
-  A2A_URL            A2A server URL (default: http://localhost:3001)
 `);
 }
 
@@ -253,7 +247,10 @@ function getArg(
   return undefined;
 }
 
-main().catch((error) => {
-  console.error('Fatal error:', error);
-  process.exit(1);
-});
+main().then(
+  () => process.exit(0),
+  (error) => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+  }
+);

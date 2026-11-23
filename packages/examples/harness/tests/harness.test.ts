@@ -2,11 +2,10 @@
  * Harness Tests
  *
  * Tests the agent training harness functionality.
- * Requires the local A2A server to be running on localhost:3001.
+ * Uses the default in-memory simulation.
  */
 
 import { describe, expect, test } from 'bun:test';
-import { HarnessA2AClient } from '../src/a2a-client';
 import { archetypeAgent } from '../src/agents/archetype-agent';
 import { randomAgent } from '../src/agents/random-agent';
 import {
@@ -15,24 +14,6 @@ import {
   getArchetypeIds,
 } from '../src/archetypes';
 import { runHarness } from '../src/harness';
-
-const A2A_URL = 'http://localhost:3001';
-
-// Top-level await: evaluated before test.skipIf() so the skip condition is correct
-const serverAvailable = await (async () => {
-  try {
-    const r = await fetch(`${A2A_URL}/health`);
-    return r.ok;
-  } catch {
-    return false;
-  }
-})();
-
-if (!serverAvailable) {
-  console.log(
-    '⚠️  A2A server not running on :3001 — integration tests will be skipped'
-  );
-}
 
 describe('Agent Harness', () => {
   describe('Archetypes', () => {
@@ -75,21 +56,6 @@ describe('Agent Harness', () => {
     });
   });
 
-  describe('A2A Client', () => {
-    test('should create client with derived address', () => {
-      const client = new HarnessA2AClient({
-        baseUrl: A2A_URL,
-        privateKey:
-          '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-      });
-
-      expect(client.getAddress()).toBe(
-        '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
-      );
-      expect(client.getAgentId()).toMatch(/^agent-31337-\d+$/);
-    });
-  });
-
   describe('Agents', () => {
     test('random agent should have correct interface', () => {
       expect(randomAgent.id).toBe('random-agent');
@@ -108,11 +74,7 @@ describe('Agent Harness', () => {
     });
 
     test('random agent should make decisions', async () => {
-      await randomAgent.initialize({
-        a2aUrl: A2A_URL,
-        privateKey:
-          '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-      });
+      await randomAgent.initialize({});
 
       const decision = await randomAgent.decide({
         balance: 1000,
@@ -137,9 +99,6 @@ describe('Agent Harness', () => {
     test('archetype agent should be influenced by archetype', async () => {
       const trader = getArchetype('trader');
       await archetypeAgent.initialize({
-        a2aUrl: A2A_URL,
-        privateKey:
-          '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
         archetype: trader,
       });
 
@@ -185,71 +144,63 @@ describe('Agent Harness', () => {
   });
 
   describe('Harness Integration', () => {
-    test.skipIf(!serverAvailable)(
-      'should run harness with single agent',
-      async () => {
-        const result = await runHarness({
-          a2aUrl: A2A_URL,
-          agents: [randomAgent],
-          archetypes: [getArchetype('trader')],
-          instancesPerAgent: 1,
-          ticksPerAgent: 3,
-          parallelAgents: 1,
-          tickInterval: 500,
-          recordTrajectories: false,
-        });
+    test('should run harness with single agent', async () => {
+      const result = await runHarness({
+        agents: [randomAgent],
+        archetypes: [getArchetype('trader')],
+        instancesPerAgent: 1,
+        ticksPerAgent: 3,
+        parallelAgents: 1,
+        tickInterval: 0,
+        recordTrajectories: false,
+      });
 
-        expect(result.agentsRun).toBe(1);
-        expect(result.totalTicks).toBe(3);
-        expect(result.trajectories.length).toBe(1);
-        expect(result.trajectories[0].steps.length).toBe(3);
+      expect(result.agentsRun).toBe(1);
+      expect(result.errors).toEqual([]);
+      expect(
+        result.trajectories[0].steps[0].context.markets.length
+      ).toBeGreaterThan(0);
+      expect(result.totalTicks).toBe(3);
+      expect(result.trajectories.length).toBe(1);
+      expect(result.trajectories[0].steps.length).toBe(3);
+    });
+
+    test('should run harness with multiple archetypes', async () => {
+      const result = await runHarness({
+        agents: [archetypeAgent],
+        archetypes: [getArchetype('trader'), getArchetype('degen')],
+        instancesPerAgent: 1,
+        ticksPerAgent: 3,
+        parallelAgents: 2,
+        tickInterval: 0,
+        recordTrajectories: false,
+      });
+
+      expect(result.agentsRun).toBe(2); // 1 agent * 2 archetypes
+      expect(result.trajectories.length).toBe(2);
+      expect(result.stats.byArchetype['trader']).toBeDefined();
+      expect(result.stats.byArchetype['degen']).toBeDefined();
+    });
+
+    test('should calculate rewards correctly', async () => {
+      const result = await runHarness({
+        agents: [randomAgent],
+        archetypes: [getArchetype('trader')],
+        instancesPerAgent: 1,
+        ticksPerAgent: 5,
+        parallelAgents: 1,
+        tickInterval: 0,
+        recordTrajectories: false,
+      });
+
+      const trajectory = result.trajectories[0];
+      expect(trajectory.totalReward).toBeDefined();
+      expect(typeof trajectory.totalReward).toBe('number');
+
+      // Each step should have a reward
+      for (const step of trajectory.steps) {
+        expect(step.reward).toBeDefined();
       }
-    );
-
-    test.skipIf(!serverAvailable)(
-      'should run harness with multiple archetypes',
-      async () => {
-        const result = await runHarness({
-          a2aUrl: A2A_URL,
-          agents: [archetypeAgent],
-          archetypes: [getArchetype('trader'), getArchetype('degen')],
-          instancesPerAgent: 1,
-          ticksPerAgent: 3,
-          parallelAgents: 2,
-          tickInterval: 500,
-          recordTrajectories: false,
-        });
-
-        expect(result.agentsRun).toBe(2); // 1 agent * 2 archetypes
-        expect(result.trajectories.length).toBe(2);
-        expect(result.stats.byArchetype['trader']).toBeDefined();
-        expect(result.stats.byArchetype['degen']).toBeDefined();
-      }
-    );
-
-    test.skipIf(!serverAvailable)(
-      'should calculate rewards correctly',
-      async () => {
-        const result = await runHarness({
-          a2aUrl: A2A_URL,
-          agents: [randomAgent],
-          archetypes: [getArchetype('trader')],
-          instancesPerAgent: 1,
-          ticksPerAgent: 5,
-          parallelAgents: 1,
-          tickInterval: 300,
-          recordTrajectories: false,
-        });
-
-        const trajectory = result.trajectories[0];
-        expect(trajectory.totalReward).toBeDefined();
-        expect(typeof trajectory.totalReward).toBe('number');
-
-        // Each step should have a reward
-        for (const step of trajectory.steps) {
-          expect(step.reward).toBeDefined();
-        }
-      }
-    );
+    });
   });
 });
