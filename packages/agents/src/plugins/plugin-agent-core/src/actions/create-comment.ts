@@ -15,9 +15,11 @@ import type {
 } from '@elizaos/core';
 import {
   and,
+  comments,
   createCommentWithParentCheck,
   db,
   eq,
+  hasBlocked,
   isNull,
   posts,
 } from '@feed/db';
@@ -124,6 +126,40 @@ export const createCommentAction: Action = {
           success: false,
           text: `Post not found or deleted. Use CHECK_POST_DETAIL to verify the post ID.`,
           error: 'Post not found',
+        };
+      }
+
+      // Same rule as the web comment route, MCP create_comment and A2A
+      // createComment: neither side of a block with the post author, or with
+      // the author of the comment being replied to, can comment.
+      const counterparts = [post.authorId];
+      if (parentCommentId) {
+        const [parent] = await db
+          .select({ authorId: comments.authorId })
+          .from(comments)
+          .where(
+            and(
+              eq(comments.id, parentCommentId),
+              eq(comments.postId, postId),
+              isNull(comments.deletedAt)
+            )
+          )
+          .limit(1);
+        if (parent && parent.authorId !== post.authorId) {
+          counterparts.push(parent.authorId);
+        }
+      }
+      const blocked = await Promise.all(
+        counterparts.flatMap((otherId) => [
+          hasBlocked(otherId, agentUserId),
+          hasBlocked(agentUserId, otherId),
+        ])
+      );
+      if (blocked.some(Boolean)) {
+        return {
+          success: false,
+          text: 'Cannot comment on this post.',
+          error: 'BLOCKED_USER',
         };
       }
 

@@ -9,6 +9,10 @@ import {
 const cases = {
   mcp: 'applies both block directions to signed MCP comments',
   a2a: 'applies both block directions to signed A2A comments',
+  plugin:
+    'applies both block directions to agent-core CREATE_COMMENT comments and replies',
+  autonomous:
+    'applies both parent-author block directions to autonomous comment replies',
 };
 
 if (!process.env.FEED_SUB_MARKET_CHILD) {
@@ -23,6 +27,12 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
   await verifySubMarketChildLease();
   const { db, comments, eq, posts, userApiKeys, userBlocks, users } =
     await import('@feed/db');
+  const { createCommentAction } = await import(
+    '../../agents/src/plugins/plugin-agent-core/src/actions/create-comment'
+  );
+  const { executeDirectComment } = await import(
+    '../../agents/src/autonomous/DirectExecutors'
+  );
   const { generateApiKey, hashApiKey } = await import('@feed/api');
   const { POST: mcp } = await import('../../../apps/web/src/app/api/mcp/route');
   const { POST: a2a } = await import('../../../apps/web/src/app/api/a2a/route');
@@ -33,6 +43,11 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
   const clean = 'comment-policy-clean';
   const missing = 'comment-policy-missing';
   const deleted = 'comment-policy-deleted';
+  // Snowflake IDs: CREATE_COMMENT validates parentCommentId with the API schema.
+  const parentByAuthorBlocks = '700000000000000001';
+  const parentByActorBlocks = '700000000000000002';
+  const parentByClean = '700000000000000003';
+  const autonomousParentByClean = '700000000000000004';
   const key = generateApiKey();
   const now = new Date();
 
@@ -62,6 +77,23 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
         deletedAt: now,
       },
     ]);
+    // Replies on the clean post whose parent author is on either side of a block.
+    await tx.insert(comments).values(
+      (
+        [
+          [parentByAuthorBlocks, authorBlocks],
+          [parentByActorBlocks, actorBlocks],
+          [parentByClean, clean],
+          [autonomousParentByClean, clean],
+        ] as const
+      ).map(([id, authorId]) => ({
+        id,
+        postId: clean,
+        authorId,
+        content: 'Comment policy parent fixture',
+        updatedAt: now,
+      }))
+    );
     await tx.insert(userBlocks).values([
       { id: authorBlocks, blockerId: authorBlocks, blockedId: actor },
       { id: actorBlocks, blockerId: actor, blockedId: actorBlocks },
@@ -159,4 +191,98 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
       ]);
     });
   }
+
+  test(cases.plugin, async () => {
+    // The agent runtime ID is the agent's user ID (AgentRuntimeManager).
+    const runtime = { agentId: actor } as unknown as Parameters<
+      NonNullable<typeof createCommentAction.handler>
+    >[0];
+    const run = (postId: string, parentCommentId?: string) =>
+      createCommentAction.handler(
+        runtime,
+        {} as never,
+        {
+          values: {},
+          data: {
+            actionParams: {
+              postId,
+              content: `Comment policy fixture plugin ${postId}`,
+              ...(parentCommentId ? { parentCommentId } : {}),
+            },
+          },
+          text: '',
+        } as never
+      );
+
+    for (const [postId, parent] of [
+      [authorBlocks, undefined],
+      [actorBlocks, undefined],
+      [clean, parentByAuthorBlocks],
+      [clean, parentByActorBlocks],
+    ] as const) {
+      expect(await run(postId, parent)).toMatchObject({
+        success: false,
+        text: 'Cannot comment on this post.',
+        error: 'BLOCKED_USER',
+      });
+    }
+    expect(await run(clean)).toMatchObject({ success: true });
+    expect(await run(clean, parentByClean)).toMatchObject({
+      success: true,
+      values: { isReply: true },
+    });
+
+    const stored = await db
+      .select({
+        postId: comments.postId,
+        parentCommentId: comments.parentCommentId,
+        content: comments.content,
+      })
+      .from(comments)
+      .where(eq(comments.authorId, actor));
+    // Only the two unblocked writes reached the database.
+    expect(
+      stored
+        .filter((row) =>
+          row.content.startsWith('Comment policy fixture plugin')
+        )
+        .map((row) => row.parentCommentId)
+        .sort()
+    ).toEqual([parentByClean, null]);
+  });
+
+  test(cases.autonomous, async () => {
+    // MultiStepExecutor REPLY_COMMENT/COMMENT path used by the agent ticks.
+    const reply = (parentCommentId: string) =>
+      executeDirectComment({
+        agentUserId: actor,
+        postId: clean,
+        content: `Comment policy fixture autonomous ${parentCommentId}`,
+        parentCommentId,
+      });
+    for (const parent of [parentByAuthorBlocks, parentByActorBlocks]) {
+      expect(await reply(parent)).toEqual({
+        success: false,
+        error: 'Cannot comment on this post',
+      });
+    }
+    expect(await reply(autonomousParentByClean)).toMatchObject({
+      success: true,
+    });
+
+    const stored = await db
+      .select({
+        parentCommentId: comments.parentCommentId,
+        content: comments.content,
+      })
+      .from(comments)
+      .where(eq(comments.authorId, actor));
+    expect(
+      stored
+        .filter((row) =>
+          row.content.startsWith('Comment policy fixture autonomous')
+        )
+        .map((row) => row.parentCommentId)
+    ).toEqual([autonomousParentByClean]);
+  });
 }

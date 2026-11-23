@@ -1375,6 +1375,31 @@ export async function executeDirectComment(
     return { success: false, error: 'Cannot comment on this post' };
   }
 
+  // The web comment route applies the same bilateral rule to the author of
+  // the comment being replied to.
+  if (parentCommentId) {
+    const [parent] = await db
+      .select({ authorId: comments.authorId })
+      .from(comments)
+      .where(
+        and(
+          eq(comments.id, parentCommentId),
+          eq(comments.postId, postId),
+          isNull(comments.deletedAt)
+        )
+      )
+      .limit(1);
+    if (parent && parent.authorId !== post.authorId) {
+      const [parentBlockedAgent, agentBlockedParent] = await Promise.all([
+        hasBlocked(parent.authorId, agentUserId),
+        hasBlocked(agentUserId, parent.authorId),
+      ]);
+      if (parentBlockedAgent || agentBlockedParent) {
+        return { success: false, error: 'Cannot comment on this post' };
+      }
+    }
+  }
+
   // DEDUPLICATION CHECK: Prevent duplicate comments
   if (parentCommentId) {
     // Replying to a specific comment - check if agent already replied to this comment
