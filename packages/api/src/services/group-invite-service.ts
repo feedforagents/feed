@@ -17,6 +17,7 @@ import {
   type DrizzleClient,
   generateSnowflakeId,
   groupMembers,
+  hasBlocked,
   sql,
 } from '@feed/db';
 import { GROUP_CONFIG } from '@feed/shared';
@@ -89,6 +90,17 @@ export async function acceptGroupInvite(
     });
     if (acceptingUser?.isBanned) {
       throw new ApiError('Cannot accept a group invite while banned', 400);
+    }
+
+    // A rejected acceptance rolls the pending-invite claim back.
+    if (invite.invitedBy) {
+      const [blockedByMe, blockedMe] = await Promise.all([
+        hasBlocked(userId, invite.invitedBy, db),
+        hasBlocked(invite.invitedBy, userId, db),
+      ]);
+      if (blockedByMe || blockedMe) {
+        throw new ApiError('This invite is not available', 403);
+      }
     }
 
     const invitedGroup = await db.group.findUnique({

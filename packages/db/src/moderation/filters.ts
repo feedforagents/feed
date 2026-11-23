@@ -84,7 +84,7 @@ export async function getFilteredUserIds(userId: string): Promise<string[]> {
 export async function hasBlocked(
   blockerId: string,
   blockedId: string,
-  tx?: Transaction
+  tx?: Pick<Transaction, 'select'>
 ): Promise<boolean> {
   const block = await (tx ?? db)
     .select({ blockerId: userBlocks.blockerId })
