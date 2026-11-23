@@ -24,6 +24,8 @@ import {
   checkRateLimitAsync,
   declineGroupInvite,
   listVisiblePostComments,
+  notifyDMMessage,
+  notifyGroupChatMessage,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -2207,7 +2209,7 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     const chat = await db.chat.findUnique({
       where: { id: chatId },
-      select: { isGroup: true },
+      select: { isGroup: true, name: true },
     });
     if (!chat) {
       throw new Error('Chat not found or access denied');
@@ -2263,6 +2265,46 @@ export class FeedAgentExecutor implements AgentExecutor {
       isGameChat: false,
       isDMChat: false,
     });
+
+    // Notify the other active participants in-app, as the website and MCP do
+    // (PRD D-28). The message has committed, so a notification failure must
+    // not invite a duplicate retry.
+    try {
+      const recipients = await db.chatParticipant.findMany({
+        where: { chatId, isActive: true, userId: { not: userId } },
+        select: { userId: true },
+      });
+      const recipientIds = recipients.map((r) => r.userId);
+      if (chat.isGroup) {
+        await notifyGroupChatMessage(
+          recipientIds,
+          userId,
+          chatId,
+          chat.name || 'Group Chat',
+          message.content,
+          { sendEmail: false }
+        );
+      } else if (recipientIds[0]) {
+        await notifyDMMessage(
+          recipientIds[0],
+          userId,
+          chatId,
+          message.content,
+          { sendEmail: false }
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        'Failed to notify participants of committed message',
+        {
+          chatId,
+          messageId: message.id,
+          userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'A2A'
+      );
+    }
 
     return {
       success: true,
