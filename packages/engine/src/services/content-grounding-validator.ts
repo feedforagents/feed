@@ -170,7 +170,7 @@ function extractKeywords(text: string): Set<string> {
  * as proper nouns; they pass through unchecked rather than triggering
  * false entity-consistency failures.
  */
-const PROPER_NOUN_PATTERN = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/g;
+const PROPER_NOUN_PATTERN = /\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)+)\b/g;
 
 /**
  * Distinct (case-insensitive) multi-word proper nouns in `text`, first
@@ -281,6 +281,8 @@ function checkKeywordOverlap(
 // ─── Entity Consistency ──────────────────────────────────────────
 
 const MAX_UNKNOWN_ENTITIES = 1;
+const ENTITY_PREFIX_WORDS =
+  /^(?:(?:A|An|The|For|On|In|At|To|From|With|And|But|Or)(?:[ \t]+|$))+/;
 
 /**
  * Check that generated text doesn't introduce entities absent from
@@ -301,29 +303,37 @@ export function checkEntityConsistency(
     }
   }
 
-  const unknownEntities: string[] = [];
+  const unknownEntities = new Map<string, string>();
   for (const entity of generatedEntities) {
+    if (allowed.has(entity.toLowerCase())) continue;
+    const name = entity.replace(ENTITY_PREFIX_WORDS, '');
+    // Any remaining Title Case words are still separated by spaces or tabs.
+    if (!/[ \t]/.test(name)) continue;
+
+    // A sentence or headline may capitalize a determiner before a known name.
+    // Check the original candidate as well when reporting an unknown name.
+    const key = name.toLowerCase();
+    if (allowed.has(key)) continue;
     const inSource = sourceText
       ? new RegExp(
           `(?<![\\p{L}\\p{N}_])${escapeRegex(entity)}(?![\\p{L}\\p{N}_])`,
           'iu'
         ).test(sourceText)
       : false;
-    if (!allowed.has(entity.toLowerCase()) && !inSource) {
-      unknownEntities.push(entity);
+    if (!inSource && !unknownEntities.has(key)) {
+      unknownEntities.set(key, entity);
     }
   }
 
-  const passed = unknownEntities.length <= MAX_UNKNOWN_ENTITIES;
+  const passed = unknownEntities.size <= MAX_UNKNOWN_ENTITIES;
   return {
     passed,
     score: passed ? 1 : 0,
-    reasons:
-      unknownEntities.length > MAX_UNKNOWN_ENTITIES
-        ? [
-            `${unknownEntities.length} unknown entities: ${unknownEntities.slice(0, 3).join(', ')}`,
-          ]
-        : [],
+    reasons: passed
+      ? []
+      : [
+          `${unknownEntities.size} unknown entities: ${[...unknownEntities.values()].slice(0, 3).join(', ')}`,
+        ],
   };
 }
 

@@ -5,12 +5,16 @@ import {
   balanceTransactions,
   dbWrite,
   eq,
+  generationLocks,
   inArray,
   markets,
   npcTrades,
+  PREDICTION_RECOVERY_LEASE_ID,
   poolPositions,
   positions,
+  posts,
   predictionPriceHistories,
+  predictionResolutionWork,
   questions,
   sql,
   tradingFees,
@@ -59,6 +63,7 @@ const options: PredictionSettlementOptions = {
 };
 const userIds: string[] = [];
 const marketIds: string[] = [];
+const recoveryQuestionNumbers: number[] = [];
 const npcSnapshots = new Map<
   string,
   { user?: typeof users.$inferSelect; actor?: typeof actorState.$inferSelect }
@@ -295,6 +300,14 @@ afterAll(async () => {
       .where(inArray(positions.marketId, marketIds));
     await dbWrite.delete(markets).where(inArray(markets.id, marketIds));
   }
+  if (recoveryQuestionNumbers.length) {
+    await dbWrite
+      .delete(posts)
+      .where(inArray(posts.relatedQuestion, recoveryQuestionNumbers));
+    await dbWrite
+      .delete(questions)
+      .where(inArray(questions.questionNumber, recoveryQuestionNumbers));
+  }
   if (userIds.length) {
     await dbWrite
       .delete(tradingFees)
@@ -428,6 +441,231 @@ describe('atomic prediction settlement with real Postgres and wallet', () => {
     expect(question?.status).toBe('resolved');
     await resolveQuestionPayouts(questionNumber);
     expect((await state(f.userId, f.marketId)).balance).toBe(paid.balance);
+  });
+
+  it('publishes one recovery proof with one approved payout', async () => {
+    const f = await fixture();
+    const buy = await executeBuyShares(f.agent, {
+      marketId: f.marketId,
+      outcome: 'YES',
+      amount: 10,
+    });
+    const resolutionDate = new Date(Date.now() - 1000);
+    const [maximum] = await dbWrite
+      .select({
+        value: sql<number>`coalesce(max(${questions.questionNumber}), 0)`,
+      })
+      .from(questions);
+    const questionNumber = Number(maximum?.value ?? 0) + 1;
+    recoveryQuestionNumbers.push(questionNumber);
+    await dbWrite.insert(questions).values({
+      id: f.marketId,
+      marketId: f.marketId,
+      questionNumber,
+      text: 'Will the scheduled test event occur?',
+      scenarioId: 1,
+      outcome: true,
+      rank: 1,
+      resolutionDate,
+      requiresManualReview: true,
+      resolutionReviewStatus: 'pending',
+      updatedAt: new Date(),
+    });
+    const recovery = {
+      resolutionDate,
+      outcome: true,
+      description: 'The scheduled event occurred before its deadline.',
+      confidence: 0.75,
+      proof: {
+        id: await generateSnowflakeId(),
+        content: 'The scheduled event occurred before its deadline.',
+        authorId: f.userId,
+      },
+    };
+    const attempt = () => resolveQuestionPayouts(questionNumber, recovery);
+    await dbWrite.insert(predictionResolutionWork).values({
+      questionId: f.marketId,
+      resolutionDate,
+      outcome: true,
+      draft: {
+        post: recovery.proof,
+        description: recovery.description,
+        confidence: recovery.confidence,
+        requiresManualReview: true,
+      },
+    });
+    const readProofs = () =>
+      dbWrite
+        .select()
+        .from(posts)
+        .where(eq(posts.relatedQuestion, questionNumber));
+    const approvedAt = new Date();
+    await dbWrite
+      .update(questions)
+      .set({
+        resolutionReviewStatus: 'approved',
+        resolutionReviewedAt: approvedAt,
+        resolutionReviewedBy: f.userId,
+      })
+      .where(eq(questions.id, f.marketId));
+
+    // The question was selected as due before the market deadline moved.
+    expect(await attempt()).toBe(false);
+    expect(await readProofs()).toEqual([]);
+    await dbWrite
+      .update(markets)
+      .set({ endDate: resolutionDate })
+      .where(eq(markets.id, f.marketId));
+    await dbWrite
+      .update(questions)
+      .set({ resolutionReviewStatus: 'pending' })
+      .where(eq(questions.id, f.marketId));
+    expect(await attempt()).toBe(false);
+    expect(await readProofs()).toEqual([]);
+    await expect(
+      executeBuyShares(f.agent, {
+        marketId: f.marketId,
+        outcome: 'YES',
+        amount: 10,
+      })
+    ).rejects.toThrow(/expired/);
+    await expect(
+      executeSellShares(f.agent, {
+        positionId: buy.position.id,
+        shares: buy.position.shares,
+      })
+    ).rejects.toThrow(/expired/);
+    expect((await state(f.userId, f.marketId)).balance).toBe(990);
+    expect(
+      await dbWrite
+        .select()
+        .from(predictionResolutionWork)
+        .where(eq(predictionResolutionWork.questionId, f.marketId))
+    ).toHaveLength(1);
+
+    await dbWrite
+      .update(questions)
+      .set({ resolutionReviewStatus: 'approved' })
+      .where(eq(questions.id, f.marketId));
+    const results = await contend(f.marketId, [attempt, attempt]);
+    expect(
+      results.filter((result) => result.status === 'fulfilled')
+    ).toHaveLength(2);
+    expect(
+      results.filter((result) => result.status === 'fulfilled' && result.value)
+    ).toHaveLength(1);
+    expect(await attempt()).toBe(false);
+    const proofs = await readProofs();
+    expect(proofs).toHaveLength(1);
+    expect(proofs[0]?.id).toBe(recovery.proof.id);
+    expect(proofs[0]?.type).toBe('proof');
+    expect(
+      await dbWrite
+        .select()
+        .from(predictionResolutionWork)
+        .where(eq(predictionResolutionWork.questionId, f.marketId))
+    ).toHaveLength(0);
+    const paid = await state(f.userId, f.marketId);
+    expect(paid.balance).toBeCloseTo(990 + floorPoints(buy.position.shares), 2);
+    expect(paid.market?.resolutionProofUrl).toBe(
+      `/article/${recovery.proof.id}`
+    );
+    const [question] = await dbWrite
+      .select()
+      .from(questions)
+      .where(eq(questions.id, f.marketId));
+    expect(question?.resolutionProofUrl).toBe(paid.market?.resolutionProofUrl);
+    expect(question?.resolutionConfidence).toBe(recovery.confidence);
+    expect(question?.resolutionReviewedAt).toEqual(approvedAt);
+    expect(question?.resolutionReviewedBy).toBe(f.userId);
+  });
+
+  it('fences an expired recovery worker before proof or payout', async () => {
+    const f = await fixture();
+    const bought = await executeBuyShares(f.agent, {
+      marketId: f.marketId,
+      outcome: 'YES',
+      amount: 10,
+    });
+    const resolutionDate = new Date(Date.now() - 1000);
+    await dbWrite
+      .update(markets)
+      .set({ endDate: resolutionDate })
+      .where(eq(markets.id, f.marketId));
+    const [maximum] = await dbWrite
+      .select({
+        value: sql<number>`coalesce(max(${questions.questionNumber}), 0)`,
+      })
+      .from(questions);
+    const questionNumber = Number(maximum?.value ?? 0) + 1;
+    recoveryQuestionNumbers.push(questionNumber);
+    await dbWrite.insert(questions).values({
+      id: await generateSnowflakeId(),
+      questionNumber,
+      // The ready-work query can supply an unambiguous legacy market match.
+      text: 'Prediction settlement regression',
+      scenarioId: 1,
+      outcome: true,
+      rank: 1,
+      resolutionDate,
+      updatedAt: new Date(),
+    });
+    const proof = {
+      id: await generateSnowflakeId(),
+      content: 'The scheduled event occurred before its deadline.',
+      authorId: f.userId,
+    };
+    const attempt = (leaseOwner: string) =>
+      resolveQuestionPayouts(questionNumber, {
+        resolutionDate,
+        outcome: true,
+        description: proof.content,
+        confidence: 0.9,
+        proof,
+        leaseOwner,
+        marketId: f.marketId,
+      });
+    const staleOwner = `stale-${f.marketId}`;
+    const nextOwner = `replacement-${f.marketId}`;
+    await dbWrite.insert(generationLocks).values({
+      id: PREDICTION_RECOVERY_LEASE_ID,
+      lockedBy: staleOwner,
+      expiresAt: resolutionDate,
+    });
+    try {
+      expect(await attempt(staleOwner)).toBe(false);
+      await dbWrite
+        .update(generationLocks)
+        .set({
+          lockedBy: nextOwner,
+          expiresAt: new Date(Date.now() + 60_000),
+        })
+        .where(eq(generationLocks.id, PREDICTION_RECOVERY_LEASE_ID));
+      expect(await attempt(staleOwner)).toBe(false);
+      const before = await state(f.userId, f.marketId);
+      expect(before.market?.resolved).toBe(false);
+      expect(before.balance).toBe(990);
+      expect(
+        await dbWrite.select().from(posts).where(eq(posts.id, proof.id))
+      ).toEqual([]);
+
+      expect(await attempt(nextOwner)).toBe(true);
+      const after = await state(f.userId, f.marketId);
+      expect(after.balance).toBeCloseTo(
+        990 + floorPoints(bought.position.shares),
+        2
+      );
+      expect(after.market?.resolutionProofUrl).toBe(`/article/${proof.id}`);
+    } finally {
+      await dbWrite
+        .delete(generationLocks)
+        .where(
+          and(
+            eq(generationLocks.id, PREDICTION_RECOVERY_LEASE_ID),
+            inArray(generationLocks.lockedBy, [staleOwner, nextOwner])
+          )
+        );
+    }
   });
 
   it('reports precisely the shares committed by each MCP buy', async () => {

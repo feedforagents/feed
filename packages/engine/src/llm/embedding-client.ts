@@ -10,6 +10,7 @@
  * can skip embedding-based checks without crashing the pipeline.
  */
 
+import { scheduledInferenceFetch } from '@feed/db';
 import { getSurplusConfig, logger } from '@feed/shared';
 import OpenAI from 'openai';
 
@@ -43,6 +44,7 @@ function getClient(): OpenAI | null {
     openaiClient = new OpenAI({
       apiKey: surplus.apiKey,
       baseURL: surplus.baseURL,
+      fetch: scheduledInferenceFetch,
       timeout: 30_000,
       maxRetries: 2,
     });

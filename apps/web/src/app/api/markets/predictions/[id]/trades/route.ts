@@ -176,11 +176,7 @@ export const GET = withErrorHandling(
           type: 'balance' as const,
           user: userMap.get(row.userId) ?? null,
           transactionType: row.transactionType,
-          // The wallet ledger stores debits as negative deltas, so a buy
-          // row carries -amount while sells and NPC rows are positive.
-          // Display the magnitude: the "Bought"/"Sold" label carries the
-          // direction, same as GET /api/users/[userId]/activity.
-          amount: Math.abs(Number(row.amount)),
+          amount: Number(row.amount),
           timestamp,
           marketId,
         };
