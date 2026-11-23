@@ -98,6 +98,55 @@ describe('normalizeTradeDecisionParameters for held positions outside top-N quot
     expect(validateTrade(normalized, context)).toBeUndefined();
   });
 
+  test('resolves non-numeric direct ids for held-only prediction positions', () => {
+    const context = createContext();
+    context.agentPositions.predictions.push({
+      marketId: 'market-held-only',
+      question: 'Will the bridge reopen this quarter?',
+      side: 'YES',
+      shares: 15,
+      avgPrice: 0.45,
+      currentPrice: 0.55,
+      pnlPercent: 22.2,
+      timeHeld: '4h',
+      timeHeldMs: 14_400_000,
+    });
+
+    const normalized = normalizeTradeDecisionParameters(
+      { marketId: 'market-held-only', side: 'sell', amount: 0 },
+      context
+    );
+
+    expect(normalized).toEqual({
+      marketType: 'prediction',
+      marketId: 'market-held-only',
+      side: 'sell_yes',
+      amount: 0,
+    });
+    expect(validateTrade(normalized, context)).toBeUndefined();
+  });
+
+  test('does not close a held perp when selling a prediction whose question starts with the ticker', () => {
+    const context = createContext();
+    context.agentPositions.predictions[0] = {
+      ...context.agentPositions.predictions[0]!,
+      question: 'TSLAI beats Q3 deliveries?',
+    };
+
+    const normalized = normalizeTradeDecisionParameters(
+      { marketId: 'TSLAI beats Q3 deliveries?', side: 'sell', amount: 0 },
+      context
+    );
+
+    expect(normalized).toEqual({
+      marketType: 'prediction',
+      marketId: '987654',
+      side: 'sell_no',
+      amount: 0,
+    });
+    expect(validateTrade(normalized, context)).toBeUndefined();
+  });
+
   test('strips decorated labels and numeric JSON ids for held-only prediction positions', () => {
     const context = createContext();
 

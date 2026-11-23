@@ -288,7 +288,10 @@ export function normalizeTradeDecisionParameters(
   }
 
   const predictionMarketId = resolvePredictionMarketId(rawMarketId, context);
-  const perpTicker = resolvePerpTicker(rawMarketId, context);
+  const perpTicker =
+    explicitMarketType === 'perp' || !predictionMarketId
+      ? resolvePerpTicker(rawMarketId, context)
+      : undefined;
   const normalizedSide = normalizeTradeSide(
     rawSide,
     predictionMarketId,
