@@ -34,6 +34,7 @@ import {
   dmAcceptances,
   eq,
   follows,
+  followUserWithBlockCheck,
   groupMembers,
   groups,
   gte,
@@ -1341,15 +1342,35 @@ export async function executeDirectComment(
 
   const cleanContent = content.trim();
 
-  // Verify post exists
+  // Comments require an existing, published post.
   const [post] = await db
-    .select({ id: posts.id })
+    .select({
+      id: posts.id,
+      authorId: posts.authorId,
+      deletedAt: posts.deletedAt,
+      timestamp: posts.timestamp,
+    })
     .from(posts)
     .where(eq(posts.id, postId))
     .limit(1);
 
-  if (!post) {
+  if (!post || post.timestamp > new Date()) {
     return { success: false, error: `Post not found: ${postId}` };
+  }
+
+  // Same rules as the web comment route: soft-deleted posts take no new
+  // comments, and neither side of a block relationship with the post
+  // author can comment on the post.
+  if (post.deletedAt) {
+    return { success: false, error: 'Cannot comment on deleted post' };
+  }
+
+  const [authorBlockedAgent, agentBlockedAuthor] = await Promise.all([
+    hasBlocked(post.authorId, agentUserId),
+    hasBlocked(agentUserId, post.authorId),
+  ]);
+  if (authorBlockedAgent || agentBlockedAuthor) {
+    return { success: false, error: 'Cannot comment on this post' };
   }
 
   // DEDUPLICATION CHECK: Prevent duplicate comments
@@ -1903,24 +1924,21 @@ export async function executeDirectFollow(
     };
   }
 
+  let followed: boolean;
+  try {
+    followed = await followUserWithBlockCheck(agentUserId, cleanTargetUserId);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Cannot follow this user') {
+      return { success: false, error: error.message };
+    }
+    throw error;
+  }
+
   logger.info(
     `[DirectExecutor] Following user ${cleanTargetUserId}`,
     { agentUserId },
     'DirectExecutors'
   );
-
-  const followId = await generateSnowflakeId();
-  const insertResult = await db
-    .insert(follows)
-    .values({
-      id: followId,
-      followerId: agentUserId,
-      followingId: cleanTargetUserId,
-    })
-    .onConflictDoNothing()
-    .returning({ id: follows.id });
-
-  const followed = insertResult.length > 0;
 
   if (followed) {
     await Promise.all([
