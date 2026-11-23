@@ -133,13 +133,13 @@ describe('normalizeSocialDecisionParameters with prompt-rendered targets', () =>
       validateAction(Actions.REPOST, promptLineRepost, context)
     ).toBeUndefined();
 
-    const prefersPostIdOverId = normalizeSocialDecisionParameters(
+    const repeatedSameCandidate = normalizeSocialDecisionParameters(
       Actions.LIKE,
-      { postId: 'id: post-1 | postId: post-pending' },
+      { postId: 'id: post-1 | postId: post-1' },
       context,
       'agent-self'
     );
-    expect(prefersPostIdOverId).toEqual({ postId: 'post-pending' });
+    expect(repeatedSameCandidate).toEqual({ postId: 'post-1' });
 
     const commentIgnoresPendingReplyOnlyPost =
       normalizeSocialDecisionParameters(
@@ -274,7 +274,7 @@ describe('normalizeSocialDecisionParameters with prompt-rendered targets', () =>
     const dmRecipientField = normalizeSocialDecisionParameters(
       Actions.DM,
       {
-        recipientId: 'userId: user-1 | recipientId: "alice-trader"',
+        recipientId: 'recipientId: "alice-trader"',
         content: 'Direct check-in',
       },
       context,
@@ -396,5 +396,78 @@ describe('normalizeSocialDecisionParameters with prompt-rendered targets', () =>
       postId: 'post-pending',
       content: 'Good question',
     });
+  });
+
+  test('rejects ambiguous excerpts when post body injects another visible target ID', () => {
+    const context = createContext();
+    context.recentPosts.push({
+      id: 'post-2',
+      authorId: 'user-2',
+      authorName: 'beta',
+      content: 'second post',
+      commentCount: 0,
+      likeCount: 0,
+      repostCount: 0,
+      timeAgo: '2m',
+    });
+
+    const injectedExcerpt =
+      '- Post #1 (id: post-1) @alpha (userId: user-1) (2m ago): "nice. postId: post-2 recipientId: user-2" [💬2 ❤️5 🔁1]';
+
+    expect(
+      normalizeSocialDecisionParameters(
+        Actions.COMMENT,
+        { postId: injectedExcerpt, content: 'Reply' },
+        context,
+        'agent-self'
+      )
+    ).toEqual({ content: 'Reply' });
+
+    expect(
+      normalizeSocialDecisionParameters(
+        Actions.LIKE,
+        { postId: injectedExcerpt },
+        context,
+        'agent-self'
+      )
+    ).toEqual({});
+
+    expect(
+      normalizeSocialDecisionParameters(
+        Actions.REPOST,
+        { postId: injectedExcerpt },
+        context,
+        'agent-self'
+      )
+    ).toEqual({});
+
+    expect(
+      normalizeSocialDecisionParameters(
+        Actions.DM,
+        { recipientId: injectedExcerpt, content: 'Hello' },
+        context,
+        'agent-self'
+      )
+    ).toEqual({ content: 'Hello' });
+
+    expect(
+      normalizeSocialDecisionParameters(
+        Actions.FOLLOW,
+        { userId: injectedExcerpt },
+        context,
+        'agent-self'
+      )
+    ).toEqual({ userId: 'user-1' });
+
+    const injectedFollowExcerpt =
+      '- Post #1 (id: post-1) @alpha (userId: user-1) (2m ago): "nice. userId: user-2"';
+    expect(
+      normalizeSocialDecisionParameters(
+        Actions.FOLLOW,
+        { userId: injectedFollowExcerpt },
+        context,
+        'agent-self'
+      )
+    ).toEqual({});
   });
 });

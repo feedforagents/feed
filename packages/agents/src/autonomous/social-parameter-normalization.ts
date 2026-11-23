@@ -70,26 +70,33 @@ const USER_ID_FIELDS = ['userId', 'id'] as const;
 const RECIPIENT_ID_FIELDS = ['recipientId', 'userId', 'id'] as const;
 const CHAT_ID_FIELDS = ['chatId', 'id'] as const;
 
-function extractEmbeddedId(
+function resolveEmbeddedCandidateId<T extends { id: string }>(
   value: string,
-  preferredFields: readonly string[]
+  candidates: T[],
+  allowedFields: readonly string[]
 ): string | undefined {
-  for (const field of preferredFields) {
-    const match = value.match(
-      new RegExp(`\\b${field}\\s*:\\s*["']?([A-Za-z0-9_-]+)`, 'i')
-    )?.[1];
-    if (match) {
-      return match;
+  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+  const pattern = new RegExp(
+    `\\b(?:${allowedFields.join('|')})\\s*:\\s*["']?([A-Za-z0-9_-]+)`,
+    'gi'
+  );
+  const matchedIds = new Set<string>();
+
+  for (const match of value.matchAll(pattern)) {
+    const id = match[1];
+    if (id && candidateIds.has(id)) {
+      matchedIds.add(id);
     }
   }
-  return undefined;
+
+  return matchedIds.size === 1 ? [...matchedIds][0] : undefined;
 }
 
 function resolveCandidateId<T extends { id: string }>(
   rawValue: unknown,
   candidates: T[],
   options: {
-    preferredFields: readonly string[];
+    allowedFields: readonly string[];
     extraCandidates?: Array<{ id: string }>;
   }
 ): string | undefined {
@@ -109,17 +116,13 @@ function resolveCandidateId<T extends { id: string }>(
     return exact.id;
   }
 
-  const embeddedId = extractEmbeddedId(
+  const embeddedId = resolveEmbeddedCandidateId(
     normalizedInput,
-    options.preferredFields
+    searchableCandidates,
+    options.allowedFields
   );
   if (embeddedId) {
-    const embedded = searchableCandidates.find(
-      (candidate) => candidate.id === embeddedId
-    );
-    if (embedded) {
-      return embedded.id;
-    }
+    return embeddedId;
   }
 
   const ordinal = extractOrdinal(normalizedInput);
@@ -189,7 +192,7 @@ export function normalizeSocialDecisionParameters(
       const resolvedPostId = resolveCandidateId(
         nextParameters.postId,
         recentPosts,
-        { preferredFields: POST_ID_FIELDS }
+        { allowedFields: POST_ID_FIELDS }
       );
 
       if (resolvedPostId) {
@@ -220,7 +223,7 @@ export function normalizeSocialDecisionParameters(
       const resolvedCommentId = resolveCandidateId(
         nextParameters.commentId,
         pendingReplies,
-        { preferredFields: COMMENT_ID_FIELDS }
+        { allowedFields: COMMENT_ID_FIELDS }
       );
       const target = resolvedCommentId
         ? pendingReplies.find((reply) => reply.id === resolvedCommentId)
@@ -243,7 +246,7 @@ export function normalizeSocialDecisionParameters(
         nextParameters.postId,
         recentPosts,
         {
-          preferredFields: POST_ID_FIELDS,
+          allowedFields: POST_ID_FIELDS,
           extraCandidates: pendingReplyPosts,
         }
       );
@@ -263,7 +266,7 @@ export function normalizeSocialDecisionParameters(
         nextParameters.userId,
         recentAuthors,
         {
-          preferredFields: USER_ID_FIELDS,
+          allowedFields: USER_ID_FIELDS,
           extraCandidates: socialGraphUsers,
         }
       );
@@ -282,7 +285,7 @@ export function normalizeSocialDecisionParameters(
         nextParameters.recipientId,
         recentAuthors,
         {
-          preferredFields: RECIPIENT_ID_FIELDS,
+          allowedFields: RECIPIENT_ID_FIELDS,
           extraCandidates: socialGraphUsers,
         }
       );
@@ -300,7 +303,7 @@ export function normalizeSocialDecisionParameters(
       const resolvedChatId = resolveCandidateId(
         nextParameters.chatId,
         pendingChats,
-        { preferredFields: CHAT_ID_FIELDS }
+        { allowedFields: CHAT_ID_FIELDS }
       );
 
       if (resolvedChatId) {
@@ -316,7 +319,7 @@ export function normalizeSocialDecisionParameters(
       const resolvedChatId = resolveCandidateId(
         nextParameters.chatId,
         groupChats,
-        { preferredFields: CHAT_ID_FIELDS }
+        { allowedFields: CHAT_ID_FIELDS }
       );
 
       if (resolvedChatId) {
