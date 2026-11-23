@@ -29,7 +29,6 @@
  * require passing referrer context through the MCP API key or session.
  */
 
-import type { JsonRpcParams, JsonRpcRequest } from '@feed/a2a';
 import {
   handleAppealBanWithEscrow,
   handleCreateEscrowPayment,
@@ -41,45 +40,64 @@ import {
   acceptGroupInvite,
   BusinessLogicError,
   checkRateLimitAsync,
+  countVisiblePostComments,
   declineGroupInvite,
+  listVisiblePostComments,
   logAdminModify,
   NotFoundError,
+  notifyCommentOnPost,
+  notifyFollow,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
   sharePost,
+  updateProfileWithLeaderboardInvalidation,
 } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { PredictionPricing } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
+  acquireUserBlockPairLock,
   and,
   db,
+  dbWrite,
   desc,
   eq,
   favorites,
+  follows,
+  followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
+  groupMembers,
   hasBlocked,
   inArray,
   isNull,
+  like,
   lte,
   markets,
+  not,
+  notExists,
+  notInArray,
   perpMarketSnapshots,
   posts,
   postTags,
   questions,
+  sql,
   timeframedMarkets,
+  userBlocks,
   users,
+  withTransaction,
 } from '@feed/db';
 import {
   createPerpPriceImpactPort,
   createPerpSettlement,
   createPerpTradesCachePort,
+  createTradingFeeOutboxAdapter,
   FEE_CONFIG,
   FeeService,
+  getCurrentTrendingTags,
   invalidateAfterPredictionTrade,
   type PredictionSettlementOptions,
   StaticDataRegistry,
@@ -93,6 +111,7 @@ import {
   logger,
   retryIfRetryable,
 } from '@feed/shared';
+import { notLike } from 'drizzle-orm';
 
 function buildWalletPort(): WalletPort {
   return {
@@ -116,14 +135,22 @@ function buildWalletPort(): WalletPort {
 
 function buildFeeProcessor(tx?: import('@feed/db').Transaction): FeeProcessor {
   return {
-    processTradingFee: ({ userId, amount, type, relatedId, positionId }) =>
+    processTradingFee: ({
+      userId,
+      amount,
+      type,
+      relatedId,
+      positionId,
+      operationId,
+    }) =>
       FeeService.processTradingFee(
         userId,
         type as (typeof FEE_CONFIG.FEE_TYPES)[keyof typeof FEE_CONFIG.FEE_TYPES],
         amount,
         positionId,
         relatedId,
-        tx
+        tx,
+        operationId
       ),
   };
 }
@@ -440,6 +467,8 @@ import type {
   GetUserStatsResult,
   GetUserWalletArgs,
   GetUserWalletResult,
+  JsonRpcParams,
+  JsonRpcRequest,
   LeaveChatArgs,
   LeaveChatResult,
   LikeCommentArgs,
@@ -661,6 +690,7 @@ function buildPerpService() {
       minFeeAmount: FEE_CONFIG.MIN_FEE_AMOUNT,
     },
     feeProcessor: buildFeeProcessor(),
+    tradingFeeOutbox: createTradingFeeOutboxAdapter(),
   });
 }
 
@@ -841,6 +871,21 @@ export async function executeGetPositions(
     skip: args.offset,
   });
 
+  // Open perpetual positions are open positions too: the same server opens
+  // and closes them (open_position / close_position), the A2A
+  // portfolio.get_positions returns them next to prediction positions, and
+  // the web wallet lists them in the same view. A marketId filter names a
+  // prediction market, so it narrows the result to prediction positions.
+  const perpPositionsRaw = args.marketId
+    ? []
+    : await db.perpPosition.findMany({
+        where: {
+          userId: agent.userId,
+          closedAt: null,
+        },
+        orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
+      });
+
   // Get markets separately
   const marketIds = positionsRaw
     .map((p) => p.marketId)
@@ -863,6 +908,17 @@ export async function executeGetPositions(
       side: p.side ? 'YES' : 'NO',
       shares: p.shares.toString(),
       avgPrice: p.avgPrice.toString(),
+    })),
+    perpPositions: perpPositionsRaw.map((p) => ({
+      id: p.id,
+      ticker: p.ticker,
+      side: resolvePerpSide(p.side),
+      size: p.size.toString(),
+      entryPrice: p.entryPrice.toString(),
+      currentPrice: p.currentPrice.toString(),
+      leverage: p.leverage,
+      unrealizedPnL: p.unrealizedPnL.toString(),
+      fundingPaid: p.fundingPaid.toString(),
     })),
   };
 }
@@ -972,19 +1028,53 @@ export async function executeQueryFeed(
     relatedQuestion = question.questionNumber;
   }
 
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const now = new Date();
-  const posts = await db.post.findMany({
-    where: {
-      deletedAt: null,
-      timestamp: { lte: now }, // No future posts
-      ...(relatedQuestion !== undefined && { relatedQuestion }),
-    },
-    orderBy: { timestamp: 'desc' },
-    take: args.limit || 20,
-  });
+  // Filter in SQL before the limit without requiring NPC authors to have Users.
+  const feedPosts = await db
+    .select({
+      id: posts.id,
+      content: posts.content,
+      authorId: posts.authorId,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(
+      and(
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, now),
+        not(like(posts.authorId, 'test-%')),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        ),
+        relatedQuestion !== undefined
+          ? eq(posts.relatedQuestion, relatedQuestion)
+          : undefined,
+        excludedAuthorIds.length > 0
+          ? notInArray(posts.authorId, excludedAuthorIds)
+          : undefined
+      )
+    )
+    // Total order, matching the web feed query
+    // (DatabaseService.getRecentPosts orders by timestamp desc, id desc):
+    // with timestamp alone, posts sharing one timestamp are cut by the
+    // limit in storage order, so the head of a tied block is arbitrary.
+    .orderBy(desc(posts.timestamp), desc(posts.id))
+    .limit(args.limit || 20);
 
   return {
-    posts: posts.map((p) => ({
+    posts: feedPosts.map((p) => ({
       id: p.id,
       content: p.content,
       authorId: p.authorId,
@@ -1305,13 +1395,29 @@ export async function executeGetTradeHistory(
  * Execute get_post tool
  */
 export async function executeGetPost(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetPostArgs
 ): Promise<GetPostResult> {
   const apiBaseUrl = getAPIBaseUrl();
-  return safeFetchRequired<GetPostResult>(
+  const result = await safeFetchRequired<GetPostResult>(
     new URL(`${apiBaseUrl}/posts/${args.postId}`)
   );
+
+  const { data } = result;
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    Array.isArray(data) ||
+    typeof data.commentCount !== 'number'
+  ) {
+    return result;
+  }
+  const commentCount = await countVisiblePostComments(
+    args.postId,
+    agent.userId,
+    data.commentCount
+  );
+  return { ...result, data: { ...data, commentCount } };
 }
 
 /**
@@ -1330,7 +1436,6 @@ export async function executeCreatePost(
       id: postId,
       content: args.content.trim(),
       authorId: agent.userId,
-      type: args.type || 'post',
       imageUrl: mediaUrl,
       timestamp: new Date(),
     },
@@ -1477,17 +1582,15 @@ export async function executeSharePost(
  * Execute get_comments tool
  */
 export async function executeGetComments(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetCommentsArgs
 ): Promise<GetCommentsResult> {
-  const commentsList = await db.comment.findMany({
-    where: {
-      postId: args.postId,
-      deletedAt: null,
-    },
-    orderBy: { createdAt: 'desc' },
-    take: args.limit || 50,
-  });
+  const commentsList = await listVisiblePostComments(
+    args.postId,
+    agent.userId,
+    args.limit || 50,
+    'desc'
+  );
   const commentIds = commentsList.map((c) => c.id);
   const reactionsList = await db.reaction.findMany({
     where: {
@@ -1523,6 +1626,36 @@ export async function executeCreateComment(
   agent: AuthenticatedAgent,
   args: CreateCommentArgs
 ): Promise<CreateCommentResult> {
+  const post = await dbWrite.post.findFirst({
+    where: { id: args.postId },
+  });
+
+  // Unknown posts cannot take comments (and are never created from the ID:
+  // comments.postId has no foreign key, so an unchecked comment would
+  // become an orphan row).
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
+  // Soft-deleted posts are hidden everywhere, so they cannot collect new
+  // comments — the web post comments route applies the same rule, as does
+  // the A2A createComment executor.
+  if (post.deletedAt) {
+    throw new NotFoundError('Post (deleted)', args.postId);
+  }
+
+  if (post.timestamp > new Date()) {
+    throw new NotFoundError('Post', args.postId);
+  }
+
+  const [authorBlockedCaller, callerBlockedAuthor] = await Promise.all([
+    hasBlocked(post.authorId, agent.userId),
+    hasBlocked(agent.userId, post.authorId),
+  ]);
+  if (authorBlockedCaller || callerBlockedAuthor) {
+    throw new BusinessLogicError('Cannot comment on this post', 'BLOCKED_USER');
+  }
+
   const commentId = await generateSnowflakeId();
   const comment = await db.comment.create({
     data: {
@@ -1533,6 +1666,30 @@ export async function executeCreateComment(
       updatedAt: new Date(),
     },
   });
+
+  // The comment has committed. Notification failure must not invite a retry.
+  if (post.authorId !== agent.userId) {
+    try {
+      await notifyCommentOnPost(
+        post.authorId,
+        agent.userId,
+        args.postId,
+        comment.id
+      );
+    } catch (error) {
+      logger.warn(
+        'Failed to notify author of committed comment',
+        {
+          postId: args.postId,
+          commentId: comment.id,
+          userId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
+  }
+
   return {
     success: true,
     commentId: comment.id,
@@ -1661,7 +1818,18 @@ export async function executeGetPostsByTag(
       and(
         eq(postTags.tagId, tag.id),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, now)
+        lte(posts.timestamp, now),
+        // Exclude test authors in SQL before paginating, so pages
+        // are full — the canonical post query's rule
+        // (DatabaseService.getRecentPosts): 'test-' ids and
+        // isTest-flagged accounts never appear in post lists.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
@@ -1732,19 +1900,15 @@ export async function executeUpdateProfile(
   if (args.username !== undefined) updateData.username = args.username;
   if (args.profileImageUrl !== undefined)
     updateData.profileImageUrl = args.profileImageUrl;
-  const user = await db.user.update({
-    where: { id: agent.userId },
-    data: updateData,
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      bio: true,
-      profileImageUrl: true,
-      reputationPoints: true,
-      virtualBalance: true,
-    },
-  });
+  const user = await updateProfileWithLeaderboardInvalidation(
+    agent.userId,
+    updateData,
+    (client) =>
+      client.user.update({
+        where: { id: agent.userId },
+        data: updateData,
+      })
+  );
   return {
     success: true,
     profile: {
@@ -1769,22 +1933,22 @@ export async function executeFollowUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
-  const existing = await db.follow.findFirst({
-    where: {
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
-  if (existing) {
-    return { success: true };
+  const created = await followUserWithBlockCheck(agent.userId, args.userId);
+  if (created) {
+    try {
+      await notifyFollow(args.userId, agent.userId);
+    } catch (error) {
+      logger.warn(
+        'Failed to notify user of committed follow',
+        {
+          userId: args.userId,
+          followerId: agent.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MCP'
+      );
+    }
   }
-  await db.follow.create({
-    data: {
-      id: await generateSnowflakeId(),
-      followerId: agent.userId,
-      followingId: args.userId,
-    },
-  });
   return { success: true };
 }
 
@@ -1811,32 +1975,37 @@ export async function executeGetFollowers(
   _agent: AuthenticatedAgent,
   args: GetFollowersArgs
 ): Promise<GetFollowersResult> {
-  const followersList = await db.follow.findMany({
-    where: { followingId: args.userId },
-    take: args.limit || 50,
-    orderBy: { createdAt: 'desc' },
-  });
-  const followerIds = followersList.map((f) => f.followerId);
-  const usersList = await db.user.findMany({
-    where: { id: { in: followerIds } },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      profileImageUrl: true,
-    },
-  });
-  const usersMap = new Map(usersList.map((u) => [u.id, u]));
+  // Same population as the website follow lists: the follower must be a
+  // real user who is not a test account (isTest flag or 'test-' id) and
+  // not banned. Joining users applies that filter before the limit, so
+  // excluded or dangling follow rows cannot consume page slots or
+  // surface as null-username entries.
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      profileImageUrl: users.profileImageUrl,
+    })
+    .from(follows)
+    .innerJoin(users, eq(users.id, follows.followerId))
+    .where(
+      and(
+        eq(follows.followingId, args.userId),
+        eq(users.isTest, false),
+        eq(users.isBanned, false),
+        sql`${users.id} NOT LIKE 'test-%'`
+      )
+    )
+    .orderBy(desc(follows.createdAt), desc(follows.id))
+    .limit(args.limit || 50);
   return {
-    followers: followersList.map((f) => {
-      const user = usersMap.get(f.followerId);
-      return {
-        id: f.followerId,
-        username: user?.username || null,
-        displayName: user?.displayName || null,
-        profileImageUrl: user?.profileImageUrl || null,
-      };
-    }),
+    followers: rows.map((user) => ({
+      id: user.id,
+      username: user.username || null,
+      displayName: user.displayName || null,
+      profileImageUrl: user.profileImageUrl || null,
+    })),
   };
 }
 
@@ -1847,32 +2016,34 @@ export async function executeGetFollowing(
   _agent: AuthenticatedAgent,
   args: GetFollowingArgs
 ): Promise<GetFollowingResult> {
-  const followingList = await db.follow.findMany({
-    where: { followerId: args.userId },
-    take: args.limit || 50,
-    orderBy: { createdAt: 'desc' },
-  });
-  const followingIds = followingList.map((f) => f.followingId);
-  const usersList = await db.user.findMany({
-    where: { id: { in: followingIds } },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      profileImageUrl: true,
-    },
-  });
-  const usersMap = new Map(usersList.map((u) => [u.id, u]));
+  // Same population as the website follow lists, mirrored on the
+  // followed side: see executeGetFollowers.
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      profileImageUrl: users.profileImageUrl,
+    })
+    .from(follows)
+    .innerJoin(users, eq(users.id, follows.followingId))
+    .where(
+      and(
+        eq(follows.followerId, args.userId),
+        eq(users.isTest, false),
+        eq(users.isBanned, false),
+        sql`${users.id} NOT LIKE 'test-%'`
+      )
+    )
+    .orderBy(desc(follows.createdAt), desc(follows.id))
+    .limit(args.limit || 50);
   return {
-    following: followingList.map((f) => {
-      const user = usersMap.get(f.followingId);
-      return {
-        id: f.followingId,
-        username: user?.username || null,
-        displayName: user?.displayName || null,
-        profileImageUrl: user?.profileImageUrl || null,
-      };
-    }),
+    following: rows.map((user) => ({
+      id: user.id,
+      username: user.username || null,
+      displayName: user.displayName || null,
+      profileImageUrl: user.profileImageUrl || null,
+    })),
   };
 }
 
@@ -1885,6 +2056,15 @@ export async function executeSearchUsers(
 ): Promise<SearchUsersResult> {
   const usersList = await db.user.findMany({
     where: {
+      // Match the web people search (GET /api/users/search) and the A2A
+      // people lookup (users.search): banned accounts are never returned,
+      // and test accounts are not real users. A test account carries the
+      // isTest flag or a 'test-' id prefix — the membership rule the feed
+      // surfaces use. The exclusions run before the limit so hidden
+      // accounts cannot occupy result slots.
+      isBanned: false,
+      isTest: false,
+      NOT: { id: { startsWith: 'test-' } },
       OR: [
         { username: { contains: args.query, mode: 'insensitive' } },
         { displayName: { contains: args.query, mode: 'insensitive' } },
@@ -1938,6 +2118,15 @@ export async function executeSearchAgents(
           : []),
         { OR: [{ isAgent: true }, { isActor: true }] },
         { isBanned: false },
+        // Test accounts are not real agents or NPCs — every user-facing
+        // surface hides them (the A2A people lookup states the rule
+        // verbatim). A test account carries the isTest flag or a 'test-'
+        // id prefix: NPC User rows are bootstrapped from pack actors
+        // without copying the flag, so both axes are required. The
+        // exclusions run before the limit so hidden accounts cannot
+        // occupy result slots.
+        { isTest: false },
+        { NOT: { id: { startsWith: 'test-' } } },
       ],
     },
     select: {
@@ -2044,7 +2233,7 @@ export async function executeGetUserStats(
  */
 export async function executeGetChats(
   agent: AuthenticatedAgent,
-  _args: GetChatsArgs
+  args: GetChatsArgs
 ): Promise<GetChatsResult> {
   // Get all chats where user is a participant
   const participants = await db.chatParticipant.findMany({
@@ -2055,10 +2244,20 @@ export async function executeGetChats(
     select: { chatId: true },
   });
   const participantChatIds = participants.map((p) => p.chatId);
+  // The tool schema advertises filter: 'all' | 'dms' | 'groups'; apply it
+  // in the chat query so last-message lookups below only run for the
+  // chats actually being returned.
   const chatsList =
     participantChatIds.length > 0
       ? await db.chat.findMany({
-          where: { id: { in: participantChatIds } },
+          where: {
+            id: { in: participantChatIds },
+            ...(args.filter === 'dms'
+              ? { isGroup: false }
+              : args.filter === 'groups'
+                ? { isGroup: true }
+                : {}),
+          },
         })
       : [];
   const chatIds = chatsList.map((c) => c.id);
@@ -2097,7 +2296,7 @@ export async function executeGetChatMessages(
 ): Promise<GetChatMessagesResult> {
   const chat = await db.chat.findUnique({
     where: { id: args.chatId },
-    select: { id: true },
+    select: { id: true, isGroup: true },
   });
 
   if (!chat) {
@@ -2117,9 +2316,37 @@ export async function executeGetChatMessages(
     throw new Error('Unauthorized: You do not have access to this chat');
   }
 
+  // A group chat is a reading surface like any other feed: authors the
+  // viewer blocked or muted, and authors who blocked the viewer, must
+  // not appear in the viewer's message list — the same rule the web
+  // group chat history (GET /api/chats/[id]), the A2A
+  // messaging.get_chat_messages, and this file's search_agents handler
+  // apply. The filter lives in the query itself so limit/offset page
+  // over only the messages the viewer may see. DM history is out of
+  // scope: a block relationship already prevents creating a DM and
+  // sending in one.
+  let excludedSenderIds: string[] = [];
+  if (chat.isGroup) {
+    const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+      getBlockedUserIds(agent.userId),
+      getMutedUserIds(agent.userId),
+      getBlockedByUserIds(agent.userId),
+    ]);
+    excludedSenderIds = [
+      ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+    ];
+  }
+
   const messagesList = await db.message.findMany({
-    where: { chatId: args.chatId },
-    orderBy: { createdAt: 'desc' },
+    where: {
+      chatId: args.chatId,
+      ...(excludedSenderIds.length > 0
+        ? { senderId: { notIn: excludedSenderIds } }
+        : {}),
+    },
+    // Break timestamp ties for deterministic pages over unchanged history.
+    // Concurrent inserts/deletes can still shift offset windows.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: args.limit || 50,
     skip: args.offset || 0,
   });
@@ -2219,9 +2446,29 @@ export async function executeCreateGroup(
   const groupId = await generateSnowflakeId();
 
   // Deduplicate memberIds and exclude the owner (agent.userId)
-  const uniqueMemberIds = [...new Set(args.memberIds)].filter(
+  const requestedMemberIds = [...new Set(args.memberIds)].filter(
     (id) => id !== agent.userId
   );
+
+  // Only members that exist and are not banned can join (the web group
+  // creation route applies the same rule: "Verify users exist and are not
+  // banned"). ChatParticipant and GroupMember have no foreign key to User,
+  // so an unchecked ID would become a permanent orphan membership row.
+  let uniqueMemberIds = requestedMemberIds;
+  if (requestedMemberIds.length > 0) {
+    // Base membership writes on current eligibility from the primary.
+    const validMembers = await dbWrite.user.findMany({
+      where: {
+        id: { in: requestedMemberIds },
+        isBanned: false,
+      },
+      select: { id: true },
+    });
+    const validMemberIdSet = new Set(validMembers.map((u) => u.id));
+    uniqueMemberIds = requestedMemberIds.filter((id) =>
+      validMemberIdSet.has(id)
+    );
+  }
 
   // Create Group
   await db.group.create({
@@ -2297,44 +2544,82 @@ export async function executeCreateGroup(
 }
 
 /**
- * Execute leave_chat tool
- * Chat.groupId → Group.id relationship
+ * Execute leave_chat tool.
+ *
+ * Chat.groupId → Group.id. The owner decision and both writes commit
+ * together on the primary. GroupMember is locked before ChatParticipant,
+ * matching DELETE /api/chats/[id]/participants/me (member update, then
+ * participant removal). Taking the participant lock first deadlocks with
+ * that route (PostgreSQL 40P01).
  */
 export async function executeLeaveChat(
   agent: AuthenticatedAgent,
   args: LeaveChatArgs
 ): Promise<LeaveChatResult> {
-  // Mark chat participant as inactive
-  await db.chatParticipant.updateMany({
-    where: {
-      chatId: args.chatId,
-      userId: agent.userId,
-    },
-    data: { isActive: false },
-  });
-
-  // Find the chat to get its groupId
-  const chat = await db.chat.findUnique({
-    where: { id: args.chatId },
-    select: { groupId: true },
-  });
-
-  // Also update GroupMember if there's an associated group
-  if (chat?.groupId) {
-    await db.groupMember.updateMany({
-      where: {
-        groupId: chat.groupId,
-        userId: agent.userId,
-      },
-      data: {
-        isActive: false,
-        kickedAt: new Date(),
-        kickReason: 'User left',
-      },
+  // $transaction is a primary write. Reads stay inside it so a replica
+  // cannot serve a stale role.
+  return db.$transaction(async (tx) => {
+    const chat = await tx.chat.findUnique({
+      where: { id: args.chatId },
+      select: { groupId: true },
     });
-  }
 
-  return { success: true };
+    // A missing chat, or a chat the caller never joined, has no participant
+    // row. Refuse that before any write so the tool does not report success
+    // after updating zero rows.
+    const participant = await tx.chatParticipant.findFirst({
+      where: { chatId: args.chatId, userId: agent.userId },
+    });
+    if (!participant) {
+      throw new Error('You are not a member of this chat.');
+    }
+
+    if (chat?.groupId) {
+      // Hold this row for the rest of the transaction, then read its role.
+      // A promotion to owner that commits while this waits is visible here.
+      const [membership] = await tx
+        .select({
+          id: groupMembers.id,
+          role: groupMembers.role,
+          isActive: groupMembers.isActive,
+        })
+        .from(groupMembers)
+        .where(
+          and(
+            eq(groupMembers.groupId, chat.groupId),
+            eq(groupMembers.userId, agent.userId)
+          )
+        )
+        .limit(1)
+        .for('update');
+
+      if (membership?.isActive && membership.role === 'owner') {
+        throw new Error(
+          'Group owners cannot leave. Transfer ownership or delete the group.'
+        );
+      }
+
+      // Same row the lock just read. An inactive row, including an inactive
+      // owner, is left alone.
+      if (membership?.isActive) {
+        await tx.groupMember.update({
+          where: { id: membership.id },
+          data: {
+            isActive: false,
+            kickedAt: new Date(),
+            kickReason: 'User left',
+          },
+        });
+      }
+    }
+
+    await tx.chatParticipant.update({
+      where: { id: participant.id },
+      data: { isActive: false },
+    });
+
+    return { success: true };
+  });
 }
 
 /**
@@ -2344,8 +2629,31 @@ export async function executeGetUnreadCount(
   agent: AuthenticatedAgent,
   _args: GetUnreadCountArgs
 ): Promise<GetUnreadCountResult> {
+  // Match the notification read rule on the web and A2A surfaces: actors
+  // the user has blocked or muted, and actors who have blocked the user,
+  // are excluded at read time. The filter has to live at read time —
+  // muting never stops notification creation, and a block placed later
+  // must hide notifications created before it. System notifications have
+  // a null actor and are always kept.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedActorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const unreadCount = await db.notification.count({
-    where: { userId: agent.userId, read: false },
+    where: {
+      userId: agent.userId,
+      read: false,
+      ...(excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {}),
+    },
   });
   return { unreadCount };
 }
@@ -2361,8 +2669,27 @@ export async function executeGetNotifications(
   agent: AuthenticatedAgent,
   args: GetNotificationsArgs
 ): Promise<GetNotificationsResult> {
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedActorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
+
   const notificationsList = await db.notification.findMany({
-    where: { userId: agent.userId },
+    where: {
+      userId: agent.userId,
+      // Match web notification visibility before taking the requested window.
+      // Existing notifications must disappear after a block or mute; system
+      // notifications have no actor and remain visible.
+      ...(excludedActorIds.length > 0
+        ? {
+            OR: [{ actorId: null }, { actorId: { notIn: excludedActorIds } }],
+          }
+        : {}),
+    },
     orderBy: { createdAt: 'desc' },
     take: args.limit || 100,
   });
@@ -2782,19 +3109,10 @@ export async function executeGetTrendingTags(
   _agent: AuthenticatedAgent,
   args: GetTrendingTagsArgs
 ): Promise<GetTrendingTagsResult> {
-  const trendingTagsList = await db.trendingTag.findMany({
-    orderBy: { rank: 'asc' },
-    take: args.limit || 20,
-  });
-  const tagIds = trendingTagsList.map((tt) => tt.tagId);
-  const tagsList = await db.tag.findMany({
-    where: { id: { in: tagIds } },
-    select: { id: true, name: true },
-  });
-  const tagsMap = new Map(tagsList.map((t) => [t.id, t]));
+  const trendingTagsList = await getCurrentTrendingTags(args.limit || 20);
   return {
     tags: trendingTagsList.map((tt) => ({
-      tag: tagsMap.get(tt.tagId)?.name || '',
+      tag: tt.tag.name,
       postCount: tt.postCount,
       trendScore: tt.score || 0,
     })),
@@ -2874,22 +3192,61 @@ export async function executeBlockUser(
   if (args.userId === agent.userId) {
     throw new Error('Cannot block yourself');
   }
-  const existing = await db.userBlock.findFirst({
-    where: {
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
+
+  // Share the website follow/block lock before reading any pair state. All
+  // validation and writes use this primary transaction, including retries.
+  await withTransaction(async (tx) => {
+    await acquireUserBlockPairLock(tx, agent.userId, args.userId);
+
+    const [targetUser] = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, args.userId))
+      .limit(1);
+    if (!targetUser) {
+      throw new Error(`User ${args.userId} not found`);
+    }
+
+    const [existing] = await tx
+      .select({ id: userBlocks.id })
+      .from(userBlocks)
+      .where(
+        and(
+          eq(userBlocks.blockerId, agent.userId),
+          eq(userBlocks.blockedId, args.userId)
+        )
+      )
+      .limit(1);
+    if (!existing) {
+      await tx.insert(userBlocks).values({
+        id: await generateSnowflakeId(),
+        blockerId: agent.userId,
+        blockedId: args.userId,
+      });
+    }
+
+    // An existing block must also sever leftover edges. Keep reciprocal
+    // deletes ordered, as in the submitted fix, within the same transaction.
+    const [firstUserId, secondUserId] = [agent.userId, args.userId].sort();
+    if (!firstUserId || !secondUserId) throw new Error('Missing block pair');
+    await tx
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followerId, firstUserId),
+          eq(follows.followingId, secondUserId)
+        )
+      );
+    await tx
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followerId, secondUserId),
+          eq(follows.followingId, firstUserId)
+        )
+      );
   });
-  if (existing) {
-    return { success: true };
-  }
-  await db.userBlock.create({
-    data: {
-      id: await generateSnowflakeId(),
-      blockerId: agent.userId,
-      blockedId: args.userId,
-    },
-  });
+
   return { success: true };
 }
 
@@ -2918,6 +3275,16 @@ export async function executeMuteUser(
 ): Promise<MuteUserResult> {
   if (args.userId === agent.userId) {
     throw new Error('Cannot mute yourself');
+  }
+  // Match POST /api/users/[userId]/mute: the target must exist. UserMute
+  // has no foreign key, so an unchecked mute of an unknown ID would leave
+  // a phantom row in the caller's mute list.
+  const targetUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!targetUser) {
+    throw new Error(`User ${args.userId} not found`);
   }
   const existing = await db.userMute.findFirst({
     where: {
@@ -2961,6 +3328,19 @@ export async function executeReportUser(
   agent: AuthenticatedAgent,
   args: ReportUserArgs
 ): Promise<ReportUserResult> {
+  if (args.userId === agent.userId) {
+    throw new Error('Cannot report yourself');
+  }
+  // Match POST /api/moderation/reports: the reported user must exist.
+  // Report has no foreign key, so an unchecked report of an unknown ID
+  // would land in the admin moderation queue as a phantom pending report.
+  const reportedUser = await db.user.findUnique({
+    where: { id: args.userId },
+    select: { id: true },
+  });
+  if (!reportedUser) {
+    throw new Error(`User ${args.userId} not found`);
+  }
   const reportId = await generateSnowflakeId();
   await db.report.create({
     data: {
@@ -2983,6 +3363,17 @@ export async function executeReportPost(
   agent: AuthenticatedAgent,
   args: ReportPostArgs
 ): Promise<ReportPostResult> {
+  // reports.reportedPostId has no foreign key, so an unchecked report
+  // would become an orphan row in the moderation queue. The web report
+  // route (POST /api/moderation/reports) looks the post up first and
+  // answers 404 when it does not exist; do the same here.
+  const post = await db.post.findUnique({
+    where: { id: args.postId },
+    select: { id: true },
+  });
+  if (!post) {
+    throw new NotFoundError('Post', args.postId);
+  }
   const reportId = await generateSnowflakeId();
   await db.report.create({
     data: {
@@ -3434,7 +3825,19 @@ export async function executeGetFavoritePosts(
       and(
         inArray(posts.authorId, favoritedUserIds),
         isNull(posts.deletedAt),
-        lte(posts.timestamp, new Date())
+        lte(posts.timestamp, new Date()),
+        // Apply the web feed's test-author rule (DatabaseService
+        // .getRecentPosts): test accounts — the isTest flag or a
+        // 'test-' id prefix — must not leak into the favorites feed
+        // either, even when the agent favorited them. Excluded in SQL
+        // before paginating, so pages stay full.
+        notLike(posts.authorId, 'test-%'),
+        notExists(
+          db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+        )
       )
     )
     .orderBy(desc(posts.timestamp))

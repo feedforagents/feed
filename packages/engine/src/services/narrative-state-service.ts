@@ -136,6 +136,21 @@ export function getPhaseForDay(
   return 'climax';
 }
 
+/** Resolve an assigned actor's signal without consulting a phase ratio. */
+export function getActorRoleSignal(
+  roles: Pick<DatabaseArcPlan, 'insiderActorIds' | 'deceiverActorIds'>,
+  actorId: string,
+  questionOutcome: boolean
+): { direction: 'YES' | 'NO'; reason: 'insider' | 'deceiver' } | undefined {
+  if (actorId && roles.insiderActorIds?.includes(actorId)) {
+    return { direction: questionOutcome ? 'YES' : 'NO', reason: 'insider' };
+  }
+  if (actorId && roles.deceiverActorIds?.includes(actorId)) {
+    return { direction: questionOutcome ? 'NO' : 'YES', reason: 'deceiver' };
+  }
+  return undefined;
+}
+
 /**
  * Determine signal direction for an actor based on arc plan and phase
  *
@@ -162,18 +177,8 @@ export function getSignalDirection(
   direction: 'YES' | 'NO';
   reason: 'insider' | 'deceiver' | 'phase';
 } {
-  const insiderIds = arcPlan.insiderActorIds ?? [];
-  const deceiverIds = arcPlan.deceiverActorIds ?? [];
-
-  // Insiders always point toward truth
-  if (actorId && insiderIds.includes(actorId)) {
-    return { direction: questionOutcome ? 'YES' : 'NO', reason: 'insider' };
-  }
-
-  // Deceivers always point away from truth
-  if (actorId && deceiverIds.includes(actorId)) {
-    return { direction: questionOutcome ? 'NO' : 'YES', reason: 'deceiver' };
-  }
+  const roleSignal = getActorRoleSignal(arcPlan, actorId, questionOutcome);
+  if (roleSignal) return roleSignal;
 
   // Regular NPCs/events follow phase distribution
   // phaseRatios contains the ratio of correct signals for each phase.

@@ -2,11 +2,9 @@
 // feed-story-author-eligibility.integration.test.ts.
 import { mock, setSystemTime } from 'bun:test';
 import assert from 'node:assert/strict';
+import { verifySubMarketChildLease } from './sub-market-isolation';
 
-const databaseUrl = new URL(process.env.DATABASE_URL ?? '');
-assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(databaseUrl.hostname));
-assert.match(databaseUrl.pathname, /^\/(test_db|feed_pr\d+)$/);
-assert.equal(process.env.DATABASE_READ_REPLICA_URL, '');
+await verifySubMarketChildLease();
 assert.equal(process.env.NODE_ENV, 'test');
 assert.equal(process.env.FEED_DISABLE_REDIS, '1');
 assert.equal(process.env.REDIS_URL, '');
@@ -15,8 +13,9 @@ assert.equal(process.env.REDIS_URL, '');
 // getCacheOrFetch's memory backend/TTL all execute their production source.
 mock.module('server-only', () => ({}));
 
-const { closeDatabase, db, inArray, posts, questions, reactions, users } =
-  await import('@feed/db');
+const { closeDatabase, db, posts, questions, reactions, users } = await import(
+  '@feed/db'
+);
 const { NextRequest } = await import('next/server');
 const { GET: narrativeGET } = await import(
   '../../../../apps/web/src/app/api/feed/narrative/route'
@@ -26,34 +25,23 @@ const { GET: forYouGET } = await import(
 );
 
 const scenario = process.argv[2];
+const windowOffset = Number(process.argv[3]);
+assert.ok([0, 1, 2].includes(windowOffset));
 const runId = crypto.randomUUID();
-const owned = {
-  users: [] as string[],
-  posts: [] as string[],
-  questions: [] as string[],
-  reactions: [] as string[],
-};
 const hour = 60 * 60 * 1000;
 const day = 24 * hour;
-// A private future UTC day separates our query windows from concurrent normal
-// integration data.
-const now = new Date(Date.UTC(2041, 2, 10, 12, 0, 0));
+// The feed looks back up to 30 days. Leave 40 days between scenarios so their
+// fixtures can share one disposable database without affecting each other.
+const now = new Date(Date.UTC(2041, 2, 10, 12, 0, 0) + windowOffset * 40 * day);
 setSystemTime(now);
 
 const normal = crypto.randomUUID();
+const normalWithoutUser = crypto.randomUUID();
 const flagged = crypto.randomUUID();
 const prefix = `test-${crypto.randomUUID()}`;
 const prefixWithoutUser = `test-${crypto.randomUUID()}`;
 const likers = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
 const seen = new Map<string, string>();
-
-async function insertUsers(values: Array<typeof users.$inferInsert>) {
-  const inserted = await db
-    .insert(users)
-    .values(values)
-    .returning({ id: users.id });
-  owned.users.push(...inserted.map((row) => row.id));
-}
 
 async function insertQuestion(): Promise<number> {
   const questionNumber =
@@ -72,7 +60,6 @@ async function insertQuestion(): Promise<number> {
     createdAt: new Date(now.getTime() - 8 * day),
     createdDate: new Date(now.getTime() - 8 * day),
   });
-  owned.questions.push(id);
   return questionNumber;
 }
 
@@ -92,7 +79,6 @@ async function addPost(
     createdAt: now,
     relatedQuestion: questionNumber,
   });
-  owned.posts.push(id);
   seen.set(label, id);
   if (withLikes) {
     for (const liker of likers) {
@@ -104,7 +90,6 @@ async function addPost(
         type: 'like',
         createdAt: now,
       });
-      owned.reactions.push(rid);
     }
   }
 }
@@ -149,6 +134,7 @@ function assertVisibility(
 
 const AUTHORS: Array<[string, string]> = [
   ['normal', normal],
+  ['normalnouser', normalWithoutUser],
   ['flagged', flagged],
   ['prefix', prefix],
   ['prefixnouser', prefixWithoutUser],
@@ -156,7 +142,7 @@ const AUTHORS: Array<[string, string]> = [
 const TEST_LABELS = ['flagged', 'prefix', 'prefixnouser'];
 
 try {
-  await insertUsers([
+  await db.insert(users).values([
     { id: normal, username: `normal-${runId}`, isTest: false, updatedAt: now },
     { id: flagged, username: `flag-${runId}`, isTest: true, updatedAt: now },
     { id: prefix, username: `prefix-${runId}`, isTest: false, updatedAt: now },
@@ -182,7 +168,12 @@ try {
     assertVisibility(
       'narrative',
       narrativeIds,
-      ['normal-linked', 'normal-solo'],
+      [
+        'normal-linked',
+        'normal-solo',
+        'normalnouser-linked',
+        'normalnouser-solo',
+      ],
       TEST_LABELS.flatMap((label) => [`${label}-linked`, `${label}-solo`])
     );
     const forYouIds = await readSurface(
@@ -192,7 +183,12 @@ try {
     assertVisibility(
       'for-you',
       forYouIds,
-      ['normal-linked', 'normal-solo'],
+      [
+        'normal-linked',
+        'normal-solo',
+        'normalnouser-linked',
+        'normalnouser-solo',
+      ],
       TEST_LABELS.flatMap((label) => [`${label}-linked`, `${label}-solo`])
     );
   } else if (scenario === 'backfill') {
@@ -214,7 +210,7 @@ try {
     assertVisibility(
       'for-you-backfill',
       forYouIds,
-      ['normal-linked'],
+      ['normal-linked', 'normalnouser-linked'],
       TEST_LABELS.map((label) => `${label}-linked`)
     );
   } else if (scenario === 'discovery') {
@@ -229,44 +225,15 @@ try {
     assertVisibility(
       'for-you-discovery',
       forYouIds,
-      ['normal-solo'],
+      ['normal-solo', 'normalnouser-solo'],
       TEST_LABELS.map((label) => `${label}-solo`)
     );
   } else {
     throw new Error(`unknown scenario ${scenario}`);
   }
 } finally {
-  try {
-    if (owned.reactions.length)
-      await db.delete(reactions).where(inArray(reactions.id, owned.reactions));
-    if (owned.posts.length)
-      await db.delete(posts).where(inArray(posts.id, owned.posts));
-    if (owned.questions.length)
-      await db.delete(questions).where(inArray(questions.id, owned.questions));
-    if (owned.users.length)
-      await db.delete(users).where(inArray(users.id, owned.users));
-    for (const [table, ids] of [
-      [posts, owned.posts],
-      [questions, owned.questions],
-      [users, owned.users],
-    ] as const) {
-      if (ids.length)
-        assert.equal(
-          (
-            await db
-              .select({ id: table.id })
-              .from(table)
-              .where(inArray(table.id, ids))
-          ).length,
-          0
-        );
-    }
-  } finally {
-    setSystemTime();
-    await closeDatabase();
-  }
+  setSystemTime();
+  await closeDatabase();
 }
-console.log(
-  `FEED_STORY_ELIGIBILITY_OK ${scenario} ${runId} owned rows cleaned`
-);
+console.log(`FEED_STORY_ELIGIBILITY_OK ${scenario}`);
 process.exit(0);

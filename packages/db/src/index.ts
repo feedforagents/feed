@@ -71,6 +71,13 @@ export type {
   UserWithAgentRelations,
   UserWithMetrics,
 } from './model-types';
+export {
+  listDuePredictionRecoveryMarkets,
+  ownsPredictionRecoveryLease,
+  PREDICTION_RECOVERY_LEASE_ID,
+  readPredictionRecoveryHealth,
+} from './prediction-resolution-work';
+export * from './scheduled-inference-budget';
 // Re-export types
 export * from './types';
 export {
@@ -131,7 +138,11 @@ export {
 import { DatabaseService, getDbInstance } from './database-service';
 
 export type { FeedPost } from './database-service';
-export { postCursorConditions } from './database-service';
+export {
+  type PostFeedVisibilityOptions,
+  postCursorConditions,
+  postFeedVisibilityConditions,
+} from './database-service';
 // Re-export query helpers
 export {
   $connect,
