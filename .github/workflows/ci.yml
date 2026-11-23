@@ -240,8 +240,11 @@ jobs:
         run: |
           [[ -d .turbo/cache ]] || exit 0
           if [[ $FULL_REPLAY == true && -s $FIXTURE_INVENTORY ]] &&
-            find .turbo/cache -printf '%D:%i:%s:%C@ %p\0' | cmp -s "$FIXTURE_INVENTORY" - &&
-            [[ -z $(find .turbo/cache -type f -mtime +7 -print -quit) ]]; then
+            find .turbo/cache -regextype posix-extended \
+              \( -type f -regex '\.turbo/cache/[0-9a-f]{16}-manifest\.json' \) -prune -o \
+              \( -type d -printf '%p %y:%m\0' -o -printf '%p %y:%m:%D:%i:%s:%C@\0' \) |
+              LC_ALL=C sort -z | cmp -s "$FIXTURE_INVENTORY" - &&
+            expired=$(find .turbo/cache -type f -mtime +7 -print -quit) && [[ -z $expired ]]; then
             echo 'Reusing the unchanged pull request Turbo archive after a full fixture replay.'
             exit 0
           fi
