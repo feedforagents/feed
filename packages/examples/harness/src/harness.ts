@@ -98,8 +98,7 @@ export class AgentHarness {
             tickInterval: this.config.tickInterval,
           });
 
-          // getAgentId() exists on HarnessA2AClient but not on all A2AClientInterface
-          // implementations (e.g. FeedProductionClient, SimulationA2AAdapter).
+          // Clients that provide an agent ID override the generated ID.
           const agentId =
             'getAgentId' in client &&
             typeof (client as { getAgentId(): string }).getAgentId ===

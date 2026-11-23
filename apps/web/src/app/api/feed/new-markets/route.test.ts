@@ -45,6 +45,7 @@ mock.module('@feed/db', () => ({
   db: { select: mockDbSelect },
   desc: (value: unknown) => value,
   eq: (left: unknown, right: unknown) => [left, right],
+  gt: (left: unknown, right: unknown) => [left, right],
   gte: (left: unknown, right: unknown) => [left, right],
   lt: (left: unknown, right: unknown) => [left, right],
   markets: {

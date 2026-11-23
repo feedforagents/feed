@@ -13,6 +13,12 @@ let market: Market | null;
 let casRows: { id: string }[] = [];
 const ipSeen: (string | undefined)[] = [];
 
+const update = () => ({
+  set: () => ({
+    where: () => ({ returning: async () => casRows }),
+  }),
+});
+
 mock.module('@feed/db', () => ({
   ...actualDb,
   db: {
@@ -24,11 +30,10 @@ mock.module('@feed/db', () => ({
       };
       return c;
     },
-    update: () => ({
-      set: () => ({
-        where: () => ({ returning: async () => casRows }),
-      }),
-    }),
+    update,
+    transaction: async (
+      run: (tx: { update: typeof update }) => Promise<unknown>
+    ) => run({ update }),
   },
 }));
 
@@ -41,6 +46,9 @@ mock.module('@feed/engine', () => ({
   FEE_CONFIG: {},
   invalidateAfterPredictionTrade: async () => undefined,
   WalletService: {},
+  withPredictionSettlement: async () => {
+    throw new Error('unused in extend tests');
+  },
 }));
 
 mock.module('@/lib/services/market-resolution-notifications', () => ({

@@ -3,7 +3,8 @@
  *
  * @route GET /api/feed/new-markets — recently opened prediction market questions
  *
- * Returns questions opened in the last 24 h with status = 'active'.
+ * Returns active questions opened in the last 24 h whose closing time
+ * is still ahead.
  * Joins the markets table to include the market UUID (for deep-linking to
  * /markets/predictions/[id]) and live yes/no shares (for real probability bars).
  */
@@ -19,6 +20,7 @@ import {
   db,
   desc,
   eq,
+  gt,
   gte,
   lt,
   markets,
@@ -86,6 +88,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           and(
             eq(questions.status, 'active'),
             gte(questions.createdAt, cutoff),
+            // Trading closes at the deadline, even while resolution is pending.
+            gt(questions.resolutionDate, now),
             // Only markets resolving within 30 days
             lt(
               questions.resolutionDate,

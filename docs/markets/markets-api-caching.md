@@ -22,7 +22,7 @@ Redis cache-aside layer for `GET /api/markets/perps` and `GET /api/markets/predi
 | Namespace (`CACHE_KEYS.*`) | Key | TTL | What it caches |
 |----------------------------|-----|-----|----------------|
 | `MARKETS_API_PERPS` | `snapshot` | 8 s | Full `PerpMarketRecord[]` from `getMarketsSnapshot()` |
-| `MARKETS_API_PREDICTIONS_LIST` | `all` | 12 s | Full `PredictionMarketRecord[]` from `listMarkets()` |
+| `MARKETS_API_PREDICTIONS_LIST` | `all`, `RESOLVED`, `CANCELLED` | 12 s | One full list per lifecycle slice. Open and explicit `ACTIVE` requests share `all`. |
 | `MARKETS_API_PREDICTIONS_POSITIONS` | `{userId}` | 30 s | `Record<marketId, UserPositionSnapshot[]>` for one user |
 
 **Why these TTLs:**
@@ -87,7 +87,7 @@ GET /api/markets/predictions?page=1&limit=5
 
 **Perps:** `countMarkets()` counts all rows in `perpMarketSnapshots` (matches what unpaginated `listMarkets()` returns). Sorted by `ticker ASC` for stable page boundaries.
 
-**Predictions:** `countUnresolvedMarkets()` counts `WHERE resolved = false` (matches what `listMarkets()` returns — also filters `resolved = false`). Sorted by `createdAt DESC` so newest markets appear first. When `?status=` is passed (`ACTIVE` | `RESOLVED` | `CANCELLED`), the list and `total` follow that slice instead (RESOLVED = settled with an outcome, CANCELLED = settled without one); omitting it keeps the open list above. A filtered unpaginated request bypasses the shared `all` cache key, like the pagination path does.
+**Predictions:** The list and paginated `total` use the same lifecycle slice. `ACTIVE` and omitted status include unresolved markets whose deadline has not passed. `RESOLVED` includes closed markets with a YES or NO outcome. `CANCELLED` includes closures without an outcome, including legacy deactivation and void rows. Settlement services determine position exits and refunds. Rows are sorted by `createdAt DESC, id DESC`. Unpaginated requests use the slice cache above. Use `page` and `limit` for bounded historical lists.
 
 ---
 
@@ -95,7 +95,7 @@ GET /api/markets/predictions?page=1&limit=5
 
 1. **Positions TTL (30 s) > list TTL (12 s):** A cached position snapshot was computed against market share counts that may be 12–30 s old. The trading user's cache is always invalidated, but other users see stale `currentValue` / `unrealizedPnL` until their position cache expires. Acceptable for now; could reduce positions TTL or always recompute positions against fresh market data.
 
-2. **In-memory cache pattern invalidation is broken:** `invalidateCachePattern` uses `key.includes(pattern)` for the in-memory fallback, but `pattern` is `'*'` (literal), which never matches real keys. When Redis is unavailable, invalidation is silently no-op and data is stale until TTL expires. This is a pre-existing bug in `cache-service.ts`, not introduced here.
+2. **Process-local fallback:** When Redis is unavailable, list entries are cached in the current process. Namespace invalidation clears matching list keys in that process.
 
 3. **Double invalidation on perp trades with price impact:** Both the route handler and `applyUserTradePriceImpact` call `invalidateMarketsApiPerpsSnapshot`. This is idempotent but redundant (two Redis SCAN operations per trade).
 

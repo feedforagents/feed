@@ -1,247 +1,230 @@
 /**
- * PRD §9.2 / MarketQuerySchema: GET /api/markets/predictions accepts a
- * `status` filter (ACTIVE | RESOLVED | CANCELLED — an invalid value is a
- * 400), and the response reports each market's `status`. A caller asking
- * for resolved markets must get resolved markets, not the open list.
- *
- * Real route + real database test. Fixtures are owned by this file (unique
- * id prefix, snapshot-guarded cleanup); no other rows are touched.
- * Assertions are inclusion/exclusion over the owned ids plus the per-row
- * `status` field, so unrelated rows in a shared disposable database cannot
- * flip the verdict — only the owned ids decide it.
+ * PRD §9.2 / MVP Phase 6. Prediction market list filters use the retained
+ * lifecycle columns and leave the detail response contract alone.
  */
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { dbWrite, markets, sql } from '@feed/db';
-import { NextRequest } from 'next/server';
-import { z } from 'zod';
-import type { GET as PredictionsGet } from '@/app/api/markets/predictions/route';
+import { beforeAll, expect, test } from 'bun:test';
+import {
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-type StoredRow = { id: string; snapshot: string };
+const cases = {
+  resolved: 'status=RESOLVED pages only outcome rows in stable order',
+  cancelled: 'status=CANCELLED lists no-outcome closures including legacy rows',
+  active: 'status=ACTIVE lists only unresolved unexpired markets',
+  default: 'omitted status keeps the open list',
+  cache: 'status-only slices stay separate and all refresh on invalidation',
+  detail: 'legacy deactivated market detail retains its existing response',
+  invalid: 'invalid status returns 400',
+};
 
-const owned = new Map<string, StoredRow>();
-const prefix = `f-w5b-status-${crypto.randomUUID()}`;
-const activeId = `${prefix}-active`;
-const expiredId = `${prefix}-expired`;
-const resolvedYesId = `${prefix}-resolved-yes`;
-const resolvedNoId = `${prefix}-resolved-no`;
-const cancelledId = `${prefix}-cancelled`;
-
-let GET: typeof PredictionsGet;
-let fixtureTime: number;
-let clientSequence = 0;
-const ipPrefix = crypto
-  .randomUUID()
-  .replaceAll('-', '')
-  .slice(0, 16)
-  .match(/.{4}/g)!
-  .join(':');
-
-const listSchema = z.object({
-  success: z.literal(true),
-  questions: z.array(
-    z.object({ id: z.string(), status: z.string() }).passthrough()
-  ),
-  total: z.number().int().nonnegative().optional(),
-  count: z.number().int().nonnegative(),
-  page: z.number().int().positive().optional(),
-  limit: z.number().int().positive().optional(),
-});
-
-function clientIp() {
-  if (++clientSequence > 65535)
-    throw new Error('Fixture client budget exceeded');
-  return `2001:db8:1734:${ipPrefix}:${clientSequence.toString(16)}`;
-}
-
-async function insertMarkets(values: Array<typeof markets.$inferInsert>) {
-  const rows = await dbWrite
-    .insert(markets)
-    .values(values)
-    .returning({
-      id: markets.id,
-      snapshot: sql<string>`to_jsonb(${markets})::text`,
-    });
-  for (const row of rows) owned.set(row.id, row);
-  if (rows.length !== values.length)
-    throw new Error('Incomplete Market RETURNING');
-  return rows;
-}
-
-async function readRow(id: string) {
-  return dbWrite.execute<StoredRow>(sql`
-    SELECT id, to_jsonb(t)::text AS snapshot FROM "Market" t WHERE id = ${id}
-  `);
-}
-
-async function cleanup() {
-  const failures: Error[] = [];
-  for (const row of [...owned.values()]) {
-    try {
-      await dbWrite.execute(sql`DELETE FROM "Market" t
-        WHERE id = ${row.id} AND to_jsonb(t) = ${row.snapshot}::text::jsonb AND (
-          NOT EXISTS (SELECT 1 FROM "Position" WHERE "marketId" = ${row.id}) AND
-          NOT EXISTS (SELECT 1 FROM "PredictionPriceHistory" WHERE "marketId" = ${row.id})
-        )`);
-      if ((await readRow(row.id)).length)
-        throw new Error(`Owned fixture row retained: Market/${row.id}`);
-      owned.delete(row.id);
-    } catch (error) {
-      if (!(error instanceof Error)) throw error;
-      failures.push(error);
-    }
-  }
-  if (failures.length)
-    throw new AggregateError(
-      failures,
-      'Owned market fixture cleanup incomplete'
-    );
-}
-
-function market(
-  id: string,
-  overrides: Partial<typeof markets.$inferInsert>
-): typeof markets.$inferInsert {
-  return {
-    id,
-    question: `Owned status-filter market ${id}`,
-    yesShares: '1000',
-    noShares: '1000',
-    liquidity: '1000',
-    resolved: false,
-    endDate: new Date(fixtureTime + 7 * 86400000),
-    createdAt: new Date(fixtureTime),
-    updatedAt: new Date(fixtureTime),
-    ...overrides,
-  };
-}
-
-async function fetchList(query: string) {
-  const response = await GET(
-    new NextRequest(`http://localhost/api/markets/predictions${query}`, {
-      headers: { 'x-forwarded-for': clientIp() },
-    })
+if (process.env.FEED_SUB_MARKET_CHILD) {
+  await verifySubMarketChildLease();
+  const { dbWrite, markets, questions } = await import('@feed/db');
+  const { invalidateMarketsApiPredictionsList } = await import('@feed/api');
+  const { NextRequest } = await import('next/server');
+  const { GET } = await import('@/app/api/markets/predictions/route');
+  const { GET: getDetail } = await import(
+    '@/app/api/markets/predictions/[id]/route'
   );
-  expect(response.status).toBe(200);
-  return listSchema.parse(await response.json());
-}
+  const { z } = await import('zod');
 
-function ids(body: z.infer<typeof listSchema>) {
-  return body.questions.map((row) => row.id);
-}
+  const active = 'm1993-active';
+  const expired = 'm1993-expired';
+  const yes = 'm1993-resolved-yes';
+  const no = 'm1993-resolved-no';
+  const cancelled = 'm1993-cancelled';
+  const legacyVoid = 'm1993-legacy-void';
+  const deactivated = 'm1993-deactivated';
+  const now = Date.now();
+  const past = new Date(now - 86_400_000);
+  const future = new Date(now + 86_400_000);
+  const client = crypto.randomUUID().slice(0, 4);
+  let sequence = 0;
 
-beforeAll(async () => {
-  const url = new URL(process.env.DATABASE_URL ?? '');
-  if (
-    !['postgres:', 'postgresql:'].includes(url.protocol) ||
-    !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ||
-    !['/test_db', '/feed_w5b'].includes(url.pathname) ||
-    url.search ||
-    url.hash ||
-    !['5432', '5433', '55685'].includes(url.port) ||
-    process.env.DATABASE_READ_REPLICA_URL
-  )
-    throw new Error('Owned local disposable primary database required');
-  if (
-    process.env.DIRECT_DATABASE_URL &&
-    new URL(process.env.DIRECT_DATABASE_URL).href !== url.href
-  )
-    throw new Error('Direct test database must match primary');
-  GET = (await import('@/app/api/markets/predictions/route')).GET;
-  fixtureTime = Date.now();
-  await insertMarkets([
-    market(activeId, {}),
-    market(expiredId, { endDate: new Date(fixtureTime - 86400000) }),
-    market(resolvedYesId, {
-      resolved: true,
+  const entry = z.object({
+    id: z.string(),
+    status: z.string(),
+    resolved: z.boolean(),
+    resolution: z.boolean().nullable(),
+    scenario: z.number().nullable(),
+  });
+  const list = z.object({
+    success: z.literal(true),
+    questions: z.array(entry),
+    total: z.number().optional(),
+    count: z.number(),
+  });
+
+  function market(
+    id: string,
+    overrides: Partial<typeof markets.$inferInsert> = {}
+  ): typeof markets.$inferInsert {
+    return {
+      id,
+      question: id,
+      yesShares: '1000',
+      noShares: '1000',
+      liquidity: '1000',
+      endDate: future,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+      ...overrides,
+    };
+  }
+
+  function request(suffix: string) {
+    return new NextRequest(
+      `http://localhost/api/markets/predictions${suffix}`,
+      {
+        headers: {
+          'x-forwarded-for': `2001:db8:1993:${client}::${++sequence}`,
+        },
+      }
+    );
+  }
+
+  async function fetchList(query: string) {
+    const response = await GET(request(query));
+    expect(response.status).toBe(200);
+    return list.parse(await response.json());
+  }
+
+  beforeAll(async () => {
+    await dbWrite.insert(markets).values([
+      market(active),
+      market(expired, { endDate: past }),
+      market(yes, { endDate: past, resolved: true, resolution: true }),
+      market(no, { endDate: past, resolved: true, resolution: false }),
+      market(cancelled, {
+        endDate: past,
+        resolved: true,
+        resolutionDescription: 'Market cancelled',
+      }),
+      market(legacyVoid, {
+        endDate: past,
+        resolved: true,
+        resolutionDescription: 'Market voided by admin',
+      }),
+      market(deactivated, { resolved: true }),
+    ]);
+    await dbWrite.insert(questions).values({
+      id: yes,
+      questionNumber: 1993001,
+      text: 'Resolved outcome scenario',
+      scenarioId: 1993,
+      outcome: true,
+      rank: 1,
+      resolutionDate: past,
+      status: 'resolved',
+      resolvedOutcome: true,
+      updatedAt: new Date(now),
+    });
+  });
+
+  test(cases.resolved, async () => {
+    const first = await fetchList('?status=RESOLVED&limit=1&page=1');
+    const second = await fetchList('?status=RESOLVED&limit=1&page=2');
+    expect(first.total).toBe(2);
+    expect(second.total).toBe(2);
+    expect(first.questions[0]).toMatchObject({
+      id: yes,
+      status: 'resolved',
       resolution: true,
-      endDate: new Date(fixtureTime - 86400000),
-    }),
-    market(resolvedNoId, {
-      resolved: true,
+      scenario: 1993,
+    });
+    expect(second.questions[0]).toMatchObject({
+      id: no,
+      status: 'resolved',
       resolution: false,
-      endDate: new Date(fixtureTime - 86400000),
-    }),
-    market(cancelledId, {
-      resolved: true,
-      resolution: null,
-      endDate: new Date(fixtureTime - 86400000),
-    }),
-  ]);
-});
-afterAll(async () => cleanup());
+    });
+  });
 
-describe('prediction market list status filter', () => {
-  test('status=RESOLVED lists only resolved markets', async () => {
-    const body = await fetchList('?status=RESOLVED&limit=100&page=1');
-    const seen = ids(body);
-    expect(seen).toContain(resolvedYesId);
-    expect(seen).toContain(resolvedNoId);
-    expect(seen).not.toContain(activeId);
-    expect(seen).not.toContain(expiredId);
-    expect(seen).not.toContain(cancelledId);
+  test(cases.cancelled, async () => {
+    const body = await fetchList('?status=CANCELLED&limit=100');
+    expect(body.total).toBe(3);
+    expect(body.questions.map(({ id }) => id)).toEqual([
+      legacyVoid,
+      deactivated,
+      cancelled,
+    ]);
     for (const row of body.questions) {
-      expect(row.status).toBe('resolved');
-    }
-    expect(body.total).toBeGreaterThanOrEqual(2);
-  });
-
-  test('status=CANCELLED lists only the cancelled market', async () => {
-    const body = await fetchList('?status=CANCELLED&limit=100&page=1');
-    const seen = ids(body);
-    expect(seen).toContain(cancelledId);
-    expect(seen).not.toContain(activeId);
-    expect(seen).not.toContain(expiredId);
-    expect(seen).not.toContain(resolvedYesId);
-    expect(seen).not.toContain(resolvedNoId);
-    expect(body.questions.find((row) => row.id === cancelledId)?.status).toBe(
-      'cancelled'
-    );
-    expect(body.total).toBeGreaterThanOrEqual(1);
-  });
-
-  test('status=ACTIVE lists only the active market', async () => {
-    const body = await fetchList('?status=ACTIVE&limit=100&page=1');
-    const seen = ids(body);
-    expect(seen).toContain(activeId);
-    expect(seen).not.toContain(expiredId);
-    expect(seen).not.toContain(resolvedYesId);
-    expect(seen).not.toContain(resolvedNoId);
-    expect(seen).not.toContain(cancelledId);
-    expect(body.questions.find((row) => row.id === activeId)?.status).toBe(
-      'active'
-    );
-    expect(body.total).toBeGreaterThanOrEqual(1);
-  });
-
-  test('no status keeps the current open-list behavior', async () => {
-    const body = await fetchList('?limit=100&page=1');
-    const seen = ids(body);
-    expect(seen).toContain(activeId);
-    expect(seen).not.toContain(expiredId);
-    expect(seen).not.toContain(resolvedYesId);
-    expect(seen).not.toContain(resolvedNoId);
-    expect(seen).not.toContain(cancelledId);
-  });
-
-  test('unpaginated status=RESOLVED also lists only resolved markets', async () => {
-    const body = await fetchList('?status=RESOLVED');
-    const seen = ids(body);
-    expect(seen).toContain(resolvedYesId);
-    expect(seen).toContain(resolvedNoId);
-    expect(seen).not.toContain(activeId);
-    expect(seen).not.toContain(cancelledId);
-    for (const row of body.questions) {
-      expect(row.status).toBe('resolved');
+      expect(row).toMatchObject({
+        status: 'cancelled',
+        resolved: true,
+        resolution: null,
+      });
     }
   });
 
-  test('invalid status is still rejected with 400', async () => {
-    const response = await GET(
-      new NextRequest(
-        'http://localhost/api/markets/predictions?status=BOGUS&limit=10',
-        { headers: { 'x-forwarded-for': clientIp() } }
-      )
-    );
-    expect(response.status).toBe(400);
+  test(cases.active, async () => {
+    const body = await fetchList('?status=ACTIVE&page=1');
+    expect(body.total).toBe(1);
+    expect(body.questions[0]).toMatchObject({ id: active, status: 'active' });
   });
-});
+
+  test(cases.default, async () => {
+    const body = await fetchList('?limit=100');
+    expect(body.total).toBe(1);
+    expect(body.questions.map(({ id }) => id)).toEqual([active]);
+  });
+
+  test(cases.cache, async () => {
+    const originalActive = await fetchList('');
+    const originalResolved = await fetchList('?status=RESOLVED');
+    const originalCancelled = await fetchList('?status=CANCELLED');
+    for (const body of [originalActive, originalResolved, originalCancelled]) {
+      expect(body.total).toBeUndefined();
+    }
+    expect(originalActive.questions.map(({ id }) => id)).toEqual([active]);
+    expect(originalResolved.questions.map(({ id }) => id)).toEqual([yes, no]);
+    expect(originalCancelled.questions.map(({ id }) => id)).toEqual([
+      legacyVoid,
+      deactivated,
+      cancelled,
+    ]);
+
+    await dbWrite
+      .insert(markets)
+      .values([
+        market('m1993-new-active'),
+        market('m1993-new-resolved', { resolved: true, resolution: true }),
+        market('m1993-new-cancelled', { resolved: true }),
+      ]);
+    expect(await fetchList('?status=RESOLVED')).toEqual(originalResolved);
+    expect(await fetchList('?status=CANCELLED')).toEqual(originalCancelled);
+    expect(await fetchList('?status=ACTIVE')).toEqual(originalActive);
+
+    await invalidateMarketsApiPredictionsList();
+    expect((await fetchList('')).count).toBe(2);
+    expect((await fetchList('?status=RESOLVED')).count).toBe(3);
+    expect((await fetchList('?status=CANCELLED')).count).toBe(4);
+  });
+
+  test(cases.detail, async () => {
+    const response = await getDetail(request(`/${deactivated}`), {
+      params: Promise.resolve({ id: deactivated }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      market: {
+        id: deactivated,
+        status: 'resolved',
+        resolved: true,
+        resolution: null,
+      },
+    });
+  });
+
+  test(cases.invalid, async () => {
+    expect((await GET(request('?status=BOGUS&limit=10'))).status).toBe(400);
+  });
+} else {
+  test('prediction market filters on a verified database lease', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'prediction-market-list-status',
+      file: 'packages/testing/integration/prediction-market-list-status-filter.integration.test.ts',
+      cases: Object.values(cases),
+    });
+  }, 60_000);
+}
