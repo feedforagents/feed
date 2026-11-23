@@ -68,6 +68,8 @@ export interface ChatParticipant {
   displayName: string;
   username?: string;
   profileImageUrl?: string;
+  /** False for departed members, who stay listed only so their old messages keep a name. */
+  isActive?: boolean;
 }
 
 export interface ChatDetails {

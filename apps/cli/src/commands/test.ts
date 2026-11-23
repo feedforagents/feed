@@ -5,7 +5,6 @@
  *
  * Commands:
  *   load     - Run load tests against the server
- *   a2a      - Run A2A protocol stress tests
  *   scambench-seed - Seed a ScamBench scenario into Feed chats
  */
 
@@ -24,15 +23,10 @@ USAGE:
 
 COMMANDS:
   load      Run load tests against the server
-  a2a       Run A2A protocol stress tests
   scambench-seed  Seed a ScamBench scenario into Feed chats
 
 OPTIONS (load):
   --scenario=NAME   Test scenario: light, normal, heavy, stress (default: normal)
-  --url=URL         Base URL (default: http://localhost:3000)
-
-OPTIONS (a2a):
-  --scenario=NAME   Test scenario: light, normal, heavy, rate-limit, coalition (default: normal)
   --url=URL         Base URL (default: http://localhost:3000)
 
 OPTIONS (scambench-seed):
@@ -44,7 +38,6 @@ OPTIONS (scambench-seed):
 EXAMPLES:
   feed test load                       Normal load test
   feed test load --scenario=heavy      Heavy load test
-  feed test a2a --scenario=rate-limit  Test rate limiting
   feed test scambench-seed --scenario-id=group-to-dm-asymmetric-info --user-id=123
 `);
 }
@@ -223,105 +216,6 @@ async function runLoadTest(args: ReturnType<typeof parseArgs>): Promise<void> {
   }
 }
 
-async function runA2AStressTest(
-  args: ReturnType<typeof parseArgs>
-): Promise<void> {
-  const scenario = getOption(args, 'scenario') || 'normal';
-  const baseUrl = getOption(args, 'url') || 'http://localhost:3000';
-
-  const validScenarios = [
-    'light',
-    'normal',
-    'heavy',
-    'rate-limit',
-    'coalition',
-  ];
-  if (!validScenarios.includes(scenario)) {
-    logger.fail(`Invalid scenario: ${scenario}`);
-    console.log(`Valid scenarios: ${validScenarios.join(', ')}`);
-    process.exit(1);
-  }
-
-  logger.header('A2A Protocol Stress Test');
-  console.log(`Scenario: ${scenario}`);
-  console.log(`Base URL: ${baseUrl}\n`);
-
-  // Import dynamically
-  const { LoadTestSimulator, A2A_TEST_SCENARIOS } = await import(
-    '@feed/testing'
-  );
-
-  const scenarioKey = scenario
-    .toUpperCase()
-    .replace('-', '_') as keyof typeof A2A_TEST_SCENARIOS;
-  const config = A2A_TEST_SCENARIOS[scenarioKey];
-
-  console.log(`Concurrent Agents: ${config.concurrentUsers}`);
-  console.log(`Duration: ${config.durationSeconds}s`);
-  console.log(`Max RPS: ${config.maxRps || 'unlimited'}\n`);
-
-  // Check A2A endpoint
-  const response = await fetch(`${baseUrl}/api/a2a`);
-  const data = await response.json();
-
-  if (data.service !== 'Feed A2A Protocol') {
-    logger.fail('A2A endpoint not responding correctly');
-    process.exit(1);
-  }
-  console.log(`✅ A2A endpoint active (version: ${data.version})\n`);
-
-  // Run test
-  const simulator = new LoadTestSimulator(baseUrl);
-
-  process.on('SIGINT', () => {
-    console.log('\n\n⚠️  Stopping test...');
-    simulator.stop();
-  });
-
-  const result = await simulator.runTest(config);
-
-  // Display results
-  console.log('\n═══════════════════════════════════════');
-  console.log('  A2A Stress Test Results');
-  console.log('═══════════════════════════════════════\n');
-
-  console.log(`Total Requests:      ${result.totalRequests.toLocaleString()}`);
-  console.log(
-    `Successful:          ${result.successfulRequests.toLocaleString()} (${(result.throughput.successRate * 100).toFixed(2)}%)`
-  );
-  console.log(`Failed:              ${result.failedRequests.toLocaleString()}`);
-  console.log(
-    `Throughput:          ${result.throughput.requestsPerSecond.toFixed(2)} req/s`
-  );
-
-  console.log('\nResponse Times:');
-  console.log(`  Mean:              ${result.responseTime.mean.toFixed(2)}ms`);
-  console.log(`  95th Percentile:   ${result.responseTime.p95.toFixed(2)}ms`);
-  console.log(`  99th Percentile:   ${result.responseTime.p99.toFixed(2)}ms`);
-
-  // Rate limiting analysis
-  type LoadTestError = { endpoint: string; error: string; count: number };
-  const rateLimitErrors = result.errors.filter(
-    (e: LoadTestError) =>
-      e.error.includes('429') || e.error.toLowerCase().includes('rate limit')
-  );
-  const totalRateLimitErrors = rateLimitErrors.reduce(
-    (sum: number, e: LoadTestError) => sum + e.count,
-    0
-  );
-
-  console.log('\nRate Limiting:');
-  console.log(`  Rate Limit Errors: ${totalRateLimitErrors.toLocaleString()}`);
-
-  if (scenario === 'rate-limit') {
-    if (totalRateLimitErrors > 0) {
-      console.log('  ✅ Rate limiting is WORKING (expected in this test)');
-    } else {
-      console.log('  ⚠️  Rate limiting may NOT be working');
-    }
-  }
-}
-
 /**
  * Main entry point for test domain commands.
  *
@@ -338,10 +232,6 @@ export async function runTestCommand(args: string[]): Promise<void> {
   switch (parsed.command) {
     case 'load':
       await runLoadTest(parsed);
-      break;
-
-    case 'a2a':
-      await runA2AStressTest(parsed);
       break;
 
     case 'scambench-seed':

@@ -54,7 +54,6 @@
     "hf:collect": "bun run apps/cli/src/index.ts model collect-data",
     "hf:upload": "bun run apps/cli/src/index.ts model upload-dataset",
     "stress-test": "bun run apps/cli/src/index.ts test load",
-    "stress-test:a2a": "bun run apps/cli/src/index.ts test a2a",
     "prepare": "husky",
     "docs:generate": "bun scripts/docs/generate_all_docs.ts",
     "skills:generate": "bun run scripts/generate-skills-md.ts",

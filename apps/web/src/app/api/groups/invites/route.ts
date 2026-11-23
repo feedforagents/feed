@@ -19,6 +19,7 @@ import {
 } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 
 /**
  * GET /api/groups/invites
@@ -26,6 +27,7 @@ import type { NextRequest } from 'next/server';
  */
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const user = await authenticate(request);
+  const hiddenInviters = await loadViewerExcludedAuthorIds(user.userId);
 
   const invites = await asUser(user, async (db) => {
     // Get pending invites
@@ -39,12 +41,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       },
     });
 
-    if (pendingInvites.length === 0) {
+    const visibleInvites = pendingInvites.filter(
+      (invite) => !hiddenInviters.has(invite.invitedBy)
+    );
+
+    if (visibleInvites.length === 0) {
       return [];
     }
 
     // Fetch group details
-    const groupIds = [...new Set(pendingInvites.map((inv) => inv.groupId))];
+    const groupIds = [...new Set(visibleInvites.map((inv) => inv.groupId))];
     const groups = await db.group.findMany({
       where: {
         id: { in: groupIds },
@@ -74,7 +80,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     );
     const groupMap = new Map(groups.map((g) => [g.id, g]));
 
-    return pendingInvites.map((invite) => {
+    return visibleInvites.map((invite) => {
       const group = groupMap.get(invite.groupId);
       return {
         inviteId: invite.id,
