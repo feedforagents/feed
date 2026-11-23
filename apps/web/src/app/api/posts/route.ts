@@ -804,8 +804,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       originals.forEach((p) => followingOriginalPostsMap.set(p.id, p));
     }
 
+    const visibleFollowingPosts = filteredPosts.filter((post) => {
+      const original = post.originalPostId
+        ? followingOriginalPostsMap.get(post.originalPostId)
+        : undefined;
+      return (
+        post.content !== '' ||
+        !original ||
+        !excludedUserIds.has(original.authorId)
+      );
+    });
+
     // Format following posts synchronously using lookup maps
-    const formattedFollowingPosts = filteredPosts.map((post: Post) => {
+    const formattedFollowingPosts = visibleFollowingPosts.map((post: Post) => {
       const originalPost = post.originalPostId
         ? (followingOriginalPostsMap.get(post.originalPostId) ?? null)
         : null;
@@ -813,8 +824,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const user = post.authorId ? userMap.get(post.authorId) : undefined;
 
       // Build repost metadata from originalPost if it exists (clean, no text parsing)
+      // Keep quote commentary without embedding an excluded original.
       const repostMetadata: Record<string, unknown> = {};
-      if (postsWithOriginal.originalPostId && postsWithOriginal.originalPost) {
+      if (
+        postsWithOriginal.originalPostId &&
+        postsWithOriginal.originalPost &&
+        !excludedUserIds.has(postsWithOriginal.originalPost.authorId)
+      ) {
         const originalPost = postsWithOriginal.originalPost;
         const isQuote = post.content && post.content.length > 0;
 
@@ -917,6 +933,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const feedVisibility: PostFeedVisibilityOptions = {
     excludedAuthorIds: viewerExcludedAuthorIds,
     excludeDeadReposts: true,
+    excludeModeratedReposts: true,
   };
 
   // Get posts from database with cursor-based pagination
@@ -1008,10 +1025,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // Defense in depth: the page queries above already exclude this viewer's
   // blocked/muted/blocking authors in SQL (see feedVisibility). Keep the
   // in-memory moderation filter so no branch can leak a hidden post.
+  const viewerExcludedAuthorIdsSet = new Set(viewerExcludedAuthorIds);
   if (viewerExcludedAuthorIds.length > 0) {
-    const excludedUserIds = new Set(viewerExcludedAuthorIds);
     postsResult = postsResult.filter(
-      (post) => !excludedUserIds.has(post.authorId)
+      (post) => !viewerExcludedAuthorIdsSet.has(post.authorId)
     );
   }
 
@@ -1044,6 +1061,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     if (post.originalPostId) {
       const hasOriginalPost = post.originalPost && !post.originalPost.deletedAt;
       const isQuote = post.content && post.content.length > 0;
+
+      // A simple repost of an original by an author the viewer must not
+      // see is dropped — its whole content is the original. The SQL
+      // visibility conditions already exclude these before the page is
+      // cut; this is the in-memory net. Quotes keep their row and render
+      // with originalPost: null below.
+      if (
+        !isQuote &&
+        post.originalPost &&
+        viewerExcludedAuthorIdsSet.has(post.originalPost.authorId)
+      ) {
+        return false;
+      }
 
       // For quote posts, keep them even if original is deleted (user has commentary)
       // For simple reposts, filter out if original is deleted
@@ -1290,7 +1320,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const originalPost = post.originalPost;
 
       // If original post exists and is not deleted
-      if (originalPost && !originalPost.deletedAt) {
+      // (or by an author the viewer must not see — the same treatment
+      // as a deleted original below)
+      if (
+        originalPost &&
+        !originalPost.deletedAt &&
+        !viewerExcludedAuthorIdsSet.has(originalPost.authorId)
+      ) {
         // Get original post author info
         const originalUser = userMap.get(originalPost.authorId);
         const originalActor = actorMap.get(originalPost.authorId);
@@ -1348,7 +1384,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         };
       }
 
-      // If original post is deleted but this is a quote post, return with null originalPost
+      // If original post is deleted (or by an author the viewer must not
+      // see) but this is a quote post, return with null originalPost
       if (isQuote) {
         return {
           ...basePost,

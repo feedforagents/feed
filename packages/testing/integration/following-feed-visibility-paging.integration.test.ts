@@ -708,7 +708,7 @@ describe('GET /api/posts?following=true author exclusions', () => {
       await follow(sentinel.userId, normalId, existing);
       await insertMute(sentinel.userId, mutedId, existing);
       expect(await followingIds(sentinel)).toEqual(visibleIds.slice(0, 2));
-      const cacheKey = `${sentinel.userId}:2:offset:0:excl:${mutedId}`;
+      const cacheKey = `${sentinel.userId}:2:offset:0:excl:v2:${mutedId}`;
       const cached = await getCache<Array<{ id: string }>>(cacheKey, {
         namespace: CACHE_KEYS.POSTS_FOLLOWING,
       });
