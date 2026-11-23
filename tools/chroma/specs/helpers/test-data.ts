@@ -53,9 +53,6 @@ export const ROUTES = {
   NFT: '/nft',
   NFT_BY_TOKEN: (id: string) => `/nft/${id}`,
 
-  // Research
-  RESEARCH: '/research',
-
   // Content (additional)
   COMMENT_BY_ID: (id: string) => `/comment/${id}`,
   USER_BY_HANDLE: (handle: string) => `/u/${handle}`,
