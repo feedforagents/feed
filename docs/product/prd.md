@@ -433,6 +433,15 @@ requests. A monthly buyer-key cap alone cannot demonstrate that behavior.
 Ollama runs on an isolated local deployment can verify timing and visible
 updates. Paid Surplus spend requires separate settlement evidence.
 
+For the November 2026 Phase 0 closeout, the maintainer approved the completed
+24-hour ai-laptop run, with OpenRouter chat inference and local embeddings, as
+the acceptance evidence for reliability, visibility, and spend controls.
+Phase 1 may start after the separately reviewed `0007` reservation ledger and
+`0008` market recovery schema are verified on staging. Hosted paid inference
+and market recovery remain paused until the provider-backed request bound,
+the effective $100 UTC cap, and staging Surplus charges are verified under
+D-25.
+
 ## 15. Success metrics (first 60 days)
 
 - **Activation:** % of Join-sheet opens that reach a verified account (target ≥ 40%).

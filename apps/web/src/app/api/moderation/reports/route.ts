@@ -109,7 +109,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db } from '@feed/db';
+import { db, sql } from '@feed/db';
 import {
   CreateReportSchema,
   GetReportsSchema,
@@ -155,25 +155,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     if (!reportedUser) {
       throw new NotFoundError('User', data.reportedUserId);
     }
-
-    // Check for duplicate report (same reporter + reported user + category within 24 hours)
-    const recentReport = await db.report.findFirst({
-      where: {
-        reporterId: authUser.userId,
-        reportedUserId: data.reportedUserId,
-        category: data.category,
-        createdAt: {
-          gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
-        },
-      },
-    });
-
-    if (recentReport) {
-      throw new BusinessLogicError(
-        'You have already reported this user for this reason recently',
-        'DUPLICATE_REPORT'
-      );
-    }
   }
 
   // Validate reported post exists if reporting a post
@@ -186,25 +167,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     if (!reportedPost) {
       throw new NotFoundError('Post', data.reportedPostId);
     }
-
-    // Check for duplicate report
-    const recentReport = await db.report.findFirst({
-      where: {
-        reporterId: authUser.userId,
-        reportedPostId: data.reportedPostId,
-        category: data.category,
-        createdAt: {
-          gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
-        },
-      },
-    });
-
-    if (recentReport) {
-      throw new BusinessLogicError(
-        'You have already reported this post for this reason recently',
-        'DUPLICATE_REPORT'
-      );
-    }
   }
 
   // Determine priority based on category
@@ -215,21 +177,79 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     priority = 'low';
   }
 
-  // Create report
-  const report = await db.report.create({
-    data: {
-      id: await generateSnowflakeId(),
-      reporterId: authUser.userId,
-      reportedUserId: data.reportedUserId || null,
-      reportedPostId: data.reportedPostId || null,
-      reportType: data.reportType,
-      category: data.category,
-      reason: data.reason,
-      evidence: data.evidence || null,
-      priority,
-      status: 'pending',
-      updatedAt: new Date(),
-    },
+  // Duplicate detection is check-then-create: two concurrent submissions for
+  // the same reporter, target and category could both read "no recent report"
+  // and both insert, leaving duplicate rows in the moderation queue — for user
+  // reports each duplicate would also run its own LLM evaluation and auto-ban
+  // pass. Serialize the check and the insert with a transaction-scoped
+  // advisory lock, the same pattern as the follow/block pair lock in
+  // packages/db/src/moderation/filters.ts: the second transaction waits,
+  // reads the first row, and raises the documented DUPLICATE_REPORT instead
+  // of inserting. The key is reporter + category only — CreateReportSchema
+  // accepts a payload carrying reportedUserId, reportedPostId or both, so a
+  // per-target key would let a mixed-target request and a single-target
+  // request hold different locks while running the same post predicate.
+  // The lock must be the first statement of the transaction.
+  const report = await db.$transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext(${'report-dedup:' + authUser.userId + ':' + data.category}))`
+    );
+
+    if (data.reportedUserId) {
+      const recentReport = await tx.report.findFirst({
+        where: {
+          reporterId: authUser.userId,
+          reportedUserId: data.reportedUserId,
+          category: data.category,
+          createdAt: {
+            gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
+          },
+        },
+      });
+
+      if (recentReport) {
+        throw new BusinessLogicError(
+          'You have already reported this user for this reason recently',
+          'DUPLICATE_REPORT'
+        );
+      }
+    }
+
+    if (data.reportedPostId) {
+      const recentReport = await tx.report.findFirst({
+        where: {
+          reporterId: authUser.userId,
+          reportedPostId: data.reportedPostId,
+          category: data.category,
+          createdAt: {
+            gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
+          },
+        },
+      });
+
+      if (recentReport) {
+        throw new BusinessLogicError(
+          'You have already reported this post for this reason recently',
+          'DUPLICATE_REPORT'
+        );
+      }
+    }
+
+    return tx.report.create({
+      data: {
+        id: await generateSnowflakeId(),
+        reporterId: authUser.userId,
+        reportedUserId: data.reportedUserId || null,
+        reportedPostId: data.reportedPostId || null,
+        reportType: data.reportType,
+        category: data.category,
+        reason: data.reason,
+        evidence: data.evidence || null,
+        priority,
+        status: 'pending',
+        updatedAt: new Date(),
+      },
+    });
   });
 
   logger.info(

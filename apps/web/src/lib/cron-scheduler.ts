@@ -144,6 +144,25 @@ function matchesCronField(field: string, value: number): boolean {
   return parseInt(field, 10) === value;
 }
 
+async function readCronOutcome(
+  response: Response
+): Promise<'triggered' | 'failed' | 'skipped'> {
+  if (!response.ok) return 'failed';
+  if (response.headers.get('content-type')?.startsWith('application/json')) {
+    try {
+      const body: unknown = await response.json();
+      if (body && typeof body === 'object') {
+        if ('success' in body && body.success === false) return 'failed';
+        if ('skipped' in body && body.skipped === true) return 'skipped';
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+  // Keep reporting successful deliveries that have no explicit job outcome.
+  return 'triggered';
+}
+
 /**
  * Trigger additional crons that should run at the current time.
  * Called from game-tick to ensure all crons run even on staging.
@@ -189,23 +208,37 @@ export async function triggerScheduledCrons(now = new Date()): Promise<{
         'CronScheduler'
       );
 
+      // Funding validates the exact UTC boundary, even if the tick starts
+      // partway through the due minute.
+      const isFundingJob = cron.path === '/api/cron/perp-funding';
+      const scheduledTime = isFundingJob
+        ? Math.floor(now.getTime() / 60_000) * 60_000
+        : now.getTime();
       const response = await fetch(`${baseUrl}${cron.path}`, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${cronSecret}`,
           'User-Agent': 'feed-internal-cron-scheduler/1.0',
-          ...(localnet
-            ? { 'X-Cloudflare-Cron-Time': String(now.getTime()) }
+          ...(localnet || isFundingJob
+            ? { 'X-Cloudflare-Cron-Time': String(scheduledTime) }
             : {}),
         },
         // Don't wait too long for each cron
         signal: AbortSignal.timeout(timeoutMs),
       });
 
-      if (response.ok) {
+      const outcome = await readCronOutcome(response);
+      if (outcome === 'triggered') {
         if (report) triggered.push(cron.path);
         logger.info(
           `✓ Cron triggered successfully: ${cron.path}`,
+          { status: response.status },
+          'CronScheduler'
+        );
+      } else if (outcome === 'skipped') {
+        if (report) skipped.push(cron.path);
+        logger.info(
+          `Cron skipped: ${cron.path}`,
           { status: response.status },
           'CronScheduler'
         );

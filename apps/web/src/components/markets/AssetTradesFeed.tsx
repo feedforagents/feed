@@ -737,6 +737,10 @@ function BalanceTradeContent({
   density: 'default' | 'compact';
 }) {
   const compact = density === 'compact';
+  const amount =
+    trade.transactionType === 'pred_buy'
+      ? Math.abs(trade.amount)
+      : trade.amount;
   const getActionLabel = (type: string) => {
     switch (type) {
       case 'pred_buy':
@@ -762,7 +766,7 @@ function BalanceTradeContent({
         </span>
       </div>
       <div className="flex items-center gap-2 text-muted-foreground text-xs">
-        <span>Amount: {formatCurrency(trade.amount)}</span>
+        <span>Amount: {formatCurrency(amount)}</span>
         {trade.side && (
           <>
             <span>•</span>

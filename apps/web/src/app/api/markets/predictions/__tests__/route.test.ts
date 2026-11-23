@@ -88,6 +88,7 @@ mock.module('@feed/core/markets/prediction', () => ({
   PredictionDbAdapter: class {},
   PredictionMarketService: class {
     countUnresolvedMarkets = async () => 2;
+    countMarketsByStatus = async () => 2;
     listMarkets = async ({ offset }: { limit: number; offset: number }) =>
       pages[offset] ?? [];
     listUserPositions = async () => positions;

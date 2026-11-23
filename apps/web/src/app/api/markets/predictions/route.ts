@@ -131,7 +131,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     );
   }
 
-  const { userId } = queryParse.data;
+  const { userId, status } = queryParse.data;
   const usePagination = searchParams.has('limit') || searchParams.has('page');
   const page = Math.max(1, queryParse.data.page ?? 1);
   const limit = Math.min(100, Math.max(1, queryParse.data.limit ?? 20));
@@ -142,14 +142,20 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   let total: number | undefined;
 
   if (usePagination) {
-    total = await service.countUnresolvedMarkets();
+    total = await service.countMarketsByStatus(status ?? 'ACTIVE');
     const offset = (page - 1) * limit;
-    markets = await service.listMarkets({ limit, offset });
+    markets = await service.listMarkets({ limit, offset, status });
   } else {
-    markets = await getCacheOrFetch('all', () => service.listMarkets(), {
-      namespace: CACHE_KEYS.MARKETS_API_PREDICTIONS_LIST,
-      ttl: DEFAULT_TTLS.MARKETS_API_PREDICTIONS_LIST,
-    });
+    const key =
+      status === 'RESOLVED' || status === 'CANCELLED' ? status : 'all';
+    markets = await getCacheOrFetch(
+      key,
+      () => service.listMarkets({ status }),
+      {
+        namespace: CACHE_KEYS.MARKETS_API_PREDICTIONS_LIST,
+        ttl: DEFAULT_TTLS.MARKETS_API_PREDICTIONS_LIST,
+      }
+    );
   }
 
   const marketMap = new Map(markets.map((m) => [m.id, m]));
@@ -196,6 +202,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   }
 
   const questionsData = markets.map((m) => {
+    const marketStatus = m.resolved
+      ? m.resolution == null
+        ? 'cancelled'
+        : 'resolved'
+      : 'active';
     const yesShares = m.yesShares;
     const noShares = m.noShares;
     const yesProb = PredictionPricing.getCurrentPrice(
@@ -213,13 +224,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       // Frontend expects 'text' field for the question text
       text: m.question,
       question: m.question, // Also include as 'question' for backward compatibility
-      status: m.status ?? (m.resolved ? 'resolved' : 'active'),
+      status: m.status ?? marketStatus,
       resolution: m.resolution,
       resolved: m.resolved,
       // Frontend expects 'resolutionDate' for the end date
       resolutionDate: toISOOrNull(m.endDate),
       endDate: toISOOrNull(m.endDate), // Also include as 'endDate'
       createdDate: toISOOrNull(m.createdAt),
+      // Scenario of the market's question (null when none is linked)
+      scenario: m.scenario ?? null,
       yesShares,
       noShares,
       yesProbability: yesProb,

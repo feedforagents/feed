@@ -27,6 +27,35 @@ test('article grounding accepts capitalized lead-ins without allowing invented n
   });
 });
 
+test('article grounding counts names after stripping sentence lead-ins', () => {
+  const article =
+    'The Jeff filing drew comments. In Feed, traders compared the filing with earlier statements. Recent Feed posts revisited the filing.';
+  expect(checkEntityConsistency(article)).toMatchObject({ passed: true });
+  expect(
+    checkEntityConsistency(`${article} On New Jupiter, trading resumed.`)
+  ).toMatchObject({
+    passed: false,
+    reasons: ['2 unknown entities: Recent Feed, On New Jupiter'],
+  });
+});
+
+test('article grounding counts the same normalized unknown name once', () => {
+  const article =
+    'For Wall Street, the change looked permanent. Wall Street reconsidered.';
+  expect(checkEntityConsistency(article)).toEqual({
+    passed: true,
+    score: 1,
+    reasons: [],
+  });
+  expect(
+    checkEntityConsistency(`${article} On New Jupiter, trading resumed.`)
+  ).toEqual({
+    passed: false,
+    score: 0,
+    reasons: ['2 unknown entities: For Wall Street, On New Jupiter'],
+  });
+});
+
 // ─── validateGrounding: Edge Cases ──────────────────────────────────────────
 
 describe('validateGrounding — edge cases', () => {

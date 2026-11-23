@@ -40,7 +40,7 @@ DOMAINS:
   train     Training operations (list, pipeline, archetype, collect)
   model     Model management (list, upload, collect-data)
   game      Game control (start, pause, status, generate, validate)
-  test      Load & stress testing (load, a2a)
+  test      Load testing and ScamBench scenario seeding
 
 EXAMPLES:
   feed db start                 Start PostgreSQL container

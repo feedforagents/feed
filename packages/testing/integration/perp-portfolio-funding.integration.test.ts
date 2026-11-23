@@ -18,7 +18,7 @@ import {
   createUserWalletAdapter,
   FEE_CONFIG,
 } from '@feed/engine';
-import { generateSnowflakeId } from '@feed/shared';
+import { floorPoints, generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
 import { GET } from '../../../apps/web/src/app/api/users/[userId]/portfolio-breakdown/route';
 import { TradingPerformanceService } from '../../api/src/services/trading-performance-service';
@@ -186,10 +186,13 @@ for (const dominant of ['long', 'short'] as const) {
         expect(remaining!.size).toBe(size / 2);
         expect(remaining!.fundingPaid).toBeCloseTo(funded!.fundingPaid / 2, 10);
         const afterPartial = await snapshot();
+        // Close proceeds settle rounded down to a hundredth (PRD §9.1).
         expect(afterPartial.wallet - after.wallet).toBeCloseTo(
-          Math.max(
-            0,
-            partial.marginPaid! + partial.realizedPnL! - partial.feePaid
+          floorPoints(
+            Math.max(
+              0,
+              partial.marginPaid! + partial.realizedPnL! - partial.feePaid
+            )
           ),
           2
         );

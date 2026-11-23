@@ -59,13 +59,7 @@ import {
   worldEvents,
   worldFacts,
 } from '@feed/db';
-import {
-  bootstrapGameIfNeeded,
-  executeGameTick,
-  StaticDataRegistry,
-} from '@feed/engine';
 import { logger } from '@feed/shared';
-import { Actions } from '../packages/agents/src/autonomous/templates/multi-step-decision';
 import {
   getLLMCallCallback,
   type LLMCallInput,
@@ -284,15 +278,6 @@ interface CycleSnapshot {
   timeframeBreakdown: Record<string, number>;
 }
 
-const CORE_NPC_ACTIONS = [
-  Actions.TRADE,
-  Actions.POST,
-  Actions.COMMENT,
-  Actions.REPLY_COMMENT,
-  Actions.LIKE,
-  Actions.REPOST,
-] as const;
-
 const DAG_TRACE_DIR = path.resolve(process.cwd(), 'runs', 'dag-traces');
 
 function isJsonRecord(value: unknown): value is JsonRecord {
@@ -425,10 +410,30 @@ Options:
 
 const cycles = Math.max(1, Number.parseInt(args.cycles, 10) || 1);
 const rssMode = args.rss === 'live' ? 'live' : 'snapshot';
-const npcTradeProbability = Math.min(
-  1,
-  Math.max(0, Number.parseFloat(args['npc-trade-probability']) || 0.1)
+const requestedTradeProbability = Number.parseFloat(
+  args['npc-trade-probability']
 );
+const npcTradeProbability = Number.isNaN(requestedTradeProbability)
+  ? 0.1
+  : Math.min(1, Math.max(0, requestedTradeProbability));
+
+// NPC trading reads its environment when the engine module initializes.
+process.env.NPC_TRADE_PROBABILITY = npcTradeProbability.toString();
+const { bootstrapGameIfNeeded, executeGameTick, StaticDataRegistry } =
+  await import('@feed/engine');
+const { Actions } = await import(
+  '../packages/agents/src/autonomous/templates/multi-step-decision'
+);
+
+const CORE_NPC_ACTIONS = [
+  Actions.TRADE,
+  Actions.POST,
+  Actions.COMMENT,
+  Actions.REPLY_COMMENT,
+  Actions.LIKE,
+  Actions.REPOST,
+] as const;
+
 const runId = new Date().toISOString().replace(/[:.]/g, '-');
 const outputDir =
   args.out && args.out.trim().length > 0
@@ -456,7 +461,6 @@ process.env.NODE_ENV ??= 'development';
 process.env.DEPLOYMENT_ENV ??= 'production';
 process.env.ENABLE_INTERNAL_CRON_SCHEDULER ??= 'false';
 process.env.REDIRECT_CRON_STAGING = 'false';
-process.env.NPC_TRADE_PROBABILITY = npcTradeProbability.toString();
 
 function writeJson(filePath: string, value: unknown): void {
   mkdirSync(path.dirname(filePath), { recursive: true });

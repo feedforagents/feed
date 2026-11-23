@@ -37,7 +37,12 @@ import {
   executeLikeComment,
   executeLikePost,
   executeMarkNotificationsRead,
+  executeTool,
 } from '../../mcp/src/handlers/tool-handlers';
+import type {
+  CreatePostResult,
+  UpdateProfileResult,
+} from '../../mcp/src/types/mcp';
 import { assertDisposableAgentFollowDatabase } from './helpers/agent-follow-database';
 
 const userIds: string[] = [];
@@ -754,5 +759,59 @@ describe('MCP tool handlers', () => {
     expect(
       await db.select().from(comments).where(eq(comments.postId, deletedPostId))
     ).toHaveLength(0);
+  });
+
+  it('validates update_profile with the shared profile schema', async () => {
+    const [before] = await db
+      .select({
+        username: users.username,
+        displayName: users.displayName,
+        profileImageUrl: users.profileImageUrl,
+      })
+      .from(users)
+      .where(eq(users.id, agentUserId));
+
+    const invalidArgs: Record<string, string>[] = [
+      { username: 'no spaces allowed' },
+      { username: 'ab' },
+      { displayName: 'x'.repeat(101) },
+      { profileImageUrl: 'javascript:alert(1)' },
+    ];
+    for (const args of invalidArgs) {
+      // assert.rejects fails cleanly if the call resolves; bun's expect().rejects hangs instead.
+      await assert.rejects(executeTool('update_profile', args, agent()));
+    }
+    const [afterRejected] = await db
+      .select({
+        username: users.username,
+        displayName: users.displayName,
+        profileImageUrl: users.profileImageUrl,
+      })
+      .from(users)
+      .where(eq(users.id, agentUserId));
+    expect(afterRejected).toEqual(before);
+
+    const ok = (await executeTool(
+      'update_profile',
+      { displayName: '  MCP Tester  ' },
+      agent()
+    )) as UpdateProfileResult;
+    expect(ok.profile.displayName).toBe('MCP Tester');
+  });
+
+  it('stores create_post as an ordinary post even when type is article', async () => {
+    const created = (await executeTool(
+      'create_post',
+      { content: 'agent post asking to be an article', type: 'article' },
+      agent()
+    )) as CreatePostResult;
+    postIds.push(created.postId);
+
+    const [row] = await db
+      .select({ type: posts.type, authorId: posts.authorId })
+      .from(posts)
+      .where(eq(posts.id, created.postId));
+    // Articles belong to the news jobs (PRD §8.2 lists text-only create_post).
+    expect(row).toEqual({ type: 'post', authorId: agentUserId });
   });
 });

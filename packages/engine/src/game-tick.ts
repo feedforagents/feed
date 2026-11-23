@@ -101,6 +101,7 @@ import {
 // Note: ActorSocialActions, FollowingMechanics, processNPCSocialEngagements,
 // npcSocialEngagementService moved to npc-tick
 import { broadcastToChannel } from './services/realtime-broadcaster';
+import { getLatestTrendingCalculation } from './services/tag-service';
 import type { TradingExecutionResult } from './types/market-decisions';
 import { calculateEstimatedCost } from './types/token-stats';
 import { getGameDayNumber, toSafeDayNumber } from './utils/date-utils';
@@ -1139,9 +1140,13 @@ async function bootstrapContentIfNeeded(_timestamp: Date): Promise<void> {
   const relationshipCount = Number(relationshipResult[0]?.count ?? 0);
 
   const MIN_TRENDING = 5;
+  // A completed empty calculation is intentional. The scheduled calculation
+  // owns refreshes after the first publication.
+  const needsTrending =
+    trendingCount < MIN_TRENDING &&
+    !(await getLatestTrendingCalculation())?.recorded;
 
-  // If we have enough of everything, nothing to do
-  if (trendingCount >= MIN_TRENDING && relationshipCount > 0) {
+  if (!needsTrending && relationshipCount > 0) {
     return;
   }
 
@@ -1150,7 +1155,7 @@ async function bootstrapContentIfNeeded(_timestamp: Date): Promise<void> {
     {
       currentTrending: trendingCount,
       currentRelationships: relationshipCount,
-      needTrending: trendingCount < MIN_TRENDING,
+      needTrending: needsTrending,
       needRelationships: relationshipCount === 0,
     },
     'GameTick'
@@ -1162,7 +1167,7 @@ async function bootstrapContentIfNeeded(_timestamp: Date): Promise<void> {
   }
 
   // Bootstrap trending if needed (requires posts and tags)
-  if (trendingCount < MIN_TRENDING) {
+  if (needsTrending) {
     await bootstrapTrending();
   }
 

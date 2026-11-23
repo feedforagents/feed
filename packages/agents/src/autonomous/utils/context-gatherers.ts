@@ -42,7 +42,7 @@ import {
   users,
   worldEvents,
 } from '@feed/db';
-import { StaticDataRegistry } from '@feed/engine';
+import { FEE_CONFIG, StaticDataRegistry } from '@feed/engine';
 import { logger } from '../../shared/logger';
 import type {
   AgentMemoryEntry,
@@ -103,7 +103,7 @@ export async function getPredictionMarkets(): Promise<
       yesPrice,
       noPrice,
       volume: yesShares + noShares,
-      maxSafeBet: maxSafeBuy(yesShares, noShares),
+      maxSafeBet: maxSafeBuy(yesShares, noShares, FEE_CONFIG.TRADING_FEE_RATE),
       endDate: m.endDate.toISOString(),
     };
   });
