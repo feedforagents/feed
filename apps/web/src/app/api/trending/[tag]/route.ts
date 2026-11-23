@@ -58,6 +58,8 @@
 
 import {
   addPublicReadHeaders,
+  countReachablePostComments,
+  countVisiblePostComments,
   publicRateLimit,
   withErrorHandling,
 } from '@feed/api';
@@ -133,6 +135,14 @@ export const GET = withErrorHandling(async function GET(
       const actor = StaticDataRegistry.getActor(post.authorId);
       const org = StaticDataRegistry.getOrganization(post.authorId);
 
+      // The card must promise only the comments the detail screen can
+      // show for this viewer (#1994 rule): the raw row count also includes
+      // soft-deleted comments and replies under a hidden parent.
+      const reachableCommentCount = await countReachablePostComments(
+        post.id,
+        []
+      );
+
       const [user, likeCount, commentCount, shareCount, userLike, userShare] =
         authUser && authUser.userId
           ? await asUser(authUser, async (db) => {
@@ -150,9 +160,11 @@ export const GET = withErrorHandling(async function GET(
                 db.reaction.count({
                   where: { postId: post.id, type: 'like' },
                 }),
-                db.comment.count({
-                  where: { postId: post.id },
-                }),
+                countVisiblePostComments(
+                  post.id,
+                  authUser.userId,
+                  reachableCommentCount
+                ),
                 db.share.count({
                   where: { postId: post.id },
                 }),
@@ -185,9 +197,7 @@ export const GET = withErrorHandling(async function GET(
                 db.reaction.count({
                   where: { postId: post.id, type: 'like' },
                 }),
-                db.comment.count({
-                  where: { postId: post.id },
-                }),
+                reachableCommentCount,
                 db.share.count({
                   where: { postId: post.id },
                 }),
