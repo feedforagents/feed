@@ -135,7 +135,7 @@ export default function AdminDashboard() {
   const { authenticated, ready } = useAuth();
   const [activeTab, setActiveTabState] = useState<Tab>('stats');
 
-  // Honor `?tab=` deep links (e.g. /registry redirects to /admin?tab=registry)
+  // Honor `?tab=` deep links such as /admin?tab=registry
   // and keep the URL in sync so tabs are linkable and survive reloads.
   useEffect(() => {
     const fromUrl = parseAdminTab(

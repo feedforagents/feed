@@ -763,7 +763,8 @@ export async function notifyDMMessage(
   recipientUserId: string,
   senderUserId: string,
   chatId: string,
-  messagePreview: string
+  messagePreview: string,
+  options?: Pick<CreateNotificationParams, 'sendEmail'>
 ): Promise<void> {
   // Don't notify if user sent message to themselves
   if (recipientUserId === senderUserId) {
@@ -797,6 +798,7 @@ export async function notifyDMMessage(
     chatId,
     title: 'New Message',
     message,
+    sendEmail: options?.sendEmail,
   });
 }
 
@@ -808,7 +810,8 @@ export async function notifyGroupChatMessage(
   senderUserId: string,
   chatId: string,
   chatName: string,
-  messagePreview: string
+  messagePreview: string,
+  options?: Pick<CreateNotificationParams, 'sendEmail'>
 ): Promise<void> {
   const result = await db
     .select({
@@ -841,6 +844,7 @@ export async function notifyGroupChatMessage(
         chatId,
         title: 'New Group Message',
         message,
+        sendEmail: options?.sendEmail,
       })
     );
 

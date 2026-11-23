@@ -88,13 +88,6 @@ export const RATE_LIMIT_CONFIGS = {
     actionType: 'submit_feedback',
   }, // 5 feedback submissions per minute
 
-  /** Public research / model pilot form (/research); no auth — keyed by IP only */
-  MODEL_PILOT_INQUIRY: {
-    maxRequests: 5,
-    windowMs: 60000,
-    actionType: 'model_pilot_inquiry',
-  },
-
   // On-chain registration (expensive operation, limit aggressively)
   ONCHAIN_REGISTRATION: {
     maxRequests: 3,

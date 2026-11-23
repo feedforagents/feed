@@ -57,6 +57,8 @@ mock.module('@feed/agents', () => ({
   npcBootstrapService: { bootstrapNpc: async () => {} },
   acquireAgentLock: async () => true,
   releaseAgentLock: async () => {},
+  selectDueNpcMarketClue: async () => undefined,
+  getNpcMarketCluePublication: async () => undefined,
   withAgentExecutionLease: async <T>(
     _id: string,
     _owner: string,
@@ -91,6 +93,18 @@ mock.module(
     import.meta.url
   ).pathname,
   () => ({ ensureEngineServices: () => {} })
+);
+
+mock.module(
+  new URL(
+    '../../../../apps/web/src/app/api/cron/npc-tick/group-work.ts',
+    import.meta.url
+  ).pathname,
+  () => ({
+    runNpcGroupWork: async () => {
+      throw new Error('Group work called from ordinary NPC trajectory tests');
+    },
+  })
 );
 
 const npcRoute = await import(

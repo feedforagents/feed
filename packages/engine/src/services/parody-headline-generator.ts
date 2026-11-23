@@ -102,8 +102,10 @@ export class ParodyHeadlineGenerator {
     originalTitle: string,
     originalContent?: string,
     sourceName?: string,
-    temperature = 0.9
+    temperature = 0.9,
+    signal?: AbortSignal
   ): Promise<GeneratedParody> {
+    signal?.throwIfAborted();
     // First, replace any real names with parody names in the original
     const titleReplacement =
       await characterMappingService.transformText(originalTitle);
@@ -133,6 +135,7 @@ export class ParodyHeadlineGenerator {
         maxTokens: 500,
         format: 'json',
         promptType: 'parody_headline_generation',
+        signal,
       }
     );
 
@@ -263,7 +266,8 @@ Generate the parody now.`;
    * Process multiple headlines into parodies
    */
   async processHeadlines(
-    headlines: Array<RSSHeadline & { source?: { name: string } | null }>
+    headlines: Array<RSSHeadline & { source?: { name: string } | null }>,
+    signal?: AbortSignal
   ): Promise<ParodyHeadline[]> {
     const parodies: ParodyHeadline[] = [];
     let retryCount = 0;
@@ -288,6 +292,7 @@ Generate the parody now.`;
     );
 
     for (const headline of headlines) {
+      signal?.throwIfAborted();
       if (alreadyParodied.has(headline.id)) {
         skipCount++;
         continue;
@@ -298,7 +303,9 @@ Generate the parody now.`;
       let parody = await this.generateParody(
         headline.title,
         headline.summary || undefined,
-        headline.source?.name
+        headline.source?.name,
+        undefined,
+        signal
       );
 
       // Quality gate: validate before insert
@@ -326,7 +333,8 @@ Generate the parody now.`;
           headline.title,
           headline.summary || undefined,
           headline.source?.name,
-          RETRY_TEMPERATURE
+          RETRY_TEMPERATURE,
+          signal
         );
 
         quality = await ContentQualityGate.validateParody(
@@ -353,6 +361,7 @@ Generate the parody now.`;
 
       // Entity diversity check: skip if any mentioned character is over-represented
       // (deduplicated so aliases mapping to one character count once)
+      signal?.throwIfAborted();
       const mentionedEntities = [
         ...new Set(Object.values(parody.characterMappings)),
       ];
