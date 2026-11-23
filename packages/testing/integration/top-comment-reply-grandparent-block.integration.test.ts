@@ -2,7 +2,9 @@
  * #1976 applied the bilateral block rule to the immediate parent author
  * only: a reply nested under a depth-1 reply (parentCommentId pointing at a
  * reply) is never checked against the grandparent author, so a replier a
- * thread ancestor blocked can still nest a reply inside that thread. */
+ * thread ancestor blocked can still nest a reply inside that thread. The
+ * cases pin the whole walk: a blocker at depth 3, and a blocker above a
+ * post-author ancestor the walk must skip past, not stop at. */
 import { expect, mock, test } from 'bun:test';
 import { NextRequest } from 'next/server';
 import { createStewardTestToken } from './helpers/steward-auth';
@@ -20,6 +22,10 @@ const cases = {
     'publishes a nested reply under an unblocked grandparent for another reader',
   depthOne:
     'preserves the immediate-parent rule for a direct reply to a blocking author',
+  depthThree:
+    'refuses a nested reply when the great-grandparent author blocked the replier',
+  postAuthorAncestor:
+    'refuses a nested reply when a blocking great-grandparent sits above a post-author ancestor',
 };
 
 if (!process.env.FEED_SUB_MARKET_CHILD) {
@@ -75,6 +81,16 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     incoming: await generateSnowflakeId(),
     outgoing: await generateSnowflakeId(),
     allowed: await generateSnowflakeId(),
+  };
+  const depth3 = {
+    great: await generateSnowflakeId(),
+    grand: await generateSnowflakeId(),
+    parent: await generateSnowflakeId(),
+  };
+  const postAuthorChain = {
+    great: await generateSnowflakeId(),
+    grand: await generateSnowflakeId(),
+    parent: await generateSnowflakeId(),
   };
   await dbWrite.transaction(async (tx) => {
     await tx.insert(posts).values([
@@ -137,6 +153,58 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
         createdAt: now,
         updatedAt: now,
       },
+      {
+        id: depth3.great,
+        authorId: blocking.id,
+        content: 'Great-grandparent comment',
+        postId,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: depth3.grand,
+        authorId: middleIncoming.id,
+        content: 'Depth-2 reply',
+        postId,
+        parentCommentId: depth3.great,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: depth3.parent,
+        authorId: neutralMiddle.id,
+        content: 'Depth-1 reply',
+        postId,
+        parentCommentId: depth3.grand,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: postAuthorChain.great,
+        authorId: blocking.id,
+        content: 'Great-grandparent comment',
+        postId,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: postAuthorChain.grand,
+        authorId: owner.id,
+        content: 'Post-author reply',
+        postId,
+        parentCommentId: postAuthorChain.great,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: postAuthorChain.parent,
+        authorId: neutralMiddle.id,
+        content: 'Depth-1 reply',
+        postId,
+        parentCommentId: postAuthorChain.grand,
+        createdAt: now,
+        updatedAt: now,
+      },
     ]);
     await tx.insert(userBlocks).values([
       { id: 'incoming', blockerId: blocking.id, blockedId: replier.id },
@@ -189,6 +257,52 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
       ).toEqual([]);
     });
   }
+
+  test(cases.depthThree, async () => {
+    const response = await createComment(
+      postId,
+      'Depth-3 nested reply',
+      depth3.parent
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: 'Cannot comment on this post',
+    });
+    expect(
+      await dbWrite
+        .select({ id: comments.id })
+        .from(comments)
+        .where(
+          and(
+            eq(comments.authorId, replier.id),
+            eq(comments.parentCommentId, depth3.parent)
+          )
+        )
+    ).toEqual([]);
+  });
+
+  test(cases.postAuthorAncestor, async () => {
+    const response = await createComment(
+      postId,
+      'Nested reply past a post-author ancestor',
+      postAuthorChain.parent
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: 'Cannot comment on this post',
+    });
+    expect(
+      await dbWrite
+        .select({ id: comments.id })
+        .from(comments)
+        .where(
+          and(
+            eq(comments.authorId, replier.id),
+            eq(comments.parentCommentId, postAuthorChain.parent)
+          )
+        )
+    ).toEqual([]);
+  });
 
   test(cases.allowed, async () => {
     const response = await createComment(
