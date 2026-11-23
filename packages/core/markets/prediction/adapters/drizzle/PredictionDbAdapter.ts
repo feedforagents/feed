@@ -8,11 +8,22 @@ import {
 } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import type { InferInsertModel } from 'drizzle-orm';
-import { and, count, desc, eq, gte, inArray, sql } from 'drizzle-orm';
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  sql,
+} from 'drizzle-orm';
 import { PredictionPricing } from '../../pricing';
 import type {
   PredictionDbPort,
   PredictionMarketRecord,
+  PredictionMarketStatus,
   PredictionPositionRecord,
   PredictionPriceSnapshotRecord,
   PredictionSide,
@@ -129,11 +140,30 @@ export class PredictionDbAdapter implements PredictionDbPort {
     return and(eq(markets.resolved, false), gte(markets.endDate, new Date()));
   }
 
+  /**
+   * Lifecycle slice predicate. ACTIVE is the open list (unresolved and
+   * unexpired); RESOLVED closed with an outcome; CANCELLED closed
+   * without one, including legacy deactivation and void rows.
+   */
+  private statusPredicate(status: PredictionMarketStatus | undefined) {
+    if (status === 'RESOLVED') {
+      return and(eq(markets.resolved, true), isNotNull(markets.resolution));
+    }
+    if (status === 'CANCELLED') {
+      return and(eq(markets.resolved, true), isNull(markets.resolution));
+    }
+    return this.openMarketPredicate();
+  }
+
   async countUnresolvedMarkets(): Promise<number> {
+    return this.countMarketsByStatus('ACTIVE');
+  }
+
+  async countMarketsByStatus(status: PredictionMarketStatus): Promise<number> {
     const [row] = await this.client
       .select({ c: count() })
       .from(markets)
-      .where(this.openMarketPredicate());
+      .where(this.statusPredicate(status));
     return Number(row?.c ?? 0);
   }
 
@@ -145,17 +175,23 @@ export class PredictionDbAdapter implements PredictionDbPort {
   async listMarkets(options?: {
     limit?: number;
     offset?: number;
+    status?: PredictionMarketStatus;
   }): Promise<PredictionMarketRecord[]> {
     const base = this.client
-      .select()
+      .select({ market: markets, scenario: questions.scenarioId })
       .from(markets)
-      .where(this.openMarketPredicate())
+      .leftJoin(questions, eq(questions.id, markets.id))
+      .where(this.statusPredicate(options?.status))
       .orderBy(desc(markets.createdAt), desc(markets.id));
     const rows =
       options?.limit != null
         ? await base.limit(options.limit).offset(options.offset ?? 0)
         : await base;
-    return this.withScenarios(rows.map(mapMarket));
+    return rows.map(({ market, scenario }) => {
+      const record = mapMarket(market);
+      if (scenario != null) record.scenario = scenario;
+      return record;
+    });
   }
 
   async listUserPositions(userId: string): Promise<PredictionPositionRecord[]> {
