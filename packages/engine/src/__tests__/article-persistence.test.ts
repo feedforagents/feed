@@ -42,6 +42,7 @@ const mockDb = {
 // Mock rate limiter
 let rateLimitAllowed = true;
 let rateLimitCurrentCount = 0;
+let nextArticleSlot = Infinity;
 const mockCanGenerateArticle = mock(() =>
   Promise.resolve({
     allowed: rateLimitAllowed,
@@ -86,6 +87,7 @@ mock.module('@feed/shared', () => ({
 mock.module('../services/article-rate-limiter', () => ({
   articleRateLimiter: {
     canGenerateArticle: mockCanGenerateArticle,
+    getNextAvailableAt: async () => nextArticleSlot,
   },
 }));
 
@@ -109,6 +111,7 @@ describe('persistArticle', () => {
     insertError = new Error('Database error');
     rateLimitAllowed = true;
     rateLimitCurrentCount = 0;
+    nextArticleSlot = Infinity;
     snowflakeIdCounter = 1000;
 
     // Clear mock call counts
@@ -229,6 +232,34 @@ describe('persistArticle', () => {
         expect(result.articleId).toBeUndefined();
       }
       expect(insertedArticles.length).toBe(0); // Should not insert
+    });
+
+    test('publishes a scheduled article only after capacity opens and is rechecked', async () => {
+      rateLimitAllowed = false;
+      rateLimitCurrentCount = 2;
+      nextArticleSlot = Date.now() + 20;
+      mockCanGenerateArticle.mockImplementationOnce(async () => {
+        rateLimitAllowed = true;
+        rateLimitCurrentCount = 1;
+        return { allowed: false, currentCount: 2, maxAllowed: 2, remaining: 0 };
+      });
+
+      const result = await persistArticle(
+        {
+          title: 'Test Article',
+          summary: 'Test summary',
+          content: 'Test content',
+          authorOrgId: 'org-123',
+          gameId: 'continuous',
+        },
+        { rateLimitWaitUntil: nextArticleSlot }
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockCanGenerateArticle).toHaveBeenCalledTimes(2);
+      expect(insertedArticles).toHaveLength(1);
+      const [row] = insertedArticles as { timestamp: Date }[];
+      expect(row!.timestamp.getTime()).toBeGreaterThanOrEqual(nextArticleSlot);
     });
 
     test('skips rate limit check when checkRateLimit is false', async () => {

@@ -26,7 +26,7 @@ describe('MCP Parity Surface', () => {
     });
 
     expect(args.mediaUrl).toBe('https://example.com/image.png');
-    expect(args.type).toBe('post');
+    expect('type' in args).toBe(false);
   });
 
   it('accepts personal wallet rankings and rejects retired team scope', () => {
