@@ -89,6 +89,7 @@ mock.module('@feed/shared', () => ({
     warn: mock(() => undefined),
     debug: mock(() => undefined),
   },
+  BadRequestError: class extends Error {},
   PredictionMarketIdSchema: {
     parse: (value: { id: string }) => value,
   },
