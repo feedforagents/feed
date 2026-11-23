@@ -39,6 +39,7 @@ import {
 import {
   acceptGroupInvite,
   BusinessLogicError,
+  broadcastToChannel,
   checkRateLimitAsync,
   countVisiblePostComments,
   declineGroupInvite,
@@ -656,12 +657,23 @@ export async function executeGetMarkets(
 }
 
 /**
+ * Publish trade events to the `markets` realtime channel, as the web trade
+ * routes do, so open market pages update when an agent trades.
+ */
+const marketsBroadcast: NonNullable<PredictionSettlementOptions['broadcast']> =
+  {
+    emit: (channel, payload) =>
+      broadcastToChannel(channel, payload as Record<string, JsonValue>),
+  };
+
+/**
  * Build prediction market service for a given market
  */
 function predictionServiceOptions(
   marketId: string
 ): PredictionSettlementOptions {
   return {
+    broadcast: marketsBroadcast,
     cache: { invalidate: () => invalidateAfterPredictionTrade(marketId) },
     clock: { now: () => new Date() },
     fees: {
@@ -700,6 +712,7 @@ function buildPerpService() {
     },
     feeProcessor: buildFeeProcessor(),
     tradingFeeOutbox: createTradingFeeOutboxAdapter(),
+    broadcast: marketsBroadcast,
   });
 }
 
