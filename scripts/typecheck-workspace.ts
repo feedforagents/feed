@@ -19,10 +19,8 @@ const WORKSPACES = [
   'packages/testing',
   'packages/sim',
   'packages/examples/local-a2a-server',
-  'packages/examples/feed-typescript-agent',
   'packages/contracts',
   'apps/cli',
-  'apps/mobile',
   'apps/web',
 ] as const;
 

@@ -387,7 +387,10 @@ export function FeedClient() {
       );
     }
 
-    if (currentPosts.length === 0) {
+    if (
+      currentPosts.length === 0 &&
+      !(tab === 'following' && followingHasMore)
+    ) {
       if (tab === 'latest') return <EmptyFeed variant="latest" />;
       if (tab === 'following')
         return <EmptyFeed variant="following" isLoading={followingLoading} />;

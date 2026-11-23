@@ -1,24 +1,14 @@
-import { describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from 'bun:test';
 
-/**
- * Following-tab pagination, hook level.
- *
- * The Following tab is the only feed tab without cursor pagination: the
- * shipped hook fetches page 1 (`limit=20`) once and never asks for page 2,
- * and FeedClient hardcodes `hasMore={false}` for it, so posts 21+ from
- * followed users are unreachable. PRD §8.2 promises `get_home_feed` —
- * For You / Following / Latest, cursor-paginated — and the API already
- * returns `nextCursor` for `GET /api/posts?following=true` (proven by the
- * integration probe next to this test), so the gap is purely the client
- * never following the cursor.
- *
- * This test executes the real hook with a synchronous React shim (no DOM
- * in the repo's test setup) and a stubbed fetch that serves two pages.
- * On the base hook it fails: the hook returns no `loadMore` / `hasMore` /
- * `cursor`, so page 2 can never be requested.
- */
-
-// ---- Synchronous React shim: executes the hook's real code paths. ----
+/** Following uses the server cursor and exposes only the active viewer's rows. */
 type Setter<T> = (v: T | ((p: T) => T)) => void;
 
 interface Cell<T> {
@@ -34,7 +24,7 @@ class HookHarness {
   private states: Cell<unknown>[] = [];
   private refs: { current: unknown }[] = [];
   private memos: { deps: unknown[] | undefined; value: unknown }[] = [];
-  private effects: { deps: unknown[] | undefined }[] = [];
+  private effects: { deps: unknown[] | undefined; cleanup?: () => void }[] = [];
   private index = 0;
 
   useState<T>(initial: T): [T, Setter<T>] {
@@ -76,8 +66,9 @@ class HookHarness {
     const i = this.index++;
     const prev = this.effects[i];
     if (!prev || !shallowEqual(deps, prev.deps)) {
-      this.effects[i] = { deps };
-      void fn();
+      prev?.cleanup?.();
+      const cleanup = fn();
+      this.effects[i] = { deps, cleanup: cleanup || undefined };
     }
   }
 
@@ -87,7 +78,7 @@ class HookHarness {
   }
 }
 
-const harness = new HookHarness();
+let harness: HookHarness;
 
 mock.module('react', () => ({
   useState: (initial: unknown) => harness.useState(initial),
@@ -98,94 +89,144 @@ mock.module('react', () => ({
   useRef: (initial: unknown) => harness.useRef(initial),
 }));
 
+let viewer: string | undefined;
+const getAccessToken = async () => 'local-fixture-token';
 mock.module('@/hooks/useAuth', () => ({
-  useAuth: () => ({
-    authenticated: true,
-    getAccessToken: async () => 'test-token',
-  }),
+  useAuth: () => ({ authenticated: viewer !== undefined, getAccessToken }),
 }));
-
 mock.module('@/stores/authStore', () => ({
-  useAuthStore: () => ({ user: { id: 'viewer-1' } }),
+  useAuthStore: () => ({ user: viewer ? { id: viewer } : null }),
 }));
+mock.module('@/utils/api-url', () => ({ apiUrl: (path: string) => path }));
 
-mock.module('@/utils/api-url', () => ({
-  apiUrl: (p: string) => p,
-}));
-
-// Two pages of followed-author posts, newest first.
-const page1 = Array.from({ length: 20 }, (_, i) => ({
-  id: `post-p1-${i}`,
-  content: `page 1 post ${i}`,
-  authorId: 'author-1',
-  timestamp: new Date(Date.now() - i * 1000).toISOString(),
-}));
-const page2 = Array.from({ length: 5 }, (_, i) => ({
-  id: `post-p2-${i}`,
-  content: `page 2 post ${i}`,
-  authorId: 'author-1',
-  timestamp: new Date(Date.now() - (20 + i) * 1000).toISOString(),
-}));
-
-const fetchUrls: string[] = [];
-const fetchStub = mock(async (url: string) => {
-  fetchUrls.push(url);
-  const hasCursor = url.includes('cursor=');
-  const posts = hasCursor ? page2 : page1;
+function post(id: string, seconds: number) {
   return {
-    ok: true,
-    json: async () => ({
-      success: true,
-      posts,
-      limit: 20,
-      source: 'following',
-      nextCursor: hasCursor ? null : 'cursor-page-2',
-    }),
+    id,
+    authorId: 'fixture-author',
+    timestamp: new Date(seconds * 1000).toISOString(),
   };
-});
+}
+const firstPage = [post('newest', 3), post('boundary', 2)];
+const nextPage = [post('boundary', 2), post('oldest', 1)];
+const page = (posts: ReturnType<typeof post>[], nextCursor: string | null) =>
+  Response.json({ posts, nextCursor });
+const fetchStub = mock(async (_url: string, _options?: RequestInit) =>
+  page(firstPage, 'next')
+);
+const origFetch = globalThis.fetch;
 globalThis.fetch = fetchStub as unknown as typeof fetch;
 
-const flush = async () => {
-  for (let i = 0; i < 10; i++) await Bun.sleep(0);
-};
+beforeEach(() => {
+  viewer = 'viewer-1';
+  harness = new HookHarness();
+  fetchStub.mockReset();
+  fetchStub.mockImplementation(async (path) =>
+    path.includes('cursor=') ? page(nextPage, null) : page(firstPage, 'next')
+  );
+});
+afterAll(() => {
+  globalThis.fetch = origFetch;
+});
 
+const flush = async () => {
+  await Bun.sleep(0);
+};
 const { useFollowingPosts } = await import('./useFollowingPosts');
+const render = () => harness.render(useFollowingPosts);
+const loadInitial = async () => {
+  render();
+  await flush();
+  return render();
+};
+const postIds = (result: ReturnType<typeof useFollowingPosts>) =>
+  result.posts.map(({ id }) => id);
+
+function deferredResponse() {
+  let resolveResponse: (value: Response) => void = () => {};
+  const promise = new Promise<Response>((resolve) => {
+    resolveResponse = resolve;
+  });
+  return { promise, resolve: resolveResponse };
+}
 
 describe('useFollowingPosts cursor pagination', () => {
-  it('fetches page 1, exposes a cursor, and loads page 2 on loadMore', async () => {
-    fetchUrls.length = 0;
-    let result = harness.render(() => useFollowingPosts({ enabled: true }));
-    await flush();
-    result = harness.render(() => useFollowingPosts({ enabled: true }));
-
-    expect(result.posts).toHaveLength(20);
-    expect(fetchUrls).toHaveLength(1);
-    expect(fetchUrls[0]).toContain('following=true');
-    expect(fetchUrls[0]).not.toContain('cursor=');
-    // The base hook has no pagination state at all.
-    expect((result as unknown as { hasMore?: unknown }).hasMore).toBe(true);
-    expect((result as unknown as { cursor?: unknown }).cursor).toBe(
-      'cursor-page-2'
-    );
-    expect(typeof result.loadMore).toBe('function');
-
-    await result.loadMore();
-    await flush();
-    result = harness.render(() => useFollowingPosts({ enabled: true }));
-
-    expect(fetchUrls).toHaveLength(2);
-    expect(fetchUrls[1]).toContain('cursor=cursor-page-2');
-    expect(result.posts).toHaveLength(25);
-    expect(new Set(result.posts.map((p) => p.id)).size).toBe(25);
-    expect((result as unknown as { hasMore?: unknown }).hasMore).toBe(false);
-    expect((result as unknown as { cursor?: unknown }).cursor).toBeNull();
+  it('follows a short page with a cursor, deduplicates overlap, and stops at the end', async () => {
+    const initial = await loadInitial();
+    expect(postIds(initial)).toEqual(['newest', 'boundary']);
+    expect(initial.hasMore).toBe(true);
+    expect(initial.cursor).toBe('next');
+    await initial.loadMore();
+    const last = render();
+    expect(fetchStub.mock.calls[1]?.[0]).toContain('cursor=next');
+    expect(postIds(last)).toEqual(['newest', 'boundary', 'oldest']);
+    expect(last.hasMore).toBe(false);
+    await last.loadMore();
+    expect(fetchStub).toHaveBeenCalledTimes(2);
   });
 
-  it('does not fetch again once the last page is reached', async () => {
-    const callsBefore = fetchUrls.length;
-    const result = harness.render(() => useFollowingPosts({ enabled: true }));
-    await result.loadMore();
+  it('keeps a failed continuation retryable without immediately refetching', async () => {
+    let now = 0;
+    const clock = spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      fetchStub.mockImplementationOnce(async () => page(firstPage, 'next'));
+      fetchStub.mockImplementationOnce(
+        async () => new Response(null, { status: 503 })
+      );
+      const initial = await loadInitial();
+      await initial.loadMore();
+      const failed = render();
+      expect(postIds(failed)).toEqual(['newest', 'boundary']);
+      expect(failed.cursor).toBe('next');
+      await failed.loadMore();
+      expect(fetchStub).toHaveBeenCalledTimes(2);
+      now += 1000;
+      await failed.loadMore();
+      expect(fetchStub.mock.calls[2]?.[0]).toContain('cursor=next');
+      expect(postIds(render())).toEqual(['newest', 'boundary', 'oldest']);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('clears old rows and cancels a continuation on viewer changes', async () => {
+    const oldPage = deferredResponse();
+    fetchStub.mockImplementationOnce(async () => page(firstPage, 'next'));
+    fetchStub.mockImplementationOnce(() => oldPage.promise);
+    fetchStub.mockImplementationOnce(async () =>
+      page([post('other-viewer', 1)], null)
+    );
+
+    const initial = await loadInitial();
+    const append = initial.loadMore();
     await flush();
-    expect(fetchUrls.length).toBe(callsBefore);
+    viewer = 'viewer-2';
+    expect(postIds(render())).toEqual([]);
+    expect(fetchStub.mock.calls[1]?.[1]?.signal?.aborted).toBe(true);
+    await flush();
+    expect(fetchStub.mock.calls[2]?.[0]).toContain('userId=viewer-2');
+    oldPage.resolve(page(nextPage, 'old-cursor'));
+    await append;
+    expect(postIds(render())).toEqual(['other-viewer']);
+    viewer = undefined;
+    expect(postIds(render())).toEqual([]);
+  });
+
+  it('ignores a continuation that resolves after a refresh', async () => {
+    const oldPage = deferredResponse();
+    fetchStub.mockImplementationOnce(async () => page(firstPage, 'next'));
+    fetchStub.mockImplementationOnce(() => oldPage.promise);
+    fetchStub.mockImplementationOnce(async () =>
+      page([post('refreshed', 1)], null)
+    );
+
+    const initial = await loadInitial();
+    const append = initial.loadMore();
+    await flush();
+    await render().refresh();
+    expect(fetchStub.mock.calls[1]?.[1]?.signal?.aborted).toBe(true);
+    oldPage.resolve(page(nextPage, 'old-cursor'));
+    await append;
+    expect(postIds(render())).toEqual(['refreshed']);
+    expect(render().hasMore).toBe(false);
   });
 });

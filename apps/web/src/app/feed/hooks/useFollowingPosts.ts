@@ -5,6 +5,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { apiUrl } from '@/utils/api-url';
 
 const PAGE_SIZE = 20;
+const PAGE_RETRY_DELAY_MS = 1000;
 
 interface UseFollowingPostsOptions {
   enabled?: boolean;
@@ -16,143 +17,124 @@ interface UseFollowingPostsResult {
   loadingMore: boolean;
   hasMore: boolean;
   cursor: string | null;
-  fetchFollowingPosts: (
-    cursor: string | null,
-    append?: boolean
-  ) => Promise<void>;
   loadMore: () => Promise<void>;
   refresh: () => Promise<void>;
 }
 
-/**
- * Hook for fetching posts from followed users/actors
- *
- * Requires authentication - returns empty if not logged in.
- *
- * Cursor-paginated like the Latest tab (`useFeedPosts`): the API returns
- * `nextCursor` for `GET /api/posts?following=true`, and `loadMore`
- * follows it, so followed users' posts past the first page are reachable.
- * Previously this hook fetched page 1 once and never paginated, which
- * capped the Following tab at 20 posts.
- */
+interface FollowingPage {
+  viewerId: string;
+  posts: FeedPost[];
+  cursor: string | null;
+}
+
+/** Load the signed-in viewer's Following feed using the server's cursor. */
 export function useFollowingPosts(
   options: UseFollowingPostsOptions = {}
 ): UseFollowingPostsResult {
   const { enabled = true } = options;
-
   const { authenticated, getAccessToken } = useAuth();
   const { user } = useAuthStore();
+  const viewerId = enabled && authenticated ? user?.id : undefined;
 
-  const [posts, setPosts] = useState<FeedPost[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const loadingMoreRef = useRef(false);
-  const initialFetchDone = useRef(false);
+  const [page, setPage] = useState<FollowingPage | null>(null);
+  const [pending, setPending] = useState<{
+    viewerId: string;
+    append: boolean;
+  } | null>(null);
+  const request = useRef<AbortController | null>(null);
+  const retryAfter = useRef(0);
 
   const fetchFollowingPosts = useCallback(
-    async (requestCursor: string | null, append = false) => {
-      const userId = user?.id;
-      if (!enabled || !authenticated || !userId) {
-        if (!append) setPosts([]);
+    async (requestCursor: string | null) => {
+      const append = requestCursor !== null;
+      if (
+        !viewerId ||
+        (append && (request.current || Date.now() < retryAfter.current))
+      )
         return;
-      }
 
-      // Prevent duplicate page appends
-      if (append && loadingMoreRef.current) return;
-
-      if (append) {
-        setLoadingMore(true);
-        loadingMoreRef.current = true;
-      } else {
-        setLoading(true);
-      }
+      request.current?.abort();
+      const controller = new AbortController();
+      request.current = controller;
+      setPending({ viewerId, append });
+      if (!append) retryAfter.current = 0;
+      let succeeded = false;
 
       try {
         const token = await getAccessToken();
+        if (!token || controller.signal.aborted) return;
+        const params = new URLSearchParams({
+          following: 'true',
+          userId: viewerId,
+          limit: String(PAGE_SIZE),
+        });
+        if (requestCursor !== null) params.set('cursor', requestCursor);
+        const response = await fetch(apiUrl(`/api/posts?${params}`), {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (!response.ok) return;
+        const data: { posts: FeedPost[]; nextCursor?: string | null } =
+          await response.json();
+        if (controller.signal.aborted) return;
 
-        const headers: HeadersInit = { 'Content-Type': 'application/json' };
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-
-        const url = requestCursor
-          ? apiUrl(
-              `/api/posts?following=true&userId=${userId}&limit=${PAGE_SIZE}&cursor=${encodeURIComponent(requestCursor)}`
-            )
-          : apiUrl(
-              `/api/posts?following=true&userId=${userId}&limit=${PAGE_SIZE}&offset=0`
-            );
-
-        const response = await fetch(url, { headers });
-
-        if (response.ok) {
-          const data = await response.json();
-          const newPosts = data.posts as FeedPost[];
-          const nextCursor = (data.nextCursor as string | null) ?? null;
-          setPosts((prev) => {
-            const combined = append ? [...prev, ...newPosts] : newPosts;
-            const unique = new Map<string, FeedPost>();
-            combined.forEach((post) => unique.set(post.id, post));
-            return Array.from(unique.values()).sort((a, b) => {
-              const aTime = new Date(a.timestamp ?? 0).getTime();
-              const bTime = new Date(b.timestamp ?? 0).getTime();
-              return bTime - aTime;
-            });
-          });
-          setCursor(nextCursor);
-          // The endpoint's nextCursor is the pagination signal: a page
-          // shortened by moderation filtering can still have a next page.
-          setHasMore(nextCursor !== null);
-        } else if (append) {
-          setHasMore(false);
-        }
+        setPage((previous) => {
+          const combined =
+            append && previous?.viewerId === viewerId
+              ? [...previous.posts, ...data.posts]
+              : data.posts;
+          const unique = new Map(combined.map((post) => [post.id, post]));
+          const posts = Array.from(unique.values()).sort(
+            (a, b) =>
+              new Date(b.timestamp ?? 0).getTime() -
+              new Date(a.timestamp ?? 0).getTime()
+          );
+          return { viewerId, posts, cursor: data.nextCursor ?? null };
+        });
+        succeeded = true;
       } catch {
-        // Network error - no action needed
-        if (append) setHasMore(false);
+        // Keep the last successful page available after a network failure.
       } finally {
-        if (append) {
-          setLoadingMore(false);
-          loadingMoreRef.current = false;
-        } else {
-          setLoading(false);
+        if (request.current === controller) {
+          // The observer can run again as soon as loadingMore clears.
+          if (append && !succeeded)
+            retryAfter.current = Date.now() + PAGE_RETRY_DELAY_MS;
+          request.current = null;
+          setPending(null);
         }
       }
     },
-    [enabled, authenticated, user?.id, getAccessToken]
+    [viewerId, getAccessToken]
   );
 
-  const loadMore = useCallback(async () => {
-    if (!cursor || loadingMoreRef.current) return;
-    await fetchFollowingPosts(cursor, true);
-  }, [cursor, fetchFollowingPosts]);
-
-  const refresh = useCallback(async () => {
-    await fetchFollowingPosts(null, false);
-  }, [fetchFollowingPosts]);
-
-  // Fetch on mount when enabled and authenticated. Only mark the
-  // initial fetch done when a fetch actually starts: auth may arrive
-  // after the first effect run, and the effect must retry then.
   useEffect(() => {
-    if (!enabled) {
-      initialFetchDone.current = false;
-      setLoading(false);
-      return;
-    }
-    if (initialFetchDone.current) return;
-    if (enabled && authenticated && user?.id) {
-      initialFetchDone.current = true;
-      void fetchFollowingPosts(null, false);
-    }
-  }, [enabled, authenticated, user?.id, fetchFollowingPosts]);
+    setPage(null);
+    setPending(null);
+    if (viewerId) void fetchFollowingPosts(null);
+    return () => {
+      request.current?.abort();
+      request.current = null;
+    };
+  }, [viewerId, fetchFollowingPosts]);
+
+  // Render only data for the current viewer, even before effect cleanup runs.
+  const visiblePage = page?.viewerId === viewerId ? page : null;
+  const visibleRequest = pending?.viewerId === viewerId ? pending : null;
+  const cursor = visiblePage?.cursor ?? null;
+  const loadMore = useCallback(async () => {
+    if (cursor !== null) await fetchFollowingPosts(cursor);
+  }, [cursor, fetchFollowingPosts]);
+  const refresh = useCallback(
+    () => fetchFollowingPosts(null),
+    [fetchFollowingPosts]
+  );
 
   return {
-    posts,
-    loading,
-    loadingMore,
-    hasMore,
+    posts: visiblePage?.posts ?? [],
+    loading: Boolean(visibleRequest && !visibleRequest.append),
+    loadingMore: Boolean(visibleRequest?.append),
+    hasMore: cursor !== null,
     cursor,
-    fetchFollowingPosts,
     loadMore,
     refresh,
   };

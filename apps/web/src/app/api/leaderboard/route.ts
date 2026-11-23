@@ -51,6 +51,7 @@
  */
 
 import {
+  CACHE_KEYS,
   findUserByIdentifier,
   getCache,
   type LeaderboardPosition,
@@ -68,7 +69,6 @@ import type { NextRequest } from 'next/server';
 import { sanitizeForJson } from '@/lib/json/sanitize';
 import { parseLeaderboardQuery } from './query';
 
-const CACHE_KEY_NAMESPACE = 'leaderboard-personal';
 /**
  * LEADERBOARD_CACHE_MS: `0` disables caching; any other value must be a
  * whole number of milliseconds >= 1000 (TTL is applied in whole seconds).
@@ -135,7 +135,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   if (CACHE_ENABLED) {
     const cached = await getCache<CachedLeaderboardEntry>(cacheKey, {
-      namespace: CACHE_KEY_NAMESPACE,
+      namespace: CACHE_KEYS.LEADERBOARD_PERSONAL,
     });
     if (cached?.data) {
       leaderboardData = cached.data;
@@ -156,7 +156,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         cacheKey,
         { data: leaderboardData, generatedAt } satisfies CachedLeaderboardEntry,
         {
-          namespace: CACHE_KEY_NAMESPACE,
+          namespace: CACHE_KEYS.LEADERBOARD_PERSONAL,
           ttl: CACHE_TTL_SECONDS,
         }
       );

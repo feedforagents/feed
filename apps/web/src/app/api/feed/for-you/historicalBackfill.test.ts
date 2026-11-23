@@ -39,13 +39,18 @@ function makeChain(result: unknown[]) {
 mock.module('@feed/db', () => ({
   and: (...args: unknown[]) => args,
   db: { select: mockDbSelect },
+  eq: (a: unknown, b: unknown) => [a, b],
   gte: (a: unknown, b: unknown) => [a, b],
   isNull: (value: unknown) => value,
+  like: (a: unknown, b: unknown) => [a, b],
   lt: (a: unknown, b: unknown) => [a, b],
+  not: (value: unknown) => value,
+  notExists: (value: unknown) => value,
   posts: postsMock,
   sql: (_strings: TemplateStringsArray, ..._values: unknown[]) => ({
     sql: true,
   }),
+  users: { id: 'users.id', isTest: 'users.isTest' },
 }));
 
 const { loadDiscoveryForYouCandidatePosts, loadHistoricalForYouBackfillPosts } =
@@ -93,7 +98,9 @@ describe('historical For You backfill helpers', () => {
     );
 
     expect(result).toEqual(rows);
-    expect(mockDbSelect).toHaveBeenCalledTimes(1);
+    // Two selects: the ranked posts query plus the test-author NOT EXISTS
+    // subquery built by excludeTestAuthors().
+    expect(mockDbSelect).toHaveBeenCalledTimes(2);
   });
 
   it('loads discovery candidates from source tables', async () => {
@@ -122,6 +129,8 @@ describe('historical For You backfill helpers', () => {
     );
 
     expect(result).toEqual(rows);
-    expect(mockDbSelect).toHaveBeenCalledTimes(1);
+    // Two selects: the ranked posts query plus the test-author NOT EXISTS
+    // subquery built by excludeTestAuthors().
+    expect(mockDbSelect).toHaveBeenCalledTimes(2);
   });
 });
