@@ -1,0 +1,51 @@
+name: Apply staging inference budget schema 0007
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed and deployed staging commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: read
+
+concurrency:
+  group: database-migrations-staging
+  cancel-in-progress: false
+
+jobs:
+  apply-0007:
+    if: github.repository == 'feedforagents/feed' && github.ref == 'refs/heads/staging'
+    environment: cloudflare-staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Verify the public staging deployment matches this run
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --fail --silent --show-error --max-time 15 https://staging.feed.fun/__deployment |
+            jq -e --arg sha "$GITHUB_SHA" '.platform == "cloudflare" and .environment == "staging" and .commit == $sha' >/dev/null
+      - name: Apply and verify the reviewed staging migration
+        env:
+          TARGET: staging
+          COMMIT_SHA: ${{ inputs.expected_sha }}
+          GH_TOKEN: ${{ github.token }}
+          STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          STAGING_DIRECT_DATABASE_URL: ${{ secrets.STAGING_DIRECT_DATABASE_URL }}
+          DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
+          STAGING_GAME_PAUSED: ${{ contains(fromJSON('["false","0"]'), fromJSON(secrets.CLOUDFLARE_RUNTIME_SECRETS || '{}').GAME_START || '') && 'true' || 'false' }}
+          # Pin the existing protected target and app role from deploy run 44995575693.
+          EXPECTED_DATABASE_IDENTITY: 672b308b408a4dcff6686efbcc350b3803478595c6bfdbf8b439208ad530d7f1
+          EXPECTED_APP_ROLE_IDENTITY: a942b37ccfaf5a813b1432caa209a43b9d144e47ad0de1549c289c253e556cd5
+        run: bun scripts/cloudflare/apply-staging-phase0.ts 0007

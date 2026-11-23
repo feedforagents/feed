@@ -1,6 +1,5 @@
 import { buildCapitalBaseContributionSql, db, sql } from '@feed/db';
 import { FEE_CONFIG } from '@feed/engine/config/fees';
-import { toISO } from '@feed/shared';
 
 export const TRADING_RETURN_CAPITAL_FLOOR = 1000;
 
@@ -196,7 +195,7 @@ export class TradingPerformanceService {
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
       LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
       LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false
+      WHERE u."isActor" = false AND u."isAgent" = false AND u."isTest" = false AND u."isBanned" = false AND u."id" NOT LIKE 'test-%'
       ORDER BY "netProfit" DESC, u."createdAt" ASC, u."id" ASC
       LIMIT ${limit} OFFSET ${offset}
     `);
@@ -241,7 +240,7 @@ export class TradingPerformanceService {
       LEFT JOIN wallet_capital wc ON wc."userId" = u."id"
       LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
       LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-      WHERE u."isActor" = false AND u."isAgent" = false AND u."id" = ${userId}
+      WHERE u."isActor" = false AND u."isAgent" = false AND u."isTest" = false AND u."isBanned" = false AND u."id" NOT LIKE 'test-%' AND u."id" = ${userId}
       LIMIT 1
     `);
 
@@ -254,10 +253,23 @@ export class TradingPerformanceService {
     createdAt: Date | string;
     netProfit: string;
   }): Promise<number> {
-    const createdAtISO = toISO(entry.createdAt);
+    // The tiebreak must compare against the entry's stored createdAt, not
+    // the caller-supplied value: production rows are stamped by the DB
+    // default now() with microsecond precision, while a JS Date round-trip
+    // truncates to milliseconds. Comparing stored timestamps against the
+    // truncated value misses wallets created in the same millisecond, so
+    // the computed rank could disagree with the leaderboard's own order.
+    // Resolve the stored value inside the query instead.
     const result = await db.execute(sql`
       WITH perp_unrealized AS (${this.perpUnrealizedCte()}),
       prediction_unrealized AS (${this.predictionUnrealizedCte()}),
+      entry_row AS (
+        SELECT
+          u."id" AS "id",
+          u."createdAt" AS "createdAt"
+        FROM "User" u
+        WHERE u."id" = ${entry.id}
+      ),
       wallet_rows AS (
         SELECT
           u."id",
@@ -266,19 +278,20 @@ export class TradingPerformanceService {
         FROM "User" u
         LEFT JOIN perp_unrealized pu ON pu."userId" = u."id"
         LEFT JOIN prediction_unrealized du ON du."userId" = u."id"
-        WHERE u."isActor" = false AND u."isAgent" = false
+        WHERE u."isActor" = false AND u."isAgent" = false AND u."isTest" = false AND u."isBanned" = false AND u."id" NOT LIKE 'test-%'
       )
       SELECT COUNT(*)::int AS "count"
       FROM wallet_rows wr
+      CROSS JOIN entry_row e
       WHERE
         wr."netProfit" > ${entry.netProfit}
         OR (
           wr."netProfit" = ${entry.netProfit}
           AND (
-            wr."createdAt" < ${createdAtISO}
+            wr."createdAt" < e."createdAt"
             OR (
-              wr."createdAt" = ${createdAtISO}
-              AND wr."id" < ${entry.id}
+              wr."createdAt" = e."createdAt"
+              AND wr."id" < e."id"
             )
           )
         )

@@ -47,7 +47,9 @@ import {
   sql,
   users,
 } from '@feed/db';
+import { npcTrades } from '@feed/db/schema';
 import {
+  createNpcPerpSettlement,
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
   createPerpSettlement,
@@ -68,6 +70,7 @@ import { floorPoints, isPureRepost } from '@feed/shared';
 import { agentPnLService } from '../services/AgentPnLService';
 import { logger } from '../shared/logger';
 import { generateSnowflakeId } from '../shared/snowflake';
+import type { NpcMarketClue } from './npc-market-clue';
 import { topicDiversityService } from './TopicDiversityService';
 import { resolvePerpTicker } from './utils/resolvePerpTicker';
 
@@ -270,11 +273,14 @@ export interface DirectTradeResult {
 }
 
 export interface DirectPostParams {
+  marketClue?: NpcMarketClue;
   agentUserId: string;
   content: string;
 }
 
 export interface DirectPostResult {
+  marketClueStatus?: 'published' | 'duplicate' | 'stale';
+  rejection?: 'post-diversity';
   success: boolean;
   postId?: string;
   error?: string;
@@ -618,6 +624,66 @@ function predictionSettlementOptions(
   };
 }
 
+/**
+ * Mirror an executed NPC prediction trade into NPCTrade, the record the
+ * market detail screen reads: its tradeCount and its trades feed union
+ * BalanceTransaction rows with NPCTrade rows, and NPC trades pay from the
+ * actorState wallet, so they never produce a BalanceTransaction row.
+ * TradeExecutionService writes this mirror for the NPC trades it executes;
+ * without the same mirror here, an autonomous-loop trade moves the price
+ * and opens or closes a real position while the market screen counts and
+ * lists no trade at all. A failed mirror must not fail the committed
+ * trade, so errors are logged, not thrown.
+ */
+async function recordNpcPredictionTrade(params: {
+  npcActorId: string;
+  marketId: string;
+  action: string;
+  side: 'YES' | 'NO';
+  amount: number;
+  price: number;
+  reason?: string;
+}): Promise<void> {
+  try {
+    await db.insert(npcTrades).values({
+      id: await generateSnowflakeId(),
+      npcActorId: params.npcActorId,
+      poolId: null,
+      marketType: 'prediction',
+      marketId: params.marketId,
+      action: params.action,
+      side: params.side,
+      amount: params.amount,
+      price: params.price,
+      sentiment: null,
+      reason: params.reason ?? null,
+    });
+  } catch (error) {
+    logger.error(
+      '[DIRECT_TRADE] Failed to mirror NPC prediction trade into NPCTrade',
+      {
+        agentUserId: params.npcActorId,
+        marketId: params.marketId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
+    return;
+  }
+  // Settlement invalidates before this best-effort mirror exists. Clear any
+  // feed repopulated in that interval, as TradeExecutionService does.
+  await invalidateAfterPredictionTrade(params.marketId).catch((error) => {
+    logger.warn(
+      'NPC prediction mirror cache invalidation failed',
+      {
+        marketId: params.marketId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'DirectExecutors'
+    );
+  });
+}
+
 async function executePredictionTrade(params: {
   agentUserId: string;
   marketId: string;
@@ -668,6 +734,18 @@ async function executePredictionTrade(params: {
         error: error.message,
       });
     });
+
+  if (isNpc) {
+    await recordNpcPredictionTrade({
+      npcActorId: agentUserId,
+      marketId,
+      action: side,
+      side: isBuyYes ? 'YES' : 'NO',
+      amount,
+      price: result.avgPrice,
+      reason: reasoning,
+    });
+  }
 
   const sharesRounded = Math.round(result.shares * 100) / 100;
 
@@ -783,6 +861,18 @@ async function executePredictionSell(params: {
       });
     });
 
+  if (isNpc) {
+    await recordNpcPredictionTrade({
+      npcActorId: agentUserId,
+      marketId,
+      action: side,
+      side: isSellYes ? 'YES' : 'NO',
+      amount: sellResult.netProceeds ?? 0,
+      price: sellResult.avgPrice ?? 0,
+      reason: reasoning,
+    });
+  }
+
   logger.info(
     `[DirectExecutor] Prediction sell executed: ${isSellYes ? 'YES' : 'NO'} on market ${marketId}`,
     { sharesSold: sharesToSell, remaining: sellResult.remainingShares },
@@ -821,12 +911,7 @@ async function executePerpTrade(params: {
   const walletAdapter = createPerpWalletAdapter(isNpc);
 
   const service = new PerpMarketService({
-    settlement: createPerpSettlement({
-      system: isNpc ? 'npc_perp_trade' : undefined,
-      wallet: isNpc
-        ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-        : undefined,
-    }),
+    settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: walletAdapter,
     cache: createPerpTradesCachePort(),
@@ -972,12 +1057,7 @@ async function executeClosePerpPosition(params: {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
     const service = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: isNpc ? 'npc_perp_trade' : undefined,
-        wallet: isNpc
-          ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-          : undefined,
-      }),
+      settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
       cache: createPerpTradesCachePort(),
@@ -1063,7 +1143,7 @@ async function executeClosePerpPosition(params: {
 export async function executeDirectPost(
   params: DirectPostParams
 ): Promise<DirectPostResult> {
-  const { agentUserId, content } = params;
+  const { agentUserId, content, marketClue } = params;
 
   if (!content || content.trim().length < 5) {
     return { success: false, error: 'Content too short' };
@@ -1090,6 +1170,7 @@ export async function executeDirectPost(
 
     return {
       success: false,
+      rejection: 'post-diversity',
       error: `Content rejected: ${diversityIssues[0]}`,
     };
   }
@@ -1135,6 +1216,7 @@ export async function executeDirectPost(
           );
           return {
             success: false,
+            rejection: 'post-diversity',
             error: 'Content too similar to a recent post by another NPC',
           };
         }
@@ -1157,16 +1239,30 @@ export async function executeDirectPost(
   const postId = await generateSnowflakeId();
   const now = new Date();
 
-  await db.insert(posts).values({
+  const post = {
     id: postId,
     content: cleanContent,
     authorId: agentUserId,
     timestamp: now,
     createdAt: now,
-  });
+  };
+  if (marketClue) {
+    const { publishNpcMarketClue } = await import('./npc-market-clue');
+    const marketClueStatus = await publishNpcMarketClue(marketClue, post);
+    if (marketClueStatus !== 'published') {
+      return { success: true, marketClueStatus };
+    }
+  } else {
+    await db.insert(posts).values(post);
+  }
 
   // Record topic coverage for future diversity checks
-  topicDiversityService.recordTopicCoverage(agentUserId, cleanContent);
+  topicDiversityService.recordTopicCoverage(
+    agentUserId,
+    cleanContent,
+    undefined,
+    post.timestamp
+  );
 
   // Generate and store tags. Tagging is best-effort: the post is already
   // committed, so a tag-generation or tag-storage failure must not report
@@ -1219,6 +1315,7 @@ export async function executeDirectPost(
   return {
     success: true,
     postId,
+    ...(marketClue && { marketClueStatus: 'published' }),
   };
 }
 
@@ -1393,6 +1490,30 @@ function stripThinkTags(text: string): string {
   return withoutBlocks.replace(/<\/?think>/gi, '').trim();
 }
 
+async function directMessageRecipientError(
+  recipientId: string
+): Promise<string | undefined> {
+  const [recipient] = await db
+    .select({ isActor: users.isActor })
+    .from(users)
+    .where(eq(users.id, recipientId))
+    .limit(1);
+
+  if (recipient && !recipient.isActor) return;
+
+  if (!recipient) {
+    const [npc] = await db
+      .select({ id: actorState.id })
+      .from(actorState)
+      .where(eq(actorState.id, recipientId))
+      .limit(1);
+
+    if (!npc) return `Recipient not found: ${recipientId}`;
+  }
+
+  return 'Cannot send direct messages to NPC actors. Use group chats instead.';
+}
+
 export async function executeDirectMessage(
   params: DirectMessageParams
 ): Promise<DirectMessageResult> {
@@ -1424,39 +1545,9 @@ export async function executeDirectMessage(
       };
     }
 
-    // Check if recipient exists
-    const [recipient] = await db
-      .select({ id: users.id, isActor: users.isActor })
-      .from(users)
-      .where(eq(users.id, recipientId))
-      .limit(1);
-
-    if (recipient?.isActor) {
-      return {
-        success: false,
-        error:
-          'Cannot send direct messages to NPC actors. Use group chats instead.',
-      };
-    }
-
-    if (!recipient) {
-      // Try searching actorState for NPCs
-      const [npc] = await db
-        .select({ id: actorState.id })
-        .from(actorState)
-        .where(eq(actorState.id, recipientId))
-        .limit(1);
-
-      if (!npc) {
-        return { success: false, error: `Recipient not found: ${recipientId}` };
-      }
-
-      // An actorState-only recipient is an NPC actor, not a user.
-      return {
-        success: false,
-        error:
-          'Cannot send direct messages to NPC actors. Use group chats instead.',
-      };
+    const recipientError = await directMessageRecipientError(recipientId);
+    if (recipientError) {
+      return { success: false, error: recipientError };
     }
 
     // Same DM rules as the web message route, MCP send_message and A2A
@@ -1651,22 +1742,13 @@ export async function executeDirectMessage(
           error: 'Invalid direct message chat',
         };
       }
-      const [otherUser, isBlocked, hasBlockedMe] = await Promise.all([
-        db
-          .select({ isActor: users.isActor })
-          .from(users)
-          .where(eq(users.id, otherParticipantId))
-          .limit(1)
-          .then((rows) => rows[0]),
+      const [recipientError, isBlocked, hasBlockedMe] = await Promise.all([
+        directMessageRecipientError(otherParticipantId),
         hasBlocked(agentUserId, otherParticipantId),
         hasBlocked(otherParticipantId, agentUserId),
       ]);
-      if (otherUser?.isActor) {
-        return {
-          success: false,
-          error:
-            'Cannot send direct messages to NPC actors. Use group chats instead.',
-        };
+      if (recipientError) {
+        return { success: false, error: recipientError };
       }
       if (isBlocked || hasBlockedMe) {
         return {

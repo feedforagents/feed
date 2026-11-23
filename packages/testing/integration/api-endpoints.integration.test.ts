@@ -215,7 +215,8 @@ describe('API Endpoints - Complete Coverage', () => {
           virtualBalance: '103',
           totalDeposited: '150',
           lifetimePnL: '3',
-          isTest: true,
+          // This ordinary wallet is eligible for the personal leaderboard.
+          isTest: false,
           updatedAt: new Date(),
         },
         {

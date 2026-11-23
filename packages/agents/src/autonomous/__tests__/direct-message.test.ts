@@ -6,10 +6,7 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 let mockAgentRow: { managedBy: string | null } | null = {
   managedBy: null,
 };
-let mockRecipient: { id: string; isActor: boolean } | null = {
-  id: 'user-2',
-  isActor: false,
-};
+let mockRecipient: { isActor: boolean } | null = { isActor: false };
 let mockNpc: { id: string } | null = null;
 let mockExistingChat: { chatId: string } | null = null;
 let mockMembership: { chatId: string } | null = { chatId: 'chat-1' };
@@ -18,7 +15,6 @@ let mockParticipants: Array<{ userId: string }> = [
   { userId: 'agent-1' },
   { userId: 'user-2' },
 ];
-let mockOtherUser: { isActor: boolean } | null = { isActor: false };
 
 const blockedPairs = new Set<string>();
 
@@ -59,10 +55,7 @@ function resolveSelect(
   const keys = Object.keys(shape);
   if (table === usersTable) {
     if (keys.includes('managedBy')) return mockAgentRow ? [mockAgentRow] : [];
-    // Recipient lookup: the original code selects only { id }, the fix
-    // also selects isActor — either shape resolves to the recipient row.
-    if (keys.includes('id')) return mockRecipient ? [mockRecipient] : [];
-    if (keys.includes('isActor')) return mockOtherUser ? [mockOtherUser] : [];
+    if (keys.includes('isActor')) return mockRecipient ? [mockRecipient] : [];
     if (keys.includes('displayName')) return [{ displayName: 'Agent One' }];
     return [];
   }
@@ -187,6 +180,7 @@ mock.module('@feed/engine', () => ({
   generateTagsFromPost: mock(async () => []),
   invalidateAfterPredictionTrade: mock(async () => undefined),
   PredictionPricing: {},
+  createNpcPerpSettlement: mock(() => ({})),
   createNpcWalletAdapter: mock(() => ({})),
   createPerpPriceImpactPort: mock(() => ({})),
   createPerpSettlement: mock(() => ({})),
@@ -227,13 +221,12 @@ const { executeDirectMessage } = await import('../DirectExecutors');
 describe('executeDirectMessage DM moderation', () => {
   beforeEach(() => {
     mockAgentRow = { managedBy: null };
-    mockRecipient = { id: 'user-2', isActor: false };
+    mockRecipient = { isActor: false };
     mockNpc = null;
     mockExistingChat = null;
     mockMembership = { chatId: 'chat-1' };
     mockDmChat = { isGroup: false };
     mockParticipants = [{ userId: 'agent-1' }, { userId: 'user-2' }];
-    mockOtherUser = { isActor: false };
     blockedPairs.clear();
     transactionMock.mockClear();
     messageInsertMock.mockClear();
@@ -271,7 +264,7 @@ describe('executeDirectMessage DM moderation', () => {
   });
 
   test('rejects a DM to an NPC recipient', async () => {
-    mockRecipient = { id: 'npc-1', isActor: true };
+    mockRecipient = { isActor: true };
 
     const result = await executeDirectMessage({
       agentUserId: 'agent-1',
@@ -329,7 +322,7 @@ describe('executeDirectMessage DM moderation', () => {
   });
 
   test('rejects a send into a DM chat by ID when the other side is an NPC', async () => {
-    mockOtherUser = { isActor: true };
+    mockRecipient = { isActor: true };
 
     const result = await executeDirectMessage({
       agentUserId: 'agent-1',
@@ -339,6 +332,37 @@ describe('executeDirectMessage DM moderation', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('NPC actors');
+    expect(messageInsertMock).not.toHaveBeenCalled();
+  });
+
+  test('rejects a send by chat ID to an actorState-only participant', async () => {
+    mockRecipient = null;
+    mockNpc = { id: 'user-2' };
+
+    const result = await executeDirectMessage({
+      agentUserId: 'agent-1',
+      chatId: 'chat-1',
+      content: 'hello there',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('NPC actors');
+    expect(messageInsertMock).not.toHaveBeenCalled();
+  });
+
+  test('rejects a send by chat ID when the counterpart is missing', async () => {
+    mockRecipient = null;
+
+    const result = await executeDirectMessage({
+      agentUserId: 'agent-1',
+      chatId: 'chat-1',
+      content: 'hello there',
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Recipient not found: user-2',
+    });
     expect(messageInsertMock).not.toHaveBeenCalled();
   });
 
