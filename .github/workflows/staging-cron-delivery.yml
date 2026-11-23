@@ -24,12 +24,14 @@ jobs:
         id: schedule
         run: |
           paths=$(bun --no-env-file -e 'import { jobs } from "./workers/cron/src/schedule.ts"; console.log(JSON.stringify(jobs.map(({ path }) => path)))')
-          printf 'paths=%s\n' "$paths" >> "$GITHUB_OUTPUT"
+          skip_reasons=$(bun --no-env-file -e 'import { cronSkipReasons } from "./workers/cron/src/skip-reasons.ts"; console.log(JSON.stringify(Object.fromEntries(Object.entries(cronSkipReasons).map(([path, reasons]) => [path, Object.values(reasons)]))))')
+          printf 'paths=%s\nskip_reasons=%s\n' "$paths" "$skip_reasons" >> "$GITHUB_OUTPUT"
       - name: Read allowlisted cron events for 145 seconds
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CRON_PATHS: ${{ steps.schedule.outputs.paths }}
+          CRON_SKIP_REASONS: ${{ steps.schedule.outputs.skip_reasons }}
           WRANGLER_SEND_METRICS: 'false'
           WRANGLER_WRITE_LOGS: 'false'
         shell: bash
@@ -45,7 +47,8 @@ jobs:
           timeout --kill-after=5s 145s ./node_modules/.bin/wrangler tail feed-cron-staging \
             --config workers/cron/wrangler.staging.jsonc --format json --search cron_delivery 2>/dev/null |
             env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_ACCOUNT_ID \
-            jq --compact-output --unbuffered --argjson paths "$CRON_PATHS" '
+            jq --compact-output --unbuffered --argjson paths "$CRON_PATHS" \
+              --argjson skipReasons "$CRON_SKIP_REASONS" '
               def uint:
                 if type == "number" then
                   isfinite and . >= 0 and . <= 9007199254740991 and . == floor
@@ -53,15 +56,22 @@ jobs:
               objects | .logs? | arrays | .[] | objects | .message? | arrays | .[]
               | if type == "string" then fromjson? else . end
               | objects
-              | select(keys == ["attempt", "event", "finishedAt", "httpStatus", "job", "outcome", "scheduledTime", "startedAt"])
+              | select((keys - ["skipReason"]) == ["attempt", "event", "finishedAt", "httpStatus", "job", "outcome", "scheduledTime", "startedAt"])
               | select(.event == "cron_delivery")
               | .job as $job
-              | select(($paths | index($job)) != null)
+              | select(($job | type) == "string" and ($paths | index($job)) != null)
               | select((.scheduledTime | uint) and (.startedAt | uint) and (.finishedAt | uint))
               | select(.attempt | uint and . > 0)
               | select(.httpStatus | . == null or (uint and . >= 100 and . <= 599))
               | select(.outcome == "completed" or .outcome == "skipped" or .outcome == "failed" or .outcome == "unknown")
+              | select(
+                  (has("skipReason") | not) or (
+                    .outcome == "skipped" and (.skipReason | type) == "string"
+                    and (.skipReason as $reason | ($skipReasons[$job] // []) | index($reason) != null)
+                  )
+                )
               | {event, job, scheduledTime, startedAt, finishedAt, attempt, httpStatus, outcome}
+                + (if has("skipReason") then {skipReason} else {} end)
             ' 2>/dev/null
           status=("${PIPESTATUS[@]}")
           set -e

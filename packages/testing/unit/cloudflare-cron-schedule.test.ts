@@ -110,13 +110,55 @@ describe('Cloudflare cron schedule', () => {
     expect(seen.size).toBe(jobs.length);
   });
   test.each([
-    [200, '{"success":true}', 'completed'],
-    [200, '{"success":true,"skipped":true}', 'skipped'],
-    [200, '{"success":false}', 'failed'],
-    [200, 'invalid JSON', 'unknown'],
-    [503, '{"success":true}', 'failed'],
-  ])('logs cron status %s and body %s as %s', async (status, body, outcome) => {
-    const path = '/api/cron/game-tick';
+    ['game-tick', 200, '{"success":true}', 'completed', undefined],
+    ['game-tick', 200, '{"success":true,"skipped":true}', 'skipped', undefined],
+    ['game-tick', 200, '{"success":false}', 'failed', undefined],
+    ['game-tick', 200, 'invalid JSON', 'unknown', undefined],
+    ['game-tick', 503, '{"success":true}', 'failed', undefined],
+    [
+      'game-tick',
+      200,
+      '{"skipped":true,"reason":"Game disabled via GAME_START environment variable"}',
+      'skipped',
+      'game_disabled',
+    ],
+    [
+      'markets-tick',
+      200,
+      '{"skipped":true,"reason":"Game not running"}',
+      'skipped',
+      'game_not_running',
+    ],
+    [
+      'npc-tick',
+      200,
+      '{"skipped":true,"reason":"Inference budget exhausted or suspended"}',
+      'skipped',
+      'inference_budget_exhausted_or_suspended',
+    ],
+    [
+      'realtime-drain',
+      200,
+      '{"skipped":true,"reason":"Game not running"}',
+      'skipped',
+      undefined,
+    ],
+    [
+      'game-tick',
+      200,
+      '{"skipped":true,"reason":"Unexpected route detail"}',
+      'skipped',
+      undefined,
+    ],
+    [
+      'game-tick',
+      200,
+      '{"success":true,"reason":"Game paused"}',
+      'completed',
+      undefined,
+    ],
+  ])('logs %s status %s and body %s as %s', async (job, status, body, outcome, skipReason) => {
+    const path = `/api/cron/${job}`;
     const scheduledTime = Date.parse('2026-10-10T00:00:00Z');
     let acknowledged = false;
     const worker = (await import(workerUrl)).default as { queue: WorkerQueue };
@@ -163,6 +205,7 @@ describe('Cloudflare cron schedule', () => {
         attempt: 2,
         httpStatus: status,
         outcome,
+        ...(skipReason ? { skipReason } : {}),
       });
     } finally {
       log.mockRestore();
