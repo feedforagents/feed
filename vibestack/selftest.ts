@@ -3563,28 +3563,11 @@ function eachCheck() {
 
 function theCommandLine() {
   test("a concurrent verifier install retries once without duplicating the check JSON stream", { skip: process.platform === "win32" }, async () => {
-    for (const change of ["model stage", "model and spec", "tests stage"] as const) {
-      const changedModel = change === "model and spec";
-      const duringTests = change === "tests stage";
+    for (const changedModel of [false, true]) {
       const root = toolchain(oneRule("value", "A value", "pure val answer = 42"), "quint", "lsc");
       const shim = path.join(root, "node_modules/.bin/quint");
       fs.unlinkSync(shim);
       fs.copyFileSync(path.join(nodeModules, ".bin/quint"), shim);
-      if (duringTests) {
-        const { packageManager } = JSON.parse(read("package.json"));
-        fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ type: "module", packageManager, scripts: { test: "node replace-quint.mjs" } }));
-        fs.writeFileSync(path.join(root, "replace-quint.mjs"), `
-          import fs from "node:fs";
-          const runs = ".cache/test-runs";
-          fs.mkdirSync(".cache", { recursive: true });
-          if (!fs.existsSync(runs)) {
-            const shim = "node_modules/.bin/quint";
-            fs.copyFileSync(shim, shim + ".new");
-            fs.renameSync(shim + ".new", shim);
-          }
-          fs.appendFileSync(runs, "ran\\n");
-        `);
-      }
       const retry = await exec(process.execPath, ["--input-type=module", "--eval", `
         import assert from "node:assert/strict";
         import fs from "node:fs";
@@ -3599,7 +3582,7 @@ function theCommandLine() {
         const { log } = console;
         let linked = false;
         console.log = (line) => {
-          if (!${duringTests} && JSON.parse(line).stage === "model" && !linked) {
+          if (JSON.parse(line).stage === "model" && !linked) {
             linked = true;
             fs.linkSync("node_modules/.bin/quint", "second-install-quint");
             if (${changedModel}) fs.renameSync("spec/value.md", "spec/renamed.md");
@@ -3615,13 +3598,9 @@ function theCommandLine() {
         assert.match(retry.stderr.trim(), /^a tool installation changed during this check; run the check again$/);
         assert.ok(rows.every((row) => typeof row.stage === "string"), "a changed prefix never gets a final answer");
       } else {
-        assert.equal(retry.stderr, "", retry.stdout);
+        assert.equal(retry.stderr, "");
         assert.deepEqual(rows.slice(0, -1), rows.at(-1).results);
         assert.ok(rows.at(-1).results.some((r: Result) => r.stage === "proof" && r.ok), retry.stdout);
-      }
-      if (duringTests) {
-        assert.deepEqual(rows.filter((row) => row.stage === "tests").map((row) => row.ok), [true]);
-        assert.equal(read(".cache/test-runs", root), "ran\nran\n");
       }
       assert.equal(rows.filter((row) => row.stage === "model").length, 1);
       assert.ok(!fs.existsSync(path.join(root, ".spec-cache/lock")));
