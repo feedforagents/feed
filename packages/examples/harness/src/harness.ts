@@ -4,13 +4,13 @@
  * Runs agents in parallel with different archetypes, recording trajectories.
  */
 
-import { HarnessA2AClient } from './a2a-client';
 import { getArchetype } from './archetypes';
+import { SimulationAdapter } from './offline-adapter';
 import type {
-  A2AClientInterface,
   ActionResult,
   AgentContext,
   AgentDecision,
+  HarnessClient,
   HarnessConfig,
   HarnessResult,
   TrainableAgent,
@@ -18,24 +18,11 @@ import type {
   TrajectoryStep,
 } from './types';
 
-const ANVIL_PRIVATE_KEYS = [
-  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
-  '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a',
-  '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6',
-  '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a',
-  '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba',
-  '0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e',
-  '0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356',
-  '0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97',
-  '0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6',
-];
-
 interface AgentInstance {
   agent: TrainableAgent;
   archetypeId: string;
   instanceId: number;
-  client: A2AClientInterface;
+  client: HarnessClient;
   trajectory: Trajectory;
 }
 
@@ -47,7 +34,7 @@ export class AgentHarness {
     this.config = {
       ...config,
       parallelAgents: Math.min(config.parallelAgents || 5, 10),
-      tickInterval: config.tickInterval || 2000,
+      tickInterval: config.tickInterval ?? 2000,
       ticksPerAgent: config.ticksPerAgent || 10,
       instancesPerAgent: config.instancesPerAgent || 1,
       recordTrajectories: config.recordTrajectories ?? true,
@@ -58,57 +45,25 @@ export class AgentHarness {
    * Initialize all agent instances
    */
   private async initializeInstances(): Promise<void> {
-    let keyIndex = 0;
     let instanceId = 0;
 
     for (const agent of this.config.agents) {
       for (const archetype of this.config.archetypes) {
         for (let i = 0; i < this.config.instancesPerAgent; i++) {
-          if (keyIndex >= ANVIL_PRIVATE_KEYS.length) {
-            keyIndex = 0; // Wrap around if we run out of keys
-          }
+          const instanceAgentId = `${agent.name}-${archetype.id}-${instanceId}`;
+          const client: HarnessClient =
+            this.config.clientFactory?.(instanceId) ??
+            new SimulationAdapter({ userId: instanceAgentId });
 
-          // Build client: use clientFactory if provided, else default HarnessA2AClient
-          let client: A2AClientInterface;
-          if (this.config.clientFactory) {
-            client = this.config.clientFactory(instanceId);
-          } else {
-            const harnessClient = new HarnessA2AClient({
-              baseUrl: this.config.a2aUrl,
-              privateKey: ANVIL_PRIVATE_KEYS[keyIndex],
-            });
-            // Register with A2A server (best-effort — already registered is fine)
-            try {
-              await harnessClient.register(
-                `${agent.name}-${archetype.id}-${i}`,
-                `${archetype.description} (${agent.language})`
-              );
-            } catch {
-              // ignored
-            }
-            client = harnessClient;
-          }
-
-          // Initialize agent with archetype
           await agent.initialize({
-            a2aUrl: this.config.a2aUrl,
-            privateKey: ANVIL_PRIVATE_KEYS[keyIndex],
-            archetype: archetype,
+            archetype,
             name: `${agent.name}-${archetype.id}-${i}`,
             tickInterval: this.config.tickInterval,
           });
 
-          // Clients that provide an agent ID override the generated ID.
-          const agentId =
-            'getAgentId' in client &&
-            typeof (client as { getAgentId(): string }).getAgentId ===
-              'function'
-              ? (client as { getAgentId(): string }).getAgentId()
-              : `${agent.name}-${archetype.id}-${instanceId}`;
-
           const trajectory: Trajectory = {
             id: `traj-${Date.now()}-${instanceId}`,
-            agentId,
+            agentId: client.getAgentId?.() ?? instanceAgentId,
             archetype: archetype.id,
             startTime: new Date().toISOString(),
             steps: [],
@@ -128,7 +83,6 @@ export class AgentHarness {
             trajectory,
           });
 
-          keyIndex++;
           instanceId++;
         }
       }
@@ -200,7 +154,7 @@ export class AgentHarness {
    */
   private async executeAction(
     decision: AgentDecision,
-    client: HarnessA2AClient,
+    client: HarnessClient,
     context: AgentContext
   ): Promise<ActionResult> {
     switch (decision.action) {

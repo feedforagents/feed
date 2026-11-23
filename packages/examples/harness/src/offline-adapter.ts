@@ -1,7 +1,7 @@
 /**
  * Simulation Game Adapter
  *
- * Bridges the harness A2AClientInterface with the engine's InMemoryStateStore.
+ * Bridges the harness HarnessClient with the engine's InMemoryStateStore.
  * Provides a complete simulation environment with no server or database required.
  *
  * @example
@@ -25,10 +25,10 @@
  * ```
  */
 
-import { InMemoryStateStore, type SimulationConfig } from '@feed/engine';
+import { InMemoryStateStore } from '@feed/engine';
 import type {
-  A2AClientInterface,
   AgentInfo,
+  HarnessClient,
   LeaderboardEntry,
   Market,
   Notification,
@@ -40,7 +40,9 @@ import type {
 } from './types';
 
 // Re-export types for convenience
-export type { SimulationConfig };
+export type SimulationConfig = NonNullable<
+  ConstructorParameters<typeof InMemoryStateStore>[0]
+>;
 
 export interface SimulationTickResult {
   tick: number;
@@ -49,7 +51,7 @@ export interface SimulationTickResult {
 }
 
 /**
- * Adapter that implements A2AClientInterface using InMemoryStateStore
+ * Adapter that implements HarnessClient using InMemoryStateStore
  *
  * This provides a complete simulation environment:
  * - No server required
@@ -57,7 +59,7 @@ export interface SimulationTickResult {
  * - Deterministic with seed
  * - Full game simulation with markets, agents, posts
  */
-export class SimulationAdapter implements A2AClientInterface {
+export class SimulationAdapter implements HarnessClient {
   private store: InMemoryStateStore;
   private userId: string;
 

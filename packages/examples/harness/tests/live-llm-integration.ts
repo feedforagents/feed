@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
 
 /**
- * Live integration test: LLMAgent + ArchetypeAgent against the local A2A server.
+ * Live integration test: LLMAgent + ArchetypeAgent using the in-memory simulation.
  *
  * Requires:
- *   - Local A2A server running on localhost:3001
  *   - GROQ_API_KEY in environment
  *
  * Run: bun run tests/live-llm-integration.ts
@@ -15,7 +14,6 @@ import { createLLMAgent } from '../src/agents/llm-agent';
 import { getArchetype } from '../src/archetypes';
 import { runHarness } from '../src/harness';
 
-const A2A_URL = 'http://localhost:3001';
 const GREEN = '\x1b[32m';
 const RED = '\x1b[31m';
 const CYAN = '\x1b[36m';
@@ -24,26 +22,6 @@ const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
 
 // ─── Pre-flight checks ────────────────────────────────────────────────────────
-
-async function checkServer(): Promise<boolean> {
-  try {
-    const r = await fetch(`${A2A_URL}/health`);
-    const j = (await r.json()) as { status?: string };
-    return r.ok && j.status === 'ok';
-  } catch {
-    return false;
-  }
-}
-
-const serverUp = await checkServer();
-if (!serverUp) {
-  console.error(`${RED}✗ Local A2A server not running on ${A2A_URL}${RESET}`);
-  console.error(
-    '  Start it with: cd packages/examples/local-a2a-server && bun run src/server.ts'
-  );
-  process.exit(1);
-}
-console.log(`${GREEN}✓ A2A server up${RESET} at ${A2A_URL}\n`);
 
 const hasGroq = !!process.env.GROQ_API_KEY;
 const hasOpenAI = !!process.env.OPENAI_API_KEY;
@@ -67,7 +45,6 @@ const archetypes = ['trader', 'degen', 'researcher', 'scammer'].map(
 );
 
 const r1 = await runHarness({
-  a2aUrl: A2A_URL,
   agents: [archetypeAgent],
   archetypes,
   instancesPerAgent: 1,
@@ -135,7 +112,6 @@ console.log(
 const llmAgent = createLLMAgent({ provider: provider as 'groq' | 'openai' });
 
 const r2 = await runHarness({
-  a2aUrl: A2A_URL,
   agents: [llmAgent],
   archetypes: [getArchetype('trader'), getArchetype('degen')],
   instancesPerAgent: 1,
@@ -201,18 +177,15 @@ if (pass2) {
   console.log(`${RED}✗ LLMAgent test FAILED${RESET}\n`);
 }
 
-// ─── Test 3: clientFactory offline (SimulationA2AAdapter) ────────────────────
+// ─── Test 3: custom offline client factory ────────────────────
 
-console.log(
-  `\n${BOLD}${CYAN}Test 3: Offline mode (SimulationA2AAdapter) — no server needed${RESET}`
-);
+console.log(`\n${BOLD}${CYAN}Test 3: Custom offline client factory${RESET}`);
 
 import { SimulationAdapter } from '../src/offline-adapter';
 
 let simIdx = 0;
 
 const r3 = await runHarness({
-  a2aUrl: '',
   agents: [archetypeAgent],
   archetypes: [getArchetype('trader'), getArchetype('researcher')],
   instancesPerAgent: 1,

@@ -14,12 +14,6 @@ const repoRoot = resolve(import.meta.dir, '..');
 
 const steps: BuildStep[] = [
   {
-    name: 'packages/examples/local-a2a-server',
-    cwd: resolve(repoRoot, 'packages/examples/local-a2a-server'),
-    command: 'bun',
-    args: ['run', 'build'],
-  },
-  {
     name: 'packages/sim',
     cwd: resolve(repoRoot, 'packages/sim'),
     command: 'bun',

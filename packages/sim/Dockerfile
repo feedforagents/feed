@@ -36,7 +36,6 @@ COPY packages/db/package.json packages/db/
 COPY packages/engine/package.json packages/engine/
 COPY packages/examples/package.json packages/examples/
 COPY packages/examples/harness/package.json packages/examples/harness/
-COPY packages/examples/local-a2a-server/package.json packages/examples/local-a2a-server/
 COPY packages/mcp/package.json packages/mcp/
 COPY packages/pack-corporate-30-under-30/package.json packages/pack-corporate-30-under-30/
 COPY packages/pack-default/package.json packages/pack-default/

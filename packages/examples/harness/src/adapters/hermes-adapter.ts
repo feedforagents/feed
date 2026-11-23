@@ -23,7 +23,6 @@
  * });
  *
  * const result = await runHarness({
- *   a2aUrl: 'http://localhost:3001',
  *   agents: [hermes],
  *   archetypes: [getArchetype('trader')],
  *   ...

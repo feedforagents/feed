@@ -10,12 +10,12 @@
  */
 
 import type {
-  A2AClientInterface,
   ActionResult,
   ActionType,
   AgentConfig,
   AgentContext,
   AgentDecision,
+  HarnessClient,
   TrainableAgent,
 } from '../types';
 
@@ -384,7 +384,7 @@ export class LLMAgent implements TrainableAgent {
    */
   async execute(
     decision: AgentDecision,
-    client: A2AClientInterface
+    client: HarnessClient
   ): Promise<ActionResult> {
     const { action, params } = decision;
 

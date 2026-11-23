@@ -59,16 +59,18 @@ export interface TrainableAgent {
   /** Execute an action (optional - harness can execute) */
   execute?(
     decision: AgentDecision,
-    client: A2AClientInterface
+    client: HarnessClient
   ): Promise<ActionResult>;
 
   /** Called at end of training run */
   cleanup?(): Promise<void>;
 }
 
-// ==================== A2A Client Interface ====================
+// ==================== Harness Client ====================
 
-export interface A2AClientInterface {
+export interface HarnessClient {
+  getAgentId?(): string;
+
   // Portfolio
   getBalance(): Promise<{ balance: number; currency: string }>;
   getPositions(): Promise<{ positions: Position[] }>;
@@ -226,12 +228,6 @@ export interface ArchetypeConfig {
 // ==================== Agent Config ====================
 
 export interface AgentConfig {
-  /** Base URL of A2A server */
-  a2aUrl: string;
-
-  /** Private key for wallet */
-  privateKey: string;
-
   /** Archetype configuration (optional) */
   archetype?: ArchetypeConfig;
 
@@ -269,20 +265,10 @@ export interface Trajectory {
 
 // ==================== Harness Config ====================
 
-/**
- * Optional factory that returns an A2AClientInterface for a given agent
- * instance. When provided, the harness calls this instead of building a
- * default HarnessA2AClient. Use to inject a SimulationA2AAdapter per instance.
- */
-export type ClientFactory = (instanceIndex: number) => A2AClientInterface;
+/** Creates the client for one harness instance. */
+export type ClientFactory = (instanceIndex: number) => HarnessClient;
 
 export interface HarnessConfig {
-  /**
-   * A2A server URL.
-   * Used only when `clientFactory` is omitted (default HarnessA2AClient).
-   */
-  a2aUrl: string;
-
   /** Agents to run */
   agents: TrainableAgent[];
 
@@ -308,9 +294,9 @@ export interface HarnessConfig {
   outputDir?: string;
 
   /**
-   * Optional factory for custom A2A clients.
+   * Optional factory. The default uses a separate in-memory simulation per instance.
    * Receives the instance index (0-based) so each instance can get
-   * its own client (e.g. SimulationA2AAdapter with separate state).
+   * its own client.
    */
   clientFactory?: ClientFactory;
 }

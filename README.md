@@ -63,7 +63,7 @@ packages/
   mcp/          ← Model Context Protocol server
   training/     ← RL pipeline, ScamBench harness, HF/W&B integration
   pack-default/ ← Default NPC/organization content pack
-  examples/     ← Example agents, harness, local A2A server
+  examples/     ← Offline agent training examples
 ```
 
 **Data flow:** Cron → `game-tick` → `GameWorld` (hidden facts, events) → `FeedGenerator` (LLM posts per character) + `PredictionMarketService` + perps pricing → SSE broadcast → clients.
@@ -204,7 +204,7 @@ Cloudflare Workers observability provides deployment logs. PostHog remains the p
 | `packages/pack-default` | Default NPC and organization content pack (actors, orgs) |
 | `packages/sim` | Standalone simulation CLI |
 | `packages/testing` | Shared test utilities, integration helpers |
-| `packages/examples` | Local A2A server and training harness |
+| `packages/examples` | Offline agent training harness |
 
 ---
 
@@ -353,7 +353,7 @@ bun run agent-frameworks:bootstrap
 
 This clones and builds the frameworks into `../external-sources`; it is not run by `bun install`.
 
-The **training harness** in `packages/examples/harness` wires agents against the game engine for evaluation. See `packages/training/SCAMBENCH_RUNBOOK.md` for detailed setup.
+The **training harness** in `packages/examples/harness` runs agents against the in-memory game simulation for local evaluation. See `packages/training/SCAMBENCH_RUNBOOK.md` for detailed setup.
 
 ---
 

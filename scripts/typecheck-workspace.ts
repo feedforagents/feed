@@ -18,7 +18,7 @@ const WORKSPACES = [
   'packages/agents',
   'packages/testing',
   'packages/sim',
-  'packages/examples/local-a2a-server',
+  'packages/examples/harness',
   'packages/contracts',
   'apps/cli',
   'apps/web',
