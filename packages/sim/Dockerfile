@@ -25,7 +25,6 @@ WORKDIR /app
 COPY package.json bun.lock ./
 COPY apps/cli/package.json apps/cli/
 COPY apps/dag-visualizer/package.json apps/dag-visualizer/
-COPY apps/mobile/package.json apps/mobile/
 COPY apps/web/package.json apps/web/
 COPY packages/a2a/package.json packages/a2a/
 COPY packages/agents/package.json packages/agents/

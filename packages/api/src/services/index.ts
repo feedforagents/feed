@@ -28,7 +28,6 @@ export * from './generation-lock-service';
 export * from './group-invite-service';
 export * from './leaderboard-types';
 export * from './market-reputation-service';
-export * from './model-pilot-inquiry-email-service';
 // Moderation Services
 export * from './moderation';
 export * from './notification-email-service';

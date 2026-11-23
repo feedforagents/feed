@@ -54,7 +54,7 @@ function ChatCacheHydrator() {
 /**
  * Root providers component wrapping the application with all necessary context.
  *
- * @param props.minimalChrome - When true (e.g. /research, /ticker): skip auth,
+ * @param props.minimalChrome - When true (e.g. /ticker): skip auth,
  *   PostHog, onboarding, SSE listeners — avoids errors on public/embed pages.
  */
 export function Providers({

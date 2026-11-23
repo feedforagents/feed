@@ -51,7 +51,6 @@ Feed is a live social simulation where players trade on prediction markets along
 apps/
   web/          ← Next.js 16 app (UI, API routes, SSE, cron endpoints)
   cli/          ← Bun CLI (db, game, agent commands)
-  mobile/       ← Capacitor mobile shell
 
 packages/
   engine/       ← Game engine: ticks, feed/world generation, prompts, LLM client
@@ -188,7 +187,6 @@ Cloudflare Workers observability provides deployment logs. PostHog remains the p
 |-----|-------------|
 | `apps/web` | Primary Next.js app — UI, API routes, SSE, Steward auth wiring |
 | `apps/cli` | `feed` CLI — db migrations, game control, agent management |
-| `apps/mobile` | Capacitor mobile shell |
 
 ### Packages
 
@@ -206,7 +204,7 @@ Cloudflare Workers observability provides deployment logs. PostHog remains the p
 | `packages/pack-default` | Default NPC and organization content pack (actors, orgs) |
 | `packages/sim` | Standalone simulation CLI |
 | `packages/testing` | Shared test utilities, integration helpers |
-| `packages/examples` | Example agents: TypeScript agent, LangGraph agent, local A2A server, training harness |
+| `packages/examples` | TypeScript example agent, local A2A server, and training harness |
 
 ---
 

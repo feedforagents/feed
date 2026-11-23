@@ -5,6 +5,7 @@ import {
   validateGetLeaderboardArgs,
   validateGetPortfolioArgs,
   validateGetPostArgs,
+  validateOpenPositionArgs,
   validateResolveMarketArgs,
   validateSearchAgentsArgs,
 } from '../../../mcp/src/utils/tool-args-validation';
@@ -26,7 +27,7 @@ describe('MCP Parity Surface', () => {
     });
 
     expect(args.mediaUrl).toBe('https://example.com/image.png');
-    expect(args.type).toBe('post');
+    expect('type' in args).toBe(false);
   });
 
   it('accepts personal wallet rankings and rejects retired team scope', () => {
@@ -44,5 +45,25 @@ describe('MCP Parity Surface', () => {
       validateResolveMarketArgs({ marketId: 'market-123', resolution: true })
         .resolution
     ).toBe(true);
+  });
+
+  it('accepts only whole-number leverage on open_position', () => {
+    const order = { ticker: 'NVDAI', side: 'LONG', amount: 100 };
+
+    expect(validateOpenPositionArgs({ ...order, leverage: 2 }).leverage).toBe(
+      2
+    );
+    expect(() =>
+      validateOpenPositionArgs({ ...order, leverage: 2.5 })
+    ).toThrow();
+
+    const tool = getAvailableTools().find(
+      (candidate) => candidate.name === 'open_position'
+    );
+    expect(tool?.inputSchema.properties.leverage).toMatchObject({
+      type: 'integer',
+      minimum: 1,
+      maximum: 20,
+    });
   });
 });

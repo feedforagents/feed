@@ -1,125 +1,133 @@
-/** PRD §9.2 / MVP Phase 6: preserve the existing prediction lifecycle. */
-import { describe, expect, test } from 'bun:test';
+/** PRD §9.2 / MVP Phase 6: markets close to trading at their deadline. */
+import { afterAll, expect, mock, setSystemTime, test } from 'bun:test';
 import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@feed/core/markets/prediction';
-import { db, eq, markets, questions } from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
-import { GET as getNewMarkets } from '@/app/api/feed/new-markets/route';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-function makeService() {
-  // List/buy-eligibility cases only. The inert wallet is isolation, not
-  // evidence for funded buys: the buy below is expected to throw before any
-  // wallet call, inside assertMarketActiveForBuy.
-  return new PredictionMarketService({
-    db: new PredictionDbAdapter(),
-    wallet: {
-      debit: async () => {},
-      credit: async () => {},
-      recordPnL: async () => {},
-      getBalance: async () => ({ balance: 0 }),
-    },
-    fees: {
-      tradingFeeRate: 0,
-      platformShare: 0,
-      referrerShare: 0,
-      minFeeAmount: 0,
-    },
-  });
-}
+const expiryCase =
+  'fills the five-card list with markets strictly before close';
 
-function uniqueQuestionNumber() {
-  return 910_000 + Math.floor(Math.random() * 8_000);
-}
-
-async function insertFixture(kind: 'expired' | 'live') {
-  const now = new Date();
-  const id = await generateSnowflakeId();
-  const questionNumber = uniqueQuestionNumber();
-  const text = `New-markets expiry ${kind} ${id}`;
-  // Created 1h ago: inside the feed's 24h "recently opened" window.
-  const createdAt = new Date(now.getTime() - 60 * 60 * 1000);
-  // Expired: resolution 30m ago (a 15m market whose resolution is held for
-  // manual review, or whose reject postponed it, stays 'active' like this).
-  // Live: resolves in 24h.
-  const resolutionDate = new Date(
-    now.getTime() + (kind === 'expired' ? -30 : 24 * 60) * 60 * 1000
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks New Markets expiry in a leased database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'new-markets-expiry',
+      file: 'packages/testing/integration/new-markets-expiry.integration.test.ts',
+      cases: [expiryCase],
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  mock.module('server-only', () => ({}));
+  const { PredictionDbAdapter, PredictionMarketService } = await import(
+    '@feed/core/markets/prediction'
   );
-  await db.insert(questions).values({
-    id,
-    questionNumber,
-    text,
-    scenarioId: 1,
-    outcome: true,
-    rank: 1,
-    resolutionDate,
-    status: 'active',
-    createdAt,
-    updatedAt: now,
+  const { closeDatabase, db, markets, questions } = await import('@feed/db');
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { NextRequest } = await import('next/server');
+  const { GET } = await import(
+    '../../../apps/web/src/app/api/feed/new-markets/route'
+  );
+  type NewMarketsResponse =
+    import('../../../apps/web/src/app/api/feed/new-markets/route').NewMarketsResponse;
+  afterAll(async () => {
+    await closeDatabase();
   });
-  await db.insert(markets).values({
-    id,
-    question: text,
-    yesShares: '100',
-    noShares: '100',
-    liquidity: '1000',
-    resolved: false,
-    resolution: null,
-    endDate: resolutionDate,
-    createdAt,
-    updatedAt: now,
-  });
-  // The feed joins markets on questions.marketId.
-  await db.update(questions).set({ marketId: id }).where(eq(questions.id, id));
-  return { id, questionNumber, text };
-}
 
-async function cleanup(ids: string[]) {
-  for (const id of ids) {
-    await db.delete(markets).where(eq(markets.id, id));
-    await db.delete(questions).where(eq(questions.id, id));
-  }
-}
-
-describe('new-markets feed expiry', () => {
-  test('an expired-but-unresolved market is not shown as a New Market trade card', async () => {
-    const expired = await insertFixture('expired');
-    const live = await insertFixture('live');
+  test(expiryCase, async () => {
+    const now = new Date('2035-01-01T12:00:00.000Z');
+    setSystemTime(now);
     try {
-      const res = await getNewMarkets(
-        new NextRequest('http://localhost/api/feed/new-markets')
+      const fixtures = await Promise.all(
+        [-1, 0, 1, 60_000, 60_000, 60_000, 60_000, 60_000].map(
+          async (offset, index) => ({
+            marketId: await generateSnowflakeId(),
+            questionId: await generateSnowflakeId(),
+            questionNumber: 910_000 + index,
+            createdAt: new Date(now.getTime() - (index + 1) * 60_000),
+            deadline: new Date(now.getTime() + offset),
+          })
+        )
       );
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as {
-        markets: Array<{ marketId: string | null; text: string }>;
+      // Both closed rows are newer than all six open rows, so filtering
+      // after taking five cards would leave the feed short.
+      await db.transaction(async (tx) => {
+        await tx.insert(markets).values(
+          fixtures.map(({ marketId, createdAt, deadline }) => ({
+            id: marketId,
+            question: 'New Markets expiry fixture',
+            yesShares: '100',
+            noShares: '100',
+            liquidity: '1000',
+            resolved: false,
+            endDate: deadline,
+            createdAt,
+            updatedAt: createdAt,
+          }))
+        );
+        await tx.insert(questions).values(
+          fixtures.map(
+            ({
+              marketId,
+              questionId,
+              questionNumber,
+              createdAt,
+              deadline,
+            }) => ({
+              id: questionId,
+              marketId,
+              questionNumber,
+              text: 'New Markets expiry fixture',
+              scenarioId: 1,
+              outcome: true,
+              rank: 1,
+              resolutionDate: deadline,
+              status: 'active',
+              createdAt,
+              updatedAt: createdAt,
+            })
+          )
+        );
+      });
+      const atClose = fixtures[1];
+      if (!atClose) throw new Error('Missing the exact-close fixture');
+      const unexpectedWalletCall = async () => {
+        throw new Error('The expiry guard must run before any wallet call');
       };
-      const shown = body.markets.map((m) => m.marketId);
-
-      // The trading list and the buy path already agree the expired market
-      // is closed: it is excluded from listMarkets and a buy is rejected.
-      // These run before the feed assertion so a base failure still proves
-      // the divergence (feed shows it, list/buy refuse it) instead of
-      // stopping at the first expect.
-      const service = makeService();
-      const listed = await service.listMarkets();
-      expect(listed.some((m) => m.id === expired.id)).toBe(false);
-      expect(listed.some((m) => m.id === live.id)).toBe(true);
+      const service = new PredictionMarketService({
+        db: new PredictionDbAdapter(),
+        wallet: {
+          debit: unexpectedWalletCall,
+          credit: unexpectedWalletCall,
+          recordPnL: unexpectedWalletCall,
+          getBalance: unexpectedWalletCall,
+        },
+        fees: {
+          tradingFeeRate: 0,
+          platformShare: 0,
+          referrerShare: 0,
+          minFeeAmount: 0,
+        },
+      });
       await expect(
         service.buy({
-          userId: 'new-markets-expiry-probe',
-          marketId: expired.id,
+          marketId: atClose.marketId,
+          userId: 'new-markets-expiry-fixture',
           side: 'yes',
           amount: 10,
         })
       ).rejects.toThrow('Market expired');
 
-      // The live market is shown; the expired one must not be.
-      expect(shown).toContain(live.id);
-      expect(shown).not.toContain(expired.id);
+      const response = await GET(
+        new NextRequest('http://localhost/api/feed/new-markets')
+      );
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as NewMarketsResponse;
+      expect(result.markets.map(({ marketId }) => marketId)).toEqual(
+        fixtures.slice(2, 7).map(({ marketId }) => marketId)
+      );
     } finally {
-      await cleanup([expired.id, live.id]);
+      setSystemTime();
     }
   });
-});
+}
