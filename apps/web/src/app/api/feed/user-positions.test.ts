@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 import * as actualDb from '@feed/db';
 
 type ColumnRef = { column: string };
@@ -26,9 +26,6 @@ const positionsTable = {
   status: { column: 'status' } as ColumnRef,
   shares: { column: 'shares' } as ColumnRef,
 };
-
-let positionRows: PositionRow[] = [];
-let selectCallCount = 0;
 
 function matchesCondition(
   row: Record<string, unknown>,
@@ -86,90 +83,74 @@ mock.module('@feed/db', () => ({
     left,
   }),
   positions: positionsTable,
-  db: {
-    select: () => {
-      selectCallCount += 1;
-      return {
-        from: () => ({
-          where: async (condition: Condition) =>
-            positionRows
-              .filter((row) => matchesCondition(row, condition))
-              .map(({ marketId, questionId }) => ({ marketId, questionId })),
-        }),
-      };
-    },
-  },
 }));
 
 const {
+  buildUserActiveStoryPositionsWhere,
   buildUserStoryPositionIndex,
-  loadUserActiveStoryPositions,
   storyHasUserPosition,
 } = await import('./user-positions');
 
-describe('feed user story position matching', () => {
-  beforeEach(() => {
-    selectCallCount = 0;
-    positionRows = [
-      // Production row written by PredictionDbAdapter (questionId is always null)
-      {
-        userId: 'u1',
-        marketId: 'mkt-12',
-        questionId: null,
-        status: 'active',
-        shares: '100.000000',
-      },
-      // Exact minimum sellable share boundary (0.01)
-      {
-        userId: 'u1',
-        marketId: 'mkt-min-lot',
-        questionId: null,
-        status: 'active',
-        shares: '0.010000',
-      },
-      // Legacy row populated with questionId
-      {
-        userId: 'u1',
-        marketId: 'mkt-legacy-other',
-        questionId: 7,
-        status: 'active',
-        shares: '50.000000',
-      },
-      // Dust / zero-share active row (must be excluded)
-      {
-        userId: 'u1',
-        marketId: 'mkt-dust',
-        questionId: null,
-        status: 'active',
-        shares: '0.005000',
-      },
-      // Closed / resolved rows (must be excluded)
-      {
-        userId: 'u1',
-        marketId: 'mkt-closed',
-        questionId: null,
-        status: 'closed',
-        shares: '0.000000',
-      },
-      {
-        userId: 'u1',
-        marketId: 'mkt-resolved',
-        questionId: null,
-        status: 'resolved',
-        shares: '50.000000',
-      },
-      // Another user's active position on a visible market (must be excluded)
-      {
-        userId: 'u2',
-        marketId: 'mkt-other-user',
-        questionId: null,
-        status: 'active',
-        shares: '100.000000',
-      },
-    ];
-  });
+const fixtureRows: PositionRow[] = [
+  // Production row written by PredictionDbAdapter (questionId is always null)
+  {
+    userId: 'u1',
+    marketId: 'mkt-12',
+    questionId: null,
+    status: 'active',
+    shares: '100.000000',
+  },
+  // Exact minimum sellable share boundary (0.01)
+  {
+    userId: 'u1',
+    marketId: 'mkt-min-lot',
+    questionId: null,
+    status: 'active',
+    shares: '0.010000',
+  },
+  // Legacy row populated with questionId
+  {
+    userId: 'u1',
+    marketId: 'mkt-legacy-other',
+    questionId: 7,
+    status: 'active',
+    shares: '50.000000',
+  },
+  // Dust / zero-share active row (must be excluded)
+  {
+    userId: 'u1',
+    marketId: 'mkt-dust',
+    questionId: null,
+    status: 'active',
+    shares: '0.005000',
+  },
+  // Closed / resolved rows (must be excluded)
+  {
+    userId: 'u1',
+    marketId: 'mkt-closed',
+    questionId: null,
+    status: 'closed',
+    shares: '0.000000',
+  },
+  {
+    userId: 'u1',
+    marketId: 'mkt-resolved',
+    questionId: null,
+    status: 'resolved',
+    shares: '50.000000',
+  },
+  // Another user's active position on a visible market (must be excluded)
+  {
+    userId: 'u2',
+    marketId: 'mkt-other-user',
+    questionId: null,
+    status: 'active',
+    shares: '100.000000',
+  },
+];
 
-  it('matches active PredictionDbAdapter positions by marketId when questionId is null and preserves legacy questionId matching', async () => {
+describe('feed user story position matching', () => {
+  it('matches active PredictionDbAdapter positions by marketId when questionId is null and preserves legacy questionId matching', () => {
     const stories = [
       { questionNumber: 12, marketId: 'mkt-12' },
       { questionNumber: 13, marketId: 'mkt-min-lot' },
@@ -181,7 +162,16 @@ describe('feed user story position matching', () => {
       { questionNumber: null, marketId: null },
     ];
 
-    const rows = await loadUserActiveStoryPositions('u1', stories);
+    const where = buildUserActiveStoryPositionsWhere(
+      'u1',
+      stories
+    ) as unknown as Condition | null;
+    expect(where).not.toBeNull();
+
+    const rows = fixtureRows
+      .filter((row) => matchesCondition(row, where ?? undefined))
+      .map(({ marketId, questionId }) => ({ marketId, questionId }));
+
     expect(rows).toEqual([
       { marketId: 'mkt-12', questionId: null },
       { marketId: 'mkt-min-lot', questionId: null },
@@ -199,25 +189,33 @@ describe('feed user story position matching', () => {
     expect(storyHasUserPosition(stories[7]!, index)).toBe(false);
   });
 
-  it('handles marketId-only, questionNumber-only, and empty story lists cleanly', async () => {
-    const marketOnly = await loadUserActiveStoryPositions('u1', [
+  it('handles marketId-only, questionNumber-only, and empty story lists cleanly', () => {
+    const marketWhere = buildUserActiveStoryPositionsWhere('u1', [
       { questionNumber: null, marketId: 'mkt-12' },
-    ]);
-    expect(marketOnly).toEqual([{ marketId: 'mkt-12', questionId: null }]);
+    ]) as unknown as Condition | null;
+    expect(marketWhere).not.toBeNull();
+    expect(
+      fixtureRows
+        .filter((row) => matchesCondition(row, marketWhere ?? undefined))
+        .map(({ marketId, questionId }) => ({ marketId, questionId }))
+    ).toEqual([{ marketId: 'mkt-12', questionId: null }]);
 
-    const questionOnly = await loadUserActiveStoryPositions('u1', [
+    const questionWhere = buildUserActiveStoryPositionsWhere('u1', [
       { questionNumber: 7, marketId: null },
-    ]);
-    expect(questionOnly).toEqual([
-      { marketId: 'mkt-legacy-other', questionId: 7 },
-    ]);
+    ]) as unknown as Condition | null;
+    expect(questionWhere).not.toBeNull();
+    expect(
+      fixtureRows
+        .filter((row) => matchesCondition(row, questionWhere ?? undefined))
+        .map(({ marketId, questionId }) => ({ marketId, questionId }))
+    ).toEqual([{ marketId: 'mkt-legacy-other', questionId: 7 }]);
 
-    const beforeEmpty = selectCallCount;
-    const empty = await loadUserActiveStoryPositions('u1', [
-      { questionNumber: null, marketId: null },
-    ]);
-    expect(empty).toEqual([]);
-    expect(selectCallCount).toBe(beforeEmpty);
+    expect(
+      buildUserActiveStoryPositionsWhere('u1', [
+        { questionNumber: null, marketId: null },
+        { questionNumber: null, marketId: '' },
+      ])
+    ).toBeNull();
   });
 
   it('stays backward compatible with cached rows lacking marketId', () => {

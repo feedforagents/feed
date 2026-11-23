@@ -14,6 +14,7 @@ import {
   lte,
   markets,
   not,
+  positions,
   posts,
   questions,
   reactions,
@@ -41,16 +42,16 @@ import {
   calculateStoryScore,
 } from '@/app/api/feed/narrative/scoring';
 import {
-  buildUserStoryPositionIndex,
-  loadUserActiveStoryPositions,
-  storyHasUserPosition,
-  type UserStoryPositionRow,
-} from '../_lib/user-positions';
-import {
   filterStoriesForViewer,
   loadViewerExcludedAuthorIds,
 } from '../_lib/viewer-moderation';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
+import {
+  buildUserActiveStoryPositionsWhere,
+  buildUserStoryPositionIndex,
+  storyHasUserPosition,
+  type UserStoryPositionRow,
+} from '../user-positions';
 import {
   loadDiscoveryForYouCandidatePosts,
   loadHistoricalForYouBackfillPosts,
@@ -1313,7 +1314,7 @@ export async function buildForYouFeed(userId?: string | null) {
     FollowRow[],
     Array<{ postId: string | null }>,
     Array<{ postId: string }>,
-    Array<{ questionId: number | null }>,
+    UserStoryPositionRow[],
     EventAggregates,
   ] = userId
     ? await (async () => {
@@ -1359,7 +1360,22 @@ export async function buildForYouFeed(userId?: string | null) {
                         )
                       )
                   : Promise.resolve([]),
-                loadUserActiveStoryPositions(userId, baseResult.stories),
+                (() => {
+                  const where = buildUserActiveStoryPositionsWhere(
+                    userId,
+                    baseResult.stories
+                  );
+                  if (!where) {
+                    return Promise.resolve([]);
+                  }
+                  return db
+                    .select({
+                      marketId: positions.marketId,
+                      questionId: positions.questionId,
+                    })
+                    .from(positions)
+                    .where(where);
+                })(),
                 loadFeedEventAggregates(userId),
               ]);
             },

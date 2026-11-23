@@ -37,6 +37,7 @@ import {
   lte,
   markets,
   not,
+  positions,
   posts,
   questions,
   reactions,
@@ -48,12 +49,13 @@ import { StaticDataRegistry } from '@feed/engine';
 import type { ArcStateType, NarrativePost, NarrativeStory } from '@feed/shared';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
-import {
-  loadUserActiveStoryPositions,
-  storyHasUserPosition,
-} from '../_lib/user-positions';
 import { compareFeedStories } from '../feed-cursor';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
+import {
+  buildUserActiveStoryPositionsWhere,
+  buildUserStoryPositionIndex,
+  storyHasUserPosition,
+} from '../user-positions';
 import {
   calculateArcStateMultiplier,
   calculateResolutionBoost,
@@ -790,8 +792,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                   )
                 )
             : Promise.resolve([]),
-          loadUserActiveStoryPositions(userId, result.stories),
+          (() => {
+            const where = buildUserActiveStoryPositionsWhere(
+              userId,
+              result.stories
+            );
+            if (!where) {
+              return Promise.resolve([]);
+            }
+            return db
+              .select({
+                marketId: positions.marketId,
+                questionId: positions.questionId,
+              })
+              .from(positions)
+              .where(where);
+          })(),
         ]);
+
+        const fetchedPositionIndex = buildUserStoryPositionIndex(userPositions);
 
         enrichment = {
           likedPostIds: userLikes
@@ -800,10 +819,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           sharedPostIds: userShares
             .map((s) => s.postId)
             .filter((id): id is string => id !== null),
-          positionMarketIds: userPositions.map((p) => p.marketId),
-          positionQuestionIds: userPositions
-            .map((p) => p.questionId)
-            .filter((id): id is number => id !== null),
+          positionMarketIds: Array.from(fetchedPositionIndex.marketIds),
+          positionQuestionIds: Array.from(fetchedPositionIndex.questionNumbers),
         };
 
         // Cache write — errors logged but never block the response.

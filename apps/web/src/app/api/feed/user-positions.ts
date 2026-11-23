@@ -1,4 +1,4 @@
-import { and, db, eq, gte, inArray, isNotNull, or, positions } from '@feed/db';
+import { and, eq, gte, inArray, isNotNull, or, positions } from '@feed/db';
 
 export interface StoryPositionTarget {
   questionNumber: number | null;
@@ -16,15 +16,16 @@ export interface UserStoryPositionIndex {
 }
 
 /**
- * Load active prediction positions for `userId` matching any of `stories`.
- * PredictionDbAdapter stores the market link in `positions.marketId` with
- * `positions.questionId = null`, while legacy rows may populate
- * `positions.questionId`. Match both and require sellable shares (>= 0.01).
+ * Build the WHERE predicate for active sellable prediction positions held by
+ * `userId` on any of `stories`. PredictionDbAdapter stores the market link in
+ * `positions.marketId` with `positions.questionId = null`, while legacy rows
+ * may populate `positions.questionId`. Returns null when no stories carry a
+ * marketId or questionNumber so callers can skip the query.
  */
-export async function loadUserActiveStoryPositions(
+export function buildUserActiveStoryPositionsWhere(
   userId: string,
   stories: readonly StoryPositionTarget[]
-): Promise<Array<{ marketId: string; questionId: number | null }>> {
+) {
   const marketIds = Array.from(
     new Set(
       stories
@@ -53,23 +54,15 @@ export async function loadUserActiveStoryPositions(
   ];
 
   if (matchers.length === 0) {
-    return [];
+    return null;
   }
 
-  return db
-    .select({
-      marketId: positions.marketId,
-      questionId: positions.questionId,
-    })
-    .from(positions)
-    .where(
-      and(
-        eq(positions.userId, userId),
-        eq(positions.status, 'active'),
-        gte(positions.shares, '0.01'),
-        matchers.length === 1 ? matchers[0] : or(...matchers)
-      )
-    );
+  return and(
+    eq(positions.userId, userId),
+    eq(positions.status, 'active'),
+    gte(positions.shares, '0.01'),
+    matchers.length === 1 ? matchers[0] : or(...matchers)
+  );
 }
 
 export function buildUserStoryPositionIndex(
