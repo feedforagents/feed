@@ -1,207 +1,198 @@
-/**
- * POST /api/chats must not let a blocked user into a new chat.
- *
- * The codebase enforces one DM rule in every other creation/sending path:
- * neither side of a block relationship can DM the other, and DMs to NPC
- * actors are not allowed.
- *
- * - POST /api/chats/dm rejects both directions (hasBlocked both ways) and
- *   NPC targets before creating the chat.
- * - The web message route (POST /api/chats/[id]/message) and MCP
- *   send_message reject blocked/NPC DM sends the same way.
- * - A2A messaging.send_message gets the same checks from open #1853.
- * - The autonomous-agent DM path gets them from open #1897, whose diff
- *   comment states the rule explicitly: "Checked before a new DM chat is
- *   created so a blocked send does not leave an auto-accepted DM chat
- *   behind."
- *
- * POST /api/chats — the documented "Create new chat (group or DM)"
- * endpoint (swagger: "Creates a new chat (group or DM) and adds
- * participants") — does none of it. It inserts whatever participantIds
- * it is given, so a blocked user lands in the room with no invite step
- * and no consent, exactly the shape F6-01 fixed for the A2A/MCP
- * create_group paths (web invite paths were fixed by F4-01). The only
- * difference is the entry point: the web's own direct chat creation
- * route. Group creation via POST /api/groups silently drops blocked
- * invitees (F4-01 precedent); a 1:1 DM is rejected outright by the DM
- * route. This test pins both behaviors.
- *
- * Real DB, real route handler (POST imported from the route module).
- *
- * Run with: DISABLE_RATE_LIMITING=true
- *   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_f12r2
- *   DIRECT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/feed_f12r2
- *   TZ=UTC bun test integration/chat-create-blocked-participants.integration.test.ts
- *   --preload ./integration/preload.ts
- */
-
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+/** PRD §12 and MVP Phase 5: apply viewer blocks at web chat creation. */
+import { afterAll, expect, test } from 'bun:test';
 import {
-  chatParticipants,
-  chats,
-  closeDatabase,
-  db,
-  eq,
-  inArray,
-  userBlocks,
-  users,
-} from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
-import { NextRequest } from 'next/server';
+  runIsolatedSubMarketCases,
+  verifySubMarketChildLease,
+} from './helpers/sub-market-isolation';
 
-let POST: typeof import('../../../apps/web/src/app/api/chats/route').POST;
+const blockedCase = 'rejects a DM to a user the creator blocked';
+const blockingCase = 'rejects a DM to a user who blocked the creator';
+const npcCase = 'rejects a DM to an NPC actor';
+const mixedGroupCase =
+  'excludes blocked users and keeps eligible group participants';
+const groupControlCase = 'creates a group chat with an eligible participant';
+const dmControlCase = 'creates a DM for an eligible participant';
 
-// The synthetic test bearer prefix, assembled at runtime.
-const testBearer = (userId: string) =>
-  `Bearer ${['stew', 'ard'].join('')}:test:${userId}`;
+if (!process.env.FEED_SUB_MARKET_CHILD) {
+  test('checks chat creation moderation in a leased database', async () => {
+    await runIsolatedSubMarketCases({
+      name: 'chat-create-moderation',
+      file: 'packages/testing/integration/chat-create-blocked-participants.integration.test.ts',
+      cases: [
+        blockedCase,
+        blockingCase,
+        npcCase,
+        mixedGroupCase,
+        groupControlCase,
+        dmControlCase,
+      ],
+    });
+  }, 300_000);
+} else {
+  await verifySubMarketChildLease();
+  process.env.STEWARD_JWT_SECRET = crypto.randomUUID();
+  const { chatParticipants, chats, count, db, eq, userBlocks, users } =
+    await import('@feed/db');
+  const { generateSnowflakeId } = await import('@feed/shared');
+  const { NextRequest } = await import('next/server');
+  const { z } = await import('zod');
+  const { createStewardTestToken } = await import('./helpers/steward-auth');
+  const { GET, POST } = await import(
+    '../../../apps/web/src/app/api/chats/route'
+  );
 
-let creatorId: string;
-let blockedId: string;
-let blockerId: string;
-let normalId: string;
-let npcId: string;
+  async function fixtureUser(label: string, isActor = false) {
+    const id = await generateSnowflakeId();
+    const stewardId = `chat-${label}-${id}`;
+    return {
+      row: {
+        id,
+        username: `chat-moderation-${id}`,
+        stewardId,
+        isActor,
+        updatedAt: new Date(),
+      },
+      token: await createStewardTestToken(stewardId),
+    };
+  }
 
-const blockIds: string[] = [];
-const createdChatIds: string[] = [];
-
-async function insertUser(id: string, isActor = false) {
-  await db.insert(users).values({
-    id,
-    username: `f12-${id.slice(-6)}`,
-    displayName: `f12 ${id.slice(-6)}`,
-    isActor,
-    isTest: false,
-    isBanned: false,
-    updatedAt: new Date(),
+  const [creator, blocked, blocker, ordinary, npc] = await Promise.all([
+    fixtureUser('creator'),
+    fixtureUser('blocked'),
+    fixtureUser('blocker'),
+    fixtureUser('ordinary'),
+    fixtureUser('npc', true),
+  ] as const);
+  const [outgoingBlockId, incomingBlockId] = await Promise.all([
+    generateSnowflakeId(),
+    generateSnowflakeId(),
+  ] as const);
+  await db.transaction(async (tx) => {
+    await tx
+      .insert(users)
+      .values([creator, blocked, blocker, ordinary, npc].map(({ row }) => row));
+    await tx.insert(userBlocks).values([
+      {
+        id: outgoingBlockId,
+        blockerId: creator.row.id,
+        blockedId: blocked.row.id,
+      },
+      {
+        id: incomingBlockId,
+        blockerId: blocker.row.id,
+        blockedId: creator.row.id,
+      },
+    ]);
   });
-}
 
-async function insertBlock(blockerId: string, blockedId: string) {
-  const id = await generateSnowflakeId();
-  await db.insert(userBlocks).values({
-    id,
-    blockerId,
-    blockedId,
-    createdAt: new Date(),
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      if (new URL(request.url).pathname !== '/api/chats')
+        return new Response(null, { status: 404 });
+      if (request.method === 'GET') return GET(new NextRequest(request));
+      if (request.method === 'POST') return POST(new NextRequest(request));
+      return new Response(null, { status: 405 });
+    },
   });
-  blockIds.push(id);
-}
+  afterAll(async () => {
+    await server.stop(true);
+  });
 
-async function createChat(
-  body: Record<string, unknown>
-): Promise<{ status: number; chatId: string | null }> {
-  const request = new NextRequest(
-    new Request('http://localhost/api/chats', {
+  const chatsUrl = new URL('/api/chats', server.url);
+  const createSchema = z.object({
+    chat: z.object({ id: z.string() }).optional(),
+    error: z.string().optional(),
+  });
+  const listSchema = z.object({
+    directChats: z.array(z.object({ id: z.string() })),
+  });
+
+  async function createChat(participantIds: string[], name?: string) {
+    const response = await fetch(chatsUrl, {
       method: 'POST',
       headers: {
-        authorization: testBearer(creatorId),
+        authorization: `Bearer ${creator.token}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify(body),
-    })
-  );
-  const response = await POST(request);
-  const payload = (await response.json().catch(() => null)) as {
-    data?: { chat?: { id?: string } };
-    chat?: { id?: string };
-  } | null;
-  const chatId = payload?.data?.chat?.id ?? payload?.chat?.id ?? null;
-  if (chatId) createdChatIds.push(chatId);
-  return { status: response.status, chatId };
-}
+      body: JSON.stringify({
+        isGroup: name !== undefined,
+        name,
+        participantIds,
+      }),
+    });
+    return {
+      status: response.status,
+      body: createSchema.parse(await response.json()),
+    };
+  }
 
-async function participantUserIds(chatId: string): Promise<string[]> {
-  const rows = await db
-    .select({ userId: chatParticipants.userId })
-    .from(chatParticipants)
-    .where(eq(chatParticipants.chatId, chatId));
-  return rows.map((r) => r.userId).sort();
-}
+  async function visibleDirectChats(token: string) {
+    const response = await fetch(chatsUrl, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.status).toBe(200);
+    return listSchema
+      .parse(await response.json())
+      .directChats.map(({ id }) => id);
+  }
 
-describe('POST /api/chats blocked participants', () => {
-  beforeAll(async () => {
-    ({ POST } = await import('../../../apps/web/src/app/api/chats/route'));
-
-    [creatorId, blockedId, blockerId, normalId, npcId] = await Promise.all(
-      Array.from({ length: 5 }, () => generateSnowflakeId())
-    );
-    await insertUser(creatorId);
-    await insertUser(blockedId);
-    await insertUser(blockerId);
-    await insertUser(normalId);
-    await insertUser(npcId, true);
-
-    // Creator blocked `blockedId`; `blockerId` blocked the creator.
-    await insertBlock(creatorId, blockedId);
-    await insertBlock(blockerId, creatorId);
-  });
-
-  afterAll(async () => {
-    if (createdChatIds.length > 0) {
-      await db
-        .delete(chatParticipants)
-        .where(inArray(chatParticipants.chatId, createdChatIds));
-      await db.delete(chats).where(inArray(chats.id, createdChatIds));
+  async function expectRejected(
+    target: Awaited<ReturnType<typeof fixtureUser>>,
+    message: string
+  ) {
+    const before = await db.select({ total: count() }).from(chats);
+    const result = await createChat([target.row.id]);
+    expect(result.status).toBe(400);
+    expect(result.body.error).toBe(message);
+    expect(result.body.chat).toBeUndefined();
+    expect(await db.select({ total: count() }).from(chats)).toEqual(before);
+    if (!target.row.isActor) {
+      expect(await visibleDirectChats(creator.token)).toEqual([]);
+      expect(await visibleDirectChats(target.token)).toEqual([]);
     }
-    await db.delete(userBlocks).where(inArray(userBlocks.id, blockIds));
-    await db
-      .delete(users)
-      .where(
-        inArray(users.id, [creatorId, blockedId, blockerId, normalId, npcId])
-      );
-    await closeDatabase();
-  });
+  }
 
-  it('rejects a DM with a user the creator blocked', async () => {
-    const { status, chatId } = await createChat({
-      isGroup: false,
-      participantIds: [blockedId],
-    });
-    expect(status).toBeGreaterThanOrEqual(400);
-    expect(chatId).toBeNull();
-  });
-
-  it('rejects a DM with a user who blocked the creator', async () => {
-    const { status, chatId } = await createChat({
-      isGroup: false,
-      participantIds: [blockerId],
-    });
-    expect(status).toBeGreaterThanOrEqual(400);
-    expect(chatId).toBeNull();
-  });
-
-  it('rejects a DM with an NPC actor', async () => {
-    const { status, chatId } = await createChat({
-      isGroup: false,
-      participantIds: [npcId],
-    });
-    expect(status).toBeGreaterThanOrEqual(400);
-    expect(chatId).toBeNull();
-  });
-
-  it('drops blocked participants from a group chat but keeps the rest', async () => {
-    const { status, chatId } = await createChat({
-      name: 'f12 group',
-      isGroup: true,
-      participantIds: [blockedId, blockerId, normalId],
-    });
-    expect(status).toBe(201);
-    expect(chatId).not.toBeNull();
-    expect(await participantUserIds(chatId!)).toEqual(
-      [creatorId, normalId].sort()
+  async function expectParticipants(
+    participantIds: string[],
+    expectedIds: string[],
+    groupName?: string
+  ) {
+    const result = await createChat(participantIds, groupName);
+    expect(result.status).toBe(201);
+    const chatId = result.body.chat?.id;
+    if (!chatId) throw new Error('The chat response omitted its ID');
+    const participants = await db
+      .select({ userId: chatParticipants.userId })
+      .from(chatParticipants)
+      .where(eq(chatParticipants.chatId, chatId));
+    expect(participants.map(({ userId }) => userId).sort()).toEqual(
+      [creator.row.id, ...expectedIds].sort()
     );
-  });
+  }
 
-  it('creates a group chat with an unblocked participant (control)', async () => {
-    const { status, chatId } = await createChat({
-      name: 'f12 control group',
-      isGroup: true,
-      participantIds: [normalId],
-    });
-    expect(status).toBe(201);
-    expect(chatId).not.toBeNull();
-    expect(await participantUserIds(chatId!)).toEqual(
-      [creatorId, normalId].sort()
-    );
-  });
-});
+  const blockedMessage = 'Cannot send messages to this user';
+  test(blockedCase, () => expectRejected(blocked, blockedMessage));
+  test(blockingCase, () => expectRejected(blocker, blockedMessage));
+  test(npcCase, () =>
+    expectRejected(
+      npc,
+      'Cannot send direct messages to NPC actors. Use group chats to interact with NPCs.'
+    )
+  );
+
+  test(mixedGroupCase, () =>
+    expectParticipants(
+      [blocked.row.id, blocker.row.id, ordinary.row.id, npc.row.id],
+      [ordinary.row.id, npc.row.id],
+      'Mixed group'
+    )
+  );
+  test(groupControlCase, () =>
+    expectParticipants([ordinary.row.id], [ordinary.row.id], 'Eligible group')
+  );
+  test(dmControlCase, () =>
+    expectParticipants([ordinary.row.id], [ordinary.row.id])
+  );
+}

@@ -28,6 +28,8 @@ let tagGenerationError: Error | null = new Error(
 );
 let tagsToReturn: Array<{ name: string; displayName: string }> = [];
 const storeTagsMock = mock(async () => undefined);
+const validateContentMock = mock((): string[] => []);
+const recordTopicCoverageMock = mock(() => undefined);
 
 const mockDb = {
   select: mock(() => ({
@@ -153,8 +155,8 @@ mock.module('../../shared/snowflake', () => ({
 
 mock.module('../TopicDiversityService', () => ({
   topicDiversityService: {
-    validateContent: mock(() => []),
-    recordTopicCoverage: mock(() => undefined),
+    validateContent: validateContentMock,
+    recordTopicCoverage: recordTopicCoverageMock,
     calculateSimilarity: mock(() => 0),
     trackPostTopics: mock(async () => undefined),
   },
@@ -173,6 +175,25 @@ describe('executeDirectPost tag-generation failure', () => {
     tagsToReturn = [];
     storeTagsMock.mockClear();
     storeTagsMock.mockImplementation(async () => undefined);
+    recordTopicCoverageMock.mockClear();
+  });
+
+  test('reports a diversity rejection without inserting, tagging, or refreshing history', async () => {
+    validateContentMock.mockReturnValueOnce([
+      'Content is 42% similar to a recent post. Add your unique take.',
+    ]);
+    const result = await executeDirectPost({
+      agentUserId: 'agent-1',
+      content: 'Sam AIltman announced SMH-6 at DevDay today',
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      rejection: 'post-diversity',
+    });
+    expect(insertedPosts).toHaveLength(0);
+    expect(storeTagsMock).not.toHaveBeenCalled();
+    expect(recordTopicCoverageMock).not.toHaveBeenCalled();
   });
 
   test('still reports success when LLM tag generation throws after the post is committed', async () => {

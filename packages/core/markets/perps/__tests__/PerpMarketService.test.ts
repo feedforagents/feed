@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import {
   calculateRawPriceFromHoldings,
   calculateTradeImpact,
+  floorPoints,
   PERP_MARKET_CONFIG,
 } from '@feed/shared';
 import type { WalletPort } from '../../shared/common';
@@ -75,6 +76,7 @@ class InMemoryWallet implements WalletPort {
 class InMemoryPerpDb implements PerpDbPort {
   private markets = new Map<string, PerpMarketRecord>();
   private positions = new Map<string, PerpPositionRecord>();
+  private fundingClaims = new Set<string>();
   private idCounter = 1;
 
   constructor(initialMarkets: PerpMarketRecord[]) {
@@ -128,6 +130,16 @@ class InMemoryPerpDb implements PerpDbPort {
     const pos = this.positions.get(id);
     if (!pos || pos.closedAt) return null;
     return { ...pos };
+  }
+
+  async claimFundingPeriod(
+    positionId: string,
+    periodStart: Date
+  ): Promise<boolean> {
+    const key = `${positionId}:${periodStart.getTime()}`;
+    if (this.fundingClaims.has(key)) return false;
+    this.fundingClaims.add(key);
+    return true;
   }
 
   async transaction<T>(fn: (tx: PerpDbPort) => Promise<T>): Promise<T> {
@@ -352,20 +364,23 @@ describe('PerpMarketService', () => {
     expect(m.openInterest).toBeCloseTo(0, 4);
     expect(m.volume24h).toBeCloseTo(200, 4); // open + close size
 
+    // PRD §9.1: the 10.10 open charge is already whole hundredths; the close
+    // proceeds settle rounded down to a hundredth.
+    const credited = floorPoints(
+      (close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid
+    );
     const balance = await wallet.getBalance('u1');
     const expectedBalance =
-      10_000 -
-      (open.marginPaid! + open.feePaid) +
-      ((close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid);
+      10_000 - (open.marginPaid! + open.feePaid) + credited;
     expect(balance.balance).toBeCloseTo(expectedBalance, 4);
 
     // PnL should include fees:
-    // - perp_open records -openFee
+    // - perp_open records -(charge - margin): the fee plus any charge rounding
     // - perp_close records (netSettlement - marginPaid) which includes close fee
     const pnls = wallet.getPnLs('u1');
     const totalPnL = pnls.reduce((sum, p) => sum + p.pnl, 0);
     expect(totalPnL).toBeCloseTo(
-      close.realizedPnL! - open.feePaid - close.feePaid,
+      credited - (close.marginPaid ?? 0) - open.feePaid,
       4
     );
   });
@@ -390,19 +405,67 @@ describe('PerpMarketService', () => {
       ((open.entryPrice - close.exitPrice!) / open.entryPrice) * 100;
     expect(close.realizedPnL).toBeCloseTo(expectedPnl, 4);
 
+    const credited = floorPoints(
+      (close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid
+    );
     const balance = await wallet.getBalance('u1');
     const expectedBalance =
-      10_000 -
-      (open.marginPaid! + open.feePaid) +
-      ((close.marginPaid ?? 0) + close.realizedPnL! - close.feePaid);
+      10_000 - (open.marginPaid! + open.feePaid) + credited;
     expect(balance.balance).toBeCloseTo(expectedBalance, 4);
 
     const pnls = wallet.getPnLs('u1');
     const totalPnL = pnls.reduce((sum, p) => sum + p.pnl, 0);
     expect(totalPnL).toBeCloseTo(
-      close.realizedPnL! - open.feePaid - close.feePaid,
+      credited - (close.marginPaid ?? 0) - open.feePaid,
       4
     );
+  });
+
+  it('never rounds close proceeds up when the tail is just below a hundredth', async () => {
+    // PRD §9.1: proceeds round down. A tail a billionth below a hundredth is
+    // a real amount, not noise, and must not be credited as that hundredth.
+    const roundTrip = async (fundingPaid: number) => {
+      const localDb = new InMemoryPerpDb([baseMarket]);
+      const localWallet = new InMemoryWallet(10_000);
+      const local = new PerpMarketService({
+        settlement: {
+          run: async (_userId, operation) =>
+            localDb.transaction((tx) => operation(tx, localWallet)),
+        },
+        db: localDb,
+        wallet: localWallet,
+        fees: feeConfig,
+      });
+      const opened = await local.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      await localDb.updateOpenPosition(opened.positionId, { fundingPaid });
+      const before = (await localWallet.getBalance('u1')).balance;
+      const closed = await local.closePosition({
+        userId: 'u1',
+        positionId: opened.positionId,
+      });
+      const credited = (await localWallet.getBalance('u1')).balance - before;
+      const proceeds =
+        (closed.marginPaid ?? 0) + closed.realizedPnL! - closed.feePaid;
+      return { credited, proceeds };
+    };
+
+    // Learn the unrounded proceeds, then charge funding that leaves them a
+    // billionth below the hundredth at or under that amount.
+    const reference = await roundTrip(0);
+    const hundredth = floorPoints(reference.proceeds);
+    const { credited, proceeds } = await roundTrip(
+      reference.proceeds - (hundredth - 1e-9)
+    );
+
+    expect(proceeds).toBeLessThan(hundredth);
+    expect(hundredth - proceeds).toBeLessThan(1e-8);
+    expect(credited).toBeCloseTo(hundredth - 0.01, 9);
   });
 
   it('calculates realized PnL from notional size while leverage only affects margin', async () => {
@@ -1022,15 +1085,48 @@ describe('PerpMarketService', () => {
       // fillPrice is what the added 100 filled at, not the blended entry.
       expect(result.fillPrice).toBeDefined();
       expect(result.fillPrice!).toBeGreaterThan(result.entryPrice);
-      // blend check: 100 @ initial + 100 @ fill = 200 @ entry
+      // blend check: 100 @ initial + 100 @ fill = 200 @ entry, where each
+      // leg holds size / price units.
       expect(
-        (initial.entryPrice * 100 + result.fillPrice! * 100) / 200
+        200 / (100 / initial.entryPrice + 100 / result.fillPrice!)
       ).toBeCloseTo(result.entryPrice, 8);
 
       // Verify position in DB
       const pos = await db.getPositionById(initial.positionId);
       expect(pos?.size).toBe(200);
       expect(pos?.entryPrice).toBeCloseTo(result.entryPrice, 4);
+    });
+
+    it('realizes the sum of both legs when closing an added position', async () => {
+      const initial = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 2,
+      });
+
+      // Average down: add the same size after a 20% drop.
+      await db.updateMarketStats('ABC', { currentPrice: 80 });
+      const added = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 2,
+      });
+
+      await db.updateMarketStats('ABC', { currentPrice: 90 });
+      const close = await service.closePosition({
+        userId: 'u3',
+        positionId: initial.positionId,
+      });
+
+      const exit = close.exitPrice!;
+      const legsPnl =
+        ((exit - initial.entryPrice) / initial.entryPrice) * 100 +
+        ((exit - added.fillPrice!) / added.fillPrice!) * 100;
+      expect(close.realizedPnL).toBeCloseTo(legsPnl, 6);
     });
 
     it('reduces position when opening opposite side with smaller size', async () => {
@@ -1168,6 +1264,167 @@ describe('PerpMarketService', () => {
       const positions = await db.getOpenPositionsByUser('u3');
       expect(positions.length).toBe(1);
       expect(positions[0]?.size).toBe(100);
+    });
+
+    it('enforces maxPositionSize on the resulting flipped position rather than gross tradeSize', async () => {
+      // With openInterest <= 100k, maxPositionSize is 10,000.
+      const initial = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 6_000,
+        leverage: 10,
+      });
+
+      // Flipping 6,000 long via a 17,000 short would leave an 11,000 short (> 10,000 limit)
+      await expect(
+        service.previewOrder({
+          userId: 'u3',
+          ticker: 'ABC',
+          side: 'short',
+          size: 17_000,
+          leverage: 10,
+        })
+      ).rejects.toThrow('Order size exceeds market limit (10,000)');
+
+      await expect(
+        service.openPosition({
+          userId: 'u3',
+          ticker: 'ABC',
+          side: 'short',
+          size: 17_000,
+          leverage: 10,
+        })
+      ).rejects.toThrow('Order size exceeds market limit (10,000)');
+
+      const unchanged = await db.getPositionById(initial.positionId);
+      expect(unchanged?.closedAt).toBeNull();
+
+      // Flipping 6,000 long via a 12,000 short closes 6,000 and opens a 6,000 short (<= 10,000 limit)
+      const preview = await service.previewOrder({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'short',
+        size: 12_000,
+        leverage: 10,
+      });
+      expect(preview.rebalanceType).toBe('flip');
+      expect(preview.resultingSize).toBe(6_000);
+
+      const flipped = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'short',
+        size: 12_000,
+        leverage: 10,
+      });
+
+      expect(flipped.isRebalance).toBe(true);
+      expect(flipped.rebalanceType).toBe('flip');
+      expect(flipped.side).toBe('short');
+      expect(flipped.size).toBe(6_000);
+    });
+
+    it('allows reducing or closing an existing position larger than current maxPositionSize via opposite-side order', async () => {
+      // Seed high open interest so u3 can open a 15,000 long (maxPositionSize = 20,000)
+      await db.updateMarketStats('ABC', { openInterest: 200_000 });
+      const initial = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 15_000,
+        leverage: 10,
+      });
+
+      // Open interest drops so current maxPositionSize becomes 10,000
+      await db.updateMarketStats('ABC', { openInterest: 15_000 });
+
+      // Previewing opposite-side reduce/close above current maxPositionSize must also succeed
+      const reducePreview = await service.previewOrder({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'short',
+        size: 12_000,
+        leverage: 10,
+      });
+      expect(reducePreview.rebalanceType).toBe('reduce');
+      expect(reducePreview.resultingSize).toBe(3_000);
+
+      const closePreview = await service.previewOrder({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'short',
+        size: 15_000,
+        leverage: 10,
+      });
+      expect(closePreview.rebalanceType).toBe('close');
+      expect(closePreview.resultingSize).toBe(0);
+
+      // Closing the 15,000 long via opposite-side trade reduces risk and must not be blocked by maxPositionSize
+      const closed = await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'short',
+        size: 15_000,
+        leverage: 10,
+      });
+
+      expect(closed.isRebalance).toBe(true);
+      expect(closed.rebalanceType).toBe('close');
+      expect(closed.fullyClosed).toBe(true);
+      const pos = await db.getPositionById(initial.positionId);
+      expect(pos?.closedAt).toBeDefined();
+    });
+
+    it('enforces maxSlippage on open, add, and flip when markPrice is undefined by falling back to currentPrice', async () => {
+      await db.updateMarketStats('ABC', {
+        markPrice: undefined,
+        currentPrice: 100,
+      });
+
+      // Fresh open: size 5,000 fill deviates from currentPrice (100) beyond 1% maxSlippage
+      await expect(
+        service.openPosition({
+          userId: 'u3',
+          ticker: 'ABC',
+          side: 'long',
+          size: 5_000,
+          leverage: 10,
+          maxSlippage: 0.01,
+        })
+      ).rejects.toThrow(/Slippage exceeded/);
+
+      // Size 100 (0.67% deviation) stays within 1% maxSlippage, so the 100-size close leg of a flip passes while the 5,000-size add/flip-open leg rejects
+      await service.openPosition({
+        userId: 'u3',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+        maxSlippage: 0.01,
+      });
+
+      await expect(
+        service.openPosition({
+          userId: 'u3',
+          ticker: 'ABC',
+          side: 'long',
+          size: 5_000,
+          leverage: 10,
+          maxSlippage: 0.01,
+        })
+      ).rejects.toThrow(/Slippage exceeded/);
+
+      await expect(
+        service.openPosition({
+          userId: 'u3',
+          ticker: 'ABC',
+          side: 'short',
+          size: 5_100,
+          leverage: 10,
+          maxSlippage: 0.01,
+        })
+      ).rejects.toThrow(/Slippage exceeded/);
     });
 
     it('uses existing leverage when adding to position', async () => {
@@ -1505,7 +1762,7 @@ describe('PerpMarketService', () => {
         PERP_MARKET_CONFIG
       ).avgFillPrice;
       const expectedEntry =
-        (1000 * first.entryPrice + 1000 * incrementalFill) / 2000;
+        2000 / (1000 / first.entryPrice + 1000 / incrementalFill);
 
       expect(incrementalFill).not.toBeCloseTo(first.entryPrice, 6);
       expect(added.entryPrice).toBeCloseTo(expectedEntry, 6);

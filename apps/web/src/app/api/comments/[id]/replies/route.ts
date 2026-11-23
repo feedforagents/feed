@@ -90,7 +90,14 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asUser, comments, eq, posts, users } from '@feed/db';
+import {
+  asUser,
+  comments,
+  createCommentWithParentCheck,
+  eq,
+  posts,
+  users,
+} from '@feed/db';
 import {
   CreateCommentSchema,
   generateSnowflakeId,
@@ -122,6 +129,8 @@ export const POST = withErrorHandling(
     const body = await request.json();
     const validatedData = CreateCommentSchema.parse(body);
     const { content } = validatedData;
+
+    const replyId = await generateSnowflakeId();
 
     // Create reply with RLS
     const reply = await asUser(user, async (dbClient) => {
@@ -158,12 +167,9 @@ export const POST = withErrorHandling(
         );
       }
 
-      // Create reply (comment with parentCommentId)
       const now = new Date();
-      const replyId = await generateSnowflakeId();
-      const [newReply] = await dbClient
-        .insert(comments)
-        .values({
+      const result = await createCommentWithParentCheck(
+        {
           id: replyId,
           content: content.trim(),
           postId: parentComment.postId,
@@ -171,8 +177,18 @@ export const POST = withErrorHandling(
           parentCommentId,
           createdAt: now,
           updatedAt: now,
-        })
-        .returning();
+        },
+        dbClient
+      );
+      if (result.status === 'parent-deleted') {
+        throw new BusinessLogicError(
+          'Cannot reply to deleted content',
+          'CONTENT_DELETED'
+        );
+      }
+      if (result.status !== 'created') {
+        throw new NotFoundError('Parent comment', parentCommentId);
+      }
 
       // Fetch author details
       const [author] = await dbClient
@@ -186,7 +202,7 @@ export const POST = withErrorHandling(
         .where(eq(users.id, user.userId))
         .limit(1);
 
-      return { ...newReply, author };
+      return { ...result.comment, author };
     });
 
     logger.info(

@@ -5,10 +5,11 @@
  * Used to exclude blocked or muted users from feeds and search results.
  */
 
+import { generateSnowflakeId } from '@feed/shared';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Transaction } from '../db';
-import { db } from '../db';
-import { userBlocks, userMutes } from '../schema';
+import { db, withTransaction } from '../db';
+import { follows, userBlocks, userMutes } from '../schema';
 
 /**
  * Get list of user IDs that the current user has blocked.
@@ -16,8 +17,11 @@ import { userBlocks, userMutes } from '../schema';
  * @param userId - Current user's ID
  * @returns Array of blocked user IDs
  */
-export async function getBlockedUserIds(userId: string): Promise<string[]> {
-  const blocks = await db
+export async function getBlockedUserIds(
+  userId: string,
+  database: Pick<Transaction, 'select'> = db
+): Promise<string[]> {
+  const blocks = await database
     .select({ blockedId: userBlocks.blockedId })
     .from(userBlocks)
     .where(eq(userBlocks.blockerId, userId));
@@ -31,8 +35,11 @@ export async function getBlockedUserIds(userId: string): Promise<string[]> {
  * @param userId - Current user's ID
  * @returns Array of user IDs who have blocked the current user
  */
-export async function getBlockedByUserIds(userId: string): Promise<string[]> {
-  const blocks = await db
+export async function getBlockedByUserIds(
+  userId: string,
+  database: Pick<Transaction, 'select'> = db
+): Promise<string[]> {
+  const blocks = await database
     .select({ blockerId: userBlocks.blockerId })
     .from(userBlocks)
     .where(eq(userBlocks.blockedId, userId));
@@ -56,16 +63,19 @@ export async function getMutedUserIds(userId: string): Promise<string[]> {
 }
 
 /**
- * Get all user IDs that should be filtered from the current user's feed.
- * Includes users blocked by the current user and users who have blocked the current user.
+ * Get user IDs with a block relationship in either direction.
+ * Pass the primary reader when the result controls a write.
  *
  * @param userId - Current user's ID
- * @returns Array of user IDs to filter from feeds
+ * @returns Array of user IDs in either block direction
  */
-export async function getFilteredUserIds(userId: string): Promise<string[]> {
+export async function getFilteredUserIds(
+  userId: string,
+  database: Pick<Transaction, 'select'> = db
+): Promise<string[]> {
   const [blockedByMe, blockedMe] = await Promise.all([
-    getBlockedUserIds(userId),
-    getBlockedByUserIds(userId),
+    getBlockedUserIds(userId, database),
+    getBlockedByUserIds(userId, database),
   ]);
 
   return [...new Set([...blockedByMe, ...blockedMe])];
@@ -83,7 +93,7 @@ export async function getFilteredUserIds(userId: string): Promise<string[]> {
 export async function hasBlocked(
   blockerId: string,
   blockedId: string,
-  tx?: Transaction
+  tx?: Pick<Transaction, 'select'>
 ): Promise<boolean> {
   const block = await (tx ?? db)
     .select({ blockerId: userBlocks.blockerId })
@@ -119,6 +129,31 @@ export async function acquireUserBlockPairLock(
   await tx.execute(
     sql`SELECT pg_advisory_xact_lock(hashtext(${'user-block-pair:' + first + ':' + second}))`
   );
+}
+
+/** Create an agent follow under the same pair lock used by block writers. */
+export async function followUserWithBlockCheck(
+  followerId: string,
+  followingId: string
+): Promise<boolean> {
+  return withTransaction(async (tx) => {
+    await acquireUserBlockPairLock(tx, followerId, followingId);
+    const [targetBlockedMe, iBlockedTarget] = await Promise.all([
+      hasBlocked(followingId, followerId, tx),
+      hasBlocked(followerId, followingId, tx),
+    ]);
+    if (targetBlockedMe || iBlockedTarget) {
+      throw new Error('Cannot follow this user');
+    }
+    const [created] = await tx
+      .insert(follows)
+      .values({ id: await generateSnowflakeId(), followerId, followingId })
+      .onConflictDoNothing({
+        target: [follows.followerId, follows.followingId],
+      })
+      .returning({ id: follows.id });
+    return Boolean(created);
+  });
 }
 
 /**

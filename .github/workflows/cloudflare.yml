@@ -60,20 +60,26 @@ jobs:
             exit 1
           fi
           gh api "repos/$REPOSITORY/commits/$sha/check-runs?per_page=100" > /tmp/checks.json
-          python3 - <<'PY'
+          SELECTED_SHA="$sha" python3 - <<'PY'
           import json
+          import os
+
           runs=json.load(open('/tmp/checks.json'))['check_runs']
           for name in ['Quality Gate', 'Run All Tests', 'Cloudflare build']:
               matches=[r for r in runs if r['name']==name and r['app']['slug']=='github-actions']
               if not matches or max(matches,key=lambda r:r['id'])['conclusion'] != 'success':
+                  if os.environ['GITHUB_EVENT_NAME'] == 'workflow_run':
+                      print(f'Waiting for {name} to pass on the selected commit.')
+                      raise SystemExit(0)
                   raise SystemExit(f'{name} must pass on the selected commit')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"environment={os.environ['TARGET']}\n")
+              output.write(f"sha={os.environ['SELECTED_SHA']}\n")
           PY
-          echo "environment=$TARGET" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   dispatch:
     needs: select
-    if: github.event_name == 'workflow_run'
+    if: github.event_name == 'workflow_run' && needs.select.outputs.sha != ''
     runs-on: ubuntu-latest
     permissions:
       actions: write

@@ -177,12 +177,14 @@ import {
   count,
   desc,
   eq,
+  getFilteredUserIds,
   groupMembers,
   groups,
-  hasBlocked,
   inArray,
+  isNull,
   messages,
   notInArray,
+  or,
   userBlocks,
   userMutes,
   users,
@@ -397,9 +399,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     );
 
     // Agent leave actions retain inactive participant rows. Only active
-    // viewer memberships should contribute DMs to this list.
-    const dmParticipantsList = await dbClient
-      .select()
+    // viewer memberships should contribute to this list.
+    const participantRows = await dbClient
+      .select({ chatId: chatParticipants.chatId })
       .from(chatParticipants)
       .where(
         and(
@@ -409,19 +411,60 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       );
 
     logger.info(
-      'Found DM participants',
-      {
-        userId: user.userId,
-        count: dmParticipantsList.length,
-      },
+      'Found active chat participants',
+      { userId: user.userId, count: participantRows.length },
       'GET /api/chats'
     );
 
-    const dmChatIds = dmParticipantsList.map((p) => p.chatId);
-    const dmChatsDetails = await dbClient
+    // Direct groups have participant rows and no Group row. Group-backed
+    // chats are already listed through groupMembers.
+    const participantChats = await dbClient
       .select()
       .from(chats)
-      .where(and(inArray(chats.id, dmChatIds), eq(chats.isGroup, false)));
+      .where(
+        and(
+          inArray(
+            chats.id,
+            participantRows.map((row) => row.chatId)
+          ),
+          or(eq(chats.isGroup, false), isNull(chats.groupId))
+        )
+      );
+    const dmChatsDetails = participantChats.filter((chat) => !chat.isGroup);
+    const dmChatIds = dmChatsDetails.map((chat) => chat.id);
+    const directGroupChatsDetails = participantChats.filter(
+      (chat) => chat.isGroup
+    );
+    const directGroupChatIds = directGroupChatsDetails.map((c) => c.id);
+    const directGroupMessageCounts =
+      directGroupChatIds.length > 0
+        ? await dbClient
+            .select({ chatId: messages.chatId, count: count(messages.id) })
+            .from(messages)
+            .where(inArray(messages.chatId, directGroupChatIds))
+            .groupBy(messages.chatId)
+        : [];
+    const directGroupCountMap = new Map(
+      directGroupMessageCounts.map((mc) => [mc.chatId, mc.count])
+    );
+
+    const directGroupMessages =
+      directGroupChatIds.length > 0
+        ? await Promise.all(
+            directGroupChatIds.map(async (chatId) => {
+              const msgs = await dbClient
+                .select()
+                .from(messages)
+                .where(and(eq(messages.chatId, chatId), groupSenderScope))
+                .orderBy(desc(messages.createdAt))
+                .limit(1);
+              return { chatId, messages: msgs };
+            })
+          )
+        : [];
+    const directGroupMessagesMap = new Map(
+      directGroupMessages.map(({ chatId, messages }) => [chatId, messages])
+    );
 
     // Get participants and messages separately
     const [allParticipants, allMessages] = await Promise.all([
@@ -570,7 +613,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       })
     ).then((chatsList) => chatsList.filter((c) => c !== null));
 
-    return { groupChats: formattedGroupChats, directChats: directChatsList };
+    // Format direct group chats (no Group row behind them)
+    const formattedDirectGroupChats = directGroupChatsDetails.map((chat) => {
+      const lastMessage = directGroupMessagesMap.get(chat.id)?.[0] || null;
+      return {
+        id: chat.id,
+        name: chat.name || 'Unnamed Group',
+        isGroup: true,
+        lastMessage,
+        messageCount: directGroupCountMap.get(chat.id) ?? 0,
+        qualityScore: null,
+        lastMessageAt: lastMessage?.createdAt ?? chat.updatedAt,
+        updatedAt: chat.updatedAt,
+      };
+    });
+
+    return {
+      groupChats: [...formattedGroupChats, ...formattedDirectGroupChats],
+      directChats: directChatsList,
+    };
   });
 
   logger.info(
@@ -605,55 +666,36 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   let addedParticipantCount = 0;
   const chat = await asUser(user, async (dbClient) => {
     const requestedIds = participantIds ?? [];
+    const blockedIds = new Set(
+      requestedIds.length > 0
+        ? await getFilteredUserIds(user.userId, dbClient)
+        : []
+    );
 
-    if (!isGroup) {
-      // A 1:1 chat follows the DM rules (POST /api/chats/dm): no NPC
-      // target, and neither side of a block relationship. Reject outright
-      // so a blocked attempt leaves no chat behind — the same rule the
-      // web message route, MCP send_message, A2A send_message (#1853)
-      // and the autonomous-agent DM path (#1897) already enforce.
-      for (const participantId of requestedIds) {
-        const [target] = await dbClient
-          .select({ isActor: users.isActor })
-          .from(users)
-          .where(eq(users.id, participantId))
-          .limit(1);
-        if (target?.isActor) {
-          throw new BusinessLogicError(
-            'Cannot send direct messages to NPC actors. Use group chats to interact with NPCs.',
-            'INVALID_DM_TARGET'
-          );
-        }
-        const [isBlocked, hasBlockedMe] = await Promise.all([
-          hasBlocked(user.userId, participantId),
-          hasBlocked(participantId, user.userId),
-        ]);
-        if (isBlocked || hasBlockedMe) {
-          throw new BusinessLogicError(
-            'Cannot send messages to this user',
-            'BLOCKED_USER'
-          );
-        }
+    if (!isGroup && requestedIds.length > 0) {
+      // Match the dedicated DM route before creating any rows.
+      const [npcTarget] = await dbClient
+        .select({ id: users.id })
+        .from(users)
+        .where(and(inArray(users.id, requestedIds), eq(users.isActor, true)))
+        .limit(1);
+      if (npcTarget) {
+        throw new BusinessLogicError(
+          'Cannot send direct messages to NPC actors. Use group chats to interact with NPCs.',
+          'INVALID_DM_TARGET'
+        );
+      }
+      if (requestedIds.some((id) => blockedIds.has(id))) {
+        throw new BusinessLogicError(
+          'Cannot send messages to this user',
+          'BLOCKED_USER'
+        );
       }
     }
 
-    // Group chats silently drop participants on either side of a block
-    // relationship, like POST /api/groups does for invitees and like the
-    // A2A/MCP create_group paths do (F6-01) — the chat itself is still
-    // created. Mutes are not filtered: muting hides content, it is not
-    // a "no contact" promise.
+    // Keep eligible members in group chats when a block excludes someone.
     const addableIds = isGroup
-      ? (
-          await Promise.all(
-            requestedIds.map(async (participantId) => {
-              const [isBlocked, hasBlockedMe] = await Promise.all([
-                hasBlocked(user.userId, participantId),
-                hasBlocked(participantId, user.userId),
-              ]);
-              return isBlocked || hasBlockedMe ? null : participantId;
-            })
-          )
-        ).filter((id): id is string => id !== null)
+      ? requestedIds.filter((id) => !blockedIds.has(id))
       : requestedIds;
 
     // Create the chat
@@ -682,14 +724,12 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
     // Add other participants if provided
     addedParticipantCount = addableIds.length;
-    if (addableIds && Array.isArray(addableIds)) {
-      for (const participantId of addableIds) {
-        await dbClient.insert(chatParticipants).values({
-          id: await generateSnowflakeId(),
-          chatId: newChat.id,
-          userId: participantId,
-        });
-      }
+    for (const participantId of addableIds) {
+      await dbClient.insert(chatParticipants).values({
+        id: await generateSnowflakeId(),
+        chatId: newChat.id,
+        userId: participantId,
+      });
     }
 
     return newChat;

@@ -17,6 +17,7 @@ import {
   type DrizzleClient,
   generateSnowflakeId,
   groupMembers,
+  hasBlocked,
   sql,
 } from '@feed/db';
 import { GROUP_CONFIG } from '@feed/shared';
@@ -77,6 +78,30 @@ export async function acceptGroupInvite(
 ): Promise<{ groupId: string; chatId: string | null }> {
   return asUser(userId, async (db) => {
     const invite = await claimPendingInvite(db, userId, inviteId, 'accepted');
+
+    // Both invite-creating entry points refuse banned users, but a ban can
+    // land after the invite was sent and the ban write does not touch
+    // pending invites. Accept is the step that grants membership, so the
+    // ban is re-checked here; throwing rolls the invite claim back and the
+    // invite stays pending.
+    const acceptingUser = await db.user.findUnique({
+      where: { id: userId },
+      select: { isBanned: true },
+    });
+    if (acceptingUser?.isBanned) {
+      throw new ApiError('Cannot accept a group invite while banned', 400);
+    }
+
+    // A rejected acceptance rolls the pending-invite claim back.
+    if (invite.invitedBy) {
+      const [blockedByMe, blockedMe] = await Promise.all([
+        hasBlocked(userId, invite.invitedBy, db),
+        hasBlocked(invite.invitedBy, userId, db),
+      ]);
+      if (blockedByMe || blockedMe) {
+        throw new ApiError('This invite is not available', 403);
+      }
+    }
 
     const invitedGroup = await db.group.findUnique({
       where: { id: invite.groupId },
