@@ -24,6 +24,8 @@ import {
   checkRateLimitAsync,
   declineGroupInvite,
   listVisiblePostComments,
+  notifyCommentOnPost,
+  notifyFollow,
   notifyReactionOnComment,
   notifyReactionOnPost,
   RATE_LIMIT_CONFIGS,
@@ -1170,6 +1172,24 @@ export class FeedAgentExecutor implements AgentExecutor {
       },
     });
 
+    // The comment has committed. Notification failure must not invite a retry.
+    if (post.authorId !== userId) {
+      try {
+        await notifyCommentOnPost(post.authorId, userId, postId, commentId);
+      } catch (error) {
+        logger.warn(
+          'Failed to notify author of committed comment',
+          {
+            postId,
+            commentId,
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'A2A'
+        );
+      }
+    }
+
     return {
       success: true,
       comment: {
@@ -1482,6 +1502,22 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (followerId === followingId) throw new Error('Cannot follow yourself');
 
     const created = await followUserWithBlockCheck(followerId, followingId);
+    // The follow has committed. Notification failure must not invite a retry.
+    if (created) {
+      try {
+        await notifyFollow(followingId, followerId);
+      } catch (error) {
+        logger.warn(
+          'Failed to notify user of committed follow',
+          {
+            userId: followingId,
+            followerId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'A2A'
+        );
+      }
+    }
     return {
       success: true,
       message: created ? 'Now following user' : 'Already following',
