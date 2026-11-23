@@ -201,6 +201,93 @@ describe('interactionStore mutations', () => {
     expect(state.postInteractions.get('post-1')?.commentCount).toBe(2);
     expect(state.errors.get('comment-post-1-root')?.code).toBe('UNAUTHORIZED');
   });
+
+  test('deleteComment drops the count by the comment and its deleted replies', async () => {
+    useInteractionStore.setState({
+      postInteractions: new Map([
+        [
+          'post-1',
+          {
+            postId: 'post-1',
+            likeCount: 5,
+            commentCount: 5,
+            shareCount: 1,
+            isLiked: false,
+            isShared: false,
+          },
+        ],
+      ]),
+    });
+    // DELETE /api/comments/[id] removes the comment and its replies and
+    // reports how many replies went with it (top-level body field).
+    mockFetch.mockImplementationOnce(() =>
+      json({
+        message: 'Comment deleted successfully',
+        deletedCommentId: 'comment-1',
+        deletedRepliesCount: 2,
+      })
+    );
+
+    const ok = await useInteractionStore
+      .getState()
+      .deleteComment('comment-1', 'post-1');
+
+    expect(ok).toBe(true);
+    const post = useInteractionStore.getState().postInteractions.get('post-1');
+    expect(post?.commentCount).toBe(2);
+  });
+
+  test('deleteComment drops the count by one when there are no replies', async () => {
+    seedPost();
+    mockFetch.mockImplementationOnce(() =>
+      json({
+        message: 'Comment deleted successfully',
+        deletedCommentId: 'comment-1',
+        deletedRepliesCount: 0,
+      })
+    );
+
+    const ok = await useInteractionStore
+      .getState()
+      .deleteComment('comment-1', 'post-1');
+
+    expect(ok).toBe(true);
+    const post = useInteractionStore.getState().postInteractions.get('post-1');
+    expect(post?.commentCount).toBe(1);
+  });
+
+  test('deleteComment never drops the count below zero', async () => {
+    useInteractionStore.setState({
+      postInteractions: new Map([
+        [
+          'post-1',
+          {
+            postId: 'post-1',
+            likeCount: 5,
+            commentCount: 1,
+            shareCount: 1,
+            isLiked: false,
+            isShared: false,
+          },
+        ],
+      ]),
+    });
+    mockFetch.mockImplementationOnce(() =>
+      json({
+        message: 'Comment deleted successfully',
+        deletedCommentId: 'comment-1',
+        deletedRepliesCount: 2,
+      })
+    );
+
+    const ok = await useInteractionStore
+      .getState()
+      .deleteComment('comment-1', 'post-1');
+
+    expect(ok).toBe(true);
+    const post = useInteractionStore.getState().postInteractions.get('post-1');
+    expect(post?.commentCount).toBe(0);
+  });
 });
 
 describe('interactionStore.syncPostInteraction', () => {

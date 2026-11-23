@@ -384,7 +384,11 @@ export const useInteractionStore = create<InteractionStore>()(
 
         deleteComment: async (commentId: string, postId?: string) => {
           const result = await run(`delete-comment-${commentId}`, () =>
-            requestJson(`/api/comments/${encodeURIComponent(commentId)}`, {
+            requestJson<{
+              message: string;
+              deletedCommentId: string;
+              deletedRepliesCount?: number;
+            }>(`/api/comments/${encodeURIComponent(commentId)}`, {
               method: 'DELETE',
             })
           );
@@ -393,7 +397,17 @@ export const useInteractionStore = create<InteractionStore>()(
           if (postId) {
             const current = get().postInteractions.get(postId);
             if (current && current.commentCount > 0) {
-              patchPost(postId, { commentCount: current.commentCount - 1 });
+              // DELETE removes the comment and its replies, and reports
+              // how many replies went with it. Dropping by one would leave
+              // the header count higher than the list below it until the
+              // next full reload, so subtract the replies too.
+              const deletedReplies = result.value.deletedRepliesCount ?? 0;
+              patchPost(postId, {
+                commentCount: Math.max(
+                  0,
+                  current.commentCount - 1 - deletedReplies
+                ),
+              });
             }
           }
           return true;
