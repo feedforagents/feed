@@ -42,7 +42,7 @@ export function calculatePredictionPositionSnapshot(params: {
   const hasPersistedCashCostBasis =
     cashCostBasis != null &&
     Number.isFinite(cashCostBasis) &&
-    (cashCostBasis > 0 || shares <= 0);
+    cashCostBasis > 0;
   const costBasis = hasPersistedCashCostBasis
     ? cashCostBasis
     : feeRate > 0 && feeRate < 1
