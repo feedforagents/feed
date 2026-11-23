@@ -325,6 +325,21 @@ describe('A2A social.like_comment notifications', () => {
     expect(await authorNotifications(targetPostId)).toHaveLength(0);
   });
 
+  it('rejects a like on a comment whose parent post is deleted', async () => {
+    const targetPostId = await createPost(authorId, {
+      deletedAt: new Date(),
+    });
+    const targetCommentId = await createComment(targetPostId, authorId);
+
+    await expect(likeComment(targetCommentId, likerId)).rejects.toThrow(
+      'Cannot like comment on deleted post'
+    );
+    expect(await commentLikeReactions(targetCommentId, likerId)).toHaveLength(
+      0
+    );
+    expect(await authorNotifications(targetPostId)).toHaveLength(0);
+  });
+
   it('still reports the committed comment like when the author notification fails', async () => {
     const notify = spyOn(notificationService, 'notifyReactionOnComment');
     notify.mockRejectedValueOnce(new Error('notification unavailable'));

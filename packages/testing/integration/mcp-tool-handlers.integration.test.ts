@@ -67,6 +67,8 @@ let marketId: string;
 let activePositionId: string;
 let liveCommentId: string;
 let deletedCommentId: string;
+let commentOnDeletedPostId: string;
+let deletedPostForCommentLikeId: string;
 
 async function acquireUsers(
   values: Array<typeof users.$inferInsert>,
@@ -188,6 +190,21 @@ describe('MCP tool handlers', () => {
     favoriteIds.push(...insertedFavorites.map((row) => row.id));
     liveCommentId = await generateSnowflakeId();
     deletedCommentId = await generateSnowflakeId();
+    commentOnDeletedPostId = await generateSnowflakeId();
+    // A second deleted post for the comment-like fixture: the
+    // create_comment test below asserts zero comments on deletedPostId,
+    // so the like fixture must not live there.
+    deletedPostForCommentLikeId = await generateSnowflakeId();
+    const insertedDeletedPostForLike = await db
+      .insert(posts)
+      .values({
+        id: deletedPostForCommentLikeId,
+        content: 'deleted post for comment like',
+        authorId: otherUserId,
+        deletedAt: new Date(),
+      })
+      .returning({ id: posts.id });
+    postIds.push(...insertedDeletedPostForLike.map((row) => row.id));
     const insertedComments = await db
       .insert(comments)
       .values([
@@ -205,6 +222,13 @@ describe('MCP tool handlers', () => {
           authorId: otherUserId,
           updatedAt: new Date(),
           deletedAt: new Date(),
+        },
+        {
+          id: commentOnDeletedPostId,
+          content: 'comment on a deleted post',
+          postId: deletedPostForCommentLikeId,
+          authorId: otherUserId,
+          updatedAt: new Date(),
         },
       ])
       .returning({ id: comments.id });
@@ -569,6 +593,30 @@ describe('MCP tool handlers', () => {
       .from(reactions)
       .where(eq(reactions.commentId, deletedCommentId));
     expect(liked).toHaveLength(0);
+  });
+
+  it('rejects a like on a comment whose parent post is deleted without writing a reaction', async () => {
+    await expect(
+      executeLikeComment(agent(), { commentId: commentOnDeletedPostId })
+    ).rejects.toThrow('Cannot like comment on deleted post');
+
+    const liked = await db
+      .select()
+      .from(reactions)
+      .where(eq(reactions.commentId, commentOnDeletedPostId));
+    expect(liked).toHaveLength(0);
+
+    const notes = await db
+      .select()
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.userId, otherUserId),
+          eq(notifications.commentId, commentOnDeletedPostId),
+          eq(notifications.type, 'reaction')
+        )
+      );
+    expect(notes).toHaveLength(0);
   });
 
   it('does not acquire cleanup ownership when user setup fails', async () => {

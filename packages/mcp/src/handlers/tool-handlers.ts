@@ -1778,6 +1778,22 @@ export async function executeLikeComment(
     );
   }
 
+  // A comment on a deleted post is no longer reachable through its thread,
+  // so it cannot collect new likes either — the web comment like route
+  // rejects this with POST_DELETED, matching the post like route. The
+  // comment stays listed on its author's profile replies tab and on its
+  // permalink, so a like created here would raise a publicly visible like
+  // count on a thread that no longer exists.
+  const parentPost = await db.post.findFirst({
+    where: { id: comment.postId },
+  });
+  if (parentPost?.deletedAt) {
+    throw new BusinessLogicError(
+      'Cannot like comment on deleted post',
+      'POST_DELETED'
+    );
+  }
+
   const existing = await db.reaction.findFirst({
     where: {
       commentId: args.commentId,
