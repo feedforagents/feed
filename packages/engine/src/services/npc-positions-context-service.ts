@@ -46,13 +46,20 @@ function formatCurrency(n: number): string {
   return `$${formatSignedNumber(n, 0)}`;
 }
 
+function truncateQuestionText(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > 80 ? `${trimmed.slice(0, 80)}...` : trimmed;
+}
+
 function formatQuestionLabel(q: {
   questionNumber: number;
   text: string;
 }): string {
-  const trimmed = q.text.trim();
-  const short = trimmed.length > 80 ? `${trimmed.slice(0, 80)}...` : trimmed;
-  return `Q${q.questionNumber}: "${short}"`;
+  return `Q${q.questionNumber}: "${truncateQuestionText(q.text)}"`;
+}
+
+function formatMarketLabel(questionText: string): string {
+  return `"${truncateQuestionText(questionText)}"`;
 }
 
 export async function buildPositionsPromptContextByActorId(
@@ -75,6 +82,7 @@ export async function buildPositionsPromptContextByActorId(
       where: { userId: { in: actorIds }, status: 'active' },
       select: {
         userId: true,
+        marketId: true,
         side: true,
         questionId: true,
         pnl: true,
@@ -103,17 +111,60 @@ export async function buildPositionsPromptContextByActorId(
         .filter((q): q is number => typeof q === 'number')
     )
   );
-
-  const questions = questionNumbers.length
-    ? await db.question.findMany({
-        where: { questionNumber: { in: questionNumbers } },
-        select: { questionNumber: true, text: true },
-      })
-    : [];
-
-  const questionMap = new Map<number, string>(
-    questions.map((q) => [q.questionNumber, formatQuestionLabel(q)])
+  const marketIds = Array.from(
+    new Set(
+      predictionPositions
+        .filter((p) => typeof p.questionId !== 'number')
+        .map((p) => p.marketId)
+    )
   );
+
+  const questionOrClauses = [
+    ...(questionNumbers.length > 0
+      ? [{ questionNumber: { in: questionNumbers } }]
+      : []),
+    ...(marketIds.length > 0
+      ? [{ marketId: { in: marketIds } }, { id: { in: marketIds } }]
+      : []),
+  ];
+
+  const questions =
+    questionOrClauses.length > 0
+      ? await db.question.findMany({
+          where: { OR: questionOrClauses },
+          select: {
+            id: true,
+            marketId: true,
+            questionNumber: true,
+            text: true,
+          },
+        })
+      : [];
+
+  const questionByNumber = new Map<number, string>();
+  const questionByMarketId = new Map<string, string>();
+  for (const q of questions) {
+    const label = formatQuestionLabel(q);
+    questionByNumber.set(q.questionNumber, label);
+    questionByMarketId.set(q.id, label);
+    if (q.marketId) {
+      questionByMarketId.set(q.marketId, label);
+    }
+  }
+
+  const unresolvedMarketIds = marketIds.filter(
+    (id) => !questionByMarketId.has(id)
+  );
+  const markets =
+    unresolvedMarketIds.length > 0
+      ? await db.market.findMany({
+          where: { id: { in: unresolvedMarketIds } },
+          select: { id: true, question: true },
+        })
+      : [];
+  for (const m of markets) {
+    questionByMarketId.set(m.id, formatMarketLabel(m.question));
+  }
 
   // Group positions by actor
   const predByActor = new Map<string, typeof predictionPositions>();
@@ -158,8 +209,8 @@ export async function buildPositionsPromptContextByActorId(
       for (const { p, pnl } of scored) {
         const qLabel =
           typeof p.questionId === 'number'
-            ? (questionMap.get(p.questionId) ?? `Q${p.questionId}`)
-            : 'Unknown question';
+            ? (questionByNumber.get(p.questionId) ?? `Q${p.questionId}`)
+            : (questionByMarketId.get(p.marketId) ?? 'Unknown question');
         const side = p.side ? 'YES' : 'NO';
         const pnlText = pnl !== null ? ` (${formatCurrency(pnl)})` : '';
         lines.push(`- ${qLabel} → ${side}${pnlText}`);
