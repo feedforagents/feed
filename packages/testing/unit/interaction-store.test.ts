@@ -227,6 +227,48 @@ describe('interactionStore mutations', () => {
         deletedRepliesCount: 2,
       })
     );
+    // The store reconciles the header count with GET /api/posts/[id]
+    // after the DELETE; here the server agrees with the optimistic value.
+    mockFetch.mockImplementationOnce(() => json({ commentCount: 2 }));
+
+    const ok = await useInteractionStore
+      .getState()
+      .deleteComment('comment-1', 'post-1');
+
+    expect(ok).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const post = useInteractionStore.getState().postInteractions.get('post-1');
+    expect(post?.commentCount).toBe(2);
+  });
+
+  test('deleteComment trusts the server count when a reply was hidden', async () => {
+    useInteractionStore.setState({
+      postInteractions: new Map([
+        [
+          'post-1',
+          {
+            postId: 'post-1',
+            likeCount: 5,
+            commentCount: 5,
+            shareCount: 1,
+            isLiked: false,
+            isShared: false,
+          },
+        ],
+      ]),
+    });
+    // DELETE counts every direct reply, including one the header never
+    // showed (soft-deleted by moderation, or by a blocked/muted author),
+    // so the optimistic 5 - 1 - 2 = 2 overshoots the visible list.
+    mockFetch.mockImplementationOnce(() =>
+      json({
+        message: 'Comment deleted successfully',
+        deletedCommentId: 'comment-1',
+        deletedRepliesCount: 2,
+      })
+    );
+    // GET /api/posts/[id] only counts comments the list can show.
+    mockFetch.mockImplementationOnce(() => json({ commentCount: 1 }));
 
     const ok = await useInteractionStore
       .getState()
@@ -234,7 +276,42 @@ describe('interactionStore mutations', () => {
 
     expect(ok).toBe(true);
     const post = useInteractionStore.getState().postInteractions.get('post-1');
-    expect(post?.commentCount).toBe(2);
+    expect(post?.commentCount).toBe(1);
+  });
+
+  test('deleteComment keeps the optimistic count when the refetch fails', async () => {
+    useInteractionStore.setState({
+      postInteractions: new Map([
+        [
+          'post-1',
+          {
+            postId: 'post-1',
+            likeCount: 5,
+            commentCount: 5,
+            shareCount: 1,
+            isLiked: false,
+            isShared: false,
+          },
+        ],
+      ]),
+    });
+    mockFetch.mockImplementationOnce(() =>
+      json({
+        message: 'Comment deleted successfully',
+        deletedCommentId: 'comment-1',
+        deletedRepliesCount: 2,
+      })
+    );
+    mockFetch.mockImplementationOnce(() => json({ error: 'boom' }, 500));
+
+    const ok = await useInteractionStore
+      .getState()
+      .deleteComment('comment-1', 'post-1');
+
+    expect(ok).toBe(true);
+    const state = useInteractionStore.getState();
+    expect(state.postInteractions.get('post-1')?.commentCount).toBe(2);
+    expect(state.errors.has('delete-comment-comment-1')).toBe(false);
   });
 
   test('deleteComment drops the count by one when there are no replies', async () => {

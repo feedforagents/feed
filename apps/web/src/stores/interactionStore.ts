@@ -409,6 +409,25 @@ export const useInteractionStore = create<InteractionStore>()(
                 ),
               });
             }
+            // The DELETE reply counts every direct reply, including
+            // replies the header never showed (soft-deleted by
+            // moderation, or by an author the viewer blocked or muted).
+            // The header count in GET /api/posts/[id] only counts the
+            // comments the list below can actually show, so reconcile
+            // with the server value; if the refetch fails the optimistic
+            // value above stands.
+            try {
+              const post = await requestJson<{ commentCount?: number }>(
+                `/api/posts/${encodeURIComponent(postId)}`
+              );
+              if (typeof post.commentCount === 'number') {
+                patchPost(postId, {
+                  commentCount: Math.max(0, post.commentCount),
+                });
+              }
+            } catch {
+              // Keep the optimistic count.
+            }
           }
           return true;
         },
