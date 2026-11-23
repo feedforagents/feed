@@ -3,6 +3,7 @@ import {
   db as defaultDb,
   organizations,
   perpMarketSnapshots,
+  perpPositionFundingAccruals,
   perpPositions,
   type Transaction,
 } from '@feed/db';
@@ -161,6 +162,20 @@ export class PerpDbAdapter implements PerpDbPort {
       .limit(1)
       .for('update');
     return pos ? mapPosition(pos) : null;
+  }
+
+  async claimFundingPeriod(
+    positionId: string,
+    periodStart: Date
+  ): Promise<boolean> {
+    const inserted = await this.dbClient
+      .insert(perpPositionFundingAccruals)
+      .values({ positionId, periodStart })
+      .onConflictDoNothing()
+      .returning({
+        positionId: perpPositionFundingAccruals.positionId,
+      });
+    return inserted.length > 0;
   }
 
   async upsertPosition(
@@ -339,9 +354,29 @@ export class PerpDbAdapter implements PerpDbPort {
         updatedAt: now,
       };
       if (rotation.metricsReset) {
-        setFields.high24h = updates.high24h ?? rotation.resetPrice;
-        setFields.low24h = updates.low24h ?? rotation.resetPrice;
+        // A reset starts a fresh 24h window whose only observed price is
+        // the reset price. Caller-passed extremes were accumulated against
+        // the previous window (the price sweep folds them in from its
+        // sweep-start read), so — exactly as in applyMarketDeltas — the
+        // reset price wins unconditionally.
+        setFields.high24h = rotation.resetPrice;
+        setFields.low24h = rotation.resetPrice;
         setFields.volume24h = updates.volume24h ?? 0;
+      }
+      // When this write rotates the 24h reference, the caller's change
+      // values were computed against the previous window's reference (read
+      // before the rotation). Recompute them against the reference this
+      // write installs so the stored row stays self-consistent:
+      // change24h = currentPrice - price24hAgo.
+      if (
+        rotation.price24hAgo !== undefined &&
+        updates.currentPrice !== undefined
+      ) {
+        const reference = Number(rotation.price24hAgo);
+        const change = updates.currentPrice - reference;
+        setFields.change24h = change;
+        setFields.changePercent24h =
+          reference === 0 ? 0 : (change / reference) * 100;
       }
 
       await client
@@ -426,6 +461,14 @@ export class PerpDbAdapter implements PerpDbPort {
   }
 
   /**
+   * Adapter bound to an existing transaction. Subclasses override this when
+   * a test or caller needs the transactional port to keep their behavior.
+   */
+  protected bindTransaction(txClient: DrizzleClient): PerpDbAdapter {
+    return new PerpDbAdapter(txClient);
+  }
+
+  /**
    * Execute operations within a transaction for atomicity.
    * Creates a new PerpDbAdapter bound to the transaction context.
    */
@@ -436,8 +479,7 @@ export class PerpDbAdapter implements PerpDbPort {
     }
 
     return defaultDb.transaction(async (txClient) => {
-      const txAdapter = new PerpDbAdapter(txClient);
-      return fn(txAdapter);
+      return fn(this.bindTransaction(txClient));
     });
   }
 }
