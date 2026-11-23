@@ -116,6 +116,13 @@ const STATS_TOTAL_HOOTS_CASES = [
   'Platform stats count only reachable posts > still moves for content readers can see',
   'Platform stats count only reachable posts > follows moderation: publishing a scheduled post raises the total, removing one lowers it',
 ];
+const STATS_ACTIVE_PLAYERS_FILE =
+  'packages/testing/integration/stats-active-players.integration.test.ts';
+const STATS_ACTIVE_PLAYERS_CASES = [
+  'Platform stats count only eligible active players > counts only the eligible player among recent activity',
+  'Platform stats count only eligible active players > unbanning a player raises the count, banning lowers it again',
+  'Platform stats count only eligible active players > clearing the agent flag raises the count',
+];
 const CHAT_MENTION_FILE =
   'packages/testing/integration/chat-mention-participants.integration.test.ts';
 const CHAT_MENTION_CASES = [
@@ -136,6 +143,7 @@ type Suite =
   | 'mcp-perp-fee'
   | 'trade-history'
   | 'stats-total-hoots'
+  | 'stats-active-players'
   | 'chat-mentions';
 type Lease = {
   database: string;
@@ -691,6 +699,10 @@ export async function runIsolatedStatsTotalHootsCases() {
   await runIsolatedCases('stats-total-hoots');
 }
 
+export async function runIsolatedStatsActivePlayersCases() {
+  await runIsolatedCases('stats-active-players');
+}
+
 export async function runIsolatedChatMentionCases() {
   await runIsolatedCases('chat-mentions');
 }
@@ -706,6 +718,7 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
   // Chat mentions, stats and trade history use the original child lease.
   const chatMentions = suite === 'chat-mentions';
   const stats = suite === 'stats-total-hoots';
+  const activePlayers = suite === 'stats-active-players';
   const tradeHistory = suite === 'trade-history';
   const closedPositions = suite === 'closed-prediction-positions';
   const balance = suite === 'balance-display';
@@ -737,9 +750,11 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
                     ? TRADE_HISTORY_FILE
                     : stats
                       ? STATS_TOTAL_HOOTS_FILE
-                      : chatMentions
-                        ? CHAT_MENTION_FILE
-                        : FILE;
+                      : activePlayers
+                        ? STATS_ACTIVE_PLAYERS_FILE
+                        : chatMentions
+                          ? CHAT_MENTION_FILE
+                          : FILE;
   const cases = closedPositions
     ? CLOSED_PREDICTION_POSITIONS_CASES
     : balance
@@ -760,9 +775,11 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
                     ? TRADE_HISTORY_CASES
                     : stats
                       ? STATS_TOTAL_HOOTS_CASES
-                      : chatMentions
-                        ? CHAT_MENTION_CASES
-                        : CASES;
+                      : activePlayers
+                        ? STATS_ACTIVE_PLAYERS_CASES
+                        : chatMentions
+                          ? CHAT_MENTION_CASES
+                          : CASES;
   const marker = closedPositions
     ? 'FEED_CLOSED_PREDICTION_POSITIONS_CHILD'
     : balance
@@ -851,9 +868,11 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
                         ? 'feed-trade-history-'
                         : stats
                           ? 'feed-stats-total-hoots-'
-                          : chatMentions
-                            ? 'feed-chat-mentions-'
-                            : 'feed-sub-market-'
+                          : activePlayers
+                            ? 'feed-stats-active-players-'
+                            : chatMentions
+                              ? 'feed-chat-mentions-'
+                              : 'feed-sub-market-'
     )
   );
   const manifest = join(directory, 'lease.json');
@@ -927,7 +946,7 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
       ...(review ? { FEED_DISABLE_REDIS: '1' } : {}),
       ...(balance ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
       ...(closedPositions ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' } : {}),
-      ...(mcpFee || tradeHistory || stats || chatMentions
+      ...(mcpFee || tradeHistory || stats || activePlayers || chatMentions
         ? { FEED_DISABLE_REDIS: '1', REDIS_URL: '' }
         : {}),
     };
@@ -1023,9 +1042,11 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
                       ? 'trade-history-http-child-case'
                       : stats
                         ? 'three-stats-total-hoots-child-cases'
-                        : chatMentions
-                          ? 'three-chat-mention-child-cases'
-                          : 'four-child-cases';
+                        : activePlayers
+                          ? 'three-stats-active-players-child-cases'
+                          : chatMentions
+                            ? 'three-chat-mention-child-cases'
+                            : 'four-child-cases';
     if (fixture) phase = fixture.name + '-child-cases';
     const output = await run(
       [
@@ -1059,6 +1080,7 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
             mcpFee ||
             tradeHistory ||
             stats ||
+            activePlayers ||
             chatMentions
               ? ''
               : 'sub-market transactional creation > ') +
@@ -1103,9 +1125,11 @@ async function runIsolatedCases(suite: Suite, fixture?: IsolatedFixture) {
                         ? 'Trade history must pass over real HTTP without skips'
                         : stats
                           ? 'All three stats cases must pass over HTTP without skips'
-                          : chatMentions
-                            ? 'All three chat mention cases must pass over HTTP without skips'
-                            : 'All four original cases must pass without skips'
+                          : activePlayers
+                            ? 'All three active players cases must pass over HTTP without skips'
+                            : chatMentions
+                              ? 'All three chat mention cases must pass over HTTP without skips'
+                              : 'All four original cases must pass without skips'
     );
     childProof = {
       pass: expectedCases.length,
