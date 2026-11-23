@@ -24,7 +24,6 @@ export {
   PEER_TRANSFER_IN_TRANSACTION_TYPE,
   PEER_TRANSFER_OUT_TRANSACTION_TYPE,
 } from './constants/constants';
-export * from './model-pilot-inquiry';
 
 // =============================================================================
 // Types (all types are client-safe - they're just TypeScript interfaces)

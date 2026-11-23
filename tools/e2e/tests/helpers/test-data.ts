@@ -23,7 +23,6 @@ export const ROUTES = {
   SETTINGS: '/settings',
   WALLET: '/wallet',
   NFT: '/nft',
-  RESEARCH: '/research',
   POST_BY_ID: (id: string) => `/post/${id}`,
   ARTICLE_BY_ID: (id: string) => `/article/${id}`,
   TRENDING_BY_TAG: (tag: string) => `/trending/${tag}`,
