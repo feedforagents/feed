@@ -19,7 +19,6 @@ export const ROUTES = {
   NOTIFICATIONS: '/notifications',
   REWARDS: '/rewards',
   REPUTATION: '/reputation',
-  REGISTRY: '/registry',
   SETTINGS: '/settings',
   WALLET: '/wallet',
   NFT: '/nft',
