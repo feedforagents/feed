@@ -313,7 +313,9 @@ export const GET = withErrorHandling(
       throw new NotFoundError('Comment', commentId);
     }
 
-    // Get the post info with author
+    // Get the post info with author. Deleted parents are never exposed —
+    // same rule as the profile Replies tab: the reply renders with
+    // post: null instead.
     const [post] = await db
       .select({
         id: posts.id,
@@ -322,7 +324,7 @@ export const GET = withErrorHandling(
         createdAt: posts.createdAt,
       })
       .from(posts)
-      .where(eq(posts.id, comment.postId))
+      .where(and(eq(posts.id, comment.postId), isNull(posts.deletedAt)))
       .limit(1);
 
     // Get post author info - check StaticDataRegistry first (for actors/orgs), then database
