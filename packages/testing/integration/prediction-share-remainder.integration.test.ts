@@ -289,7 +289,15 @@ if (!process.env.FEED_PREDICTION_REMAINDER_CHILD) {
         ).filter((row) => row.type === 'pred_resolve');
         assert.equal(credits.length, expected > 0 ? 1 : 0);
         if (expected > 0) assert.equal(Number(credits[0]?.amount), expected);
-        assert.equal(settled.status, 'resolved');
+        if (closed) {
+          assert.deepEqual(
+            settled,
+            afterSale,
+            'Resolution preserves a sold holding'
+          );
+        } else {
+          assert.equal(settled.status, 'resolved');
+        }
         assert.equal(Number(settled.cashCostBasis), 0);
         assert.equal(
           cents(Number(afterUser.lifetimePnL) - Number(beforeUser.lifetimePnL)),

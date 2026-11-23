@@ -28,6 +28,7 @@ import {
   chatParticipants,
   chats,
   comments,
+  createCommentWithParentCheck,
   db,
   desc,
   dmAcceptances,
@@ -36,6 +37,7 @@ import {
   groupMembers,
   groups,
   gte,
+  hasBlocked,
   inArray,
   isNull,
   messages,
@@ -48,6 +50,7 @@ import {
 } from '@feed/db';
 import { npcTrades } from '@feed/db/schema';
 import {
+  createNpcPerpSettlement,
   createNpcWalletAdapter,
   createPerpPriceImpactPort,
   createPerpSettlement,
@@ -68,6 +71,7 @@ import { floorPoints, isPureRepost } from '@feed/shared';
 import { agentPnLService } from '../services/AgentPnLService';
 import { logger } from '../shared/logger';
 import { generateSnowflakeId } from '../shared/snowflake';
+import type { NpcMarketClue } from './npc-market-clue';
 import { topicDiversityService } from './TopicDiversityService';
 import { resolvePerpTicker } from './utils/resolvePerpTicker';
 
@@ -270,11 +274,14 @@ export interface DirectTradeResult {
 }
 
 export interface DirectPostParams {
+  marketClue?: NpcMarketClue;
   agentUserId: string;
   content: string;
 }
 
 export interface DirectPostResult {
+  marketClueStatus?: 'published' | 'duplicate' | 'stale';
+  rejection?: 'post-diversity';
   success: boolean;
   postId?: string;
   error?: string;
@@ -905,12 +912,7 @@ async function executePerpTrade(params: {
   const walletAdapter = createPerpWalletAdapter(isNpc);
 
   const service = new PerpMarketService({
-    settlement: createPerpSettlement({
-      system: isNpc ? 'npc_perp_trade' : undefined,
-      wallet: isNpc
-        ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-        : undefined,
-    }),
+    settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
     db: new PerpDbAdapter(),
     wallet: walletAdapter,
     cache: createPerpTradesCachePort(),
@@ -1056,12 +1058,7 @@ async function executeClosePerpPosition(params: {
     const walletAdapter = createPerpWalletAdapter(isNpc);
 
     const service = new PerpMarketService({
-      settlement: createPerpSettlement({
-        system: isNpc ? 'npc_perp_trade' : undefined,
-        wallet: isNpc
-          ? (userId, tx) => createNpcWalletAdapter(userId, tx)
-          : undefined,
-      }),
+      settlement: isNpc ? createNpcPerpSettlement() : createPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
       cache: createPerpTradesCachePort(),
@@ -1147,7 +1144,7 @@ async function executeClosePerpPosition(params: {
 export async function executeDirectPost(
   params: DirectPostParams
 ): Promise<DirectPostResult> {
-  const { agentUserId, content } = params;
+  const { agentUserId, content, marketClue } = params;
 
   if (!content || content.trim().length < 5) {
     return { success: false, error: 'Content too short' };
@@ -1174,6 +1171,7 @@ export async function executeDirectPost(
 
     return {
       success: false,
+      rejection: 'post-diversity',
       error: `Content rejected: ${diversityIssues[0]}`,
     };
   }
@@ -1219,6 +1217,7 @@ export async function executeDirectPost(
           );
           return {
             success: false,
+            rejection: 'post-diversity',
             error: 'Content too similar to a recent post by another NPC',
           };
         }
@@ -1241,16 +1240,30 @@ export async function executeDirectPost(
   const postId = await generateSnowflakeId();
   const now = new Date();
 
-  await db.insert(posts).values({
+  const post = {
     id: postId,
     content: cleanContent,
     authorId: agentUserId,
     timestamp: now,
     createdAt: now,
-  });
+  };
+  if (marketClue) {
+    const { publishNpcMarketClue } = await import('./npc-market-clue');
+    const marketClueStatus = await publishNpcMarketClue(marketClue, post);
+    if (marketClueStatus !== 'published') {
+      return { success: true, marketClueStatus };
+    }
+  } else {
+    await db.insert(posts).values(post);
+  }
 
   // Record topic coverage for future diversity checks
-  topicDiversityService.recordTopicCoverage(agentUserId, cleanContent);
+  topicDiversityService.recordTopicCoverage(
+    agentUserId,
+    cleanContent,
+    undefined,
+    post.timestamp
+  );
 
   // Generate and store tags. Tagging is best-effort: the post is already
   // committed, so a tag-generation or tag-storage failure must not report
@@ -1303,6 +1316,7 @@ export async function executeDirectPost(
   return {
     success: true,
     postId,
+    ...(marketClue && { marketClueStatus: 'published' }),
   };
 }
 
@@ -1364,20 +1378,6 @@ export async function executeDirectComment(
         error: `Already replied to this comment`,
       };
     }
-
-    // Verify parent comment exists
-    const [parentComment] = await db
-      .select({ id: comments.id })
-      .from(comments)
-      .where(eq(comments.id, parentCommentId))
-      .limit(1);
-
-    if (!parentComment) {
-      return {
-        success: false,
-        error: `Parent comment not found: ${parentCommentId}`,
-      };
-    }
   } else {
     // Top-level comment - check if agent already commented on this post
     const [existingComment] = await db
@@ -1414,7 +1414,7 @@ export async function executeDirectComment(
   const commentId = await generateSnowflakeId();
   const now = new Date();
 
-  await db.insert(comments).values({
+  const result = await createCommentWithParentCheck({
     id: commentId,
     content: cleanContent,
     postId,
@@ -1423,6 +1423,16 @@ export async function executeDirectComment(
     createdAt: now,
     updatedAt: now,
   });
+
+  if (result.status !== 'created') {
+    return {
+      success: false,
+      error:
+        result.status === 'parent-post-mismatch'
+          ? 'Parent comment does not belong to this post'
+          : `Parent comment not found: ${parentCommentId}`,
+    };
+  }
 
   logger.info(
     `[DirectExecutor] Comment created: ${commentId}`,
@@ -1477,6 +1487,30 @@ function stripThinkTags(text: string): string {
   return withoutBlocks.replace(/<\/?think>/gi, '').trim();
 }
 
+async function directMessageRecipientError(
+  recipientId: string
+): Promise<string | undefined> {
+  const [recipient] = await db
+    .select({ isActor: users.isActor })
+    .from(users)
+    .where(eq(users.id, recipientId))
+    .limit(1);
+
+  if (recipient && !recipient.isActor) return;
+
+  if (!recipient) {
+    const [npc] = await db
+      .select({ id: actorState.id })
+      .from(actorState)
+      .where(eq(actorState.id, recipientId))
+      .limit(1);
+
+    if (!npc) return `Recipient not found: ${recipientId}`;
+  }
+
+  return 'Cannot send direct messages to NPC actors. Use group chats instead.';
+}
+
 export async function executeDirectMessage(
   params: DirectMessageParams
 ): Promise<DirectMessageResult> {
@@ -1508,24 +1542,24 @@ export async function executeDirectMessage(
       };
     }
 
-    // Check if recipient exists
-    const [recipient] = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.id, recipientId))
-      .limit(1);
+    const recipientError = await directMessageRecipientError(recipientId);
+    if (recipientError) {
+      return { success: false, error: recipientError };
+    }
 
-    if (!recipient) {
-      // Try searching actorState for NPCs
-      const [npc] = await db
-        .select({ id: actorState.id })
-        .from(actorState)
-        .where(eq(actorState.id, recipientId))
-        .limit(1);
-
-      if (!npc) {
-        return { success: false, error: `Recipient not found: ${recipientId}` };
-      }
+    // Same DM rules as the web message route, MCP send_message and A2A
+    // messaging.send_message: neither side of a block relationship can DM
+    // the other. Checked before a new DM chat is created so a blocked send
+    // does not leave an auto-accepted DM chat behind.
+    const [blockedRecipient, blockedByRecipient] = await Promise.all([
+      hasBlocked(agentUserId, recipientId),
+      hasBlocked(recipientId, agentUserId),
+    ]);
+    if (blockedRecipient || blockedByRecipient) {
+      return {
+        success: false,
+        error: 'Cannot send messages to this user',
+      };
     }
 
     // Find existing DM chat using a single query with self-join
@@ -1673,6 +1707,52 @@ export async function executeDirectMessage(
         success: false,
         error: `Chat not found or agent is not a member: ${chatId}`,
       };
+    }
+
+    // Same DM rules as the web message route, MCP send_message and A2A
+    // messaging.send_message: DMs to NPC actors are not allowed, and
+    // neither side of a block relationship can DM the other. Group chats
+    // are unaffected. The recipientId path already enforces these rules
+    // before a DM chat is created, so this covers sends into an existing
+    // chat addressed by ID.
+    const [dmChat] = await db
+      .select({ isGroup: chats.isGroup })
+      .from(chats)
+      .where(eq(chats.id, chatId))
+      .limit(1);
+    if (dmChat && !dmChat.isGroup) {
+      const otherParticipants = await db
+        .select({ userId: chatParticipants.userId })
+        .from(chatParticipants)
+        .where(
+          and(
+            eq(chatParticipants.chatId, chatId),
+            eq(chatParticipants.isActive, true)
+          )
+        );
+      const otherParticipantId = otherParticipants
+        .map((p) => p.userId)
+        .find((id) => id !== agentUserId);
+      if (!otherParticipantId) {
+        return {
+          success: false,
+          error: 'Invalid direct message chat',
+        };
+      }
+      const [recipientError, isBlocked, hasBlockedMe] = await Promise.all([
+        directMessageRecipientError(otherParticipantId),
+        hasBlocked(agentUserId, otherParticipantId),
+        hasBlocked(otherParticipantId, agentUserId),
+      ]);
+      if (recipientError) {
+        return { success: false, error: recipientError };
+      }
+      if (isBlocked || hasBlockedMe) {
+        return {
+          success: false,
+          error: 'Cannot send messages to this user',
+        };
+      }
     }
   }
 

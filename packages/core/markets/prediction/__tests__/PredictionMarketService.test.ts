@@ -161,6 +161,7 @@ class InMemoryDb implements PredictionDbPort {
       side: position.side,
       shares: position.shares,
       avgPrice: position.avgPrice,
+      cashCostBasis: position.cashCostBasis,
       status: position.status ?? 'active',
       outcome: position.outcome ?? null,
       pnl: position.pnl,
@@ -417,7 +418,7 @@ describe('PredictionMarketService', () => {
     ).rejects.toThrow(/expired/);
   });
 
-  it('should allow sells on expired but unresolved markets', async () => {
+  it('should block sells on expired but unresolved markets', async () => {
     // First buy a position while market is active
     await service.buy({
       userId: 'u1',
@@ -433,14 +434,10 @@ describe('PredictionMarketService', () => {
       endDate: new Date(Date.now() - 1000),
     });
 
-    // User should still be able to close their position
-    const result = await service.sell({
-      userId: 'u1',
-      marketId: 'm1',
-      shares: pos!.shares,
-    });
-    expect(result.positionClosed).toBe(true);
-    expect(result.netProceeds).toBeGreaterThan(0);
+    await expect(
+      service.sell({ userId: 'u1', marketId: 'm1', shares: pos!.shares })
+    ).rejects.toThrow(/expired/);
+    expect(await db.getPosition('u1', 'm1', 'yes')).toEqual(pos);
   });
 
   it('should block sells on resolved markets with outcome', async () => {
@@ -758,6 +755,99 @@ describe('PredictionMarketService', () => {
     expect(credited).toBeCloseTo(floorPoints(pos!.shares), 8);
   });
 
+  it('resolve skips closed and cancelled positions without overwriting their state or settling them again', async () => {
+    const buyResult = await service.buy({
+      userId: 'u1',
+      marketId: 'm1',
+      side: 'yes',
+      amount: 100,
+    });
+    const sellResult = await service.sell({
+      userId: 'u1',
+      marketId: 'm1',
+      shares: buyResult.shares,
+    });
+    expect(sellResult.positionClosed).toBe(true);
+
+    const closedBefore = await db.getPosition('u1', 'm1', 'yes');
+    expect(closedBefore?.status).toBe('closed');
+    const u1BalanceBeforeResolve = (await wallet.getBalance('u1')).balance;
+    const u1PnlCountBeforeResolve = wallet.pnls.filter(
+      (p) => p.userId === 'u1'
+    ).length;
+
+    await db.upsertPosition({
+      id: 'pos-cancelled',
+      userId: 'u-cancelled',
+      marketId: 'm1',
+      side: 'yes',
+      shares: 50,
+      avgPrice: 0.5,
+      cashCostBasis: 25,
+      status: 'cancelled',
+      outcome: null,
+      pnl: 0,
+      resolvedAt: null,
+    });
+    const cancelledBalanceBefore = (await wallet.getBalance('u-cancelled'))
+      .balance;
+
+    await service.buy({
+      userId: 'u2',
+      marketId: 'm1',
+      side: 'yes',
+      amount: 100,
+    });
+    const activeBefore = await db.getPosition('u2', 'm1', 'yes');
+    const u2BalanceBeforeResolve = (await wallet.getBalance('u2')).balance;
+
+    await service.resolve({
+      marketId: 'm1',
+      winningSide: 'yes',
+      resolutionDescription: 'Active positions only',
+    });
+
+    const closedAfter = await db.getPosition('u1', 'm1', 'yes');
+    expect(closedAfter?.status).toBe('closed');
+    expect(closedAfter?.outcome).toBeNull();
+    expect(closedAfter?.resolvedAt).toBeNull();
+    expect(closedAfter?.pnl).toBe(closedBefore?.pnl);
+    expect((await wallet.getBalance('u1')).balance).toBe(
+      u1BalanceBeforeResolve
+    );
+    expect(wallet.pnls.filter((p) => p.userId === 'u1')).toHaveLength(
+      u1PnlCountBeforeResolve
+    );
+
+    const cancelledAfter = await db.getPosition('u-cancelled', 'm1', 'yes');
+    expect(cancelledAfter?.status).toBe('cancelled');
+    expect(cancelledAfter?.outcome).toBeNull();
+    expect(cancelledAfter?.resolvedAt).toBeNull();
+    expect(cancelledAfter?.pnl).toBe(0);
+    expect((await wallet.getBalance('u-cancelled')).balance).toBe(
+      cancelledBalanceBefore
+    );
+    expect(wallet.pnls.filter((p) => p.userId === 'u-cancelled')).toHaveLength(
+      0
+    );
+
+    const activeAfter = await db.getPosition('u2', 'm1', 'yes');
+    expect(activeAfter?.status).toBe('resolved');
+    expect(activeAfter?.outcome).toBe(true);
+    const expectedActivePayout = floorPoints(activeBefore!.shares);
+    expect(
+      (await wallet.getBalance('u2')).balance - u2BalanceBeforeResolve
+    ).toBeCloseTo(expectedActivePayout, 8);
+
+    const resolutionEvent = broadcast.events.find(
+      (e) => e.payload.type === 'prediction_resolution'
+    );
+    expect(resolutionEvent?.payload.totalPayout).toBeCloseTo(
+      expectedActivePayout,
+      8
+    );
+  });
+
   it('pricing getCurrentPrice returns 0.5 when total is zero for display', () => {
     expect(PredictionPricing.getCurrentPrice(0, 0, 'yes')).toBe(0.5);
   });
@@ -833,12 +923,13 @@ describe('PredictionMarketService input boundaries (D17)', () => {
     expect(result.shares).toBeCloseTo(0.01);
   });
 
-  it('uses the injected clock for buy expiry', async () => {
-    const { service: expired } = makeService(
-      new Date('2031-01-01T00:00:00.000Z')
-    );
+  it('closes buys and sells at the exact scheduled time', async () => {
+    const { service: expired } = makeService(baseMarket.endDate);
     await expect(
       expired.buy({ userId: 'u1', marketId: 'mb', side: 'yes', amount: 10 })
+    ).rejects.toThrow('Market expired');
+    await expect(
+      expired.sell({ userId: 'u1', marketId: 'mb', shares: 1 })
     ).rejects.toThrow('Market expired');
   });
 });
