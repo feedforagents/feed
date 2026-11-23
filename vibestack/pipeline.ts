@@ -944,26 +944,46 @@ function generationLayout(root: string): GenerationLayout {
   }
 }
 
-function generationConfig(root: string, args: string[], env: NodeJS.ProcessEnv): string | undefined {
-  if (env.GITHUB_ACTIONS !== "true" || env.GITHUB_JOB !== "verify" || env.GITHUB_WORKSPACE !== root ||
-      !env.GITHUB_REPOSITORY || !env.GITHUB_WORKFLOW_REF?.startsWith(`${env.GITHUB_REPOSITORY}/.github/workflows/ci.yml@`) ||
-      path.join(root, "vibestack", "pipeline.ts") !== import.meta.filename || args.includes("--") || env.TURBO_ROOT_TURBO_JSON !== undefined ||
-      args.some((arg) => /^--(?:root-turbo-json|cwd)(?:=|$)/.test(arg)) ||
-      (args.includes("--only") && !args.includes("//#gen"))) return;
-  let config: unknown;
-  try {
-    const scripts = packageScripts(root);
-    if (scripts.gen !== "node vibestack/spec.ts gen" || scripts.pregen || scripts.postgen ||
-        fs.lstatSync(path.join(root, "turbo.jsonc"), { throwIfNoEntry: false })) return;
-    config = JSON.parse(fs.readFileSync(path.join(root, "turbo.json"), "utf8"));
-  } catch {
-    return;
-  }
+function readGenerationConfig(file: string) {
+  const config: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
   if (!config || typeof config !== "object" || !("tasks" in config)) return;
   const { tasks } = config;
   if (!tasks || typeof tasks !== "object" || !("//#gen" in tasks)) return;
   const gen = tasks["//#gen"];
   if (!gen || typeof gen !== "object" || !("inputs" in gen)) return;
+  return { config, tasks, gen };
+}
+
+function generationConfig(root: string, args: string[], env: NodeJS.ProcessEnv) {
+  if (env.GITHUB_ACTIONS !== "true" || env.GITHUB_JOB !== "verify" || env.GITHUB_WORKSPACE !== root ||
+      !env.GITHUB_REPOSITORY || !env.GITHUB_WORKFLOW_REF?.startsWith(`${env.GITHUB_REPOSITORY}/.github/workflows/ci.yml@`) ||
+      path.join(root, "vibestack", "pipeline.ts") !== import.meta.filename || args.includes("--") || env.TURBO_ROOT_TURBO_JSON !== undefined ||
+      args.some((arg) => /^--cwd(?:=|$)/.test(arg))) return;
+  const options = args.flatMap((arg, index) => /^--root-turbo-json(?:=|$)/.test(arg) ? [index] : []);
+  if (options.length > 1 || (args.includes("--only") && (options.length || !args.includes("//#gen")))) return;
+  const index = options[0] ?? args.length;
+  const option = args[index];
+  const separate = option === "--root-turbo-json";
+  const file = separate ? args[index + 1] : option?.slice("--root-turbo-json=".length);
+  if (option && (!file || (separate && file.startsWith("-")))) return;
+  let selected: ReturnType<typeof readGenerationConfig>;
+  try {
+    const scripts = packageScripts(root);
+    if (scripts.gen !== "node vibestack/spec.ts gen" || scripts.pregen || scripts.postgen ||
+        fs.lstatSync(path.join(root, "turbo.jsonc"), { throwIfNoEntry: false })) return;
+    const stock = readGenerationConfig(path.join(root, "turbo.json"));
+    if (!stock) return;
+    selected = stock;
+    if (file) {
+      const resolved = path.resolve(root, file);
+      if (!fs.statSync(resolved).isFile()) return;
+      selected = readGenerationConfig(resolved);
+      if (!selected || !isDeepStrictEqual(stock.gen, selected.gen)) return;
+    }
+  } catch {
+    return;
+  }
+  const { config, tasks, gen } = selected;
   const inputs: unknown = gen.inputs;
   if (!Array.isArray(inputs) || !inputs.includes("spec/**") || inputs.some((input) => typeof input !== "string" || input.startsWith("!") || input.includes(".cache"))) return;
   const layout = generationLayout(root);
@@ -977,7 +997,7 @@ function generationConfig(root: string, args: string[], env: NodeJS.ProcessEnv):
   for (const [file, text] of [[path.join(root, layoutInput), shape], [projectedPath, projected]]) {
     if (!fs.lstatSync(file, { throwIfNoEntry: false })?.isFile() || fs.readFileSync(file, "utf8") !== text) writeWhole(file, text);
   }
-  return projectedPath;
+  return { path: projectedPath, index, count: separate ? 2 : option ? 1 : 0 };
 }
 
 async function runTasks(root: string, args: string[]): Promise<number | null> {
@@ -995,7 +1015,8 @@ async function runTasks(root: string, args: string[]): Promise<number | null> {
   const turboPackage = createRequire(bin("turbo", root)).resolve("turbo/package.json");
   const turboEntry = path.resolve(path.dirname(turboPackage), JSON.parse(fs.readFileSync(turboPackage, "utf8")).bin.turbo);
   const config = generationConfig(root, args, env);
-  const child = spawn(process.execPath, [turboEntry, "run", ...args, ...(config ? ["--root-turbo-json", config] : [])], { cwd: root, env, stdio: "inherit" });
+  const options = config ? args.toSpliced(config.index, config.count, "--root-turbo-json", config.path) : args;
+  const child = spawn(process.execPath, [turboEntry, "run", ...options], { cwd: root, env, stdio: "inherit" });
   return new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", resolve);

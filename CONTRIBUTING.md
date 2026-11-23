@@ -49,6 +49,10 @@ as `@repo/app`'s are. `pnpm lint:js` on its own needs what `gen` and `typecheck`
 `pnpm all //#analyze` also runs or restores the application and Studio generators,
 the UI stories and the design theme before analysis reads their outputs.
 
+The hosted VibeStack app build keys its `//#gen` dependency on `apps/app/gen/`.
+Its other inputs come from `apps/app/` and the declared workspace builds. Add any
+new reads outside those inputs to the build profile in `.github/workflows/ci.yml`.
+
 Pull requests go to `main`, the only long-lived branch; what CI runs on them is in
 [CI](#ci).
 

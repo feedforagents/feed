@@ -87,8 +87,34 @@ jobs:
           mkdir -p .turbo/cache
           rm -f ".turbo/cache/$HASH-manifest.json"
           mv "$archive" "$meta" .turbo/cache/
+      - name: Materialize UI stories before tests
+        if: github.repository == 'lalalune/vibestack' && matrix.name == 'verify'
+        continue-on-error: true
+        run: node vibestack/spec.ts tasks '@repo/ui#gen'
       - id: verify-tasks
-        run: node vibestack/spec.ts tasks ${{ matrix.tasks }} ${{ startsWith(matrix.name, 'selftest-') && '--only' || '' }} --continue=dependencies-successful --summarize ${{ matrix.name == 'verify' && '--log-order=stream' || '' }}
+        env:
+          JOB: ${{ matrix.name }}
+          TASKS: ${{ matrix.tasks }}
+        run: |
+          read -ra tasks <<< "$TASKS"
+          options=()
+          if [[ $JOB == verify ]]; then
+            options+=(--log-order=stream)
+            config=.cache/verify-turbo.json
+            if [[ $GITHUB_REPOSITORY == lalalune/vibestack && -z ${TURBO_ROOT_TURBO_JSON+x} && ! -e turbo.jsonc && ! -L turbo.jsonc &&
+              -d spec/app && -f apps/app/package.json && ! -e apps/app/spec && ! -e apps/app/turbo.json && ! -e apps/app/turbo.jsonc ]] &&
+              jq -e --slurpfile app apps/app/package.json '
+                select($app[0] | .name == "@repo/app" and .scripts.build == "vite build" and (.scripts | has("prebuild") or has("postbuild") | not))
+                | select(.tasks | (has("@repo/app#build") | not) and (.build | type == "object" and (has("inputs") or has("command") | not) and (.dependsOn | index("//#gen") != null)))
+                | select(.tasks["//#gen"].outputs | index("apps/*/gen/**") != null and all(.[]; startswith("!") | not))
+                | .tasks["@repo/app#build"] = (.tasks.build + {inputs: ["$TURBO_DEFAULT$", {mode: "dependencyOutputs", from: ["//#gen"], globs: ["apps/app/gen/**"]}]})
+              ' turbo.json > "$config"; then
+              options+=(--root-turbo-json "$config")
+            fi
+          elif [[ $JOB == selftest-* ]]; then
+            options+=(--only)
+          fi
+          node vibestack/spec.ts tasks "${tasks[@]}" --continue=dependencies-successful --summarize "${options[@]}"
       - id: publish-tool-selftest
         if: >-
           github.event_name == 'push' && steps.tool-selftest-cache.outputs.key != '' &&
