@@ -19,7 +19,7 @@ import { contracts, citationLookup, pending, pendingKey, pendingContracts, accep
 import { cacheCredentials, dafnyVersion, entry, recall, remembered, steady, store, certifyInstallation, collectGarbage, evaluatorForCheck, isActionEntry, toolchainFingerprint, type Memory } from "./cache.ts";
 import { generated, mirrorGen, publishGen, typecheckAll, proofUnits, proofFiles, strayProofFiles } from "./units.ts";
 import { simulation, type Simulation } from "./simulate.ts";
-import { sha, digest, indent, packageScripts, pruneSidecars, configured, testInputs, tests, VITEST_CONFIG, readSrc, codeDirs, codeDirOf, projectRoot, allDone, UNREAD, workspacePackages, type Reported, type SrcFile } from "./util.ts";
+import { sha, digest, indent, packageScripts, pruneSidecars, configured, testInputs, tests, VITEST_CONFIG, readSrc, codeDirs, codeDirOf, owner, projectRoot, allDone, UNREAD, workspacePackages, writeWhole, type Reported, type SrcFile } from "./util.ts";
 import { profile, type TestProfile } from "./testing/profile.ts";
 import { setupProjectAgents } from "./skill-links.ts";
 
@@ -928,6 +928,58 @@ async function generateOwner(root: string, name: string) {
   }
 }
 
+type GenerationLayout = { kind: "ordinary" | "proof-directory"; owners: [string, string | null][]; dirs: string[] } | { kind: "invalid" };
+
+function generationLayout(root: string): GenerationLayout {
+  try {
+    const files = specFiles(root);
+    const areas = [...new Set(files.map((file) => file.split("/")).filter((parts) => parts.length > 2).map((parts) => parts[1]))].sort();
+    return {
+      kind: files.some((file) => file.split("/").some((part) => part.endsWith(".proof.dfy"))) ? "proof-directory" : "ordinary",
+      owners: areas.map((area) => [area, owner(root, `spec/${area}/`) ?? null]),
+      dirs: codeDirs(root),
+    };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
+function generationConfig(root: string, args: string[], env: NodeJS.ProcessEnv): string | undefined {
+  if (env.GITHUB_ACTIONS !== "true" || env.GITHUB_JOB !== "verify" || env.GITHUB_WORKSPACE !== root ||
+      !env.GITHUB_REPOSITORY || !env.GITHUB_WORKFLOW_REF?.startsWith(`${env.GITHUB_REPOSITORY}/.github/workflows/ci.yml@`) ||
+      path.join(root, "vibestack", "pipeline.ts") !== import.meta.filename || args.includes("--") || env.TURBO_ROOT_TURBO_JSON !== undefined ||
+      args.some((arg) => /^--(?:root-turbo-json|cwd)(?:=|$)/.test(arg)) ||
+      (args.includes("--only") && !args.includes("//#gen"))) return;
+  let config: unknown;
+  try {
+    const scripts = packageScripts(root);
+    if (scripts.gen !== "node vibestack/spec.ts gen" || scripts.pregen || scripts.postgen ||
+        fs.lstatSync(path.join(root, "turbo.jsonc"), { throwIfNoEntry: false })) return;
+    config = JSON.parse(fs.readFileSync(path.join(root, "turbo.json"), "utf8"));
+  } catch {
+    return;
+  }
+  if (!config || typeof config !== "object" || !("tasks" in config)) return;
+  const { tasks } = config;
+  if (!tasks || typeof tasks !== "object" || !("//#gen" in tasks)) return;
+  const gen = tasks["//#gen"];
+  if (!gen || typeof gen !== "object" || !("inputs" in gen)) return;
+  const inputs: unknown = gen.inputs;
+  if (!Array.isArray(inputs) || !inputs.includes("spec/**") || inputs.some((input) => typeof input !== "string" || input.startsWith("!") || input.includes(".cache"))) return;
+  const layout = generationLayout(root);
+  const shape = JSON.stringify({ version: 1, layout });
+  const layoutInput = ".cache/gen-layout-" + digest(shape) + ".json";
+  const projected = JSON.stringify({
+    ...config,
+    tasks: { ...tasks, "//#gen": { ...gen, inputs: [...inputs, layoutInput, ...(layout.kind === "ordinary" ? ["!spec/**/*.proof.dfy"] : [])] } },
+  });
+  const projectedPath = path.join(root, ".cache", "gen-turbo-" + digest(projected) + ".json");
+  for (const [file, text] of [[path.join(root, layoutInput), shape], [projectedPath, projected]]) {
+    if (!fs.lstatSync(file, { throwIfNoEntry: false })?.isFile() || fs.readFileSync(file, "utf8") !== text) writeWhole(file, text);
+  }
+  return projectedPath;
+}
+
 async function runTasks(root: string, args: string[]): Promise<number | null> {
   const fingerprint = path.join(root, ".cache", "toolchain.json");
   const text = JSON.stringify(await steady(toolchainFingerprint)) + "\n";
@@ -942,7 +994,8 @@ async function runTasks(root: string, args: string[]): Promise<number | null> {
   }
   const turboPackage = createRequire(bin("turbo", root)).resolve("turbo/package.json");
   const turboEntry = path.resolve(path.dirname(turboPackage), JSON.parse(fs.readFileSync(turboPackage, "utf8")).bin.turbo);
-  const child = spawn(process.execPath, [turboEntry, "run", ...args], { cwd: root, env, stdio: "inherit" });
+  const config = generationConfig(root, args, env);
+  const child = spawn(process.execPath, [turboEntry, "run", ...args, ...(config ? ["--root-turbo-json", config] : [])], { cwd: root, env, stdio: "inherit" });
   return new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", resolve);
