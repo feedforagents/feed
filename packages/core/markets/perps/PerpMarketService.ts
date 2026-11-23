@@ -859,11 +859,15 @@ export class PerpMarketService {
           );
         }
 
-        const closePercentage = resolveClosePercentage(input.percentage);
+        const requestedClosePercentage = resolveClosePercentage(
+          input.percentage
+        );
 
-        const closeSize = position.size * closePercentage;
+        const requestedCloseSize = position.size * requestedClosePercentage;
+        const isFullClose = position.size - requestedCloseSize < 0.01;
+        const closePercentage = isFullClose ? 1 : requestedClosePercentage;
+        const closeSize = isFullClose ? position.size : requestedCloseSize;
         const remainingSize = position.size - closeSize;
-        const isFullClose = remainingSize < 0.01;
         const minOrderSize = market.minOrderSize ?? DEFAULT_MIN_ORDER_SIZE;
         if (!isFullClose && closeSize < minOrderSize) {
           throw new Error(
@@ -1872,7 +1876,7 @@ export class PerpMarketService {
 
     const now = this.deps.clock?.now() ?? new Date();
 
-    if (tradeSize < existing.size) {
+    if (existing.size - tradeSize >= 0.01) {
       // REDUCE: Partial close of existing position
       const closePercentage = tradeSize / existing.size;
       const closeResult = await this.closePosition({
@@ -2436,7 +2440,7 @@ export class PerpMarketService {
         ? market.currentPrice
         : existing.currentPrice;
 
-    if (input.size < existing.size) {
+    if (existing.size - input.size >= 0.01) {
       const closeExecution = this.getCloseExecutionQuote(
         market,
         existing.side,
