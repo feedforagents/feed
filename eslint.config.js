@@ -41,7 +41,7 @@ const suppression = new RegExp(String.raw`^ eslint-disable(?:-next-line|-line)? 
 const configs = [suppression, /^ eslint-enable\b/]
 const directives = {
   Line: [cited, suppression, /^@ (?:backend|requires|ensures|invariant|decreases|assert|pure|type|ghost)(?: |$)/, /^\/ <reference /, /^ @vitest-environment [\w-]+$/],
-  Block: [cited, ...configs, /^\*(?:[\s*]*@(?:model|design) \S+)+[\s*]*$/],
+  Block: [cited, ...configs, /^\*(?:[\s*]*@(?:model|design) \S+)+[\s*]*$/, /^\*(?:[\s*]*@throws \{[^{}]+\})+[\s*]*$/],
   Shebang: [/^/],
 }
 const inline = /^\s*(?:eslint(?:-[a-z]+)*|exported|globals?)(?:\s|$)/
