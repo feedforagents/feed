@@ -373,4 +373,25 @@ describe('PredictionMarketService — buy unwinding an extreme market', () => {
       })
     ).rejects.toThrow(/move odds by/i);
   });
+
+  test('buy crossing the centre past the far band is still rejected', async () => {
+    // Same 99% YES pool: a $7800 NO buy with the cap relaxed would move
+    // YES to ~1.59% — across the centre and past the 2% floor. The
+    // unwind carve-out only covers trades that land closer to 50% on the
+    // same side, so the floor still rejects this one.
+    const service = makeService({
+      yesShares: 100,
+      noShares: 9900,
+      liquidity: 10_000,
+    });
+    await expect(
+      service.buy({
+        userId: 'u1',
+        marketId: 'market-1',
+        side: 'no',
+        amount: 7800,
+        maxOddsMove: 1,
+      })
+    ).rejects.toThrow(/thin|push YES odds/i);
+  });
 });

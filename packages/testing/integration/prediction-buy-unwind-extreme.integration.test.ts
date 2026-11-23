@@ -1,6 +1,6 @@
 /**
  * Real service + real DB repro: the buy-side hard
- * floor/ceiling (2%/98%) has no "worsens" carve-out, unlike the sell
+ * floor/ceiling (2%/98%) has no unwind carve-out, unlike the sell
  * guard added by #2073. A buy that unwinds an already-extreme market
  * toward 50% is rejected whenever it still lands outside 2-98%.
  *
@@ -8,6 +8,10 @@
  * NO while YES is low (guard-compliant), user B buys YES up to 97.5%
  * (guard-compliant), then A sells NO legs and YES walks past 98%.
  * A fresh user C then cannot buy the cheap NO side to unwind it.
+ * The extreme pool is seeded directly with the exact pool that walk
+ * reaches (YES 98.20%) instead of replaying it: replaying the walk
+ * depends on the unguarded sell, so the test would go red as soon as
+ * #2073 merges, whichever PR merges second.
  *
  * Each step drives the real PredictionMarketService through the real
  * PredictionDbAdapter against the real test Postgres (same wiring as
@@ -19,7 +23,6 @@ import assert from 'node:assert/strict';
 import {
   PredictionDbAdapter,
   PredictionMarketService,
-  PredictionPricing,
 } from '@feed/core/markets/prediction';
 import {
   count,
@@ -112,41 +115,6 @@ function yesPrice(pool: { yesShares: number; noShares: number }): number {
   return pool.noShares / (pool.yesShares + pool.noShares);
 }
 
-/**
- * Largest whole-cent buy amount whose guard outcome stays inside the
- * given move cap and landing band. Mirrors the service's own guard
- * arithmetic (same pricing, same fee rate) so the search only ever
- * returns amounts the service accepts.
- */
-function maxGuardedAmount(
-  pool: { yesShares: number; noShares: number },
-  side: 'yes' | 'no',
-  maxMove: number,
-  floor: number,
-  ceiling: number
-): number {
-  const cur = yesPrice(pool);
-  let lo = 0;
-  let hi = 200_000;
-  for (let i = 0; i < 40; i++) {
-    const mid = (lo + hi) / 2;
-    const calc = PredictionPricing.calculateBuyWithFees(
-      pool.yesShares,
-      pool.noShares,
-      side,
-      mid,
-      FEE_CONFIG.TRADING_FEE_RATE
-    );
-    const ok =
-      Math.abs(calc.newYesPrice - cur) <= maxMove &&
-      calc.newYesPrice >= floor &&
-      calc.newYesPrice <= ceiling;
-    if (ok) lo = mid;
-    else hi = mid;
-  }
-  return Math.floor(lo * 100) / 100;
-}
-
 afterAll(async () => {
   if (testMarketIds.length > 0) {
     await db
@@ -187,60 +155,18 @@ afterAll(async () => {
 });
 
 describe('Prediction — buy unwinding an extreme market (real DB)', () => {
-  test('extreme market reached by ordinary service calls, then NO buy unwinds it', async () => {
+  test('extreme market seeded directly, then NO buy unwinds it', async () => {
     const service = marketService();
-    const userA = await createTestUser();
-    const userB = await createTestUser();
     const userC = await createTestUser();
-    const marketId = await createMarket({ yesShares: 5000, noShares: 5000 });
-
-    // 1. A accumulates NO while YES is low (guard-compliant buys).
-    for (let i = 0; i < 10; i++) {
-      const pool = await readPool(marketId);
-      if (yesPrice(pool) <= 0.15) break;
-      const amount = maxGuardedAmount(pool, 'no', 0.19, 0.025, 0.975);
-      assert.ok(amount >= 1, 'no guarded NO amount found');
-      await service.buy({ userId: userA, marketId, side: 'no', amount });
-    }
-    const [posA] = await db
-      .select()
-      .from(positions)
-      .where(eq(positions.marketId, marketId));
-    console.log(
-      'after A accumulation:',
-      JSON.stringify(await readPool(marketId)),
-      'A NO shares:',
-      posA ? Number(posA.shares).toFixed(0) : 'none'
-    );
-
-    // 2. B walks YES up to ~97.5% with guard-compliant YES buys.
-    for (let i = 0; i < 30; i++) {
-      const pool = await readPool(marketId);
-      if (yesPrice(pool) >= 0.97) break;
-      const amount = maxGuardedAmount(pool, 'yes', 0.19, 0.025, 0.98);
-      assert.ok(amount >= 1, 'no guarded YES amount found');
-      await service.buy({ userId: userB, marketId, side: 'yes', amount });
-    }
-    console.log(
-      'after B walk-up:',
-      JSON.stringify(await readPool(marketId)),
-      'YES:',
-      (yesPrice(await readPool(marketId)) * 100).toFixed(2) + '%'
-    );
-
-    // 3. A sells NO legs (unguarded on base) — YES must cross 98%.
-    const before = yesPrice(await readPool(marketId));
-    await service.sell({ userId: userA, marketId, shares: 2000 });
+    // The exact pool the multi-actor walk reaches (YES 98.20%).
+    const marketId = await createMarket({
+      yesShares: 676.36886,
+      noShares: 36962.080087,
+    });
     const extreme = await readPool(marketId);
-    console.log(
-      'after A sell 2000 NO: YES',
-      (yesPrice(extreme) * 100).toFixed(2) + '%',
-      JSON.stringify(extreme)
-    );
     expect(yesPrice(extreme)).toBeGreaterThan(0.98);
-    expect(yesPrice(extreme)).toBeGreaterThan(before);
 
-    // 4. C buys the cheap NO side: the trade unwinds toward 50% but
+    // C buys the cheap NO side: the trade unwinds toward 50% but
     // still lands above 98% — the buy guard rejects it on base.
     const result = await service
       .buy({ userId: userC, marketId, side: 'no', amount: 10 })
