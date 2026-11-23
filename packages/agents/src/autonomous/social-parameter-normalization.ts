@@ -64,34 +64,57 @@ function extractOrdinal(value: string): number | undefined {
   return undefined;
 }
 
-function extractEmbeddedId(value: string): string | undefined {
-  const explicitId =
-    value.match(/\bid\s*:\s*([A-Za-z0-9_-]+)/i)?.[1] ??
-    value.match(
-      /\b(?:postId|commentId|chatId|userId|recipientId)\s*:\s*([A-Za-z0-9_-]+)/i
+const POST_ID_FIELDS = ['postId', 'id'] as const;
+const COMMENT_ID_FIELDS = ['commentId', 'id'] as const;
+const USER_ID_FIELDS = ['userId', 'id'] as const;
+const RECIPIENT_ID_FIELDS = ['recipientId', 'userId', 'id'] as const;
+const CHAT_ID_FIELDS = ['chatId', 'id'] as const;
+
+function extractEmbeddedId(
+  value: string,
+  preferredFields: readonly string[]
+): string | undefined {
+  for (const field of preferredFields) {
+    const match = value.match(
+      new RegExp(`\\b${field}\\s*:\\s*["']?([A-Za-z0-9_-]+)`, 'i')
     )?.[1];
-  return explicitId?.trim();
+    if (match) {
+      return match;
+    }
+  }
+  return undefined;
 }
 
 function resolveCandidateId<T extends { id: string }>(
   rawValue: unknown,
-  candidates: T[]
+  candidates: T[],
+  options: {
+    preferredFields: readonly string[];
+    extraCandidates?: Array<{ id: string }>;
+  }
 ): string | undefined {
   const normalizedInput = normalizeIdInput(rawValue);
   if (!normalizedInput) {
     return undefined;
   }
 
-  const exact = candidates.find(
+  const searchableCandidates = options.extraCandidates
+    ? [...candidates, ...options.extraCandidates]
+    : candidates;
+
+  const exact = searchableCandidates.find(
     (candidate) => candidate.id === normalizedInput
   );
   if (exact) {
     return exact.id;
   }
 
-  const embeddedId = extractEmbeddedId(normalizedInput);
+  const embeddedId = extractEmbeddedId(
+    normalizedInput,
+    options.preferredFields
+  );
   if (embeddedId) {
-    const embedded = candidates.find(
+    const embedded = searchableCandidates.find(
       (candidate) => candidate.id === embeddedId
     );
     if (embedded) {
@@ -146,6 +169,9 @@ export function normalizeSocialDecisionParameters(
     id: reply.id,
     postId: reply.postId,
   }));
+  const pendingReplyPosts = pendingReplies.map((reply) => ({
+    id: reply.postId,
+  }));
   const pendingChats = context.pendingChatMessages.map((message) => ({
     id: message.chatId,
   }));
@@ -154,12 +180,16 @@ export function normalizeSocialDecisionParameters(
       id: group.id,
     })) ?? [];
   const recentAuthors = dedupeRecentPostAuthors(context, agentUserId);
+  const socialGraphUsers = (context.socialGraph ?? [])
+    .filter((connection) => connection.userId !== agentUserId)
+    .map((connection) => ({ id: connection.userId }));
 
   switch (action) {
     case Actions.COMMENT: {
       const resolvedPostId = resolveCandidateId(
         nextParameters.postId,
-        recentPosts
+        recentPosts,
+        { preferredFields: POST_ID_FIELDS }
       );
 
       if (resolvedPostId) {
@@ -189,7 +219,8 @@ export function normalizeSocialDecisionParameters(
     case Actions.REPLY_COMMENT: {
       const resolvedCommentId = resolveCandidateId(
         nextParameters.commentId,
-        pendingReplies
+        pendingReplies,
+        { preferredFields: COMMENT_ID_FIELDS }
       );
       const target = resolvedCommentId
         ? pendingReplies.find((reply) => reply.id === resolvedCommentId)
@@ -206,25 +237,15 @@ export function normalizeSocialDecisionParameters(
       return nextParameters;
     }
 
-    case Actions.LIKE: {
-      const resolvedPostId = resolveCandidateId(
-        nextParameters.postId,
-        recentPosts
-      );
-
-      if (resolvedPostId) {
-        nextParameters.postId = resolvedPostId;
-      } else {
-        delete nextParameters.postId;
-      }
-
-      return nextParameters;
-    }
-
+    case Actions.LIKE:
     case Actions.REPOST: {
       const resolvedPostId = resolveCandidateId(
         nextParameters.postId,
-        recentPosts
+        recentPosts,
+        {
+          preferredFields: POST_ID_FIELDS,
+          extraCandidates: pendingReplyPosts,
+        }
       );
 
       if (resolvedPostId) {
@@ -240,7 +261,11 @@ export function normalizeSocialDecisionParameters(
     case Actions.UNFOLLOW: {
       const resolvedUserId = resolveCandidateId(
         nextParameters.userId,
-        recentAuthors
+        recentAuthors,
+        {
+          preferredFields: USER_ID_FIELDS,
+          extraCandidates: socialGraphUsers,
+        }
       );
 
       if (resolvedUserId) {
@@ -255,7 +280,11 @@ export function normalizeSocialDecisionParameters(
     case Actions.DM: {
       const resolvedRecipientId = resolveCandidateId(
         nextParameters.recipientId,
-        recentAuthors
+        recentAuthors,
+        {
+          preferredFields: RECIPIENT_ID_FIELDS,
+          extraCandidates: socialGraphUsers,
+        }
       );
 
       if (resolvedRecipientId) {
@@ -270,7 +299,8 @@ export function normalizeSocialDecisionParameters(
     case Actions.REPLY_CHAT: {
       const resolvedChatId = resolveCandidateId(
         nextParameters.chatId,
-        pendingChats
+        pendingChats,
+        { preferredFields: CHAT_ID_FIELDS }
       );
 
       if (resolvedChatId) {
@@ -285,7 +315,8 @@ export function normalizeSocialDecisionParameters(
     case Actions.GROUP_MESSAGE: {
       const resolvedChatId = resolveCandidateId(
         nextParameters.chatId,
-        groupChats
+        groupChats,
+        { preferredFields: CHAT_ID_FIELDS }
       );
 
       if (resolvedChatId) {
