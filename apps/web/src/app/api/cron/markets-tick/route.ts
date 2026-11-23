@@ -64,7 +64,9 @@ import {
   positions,
   posts,
   questions,
+  readPredictionRecoveryHealth,
   sql,
+  timeframedMarketRoles,
   timeframedMarkets,
   worldEvents,
 } from '@feed/db';
@@ -73,6 +75,7 @@ import {
   dailyTopicService,
   deriveTopicFromText,
   FeedLLMClient,
+  getCurrentArcState,
   getMaxSubMarketDuration,
   getPredictionMarketInitialization,
   isEligibleActor,
@@ -419,6 +422,27 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     });
   }
 
+  if (process.env.DEPLOYMENT_ENV === 'localnet') {
+    const startTime = new Date();
+    try {
+      const health = await readPredictionRecoveryHealth(startTime);
+      const result = {
+        success: true,
+        ...health,
+        durationMs: Date.now() - startTime.getTime(),
+      };
+      recordCronExecution('markets-tick', startTime, result);
+      logger.info('Markets tick completed', result, 'MarketsTick');
+      return NextResponse.json(result);
+    } catch (error) {
+      recordCronExecution('markets-tick', startTime, {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
   const startTime = Date.now();
   const processId = `markets-tick-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
   logger.info('Markets tick started', { processId }, 'MarketsTick');
@@ -722,13 +746,29 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
                 id: questions.id,
                 questionNumber: questions.questionNumber,
                 status: questions.status,
+                requiresManualReview: questions.requiresManualReview,
+                resolutionReviewStatus: questions.resolutionReviewStatus,
+                resolutionDate: questions.resolutionDate,
               })
               .from(questions)
               .where(eq(questions.id, orphan.questionId))
               .limit(1);
 
-            // If question exists and is still active, resolve it
-            if (linkedQuestion && linkedQuestion.status === 'active') {
+            // Held for review or postponed by a rejection: keep the orphan active.
+            if (
+              linkedQuestion?.status === 'active' &&
+              isResolutionHeld(linkedQuestion, resolutionTimestamp)
+            ) {
+              shouldMarkTimeframedResolved = false;
+              logger.info(
+                `Q${linkedQuestion.questionNumber} is held for manual resolution review`,
+                {
+                  timeframedMarketId: orphan.id,
+                  reviewStatus: linkedQuestion.resolutionReviewStatus,
+                },
+                'MarketsTick'
+              );
+            } else if (linkedQuestion && linkedQuestion.status === 'active') {
               logger.info(
                 `Resolving orphaned market via question Q${linkedQuestion.questionNumber}`,
                 { timeframedMarketId: orphan.id },
@@ -1293,6 +1333,29 @@ async function getMarketsReadyForResolution(now: Date): Promise<
 }
 
 /**
+ * A resolution an admin still has to review, or one an admin rejected and
+ * postponed, must not pay out yet. The admin review queue
+ * (`/api/admin/resolutions`) only acts on questions that are still active.
+ */
+function isResolutionHeld(
+  question: {
+    requiresManualReview: boolean | null;
+    resolutionReviewStatus: string | null;
+    resolutionDate: Date;
+  },
+  now: Date
+): boolean {
+  if (
+    question.requiresManualReview &&
+    (question.resolutionReviewStatus === null ||
+      question.resolutionReviewStatus === 'pending')
+  ) {
+    return true;
+  }
+  return question.resolutionDate.getTime() > now.getTime();
+}
+
+/**
  * Resolve a market with complete lifecycle:
  * 1. Signal extraction (validation/logging)
  * 2. Proof generation (LLM-based resolution explanation)
@@ -1601,6 +1664,16 @@ async function resolveMarket(
     }
   }
 
+  // A proof stored on an earlier tick can still be waiting for admin review.
+  if (isResolutionHeld(question, new Date())) {
+    logger.info(
+      `Q${market.questionNumber} is held for manual resolution review`,
+      { reviewStatus: question.resolutionReviewStatus },
+      'MarketsTick'
+    );
+    return { resolved: false };
+  }
+
   // ==========================================================================
   // STEP 3: Execute Payouts
   // ==========================================================================
@@ -1857,6 +1930,7 @@ async function createMarketForTimeframe(
     // Wrap all DB writes in a transaction to prevent orphaned rows
     // If any step fails, the entire transaction rolls back
     let market!: { id: string };
+    const localnet = process.env.DEPLOYMENT_ENV === 'localnet';
 
     await db.transaction(async (tx) => {
       // Step 1: Create the question in the database
@@ -1908,7 +1982,7 @@ async function createMarketForTimeframe(
       await tx.insert(timeframedMarkets).values({
         id: timeframedMarketId,
         questionId,
-        timeframe: mapTimeframeToDbType(timeframe),
+        timeframe: dbTimeframe,
         granularTimeframe: timeframe, // Store precise timeframe key ('15m', '30m', etc.)
         category: inferCategory(questionData.text),
         topicKey: questionTopic.topicKey,
@@ -1916,12 +1990,21 @@ async function createMarketForTimeframe(
         topicDate: questionTopic.date,
         startTime: now,
         endTime: resolutionDate,
-        arcState: (arcPlan.phaseOrder[0] || 'setup') as ArcStateType,
+        arcState: localnet
+          ? getCurrentArcState(now, resolutionDate, dbTimeframe, now)
+          : ((arcPlan.phaseOrder[0] || 'setup') as ArcStateType),
         arcStateEnteredAt: now,
         // Store affiliated actors/orgs for context in NPC behavior
         affiliatedActorIds: arcPlan.affiliatedActorIds,
         affiliatedOrgIds: arcPlan.affiliatedOrgIds,
       });
+      if (localnet) {
+        await tx.insert(timeframedMarketRoles).values({
+          timeframedMarketId,
+          insiderActorIds: arcPlan.insiders,
+          deceiverActorIds: arcPlan.deceivers,
+        });
+      }
     });
 
     logger.info(
@@ -2365,6 +2448,10 @@ async function createSubMarket(
       timeframe,
       topic: inheritedTopic,
       arcState: (arcPlan.phaseOrder[0] || 'setup') as ArcStateType,
+      roles: {
+        insiderActorIds: arcPlan.insiders,
+        deceiverActorIds: arcPlan.deceivers,
+      },
       affiliatedActorIds: finalAffiliatedActorIds,
       affiliatedOrgIds: finalAffiliatedOrgIds,
       gameId: gameState.id,

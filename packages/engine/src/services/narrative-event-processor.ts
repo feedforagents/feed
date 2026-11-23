@@ -27,7 +27,7 @@ import {
 } from '@feed/db';
 import { escapeRegex, generateSnowflakeId, logger } from '@feed/shared';
 import type { FeedLLMClient } from '../llm/openai-client';
-import { toSafeDayNumber } from '../utils/date-utils';
+import { getGameHourOfDay, toSafeDayNumber } from '../utils/date-utils';
 import { secureRandom } from '../utils/entropy';
 import { formatError } from '../utils/error-utils';
 import { generateArticlesForArcEvent } from './event-generation-helpers';
@@ -333,21 +333,41 @@ export function shouldGenerateEvent(
 }
 
 /**
- * Get the next scheduled event that should fire based on current day and hour.
+ * Hour within the game day for scheduled world events.
  *
- * @description
- * Checks the eventSchedule in the arc plan for unfired events that are due.
- * Events fire when: currentDay >= baseDay AND currentHour >= jitterHours (adjusted to 0-23).
+ * Arc schedules are offsets from the continuous game's start, the same epoch
+ * as `getGameDayNumber`. The host's wall-clock hour is a different clock: a
+ * game that starts at 15:00 is only one hour old at 16:30, even when the
+ * local hour is 16. Missing or invalid `gameStartedAt` keeps the host hour
+ * so an unconfigured tick does not invent a game epoch.
+ */
+export function scheduledEventHour(
+  gameStartedAt: Date | null,
+  now: Date
+): number {
+  if (
+    gameStartedAt === null ||
+    !(gameStartedAt instanceof Date) ||
+    !Number.isFinite(gameStartedAt.getTime()) ||
+    !Number.isFinite(now.getTime())
+  ) {
+    return now.getHours();
+  }
+  return getGameHourOfDay(gameStartedAt, now);
+}
+
+/**
+ * Next unfired scheduled event that is due.
  *
- * @param eventSchedule - Array of scheduled events from the arc plan
- * @param currentDay - Current game day (1-indexed)
- * @param currentHour - Current hour of day (0-23)
- * @returns The next event to fire, or null if none are due
+ * `currentDay` and `currentHour` are game time. Day 1 is the first 24 hours
+ * after the continuous game started, and `currentHour` is hours since the
+ * start of that game day (0-23). An event is due at `baseDay` plus
+ * `jitterHours`; negative jitter moves it into the previous game day.
  */
 export function getNextScheduledEvent(
   eventSchedule: ScheduledEvent[] | null | undefined,
   currentDay: number,
-  currentHour: number = new Date().getHours()
+  currentHour: number
 ): ScheduledEvent | null {
   if (!eventSchedule || eventSchedule.length === 0) {
     return null;
@@ -822,7 +842,8 @@ async function getAffectedStocksForQuestion(
 export async function processArcTick(
   arcId: string,
   dayNumber: number,
-  llmClient?: FeedLLMClient | null
+  llmClient?: FeedLLMClient | null,
+  clock?: { gameStartedAt?: Date | null; now?: Date }
 ): Promise<{
   transitioned: boolean;
   eventGenerated: boolean;
@@ -881,8 +902,14 @@ export async function processArcTick(
     .where(eq(questionArcPlans.questionId, arc.questionId))
     .limit(1);
 
-  // Check for scheduled events first (deterministic approach)
-  const currentHour = new Date().getHours();
+  // Check for scheduled events first (deterministic approach).
+  // Day and hour must share the tick timestamp so a game-day boundary
+  // cannot be applied to the day and missed by the hour.
+  const scheduleNow = clock?.now ?? new Date();
+  const currentHour = scheduledEventHour(
+    clock?.gameStartedAt ?? null,
+    scheduleNow
+  );
   const parsedSchedule = arcPlan?.eventSchedule
     ? parseScheduledEventsSafe(arcPlan.eventSchedule, {
         questionId: arc.questionId,
@@ -1168,13 +1195,14 @@ export class NarrativeEventProcessorService {
   async processArcTick(
     arcId: string,
     dayNumber: number,
-    llmClient?: FeedLLMClient | null
+    llmClient?: FeedLLMClient | null,
+    clock?: { gameStartedAt?: Date | null; now?: Date }
   ): Promise<{
     transitioned: boolean;
     eventGenerated: boolean;
     newState?: ArcStateType;
   }> {
-    return processArcTick(arcId, dayNumber, llmClient);
+    return processArcTick(arcId, dayNumber, llmClient, clock);
   }
 
   async createArcState(questionId: string): Promise<string> {

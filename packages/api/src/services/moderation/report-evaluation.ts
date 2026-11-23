@@ -9,18 +9,22 @@
 
 import {
   and,
+  chats,
   count,
   db,
   desc,
+  dmAcceptances,
   eq,
   gte,
+  inArray,
   isNull,
   messages,
+  or,
   posts,
   reports,
+  sql,
   users,
 } from '@feed/db';
-import { findDMChat } from '@feed/engine';
 import { logger } from '@feed/shared';
 import { z } from 'zod';
 import { callClaudeDirect } from '../claude-service';
@@ -229,17 +233,35 @@ export async function collectReportContext(
   const reporterId = report.reporterId;
   const reportedId = report.reportedUserId;
 
-  // Find DM chat between reporter and reported. Resolve the real chat
-  // through its participants: actor/NPC DMs are created by
-  // getOrCreateDMChat with a Snowflake id, while legacy human-human DMs
-  // use `dm-<sorted ids>`. Assuming the legacy id misses every actor DM,
-  // so the evaluator saw zero chat messages for exactly the reports
-  // (e.g. DM scam pitches) where the chat is the key evidence. Fall back
-  // to the legacy id when no participant row exists (e.g. a departed
-  // participant), so old messages under that id are still found.
-  const sortedIds = [reporterId, reportedId].sort();
-  const chatId =
-    (await findDMChat(reporterId, reportedId)) ?? `dm-${sortedIds.join('-')}`;
+  const pair = [reporterId, reportedId];
+  const legacyChatId = `dm-${[...pair].sort().join('-')}`;
+  // Snowflake DMs record their two users at creation. This association
+  // survives leaving a chat, which removes the active participant row.
+  const acceptedDms = db
+    .select({ chatId: dmAcceptances.chatId })
+    .from(dmAcceptances)
+    .innerJoin(chats, eq(chats.id, dmAcceptances.chatId))
+    .where(
+      and(
+        eq(chats.isGroup, false),
+        eq(dmAcceptances.status, 'accepted'),
+        or(
+          and(
+            eq(dmAcceptances.userId, reporterId),
+            eq(dmAcceptances.otherUserId, reportedId)
+          ),
+          and(
+            eq(dmAcceptances.userId, reportedId),
+            eq(dmAcceptances.otherUserId, reporterId)
+          )
+        )
+      )
+    );
+  const evidenceChatIds = sql`(
+    SELECT ${legacyChatId}::text
+    UNION
+    ${acceptedDms}
+  )`;
 
   const chatMessages = await db
     .select({
@@ -249,7 +271,12 @@ export async function collectReportContext(
       createdAt: messages.createdAt,
     })
     .from(messages)
-    .where(eq(messages.chatId, chatId))
+    .where(
+      and(
+        inArray(messages.chatId, evidenceChatIds),
+        inArray(messages.senderId, pair)
+      )
+    )
     .orderBy(desc(messages.createdAt))
     .limit(50);
 

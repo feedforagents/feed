@@ -18,7 +18,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asUser } from '@feed/db';
+import { and, asUser, eq, groupMembers, like, not, users } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -54,24 +54,37 @@ export const GET = withErrorHandling(
         throw new ApiError('Group not found', 404);
       }
 
-      // Fetch members
-      const members = await db.groupMember.findMany({
-        where: { groupId, isActive: true },
+      // Visibility must not revoke an otherwise active requester's membership.
+      const userMembership = await db.groupMember.findFirst({
+        where: { groupId, userId: user.userId, isActive: true },
+        select: { role: true },
       });
-
-      // Check if user is a member
-      const userMembership = members.find((m) => m.userId === user.userId);
       if (!userMembership) {
         throw new ApiError('You are not a member of this group', 403);
       }
 
-      // Fetch member user details
-      const memberIds = members.map((m) => m.userId);
-      const memberUsers = await db.user.findMany({
-        where: {
-          id: { in: memberIds },
-        },
-      });
+      const members = await db
+        .select({
+          id: users.id,
+          displayName: users.displayName,
+          username: users.username,
+          profileImageUrl: users.profileImageUrl,
+          isActor: users.isActor,
+          isAgent: users.isAgent,
+          role: groupMembers.role,
+          joinedAt: groupMembers.joinedAt,
+        })
+        .from(groupMembers)
+        .innerJoin(users, eq(users.id, groupMembers.userId))
+        .where(
+          and(
+            eq(groupMembers.groupId, groupId),
+            eq(groupMembers.isActive, true),
+            eq(users.isTest, false),
+            eq(users.isBanned, false),
+            not(like(users.id, 'test-%'))
+          )
+        );
 
       // Get the chat for this group (Chat.groupId → Group.id)
       const groupChat = await db.chat.findFirst({
@@ -89,23 +102,21 @@ export const GET = withErrorHandling(
         createdById: group.createdById,
         createdAt: group.createdAt,
         updatedAt: group.updatedAt,
-        members: memberUsers.map((u) => {
-          const membership = members.find((m) => m.userId === u.id);
-          // Determine member type: NPC (isActor), Agent (isAgent), or User
-          const memberType = u.isActor ? 'npc' : u.isAgent ? 'agent' : 'user';
-          return {
-            id: u.id,
-            displayName: u.displayName,
-            username: u.username,
-            profileImageUrl: u.profileImageUrl,
-            memberType,
-            role: membership?.role ?? 'member',
-            isAdmin:
-              membership?.role === 'admin' || membership?.role === 'owner',
-            isOwner: membership?.role === 'owner',
-            joinedAt: membership?.joinedAt || new Date(),
-          };
-        }),
+        members: members.map((member) => ({
+          id: member.id,
+          displayName: member.displayName,
+          username: member.username,
+          profileImageUrl: member.profileImageUrl,
+          memberType: member.isActor
+            ? 'npc'
+            : member.isAgent
+              ? 'agent'
+              : 'user',
+          role: member.role,
+          isAdmin: member.role === 'admin' || member.role === 'owner',
+          isOwner: member.role === 'owner',
+          joinedAt: member.joinedAt,
+        })),
         userRole: userMembership.role,
         isAdmin:
           userMembership.role === 'admin' || userMembership.role === 'owner',

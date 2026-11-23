@@ -179,7 +179,12 @@ import {
   groupMembers,
   groups,
   inArray,
+  isNull,
   messages,
+  notInArray,
+  or,
+  userBlocks,
+  userMutes,
   users,
 } from '@feed/db';
 import {
@@ -346,13 +351,42 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     // Map chatId -> chat details
     const chatDetailsMap = new Map(filteredGroupChats.map((c) => [c.id, c]));
 
+    // Group-list previews omit authors the viewer blocked or muted and
+    // authors who blocked the viewer. Apply this before choosing the newest
+    // preview through this request's handle so failures do not fall back to
+    // an unfiltered message. History-route parity and DM previews are outside
+    // this change; the existing DM query remains unchanged.
+    const [blockedRows, mutedRows, blockedByRows] = await Promise.all([
+      dbClient
+        .select({ id: userBlocks.blockedId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockerId, user.userId)),
+      dbClient
+        .select({ id: userMutes.mutedId })
+        .from(userMutes)
+        .where(eq(userMutes.muterId, user.userId)),
+      dbClient
+        .select({ id: userBlocks.blockerId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockedId, user.userId)),
+    ]);
+    const excludedSenderIds = [
+      ...blockedRows,
+      ...mutedRows,
+      ...blockedByRows,
+    ].map((row) => row.id);
+    const groupSenderScope =
+      excludedSenderIds.length > 0
+        ? notInArray(messages.senderId, excludedSenderIds)
+        : undefined;
+
     // Get last messages for group chats
     const groupChatMessages = await Promise.all(
       groupChatIds.map(async (chatId) => {
         const msgs = await dbClient
           .select()
           .from(messages)
-          .where(eq(messages.chatId, chatId))
+          .where(and(eq(messages.chatId, chatId), groupSenderScope))
           .orderBy(desc(messages.createdAt))
           .limit(1);
         return { chatId, messages: msgs };
@@ -362,26 +396,73 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       groupChatMessages.map(({ chatId, messages }) => [chatId, messages])
     );
 
-    // Get DM chats the user participates in
-    const dmParticipantsList = await dbClient
-      .select()
+    // Agent leave actions retain inactive participant rows. Only active
+    // viewer memberships should contribute to this list.
+    const participantRows = await dbClient
+      .select({ chatId: chatParticipants.chatId })
       .from(chatParticipants)
-      .where(eq(chatParticipants.userId, user.userId));
+      .where(
+        and(
+          eq(chatParticipants.userId, user.userId),
+          eq(chatParticipants.isActive, true)
+        )
+      );
 
     logger.info(
-      'Found DM participants',
-      {
-        userId: user.userId,
-        count: dmParticipantsList.length,
-      },
+      'Found active chat participants',
+      { userId: user.userId, count: participantRows.length },
       'GET /api/chats'
     );
 
-    const dmChatIds = dmParticipantsList.map((p) => p.chatId);
-    const dmChatsDetails = await dbClient
+    // Direct groups have participant rows and no Group row. Group-backed
+    // chats are already listed through groupMembers.
+    const participantChats = await dbClient
       .select()
       .from(chats)
-      .where(and(inArray(chats.id, dmChatIds), eq(chats.isGroup, false)));
+      .where(
+        and(
+          inArray(
+            chats.id,
+            participantRows.map((row) => row.chatId)
+          ),
+          or(eq(chats.isGroup, false), isNull(chats.groupId))
+        )
+      );
+    const dmChatsDetails = participantChats.filter((chat) => !chat.isGroup);
+    const dmChatIds = dmChatsDetails.map((chat) => chat.id);
+    const directGroupChatsDetails = participantChats.filter(
+      (chat) => chat.isGroup
+    );
+    const directGroupChatIds = directGroupChatsDetails.map((c) => c.id);
+    const directGroupMessageCounts =
+      directGroupChatIds.length > 0
+        ? await dbClient
+            .select({ chatId: messages.chatId, count: count(messages.id) })
+            .from(messages)
+            .where(inArray(messages.chatId, directGroupChatIds))
+            .groupBy(messages.chatId)
+        : [];
+    const directGroupCountMap = new Map(
+      directGroupMessageCounts.map((mc) => [mc.chatId, mc.count])
+    );
+
+    const directGroupMessages =
+      directGroupChatIds.length > 0
+        ? await Promise.all(
+            directGroupChatIds.map(async (chatId) => {
+              const msgs = await dbClient
+                .select()
+                .from(messages)
+                .where(and(eq(messages.chatId, chatId), groupSenderScope))
+                .orderBy(desc(messages.createdAt))
+                .limit(1);
+              return { chatId, messages: msgs };
+            })
+          )
+        : [];
+    const directGroupMessagesMap = new Map(
+      directGroupMessages.map(({ chatId, messages }) => [chatId, messages])
+    );
 
     // Get participants and messages separately
     const [allParticipants, allMessages] = await Promise.all([
@@ -460,7 +541,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           (p) => p.userId !== user.userId
         );
         let chatName = chat.name || 'Direct Message';
-        let otherUserDetails = null;
+        let otherUserDetails: Pick<
+          typeof users.$inferSelect,
+          | 'id'
+          | 'displayName'
+          | 'username'
+          | 'profileImageUrl'
+          | 'isAgent'
+          | 'managedBy'
+        > | null = null;
 
         if (otherParticipant) {
           // Try to get user details (real users only, not actors)
@@ -522,7 +611,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       })
     ).then((chatsList) => chatsList.filter((c) => c !== null));
 
-    return { groupChats: formattedGroupChats, directChats: directChatsList };
+    // Format direct group chats (no Group row behind them)
+    const formattedDirectGroupChats = directGroupChatsDetails.map((chat) => {
+      const lastMessage = directGroupMessagesMap.get(chat.id)?.[0] || null;
+      return {
+        id: chat.id,
+        name: chat.name || 'Unnamed Group',
+        isGroup: true,
+        lastMessage,
+        messageCount: directGroupCountMap.get(chat.id) ?? 0,
+        qualityScore: null,
+        lastMessageAt: lastMessage?.createdAt ?? chat.updatedAt,
+        updatedAt: chat.updatedAt,
+      };
+    });
+
+    return {
+      groupChats: [...formattedGroupChats, ...formattedDirectGroupChats],
+      directChats: directChatsList,
+    };
   });
 
   logger.info(

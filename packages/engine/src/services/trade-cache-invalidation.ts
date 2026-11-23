@@ -127,3 +127,28 @@ export async function invalidateAfterPredictionTrade(
 export async function invalidateAfterPerpTrade(ticker: string): Promise<void> {
   await invalidatePerpTradesCache(ticker);
 }
+
+/**
+ * Cache port for PerpMarketService constructions.
+ *
+ * PerpMarketService invalidates through its cache port with the
+ * pattern `perp:<ticker>:*` after opens, closes, and liquidations.
+ * The service serves all tickers, so the ticker is recovered from the
+ * pattern and delegated to invalidateAfterPerpTrade. Wire this port
+ * into every PerpMarketService that can trade (web, A2A, MCP, agents,
+ * engine NPC execution, price updates); without it the service's
+ * invalidation is a no-op and the cached perp trades list is served
+ * stale until its TTL expires.
+ */
+export function createPerpTradesCachePort(): {
+  invalidate: (pattern: string) => Promise<void>;
+} {
+  return {
+    invalidate: async (pattern: string) => {
+      const ticker = pattern.split(':')[1];
+      if (ticker) {
+        await invalidateAfterPerpTrade(ticker);
+      }
+    },
+  };
+}
