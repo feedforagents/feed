@@ -146,6 +146,12 @@ export interface PredictionSellInput {
   marketId: string;
   shares: number;
   positionId?: string;
+  /**
+   * Per-trade odds-move allowance, mirroring PredictionBuyInput.maxOddsMove.
+   * Defaults to MAX_ODDS_MOVE_PER_TRADE; agent/NPC callers with larger
+   * positions can relax it the same way buys do.
+   */
+  maxOddsMove?: number;
 }
 
 export interface PredictionResolveInput {

@@ -13,6 +13,11 @@
  *   - Thin pool (100/100): $700 NO pushes YES to ~1.6% (< 2% hard floor)
  *   - Skewed YES pool (250/9750): $2000 YES pushes YES to 98.26% (> 98% hard ceiling)
  *   - Skewed NO pool (9750/250): $5000 NO pushes YES to ~1.1% (< 2% hard floor)
+ * Sells mirror the buy guards (same 20ppt cap, same 2%/98% bounds):
+ *   - Balanced pool: selling 3000 YES shares moves odds -14.37ppt (passes);
+ *     selling 4500 YES shares moves -20.52ppt (> 20ppt cap)
+ *   - Skewed YES pool (250/9750): selling 2000 NO shares pushes YES to 98.25%
+ *   - Skewed NO pool (9750/250): selling 2000 YES shares pushes YES to 1.75%
  */
 
 import { describe, expect, mock, test } from 'bun:test';
@@ -23,7 +28,9 @@ import {
 import type {
   PredictionDbPort,
   PredictionMarketRecord,
+  PredictionPositionRecord,
   PredictionServiceDeps,
+  PredictionSide,
   QuestionRecord,
 } from '../../core/markets/prediction';
 import {
@@ -51,8 +58,26 @@ function makeMarket(
   };
 }
 
+function makePosition(
+  side: PredictionSide,
+  shares: number
+): PredictionPositionRecord {
+  return {
+    id: 'pos-1',
+    userId: 'u1',
+    marketId: 'market-1',
+    side,
+    shares,
+    avgPrice: 0.5,
+    cashCostBasis: 0,
+    status: 'active',
+    pnl: 0,
+  };
+}
+
 function makeService(
-  marketOverrides: Partial<PredictionMarketRecord> = {}
+  marketOverrides: Partial<PredictionMarketRecord> = {},
+  position: PredictionPositionRecord | null = null
 ): PredictionMarketService {
   const market = makeMarket(marketOverrides);
 
@@ -66,7 +91,9 @@ function makeService(
       ...market,
       ...updates,
     })),
-    getPosition: mock(async () => null),
+    getPosition: mock(async (_userId, _marketId, side: PredictionSide) =>
+      position && position.side === side ? position : null
+    ),
     upsertPosition: mock(async (pos) => ({
       ...pos,
       id: pos.id ?? 'new-pos',
@@ -313,5 +340,110 @@ describe('Perp AMM — config constants', () => {
 
   test('INITIAL_BASE_RESERVE is unchanged', () => {
     expect(PERP_MARKET_CONFIG.INITIAL_BASE_RESERVE).toBe(5000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Prediction: sells apply the same odds guards as buys
+//    (revival of #1875 — the sell path had neither the 20ppt cap nor the
+//    2%/98% hard bounds, so one sell could swing odds farther than any buy)
+// ---------------------------------------------------------------------------
+describe('PredictionMarketService — sell odds guards', () => {
+  test('small sell (< 20ppt move) succeeds', async () => {
+    const service = makeService({}, makePosition('yes', 5000));
+    // Selling 3000 YES shares on a 5000/5000 pool moves odds -14.37ppt
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 3000,
+      })
+    ).resolves.toBeDefined();
+  });
+
+  test('large sell that moves odds > 20ppt is rejected by default', async () => {
+    const service = makeService({}, makePosition('yes', 5000));
+    // Selling 4500 YES shares on a 5000/5000 pool moves odds -20.52ppt
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 4500,
+      })
+    ).rejects.toThrow(/move odds by/i);
+  });
+
+  test('caller can relax the cap with maxOddsMove: 0.30', async () => {
+    const service = makeService({}, makePosition('yes', 5000));
+    // Same 4500-share sell is allowed when the caller allows up to 30ppt
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 4500,
+        maxOddsMove: 0.3,
+      })
+    ).resolves.toBeDefined();
+  });
+
+  test('sell pushing YES above 98% is rejected', async () => {
+    // Skewed: 250/9750 → YES at 97.5%. Selling 2000 NO shares → 98.25%
+    // oddsShift is only ~0.75ppt, so only the ceiling guard catches it
+    const service = makeService(
+      {
+        yesShares: 250,
+        noShares: 9750,
+        liquidity: 10_000,
+      },
+      makePosition('no', 2000)
+    );
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 2000,
+      })
+    ).rejects.toThrow(/thin|extreme|floor|ceiling|push YES odds/i);
+  });
+
+  test('sell pushing YES below 2% is rejected', async () => {
+    // Skewed: 9750/250 → YES at 2.5%. Selling 2000 YES shares → 1.75%
+    // oddsShift is only ~0.75ppt, so only the floor guard catches it
+    const service = makeService(
+      {
+        yesShares: 9750,
+        noShares: 250,
+        liquidity: 10_000,
+      },
+      makePosition('yes', 2000)
+    );
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 2000,
+      })
+    ).rejects.toThrow(/thin|extreme|floor|ceiling|push YES odds/i);
+  });
+
+  test('relaxed cap still respects the hard ceiling', async () => {
+    // Same 2000-NO sell with maxOddsMove 1.0: the cap is relaxed but the
+    // 98% ceiling still rejects it
+    const service = makeService(
+      {
+        yesShares: 250,
+        noShares: 9750,
+        liquidity: 10_000,
+      },
+      makePosition('no', 2000)
+    );
+    await expect(
+      service.sell({
+        userId: 'u1',
+        marketId: 'market-1',
+        shares: 2000,
+        maxOddsMove: 1.0,
+      })
+    ).rejects.toThrow(/thin|extreme|floor|ceiling|push YES odds/i);
   });
 });

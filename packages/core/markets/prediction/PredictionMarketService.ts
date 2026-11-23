@@ -386,6 +386,30 @@ export class PredictionMarketService {
       this.deps.fees.tradingFeeRate
     );
 
+    // Price impact guard: same limits as buys (PRD §9.2 quote parity).
+    // A single sell must not swing odds farther than a single buy may.
+    const currentTotal = market.yesShares + market.noShares;
+    const currentYesOdds =
+      currentTotal > 0 ? market.noShares / currentTotal : 0.5;
+    const oddsShift = Math.abs(calc.newYesPrice - currentYesOdds);
+    const maxAllowed = input.maxOddsMove ?? MAX_ODDS_MOVE_PER_TRADE;
+
+    if (oddsShift > maxAllowed) {
+      throw new BadRequestError(
+        `Trade would move odds by ${(oddsShift * 100).toFixed(1)}ppt (max ${(maxAllowed * 100).toFixed(0)}ppt). Reduce trade size or split into smaller orders.`
+      );
+    }
+
+    // Hard floor/ceiling: reject any trade that pushes odds to extreme values.
+    if (
+      calc.newYesPrice < ODDS_HARD_FLOOR ||
+      calc.newYesPrice > ODDS_HARD_CEILING
+    ) {
+      throw new BadRequestError(
+        `Trade would push YES odds to ${(calc.newYesPrice * 100).toFixed(1)}% — market is too thin for this trade size.`
+      );
+    }
+
     const newLiquidity =
       market.liquidity - (calc.totalCost - (calc.roundingRemainder ?? 0));
     if (newLiquidity < 0) {
