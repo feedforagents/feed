@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual, stripVTControlCharacters } from "node:util";
 import { gzipSync, zstdDecompressSync } from "node:zlib";
 import { Miniflare } from "miniflare";
+import { violated } from "./action.ts";
 import { cacheCredentials, collectGarbage, isActionEntry, withFormalCache, type installedProgram as lookupTool } from "./cache.ts";
 import { LIB_FILE, isolatedCopies, parseProofFile, readVerdict, splice } from "./prove.ts";
 import { precomputeSimulations, prepareSimulationReceipts } from "./formal.ts";
@@ -1042,19 +1043,24 @@ pure val witnessSender = 4
 pure val witness_fixture = 5
 pure val witness_sometimesDone = 6
 pure def witnessStep_sometimesDone(n: int): int = n`;
-    const simulateExample = async (source: string, example: string) => {
-      const root = oneRule("journey", "Publish then finish", `${source}\npure val eval_witness_sometimesDone = ${example}`);
+    const example = (source: string, guide: string) => `${source}\npure val eval_witness_sometimesDone = ${guide}`;
+    const fixture = (source: string, guide: string) => oneRule("journey", "Publish then finish", example(source, guide));
+    const runExample = async (root: string) => {
       const spec = readSpecs(root)[0];
       const model = await gen(root, spec);
       const domain = await import(pathToFileURL(path.join(root, "gen", "journey.ts")).href);
       assert.deepEqual([domain.witnessIndex, domain.witnessSender, domain.witness_fixture, domain.witness_sometimesDone, domain.witnessStep_sometimesDone(7)], [3, 4, 5, 6, 7]);
       return simulation({ root, fresh: false, used: new Set() }, spec, [spec], model, domain, 1);
     };
-    const [reached, denied, unsafe, mistyped] = await Promise.all([
-      simulateExample(modelSource, '(("publish", 41), "finish")'),
+    const original = fixture(modelSource, '(("publish", 41), "finish")');
+    const ordinary = fixture(`${modelSource}\npure val amountValues = Set(43)`, '(("publish", 41), "finish")');
+    const simulateExample = (source: string, guide: string) => runExample(fixture(source, guide));
+    const [reached, denied, unsafe, mistyped, ordinaryFailure] = await Promise.all([
+      runExample(original),
       simulateExample(modelSource.replace("n == 42", "n == 1"), '("publish", -1)'),
       simulateExample(modelSource, '(("publish", 43), "finish")'),
       simulateExample(modelSource, '("publish", "unknown")'),
+      runExample(ordinary),
     ]);
     assert.ok(reached.said.some((r) => r.ok && r.summary === "sometimesDone is reachable"), JSON.stringify(reached.said));
     assert.ok(reached.said.some((r) => r.ok && r.stage === "replay"), JSON.stringify(reached.said));
@@ -1062,6 +1068,17 @@ pure def witnessStep_sometimesDone(n: int): int = n`;
     assert.ok(denied.said.some((r) => r.ok && r.summary === "sometimesDone is reachable"), JSON.stringify(denied.said));
     assert.ok(unsafe.said.some((r) => !r.ok && r.stage === "always" && r.detail.includes('publish{"amount":43}')), JSON.stringify(unsafe.said));
     assert.ok(mistyped.said.some((r) => !r.ok && /Couldn't unify (?:int and str|str and int)/.test(r.detail)), JSON.stringify(mistyped.said));
+    fs.writeFileSync(path.join(original, "spec/journey.md"), ruleSpec(example(modelSource, '(("publish", 42), "finish")'), "Publish then finish"));
+    const edited = await runExample(original);
+    assert.deepEqual(edited.tested?.journeys[0]?.events, [{ type: "publish", amount: 42 }]);
+    const reproduction = "gen/traces/journey.ordinary/journey.run.qnt";
+    const again = ordinaryFailure.said.find((row) => !row.ok && row.detail.includes(`quint run ${reproduction}`));
+    assert.ok(again, JSON.stringify(ordinaryFailure.said));
+    const recovered = await runExample(ordinary);
+    assert.deepEqual(recovered.said, ordinaryFailure.said);
+    const [command] = again.detail.split("\n").filter((line) => line.includes(`quint run ${reproduction}`));
+    const rerun = await tool("quint", command.slice(command.indexOf("quint run ") + "quint ".length).split(" "), ordinary);
+    assert.ok(violated(rerun), rerun.out);
   });
 
   test("hand-written code that changes what it is checked against is refused or flagged", async () => {
