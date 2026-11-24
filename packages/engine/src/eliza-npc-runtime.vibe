@@ -2,7 +2,6 @@
 import {
   AgentRuntime,
   createCharacter,
-  parseJsonModelRecord,
   stringToUuid,
   type Action,
   type ActionResult,
@@ -27,7 +26,7 @@ import { RealtimeBus, createNpcAlphaInvite, createPost, listFeedPosts, sendChatM
 import { minAlphaEngagement } from "../gen/engine__npcLoop.effect.vibe"
 import { generateCompletion } from "./llm-client.vibe"
 import { buildWorldContext, formatFeedDiversityHint, renderPrompt, validateNpcTradingDecision } from "./prompts.vibe"
-import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, resolveClockNow, sanitizeText } from "./shared.vibe"
+import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, parseLlmJsonRecord, resolveClockNow, sanitizeText } from "./shared.vibe"
 import { getDailySpendStatus } from "./spend-budget.vibe"
 
 interface DbActorRow {
@@ -121,7 +120,7 @@ interface NpcProviderSnapshot {
   readonly chatIds: ReadonlyArray<string>
 }
 
-effect function loadNpcProviderSnapshot(actor: DbActorRow): NpcProviderSnapshot!StoreFailure!Store {
+effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcProviderSnapshot!StoreFailure!Store {
   const store = try Store
   const dbSnap = try store.transaction(effect (tx: Tx) => {
     const stateRows = try tx.query("SELECT current_day, current_hour, phase FROM feed_world_state WHERE singleton = true")
@@ -166,7 +165,7 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow): NpcProviderSnapshot!
       yesProbPct: Math.round((no * 100) / (yes + no)),
       expiresAt: toInt(row.expiresAt ?? row.expires_at),
     }
-  }).filter((m) => m.id.length > 0)
+  }).filter((m) => m.id.length > 0 && m.expiresAt > nowMs)
   const perps = (Array.isArray(perpMarketsRaw) ? perpMarketsRaw : []).map((p) => {
     const row = p as Record<string, unknown>
     return {
@@ -386,7 +385,7 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
       : Layer.succeed(Store, store)
     return runPromise(Effect.provide(eff, layer))
   }
-  const snap = try loadNpcProviderSnapshot(actor)
+  const snap = try loadNpcProviderSnapshot(actor, nowMs)
   const packActor = actors.find((a) => a.id === actor.id || a.username === actor.username)
   const character = buildNpcCharacter(actor, packActor)
   const plugin = createFeedNpcPlugin(actor, snap, runWithStore)
@@ -431,7 +430,7 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     nowMs,
     actorId: actor.id,
   })
-  const parsed = parseJsonModelRecord(completion.text)
+  const parsed = parseLlmJsonRecord(completion.text)
   const decisions = validateNpcTradingDecision(parsed, maxSteps, snap.tickers, snap.marketIds, snap.replyPostIds, snap.chatIds)
   let actionsExecuted = 0
   const actionMap = new Map((plugin.actions ?? []).map((act) => [act.name, act]))

@@ -2,16 +2,20 @@
 import { assert, it } from "@effect/vitest"
 import { Store, migrateFeedSchema, seedFeedWorld, toInt, toText, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
+import { buyPredictionShares, openPerpPosition } from "@repo/markets"
 import { TestClock } from "effect/testing"
 import {
   EngineFailure,
   approveManualHold,
   confirmLlmSpend,
+  ensureRollingMarketSlots,
   fastForwardSimulatedHours,
   getDailySpendStatus,
   getEngineAdminStatus,
+  loadPublicWorldSnapshot,
   markLlmSpendUncertain,
   overrideManualHold,
+  parseLlmJsonRecord,
   reserveLlmBudget,
   runMarketsRecovery,
   runMarketsTick,
@@ -411,3 +415,115 @@ it.effect('NPC ticks drive spot markets and posts while markets emit idempotent 
     })
   })
 }), 180_000)
+
+it.effect('Engine parses wrapped LLM JSON, filters expired snapshot markets, funds rolling slots to 50k, and reports liquidation counts (spec/engine/worldClock.md, "The minute tick advances the clock, flips signal windows, and tracks pending recovery age"; spec/engine/narrativeArc.md, "Advancing a slot moves through active phases and closes trading immediately on expiry"; spec/engine/narrativeArc.md, "Resolved slots are replaced independently with a fresh market epoch"; spec/engine/npcLoop.md, "Each NPC tick starts with a budget-enforced step cap and loops ObserveFeed -> Decide -> Act")', () => scoped(effect {
+  const startMs = Date.UTC(2026, 10, 23, 14, 0, 0)
+  try withSeededEngine(startMs, effect {
+    const proseWrapped = parseLlmJsonRecord(
+      'Sure, here is the decision:\n{"actions":[{"kind":"CREATE_POST","content":"Holding {NVDAI} with \\"conviction\\" and } brace\\\\"}]}\nHope that helps!',
+    )
+    const fencedWithLeadingBraces = parseLlmJsonRecord(
+      'Avoid {} and {ticker} placeholders. Output:\n```json\n{"title":"Proof } Title","summary":"Uses ```inline``` ticks","body":"Nested {\\"ok\\":true} body"}\n```\nDone.',
+    )
+    const leadingNonJsonAndBroken = parseLlmJsonRecord(
+      'Check {foo: bar} and {"broken": nope} before {"question":"Will NVIDAI ship?","secretOutcome":"YES"} trailing',
+    )
+    const invalidArray = parseLlmJsonRecord("Result: [1, 2, 3]")
+    const invalidUnclosed = parseLlmJsonRecord('Broken {"unclosed": "value')
+
+    const store = try Store
+    const expiredQuestion = toText((try queryRows("SELECT question FROM feed_prediction_markets WHERE id = 'seed-market-1'"))[0]?.question) ?? ""
+    try queryRows(
+      `UPDATE feed_prediction_markets
+       SET expires_at = $1
+       WHERE id = 'seed-market-1' AND status = 'open'`,
+      [startMs - 1_000],
+    )
+    const snapshot = try store.transaction(effect (tx: Tx) => try loadPublicWorldSnapshot(tx, startMs))
+
+    try queryRows(
+      `UPDATE feed_prediction_markets
+       SET status = 'resolved', phase = 'resolved', resolved_outcome = 'YES', resolved_at = $1
+       WHERE id = 'seed-market-2'`,
+      [startMs],
+    )
+    const createdIds = try ensureRollingMarketSlots(startMs)
+    const replacementId = createdIds[0] ?? ""
+    const replacementRows = try queryRows(
+      `SELECT id, yes_shares, no_shares, liquidity_cents
+       FROM feed_prediction_markets
+       WHERE id = $1`,
+      [replacementId],
+    )
+    const traderAccountId = "rolling-market-trader"
+    try queryRows(
+      `INSERT INTO feed_accounts (account_id, handle, display_name, balance_cents, starting_grant_cents, created_at, updated_at)
+       VALUES ($1, $2, $3, 100000, 100000, $4, $4)`,
+      [traderAccountId, "rollingtrader", "Rolling Trader", startMs],
+    )
+    const buyReceipt = try buyPredictionShares({
+      actorId: traderAccountId,
+      actorKind: "user",
+      marketId: replacementId,
+      side: "yes",
+      amountCents: 1_500,
+    })
+
+    const perpRows = try queryRows("SELECT ticker, mark_price_cents FROM feed_perp_markets ORDER BY ticker ASC LIMIT 1")
+    const perpTicker = toText(perpRows[0]?.ticker) ?? ""
+    const initialMark = toInt(perpRows[0]?.mark_price_cents)
+    const openedPerp = try openPerpPosition({
+      ownerId: traderAccountId,
+      ownerKind: "user",
+      ticker: perpTicker,
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 10,
+    })
+    try queryRows(
+      `UPDATE feed_perp_markets
+       SET mark_price_cents = $2, index_price_cents = $2
+       WHERE ticker = $1`,
+      [perpTicker, Math.max(1, Math.floor(initialMark / 2))],
+    )
+    const liquidationTick = try runMinuteTick(startMs + 60_000)
+    const liquidatedPositionRows = try queryRows(
+      `SELECT status FROM feed_perp_positions WHERE id = $1`,
+      [openedPerp.positionId],
+    )
+
+    try check(() => {
+      assert.deepStrictEqual(proseWrapped, {
+        actions: [{ kind: "CREATE_POST", content: 'Holding {NVDAI} with "conviction" and } brace\\' }],
+      })
+      assert.deepStrictEqual(fencedWithLeadingBraces, {
+        title: "Proof } Title",
+        summary: "Uses ```inline``` ticks",
+        body: 'Nested {"ok":true} body',
+      })
+      assert.deepStrictEqual(leadingNonJsonAndBroken, {
+        question: "Will NVIDAI ship?",
+        secretOutcome: "YES",
+      })
+      assert.isNull(invalidArray)
+      assert.isNull(invalidUnclosed)
+      assert.isFalse(snapshot.openMarketIds.includes("seed-market-1"))
+      assert.isTrue(expiredQuestion.length > 0)
+      assert.isFalse(snapshot.existingQuestions.includes(expiredQuestion))
+      assert.isFalse(snapshot.worldContext.includes(expiredQuestion))
+      assert.isTrue(snapshot.openMarketIds.includes("seed-market-2"))
+      assert.strictEqual(createdIds.length, 1)
+      assert.deepStrictEqual(
+        {
+          yesShares: toInt(replacementRows[0]?.yes_shares),
+          noShares: toInt(replacementRows[0]?.no_shares),
+          liquidityCents: toInt(replacementRows[0]?.liquidity_cents),
+        },
+        { yesShares: 50_000, noShares: 50_000, liquidityCents: 50_000 },
+      )
+      assert.isTrue(buyReceipt.shares > 0)
+      assert.strictEqual(liquidationTick.liquidatedCount, 1)
+      assert.strictEqual(toText(liquidatedPositionRows[0]?.status), "liquidated")
+    })
+  })
+}))

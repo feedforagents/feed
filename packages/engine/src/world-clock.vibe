@@ -1,5 +1,5 @@
 // spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes"; spec/engine/worldClock.md, "Story: Guard perpetual funding cutover across 8-hour UTC periods"; spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
-import { parseJsonModelRecord, readEnv } from "@elizaos/core"
+import { readEnv } from "@elizaos/core"
 import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
 import { accruePerpFunding, liquidateEligiblePositions, type MarketFailure } from "@repo/markets"
 import { organizations } from "@repo/pack-default"
@@ -34,6 +34,7 @@ import {
   maybePublishFeedEvent,
   minuteIndexOf,
   newEngineId,
+  parseLlmJsonRecord,
   recordTickHealth,
   resolveClockNow,
   sanitizeText,
@@ -163,14 +164,8 @@ export effect function runMinuteTick(nowMs?: number): MinuteTickResult!(EngineFa
     }
   }
   const phaseRes = try advanceNarrativePhases(world.nowMs)
-  const liquidated = liquidateEligiblePositions() catch effect () => []
-  const liquidatedCount = Array.isArray(liquidated)
-    ? liquidated.length
-    : typeof liquidated === "number"
-      ? liquidated
-      : typeof (liquidated as { readonly count?: unknown } | undefined)?.count === "number"
-        ? Number((liquidated as { readonly count?: unknown }).count)
-        : 0
+  const liquidated = liquidateEligiblePositions() catch effect () => null
+  const liquidatedCount = liquidated === null ? 0 : liquidated.liquidatedCount
   const fundingAccrued = checkAndAccrueFunding(world.nowMs, world.fundingCutoverPeriod) catch effect () => false
   const stats = try pendingResolutionStats()
   const endWall = try Clock.currentTimeMillis
@@ -274,7 +269,7 @@ export effect function runOrganizationTick(nowMs?: number): { readonly postsCrea
        WHERE can_be_involved = true
        ORDER BY id ASC`,
     )
-    const snapshot = try loadPublicWorldSnapshot(tx)
+    const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
     return { orgRows, worldContext: snapshot.worldContext }
   })
   if (context.orgRows.length === 0) {
@@ -326,7 +321,7 @@ export effect function runArticleTick(nowMs?: number): { readonly articleId: str
        ORDER BY (CASE WHEN org_type = 'media' THEN 0 ELSE 1 END), id ASC
        LIMIT 4`,
     )
-    const snapshot = try loadPublicWorldSnapshot(tx)
+    const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
     return { mediaRows, worldContext: snapshot.worldContext }
   })
   const fallbackOrg = organizations[0]
@@ -348,7 +343,7 @@ export effect function runArticleTick(nowMs?: number): { readonly articleId: str
     jsonMode: true,
     nowMs: resolvedNow,
   })
-  const parsed = parseJsonModelRecord(completion.text)
+  const parsed = parseLlmJsonRecord(completion.text)
   const title = sanitizeText(typeof parsed?.title === "string" ? parsed.title : `${orgName} Market Dispatch`, 180)
   const summary = sanitizeText(typeof parsed?.summary === "string" ? parsed.summary : "Inside the latest spot and prediction market shifts.", 340)
   const body = typeof parsed?.body === "string" && parsed.body.trim().length > 0
@@ -430,7 +425,7 @@ export effect function runWorldFactsTick(nowMs?: number): { readonly factsAdded:
     jsonMode: true,
     nowMs: resolvedNow,
   })
-  const parsed = parseJsonModelRecord(completion.text)
+  const parsed = parseLlmJsonRecord(completion.text)
   const items = Array.isArray(parsed?.facts) ? parsed.facts.slice(0, 3) : []
   let factsAdded = 0
   try store.transaction(effect (tx: Tx) => {
