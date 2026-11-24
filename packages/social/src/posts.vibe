@@ -1116,12 +1116,16 @@ export effect function getArticle(
 
 export effect function listTrending(
   limit?: number,
-  mode: SocialPresentationMode = "game"
+  mode: SocialPresentationMode = "game",
+  viewerId?: string
 ): ReadonlyArray<TrendingView>!StoreFailure!Store {
   const effectiveLimit = clampLimit(limit, 10, 50)
+  const viewer = normalizeOptionalText(viewerId) ?? undefined
+  const visibilitySuffix = viewer === undefined ? "" : ` AND ${viewerAuthorVisibilitySql("$1", "author_id")}`
   const store = try Store
   const rows = try store.transaction((tx) => tx.query(
-    "SELECT content, ticker, like_count, repost_count, reply_count, created_at FROM feed_posts WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 250"
+        `SELECT content, ticker, like_count, repost_count, reply_count, created_at FROM feed_posts WHERE deleted_at IS NULL${visibilitySuffix} ORDER BY created_at DESC LIMIT 250`,
+    viewer === undefined ? [] :  [viewer]
   ))
   const aggregates = new Map<string, TrendingView>()
   for (const row of rows) {
