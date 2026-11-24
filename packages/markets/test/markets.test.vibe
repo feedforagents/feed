@@ -309,6 +309,26 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
     const positionsAfterClose = try listPerpPositions("user-alice")
     const perpAfterClose = try getPerpMarket("XTRPC")
 
+    // spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
+    const sellWithoutHoldingsCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "mark-zuckerborg",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 100_000
+    }))
+    const spotSell1 = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 2_000_000
+    })
+    const sellBeyondHoldingsCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 17_000_000
+    }))
+
     try check(() => assert.deepStrictEqual(
       {
         initialPerp: [initialPerp.indexPriceCents, initialPerp.markPriceCents, initialPerp.baseReserve, initialPerp.quoteReserveCents],
@@ -346,6 +366,11 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
           fundingRows.map((row) => [toInt(row.period_index) === nextPeriodFunding.period, toInt(row.funding_delta_cents)])
         ],
         spotBuy2: [spotBuy2.baseReserve, spotBuy2.quoteReserveCents, spotBuy2.indexPriceCents, spotBuy2.markPriceCents],
+        spotSells: [
+          sellWithoutHoldingsCode,
+          [spotSell1.baseReserve, spotSell1.quoteReserveCents, spotSell1.indexPriceCents, spotSell1.baseDelta],
+          sellBeyondHoldingsCode
+        ],
         closed: [
           closed.exitPriceCents,
           closed.feeCents,
@@ -367,6 +392,7 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
         opened: [10, 20_000, 20, 1_875, 7_980, 1_875, 1_968, 20_000],
         funding: [0, false, 1, 1, true, 0, [[100, true]], [[true, 100]]],
         spotBuy2: [6_000, 20_000_000, 3_333, 3_499],
+        spotSells: ["INSUFFICIENT_INVENTORY", [6_667, 18_000_000, 2_699, 667], "INSUFFICIENT_INVENTORY"],
         closed: [3_499, 20, 19_202, 17_202, 27_182, 0, 0, 0, 3_333, 3_333]
       }
     ))

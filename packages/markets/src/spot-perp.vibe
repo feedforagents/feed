@@ -354,6 +354,15 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
       nextQuote = quoteReserve - input.quoteCents
       nextBase = ceilDivProduct(baseReserve, quoteReserve, nextQuote)
       baseDelta = nextBase - baseReserve
+      const holdingsRows = try tx.query(
+        `SELECT COALESCE(SUM(CASE WHEN side = 'buy' THEN shares_or_size ELSE -shares_or_size END), 0) AS base_holdings
+         FROM feed_trades
+         WHERE trader_id = $1 AND trader_kind = 'npc' AND market_kind = 'spot' AND market_ref = $2`,
+        [input.actorId, input.ticker]
+      )
+      if (toInt(holdingsRows[0]?.base_holdings) < baseDelta) {
+        throw marketFail("INSUFFICIENT_INVENTORY", "NPC actor has insufficient spot base inventory for this sale")
+      }
       cashDelta = input.quoteCents
     }
     const nextIndexPriceCents = Math.max(1, Math.floor(nextQuote / nextBase))
