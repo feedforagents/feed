@@ -737,6 +737,13 @@ effect function executePublicMarketTool(
   args: Record<string, unknown>,
   viewer: { readonly viewerId: string | undefined; readonly playMode: PlayMode }
 ): object!(SocialFailure | MarketFailure | StoreFailure)!Store {
+  if (viewer.playMode === "social") {
+    return {
+      playMode: "social",
+      financialFieldsOmittedInSocialMode: true,
+      message: "Markets, odds, and leaderboard P&L are omitted in Social mode. Switch via set_mode({ mode: \"game\" }) only if the user explicitly wants Game mode."
+    }
+  }
   switch (toolName) {
     case "list_markets": {
       const kind = asOptionalString(args.kind) ?? "all"

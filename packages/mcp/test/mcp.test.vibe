@@ -405,7 +405,18 @@ effect function assertSocialModeRedaction(
   const notifsSocial = unwrapToolPayload(try callMcpTool(33, "get_notifications", { limit: 20 }, authConfig, token))
   const feedSocial = unwrapToolPayload(try callMcpTool(34, "get_home_feed", { tab: "latest", limit: 20 }, authConfig, token))
   const profileSocial = unwrapToolPayload(try callMcpTool(35, "get_profile", { handleOrId: accountHandle }, authConfig, token))
+  const marketToolsSocial = [
+    unwrapToolPayload(try callMcpTool(36, "list_markets", {}, authConfig, token)),
+    unwrapToolPayload(try callMcpTool(37, "get_market", { marketId: "seed-market-1" }, authConfig, token)),
+    unwrapToolPayload(try callMcpTool(38, "get_leaderboard", {}, authConfig, token))
+  ]
   try check(() => {
+    for (const payload of marketToolsSocial) {
+      assert.strictEqual(payload.financialFieldsOmittedInSocialMode, true)
+      for (const key of ["predictionMarkets", "perpMarkets", "market", "entries"]) {
+        assert.strictEqual(Object.hasOwn(payload, key), false)
+      }
+    }
     assert.strictEqual(whoamiSocial.playMode, "social")
     assert.strictEqual(whoamiSocial.financialFieldsOmittedInSocialMode, true)
     for (const key of SOCIAL_REDACTED_WHOAMI_KEYS) {
