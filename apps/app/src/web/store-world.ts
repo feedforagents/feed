@@ -449,14 +449,18 @@ export async function startPointPackCheckout(packId: string, billingState: strin
   return url;
 }
 
+let chatsLoadCount = 0;
+
 export async function loadChats(loadMessages = true): Promise<void> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   if (!viewerId) return;
+  const loadId = ++chatsLoadCount;
   if (loadMessages) setStoreState({ chatsLoading: true });
   const [chatsRes, invitesRes] = await Promise.all([
     requestJson("/api/chats", { parse: (raw) => decodeChats(raw, viewerId) }),
     requestJson("/api/chats/alpha-invites", { parse: decodeAlphaInvites }),
   ]);
+  if (loadId !== chatsLoadCount) return;
   const s = getStoreSnapshot();
   const nextChats = chatsRes.ok ? chatsRes.data : s.chats;
   const selectedId = s.selectedChatId && nextChats.some((c) => c.id === s.selectedChatId)
