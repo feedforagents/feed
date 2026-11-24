@@ -913,8 +913,7 @@ effect function executeProtectedAccountTool(
     case "get_notifications": {
       const unreadOnly = args.unreadOnly === true
       const limit = clampCount(asOptionalInt(args.limit), 30, 100)
-      const all = try listNotifications(caller.accountId, limit, mode)
-      const items = unreadOnly ? all.filter((n) => !n.isRead) : all
+      const items = try listNotifications(caller.accountId, limit, mode, unreadOnly)
       return { mode, items }
     }
     case "get_portfolio": {
