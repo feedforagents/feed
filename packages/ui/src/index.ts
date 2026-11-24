@@ -45,3 +45,4 @@ export * from "./components/Tabs.tsx";
 export * from "./components/Textarea.tsx";
 export * from "./components/Tooltip.tsx";
 export * from "./components/TradeTicket.tsx";
+export * from "./components/TurnstileChallenge.tsx";

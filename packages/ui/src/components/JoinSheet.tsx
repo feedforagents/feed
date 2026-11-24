@@ -11,6 +11,7 @@ import { Input } from "./Input.tsx";
 import { Label } from "./Label.tsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./Select.tsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./Tabs.tsx";
+import { TurnstileChallenge } from "./TurnstileChallenge.tsx";
 
 export type JoinTab = "phone" | "agent" | "reviewer";
 export type JoinPhoneStep = "entry" | "verify" | "profile";
@@ -39,11 +40,11 @@ export type JoinSheetProps = {
   /** One-click agent launchers rendered in the Connect Your Agent tab. */
   launchers?: AgentHostLauncher[];
   /** Requests a 6-digit SMS code for an allowlisted non-VoIP phone number. */
-  onRequestSmsCode?: (payload: { country: string; phone: string }) => void;
+  onRequestSmsCode?: (payload: { country: string; phone: string; turnstileToken?: string }) => void;
   /** Verifies the 6-digit SMS autofill code. */
   onVerifySmsCode?: (code: string) => void;
   /** Re-requests the SMS verification code. */
-  onResendSmsCode?: () => void;
+  onResendSmsCode?: (payload: { turnstileToken?: string }) => void;
   /** Completes new-account profile with username, 18+ confirmation, and terms acceptance for 100 pts. */
   onCompleteProfile?: (payload: { username: string; ageConfirmed: boolean; acceptedTerms: boolean }) => void;
   /** Opens a host launcher in the Connect Your Agent tab. */
@@ -52,6 +53,8 @@ export type JoinSheetProps = {
   onCopySkillPrompt?: (prompt: string) => Promise<void>;
   /** Submits reviewer password credentials for operator-flagged reviewer accounts. */
   onSubmitReviewer?: (payload: { identifier: string; password: string }) => void;
+  /** Cloudflare Turnstile site key; without it no challenge renders and the SMS gate is skipped client-side. */
+  turnstileSiteKey?: string;
   /** Shows loading state on active form submission. */
   loading?: boolean;
   /** Disables the trigger and all dialog actions. */
@@ -93,6 +96,7 @@ export function JoinSheet({
   onLaunchHost,
   onCopySkillPrompt,
   onSubmitReviewer,
+  turnstileSiteKey,
   loading = false,
   disabled = false,
   error,
@@ -116,10 +120,12 @@ export function JoinSheet({
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [reviewerId, setReviewerId] = useState("");
   const [reviewerPassword, setReviewerPassword] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
 
   const currentTab = activeTab ?? internalTab;
   const currentStep = phoneStep ?? internalStep;
   const blocked = disabled || loading;
+  const turnstileReady = turnstileSiteKey === undefined || turnstileToken !== "";
 
   const setTab = (next: JoinTab) => {
     if (blocked) return;
@@ -135,8 +141,9 @@ export function JoinSheet({
 
   const handleRequestCode = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (blocked || !phone.trim()) return;
-    onRequestSmsCode?.({ country, phone: phone.trim() });
+    if (blocked || !phone.trim() || !turnstileReady) return;
+    onRequestSmsCode?.({ country, phone: phone.trim(), turnstileToken: turnstileToken === "" ? undefined : turnstileToken });
+    setTurnstileToken("");
     setStep("verify");
   };
 
@@ -214,7 +221,8 @@ export function JoinSheet({
                     onChange={(event) => setPhone(event.target.value)}
                   />
                 </div>
-                <Button type="submit" loading={loading} disabled={blocked || !phone.trim()}>
+                {turnstileSiteKey !== undefined ? <TurnstileChallenge siteKey={turnstileSiteKey} onToken={setTurnstileToken} /> : null}
+                <Button type="submit" loading={loading} disabled={blocked || !phone.trim() || !turnstileReady}>
                   Send 6-digit SMS code
                 </Button>
               </form>
@@ -234,8 +242,15 @@ export function JoinSheet({
                     className="font-mono tracking-widest tabular-nums"
                   />
                 </div>
+                {turnstileSiteKey !== undefined ? <TurnstileChallenge siteKey={turnstileSiteKey} onToken={setTurnstileToken} /> : null}
                 <div className="flex items-center justify-between gap-2">
-                  <Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={() => onResendSmsCode?.()}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={blocked || !turnstileReady}
+                    onClick={() => onResendSmsCode?.({ turnstileToken: turnstileToken === "" ? undefined : turnstileToken })}
+                  >
                     Resend code
                   </Button>
                   <Button type="submit" loading={loading} disabled={blocked || smsCode.length !== 6}>

@@ -318,13 +318,14 @@ export function App() {
         pendingActionLabel={s.pendingAction?.label}
         skillPrompt={s.skills.prompt}
         launchers={s.skills.hosts.map((h) => h.launcher)}
-        onRequestSmsCode={({ country, phone }) => { void storeActions.requestSmsCode(country, phone); }}
+        onRequestSmsCode={({ country, phone, turnstileToken }) => { void storeActions.requestSmsCode(country, phone, turnstileToken); }}
         onVerifySmsCode={(code) => { void storeActions.verifySmsCode(code); }}
-        onResendSmsCode={() => { void storeActions.resendSmsCode(); }}
+        onResendSmsCode={({ turnstileToken }) => { void storeActions.resendSmsCode(turnstileToken); }}
         onCompleteProfile={(payload) => { void storeActions.completePhoneOnboard(payload); }}
         onLaunchHost={storeActions.launchAgentHost}
         onCopySkillPrompt={storeActions.copySkillPrompt}
         onSubmitReviewer={(payload) => { void storeActions.submitReviewerLogin(payload); }}
+        turnstileSiteKey={s.turnstileSiteKey === "" ? undefined : s.turnstileSiteKey}
         loading={s.joinLoading}
         error={s.joinError ?? undefined}
       />

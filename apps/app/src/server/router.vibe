@@ -642,7 +642,8 @@ effect function handleAuthRoute(
         authenticated: false,
         viewer: null,
         acceptedCountries: config.auth.allowedCountries,
-        publicAppUrl: config.publicAppUrl
+        publicAppUrl: config.publicAppUrl,
+        turnstileSiteKey: config.turnstileSiteKey ?? ""
       })
     }
     const profile = getAccountProfile(session.accountId) catch effect (err) => {
@@ -655,7 +656,8 @@ effect function handleAuthRoute(
           authenticated: false,
           viewer: null,
           acceptedCountries: config.auth.allowedCountries,
-          publicAppUrl: config.publicAppUrl
+          publicAppUrl: config.publicAppUrl,
+          turnstileSiteKey: config.turnstileSiteKey ?? ""
         },
         200,
         {},
@@ -681,7 +683,8 @@ effect function handleAuthRoute(
         agentGrant: grant
       },
       acceptedCountries: config.auth.allowedCountries,
-      publicAppUrl: config.publicAppUrl
+      publicAppUrl: config.publicAppUrl,
+      turnstileSiteKey: config.turnstileSiteKey ?? ""
     })
   }
   if (method === "POST" && path === "/api/auth/phone/start") {

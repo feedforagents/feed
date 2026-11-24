@@ -71,7 +71,7 @@ export async function hydrateAuth(): Promise<void> {
     setStoreState({ authLoaded: true });
     return;
   }
-  const { authenticated, viewer, acceptedCountries, publicAppUrl } = res.data;
+  const { authenticated, viewer, acceptedCountries, publicAppUrl, turnstileSiteKey } = res.data;
   if (authenticated && viewer) {
     sendNav({ type: "signInNav", asAdmin: viewer.isAdmin });
     sendOnboarding({ type: "verifySmsCode", codeValid: true, isNewAccount: false });
@@ -92,6 +92,7 @@ export async function hydrateAuth(): Promise<void> {
       viewer,
       acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : getStoreSnapshot().acceptedCountries,
       publicAppUrl,
+      turnstileSiteKey,
       route: nextRoute,
       localUiMode: viewer.uiMode,
       joinSheetOpen: false,
@@ -110,6 +111,7 @@ export async function hydrateAuth(): Promise<void> {
     viewer: null,
     acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : getStoreSnapshot().acceptedCountries,
     publicAppUrl,
+    turnstileSiteKey,
     route: fallbackRoute,
   });
 }
@@ -191,12 +193,12 @@ export function setJoinPhoneStep(step: JoinPhoneStep): void {
   setStoreState({ joinPhoneStep: step });
 }
 
-export async function requestSmsCode(country: string, phone: string): Promise<void> {
+export async function requestSmsCode(country: string, phone: string, turnstileToken?: string): Promise<void> {
   const phoneE164 = formatPhoneToE164(country, phone);
   setStoreState({ joinLoading: true, joinError: null, pendingPhoneE164: phoneE164 });
   const res = await requestJson("/api/auth/phone/start", {
     method: "POST",
-    body: { phoneE164 },
+    body: { phoneE164, ...(turnstileToken !== undefined && turnstileToken !== "" ? { turnstileToken } : {}) },
     parse: passThrough,
   });
   if (!res.ok) {
@@ -210,10 +212,10 @@ export async function requestSmsCode(country: string, phone: string): Promise<vo
   setStoreState({ joinLoading: false, joinPhoneStep: "verify", joinError: null });
 }
 
-export async function resendSmsCode(): Promise<void> {
+export async function resendSmsCode(turnstileToken?: string): Promise<void> {
   const phoneE164 = getStoreSnapshot().pendingPhoneE164;
   if (!phoneE164) return;
-  await requestSmsCode("EU", phoneE164);
+  await requestSmsCode("EU", phoneE164, turnstileToken);
 }
 
 export async function verifySmsCode(code: string): Promise<void> {

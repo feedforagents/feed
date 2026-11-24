@@ -14,6 +14,7 @@ export interface AppServerConfig {
   readonly cronSecret: string
   readonly stripeSecretKey: string | undefined
   readonly stripeWebhookSecret: string | undefined
+  readonly turnstileSiteKey: string | undefined
   readonly auth: AuthRuntimeConfig
 }
 
@@ -130,6 +131,7 @@ export function parseAppServerConfig(
     cronSecret: trimmed(env.CRON_SECRET) ?? "",
     stripeSecretKey: trimmed(env.STRIPE_SECRET_KEY),
     stripeWebhookSecret: trimmed(env.STRIPE_WEBHOOK_SECRET),
+    turnstileSiteKey: trimmed(env.TURNSTILE_SITE_KEY),
     auth: {
       digestKey,
       oauthSigningSecret,

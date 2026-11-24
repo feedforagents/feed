@@ -45,6 +45,7 @@ export interface StoreState {
   readonly viewer: ViewerSession | null;
   readonly acceptedCountries: ReadonlyArray<string>;
   readonly publicAppUrl: string;
+  readonly turnstileSiteKey: string;
   readonly route: AppRoute;
   readonly profileHandle: string | null;
   readonly selectedTicker: string | null;
@@ -136,6 +137,7 @@ let currentState: StoreState = {
   viewer: null,
   acceptedCountries: ["+1", "+44", "+353", "+61", "+64"],
   publicAppUrl: typeof window !== "undefined" ? window.location.origin : "https://feed.fun",
+  turnstileSiteKey: "",
   route: initialLocation.route,
   profileHandle: initialLocation.profileHandle,
   selectedTicker: initialLocation.queryTicker,

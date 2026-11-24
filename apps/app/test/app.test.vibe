@@ -29,8 +29,39 @@ module node {
   export function makeRequest(url: string, init: RequestInit): Request {
     return new Request(url, init)
   }
+
+  /** @throws {never} */
+  export function setProductionEnv(): string | undefined {
+    const env = (globalThis as { readonly process?: { env?: Record<string, string | undefined> } }).process?.env
+    const previous = env?.DEPLOYMENT_ENV
+    if (env !== undefined) env.DEPLOYMENT_ENV = "production"
+    return previous
+  }
+
+  /** @throws {never} */
+  export function restoreProductionEnv(previous: string | undefined): void {
+    const env = (globalThis as { readonly process?: { env?: Record<string, string | undefined> } }).process?.env
+    if (env === undefined) return
+    if (previous === undefined) {
+      delete env.DEPLOYMENT_ENV
+    } else {
+      env.DEPLOYMENT_ENV = previous
+    }
+  }
+
+  /** @throws {never} */
+  export function installTurnstileSuccessStub(): void {
+    const g = globalThis as { fetch: typeof fetch }
+    const originalFetch = g.fetch
+    const stub = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+      if (raw.includes("challenges.cloudflare.com")) return Response.json({ success: true })
+      return originalFetch(input, init)
+    }) as typeof fetch
+    g.fetch = stub
+  }
 }
-import { makeHeaders, makeRequest, pkceChallenge, sha256Hex } from node
+import { installTurnstileSuccessStub, makeHeaders, makeRequest, pkceChallenge, restoreProductionEnv, setProductionEnv, sha256Hex } from node
 
 const APP_ORIGIN = "http://feed.localtest"
 
@@ -45,6 +76,20 @@ const TEST_CONFIG = parseAppServerConfig(
     CRON_SECRET: "test-cron-secret"
   },
   APP_ORIGIN
+)
+
+const PROD_CONFIG = parseAppServerConfig(
+  {
+    DEPLOYMENT_ENV: "production",
+    PUBLIC_APP_URL: "https://feed.fun",
+    PUBLIC_API_URL: "https://feed.fun",
+    SMS_MODE: "loopback",
+    AUTH_DIGEST_KEY: "test-digest-key-00000000000000000000000000000000",
+    OAUTH_SIGNING_SECRET: "test-oauth-secret-00000000000000000000000000000",
+    CRON_SECRET: "test-cron-secret",
+    TURNSTILE_SECRET_KEY: "test-turnstile-secret-0000000000000000000000"
+  },
+  "https://feed.fun"
 )
 
 function check(run: () => void): void!! {
@@ -83,6 +128,31 @@ effect function callApp(
     body: hasJson ? JSON.stringify(options.json) : undefined
   })
   return try handleFeedRequest(request, TEST_CONFIG)
+}
+
+effect function callProd(
+  path: string,
+  options?: {
+    readonly method?: string
+    readonly json?: unknown
+    readonly cookie?: string
+    readonly bearer?: string
+    readonly headers?: Readonly<Record<string, string>>
+  }
+) {
+  const rawHeaders: Record<string, string> = { ...(options?.headers ?? {}) }
+  if (options?.cookie !== undefined) rawHeaders.cookie = options.cookie
+  if (options?.bearer !== undefined) rawHeaders.authorization = `Bearer ${options.bearer}`
+  const hasJson = options?.json !== undefined
+  if (hasJson && !Object.keys(rawHeaders).some((k) => k.toLowerCase() === "content-type")) {
+    rawHeaders["content-type"] = "application/json"
+  }
+  const request = makeRequest(`${APP_ORIGIN}${path}`, {
+    method: options?.method ?? (hasJson ? "POST" : "GET"),
+    headers: makeHeaders(rawHeaders),
+    body: hasJson ? JSON.stringify(options.json) : undefined
+  })
+  return try handleFeedRequest(request, PROD_CONFIG)
 }
 
 effect function readJson(response: Response) {
@@ -288,5 +358,23 @@ it.effect('Full HTTP + MCP + Single-Agent Replacement gameplay journey (spec/app
     const lbRes = try callApp("/api/leaderboard")
     try check(() => assert.strictEqual(cronRes.status, 200))
     try check(() => assert.strictEqual(lbRes.status, 200))
+  }
+})
+
+it.effect('Production phone start passes the Turnstile gate only with a verified token (spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+    const previousEnv = setProductionEnv()
+    try check(() => installTurnstileSuccessStub())
+    const noTokenRes = try callProd("/api/auth/phone/start", { json: { phoneE164: "+14155550199" } })
+    try check(() => assert.strictEqual(noTokenRes.status, 400))
+    const noTokenBody = try readText(noTokenRes)
+    try check(() => assert.ok(noTokenBody.includes("turnstile_failed")))
+    const tokenRes = try callProd("/api/auth/phone/start", { json: { phoneE164: "+14155550199", turnstileToken: "test-turnstile-token" } })
+    try check(() => assert.strictEqual(tokenRes.status, 200))
+    const tokenBody = try readJson(tokenRes)
+    try check(() => assert.ok(String(tokenBody.challengeId ?? "").length > 0))
+    try check(() => restoreProductionEnv(previousEnv))
   }
 })

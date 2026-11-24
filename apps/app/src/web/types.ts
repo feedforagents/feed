@@ -45,6 +45,7 @@ export interface AuthMePayload {
   readonly viewer: ViewerSession | null;
   readonly acceptedCountries: ReadonlyArray<string>;
   readonly publicAppUrl: string;
+  readonly turnstileSiteKey: string;
 }
 
 export interface AppPost {
@@ -403,6 +404,7 @@ export function decodeAuthMe(raw: unknown): AuthMePayload {
     viewer,
     acceptedCountries,
     publicAppUrl: str(rec.publicAppUrl, typeof window !== "undefined" ? window.location.origin : "https://feed.fun"),
+    turnstileSiteKey: str(rec.turnstileSiteKey, ""),
   };
 }
 

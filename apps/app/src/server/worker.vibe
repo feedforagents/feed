@@ -46,6 +46,7 @@ export interface WorkerEnv extends Readonly<Record<string, unknown>> {
   readonly TWILIO_AUTH_TOKEN?: string | undefined
   readonly TWILIO_VERIFY_SERVICE_SID?: string | undefined
   readonly TURNSTILE_SECRET_KEY?: string | undefined
+  readonly TURNSTILE_SITE_KEY?: string | undefined
   readonly STRIPE_SECRET_KEY?: string | undefined
   readonly STRIPE_WEBHOOK_SECRET?: string | undefined
   readonly CRON_SECRET?: string | undefined
