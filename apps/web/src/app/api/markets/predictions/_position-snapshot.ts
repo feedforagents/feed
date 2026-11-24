@@ -33,6 +33,7 @@ export function buildPredictionUserPositionSnapshot(
   const snapshot = calculatePredictionPositionSnapshot({
     shares: position.shares,
     avgPrice: position.avgPrice,
+    cashCostBasis: position.cashCostBasis,
     side: position.side,
     yesShares: market.yesShares,
     noShares: market.noShares,

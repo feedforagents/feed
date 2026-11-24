@@ -10,6 +10,7 @@ import type {
   UserPositionsSnapshot,
   UserPositionsStatus,
   UserPositionsType,
+  UserPredictionPositionSnapshot,
 } from './user-positions-types';
 
 export {
@@ -101,6 +102,69 @@ async function loadDbPerpPositions(params: {
     openedAt: toISO(position.openedAt),
     closedAt: toISOOrNull(position.closedAt),
   }));
+}
+
+export function mapUserPredictionPositionSnapshot(
+  position: {
+    id: string;
+    marketId: string;
+    side: boolean;
+    shares: unknown;
+    avgPrice: unknown;
+    cashCostBasis: unknown;
+    status: unknown;
+    createdAt: Date | string | null;
+    outcome: boolean | null;
+    pnl: unknown;
+    resolvedAt: Date | string | null;
+  },
+  market: {
+    question: string;
+    endDate: Date | string | null;
+    resolved: boolean;
+    resolution: boolean | null;
+    yesShares: unknown;
+    noShares: unknown;
+  }
+): UserPredictionPositionSnapshot {
+  const shares = Number(position.shares);
+  const avgPrice = Number(position.avgPrice);
+  const cashCostBasis =
+    position.cashCostBasis == null ? undefined : Number(position.cashCostBasis);
+  const side = position.side ? 'yes' : 'no';
+  const snapshot = calculatePredictionPositionSnapshot({
+    shares,
+    avgPrice,
+    cashCostBasis,
+    side,
+    yesShares: Number(market.yesShares),
+    noShares: Number(market.noShares),
+    feeRate: FEE_CONFIG.TRADING_FEE_RATE,
+    resolved: market.resolved,
+    resolution: market.resolution,
+  });
+
+  return {
+    id: position.id,
+    marketId: position.marketId,
+    question: market.question,
+    side: (position.side ? 'YES' : 'NO') as 'YES' | 'NO',
+    shares,
+    avgPrice,
+    currentPrice: snapshot.currentUnitPrice,
+    currentProbability: snapshot.currentProbability,
+    currentValue: snapshot.currentValue,
+    costBasis: snapshot.costBasis,
+    unrealizedPnL: snapshot.unrealizedPnL,
+    resolved: market.resolved,
+    resolution: market.resolution,
+    closesAt: toISOOrNull(market.endDate),
+    status: position.status as string,
+    createdAt: toISOOrNull(position.createdAt),
+    outcome: position.outcome ?? null,
+    pnl: position.pnl == null ? null : Number(position.pnl),
+    resolvedAt: toISOOrNull(position.resolvedAt),
+  };
 }
 
 export async function getUserPositionsSnapshot({
@@ -204,41 +268,7 @@ export async function getUserPositionsSnapshot({
         );
       }
 
-      const shares = Number(position.shares);
-      const avgPrice = Number(position.avgPrice);
-      const side = position.side ? 'yes' : 'no';
-      const snapshot = calculatePredictionPositionSnapshot({
-        shares,
-        avgPrice,
-        side,
-        yesShares: Number(market.yesShares),
-        noShares: Number(market.noShares),
-        feeRate: FEE_CONFIG.TRADING_FEE_RATE,
-        resolved: market.resolved,
-        resolution: market.resolution,
-      });
-
-      return {
-        id: position.id,
-        marketId: position.marketId,
-        question: market.question,
-        side: (position.side ? 'YES' : 'NO') as 'YES' | 'NO',
-        shares,
-        avgPrice,
-        currentPrice: snapshot.currentUnitPrice,
-        currentProbability: snapshot.currentProbability,
-        currentValue: snapshot.currentValue,
-        costBasis: snapshot.costBasis,
-        unrealizedPnL: snapshot.unrealizedPnL,
-        resolved: market.resolved,
-        resolution: market.resolution,
-        closesAt: toISOOrNull(market.endDate),
-        status: position.status as string,
-        createdAt: toISOOrNull(position.createdAt),
-        outcome: position.outcome ?? null,
-        pnl: position.pnl == null ? null : Number(position.pnl),
-        resolvedAt: toISOOrNull(position.resolvedAt),
-      };
+      return mapUserPredictionPositionSnapshot(position, market);
     })
     // The dust filter guards the open view: an active position below the
     // minimum lot is not sellable and does not belong in the held list.

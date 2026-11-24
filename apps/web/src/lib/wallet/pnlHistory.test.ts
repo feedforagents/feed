@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test';
+import { PredictionPricing } from '@feed/core/markets/prediction';
+import { FEE_CONFIG } from '@feed/engine/config/fees';
 import {
   buildPnlMetricIdentityMap,
   buildScopedPnlHistoryPoints,
+  calculatePredictionRowUnrealizedPnL,
   getHourBoundary,
 } from './pnlHistory';
 
@@ -137,5 +140,35 @@ describe('buildPnlMetricIdentityMap', () => {
       'owner-1'
     );
     expect(result.aliasToCanonicalUserId.get('agent-1')).toBe('agent-1');
+  });
+});
+
+describe('calculatePredictionRowUnrealizedPnL', () => {
+  it('marks active prediction unrealized PnL against persisted cashCostBasis', () => {
+    const buy = PredictionPricing.calculateBuyWithFees(
+      5_000,
+      5_000,
+      'yes',
+      1,
+      FEE_CONFIG.TRADING_FEE_RATE
+    );
+    const sellPreview = PredictionPricing.calculateSellWithFees(
+      buy.newYesShares,
+      buy.newNoShares,
+      'yes',
+      buy.sharesBought,
+      FEE_CONFIG.TRADING_FEE_RATE
+    );
+
+    const pnl = calculatePredictionRowUnrealizedPnL({
+      shares: String(buy.sharesBought),
+      avgPrice: String(buy.avgPrice),
+      cashCostBasis: '1.00',
+      side: true,
+      yesShares: String(buy.newYesShares),
+      noShares: String(buy.newNoShares),
+    });
+
+    expect(pnl).toBeCloseTo((sellPreview.netProceeds ?? 0) - 1, 10);
   });
 });

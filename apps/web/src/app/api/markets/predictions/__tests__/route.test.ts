@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { NextRequest } from 'next/server';
+import { calculatePredictionPositionSnapshot } from '../../../../../../../../packages/core/markets/prediction/positionSnapshot';
+import { PredictionPricing } from '../../../../../../../../packages/core/markets/prediction/pricing';
 import { MarketQuerySchema } from '../../../../../../../../packages/shared/src/validation/schemas/market';
 
 type Market = {
@@ -37,8 +39,9 @@ const positions = [
     userId: 'user-1',
     marketId: 'm1',
     side: 'yes',
-    shares: 5,
+    shares: 1.98,
     avgPrice: 0.5,
+    cashCostBasis: 1,
   },
   {
     id: 'p2',
@@ -47,6 +50,7 @@ const positions = [
     side: 'no',
     shares: 3,
     avgPrice: 0.4,
+    cashCostBasis: null,
   },
 ];
 
@@ -93,26 +97,16 @@ mock.module('@feed/core/markets/prediction', () => ({
       pages[offset] ?? [];
     listUserPositions = async () => positions;
   },
-  PredictionPricing: {
-    getCurrentPrice: () => 0.5,
-    // Mirrors floorPoints(shares) in the real implementation.
-    calculateExpectedPayout: (shares: number) => Math.floor(shares * 100) / 100,
-  },
-  calculatePredictionPositionSnapshot: () => ({
-    currentUnitPrice: 0.5,
-    currentProbability: 0.5,
-    currentValue: 1,
-    costBasis: 1,
-    unrealizedPnL: 0,
-  }),
+  PredictionPricing,
+  calculatePredictionPositionSnapshot,
 }));
 
 mock.module('@feed/engine', () => ({
   FEE_CONFIG: {
-    TRADING_FEE_RATE: 0.01,
+    TRADING_FEE_RATE: 0.001,
     PLATFORM_SHARE: 0.5,
     REFERRER_SHARE: 0.5,
-    MIN_FEE_AMOUNT: 0,
+    MIN_FEE_AMOUNT: 0.01,
   },
   WalletService: {},
 }));
@@ -127,7 +121,15 @@ mock.module('@feed/shared', () => ({
 const { GET } = await import('../route');
 
 type ListBody = {
-  questions: Array<{ id: string; userPositions: Array<{ id: string }> }>;
+  questions: Array<{
+    id: string;
+    userPositions: Array<{
+      id: string;
+      costBasis: number;
+      currentValue: number;
+      unrealizedPnL: number;
+    }>;
+  }>;
 };
 
 async function fetchPage(page: number): Promise<ListBody> {
@@ -152,5 +154,23 @@ describe('GET /api/markets/predictions user positions cache', () => {
     expect(first.questions[0]?.userPositions.map((p) => p.id)).toEqual(['p1']);
     expect(second.questions[0]?.id).toBe('m2');
     expect(second.questions[0]?.userPositions.map((p) => p.id)).toEqual(['p2']);
+  });
+
+  it('preserves persisted cashCostBasis across the positions cache and falls back on legacy rows', async () => {
+    const first = await fetchPage(1);
+    const firstCached = await fetchPage(1);
+    const second = await fetchPage(2);
+
+    const p1Miss = first.questions[0]?.userPositions[0];
+    const p1Hit = firstCached.questions[0]?.userPositions[0];
+    const p2Legacy = second.questions[0]?.userPositions[0];
+
+    expect(p1Miss?.costBasis).toBe(1);
+    expect(p1Miss?.unrealizedPnL).toBeCloseTo(
+      (p1Miss?.currentValue ?? 0) - 1,
+      10
+    );
+    expect(p1Hit?.costBasis).toBe(1);
+    expect(p2Legacy?.costBasis).toBeCloseTo((3 * 0.4) / (1 - 0.001), 10);
   });
 });

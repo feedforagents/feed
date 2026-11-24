@@ -11,6 +11,7 @@ export interface PredictionPositionSnapshot {
 export function calculatePredictionPositionSnapshot(params: {
   shares: number;
   avgPrice: number;
+  cashCostBasis?: number | null;
   side: 'yes' | 'no';
   yesShares: number;
   noShares: number;
@@ -22,6 +23,7 @@ export function calculatePredictionPositionSnapshot(params: {
   const {
     shares,
     avgPrice,
+    cashCostBasis,
     side,
     yesShares,
     noShares,
@@ -32,8 +34,20 @@ export function calculatePredictionPositionSnapshot(params: {
   } = params;
 
   const costBasisNet = shares * avgPrice;
-  const costBasis =
-    feeRate > 0 && feeRate < 1 ? costBasisNet / (1 - feeRate) : costBasisNet;
+  // Prefer the persisted remaining gross cash cost (PRD §9.1: canonical
+  // cent-rounded fees and historical fee rates cannot be reconstructed from
+  // net avgPrice / (1 - feeRate)). Resolved/cancelled settlement zeroes
+  // cashCostBasis while keeping shares on the row, so fall back to the
+  // gross-up estimate whenever cashCostBasis is absent or zero with shares > 0.
+  const hasPersistedCashCostBasis =
+    cashCostBasis != null &&
+    Number.isFinite(cashCostBasis) &&
+    cashCostBasis > 0;
+  const costBasis = hasPersistedCashCostBasis
+    ? cashCostBasis
+    : feeRate > 0 && feeRate < 1
+      ? costBasisNet / (1 - feeRate)
+      : costBasisNet;
 
   const currentProbability =
     yesShares + noShares > 0

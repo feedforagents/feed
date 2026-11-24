@@ -31,7 +31,13 @@ import {
  */
 type CachedPredictionPosition = Pick<
   PredictionPositionRecord,
-  'id' | 'userId' | 'marketId' | 'side' | 'shares' | 'avgPrice'
+  | 'id'
+  | 'userId'
+  | 'marketId'
+  | 'side'
+  | 'shares'
+  | 'avgPrice'
+  | 'cashCostBasis'
 >;
 
 function buildUserPositionsRecord(
@@ -174,6 +180,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             side: p.side,
             shares: p.shares,
             avgPrice: p.avgPrice,
+            cashCostBasis: p.cashCostBasis,
           }));
         },
         {
