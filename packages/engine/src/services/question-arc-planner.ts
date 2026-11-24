@@ -209,9 +209,10 @@ export class QuestionArcPlanner {
     const clarityOnsetDay = 17 + Math.floor(rng() * 5); // Day 17-21
     const verificationDay = 27 + Math.floor(rng() * 2); // Day 27-28
 
-    // Assign NPC roles
+    // Assign NPC roles (insiders and deceivers must be disjoint; insiders take
+    // precedence in getActorRoleSignal so overlapping roles waste deceiver slots)
     const insiders = this.selectInsiders(question, actors, organizations, rng);
-    const deceivers = this.selectDeceivers(actors, rng);
+    const deceivers = this.selectDeceivers(actors, insiders, rng);
 
     // Plan red herrings (intentional misdirection around uncertainty peak)
     const redHerrings = this.planRedHerrings(question, uncertaintyPeakDay, rng);
@@ -358,14 +359,17 @@ export class QuestionArcPlanner {
    */
   private selectDeceivers(
     actors: Actor[],
+    excludeActorIds: readonly string[],
     rng: RngFunction = Math.random
   ): string[] {
+    const excluded = new Set(excludeActorIds);
     const potentialDeceivers = actors.filter(
       (a) =>
-        a.personality?.includes('contrarian') ||
-        a.personality?.includes('conspiracy') ||
-        a.domain?.includes('politics') ||
-        a.description?.toLowerCase().includes('conspiracy')
+        !excluded.has(a.id) &&
+        (a.personality?.includes('contrarian') ||
+          a.personality?.includes('conspiracy') ||
+          a.domain?.includes('politics') ||
+          a.description?.toLowerCase().includes('conspiracy'))
     );
 
     // Select 1-2 deceivers using provided RNG for reproducibility

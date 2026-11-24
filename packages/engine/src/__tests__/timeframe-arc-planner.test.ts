@@ -216,6 +216,65 @@ describe('TimeframeArcPlanner', () => {
       expect(plan.affiliatedOrgIds).toEqual(['org-1']);
     });
 
+    test('excludes selected insiders from deceivers across org-matched and affiliated roles', () => {
+      const actorsWithOutsider = [
+        ...mockActors,
+        {
+          id: 'actor-3',
+          name: 'Outside Contrarian',
+          description: 'An external skeptic',
+          tier: 'B_TIER' as const,
+          role: 'supporting' as const,
+          personality: 'contrarian',
+          domain: ['media'],
+          affiliations: [],
+        },
+      ];
+
+      // actor-1 is affiliated with TechCorp so it becomes an insider; deceiver
+      // slots must go exclusively to non-insider candidates like actor-3.
+      const orgMatchedDaily = timeframeArcPlanner.planTimeframeArc(
+        'q-disjoint-daily',
+        'Will TechCorp ship v2 today?',
+        '1d',
+        24 * 60 * 60 * 1000,
+        true,
+        actorsWithOutsider,
+        mockOrganizations
+      );
+
+      expect(orgMatchedDaily.insiders).toEqual(['actor-1']);
+      expect(orgMatchedDaily.deceivers).toEqual(['actor-3']);
+
+      const orgMatchedIntraday = timeframeArcPlanner.planTimeframeArc(
+        'q-disjoint-intraday',
+        'Will TechCorp ship v2 this hour?',
+        '1h',
+        60 * 60 * 1000,
+        true,
+        actorsWithOutsider,
+        mockOrganizations
+      );
+
+      expect(orgMatchedIntraday.insiders).toEqual(['actor-1']);
+      expect(orgMatchedIntraday.deceivers).toEqual(['actor-3']);
+
+      // Explicitly affiliated actors are also insiders and must not appear in deceivers.
+      const affiliatedPlan = timeframeArcPlanner.planTimeframeArc(
+        'q-disjoint-aff',
+        'Will the announcement move markets?',
+        '1d',
+        24 * 60 * 60 * 1000,
+        true,
+        mockActors,
+        mockOrganizations,
+        ['actor-1']
+      );
+
+      expect(affiliatedPlan.insiders).toEqual(['actor-1']);
+      expect(affiliatedPlan.deceivers).toEqual([]);
+    });
+
     test('plans own their phase config and affiliation arrays', () => {
       const affiliated = ['actor-1'];
       const first = timeframeArcPlanner.planTimeframeArc(
