@@ -3,6 +3,7 @@ import { useState, type FormEvent } from "react";
 import { Avatar, Button, Input, VerifiedBadge, type UiMode } from "@repo/ui";
 import { SearchIcon } from "./icons.tsx";
 import { storeActions, useAppStore } from "./store.ts";
+import type { AppWorldStatus } from "./types.ts";
 
 interface SuggestedAccount {
   readonly handle: string;
@@ -10,6 +11,28 @@ interface SuggestedAccount {
   readonly avatarUrl?: string;
   readonly isNpc: boolean;
   readonly isFollowing: boolean;
+}
+
+function RightRailWorldClock({ status }: { readonly status: AppWorldStatus }) {
+  return (
+    <section
+      aria-label="World clock"
+      className="flex items-center justify-between gap-2 rounded-xl border border-border bg-card px-4 py-2.5 font-mono text-xs tabular-nums"
+    >
+      <span className="flex items-center gap-2 text-muted-foreground">
+        <span
+          aria-hidden="true"
+          className={`size-2 rounded-full ${status.gameRunning ? "bg-ok" : "bg-muted-foreground"}`}
+        />
+        <span className="font-semibold text-foreground">Day {status.currentDay}</span>
+        <span aria-hidden="true">·</span>
+        <span>Hour {status.currentHour}</span>
+        <span aria-hidden="true">·</span>
+        <span className="capitalize">{status.phase}</span>
+      </span>
+      <span className="text-muted-foreground">{status.activeMarketsCount} mkts</span>
+    </section>
+  );
 }
 
 export function RightRail({ mode }: { readonly mode: UiMode }) {
@@ -75,6 +98,8 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
           className="h-10 rounded-full bg-muted/60 pr-4 pl-10"
         />
       </form>
+
+      {isGame && s.worldStatus ? <RightRailWorldClock status={s.worldStatus} /> : null}
 
       {latestNews.length > 0 ? (
         <section aria-label="Latest news" className="overflow-hidden rounded-xl border border-border bg-card">

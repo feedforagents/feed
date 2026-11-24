@@ -1,5 +1,20 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/navigation.md, "Story: Browse public world content without a login wall"
-import type { AgentHostId, ChatMessageItem, JoinPhoneStep, JoinTab, ToastTone, UiMode } from "@repo/ui";
+import type {
+  AgentHostId,
+  AssetTradeEntry,
+  ChatMessageItem,
+  JoinPhoneStep,
+  JoinTab,
+  LeaderboardAudienceFilter,
+  LeaderboardTimeframe,
+  LightweightChartPoint,
+  MarketTimeRange,
+  PerpPricePoint,
+  PredictionProbabilityPoint,
+  ToastTone,
+  UiMode,
+  WalletClosedPosition,
+} from "@repo/ui";
 import { ManagedRuntime } from "effect";
 import { routeAccessible, type AppRoute, type FeedTab as SpecFeedTab } from "../../gen/app__navigation.ts";
 import { type Event as AppEvent } from "../../gen/app.ts";
@@ -22,6 +37,7 @@ import {
   type AppChatSummary,
   type AppFollowListEntry,
   type AppLeaderboardEntry,
+  type AppLeaderboardViewerRank,
   type AppLedgerEntry,
   type AppModerationEntry,
   type AppNotification,
@@ -31,6 +47,8 @@ import {
   type AppPredictionMarket,
   type AppProfileBundle,
   type AppSkillsPayload,
+  type AppWorldStatus,
+  type ClosedOutcomeFilter,
   type ExploreData,
   type OAuthConsentInfo,
   type PendingAction,
@@ -119,11 +137,34 @@ export interface StoreState {
   readonly positions: ReadonlyArray<AppPosition>;
   readonly selectedMarketKind: "prediction" | "perp";
   readonly selectedMarketId: string | null;
+  readonly marketTimeRange: MarketTimeRange;
+  readonly perpHistory: ReadonlyArray<PerpPricePoint>;
+  readonly predictionHistory: ReadonlyArray<PredictionProbabilityPoint>;
+  readonly marketChartLoading: boolean;
+  readonly marketTrades: ReadonlyArray<AssetTradeEntry>;
+  readonly marketTradesLoading: boolean;
+  readonly marketSocialPosts: ReadonlyArray<AppPost>;
+  readonly marketSocialLoading: boolean;
+  readonly watchlist: ReadonlyArray<string>;
+  readonly worldStatus: AppWorldStatus | null;
   readonly leaderboard: ReadonlyArray<AppLeaderboardEntry>;
   readonly leaderboardLoading: boolean;
+  readonly leaderboardFilter: LeaderboardAudienceFilter;
+  readonly leaderboardTimeframe: LeaderboardTimeframe;
+  readonly leaderboardPage: number;
+  readonly leaderboardTotalPages: number;
+  readonly leaderboardViewerRank: AppLeaderboardViewerRank | null;
   readonly economy: AppAccountEconomy | null;
   readonly ledger: ReadonlyArray<AppLedgerEntry>;
   readonly economyLoading: boolean;
+  readonly pnlTimeRange: MarketTimeRange;
+  readonly pnlHistory: ReadonlyArray<LightweightChartPoint>;
+  readonly pnlHistoryLoading: boolean;
+  readonly closedPositions: ReadonlyArray<WalletClosedPosition>;
+  readonly closedPositionsOutcome: ClosedOutcomeFilter;
+  readonly closedPositionsPage: number;
+  readonly closedPositionsTotalPages: number;
+  readonly closedPositionsLoading: boolean;
   readonly tradeLoading: boolean;
   readonly tradeError: string | null;
   readonly chatsLoading: boolean;
@@ -160,6 +201,36 @@ export interface StoreState {
 
 const EXPLAINER_STORAGE_KEY = "feed:explainer-dismissed";
 const THEME_STORAGE_KEY = "feed-theme";
+const WATCHLIST_STORAGE_KEY = "feed-watchlist";
+
+function readWatchlist(): ReadonlyArray<string> {
+  try {
+    if (typeof localStorage === "undefined") return [];
+    const raw = localStorage.getItem(WATCHLIST_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+  } catch {
+    return [];
+  }
+}
+
+export function toggleWatchlistItem(kind: "perp" | "prediction", ref: string): void {
+  const key = `${kind}:${kind === "perp" ? ref.toUpperCase() : ref}`;
+  const current = currentState.watchlist;
+  const exists = current.includes(key);
+  const next = exists ? current.filter((item) => item !== key) : [...current, key];
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next));
+    }
+  } catch {
+    setStoreState({ watchlist: next });
+    return;
+  }
+  setStoreState({ watchlist: next });
+}
 
 function readExplainerDismissed(): boolean {
   try {
@@ -288,11 +359,34 @@ let currentState: StoreState = {
   positions: [],
   selectedMarketKind: initialLocation.marketKind ?? (initialLocation.queryTicker ? "perp" : "prediction"),
   selectedMarketId: initialLocation.marketId ?? initialLocation.queryTicker,
+  marketTimeRange: "1D",
+  perpHistory: [],
+  predictionHistory: [],
+  marketChartLoading: false,
+  marketTrades: [],
+  marketTradesLoading: false,
+  marketSocialPosts: [],
+  marketSocialLoading: false,
+  watchlist: readWatchlist(),
+  worldStatus: null,
   leaderboard: [],
   leaderboardLoading: false,
+  leaderboardFilter: "all",
+  leaderboardTimeframe: "ALL",
+  leaderboardPage: 1,
+  leaderboardTotalPages: 1,
+  leaderboardViewerRank: null,
   economy: null,
   ledger: [],
   economyLoading: false,
+  pnlTimeRange: "ALL",
+  pnlHistory: [],
+  pnlHistoryLoading: false,
+  closedPositions: [],
+  closedPositionsOutcome: "all",
+  closedPositionsPage: 1,
+  closedPositionsTotalPages: 1,
+  closedPositionsLoading: false,
   tradeLoading: false,
   tradeError: null,
   chatsLoading: false,

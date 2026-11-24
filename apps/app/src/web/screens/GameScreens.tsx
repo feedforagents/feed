@@ -1,38 +1,116 @@
 // spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Button,
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
   EmptyState,
-  LeaderboardTable,
+  LeaderboardPanel,
   type LeaderboardSortColumn,
-  PositionRow,
-  Skeleton,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-  formatPts,
+  type TradeConfirmationDetails,
+  TradeConfirmationDialog,
+  type WalletLedgerEntry,
+  type WalletOpenPosition,
+  WalletPanel,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "../store.ts";
+import type { AppPosition } from "../types.ts";
+
+function formatLedgerKind(kind: string): string {
+  return kind
+    .split("_")
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function calcLiquidationDistancePct(markCents: number, liqCents: number, side: "long" | "short"): number | undefined {
+  if (markCents <= 0 || liqCents <= 0) return undefined;
+  const diff = side === "long" ? markCents - liqCents : liqCents - markCents;
+  return Math.max(0, (diff / markCents) * 100);
+}
+
+function toWalletOpenPosition(pos: AppPosition): WalletOpenPosition {
+  if (pos.row.kind === "perp") {
+    const side = pos.rawSide === "short" ? "short" : "long";
+    const liqDist = calcLiquidationDistancePct(pos.markPriceCents, pos.liquidationPriceCents, side);
+    const pnlPct = pos.marginCents > 0 ? (pos.unrealizedPnlCents / pos.marginCents) * 100 : 0;
+    return {
+      id: pos.row.id,
+      kind: "perp",
+      marketLabel: pos.row.marketLabel,
+      side: side === "short" ? "Short" : "Long",
+      sizeLabel: pos.row.quantityLabel,
+      leverage: pos.leverage,
+      entryLabel: pos.row.entryLabel,
+      markLabel: pos.row.markLabel,
+      pnlPts: pos.unrealizedPnlCents / 100,
+      pnlPct,
+      ...(pos.row.liquidationLabel ? { liquidationLabel: pos.row.liquidationLabel } : {}),
+      ...(liqDist !== undefined ? { liquidationDistancePct: liqDist } : {}),
+    };
+  }
+  const pnlPct = pos.costBasisCents > 0 ? (pos.unrealizedPnlCents / pos.costBasisCents) * 100 : 0;
+  return {
+    id: pos.row.id,
+    kind: "prediction",
+    marketLabel: pos.row.marketLabel,
+    side: pos.rawSide === "no" ? "NO" : "YES",
+    sizeLabel: pos.row.quantityLabel,
+    entryLabel: pos.row.entryLabel,
+    markLabel: pos.row.markLabel,
+    pnlPts: pos.unrealizedPnlCents / 100,
+    pnlPct,
+  };
+}
+
+function buildCloseConfirmation(pos: AppPosition): TradeConfirmationDetails {
+  if (pos.row.kind === "perp") {
+    const notionalPts = pos.sizeCents / 100;
+    const unrealizedPnlPts = pos.unrealizedPnlCents / 100;
+    const unrealizedPnlPct = pos.marginCents > 0 ? (pos.unrealizedPnlCents / pos.marginCents) * 100 : 0;
+    return {
+      kind: "close-perp",
+      ticker: pos.marketId,
+      side: pos.rawSide === "short" ? "short" : "long",
+      notionalPts,
+      leverage: pos.leverage,
+      entryPrice: pos.entryPriceCents / 100,
+      markPrice: pos.markPriceCents / 100,
+      estimatedFeePts: Math.max(0.01, (notionalPts * 10) / 10_000),
+      unrealizedPnlPts,
+      unrealizedPnlPct,
+    };
+  }
+  const avgPricePct = pos.sidePriceBps / 100;
+  const grossProceedsPts = pos.estimatedValueCents / 100;
+  const estimatedFeePts = Math.max(0.01, (grossProceedsPts * 10) / 10_000);
+  return {
+    kind: "sell-prediction",
+    question: pos.row.marketLabel,
+    side: pos.rawSide === "no" ? "NO" : "YES",
+    shares: pos.shares,
+    avgPricePct,
+    grossProceedsPts,
+    estimatedFeePts,
+    netProceedsPts: Math.max(0, grossProceedsPts - estimatedFeePts),
+    unrealizedPnlPts: pos.unrealizedPnlCents / 100,
+  };
+}
 
 export function LeaderboardScreen() {
   const s = useAppStore();
-  const [sortBy, setSortBy] = useState<LeaderboardSortColumn>("netProfit");
-  const [sortDir, setSortDir] = useState<"ascending" | "descending">("descending");
+  const [sortBy, setSortBy] = useState<LeaderboardSortColumn>("rank");
+  const [sortDir, setSortDir] = useState<"ascending" | "descending">("ascending");
 
-  const sortedRows = [...s.leaderboard].sort((a, b) => {
+  const sortedRows = useMemo(() => {
     const dir = sortDir === "ascending" ? 1 : -1;
-    if (sortBy === "rank") return (a.rank - b.rank) * dir;
-    if (sortBy === "winRate") return (a.winRatePct - b.winRatePct) * dir;
-    if (sortBy === "volume") return (a.volumePts - b.volumePts) * dir;
-    return (a.netProfitPts - b.netProfitPts) * dir;
-  });
+    return [...s.leaderboard].sort((a, b) => {
+      if (sortBy === "rank") return (a.rank - b.rank) * dir;
+      if (sortBy === "returnPct") return ((a.roiPct ?? 0) - (b.roiPct ?? 0)) * dir;
+      if (sortBy === "winRate") return (a.winRatePct - b.winRatePct) * dir;
+      if (sortBy === "volume") return (a.volumePts - b.volumePts) * dir;
+      return (a.netProfitPts - b.netProfitPts) * dir;
+    });
+  }, [s.leaderboard, sortBy, sortDir]);
 
   const handleSort = (col: LeaderboardSortColumn) => {
     if (sortBy === col) {
@@ -40,38 +118,58 @@ export function LeaderboardScreen() {
       return;
     }
     setSortBy(col);
-    setSortDir("descending");
+    setSortDir(col === "rank" ? "ascending" : "descending");
   };
+
+  const viewerPage = s.leaderboardViewerRank?.page ?? null;
 
   return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
-        <h1 className="text-base font-bold text-foreground">Leaderboard</h1>
+      <div className="flex items-center justify-end gap-2 border-b border-border bg-background/85 px-4 py-2.5 backdrop-blur-md">
         <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>
           Trade Markets
         </Button>
-      </header>
+      </div>
 
-      <div className="flex flex-col gap-4 p-4">
-        {s.leaderboardLoading && s.leaderboard.length === 0 ? (
-          <Skeleton className="h-64" />
-        ) : (
-          <LeaderboardTable
-            rows={sortedRows}
-            sortBy={sortBy}
-            sortDir={sortDir}
-            viewerAccountId={s.viewer?.accountId}
-            onSort={handleSort}
-            onSelectTrader={(accountId) => {
-              const found = s.leaderboard.find((r) => r.accountId === accountId);
-              if (found) void storeActions.navigate(`/u/${encodeURIComponent(found.handle)}`);
-            }}
-            onFollow={(accountId) => {
-              const found = s.leaderboard.find((r) => r.accountId === accountId);
-              if (found) void storeActions.toggleFollow(found.handle, found.isFollowing);
-            }}
-          />
-        )}
+      <div className="p-4">
+        <LeaderboardPanel
+          rows={sortedRows}
+          audience={s.leaderboardFilter}
+          onAudienceChange={(audience) => {
+            void storeActions.loadLeaderboardFiltered(audience, s.leaderboardTimeframe, 1);
+          }}
+          timeframe={s.leaderboardTimeframe}
+          onTimeframeChange={(timeframe) => {
+            void storeActions.loadLeaderboardFiltered(s.leaderboardFilter, timeframe, 1);
+          }}
+          page={s.leaderboardPage}
+          totalPages={s.leaderboardTotalPages}
+          onPageChange={(nextPage) => {
+            void storeActions.loadLeaderboardFiltered(s.leaderboardFilter, s.leaderboardTimeframe, nextPage);
+          }}
+          sortBy={sortBy}
+          sortDir={sortDir}
+          onSort={handleSort}
+          viewerAccountId={s.viewer?.accountId}
+          viewerPosition={s.leaderboardViewerRank?.entry ?? null}
+          onJumpToMyPosition={
+            viewerPage !== null
+              ? () => {
+                  void storeActions.loadLeaderboardFiltered(s.leaderboardFilter, s.leaderboardTimeframe, viewerPage);
+                }
+              : undefined
+          }
+          onFollow={(accountId) => {
+            const found =
+              s.leaderboard.find((r) => r.accountId === accountId) ??
+              (s.leaderboardViewerRank?.entry?.accountId === accountId ? s.leaderboardViewerRank.entry : undefined);
+            if (found) void storeActions.toggleFollow(found.handle, found.isFollowing);
+          }}
+          onViewProfile={(handle) => {
+            void storeActions.navigate(`/u/${encodeURIComponent(handle)}`);
+          }}
+          loading={s.leaderboardLoading && s.leaderboard.length === 0}
+        />
       </div>
     </div>
   );
@@ -79,12 +177,64 @@ export function LeaderboardScreen() {
 
 export function WalletScreen() {
   const s = useAppStore();
+  const [pendingClose, setPendingClose] = useState<{
+    readonly pos: AppPosition;
+    readonly details: TradeConfirmationDetails;
+  } | null>(null);
+
   const econ = s.economy;
   const cashCents = econ?.balanceCents ?? s.viewer?.balanceCents ?? 0;
   const positionCents = econ?.positionValueCents ?? 0;
   const equityCents = econ?.equityCents ?? cashCents + positionCents;
-  const netProfitCents = econ?.netProfitCents ?? equityCents - (s.viewer?.startingGrantCents ?? 10000);
-  const openPositions = s.positions.filter((p) => !p.isClosed);
+  const startingGrantCents = econ?.startingGrantCents ?? s.viewer?.startingGrantCents ?? 10000;
+  const netProfitCents = econ?.netProfitCents ?? equityCents - startingGrantCents;
+  const feesPaidCents = econ?.totalFeesPaidCents ?? 0;
+  const roiPct = startingGrantCents > 0 ? (netProfitCents / startingGrantCents) * 100 : 0;
+
+  const openAppPositions = useMemo(() => s.positions.filter((p) => !p.isClosed), [s.positions]);
+  const walletOpenPositions = useMemo(() => openAppPositions.map(toWalletOpenPosition), [openAppPositions]);
+  const walletLedgerEntries = useMemo<ReadonlyArray<WalletLedgerEntry>>(
+    () =>
+      s.ledger.map((row) => ({
+        id: row.id,
+        timestampLabel: row.timestamp,
+        eventLabel: formatLedgerKind(row.kind),
+        deltaPts: row.deltaCents / 100,
+        balanceAfterPts: row.balanceAfterCents / 100,
+      })),
+    [s.ledger],
+  );
+
+  const handleSelectPosition = (id: string, kind: "perp" | "prediction") => {
+    const pos = openAppPositions.find((p) => p.row.id === id);
+    if (!pos) return;
+    const path = kind === "perp"
+      ? `/markets/perps/${encodeURIComponent(pos.marketId)}`
+      : `/markets/predictions/${encodeURIComponent(pos.marketId)}`;
+    void storeActions.navigate(path);
+  };
+
+  const handleRequestClose = (id: string) => {
+    const pos = openAppPositions.find((p) => p.row.id === id);
+    if (!pos) return;
+    setPendingClose({ pos, details: buildCloseConfirmation(pos) });
+  };
+
+  const handleConfirmClose = () => {
+    if (!pendingClose) return;
+    const target = pendingClose.pos;
+    setPendingClose(null);
+    if (target.row.kind === "perp") {
+      void storeActions.closePerpPosition(target.row.id);
+    } else {
+      void storeActions.submitPredictionOrder(
+        target.marketId,
+        "Sell",
+        target.rawSide === "no" ? "no" : "yes",
+        target.shares,
+      );
+    }
+  };
 
   return (
     <div className="flex flex-col">
@@ -99,107 +249,48 @@ export function WalletScreen() {
         <div className="p-6">
           <EmptyState title="Sign in to view your wallet">
             <Button shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
-              Sign in & claim 100 pts
+              Sign in &amp; claim 100 pts
             </Button>
           </EmptyState>
         </div>
       ) : (
-        <div className="flex flex-col gap-5 p-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Card className="gap-1 p-4">
-              <span className="text-xs text-muted-foreground">Total Equity</span>
-              <span className="font-mono text-xl font-bold text-foreground tabular-nums">{formatPts(equityCents / 100)}</span>
-            </Card>
-            <Card className="gap-1 p-4">
-              <span className="text-xs text-muted-foreground">Available Cash</span>
-              <span className="font-mono text-xl font-bold text-foreground tabular-nums">{formatPts(cashCents / 100)}</span>
-            </Card>
-            <Card className="gap-1 p-4">
-              <span className="text-xs text-muted-foreground">Positions Value</span>
-              <span className="font-mono text-xl font-bold text-foreground tabular-nums">{formatPts(positionCents / 100)}</span>
-            </Card>
-            <Card className="gap-1 p-4">
-              <span className="text-xs text-muted-foreground">Net Profit</span>
-              <span className={`font-mono text-xl font-bold tabular-nums ${netProfitCents >= 0 ? "text-ok" : "text-destructive"}`}>
-                {formatPts(netProfitCents / 100, true)}
-              </span>
-            </Card>
-          </div>
-
-          <section className="flex flex-col gap-2">
-            <h2 className="text-sm font-bold text-foreground">Open Positions ({openPositions.length})</h2>
-            {openPositions.length === 0 ? (
-              <Card className="p-6">
-                <EmptyState title="No open positions">
-                  <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>
-                    Explore Markets
-                  </Button>
-                </EmptyState>
-              </Card>
-            ) : (
-              <Card className="gap-0 overflow-hidden p-0">
-                {openPositions.map((pos) => (
-                  <PositionRow
-                    key={pos.row.id}
-                    position={pos.row}
-                    loading={s.tradeLoading}
-                    onClose={() => {
-                      if (pos.row.kind === "perp") {
-                        void storeActions.closePerpPosition(pos.row.id);
-                      } else {
-                        void storeActions.submitPredictionOrder(
-                          pos.marketId,
-                          "Sell",
-                          pos.rawSide === "no" ? "no" : "yes",
-                          pos.shares,
-                        );
-                      }
-                    }}
-                  />
-                ))}
-              </Card>
-            )}
-          </section>
-
-          <Card className="gap-3 p-4">
-            <CardHeader>
-              <CardTitle className="text-sm">Recent Activity</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {s.economyLoading && s.ledger.length === 0 ? (
-                <Skeleton className="h-32" />
-              ) : s.ledger.length === 0 ? (
-                <EmptyState title="No ledger activity yet" />
-              ) : (
-                <Table label="Wallet ledger">
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Event</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
-                      <TableHead className="text-right">Balance</TableHead>
-                      <TableHead className="text-right">Time</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {s.ledger.map((row) => (
-                      <TableRow key={row.id}>
-                        <TableCell className="text-sm font-medium text-foreground">{row.kind}</TableCell>
-                        <TableCell className={`text-right font-mono tabular-nums ${row.deltaCents >= 0 ? "text-ok" : "text-destructive"}`}>
-                          {formatPts(row.deltaCents / 100, true)}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-muted-foreground tabular-nums">
-                          {formatPts(row.balanceAfterCents / 100)}
-                        </TableCell>
-                        <TableCell className="text-right text-xs text-muted-foreground">{row.timestamp}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
+        <div className="p-4">
+          <WalletPanel
+            summary={{
+              equityPts: equityCents / 100,
+              cashPts: cashCents / 100,
+              openPositionsValuePts: positionCents / 100,
+              netProfitPts: netProfitCents / 100,
+              roiPct,
+              feesPaidPts: feesPaidCents / 100,
+            }}
+            pnlHistory={s.pnlHistory}
+            pnlTimeRange={s.pnlTimeRange}
+            onPnlTimeRangeChange={(range) => {
+              void storeActions.loadPnlHistory(range);
+            }}
+            openPositions={walletOpenPositions}
+            closedPositions={s.closedPositions}
+            ledgerEntries={walletLedgerEntries}
+            onClosePosition={handleRequestClose}
+            onSelectPosition={handleSelectPosition}
+            closedPageSize={10}
+            loading={s.economyLoading && !s.economy && s.ledger.length === 0}
+            error={s.tradeError ?? undefined}
+            submitting={s.tradeLoading}
+          />
         </div>
       )}
+
+      <TradeConfirmationDialog
+        open={pendingClose !== null}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setPendingClose(null);
+        }}
+        details={pendingClose?.details ?? null}
+        submitting={s.tradeLoading}
+        onConfirm={handleConfirmClose}
+      />
     </div>
   );
 }

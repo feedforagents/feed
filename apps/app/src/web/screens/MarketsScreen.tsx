@@ -1,250 +1,379 @@
 // spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Button,
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
   EmptyState,
-  LeaderboardTable,
-  type LeaderboardSortColumn,
-  MarketCard,
-  PositionRow,
-  PriceChart,
+  type ExistingPerpPosition,
+  type ExistingPredictionHolding,
+  MarketsDashboard,
+  MarketsTradingTerminal,
+  type PerpMarketRow,
+  PostComposer,
+  type PredictionMarketRow,
   Skeleton,
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-  TradeTicket,
+  SpotlightTutorial,
   formatPts,
 } from "@repo/ui";
+import { HelpIcon } from "../icons.tsx";
+import { FeedPostCard } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
+import type { AppPerpMarket, AppPosition, AppPredictionMarket, AppWorldStatus } from "../types.ts";
 
-export function MarketsScreen() {
-  const s = useAppStore();
-  const [marketTab, setMarketTab] = useState<"predictions" | "perps" | "positions" | "leaderboard">(
-    s.selectedMarketKind === "perp" ? "perps" : "predictions",
+function WorldClockHud({ status }: { readonly status: AppWorldStatus | null }) {
+  if (!status) return null;
+  return (
+    <div
+      aria-label={`World clock: Day ${status.currentDay}, Hour ${status.currentHour}, ${status.phase}`}
+      className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 font-mono text-xs text-muted-foreground tabular-nums"
+    >
+      <span
+        aria-hidden="true"
+        className={`size-2 rounded-full ${status.gameRunning ? "bg-ok" : "bg-muted-foreground"}`}
+      />
+      <span className="font-semibold text-foreground">Day {status.currentDay}</span>
+      <span aria-hidden="true">·</span>
+      <span>Hour {status.currentHour}</span>
+      <span aria-hidden="true">·</span>
+      <span className="capitalize">{status.phase}</span>
+    </div>
   );
-  const [sortBy, setSortBy] = useState<LeaderboardSortColumn>("netProfit");
-  const [sortDir, setSortDir] = useState<"ascending" | "descending">("descending");
+}
 
-  const balancePts = s.viewer ? formatPts(s.viewer.balanceCents / 100) : "0 pts";
-  const selectedPrediction = s.predictions.find((m) => m.card.id === s.selectedMarketId) ?? s.predictions[0] ?? null;
-  const selectedPerp = s.perps.find((m) => m.ticker === s.selectedMarketId) ?? s.perps[0] ?? null;
-  const openPositions = s.positions.filter((p) => !p.isClosed);
+function TerminalSocialFeed({
+  kind,
+  marketRef,
+}: {
+  readonly kind: "perp" | "prediction";
+  readonly marketRef: string;
+}) {
+  const s = useAppStore();
+  const [draft, setDraft] = useState("");
+  const [posting, setPosting] = useState(false);
 
-  const sortedRows = [...s.leaderboard].sort((a, b) => {
-    const dir = sortDir === "ascending" ? 1 : -1;
-    if (sortBy === "rank") return (a.rank - b.rank) * dir;
-    if (sortBy === "winRate") return (a.winRatePct - b.winRatePct) * dir;
-    if (sortBy === "volume") return (a.volumePts - b.volumePts) * dir;
-    return (a.netProfitPts - b.netProfitPts) * dir;
-  });
-
-  const handleSort = (col: LeaderboardSortColumn) => {
-    if (sortBy === col) {
-      setSortDir(sortDir === "descending" ? "ascending" : "descending");
-      return;
-    }
-    setSortBy(col);
-    setSortDir("descending");
+  const handleSubmit = (content: string) => {
+    if (posting) return;
+    setPosting(true);
+    void storeActions
+      .createPost(content, kind === "perp" ? { ticker: marketRef } : { marketId: marketRef })
+      .then((ok) => {
+        if (ok) setDraft("");
+      })
+      .finally(() => {
+        setPosting(false);
+      });
   };
 
   return (
+    <div className="flex flex-col gap-4">
+      {s.viewer ? (
+        <PostComposer
+          value={draft}
+          onValueChange={setDraft}
+          onSubmit={handleSubmit}
+          authorName={s.viewer.displayName}
+          authorAvatarUrl={s.viewer.avatarUrl ?? undefined}
+          placeholder={kind === "perp" ? `Share your thesis on $${marketRef}…` : "Discuss this prediction market…"}
+          submitLabel="Post"
+          loading={posting}
+        />
+      ) : null}
+
+      {s.marketSocialLoading && s.marketSocialPosts.length === 0 ? (
+        <div className="flex flex-col gap-3">
+          <Skeleton className="h-24 w-full" />
+          <Skeleton className="h-24 w-full" />
+        </div>
+      ) : s.marketSocialPosts.length === 0 ? (
+        <EmptyState
+          title={kind === "perp" ? `No posts mentioning $${marketRef} yet` : "No discussion posts for this market yet"}
+        />
+      ) : (
+        <div className="flex flex-col divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+          {s.marketSocialPosts.map((post) => (
+            <FeedPostCard key={post.card.id} post={post} mode="GameMode" />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function toPerpMarketRow(perp: AppPerpMarket, watchlistSet: ReadonlySet<string>): PerpMarketRow {
+  return {
+    ticker: perp.ticker,
+    name: perp.card.name,
+    ...(perp.orgImageUrl ? { avatarUrl: perp.orgImageUrl } : {}),
+    currentPrice: perp.markCents / 100,
+    changePercent24h: perp.change24hPct,
+    volume24h: perp.volume24hCents / 100,
+    openInterest: perp.openInterestCents / 100,
+    fundingRatePct: perp.fundingRateBps / 100,
+    maxLeverage: perp.card.maxLeverage ?? 20,
+    isFavorite: watchlistSet.has(`perp:${perp.ticker.toUpperCase()}`),
+  };
+}
+
+function toPredictionMarketRow(pred: AppPredictionMarket, watchlistSet: ReadonlySet<string>): PredictionMarketRow {
+  return {
+    id: pred.card.id,
+    question: pred.card.question,
+    category: pred.category,
+    yesOddsPct: pred.yesPriceBps / 100,
+    liquidityPts: pred.liquidityCents / 100,
+    endsAtLabel: pred.card.closesIn ?? (pred.status === "open" ? "Open" : pred.status),
+    endsAtMs: pred.expiresAtMs,
+    isFavorite: watchlistSet.has(`prediction:${pred.card.id}`),
+  };
+}
+
+function toExistingPerpPositions(positions: ReadonlyArray<AppPosition>): ReadonlyArray<ExistingPerpPosition> {
+  return positions
+    .filter((pos) => !pos.isClosed && pos.row.kind === "perp")
+    .map((pos) => ({
+      id: pos.row.id,
+      ticker: pos.marketId,
+      side: pos.rawSide === "short" ? "short" : "long",
+      notionalPts: pos.sizeCents / 100,
+      marginPts: pos.marginCents / 100,
+      leverage: pos.leverage,
+      entryPrice: pos.entryPriceCents / 100,
+      markPrice: pos.markPriceCents / 100,
+      liquidationPrice: pos.liquidationPriceCents / 100,
+      unrealizedPnlPts: pos.unrealizedPnlCents / 100,
+      unrealizedPnlPct: pos.marginCents > 0 ? (pos.unrealizedPnlCents / pos.marginCents) * 100 : 0,
+    }));
+}
+
+function toExistingPredictionHoldings(positions: ReadonlyArray<AppPosition>): ReadonlyArray<ExistingPredictionHolding> {
+  return positions
+    .filter((pos) => !pos.isClosed && pos.row.kind === "prediction")
+    .map((pos) => ({
+      id: pos.row.id,
+      marketId: pos.marketId,
+      question: pos.row.marketLabel,
+      side: pos.rawSide === "no" ? "NO" : "YES",
+      shares: pos.shares,
+      avgPricePct: pos.shares > 0 ? Math.min(100, Math.max(0, pos.costBasisCents / pos.shares)) : pos.sidePriceBps / 100,
+      currentPricePct: pos.sidePriceBps / 100,
+      unrealizedPnlPts: pos.unrealizedPnlCents / 100,
+    }));
+}
+
+export function MarketsScreen() {
+  const s = useAppStore();
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+
+  const balancePts = s.viewer ? s.viewer.balanceCents / 100 : 0;
+  const formattedBalance = formatPts(balancePts);
+  const watchlistSet = useMemo(() => new Set(s.watchlist), [s.watchlist]);
+
+  const perpRows = useMemo(
+    () => s.perps.map((perp) => toPerpMarketRow(perp, watchlistSet)),
+    [s.perps, watchlistSet],
+  );
+  const predictionRows = useMemo(
+    () => s.predictions.map((pred) => toPredictionMarketRow(pred, watchlistSet)),
+    [s.predictions, watchlistSet],
+  );
+  const perpPositions = useMemo(() => toExistingPerpPositions(s.positions), [s.positions]);
+  const predictionPositions = useMemo(() => toExistingPredictionHoldings(s.positions), [s.positions]);
+
+  const selectedPerp = s.selectedMarketId && s.selectedMarketKind === "perp"
+    ? s.perps.find((p) => p.ticker.toUpperCase() === s.selectedMarketId?.toUpperCase()) ?? null
+    : null;
+  const selectedPrediction = s.selectedMarketId && s.selectedMarketKind === "prediction"
+    ? s.predictions.find((m) => m.card.id === s.selectedMarketId) ?? null
+    : null;
+
+  const isTerminalRoute = s.selectedMarketId !== null;
+  const initialDashboardTab = s.perps.length > 0 ? "perps" : "predictions";
+
+  return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
-        <div className="flex items-center gap-3">
-          <h1 className="text-base font-bold text-foreground">Markets</h1>
+      <header className="sticky top-[53px] z-20 flex flex-wrap items-center justify-between gap-3 border-b border-border bg-background/85 px-4 py-2.5 backdrop-blur-md md:top-0">
+        <div className="flex flex-wrap items-center gap-3">
+          <WorldClockHud status={s.worldStatus} />
           {s.viewer ? (
             <span className="font-mono text-xs font-semibold text-muted-foreground tabular-nums">
-              {balancePts}
+              {formattedBalance}
             </span>
           ) : null}
         </div>
-        {s.viewer ? (
-          <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/wallet"); }}>
-            Wallet
-          </Button>
-        ) : (
-          <Button size="sm" shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
-            Claim 100 pts
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {!isTerminalRoute ? (
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label="Open trading tutorial"
+              onClick={() => setTutorialOpen(true)}
+            >
+              <HelpIcon className="size-4" />
+            </Button>
+          ) : null}
+          {s.viewer ? (
+            <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/wallet"); }}>
+              Wallet
+            </Button>
+          ) : (
+            <Button size="sm" shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
+              Claim 100 pts
+            </Button>
+          )}
+        </div>
       </header>
 
-      <div className="flex flex-col gap-5 p-4">
-        <Tabs
-          value={marketTab}
-          onValueChange={(next) => {
-            if (next === "perps" || next === "positions" || next === "leaderboard" || next === "predictions") {
-              setMarketTab(next);
-            }
-          }}
-        >
-          <TabsList variant="underline">
-            <TabsTrigger value="predictions">Predictions</TabsTrigger>
-            <TabsTrigger value="perps">Perps (20x)</TabsTrigger>
-            <TabsTrigger value="positions">Positions ({openPositions.length})</TabsTrigger>
-            <TabsTrigger value="leaderboard">Leaderboard</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="predictions" className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-            <div className="flex flex-col gap-3">
-              {s.marketsLoading && s.predictions.length === 0 ? (
-                <Skeleton className="h-44" />
-              ) : s.predictions.length === 0 ? (
-                <EmptyState title="No prediction markets available" />
-              ) : (
-                s.predictions.map((mkt) => (
-                  <MarketCard
-                    key={mkt.card.id}
-                    market={mkt.card}
-                    selected={selectedPrediction?.card.id === mkt.card.id}
-                    onSelect={(id) => storeActions.selectMarket("prediction", id)}
-                  />
-                ))
-              )}
-            </div>
-            {selectedPrediction ? (
-              <div className="flex flex-col gap-3">
-                <TradeTicket
-                  marketKind="prediction"
-                  marketTitle={selectedPrediction.card.question}
-                  balancePts={balancePts}
-                  yesOddsPct={selectedPrediction.card.yesOddsPct}
-                  yesShares={selectedPrediction.card.yesShares}
-                  noShares={selectedPrediction.card.noShares}
-                  loading={s.tradeLoading}
-                  error={s.tradeError ?? undefined}
-                  disabled={selectedPrediction.status !== "open"}
-                  onSubmit={(order) => {
-                    if (order.marketKind === "prediction") {
-                      void storeActions.submitPredictionOrder(
-                        selectedPrediction.card.id,
-                        order.action,
-                        order.side === "NO" ? "no" : "yes",
-                        order.amountPts,
-                      );
-                    }
-                  }}
-                />
-                {selectedPrediction.resolutionProof ? (
-                  <Card className="gap-2 rounded-xl p-4">
-                    <CardHeader>
-                      <CardTitle className="text-sm">Resolution proof</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <p className="text-xs text-muted-foreground">{selectedPrediction.resolutionProof}</p>
-                    </CardContent>
-                  </Card>
-                ) : null}
-              </div>
-            ) : null}
-          </TabsContent>
-
-          <TabsContent value="perps" className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-            <div className="flex flex-col gap-3">
-              {selectedPerp ? (
-                <PriceChart
-                  points={selectedPerp.history}
-                  title={`$${selectedPerp.ticker} Spot Index & Mark`}
-                  ariaLabel={`${selectedPerp.ticker} price chart`}
-                  formatValue={(v) => formatPts(v)}
-                />
-              ) : null}
-              {s.marketsLoading && s.perps.length === 0 ? (
-                <Skeleton className="h-44" />
-              ) : s.perps.length === 0 ? (
-                <EmptyState title="No perpetual markets available" />
-              ) : (
-                s.perps.map((perp) => (
-                  <MarketCard
-                    key={perp.ticker}
-                    market={perp.card}
-                    selected={selectedPerp?.ticker === perp.ticker}
-                    onSelect={(id) => storeActions.selectMarket("perp", id)}
-                  />
-                ))
-              )}
-            </div>
-            {selectedPerp ? (
-              <TradeTicket
-                marketKind="perp"
-                ticker={selectedPerp.ticker}
-                marketTitle={selectedPerp.card.name}
-                balancePts={balancePts}
-                markPricePts={selectedPerp.card.markPricePts}
-                indexPricePts={selectedPerp.card.indexPricePts}
-                maxLeverage={selectedPerp.card.maxLeverage ?? 20}
-                loading={s.tradeLoading}
-                error={s.tradeError ?? undefined}
-                onSubmit={(order) => {
-                  if (order.marketKind === "perp") {
-                    void storeActions.submitPerpOrder(
-                      selectedPerp.ticker,
-                      order.side === "Short" ? "short" : "long",
-                      order.marginPts,
-                      order.leverage,
-                    );
-                  }
-                }}
-              />
-            ) : null}
-          </TabsContent>
-
-          <TabsContent value="positions">
-            {!s.viewer ? (
-              <EmptyState title="Sign in to view open positions">
-                <Button shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>Sign in</Button>
-              </EmptyState>
-            ) : openPositions.length === 0 ? (
-              <EmptyState title="No open positions yet" />
-            ) : (
-              <Card className="gap-0 overflow-hidden rounded-xl p-0">
-                {openPositions.map((pos) => (
-                  <PositionRow
-                    key={pos.row.id}
-                    position={pos.row}
-                    loading={s.tradeLoading}
-                    onClose={() => {
-                      if (pos.row.kind === "perp") {
-                        void storeActions.closePerpPosition(pos.row.id);
-                      } else {
-                        void storeActions.submitPredictionOrder(
-                          pos.marketId,
-                          "Sell",
-                          pos.rawSide === "no" ? "no" : "yes",
-                          pos.shares,
-                        );
-                      }
-                    }}
-                  />
-                ))}
-              </Card>
-            )}
-          </TabsContent>
-
-          <TabsContent value="leaderboard" className="flex flex-col gap-3">
-            <LeaderboardTable
-              rows={sortedRows}
-              sortBy={sortBy}
-              sortDir={sortDir}
-              viewerAccountId={s.viewer?.accountId}
-              onSort={handleSort}
-              onSelectTrader={(accountId) => {
-                const found = s.leaderboard.find((r) => r.accountId === accountId);
-                if (found) void storeActions.navigate(`/u/${encodeURIComponent(found.handle)}`);
+      <div className="flex flex-col gap-4 p-4">
+        {isTerminalRoute ? (
+          selectedPerp ? (
+            <MarketsTradingTerminal
+              market={{
+                kind: "perp",
+                data: {
+                  ticker: selectedPerp.ticker,
+                  name: selectedPerp.card.name,
+                  ...(selectedPerp.orgImageUrl ? { avatarUrl: selectedPerp.orgImageUrl } : {}),
+                  currentPrice: selectedPerp.markCents / 100,
+                  indexPrice: selectedPerp.indexCents / 100,
+                  changePercent24h: selectedPerp.change24hPct,
+                  volume24h: selectedPerp.volume24hCents / 100,
+                  openInterest: selectedPerp.openInterestCents / 100,
+                  fundingRatePct: selectedPerp.fundingRateBps / 100,
+                  maxLeverage: selectedPerp.card.maxLeverage ?? 20,
+                  priceHistory: s.perpHistory,
+                },
               }}
-              onFollow={(accountId) => {
-                const found = s.leaderboard.find((r) => r.accountId === accountId);
-                if (found) void storeActions.toggleFollow(found.handle, found.isFollowing);
+              balancePts={balancePts}
+              timeRange={s.marketTimeRange}
+              onTimeRangeChange={(range) => { void storeActions.setMarketTimeRange(range); }}
+              onBack={() => { void storeActions.navigate("/markets"); }}
+              trades={s.marketTrades}
+              tradesLoading={s.marketTradesLoading}
+              chartLoading={s.marketChartLoading}
+              socialFeed={<TerminalSocialFeed kind="perp" marketRef={selectedPerp.ticker} />}
+              perpPositions={perpPositions}
+              predictionPositions={predictionPositions}
+              onOpenPerp={(order) => {
+                void storeActions.submitPerpOrder(order.ticker, order.side, order.marginPts, order.leverage);
               }}
+              onRebalancePerp={(order) => {
+                void storeActions.rebalancePerpPosition({
+                  positionId: order.positionId,
+                  ticker: order.ticker,
+                  action: order.action,
+                  side: order.nextSide,
+                  marginPts: order.marginPts,
+                  resultingNotionalPts: order.resultingNotionalPts,
+                  leverage: order.leverage,
+                });
+              }}
+              onClosePerp={(positionId) => { void storeActions.closePerpPosition(positionId); }}
+              onSubmitPrediction={(order) => {
+                void storeActions.submitPredictionOrder(
+                  order.marketId,
+                  order.action === "sell" ? "Sell" : "Buy",
+                  order.side === "NO" ? "no" : "yes",
+                  order.amountOrShares,
+                );
+              }}
+              onOpenResolutionArticle={(articleId) => { void storeActions.navigate(`/article/${encodeURIComponent(articleId)}`); }}
+              submitting={s.tradeLoading}
+              orderError={s.tradeError ?? undefined}
+              confirmBeforeSubmit
             />
-          </TabsContent>
-        </Tabs>
+          ) : selectedPrediction ? (
+            <MarketsTradingTerminal
+              market={{
+                kind: "prediction",
+                data: {
+                  id: selectedPrediction.card.id,
+                  question: selectedPrediction.card.question,
+                  category: selectedPrediction.category,
+                  yesOddsPct: selectedPrediction.yesPriceBps / 100,
+                  yesShares: selectedPrediction.yesShares > 0 ? selectedPrediction.yesShares : 500,
+                  noShares: selectedPrediction.noShares > 0 ? selectedPrediction.noShares : 500,
+                  liquidityPts: selectedPrediction.liquidityCents / 100,
+                  endsAtLabel: selectedPrediction.card.closesIn,
+                  resolutionCriteria: selectedPrediction.resolutionProof ?? (selectedPrediction.description || undefined),
+                  ...(selectedPrediction.resolutionArticleId
+                    ? { resolutionArticleId: selectedPrediction.resolutionArticleId }
+                    : {}),
+                  probabilityHistory: s.predictionHistory,
+                },
+              }}
+              balancePts={balancePts}
+              timeRange={s.marketTimeRange}
+              onTimeRangeChange={(range) => { void storeActions.setMarketTimeRange(range); }}
+              onBack={() => { void storeActions.navigate("/markets"); }}
+              trades={s.marketTrades}
+              tradesLoading={s.marketTradesLoading}
+              chartLoading={s.marketChartLoading}
+              socialFeed={<TerminalSocialFeed kind="prediction" marketRef={selectedPrediction.card.id} />}
+              perpPositions={perpPositions}
+              predictionPositions={predictionPositions}
+              onOpenPerp={(order) => {
+                void storeActions.submitPerpOrder(order.ticker, order.side, order.marginPts, order.leverage);
+              }}
+              onRebalancePerp={(order) => {
+                void storeActions.rebalancePerpPosition({
+                  positionId: order.positionId,
+                  ticker: order.ticker,
+                  action: order.action,
+                  side: order.nextSide,
+                  marginPts: order.marginPts,
+                  resultingNotionalPts: order.resultingNotionalPts,
+                  leverage: order.leverage,
+                });
+              }}
+              onClosePerp={(positionId) => { void storeActions.closePerpPosition(positionId); }}
+              onSubmitPrediction={(order) => {
+                void storeActions.submitPredictionOrder(
+                  order.marketId,
+                  order.action === "sell" ? "Sell" : "Buy",
+                  order.side === "NO" ? "no" : "yes",
+                  order.amountOrShares,
+                );
+              }}
+              onOpenResolutionArticle={(articleId) => { void storeActions.navigate(`/article/${encodeURIComponent(articleId)}`); }}
+              submitting={s.tradeLoading}
+              orderError={s.tradeError ?? undefined}
+              confirmBeforeSubmit
+            />
+          ) : s.marketsLoading ? (
+            <div className="flex flex-col gap-4">
+              <Skeleton className="h-14 w-full" />
+              <Skeleton className="h-96 w-full" />
+            </div>
+          ) : (
+            <EmptyState title="Market not found">
+              <Button size="sm" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>
+                Back to Markets
+              </Button>
+            </EmptyState>
+          )
+        ) : (
+          <MarketsDashboard
+            key={initialDashboardTab}
+            defaultTab={initialDashboardTab}
+            perpMarkets={perpRows}
+            predictionMarkets={predictionRows}
+            loading={s.marketsLoading && perpRows.length === 0 && predictionRows.length === 0}
+            onSelectMarket={(selection) => {
+              const path = selection.kind === "perp"
+                ? `/markets/perps/${encodeURIComponent(selection.ticker)}`
+                : `/markets/predictions/${encodeURIComponent(selection.id)}`;
+              void storeActions.navigate(path);
+            }}
+            onToggleFavorite={(selection) => {
+              storeActions.toggleWatchlistItem(
+                selection.kind,
+                selection.kind === "perp" ? selection.ticker : selection.id,
+              );
+            }}
+          />
+        )}
       </div>
+
+      <SpotlightTutorial open={tutorialOpen} onOpenChange={setTutorialOpen} />
     </div>
   );
 }

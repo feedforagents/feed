@@ -83,8 +83,53 @@ function installMockNetwork() {
     if (path === "/api/trending") return json({ trending: [] });
     if (path === "/api/articles") return json({ articles: [] });
     if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/markets/prediction/seed-market-1/history") {
+      return json({
+        range: "1D",
+        points: [
+          { timestamp: Date.now() - 3_600_000, priceCents: 46, yesPriceBps: 4600, volumeCents: 1000 },
+          { timestamp: Date.now(), priceCents: 50, yesPriceBps: 5000, volumeCents: 2500 },
+        ],
+      });
+    }
+    if (path === "/api/markets/prediction/seed-market-1/trades") {
+      return json({
+        trades: [
+          {
+            id: "trade-1",
+            traderId: "ailon-musk",
+            traderName: "AIlon Musk",
+            traderHandle: "ailonmusk",
+            traderAvatarUrl: null,
+            isNpc: true,
+            marketKind: "prediction",
+            marketRef: "seed-market-1",
+            marketTitle: "Will OpenAGI ship Strawberry-9000 before Friday?",
+            side: "buy_yes",
+            sharesOrSize: 20,
+            priceCents: 50,
+            notionalCents: 1000,
+            feeCents: 1,
+            realizedPnlCents: null,
+            createdAt: Date.now() - 30_000,
+          },
+        ],
+      });
+    }
+    if (path === "/api/world/status") {
+      return json({
+        currentDay: 3,
+        currentHour: 14,
+        phase: "active",
+        gameRunning: true,
+        lastTickAt: Date.now(),
+        activeMarketsCount: 1,
+        totalPostsCount: 1,
+        activeActorsCount: 5,
+      });
+    }
     if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [] } });
-    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/leaderboard") return json({ entries: [], leaderboard: [], pagination: { page: 1, pageSize: 50, totalCount: 0, totalPages: 1 } });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
     return json({});
   };
@@ -124,7 +169,16 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
 
   const marketsButton = page.getByRole("button", { name: "Markets" }).first();
   await act(() => userEvent.click(marketsButton));
+  await expect.element(page.getByText("Day 3")).toBeInTheDocument();
+  const marketRowButton = page.getByRole("button", { name: /^Will OpenAGI ship Strawberry-9000 before Friday\?/ }).first();
+  await expect.element(marketRowButton).toBeInTheDocument();
+  await act(() => userEvent.click(marketRowButton));
   await expect.element(page.getByRole("heading", { name: "Will OpenAGI ship Strawberry-9000 before Friday?" })).toBeInTheDocument();
+  const tutorialBtn = page.getByRole("button", { name: "Open trading tutorial" }).first();
+  await act(() => userEvent.click(tutorialBtn));
+  await expect.element(page.getByRole("dialog")).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Close" })));
+  await expect.element(page.getByRole("tab", { name: "Trades (1)" })).toBeInTheDocument();
 
   const modeSwitch = page.getByRole("switch", { name: "Social mode" }).first();
   await act(() => userEvent.click(modeSwitch));
