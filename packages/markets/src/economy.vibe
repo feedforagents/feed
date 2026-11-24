@@ -1,5 +1,5 @@
 // spec/markets/economy.md, "Story: Verify account and claim initial grant once"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
-import { Store, type StoreFailure, toInt, toText, type Tx } from "@repo/db"
+import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import { BPS_DENOMINATOR } from "../gen/shared__money.effect.vibe"
 import {
@@ -327,6 +327,17 @@ function markToMarketPredictionCents(side: unknown, shares: number, yesShares: n
   return Math.floor((shares * sidePriceBps) / BPS_DENOMINATOR)
 }
 
+effect function loadOpenUserPerpRows(tx: Tx, accountId?: string): ReadonlyArray<Row>!StoreFailure {
+  const accountFilter = accountId === undefined ? "" : " AND p.holder_id = $1"
+  return try tx.query(
+    `SELECT p.holder_id, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
+     FROM feed_perp_positions p
+     JOIN feed_perp_markets m ON m.ticker = p.ticker
+     WHERE p.holder_kind = 'user' AND p.status = 'open'${accountFilter}`,
+    accountId === undefined ? [] : [accountId]
+  )
+}
+
 export effect function getAccountEconomy(accountId: string): AccountEconomyView!(MarketFailure | StoreFailure)!Store {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
@@ -351,13 +362,7 @@ export effect function getAccountEconomy(accountId: string): AccountEconomyView!
     for (const row of predRows) {
       predValueCents += markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
     }
-    const perpRows = try tx.query(
-      `SELECT p.holder_id, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
-       FROM feed_perp_positions p
-       JOIN feed_perp_markets m ON m.ticker = p.ticker
-       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.status = 'open'`,
-      [accountId]
-    )
+    const perpRows = try loadOpenUserPerpRows(tx, accountId)
     let perpValueCents = 0
     for (const row of perpRows) {
       const equity = positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents))
@@ -579,6 +584,14 @@ effect function alreadyCompletedWebhookResult(
   }
 }
 
+effect function lockAccountBalance(tx: Tx, accountId: string): number!(MarketFailure | StoreFailure) {
+  const rows = try tx.query("SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE", [accountId])
+  if (rows.length === 0) {
+    throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
+  }
+  return toInt(rows[0]!.balance_cents)
+}
+
 effect function applyStripeReversalTx(
   tx: Tx,
   params: {
@@ -608,14 +621,7 @@ effect function applyStripeReversalTx(
   const sessionId = requiredText(purchase.stripe_session_id)
   const purchasePointsCents = toInt(purchase.points_cents)
   const prevRefundedUsdCents = toInt(purchase.refunded_cents)
-  const acctRows = try tx.query(
-    "SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE",
-    [accountId]
-  )
-  if (acctRows.length === 0) {
-    throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
-  }
-  const currentBalanceCents = toInt(acctRows[0]!.balance_cents)
+  const currentBalanceCents = try lockAccountBalance(tx, accountId)
   const existingReversal = params.disputeId !== null
     ? try tx.query(
         "SELECT id FROM feed_stripe_reversals WHERE stripe_event_id = $1 OR dispute_id = $2 LIMIT 1",
@@ -740,14 +746,7 @@ effect function handleDisputeWonTx(
   const accountId = requiredText(reversal.account_id)
   const sessionId = requiredText(reversal.stripe_session_id)
   const debitedPtsCents = toInt(reversal.debited_pts_cents)
-  const acctRows = try tx.query(
-    "SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE",
-    [accountId]
-  )
-  if (acctRows.length === 0) {
-    throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
-  }
-  const currentBalanceCents = toInt(acctRows[0]!.balance_cents)
+  const currentBalanceCents = try lockAccountBalance(tx, accountId)
   if (reversal.restored_at !== null) {
     return try alreadyCompletedWebhookResult(tx, params.eventType, accountId, sessionId)
   }
@@ -822,50 +821,28 @@ export effect function handleStripeWebhook(
   if (event === undefined) {
     throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Webhook body does not match Stripe event shape")
   }
-  if (event.type === "charge.refunded") {
-    const paymentIntentId = extractPaymentIntentId(event.data.object)
-    const amountRefundedUsdCents = toInt(event.data.object.amount_refunded)
-    if (Number.isNaN(amountRefundedUsdCents) || amountRefundedUsdCents < 0) {
-      throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Charge refund missing valid amount_refunded")
-    }
-    if (paymentIntentId === null) {
-      return unprocessedWebhookResult(event.type)
-    }
-    return try store.transaction(effect (tx: Tx) =>
-      try applyStripeReversalTx(tx, {
-        eventId: event.id,
-        eventType: event.type,
-        kind: "refund",
-        paymentIntentId,
-        disputeId: null,
-        amountUsdCents: amountRefundedUsdCents,
-        isCumulativeRefund: true,
-        now
-      })
-    )
-  }
-  if (event.type === "charge.dispute.created") {
-    const disputeId = toText(event.data.object.id)?.trim() ?? ""
-    const amountUsdCents = toInt(event.data.object.amount)
+  if (event.type === "charge.refunded" || event.type === "charge.dispute.created") {
+    const isCumulativeRefund = event.type === "charge.refunded"
+    const disputeId = isCumulativeRefund ? null : toText(event.data.object.id)?.trim() ?? ""
+    const amountUsdCents = toInt(isCumulativeRefund ? event.data.object.amount_refunded : event.data.object.amount)
     if (disputeId === "" || Number.isNaN(amountUsdCents) || amountUsdCents < 0) {
-      throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Dispute created missing id or valid amount")
+      const message = isCumulativeRefund ? "Charge refund missing valid amount_refunded" : "Dispute created missing id or valid amount"
+      throw marketFail("INVALID_WEBHOOK_PAYLOAD", message)
     }
     const paymentIntentId = extractPaymentIntentId(event.data.object)
     if (paymentIntentId === null) {
       return unprocessedWebhookResult(event.type)
     }
-    return try store.transaction(effect (tx: Tx) =>
-      try applyStripeReversalTx(tx, {
-        eventId: event.id,
-        eventType: event.type,
-        kind: "dispute",
-        paymentIntentId,
-        disputeId,
-        amountUsdCents,
-        isCumulativeRefund: false,
-        now
-      })
-    )
+    return try store.transaction((tx: Tx) => applyStripeReversalTx(tx, {
+      eventId: event.id,
+      eventType: event.type,
+      kind: isCumulativeRefund ? "refund" : "dispute",
+      paymentIntentId,
+      disputeId,
+      amountUsdCents,
+      isCumulativeRefund,
+      now
+    }))
   }
   if (event.type === "charge.dispute.closed") {
     const disputeId = toText(event.data.object.id)?.trim() ?? ""
@@ -1015,12 +992,7 @@ export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntr
       const mtm = markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
       predMap.set(holderId, (predMap.get(holderId) ?? 0) + mtm)
     }
-    const perpRows = try tx.query(
-      `SELECT p.holder_id, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
-       FROM feed_perp_positions p
-       JOIN feed_perp_markets m ON m.ticker = p.ticker
-       WHERE p.holder_kind = 'user' AND p.status = 'open'`
-    )
+    const perpRows = try loadOpenUserPerpRows(tx)
     const perpMap = new Map<string, number>()
     for (const row of perpRows) {
       const holderId = requiredText(row.holder_id)

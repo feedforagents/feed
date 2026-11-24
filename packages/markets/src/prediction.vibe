@@ -372,12 +372,6 @@ interface LockedPredictionContext {
   readonly requestFingerprint: string
 }
 
-interface PredictionIdempotencySpec {
-  readonly actorId: string
-  readonly rawKey: string | undefined
-  readonly fingerprint: string
-}
-
 interface RecordPredictionTradeParams {
   readonly tx: Tx
   readonly marketId: string
@@ -482,22 +476,21 @@ effect function findIdempotentPredictionReceipt(
 }
 
 effect function withLockedPredictionMarket(
-  marketId: string,
-  rawViaClientName: string | undefined,
-  idempotency: PredictionIdempotencySpec,
+  input: Pick<BuyPredictionInput, "marketId" | "viaClientName" | "actorId" | "idempotencyKey">,
+  requestFingerprint: string,
   run: (ctx: LockedPredictionContext) => TradeReceipt!(MarketFailure | StoreFailure)
 ): TradeReceipt!(MarketFailure | StoreFailure)!Store {
-  const viaClientName = normalizeViaClient(rawViaClientName)
-  const idempotencyKey = try normalizeIdempotencyKey(idempotency.rawKey)
+  const viaClientName = normalizeViaClient(input.viaClientName)
+  const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     if (idempotencyKey !== null) {
-      const replayed = try findIdempotentPredictionReceipt(tx, idempotency.actorId, idempotencyKey, idempotency.fingerprint)
+      const replayed = try findIdempotentPredictionReceipt(tx, input.actorId, idempotencyKey, requestFingerprint)
       if (replayed !== null) return replayed
     }
-    const market = try lockOpenPredictionMarket(tx, marketId, now)
-    return try run({ tx, market, now, viaClientName, idempotencyKey, requestFingerprint: idempotency.fingerprint })
+    const market = try lockOpenPredictionMarket(tx, input.marketId, now)
+    return try run({ tx, market, now, viaClientName, idempotencyKey, requestFingerprint })
   })
 }
 
@@ -618,9 +611,8 @@ export effect function buyPredictionShares(input: BuyPredictionInput): TradeRece
   }
   const fingerprint = `buy:${input.marketId}:${input.side}:${input.amountCents}`
   return try withLockedPredictionMarket(
-    input.marketId,
-    input.viaClientName,
-    { actorId: input.actorId, rawKey: input.idempotencyKey, fingerprint },
+    input,
+    fingerprint,
     effect ({ tx, market, now, viaClientName, idempotencyKey, requestFingerprint }) => {
       const yesShares = toInt(market.yes_shares)
       const noShares = toInt(market.no_shares)
@@ -686,9 +678,8 @@ export effect function sellPredictionShares(input: SellPredictionInput): TradeRe
   try assertSafePositiveInt(input.shares, "INVALID_SHARES", "Shares to sell must be a positive integer")
   const fingerprint = `sell:${input.marketId}:${input.side}:${input.shares}`
   return try withLockedPredictionMarket(
-    input.marketId,
-    input.viaClientName,
-    { actorId: input.actorId, rawKey: input.idempotencyKey, fingerprint },
+    input,
+    fingerprint,
     effect ({ tx, market, now, viaClientName, idempotencyKey, requestFingerprint }) => {
       const dbSide = toDbSide(input.side)
       const posRows = try tx.query(

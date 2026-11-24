@@ -23,7 +23,9 @@ import {
   listPredictionMarkets,
   openPerpPosition,
   resolvePredictionMarket,
-  sellPredictionShares
+  sellPredictionShares,
+  type BuyPredictionInput,
+  type SellPredictionInput
 } from "../src/index.vibe"
 
 module node {
@@ -54,17 +56,17 @@ effect function runWithSeededDb<A, E>(body: A!E!Store) {
   }
 }
 
+const FEED_ACCOUNT_COLUMNS = `account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2,
+  phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents,
+  purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
+  created_at, updated_at`
+
 effect function createVerifiedAccount(accountId: string, handle: string, balanceCents = 10_000): void!StoreFailure!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
   try store.transaction(effect (tx: Tx) => {
     try tx.query(
-      `INSERT INTO feed_accounts (
-         account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2,
-         phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents,
-         purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
-         created_at, updated_at
-       ) VALUES ($1, $2, $3, '', NULL, $4, '01', $5, $5, 'game', $6, $6, 0, 0, false, false, NULL, $5, $5)`,
+      `INSERT INTO feed_accounts (${FEED_ACCOUNT_COLUMNS}) VALUES ($1, $2, $3, '', NULL, $4, '01', $5, $5, 'game', $6, $6, 0, 0, false, false, NULL, $5, $5)`,
       [accountId, handle, handle, `phone-hash-${accountId}`, now, balanceCents]
     )
   })
@@ -528,11 +530,17 @@ it.effect('Economy and Stripe Checkout: Washington geo-block, idempotent HMAC we
   })
 })
 
-it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement, and resolved notifications (spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () => effect {
+effect function runWithSeededMarketDay<A, E>(body: (now: number) => A!E!Store) {
   try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
-  try runWithSeededDb(effect {
-    const store = try Store
+  return try runWithSeededDb(effect {
     const now = try Clock.currentTimeMillis
+    return try body(now)
+  })
+}
+
+it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement, and resolved notifications (spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    const store = try Store
     try createVerifiedAccount("user-alice", "alice", 500_000)
     try createVerifiedAccount("user-bob", "bob", 500_000)
     try createVerifiedAccount("user-carol", "carol", 500_000)
@@ -615,62 +623,29 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
       shares: 12_000
     })
 
-    const idemBuy1 = try buyPredictionShares({
+    const idempotentBuy: BuyPredictionInput = {
       actorId: "user-alice",
       actorKind: "user",
       marketId: "seed-market-1",
       side: "yes",
       amountCents: 1_000,
       idempotencyKey: "trade-key-1"
-    })
-    const idemBuyReplay = try buyPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "yes",
-      amountCents: 1_000,
-      idempotencyKey: "trade-key-1"
-    })
-    const idemBuyConflictCode = try marketErrorCode(buyPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "yes",
-      amountCents: 2_000,
-      idempotencyKey: "trade-key-1"
-    }))
-    const idemOtherUserBuy = try buyPredictionShares({
-      actorId: "user-bob",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "no",
-      amountCents: 1_000,
-      idempotencyKey: "trade-key-1"
-    })
-    const idemSell1 = try sellPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "yes",
+    }
+    const idemBuy1 = try buyPredictionShares(idempotentBuy)
+    const idemBuyReplay = try buyPredictionShares(idempotentBuy)
+    const idemBuyConflictCode = try marketErrorCode(buyPredictionShares({ ...idempotentBuy, amountCents: 2_000 }))
+    const idemOtherUserBuy = try buyPredictionShares({ ...idempotentBuy, actorId: "user-bob", side: "no" })
+    const idempotentSell: SellPredictionInput = {
+      actorId: idempotentBuy.actorId,
+      actorKind: idempotentBuy.actorKind,
+      marketId: idempotentBuy.marketId,
+      side: idempotentBuy.side,
       shares: idemBuy1.shares,
       idempotencyKey: "trade-sell-1"
-    })
-    const idemSellReplay = try sellPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "yes",
-      shares: idemBuy1.shares,
-      idempotencyKey: "trade-sell-1"
-    })
-    const idemSellConflictCode = try marketErrorCode(sellPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "yes",
-      shares: 100,
-      idempotencyKey: "trade-sell-1"
-    }))
+    }
+    const idemSell1 = try sellPredictionShares(idempotentSell)
+    const idemSellReplay = try sellPredictionShares(idempotentSell)
+    const idemSellConflictCode = try marketErrorCode(sellPredictionShares({ ...idempotentSell, shares: 100 }))
 
     try buyPredictionShares({
       actorId: "user-carol",
@@ -682,14 +657,7 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
 
     // spec/markets/prediction.md, "Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently"
     const resolved = try resolvePredictionMarket({ marketId: "seed-market-1" })
-    const idemReplayAfterClose = try buyPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "yes",
-      amountCents: 1_000,
-      idempotencyKey: "trade-key-1"
-    })
+    const idemReplayAfterClose = try buyPredictionShares(idempotentBuy)
     const zeroSharePos = try store.transaction((tx: Tx) =>
       tx.query(
         "SELECT shares, settled_at FROM feed_prediction_positions WHERE market_id = 'seed-market-1' AND holder_id = 'user-alice' AND side = 'YES'"
@@ -747,13 +715,11 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
       }
     ))
   })
-})
+)
 
-it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unified Stripe refund and dispute reversals (spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () => effect {
-  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
-  try runWithSeededDb(effect {
+it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unified Stripe refund and dispute reversals (spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+  runWithSeededMarketDay(effect (now) => {
     const store = try Store
-    const now = try Clock.currentTimeMillis
     try createVerifiedAccount("user-alice", "alice", 10_000)
     try createVerifiedAccount("user-bob", "bob", 10_000)
 
@@ -765,12 +731,7 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
         [now]
       )
       try tx.query(
-        `INSERT INTO feed_accounts (
-           account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2,
-           phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents,
-           purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
-           created_at, updated_at
-         ) VALUES
+        `INSERT INTO feed_accounts (${FEED_ACCOUNT_COLUMNS}) VALUES
            ('user-deleted', 'deleted_user', 'Deleted', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, 0, false, false, NULL, $1, $1),
            ('user-reviewer', 'reviewer1', 'Reviewer', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, 0, false, true, 'hash', $1, $1),
            ('user-unverified', 'unverified1', 'Unverified', '', NULL, NULL, NULL, NULL, $1, 'game', 50000, 10000, 0, 0, false, false, NULL, $1, $1)`,
@@ -938,4 +899,4 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
       }
     ))
   })
-})
+)
