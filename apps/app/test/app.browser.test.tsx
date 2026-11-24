@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { storeActions } from "../src/web/store.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -151,6 +153,12 @@ const SAMPLE_LEADERBOARD_CHARACTERS = {
 
 const SAMPLE_THREAD = {
   post: SAMPLE_POSTS[0],
+  parentPost: null,
+  replies: [],
+};
+
+const SAMPLE_THREAD_B = {
+  post: { ...SAMPLE_POSTS[0], id: "browser-post-2", content: "Second post for the stale thread fetch probe.", createdAt: Date.now() - 30_000 },
   parentPost: null,
   replies: [],
 };
@@ -305,6 +313,20 @@ function installMockNetwork(threadFetch?: (path: string) => Promise<Response> | 
   vi.stubGlobal("EventSource", StubEventSource);
 }
 
+async function openThreadDialog() {
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
+  await act(() => userEvent.click(homeButton));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  const replyButton = page.getByRole("button", { name: /^Reply/ }).first();
+  await act(() => userEvent.click(replyButton));
+  await expect.element(page.getByText("Post thread")).toBeInTheDocument();
+}
+
 beforeAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -313,6 +335,17 @@ afterEach(async () => {
   for (const root of opened.splice(0)) {
     await act(() => Promise.resolve(root.unmount()));
   }
+  setStoreState({
+    route: "Home",
+    profileHandle: null,
+    selectedTicker: null,
+    localUiMode: "game",
+    joinSheetOpen: false,
+    joinTab: "phone",
+    joinPhoneStep: "entry",
+    activeThread: null,
+    threadLoading: false,
+  });
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
@@ -392,21 +425,18 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
 
 it('Thread close during load stays closed (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const threadGate = { release: () => {} };
+  let threadConsumed = false;
+  const threadBody = Response.json(SAMPLE_THREAD);
+  const readThreadBody = threadBody.text.bind(threadBody);
+  threadBody.text = async () => {
+    threadConsumed = true;
+    return readThreadBody();
+  };
   const threadResponse = new Promise<Response>((resolve) => {
-    threadGate.release = () => resolve(Response.json(SAMPLE_THREAD));
+    threadGate.release = () => resolve(threadBody);
   });
   installMockNetwork((path) => (path.startsWith("/api/posts/") ? threadResponse : null));
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-
-  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
-  await act(() => userEvent.click(homeButton));
-  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
-  const replyButton = page.getByRole("button", { name: /^Reply/ }).first();
-  await act(() => userEvent.click(replyButton));
-  await expect.element(page.getByText("Post thread")).toBeInTheDocument();
+  await openThreadDialog();
 
   await act(() => userEvent.keyboard("{Escape}"));
   await vi.waitFor(() => {
@@ -415,6 +445,43 @@ it('Thread close during load stays closed (spec/app/navigation.md, "Story: Brows
 
   threadGate.release();
   await vi.waitFor(() => {
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(threadConsumed).toBe(true);
   });
+  await act(() => Promise.resolve());
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(getStoreSnapshot().activeThread).toBeNull();
+});
+
+it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const gates = new Map<string, { release: () => void }>();
+  const threadResponses = new Map<string, Promise<Response>>();
+  for (const [id, thread] of [
+    ["browser-post-1", SAMPLE_THREAD],
+    ["browser-post-2", SAMPLE_THREAD_B],
+  ] as const) {
+    const gate = { release: () => {} };
+    threadResponses.set(
+      id,
+      new Promise<Response>((resolve) => {
+        gate.release = () => resolve(Response.json(thread));
+      }),
+    );
+    gates.set(id, gate);
+  }
+  installMockNetwork((path) => {
+    const id = path.startsWith("/api/posts/") ? decodeURIComponent(path.slice("/api/posts/".length)) : null;
+    return id === null ? null : (threadResponses.get(id) ?? null);
+  });
+  await openThreadDialog();
+
+  act(() => {
+    void storeActions.openThread("browser-post-2");
+  });
+  gates.get("browser-post-2")?.release();
+  gates.get("browser-post-1")?.release();
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().activeThread?.post.card.id).toBe("browser-post-2");
+  });
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  await expect.element(page.getByRole("dialog").getByText("Second post for the stale thread fetch probe.")).toBeInTheDocument();
 });
