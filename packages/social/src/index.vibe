@@ -96,11 +96,13 @@ export {
 
 export {
   RealtimeBus,
+  canDeliverRealtimeEventToViewer,
   createSseResponse,
   encodeSseEvent,
   publishFeedEvent,
   realtimeBusLayer,
   subscribeFeedEvents,
+  subscribeViewerFeedEvents,
   toSseReadableStream,
   type FeedRealtimeEvent,
   type SseResponseOptions,

@@ -172,16 +172,34 @@ function buildPairModerationState(
   }
 }
 
+effect function lockAccountPairTx(tx: Tx, a: string, b: string): void!StoreFailure {
+  const pairKey = a < b ? `${a}:${b}` : `${b}:${a}`
+  try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`social:pair:${pairKey}`])
+}
+
+function isUniqueViolationFailure(err: StoreFailure): boolean {
+  const cause = err.cause
+  if (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "23505") {
+    return true
+  }
+  const msg = cause instanceof Error ? cause.message : String(cause)
+  return msg.includes("23505") || msg.toLowerCase().includes("duplicate key")
+}
+
 effect function loadPairSnapshotTx(
   tx: Tx,
   actorId: string,
   targetHandleOrId: string,
-  allowOrgTarget: boolean
+  allowOrgTarget: boolean,
+  lockPair = false
 ): ModerationPairSnapshot!(SocialFailure | StoreFailure) {
   const actor = try resolveUserOrNpcTx(tx, actorId)
   const target = allowOrgTarget
     ? try resolveSubjectTx(tx, targetHandleOrId)
     : try resolveUserOrNpcTx(tx, targetHandleOrId)
+  if (lockPair && actor.id !== target.id) {
+    try lockAccountPairTx(tx, actor.id, target.id)
+  }
   const followRows = try tx.query(
     "SELECT 1 FROM feed_follows WHERE follower_id = $1 AND target_id = $2 LIMIT 1",
     [actor.id, target.id]
@@ -304,7 +322,7 @@ export effect function followAccount(followerId: string, targetHandleOrId: strin
   const store = try Store
   const now = try Clock.currentTimeMillis
   const committed = try store.transaction(effect (tx: Tx) => {
-    const pair = try loadPairSnapshotTx(tx, followerId, targetHandleOrId, true)
+    const pair = try loadPairSnapshotTx(tx, followerId, targetHandleOrId, true, true)
     if (pair.actor.id === pair.target.id) {
       throw new SocialFailure({ code: "InvalidInput", message: "Cannot follow yourself" })
     }
@@ -352,7 +370,7 @@ export effect function followAccount(followerId: string, targetHandleOrId: strin
 export effect function unfollowAccount(followerId: string, targetHandleOrId: string): FollowResult!(SocialFailure | StoreFailure)!Store {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const pair = try loadPairSnapshotTx(tx, followerId, targetHandleOrId, true)
+    const pair = try loadPairSnapshotTx(tx, followerId, targetHandleOrId, true, true)
     if (pair.following && !canUnfollowUser(pair.state, pair.target.id, pair.actor.id)) {
       throw new SocialFailure({ code: "Forbidden", message: "Cannot unfollow account" })
     }
@@ -373,7 +391,7 @@ export effect function blockAccount(blockerId: string, targetHandleOrId: string)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const pair = try loadPairSnapshotTx(tx, blockerId, targetHandleOrId, false)
+    const pair = try loadPairSnapshotTx(tx, blockerId, targetHandleOrId, false, true)
     if (pair.actor.id === pair.target.id) {
       throw new SocialFailure({ code: "InvalidInput", message: "Cannot block yourself" })
     }
@@ -404,7 +422,7 @@ export effect function blockAccount(blockerId: string, targetHandleOrId: string)
 export effect function unblockAccount(blockerId: string, targetHandleOrId: string): BlockResult!(SocialFailure | StoreFailure)!Store {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const pair = try loadPairSnapshotTx(tx, blockerId, targetHandleOrId, false)
+    const pair = try loadPairSnapshotTx(tx, blockerId, targetHandleOrId, false, true)
     if (pair.directBlock && !canUnblock(pair.state, pair.target.id, pair.actor.id)) {
       throw new SocialFailure({ code: "Forbidden", message: "Cannot unblock account" })
     }
@@ -494,6 +512,10 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
     if (reporter.id === targetOwnerId) {
       throw new SocialFailure({ code: "InvalidInput", message: "Cannot report yourself or your own post" })
     }
+    try tx.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+      [`social:report:${reporter.id}:${input.targetKind}:${resolvedTargetId}`]
+    )
     const existingOpen = try tx.query(
       "SELECT 1 FROM feed_reports WHERE reporter_id = $1 AND target_id = $2 AND target_kind = $3 AND status = 'open' LIMIT 1",
       [reporter.id, resolvedTargetId, input.targetKind]
@@ -529,10 +551,15 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
       throw new SocialFailure({ code: "Conflict", message: "An open report already exists for this target" })
     }
     const id = freshId()
-    try tx.query(
+    tx.query(
       "INSERT INTO feed_reports (id, reporter_id, target_id, target_kind, reason, status, created_at) VALUES ($1, $2, $3, $4, $5, 'open', $6)",
       [id, reporter.id, resolvedTargetId, input.targetKind, reason, now]
-    )
+    ) catch effect (err) => {
+      if (isUniqueViolationFailure(err)) {
+        throw new SocialFailure({ code: "Conflict", message: "An open report already exists for this target" })
+      }
+      throw err
+    }
     return {
       id,
       reporterId: reporter.id,
@@ -573,6 +600,13 @@ effect function requireAccountUiModeTx(
   return toText(accountRows[0]?.ui_mode) === "social" ? "social" : "game"
 }
 
+function notificationVisibilityWhereSql(mode: SocialPresentationMode): string {
+  const modeFilter = mode === "social"
+    ? " AND n.is_game_only = false AND n.kind NOT IN ('market_resolved', 'pnl_digest')"
+    : ""
+  return `n.account_id = $1${modeFilter} AND (n.post_id IS NULL OR (p.id IS NOT NULL AND p.deleted_at IS NULL)) AND (n.actor_id IS NULL OR NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1)))`
+}
+
 export effect function listNotifications(
   accountId: string,
   limit?: number,
@@ -588,13 +622,12 @@ export effect function listNotifications(
     const effectiveMode = mode ?? accountMode
     const specMode = toSpecMode(effectiveMode)
     const rows = try tx.query(
-      "SELECT n.* FROM feed_notifications n WHERE n.account_id = $1 AND (n.actor_id IS NULL OR NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1))) ORDER BY n.created_at DESC, n.id DESC LIMIT $2",
-      [accountId, effectiveLimit * 2]
+      `SELECT n.* FROM feed_notifications n LEFT JOIN feed_posts p ON p.id = n.post_id WHERE ${notificationVisibilityWhereSql(effectiveMode)} ORDER BY n.created_at DESC, n.id DESC LIMIT $2`,
+      [accountId, effectiveLimit]
     )
     return rows
       .map(rowToNotification)
       .filter((notif) => isVisibleInMode(toSpecNotificationKind(notif.kind, notif.isGameOnly), specMode))
-      .slice(0, effectiveLimit)
   })
 }
 
@@ -603,11 +636,8 @@ effect function countUnreadNotificationsTx(
   accountId: string,
   mode: SocialPresentationMode
 ): number!StoreFailure {
-  const modeFilter = mode === "social"
-    ? " AND n.is_game_only = false AND n.kind NOT IN ('market_resolved', 'pnl_digest')"
-    : ""
   const rows = try tx.query(
-    `SELECT count(*) AS count FROM feed_notifications n WHERE n.account_id = $1 AND n.read_at IS NULL${modeFilter} AND (n.actor_id IS NULL OR NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1)))`,
+    `SELECT count(*) AS count FROM feed_notifications n LEFT JOIN feed_posts p ON p.id = n.post_id WHERE n.read_at IS NULL AND ${notificationVisibilityWhereSql(mode)}`,
     [accountId]
   )
   return safeInt(rows[0]?.count, 0)
@@ -639,7 +669,7 @@ export effect function markNotificationsRead(
   return try store.transaction(effect (tx: Tx) => {
     const mode = try requireAccountUiModeTx(tx, accountId)
     const unreadRows = try tx.query(
-      "SELECT id, kind, actor_id, is_game_only FROM feed_notifications WHERE account_id = $1 AND read_at IS NULL",
+      `SELECT n.id, n.kind, n.actor_id, n.is_game_only FROM feed_notifications n LEFT JOIN feed_posts p ON p.id = n.post_id WHERE n.read_at IS NULL AND ${notificationVisibilityWhereSql(mode)}`,
       [accountId]
     )
     const specNotifs: SpecNotification[] = unreadRows.map((row, idx) => ({
@@ -663,13 +693,10 @@ export effect function markNotificationsRead(
     if (!canMarkNotificationsRead(modState, accountId) || (notificationIds !== undefined && notificationIds.length === 0)) {
       return { markedCount: 0, unreadCount: try countUnreadNotificationsTx(tx, accountId, mode) }
     }
-    const modeFilter = mode === "social"
-      ? " AND is_game_only = false AND kind NOT IN ('market_resolved', 'pnl_digest')"
-      : ""
-    const idFilter = notificationIds !== undefined ? " AND id = ANY($3)" : ""
+    const idFilter = notificationIds !== undefined ? " AND n.id = ANY($3)" : ""
     const params: unknown[] = notificationIds !== undefined ? [accountId, now, [...notificationIds]] : [accountId, now]
     const updated = try tx.query(
-      `UPDATE feed_notifications SET read_at = $2 WHERE account_id = $1 AND read_at IS NULL${modeFilter}${idFilter} RETURNING id`,
+      `UPDATE feed_notifications n SET read_at = $2 WHERE n.read_at IS NULL AND n.id IN (SELECT n2.id FROM feed_notifications n2 LEFT JOIN feed_posts p ON p.id = n2.post_id WHERE n2.read_at IS NULL AND ${notificationVisibilityWhereSql(mode).replace(/\bn\./g, "n2.")})${idFilter} RETURNING n.id`,
       params
     )
     return {

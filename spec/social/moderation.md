@@ -6,14 +6,14 @@ User blocks, mutes, post and user reports, in-app notifications, unread counts, 
 
 ### Accounts, moderation edges, reports, and notifications
 
-Each account stores its presentation mode (`GameMode` or `SocialMode`), open trading position count (owned by the markets domain and preserved across mode switches), and unread notification count. Reports target either a user (`UserTarget`, `targetPostId == 0`) or a specific post (`PostTarget`, `targetPostId > 0`). Notifications cover social/invite events as well as `MarketResolved` and `PnLDigest`.
+Each account stores its presentation mode (`GameMode` or `SocialMode`), open trading position count (owned by the markets domain and preserved across mode switches), and unread notification count. Reports target either a user (`UserTarget`, `targetPostId == 0`) or a specific post (`PostTarget`, `targetPostId > 0`). Notifications cover social, chat message, and invite events as well as `MarketResolved` and `PnLDigest`.
 
 ```quint
 type PresentationMode = GameMode | SocialMode
 type ReportTargetKind = UserTarget | PostTarget
 type ReportCategory = Spam | Harassment | Impersonation | OtherViolation
 type ReportStatus = PendingReview | ResolvedActioned | Dismissed
-type NotificationKind = SocialReply | SocialMention | SocialLike | SocialFollow | GroupInvite | MarketResolved | PnLDigest
+type NotificationKind = SocialReply | SocialMention | SocialLike | SocialFollow | ChatMessage | GroupInvite | MarketResolved | PnLDigest
 
 type AccountModeration = {
   id: str,

@@ -220,6 +220,7 @@ interface ParsedCursor {
 }
 
 const POSTS_PER_HOUR_LIMIT = 30
+const MAX_REPLY_ANCESTOR_DEPTH = 50
 
 function toAuthorKind(raw: unknown): PostAuthorKind {
   const value = toText(raw)
@@ -346,6 +347,22 @@ effect function hydratePostRowsTx(
     quoteMap.set(preview.id, preview)
   }
   const postIds = rows.map((r) => toText(r.id) ?? "").filter(Boolean)
+  const replyCountMap = new Map<string, number>()
+  if (postIds.length > 0) {
+    const replyCountRows = viewerId !== undefined && viewerId !== ""
+      ? try tx.query(
+          `SELECT r.reply_to_post_id AS post_id, count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = ANY($1) AND r.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "r.author_id")} GROUP BY r.reply_to_post_id`,
+          [postIds, viewerId]
+        )
+      : try tx.query(
+          "SELECT r.reply_to_post_id AS post_id, count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = ANY($1) AND r.deleted_at IS NULL GROUP BY r.reply_to_post_id",
+          [postIds]
+        )
+    for (const row of replyCountRows) {
+      const pid = toText(row.post_id)
+      if (pid !== undefined) replyCountMap.set(pid, safeInt(row.visible_count, 0))
+    }
+  }
   const likedSet = new Set<string>()
   const repostedSet = new Set<string>()
   if (viewerId !== undefined && viewerId !== "" && postIds.length > 0) {
@@ -377,7 +394,7 @@ effect function hydratePostRowsTx(
       quotePost: quotePostId === null ? null : (quoteMap.get(quotePostId) ?? null),
       likeCount: safeInt(row.like_count, 0),
       repostCount: safeInt(row.repost_count, 0),
-      replyCount: safeInt(row.reply_count, 0),
+      replyCount: replyCountMap.get(base.id) ?? 0,
       likedByViewer: likedSet.has(base.id),
       repostedByViewer: repostedSet.has(base.id)
     }
@@ -404,12 +421,14 @@ function parseCursor(cursor: string | undefined, requireScore: boolean): ParsedC
   return { score: undefined, createdAt, id }
 }
 
-function encodeCursor(post: PostView, tab: FeedTab): string {
+function encodeCursorFromRow(row: Row, tab: FeedTab): string {
+  const createdAt = safeInt(row.created_at, 0)
+  const id = toText(row.id) ?? ""
   if (tab === "top") {
-    const score = post.likeCount * 2 + post.repostCount * 3 + post.replyCount * 2
-    return `${score}:${post.createdAt}:${post.id}`
+    const score = safeInt(row.like_count, 0) * 2 + safeInt(row.repost_count, 0) * 3 + safeInt(row.reply_count, 0) * 2
+    return `${score}:${createdAt}:${id}`
   }
-  return `${post.createdAt}:${post.id}`
+  return `${createdAt}:${id}`
 }
 
 export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(SocialFailure | StoreFailure)!Store {
@@ -474,10 +493,10 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
     const hasMore = rows.length > limit
     const pageRows = hasMore ? rows.slice(0, limit) : rows
     const items = try hydratePostRowsTx(tx, pageRows, viewerId, mode)
-    const last = items[items.length - 1]
+    const lastRow = pageRows[pageRows.length - 1]
     return {
       items,
-      nextCursor: hasMore && last !== undefined ? encodeCursor(last, input.tab) : null
+      nextCursor: hasMore && lastRow !== undefined ? encodeCursorFromRow(lastRow, input.tab) : null
     }
   })
 }
@@ -554,23 +573,52 @@ effect function resolveReferencePostTx(
   tx: Tx,
   authorId: string,
   targetPostId: string | null,
-  label: string
+  label: string,
+  walkReplyAncestors: boolean
 ): ({ readonly id: string; readonly authorId: string; readonly authorKind: PostAuthorKind } | undefined)!(SocialFailure | StoreFailure) {
   if (targetPostId === null) return undefined
   const rows = try tx.query(
-    "SELECT id, author_id, author_kind FROM feed_posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
+    "SELECT id, author_id, author_kind, reply_to_post_id FROM feed_posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
     [targetPostId]
   )
   const row = rows[0]
   if (row === undefined) {
     throw new SocialFailure({ code: "NotFound", message: `${label} target post not found` })
   }
+  const resolvedId = toText(row.id) ?? targetPostId
   const targetAuthorId = toText(row.author_id) ?? ""
   if (try isBlockedBetweenTx(tx, authorId, targetAuthorId)) {
     throw new SocialFailure({ code: "Blocked", message: `Cannot ${label.toLowerCase()} a post from a blocked account` })
   }
+  const parentReplyToPostId = toText(row.reply_to_post_id) ?? null
+  if (walkReplyAncestors && parentReplyToPostId !== null) {
+    const blockedAncestors = try tx.query(
+      `WITH RECURSIVE ancestors(id, author_id, reply_to_post_id, depth, visited) AS (
+         SELECT id, author_id, reply_to_post_id, 1, ARRAY[$1::text, id]
+         FROM feed_posts
+         WHERE id = $2 AND id <> $1
+         UNION ALL
+         SELECT p.id, p.author_id, p.reply_to_post_id, a.depth + 1, a.visited || p.id
+         FROM feed_posts p
+         INNER JOIN ancestors a ON p.id = a.reply_to_post_id
+         WHERE a.reply_to_post_id IS NOT NULL
+           AND a.depth < $3
+           AND NOT (p.id = ANY(a.visited))
+       )
+       SELECT 1
+       FROM ancestors a
+       INNER JOIN feed_blocks b
+         ON (b.blocker_id = $4 AND b.blocked_id = a.author_id)
+         OR (b.blocker_id = a.author_id AND b.blocked_id = $4)
+       LIMIT 1`,
+      [resolvedId, parentReplyToPostId, MAX_REPLY_ANCESTOR_DEPTH, authorId]
+    )
+    if (blockedAncestors.length > 0) {
+      throw new SocialFailure({ code: "Blocked", message: "Cannot reply in a thread with a blocked ancestor account" })
+    }
+  }
   return {
-    id: toText(row.id) ?? targetPostId,
+    id: resolvedId,
     authorId: targetAuthorId,
     authorKind: toAuthorKind(row.author_kind)
   }
@@ -607,10 +655,10 @@ export effect function createPost(input: CreatePostInput): PostView!(SocialFailu
           throw new SocialFailure({ code: "Forbidden", message: "Active connected agent grant does not match viaClientName" })
         }
       }
-      try consumeHourlyRateLimitTx(tx, `social:post:${input.authorId}`, POSTS_PER_HOUR_LIMIT, now)
+      try consumeHourlyRateLimitTx(tx, `${input.authorId}:post`, POSTS_PER_HOUR_LIMIT, now)
     }
-    const replyTarget = try resolveReferencePostTx(tx, input.authorId, replyToPostId, "Reply")
-    const quoteTarget = try resolveReferencePostTx(tx, input.authorId, quotePostId, "Quote")
+    const replyTarget = try resolveReferencePostTx(tx, input.authorId, replyToPostId, "Reply", true)
+    const quoteTarget = try resolveReferencePostTx(tx, input.authorId, quotePostId, "Quote", false)
     const specAccounts: AccountInfo[] = [
       {
         id: input.authorId,

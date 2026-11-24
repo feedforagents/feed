@@ -90,6 +90,7 @@ export function toSpecNotificationKind(kind: string, isGameOnly: boolean): Notif
   if (kind === "mention") return "SocialMention"
   if (kind === "like") return "SocialLike"
   if (kind === "follow") return "SocialFollow"
+  if (kind === "chat_message") return "ChatMessage"
   if (kind === "group_invite") return "GroupInvite"
   return "SocialReply"
 }
@@ -309,7 +310,9 @@ export effect function insertNotificationTx(
     notificationId: id,
     accountId: seed.accountId,
     kind: seed.kind,
-    isGameOnly: seed.isGameOnly
+    isGameOnly: seed.isGameOnly,
+    actorId: seed.actorId,
+    recipientIds: [seed.accountId]
   }
 }
 

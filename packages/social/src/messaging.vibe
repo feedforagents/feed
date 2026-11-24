@@ -275,8 +275,19 @@ effect function hydrateChatsTx(
     else bucket.push(view)
   }
   const latestMsgRows = try tx.query(
-    "SELECT DISTINCT ON (chat_id) chat_id, body, created_at FROM feed_messages WHERE chat_id = ANY($1) ORDER BY chat_id, created_at DESC, id DESC",
-    [chatIds]
+    `SELECT DISTINCT ON (m.chat_id) m.chat_id, m.body, m.created_at
+     FROM feed_messages m
+     INNER JOIN feed_chats c ON c.id = m.chat_id
+     WHERE m.chat_id = ANY($1)
+       AND (
+         c.kind = 'direct'
+         OR (
+           NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $2 AND b.blocked_id = m.sender_id) OR (b.blocker_id = m.sender_id AND b.blocked_id = $2))
+           AND NOT EXISTS (SELECT 1 FROM feed_mutes mu WHERE mu.muter_id = $2 AND mu.muted_id = m.sender_id)
+         )
+       )
+     ORDER BY m.chat_id, m.created_at DESC, m.id DESC`,
+    [chatIds, viewerId]
   )
   const latestByChat = new Map<string, { readonly body: string; readonly createdAt: number }>()
   for (const row of latestMsgRows) {
@@ -338,7 +349,7 @@ export effect function getChatMessages(
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const account = try resolveUserOrNpcTx(tx, accountId)
-    try loadChatHeaderTx(tx, chatId)
+    const chat = try loadChatHeaderTx(tx, chatId)
     const membershipRows = try tx.query(
       "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
       [chatId, account.id]
@@ -346,10 +357,22 @@ export effect function getChatMessages(
     if (membershipRows.length === 0) {
       throw new SocialFailure({ code: "Forbidden", message: "Not a member of this chat" })
     }
-    const messageRows = try tx.query(
-      "SELECT * FROM (SELECT * FROM feed_messages WHERE chat_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2) recent ORDER BY created_at ASC, id ASC",
-      [chatId, effectiveLimit]
-    )
+    const messageRows = chat.kind === "direct"
+      ? try tx.query(
+          "SELECT * FROM (SELECT * FROM feed_messages WHERE chat_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2) recent ORDER BY created_at ASC, id ASC",
+          [chatId, effectiveLimit]
+        )
+      : try tx.query(
+          `SELECT * FROM (
+             SELECT m.* FROM feed_messages m
+             WHERE m.chat_id = $1
+               AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $3 AND b.blocked_id = m.sender_id) OR (b.blocker_id = m.sender_id AND b.blocked_id = $3))
+               AND NOT EXISTS (SELECT 1 FROM feed_mutes mu WHERE mu.muter_id = $3 AND mu.muted_id = m.sender_id)
+             ORDER BY m.created_at DESC, m.id DESC
+             LIMIT $2
+           ) recent ORDER BY created_at ASC, id ASC`,
+          [chatId, effectiveLimit, account.id]
+        )
     if (messageRows.length === 0) return []
     const profiles = try loadParticipantProfilesTx(tx, messageRows)
     const msgIds = messageRows.map((r) => toText(r.id) ?? "").filter(Boolean)
@@ -544,7 +567,7 @@ export effect function sendChatMessage(input: SendChatMessageInput): ChatMessage
           throw new SocialFailure({ code: "Forbidden", message: "Active connected agent grant does not match viaClientName" })
         }
       }
-      try consumeHourlyRateLimitTx(tx, `social:dm:${sender.id}`, DMS_PER_HOUR_LIMIT, now)
+      try consumeHourlyRateLimitTx(tx, `${sender.id}:dm`, DMS_PER_HOUR_LIMIT, now)
     }
     const chat = try loadChatHeaderTx(tx, input.chatId)
     const kind = chat.kind
@@ -597,6 +620,7 @@ export effect function sendChatMessage(input: SendChatMessageInput): ChatMessage
       reactions: [],
       createdAt: now
     }
+    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
     const events: FeedRealtimeEvent[] = [
       {
         type: "chat.message",
@@ -604,9 +628,26 @@ export effect function sendChatMessage(input: SendChatMessageInput): ChatMessage
         messageId,
         senderId: sender.id,
         senderKind: input.senderKind,
-        createdAt: now
+        createdAt: now,
+        recipientIds
       }
     ]
+    for (const memberRow of memberRows) {
+      const memberId = toText(memberRow.member_id) ?? ""
+      if (memberId === "" || memberId === sender.id || toSenderKind(memberRow.member_kind) !== "user") continue
+      const notifEvent = try insertNotificationTx(tx, {
+        accountId: memberId,
+        kind: "chat_message",
+        actorId: sender.id,
+        postId: null,
+        marketId: null,
+        title: kind === "direct" ? "New direct message" : "New chat message",
+        body: input.content.slice(0, 120),
+        isGameOnly: false,
+        createdAt: now
+      })
+      if (notifEvent !== undefined) events.push(notifEvent)
+    }
     return { message, events }
   })
   try emitAfterCommit(committed.events)
@@ -691,7 +732,8 @@ export effect function reactToMessage(input: ReactToMessageInput): ReactToMessag
         "INSERT INTO feed_message_reactions (message_id, account_id, emoji, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT (message_id, account_id, emoji) DO NOTHING",
         [input.messageId, account.id, emoji, now]
       )
-      events.push({ type: "chat.reaction", chatId, messageId: input.messageId, accountId: account.id, emoji })
+      const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
+      events.push({ type: "chat.reaction", chatId, messageId: input.messageId, accountId: account.id, emoji, recipientIds })
     }
     return {
       result: { messageId: input.messageId, chatId, accountId: account.id, emoji, added: true },
@@ -832,7 +874,8 @@ export effect function respondAlphaInvite(input: RespondAlphaInviteInput): Alpha
         chatId,
         invitedAccountId: account.id,
         invitedByNpcId: inviterId,
-        status: nextStatus
+        status: nextStatus,
+        recipientIds: [account.id]
       }
     ]
     return { invite: updatedView, events }
@@ -947,7 +990,8 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
         chatId,
         invitedAccountId: input.targetAccountId,
         invitedByNpcId: actorId,
-        status: "pending"
+        status: "pending",
+        recipientIds: [input.targetAccountId]
       }
     ]
     const notifEvent = try insertNotificationTx(tx, {

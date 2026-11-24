@@ -3,10 +3,12 @@ import { assert, it } from "@effect/vitest"
 import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
 import {
+  type FeedRealtimeEvent,
   type RealtimeBus,
   SocialFailure,
   assertAllowedChatKind,
   blockAccount,
+  canDeliverRealtimeEventToViewer,
   createDirectChat,
   createNpcAlphaInvite,
   createPost,
@@ -488,6 +490,7 @@ it.effect(
     ))
     const teamChatRows = try queryStore("SELECT id FROM feed_chats WHERE kind = 'team'")
 
+    try TestClock.adjust(Duration.seconds(1))
     const alphaInvite = try createNpcAlphaInvite({
       actorId: "ailon-musk",
       targetAccountId: "alice",
@@ -580,7 +583,11 @@ it.effect(
         "ailon-musk",
         "inner_circle",
         [alphaInvite.id],
-        [["group_invite", "ailon-musk", false]],
+        [
+          ["group_invite", "ailon-musk", false],
+          ["chat_message", "bob", false],
+          ["chat_message", "bob", false]
+        ],
         "Forbidden",
         false,
         "accepted",
@@ -592,6 +599,274 @@ it.effect(
           members: [["ailon-musk", "npc", "owner"], ["alice", "user", "member"]]
         },
         [[npcAlphaMsg.id, "ailon-musk", "npc", "Orbital alpha signal"]]
+      ]
+    }))
+  })
+)
+
+it.effect(
+  'canonical rate limits, nested reply ancestor block walk, viewer-adjusted replyCount, group chat filtering, notification visibility, concurrency locks, and SSE viewer auth/fail-closed delivery (spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"; spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 10_000, "game")
+    try seedAccount("bob", "bob", "Bob Trader", 10_000, "game")
+    try seedAccount("carol", "carol", "Carol Analyst", 10_000, "game")
+    try seedAccount("dave", "dave", "Dave Observer", 10_000, "social")
+
+    const root = try createPost({ authorId: "alice", authorKind: "user", content: "Root thread post" })
+    try TestClock.adjust(Duration.seconds(1))
+    const replyBob = try createPost({ authorId: "bob", authorKind: "user", content: "Bob reply", replyToPostId: root.id })
+    try TestClock.adjust(Duration.seconds(1))
+    const replyCarol = try createPost({ authorId: "carol", authorKind: "user", content: "Carol nested reply", replyToPostId: replyBob.id })
+    try TestClock.adjust(Duration.seconds(1))
+    const directCarol = try createPost({ authorId: "carol", authorKind: "user", content: "Carol direct reply", replyToPostId: root.id })
+    try TestClock.adjust(Duration.seconds(1))
+    const directDave = try createPost({ authorId: "dave", authorKind: "user", content: "Dave direct reply", replyToPostId: root.id })
+
+    const postRateRows = try queryStore("SELECT scope_key, count FROM feed_rate_limits WHERE scope_key IN ('alice:post', 'social:post:alice')")
+
+    const dm = try createDirectChat("alice", "bob")
+    try sendChatMessage({ senderId: "alice", senderKind: "user", chatId: dm.id, content: "Rate limit DM check" })
+    const dmRateRows = try queryStore("SELECT scope_key, count FROM feed_rate_limits WHERE scope_key IN ('alice:dm', 'social:dm:alice')")
+
+    try blockAccount("alice", "dave")
+    const blockedAncestorReplyCode = try expectSocialCode(createPost({
+      authorId: "dave",
+      authorKind: "user",
+      content: "Dave trying to reply deep under Alice root",
+      replyToPostId: replyCarol.id
+    }))
+    try deletePost("bob", replyBob.id)
+    const blockedThroughDeletedAncestorCode = try expectSocialCode(createPost({
+      authorId: "dave",
+      authorKind: "user",
+      content: "Dave replying after intermediate reply soft-deleted",
+      replyToPostId: replyCarol.id
+    }))
+    try unblockAccount("alice", "dave")
+
+    const unauthFeed = try listFeedPosts({ tab: "latest", limit: 50 })
+    const unauthRootReplyCount = unauthFeed.items.find((p) => p.id === root.id)?.replyCount
+    try muteAccount("alice", "carol")
+    const aliceFeedMuted = try listFeedPosts({ tab: "latest", viewerId: "alice", limit: 50 })
+    const aliceThreadMuted = try getPostThread(root.id, "alice", "game")
+    const aliceFeedReplyCountMuted = aliceFeedMuted.items.find((p) => p.id === root.id)?.replyCount
+    try unmuteAccount("alice", "carol")
+
+    const notifPost = try createPost({ authorId: "alice", authorKind: "user", content: "Post for notif deletion check" })
+    try TestClock.adjust(Duration.seconds(1))
+    const bobNotifReply = try createPost({ authorId: "bob", authorKind: "user", content: "Reply triggering notif", replyToPostId: notifPost.id })
+    const aliceUnreadBeforeReplyDelete = try getUnreadNotificationCount("alice", "game")
+    const aliceNotifsBeforeReplyDelete = try listNotifications("alice", 50, "game")
+    try deletePost("bob", bobNotifReply.id)
+    const aliceUnreadAfterReplyDelete = try getUnreadNotificationCount("alice", "game")
+    const aliceNotifsAfterReplyDelete = try listNotifications("alice", 50, "game")
+
+    const baseNow = try Clock.currentTimeMillis
+    for (let i = 1; i <= 4; i += 1) {
+      try queryStore(
+        "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ($1, 'alice', 'market_resolved', NULL, NULL, 'seed-market-1', 'Market settled', 'Resolved YES', true, NULL, $2)",
+        [`game-page-notif-${i}`, baseNow + 10_000 + i]
+      )
+    }
+    const aliceSocialPage = try listNotifications("alice", 2, "social")
+
+    const group = try createUserGroupChat("alice", "Filter Desk", ["bob", "carol", "dave"])
+    try TestClock.adjust(Duration.seconds(1))
+    const groupMsgDave = try sendChatMessage({ senderId: "dave", senderKind: "user", chatId: group.id, content: "Dave group message" })
+    try TestClock.adjust(Duration.seconds(1))
+    const groupMsgBob = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: group.id, content: "Bob group message" })
+    try TestClock.adjust(Duration.seconds(1))
+    const groupMsgCarol = try sendChatMessage({ senderId: "carol", senderKind: "user", chatId: group.id, content: "Carol group message" })
+    const bobChatNotifs = try listNotifications("bob", 50, "game")
+    try muteAccount("alice", "bob")
+    try blockAccount("alice", "carol")
+    const groupMsgsForAlice = try getChatMessages("alice", group.id)
+    const aliceChatsFiltered = try listChats("alice")
+    const filteredGroupSummary = aliceChatsFiltered.find((c) => c.id === group.id)
+    try unmuteAccount("alice", "bob")
+    try unblockAccount("alice", "carol")
+
+    const [followRace, blockRace] = try.all([
+      expectSocialCode(followAccount("bob", "alice")),
+      expectSocialCode(blockAccount("alice", "bob"))
+    ])
+    const raceFollowRows = try queryStore(
+      "SELECT 1 FROM feed_follows WHERE (follower_id = 'bob' AND target_id = 'alice') OR (follower_id = 'alice' AND target_id = 'bob')"
+    )
+    const raceBlockRows = try queryStore(
+      "SELECT 1 FROM feed_blocks WHERE blocker_id = 'alice' AND blocked_id = 'bob'"
+    )
+    try unblockAccount("alice", "bob")
+
+    const reportRace = try.all([
+      expectSocialCode(reportTarget({ reporterId: "alice", targetKind: "post", targetId: directCarol.id, reason: "Race 1" })),
+      expectSocialCode(reportTarget({ reporterId: "alice", targetKind: "post", targetId: directCarol.id, reason: "Race 2" }))
+    ])
+    const openReportsCountRows = try queryStore(
+      "SELECT count(*)::int AS count FROM feed_reports WHERE reporter_id = 'alice' AND target_kind = 'post' AND target_id = $1 AND status = 'open'",
+      [directCarol.id]
+    )
+
+    const store = try Store
+    const brokenStore: Store.Shape = {
+      location: store.location,
+      transaction: () => Effect.fail(new StoreFailure({ operation: "query", cause: new Error("db offline") }))
+    }
+    const perpEvent: FeedRealtimeEvent = {
+      type: "market.perp",
+      action: "open",
+      actorId: "ailon-musk",
+      ticker: "NVDAI",
+      side: "long",
+      sizeCents: 7500,
+      leverage: 3
+    }
+    const postEvent: FeedRealtimeEvent = {
+      type: "post.created",
+      postId: directCarol.id,
+      authorId: "carol",
+      authorKind: "user",
+      replyToPostId: root.id,
+      quotePostId: null,
+      createdAt: baseNow
+    }
+    const chatEvent: FeedRealtimeEvent = {
+      type: "chat.message",
+      chatId: group.id,
+      messageId: groupMsgBob.id,
+      senderId: "bob",
+      senderKind: "user",
+      createdAt: baseNow,
+      recipientIds: ["alice", "bob", "carol", "dave"]
+    }
+    const notifGameEvent: FeedRealtimeEvent = {
+      type: "notification.created",
+      notificationId: "notif-1",
+      accountId: "dave",
+      kind: "market_resolved",
+      isGameOnly: true,
+      actorId: null,
+      recipientIds: ["dave"]
+    }
+    const inviteEvent: FeedRealtimeEvent = {
+      type: "alpha.invite",
+      actorId: "ailon-musk",
+      targetAccountId: "alice",
+      recipientIds: ["alice"]
+    }
+
+    const ssePublicPerpUnauth = try canDeliverRealtimeEventToViewer(store, perpEvent, null)
+    const ssePostUnauth = try canDeliverRealtimeEventToViewer(store, postEvent, null)
+    const sseChatUnauth = try canDeliverRealtimeEventToViewer(store, chatEvent, null)
+    const sseInviteUnauth = try canDeliverRealtimeEventToViewer(store, inviteEvent, undefined)
+    const sseNotifUnauth = try canDeliverRealtimeEventToViewer(store, notifGameEvent, null)
+    const sseChatMemberAllowed = try canDeliverRealtimeEventToViewer(store, chatEvent, "alice")
+    try muteAccount("alice", "bob")
+    const sseChatMutedDenied = try canDeliverRealtimeEventToViewer(store, chatEvent, "alice")
+    try unmuteAccount("alice", "bob")
+    try blockAccount("alice", "carol")
+    const ssePostBlockedDenied = try canDeliverRealtimeEventToViewer(store, postEvent, "alice")
+    try unblockAccount("alice", "carol")
+    try leaveGroupChat("dave", group.id)
+    const sseChatNonMemberDenied = try canDeliverRealtimeEventToViewer(store, chatEvent, "dave")
+    const sseGameNotifSocialModeDenied = try canDeliverRealtimeEventToViewer(store, notifGameEvent, "dave")
+    const sseInviteWrongViewerDenied = try canDeliverRealtimeEventToViewer(store, inviteEvent, "bob")
+    const sseInviteRightViewerAllowed = try canDeliverRealtimeEventToViewer(store, inviteEvent, "alice")
+    const sseFailClosedBrokenStorePost = try canDeliverRealtimeEventToViewer(brokenStore, postEvent, "alice")
+    const sseFailClosedBrokenStoreChat = try canDeliverRealtimeEventToViewer(brokenStore, chatEvent, "alice")
+    const sseFailClosedMissingStoreChat = try canDeliverRealtimeEventToViewer(undefined, chatEvent, "alice")
+
+    try check(() => assert.deepStrictEqual({
+      rateKeys: [
+        postRateRows.map((r) => [r.scope_key, r.count]),
+        dmRateRows.map((r) => [r.scope_key, r.count])
+      ],
+      ancestorBlocks: [blockedAncestorReplyCode, blockedThroughDeletedAncestorCode],
+      replyCounts: [
+        unauthRootReplyCount,
+        aliceFeedReplyCountMuted,
+        aliceThreadMuted.post.replyCount,
+        aliceThreadMuted.replies.map((r) => r.id)
+      ],
+      deletedPostNotif: [
+        aliceNotifsBeforeReplyDelete.some((n) => n.postId === bobNotifReply.id),
+        aliceNotifsAfterReplyDelete.some((n) => n.postId === bobNotifReply.id),
+        aliceUnreadBeforeReplyDelete - aliceUnreadAfterReplyDelete
+      ],
+      socialNotifPage: [
+        aliceSocialPage.length,
+        aliceSocialPage.every((n) => !n.isGameOnly)
+      ],
+      groupChat: [
+        bobChatNotifs.some((n) => n.kind === "chat_message" && n.actorId === "alice"),
+        groupMsgsForAlice.map((m) => m.id),
+        filteredGroupSummary?.lastMessagePreview,
+        [groupMsgBob.id, groupMsgCarol.id].every((id) => !groupMsgsForAlice.some((m) => m.id === id))
+      ],
+      concurrency: [
+        blockRace,
+        followRace === "accepted" || followRace === "Blocked",
+        raceBlockRows.length,
+        raceFollowRows.length,
+        [...reportRace].sort(),
+        openReportsCountRows[0]?.count
+      ],
+      sse: [
+        ssePublicPerpUnauth,
+        ssePostUnauth,
+        sseChatUnauth,
+        sseInviteUnauth,
+        sseNotifUnauth,
+        sseChatMemberAllowed,
+        sseChatMutedDenied,
+        ssePostBlockedDenied,
+        sseChatNonMemberDenied,
+        sseGameNotifSocialModeDenied,
+        sseInviteWrongViewerDenied,
+        sseInviteRightViewerAllowed,
+        sseFailClosedBrokenStorePost,
+        sseFailClosedBrokenStoreChat,
+        sseFailClosedMissingStoreChat
+      ]
+    }, {
+      rateKeys: [
+        [["alice:post", 1]],
+        [["alice:dm", 1]]
+      ],
+      ancestorBlocks: ["Blocked", "Blocked"],
+      replyCounts: [2, 1, 1, [directDave.id]],
+      deletedPostNotif: [true, false, 1],
+      socialNotifPage: [2, true],
+      groupChat: [
+        true,
+        [groupMsgDave.id],
+        "Dave group message",
+        true
+      ],
+      concurrency: [
+        "accepted",
+        true,
+        1,
+        0,
+        ["Conflict", "accepted"],
+        1
+      ],
+      sse: [
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false
       ]
     }))
   })

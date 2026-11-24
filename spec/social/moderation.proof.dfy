@@ -161,6 +161,25 @@ lemma PreserveNotificationsUnchanged(s: ModerationState, after: ModerationState)
   NotificationsBridge(after);
 }
 
+lemma PreserveUnreadUnchanged(s: ModerationState, after: ModerationState)
+  requires alwaysUnreadCountNonNegativeAndAccurate(s)
+  requires after.notifications == s.notifications
+  requires |after.accounts| == |s.accounts|
+  requires forall i :: 0 <= i < |s.accounts| ==> after.accounts[i].id == s.accounts[i].id && after.accounts[i].unreadCount == s.accounts[i].unreadCount
+  ensures alwaysUnreadCountNonNegativeAndAccurate(after)
+{
+  UnreadBridge(s);
+  UnreadBridge(after);
+  forall a | a in after.accounts
+    ensures a.unreadCount >= 0 && a.unreadCount == |ProofLib.Filter((n: Notification) => ((n.userId == a.id) && !(n.read)), after.notifications)|
+  {
+    var i :| 0 <= i < |after.accounts| && after.accounts[i] == a;
+    var prev := s.accounts[i];
+    assert prev in s.accounts;
+    ProofLib.FilterSamePredicate((n: Notification) => ((n.userId == prev.id) && !(n.read)), (n: Notification) => ((n.userId == a.id) && !(n.read)), s.notifications);
+  }
+}
+
 lemma CreateNotifUnreadValid(s: ModerationState, recipientId: string, actorId: string, notifKind: NotificationKind, by_: string)
   requires alwaysUnreadCountNonNegativeAndAccurate(s)
   ensures alwaysUnreadCountNonNegativeAndAccurate(createNotification(s, recipientId, actorId, notifKind, by_))
@@ -557,9 +576,13 @@ lemma setPresentationMode_ensures(s: ModerationState, mode: PresentationMode, by
   ensures (inv(s) ==> canSetPresentationMode(s, mode, by_) ==> stepModeSwitchPreservesOpenPositions(s, setPresentationMode(s, mode, by_)))
 {
   if inv(s) && canSetPresentationMode(s, mode, by_) {
+    hide *;
+    reveal inv, setPresentationMode;
     var after := setPresentationMode(s, mode, by_);
     HasAccountEquiv(s, after);
     PreserveAccountsValid(s, after);
+    PreserveSelfAndBlockUnfollow(s, after);
+    PreserveUnreadUnchanged(s, after);
     PreserveEdgesValid(s, after);
     PreserveReportsValid(s, after);
     PreserveNotificationsUnchanged(s, after);
