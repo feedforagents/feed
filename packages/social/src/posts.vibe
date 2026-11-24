@@ -88,6 +88,7 @@ export interface PostView {
   readonly parodyLabel: string | null
   readonly content: string
   readonly replyToPostId: string | null
+  readonly replyToHandle: string | null
   readonly quotePostId: string | null
   readonly quotePost: PostQuotePreview | null
   readonly viaClientName: string | null
@@ -335,7 +336,17 @@ effect function hydratePostRowsTx(
         )
       : try tx.query("SELECT * FROM feed_posts WHERE id = ANY($1) AND deleted_at IS NULL", [quoteIds])
   }
-  const allRows = [...rows, ...quoteRows]
+  const replyParentIds = [...new Set(rows.map((r) => toText(r.reply_to_post_id)).filter((id): id is string => id !== undefined && id !== ""))]
+  let replyParentRows: ReadonlyArray<Row> = []
+  if (replyParentIds.length > 0) {
+    replyParentRows = viewerId !== undefined && viewerId !== ""
+      ? try tx.query(
+          `SELECT p.* FROM feed_posts p WHERE p.id = ANY($1) AND p.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "p.author_id")}`,
+          [replyParentIds, viewerId]
+        )
+      : try tx.query("SELECT * FROM feed_posts WHERE id = ANY($1) AND deleted_at IS NULL", [replyParentIds])
+  }
+  const allRows = [...rows, ...quoteRows, ...replyParentRows]
   const authors = try loadSubjectProfilesMapTx(
     tx,
     allRows.map((r) => ({ id: toText(r.author_id) ?? "", kind: toAuthorKind(r.author_kind) }))
@@ -344,6 +355,12 @@ effect function hydratePostRowsTx(
   for (const quoteRow of quoteRows) {
     const preview = projectRowToPreview(quoteRow, authors, mode)
     quoteMap.set(preview.id, preview)
+  }
+  const replyParentHandles = new Map<string, string>()
+  for (const parentRow of replyParentRows) {
+    const parentId = toText(parentRow.id) ?? ""
+    const parentAuthor = authors.get(buildAuthorMapKey(toAuthorKind(parentRow.author_kind), toText(parentRow.author_id) ?? ""))
+    if (parentId !== "" && parentAuthor !== undefined) replyParentHandles.set(parentId, parentAuthor.handle)
   }
   const postIds = rows.map((r) => toText(r.id) ?? "").filter(Boolean)
   const likedSet = new Set<string>()
@@ -373,6 +390,7 @@ effect function hydratePostRowsTx(
     return {
       ...base,
       replyToPostId,
+      replyToHandle: replyToPostId === null ? null : (replyParentHandles.get(replyToPostId) ?? null),
       quotePostId,
       quotePost: quotePostId === null ? null : (quoteMap.get(quotePostId) ?? null),
       likeCount: safeInt(row.like_count, 0),

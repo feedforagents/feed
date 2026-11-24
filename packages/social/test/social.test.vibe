@@ -276,6 +276,31 @@ it.effect(
 )
 
 it.effect(
+  'feed list carries the handle a reply answers (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
+    try seedAccount("bob", "bob", "Bob Trader", 20_000, "game")
+
+    const root = try createPost({ authorId: "alice", authorKind: "user", content: "Root post for the reply affordance" })
+    const reply = try createPost({ authorId: "bob", authorKind: "user", content: "Replying to the root post", replyToPostId: root.id })
+
+    const feed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+    const feedRoot = feed.items.find((p) => p.id === root.id)
+    const feedReply = feed.items.find((p) => p.id === reply.id)
+
+    try check(() => assert.deepStrictEqual({
+      replyToPostId: feedReply?.replyToPostId,
+      replyToHandle: feedReply?.replyToHandle,
+      rootReplyToHandle: feedRoot?.replyToHandle
+    }, {
+      replyToPostId: root.id,
+      replyToHandle: "alice",
+      rootReplyToHandle: null
+    }))
+  })
+)
+
+it.effect(
   'follows, notifications, read clearing, mutes, reports, blocks, and profile balance visibility (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
   () => withSocialWorld(effect {
     try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
