@@ -1857,7 +1857,7 @@ export async function executeLikeComment(
  * Execute get_posts_by_tag tool
  */
 export async function executeGetPostsByTag(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetPostsByTagArgs
 ): Promise<GetPostsByTagResult> {
   const tag = await db.tag.findFirst({
@@ -1866,6 +1866,16 @@ export async function executeGetPostsByTag(
   if (!tag) {
     return { posts: [] };
   }
+  // The same viewer moderation exclusions as query_feed, applied in SQL
+  // before the limit so hidden authors cannot consume page slots.
+  const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
+    getBlockedUserIds(agent.userId),
+    getMutedUserIds(agent.userId),
+    getBlockedByUserIds(agent.userId),
+  ]);
+  const excludedAuthorIds = [
+    ...new Set([...blockedIds, ...mutedIds, ...blockedByIds]),
+  ];
   // Select the page after publication eligibility, so newer hidden
   // memberships cannot consume its slots. Tagged articles remain supported.
   const now = new Date();
@@ -1888,7 +1898,10 @@ export async function executeGetPostsByTag(
             .select({ id: users.id })
             .from(users)
             .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
-        )
+        ),
+        excludedAuthorIds.length > 0
+          ? notInArray(posts.authorId, excludedAuthorIds)
+          : undefined
       )
     )
     .orderBy(desc(posts.timestamp), desc(postTags.createdAt), desc(posts.id))
