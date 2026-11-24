@@ -939,3 +939,101 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
     ))
   })
 })
+
+it.effect('Perp open/close idempotency: same key replays the receipt, different params conflict, other traders unaffected (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () => effect {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
+  try runWithSeededDb(effect {
+    try createVerifiedAccount("user-alice", "alice", 500_000)
+    try createVerifiedAccount("user-bob", "bob", 500_000)
+
+    const open1 = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 10,
+      idempotencyKey: "perp-open-1"
+    })
+    const openReplay = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 10,
+      idempotencyKey: "perp-open-1"
+    })
+    const openConflictCode = try marketErrorCode(openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 3_000,
+      leverage: 10,
+      idempotencyKey: "perp-open-1"
+    }))
+    const openOtherUser = try openPerpPosition({
+      ownerId: "user-bob",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 10,
+      idempotencyKey: "perp-open-1"
+    })
+    const close1 = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: open1.positionId,
+      idempotencyKey: "perp-close-1"
+    })
+    const closeReplay = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: open1.positionId,
+      idempotencyKey: "perp-close-1"
+    })
+    const open2 = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 10,
+      idempotencyKey: "perp-open-2"
+    })
+    const closeConflictCode = try marketErrorCode(closePerpPosition({
+      ownerId: "user-alice",
+      positionId: open2.positionId,
+      idempotencyKey: "perp-close-1"
+    }))
+    const close2 = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: open2.positionId
+    })
+    const bobPositions = try listPerpPositions("user-bob")
+    const alicePositions = try listPerpPositions("user-alice")
+
+    try check(() => assert.deepStrictEqual(
+      {
+        openReplaySame: [openReplay.tradeId === open1.tradeId, openReplay.positionId === open1.positionId, openReplay.balanceAfterCents === open1.balanceAfterCents],
+        openConflictCode,
+        openOtherUserDifferent: openOtherUser.tradeId !== open1.tradeId && openOtherUser.positionId !== open1.positionId,
+        closeReplaySame: [closeReplay.tradeId === close1.tradeId, closeReplay.balanceAfterCents === close1.balanceAfterCents],
+        closeConflictCode,
+        close2Ok: close2.positionId === open2.positionId,
+        bobStillOpen: bobPositions.length,
+        aliceStillOpen: alicePositions.length
+      },
+      {
+        openReplaySame: [true, true, true],
+        openConflictCode: "IDEMPOTENCY_CONFLICT",
+        openOtherUserDifferent: true,
+        closeReplaySame: [true, true],
+        closeConflictCode: "IDEMPOTENCY_CONFLICT",
+        close2Ok: true,
+        bobStillOpen: 1,
+        aliceStillOpen: 0
+      }
+    ))
+  })
+})
