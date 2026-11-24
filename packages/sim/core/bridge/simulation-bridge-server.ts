@@ -60,6 +60,10 @@ interface NPCState {
   balance: number;
   /** Amount staked in open long/short positions; closes draw down this. */
   openExposure: bigint;
+  /** YES-side prediction inventory; only sell_yes draws it down. */
+  predictionYesExposure: bigint;
+  /** NO-side prediction inventory; only sell_no draws it down. */
+  predictionNoExposure: bigint;
 }
 
 interface SimulationState {
@@ -585,6 +589,8 @@ Bun.serve({
             archetype: archetypeMap[npcId] ?? 'trader',
             balance: 10_000,
             openExposure: 0n,
+            predictionYesExposure: 0n,
+            predictionNoExposure: 0n,
           });
         }
 
@@ -679,15 +685,47 @@ Bun.serve({
               break;
             }
             case 'buy_yes':
-            case 'buy_no':
-            case 'sell_yes':
-            case 'sell_no': {
+            case 'buy_no': {
               const amount = amountOrError;
               if (amount > npc.balance) {
                 success = false;
                 error = 'Insufficient balance';
               } else {
+                // A prediction buy opens matching-side inventory (like the
+                // generic buy opens a stake): a later sell on the same side
+                // draws it down, and no other leg can spend it.
                 npc.balance -= amount;
+                if (action.type === 'buy_yes') {
+                  npc.predictionYesExposure += exposureUnits(amount);
+                } else {
+                  npc.predictionNoExposure += exposureUnits(amount);
+                }
+              }
+              break;
+            }
+            case 'sell_yes':
+            case 'sell_no': {
+              const amount = amountOrError;
+              const sellExposure = exposureUnits(amount);
+              const openSide =
+                action.type === 'sell_yes'
+                  ? npc.predictionYesExposure
+                  : npc.predictionNoExposure;
+              if (sellExposure > openSide) {
+                success = false;
+                error = 'Insufficient open position';
+              } else {
+                // A sell exits a matching-side prediction position, like the
+                // close legs: the principal comes back plus the simulated
+                // PnL. Treating it as an entry debited the balance a second
+                // time, so every sell lost the full amount (#1824).
+                pnl = (random() - 0.4) * amount * 0.2;
+                if (action.type === 'sell_yes') {
+                  npc.predictionYesExposure -= sellExposure;
+                } else {
+                  npc.predictionNoExposure -= sellExposure;
+                }
+                npc.balance += amount + pnl;
               }
               break;
             }
