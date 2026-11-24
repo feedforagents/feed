@@ -696,6 +696,16 @@ pure def sometimesSignedOutEverywhere(s: PhoneAuth): bool =
   s.status == AccountActive and s.sessionsEpoch >= 2
 ```
 
+### Discovered by the proof: Unregistered accounts have session epoch zero and onboarding accounts have at least one
+
+An unregistered account has not yet established a session (`sessionsEpoch == 0`), and a verified account awaiting onboarding already carries `sessionsEpoch >= 1` into activation.
+
+```quint
+pure def alwaysUnregisteredAndOnboardingSessionEpoch(s: PhoneAuth): bool =
+  (s.status == AccountUnregistered implies s.sessionsEpoch == 0)
+    and (s.status == AccountPendingOnboarding implies s.sessionsEpoch >= 1)
+```
+
 ### Simulation samples and witness journeys cover onboarding, lockouts, phone change, deletion cooldown, and reviewer sign-in
 
 ```quint
@@ -706,7 +716,7 @@ pure val newPhoneHashValues: Set[str] = Set("ph_02", "ph_99")
 pure val issuedCodeValues: Set[SecretCode] = Set("123456", "654321")
 pure val assignedUserIdValues: Set[str] = Set("user-1", "user-2")
 pure val usernameValues: Set[str] = Set("alice", "reviewer_demo")
-pure val elapsedValues: Set[Millis] = Set(30000, 600000, 3600000, 86400000, 2592000000)
+pure val elapsedValues: Set[Millis] = Set(0, 30000, 600000, 3600000, 86400000, 2592000000)
 
 pure val eval_witness_sometimesSignedUpWithStartingGrant = (
   ("requestSignInCode", "+14155550101", "ph_01", "123456", CountryUs, false, false, true, true),
