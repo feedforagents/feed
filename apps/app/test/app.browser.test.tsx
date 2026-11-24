@@ -79,11 +79,12 @@ function installMockNetwork() {
       });
     }
     if (path === "/api/feed") return json(SAMPLE_POSTS);
-    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
+    if (path === "/api/trending") return json({ trending: [] });
+    if (path === "/api/articles") return json({ articles: [] });
     if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [] } });
     if (path === "/api/leaderboard") return json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return json({ packs: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
     return json({});
   };
@@ -125,23 +126,22 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(marketsButton));
   await expect.element(page.getByRole("heading", { name: "Will OpenAGI ship Strawberry-9000 before Friday?" })).toBeInTheDocument();
 
-  const modeSwitch = page.getByRole("switch", { name: "Social mode" });
+  const modeSwitch = page.getByRole("switch", { name: "Social mode" }).first();
   await act(() => userEvent.click(modeSwitch));
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Markets" })).not.toBeInTheDocument();
 
   await act(() => userEvent.click(page.getByRole("button", { name: /^Reply/ })));
-  const thread = page.getByRole("dialog", { name: "Post thread" });
-  const reply = thread.getByRole("textbox");
+  await expect.element(page.getByRole("heading", { name: "Post", exact: true })).toBeInTheDocument();
+  const reply = page.getByRole("textbox", { name: "Post text" });
   await act(() => userEvent.fill(reply, "Draft reply"));
-  await act(() => userEvent.click(thread.getByRole("button", { name: /^Like/ })));
+  await act(() => userEvent.click(page.getByRole("button", { name: /^Like/ })));
   const join = page.getByRole("dialog", { name: "Join Feed" });
   await expect.element(join).toBeInTheDocument();
   expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
   await act(() => userEvent.click(join.getByRole("button", { name: "Close" })));
   await expect.element(reply).toHaveValue("Draft reply");
-  expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
-  await act(() => userEvent.click(thread.getByRole("button", { name: "Close" })));
+  expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(0);
 
   const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
   await act(() => userEvent.click(signInBtn));
