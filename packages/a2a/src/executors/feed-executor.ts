@@ -1873,8 +1873,10 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!['long', 'short'].includes(sideParam))
       throw new Error('side must be long or short');
     if (amount <= 0) throw new Error('amount must be positive');
-    if (leverage < 1 || leverage > 100)
-      throw new Error('leverage must be between 1 and 100');
+    // Same rule as the HTTP open route (PerpOpenPositionSchema) and MCP: the
+    // PerpPosition.leverage column is an integer and the cap is 20x (D-17b).
+    if (!Number.isInteger(leverage) || leverage < 1 || leverage > 20)
+      throw new Error('leverage must be a whole number from 1 to 20');
 
     const side = sideParam as 'long' | 'short';
     const service = this.buildPerpService();
