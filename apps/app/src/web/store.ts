@@ -87,6 +87,7 @@ import {
   toggleMute,
   updateOwnProfile,
 } from "./store-world.ts";
+import { isRecord } from "./types.ts";
 
 let booted = false;
 let sseRefreshPending = false;
