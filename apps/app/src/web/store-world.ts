@@ -406,21 +406,25 @@ export async function submitPerpOrder(
   marginPts: number,
   leverage: number,
 ): Promise<boolean> {
+  if (getStoreSnapshot().tradeLoading) return false;
   if (!requireAuthOrQueue({ kind: "trade_perp", ticker, side, marginPts, leverage, label: `open $${ticker} ${side} perp` })) {
     return false;
   }
   return executeTradeRequest({
     endpoint: `/api/markets/perp/${encodeURIComponent(ticker)}/open`,
     body: { side, collateralCents: Math.max(1, Math.round(marginPts * 100)), collateralPts: marginPts, leverage },
+    headers: { "Idempotency-Key": newIdempotencyKey() },
     statusMessage: `Opened $${ticker} ${side} ${leverage}x position.`,
   });
 }
 
 export async function closePerpPosition(positionId: string): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  if (getStoreSnapshot().tradeLoading) return;
   await executeTradeRequest({
     endpoint: `/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`,
     body: {},
+    headers: { "Idempotency-Key": newIdempotencyKey() },
     statusMessage: "Position closed.",
   });
 }
