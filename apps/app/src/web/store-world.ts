@@ -160,7 +160,7 @@ export async function createPost(
   }
   setStoreState({ statusMessage: options?.replyToPostId ? "Reply posted." : "Post published." });
   await loadFeed();
-const thread = getStoreSnapshot().activeThread;
+  const thread = getStoreSnapshot().activeThread;
   if (thread && options?.replyToPostId === thread.post.card.id) {
     await openThread(thread.post.card.id);
   }
@@ -177,13 +177,13 @@ export async function deletePost(postId: string): Promise<void> {
     setStoreState({ errorMessage: res.message });
     return;
   }
-const cur = getStoreSnapshot();
+  const cur = getStoreSnapshot();
   const thread = cur.activeThread;
   setStoreState({
     feedPosts: cur.feedPosts.filter((p) => p.card.id !== postId),
     explore: { ...cur.explore, posts: cur.explore.posts.filter((p) => p.card.id !== postId) },
     profileBundle: cur.profileBundle
-    ? { ...cur.profileBundle, posts: cur.profileBundle.posts.filter((p) => p.card.id !== postId) }
+      ? { ...cur.profileBundle, posts: cur.profileBundle.posts.filter((p) => p.card.id !== postId) }
       : null,
     activeThread: thread?.post.card.id === postId ? null : thread,
     statusMessage: "Post deleted.",
