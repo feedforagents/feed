@@ -21,6 +21,7 @@ import {
   requestPhoneChange,
   revokeActiveAgentGrant,
   revokeOAuthToken,
+  revokeSessionByCookie,
   setPlayMode,
   signInReviewerPassword,
   signOutEverywhere,
@@ -750,6 +751,7 @@ effect function handleAuthRoute(
     return jsonResponse({ account: result.account }, 200, {}, [result.sessionCookieHeader])
   }
   if (method === "POST" && path === "/api/auth/logout") {
+    try revokeSessionByCookie(request.headers.get("cookie") ?? undefined, config.auth)
     return jsonResponse({ ok: true }, 200, {}, clearCookieHeaders(config.publicAppUrl))
   }
   if (method === "POST" && path === "/api/auth/signout-everywhere") {
