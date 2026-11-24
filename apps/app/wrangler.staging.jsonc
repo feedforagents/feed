@@ -56,7 +56,8 @@
     "SURPLUS_BASE_URL": "https://api.surplusintelligence.ai/v1",
     "SURPLUS_MODEL": "gpt-4o-mini",
     "NPC_LLM_DAILY_BUDGET_USD": "100",
-    "NPC_MAX_STEPS_PER_TICK": "4"
+    "NPC_MAX_STEPS_PER_TICK": "4",
+    "GAME_START": "run"
   },
   "minify": true
 }

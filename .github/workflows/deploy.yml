@@ -138,7 +138,7 @@ jobs:
             const parsed = JSON.parse(raw);
             const secrets = {};
             for (const [key, value] of Object.entries(parsed)) {
-              if (typeof value === "string" && value.trim() !== "" && key !== "DATABASE_URL") {
+              if (typeof value === "string" && value.trim() !== "" && key !== "DATABASE_URL" && key !== "GAME_START") {
                 secrets[key] = value;
               }
             }
@@ -188,6 +188,7 @@ jobs:
               console.log(`R2 bucket ready: ${bucketName}`);
             }
           '
+          pnpm --filter @repo/app exec wrangler secret delete GAME_START --config "wrangler.${TARGET_ENV}.jsonc" --force || true
           pnpm --filter @repo/app exec wrangler deploy \
             --config "wrangler.${TARGET_ENV}.jsonc" \
             --secrets-file "$SECRETS_FILE" \
@@ -230,7 +231,7 @@ jobs:
               });
               if (res.ok) {
                 const json = await res.json();
-                if (json.ok === true && json.service === "feed" && json.commit === expectedSha) {
+                if (json.ok === true && json.service === "feed" && json.gameStart === "run" && json.commit === expectedSha) {
                   health = json;
                   break;
                 }
