@@ -89,6 +89,7 @@ import {
 
 let booted = false;
 let sseRefreshPending = false;
+let queuedChatSignal: string | null = null;
 
 async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
   switch (route) {
@@ -167,7 +168,12 @@ export function navigateRoute(route: AppRoute): void {
 }
 
 function handleSseSignal(eventType: string): void {
-  if (sseRefreshPending) return;
+  if (sseRefreshPending) {
+    if (eventType.startsWith("chat.") || eventType === "alpha.invite") {
+      queuedChatSignal = eventType;
+    }
+    return;
+  }
   sseRefreshPending = true;
   const s = getStoreSnapshot();
   const refresh = async () => {
@@ -187,6 +193,9 @@ function handleSseSignal(eventType: string): void {
       }
     } finally {
       sseRefreshPending = false;
+      const queued = queuedChatSignal;
+      queuedChatSignal = null;
+      if (queued !== null) handleSseSignal(queued);
     }
   };
   void refresh();
