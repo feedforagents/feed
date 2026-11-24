@@ -145,6 +145,16 @@ effect function connectAgentOAuthPkce(cookie: string, clientName: string) {
   const regBody = try readJson(regRes)
   const clientId = String(regBody.client_id ?? "")
   const verifier = `pkce-verifier-${clientName.replace(/\s+/g, "-")}-0123456789abcdef`
+  const metadata = try readJson(try callApp("/.well-known/oauth-authorization-server"))
+  const denyRes = try callApp("/api/oauth/authorize", {
+    cookie,
+    json: { clientId, redirectUri, codeChallenge: pkceChallenge(verifier), state: "denied-state", approved: false }
+  })
+  const deniedRedirect = new URL(String((try readJson(denyRes)).redirectTo ?? "")).searchParams
+  try check(() => assert.deepStrictEqual(
+    [denyRes.status, deniedRedirect.get("error"), deniedRedirect.get("state"), deniedRedirect.get("iss")],
+    [200, "access_denied", "denied-state", metadata.issuer]
+  ))
   const authRes = try callApp("/api/oauth/authorize", {
     cookie,
     json: {

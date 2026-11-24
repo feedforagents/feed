@@ -511,7 +511,7 @@ effect function submitOAuthDecision(
     throw new AuthFailure({ code: "invalid_redirect_uri", message: "redirect_uri is not registered for this client.", status: 400 })
   }
   if (deny) {
-    const redirectTo = appendRedirectParams(redirectUri, { error: "access_denied", state })
+    const redirectTo = appendRedirectParams(redirectUri, { error: "access_denied", state, iss: oauthAuthorizationServerMetadata(origin).issuer })
     return parsed.isForm ? makeResponse(null, { status: 302, headers: { location: redirectTo } }) : jsonResponse({ denied: true, redirectTo })
   }
   const issued = try createAuthorizationCode({
