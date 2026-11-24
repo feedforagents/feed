@@ -182,7 +182,7 @@ it('Stale load-more page is dropped after a feed refresh (spec/app/index.md, "St
   const firstPagePost = racePost("race-post-1", "Race first page post.");
   const refreshedPost = racePost("race-post-new", "Race refreshed post.");
   const stalePagePost = racePost("race-post-stale", "Race stale second page post.");
-  let pageOneCalls = 0;
+  let refreshed = false;
   let resolveStalePage: (() => void) | undefined;
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input) => {
@@ -204,10 +204,9 @@ it('Stale load-more page is dropped after a feed refresh (spec/app/index.md, "St
           resolveStalePage = () => resolve(Response.json({ items: [stalePagePost], nextCursor: "cursor-2" }));
         });
       }
-      pageOneCalls += 1;
-      return pageOneCalls === 1
-        ? json({ items: [firstPagePost], nextCursor: "cursor-1" })
-        : json({ items: [refreshedPost, firstPagePost], nextCursor: "cursor-r1" });
+      return refreshed
+        ? json({ items: [refreshedPost, firstPagePost], nextCursor: "cursor-r1" })
+        : json({ items: [firstPagePost], nextCursor: "cursor-1" });
     }
     if (path === "/api/markets") return json(SAMPLE_MARKETS);
     if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
@@ -232,6 +231,7 @@ it('Stale load-more page is dropped after a feed refresh (spec/app/index.md, "St
   expect(getStoreSnapshot().feedNextCursor).toBe("cursor-1");
 
   const loadingMore = storeActions.loadMoreFeed();
+  refreshed = true;
   await act(() => storeActions.loadFeed());
   await expect.element(page.getByText("Race refreshed post.")).toBeInTheDocument();
   expect(getStoreSnapshot().feedNextCursor).toBe("cursor-r1");
@@ -244,4 +244,70 @@ it('Stale load-more page is dropped after a feed refresh (spec/app/index.md, "St
   expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual(["race-post-new", "race-post-1"]);
   expect(getStoreSnapshot().feedNextCursor).toBe("cursor-r1");
   expect(getStoreSnapshot().feedLoadingMore).toBe(false);
+});
+
+it('Stale feed refresh is dropped when a newer refresh lands first (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', async () => {
+  const newerPost = racePost("race-post-fresh", "Race newest refresh post.");
+  const olderPost = racePost("race-post-old", "Race older refresh post.");
+  const held: Array<(res: Response) => void> = [];
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(raw, window.location.origin);
+    const path = url.pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/feed") {
+      if (url.searchParams.get("tab") === "following") {
+        return new Promise<Response>((resolve) => {
+          held.push(resolve);
+        });
+      }
+      return json({ items: [newerPost], nextCursor: null });
+    }
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.loadFeed("latest"));
+  await expect.element(page.getByText("Race newest refresh post.")).toBeInTheDocument();
+  expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual(["race-post-fresh"]);
+
+  const olderRefresh = storeActions.loadFeed("following");
+  await act(() => storeActions.loadFeed("latest"));
+  await expect.element(page.getByText("Race newest refresh post.")).toBeInTheDocument();
+  held[0](Response.json({ items: [olderPost], nextCursor: null }));
+  await act(() => olderRefresh);
+
+  await expect.element(page.getByText("Race older refresh post.")).not.toBeInTheDocument();
+  expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual(["race-post-fresh"]);
+  expect(getStoreSnapshot().errorMessage).toBeNull();
+
+  const olderError = storeActions.loadFeed("following");
+  await act(() => storeActions.loadFeed("latest"));
+  held[1](new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } }));
+  await act(() => olderError);
+
+  expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual(["race-post-fresh"]);
+  expect(getStoreSnapshot().errorMessage).toBeNull();
 });
