@@ -851,6 +851,9 @@ export class FeedAgentExecutor implements AgentExecutor {
         timestamp: new Date(),
       },
     });
+    // Same list refresh as POST /api/posts and MCP create_post.
+    await cachedDb.invalidatePostsCache();
+    await cachedDb.invalidateActorPostsCache(post.authorId);
     return { success: true, postId: post.id, content: post.content };
   }
 
@@ -1055,6 +1058,9 @@ export class FeedAgentExecutor implements AgentExecutor {
       where: { id: postId },
       data: { deletedAt: new Date() },
     });
+    // Same list refresh as DELETE /api/posts/[id] and MCP delete_post.
+    await cachedDb.invalidatePostsCache();
+    await cachedDb.invalidateActorPostsCache(post.authorId);
 
     return { success: true, message: 'Post deleted' };
   }

@@ -1482,6 +1482,10 @@ export async function executeCreatePost(
       timestamp: new Date(),
     },
   });
+  // Same list refresh as POST /api/posts: Recent, Following and the
+  // author's profile list must show the new post before their TTL ends.
+  await cachedDb.invalidatePostsCache();
+  await cachedDb.invalidateActorPostsCache(agent.userId);
   return {
     success: true,
     postId: post.id,
@@ -1504,10 +1508,22 @@ export async function executeDeletePost(
   if (post.authorId !== agent.userId) {
     throw new Error('Unauthorized: You can only delete your own posts');
   }
+  // Same refusal as DELETE /api/posts/[id]: a repeat delete must not
+  // rewrite deletedAt or clear the global post-list caches again.
+  if (post.deletedAt) {
+    throw new BusinessLogicError(
+      'Post already deleted',
+      'POST_ALREADY_DELETED'
+    );
+  }
   await db.post.update({
     where: { id: args.postId },
     data: { deletedAt: new Date() },
   });
+  // Same list refresh as DELETE /api/posts/[id], so warmed lists stop
+  // serving the deleted post.
+  await cachedDb.invalidatePostsCache();
+  await cachedDb.invalidateActorPostsCache(post.authorId);
   return { success: true };
 }
 
