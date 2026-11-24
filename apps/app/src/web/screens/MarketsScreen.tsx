@@ -167,7 +167,7 @@ function BuyPointsDialog({ open, onOpenChange }: { readonly open: boolean; reado
 
 export function MarketsScreen() {
   const s = useAppStore();
-    const marketTab = s.marketsTab;
+  const marketTab = s.marketsTab;
   const [buyDialogOpen, setBuyDialogOpen] = useState(false);
   const [sortBy, setSortBy] = useState<LeaderboardSortColumn>("netProfit");
   const [sortDir, setSortDir] = useState<"ascending" | "descending">("descending");
