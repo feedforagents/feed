@@ -8,6 +8,7 @@ import {
   approveManualHold,
   confirmLlmSpend,
   fastForwardSimulatedHours,
+  generateCompletion,
   getDailySpendStatus,
   getEngineAdminStatus,
   markLlmSpendUncertain,
@@ -280,6 +281,57 @@ it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncerta
       assert.strictEqual(day2Reconciled.carryoverReservedCents, 0)
       assert.strictEqual(day2Reconciled.uncertainReservations, 0)
       assert.strictEqual(day2Reconciled.remainingCents, 10_000)
+    })
+  })
+}))
+
+it.effect('Failed live completion with offline fallback releases its budget reservation (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation")', () => scoped(effect {
+  const dayMs = Date.UTC(2026, 10, 23, 12, 0, 0)
+  try withSeededEngine(dayMs, effect {
+    const before = try getDailySpendStatus(dayMs)
+    const result = try withEnvOverrides({ SURPLUS_BASE_URL: "http://127.0.0.1:1" }, generateCompletion({
+      user: "Will NVDAI finish the slot above consensus expectations?",
+      allowOfflineFallback: true,
+      estimatedMicros: 10_000_000,
+      nowMs: dayMs,
+    }))
+    const after = try getDailySpendStatus(dayMs)
+    const rows = try queryRows("SELECT status, reserved_micros, actual_micros FROM feed_llm_spend_reservations")
+    try check(() => {
+      assert.strictEqual(before.remainingMicros, 100_000_000)
+      assert.strictEqual(result.usedFallback, true)
+      assert.strictEqual(result.actualMicros, 0)
+      assert.strictEqual(after.remainingMicros, 100_000_000)
+      assert.strictEqual(after.committedMicros, 0)
+      assert.strictEqual(after.uncertainReservations, 0)
+      assert.strictEqual(rows.length, 1)
+      assert.strictEqual(toText(rows[0]?.status), "settled")
+      assert.strictEqual(toInt(rows[0]?.reserved_micros), 10_000_000)
+      assert.strictEqual(toInt(rows[0]?.actual_micros), 0)
+    })
+  })
+}))
+
+it.effect('Failed live completion without offline fallback keeps its reservation uncertain (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds")', () => scoped(effect {
+  const dayMs = Date.UTC(2026, 10, 23, 12, 0, 0)
+  try withSeededEngine(dayMs, effect {
+    const before = try getDailySpendStatus(dayMs)
+    const failure = try withEnvOverrides({ SURPLUS_BASE_URL: "http://127.0.0.1:1" }, Effect.flip(generateCompletion({
+      user: "Will NVDAI finish the slot above consensus expectations?",
+      allowOfflineFallback: false,
+      estimatedMicros: 10_000_000,
+      nowMs: dayMs,
+    })))
+    const after = try getDailySpendStatus(dayMs)
+    const rows = try queryRows("SELECT status, reserved_micros, actual_micros FROM feed_llm_spend_reservations")
+    try check(() => {
+      assert.strictEqual(before.remainingMicros, 100_000_000)
+      assert.strictEqual(failureCode(failure), "LLM_UNAVAILABLE")
+      assert.strictEqual(after.remainingMicros, 90_000_000)
+      assert.strictEqual(after.uncertainReservations, 1)
+      assert.strictEqual(rows.length, 1)
+      assert.strictEqual(toText(rows[0]?.status), "uncertain")
+      assert.strictEqual(rows[0]?.actual_micros, null)
     })
   })
 }))
