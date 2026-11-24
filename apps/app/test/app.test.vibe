@@ -1,5 +1,6 @@
 // spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"; spec/app/index.md, "Story: Connect and revoke the account's single AI agent"; spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"
 import { assert, it } from "@effect/vitest"
+import { getRateLimitStatus } from "@repo/auth"
 import { migrateFeedSchema, seedFeedWorld, Store, toInt, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
 import { realtimeBusLayer } from "@repo/social"
@@ -622,6 +623,43 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
         aliceHasPerpOpen: true,
         aliceHasPerpClose: true
       }
+    ))
+  }
+}, 180_000)
+
+it.effect('Web perp close consumes one trade rate-limit slot, like perp open (spec/shared/limits.md, "Web and MCP always see identical capacity, and consuming via one reduces the other")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+
+    const player = try onboardPhonePlayer("+14155550155", "perp_close_limit")
+    const accountId = String(player.account.accountId)
+
+    const before = try getRateLimitStatus(accountId)
+    try check(() => assert.strictEqual(before.trade.used, 0))
+
+    const openRes = try callApp("/api/markets/perp/XTRPC/open", {
+      cookie: player.cookie,
+      json: { side: "long", collateralCents: 1000, leverage: 2 }
+    })
+    try check(() => assert.strictEqual(openRes.status, 201))
+    const opened = try readJson(openRes)
+    const positionId = String(opened.positionId ?? "")
+
+    const afterOpen = try getRateLimitStatus(accountId)
+    try check(() => assert.strictEqual(afterOpen.trade.used, 1))
+
+    const closeRes = try callApp(`/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`, {
+      method: "POST",
+      cookie: player.cookie,
+      json: {}
+    })
+    try check(() => assert.strictEqual(closeRes.status, 200))
+
+    const afterClose = try getRateLimitStatus(accountId)
+    try check(() => assert.deepStrictEqual(
+      { used: afterClose.trade.used, limit: afterClose.trade.limit },
+      { used: 2, limit: 120 }
     ))
   }
 }, 180_000)
