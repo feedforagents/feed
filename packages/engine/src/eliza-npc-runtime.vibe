@@ -291,7 +291,18 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner): Ac
       const side = p.side === "short" ? "short" : "long"
       const collateralCents = Math.max(500, Math.round(Number(p.collateralCents ?? 2500)))
       const leverage = Math.max(1, Math.min(20, Math.round(Number(p.leverage ?? 3))))
-      try openPerpPosition({ ownerId: actor.id, ownerKind: "npc", ticker, side, collateralCents, leverage, viaClientName: "eliza-npc" })
+      const opened = try openPerpPosition({ ownerId: actor.id, ownerKind: "npc", ticker, side, collateralCents, leverage, viaClientName: "eliza-npc" })
+      try maybePublishFeedEvent({
+        type: "market.perp",
+        action: "open",
+        actorId: actor.id,
+        ticker,
+        side,
+        sizeCents: opened.sizeCents,
+        leverage: opened.leverage,
+        positionId: opened.positionId,
+        markPriceCents: opened.position.markPriceCents,
+      })
       return { success: true, text: `Perp ${side} ${leverage}x ${ticker}`, data: { ticker, side, collateralCents, leverage } }
     }),
     wrap("PREDICTION_TRADE", "Trade prediction market YES/NO shares", effect (p) => {
