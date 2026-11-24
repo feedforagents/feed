@@ -11,9 +11,13 @@ import {
   eq,
   inArray,
   markets,
+  notifications,
   pointsTransactions,
   positions,
   predictionPriceHistories,
+  tradingFees,
+  userAchievements,
+  userChallengeProgress,
   users,
 } from '@feed/db';
 import { RATE_LIMIT_CONFIGS } from '@feed/engine';
@@ -73,6 +77,16 @@ beforeAll(async () => {
 
 afterAll(async () => {
   const ids = [userId, mixedUserId];
+  // Every trade records a fee, and the first trades can award an achievement,
+  // challenge progress and their notifications; leave none of them behind.
+  await db.delete(tradingFees).where(inArray(tradingFees.userId, ids));
+  await db.delete(notifications).where(inArray(notifications.userId, ids));
+  await db
+    .delete(userChallengeProgress)
+    .where(inArray(userChallengeProgress.userId, ids));
+  await db
+    .delete(userAchievements)
+    .where(inArray(userAchievements.userId, ids));
   await db
     .delete(pointsTransactions)
     .where(inArray(pointsTransactions.userId, ids));
