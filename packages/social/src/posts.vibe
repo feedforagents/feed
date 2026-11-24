@@ -1089,9 +1089,14 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
       initialPriceCents: mode === "social" || row.initial_price_cents === null ? null : safeInt(row.initial_price_cents, 0)
     }))
     const cleanedTag = queryText.replace(/^[#$]/, "").toLowerCase()
+    const tagRows = viewerId === undefined
+      ? try tx.query(`SELECT p.content, p.ticker FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch}`, [likePattern])
+      : try tx.query(`SELECT p.content, p.ticker FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql("$2", "p.author_id")}`, [likePattern, viewerId])
     const tagCounts = new Map<string, SearchTagResult>()
-    for (const post of posts) {
-      for (const hashtag of post.hashtags) {
+    for (const row of tagRows) {
+      const content = toText(row.content) ?? ""
+      const rawTicker = toText(row.ticker) ?? null
+      for (const hashtag of extractHashtags(content)) {
         if (cleanedTag === "" || hashtag.includes(cleanedTag)) {
           const key = `hashtag:${hashtag}`
           const current = tagCounts.get(key)
@@ -1099,7 +1104,7 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
         }
       }
       if (mode === "game") {
-        for (const cashtag of post.cashtags) {
+        for (const cashtag of extractCashtags(content, rawTicker)) {
           if (cleanedTag === "" || cashtag.toLowerCase().includes(cleanedTag)) {
             const key = `ticker:${cashtag}`
             const current = tagCounts.get(key)

@@ -886,3 +886,28 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     })
   }
 }))
+
+it.effect('Search tag counts cover every match regardless of limit and agree with trending (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")', () => withSeededWorld(effect (authConfig) => {
+  const searchLimit1 = try callMcpTool(1, "search", { query: "$TSLAI", kind: "posts", limit: 1 }, authConfig)
+  const searchLimit10 = try callMcpTool(2, "search", { query: "$TSLAI", kind: "posts", limit: 10 }, authConfig)
+  const searchOpenAgiLimit1 = try callMcpTool(3, "search", { query: "$OPENAGI", kind: "posts", limit: 1 }, authConfig)
+  const searchOpenAgiLimit10 = try callMcpTool(4, "search", { query: "$OPENAGI", kind: "posts", limit: 10 }, authConfig)
+  const searchNvdaiLimit1 = try callMcpTool(5, "search", { query: "$NVDAI", kind: "posts", limit: 1 }, authConfig)
+  const trendingRes = try callMcpTool(6, "get_trending", { limit: 10 }, authConfig)
+  try check(() => {
+    const tagsLimit1 = unwrapToolPayload(searchLimit1).tags as ReadonlyArray<{ readonly tag?: string; readonly postCount?: number }> | undefined
+    const tagsLimit10 = unwrapToolPayload(searchLimit10).tags as ReadonlyArray<{ readonly tag?: string; readonly postCount?: number }> | undefined
+    const tagsOpenAgiLimit1 = unwrapToolPayload(searchOpenAgiLimit1).tags as ReadonlyArray<{ readonly tag?: string; readonly postCount?: number }> | undefined
+    const tagsOpenAgiLimit10 = unwrapToolPayload(searchOpenAgiLimit10).tags as ReadonlyArray<{ readonly tag?: string; readonly postCount?: number }> | undefined
+    const tagsNvdaiLimit1 = unwrapToolPayload(searchNvdaiLimit1).tags as ReadonlyArray<{ readonly tag?: string; readonly postCount?: number }> | undefined
+    const trendingItems = unwrapToolPayload(trendingRes).items as ReadonlyArray<{ readonly tag?: string; readonly postCount?: number }> | undefined
+    const postsLimit1 = unwrapToolPayload(searchLimit1).posts as ReadonlyArray<unknown> | undefined
+    assert.strictEqual(tagsLimit1?.find((tag) => tag.tag === "$TSLAI")?.postCount, 3)
+    assert.strictEqual(tagsLimit10?.find((tag) => tag.tag === "$TSLAI")?.postCount, 3)
+    assert.strictEqual(tagsOpenAgiLimit1?.find((tag) => tag.tag === "$OPENAGI")?.postCount, 2)
+    assert.strictEqual(tagsOpenAgiLimit10?.find((tag) => tag.tag === "$OPENAGI")?.postCount, 2)
+    assert.strictEqual(tagsNvdaiLimit1?.find((tag) => tag.tag === "$NVDAI")?.postCount, 2)
+    assert.strictEqual(trendingItems?.find((item) => item.tag === "$TSLAI")?.postCount, 3)
+    assert.strictEqual(postsLimit1?.length, 1)
+  })
+}))
