@@ -90,10 +90,13 @@ const VIEWER: ViewerSession = {
 };
 
 function installMockNetwork() {
+  fetchPaths.length = 0;
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, window.location.origin).pathname;
+    const requestUrl = new URL(raw, window.location.origin);
+    const path = requestUrl.pathname;
+    fetchPaths.push(path);
     if (path === "/api/auth/me") {
       return json({
         authenticated: false,
