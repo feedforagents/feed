@@ -1,5 +1,5 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
-import { migrateFeedSchema, seedFeedWorld, workerDbStore, type Store, type StoreFailure } from "@repo/db/worker"
+import { migrateFeedSchema, seedFeedWorld, Store, toInt, workerDbStore, type StoreFailure, type Tx } from "@repo/db/worker"
 import { RealtimeBus, realtimeBusLayer } from "@repo/social"
 import { parseAppServerConfig, stringEnvRecord, syncProcessEnv } from "./config.vibe"
 import { resolveOptionalRouteResponse, runScheduledTicks } from "./router.vibe"
@@ -51,9 +51,10 @@ export interface WorkerEnv extends Readonly<Record<string, unknown>> {
   readonly STRIPE_WEBHOOK_SECRET?: string | undefined
   readonly CRON_SECRET?: string | undefined
   readonly GAME_START?: string | undefined
+  readonly COMMIT_SHA?: string | undefined
 }
 
-const isolateBootstrap = new Map<string, Promise<void>>()
+const bootstrappedConnections = new Set<string>()
 let isolateBusRuntime: ManagedRuntime.ManagedRuntime<RealtimeBus, never> | undefined
 
 function connectionStringForEnv(env: WorkerEnv): string | undefined {
@@ -63,20 +64,35 @@ function connectionStringForEnv(env: WorkerEnv): string | undefined {
   return directUrl !== undefined && directUrl !== "" ? directUrl : undefined
 }
 
+effect function schemaAndSeedReady(): boolean!StoreFailure!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const revRows = try tx.query(
+      "SELECT to_regclass('public.feed_stripe_reversals') AS rev, to_regclass('public.feed_actors') AS actors"
+    )
+    const rev = revRows[0]?.rev
+    const actorsTable = revRows[0]?.actors
+    if (typeof rev !== "string" || typeof actorsTable !== "string") return false
+    const colRows = try tx.query(
+      "SELECT count(*) AS count FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feed_stripe_purchases' AND column_name = 'payment_intent_id'"
+    )
+    if (toInt(colRows[0]?.count) < 1) return false
+    const actorRows = try tx.query("SELECT count(*) AS count FROM feed_actors")
+    return toInt(actorRows[0]?.count) > 0
+  })
+}
+
 effect function bootstrapDatabase(): void!StoreFailure!Store {
+  const ready = try schemaAndSeedReady()
+  if (ready) return
   try migrateFeedSchema()
   try seedFeedWorld()
 }
 
-function ensureBootstrapped(connectionString: string, dbLayer: Layer.Layer<Store, StoreFailure>): Promise<void> {
-  const existing = isolateBootstrap.get(connectionString)
-  if (existing !== undefined) return existing
-  const pending = Effect.runPromise(Effect.provide(bootstrapDatabase(), dbLayer)).catch((err) => {
-    isolateBootstrap.delete(connectionString)
-    return Promise.reject(err)
-  })
-  isolateBootstrap.set(connectionString, pending)
-  return pending
+async function ensureBootstrapped(connectionString: string, dbLayer: Layer.Layer<Store, StoreFailure>): Promise<void> {
+  if (bootstrappedConnections.has(connectionString)) return
+  await Effect.runPromise(Effect.provide(bootstrapDatabase(), dbLayer))
+  bootstrappedConnections.add(connectionString)
 }
 
 effect function readBusService(): RealtimeBus.Shape!!RealtimeBus {
