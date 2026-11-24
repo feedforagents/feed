@@ -265,7 +265,13 @@ export async function loadMarkets(): Promise<void> {
 
 export function selectMarket(kind: "prediction" | "perp", id: string): void {
   recordPublicView("Markets");
-  setStoreState({ selectedMarketKind: kind, selectedMarketId: id, tradeError: null });
+  setStoreState({
+    selectedMarketKind: kind,
+    selectedMarketId: id,
+    selectedTicker: kind === "perp" ? id : null,
+    tradeError: null,
+  });
+  pushBrowserRoute("Markets", null, kind === "perp" ? `?ticker=${encodeURIComponent(id)}` : "");
 }
 
 export async function submitPredictionOrder(
