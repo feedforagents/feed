@@ -434,9 +434,6 @@ importers:
       '@effect/vitest':
         specifier: 4.1.1
         version: 4.1.1(effect@4.1.1)(vitest@5.1.0)
-      '@electric-sql/pglite':
-        specifier: 'catalog:'
-        version: 0.4.6
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
@@ -458,9 +455,6 @@ importers:
       '@effect/platform-node':
         specifier: 4.1.1
         version: 4.1.1(effect@4.1.1)(redis@6.3.1(@opentelemetry/api@1.10.0))
-      '@electric-sql/pglite':
-        specifier: 'catalog:'
-        version: 0.4.6
       '@elizaos/cloud':
         specifier: workspace:*
         version: link:../../vendor/eliza/packages/cloud
@@ -489,9 +483,6 @@ importers:
       vibelang:
         specifier: 0.0.13
         version: 0.0.13(@babel/core@7.29.13)(effect@4.1.1)(typescript@6.0.3)
-      vibestack:
-        specifier: workspace:*
-        version: link:../..
 
   packages/design-system:
     devDependencies:
@@ -535,9 +526,6 @@ importers:
       '@effect/vitest':
         specifier: 4.1.1
         version: 4.1.1(effect@4.1.1)(vitest@5.1.0)
-      '@electric-sql/pglite':
-        specifier: 'catalog:'
-        version: 0.4.6
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
@@ -572,9 +560,6 @@ importers:
       '@effect/vitest':
         specifier: 4.1.1
         version: 4.1.1(effect@4.1.1)(vitest@5.1.0)
-      '@electric-sql/pglite':
-        specifier: 'catalog:'
-        version: 0.4.6
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
@@ -624,9 +609,6 @@ importers:
       '@effect/vitest':
         specifier: 4.1.1
         version: 4.1.1(effect@4.1.1)(vitest@5.1.0)
-      '@electric-sql/pglite':
-        specifier: 'catalog:'
-        version: 0.4.6
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
@@ -667,9 +649,6 @@ importers:
       '@effect/vitest':
         specifier: 4.1.1
         version: 4.1.1(effect@4.1.1)(vitest@5.1.0)
-      '@electric-sql/pglite':
-        specifier: 'catalog:'
-        version: 0.4.6
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6

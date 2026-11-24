@@ -11,6 +11,7 @@ packages:
 # where `spec init` reads them: VibeLang 0.0.13 accepts Effect 4.1.1 only.
 catalog:
   "@cloudflare/workers-types": ^4.20260429.1
+  "@electric-sql/pglite": ^0.4.6
   "@eslint-react/eslint-plugin": ^5.30.2
   "@eslint/js": ^10.0.1
   "@modelcontextprotocol/sdk": ^1.12.1
