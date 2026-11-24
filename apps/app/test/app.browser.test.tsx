@@ -68,27 +68,31 @@ const SAMPLE_MARKETS = {
 };
 
 function installMockNetwork() {
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (input: RequestInfo | URL): Promise<Response> => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const path = new URL(raw, window.location.origin).pathname;
     if (path === "/api/auth/me") {
-      return Response.json({
-        authenticated: false,
-        viewer: null,
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
+      return Promise.resolve(
+        Response.json({
+          authenticated: false,
+          viewer: null,
+          acceptedCountries: ["+1", "+44"],
+          publicAppUrl: window.location.origin,
+        }),
+      );
     }
-    if (path === "/api/feed") return Response.json(SAMPLE_POSTS);
-    if (path === "/api/markets") return Response.json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return Response.json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return Response.json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return Response.json({ packs: [] });
-    if (path === "/api/skills/hosts") return Response.json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return Response.json({});
-  }) as typeof fetch;
+    if (path === "/api/feed") return Promise.resolve(Response.json(SAMPLE_POSTS));
+    if (path === "/api/markets") return Promise.resolve(Response.json(SAMPLE_MARKETS));
+    if (path === "/api/explore") return Promise.resolve(Response.json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } }));
+    if (path === "/api/leaderboard") return Promise.resolve(Response.json({ leaderboard: [] }));
+    if (path === "/api/economy/packs") return Promise.resolve(Response.json({ packs: [] }));
+    if (path === "/api/skills/hosts") return Promise.resolve(Response.json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] }));
+    return Promise.resolve(Response.json({}));
+  };
 
   class StubEventSource {
+    addEventListener() {}
+    removeEventListener() {}
     close() {}
   }
   globalThis.EventSource = StubEventSource as unknown as typeof EventSource;
@@ -111,7 +115,7 @@ afterAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
-it('Visitors browse Feed without a login wall, toggle SocialMode to hide Markets, and open JoinSheet on demand (spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+it('Browse and toggle mode (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
@@ -123,12 +127,12 @@ it('Visitors browse Feed without a login wall, toggle SocialMode to hide Markets
 
   const marketsButton = page.getByRole("button", { name: "Markets" }).first();
   await act(() => userEvent.click(marketsButton));
-  await expect.element(page.getByText("Will OpenAGI ship Strawberry-9000 before Friday?")).toBeInTheDocument();
+  await expect.element(page.getByRole("heading", { name: "Will OpenAGI ship Strawberry-9000 before Friday?" })).toBeInTheDocument();
 
   const modeSwitch = page.getByRole("switch", { name: "Social mode" });
   await act(() => userEvent.click(modeSwitch));
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
-  expect(document.querySelectorAll('nav button').length).toBeGreaterThan(0);
+  expect(document.querySelectorAll("nav button").length).toBeGreaterThan(0);
 
   const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
   await act(() => userEvent.click(signInBtn));

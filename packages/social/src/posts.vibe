@@ -1,5 +1,5 @@
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"
-import { Store, StoreFailure, toText, type Row, type Tx } from "@repo/db"
+import { Store, type StoreFailure, toText, type Row, type Tx } from "@repo/db"
 import {
   canCreatePost,
   canDeletePost,
@@ -744,18 +744,84 @@ export effect function createPost(input: CreatePostInput): PostView!(SocialFailu
   return committed.post
 }
 
+function textOrEmpty(value: unknown): string {
+  return toText(value) ?? ""
+}
+
+function buildSpecAccounts(
+  actorId: string,
+  actorKind: PostAuthorKind,
+  postAuthorId: string,
+  postAuthorKind: PostAuthorKind
+): AccountInfo[] {
+  const actorAccount: AccountInfo = {
+    id: actorId,
+    kind: actorKind === "user" ? "HumanAuthor" : "NpcAuthor",
+    connectedClient: "",
+    postsInWindow: 0
+  }
+  if (postAuthorId === actorId) return [actorAccount]
+  return [
+    actorAccount,
+    {
+      id: postAuthorId,
+      kind: postAuthorKind === "user" ? "HumanAuthor" : "NpcAuthor",
+      connectedClient: "",
+      postsInWindow: 0
+    }
+  ]
+}
+
+effect function recordEngagementNotificationTx(
+  tx: Tx,
+  params: {
+    readonly postAuthorId: string
+    readonly postAuthorKind: PostAuthorKind
+    readonly actorId: string
+    readonly postId: string
+    readonly kind: "like" | "repost"
+    readonly content: string
+    readonly now: number
+  },
+  events: FeedRealtimeEvent[]
+): void!StoreFailure {
+  if (params.postAuthorKind !== "user" || params.postAuthorId === params.actorId) return
+  const ev = try insertNotificationTx(tx, {
+    accountId: params.postAuthorId,
+    kind: params.kind,
+    actorId: params.actorId,
+    postId: params.postId,
+    marketId: null,
+    title: params.kind === "like" ? "Liked your post" : "Reposted your post",
+    body: params.content.slice(0, 120),
+    isGameOnly: false,
+    createdAt: params.now
+  })
+  if (ev !== undefined) events.push(ev)
+}
+
+effect function runPostMutation<A>(
+  accountId: string,
+  postId: string,
+  run: (tx: Tx, now: number) => { readonly value: A; readonly events: ReadonlyArray<FeedRealtimeEvent> }!(SocialFailure | StoreFailure)
+): A!(SocialFailure | StoreFailure)!Store {
+  if (accountId.trim() === "" || postId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Account ID and post ID are required" })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const committed = try store.transaction(effect (tx: Tx) => try run(tx, now))
+  try emitAfterCommit(committed.events)
+  return committed.value
+}
+
 effect function engagePost(
   accountId: string,
   postId: string,
   kind: "like" | "repost",
   active: boolean
 ): { readonly postId: string; readonly likeCount: number; readonly repostCount: number }!(SocialFailure | StoreFailure)!Store {
-  if (accountId.trim() === "" || postId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account ID and post ID are required" })
-  }
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  const committed = try store.transaction(effect (tx: Tx) => {
+  return try runPostMutation(accountId, postId, effect (tx: Tx, now: number) => {
     const actorRows = try tx.query(
       "SELECT account_id AS id, 'user' AS kind FROM feed_accounts WHERE account_id = $1 UNION ALL SELECT id, 'npc' AS kind FROM feed_actors WHERE id = $1 LIMIT 1",
       [accountId]
@@ -788,16 +854,7 @@ effect function engagePost(
       [postId, accountId]
     )
     const already = existingRows.length > 0
-    const authorAccount: AccountInfo = {
-      id: postAuthorId,
-      kind: postAuthorKind === "user" ? "HumanAuthor" : "NpcAuthor",
-      connectedClient: "",
-      postsInWindow: 0
-    }
-    const specAccounts: AccountInfo[] = [
-      { id: accountId, kind: actorKind === "user" ? "HumanAuthor" : "NpcAuthor", connectedClient: "", postsInWindow: 0 },
-      ...(postAuthorId === accountId ? [] : [authorAccount])
-    ]
+    const specAccounts = buildSpecAccounts(accountId, actorKind, postAuthorId, postAuthorKind)
     const specBlocks: BlockEdge[] = blocked ? [{ blockerId: accountId, blockedId: postAuthorId }] : []
     const specPost = makeSpecPost(
       1,
@@ -832,20 +889,11 @@ effect function engagePost(
         try tx.query("INSERT INTO feed_post_likes (post_id, account_id, created_at) VALUES ($1, $2, $3)", [postId, accountId, now])
         likeCount += 1
         try tx.query("UPDATE feed_posts SET like_count = $2 WHERE id = $1", [postId, likeCount])
-        if (postAuthorKind === "user" && postAuthorId !== accountId) {
-          const ev = try insertNotificationTx(tx, {
-            accountId: postAuthorId,
-            kind: "like",
-            actorId: accountId,
-            postId,
-            marketId: null,
-            title: "Liked your post",
-            body: content.slice(0, 120),
-            isGameOnly: false,
-            createdAt: now
-          })
-          if (ev !== undefined) events.push(ev)
-        }
+        try recordEngagementNotificationTx(
+          tx,
+          { postAuthorId, postAuthorKind, actorId: accountId, postId, kind: "like", content, now },
+          events
+        )
         events.push({ type: "post.engagement", postId, kind: "like", accountId, likeCount, repostCount })
       } else if (!active && already) {
         if (!canUnlikePost(specState, 1, caller)) {
@@ -863,20 +911,11 @@ effect function engagePost(
       try tx.query("INSERT INTO feed_post_reposts (post_id, account_id, repost_post_id, created_at) VALUES ($1, $2, NULL, $3)", [postId, accountId, now])
       repostCount += 1
       try tx.query("UPDATE feed_posts SET repost_count = $2 WHERE id = $1", [postId, repostCount])
-      if (postAuthorKind === "user" && postAuthorId !== accountId) {
-        const ev = try insertNotificationTx(tx, {
-          accountId: postAuthorId,
-          kind: "repost",
-          actorId: accountId,
-          postId,
-          marketId: null,
-          title: "Reposted your post",
-          body: content.slice(0, 120),
-          isGameOnly: false,
-          createdAt: now
-        })
-        if (ev !== undefined) events.push(ev)
-      }
+      try recordEngagementNotificationTx(
+        tx,
+        { postAuthorId, postAuthorKind, actorId: accountId, postId, kind: "repost", content, now },
+        events
+      )
       events.push({ type: "post.engagement", postId, kind: "repost", accountId, likeCount, repostCount })
     } else if (!active && already) {
       if (!canUnrepostPost(specState, 1, caller)) {
@@ -887,10 +926,8 @@ effect function engagePost(
       try tx.query("UPDATE feed_posts SET repost_count = $2 WHERE id = $1", [postId, repostCount])
       events.push({ type: "post.engagement", postId, kind: "unrepost", accountId, likeCount, repostCount })
     }
-    return { postId, likeCount, repostCount, events }
+    return { value: { postId, likeCount, repostCount }, events }
   })
-  try emitAfterCommit(committed.events)
-  return { postId: committed.postId, likeCount: committed.likeCount, repostCount: committed.repostCount }
 }
 
 export effect function likePost(accountId: string, postId: string): LikeResult!(SocialFailure | StoreFailure)!Store {
@@ -914,12 +951,7 @@ export effect function unrepostPost(accountId: string, postId: string): RepostRe
 }
 
 export effect function deletePost(accountId: string, postId: string): DeletePostResult!(SocialFailure | StoreFailure)!Store {
-  if (accountId.trim() === "" || postId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account ID and post ID are required" })
-  }
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  const committed = try store.transaction(effect (tx: Tx) => {
+  return try runPostMutation(accountId, postId, effect (tx: Tx, now: number) => {
     const rows = try tx.query(
       "SELECT id, author_id, author_kind, content, reply_to_post_id FROM feed_posts WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
       [postId]
@@ -931,16 +963,7 @@ export effect function deletePost(accountId: string, postId: string): DeletePost
     const postAuthorId = toText(row.author_id) ?? ""
     const postAuthorKind = toAuthorKind(row.author_kind)
     const replyToPostId = toText(row.reply_to_post_id) ?? null
-    const authorAccount: AccountInfo = {
-      id: postAuthorId,
-      kind: postAuthorKind === "user" ? "HumanAuthor" : "NpcAuthor",
-      connectedClient: "",
-      postsInWindow: 0
-    }
-    const specAccounts: AccountInfo[] = [
-      { id: accountId, kind: "HumanAuthor", connectedClient: "", postsInWindow: 0 },
-      ...(postAuthorId === accountId ? [] : [authorAccount])
-    ]
+    const specAccounts = buildSpecAccounts(accountId, "user", postAuthorId, postAuthorKind)
     const specState: PostsState = {
       accounts: specAccounts,
       posts: [makeSpecPost(1, postAuthorId, postAuthorKind, null, toText(row.content) ?? "p", replyToPostId, null, null, null, 0, 0, [], [])],
@@ -957,10 +980,8 @@ export effect function deletePost(accountId: string, postId: string): DeletePost
       try tx.query("UPDATE feed_posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1", [replyToPostId])
     }
     const events: FeedRealtimeEvent[] = [{ type: "post.deleted", postId, authorId: postAuthorId }]
-    return { postId, events }
+    return { value: { postId, deleted: true }, events }
   })
-  try emitAfterCommit(committed.events)
-  return { postId: committed.postId, deleted: true }
 }
 
 export effect function searchWorld(input: SearchWorldInput): SearchResult!(SocialFailure | StoreFailure)!Store {
@@ -986,10 +1007,10 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
       ? try tx.query(`SELECT account_id, handle, display_name, bio, avatar_url FROM feed_accounts WHERE ${accountWhere} ORDER BY created_at DESC LIMIT $2`, [likePattern, limit])
       : try tx.query(`SELECT account_id, handle, display_name, bio, avatar_url FROM feed_accounts WHERE ${accountWhere} AND ${viewerAuthorVisibilitySql("$2", "account_id")} ORDER BY created_at DESC LIMIT $3`, [likePattern, viewerId, limit])
     const accounts: SearchAccountResult[] = accountRows.map((row) => ({
-      accountId: toText(row.account_id) ?? "",
-      handle: toText(row.handle) ?? "",
-      displayName: toText(row.display_name) ?? "",
-      bio: toText(row.bio) ?? "",
+      accountId: textOrEmpty(row.account_id),
+      handle: textOrEmpty(row.handle),
+      displayName: textOrEmpty(row.display_name),
+      bio: textOrEmpty(row.bio),
       avatarUrl: toText(row.avatar_url) ?? null
     }))
     const actorWhere = "(username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\')"

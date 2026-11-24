@@ -412,27 +412,17 @@ effect function fetchFollowList(
   }
   const store = try Store
   const rows = try store.transaction(effect (tx: Tx) => {
-    const query = direction === "followers"
-      ? `SELECT f.follower_id AS peer_id,
+    const peerCol = direction === "followers" ? "follower_id" : "target_id"
+    const filterCol = direction === "followers" ? "target_id" : "follower_id"
+    const query = `SELECT f.${peerCol} AS peer_id,
                 fa.account_id AS user_id, fa.handle AS user_handle, fa.display_name AS user_name, fa.avatar_url AS user_avatar,
                 act.id AS npc_id, act.username AS npc_handle, act.name AS npc_name,
                 org.id AS org_id, org.name AS org_name
          FROM feed_follows f
-         LEFT JOIN feed_accounts fa ON fa.account_id = f.follower_id
-         LEFT JOIN feed_actors act ON act.id = f.follower_id
-         LEFT JOIN feed_organizations org ON org.id = f.follower_id
-         WHERE f.target_id = $1
-         ORDER BY f.created_at DESC
-         LIMIT $2`
-      : `SELECT f.target_id AS peer_id,
-                fa.account_id AS user_id, fa.handle AS user_handle, fa.display_name AS user_name, fa.avatar_url AS user_avatar,
-                act.id AS npc_id, act.username AS npc_handle, act.name AS npc_name,
-                org.id AS org_id, org.name AS org_name
-         FROM feed_follows f
-         LEFT JOIN feed_accounts fa ON fa.account_id = f.target_id
-         LEFT JOIN feed_actors act ON act.id = f.target_id
-         LEFT JOIN feed_organizations org ON org.id = f.target_id
-         WHERE f.follower_id = $1
+         LEFT JOIN feed_accounts fa ON fa.account_id = f.${peerCol}
+         LEFT JOIN feed_actors act ON act.id = f.${peerCol}
+         LEFT JOIN feed_organizations org ON org.id = f.${peerCol}
+         WHERE f.${filterCol} = $1
          ORDER BY f.created_at DESC
          LIMIT $2`
     return try tx.query(query, [target.id, limit])
@@ -518,6 +508,15 @@ effect function updateAccountProfile(
   })
 }
 
+effect function loadChatKind(tx: Tx, chatId: string): string!(SocialFailure | StoreFailure) {
+  const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
+  const chat = chatRows[0]
+  if (chat === undefined) {
+    throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
+  }
+  return toText(chat.kind) ?? ""
+}
+
 effect function inviteMemberToGroup(
   accountId: string,
   chatId: string,
@@ -533,12 +532,7 @@ effect function inviteMemberToGroup(
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
-    const chat = chatRows[0]
-    if (chat === undefined) {
-      throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
-    }
-    const kind = toText(chat.kind) ?? ""
+    const kind = try loadChatKind(tx, chatId)
     if (kind !== "group" && kind !== "user_group") {
       throw new SocialFailure({ code: "Forbidden", message: "Direct member invitations only apply to user group chats." })
     }
@@ -563,12 +557,7 @@ effect function leaveGroupById(
 ): { readonly chatId: string; readonly left: boolean }!(SocialFailure | StoreFailure)!Store {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
-    const chat = chatRows[0]
-    if (chat === undefined) {
-      throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
-    }
-    const kind = toText(chat.kind) ?? ""
+    const kind = try loadChatKind(tx, chatId)
     if (kind === "direct") {
       throw new SocialFailure({ code: "Forbidden", message: "Cannot leave a direct message thread." })
     }
@@ -623,17 +612,13 @@ effect function requireAuthenticatedCaller(
   return caller
 }
 
-effect function executePublicTool(
-  definition: McpToolDefinition,
+effect function executePublicWorldTool(
+  toolName: "about_feed" | "how_to_play" | "start_sign_in" | "check_sign_in",
   args: Record<string, unknown>,
-  origin: string,
-  authorizationHeader: string | undefined,
+  baseOrigin: string,
   authConfig: AuthRuntimeConfig
-): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
-  const baseOrigin = normalizeOrigin(origin)
-  const viewer = try resolveOptionalViewer(authorizationHeader, authConfig)
-
-  switch (definition.name) {
+): object!(InvalidRpcParamsFailure | McpFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
+  switch (toolName) {
     case "about_feed": {
       const status = getEngineAdminStatus() catch effect (err) => {
         if (err instanceof StoreFailure) throw err
@@ -749,6 +734,15 @@ effect function executePublicTool(
         client_name: exchanged.client_name
       }
     }
+  }
+}
+
+effect function executePublicSocialTool(
+  toolName: "get_post" | "get_replies" | "get_user_posts" | "get_profile" | "search" | "get_trending" | "get_followers" | "get_following",
+  args: Record<string, unknown>,
+  viewer: { readonly viewerId: string | undefined; readonly playMode: PlayMode }
+): object!(SocialFailure | MarketFailure | StoreFailure)!Store {
+  switch (toolName) {
     case "get_post": {
       const postId = asOptionalString(args.postId) ?? ""
       const thread = try getPostThread(postId, viewer.viewerId, viewer.playMode)
@@ -852,6 +846,15 @@ effect function executePublicTool(
       const limit = clampCount(asOptionalInt(args.limit), 50, 100)
       return try fetchFollowList("following", handleOrId, viewer.viewerId, limit)
     }
+  }
+}
+
+effect function executePublicMarketTool(
+  toolName: "list_markets" | "get_market" | "get_leaderboard",
+  args: Record<string, unknown>,
+  viewer: { readonly viewerId: string | undefined; readonly playMode: PlayMode }
+): object!(SocialFailure | MarketFailure | StoreFailure)!Store {
+  switch (toolName) {
     case "list_markets": {
       const kind = asOptionalString(args.kind) ?? "all"
       const rawStatus = asOptionalString(args.status) ?? "open"
@@ -944,19 +947,50 @@ effect function executePublicTool(
         })
       }
     }
+  }
+}
+
+effect function executePublicTool(
+  definition: McpToolDefinition,
+  args: Record<string, unknown>,
+  origin: string,
+  authorizationHeader: string | undefined,
+  authConfig: AuthRuntimeConfig
+): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
+  const baseOrigin = normalizeOrigin(origin)
+  const viewer = try resolveOptionalViewer(authorizationHeader, authConfig)
+
+  switch (definition.name) {
+    case "about_feed":
+    case "how_to_play":
+    case "start_sign_in":
+    case "check_sign_in":
+      return try executePublicWorldTool(definition.name, args, baseOrigin, authConfig)
+    case "get_post":
+    case "get_replies":
+    case "get_user_posts":
+    case "get_profile":
+    case "search":
+    case "get_trending":
+    case "get_followers":
+    case "get_following":
+      return try executePublicSocialTool(definition.name, args, viewer)
+    case "list_markets":
+    case "get_market":
+    case "get_leaderboard":
+      return try executePublicMarketTool(definition.name, args, viewer)
     default:
       throw new McpFailure({ code: "INVALID_PUBLIC_TOOL", message: `Unsupported public tool: ${definition.name}` })
   }
 }
 
-effect function executeProtectedTool(
-  definition: McpToolDefinition,
+effect function executeProtectedAccountTool(
+  toolName: "whoami" | "get_home_feed" | "get_notifications" | "get_portfolio" | "preview_perp" | "set_mode" | "mark_notifications_read",
   args: Record<string, unknown>,
   caller: VerifiedAccessToken
-): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
+): object!(InvalidRpcParamsFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
   const mode = caller.playMode
-
-  switch (definition.name) {
+  switch (toolName) {
     case "whoami": {
       const profile = try getProfile(caller.accountId, caller.accountId, mode)
       const rateLimits = try getRateLimitStatus(caller.accountId)
@@ -1079,13 +1113,7 @@ effect function executeProtectedTool(
       }
     }
     case "preview_perp": {
-      const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
-      const side = args.side === "short" ? "short" : "long"
-      const leverage = asOptionalInt(args.leverage) ?? 1
-      const collateralCents = ptsToWholeCents(Number(args.collateralPts))
-      if (collateralCents === undefined) {
-        throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
-      }
+      const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
       const market = try getPerpMarket(ticker)
       if (leverage < 1 || leverage > market.maxLeverage) {
         throw new InvalidRpcParamsFailure({ message: `Leverage must be between 1 and ${market.maxLeverage}.` })
@@ -1130,6 +1158,15 @@ effect function executeProtectedTool(
         : undefined
       return try markNotificationsRead(caller.accountId, notificationIds)
     }
+  }
+}
+
+effect function executeProtectedSocialTool(
+  toolName: "create_post" | "delete_post" | "like" | "unlike" | "repost" | "unrepost" | "follow" | "unfollow" | "block" | "unblock" | "mute" | "unmute" | "report" | "update_profile",
+  args: Record<string, unknown>,
+  caller: VerifiedAccessToken
+): object!(InvalidRpcParamsFailure | SocialFailure | StoreFailure)!Store {
+  switch (toolName) {
     case "create_post": {
       const content = String(args.content ?? "")
       const created = try createPost({
@@ -1142,7 +1179,7 @@ effect function executeProtectedTool(
         ticker: asOptionalString(args.ticker) ?? null,
         viaClientName: caller.clientName
       })
-      return { post: formatPostForMcp(created, mode), viaClientName: caller.clientName }
+      return { post: formatPostForMcp(created, caller.playMode), viaClientName: caller.clientName }
     }
     case "delete_post":
       return try deletePost(caller.accountId, asOptionalString(args.postId) ?? "")
@@ -1174,6 +1211,15 @@ effect function executeProtectedTool(
     }
     case "update_profile":
       return try updateAccountProfile(caller.accountId, asOptionalString(args.displayName), typeof args.bio === "string" ? args.bio : undefined)
+  }
+}
+
+effect function executeProtectedMessagingTool(
+  toolName: "list_chats" | "get_messages" | "send_dm" | "send_message" | "create_group" | "invite_to_group" | "leave_group" | "list_group_invites" | "respond_to_group_invite",
+  args: Record<string, unknown>,
+  caller: VerifiedAccessToken
+): object!(SocialFailure | StoreFailure)!Store {
+  switch (toolName) {
     case "list_chats": {
       const limit = clampCount(asOptionalInt(args.limit), 50, 100)
       const chats = try listChats(caller.accountId)
@@ -1234,6 +1280,82 @@ effect function executeProtectedTool(
       const invite = try respondAlphaInvite({ accountId: caller.accountId, inviteId, accept })
       return { invite }
     }
+  }
+}
+
+effect function parsePerpOrderArgs(args: Record<string, unknown>): {
+  readonly ticker: string
+  readonly side: "long" | "short"
+  readonly leverage: number
+  readonly collateralCents: number
+}!InvalidRpcParamsFailure {
+  const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
+  const side = args.side === "short" ? "short" : "long"
+  const leverage = asOptionalInt(args.leverage) ?? 1
+  const collateralCents = ptsToWholeCents(Number(args.collateralPts))
+  if (collateralCents === undefined) {
+    throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
+  }
+  return { ticker, side, leverage, collateralCents }
+}
+
+function tradeBalanceFooter(
+  mode: PlayMode,
+  clientName: string,
+  balanceAfterCents: number,
+  extraGameFields?: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    viaClientName: clientName,
+    currency: CURRENCY_DISCLAIMER,
+    ...(mode === "social"
+      ? { financialFieldsOmittedInSocialMode: true }
+      : {
+          ...extraGameFields,
+          balanceAfterPts: toPtsNumber(balanceAfterCents),
+          balanceAfterDisplay: formatPtsLabeled(balanceAfterCents)
+        })
+  }
+}
+
+function formatPredictionTradeReceipt(
+  receipt: {
+    readonly tradeId: string
+    readonly marketId: string
+    readonly action: string
+    readonly side: string
+    readonly shares: number
+    readonly notionalCents: number
+    readonly feeCents: number
+    readonly netCents: number
+    readonly yesPriceBps: number
+    readonly noPriceBps: number
+    readonly balanceAfterCents: number
+  },
+  caller: VerifiedAccessToken
+): Record<string, unknown> {
+  return {
+    tradeId: receipt.tradeId,
+    marketId: receipt.marketId,
+    action: receipt.action,
+    side: receipt.side,
+    shares: receipt.shares,
+    notionalPts: toPtsNumber(receipt.notionalCents),
+    feePts: toPtsNumber(receipt.feeCents),
+    netPts: toPtsNumber(receipt.netCents),
+    yesPriceBps: receipt.yesPriceBps,
+    noPriceBps: receipt.noPriceBps,
+    ...tradeBalanceFooter(caller.playMode, caller.clientName, receipt.balanceAfterCents)
+  }
+}
+
+effect function executeProtectedTradeTool(
+  toolName: "buy_prediction" | "sell_prediction" | "open_perp" | "close_perp",
+  args: Record<string, unknown>,
+  caller: VerifiedAccessToken
+): object!(InvalidRpcParamsFailure | MarketFailure | StoreFailure)!Store {
+  const mode = caller.playMode
+  switch (toolName) {
     case "buy_prediction": {
       const marketId = asOptionalString(args.marketId) ?? ""
       const side = args.side === "no" ? "no" : "yes"
@@ -1249,26 +1371,7 @@ effect function executeProtectedTool(
         amountCents,
         viaClientName: caller.clientName
       })
-      return {
-        tradeId: receipt.tradeId,
-        marketId: receipt.marketId,
-        action: receipt.action,
-        side: receipt.side,
-        shares: receipt.shares,
-        notionalPts: toPtsNumber(receipt.notionalCents),
-        feePts: toPtsNumber(receipt.feeCents),
-        netPts: toPtsNumber(receipt.netCents),
-        yesPriceBps: receipt.yesPriceBps,
-        noPriceBps: receipt.noPriceBps,
-        viaClientName: caller.clientName,
-        currency: CURRENCY_DISCLAIMER,
-        ...(mode === "social"
-          ? { financialFieldsOmittedInSocialMode: true }
-          : {
-              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
-              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
-            })
-      }
+      return formatPredictionTradeReceipt(receipt, caller)
     }
     case "sell_prediction": {
       const marketId = asOptionalString(args.marketId) ?? ""
@@ -1282,35 +1385,10 @@ effect function executeProtectedTool(
         shares,
         viaClientName: caller.clientName
       })
-      return {
-        tradeId: receipt.tradeId,
-        marketId: receipt.marketId,
-        action: receipt.action,
-        side: receipt.side,
-        shares: receipt.shares,
-        notionalPts: toPtsNumber(receipt.notionalCents),
-        feePts: toPtsNumber(receipt.feeCents),
-        netPts: toPtsNumber(receipt.netCents),
-        yesPriceBps: receipt.yesPriceBps,
-        noPriceBps: receipt.noPriceBps,
-        viaClientName: caller.clientName,
-        currency: CURRENCY_DISCLAIMER,
-        ...(mode === "social"
-          ? { financialFieldsOmittedInSocialMode: true }
-          : {
-              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
-              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
-            })
-      }
+      return formatPredictionTradeReceipt(receipt, caller)
     }
     case "open_perp": {
-      const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
-      const side = args.side === "short" ? "short" : "long"
-      const leverage = asOptionalInt(args.leverage) ?? 1
-      const collateralCents = ptsToWholeCents(Number(args.collateralPts))
-      if (collateralCents === undefined) {
-        throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
-      }
+      const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
       const receipt = try openPerpPosition({
         ownerId: caller.accountId,
         ownerKind: "user",
@@ -1331,14 +1409,7 @@ effect function executeProtectedTool(
         feePts: toPtsNumber(receipt.feeCents),
         executionPricePts: toPtsNumber(receipt.executionPriceCents),
         liquidationPricePts: toPtsNumber(receipt.position.liquidationPriceCents),
-        viaClientName: caller.clientName,
-        currency: CURRENCY_DISCLAIMER,
-        ...(mode === "social"
-          ? { financialFieldsOmittedInSocialMode: true }
-          : {
-              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
-              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
-            })
+        ...tradeBalanceFooter(mode, caller.clientName, receipt.balanceAfterCents)
       }
     }
     case "close_perp": {
@@ -1356,18 +1427,59 @@ effect function executeProtectedTool(
         sizePts: toPtsNumber(receipt.sizeCents),
         exitPricePts: toPtsNumber(receipt.exitPriceCents),
         feePts: toPtsNumber(receipt.feeCents),
-        viaClientName: caller.clientName,
-        currency: CURRENCY_DISCLAIMER,
-        ...(mode === "social"
-          ? { financialFieldsOmittedInSocialMode: true }
-          : {
-              realizedPnlPts: toPtsNumber(receipt.realizedPnlCents),
-              netCreditPts: toPtsNumber(receipt.netCreditCents),
-              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
-              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
-            })
+        ...tradeBalanceFooter(mode, caller.clientName, receipt.balanceAfterCents, {
+          realizedPnlPts: toPtsNumber(receipt.realizedPnlCents),
+          netCreditPts: toPtsNumber(receipt.netCreditCents)
+        })
       }
     }
+  }
+}
+
+effect function executeProtectedTool(
+  definition: McpToolDefinition,
+  args: Record<string, unknown>,
+  caller: VerifiedAccessToken
+): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
+  switch (definition.name) {
+    case "whoami":
+    case "get_home_feed":
+    case "get_notifications":
+    case "get_portfolio":
+    case "preview_perp":
+    case "set_mode":
+    case "mark_notifications_read":
+      return try executeProtectedAccountTool(definition.name, args, caller)
+    case "create_post":
+    case "delete_post":
+    case "like":
+    case "unlike":
+    case "repost":
+    case "unrepost":
+    case "follow":
+    case "unfollow":
+    case "block":
+    case "unblock":
+    case "mute":
+    case "unmute":
+    case "report":
+    case "update_profile":
+      return try executeProtectedSocialTool(definition.name, args, caller)
+    case "list_chats":
+    case "get_messages":
+    case "send_dm":
+    case "send_message":
+    case "create_group":
+    case "invite_to_group":
+    case "leave_group":
+    case "list_group_invites":
+    case "respond_to_group_invite":
+      return try executeProtectedMessagingTool(definition.name, args, caller)
+    case "buy_prediction":
+    case "sell_prediction":
+    case "open_perp":
+    case "close_perp":
+      return try executeProtectedTradeTool(definition.name, args, caller)
     default:
       throw new McpFailure({ code: "INVALID_PROTECTED_TOOL", message: `Unsupported protected tool: ${definition.name}` })
   }

@@ -31,6 +31,7 @@ import {
   verifyPhoneCode,
   type AuthRuntimeConfig
 } from "../src/index.vibe"
+import { insertCloudAccountTx } from "../src/phone-auth.vibe"
 
 module node {
   import { createHash } from "node:crypto"
@@ -143,16 +144,13 @@ effect function provisionReviewerAccount(handle: string, password: string) {
   })
   const store = try Store
   try store.transaction(effect (tx: Tx) => {
-    try tx.query(
-      "INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ($1, $2, 0, $3)",
-      [organizationId, handle, now]
-    )
-    try tx.query(
-      `INSERT INTO accounts
-         (key, state, revision, organization_id, status, email, phone, name, sessions_revoked_before, devices_revoked_before, device_epoch, created_at, updated_at)
-       VALUES ($1, $2::jsonb, 1, $3, 'active', NULL, NULL, $4, 1, 0, 0, $5, $5)`,
-      [accountId, stateJson, organizationId, handle, now]
-    )
+    try insertCloudAccountTx(tx, {
+      accountId,
+      organizationId,
+      displayName: handle,
+      stateJson,
+      now
+    })
     try tx.query(
       `INSERT INTO feed_accounts
          (account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
@@ -389,25 +387,20 @@ it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 86
       resource: "https://feed.fun/mcp/",
       origin: "https://feed.fun"
     })
-    const pendingDeviceExchange = try refusedCode(exchangeOAuthToken({
-      grantType: "urn:ietf:params:oauth:grant-type:device_code",
+    const deviceExchangeInput = {
+      grantType: "urn:ietf:params:oauth:grant-type:device_code" as const,
       deviceCode: deviceAuth.device_code,
       clientId: clientB.client_id,
       resource: "https://feed.fun/mcp/",
       config: localnetConfig
-    }))
+    }
+    const pendingDeviceExchange = try refusedCode(exchangeOAuthToken(deviceExchangeInput))
     const deviceApproved = try approveDeviceAuthorization({
       accountId,
       userCode: deviceAuth.user_code,
       scopes: ["read", "trade"]
     })
-    const tokenB = try exchangeOAuthToken({
-      grantType: "urn:ietf:params:oauth:grant-type:device_code",
-      deviceCode: deviceAuth.device_code,
-      clientId: clientB.client_id,
-      resource: "https://feed.fun/mcp/",
-      config: localnetConfig
-    })
+    const tokenB = try exchangeOAuthToken(deviceExchangeInput)
 
     const tokenAAfterSwap = try refusedCode(verifyBearer(tokenA.access_token))
     const attribAAfterSwap = try refusedCode(recordAgentAttribution(accountId, tokenA.grant_id))

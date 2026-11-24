@@ -467,8 +467,20 @@ export async function confirmPhoneChange(newPhoneE164: string, code: string): Pr
   return true;
 }
 
-export async function logout(): Promise<void> {
-  await requestJson("/api/auth/logout", { method: "POST", body: {}, parse: passThrough });
+async function performSignOut({
+  endpoint,
+  statusMessage,
+  ignoreFailure = false,
+}: {
+  readonly endpoint: string;
+  readonly statusMessage: string;
+  readonly ignoreFailure?: boolean;
+}): Promise<void> {
+  const res = await requestJson(endpoint, { method: "POST", body: {}, parse: passThrough });
+  if (!ignoreFailure && !res.ok) {
+    setStoreState({ errorMessage: res.message });
+    return;
+  }
   sendNav({ type: "signOutNav" });
   sendOnboarding({ type: "signOutOnboarding" });
   sendApp({ type: "signOutApp" });
@@ -480,53 +492,31 @@ export async function logout(): Promise<void> {
     chats: [],
     notifications: [],
     positions: [],
-    statusMessage: "Signed out.",
+    statusMessage,
   });
   await loadFeed("latest");
+}
+
+export async function logout(): Promise<void> {
+  await performSignOut({
+    endpoint: "/api/auth/logout",
+    statusMessage: "Signed out.",
+    ignoreFailure: true,
+  });
 }
 
 export async function signOutEverywhere(): Promise<void> {
-  const res = await requestJson("/api/auth/signout-everywhere", { method: "POST", body: {}, parse: passThrough });
-  if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
-    return;
-  }
-  sendNav({ type: "signOutNav" });
-  sendOnboarding({ type: "signOutOnboarding" });
-  sendApp({ type: "signOutApp" });
-  pushBrowserRoute("Home");
-  setStoreState({
-    viewer: null,
-    route: "Home",
-    feedTab: "latest",
-    chats: [],
-    notifications: [],
-    positions: [],
+  await performSignOut({
+    endpoint: "/api/auth/signout-everywhere",
     statusMessage: "Signed out across all sessions.",
   });
-  await loadFeed("latest");
 }
 
 export async function deleteAccount(): Promise<void> {
-  const res = await requestJson("/api/auth/account/delete", { method: "POST", body: {}, parse: passThrough });
-  if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
-    return;
-  }
-  sendNav({ type: "signOutNav" });
-  sendOnboarding({ type: "signOutOnboarding" });
-  sendApp({ type: "signOutApp" });
-  pushBrowserRoute("Home");
-  setStoreState({
-    viewer: null,
-    route: "Home",
-    feedTab: "latest",
-    chats: [],
-    notifications: [],
-    positions: [],
+  await performSignOut({
+    endpoint: "/api/auth/account/delete",
     statusMessage: "Account deleted. Phone number held in 30-day cooldown.",
   });
-  await loadFeed("latest");
 }
 
 export async function loadOAuthConsent(search: string): Promise<void> {

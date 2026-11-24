@@ -36,7 +36,12 @@ export function minuteIndexOf(nowMs: number): number {
 }
 
 export function sanitizeText(input: string, maxLen: number): string {
-  const collapsed = input.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/\s+/g, " ").trim()
+  let plain = ""
+  for (let i = 0; i < input.length; i++) {
+    const code = input.charCodeAt(i)
+    plain += code <= 31 || code === 127 ? " " : input[i]!
+  }
+  const collapsed = plain.replace(/\s+/g, " ").trim()
   if (collapsed.length <= maxLen) return collapsed
   if (maxLen <= 3) return collapsed.slice(0, maxLen)
   return `${collapsed.slice(0, maxLen - 3).trimEnd()}...`

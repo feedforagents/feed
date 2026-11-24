@@ -288,3 +288,16 @@ pure def sometimesAgentConnectedThenReplaced(s: AppShellState): bool =
 
 pure def sometimesSocialModeWithOpenPositions(s: AppShellState): bool =
   Nav::visibleSurfaces(s.nav).showAtRiskPositionsNotice
+```
+
+### Discovered by the proof: Onboarding pending gated action has a positive target
+
+Discovered by the proof: without stating `Onb::alwaysPendingActionValid(s.onb)`,
+phone and reviewer sign-in transitions could not prove
+`Onb::alwaysCompletedActionsValid` when promoting a queued pending action into
+`completedActions`.
+
+```quint
+pure def alwaysOnboardingPendingActionValid(s: AppShellState): bool =
+  Onb::alwaysPendingActionValid(s.onb)
+```

@@ -9,5 +9,6 @@ export const meta: ComponentMeta<BadgeProps> = {
     Warn: { variant: "warn", children: "Manual Hold" },
     Info: { variant: "info", children: "NPC Alpha" },
     Destructive: { variant: "destructive", children: "Revoked" },
+    AsChild: { asChild: true, children: <a href="#parody">AI parody</a> },
   },
 };

@@ -8,7 +8,11 @@
     "node": ">=26"
   },
   "exports": {
-    ".": "./src/index.vibe"
+    ".": {
+      "workerd": "./dist/src/index.js",
+      "types": "./src/index.vibe",
+      "default": "./src/index.vibe"
+    }
   },
   "scripts": {
     "build": "vibelang -p tsconfig.build.json",
@@ -23,7 +27,6 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.1.1",
-    "@electric-sql/pglite": "catalog:",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vibelang": "0.0.13",

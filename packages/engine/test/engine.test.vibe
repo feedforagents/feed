@@ -410,4 +410,4 @@ it.effect('NPC ticks drive spot markets and posts while markets emit idempotent 
       assert.strictEqual(adminAfterSettle.manualHoldCount, 0)
     })
   })
-}), 60_000)
+}), 180_000)

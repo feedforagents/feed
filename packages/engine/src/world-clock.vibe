@@ -20,6 +20,7 @@ import {
   ensureRollingMarketSlots,
   loadPublicWorldSnapshot,
   publishPhaseClues,
+  queryPendingRecovery,
   recoverExpiredMarkets,
   type RecoveryRunResult,
 } from "./narrative-arc.vibe"
@@ -125,19 +126,7 @@ effect function advanceWorldClockTx(tx: Tx, nowMs: number): {
 
 effect function pendingResolutionStats(): { readonly pendingCount: number; readonly oldestPendingAt: number | null }!StoreFailure!Store {
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(
-      `SELECT COUNT(*) AS cnt, MIN(expires_at) AS oldest
-       FROM feed_prediction_markets
-       WHERE status IN ('expired', 'awaiting_proof')`,
-    )
-    const pendingCount = Math.max(0, toInt(rows[0]?.cnt))
-    const oldestRaw = rows[0]?.oldest
-    return {
-      pendingCount,
-      oldestPendingAt: pendingCount > 0 && oldestRaw !== null && oldestRaw !== undefined ? toInt(oldestRaw) : null,
-    }
-  })
+  return try store.transaction(effect (tx: Tx) => try queryPendingRecovery(tx))
 }
 
 effect function checkAndAccrueFunding(nowMs: number, cutoverPeriod: number): boolean!(StoreFailure | MarketFailure)!Store {

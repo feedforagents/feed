@@ -506,6 +506,19 @@ pure def alwaysSettledAccountsHaveZeroOpenShares(m: PredictionMarket): bool =
       m.accounts.every(a => not(a.settledOnClose)))
 ```
 
+### Discovered by the proof: Active share and cash supply stays within the integer square-root range
+
+Because `isqrt` evaluates a fixed 26-bit binary search (`sum(SQRT_BITS) = 67,108,863`), the constant-product bound on `sell` holds inductively only when active reserves plus trader shares and cash stay within `isqrt`'s exact range; neither `buy` nor `sell` ever increases this total.
+
+```quint
+pure def alwaysActiveSupplyWithinSqrtRange(m: PredictionMarket): bool =
+  (m.phase != Resolved and m.phase != Cancelled) implies
+    and {
+      m.yesReserve + m.accounts.foldl(0, (acc, a) => acc + a.yesShares + a.balanceCents * SUBCENTS_PER_CENT) <= 20000000,
+      m.noReserve + m.accounts.foldl(0, (acc, a) => acc + a.noShares + a.balanceCents * SUBCENTS_PER_CENT) <= 20000000,
+    }
+```
+
 ### Resolved, cancelled, held, and expired markets allow no trades, and duplicate resolution pays nothing extra
 
 ```quint

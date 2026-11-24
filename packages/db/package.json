@@ -8,10 +8,25 @@
     "node": ">=26"
   },
   "exports": {
-    ".": "./src/index.vibe",
-    "./worker": "./src/worker.vibe",
-    "./node": "./src/node.vibe",
-    "./schema": "./src/schema.sql.ts"
+    ".": {
+      "workerd": "./dist/src/index.js",
+      "types": "./src/index.vibe",
+      "default": "./src/index.vibe"
+    },
+    "./worker": {
+      "workerd": "./dist/src/worker.js",
+      "types": "./src/worker.vibe",
+      "default": "./src/worker.vibe"
+    },
+    "./node": {
+      "types": "./src/node.vibe",
+      "default": "./src/node.vibe"
+    },
+    "./schema": {
+      "workerd": "./dist/src/schema.sql.js",
+      "types": "./src/schema.sql.ts",
+      "default": "./src/schema.sql.ts"
+    }
   },
   "scripts": {
     "typecheck": "vibelang --noEmit -p .",
@@ -19,7 +34,6 @@
   },
   "dependencies": {
     "@effect/platform-node": "4.1.1",
-    "@electric-sql/pglite": "catalog:",
     "@elizaos/cloud": "workspace:*",
     "@repo/pack-default": "workspace:*",
     "effect": "4.1.1",
@@ -30,7 +44,6 @@
     "@types/node": "catalog:",
     "@types/pg": "catalog:",
     "typescript": "catalog:",
-    "vibelang": "0.0.13",
-    "vibestack": "workspace:*"
+    "vibelang": "0.0.13"
   }
 }

@@ -1,5 +1,5 @@
 // spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"
-import { Store, StoreFailure, toText, type Row, type Tx } from "@repo/db"
+import { Store, type StoreFailure, toText, type Row, type Tx } from "@repo/db"
 import {
   canAddReaction,
   canCreateGroup,

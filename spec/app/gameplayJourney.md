@@ -481,3 +481,17 @@ pure val eval_witness_sometimesFullGameplayJourneyCompleted = (
   ("prepareMarketProof", 8, false),
   ("settleMarketAndPayout", 8)
 )
+```
+
+### Discovered by the proof: Spend budget attempt bounds remain valid
+
+Discovered by the proof: without stating
+`SB::alwaysAttemptBoundsValid(j.budget)`, an arbitrary prior attempt could
+already hold `nextAttemptId`, breaking `SB::alwaysAttemptIdsUnique`,
+`SB::alwaysTotalsMatchAttempts`, and `SB::alwaysNonNegativeAndWithinBudget`
+during `runNpcTickSpotAndAlpha`.
+
+```quint
+pure def alwaysBudgetAttemptBoundsValid(j: JourneyState): bool =
+  SB::alwaysAttemptBoundsValid(j.budget)
+```

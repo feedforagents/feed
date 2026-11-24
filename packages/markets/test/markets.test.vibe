@@ -383,27 +383,19 @@ it.effect('Economy and Stripe Checkout: Washington geo-block, idempotent HMAC we
     })
     try resolvePredictionMarket({ marketId: "seed-market-1" })
 
+    const bobCheckoutInput = (billingState: string, ipRegion: string) => ({
+      accountId: "user-bob",
+      packId: "pack_20" as const,
+      billingState,
+      ipRegion,
+      requestCountry: "US",
+      successUrl: "https://feed.fun/markets?checkout=success",
+      cancelUrl: "https://feed.fun/markets?checkout=cancel",
+      stripeSecretKey: "sk_test_fake"
+    })
     // spec/markets/economy.md, "Stripe Checkout packs are web-only and strictly blocked for Washington billing addresses or IPs"
-    const waBillingCode = try marketErrorCode(createStripeCheckoutSession({
-      accountId: "user-bob",
-      packId: "pack_20",
-      billingState: "WA",
-      ipRegion: "CA",
-      requestCountry: "US",
-      successUrl: "https://feed.fun/markets?checkout=success",
-      cancelUrl: "https://feed.fun/markets?checkout=cancel",
-      stripeSecretKey: "sk_test_fake"
-    }))
-    const waIpCode = try marketErrorCode(createStripeCheckoutSession({
-      accountId: "user-bob",
-      packId: "pack_20",
-      billingState: "CA",
-      ipRegion: "US-WA",
-      requestCountry: "US",
-      successUrl: "https://feed.fun/markets?checkout=success",
-      cancelUrl: "https://feed.fun/markets?checkout=cancel",
-      stripeSecretKey: "sk_test_fake"
-    }))
+    const waBillingCode = try marketErrorCode(createStripeCheckoutSession(bobCheckoutInput("WA", "CA")))
+    const waIpCode = try marketErrorCode(createStripeCheckoutSession(bobCheckoutInput("CA", "US-WA")))
 
     const bobBefore = try getAccountEconomy("user-bob")
     const boardBefore = try getLeaderboard()
@@ -421,16 +413,7 @@ it.effect('Economy and Stripe Checkout: Washington geo-block, idempotent HMAC we
     })
 
     const checkout = try Effect.provideService(
-      createStripeCheckoutSession({
-        accountId: "user-bob",
-        packId: "pack_20",
-        billingState: "CA",
-        ipRegion: "US-CA",
-        requestCountry: "US",
-        successUrl: "https://feed.fun/markets?checkout=success",
-        cancelUrl: "https://feed.fun/markets?checkout=cancel",
-        stripeSecretKey: "sk_test_fake"
-      }),
+      createStripeCheckoutSession(bobCheckoutInput("CA", "US-CA")),
       HttpClient.HttpClient,
       stripeClient
     )

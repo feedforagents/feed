@@ -4,7 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices"
 import { localStoreLayer } from "@repo/db/node"
 import { migrateFeedSchema, parseStoreLocation, seedFeedWorld, type Store, type StoreFailure } from "@repo/db"
 import { realtimeBusLayer, type RealtimeBus } from "@repo/social"
-import { parseAppServerConfig, processEnvRecord, type AppServerConfig } from "./config.vibe"
+import { parseAppServerConfig, processEnvRecord } from "./config.vibe"
 import { resolveOptionalRouteResponse, runScheduledTicks } from "./router.vibe"
 
 const SERVER_DIR = import.meta.dirname
@@ -59,7 +59,7 @@ module node {
     if (method !== "GET" && method !== "HEAD") return undefined
     const distWebRoot = path.resolve(serverDir, "../../dist/web")
     if (!fs.existsSync(distWebRoot)) return undefined
-    let cleanPath = pathname
+    let cleanPath: string
     try {
       cleanPath = decodeURIComponent(pathname)
     } catch {

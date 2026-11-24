@@ -505,7 +505,7 @@ pure val accountIdValues: Set[str] = Set("acct-1")
 pure val grantIdValues: Set[str] = Set("grant-1", "grant-2")
 pure val presentedGrantIdValues: Set[str] = Set("", "grant-1", "grant-2")
 pure val clientNameValues: Set[str] = Set("Claude", "ChatGPT")
-pure val elapsedValues: Set[AG::Millis] = Set(60000, 3600000)
+pure val elapsedValues: Set[AG::Millis] = Set(0, 60000, 3600000)
 
 pure val eval_witness_sometimesPublicReadSucceeded =
   ("callMcpTool", ToolListMarkets, "", false, false, GameMode)

@@ -327,6 +327,77 @@ function defineTool(config: {
   }
 }
 
+function followListFields(limitDescription: string): Readonly<Record<string, PropFieldSpec>> {
+  return {
+    handleOrId: {
+      kind: "string",
+      required: true,
+      minLength: 1,
+      maxLength: 120,
+      description: "Target username handle or ID."
+    },
+    limit: {
+      kind: "integer",
+      minimum: 1,
+      maximum: 100,
+      description: limitDescription
+    }
+  }
+}
+
+function perpOrderFields(
+  collateralDescription: string,
+  leverageDescription: string
+): Readonly<Record<string, PropFieldSpec>> {
+  return {
+    ticker: {
+      kind: "string",
+      required: true,
+      minLength: 1,
+      maxLength: 32,
+      description: "Perpetual market ticker symbol."
+    },
+    side: {
+      kind: "enum",
+      required: true,
+      values: ["long", "short"],
+      description: "Position direction."
+    },
+    collateralPts: {
+      kind: "number",
+      required: true,
+      exclusiveMinimum: 0,
+      maximum: 1000000,
+      description: collateralDescription
+    },
+    leverage: {
+      kind: "integer",
+      required: true,
+      minimum: 1,
+      maximum: 20,
+      description: leverageDescription
+    }
+  }
+}
+
+function predictionTradeBaseFields(sideDescription: string): Readonly<Record<string, PropFieldSpec>> {
+  return {
+    marketId: {
+      kind: "string",
+      required: true,
+      minLength: 1,
+      maxLength: 120,
+      description: "Open prediction market ID."
+    },
+    side: {
+      kind: "enum",
+      required: true,
+      values: ["yes", "no"],
+      description: sideDescription
+    }
+  }
+}
+
 export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
   defineTool({
     name: "about_feed",
@@ -535,21 +606,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     description: "List public followers for an account or NPC.",
     scope: "public",
     readOnly: true,
-    fields: {
-      handleOrId: {
-        kind: "string",
-        required: true,
-        minLength: 1,
-        maxLength: 120,
-        description: "Target username handle or ID."
-      },
-      limit: {
-        kind: "integer",
-        minimum: 1,
-        maximum: 100,
-        description: "Maximum follower rows (1-100)."
-      }
-    }
+    fields: followListFields("Maximum follower rows (1-100).")
   }),
   defineTool({
     name: "get_following",
@@ -557,21 +614,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     description: "List accounts and NPCs followed by a target handle or ID.",
     scope: "public",
     readOnly: true,
-    fields: {
-      handleOrId: {
-        kind: "string",
-        required: true,
-        minLength: 1,
-        maxLength: 120,
-        description: "Target username handle or ID."
-      },
-      limit: {
-        kind: "integer",
-        minimum: 1,
-        maximum: 100,
-        description: "Maximum following rows (1-100)."
-      }
-    }
+    fields: followListFields("Maximum following rows (1-100).")
   }),
   defineTool({
     name: "list_markets",
@@ -726,35 +769,10 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     scope: "read",
     readOnly: true,
     isGameFinanceTool: true,
-    fields: {
-      ticker: {
-        kind: "string",
-        required: true,
-        minLength: 1,
-        maxLength: 32,
-        description: "Perpetual market ticker symbol."
-      },
-      side: {
-        kind: "enum",
-        required: true,
-        values: ["long", "short"],
-        description: "Position direction."
-      },
-      collateralPts: {
-        kind: "number",
-        required: true,
-        exclusiveMinimum: 0,
-        maximum: 1000000,
-        description: "Collateral in virtual points (pts; 1 pt = 100 cents)."
-      },
-      leverage: {
-        kind: "integer",
-        required: true,
-        minimum: 1,
-        maximum: 20,
-        description: "Integer leverage multiplier from 1 to 20."
-      }
-    }
+    fields: perpOrderFields(
+      "Collateral in virtual points (pts; 1 pt = 100 cents).",
+      "Integer leverage multiplier from 1 to 20."
+    )
   }),
   defineTool({
     name: "set_mode",
@@ -1242,19 +1260,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     hasBalanceOrPnlField: true,
     isGameFinanceTool: true,
     fields: {
-      marketId: {
-        kind: "string",
-        required: true,
-        minLength: 1,
-        maxLength: 120,
-        description: "Open prediction market ID."
-      },
-      side: {
-        kind: "enum",
-        required: true,
-        values: ["yes", "no"],
-        description: "Outcome side to buy."
-      },
+      ...predictionTradeBaseFields("Outcome side to buy."),
       amountPts: {
         kind: "number",
         required: true,
@@ -1274,19 +1280,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     hasBalanceOrPnlField: true,
     isGameFinanceTool: true,
     fields: {
-      marketId: {
-        kind: "string",
-        required: true,
-        minLength: 1,
-        maxLength: 120,
-        description: "Open prediction market ID."
-      },
-      side: {
-        kind: "enum",
-        required: true,
-        values: ["yes", "no"],
-        description: "Outcome side to sell."
-      },
+      ...predictionTradeBaseFields("Outcome side to sell."),
       shares: {
         kind: "integer",
         required: true,
@@ -1306,35 +1300,10 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     destructive: true,
     hasBalanceOrPnlField: true,
     isGameFinanceTool: true,
-    fields: {
-      ticker: {
-        kind: "string",
-        required: true,
-        minLength: 1,
-        maxLength: 32,
-        description: "Perpetual market ticker symbol."
-      },
-      side: {
-        kind: "enum",
-        required: true,
-        values: ["long", "short"],
-        description: "Position direction."
-      },
-      collateralPts: {
-        kind: "number",
-        required: true,
-        exclusiveMinimum: 0,
-        maximum: 1000000,
-        description: "Collateral in virtual points (pts; minimum 0.01 pt = 1 cent)."
-      },
-      leverage: {
-        kind: "integer",
-        required: true,
-        minimum: 1,
-        maximum: 20,
-        description: "Integer leverage multiplier between 1 and 20."
-      }
-    }
+    fields: perpOrderFields(
+      "Collateral in virtual points (pts; minimum 0.01 pt = 1 cent).",
+      "Integer leverage multiplier between 1 and 20."
+    )
   }),
   defineTool({
     name: "close_perp",
@@ -1477,11 +1446,6 @@ export function validateToolArguments(
 /** @throws {never} */
 export function toPtsNumber(cents: number): number {
   return Math.round(cents) / 100
-}
-
-/** @throws {never} */
-export function formatPts(cents: number): string {
-  return `${(cents / 100).toFixed(2)} pts`
 }
 
 /** @throws {never} */

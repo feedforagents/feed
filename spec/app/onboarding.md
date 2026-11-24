@@ -347,3 +347,16 @@ pure def sometimesAgentDoorUsed(s: OnboardingState): bool =
 
 pure def sometimesReviewerSignedIn(s: OnboardingState): bool =
   s.isReviewer and s.signedIn
+```
+
+### Discovered by the proof: Pending gated action has a positive target
+
+Discovered by the proof: without stating that any non-empty queued pending
+action has a positive target id, sign-in transitions could not prove
+`alwaysCompletedActionsValid` when promoting `pendingAction` into
+`completedActions`.
+
+```quint
+pure def alwaysPendingActionValid(s: OnboardingState): bool =
+  s.pendingAction.actionKind != GatedNone implies s.pendingAction.targetId > 0
+```
