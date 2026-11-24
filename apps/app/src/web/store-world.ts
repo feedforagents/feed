@@ -281,13 +281,17 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
   setStoreState({ exploreLoading: false, errorMessage: res.message });
 }
 
+let marketsLoadCount = 0;
+
 export async function loadMarkets(): Promise<void> {
+  const loadId = ++marketsLoadCount;
   setStoreState({ marketsLoading: true });
   const [mktRes, lbRes, packsRes] = await Promise.all([
     requestJson("/api/markets", { parse: passThrough }),
     requestJson("/api/leaderboard", { parse: decodeLeaderboard }),
     requestJson("/api/economy/packs", { parse: decodePointPacks }),
   ]);
+  if (loadId !== marketsLoadCount) return;
   const s = getStoreSnapshot();
   let predictions = s.predictions;
   let perps = s.perps;
