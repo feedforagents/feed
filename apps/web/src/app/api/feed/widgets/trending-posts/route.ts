@@ -6,7 +6,8 @@
  *
  * @description
  * Returns trending posts based on engagement (likes, comments, shares) and recency.
- * Uses weighted scoring algorithm with recency factor. Filters posts from last 24 hours.
+ * Uses weighted scoring algorithm with recency factor. Filters posts from
+ * the requested time window.
  *
  * @openapi
  * /api/feed/widgets/trending-posts:
@@ -148,10 +149,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     timeframe: searchParams.get('timeframe') || '24h',
     minInteractions: searchParams.get('minInteractions') || '5',
   };
-  const { limit } = TrendingPostsQuerySchema.parse(queryParams);
-  // Get recent posts from last 24 hours
-  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const { limit, timeframe } = TrendingPostsQuerySchema.parse(queryParams);
   const now = new Date(); // Current time for filtering out future posts
+  // Window start for the requested timeframe (one request clock, as in
+  // the upcoming-events widget fix 6900e85dc).
+  const timeframeMs = {
+    '1h': 60 * 60 * 1000,
+    '6h': 6 * 60 * 60 * 1000,
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+  } as const;
+  const windowStart = new Date(now.getTime() - timeframeMs[timeframe]);
 
   // Optional auth - trending posts are public but RLS still applies
   const authUser = await optionalAuth(request).catch(() => null);
@@ -173,7 +181,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .from(postsTable)
             .where(
               and(
-                gte(postsTable.timestamp, oneDayAgo),
+                gte(postsTable.timestamp, windowStart),
                 lte(postsTable.timestamp, now), // ✅ No future posts
                 isNull(postsTable.deletedAt), // Filter out deleted posts
                 // Filter the author and any reposted or quoted author before the candidate limit.
@@ -271,7 +279,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .from(postsTable)
             .where(
               and(
-                gte(postsTable.timestamp, oneDayAgo),
+                gte(postsTable.timestamp, windowStart),
                 lte(postsTable.timestamp, now), // ✅ No future posts
                 isNull(postsTable.deletedAt), // Filter out deleted posts
                 // Test authors are excluded in SQL before the 100-post
