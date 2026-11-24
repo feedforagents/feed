@@ -18,6 +18,7 @@ import {
   loadMarkets,
   loadNotifications,
   loadProfile,
+  loadTrending,
   repostPost,
   selectFeedTab,
   startDirectChat,
@@ -71,7 +72,7 @@ export async function hydrateAuth(): Promise<void> {
     setStoreState({ authLoaded: true });
     return;
   }
-  const { authenticated, viewer, acceptedCountries, publicAppUrl } = res.data;
+  const { authenticated, viewer, acceptedCountries, publicAppUrl, turnstileSiteKey, devSmsCodeEnabled } = res.data;
   if (authenticated && viewer) {
     sendNav({ type: "signInNav", asAdmin: viewer.isAdmin });
     sendOnboarding({ type: "verifySmsCode", codeValid: true, isNewAccount: false });
@@ -92,6 +93,8 @@ export async function hydrateAuth(): Promise<void> {
       viewer,
       acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : getStoreSnapshot().acceptedCountries,
       publicAppUrl,
+      turnstileSiteKey,
+      devSmsCodeEnabled,
       route: nextRoute,
       localUiMode: viewer.uiMode,
       joinSheetOpen: false,
@@ -110,6 +113,8 @@ export async function hydrateAuth(): Promise<void> {
     viewer: null,
     acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : getStoreSnapshot().acceptedCountries,
     publicAppUrl,
+    turnstileSiteKey,
+    devSmsCodeEnabled,
     route: fallbackRoute,
   });
 }
@@ -191,12 +196,12 @@ export function setJoinPhoneStep(step: JoinPhoneStep): void {
   setStoreState({ joinPhoneStep: step });
 }
 
-export async function requestSmsCode(country: string, phone: string): Promise<void> {
+export async function requestSmsCode(country: string, phone: string, turnstileToken?: string): Promise<void> {
   const phoneE164 = formatPhoneToE164(country, phone);
   setStoreState({ joinLoading: true, joinError: null, pendingPhoneE164: phoneE164 });
   const res = await requestJson("/api/auth/phone/start", {
     method: "POST",
-    body: { phoneE164 },
+    body: { phoneE164, ...(turnstileToken ? { turnstileToken } : {}) },
     parse: passThrough,
   });
   if (!res.ok) {
@@ -211,9 +216,13 @@ export async function requestSmsCode(country: string, phone: string): Promise<vo
 }
 
 export async function resendSmsCode(): Promise<void> {
-  const phoneE164 = getStoreSnapshot().pendingPhoneE164;
-  if (!phoneE164) return;
-  await requestSmsCode("EU", phoneE164);
+  const s = getStoreSnapshot();
+  if (!s.pendingPhoneE164) return;
+  if (s.turnstileSiteKey) {
+    setStoreState({ joinPhoneStep: "entry", joinError: "Complete security verification to resend the code." });
+    return;
+  }
+  await requestSmsCode("EU", s.pendingPhoneE164);
 }
 
 export async function verifySmsCode(code: string): Promise<void> {
@@ -322,12 +331,15 @@ export async function submitReviewerLogin(payload: { readonly identifier: string
 
 export async function refreshViewerSurfaces(): Promise<void> {
   const s = getStoreSnapshot();
-  await loadFeed();
-  if (s.route === "Markets") await loadMarkets();
-  if (s.route === "Chats" && s.viewer) await loadChats();
-  if (s.route === "Notifications" && s.viewer) await loadNotifications();
-  if (s.route === "Profile") await loadProfile(s.profileHandle);
-  if (s.route === "OAuthConsent" && typeof window !== "undefined") await loadOAuthConsent(window.location.search);
+  const tasks: Promise<void>[] = [loadFeed(), loadTrending()];
+  if (s.route === "Markets") tasks.push(loadMarkets());
+  if (s.viewer) {
+    tasks.push(loadNotifications());
+    tasks.push(loadChats(s.route === "Chats"));
+  }
+  if (s.route === "Profile") tasks.push(loadProfile(s.profileHandle));
+  if (s.route === "OAuthConsent" && typeof window !== "undefined") tasks.push(loadOAuthConsent(window.location.search));
+  await Promise.all(tasks);
 }
 
 export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
@@ -438,10 +450,10 @@ export async function fetchLoopbackCode(phoneE164: string): Promise<string | nul
   return optStr(res.data.code);
 }
 
-export async function startPhoneChange(newPhoneE164: string): Promise<boolean> {
+export async function startPhoneChange(newPhoneE164: string, turnstileToken?: string): Promise<boolean> {
   const res = await requestJson("/api/auth/phone/change/start", {
     method: "POST",
-    body: { newPhoneE164 },
+    body: { newPhoneE164, ...(turnstileToken ? { turnstileToken } : {}) },
     parse: passThrough,
   });
   if (!res.ok) {

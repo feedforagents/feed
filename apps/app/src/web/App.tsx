@@ -318,7 +318,8 @@ export function App() {
         pendingActionLabel={s.pendingAction?.label}
         skillPrompt={s.skills.prompt}
         launchers={s.skills.hosts.map((h) => h.launcher)}
-        onRequestSmsCode={({ country, phone }) => { void storeActions.requestSmsCode(country, phone); }}
+        turnstileSiteKey={s.turnstileSiteKey ?? undefined}
+        onRequestSmsCode={({ country, phone, turnstileToken }) => { void storeActions.requestSmsCode(country, phone, turnstileToken); }}
         onVerifySmsCode={(code) => { void storeActions.verifySmsCode(code); }}
         onResendSmsCode={() => { void storeActions.resendSmsCode(); }}
         onCompleteProfile={(payload) => { void storeActions.completePhoneOnboard(payload); }}

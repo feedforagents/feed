@@ -45,6 +45,13 @@ export interface AuthMePayload {
   readonly viewer: ViewerSession | null;
   readonly acceptedCountries: ReadonlyArray<string>;
   readonly publicAppUrl: string;
+  readonly turnstileSiteKey: string | null;
+  readonly devSmsCodeEnabled: boolean;
+}
+
+export interface AppFeedPage {
+  readonly items: ReadonlyArray<AppPost>;
+  readonly nextCursor: string | null;
 }
 
 export interface AppPost {
@@ -166,6 +173,7 @@ export interface AppProfileBundle {
   readonly postsCount: number;
   readonly viewerBlockedBy: boolean;
   readonly posts: ReadonlyArray<AppPost>;
+  readonly postsNextCursor: string | null;
   readonly positions: ReadonlyArray<AppPosition>;
 }
 
@@ -403,6 +411,8 @@ export function decodeAuthMe(raw: unknown): AuthMePayload {
     viewer,
     acceptedCountries,
     publicAppUrl: str(rec.publicAppUrl, typeof window !== "undefined" ? window.location.origin : "https://feed.fun"),
+    turnstileSiteKey: optStr(rec.turnstileSiteKey),
+    devSmsCodeEnabled: bool(rec.devSmsCodeEnabled, false),
   };
 }
 
@@ -466,6 +476,13 @@ export function decodePost(raw: unknown): AppPost | null {
 export function decodePosts(raw: unknown): ReadonlyArray<AppPost> {
   const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.items ?? raw.posts) : [];
   return list.map(decodePost).filter((p): p is AppPost => p !== null);
+}
+
+export function decodeFeedPage(raw: unknown): AppFeedPage {
+  return {
+    items: decodePosts(raw),
+    nextCursor: isRecord(raw) ? optStr(raw.nextCursor) : null,
+  };
 }
 
 export function decodePostThread(raw: unknown): PostThreadData | null {
@@ -615,10 +632,14 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
       if (!id || !ticker) return null;
       const rawSide = str(entry.side, "long").toLowerCase() === "short" ? "short" : "long";
       const sizeCents = num(entry.sizeCents ?? entry.size_cents, 0);
+      const marginCents = num(entry.marginCents ?? entry.margin_cents, 0);
       const entryCents = num(entry.entryPriceCents ?? entry.entry_price_cents, 0);
       const markCents = num(entry.markPriceCents ?? entry.mark_price_cents, entryCents);
       const liqCents = num(entry.liquidationPriceCents, 0);
-      const pnlCents = num(entry.unrealizedPnlCents, 0);
+      const rawEquity = entry.equityCents ?? entry.equity_cents;
+      const pnlCents = rawEquity !== undefined
+        ? num(rawEquity, marginCents) - marginCents
+        : num(entry.unrealizedPnlCents, 0) - num(entry.accruedFundingCents ?? entry.accrued_funding_cents, 0);
       return {
         marketId: ticker,
         rawSide,
@@ -668,9 +689,9 @@ export function decodeLeaderboard(raw: unknown): ReadonlyArray<LeaderboardEntry>
     .filter((e): e is LeaderboardEntry => e !== null);
 }
 
-export function decodeExplore(raw: unknown): ExploreData {
-  const rec = isRecord(raw) ? raw : {};
-  const trending = arr(rec.trending)
+export function decodeTrendingList(raw: unknown): ReadonlyArray<TrendingItem> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.trending ?? raw.items) : [];
+  return list
     .map((t, idx): TrendingItem | null => {
       if (!isRecord(t)) return null;
       const tag = optStr(t.tag ?? t.title);
@@ -686,6 +707,11 @@ export function decodeExplore(raw: unknown): ExploreData {
       };
     })
     .filter((t): t is TrendingItem => t !== null);
+}
+
+export function decodeExplore(raw: unknown): ExploreData {
+  const rec = isRecord(raw) ? raw : {};
+  const trending = decodeTrendingList(rec.trending);
 
   const articles = arr(rec.articles)
     .map((a): AppArticle | null => {
@@ -908,6 +934,7 @@ export function decodeProfileBundle(raw: unknown, viewerAccountId: string | null
     postsCount: num(p.postsCount, 0),
     viewerBlockedBy: bool(p.viewerBlockedBy, false),
     posts: decodePosts(raw.posts),
+    postsNextCursor: optStr(raw.nextCursor),
     positions: decodePositions(raw.positions),
     summary: {
       displayName: str(p.displayName, handle),

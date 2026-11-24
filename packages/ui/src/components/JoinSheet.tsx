@@ -1,6 +1,7 @@
 import { type FormEvent, type ReactNode, useId, useState } from "react";
-import { cn } from "../lib/cn.ts";
+import { cn, focusRing } from "../lib/cn.ts";
 import { type AgentHostId, type AgentHostLauncher, defaultAgentLaunchers, defaultSkillPrompt } from "../lib/hosts.ts";
+import { useTurnstileContainerRef } from "../lib/turnstile.ts";
 import { AgentHostGrid } from "./AgentMark.tsx";
 import { Alert } from "./Alert.tsx";
 import { Button } from "./Button.tsx";
@@ -38,8 +39,10 @@ export type JoinSheetProps = {
   skillPrompt?: string;
   /** One-click agent launchers rendered in the Connect Your Agent tab. */
   launchers?: AgentHostLauncher[];
+  /** Optional Cloudflare Turnstile site key; renders a security challenge on phone entry when set. */
+  turnstileSiteKey?: string;
   /** Requests a 6-digit SMS code for an allowlisted non-VoIP phone number. */
-  onRequestSmsCode?: (payload: { country: string; phone: string }) => void;
+  onRequestSmsCode?: (payload: { country: string; phone: string; turnstileToken?: string }) => void;
   /** Verifies the 6-digit SMS autofill code. */
   onVerifySmsCode?: (code: string) => void;
   /** Re-requests the SMS verification code. */
@@ -70,6 +73,96 @@ const countryAllowlist = [
   { code: "EU", label: "EU / EEA" },
 ];
 
+function JoinTermsLabel({
+  termsId,
+  acceptedTerms,
+  blocked,
+  onAcceptedChange,
+}: {
+  readonly termsId: string;
+  readonly acceptedTerms: boolean;
+  readonly blocked: boolean;
+  readonly onAcceptedChange: (accepted: boolean) => void;
+}) {
+  return (
+    <Label htmlFor={termsId} className={cn("font-normal")}>
+      <Checkbox id={termsId} checked={acceptedTerms} disabled={blocked} onCheckedChange={(checked) => onAcceptedChange(checked === true)} />
+      <span>
+        I accept the{" "}
+        <a
+          href="https://docs.feed.fun/legal/terms-of-service/"
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(event) => event.stopPropagation()}
+          className={cn(focusRing, "rounded-sm underline hover:text-foreground")}
+        >
+          Terms of Service
+        </a>{" "}
+        and{" "}
+        <a
+          href="https://docs.feed.fun/legal/privacy-policy/"
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(event) => event.stopPropagation()}
+          className={cn(focusRing, "rounded-sm underline hover:text-foreground")}
+        >
+          Privacy Policy
+        </a>{" "}
+        (virtual points have no cash value)
+      </span>
+    </Label>
+  );
+}
+
+function JoinReviewerForm({
+  blocked,
+  loading,
+  onSubmitReviewer,
+}: {
+  readonly blocked: boolean;
+  readonly loading: boolean;
+  readonly onSubmitReviewer?: (payload: { identifier: string; password: string }) => void;
+}) {
+  const reviewerUserId = useId();
+  const reviewerPasswordId = useId();
+  const [reviewerId, setReviewerId] = useState("");
+  const [reviewerPassword, setReviewerPassword] = useState("");
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (blocked || !reviewerId.trim() || !reviewerPassword) return;
+    onSubmitReviewer?.({ identifier: reviewerId.trim(), password: reviewerPassword });
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor={reviewerUserId}>Reviewer username</Label>
+        <Input
+          id={reviewerUserId}
+          value={reviewerId}
+          disabled={blocked}
+          onChange={(event) => setReviewerId(event.target.value)}
+        />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor={reviewerPasswordId}>Password</Label>
+        <Input
+          id={reviewerPasswordId}
+          type="password"
+          value={reviewerPassword}
+          disabled={blocked}
+          onChange={(event) => setReviewerPassword(event.target.value)}
+        />
+      </div>
+      <p className="text-xs text-muted-foreground">Restricted to operator-flagged reviewer accounts.</p>
+      <Button type="submit" loading={loading} disabled={blocked || !reviewerId.trim() || !reviewerPassword}>
+        Sign in as reviewer
+      </Button>
+    </form>
+  );
+}
+
 /**
  * Three-tab onboarding dialog: Phone 6-digit SMS + 18+ + username, Connect Your Agent (`SKILL.md`), and Reviewer sign-in.
  * @model spec/app/onboarding.md
@@ -86,6 +179,7 @@ export function JoinSheet({
   pendingActionLabel,
   skillPrompt = defaultSkillPrompt,
   launchers = defaultAgentLaunchers,
+  turnstileSiteKey,
   onRequestSmsCode,
   onVerifySmsCode,
   onResendSmsCode,
@@ -103,8 +197,6 @@ export function JoinSheet({
   const usernameId = useId();
   const ageId = useId();
   const termsId = useId();
-  const reviewerUserId = useId();
-  const reviewerPasswordId = useId();
 
   const [internalTab, setInternalTab] = useState<JoinTab>("phone");
   const [internalStep, setInternalStep] = useState<JoinPhoneStep>("entry");
@@ -114,8 +206,10 @@ export function JoinSheet({
   const [username, setUsername] = useState("");
   const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
-  const [reviewerId, setReviewerId] = useState("");
-  const [reviewerPassword, setReviewerPassword] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const activeTurnstileKey = turnstileSiteKey?.trim() || undefined;
+  const turnstileRef = useTurnstileContainerRef(activeTurnstileKey, setTurnstileToken);
 
   const currentTab = activeTab ?? internalTab;
   const currentStep = phoneStep ?? internalStep;
@@ -136,7 +230,11 @@ export function JoinSheet({
   const handleRequestCode = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (blocked || !phone.trim()) return;
-    onRequestSmsCode?.({ country, phone: phone.trim() });
+    if (activeTurnstileKey && !turnstileToken) return;
+    const token = turnstileToken ?? undefined;
+    setTurnstileToken(null);
+    setTurnstileResetKey((n) => n + 1);
+    onRequestSmsCode?.({ country, phone: phone.trim(), ...(token ? { turnstileToken: token } : {}) });
     setStep("verify");
   };
 
@@ -151,12 +249,6 @@ export function JoinSheet({
     event.preventDefault();
     if (blocked || !username.trim() || !ageConfirmed || !acceptedTerms) return;
     onCompleteProfile?.({ username: username.trim(), ageConfirmed, acceptedTerms });
-  };
-
-  const handleReviewerSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (blocked || !reviewerId.trim() || !reviewerPassword) return;
-    onSubmitReviewer?.({ identifier: reviewerId.trim(), password: reviewerPassword });
   };
 
   return (
@@ -214,7 +306,15 @@ export function JoinSheet({
                     onChange={(event) => setPhone(event.target.value)}
                   />
                 </div>
-                <Button type="submit" loading={loading} disabled={blocked || !phone.trim()}>
+                {activeTurnstileKey ? (
+                  <div
+                    key={`${activeTurnstileKey}:${turnstileResetKey}`}
+                    ref={turnstileRef}
+                    aria-label="Security verification"
+                    className="min-h-16"
+                  />
+                ) : null}
+                <Button type="submit" loading={loading} disabled={blocked || !phone.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
                   Send 6-digit SMS code
                 </Button>
               </form>
@@ -259,10 +359,12 @@ export function JoinSheet({
                   <Checkbox id={ageId} checked={ageConfirmed} disabled={blocked} onCheckedChange={(checked) => setAgeConfirmed(checked === true)} />
                   I confirm I am at least 18 years old
                 </Label>
-                <Label htmlFor={termsId} className={cn("font-normal")}>
-                  <Checkbox id={termsId} checked={acceptedTerms} disabled={blocked} onCheckedChange={(checked) => setAcceptedTerms(checked === true)} />
-                  I accept the Feed Terms (virtual points have no cash value)
-                </Label>
+                <JoinTermsLabel
+                  termsId={termsId}
+                  acceptedTerms={acceptedTerms}
+                  blocked={blocked}
+                  onAcceptedChange={setAcceptedTerms}
+                />
                 <Button type="submit" loading={loading} disabled={blocked || !username.trim() || !ageConfirmed || !acceptedTerms}>
                   Claim 100 pts & enter
                 </Button>
@@ -289,31 +391,7 @@ export function JoinSheet({
           </TabsContent>
 
           <TabsContent value="reviewer">
-            <form onSubmit={handleReviewerSubmit} className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor={reviewerUserId}>Reviewer username</Label>
-                <Input
-                  id={reviewerUserId}
-                  value={reviewerId}
-                  disabled={blocked}
-                  onChange={(event) => setReviewerId(event.target.value)}
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor={reviewerPasswordId}>Password</Label>
-                <Input
-                  id={reviewerPasswordId}
-                  type="password"
-                  value={reviewerPassword}
-                  disabled={blocked}
-                  onChange={(event) => setReviewerPassword(event.target.value)}
-                />
-              </div>
-              <p className="text-xs text-muted-foreground">Restricted to operator-flagged reviewer accounts.</p>
-              <Button type="submit" loading={loading} disabled={blocked || !reviewerId.trim() || !reviewerPassword}>
-                Sign in as reviewer
-              </Button>
-            </form>
+            <JoinReviewerForm blocked={blocked} loading={loading} onSubmitReviewer={onSubmitReviewer} />
           </TabsContent>
         </Tabs>
       </DialogContent>

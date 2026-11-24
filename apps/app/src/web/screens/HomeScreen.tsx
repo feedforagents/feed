@@ -21,7 +21,7 @@ import {
   type PostComposerContext,
   type UiMode,
 } from "@repo/ui";
-import { FeedPostCard } from "../PostList.tsx";
+import { FeedPostCard, ReportPostDialog } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 import type { AppPost } from "../types.ts";
 
@@ -158,6 +158,7 @@ export function HomeScreen({ mode, explainerVisible }: HomeScreenProps) {
   const [composerText, setComposerText] = useState("");
   const [composerBusy, setComposerBusy] = useState(false);
   const [quoteTarget, setQuoteTarget] = useState<AppPost | null>(null);
+  const [reportPostId, setReportPostId] = useState<string | null>(null);
 
   const quoteContext: PostComposerContext | undefined = quoteTarget
     ? { authorHandle: quoteTarget.card.authorHandle, excerpt: quoteTarget.card.content }
@@ -241,9 +242,22 @@ export function HomeScreen({ mode, explainerVisible }: HomeScreenProps) {
                   }
                   setQuoteTarget(target);
                 }}
+                onReport={s.viewer && post.card.authorHandle !== s.viewer.handle ? (id) => setReportPostId(id) : undefined}
               />
             </div>
           ))}
+          {s.feedNextCursor ? (
+            <div className="flex justify-center p-4">
+              <Button
+                variant="outline"
+                size="sm"
+                loading={s.feedLoadingMore}
+                onClick={() => { void storeActions.loadMoreFeed(); }}
+              >
+                Load more
+              </Button>
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -255,6 +269,8 @@ export function HomeScreen({ mode, explainerVisible }: HomeScreenProps) {
           setQuoteTarget(post);
         }}
       />
+
+      <ReportPostDialog postId={reportPostId} onClose={() => setReportPostId(null)} />
     </div>
   );
 }

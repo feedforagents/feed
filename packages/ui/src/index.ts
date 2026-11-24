@@ -2,6 +2,7 @@ export * from "./lib/cn.ts";
 export * from "./lib/control.ts";
 export * from "./lib/hosts.ts";
 export * from "./lib/overlay.ts";
+export * from "./lib/turnstile.ts";
 export * from "./components/AgentConnectCard.tsx";
 export * from "./components/AgentMark.tsx";
 export * from "./components/Alert.tsx";

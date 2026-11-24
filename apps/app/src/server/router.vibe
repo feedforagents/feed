@@ -102,6 +102,7 @@ import {
   listTrending,
   markNotificationsRead,
   muteAccount,
+  publishFeedEvent,
   reactToMessage,
   reportTarget,
   repostPost,
@@ -344,10 +345,12 @@ function clampIntQuery(url: URL, key: string, fallback: number, min: number, max
 }
 
 function marketFailureStatus(code: string): number {
+  if (code === "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING") return 500
   if (code.includes("NOT_FOUND")) return 404
   if (code.includes("WASHINGTON") || code.includes("GEO") || code === "FORBIDDEN") return 403
   if (code === "RATE_LIMITED") return 429
-  if (code === "MARKET_NOT_OPEN" || code === "ALREADY_SETTLED" || code === "CONFLICT") return 409
+  if (code === "MARKET_NOT_OPEN" || code === "ALREADY_SETTLED" || code === "CONFLICT" || code === "IDEMPOTENCY_CONFLICT") return 409
+  if (code === "INVALID_IDEMPOTENCY_KEY") return 400
   return 400
 }
 
@@ -626,6 +629,15 @@ effect function handleOAuthRoute(
   return undefined
 }
 
+function authBootstrapFields(config: AppServerConfig) {
+  return {
+    acceptedCountries: config.auth.allowedCountries,
+    publicAppUrl: config.publicAppUrl,
+    turnstileSiteKey: config.auth.turnstileSiteKey ?? null,
+    devSmsCodeEnabled: config.auth.smsMode === "loopback"
+  }
+}
+
 effect function handleAuthRoute(
   request: Request,
   url: URL,
@@ -636,13 +648,13 @@ effect function handleAuthRoute(
   if (!path.startsWith("/api/auth/")) return undefined
 
   if (method === "GET" && path === "/api/auth/me") {
+    const bootstrap = authBootstrapFields(config)
     const session = try optionalSession(request, config)
     if (session === null) {
       return jsonResponse({
         authenticated: false,
         viewer: null,
-        acceptedCountries: config.auth.allowedCountries,
-        publicAppUrl: config.publicAppUrl
+        ...bootstrap
       })
     }
     const profile = getAccountProfile(session.accountId) catch effect (err) => {
@@ -654,8 +666,7 @@ effect function handleAuthRoute(
         {
           authenticated: false,
           viewer: null,
-          acceptedCountries: config.auth.allowedCountries,
-          publicAppUrl: config.publicAppUrl
+          ...bootstrap
         },
         200,
         {},
@@ -680,8 +691,7 @@ effect function handleAuthRoute(
         isReviewer: profile.isReviewer,
         agentGrant: grant
       },
-      acceptedCountries: config.auth.allowedCountries,
-      publicAppUrl: config.publicAppUrl
+      ...bootstrap
     })
   }
   if (method === "POST" && path === "/api/auth/phone/start") {
@@ -858,6 +868,62 @@ effect function handleAccountEdge(
   return jsonResponse({ error: "method_not_allowed", code: "method_not_allowed", message: "Method not allowed." }, 405)
 }
 
+effect function updateOwnAccountProfile(
+  accountId: string,
+  data: Readonly<Record<string, unknown>>
+): { readonly accountId: string; readonly handle: string; readonly displayName: string; readonly bio: string }!(HttpRequestError | StoreFailure)!Store {
+  const hasDisplayName = Object.prototype.hasOwnProperty.call(data, "displayName")
+  const hasBio = Object.prototype.hasOwnProperty.call(data, "bio")
+  if (!hasDisplayName && !hasBio) {
+    return try badRequest("invalid_input", "Provide displayName or bio to update.")
+  }
+  let nextDisplayName: string | null = null
+  if (hasDisplayName) {
+    if (typeof data.displayName !== "string") {
+      return try badRequest("invalid_display_name", "displayName must be a string.")
+    }
+    const trimmed = data.displayName.trim()
+    if (trimmed.length < 1 || trimmed.length > 60) {
+      return try badRequest("invalid_display_name", "displayName must be between 1 and 60 characters.")
+    }
+    nextDisplayName = trimmed
+  }
+  let nextBio: string | null = null
+  if (hasBio) {
+    if (typeof data.bio !== "string") {
+      return try badRequest("invalid_bio", "bio must be a string.")
+    }
+    const trimmed = data.bio.trim()
+    if (trimmed.length > 280) {
+      return try badRequest("invalid_bio", "bio must be at most 280 characters.")
+    }
+    nextBio = trimmed
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `UPDATE feed_accounts
+       SET display_name = COALESCE($2, display_name),
+           bio = COALESCE($3, bio),
+           updated_at = $4
+       WHERE account_id = $1
+       RETURNING account_id, handle, display_name, bio`,
+      [accountId, nextDisplayName, nextBio, now]
+    )
+    const row = rows[0]
+    if (row === undefined) {
+      return try badRequest("not_found", "Account profile not found.", 404)
+    }
+    return {
+      accountId: toText(row.account_id) ?? accountId,
+      handle: toText(row.handle) ?? "",
+      displayName: toText(row.display_name) ?? "",
+      bio: toText(row.bio) ?? ""
+    }
+  })
+}
+
 effect function handleSocialPostsAndUsers(
   request: Request,
   url: URL,
@@ -882,7 +948,6 @@ effect function handleSocialPostsAndUsers(
   }
   if (method === "POST" && path === "/api/posts") {
     const session = try requireSession(request, config)
-    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "post", surface: "web" })
     const { data } = try readParsedBody(request)
     const post = try createPost({
       authorId: session.accountId,
@@ -951,17 +1016,29 @@ effect function handleSocialPostsAndUsers(
   if (userEdgeMatch !== null) {
     return try handleAccountEdge(request, decodeSegment(userEdgeMatch[1] ?? ""), userEdgeMatch[2] ?? "", config)
   }
+  if (method === "PATCH" && path === "/api/users/me") {
+    const session = try requireSession(request, config)
+    const { data } = try readParsedBody(request)
+    return jsonResponse(try updateOwnAccountProfile(session.accountId, data))
+  }
   const userMatch = /^\/api\/users\/([^/]+)$/.exec(path)
   if (method === "GET" && userMatch !== null) {
     const session = try optionalSession(request, config)
     const mode = resolveMode(session, url)
     const handle = decodeSegment(userMatch[1] ?? "")
     const profile = try getProfile(handle, session?.accountId, mode)
-    const feed = try listFeedPosts({ tab: "latest", viewerId: session?.accountId, mode, authorId: profile.id, limit: 30 })
+    const feed = try listFeedPosts({
+      tab: "latest",
+      viewerId: session?.accountId,
+      mode,
+      authorId: profile.id,
+      cursor: url.searchParams.get("cursor") ?? undefined,
+      limit: clampIntQuery(url, "limit", 30, 1, 100)
+    })
     const positions = profile.kind === "user" && mode === "game"
       ? try getUserPositions(profile.id)
       : { accountId: profile.id, predictionPositions: [], perpPositions: [] }
-    return jsonResponse({ profile, posts: feed.items, positions })
+    return jsonResponse({ profile, posts: feed.items, nextCursor: feed.nextCursor, positions })
   }
   if (method === "POST" && path === "/api/reports") {
     const session = try requireSession(request, config)
@@ -988,7 +1065,12 @@ effect function handleSocialChatsAndNotifications(
   const path = url.pathname
   const method = request.method.toUpperCase()
   if (method === "GET" && path === "/api/events") {
-    return try createSseResponse({ signal: request.signal, keepalive: true })
+    const session = try optionalSession(request, config)
+    return try createSseResponse({
+      signal: request.signal,
+      keepalive: true,
+      viewerAccountId: session?.accountId ?? null
+    })
   }
   if (method === "GET" && path === "/api/notifications") {
     const session = try requireSession(request, config)
@@ -1053,7 +1135,6 @@ effect function handleSocialChatsAndNotifications(
       return jsonResponse({ messages: try getChatMessages(session.accountId, chatId, clampIntQuery(url, "limit", 60, 1, 200)) })
     }
     if (method === "POST") {
-      try checkAndConsumeRateLimit({ accountId: session.accountId, action: "dm", surface: "web" })
       const { data } = try readParsedBody(request)
       return jsonResponse(try sendChatMessage({
         senderId: session.accountId,
@@ -1108,6 +1189,7 @@ effect function handleMarketRoute(
     const marketId = decodeSegment(predTradeMatch[1] ?? "")
     const action = predTradeMatch[2]
     const { data } = try readParsedBody(request)
+    const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
     if (rawSide !== "yes" && rawSide !== "no") return try badRequest("invalid_side", "Side must be yes or no.")
     if (action === "buy") {
@@ -1117,7 +1199,8 @@ effect function handleMarketRoute(
         actorKind: "user",
         marketId,
         side: rawSide,
-        amountCents: Math.round(amountCents)
+        amountCents: Math.round(amountCents),
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       }))
     }
     const shares = numField(data, "shares") ?? 0
@@ -1126,7 +1209,8 @@ effect function handleMarketRoute(
       actorKind: "user",
       marketId,
       side: rawSide,
-      shares: Math.round(shares)
+      shares: Math.round(shares),
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey })
     }))
   }
   const perpDetailMatch = /^\/api\/markets\/perp\/([^/]+)$/.exec(path)
@@ -1142,23 +1226,52 @@ effect function handleMarketRoute(
     const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
     if (rawSide !== "long" && rawSide !== "short") return try badRequest("invalid_side", "Side must be long or short.")
     const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
-    const leverage = Math.round(numField(data, "leverage") ?? 1)
-    return jsonResponse(try openPerpPosition({
+    const leverage = numField(data, "leverage") ?? 1
+    const opened = try openPerpPosition({
       ownerId: session.accountId,
       ownerKind: "user",
       ticker,
       side: rawSide,
       collateralCents: Math.round(collateralCents),
       leverage
-    }), 201)
+    })
+    try publishFeedEvent({
+      type: "market.perp",
+      action: "open",
+      actorId: session.accountId,
+      ticker: opened.position.ticker,
+      side: opened.position.side,
+      sizeCents: opened.sizeCents,
+      leverage: opened.leverage,
+      positionId: opened.positionId,
+      markPriceCents: opened.position.markPriceCents
+    })
+    return jsonResponse(opened, 201)
   }
   const perpCloseMatch = /^\/api\/markets\/perp\/positions\/([^/]+)\/close$/.exec(path)
   if (method === "POST" && perpCloseMatch !== null) {
     const session = try requireSession(request, config)
-    return jsonResponse(try closePerpPosition({
+    const closed = try closePerpPosition({
       ownerId: session.accountId,
       positionId: decodeSegment(perpCloseMatch[1] ?? "")
-    }))
+    })
+    const store = try Store
+    const levRows = try store.transaction((tx: Tx) =>
+      tx.query("SELECT leverage FROM feed_perp_positions WHERE id = $1 LIMIT 1", [closed.positionId])
+    )
+    const leverage = levRows[0] === undefined ? 1 : Math.max(1, toInt(levRows[0].leverage))
+    try publishFeedEvent({
+      type: "market.perp",
+      action: "close",
+      actorId: session.accountId,
+      ticker: closed.ticker,
+      side: closed.side,
+      sizeCents: closed.sizeCents,
+      leverage,
+      positionId: closed.positionId,
+      markPriceCents: closed.exitPriceCents
+    })
+    return jsonResponse(closed)
   }
   if (method === "GET" && path === "/api/leaderboard") {
     return jsonResponse({ leaderboard: try getLeaderboard(clampIntQuery(url, "limit", 50, 1, 200)) })

@@ -1,14 +1,14 @@
-// spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"; spec/app/index.md, "Story: Connect and revoke the account's single AI agent"
+// spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"; spec/app/index.md, "Story: Connect and revoke the account's single AI agent"; spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"
 import { assert, it } from "@effect/vitest"
 import { migrateFeedSchema, seedFeedWorld, Store, toInt, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
 import { realtimeBusLayer } from "@repo/social"
 import { TestClock } from "effect/testing"
-import { parseAppServerConfig } from "../src/server/config.vibe"
+import { parseAppServerConfig, type AppServerConfig } from "../src/server/config.vibe"
 import { handleFeedRequest } from "../src/server/router.vibe"
 
 module node {
-  import { createHash } from "node:crypto"
+  import { createHash, createHmac } from "node:crypto"
 
   /** @throws {never} */
   export function sha256Hex(text: string): string {
@@ -21,6 +21,12 @@ module node {
   }
 
   /** @throws {never} */
+  export function signStripeWebhook(rawBody: string, secret: string, timestampSec: number): string {
+    const signature = createHmac("sha256", secret).update(`${timestampSec}.${rawBody}`).digest("hex")
+    return `t=${timestampSec},v1=${signature}`
+  }
+
+  /** @throws {never} */
   export function makeHeaders(init?: Readonly<Record<string, string>>): Headers {
     return new Headers(init)
   }
@@ -29,10 +35,31 @@ module node {
   export function makeRequest(url: string, init: RequestInit): Request {
     return new Request(url, init)
   }
+
+  /** @throws {never} */
+  export function makeAbortController(): AbortController {
+    return new AbortController()
+  }
+
+  /** @throws {never} */
+  export function decodeUtf8(bytes: Uint8Array | undefined): string {
+    return bytes === undefined ? "" : new TextDecoder().decode(bytes)
+  }
+
+  /** @throws {never} */
+  export function getBodyReader(response: Response): ReadableStreamDefaultReader<Uint8Array> {
+    return response.body!.getReader()
+  }
+
+  /** @throws {never} */
+  export function startReadChunk(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReadableStreamReadResult<Uint8Array>> {
+    return reader.read()
+  }
 }
-import { makeHeaders, makeRequest, pkceChallenge, sha256Hex } from node
+import { decodeUtf8, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, signStripeWebhook, startReadChunk } from node
 
 const APP_ORIGIN = "http://feed.localtest"
+const TEST_STRIPE_WEBHOOK_SECRET = "whsec_app_parity_test"
 
 const TEST_CONFIG = parseAppServerConfig(
   {
@@ -42,9 +69,24 @@ const TEST_CONFIG = parseAppServerConfig(
     SMS_MODE: "loopback",
     AUTH_DIGEST_KEY: "test-digest-key-00000000000000000000000000000000",
     OAUTH_SIGNING_SECRET: "test-oauth-secret-00000000000000000000000000000",
-    CRON_SECRET: "test-cron-secret"
+    CRON_SECRET: "test-cron-secret",
+    TURNSTILE_SITE_KEY: "0x4AAAAAAB_test_site_key",
+    STRIPE_WEBHOOK_SECRET: TEST_STRIPE_WEBHOOK_SECRET
   },
   APP_ORIGIN
+)
+
+const TWILIO_CONFIG = parseAppServerConfig(
+  {
+    DEPLOYMENT_ENV: "production",
+    PUBLIC_APP_URL: "https://feed.fun",
+    PUBLIC_API_URL: "https://feed.fun",
+    SMS_MODE: "twilio",
+    AUTH_DIGEST_KEY: "prod-digest-key-00000000000000000000000000000000",
+    OAUTH_SIGNING_SECRET: "prod-oauth-secret-00000000000000000000000000000",
+    CRON_SECRET: "prod-cron-secret"
+  },
+  "https://feed.fun"
 )
 
 function check(run: () => void): void!! {
@@ -65,24 +107,29 @@ effect function callApp(
   options?: {
     readonly method?: string
     readonly json?: unknown
+    readonly rawBody?: string
     readonly cookie?: string
     readonly bearer?: string
     readonly headers?: Readonly<Record<string, string>>
+    readonly signal?: AbortSignal
+    readonly config?: AppServerConfig
   }
 ) {
   const rawHeaders: Record<string, string> = { ...(options?.headers ?? {}) }
   if (options?.cookie !== undefined) rawHeaders.cookie = options.cookie
   if (options?.bearer !== undefined) rawHeaders.authorization = `Bearer ${options.bearer}`
   const hasJson = options?.json !== undefined
+  const hasRaw = options?.rawBody !== undefined
   if (hasJson && !Object.keys(rawHeaders).some((k) => k.toLowerCase() === "content-type")) {
     rawHeaders["content-type"] = "application/json"
   }
   const request = makeRequest(`${APP_ORIGIN}${path}`, {
-    method: options?.method ?? (hasJson ? "POST" : "GET"),
+    method: options?.method ?? (hasJson || hasRaw ? "POST" : "GET"),
     headers: makeHeaders(rawHeaders),
-    body: hasJson ? JSON.stringify(options.json) : undefined
+    body: hasRaw ? options.rawBody : hasJson ? JSON.stringify(options.json) : undefined,
+    ...(options?.signal === undefined ? {} : { signal: options.signal })
   })
-  return try handleFeedRequest(request, TEST_CONFIG)
+  return try handleFeedRequest(request, options?.config ?? TEST_CONFIG)
 }
 
 effect function readJson(response: Response) {
@@ -288,5 +335,293 @@ it.effect('Full HTTP + MCP + Single-Agent Replacement gameplay journey (spec/app
     const lbRes = try callApp("/api/leaderboard")
     try check(() => assert.strictEqual(cronRes.status, 200))
     try check(() => assert.strictEqual(lbRes.status, 200))
+  }
+}, 180_000)
+
+effect function readNextSseChunk(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  const step = try tryPromise({
+    try: () => reader.read(),
+    catch: () => new TestHttpFailure({ message: "Failed reading SSE stream" })
+  })
+  return decodeUtf8(step.value)
+}
+
+effect function beginReadSseChunk(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  return try Effect.try({
+    try: () => startReadChunk(reader),
+    catch: () => new TestHttpFailure({ message: "Failed starting SSE read" })
+  })
+}
+
+effect function readSseEventsUntil(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  firstPending: Promise<ReadableStreamReadResult<Uint8Array>> | undefined,
+  needle: string
+): ReadonlyArray<string>!TestHttpFailure {
+  const frames: string[] = []
+  let pending = firstPending
+  for (let i = 0; i < 12; i += 1) {
+    const chunk = pending !== undefined
+      ? decodeUtf8((try tryPromise({
+          try: () => pending!,
+          catch: () => new TestHttpFailure({ message: "Failed awaiting SSE chunk" })
+        })).value)
+      : try readNextSseChunk(reader)
+    pending = undefined
+    if (chunk !== "" && !chunk.trim().startsWith(":")) {
+      frames.push(chunk)
+      if (chunk.includes(needle)) return frames
+    }
+  }
+  return frames
+}
+
+it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 500, profile cursor/edit, SSE auth/block, perp broadcast, single rate-limit bucket (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
+  provide appLayer() {
+    const now = Date.now()
+    try TestClock.setTime(now)
+    try seedWorld()
+
+    const meLoopbackRes = try callApp("/api/auth/me")
+    const meLoopback = try readJson(meLoopbackRes)
+    const meTwilioRes = try callApp("/api/auth/me", { config: TWILIO_CONFIG })
+    const meTwilio = try readJson(meTwilioRes)
+    try check(() => assert.deepStrictEqual(
+      {
+        loopback: [meLoopback.turnstileSiteKey, meLoopback.devSmsCodeEnabled],
+        twilio: [meTwilio.turnstileSiteKey, meTwilio.devSmsCodeEnabled]
+      },
+      {
+        loopback: ["0x4AAAAAAB_test_site_key", true],
+        twilio: [null, false]
+      }
+    ))
+
+    const alice = try onboardPhonePlayer("+14155550111", "parity_alice")
+    const bob = try onboardPhonePlayer("+14155550112", "parity_bob")
+    const aliceId = String(alice.account.accountId)
+
+    const badLevRes = try callApp("/api/markets/perp/XTRPC/open", {
+      cookie: alice.cookie,
+      json: { side: "long", collateralCents: 1000, leverage: 2.5 }
+    })
+    const badLevBody = try readJson(badLevRes)
+    try check(() => assert.deepStrictEqual([badLevRes.status, badLevBody.code], [400, "INVALID_LEVERAGE"]))
+
+    const buyIdem1 = try callApp("/api/markets/prediction/seed-market-1/buy", {
+      cookie: alice.cookie,
+      headers: { "Idempotency-Key": "rest-idem-key-1" },
+      json: { side: "yes", amountCents: 500 }
+    })
+    const buyIdem1Body = try readJson(buyIdem1)
+    const buyIdemReplay = try callApp("/api/markets/prediction/seed-market-1/buy", {
+      cookie: alice.cookie,
+      headers: { "Idempotency-Key": "rest-idem-key-1" },
+      json: { side: "yes", amountCents: 500 }
+    })
+    const buyIdemReplayBody = try readJson(buyIdemReplay)
+    const buyIdemConflict = try callApp("/api/markets/prediction/seed-market-1/buy", {
+      cookie: alice.cookie,
+      headers: { "Idempotency-Key": "rest-idem-key-1" },
+      json: { side: "no", amountCents: 500 }
+    })
+    const buyIdemConflictBody = try readJson(buyIdemConflict)
+    const buyIdemInvalid = try callApp("/api/markets/prediction/seed-market-1/buy", {
+      cookie: alice.cookie,
+      headers: { "Idempotency-Key": "k".repeat(260) },
+      json: { side: "yes", amountCents: 500 }
+    })
+    const buyIdemInvalidBody = try readJson(buyIdemInvalid)
+    try check(() => assert.deepStrictEqual(
+      {
+        statuses: [buyIdem1.status, buyIdemReplay.status, buyIdemConflict.status, buyIdemInvalid.status],
+        sameTradeId: buyIdem1Body.tradeId === buyIdemReplayBody.tradeId,
+        sameBalance: buyIdem1Body.balanceAfterCents === buyIdemReplayBody.balanceAfterCents,
+        codes: [buyIdemConflictBody.code, buyIdemInvalidBody.code]
+      },
+      {
+        statuses: [200, 200, 409, 400],
+        sameTradeId: true,
+        sameBalance: true,
+        codes: ["IDEMPOTENCY_CONFLICT", "INVALID_IDEMPOTENCY_KEY"]
+      }
+    ))
+
+    const checkoutRaw = JSON.stringify({
+      id: "evt_app_checkout_1",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_app_1",
+          payment_status: "paid",
+          payment_intent: "pi_app_1",
+          amount_total: 500,
+          client_reference_id: aliceId,
+          metadata: { accountId: aliceId, packId: "pack_5" }
+        }
+      }
+    })
+    const checkoutWhRes = try callApp("/api/webhooks/stripe", {
+      rawBody: checkoutRaw,
+      headers: {
+        "content-type": "application/json",
+        "stripe-signature": signStripeWebhook(checkoutRaw, TEST_STRIPE_WEBHOOK_SECRET, Math.floor(now / 1000))
+      }
+    })
+    const earlyWonRaw = JSON.stringify({
+      id: "evt_app_dispute_won_early",
+      type: "charge.dispute.closed",
+      data: {
+        object: {
+          id: "dp_app_missing_1",
+          payment_intent: "pi_app_1",
+          amount: 500,
+          status: "won"
+        }
+      }
+    })
+    const earlyWonRes = try callApp("/api/webhooks/stripe", {
+      rawBody: earlyWonRaw,
+      headers: {
+        "content-type": "application/json",
+        "stripe-signature": signStripeWebhook(earlyWonRaw, TEST_STRIPE_WEBHOOK_SECRET, Math.floor(now / 1000))
+      }
+    })
+    const earlyWonBody = try readJson(earlyWonRes)
+    try check(() => assert.deepStrictEqual(
+      [checkoutWhRes.status, earlyWonRes.status, earlyWonBody.code],
+      [200, 500, "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING"]
+    ))
+
+    const badPatch = try callApp("/api/users/me", { method: "PATCH", cookie: alice.cookie, json: {} })
+    const goodPatch = try callApp("/api/users/me", {
+      method: "PATCH",
+      cookie: alice.cookie,
+      json: { displayName: "Alice Parity", bio: "Verified markets trader" }
+    })
+    const goodPatchBody = try readJson(goodPatch)
+    const meAfterPatch = try readJson(try callApp("/api/auth/me", { cookie: alice.cookie }))
+    const meViewer = meAfterPatch.viewer as Record<string, unknown>
+    try check(() => assert.deepStrictEqual(
+      {
+        statuses: [badPatch.status, goodPatch.status],
+        patched: [goodPatchBody.displayName, goodPatchBody.bio],
+        me: [meViewer.displayName, meViewer.bio]
+      },
+      {
+        statuses: [400, 200],
+        patched: ["Alice Parity", "Verified markets trader"],
+        me: ["Alice Parity", "Verified markets trader"]
+      }
+    ))
+
+    const p1 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 1" } })
+    try TestClock.adjust("2 seconds")
+    const p2 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 2" } })
+    try TestClock.adjust("2 seconds")
+    const p3 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 3" } })
+    try check(() => assert.deepStrictEqual([p1.status, p2.status, p3.status], [201, 201, 201]))
+
+    const page1Res = try callApp("/api/users/parity_alice?limit=2")
+    const page1 = try readJson(page1Res)
+    const page1Posts = page1.posts as ReadonlyArray<Record<string, unknown>>
+    const nextCursor = String(page1.nextCursor ?? "")
+    try check(() => assert.strictEqual(page1Posts.length, 2))
+    try check(() => assert.ok(nextCursor.length > 0))
+    const page2Res = try callApp(`/api/users/parity_alice?limit=2&cursor=${encodeURIComponent(nextCursor)}`)
+    const page2 = try readJson(page2Res)
+    const page2Posts = page2.posts as ReadonlyArray<Record<string, unknown>>
+    const page1Ids = new Set(page1Posts.map((p) => String(p.id)))
+    try check(() => assert.strictEqual(page2Posts.length, 1))
+    try check(() => assert.ok(!page1Ids.has(String(page2Posts[0]?.id ?? ""))))
+
+    const dmRes = try callApp("/api/chats/direct", { cookie: alice.cookie, json: { targetHandleOrId: "parity_bob" } })
+    const dmBody = try readJson(dmRes)
+    const dmChatId = String((dmBody.chat as Record<string, unknown>).id ?? "")
+    const dmMsgRes = try callApp(`/api/chats/${encodeURIComponent(dmChatId)}/messages`, {
+      cookie: alice.cookie,
+      json: { content: "Single bucket check" }
+    })
+    try check(() => assert.strictEqual(dmMsgRes.status, 201))
+
+    const store = try Store
+    const rlRows = try store.transaction((tx: Tx) =>
+      tx.query(
+        "SELECT scope_key, count FROM feed_rate_limits WHERE scope_key = $1 OR scope_key = $2 ORDER BY scope_key ASC",
+        [`${aliceId}:dm`, `${aliceId}:post`]
+      )
+    )
+    const countsByKey = Object.fromEntries(rlRows.map((r) => [String(r.scope_key), toInt(r.count)]))
+    try check(() => assert.deepStrictEqual(countsByKey, { [`${aliceId}:dm`]: 1, [`${aliceId}:post`]: 3 }))
+
+    const anonAbort = makeAbortController()
+    const aliceAbort = makeAbortController()
+    const anonSseRes = try callApp("/api/events", { signal: anonAbort.signal })
+    const aliceSseRes = try callApp("/api/events", { cookie: alice.cookie, signal: aliceAbort.signal })
+    const anonReader = getBodyReader(anonSseRes)
+    const aliceReader = getBodyReader(aliceSseRes)
+
+    const anonConnected = try readNextSseChunk(anonReader)
+    const aliceConnected = try readNextSseChunk(aliceReader)
+    try check(() => assert.ok(anonConnected.includes(": connected")))
+    try check(() => assert.ok(aliceConnected.includes(": connected")))
+
+    const anonNext = try beginReadSseChunk(anonReader)
+    const aliceNext = try beginReadSseChunk(aliceReader)
+    try Effect.yieldNow
+
+    const blockRes = try callApp("/api/users/parity_bob/block", { method: "POST", cookie: alice.cookie })
+    try check(() => assert.strictEqual(blockRes.status, 200))
+
+    const privateDmForBob = try callApp("/api/chats/direct", { cookie: bob.cookie, json: { targetHandleOrId: "ailonmusk" } })
+    const bobDmId = String(((try readJson(privateDmForBob)).chat as Record<string, unknown>).id ?? "")
+    try callApp(`/api/chats/${encodeURIComponent(bobDmId)}/messages`, {
+      cookie: bob.cookie,
+      json: { content: "Private message hidden from unauth SSE" }
+    })
+    try callApp("/api/posts", {
+      cookie: bob.cookie,
+      json: { content: "Blocked author post hidden from Alice SSE" }
+    })
+
+    const perpOpenRes = try callApp("/api/markets/perp/XTRPC/open", {
+      cookie: alice.cookie,
+      json: { side: "long", collateralCents: 1000, leverage: 2 }
+    })
+    try check(() => assert.strictEqual(perpOpenRes.status, 201))
+    const perpOpened = try readJson(perpOpenRes)
+    const perpPosId = String(perpOpened.positionId ?? "")
+
+    const perpCloseRes = try callApp(`/api/markets/perp/positions/${encodeURIComponent(perpPosId)}/close`, {
+      method: "POST",
+      cookie: alice.cookie,
+      json: {}
+    })
+    try check(() => assert.strictEqual(perpCloseRes.status, 200))
+
+    const anonFrames = try readSseEventsUntil(anonReader, anonNext, '"action":"close"')
+    const aliceFrames = try readSseEventsUntil(aliceReader, aliceNext, '"action":"close"')
+
+    anonAbort.abort()
+    aliceAbort.abort()
+
+    const anonJoined = anonFrames.join("\n")
+    const aliceJoined = aliceFrames.join("\n")
+    try check(() => assert.deepStrictEqual(
+      {
+        anonHasNoPrivateChat: !anonJoined.includes("event: chat.message"),
+        anonHasPerpOpen: anonJoined.includes("event: market.perp") && anonJoined.includes('"action":"open"'),
+        aliceHasNoBlockedPost: !aliceJoined.includes("event: post.created"),
+        aliceHasPerpOpen: aliceJoined.includes("event: market.perp") && aliceJoined.includes('"action":"open"'),
+        aliceHasPerpClose: aliceJoined.includes("event: market.perp") && aliceJoined.includes('"action":"close"') && aliceJoined.includes('"leverage":2')
+      },
+      {
+        anonHasNoPrivateChat: true,
+        anonHasPerpOpen: true,
+        aliceHasNoBlockedPost: true,
+        aliceHasPerpOpen: true,
+        aliceHasPerpClose: true
+      }
+    ))
   }
 }, 180_000)

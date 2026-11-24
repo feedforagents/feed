@@ -20,33 +20,87 @@ import {
   decodeChatMessages,
   decodeChats,
   decodeExplore,
+  decodeFeedPage,
   decodeLeaderboard,
   decodeNotifications,
   decodePerpMarket,
   decodePointPacks,
   decodePositions,
   decodePost,
-  decodePosts,
   decodePostThread,
   decodePredictionMarket,
   decodeProfileBundle,
+  decodeTrendingList,
   isRecord,
   arr,
   optStr,
+  str,
 } from "./types.ts";
+
+function appendUniquePosts(
+  existing: ReadonlyArray<AppPost>,
+  incoming: ReadonlyArray<AppPost>,
+): ReadonlyArray<AppPost> {
+  const seen = new Set(existing.map((p) => p.card.id));
+  const merged = [...existing];
+  for (const post of incoming) {
+    if (!seen.has(post.card.id)) {
+      seen.add(post.card.id);
+      merged.push(post);
+    }
+  }
+  return merged;
+}
+
+function findPostInState(postId: string): AppPost | undefined {
+  const s = getStoreSnapshot();
+  return s.feedPosts.find((p) => p.card.id === postId)
+    ?? (s.activeThread?.post.card.id === postId ? s.activeThread.post : undefined)
+    ?? s.activeThread?.replies.find((p) => p.card.id === postId)
+    ?? s.profileBundle?.posts.find((p) => p.card.id === postId)
+    ?? s.explore.posts.find((p) => p.card.id === postId);
+}
 
 export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const s = getStoreSnapshot();
   const tab = tabOverride ?? s.feedTab;
   setStoreState({ feedLoading: true });
   const res = await requestJson(`/api/feed?tab=${encodeURIComponent(tab)}`, {
-    parse: decodePosts,
+    parse: decodeFeedPage,
   });
   if (res.ok) {
-    setStoreState({ feedPosts: res.data, feedLoading: false });
+    setStoreState({ feedPosts: res.data.items, feedNextCursor: res.data.nextCursor, feedLoading: false });
     return;
   }
   setStoreState({ feedLoading: false, errorMessage: res.message });
+}
+
+export async function loadMoreFeed(): Promise<void> {
+  const s = getStoreSnapshot();
+  if (!s.feedNextCursor || s.feedLoading || s.feedLoadingMore) return;
+  setStoreState({ feedLoadingMore: true });
+  const res = await requestJson(
+    `/api/feed?tab=${encodeURIComponent(s.feedTab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
+    { parse: decodeFeedPage },
+  );
+  if (res.ok) {
+    const latest = getStoreSnapshot();
+    setStoreState({
+      feedPosts: appendUniquePosts(latest.feedPosts, res.data.items),
+      feedNextCursor: res.data.nextCursor,
+      feedLoadingMore: false,
+    });
+    return;
+  }
+  setStoreState({ feedLoadingMore: false, errorMessage: res.message });
+}
+
+export async function loadTrending(): Promise<void> {
+  const res = await requestJson("/api/trending", { parse: decodeTrendingList });
+  if (res.ok) {
+    const cur = getStoreSnapshot();
+    setStoreState({ explore: { ...cur.explore, trending: res.data } });
+  }
 }
 
 export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
@@ -173,12 +227,7 @@ async function executePostAction({
 }
 
 export async function toggleLike(postId: string): Promise<void> {
-  const s = getStoreSnapshot();
-  const existing = s.feedPosts.find((p) => p.card.id === postId)
-    ?? (s.activeThread?.post.card.id === postId ? s.activeThread.post : undefined)
-    ?? s.activeThread?.replies.find((p) => p.card.id === postId)
-    ?? s.profileBundle?.posts.find((p) => p.card.id === postId)
-    ?? s.explore.posts.find((p) => p.card.id === postId);
+  const existing = findPostInState(postId);
   const currentlyLiked = existing?.card.liked ?? false;
   if (!requireAuthOrQueue({ kind: "like", postId, currentlyLiked, label: "like this post" })) return;
   await executePostAction({
@@ -198,17 +247,23 @@ export async function toggleLike(postId: string): Promise<void> {
 }
 
 export async function repostPost(postId: string): Promise<void> {
-  if (!requireAuthOrQueue({ kind: "repost", postId, label: "repost this post" })) return;
+  const existing = findPostInState(postId);
+  const currentlyReposted = existing?.card.reposted ?? false;
+  if (!requireAuthOrQueue({ kind: "repost", postId, label: currentlyReposted ? "remove repost" : "repost this post" })) return;
   await executePostAction({
     postId,
     endpoint: `/api/posts/${encodeURIComponent(postId)}/repost`,
-    method: "POST",
-    includeThread: false,
+    method: currentlyReposted ? "DELETE" : "POST",
+    includeThread: true,
     buildPatch: (data) => {
       const rec = isRecord(data) ? data : {};
-      const nextReposted = typeof rec.reposted === "boolean" ? rec.reposted : true;
+      const nextReposted = typeof rec.reposted === "boolean" ? rec.reposted : !currentlyReposted;
       const nextCount = typeof rec.repostCount === "number" ? rec.repostCount : undefined;
-      return (card) => ({ ...card, reposted: nextReposted, repostCount: nextCount ?? card.repostCount + 1 });
+      return (card) => ({
+        ...card,
+        reposted: nextReposted,
+        repostCount: nextCount ?? Math.max(0, card.repostCount + (nextReposted ? 1 : -1)),
+      });
     },
   });
 }
@@ -286,17 +341,26 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
   setStoreState({ selectedMarketKind: kind, selectedMarketId: id, tradeError: null });
 }
 
+function newIdempotencyKey(): string {
+  if (typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 async function executeTradeRequest({
   endpoint,
   body,
+  headers,
   statusMessage,
 }: {
   readonly endpoint: string;
   readonly body: unknown;
+  readonly headers?: Readonly<Record<string, string>>;
   readonly statusMessage: string;
 }): Promise<boolean> {
   setStoreState({ tradeLoading: true, tradeError: null });
-  const res = await requestJson(endpoint, { method: "POST", body, parse: passThrough });
+  const res = await requestJson(endpoint, { method: "POST", body, headers, parse: passThrough });
   if (!res.ok) {
     setStoreState({ tradeLoading: false, tradeError: res.message });
     return false;
@@ -318,6 +382,7 @@ export async function submitPredictionOrder(
   side: "yes" | "no",
   amountPts: number,
 ): Promise<boolean> {
+  if (getStoreSnapshot().tradeLoading) return false;
   if (!requireAuthOrQueue({ kind: "trade_prediction", marketId, action, side, amountPts, label: `${action} ${side.toUpperCase()} prediction` })) {
     return false;
   }
@@ -330,6 +395,7 @@ export async function submitPredictionOrder(
   return executeTradeRequest({
     endpoint,
     body,
+    headers: { "Idempotency-Key": newIdempotencyKey() },
     statusMessage: `${action} ${side.toUpperCase()} executed.`,
   });
 }
@@ -383,10 +449,10 @@ export async function startPointPackCheckout(packId: string, billingState: strin
   return url;
 }
 
-export async function loadChats(): Promise<void> {
+export async function loadChats(loadMessages = true): Promise<void> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   if (!viewerId) return;
-  setStoreState({ chatsLoading: true });
+  if (loadMessages) setStoreState({ chatsLoading: true });
   const [chatsRes, invitesRes] = await Promise.all([
     requestJson("/api/chats", { parse: (raw) => decodeChats(raw, viewerId) }),
     requestJson("/api/chats/alpha-invites", { parse: decodeAlphaInvites }),
@@ -402,7 +468,7 @@ export async function loadChats(): Promise<void> {
     selectedChatId: selectedId,
     alphaInvites: invitesRes.ok ? invitesRes.data : s.alphaInvites,
   });
-  if (selectedId) {
+  if (loadMessages && selectedId) {
     await loadChatMessages(selectedId);
   }
 }
@@ -458,6 +524,45 @@ export async function createGroupChat(title: string, memberHandles: ReadonlyArra
   const chatId = optStr(rec.id);
   await loadChats();
   if (chatId) await loadChatMessages(chatId);
+  return true;
+}
+
+export async function inviteToGroupChat(chatId: string, targetHandleOrId: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer) return false;
+  const cleaned = targetHandleOrId.trim().replace(/^@/, "");
+  if (!cleaned) return false;
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/invite`, {
+    method: "POST",
+    body: { targetHandleOrId: cleaned },
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setStoreState({ errorMessage: res.message });
+    return false;
+  }
+  setStoreState({ statusMessage: `Invited @${cleaned} to group.` });
+  await loadChats();
+  return true;
+}
+
+export async function leaveGroupChat(chatId: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer) return false;
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/leave`, {
+    method: "POST",
+    body: {},
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setStoreState({ errorMessage: res.message });
+    return false;
+  }
+  const s = getStoreSnapshot();
+  setStoreState({
+    selectedChatId: s.selectedChatId === chatId ? null : s.selectedChatId,
+    chatMessages: s.selectedChatId === chatId ? [] : s.chatMessages,
+    statusMessage: "Left group chat.",
+  });
+  await loadChats();
   return true;
 }
 
@@ -549,6 +654,60 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     return;
   }
   setStoreState({ profileBundle: null, profileLoading: false, errorMessage: res.ok ? "Profile not found" : res.message });
+}
+
+export async function loadMoreProfilePosts(): Promise<void> {
+  const s = getStoreSnapshot();
+  const bundle = s.profileBundle;
+  if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
+  setStoreState({ profileLoadingMore: true });
+  const res = await requestJson(
+    `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
+    { parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null) },
+  );
+  if (res.ok && res.data) {
+    const latest = getStoreSnapshot().profileBundle;
+    if (latest && latest.id === res.data.id) {
+      setStoreState({
+        profileBundle: {
+          ...latest,
+          posts: appendUniquePosts(latest.posts, res.data.posts),
+          postsNextCursor: res.data.postsNextCursor,
+        },
+        profileLoadingMore: false,
+      });
+      return;
+    }
+    setStoreState({ profileLoadingMore: false });
+    return;
+  }
+  setStoreState({ profileLoadingMore: false, errorMessage: res.ok ? "Profile not found" : res.message });
+}
+
+export async function updateOwnProfile(payload: {
+  readonly displayName?: string;
+  readonly bio?: string;
+}): Promise<boolean> {
+  const s = getStoreSnapshot();
+  if (!s.viewer) return false;
+  const res = await requestJson("/api/users/me", {
+    method: "PATCH",
+    body: payload,
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setStoreState({ errorMessage: res.message });
+    return false;
+  }
+  const rec = isRecord(res.data) ? res.data : {};
+  const nextDisplayName = str(rec.displayName, payload.displayName ?? s.viewer.displayName);
+  const nextBio = str(rec.bio, payload.bio ?? s.viewer.bio);
+  setStoreState({
+    viewer: { ...s.viewer, displayName: nextDisplayName, bio: nextBio },
+    statusMessage: "Profile updated.",
+  });
+  await loadProfile(s.viewer.handle);
+  return true;
 }
 
 export async function toggleFollow(handle: string, currentlyFollowing?: boolean): Promise<void> {

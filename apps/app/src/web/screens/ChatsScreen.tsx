@@ -26,6 +26,9 @@ export function ChatsScreen() {
   const [groupOpen, setGroupOpen] = useState(false);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupMembers, setGroupMembers] = useState("");
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteHandle, setInviteHandle] = useState("");
+  const [inviteBusy, setInviteBusy] = useState(false);
 
   const activeChat = s.chats.find((c) => c.id === s.selectedChatId) ?? null;
 
@@ -49,6 +52,18 @@ export function ChatsScreen() {
       setGroupTitle("");
       setGroupMembers("");
       setGroupOpen(false);
+    }
+  };
+
+  const handleInviteMember = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!activeChat || !inviteHandle.trim()) return;
+    setInviteBusy(true);
+    const ok = await storeActions.inviteToGroupChat(activeChat.id, inviteHandle.trim());
+    setInviteBusy(false);
+    if (ok) {
+      setInviteHandle("");
+      setInviteOpen(false);
     }
   };
 
@@ -142,6 +157,12 @@ export function ChatsScreen() {
               messages={[...s.chatMessages]}
               loading={s.chatSending}
               disabled={activeChat.isBlocked}
+              onInvite={activeChat.chatType === "UserGroup" ? () => setInviteOpen(true) : undefined}
+              onLeave={
+                activeChat.chatType === "NpcAlpha" || (activeChat.chatType === "UserGroup" && !activeChat.isOwner)
+                  ? () => { void storeActions.leaveGroupChat(activeChat.id); }
+                  : undefined
+              }
               onSendMessage={(text) => { void storeActions.sendChatMessage(activeChat.id, text); }}
               onReact={(messageId, emoji) => { void storeActions.reactToChatMessage(messageId, emoji); }}
             />
@@ -184,6 +205,27 @@ export function ChatsScreen() {
             </div>
             <Button type="submit" disabled={!groupTitle.trim()}>
               Create group
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogTitle>Invite member</DialogTitle>
+          <DialogDescription>Add a player or character handle to {activeChat?.title ?? "this group"}.</DialogDescription>
+          <form onSubmit={(e) => { void handleInviteMember(e); }} className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="group-invite-input">Handle</Label>
+              <Input
+                id="group-invite-input"
+                placeholder="alice"
+                value={inviteHandle}
+                onChange={(e) => setInviteHandle(e.target.value)}
+              />
+            </div>
+            <Button type="submit" loading={inviteBusy} disabled={!inviteHandle.trim() || !activeChat}>
+              Send invite
             </Button>
           </form>
         </DialogContent>

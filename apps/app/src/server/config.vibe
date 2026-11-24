@@ -138,6 +138,7 @@ export function parseAppServerConfig(
       twilioAuthToken: trimmed(env.TWILIO_AUTH_TOKEN),
       twilioVerifyServiceSid: trimmed(env.TWILIO_VERIFY_SERVICE_SID),
       turnstileSecretKey: trimmed(env.TURNSTILE_SECRET_KEY),
+      turnstileSiteKey: trimmed(env.TURNSTILE_SITE_KEY),
       allowedCountries: parseAllowedCountries(env.SMS_ALLOWED_COUNTRIES),
       publicAppUrl
     }

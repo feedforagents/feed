@@ -20,7 +20,6 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-  formatPts,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "../store.ts";
 
@@ -246,8 +245,8 @@ export function AdminScreen() {
         <CardContent className="gap-4">
           <div className="flex flex-col gap-1.5">
             <div className="flex justify-between text-xs font-mono tabular-nums">
-              <span>Committed: {formatPts(committedCents)}</span>
-              <span>Budget: {formatPts(budgetCents)} ({pct}%)</span>
+              <span>{`Committed: $${(committedCents / 100).toFixed(2)}`}</span>
+              <span>{`Budget: $${(budgetCents / 100).toFixed(2)} (${pct}%)`}</span>
             </div>
             <Progress value={pct} aria-label="D-25 daily LLM spend budget" />
             <p className="text-xs text-muted-foreground">

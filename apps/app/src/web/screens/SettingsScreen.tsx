@@ -27,20 +27,30 @@ import {
   Label,
   ModeToggle,
   type UiMode,
+  useTurnstileContainerRef,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "../store.ts";
 
 function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; readonly onOpenChange: (open: boolean) => void }) {
+  const s = useAppStore();
   const [step, setStep] = useState<"phone" | "code">("phone");
   const [newPhone, setNewPhone] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const activeTurnstileKey = s.turnstileSiteKey?.trim() || undefined;
+  const turnstileRef = useTurnstileContainerRef(activeTurnstileKey, setTurnstileToken);
 
   const handleStart = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!newPhone.trim()) return;
+    if (activeTurnstileKey && !turnstileToken) return;
+    const token = turnstileToken ?? undefined;
+    setTurnstileToken(null);
+    setTurnstileResetKey((n) => n + 1);
     setBusy(true);
-    const ok = await storeActions.startPhoneChange(newPhone.trim());
+    const ok = await storeActions.startPhoneChange(newPhone.trim(), token);
     setBusy(false);
     if (ok) setStep("code");
   };
@@ -81,7 +91,15 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
                 onChange={(e) => setNewPhone(e.target.value)}
               />
             </div>
-            <Button type="submit" loading={busy} disabled={!newPhone.trim()}>
+            {activeTurnstileKey ? (
+              <div
+                key={`${activeTurnstileKey}:${turnstileResetKey}`}
+                ref={turnstileRef}
+                aria-label="Security verification"
+                className="min-h-16"
+              />
+            ) : null}
+            <Button type="submit" loading={busy} disabled={!newPhone.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
               Send 6-digit code
             </Button>
           </form>
@@ -98,10 +116,12 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
                 onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
               />
             </div>
-            <div className="flex items-center justify-between gap-2">
-              <Button type="button" variant="ghost" size="sm" onClick={() => { void fillDevCode(); }}>
-                Fill dev code
-              </Button>
+            <div className="flex items-center justify-end gap-2">
+              {s.devSmsCodeEnabled ? (
+                <Button type="button" variant="ghost" size="sm" className="mr-auto" onClick={() => { void fillDevCode(); }}>
+                  Fill dev code
+                </Button>
+              ) : null}
               <Button type="submit" loading={busy} disabled={code.length !== 6}>
                 Confirm change
               </Button>

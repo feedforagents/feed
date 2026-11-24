@@ -24,11 +24,12 @@ export async function requestJson<T>(
   options: {
     readonly method?: "GET" | "POST" | "DELETE" | "PATCH";
     readonly body?: unknown;
+    readonly headers?: Readonly<Record<string, string>>;
     readonly parse: (raw: unknown) => T;
   },
 ): Promise<ApiResult<T>> {
   const method = options.method ?? "GET";
-  const headers: Record<string, string> = { accept: "application/json" };
+  const headers: Record<string, string> = { accept: "application/json", ...(options.headers ?? {}) };
   let encodedBody: string | undefined;
   if (options.body !== undefined) {
     headers["content-type"] = "application/json";

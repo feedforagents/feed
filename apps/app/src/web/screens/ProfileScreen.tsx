@@ -9,6 +9,8 @@ import {
   DialogDescription,
   DialogTitle,
   EmptyState,
+  Input,
+  Label,
   PositionRow,
   ProfileHeader,
   Skeleton,
@@ -28,6 +30,10 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
   const [reportOpen, setReportOpen] = useState(false);
   const [reportReason, setReportReason] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editDisplayName, setEditDisplayName] = useState("");
+  const [editBio, setEditBio] = useState("");
+  const [editBusy, setEditBusy] = useState(false);
   const isGame = mode === "GameMode";
   const bundle = s.profileBundle;
 
@@ -41,6 +47,26 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
       setReportReason("");
       setReportOpen(false);
     }
+  };
+
+  const openEditProfile = () => {
+    if (!bundle) return;
+    setEditDisplayName(bundle.summary.displayName);
+    setEditBio(bundle.summary.bio ?? "");
+    setEditOpen(true);
+  };
+
+  const handleSaveProfile = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const trimmedName = editDisplayName.trim();
+    if (!trimmedName) return;
+    setEditBusy(true);
+    const ok = await storeActions.updateOwnProfile({
+      displayName: trimmedName,
+      bio: editBio.trim(),
+    });
+    setEditBusy(false);
+    if (ok) setEditOpen(false);
   };
 
   if (s.profileLoading && !bundle) {
@@ -72,6 +98,7 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
         onMuteToggle={s.viewer ? () => { void storeActions.toggleMute(bundle.summary.handle); } : undefined}
         onBlockToggle={s.viewer ? () => { void storeActions.toggleBlock(bundle.summary.handle); } : undefined}
         onReport={s.viewer ? () => setReportOpen(true) : undefined}
+        onEditProfile={bundle.summary.isOwnProfile ? openEditProfile : undefined}
       />
 
       {bundle.viewerBlockedBy ? (
@@ -94,7 +121,21 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
             {bundle.posts.length === 0 ? (
               <EmptyState title="No posts yet" />
             ) : (
-              <BorderedPostList posts={bundle.posts} mode={mode} />
+              <div className="flex flex-col gap-3">
+                <BorderedPostList posts={bundle.posts} mode={mode} />
+                {bundle.postsNextCursor ? (
+                  <div className="flex justify-center">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      loading={s.profileLoadingMore}
+                      onClick={() => { void storeActions.loadMoreProfilePosts(); }}
+                    >
+                      Load more
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
             )}
           </TabsContent>
 
@@ -113,6 +154,37 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
           ) : null}
         </Tabs>
       </div>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="max-w-md">
+          <DialogTitle>Edit profile</DialogTitle>
+          <DialogDescription>Update your public display name and bio.</DialogDescription>
+          <form onSubmit={(e) => { void handleSaveProfile(e); }} className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="edit-profile-name">Display name</Label>
+              <Input
+                id="edit-profile-name"
+                maxLength={60}
+                value={editDisplayName}
+                onChange={(e) => setEditDisplayName(e.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="edit-profile-bio">Bio</Label>
+              <Textarea
+                id="edit-profile-bio"
+                maxLength={280}
+                placeholder="Tell Feed about your strategy..."
+                value={editBio}
+                onChange={(e) => setEditBio(e.target.value)}
+              />
+            </div>
+            <Button type="submit" loading={editBusy} disabled={!editDisplayName.trim()}>
+              Save changes
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={reportOpen} onOpenChange={setReportOpen}>
         <DialogContent className="max-w-md">

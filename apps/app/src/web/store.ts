@@ -55,13 +55,18 @@ import {
   createGroupChat,
   createPost,
   deletePost,
+  inviteToGroupChat,
+  leaveGroupChat,
   loadChatMessages,
   loadChats,
   loadExplore,
   loadFeed,
   loadMarkets,
+  loadMoreFeed,
+  loadMoreProfilePosts,
   loadNotifications,
   loadProfile,
+  loadTrending,
   markAllNotificationsRead,
   openThread,
   reactToChatMessage,
@@ -79,6 +84,7 @@ import {
   toggleFollow,
   toggleLike,
   toggleMute,
+  updateOwnProfile,
 } from "./store-world.ts";
 
 let booted = false;
@@ -172,9 +178,10 @@ function handleSseSignal(eventType: string): void {
         if (s.route === "Markets") await loadMarkets();
         if (s.route === "Explore") await loadExplore();
         if (s.route === "Home") await loadFeed();
+        if (s.route === "Profile") await loadProfile();
         if (s.viewer) await hydrateAuth();
       } else if (eventType.startsWith("chat.") || eventType === "alpha.invite") {
-        if (s.viewer && s.route === "Chats") await loadChats();
+        if (s.viewer) await loadChats(s.route === "Chats");
       } else if (eventType === "notification.created") {
         if (s.viewer) await loadNotifications();
       }
@@ -201,6 +208,7 @@ function connectRealtime(): void {
     "market.clue",
     "market.resolved",
     "market.spot",
+    "market.perp",
   ];
   for (const eventType of types) {
     source.addEventListener(eventType, () => handleSseSignal(eventType));
@@ -240,7 +248,15 @@ export function bootStore(): void {
   void (async () => {
     await Promise.all([hydrateAuth(), loadSkillsHosts()]);
     const afterAuth = getStoreSnapshot();
-    await loadDataForRoute(afterAuth.route, initialSearch);
+    const tasks: Promise<void>[] = [loadDataForRoute(afterAuth.route, initialSearch)];
+    if (afterAuth.route !== "Explore") {
+      tasks.push(loadTrending());
+    }
+    if (afterAuth.viewer !== null) {
+      if (afterAuth.route !== "Notifications") tasks.push(loadNotifications());
+      if (afterAuth.route !== "Chats") tasks.push(loadChats(false));
+    }
+    await Promise.all(tasks);
   })();
 }
 
@@ -257,6 +273,7 @@ export const storeActions = {
   navigate,
   navigateRoute,
   loadFeed,
+  loadMoreFeed,
   selectFeedTab,
   openThread,
   closeThread,
@@ -265,6 +282,7 @@ export const storeActions = {
   toggleLike,
   repostPost,
   loadExplore,
+  loadTrending,
   loadMarkets,
   selectMarket,
   submitPredictionOrder,
@@ -275,12 +293,16 @@ export const storeActions = {
   loadChatMessages,
   startDirectChat,
   createGroupChat,
+  inviteToGroupChat,
+  leaveGroupChat,
   sendChatMessage,
   reactToChatMessage,
   respondAlphaInvite,
   loadNotifications,
   markAllNotificationsRead,
   loadProfile,
+  loadMoreProfilePosts,
+  updateOwnProfile,
   toggleFollow,
   toggleBlock,
   toggleMute,

@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { Heart, MessageSquare, Quote, Repeat2, TrendingUp } from "lucide-react";
+import { Flag, Heart, MessageSquare, Quote, Repeat2, TrendingUp } from "lucide-react";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import { splitTextSegments } from "../lib/hosts.ts";
 import { Avatar } from "./Avatar.tsx";
@@ -82,6 +82,8 @@ export type PostCardProps = Omit<ComponentProps<"article">, "children"> & {
   onAuthorClick?: (handle: string) => void;
   /** Called when a cashtag or market badge is clicked in `GameMode`. */
   onMarketClick?: (ticker: string) => void;
+  /** Called when Report is clicked. */
+  onReport?: (postId: string) => void;
   /** Disables interactive actions. */
   disabled?: boolean;
 };
@@ -98,6 +100,7 @@ export function PostCard({
   onQuote,
   onAuthorClick,
   onMarketClick,
+  onReport,
   disabled = false,
   className,
   ...props
@@ -236,6 +239,17 @@ export function PostCard({
           >
             <Quote aria-hidden className="size-4" />
           </button>
+          {onReport ? (
+            <button
+              type="button"
+              disabled={disabled}
+              aria-label="Report post"
+              onClick={() => !disabled && onReport(post.id)}
+              className={cn(focusRing, inactive, "ml-auto inline-flex items-center gap-1.5 rounded-sm py-1 hover:text-destructive")}
+            >
+              <Flag aria-hidden className="size-4" />
+            </button>
+          ) : null}
         </div>
       </div>
     </article>

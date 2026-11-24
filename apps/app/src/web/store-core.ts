@@ -45,6 +45,8 @@ export interface StoreState {
   readonly viewer: ViewerSession | null;
   readonly acceptedCountries: ReadonlyArray<string>;
   readonly publicAppUrl: string;
+  readonly turnstileSiteKey: string | null;
+  readonly devSmsCodeEnabled: boolean;
   readonly route: AppRoute;
   readonly profileHandle: string | null;
   readonly selectedTicker: string | null;
@@ -65,7 +67,9 @@ export interface StoreState {
   readonly pendingOnboardingToken: string;
   readonly pendingAction: PendingAction | null;
   readonly feedLoading: boolean;
+  readonly feedLoadingMore: boolean;
   readonly feedPosts: ReadonlyArray<AppPost>;
+  readonly feedNextCursor: string | null;
   readonly activeThread: PostThreadData | null;
   readonly threadLoading: boolean;
   readonly exploreQuery: string;
@@ -93,6 +97,7 @@ export interface StoreState {
   readonly notifications: ReadonlyArray<AppNotification>;
   readonly unreadNotifications: number;
   readonly profileLoading: boolean;
+  readonly profileLoadingMore: boolean;
   readonly profileBundle: AppProfileBundle | null;
   readonly skills: AppSkillsPayload;
   readonly hostActionNote: string | null;
@@ -136,6 +141,8 @@ let currentState: StoreState = {
   viewer: null,
   acceptedCountries: ["+1", "+44", "+353", "+61", "+64"],
   publicAppUrl: typeof window !== "undefined" ? window.location.origin : "https://feed.fun",
+  turnstileSiteKey: null,
+  devSmsCodeEnabled: false,
   route: initialLocation.route,
   profileHandle: initialLocation.profileHandle,
   selectedTicker: initialLocation.queryTicker,
@@ -156,7 +163,9 @@ let currentState: StoreState = {
   pendingOnboardingToken: "",
   pendingAction: null,
   feedLoading: false,
+  feedLoadingMore: false,
   feedPosts: [],
+  feedNextCursor: null,
   activeThread: null,
   threadLoading: false,
   exploreQuery: "",
@@ -184,6 +193,7 @@ let currentState: StoreState = {
   notifications: [],
   unreadNotifications: 0,
   profileLoading: false,
+  profileLoadingMore: false,
   profileBundle: null,
   skills: decodeSkillHosts(null),
   hostActionNote: null,

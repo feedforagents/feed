@@ -205,6 +205,19 @@ export function AppShell({
                 </Badge>
               ) : null}
               {headerActions}
+              {signedIn ? (
+                <Button
+                  size="icon"
+                  variant={route === "Settings" ? "secondary" : "ghost"}
+                  aria-label="Settings"
+                  aria-current={route === "Settings" ? "page" : undefined}
+                  disabled={disabled}
+                  onClick={() => !disabled && onNavigate?.("Settings")}
+                  className="md:hidden"
+                >
+                  <Settings aria-hidden className="size-4" />
+                </Button>
+              ) : null}
               {!signedIn && !headerActions ? (
                 <Button size="sm" disabled={disabled} onClick={() => !disabled && onSignInClick?.()}>
                   Sign in

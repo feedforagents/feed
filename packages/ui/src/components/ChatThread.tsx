@@ -1,5 +1,5 @@
 import { type ComponentProps, type FormEvent, useState } from "react";
-import { LogOut, Send } from "lucide-react";
+import { LogOut, Send, UserPlus } from "lucide-react";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
@@ -58,6 +58,8 @@ export type ChatThreadProps = Omit<ComponentProps<"section">, "children"> & {
   onReact?: (messageId: string, emoji: string) => void;
   /** Marks the thread read. */
   onMarkRead?: () => void;
+  /** Opens member invitation flow for a user group chat. */
+  onInvite?: () => void;
   /** Leaves a non-owner group or alpha chat. */
   onLeave?: () => void;
   /** Maximum characters per message (defaults to 500). */
@@ -85,6 +87,7 @@ export function ChatThread({
   onSendMessage,
   onReact,
   onMarkRead,
+  onInvite,
   onLeave,
   maxMessageChars = 500,
   loading = false,
@@ -127,6 +130,12 @@ export function ChatThread({
           {unreadCount > 0 && onMarkRead ? (
             <Button variant="outline" size="sm" disabled={blocked} onClick={() => !blocked && onMarkRead()}>
               Mark read
+            </Button>
+          ) : null}
+          {chatType === "UserGroup" && onInvite ? (
+            <Button variant="outline" size="sm" disabled={blocked} onClick={() => !blocked && onInvite()}>
+              <UserPlus aria-hidden className="size-4" />
+              Invite
             </Button>
           ) : null}
           {chatType !== "Direct" && onLeave ? (
