@@ -526,6 +526,8 @@ export function decodePredictionMarket(raw: unknown): AppPredictionMarket | null
   const status = str(raw.status, "open");
   const yesPriceBps = num(raw.yesPriceBps, Math.round(num(raw.yesPrice, 0.5) * 10000));
   const noPriceBps = num(raw.noPriceBps, 10000 - yesPriceBps);
+  const yesShares = num(raw.yesShares ?? raw.yes_shares, 0);
+  const noShares = num(raw.noShares ?? raw.no_shares, 0);
   const outcomeRaw = str(raw.resolvedOutcome ?? raw.resolved_outcome).toUpperCase();
   const resolvedOutcome = outcomeRaw === "YES" || outcomeRaw === "NO" ? outcomeRaw : undefined;
   const expiresAt = num(raw.expiresAt ?? raw.expires_at, 0);
@@ -545,6 +547,7 @@ export function decodePredictionMarket(raw: unknown): AppPredictionMarket | null
       phase: toPredictionPhase(status),
       yesOddsPct: Math.min(98, Math.max(2, Math.round(yesPriceBps / 100))),
       liquidityPts: formatPts(num(raw.liquidityCents ?? raw.liquidity_cents, 0) / 100),
+      ...(yesShares > 0 && noShares > 0 ? { yesShares, noShares } : {}),
       ...(expiresAt > 0 ? { closesIn: formatCountdown(expiresAt) } : {}),
       ...(resolvedOutcome ? { resolvedOutcome } : {}),
     },

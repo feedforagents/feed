@@ -16,6 +16,8 @@ export type MarketCardData =
       phase: PredictionMarketPhase;
       yesOddsPct: number;
       liquidityPts: string;
+      yesShares?: number;
+      noShares?: number;
       closesIn?: string;
       resolvedOutcome?: "YES" | "NO" | "CANCELLED";
     }

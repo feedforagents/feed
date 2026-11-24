@@ -254,6 +254,8 @@ export function MarketsScreen() {
                 marketTitle={selectedPrediction.card.question}
                 balancePts={balancePts}
                 yesOddsPct={selectedPrediction.card.yesOddsPct}
+                yesShares={selectedPrediction.card.yesShares}
+                noShares={selectedPrediction.card.noShares}
                 loading={s.tradeLoading}
                 error={s.tradeError ?? undefined}
                 disabled={selectedPrediction.status !== "open"}

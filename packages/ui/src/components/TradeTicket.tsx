@@ -31,6 +31,10 @@ export type TradeTicketProps = Omit<ComponentProps<"form">, "onSubmit" | "childr
   balancePts: string;
   /** Current YES implied probability (2..98) for prediction markets. */
   yesOddsPct?: number;
+  /** CPMM YES reserve in credited shares, when the market view carries it. */
+  yesShares?: number;
+  /** CPMM NO reserve in credited shares, when the market view carries it. */
+  noShares?: number;
   /** Optional perp ticker such as `SAMALT`. */
   ticker?: string;
   /** Current perp mark price string. */
@@ -61,12 +65,34 @@ export type TradeTicketProps = Omit<ComponentProps<"form">, "onSubmit" | "childr
 
 const leveragePresets = [1, 5, 10, 20];
 
+function estimatePredictionBuyShares(
+  yesShares: number,
+  noShares: number,
+  side: "YES" | "NO",
+  amountCents: number,
+  feeBps: number,
+): number {
+  if (yesShares <= 0 || noShares <= 0 || amountCents <= 0) return 0;
+  const feeCents = feeBps > 0 ? Math.ceil((amountCents * feeBps) / 10000) : 0;
+  const netCents = amountCents - feeCents;
+  if (netCents <= 0) return 0;
+  const y = BigInt(yesShares);
+  const n = BigInt(noShares);
+  const net = BigInt(netCents);
+  const denom = side === "YES" ? n + net : y + net;
+  const nextReserve = (y * n + denom - 1n) / denom;
+  const bought = (side === "YES" ? y : n) - nextReserve + net;
+  return bought > 0n ? Number(bought) : 0;
+}
+
 /** Order ticket for prediction YES/NO shares and 1x-20x perpetuals with mandatory virtual-points disclosure. */
 export function TradeTicket({
   marketKind,
   marketTitle,
   balancePts,
   yesOddsPct = 50,
+  yesShares,
+  noShares,
   ticker,
   markPricePts,
   indexPricePts,
@@ -96,10 +122,32 @@ export function TradeTicket({
   const blocked = disabled || loading;
   const numericAmount = Number(amount);
   const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
-  const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
-  const estimatedFeePts = validAmount ? Math.max(0.01, (notionalPts * feeBps) / 10000) : 0;
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
-  const estimatedShares = validAmount && activePricePct > 0 ? (numericAmount * 100) / activePricePct : 0;
+  const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
+  const sellSettledCents =
+    marketKind === "prediction" && action === "Sell" && validAmount ? Math.floor((numericAmount * activePricePct) / 100) : 0;
+  const estimatedFeePts = validAmount
+    ? marketKind === "prediction" && action === "Sell"
+      ? Math.max(0.01, Math.ceil((sellSettledCents * feeBps) / 10000) / 100)
+      : Math.max(0.01, (notionalPts * feeBps) / 10000)
+    : 0;
+  const amountCents = Math.round(numericAmount * 100);
+  const hasExactCpmmInputs =
+    validAmount &&
+    yesShares !== undefined &&
+    noShares !== undefined &&
+    yesShares > 0 &&
+    noShares > 0 &&
+    Number.isSafeInteger(amountCents) &&
+    Number.isSafeInteger(feeBps) &&
+    Number.isSafeInteger(yesShares) &&
+    Number.isSafeInteger(noShares);
+  const estimatedShares =
+    validAmount && activePricePct > 0
+      ? hasExactCpmmInputs
+        ? estimatePredictionBuyShares(yesShares, noShares, predSide, amountCents, feeBps)
+        : (numericAmount * 10000) / activePricePct
+      : 0;
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

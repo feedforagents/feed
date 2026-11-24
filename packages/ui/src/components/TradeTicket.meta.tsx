@@ -25,6 +25,18 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     WithError: {
       error: "Insufficient points balance for margin and 10 bps fee.",
     },
+    PredictionCpmmQuote: {
+      yesOddsPct: 54,
+      yesShares: 46000,
+      noShares: 54000,
+      defaultAmount: "10",
+    },
+    PredictionSellFee: {
+      yesOddsPct: 54,
+      defaultAction: "Sell",
+      defaultSide: "YES",
+      defaultAmount: "1834",
+    },
   },
   play: {
     Default: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
@@ -33,6 +45,16 @@ export const meta: ComponentMeta<TradeTicketProps> = {
       await expect(canvas.getByText("Virtual points — no cash value")).toBeVisible();
       await userEvent.click(canvas.getByRole("button", { name: "Buy YES" }));
       await expect(onSubmit).toHaveBeenCalledWith({ marketKind: "prediction", action: "Buy", side: "YES", amountPts: 10 });
+    },
+    PredictionCpmmQuote: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("1834.00 shares")).toBeVisible();
+      await userEvent.click(canvas.getByRole("radio", { name: /NO/i }));
+      await expect(canvas.getByText("2146.00 shares")).toBeVisible();
+    },
+    PredictionSellFee: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("0.01 pts")).toBeVisible();
     },
   },
 };
