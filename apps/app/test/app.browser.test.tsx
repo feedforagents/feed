@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -147,4 +149,89 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"
+it('Stale markets response is dropped when a newer load lands first', async () => {
+  const marketPayload = (id: string, question: string) => ({
+    predictions: [
+      {
+        id,
+        slotIndex: 0,
+        question,
+        description: "Virtual prediction market",
+        category: "tech",
+        timeframe: "1d",
+        phase: "opening",
+        yesShares: 500,
+        noShares: 500,
+        liquidityCents: 100_000,
+        yesProbabilityBps: 5000,
+        noProbabilityBps: 5000,
+        status: "open",
+        resolvedOutcome: null,
+        resolutionProof: null,
+        resolutionArticleId: null,
+        expiresAt: Date.now() + 3_600_000,
+        resolvedAt: null,
+        createdAt: Date.now() - 300_000,
+      },
+    ],
+    perps: [],
+    positions: [],
+    economy: null,
+  });
+  let holdMarkets = false;
+  let resolveHeld: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/markets") {
+      if (holdMarkets) {
+        return new Promise<Response>((resolve) => {
+          resolveHeld = () => resolve(Response.json(marketPayload("seed-market-stale", "Stale market question?")));
+        });
+      }
+      return json(marketPayload("seed-market-fresh", "Fresh market question?"));
+    }
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  holdMarkets = true;
+  const loading = storeActions.loadMarkets();
+  holdMarkets = false;
+  await act(() => storeActions.loadMarkets());
+  expect(getStoreSnapshot().predictions.map((m) => m.card.id)).toEqual(["seed-market-fresh"]);
+
+  resolveHeld?.();
+  await act(() => loading);
+
+  expect(getStoreSnapshot().predictions.map((m) => m.card.id)).toEqual(["seed-market-fresh"]);
+  expect(getStoreSnapshot().predictions.map((m) => m.card.question)).toEqual(["Fresh market question?"]);
+  expect(getStoreSnapshot().marketsLoading).toBe(false);
 });
