@@ -98,6 +98,7 @@ export {
   RealtimeBus,
   createSseResponse,
   encodeSseEvent,
+  isFeedEventVisibleToViewer,
   publishFeedEvent,
   realtimeBusLayer,
   subscribeFeedEvents,
@@ -106,3 +107,7 @@ export {
   type SseResponseOptions,
   type SseStreamOptions
 } from "./realtime.vibe"
+
+export {
+  loadViewerExcludedAuthorIdsTx
+} from "./shared.vibe"
