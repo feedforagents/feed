@@ -380,6 +380,22 @@ effect function readSseEventsUntil(
   return frames
 }
 
+it.effect('Phone change requires a recent sign-in (spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+
+    const player = try onboardPhonePlayer("+14155550131", "phonechange_alice")
+    const freshRes = try callApp("/api/auth/phone/change/start", { cookie: player.cookie, json: { newPhoneE164: "+14155550199" } })
+    try check(() => assert.strictEqual(freshRes.status, 200))
+
+    try TestClock.adjust("11 minutes")
+    const staleRes = try callApp("/api/auth/phone/change/start", { cookie: player.cookie, json: { newPhoneE164: "+14155550198" } })
+    const staleBody = try readJson(staleRes)
+    try check(() => assert.deepStrictEqual([staleRes.status, staleBody.code], [403, "recent_signin_required"]))
+  }
+}, 180_000)
+
 it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 500, profile cursor/edit, SSE auth/block, perp broadcast, single rate-limit bucket (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
   provide appLayer() {
     const now = Date.now()

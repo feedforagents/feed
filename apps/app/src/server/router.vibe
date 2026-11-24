@@ -787,6 +787,7 @@ effect function handleAuthRoute(
       newPhoneE164: try reqStr(data, "newPhoneE164", "newPhoneE164", "phoneE164"),
       turnstileToken: strField(data, "turnstileToken", "turnstile_token"),
       ipAddress: clientIp(request),
+      sessionAuthAt: session.authAt,
       config: config.auth
     })
     return jsonResponse({ challengeId: res.challengeId, last2: res.last2, expiresAt: res.expiresAt, resendAvailableAt: res.resendAvailableAt })

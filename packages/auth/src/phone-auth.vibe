@@ -1159,8 +1159,18 @@ export effect function requestPhoneChange(input: {
   readonly turnstileToken?: string | undefined
   readonly ipAddress?: string | undefined
   readonly oldPhoneVerifiedOrRecovery?: boolean | undefined
+  readonly sessionAuthAt?: number | undefined
   readonly config: AuthRuntimeConfig
 }): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const signedInAt = input.sessionAuthAt
+  const now = try Clock.currentTimeMillis
+  if (signedInAt === undefined || !Number.isSafeInteger(signedInAt) || now - signedInAt > recentSignInWindowMs) {
+    throw new AuthFailure({
+      code: "recent_signin_required",
+      message: "Please sign in again within the last 10 minutes before changing your phone number.",
+      status: 403
+    })
+  }
   return try sendPhoneChallenge({
     phoneE164: input.newPhoneE164,
     purposeKey: "feed_phone_change",
