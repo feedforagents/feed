@@ -298,6 +298,26 @@ effect function seedGameNotifications(accountId: string) {
   })
 }
 
+effect function seedUnreadPageNotifications(accountId: string, actorId: string) {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at)
+       VALUES
+         ($1, $3, 'mention', $4, NULL, NULL, 'Unread mention', 'Someone mentioned you.', false, NULL, $5),
+         ($2, $3, 'mention', $4, NULL, NULL, 'Unread mention', 'Someone else mentioned you.', false, NULL, $6),
+         ($7, $3, 'like', $4, NULL, NULL, 'Read like', 'Someone liked your post.', false, $8, $9),
+         ($10, $3, 'like', $4, NULL, NULL, 'Read like', 'Someone else liked your post.', false, $11, $12)`,
+      [`notif-unread-old-${accountId}`, `notif-unread-new-${accountId}`, accountId, actorId, now + 10000, now + 20000, `notif-read-old-${accountId}`, now + 100000, now + 100000, `notif-read-new-${accountId}`, now + 110000, now + 110000]
+    )
+  })
+  return {
+    unreadIds: [`notif-unread-new-${accountId}`, `notif-unread-old-${accountId}`],
+    readIds: [`notif-read-new-${accountId}`, `notif-read-old-${accountId}`],
+  }
+}
+
 function assertToolCatalogClean(tools: ReadonlyArray<ToolSchemaSummary>): void {
   assert.strictEqual(tools.length, 49)
   for (const tool of tools) {
@@ -556,7 +576,7 @@ it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no
     })
 }))
 
-it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribution, and Social mode redaction end to end (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution")', () => withSeededWorld(effect (authConfig) => {
+it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribution, and Social mode redaction end to end (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', () => withSeededWorld(effect (authConfig) => {
     const alice = try onboardPhoneUser("+14155550101", "alice_mcp", "Alice MCP", authConfig)
     const bob = try onboardPhoneUser("+14155550102", "bob_social", "Bob Social", authConfig)
     try createPost({
@@ -617,6 +637,9 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
     const whoamiGame = unwrapToolPayload(try callMcpTool(17, "whoami", {}, authConfig, token2Access))
     const portfolioGame = unwrapToolPayload(try callMcpTool(18, "get_portfolio", {}, authConfig, token2Access))
     const notifsGame = unwrapToolPayload(try callMcpTool(19, "get_notifications", { limit: 20 }, authConfig, token2Access))
+    const mixedSeed = try seedUnreadPageNotifications(alice.account.accountId, bob.account.accountId)
+    const unreadOnlyRes = unwrapToolPayload(try callMcpTool(24, "get_notifications", { unreadOnly: true, limit: 2 }, authConfig, token2Access))
+    const allLimitedRes = unwrapToolPayload(try callMcpTool(25, "get_notifications", { limit: 2 }, authConfig, token2Access))
     const setSocialRes = unwrapToolPayload(try callMcpTool(20, "set_mode", { mode: "social" }, authConfig, token2Access))
     try assertSocialModeRedaction("alice_mcp", authConfig, token2Access)
     const setGameBackRes = unwrapToolPayload(try callMcpTool(21, "set_mode", { mode: "game" }, authConfig, token2Access))
@@ -658,6 +681,12 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
       assert.strictEqual((portfolioGame.predictionPositions as ReadonlyArray<unknown>).length, 1)
       const gameKinds = ((notifsGame.items ?? []) as ReadonlyArray<{ readonly kind: string }>).map((n) => n.kind)
       assert.includeMembers(gameKinds, ["mention", "market_resolved", "pnl_digest"])
+      const unreadOnlyItems = (unreadOnlyRes.items ?? []) as ReadonlyArray<{ readonly id: string; readonly isRead: boolean }>
+      assert.deepStrictEqual(unreadOnlyItems.map((item) => item.id), mixedSeed.unreadIds)
+      assert.strictEqual(unreadOnlyItems.every((item) => !item.isRead), true)
+      const allLimitedItems = (allLimitedRes.items ?? []) as ReadonlyArray<{ readonly id: string; readonly isRead: boolean }>
+      assert.deepStrictEqual(allLimitedItems.map((item) => item.id), mixedSeed.readIds)
+      assert.strictEqual(allLimitedItems.every((item) => item.isRead), true)
       assert.strictEqual(setSocialRes.playMode, "social")
       assert.strictEqual(setGameBackRes.playMode, "game")
       assert.strictEqual(portfolioRestored.balancePts, 90)
