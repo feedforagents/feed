@@ -168,6 +168,8 @@ function handleSseSignal(eventType: string): void {
     try {
       if (eventType.startsWith("post.") && s.route === "Home") {
         await loadFeed();
+      } else if (eventType === "article.published") {
+        if (s.route === "Explore") await loadExplore();
       } else if (eventType.startsWith("market.") || eventType === "world.tick") {
         if (s.route === "Markets") await loadMarkets();
         if (s.route === "Explore") await loadExplore();
@@ -192,6 +194,7 @@ function connectRealtime(): void {
     "post.created",
     "post.deleted",
     "post.engagement",
+    "article.published",
     "chat.message",
     "chat.reaction",
     "chat.invite",
