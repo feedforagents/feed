@@ -95,6 +95,7 @@ import {
   posts,
   reactions,
   shares,
+  sql,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -344,16 +345,30 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             and(inArray(reactions.postId, postIds), eq(reactions.type, 'like'))
           )
           .groupBy(reactions.postId),
-        db
-          .select({
-            postId: comments.postId,
-            count: count(),
-          })
-          .from(comments)
-          .where(
-            and(inArray(comments.postId, postIds), isNull(comments.deletedAt))
+        // A comment counts only if it is reachable from its post through
+        // visible parents: replies under a soft-deleted parent are invisible
+        // on the post detail screen, so the card must not count them either
+        // (#1994 rule, same as GET /api/posts and the For You/tag/Stories
+        // cards). Same recursive pattern as post-comments-service.
+        db.execute<{ postId: string; count: string }>(sql`
+          WITH RECURSIVE eligible_comments AS MATERIALIZED (
+            SELECT ${comments.id}, ${comments.postId}, ${comments.parentCommentId}
+            FROM ${comments}
+            WHERE ${and(inArray(comments.postId, postIds), isNull(comments.deletedAt))}
+          ),
+          visible_comments(id, "postId") AS (
+            SELECT id, "postId"
+            FROM eligible_comments
+            WHERE "parentCommentId" IS NULL
+            UNION ALL
+            SELECT child.id, child."postId"
+            FROM eligible_comments child
+            JOIN visible_comments parent ON child."parentCommentId" = parent.id
           )
-          .groupBy(comments.postId),
+          SELECT "postId", count(*)::text AS count
+          FROM visible_comments
+          GROUP BY "postId"
+        `),
         db
           .select({
             postId: shares.postId,
