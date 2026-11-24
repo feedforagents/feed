@@ -69,14 +69,13 @@ export function toAppNavRoute(route: AppRoute): AppNavRoute {
     case "Home":
     case "Explore":
     case "Markets":
+    case "Leaderboard":
     case "Chats":
     case "Notifications":
     case "Profile":
     case "Settings":
     case "HowToPlay":
       return route;
-    case "Leaderboard":
-      return "Markets";
     case "PostDetail":
       return "Home";
     case "Link":

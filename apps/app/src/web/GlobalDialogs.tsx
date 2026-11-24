@@ -88,7 +88,6 @@ export function GlobalDialogs() {
             onSubmit={(text) => { void handleComposeSubmit(text); }}
             authorName={s.viewer?.displayName ?? "You"}
             authorAvatarUrl={s.viewer?.avatarUrl ?? undefined}
-            viaClientName={s.viewer?.agentGrant?.clientName}
             quotePost={quoteContext}
             onCancelContext={() => storeActions.openComposeDialog(null)}
             placeholder={s.quotePostTarget ? "Add a comment..." : "What's happening?"}

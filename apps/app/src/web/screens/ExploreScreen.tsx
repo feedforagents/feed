@@ -284,6 +284,25 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
       ) : hasSearch ? (
         activeSearchTab === "top" ? (
           <div className="flex flex-col">
+            {s.explore.tags.length > 0 ? (
+              <section className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
+                {s.explore.tags.map((tag) => (
+                  <Button
+                    key={tag}
+                    size="sm"
+                    variant="outline"
+                    shape="pill"
+                    onClick={() => {
+                      const clean = tag.replace(/^#/, "");
+                      setDraftQuery(`#${clean}`);
+                      void storeActions.navigate(`/trending/${encodeURIComponent(clean)}`);
+                    }}
+                  >
+                    #{tag.replace(/^#/, "")}
+                  </Button>
+                ))}
+              </section>
+            ) : null}
             {peopleCount > 0 ? (
               <section className="border-b border-border">
                 <div className="flex items-center justify-between px-4 py-2.5">
@@ -295,9 +314,20 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
                 <ExplorePeopleList hasSearch />
               </section>
             ) : null}
+            {s.explore.organizations.length > 0 ? (
+              <section className="border-b border-border">
+                <div className="flex items-center justify-between px-4 py-2.5">
+                  <h2 className="text-sm font-bold text-foreground">Organizations</h2>
+                  <button type="button" onClick={() => setSearchTab("orgs")} className="text-xs font-medium text-primary hover:underline">
+                    View all
+                  </button>
+                </div>
+                <ExploreOrgsList hasSearch isGame={isGame} />
+              </section>
+            ) : null}
             {s.explore.posts.length > 0 ? (
               <FlatPostList posts={s.explore.posts} mode={mode} />
-            ) : peopleCount === 0 && s.explore.organizations.length === 0 ? (
+            ) : peopleCount === 0 && s.explore.organizations.length === 0 && s.explore.tags.length === 0 ? (
               <EmptyState title={`No results for "${s.exploreQuery}"`} />
             ) : null}
           </div>

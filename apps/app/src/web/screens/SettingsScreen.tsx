@@ -447,7 +447,9 @@ export function SettingsScreen({ mode }: { readonly mode: UiMode }) {
               mode={mode}
               hasAtRiskOpenPositions={hasAtRiskOpenPositions(s)}
               onModeChange={storeActions.toggleUiModeFromControl}
-              onReturnToGame={() => { void storeActions.navigate("/markets"); }}
+              onReturnToGame={() => {
+                void storeActions.setPlayMode("game").then(() => storeActions.navigate("/markets"));
+              }}
             />
           </>
         ) : null}

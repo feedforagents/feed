@@ -2,51 +2,52 @@
 import { useState } from "react";
 import {
   Button,
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
   EmptyState,
   LeaderboardTable,
-  type LeaderboardSortColumn,
-  PositionRow,
   Skeleton,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-  formatPts,
+  WalletPanel,
+  type LightweightChartPoint,
+  type MarketTimeRange,
+  type WalletLedgerEntry,
+  type WalletOpenPosition,
+  type WalletSummary,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "../store.ts";
 
+const RANGE_MS: Record<MarketTimeRange, number | null> = {
+  "1H": 3_600_000,
+  "4H": 14_400_000,
+  "1D": 86_400_000,
+  "1W": 604_800_000,
+  ALL: null,
+};
+
+function formatLedgerKind(kind: string): string {
+  return kind
+    .split("_")
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
+    .join(" ");
+}
+
+function calcLiquidationDistancePct(markCents: number, liqCents: number, side: "long" | "short"): number | undefined {
+  if (markCents <= 0 || liqCents <= 0) return undefined;
+  const diff = side === "long" ? markCents - liqCents : liqCents - markCents;
+  return Math.max(0, (diff / markCents) * 100);
+}
+
 export function LeaderboardScreen() {
   const s = useAppStore();
-  const [sortBy, setSortBy] = useState<LeaderboardSortColumn>("netProfit");
-  const [sortDir, setSortDir] = useState<"ascending" | "descending">("descending");
-
-  const sortedRows = [...s.leaderboard].sort((a, b) => {
-    const dir = sortDir === "ascending" ? 1 : -1;
-    if (sortBy === "rank") return (a.rank - b.rank) * dir;
-    if (sortBy === "winRate") return (a.winRatePct - b.winRatePct) * dir;
-    if (sortBy === "volume") return (a.volumePts - b.volumePts) * dir;
-    return (a.netProfitPts - b.netProfitPts) * dir;
-  });
-
-  const handleSort = (col: LeaderboardSortColumn) => {
-    if (sortBy === col) {
-      setSortDir(sortDir === "descending" ? "ascending" : "descending");
-      return;
-    }
-    setSortBy(col);
-    setSortDir("descending");
-  };
 
   return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
-        <h1 className="text-base font-bold text-foreground">Leaderboard</h1>
+      <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
+        <div className="flex min-w-0 items-center gap-3">
+          <h1 className="text-base font-bold text-foreground">Leaderboard</h1>
+          <span className="hidden truncate text-xs text-muted-foreground sm:inline">
+            Starting capital: 100 pts — trade to climb the leaderboard
+          </span>
+        </div>
         <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>
           Trade Markets
         </Button>
@@ -57,13 +58,30 @@ export function LeaderboardScreen() {
           <Skeleton className="h-64" />
         ) : (
           <LeaderboardTable
-            rows={sortedRows}
-            sortBy={sortBy}
-            sortDir={sortDir}
+            rows={[...s.leaderboard]}
+            scope={s.leaderboardScope}
+            onScopeChange={(scope) => {
+              void storeActions.loadLeaderboard({ scope, page: 1 });
+            }}
+            metric={s.leaderboardMetric}
+            onMetricChange={(metric) => {
+              void storeActions.loadLeaderboard({ metric, page: 1 });
+            }}
+            currentUserId={s.viewer?.accountId}
             viewerAccountId={s.viewer?.accountId}
-            onSort={handleSort}
+            currentUserRow={s.leaderboardCurrentUser}
+            onJumpToCurrentUser={() => {
+              void storeActions.jumpToMyLeaderboardRank();
+            }}
+            page={s.leaderboardPage}
+            totalPages={s.leaderboardTotalPages}
+            totalCount={s.leaderboardTotalCount}
+            onPageChange={(page) => {
+              void storeActions.loadLeaderboard({ page });
+            }}
             onSelectTrader={(accountId) => {
-              const found = s.leaderboard.find((r) => r.accountId === accountId);
+              const found = s.leaderboard.find((r) => r.accountId === accountId)
+                ?? (s.leaderboardCurrentUser?.accountId === accountId ? s.leaderboardCurrentUser : undefined);
               if (found) void storeActions.navigate(`/u/${encodeURIComponent(found.handle)}`);
             }}
             onFollow={(accountId) => {
@@ -79,17 +97,79 @@ export function LeaderboardScreen() {
 
 export function WalletScreen() {
   const s = useAppStore();
+  const [pnlTimeRange, setPnlTimeRange] = useState<MarketTimeRange>("ALL");
+
   const econ = s.economy;
+  const startingGrantCents = econ?.startingGrantCents ?? s.viewer?.startingGrantCents ?? 10000;
   const cashCents = econ?.balanceCents ?? s.viewer?.balanceCents ?? 0;
   const positionCents = econ?.positionValueCents ?? 0;
   const equityCents = econ?.equityCents ?? cashCents + positionCents;
-  const netProfitCents = econ?.netProfitCents ?? equityCents - (s.viewer?.startingGrantCents ?? 10000);
+  const netProfitCents = econ?.netProfitCents ?? equityCents - startingGrantCents;
+  const feesPaidCents = econ?.totalFeesPaidCents ?? 0;
+  const roiPct = startingGrantCents > 0 ? (netProfitCents / startingGrantCents) * 100 : 0;
+
+  const summary: WalletSummary = {
+    equityPts: equityCents / 100,
+    cashPts: cashCents / 100,
+    openPositionsValuePts: positionCents / 100,
+    netProfitPts: netProfitCents / 100,
+    roiPct,
+    feesPaidPts: feesPaidCents / 100,
+  };
+
   const openPositions = s.positions.filter((p) => !p.isClosed);
+  const walletOpenPositions: WalletOpenPosition[] = openPositions.map((pos) => {
+    const liqDist = pos.row.kind === "perp"
+      ? calcLiquidationDistancePct(
+          pos.markPriceCents,
+          pos.liquidationPriceCents,
+          pos.rawSide === "short" ? "short" : "long",
+        )
+      : undefined;
+    return {
+      id: pos.row.id,
+      kind: pos.row.kind,
+      marketLabel: pos.row.marketLabel,
+      side: pos.row.side,
+      sizeLabel: pos.row.quantityLabel,
+      ...(pos.row.leverage ? { leverage: pos.row.leverage } : {}),
+      entryLabel: pos.row.entryLabel,
+      markLabel: pos.row.markLabel,
+      pnlPts: pos.row.pnlPts,
+      pnlPct: pos.pnlPct,
+      ...(pos.row.liquidationLabel ? { liquidationLabel: pos.row.liquidationLabel } : {}),
+      ...(liqDist !== undefined ? { liquidationDistancePct: liqDist } : {}),
+    };
+  });
+
+  const ledgerEntries: WalletLedgerEntry[] = s.ledger.map((row) => ({
+    id: row.id,
+    timestampLabel: row.timestamp,
+    eventLabel: formatLedgerKind(row.kind),
+    deltaPts: row.deltaCents / 100,
+    balanceAfterPts: row.balanceAfterCents / 100,
+  }));
+
+  const rangeMs = RANGE_MS[pnlTimeRange];
+  const latestLedgerMs = s.ledger.reduce((acc, row) => Math.max(acc, row.createdAtMs), 0);
+  const cutoffMs = rangeMs !== null && latestLedgerMs > 0 ? latestLedgerMs - rangeMs : null;
+  const pnlHistory: LightweightChartPoint[] = [...s.ledger]
+    .filter((row) => row.createdAtMs > 0 && (cutoffMs === null || row.createdAtMs >= cutoffMs))
+    .sort((a, b) => a.createdAtMs - b.createdAtMs)
+    .map((row) => ({
+      time: row.createdAtMs,
+      value: (row.balanceAfterCents - startingGrantCents) / 100,
+    }));
 
   return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
-        <h1 className="text-base font-bold text-foreground">Wallet</h1>
+      <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
+        <div className="flex min-w-0 items-center gap-3">
+          <h1 className="text-base font-bold text-foreground">Wallet</h1>
+          <span className="hidden truncate text-xs text-muted-foreground sm:inline">
+            Starting capital: 100 pts — trade to climb the leaderboard
+          </span>
+        </div>
         <Button size="sm" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>
           Markets
         </Button>
@@ -99,105 +179,47 @@ export function WalletScreen() {
         <div className="p-6">
           <EmptyState title="Sign in to view your wallet">
             <Button shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
-              Sign in & claim 100 pts
+              Sign in &amp; claim 100 pts
             </Button>
           </EmptyState>
         </div>
       ) : (
-        <div className="flex flex-col gap-5 p-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Card className="gap-1 p-4">
-              <span className="text-xs text-muted-foreground">Total Equity</span>
-              <span className="font-mono text-xl font-bold text-foreground tabular-nums">{formatPts(equityCents / 100)}</span>
-            </Card>
-            <Card className="gap-1 p-4">
-              <span className="text-xs text-muted-foreground">Available Cash</span>
-              <span className="font-mono text-xl font-bold text-foreground tabular-nums">{formatPts(cashCents / 100)}</span>
-            </Card>
-            <Card className="gap-1 p-4">
-              <span className="text-xs text-muted-foreground">Positions Value</span>
-              <span className="font-mono text-xl font-bold text-foreground tabular-nums">{formatPts(positionCents / 100)}</span>
-            </Card>
-            <Card className="gap-1 p-4">
-              <span className="text-xs text-muted-foreground">Net Profit</span>
-              <span className={`font-mono text-xl font-bold tabular-nums ${netProfitCents >= 0 ? "text-ok" : "text-destructive"}`}>
-                {formatPts(netProfitCents / 100, true)}
-              </span>
-            </Card>
-          </div>
-
-          <section className="flex flex-col gap-2">
-            <h2 className="text-sm font-bold text-foreground">Open Positions ({openPositions.length})</h2>
-            {openPositions.length === 0 ? (
-              <Card className="p-6">
-                <EmptyState title="No open positions">
-                  <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>
-                    Explore Markets
-                  </Button>
-                </EmptyState>
-              </Card>
-            ) : (
-              <Card className="gap-0 overflow-hidden p-0">
-                {openPositions.map((pos) => (
-                  <PositionRow
-                    key={pos.row.id}
-                    position={pos.row}
-                    loading={s.tradeLoading}
-                    onClose={() => {
-                      if (pos.row.kind === "perp") {
-                        void storeActions.closePerpPosition(pos.row.id);
-                      } else {
-                        void storeActions.submitPredictionOrder(
-                          pos.marketId,
-                          "Sell",
-                          pos.rawSide === "no" ? "no" : "yes",
-                          pos.shares,
-                        );
-                      }
-                    }}
-                  />
-                ))}
-              </Card>
-            )}
-          </section>
-
-          <Card className="gap-3 p-4">
-            <CardHeader>
-              <CardTitle className="text-sm">Recent Activity</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {s.economyLoading && s.ledger.length === 0 ? (
-                <Skeleton className="h-32" />
-              ) : s.ledger.length === 0 ? (
-                <EmptyState title="No ledger activity yet" />
-              ) : (
-                <Table label="Wallet ledger">
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Event</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
-                      <TableHead className="text-right">Balance</TableHead>
-                      <TableHead className="text-right">Time</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {s.ledger.map((row) => (
-                      <TableRow key={row.id}>
-                        <TableCell className="text-sm font-medium text-foreground">{row.kind}</TableCell>
-                        <TableCell className={`text-right font-mono tabular-nums ${row.deltaCents >= 0 ? "text-ok" : "text-destructive"}`}>
-                          {formatPts(row.deltaCents / 100, true)}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-muted-foreground tabular-nums">
-                          {formatPts(row.balanceAfterCents / 100)}
-                        </TableCell>
-                        <TableCell className="text-right text-xs text-muted-foreground">{row.timestamp}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
+        <div className="p-4">
+          <WalletPanel
+            summary={summary}
+            pnlHistory={pnlHistory}
+            pnlTimeRange={pnlTimeRange}
+            onPnlTimeRangeChange={setPnlTimeRange}
+            openPositions={walletOpenPositions}
+            closedPositions={s.closedPositions}
+            ledgerEntries={ledgerEntries}
+            loading={s.economyLoading && s.economy === null}
+            submitting={s.tradeLoading}
+            onSelectPosition={(id, kind) => {
+              const found = openPositions.find((pos) => pos.row.id === id);
+              if (!found) return;
+              if (kind === "perp") {
+                void storeActions.navigate(`/markets/perps/${encodeURIComponent(found.marketId)}`);
+                return;
+              }
+              void storeActions.navigate(`/markets/predictions/${encodeURIComponent(found.marketId)}`);
+            }}
+            onClosePosition={(id, kind) => {
+              const found = openPositions.find((pos) => pos.row.id === id);
+              if (!found) return;
+              if (kind === "perp") {
+                void storeActions.closePerpPosition(found.row.id);
+                return;
+              }
+              void storeActions.submitPredictionOrder(
+                found.marketId,
+                "Sell",
+                found.rawSide === "no" ? "no" : "yes",
+                found.wholeShares,
+                found.shares,
+              );
+            }}
+          />
         </div>
       )}
     </div>

@@ -14,6 +14,7 @@ import {
   dismissBottomBanner,
   dismissExplainer,
   fetchLoopbackCode,
+  formatPhoneToE164,
   hydrateAuth,
   launchAgentHost,
   loadAdminStatus,
@@ -67,23 +68,28 @@ import {
   subscribeStore,
 } from "./store-core.ts";
 import {
+  clearNotifications,
   closeFollowList,
   closePerpPosition,
   closeThread,
   createGroupChat,
   createPost,
+  deleteGroupChat,
   deletePost,
   flushPendingNewPosts,
   inviteToGroupChat,
+  jumpToMyLeaderboardRank,
   leaveGroupChat,
   loadArticle,
   loadChatMessages,
   loadChats,
+  loadClosedPositions,
   loadEconomy,
   loadExplore,
   loadFeed,
   loadFollowList,
   loadLeaderboard,
+  loadMarketDetails,
   loadMarkets,
   loadModerationLists,
   loadMoreFeed,
@@ -91,17 +97,24 @@ import {
   loadNotifications,
   loadPositionsSilent,
   loadProfile,
+  loadProfileReplies,
   loadTrending,
   loadTrendingTag,
   markAllNotificationsRead,
   markChatRead,
   markNotificationRead,
+  openMarketsDashboard,
   openThread,
   patchPostCardAcrossStore,
+  previewPerpOrder,
   reactToChatMessage,
+  rebalancePerpPosition,
+  removeGroupMember,
   removePostAcrossStore,
+  renameGroupChat,
   repostPost,
   respondAlphaInvite,
+  respondGroupInvite,
   searchAccounts,
   selectFeedTab,
   selectMarket,
@@ -123,14 +136,23 @@ type SseDomain = "feed" | "markets" | "explore" | "profile" | "chats" | "notific
 let booted = false;
 let activeEventSource: EventSource | null = null;
 const sseDomainInFlight = new Set<SseDomain>();
+const sseDomainPending = new Map<SseDomain, () => Promise<void>>();
 
 async function runDomainRefresh(domain: SseDomain, task: () => Promise<void>): Promise<void> {
-  if (sseDomainInFlight.has(domain)) return;
+  if (sseDomainInFlight.has(domain)) {
+    sseDomainPending.set(domain, task);
+    return;
+  }
   sseDomainInFlight.add(domain);
   try {
     await task();
   } finally {
     sseDomainInFlight.delete(domain);
+    const queued = sseDomainPending.get(domain);
+    if (queued) {
+      sseDomainPending.delete(domain);
+      void runDomainRefresh(domain, queued);
+    }
   }
 }
 
@@ -154,7 +176,9 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
       return;
     case "Markets":
       await loadMarkets();
-      if (s.walletView && s.viewer) await loadEconomy();
+      if (s.walletView && s.viewer) {
+        await Promise.all([loadEconomy(), loadClosedPositions()]);
+      }
       return;
     case "Leaderboard":
       await loadLeaderboard();
@@ -224,6 +248,7 @@ export async function navigate(path: string): Promise<void> {
   sendNav({ type: "navigateTo", targetRoute: parsed.route });
   sendApp({ type: "navigateApp", targetRoute: parsed.route });
   recordPublicView(parsed.route);
+  const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
   setStoreState({
     route: parsed.route,
     profileHandle: parsed.profileHandle,
@@ -234,6 +259,12 @@ export async function navigate(path: string): Promise<void> {
     ...(parsed.exploreQuery !== null ? { exploreQuery: parsed.exploreQuery } : {}),
     ...(parsed.settingsTab ? { settingsTab: parsed.settingsTab } : {}),
     selectedTicker: parsed.queryTicker,
+    ...(parsed.route === "Markets"
+      ? {
+          marketsViewMode: enteringTerminal ? "terminal" as const : "dashboard" as const,
+          perpPreview: null,
+        }
+      : {}),
     ...(parsed.marketKind && parsed.marketId
       ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId }
       : parsed.queryTicker
@@ -300,7 +331,10 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
   if (eventType === "post.deleted" && data) {
     const postId = optStr(data.postId);
     if (postId) {
-      removePostAcrossStore(postId);
+      removePostAcrossStore(postId, {
+        replyToPostId: optStr(data.replyToPostId),
+        parentReplyCount: typeof data.parentReplyCount === "number" ? data.parentReplyCount : null,
+      });
     }
     return;
   }
@@ -422,6 +456,7 @@ export function bootStore(): void {
     }
     window.addEventListener("popstate", () => {
       const parsed = parseLocation(window.location.pathname, window.location.search);
+      const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
       sendNav({ type: "navigateTo", targetRoute: parsed.route });
       sendApp({ type: "navigateApp", targetRoute: parsed.route });
       setStoreState({
@@ -434,6 +469,17 @@ export function bootStore(): void {
         ...(parsed.exploreQuery !== null ? { exploreQuery: parsed.exploreQuery } : {}),
         ...(parsed.settingsTab ? { settingsTab: parsed.settingsTab } : {}),
         selectedTicker: parsed.queryTicker,
+        ...(parsed.route === "Markets"
+          ? {
+              marketsViewMode: enteringTerminal ? "terminal" as const : "dashboard" as const,
+              perpPreview: null,
+            }
+          : {}),
+        ...(parsed.marketKind && parsed.marketId
+          ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId }
+          : parsed.queryTicker
+            ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker }
+            : {}),
       });
       void loadDataForRoute(parsed.route, window.location.search);
     });
@@ -515,11 +561,17 @@ export const storeActions = {
   loadTrendingTag,
   searchAccounts,
   loadMarkets,
+  loadMarketDetails,
+  loadClosedPositions,
   loadLeaderboard,
+  jumpToMyLeaderboardRank,
   loadEconomy,
   selectMarket,
+  openMarketsDashboard,
+  previewPerpOrder,
   submitPredictionOrder,
   submitPerpOrder,
+  rebalancePerpPosition,
   closePerpPosition,
   loadChats,
   loadChatMessages,
@@ -528,13 +580,19 @@ export const storeActions = {
   createGroupChat,
   inviteToGroupChat,
   leaveGroupChat,
+  renameGroupChat,
+  removeGroupMember,
+  deleteGroupChat,
   sendChatMessage,
   reactToChatMessage,
   respondAlphaInvite,
+  respondGroupInvite,
   loadNotifications,
   markNotificationRead,
   markAllNotificationsRead,
+  clearNotifications,
   loadProfile,
+  loadProfileReplies,
   loadMoreProfilePosts,
   loadFollowList,
   closeFollowList,
@@ -561,6 +619,7 @@ export const storeActions = {
   launchAgentHost,
   revokeAgentGrant,
   fetchLoopbackCode,
+  formatPhoneToE164,
   startPhoneChange,
   confirmPhoneChange,
   logout,
