@@ -90,6 +90,7 @@ import {
   getProfile,
   getUnreadNotificationCount,
   inviteToUserGroupChat,
+  isFeedEventVisibleToViewer,
   leaveGroupChat,
   likePost,
   listAlphaInvites,
@@ -100,6 +101,7 @@ import {
   listFollowing,
   listNotifications,
   listTrending,
+  loadViewerExcludedAuthorIdsTx,
   markNotificationsRead,
   muteAccount,
   reactToMessage,
@@ -988,7 +990,14 @@ effect function handleSocialChatsAndNotifications(
   const path = url.pathname
   const method = request.method.toUpperCase()
   if (method === "GET" && path === "/api/events") {
-    return try createSseResponse({ signal: request.signal, keepalive: true })
+    const session = try requireSession(request, config)
+    const store = try Store
+    const excluded = try store.transaction((tx) => loadViewerExcludedAuthorIdsTx(tx, session.accountId))
+    return try createSseResponse({
+      signal: request.signal,
+      keepalive: true,
+      filter: (event) => isFeedEventVisibleToViewer(excluded, session.accountId, event)
+    })
   }
   if (method === "GET" && path === "/api/notifications") {
     const session = try requireSession(request, config)
