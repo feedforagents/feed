@@ -35,15 +35,60 @@ type JsonValue =
 type Xml2JsFeed = {
   rss?: {
     channel?: Array<{
-      title?: string[];
+      title?: JsonValue[];
       item?: Array<Record<string, JsonValue>>;
     }>;
   };
   feed?: {
-    title?: string[];
+    title?: JsonValue[];
     entry?: Array<Record<string, JsonValue>>;
   };
 };
+
+function extractXmlText(raw: JsonValue | undefined): string | undefined {
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  const value =
+    typeof first === 'object' &&
+    first !== null &&
+    !Array.isArray(first) &&
+    '_' in first
+      ? (first as { _?: JsonValue })._
+      : first;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (typeof value === 'number') {
+    return String(value);
+  }
+  return undefined;
+}
+
+function extractAtomLink(raw: JsonValue | undefined): string | undefined {
+  const candidates = Array.isArray(raw) ? raw : raw !== undefined ? [raw] : [];
+  let fallback: string | undefined;
+  for (const candidate of candidates) {
+    if (
+      typeof candidate !== 'object' ||
+      candidate === null ||
+      Array.isArray(candidate) ||
+      !('$' in candidate)
+    ) {
+      continue;
+    }
+    const attrs = (candidate as { $?: { href?: JsonValue; rel?: JsonValue } })
+      .$;
+    const href =
+      typeof attrs?.href === 'string' ? attrs.href.trim() : undefined;
+    if (!href) continue;
+    const rel = typeof attrs?.rel === 'string' ? attrs.rel.trim() : undefined;
+    if (!rel || rel === 'alternate') {
+      return href;
+    }
+    fallback ??= href;
+  }
+  return fallback;
+}
 
 export interface RSSFeedItem {
   title: string;
@@ -109,50 +154,16 @@ export class RSSFeedService {
         if (parsed.rss?.channel?.[0]) {
           const channel = parsed.rss.channel[0];
           return {
-            title: channel.title?.[0] || 'Unknown Feed',
+            title: extractXmlText(channel.title) || 'Unknown Feed',
             items: (channel.item || []).map(
-              (item: Record<string, JsonValue>) => {
-                const title = Array.isArray(item.title)
-                  ? item.title[0]
-                  : item.title;
-                const link = Array.isArray(item.link)
-                  ? item.link[0]
-                  : item.link;
-                const pubDate = Array.isArray(item.pubDate)
-                  ? item.pubDate[0]
-                  : item.pubDate;
-                const description = Array.isArray(item.description)
-                  ? item.description[0]
-                  : item.description;
-                const content = Array.isArray(item['content:encoded'])
-                  ? item['content:encoded'][0]
-                  : item['content:encoded'];
-                const guidRaw = Array.isArray(item.guid)
-                  ? item.guid[0]
-                  : item.guid;
-                const guid =
-                  typeof guidRaw === 'object' &&
-                  guidRaw !== null &&
-                  !Array.isArray(guidRaw) &&
-                  '_' in guidRaw
-                    ? (guidRaw as { _?: JsonValue })._
-                    : guidRaw;
-
-                return {
-                  title: typeof title === 'string' ? title : '',
-                  link: typeof link === 'string' ? link : undefined,
-                  pubDate: typeof pubDate === 'string' ? pubDate : undefined,
-                  description:
-                    typeof description === 'string' ? description : undefined,
-                  content: typeof content === 'string' ? content : undefined,
-                  guid:
-                    typeof guid === 'string'
-                      ? guid
-                      : typeof guid === 'number'
-                        ? String(guid)
-                        : undefined,
-                };
-              }
+              (item: Record<string, JsonValue>) => ({
+                title: extractXmlText(item.title) ?? '',
+                link: extractXmlText(item.link),
+                pubDate: extractXmlText(item.pubDate),
+                description: extractXmlText(item.description),
+                content: extractXmlText(item['content:encoded']),
+                guid: extractXmlText(item.guid),
+              })
             ),
           };
         }
@@ -160,49 +171,18 @@ export class RSSFeedService {
         // Handle Atom format
         if (parsed.feed?.entry) {
           return {
-            title: parsed.feed.title?.[0] || 'Unknown Feed',
+            title: extractXmlText(parsed.feed.title) || 'Unknown Feed',
             items: (parsed.feed.entry || []).map(
-              (entry: Record<string, JsonValue>) => {
-                const title = Array.isArray(entry.title)
-                  ? entry.title[0]
-                  : entry.title;
-                const linkRaw = Array.isArray(entry.link)
-                  ? entry.link[0]
-                  : entry.link;
-                const linkObj =
-                  typeof linkRaw === 'object' &&
-                  linkRaw !== null &&
-                  !Array.isArray(linkRaw) &&
-                  '$' in linkRaw
-                    ? (linkRaw as { $?: { href?: JsonValue } }).$
-                    : undefined;
-                const link = linkObj?.href;
-                const pubDate = Array.isArray(entry.published)
-                  ? entry.published[0]
-                  : entry.published;
-                const description = Array.isArray(entry.summary)
-                  ? entry.summary[0]
-                  : entry.summary;
-                const content = Array.isArray(entry.content)
-                  ? entry.content[0]
-                  : entry.content;
-                const guid = Array.isArray(entry.id) ? entry.id[0] : entry.id;
-
-                return {
-                  title: typeof title === 'string' ? title : '',
-                  link: typeof link === 'string' ? link : undefined,
-                  pubDate: typeof pubDate === 'string' ? pubDate : undefined,
-                  description:
-                    typeof description === 'string' ? description : undefined,
-                  content: typeof content === 'string' ? content : undefined,
-                  guid:
-                    typeof guid === 'string'
-                      ? guid
-                      : typeof guid === 'number'
-                        ? String(guid)
-                        : undefined,
-                };
-              }
+              (entry: Record<string, JsonValue>) => ({
+                title: extractXmlText(entry.title) ?? '',
+                link: extractAtomLink(entry.link),
+                pubDate:
+                  extractXmlText(entry.published) ??
+                  extractXmlText(entry.updated),
+                description: extractXmlText(entry.summary),
+                content: extractXmlText(entry.content),
+                guid: extractXmlText(entry.id),
+              })
             ),
           };
         }
