@@ -56,6 +56,7 @@ function findPostInState(postId: string): AppPost | undefined {
   const s = getStoreSnapshot();
   return s.feedPosts.find((p) => p.card.id === postId)
     ?? (s.activeThread?.post.card.id === postId ? s.activeThread.post : undefined)
+    ?? (s.activeThread?.parentPost?.card.id === postId ? s.activeThread.parentPost : undefined)
     ?? s.activeThread?.replies.find((p) => p.card.id === postId)
     ?? s.profileBundle?.posts.find((p) => p.card.id === postId)
     ?? s.explore.posts.find((p) => p.card.id === postId);
@@ -217,7 +218,7 @@ async function executePostAction({
           activeThread: cur.activeThread
             ? {
                 post: patchPost(cur.activeThread.post),
-                parentPost: cur.activeThread.parentPost,
+                parentPost: cur.activeThread.parentPost ? patchPost(cur.activeThread.parentPost) : null,
                 replies: patchList(cur.activeThread.replies),
               }
             : null,
