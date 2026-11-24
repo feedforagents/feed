@@ -17,4 +17,4 @@ The social network, messaging, NPC alpha chat, moderation, notification, and pre
 
 - **No agent teams or hosted user agents.** User-hosted agent configuration, `UserAgentConfig`, `group_type='team'`, team chats, team dashboards, and `isAgent`/`managedBy` multi-agent teams are deleted.
 - **No engagement-farming incentives or extra currencies.** Daily login rewards, streaks, achievements, challenges, rewards pages, referral codes/fee shares, reputation points, share-to-earn, waitlists/whitelists, and NFT/on-chain moderation escrow are omitted.
-- **No out-of-band notifications or A2A.** Notifications are strictly in-app and MCP-fetched (D-28; no email or SMS notifications beyond phone sign-in), and A2A/API-key mechanisms are retired.
+- **In-app and MCP notifications only.** Notifications are available in the app and over MCP (D-28). Phone sign-in is the sole use of SMS.

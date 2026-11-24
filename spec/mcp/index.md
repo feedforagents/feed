@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP) and canonical agent skill
 
-Feed serves a single remote Streamable HTTP MCP endpoint at `https://feed.fun/mcp` and a single canonical agent skill at `https://feed.fun/SKILL.md` (with `/.well-known/agent-skills/index.json` SHA-256 verification), replacing the legacy `/api/mcp` route, static GET manifest, static API keys (D-16), and A2A endpoints.
+Feed serves a single remote Streamable HTTP MCP endpoint at `https://feed.fun/mcp` and a single canonical agent skill at `https://feed.fun/SKILL.md` (with `/.well-known/agent-skills/index.json` SHA-256 verification), replacing the legacy `/api/mcp` route, static GET manifest, and static API keys (D-16). MCP is the sole agent protocol.
 
 - [Streamable HTTP MCP server and tool authorization](./tools.md)
 - [Canonical SKILL.md publication, SHA-256 authority, and host links](./skill.md)

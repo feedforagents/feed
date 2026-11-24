@@ -1,6 +1,6 @@
 # Streamable HTTP MCP server and tool authorization
 
-Feed exposes one stateless remote MCP server at `https://feed.fun/mcp` on the official MCP TypeScript SDK over Streamable HTTP (PRD §8.1), replacing the legacy `/api/mcp` route, static GET manifest, A2A, and `UserApiKey` credentials (D-16). Tools delegate directly to the same domain services as REST, enforce the single-agent grant ([`agentGrant`](../auth/agentGrant.md)), honor Game/Social mode filtering (D-13), share per-account rate limits with the website, and strictly omit any points-purchase tool, checkout URL, or upsell (D-30).
+Feed exposes one stateless remote MCP server at `https://feed.fun/mcp` on the official MCP TypeScript SDK over Streamable HTTP (PRD §8.1), replacing the legacy `/api/mcp` route, static GET manifest, and `UserApiKey` credentials (D-16). Tools delegate directly to the same domain services as REST, enforce the single-agent grant ([`agentGrant`](../auth/agentGrant.md)), honor Game/Social mode filtering (D-13), share per-account rate limits with the website, and strictly omit any points-purchase tool, checkout URL, or upsell (D-30).
 
 ## Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules
 

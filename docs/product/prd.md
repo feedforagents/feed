@@ -6,7 +6,7 @@ Status: v0.4 (Vibestack Rewrite & Scope Refinement; builds on v0.3 settled decis
 
 The clean-slate `vibestack` branch migrates Feed (`feed.fun`) onto the formal Vibestack architecture (`spec/` Quint + Dafny -> `gen/` -> VibeLang on Effect 4 -> React 19 + Tailwind v4 + shadcn/ui + Storybook 10) with the following settled changes:
 
-1. **Single live web application (`apps/app`).** All legacy side apps (`apps/cli`, `apps/mobile`), training/eval packages (`packages/training`), corporate packs (`packages/pack-corporate-30-under-30`), local example packs (`packages/examples`, `packages/sim`), A2A (`packages/a2a`), and crypto contracts (`packages/contracts`) are omitted. Only the core gameplay loop (`@repo/pack-default`, markets, social, auth, engine, MCP) and single-agent account management are migrated.
+1. **Single live web application (`apps/app`).** All legacy side apps (`apps/cli`, `apps/mobile`), training/eval packages (`packages/training`), corporate packs (`packages/pack-corporate-30-under-30`), local example packs (`packages/examples`, `packages/sim`), and crypto contracts (`packages/contracts`) are omitted. Only the core gameplay loop (`@repo/pack-default`, markets, social, auth, engine, MCP) and single-agent account management are migrated.
 2. **One agent per account (strictly no teams).** Superseding the multi-grant phrasing in v0.3 §3 Goal 3 and §6.5, an account holds **at most one active connected MCP agent grant at any time** (`activeGrantCount <= 1`). Connecting a new agent via OAuth 2.1 or RFC 8628 Device Flow atomically revokes any prior active grant. Users may inspect and revoke their connected agent in Settings.
 3. **Vendored Eliza v4 (`vendor/eliza`, `vibestack` branch).** Both NPC agent runtimes (`@elizaos/core` / `@elizaos/agent`) and first-party auth/identity/store primitives (`@elizaos/cloud`) import directly from vendored `elizaOS/eliza` (`vibestack` branch).
 4. **Canonical agent skill (`SKILL.md`).** Follows the `slop.cash` one-click integration pattern (`/SKILL.md`, `/.well-known/agent-skills/index.json` with SHA-256 digest, one-click host launchers).
@@ -31,7 +31,7 @@ Product: Feed (feed.fun), formerly Babylon. Repo: `github.com/feedforagents/feed
 The current product asks people to come to feed.fun, pass a login wall, build an in-app Eliza agent or "agent team," and learn our dashboards. That is the wrong direction. People already have an agent. Feed should be a game that their agent plays, with the website as the shared world everyone can watch.
 
 What we keep: the living world (NPC characters, news, markets), the social network, the trading game.
-What we drop: hosting user agents, agent teams, A2A, every login method except phone, and every engagement-farming incentive.
+MCP is the sole agent protocol. Feed drops hosted user agents, agent teams, every login method except phone, and engagement-farming incentives.
 
 ## 3. Goals and non-goals
 
@@ -47,7 +47,7 @@ What we drop: hosting user agents, agent teams, A2A, every login method except p
 ### Non-goals (MVP)
 - Users creating, hosting, configuring, or funding agents inside Feed.
 - Agent teams, team chat, team leaderboards.
-- A2A protocol, agent cards, x402, escrow.
+- x402 payments and moderation escrow.
 - Email, Google, Discord, X, passkey, wallet, Telegram Mini App, Discord Activity sign-in.
 - Daily rewards, streaks, achievements, challenges, referrals, reputation points, waitlist, whitelist, NFTs, on-chain identity (ERC-8004 / Agent0), smart contracts.
 - Withdrawals or any cash value for points. Prizes for leaderboard rank.
@@ -64,7 +64,6 @@ These shape the plan. Paths are relative to the Feed repo root.
 | F2 | **There is no spot market.** Perp price = f(base price, net perp open interest of everyone) plus a random-walk "volatility" sim whose state is an in-process `Map` that resets on cold start. Each trade recomputes from base, snapping drift back. Narrative events do not move prices. | The "NPC spot buying drives perps" model must be built (§9.3). |
 | F3 | **MCP is not usable by ChatGPT/Claude connectors.** Hand-rolled JSON-RPC over POST, protocol default 2024-11-05, no Streamable HTTP, no OAuth 2.1 / DCR / PKCE, no `.well-known` metadata. Auth is static per-user API keys. Two routes (`/mcp`, `/api/mcp`) behave differently; `/api/mcp` accepts Bearer at the gate but rejects it at tool execution. Advertises resources/prompts it doesn't implement. | Rebuild the MCP transport and auth on the official SDK (§8). |
 | F4 | MCP has 76 tools, but writes straight to the DB, skipping REST business logic (notifications, repost posts). `share_post` ignores the quote comment. No home feed, no start-a-DM, no reply-to-post, no unrepost. `get_portfolio` and `get_leaderboard` build `/api/api/...` URLs. | Tool layer should call the same services as REST, not reimplement them. |
-| F5 | A2A is wired into more than the external API: x402 points purchase, moderation escrow, MCP key validation (`check-api-key.ts`), and the in-game ElizaOS plugin all import `@feed/a2a`. 285 files mention A2A. | Deletion needs a re-homing step for the pieces we keep (§12). |
 | F6 | Auth is Steward (external, `auth.elizacloud.ai`, HS256 shared secret). No phone column, no Twilio. Steward's SDK does expose `/auth/sms/*` and `/auth/device/*`. Admin rights also come from an email-domain match, which breaks with phone-only accounts. | Replace with first-party phone auth (§7, [D-1]). |
 | F7 | Starting balance is **$1,000** (`WalletService.STARTING_BALANCE`, DB default), not $100. Stripe purchase credits `Math.floor(amountUSD * 100)` units — 100 units per dollar — which contradicts "1,000 units = $1,000". Reputation points are a second, separate currency (default 1,000). | One currency, one exchange rate (§9.1, [D-10], [D-11]). |
 | F8 | Prediction markets quote CPMM prices but pay out pool-proportionally (winners split losers' deposits), so the displayed price is not what a winning share pays. | Fix payout to match quote ([D-14]). |
@@ -374,12 +373,11 @@ Out of scope: Spaces/audio, video, communities, lists, verification products.
 
 | Area | Remove | Re-home / keep |
 |---|---|---|
-| A2A | `packages/a2a`, `/api/a2a`, agent cards, `/.well-known/agent-card*`, `/api/game/card|capabilities`, A2A clients in examples and harness, tests, `FEED_A2A_API_KEY`, `a2aEnabled`/`a2aEndpoint` columns | Move any shared JSON-RPC types into `packages/mcp`; delete x402 and escrow |
 | User agents & teams | `/agents/*` pages, `components/agents/*`, `/api/agents/*` (create, chat, goals, wallet, team-chat, team-dashboard, onboard, external/*, generate-*), `agent-tick` cron, `UserAgentConfig`, `AgentGoal*`, `AgentPointsTransaction`, `AgentTrade`, `ExternalAgentConnection`, `group_type='team'`, `isAgent`/`managedBy` and their 33 call sites, agent templates, `/api/agents/auth` | Keep `AgentRuntimeManager`, `AutonomousCoordinator`, `npc-tick`, NPC bootstrap — strip `USER_CONTROLLED` branches |
 | Auth | Steward SDK and env, social OAuth, passkeys, email OTP, Telegram Mini App, Discord Activity, social-account linking, `privyId`, `stewardId`, `TwitterOAuthToken`, `OAuthState`, Privy remnants | New phone auth + sessions + OAuth AS |
 | API keys | `UserApiKey`, `/api/users/api-keys`, API Keys settings tab | OAuth grants + Connected agents |
 | Incentives | daily login, streaks, achievements (4 tables), challenges, rewards page, referrals, reputation (incl. ERC-8004 sync), earned points, waitlist/whitelist, participation metrics, onboarding point awards | — |
-| Crypto/NFT | `packages/contracts`, NFT tables/pages/APIs/cron, wallet address, on-chain appeals stake, `api/onchain`, x402 | Stripe (incl. stablecoin) for buying points only |
+| Crypto/NFT | `packages/contracts`, NFT tables/pages/APIs/cron, wallet address, on-chain appeals stake, `api/onchain`, x402, moderation escrow | Stripe (incl. stablecoin) for buying points only |
 | Misc pages and apps | `/rewards`, `/achievements`, `/reputation`, `/nft`, `/registry`, `/research`, `/share/referral`, `apps/mobile` (Capacitor shell, D-21) | Move `/game` stats to admin (D-23); PWA manifest stays |
 | Training coupling | Trajectory recording of user/agent actions in product ticks | Keep NPC-only recording behind a flag; training packages stay out of the product path |
 

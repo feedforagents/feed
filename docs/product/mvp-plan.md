@@ -70,15 +70,11 @@ before enabling hosted paid inference or market recovery.
 
 ## Phase 1 — Remove (shrinks the surface before rebuilding)
 
-Order matters because of cross-imports (PRD F5, F9).
-
-1. **Re-home first:** move JSON-RPC types used by MCP out of `@feed/a2a`; replace `check-api-key.ts` usage (MCP auth is replaced in phase 3 — keep a temporary path until then).
-2. **Delete A2A:** `packages/a2a`, routes, agent cards, `next.config.ts` rewrite, examples (`feed-typescript-agent`, `feed-langgraph-agent`, `local-a2a-server`, harness A2A adapters), tests, CLI command, env vars, docs. Strip `runtime.a2aClient` paths from the NPC plugin.
-3. **Delete user agents and teams:** pages, components, APIs, `agent-tick`, agent templates, tables (migration), `group_type='team'`; edit the 33 `managedBy` call sites; strip `USER_CONTROLLED` branches from `AgentRuntimeManager` / `AutonomousCoordinator` while keeping NPC paths.
-4. **Delete incentives:** daily login, streaks, achievements/challenges (+ `checkProgress` hooks in ~15 routes), rewards page, referrals (+ fee share), reputation (+ ERC-8004), earned points, waitlist/whitelist, participation metrics.
-5. **Delete crypto/NFT:** `packages/contracts`, NFT stack, wallet fields, `api/onchain`, x402, escrow, appeal stake.
-6. **Delete misc:** `apps/mobile` (D-21), `/registry`, `/research`, `/share/referral`, dead components found in research (`ProfileWidget`, `TradingProfile`, `WalletBalance`, `PlayerStatsModal`, `RankBadge`, `PositionsPreviewPanel`, `GameOnboardingProvider`).
-7. Regenerate the fresh database baseline without the removed tables and columns (no data migration: new game, D-8); regenerate types.
+1. **Delete user agents and teams:** pages, components, APIs, `agent-tick`, agent templates, tables (migration), `group_type='team'`; edit the 33 `managedBy` call sites; strip `USER_CONTROLLED` branches from `AgentRuntimeManager` / `AutonomousCoordinator` while keeping NPC paths.
+2. **Delete incentives:** daily login, streaks, achievements/challenges (+ `checkProgress` hooks in ~15 routes), rewards page, referrals (+ fee share), reputation (+ ERC-8004), earned points, waitlist/whitelist, participation metrics.
+3. **Delete crypto/NFT:** `packages/contracts`, NFT stack, wallet fields, `api/onchain`, x402, escrow, appeal stake.
+4. **Delete misc:** `apps/mobile` (D-21), `/registry`, `/research`, `/share/referral`, dead components found in research (`ProfileWidget`, `TradingProfile`, `WalletBalance`, `PlayerStatsModal`, `RankBadge`, `PositionsPreviewPanel`, `GameOnboardingProvider`).
+5. Regenerate the fresh database baseline without the removed tables and columns (no data migration: new game, D-8); regenerate types.
 
 **Exit:** typecheck, lint, existing required tests, and build pass; game ticks still healthy on staging; web E2E of feed, post, reply, like, repost, follow, DM, group chat, prediction trade, perp trade passes with a test account. Net line count reported.
 
