@@ -7,11 +7,28 @@ import {
   INITIAL_WORLD_FACTS,
   buildInsertBatch,
   initialOrgPriceCents,
+  resolveActorAvatarUrl,
+  resolveActorBannerUrl,
+  resolveOrgBannerUrl,
+  resolveOrgLogoUrl,
+  resolveUserPresetAvatarUrl,
+  resolveUserPresetBannerUrl,
   serializeActorPersonality,
+  tierStartingBalanceCents,
   type BatchQuery
 } from "./seed-data.ts"
 
-export { FEED_BASELINE_SQL, FEED_SCHEMA_VERSION }
+export {
+  FEED_BASELINE_SQL,
+  FEED_SCHEMA_VERSION,
+  resolveActorAvatarUrl,
+  resolveActorBannerUrl,
+  resolveOrgBannerUrl,
+  resolveOrgLogoUrl,
+  resolveUserPresetAvatarUrl,
+  resolveUserPresetBannerUrl,
+  tierStartingBalanceCents
+}
 
 export type Row = Readonly<Record<string, unknown>>
 
@@ -156,6 +173,13 @@ export effect function migrateFeedSchema(): void!StoreFailure!Store {
   try store.transaction(effect (tx: Tx) => {
     try tx.query("SELECT pg_advisory_xact_lock(4242002)")
     try tx.script(FEED_BASELINE_SQL)
+    try tx.query("ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS banner_url text")
+    try tx.query("ALTER TABLE feed_actors ADD COLUMN IF NOT EXISTS profile_image_url text")
+    try tx.query("ALTER TABLE feed_actors ADD COLUMN IF NOT EXISTS profile_banner_url text")
+    try tx.query("ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS image_url text")
+    try tx.query("ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS banner_url text")
+    try tx.query("ALTER TABLE feed_articles ADD COLUMN IF NOT EXISTS image_url text")
+    try tx.query("ALTER TABLE feed_chat_members ADD COLUMN IF NOT EXISTS last_read_at bigint NOT NULL DEFAULT 0")
     try tx.query(
       "INSERT INTO feed_world_state (singleton, current_day, current_hour, phase, game_running, funding_cutover_period, last_tick_at, updated_at) VALUES (true, 1, 0, 'active', true, 0, 0, $1) ON CONFLICT (singleton) DO NOTHING",
       [now]
@@ -172,16 +196,39 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
   const now = try Clock.currentTimeMillis
   try store.transaction(effect (tx: Tx) => {
     try tx.query("SELECT pg_advisory_xact_lock(4242003)")
+    try tx.query("DELETE FROM feed_npc_market_clues WHERE actor_id LIKE 'test-%'")
+    try tx.query("DELETE FROM feed_actors WHERE id LIKE 'test-%'")
     const existing = toInt((try tx.query("SELECT count(*) AS count FROM feed_actors"))[0]?.count)
-    if (existing > 0) return
+    if (existing > 0) {
+      try tx.query(
+        `UPDATE feed_actors
+         SET profile_image_url = COALESCE(
+               profile_image_url,
+               CASE WHEN id LIKE 'org-%' THEN '/images/organizations/' || substring(id FROM 5) || '.jpg' ELSE '/images/actors/' || id || '.jpg' END
+             ),
+             profile_banner_url = COALESCE(
+               profile_banner_url,
+               CASE WHEN id LIKE 'org-%' THEN '/images/org-banners/' || substring(id FROM 5) || '.jpg' ELSE '/images/actor-banners/' || id || '.jpg' END
+             )
+         WHERE profile_image_url IS NULL OR profile_banner_url IS NULL`
+      )
+      try tx.query(
+        `UPDATE feed_organizations
+         SET image_url = COALESCE(image_url, '/images/organizations/' || id || '.jpg'),
+             banner_url = COALESCE(banner_url, '/images/org-banners/' || id || '.jpg')
+         WHERE image_url IS NULL OR banner_url IS NULL`
+      )
+      return
+    }
     try tx.query(
       "INSERT INTO feed_world_state (singleton, current_day, current_hour, phase, game_running, funding_cutover_period, last_tick_at, updated_at) VALUES (true, 1, 0, 'active', true, 0, 0, $1) ON CONFLICT (singleton) DO NOTHING",
       [now]
     )
+    const seededActors = actors.filter((actor) => !actor.id.startsWith("test-"))
     try runBatch(tx, buildInsertBatch(
       "feed_actors",
-      ["id", "name", "username", "tier", "description", "system_prompt", "personality_json", "balance_cents", "created_at"],
-      actors.map((actor) => [
+      ["id", "name", "username", "tier", "description", "system_prompt", "personality_json", "profile_image_url", "profile_banner_url", "balance_cents", "created_at"],
+      seededActors.map((actor) => [
         actor.id,
         actor.name,
         actor.username,
@@ -189,14 +236,16 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
         actor.description,
         actor.system,
         serializeActorPersonality(actor),
-        10_000_000,
+        resolveActorAvatarUrl(actor.id),
+        resolveActorBannerUrl(actor.id),
+        tierStartingBalanceCents(actor.tier),
         now
       ]),
       "ON CONFLICT (id) DO NOTHING"
     ))
     try runBatch(tx, buildInsertBatch(
       "feed_organizations",
-      ["id", "name", "ticker", "org_type", "description", "post_style", "can_be_involved", "initial_price_cents", "created_at"],
+      ["id", "name", "ticker", "org_type", "description", "post_style", "can_be_involved", "initial_price_cents", "image_url", "banner_url", "created_at"],
       organizations.map((org) => [
         org.id,
         org.name,
@@ -206,6 +255,8 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
         org.postStyle ?? "",
         org.canBeInvolved,
         initialOrgPriceCents(org),
+        resolveOrgLogoUrl(org.id),
+        resolveOrgBannerUrl(org.id),
         now
       ]),
       "ON CONFLICT (id) DO NOTHING"

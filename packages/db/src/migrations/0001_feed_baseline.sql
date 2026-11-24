@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS feed_accounts (
   display_name text NOT NULL,
   bio text NOT NULL DEFAULT '',
   avatar_url text,
+  banner_url text,
   phone_hash text UNIQUE,
   phone_last2 text,
   phone_verified_at bigint,
@@ -207,6 +208,7 @@ CREATE TABLE IF NOT EXISTS feed_accounts (
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL
 );
+ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS banner_url text;
 
 CREATE TABLE IF NOT EXISTS feed_phone_cooldowns (
   phone_hash text PRIMARY KEY,
@@ -289,9 +291,13 @@ CREATE TABLE IF NOT EXISTS feed_actors (
   description text NOT NULL,
   system_prompt text NOT NULL,
   personality_json text NOT NULL DEFAULT '{}',
+  profile_image_url text,
+  profile_banner_url text,
   balance_cents bigint NOT NULL DEFAULT 10000000 CHECK (balance_cents >= 0),
   created_at bigint NOT NULL
 );
+ALTER TABLE feed_actors ADD COLUMN IF NOT EXISTS profile_image_url text;
+ALTER TABLE feed_actors ADD COLUMN IF NOT EXISTS profile_banner_url text;
 
 CREATE TABLE IF NOT EXISTS feed_organizations (
   id text PRIMARY KEY,
@@ -302,8 +308,12 @@ CREATE TABLE IF NOT EXISTS feed_organizations (
   post_style text NOT NULL,
   can_be_involved boolean NOT NULL DEFAULT true,
   initial_price_cents bigint,
+  image_url text,
+  banner_url text,
   created_at bigint NOT NULL
 );
+ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS image_url text;
+ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS banner_url text;
 
 CREATE TABLE IF NOT EXISTS feed_world_state (
   singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
@@ -433,8 +443,10 @@ CREATE TABLE IF NOT EXISTS feed_chat_members (
   member_kind text NOT NULL CHECK (member_kind IN ('user', 'npc')),
   role text NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
   joined_at bigint NOT NULL,
+  last_read_at bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (chat_id, member_id)
 );
+ALTER TABLE feed_chat_members ADD COLUMN IF NOT EXISTS last_read_at bigint NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS feed_chat_members_member_idx ON feed_chat_members (member_id);
 
 CREATE TABLE IF NOT EXISTS feed_messages (
@@ -672,9 +684,11 @@ CREATE TABLE IF NOT EXISTS feed_articles (
   body text NOT NULL,
   author_org_id text NOT NULL,
   related_market_id text,
+  image_url text,
   is_resolution_proof boolean NOT NULL DEFAULT false,
   published_at bigint NOT NULL
 );
+ALTER TABLE feed_articles ADD COLUMN IF NOT EXISTS image_url text;
 CREATE INDEX IF NOT EXISTS feed_articles_published_idx ON feed_articles (published_at DESC);
 
 CREATE TABLE IF NOT EXISTS feed_rate_limits (

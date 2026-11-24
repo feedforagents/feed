@@ -96,18 +96,19 @@ function deterministicMarketFallback(user: string, seed: number): string {
   const timeframe = extractField(user, "Timeframe") || "1d"
   const slot = extractField(user, "Slot Index") || "0"
   const orgPool = organizations.filter((o) => Boolean(o.ticker))
+  const actorPool = actors.filter((a) => !a.id.startsWith("test-") && (a.tier === "S_TIER" || a.tier === "A_TIER"))
   const org = orgPool[seed % Math.max(1, orgPool.length)]
-  const actor = actors[seed % Math.max(1, actors.length)]
+  const actor = actorPool[seed % Math.max(1, actorPool.length)]
   const ticker = org?.ticker ?? "NVDAI"
   const templates = [
     `Will ${org?.name ?? ticker} announce a $${ticker} catalyst before the ${timeframe} window closes?`,
-    `Will ${actor?.name ?? "Solon"} push $${ticker} orderbook flow higher during this ${timeframe} epoch?`,
+    `Will ${actor?.name ?? "Sam AIltman"} push $${ticker} orderbook flow higher during this ${timeframe} epoch?`,
     `Will $${ticker} finish the ${timeframe} slot above consensus expectations?`,
   ]
   const question = templates[(seed + Number(slot || 0)) % templates.length] ?? templates[0]!
   return JSON.stringify({
     question,
-    description: `Slot ${slot} (${timeframe}) catalyst tracker around ${org?.name ?? ticker} and Fed-universe liquidity flows.`,
+    description: `Slot ${slot} (${timeframe}) catalyst tracker around ${org?.name ?? ticker} and Feed market liquidity flows.`,
     category: seed % 2 === 0 ? "tech" : "markets",
     secretOutcome: seed % 2 === 0 ? "YES" : "NO",
   })
@@ -195,7 +196,7 @@ function buildDeterministicFallback(request: CompletionRequest): string {
       return deterministicDecisionFallback(request.user, seed)
     case "rssParodyRewrite": {
       const headline = extractField(request.user, "Original Headline") || "Tech valuations climb on AI capex"
-      return sanitizeText(`Solon's OpenLie claims "${headline}" is actually a 4D liquidity catalyst`, 155)
+      return sanitizeText(`OpenAGI insiders claim "${headline}" is actually a 4D liquidity catalyst`, 155)
     }
     case "cluePost": {
       const question = extractField(request.user, "Market Question") || "the active catalyst"

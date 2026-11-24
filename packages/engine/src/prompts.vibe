@@ -1,5 +1,7 @@
 // spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
 import { actors, correlations, manifest, organizations } from "@repo/pack-default"
+import { realityGroundingContent } from "./data/reality-grounding.ts"
+import { worldFactsContent } from "./data/world-facts.ts"
 import { sanitizeText } from "./shared.vibe"
 
 export type PromptId =
@@ -208,16 +210,30 @@ export function renderPrompt(id: PromptId, vars: Readonly<Record<string, string>
 }
 
 export function groundingRosterSummary(): string {
-  const sampleActors = actors.slice(0, 6).map((a) => `${a.name} (@${a.username})`).join(", ")
-  const sampleOrgs = organizations.filter((o) => o.ticker).slice(0, 6).map((o) => `${o.name} [$${o.ticker}]`).join(", ")
-  const sampleCorr = correlations.slice(0, 2).map((c) => `${c.orgId}->${c.relatedOrgId}`).join(", ")
-  return `Pack ${manifest.id}: Actors [${sampleActors}]; Tickers [${sampleOrgs}]; Links [${sampleCorr}]`
+  const realActors = actors.filter((a) => !a.id.startsWith("test-"))
+  const prioritizedActors = [
+    ...realActors.filter((a) => a.tier === "S_TIER"),
+    ...realActors.filter((a) => a.tier === "A_TIER"),
+  ].slice(0, 8)
+  const sampleActors = prioritizedActors.map((a) => `${a.name} (@${a.username})`).join(", ")
+  const orgById = new Map(organizations.map((o) => [o.id, o]))
+  const majorOrgs = manifest.orgPriorities.major
+    .map((id) => orgById.get(id))
+    .filter((o): o is (typeof organizations)[number] => o !== undefined && Boolean(o.ticker))
+    .slice(0, 8)
+  const sampleOrgs = (majorOrgs.length > 0 ? majorOrgs : organizations.filter((o) => o.ticker).slice(0, 8))
+    .map((o) => `${o.name} [$${o.ticker}]`)
+    .join(", ")
+  const sampleCorr = correlations.slice(0, 3).map((c) => `${c.orgId}->${c.relatedOrgId}`).join(", ")
+  return `Pack ${manifest.id}: S-Tier Actors [${sampleActors}]; Major Tickers [${sampleOrgs}]; Links [${sampleCorr}]`
 }
 
 export function buildWorldContext(input: WorldContextInput): string {
   const sections: string[] = [
     `World Clock: Day ${input.currentDay}, Hour ${String(input.currentHour).padStart(2, "0")}:00 UTC (Phase: ${input.phase})`,
     groundingRosterSummary(),
+    worldFactsContent,
+    realityGroundingContent,
   ]
   if (input.worldFacts.length > 0) {
     sections.push(`World Facts:\n${input.worldFacts.slice(0, 6).map((f) => `- ${sanitizeText(f, 160)}`).join("\n")}`)
