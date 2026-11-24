@@ -1,4 +1,4 @@
-/** Bilateral post-author blocks apply to both reply routes. PRD §12, MVP Phase 5. */
+/** Bilateral post-author and parent-author blocks apply to both reply routes. PRD §12, MVP Phase 5. */
 import { expect, mock, test } from 'bun:test';
 import { NextRequest } from 'next/server';
 import {
@@ -9,7 +9,7 @@ import {
 const cases = {
   authorBlock: 'rejects replies when the post author blocked the replier',
   replierBlock: 'rejects replies when the replier blocked the post author',
-  allowed: 'allows nonblocked replies and preserves the post-author-only rule',
+  allowed: 'allows nonblocked replies and refuses parent-blocked replies',
 };
 
 if (!process.env.FEED_SUB_MARKET_CHILD) {
@@ -149,17 +149,24 @@ if (!process.env.FEED_SUB_MARKET_CHILD) {
     const parentOnly = await thread();
     await block(parentOnly.commentAuthor.id, parentOnly.replier.id);
     await block(parentOnly.replier.id, parentOnly.commentAuthor.id);
-    for (const fixture of [unblocked, parentOnly]) {
-      const response = await reply(fixture);
-      expect(response.status).toBe(201);
-      expect(await response.json()).toMatchObject({
-        postId: fixture.postId,
-        parentCommentId: fixture.parentId,
-        authorId: fixture.replier.id,
-      });
-      expect(await storedReplies(fixture)).toEqual([
-        { authorId: fixture.replier.id },
-      ]);
-    }
+    const response = await reply(unblocked);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      postId: unblocked.postId,
+      parentCommentId: unblocked.parentId,
+      authorId: unblocked.replier.id,
+    });
+    expect(await storedReplies(unblocked)).toEqual([
+      { authorId: unblocked.replier.id },
+    ]);
+    // The parent-author rule now applies to this route too (same as the
+    // top-level route's parent check in open #1976): a reply under a
+    // comment whose author blocked the replier is refused.
+    const parentResponse = await reply(parentOnly);
+    expect(parentResponse.status).toBe(400);
+    expect(await parentResponse.json()).toMatchObject({
+      error: 'Cannot comment on this post',
+    });
+    expect(await storedReplies(parentOnly)).toEqual([]);
   });
 }
