@@ -405,6 +405,10 @@ pure def seedReplacementMarket(slotId: int, s: NarrativeState, seedYes: bool, by
 
 ### Inductive invariants for 10 slots, unique clues, and secret isolation
 
+The manual-hold reachability check exercises a state where a slot is held for
+review and a settlement has already proceeded. The admin-only approval and
+override transitions separately govern resolution of a held market.
+
 ```quint
 pure def alwaysTenMarketSlots(s: NarrativeState): bool = and {
   s.slots.length() == 10,

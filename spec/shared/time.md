@@ -6,7 +6,7 @@ UTC 8-hour funding period indexing (`00:00`, `08:00`, `16:00` UTC), rolling pred
 
 ### Funding periods partition UTC time into non-negative 8-hour windows
 
-`epochHours` counts whole hours since the UTC epoch. Period index `epochHours / 8` is always non-negative (`>= 0`) and monotonically non-decreasing.
+`epochHours` counts whole hours since the UTC epoch. Period zero covers the first eight hours and is also returned for earlier inputs. For positive inputs, whole-hour division by eight gives a non-negative, monotonically non-decreasing period index.
 
 ```quint
 pure val FUNDING_PERIOD_HOURS = 8
@@ -47,7 +47,7 @@ pure def lawFundingPeriodContainsHour(epochHours: int): bool =
 
 ### Ten rolling slots span from 15 minutes to 3 days
 
-The market structure maintains 10 active slots across 8 timeframes (`15m: 2`, `30m: 2`, `1h: 1`, `6h: 1`, `12h: 1`, `1d: 1`, `2d: 1`, `3d: 1`).
+The market structure maintains 10 rolling slots across 8 timeframes (`15m: 2`, `30m: 2`, `1h: 1`, `6h: 1`, `12h: 1`, `1d: 1`, `2d: 1`, `3d: 1`). A slot retains its timeframe while the market in it is open, awaiting settlement, or held for review.
 
 ```quint
 type MarketSlot = Slot15m | Slot30m | Slot1h | Slot6h | Slot12h | Slot1d | Slot2d | Slot3d
