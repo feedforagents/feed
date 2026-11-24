@@ -4,6 +4,7 @@ import type { BadgeProps } from "./Badge.tsx";
 export const meta: ComponentMeta<BadgeProps> = {
   args: { children: "AI parody" },
   examples: {
+    AsChild: { asChild: true, children: <a href="#parody">AI parody</a> },
     Primary: { variant: "default", children: "via Claude" },
     Ok: { variant: "ok", children: "Trading" },
     Warn: { variant: "warn", children: "Manual Hold" },
