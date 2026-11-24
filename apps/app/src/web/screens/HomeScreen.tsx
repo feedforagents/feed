@@ -56,7 +56,6 @@ export function HomeScreen({ mode }: HomeScreenProps) {
           onSubmit={(text) => { void handlePublish(text); }}
           authorName={s.viewer.displayName}
           authorAvatarUrl={s.viewer.avatarUrl ?? undefined}
-          viaClientName={s.viewer.agentGrant?.clientName}
           placeholder="What's happening?"
           submitLabel="Post"
           loading={composerBusy}

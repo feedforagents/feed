@@ -1,5 +1,16 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/navigation.md, "Story: Browse public world content without a login wall"
-import type { AgentHostId, ChatMessageItem, JoinPhoneStep, JoinTab, ToastTone, UiMode } from "@repo/ui";
+import type {
+  AgentHostId,
+  AssetTradeEntry,
+  ChatMessageItem,
+  JoinPhoneStep,
+  JoinTab,
+  LeaderboardMetric,
+  LeaderboardScope,
+  ToastTone,
+  UiMode,
+  WalletClosedPosition,
+} from "@repo/ui";
 import { ManagedRuntime } from "effect";
 import { routeAccessible, type AppRoute, type FeedTab as SpecFeedTab } from "../../gen/app__navigation.ts";
 import { type Event as AppEvent } from "../../gen/app.ts";
@@ -23,9 +34,11 @@ import {
   type AppFollowListEntry,
   type AppLeaderboardEntry,
   type AppLedgerEntry,
+  type AppMarketHistoryPoint,
   type AppModerationEntry,
   type AppNotification,
   type AppPerpMarket,
+  type AppPerpPreview,
   type AppPosition,
   type AppPost,
   type AppPredictionMarket,
@@ -114,12 +127,27 @@ export interface StoreState {
   readonly exploreLoading: boolean;
   readonly explore: ExploreData;
   readonly marketsLoading: boolean;
+  readonly marketsViewMode: "dashboard" | "terminal";
   readonly predictions: ReadonlyArray<AppPredictionMarket>;
   readonly perps: ReadonlyArray<AppPerpMarket>;
   readonly positions: ReadonlyArray<AppPosition>;
+  readonly closedPositions: ReadonlyArray<WalletClosedPosition>;
+  readonly closedPositionsLoading: boolean;
   readonly selectedMarketKind: "prediction" | "perp";
   readonly selectedMarketId: string | null;
+  readonly marketHistory: ReadonlyArray<AppMarketHistoryPoint>;
+  readonly marketHistoryLoading: boolean;
+  readonly marketTrades: ReadonlyArray<AssetTradeEntry>;
+  readonly marketTradesLoading: boolean;
+  readonly marketSocialPosts: ReadonlyArray<AppPost>;
+  readonly perpPreview: AppPerpPreview | null;
   readonly leaderboard: ReadonlyArray<AppLeaderboardEntry>;
+  readonly leaderboardScope: LeaderboardScope;
+  readonly leaderboardMetric: LeaderboardMetric;
+  readonly leaderboardPage: number;
+  readonly leaderboardTotalPages: number;
+  readonly leaderboardTotalCount: number;
+  readonly leaderboardCurrentUser: AppLeaderboardEntry | null;
   readonly leaderboardLoading: boolean;
   readonly economy: AppAccountEconomy | null;
   readonly ledger: ReadonlyArray<AppLedgerEntry>;
@@ -138,6 +166,8 @@ export interface StoreState {
   readonly profileLoading: boolean;
   readonly profileLoadingMore: boolean;
   readonly profileBundle: AppProfileBundle | null;
+  readonly profileReplies: ReadonlyArray<AppPost>;
+  readonly profileRepliesLoading: boolean;
   readonly followListKind: "followers" | "following" | null;
   readonly followListHandle: string | null;
   readonly followListItems: ReadonlyArray<AppFollowListEntry>;
@@ -281,14 +311,29 @@ let currentState: StoreState = {
   threadLoading: false,
   exploreQuery: initialLocation.exploreQuery ?? "",
   exploreLoading: false,
-  explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [] },
+  explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [], tags: [] },
   marketsLoading: false,
+  marketsViewMode: initialLocation.marketId || initialLocation.queryTicker ? "terminal" : "dashboard",
   predictions: [],
   perps: [],
   positions: [],
+  closedPositions: [],
+  closedPositionsLoading: false,
   selectedMarketKind: initialLocation.marketKind ?? (initialLocation.queryTicker ? "perp" : "prediction"),
   selectedMarketId: initialLocation.marketId ?? initialLocation.queryTicker,
+  marketHistory: [],
+  marketHistoryLoading: false,
+  marketTrades: [],
+  marketTradesLoading: false,
+  marketSocialPosts: [],
+  perpPreview: null,
   leaderboard: [],
+  leaderboardScope: "players",
+  leaderboardMetric: "net_profit",
+  leaderboardPage: 1,
+  leaderboardTotalPages: 1,
+  leaderboardTotalCount: 0,
+  leaderboardCurrentUser: null,
   leaderboardLoading: false,
   economy: null,
   ledger: [],
@@ -307,6 +352,8 @@ let currentState: StoreState = {
   profileLoading: false,
   profileLoadingMore: false,
   profileBundle: null,
+  profileReplies: [],
+  profileRepliesLoading: false,
   followListKind: null,
   followListHandle: null,
   followListItems: [],

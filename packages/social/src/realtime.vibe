@@ -74,6 +74,8 @@ export type FeedRealtimeEvent =
       readonly ticker: string
       readonly side: "buy" | "sell"
       readonly quoteCents: number
+      readonly indexPriceCents?: number
+      readonly markPriceCents?: number
     }
   | {
       readonly type: "market.perp"
@@ -85,6 +87,16 @@ export type FeedRealtimeEvent =
       readonly leverage: number
       readonly positionId?: string
       readonly markPriceCents?: number
+    }
+  | {
+      readonly type: "market.prediction"
+      readonly marketId: string
+      readonly action: "buy" | "sell"
+      readonly side: "yes" | "no"
+      readonly yesPriceBps: number
+      readonly noPriceBps: number
+      readonly shares: number
+      readonly notionalCents: number
     }
   | {
       readonly type: "market.clue"
@@ -292,6 +304,7 @@ export effect function canDeliverRealtimeEventToViewer(
     case "world.tick":
     case "market.spot":
     case "market.perp":
+    case "market.prediction":
     case "market.clue":
     case "market.resolved":
     case "org.posted":

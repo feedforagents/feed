@@ -19,8 +19,11 @@ import {
   createPost,
   loadArticle,
   loadChats,
+  loadClosedPositions,
+  loadEconomy,
   loadExplore,
   loadFeed,
+  loadLeaderboard,
   loadMarkets,
   loadNotifications,
   loadPositionsSilent,
@@ -159,7 +162,7 @@ async function runPendingAction(action: PendingAction | null): Promise<void> {
       await startDirectChat(action.handle);
       return;
     case "trade_prediction":
-      await submitPredictionOrder(action.marketId, action.action, action.side, action.amountPts);
+      await submitPredictionOrder(action.marketId, action.action, action.side, action.amountPts, action.shareUnits);
       return;
     case "trade_perp":
       await submitPerpOrder(action.ticker, action.side, action.marginPts, action.leverage);
@@ -276,7 +279,6 @@ export async function verifySmsCode(code: string): Promise<void> {
   const pending = getStoreSnapshot().pendingAction;
   setStoreState({ joinLoading: false, pendingAction: null, joinSheetOpen: false, joinPhoneStep: "entry" });
   await hydrateAuth();
-  notifyAuthChanged();
   await runPendingAction(pending);
   await refreshViewerSurfaces();
 }
@@ -324,7 +326,6 @@ export async function completePhoneOnboard(payload: {
   });
   setStatusNotice("Welcome to Feed. 100 pts credited.");
   await hydrateAuth();
-  notifyAuthChanged();
   await runPendingAction(pending);
   await refreshViewerSurfaces();
 }
@@ -345,7 +346,6 @@ export async function submitReviewerLogin(payload: { readonly identifier: string
   const pending = getStoreSnapshot().pendingAction;
   setStoreState({ joinLoading: false, pendingAction: null, joinSheetOpen: false });
   await hydrateAuth();
-  notifyAuthChanged();
   await runPendingAction(pending);
   await refreshViewerSurfaces();
 }
@@ -363,11 +363,17 @@ export async function refreshViewerSurfaces(): Promise<void> {
   if (s.route === "PostDetail" && s.activePostId) {
     tasks.push(openThread(s.activePostId, s.threadSort));
   }
-  if (s.route === "Markets" || s.route === "Leaderboard") tasks.push(loadMarkets());
+  if (s.route === "Markets") {
+    tasks.push(loadMarkets());
+    if (s.walletView && s.viewer) {
+      tasks.push(loadEconomy(), loadClosedPositions());
+    }
+  }
+  if (s.route === "Leaderboard") tasks.push(loadLeaderboard());
   if (s.viewer) {
     tasks.push(loadNotifications());
     tasks.push(loadChats(s.route === "Chats"));
-    if (s.route !== "Markets" && s.route !== "Leaderboard") {
+    if (s.route !== "Markets") {
       tasks.push(loadPositionsSilent());
     }
   }
@@ -550,6 +556,11 @@ async function performSignOut({
     notifications: [],
     unreadNotifications: 0,
     positions: [],
+    closedPositions: [],
+    economy: null,
+    ledger: [],
+    perpPreview: null,
+    leaderboardCurrentUser: null,
     blockedAccounts: [],
     mutedAccounts: [],
   });

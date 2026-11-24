@@ -59,7 +59,10 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
       return;
     }
     if (notif.item.kind === "GroupInvite" || notif.chatId) {
-      void storeActions.navigate("/chats");
+      const targetChatId = notif.chatId;
+      void storeActions.navigate("/chats").then(() => {
+        if (targetChatId) void storeActions.loadChatMessages(targetChatId);
+      });
       return;
     }
     if (notif.marketId && !isSocial) {
@@ -71,7 +74,7 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
     const inviteId = resolveInviteId(notif);
     void storeActions.markNotificationRead(notif.item.id);
     if (inviteId) {
-      void storeActions.respondAlphaInvite(inviteId, accept);
+      void storeActions.respondGroupInvite(inviteId, accept);
       return;
     }
     void storeActions.navigate("/chats");
@@ -91,6 +94,15 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
               onClick={() => { void storeActions.markAllNotificationsRead(); }}
             >
               Mark all read
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              shape="pill"
+              disabled={s.notifications.length === 0}
+              onClick={() => { void storeActions.clearNotifications(); }}
+            >
+              Clear all
             </Button>
             <Button
               variant="ghost"

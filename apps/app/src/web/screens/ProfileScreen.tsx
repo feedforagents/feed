@@ -281,7 +281,7 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
 
   const activeTab: ProfileTab = !isGame && (tab === "trades" || tab === "positions") ? "posts" : tab;
   const topLevelPosts = bundle.posts.filter((p) => !p.replyToPostId);
-  const replyPosts = bundle.posts.filter((p) => Boolean(p.replyToPostId));
+  const replyPosts = s.profileReplies.length > 0 ? s.profileReplies : bundle.posts.filter((p) => Boolean(p.replyToPostId));
   const likedPosts = bundle.posts.filter((p) => Boolean(p.card.liked));
   const openPositions = bundle.positions.filter((p) => !p.isClosed);
   const closedPositions = bundle.positions.filter((p) => p.isClosed);
@@ -364,6 +364,9 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
         onValueChange={(next) => {
           if (next === "posts" || next === "replies" || next === "likes" || next === "trades" || next === "positions") {
             setTab(next);
+            if (next === "replies") {
+              void storeActions.loadProfileReplies(bundle.summary.handle);
+            }
           }
         }}
       >
@@ -398,7 +401,12 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
           </div>
         )
       ) : activeTab === "replies" ? (
-        replyPosts.length === 0 ? (
+        s.profileRepliesLoading && replyPosts.length === 0 ? (
+          <div className="flex flex-col gap-3 p-4">
+            <Skeleton className="h-20" />
+            <Skeleton className="h-20" />
+          </div>
+        ) : replyPosts.length === 0 ? (
           <EmptyState title="No replies yet" />
         ) : (
           <FlatPostList posts={replyPosts} mode={mode} />

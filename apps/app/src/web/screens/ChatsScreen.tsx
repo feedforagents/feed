@@ -439,15 +439,20 @@ export function ChatsScreen() {
                         size="sm"
                       />
                       <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-bold text-foreground">{invite.chatTitle}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="truncate text-sm font-bold text-foreground">{invite.chatTitle}</p>
+                          <Badge variant={invite.isAlpha ? "info" : "secondary"}>
+                            {invite.isAlpha ? "Alpha" : "Group"}
+                          </Badge>
+                        </div>
                         <p className="truncate text-xs text-muted-foreground">from @{invite.actorHandle}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5">
-                      <Button size="sm" shape="pill" className="flex-1" onClick={() => { void storeActions.respondAlphaInvite(invite.id, true); }}>
+                      <Button size="sm" shape="pill" className="flex-1" onClick={() => { void storeActions.respondGroupInvite(invite.id, true); }}>
                         Accept
                       </Button>
-                      <Button size="sm" shape="pill" variant="outline" className="flex-1" onClick={() => { void storeActions.respondAlphaInvite(invite.id, false); }}>
+                      <Button size="sm" shape="pill" variant="outline" className="flex-1" onClick={() => { void storeActions.respondGroupInvite(invite.id, false); }}>
                         Decline
                       </Button>
                     </div>
@@ -513,6 +518,13 @@ export function ChatsScreen() {
             memberCount={activeChat.memberCount}
             unreadCount={activeChat.unreadCount}
             messages={[...s.chatMessages]}
+            isGroupOwner={activeChat.chatType === "UserGroup" && activeChat.isOwner}
+            members={activeChat.members.map((m) => ({
+              accountId: m.memberId,
+              displayName: m.displayName,
+              handle: m.handle,
+              isOwner: m.role === "owner",
+            }))}
             loading={s.chatSending}
             disabled={activeChat.isBlocked}
             onBack={() => setMobileShowThread(false)}
@@ -525,6 +537,21 @@ export function ChatsScreen() {
             }
             onMarkRead={() => { void storeActions.markChatRead(activeChat.id); }}
             onInvite={activeChat.chatType === "UserGroup" ? () => setManageOpen(true) : undefined}
+            onRenameGroup={
+              activeChat.chatType === "UserGroup" && activeChat.isOwner
+                ? (nextTitle) => { void storeActions.renameGroupChat(activeChat.id, nextTitle); }
+                : undefined
+            }
+            onRemoveMember={
+              activeChat.chatType === "UserGroup" && activeChat.isOwner
+                ? (target) => { void storeActions.removeGroupMember(activeChat.id, target); }
+                : undefined
+            }
+            onDeleteGroup={
+              activeChat.chatType === "UserGroup" && activeChat.isOwner
+                ? () => { void storeActions.deleteGroupChat(activeChat.id); }
+                : undefined
+            }
             onLeave={
               activeChat.chatType === "NpcAlpha" || (activeChat.chatType === "UserGroup" && !activeChat.isOwner)
                 ? () => { void storeActions.leaveGroupChat(activeChat.id); }
