@@ -612,3 +612,34 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
     ))
   }
 }, 180_000)
+
+it.effect('Web perp close draws from the shared hourly trade budget (spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+
+    const player = try onboardPhonePlayer("+14155550131", "perp_close_budget")
+    const playerId = String(player.account.accountId)
+
+    const openRes = try callApp("/api/markets/perp/XTRPC/open", {
+      cookie: player.cookie,
+      json: { side: "long", collateralCents: 1000, leverage: 2 }
+    })
+    try check(() => assert.strictEqual(openRes.status, 201))
+    const opened = try readJson(openRes)
+    const positionId = String(opened.positionId ?? "")
+
+    const closeRes = try callApp(`/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`, {
+      method: "POST",
+      cookie: player.cookie,
+      json: {}
+    })
+    try check(() => assert.strictEqual(closeRes.status, 200))
+
+    const store = try Store
+    const rlRows = try store.transaction((tx: Tx) =>
+      tx.query("SELECT count FROM feed_rate_limits WHERE scope_key = $1", [`${playerId}:trade`])
+    )
+    try check(() => assert.strictEqual(toInt(rlRows[0]?.count), 2))
+  }
+}, 180_000)
