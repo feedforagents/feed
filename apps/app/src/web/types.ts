@@ -437,10 +437,13 @@ export function decodePost(raw: unknown): AppPost | null {
   const ticker = optStr(raw.ticker);
   const showTradeEmbed = bool(raw.showTradeEmbed, true);
   const badgeRaw = isRecord(raw.marketBadge) ? raw.marketBadge : null;
-  const marketBadge = showTradeEmbed && (badgeRaw || ticker)
+  const badgeLabel = badgeRaw && typeof badgeRaw.label === "string" && badgeRaw.label !== "" ? badgeRaw.label : null;
+  const badgeTicker = str(badgeRaw?.ticker, ticker ?? "");
+  const marketBadge = showTradeEmbed && (badgeLabel !== null || badgeTicker !== "")
     ? {
-        ticker: str(badgeRaw?.ticker, ticker ?? ""),
-        label: str(badgeRaw?.label, ticker ? `Trade $${ticker}` : "Market"),
+        ...(badgeTicker !== "" ? { ticker: badgeTicker } : {}),
+        ...(badgeTicker === "" && marketId ? { marketId } : {}),
+        label: badgeLabel ?? (ticker ? `Trade $${ticker}` : "Market"),
         ...(badgeRaw && typeof badgeRaw.oddsPct === "number" ? { oddsPct: badgeRaw.oddsPct } : {}),
         ...(badgeRaw && typeof badgeRaw.changePct === "number" ? { changePct: badgeRaw.changePct } : {}),
       }
@@ -463,7 +466,7 @@ export function decodePost(raw: unknown): AppPost | null {
       ...(optStr(raw.viaClientName ?? raw.via_client_name) ? { viaClientName: optStr(raw.viaClientName ?? raw.via_client_name) ?? undefined } : {}),
       ...(optStr(raw.replyToHandle) ? { replyToHandle: optStr(raw.replyToHandle) ?? undefined } : {}),
       ...(quotePost ? { quotePost } : {}),
-      ...(marketBadge && marketBadge.ticker ? { marketBadge } : {}),
+      ...(marketBadge ? { marketBadge } : {}),
       likeCount: num(raw.likeCount ?? raw.like_count, 0),
       repostCount: num(raw.repostCount ?? raw.repost_count, 0),
       replyCount: num(raw.replyCount ?? raw.reply_count, 0),

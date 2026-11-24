@@ -77,6 +77,13 @@ export interface PostQuotePreview {
   readonly createdAt: number
 }
 
+export interface PostMarketBadge {
+  /** Attached prediction market question shown on the trade embed. */
+  readonly label: string
+  /** Optional YES odds percentage for prediction markets. */
+  readonly oddsPct: number | null
+}
+
 export interface PostView {
   readonly id: string
   readonly authorId: string
@@ -93,6 +100,8 @@ export interface PostView {
   readonly viaClientName: string | null
   readonly marketId: string | null
   readonly ticker: string | null
+  /** Trade embed supplied by the server for an attached market; null when no market is attached or embeds are hidden. */
+  readonly marketBadge: PostMarketBadge | null
   readonly cashtags: ReadonlyArray<string>
   readonly hashtags: ReadonlyArray<string>
   readonly showTradeEmbed: boolean
@@ -346,6 +355,20 @@ effect function hydratePostRowsTx(
     const preview = projectRowToPreview(quoteRow, authors, mode)
     quoteMap.set(preview.id, preview)
   }
+  const marketBadgeById = new Map<string, PostMarketBadge>()
+  if (mode !== "social") {
+    const marketIds = [...new Set(rows.map((r) => toText(r.market_id)).filter((id): id is string => id !== undefined && id !== ""))]
+    if (marketIds.length > 0) {
+      const marketRows = try tx.query("SELECT id, question FROM feed_prediction_markets WHERE id = ANY($1)", [marketIds])
+      for (const marketRow of marketRows) {
+        const marketId = toText(marketRow.id)
+        const question = toText(marketRow.question)
+        if (marketId !== undefined && question !== undefined && question !== "") {
+          marketBadgeById.set(marketId, { label: question, oddsPct: null })
+        }
+      }
+    }
+  }
   const postIds = rows.map((r) => toText(r.id) ?? "").filter(Boolean)
   const replyCountMap = new Map<string, number>()
   if (postIds.length > 0) {
@@ -392,6 +415,7 @@ effect function hydratePostRowsTx(
       replyToPostId,
       quotePostId,
       quotePost: quotePostId === null ? null : (quoteMap.get(quotePostId) ?? null),
+      marketBadge: base.marketId === null ? null : (marketBadgeById.get(base.marketId) ?? null),
       likeCount: safeInt(row.like_count, 0),
       repostCount: safeInt(row.repost_count, 0),
       replyCount: replyCountMap.get(base.id) ?? 0,

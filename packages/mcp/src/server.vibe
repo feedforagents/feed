@@ -259,6 +259,7 @@ function formatPostForMcp(post: PostView, mode: PlayMode): Record<string, unknow
       ...post,
       marketId: null,
       ticker: null,
+      marketBadge: null,
       cashtags: [],
       showTradeEmbed: false,
       linkCashtags: false,

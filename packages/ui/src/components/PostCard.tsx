@@ -20,8 +20,10 @@ export interface PostQuotePreview {
 }
 
 export interface PostMarketBadge {
-  /** Market cashtag ticker without `$`. */
-  ticker: string;
+  /** Attached prediction market id; clicking opens that market. Set when the badge names a market by id instead of a ticker. */
+  marketId?: string;
+  /** Market cashtag ticker without `$`. Optional when the badge names a prediction market by id. */
+  ticker?: string;
   /** Market headline or contract summary. */
   label: string;
   /** Optional YES odds percentage for prediction markets. */
@@ -82,6 +84,8 @@ export type PostCardProps = Omit<ComponentProps<"article">, "children"> & {
   onAuthorClick?: (handle: string) => void;
   /** Called when a cashtag or market badge is clicked in `GameMode`. */
   onMarketClick?: (ticker: string) => void;
+  /** Called when a market badge that names a market by id (no ticker) is clicked in `GameMode`. */
+  onMarketOpen?: (marketId: string) => void;
   /** Called when Report is clicked. */
   onReport?: (postId: string) => void;
   /** Disables interactive actions. */
@@ -100,6 +104,7 @@ export function PostCard({
   onQuote,
   onAuthorClick,
   onMarketClick,
+  onMarketOpen,
   onReport,
   disabled = false,
   className,
@@ -175,7 +180,12 @@ export function PostCard({
           <button
             type="button"
             disabled={disabled}
-            onClick={() => !disabled && onMarketClick?.(post.marketBadge!.ticker)}
+            onClick={() => {
+              if (disabled) return;
+              const badge = post.marketBadge!;
+              if (badge.marketId !== undefined && badge.ticker === undefined) onMarketOpen?.(badge.marketId);
+              else if (badge.ticker !== undefined) onMarketClick?.(badge.ticker);
+            }}
             className={cn(
               focusRing,
               inactive,
@@ -184,7 +194,9 @@ export function PostCard({
           >
             <span className="flex min-w-0 items-center gap-2">
               <TrendingUp aria-hidden className="size-4 shrink-0 text-primary" />
-              <span className="font-mono font-semibold text-primary">${post.marketBadge.ticker}</span>
+              {post.marketBadge.ticker ? (
+                <span className="font-mono font-semibold text-primary">${post.marketBadge.ticker}</span>
+              ) : null}
               <span className="truncate text-foreground">{post.marketBadge.label}</span>
             </span>
             <span className="shrink-0 font-mono font-semibold text-foreground tabular-nums">

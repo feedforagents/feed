@@ -876,3 +876,68 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  'marketId-only post carries its market badge in Game mode (spec/social/posts.md, "Story: Project posts for Game and Social presentation modes")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
+
+    const idOnly = try createPost({
+      authorId: "alice",
+      authorKind: "user",
+      content: "Will OpenAGI announce pricing before Friday?",
+      marketId: "seed-market-1"
+    })
+    const withTicker = try createPost({
+      authorId: "alice",
+      authorKind: "user",
+      content: "Shipping thesis on the benchmark callout",
+      marketId: "seed-market-1",
+      ticker: "nvdai"
+    })
+
+    const gameFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+    const socialFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "social", limit: 50 })
+    const gameIdOnly = gameFeed.items.find((p) => p.id === idOnly.id)
+    const gameWithTicker = gameFeed.items.find((p) => p.id === withTicker.id)
+    const socialIdOnly = socialFeed.items.find((p) => p.id === idOnly.id)
+
+    try check(() => assert.deepStrictEqual({
+      idOnly: gameIdOnly === undefined ? undefined : {
+        marketId: gameIdOnly.marketId,
+        ticker: gameIdOnly.ticker,
+        marketBadge: gameIdOnly.marketBadge,
+        showTradeEmbed: gameIdOnly.showTradeEmbed
+      },
+      withTicker: gameWithTicker === undefined ? undefined : {
+        marketId: gameWithTicker.marketId,
+        ticker: gameWithTicker.ticker,
+        marketBadge: gameWithTicker.marketBadge,
+        showTradeEmbed: gameWithTicker.showTradeEmbed
+      },
+      socialIdOnly: socialIdOnly === undefined ? undefined : {
+        marketId: socialIdOnly.marketId,
+        marketBadge: socialIdOnly.marketBadge,
+        showTradeEmbed: socialIdOnly.showTradeEmbed
+      }
+    }, {
+      idOnly: {
+        marketId: "seed-market-1",
+        ticker: null,
+        marketBadge: { label: "Will OpenAGI announce GPT-Next compute pricing before Friday close?", oddsPct: null },
+        showTradeEmbed: true
+      },
+      withTicker: {
+        marketId: "seed-market-1",
+        ticker: "NVDAI",
+        marketBadge: { label: "Will OpenAGI announce GPT-Next compute pricing before Friday close?", oddsPct: null },
+        showTradeEmbed: true
+      },
+      socialIdOnly: {
+        marketId: null,
+        marketBadge: null,
+        showTradeEmbed: false
+      }
+    }))
+  })
+)

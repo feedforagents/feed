@@ -95,6 +95,10 @@ export function FeedPostCard({
       onReport={onReport}
       onAuthorClick={(handle) => navigateAfter(`/u/${encodeURIComponent(handle)}`)}
       onMarketClick={(ticker) => navigateAfter(`/markets?ticker=${encodeURIComponent(ticker)}`)}
+      onMarketOpen={(marketId) => {
+        void storeActions.selectMarket("prediction", marketId);
+        navigateAfter("/markets");
+      }}
     />
   );
 }
