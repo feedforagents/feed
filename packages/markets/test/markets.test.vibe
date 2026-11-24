@@ -328,6 +328,24 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
       side: "sell",
       quoteCents: 17_000_000
     }))
+    const sellOtherTickerCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "NVDAI",
+      side: "sell",
+      quoteCents: 100_000
+    }))
+    const spotSellExact = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 5_999_400
+    })
+    const sellOneBaseCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 600
+    }))
 
     try check(() => assert.deepStrictEqual(
       {
@@ -369,7 +387,10 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
         spotSells: [
           sellWithoutHoldingsCode,
           [spotSell1.baseReserve, spotSell1.quoteReserveCents, spotSell1.indexPriceCents, spotSell1.baseDelta],
-          sellBeyondHoldingsCode
+          sellBeyondHoldingsCode,
+          sellOtherTickerCode,
+          [spotSellExact.baseReserve, spotSellExact.quoteReserveCents, spotSellExact.indexPriceCents, spotSellExact.baseDelta],
+          sellOneBaseCode
         ],
         closed: [
           closed.exitPriceCents,
@@ -392,7 +413,7 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
         opened: [10, 20_000, 20, 1_875, 7_980, 1_875, 1_968, 20_000],
         funding: [0, false, 1, 1, true, 0, [[100, true]], [[true, 100]]],
         spotBuy2: [6_000, 20_000_000, 3_333, 3_499],
-        spotSells: ["INSUFFICIENT_INVENTORY", [6_667, 18_000_000, 2_699, 667], "INSUFFICIENT_INVENTORY"],
+        spotSells: ["INSUFFICIENT_INVENTORY", [6_667, 18_000_000, 2_699, 667], "INSUFFICIENT_INVENTORY", "INSUFFICIENT_INVENTORY", [10_000, 12_000_600, 1_200, 3_333], "INSUFFICIENT_INVENTORY"],
         closed: [3_499, 20, 19_202, 17_202, 27_182, 0, 0, 0, 3_333, 3_333]
       }
     ))
