@@ -3,6 +3,7 @@ import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@rep
 import { BPS_DENOMINATOR, buyNetAfterFee, canonicalTradingFee, sellNetProceeds } from "../gen/shared__money.effect.vibe"
 import {
   MAX_ODDS_MOVE_BPS,
+MIN_SELL_SHARE_UNITS,
   MIN_TRADE_CENTS,
   absInt,
   buyNextNoReserve,
@@ -676,9 +677,13 @@ export effect function buyPredictionShares(input: BuyPredictionInput): TradeRece
 export effect function sellPredictionShares(input: SellPredictionInput): TradeReceipt!(MarketFailure | StoreFailure)!Store {
   try validateSide(input.side)
   try assertSafePositiveInt(input.shares, "INVALID_SHARES", "Shares to sell must be a positive integer")
+  if (input.shares < MIN_SELL_SHARE_UNITS) {
+    throw marketFail("INVALID_SHARES", `Minimum sell size is ${MIN_SELL_SHARE_UNITS} share units`)
+  }
   const fingerprint = `sell:${input.marketId}:${input.side}:${input.shares}`
   return try withLockedPredictionMarket(
     input,
+
     fingerprint,
     effect ({ tx, market, now, viaClientName, idempotencyKey, requestFingerprint }) => {
       const dbSide = toDbSide(input.side)
