@@ -664,11 +664,16 @@ export async function loadMoreProfilePosts(): Promise<void> {
   const s = getStoreSnapshot();
   const bundle = s.profileBundle;
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
+  const loadId = profileLoadCount;
   setStoreState({ profileLoadingMore: true });
   const res = await requestJson(
     `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
     { parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null) },
   );
+  if (loadId !== profileLoadCount) {
+    setStoreState({ profileLoadingMore: false });
+    return;
+  }
   if (res.ok && res.data) {
     const latest = getStoreSnapshot().profileBundle;
     if (latest && latest.id === res.data.id) {
