@@ -481,6 +481,10 @@ it.effect(
 
     const group = try createUserGroupChat("alice", "Trading Desk", ["bob"])
     const invitedCarol = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    const carolNotifsAfterInvite = try listNotifications("carol")
+    const carolUnreadAfterInvite = try getUnreadNotificationCount("carol")
+    const invitedCarolAgain = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    const carolNotifsAfterReinvite = try listNotifications("carol")
     const groupMsg = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: group.id, content: "Group signal" })
     const groupReact = try reactToMessage({ accountId: "carol", messageId: groupMsg.id, emoji: "👀" })
     const groupMsgs = try getChatMessages("alice", group.id)
@@ -540,6 +544,12 @@ it.effect(
         carolLeft.left,
         carolAfterLeaveCode
       ],
+      carolInvite: [
+        carolNotifsAfterInvite.map((n) => [n.kind, n.actorId, n.isRead]),
+        carolUnreadAfterInvite,
+        invitedCarolAgain.added,
+        carolNotifsAfterReinvite.length
+      ],
       retiredTeam: [helperTeamCode, createTeamCode, rawTeamRefused, teamChatRows.length],
       alpha: [
         alphaInvite.status,
@@ -580,6 +590,12 @@ it.effect(
         [{ emoji: "👀", count: 1, reactedByViewer: false }],
         true,
         "Forbidden"
+      ],
+      carolInvite: [
+        [["group_invite", "alice", false]],
+        1,
+        true,
+        1
       ],
       retiredTeam: ["TeamChatRetired", "TeamChatRetired", true, 0],
       alpha: [
