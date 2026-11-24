@@ -36,6 +36,7 @@ export function minuteIndexOf(nowMs: number): number {
 }
 
 export function sanitizeText(input: string, maxLen: number): string {
+  // eslint-disable-next-line no-control-regex -- External text can contain ASCII control characters.
   const collapsed = input.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/\s+/g, " ").trim()
   if (collapsed.length <= maxLen) return collapsed
   if (maxLen <= 3) return collapsed.slice(0, maxLen)

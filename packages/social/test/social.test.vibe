@@ -3,7 +3,7 @@ import { assert, it } from "@effect/vitest"
 import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
 import {
-  RealtimeBus,
+  type RealtimeBus,
   SocialFailure,
   assertAllowedChatKind,
   blockAccount,

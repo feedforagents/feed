@@ -1,5 +1,5 @@
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"
-import { Store, StoreFailure, toText, type Row, type Tx } from "@repo/db"
+import { Store, type StoreFailure, toText, type Row, type Tx } from "@repo/db"
 import {
   canCreatePost,
   canDeletePost,

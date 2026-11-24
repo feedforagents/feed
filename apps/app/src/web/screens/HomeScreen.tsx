@@ -4,7 +4,6 @@ import {
   Badge,
   Button,
   Card,
-  CardContent,
   CardDescription,
   CardFooter,
   CardHeader,

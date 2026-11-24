@@ -26,7 +26,6 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.1.1",
-    "@electric-sql/pglite": "catalog:",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vibelang": "0.0.13",

@@ -1,5 +1,5 @@
 // spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"
-import { Store, StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
 import { BPS_DENOMINATOR, buyNetAfterFee, canonicalTradingFee, sellNetProceeds } from "../gen/shared__money.effect.vibe"
 import {
   MAX_ODDS_MOVE_BPS,
@@ -15,7 +15,7 @@ import {
   type Side
 } from "../gen/markets__prediction.effect.vibe"
 import {
-  MarketFailure,
+  type MarketFailure,
   assertSafePositiveInt,
   ceilDivProduct,
   creditActorBalance,

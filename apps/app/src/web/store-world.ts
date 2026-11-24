@@ -16,7 +16,6 @@ import {
   type AppPerpMarket,
   type AppPost,
   type AppPredictionMarket,
-  type AppProfileBundle,
   decodeAlphaInvites,
   decodeChatMessages,
   decodeChats,
@@ -34,7 +33,6 @@ import {
   isRecord,
   arr,
   optStr,
-  str,
 } from "./types.ts";
 
 export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
@@ -605,8 +603,4 @@ export async function submitReport(targetKind: "account" | "post", targetId: str
   }
   setStoreState({ statusMessage: "Report submitted." });
   return true;
-}
-
-export function extractInviteNotificationStatus(rawTitle: string): string {
-  return str(rawTitle, "Invite");
 }

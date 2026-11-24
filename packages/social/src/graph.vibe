@@ -1,5 +1,5 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"
-import { Store, StoreFailure, toText, type Row, type Tx } from "@repo/db"
+import { Store, type StoreFailure, toText, type Row, type Tx } from "@repo/db"
 import {
   block as applySpecBlock,
   canBlock,
@@ -220,7 +220,7 @@ export effect function getProfile(
     const target = try resolveSubjectTx(tx, handleOrId)
     const isSelf = viewer !== undefined && target.kind === "user" && viewer === target.id
     const effectiveMode = mode ?? (isSelf ? target.uiMode : try readViewerUiModeTx(tx, viewer))
-    let bio = ""
+    let bio: string
     let balanceCents: number | null = null
     let activeAgentClientName: string | null = null
     if (target.kind === "user") {
@@ -473,8 +473,8 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     const reporter = try resolveUserOrNpcTx(tx, input.reporterId)
-    let resolvedTargetId = ""
-    let targetOwnerId = ""
+    let resolvedTargetId: string
+    let targetOwnerId: string
     if (input.targetKind === "account") {
       const target = try resolveSubjectTx(tx, input.targetId)
       resolvedTargetId = target.id

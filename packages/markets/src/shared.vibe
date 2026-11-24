@@ -1,5 +1,5 @@
 // spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
-import { StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+import { type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
 import { fundingPeriodFromSeconds } from "../gen/shared__time.effect.vibe"
 import type { PerpPosition } from "../gen/markets__spotPerp.effect.vibe"
 

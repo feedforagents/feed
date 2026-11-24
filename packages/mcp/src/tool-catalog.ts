@@ -1480,11 +1480,6 @@ export function toPtsNumber(cents: number): number {
 }
 
 /** @throws {never} */
-export function formatPts(cents: number): string {
-  return `${(cents / 100).toFixed(2)} pts`
-}
-
-/** @throws {never} */
 export function formatPtsLabeled(cents: number): string {
   return `${(cents / 100).toFixed(2)} pts (${CURRENCY_DISCLAIMER})`
 }

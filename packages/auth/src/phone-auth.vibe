@@ -14,13 +14,11 @@ import {
   codeLifetimeMs,
   completeOnboarding,
   countryAllowed,
-  currentDaySends,
   currentHourSends,
   declassifyPhoneLast2,
   deleteAccount,
   initial,
   maxCodeAttempts,
-  maxSendsPerDay,
   maxSendsPerHour,
   phoneCooldownMs,
   recentSignInWindowMs,
@@ -619,7 +617,7 @@ effect function sendPhoneChallenge(input: {
       }
       try tx.query("DELETE FROM feed_phone_cooldowns WHERE phone_hash = $1", [phoneHash])
     }
-    let baseState: PhoneAuth = { ...initial, now }
+    let baseState: PhoneAuth
     if (input.purposeKey === "feed_phone_change") {
       if (input.accountId === null || input.accountId === "") {
         throw new AuthFailure({ code: "unauthorized", message: "Account is required.", status: 401 })

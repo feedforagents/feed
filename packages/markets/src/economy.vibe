@@ -1,5 +1,5 @@
 // spec/markets/economy.md, "Story: Verify account and claim initial grant once"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
-import { Store, StoreFailure, toInt, toText, type Tx } from "@repo/db"
+import { Store, type StoreFailure, toInt, toText, type Tx } from "@repo/db"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import {
   equityCents,
@@ -14,7 +14,7 @@ import {
 } from "../gen/markets__economy.effect.vibe"
 import { positionEquityAtMark } from "../gen/markets__spotPerp.effect.vibe"
 import {
-  MarketFailure,
+  type MarketFailure,
   marketFail,
   newMarketId,
   optionalText,
@@ -599,8 +599,8 @@ export effect function handleStripeWebhook(
       "SELECT id, account_id, points_cents, status FROM feed_stripe_purchases WHERE stripe_session_id = $1 FOR UPDATE",
       [sessionId]
     )
-    let accountId = ""
-    let pointsCents = 0
+    let accountId: string
+    let pointsCents: number
     if (existingRows.length > 0) {
       const existing = existingRows[0]!
       accountId = requiredText(existing.account_id)

@@ -1,5 +1,5 @@
 // spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation"; spec/shared/time.md, "Funding periods partition UTC time into non-negative 8-hour windows"; spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"
-import { Store, StoreFailure, toInt, type Row, type Tx } from "@repo/db"
+import { Store, type StoreFailure, toInt, type Row, type Tx } from "@repo/db"
 import { canonicalTradingFee, clampMin0, minInt } from "../gen/shared__money.effect.vibe"
 import { fundingPeriodFromSeconds } from "../gen/shared__time.effect.vibe"
 import {
@@ -14,7 +14,7 @@ import {
   type PerpPosition
 } from "../gen/markets__spotPerp.effect.vibe"
 import {
-  MarketFailure,
+  type MarketFailure,
   assertSafePositiveInt,
   ceilDivProduct,
   creditActorBalance,
@@ -332,10 +332,10 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
     const baseReserve = toInt(poolRows[0]!.base_reserve)
     const quoteReserve = toInt(poolRows[0]!.quote_reserve_cents)
     const npcBalance = toInt(actorRows[0]!.balance_cents)
-    let nextQuote = quoteReserve
-    let nextBase = baseReserve
-    let baseDelta = 0
-    let cashDelta = 0
+    let nextQuote: number
+    let nextBase: number
+    let baseDelta: number
+    let cashDelta: number
     if (input.side === "buy") {
       if (npcBalance < input.quoteCents) {
         throw marketFail("INSUFFICIENT_POINTS", "NPC actor has insufficient points balance")
