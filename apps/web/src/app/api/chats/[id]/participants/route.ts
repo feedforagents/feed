@@ -130,7 +130,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asSystem, asUser } from '@feed/db';
+import { asSystem, asUser, getFilteredUserIds } from '@feed/db';
 import { generateSnowflakeId, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -226,6 +226,9 @@ export const POST = withErrorHandling(
 
     // Verify all users exist and add them to the chat
     const addedUsers = await asSystem(async (db) => {
+      // Match chat creation: never pull a user the adder blocked, or who
+      // blocked the adder, into the chat.
+      const blockedIds = new Set(await getFilteredUserIds(user.userId, db));
       // Verify users exist and are not actors
       const usersToAdd = await db.user.findMany({
         where: {
@@ -241,7 +244,9 @@ export const POST = withErrorHandling(
         },
       });
 
-      if (usersToAdd.length === 0) {
+      const eligibleUsers = usersToAdd.filter((u) => !blockedIds.has(u.id));
+
+      if (eligibleUsers.length === 0) {
         throw new BusinessLogicError('No valid users to add', 'NO_VALID_USERS');
       }
 
@@ -249,7 +254,7 @@ export const POST = withErrorHandling(
       const existingParticipantIds = (chat.participants || []).map(
         (p) => p.userId
       );
-      const newUsers = usersToAdd.filter(
+      const newUsers = eligibleUsers.filter(
         (u) => !existingParticipantIds.includes(u.id)
       );
 
