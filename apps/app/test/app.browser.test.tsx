@@ -149,7 +149,13 @@ const SAMPLE_LEADERBOARD_CHARACTERS = {
   ],
 };
 
-function installMockNetwork() {
+const SAMPLE_THREAD = {
+  post: SAMPLE_POSTS[0],
+  parentPost: null,
+  replies: [],
+};
+
+function installMockNetwork(threadFetch?: (path: string) => Promise<Response> | null) {
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   const json = (body: unknown) => Promise.resolve(Response.json(body));
@@ -157,6 +163,8 @@ function installMockNetwork() {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(raw, window.location.origin);
     const path = url.pathname;
+    const delayed = threadFetch?.(path) ?? null;
+    if (delayed) return delayed;
     if (path === "/api/auth/reviewer/login") {
       signedIn = true;
       return json({ ok: true });
@@ -380,4 +388,33 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();
+});
+
+it('Thread close during load stays closed (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const threadGate = { release: () => {} };
+  const threadResponse = new Promise<Response>((resolve) => {
+    threadGate.release = () => resolve(Response.json(SAMPLE_THREAD));
+  });
+  installMockNetwork((path) => (path.startsWith("/api/posts/") ? threadResponse : null));
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
+  await act(() => userEvent.click(homeButton));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  const replyButton = page.getByRole("button", { name: /^Reply/ }).first();
+  await act(() => userEvent.click(replyButton));
+  await expect.element(page.getByText("Post thread")).toBeInTheDocument();
+
+  await act(() => userEvent.keyboard("{Escape}"));
+  await vi.waitFor(() => {
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  threadGate.release();
+  await vi.waitFor(() => {
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
 });
