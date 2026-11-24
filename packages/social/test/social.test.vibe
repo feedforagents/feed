@@ -38,6 +38,7 @@ import {
   reportTarget,
   repostPost,
   respondAlphaInvite,
+  searchWorld,
   sendChatMessage,
   unblockAccount,
   unfollowAccount,
@@ -873,6 +874,30 @@ it.effect(
         false,
         false
       ]
+    }))
+  })
+)
+
+it.effect(
+  'hashtag search returns only posts carrying that hashtag (spec/social/posts.md, "Story: Project posts for Game and Social presentation modes")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player")
+    try seedAccount("bob", "bob", "Bob Trader")
+    const exactTag = try createPost({ authorId: "bob", authorKind: "user", content: "Loving the new model #ai" })
+    const longerTag = try createPost({ authorId: "bob", authorKind: "user", content: "Big airdrop coming #airdrop" })
+    const gluedTag = try createPost({ authorId: "bob", authorKind: "user", content: "check foo#ai news" })
+    const upperTag = try createPost({ authorId: "alice", authorKind: "user", content: "AI is wild #AI" })
+    const unrelated = try createPost({ authorId: "alice", authorKind: "user", content: "Cooking dinner tonight" })
+    const game = try searchWorld({ query: "#ai", mode: "game", viewerId: "alice", limit: 50 })
+    const social = try searchWorld({ query: "#ai", mode: "social", viewerId: "alice", limit: 50 })
+    try check(() => assert.deepStrictEqual({
+      hashtags: [exactTag.hashtags, longerTag.hashtags, gluedTag.hashtags, upperTag.hashtags, unrelated.hashtags],
+      gameIds: game.posts.map((p) => p.id).sort(),
+      socialIds: social.posts.map((p) => p.id).sort()
+    }, {
+      hashtags: [["ai"], ["airdrop"], [], ["ai"], []],
+      gameIds: [exactTag.id, upperTag.id].sort(),
+      socialIds: [exactTag.id, upperTag.id].sort()
     }))
   })
 )

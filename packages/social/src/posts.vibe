@@ -1040,15 +1040,22 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
   const limit = clampLimit(input.limit, 15, 50)
   const viewerId = normalizeOptionalText(input.viewerId) ?? undefined
   const likePattern = `%${escapeLikePattern(queryText)}%`
+  const queryTags = extractHashtags(queryText)
+  const firstTag = queryTags[0] ?? null
+  const tagQuery = firstTag !== null && queryTags.length === 1 && queryText.toLowerCase() === `#${firstTag}` ? firstTag : null
+  const tagPattern = tagQuery === null ? null : `(^|[^a-zA-Z0-9_])#${tagQuery}([^a-zA-Z0-9_]|$)`
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const mode = input.mode ?? (try readViewerUiModeTx(tx, viewerId))
-    const postMatch = mode === "social"
-      ? "p.content ILIKE $1 ESCAPE '\\'"
-      : "(p.content ILIKE $1 ESCAPE '\\' OR p.ticker ILIKE $1 ESCAPE '\\')"
+    const postMatch = tagPattern !== null
+      ? "p.content ~* $1"
+      : mode === "social"
+        ? "p.content ILIKE $1 ESCAPE '\\'"
+        : "(p.content ILIKE $1 ESCAPE '\\' OR p.ticker ILIKE $1 ESCAPE '\\')"
+    const postPattern = tagPattern ?? likePattern
     const postRows = viewerId === undefined
-      ? try tx.query(`SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} ORDER BY p.created_at DESC LIMIT $2`, [likePattern, limit])
-      : try tx.query(`SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql("$2", "p.author_id")} ORDER BY p.created_at DESC LIMIT $3`, [likePattern, viewerId, limit])
+      ? try tx.query(`SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} ORDER BY p.created_at DESC LIMIT $2`, [postPattern, limit])
+      : try tx.query(`SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql("$2", "p.author_id")} ORDER BY p.created_at DESC LIMIT $3`, [postPattern, viewerId, limit])
     const posts = try hydratePostRowsTx(tx, postRows, viewerId, mode)
     const accountWhere = "is_reviewer = false AND (handle ILIKE $1 ESCAPE '\\' OR display_name ILIKE $1 ESCAPE '\\')"
     const accountRows = viewerId === undefined
