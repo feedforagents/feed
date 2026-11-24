@@ -457,6 +457,47 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
   return actionsExecuted
 }
 
+function actorSelectionWeight(tier: string): number {
+  switch (tier) {
+    case "S_TIER":
+      return 4
+    case "A_TIER":
+      return 3
+    case "B_TIER":
+      return 2
+    default:
+      return 1
+  }
+}
+
+function selectWeightedNpcBatch(
+  allActors: ReadonlyArray<DbActorRow>,
+  batchLimit: number,
+  bucketKey: string,
+): ReadonlyArray<DbActorRow> {
+  const targetCount = Math.min(batchLimit, allActors.length)
+  const pool = [...allActors]
+  const selected: DbActorRow[] = []
+  for (let slot = 0; slot < targetCount && pool.length > 0; slot += 1) {
+    let totalWeight = 0
+    for (const candidate of pool) {
+      totalWeight += actorSelectionWeight(candidate.tier)
+    }
+    let cursor = hashString(`${bucketKey}:${slot}`) % Math.max(1, totalWeight)
+    let pickedIdx = 0
+    for (let i = 0; i < pool.length; i += 1) {
+      cursor -= actorSelectionWeight(pool[i]!.tier)
+      if (cursor < 0) {
+        pickedIdx = i
+        break
+      }
+    }
+    selected.push(pool[pickedIdx]!)
+    pool.splice(pickedIdx, 1)
+  }
+  return selected
+}
+
 export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(EngineFailure | StoreFailure)!Store {
   const resolvedNow = try resolveClockNow(nowMs)
   const spendStatus = try getDailySpendStatus(resolvedNow)
@@ -467,6 +508,7 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
     const rows = try tx.query(
       `SELECT id, name, username, tier, description, system_prompt, balance_cents
        FROM feed_actors
+       WHERE id NOT LIKE 'test-%'
        ORDER BY id ASC`,
     )
     return rows.map((row) => ({
@@ -482,12 +524,7 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
   if (allActors.length === 0) {
     return { actorsSelected: 0, actorsCompleted: 0, actionsExecuted: 0, maxStepsUsed: maxSteps, throttledBatchSize: batchLimit }
   }
-  const startOffset = hashString(`npc-batch:${Math.floor(resolvedNow / 120_000)}`) % allActors.length
-  const selectedCount = Math.min(batchLimit, allActors.length)
-  const batch: DbActorRow[] = []
-  for (let i = 0; i < selectedCount; i++) {
-    batch.push(allActors[(startOffset + i) % allActors.length]!)
-  }
+  const batch = selectWeightedNpcBatch(allActors, batchLimit, `npc-batch:${Math.floor(resolvedNow / 120_000)}`)
   let actorsCompleted = 0
   let actionsExecuted = 0
   for (const actor of batch) {

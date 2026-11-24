@@ -328,7 +328,7 @@ export effect function runArticleTick(nowMs?: number): { readonly articleId: str
   const chosen = data.mediaRows.length > 0 ? data.mediaRows[hashString(`art:${resolvedNow}`) % data.mediaRows.length]! : null
   const orgId = toText(chosen?.id) ?? fallbackOrg?.id ?? "feed-wire"
   const orgName = toText(chosen?.name) ?? fallbackOrg?.name ?? "The Feed Wire"
-  const orgDesc = toText(chosen?.description) ?? fallbackOrg?.description ?? "Feed financial satire wire"
+  const orgDesc = toText(chosen?.description) ?? fallbackOrg?.description ?? "Feed financial wire"
   const rendered = renderPrompt("feedArticle", {
     orgName,
     orgDescription: orgDesc,
