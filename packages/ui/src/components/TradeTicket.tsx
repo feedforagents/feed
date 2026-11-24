@@ -85,6 +85,38 @@ function estimatePredictionBuyShares(
   return bought > 0n ? Number(bought) : 0;
 }
 
+function bigIntSqrt(value: bigint): bigint {
+  if (value <= 0n) return 0n;
+  let x = value;
+  let y = (x + 1n) >> 1n;
+  while (y < x) {
+    x = y;
+    y = (x + value / x) >> 1n;
+  }
+  return x;
+}
+
+function estimatePredictionSellGrossCents(
+  yesShares: number,
+  noShares: number,
+  side: "YES" | "NO",
+  sellShares: number,
+): number {
+  if (yesShares <= 0 || noShares <= 0 || sellShares <= 0) return 0;
+  const sideReserve = BigInt(side === "YES" ? yesShares : noShares);
+  const oppReserve = BigInt(side === "YES" ? noShares : yesShares);
+  const sell = BigInt(sellShares);
+  const total = sideReserve + oppReserve + sell;
+  const diff = sideReserve + oppReserve - sell;
+  const discriminant = diff * diff + 4n * sideReserve * sell;
+  const rootFloor = bigIntSqrt(discriminant);
+  const rootCeil = rootFloor * rootFloor >= discriminant ? rootFloor : rootFloor + 1n;
+  const denom = total + rootCeil;
+  if (denom <= 0n) return 0;
+  const rawGross = Number((2n * sell * oppReserve) / denom);
+  return Math.max(0, Math.min(rawGross, Math.min(Number(oppReserve) - 1, sellShares)));
+}
+
 /** Order ticket for prediction YES/NO shares and 1x-20x perpetuals with mandatory virtual-points disclosure. */
 export function TradeTicket({
   marketKind,
@@ -124,13 +156,30 @@ export function TradeTicket({
   const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
   const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
+  const hasSellCpmmInputs =
+    validAmount &&
+    yesShares !== undefined &&
+    noShares !== undefined &&
+    yesShares > 0 &&
+    noShares > 0 &&
+    Number.isSafeInteger(numericAmount) &&
+    Number.isSafeInteger(yesShares) &&
+    Number.isSafeInteger(noShares);
   const sellSettledCents =
-    marketKind === "prediction" && action === "Sell" && validAmount ? Math.floor((numericAmount * activePricePct) / 100) : 0;
+    marketKind === "prediction" && action === "Sell" && validAmount
+      ? hasSellCpmmInputs
+        ? estimatePredictionSellGrossCents(yesShares, noShares, predSide, numericAmount)
+        : Math.floor((numericAmount * activePricePct) / 100)
+      : 0;
   const estimatedFeePts = validAmount
     ? marketKind === "prediction" && action === "Sell"
       ? Math.max(0.01, Math.ceil((sellSettledCents * feeBps) / 10000) / 100)
       : Math.max(0.01, (notionalPts * feeBps) / 10000)
     : 0;
+  const sellProceedsPts =
+    marketKind === "prediction" && action === "Sell" && validAmount
+      ? Math.max(0, sellSettledCents - Math.round(estimatedFeePts * 100)) / 100
+      : 0;
   const amountCents = Math.round(numericAmount * 100);
   const hasExactCpmmInputs =
     validAmount &&
@@ -263,12 +312,22 @@ export function TradeTicket({
 
           <dl className="flex flex-col gap-1.5 rounded-md border border-border bg-muted p-3 text-xs">
             {marketKind === "prediction" ? (
-              <div className="flex items-center justify-between">
-                <dt className="text-muted-foreground">{action === "Buy" ? "Est. shares" : "Implied price"}</dt>
-                <dd className="font-mono font-medium text-foreground tabular-nums">
-                  {action === "Buy" ? `${estimatedShares.toFixed(2)} shares` : `${activePricePct}%`}
-                </dd>
-              </div>
+              <>
+                <div className="flex items-center justify-between">
+                  <dt className="text-muted-foreground">{action === "Buy" ? "Est. shares" : "Implied price"}</dt>
+                  <dd className="font-mono font-medium text-foreground tabular-nums">
+                    {action === "Buy" ? `${estimatedShares.toFixed(2)} shares` : `${activePricePct}%`}
+                  </dd>
+                </div>
+                {action === "Sell" ? (
+                  <div className="flex items-center justify-between">
+                    <dt className="text-muted-foreground">Est. proceeds</dt>
+                    <dd className="font-mono font-medium text-foreground tabular-nums">
+                      {validAmount ? `${sellProceedsPts.toFixed(2)} pts` : "—"}
+                    </dd>
+                  </div>
+                ) : null}
+              </>
             ) : (
               <>
                 <div className="flex items-center justify-between">
