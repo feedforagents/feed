@@ -4,6 +4,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
+import { hydrateAuth } from "../src/web/store-auth.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -147,4 +150,80 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"
+it('Stale notifications response is dropped after mark all read', async () => {
+  const unreadItem = {
+    id: "notif-race-1",
+    kind: "like",
+    title: "AIlon Musk liked your post",
+    actorHandle: "ailonmusk",
+    isRead: false,
+    createdAt: Date.now() - 60_000,
+  };
+  let holdNotifications = false;
+  let resolveHeld: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input, init) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: true,
+        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/notifications/read") return json({});
+    if (path === "/api/notifications") {
+      if (init?.method === "POST") return json({});
+      if (holdNotifications) {
+        return new Promise<Response>((resolve) => {
+          resolveHeld = () => resolve(Response.json({ notifications: [unreadItem] }));
+        });
+      }
+      return json({ notifications: [unreadItem] });
+    }
+    if (path === "/api/chats") return json({ chats: [] });
+    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+  await act(() => hydrateAuth());
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+
+  await act(() => storeActions.loadNotifications());
+  expect(getStoreSnapshot().unreadNotifications).toBe(1);
+  expect(getStoreSnapshot().notifications.map((n) => n.item.read)).toEqual([false]);
+
+  holdNotifications = true;
+  const loading = storeActions.loadNotifications();
+  await act(() => storeActions.markAllNotificationsRead());
+  expect(getStoreSnapshot().unreadNotifications).toBe(0);
+  expect(getStoreSnapshot().notifications.map((n) => n.item.read)).toEqual([true]);
+
+  resolveHeld?.();
+  await act(() => loading);
+
+  expect(getStoreSnapshot().unreadNotifications).toBe(0);
+  expect(getStoreSnapshot().notifications.map((n) => n.item.read)).toEqual([true]);
+  expect(getStoreSnapshot().notificationsLoading).toBe(false);
 });
