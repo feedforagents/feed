@@ -371,10 +371,13 @@ pure def adminOverrideHold(s: NarrativeState, slotId: int, approveYes: bool, by:
 
 ### Resolved slots are replaced independently with a fresh market epoch
 
+Each replacement targets one of the ten existing slots. A lookup that returns the
+missing-slot sentinel leaves the replacement count unchanged.
+
 ```quint
 pure def canReplaceMarket(s: NarrativeState, slotId: int, by: ArcActor): bool =
   val target = findSlot(s.slots, slotId)
-  by == ArcSystem and target.slotId == slotId
+  by == ArcSystem and slotId >= 0 and slotId < 10 and target.slotId == slotId
     and (target.phase == ResolvedYes or target.phase == ResolvedNo)
 
 pure def replaceMarket(s: NarrativeState, slotId: int, newOutcome: SecretOutcome, by: ArcActor): NarrativeState =
