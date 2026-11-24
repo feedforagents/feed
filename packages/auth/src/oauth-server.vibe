@@ -55,7 +55,8 @@ import {
   sha256Base64Url,
   sha256Hex
 } from "./crypto.vibe"
-import { AuthFailure, RateLimited, UnauthorizedError } from "./errors.vibe"
+import { AuthFailure, UnauthorizedError } from "./errors.vibe"
+import type { RateLimited } from "./errors.vibe"
 import { executeHttpJson } from "./http.vibe"
 import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
 import type { AuthRuntimeConfig, PlayMode } from "./phone-auth.vibe"

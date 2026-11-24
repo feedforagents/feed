@@ -631,6 +631,8 @@ pure def elapse(s: OAuthState, elapsed: AG::Millis): OAuthStep =
   }
 ```
 
+Approval attempts against the device flow are budgeted per account. A signed-in account may make at most 20 approval attempts per clock hour. An attempt is counted before the user code is looked up, so successful, denied, wrong-code and expired-code attempts all count; a request with an empty user code is refused before counting. When the budget is used up, the approval route refuses further attempts with a rate-limit error (HTTP 429) until the next hour. The budget is per account: one account using its budget does not change the budget of any other account. The window is the clock hour, so up to twice the budget (40 attempts) can fall inside one user code's 10-minute lifetime when the attempts straddle an hour boundary. The budget is defence in depth for the 4-digit user code; it raises the cost of guessing and does not make guessing impossible.
+
 ### Inductive OAuth invariants enforce PKCE S256, single-agent replacement, and token reuse revocation
 
 ```quint

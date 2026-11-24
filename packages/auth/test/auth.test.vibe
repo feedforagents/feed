@@ -726,6 +726,9 @@ it.effect('Device approval attempts are budgeted per account so pending user cod
     const cappedWrong = try refusedCode(approveDeviceAuthorization({ accountId, userCode: wrongCode, scopes: ["read"] }))
     const cappedCorrect = try refusedCode(approveDeviceAuthorization({ accountId, userCode: second.user_code, scopes: ["read"] }))
 
+    const other = try onboardViaPhone("+14155550178", "erin_device")
+    const approvedByOther = try approveDeviceAuthorization({ accountId: other.account.accountId, userCode: second.user_code, scopes: ["read"] })
+
     try TestClock.adjust("1 hour")
     const third = try startDeviceAuthorization({
       clientId: client.client_id,
@@ -742,6 +745,7 @@ it.effect('Device approval attempts are budgeted per account so pending user cod
         wrongAttempts: wrongCodes.length,
         cappedWrong,
         cappedCorrect,
+        approvedByOther: approvedByOther.approved,
         approvedAfterReset: approvedAfterReset.approved
       },
       {
@@ -750,6 +754,7 @@ it.effect('Device approval attempts are budgeted per account so pending user cod
         wrongAttempts: 19,
         cappedWrong: "rate_limited:device_approve",
         cappedCorrect: "rate_limited:device_approve",
+        approvedByOther: true,
         approvedAfterReset: true
       }
     ))
