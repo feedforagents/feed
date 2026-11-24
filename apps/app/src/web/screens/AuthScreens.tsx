@@ -251,7 +251,7 @@ export function AdminScreen() {
             </div>
             <Progress value={pct} aria-label="D-25 daily LLM spend budget" />
             <p className="text-xs text-muted-foreground">
-              Max steps {status?.spend.maxStepsAllowed ?? 4} · Batch {status?.spend.effectiveBatchSize ?? 6} · Remaining {`$${(status?.spend.remainingCents ?? 0) / 100}`}
+              Max steps {status?.spend.maxStepsAllowed ?? 4} · Batch {status?.spend.effectiveBatchSize ?? 6} · {`Remaining $${((status?.spend.remainingCents ?? 0) / 100).toFixed(2)}`}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

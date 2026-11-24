@@ -1,5 +1,5 @@
 // spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
-export { EngineFailure, type EngineErrorCode } from "./shared.vibe"
+export { EngineFailure, parseLlmJsonRecord, type EngineErrorCode } from "./shared.vibe"
 export {
   PromptCatalog,
   buildWorldContext,
@@ -39,6 +39,7 @@ export {
   advanceNarrativePhases,
   approveManualHold,
   ensureRollingMarketSlots,
+  loadPublicWorldSnapshot,
   overrideManualHold,
   publishPhaseClues,
   recoverExpiredMarkets,

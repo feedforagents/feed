@@ -1,5 +1,4 @@
 // spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"
-import { parseJsonModelRecord } from "@elizaos/core"
 import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
 import { resolvePredictionMarket, type MarketFailure } from "@repo/markets"
 import { organizations } from "@repo/pack-default"
@@ -15,7 +14,7 @@ import {
 } from "../gen/engine__narrativeArc.effect.vibe"
 import { generateCompletion } from "./llm-client.vibe"
 import { buildWorldContext, renderPrompt, type WorldContextMarketItem } from "./prompts.vibe"
-import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, resolveClockNow, sanitizeText } from "./shared.vibe"
+import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, parseLlmJsonRecord, resolveClockNow, sanitizeText } from "./shared.vibe"
 
 export const ROLLING_SLOT_TIMEFRAMES: ReadonlyArray<{ readonly timeframe: string; readonly durationMs: number }> = [
   { timeframe: "3d", durationMs: 3 * 86_400_000 },
@@ -151,7 +150,7 @@ export effect function advanceNarrativePhases(nowMs?: number): PhaseAdvanceResul
   })
 }
 
-export effect function loadPublicWorldSnapshot(tx: Tx): {
+export effect function loadPublicWorldSnapshot(tx: Tx, nowMs: number): {
   readonly currentDay: number
   readonly currentHour: number
   readonly phase: string
@@ -170,8 +169,9 @@ export effect function loadPublicWorldSnapshot(tx: Tx): {
   const marketRows = try tx.query(
     `SELECT id, question, category, timeframe, phase, yes_shares, no_shares, expires_at
      FROM feed_prediction_markets
-     WHERE status = 'open'
+     WHERE status = 'open' AND expires_at > $1
      ORDER BY slot_index ASC NULLS LAST, expires_at ASC`,
+    [nowMs],
   )
   const perpRows = try tx.query("SELECT ticker, mark_price_cents, index_price_cents, funding_rate_bps FROM feed_perp_markets ORDER BY ticker ASC LIMIT 12")
   const postRows = try tx.query(
@@ -229,7 +229,7 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
   const resolvedNow = try resolveClockNow(nowMs)
   const store = try Store
   const candidates = try store.transaction(effect (tx: Tx) => {
-    const snapshot = try loadPublicWorldSnapshot(tx)
+    const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
     const markets = try tx.query(
       `SELECT id, question, category, phase, created_at, expires_at
        FROM feed_prediction_markets
@@ -376,7 +376,7 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
        WHERE slot_index IS NOT NULL AND status IN ('open', 'expired', 'awaiting_proof', 'manual_hold')`,
     )
     const occupied = new Set(occupiedRows.map((r) => toInt(r.slot_index)))
-    const snapshot = try loadPublicWorldSnapshot(tx)
+    const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
     return { occupied, snapshot }
   })
   const createdIds: string[] = []
@@ -399,7 +399,7 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
       jsonMode: true,
       nowMs: resolvedNow,
     }) catch effect () => null
-    const parsed = completion ? parseJsonModelRecord(completion.text) : null
+    const parsed = completion ? parseLlmJsonRecord(completion.text) : null
     const fallbackSeed = hashString(`slot:${slotIndex}:${resolvedNow}`)
     const question = sanitizeText(
       typeof parsed?.question === "string" && parsed.question.trim().length > 8
@@ -434,7 +434,7 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
              id, slot_index, question, description, category, timeframe, phase,
              yes_shares, no_shares, liquidity_cents, secret_outcome, status, expires_at, created_at
            )
-           VALUES ($1, $2, $3, $4, $5, $6, 'opening', 1000, 1000, 100000, $7, 'open', $8, $9)`,
+           VALUES ($1, $2, $3, $4, $5, $6, 'opening', 50000, 50000, 50000, $7, 'open', $8, $9)`,
           [marketId, slotIndex, question, description, category, slotSpec.timeframe, secretOutcome, expiresAt, resolvedNow],
         )
         createdIds.push(marketId)
@@ -479,7 +479,7 @@ export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!
        LIMIT 5`,
       [resolvedNow],
     )
-    const snapshot = try loadPublicWorldSnapshot(tx)
+    const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
     return { due, worldContext: snapshot.worldContext }
   })
   let processed = 0
@@ -531,7 +531,7 @@ export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!
       allowOfflineFallback: true,
       nowMs: resolvedNow,
     }) catch effect () => null
-    const parsed = completion ? parseJsonModelRecord(completion.text) : null
+    const parsed = completion ? parseLlmJsonRecord(completion.text) : null
     const title = typeof parsed?.title === "string" && parsed.title.trim().length > 0 ? parsed.title.trim() : ""
     const summary = typeof parsed?.summary === "string" && parsed.summary.trim().length > 0 ? parsed.summary.trim() : ""
     const body = typeof parsed?.body === "string" && parsed.body.trim().length > 0 ? parsed.body.trim() : ""

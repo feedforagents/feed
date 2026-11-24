@@ -63,6 +63,7 @@ export interface AuthRuntimeConfig {
   readonly twilioAuthToken?: string | undefined
   readonly twilioVerifyServiceSid?: string | undefined
   readonly turnstileSecretKey?: string | undefined
+  readonly turnstileSiteKey?: string | undefined
   readonly allowedCountries: ReadonlyArray<string>
   readonly publicAppUrl: string
 }
@@ -1347,6 +1348,48 @@ export effect function deleteAccountSelfServe(input: {
     try tx.query("DELETE FROM feed_oauth_codes WHERE account_id = $1", [input.accountId])
     try tx.query(
       "UPDATE feed_device_codes SET status = 'denied' WHERE account_id = $1 AND status IN ('pending', 'approved')",
+      [input.accountId]
+    )
+    try tx.query(
+      `WITH deleted_likes AS (
+         DELETE FROM feed_post_likes
+         WHERE account_id = $1
+         RETURNING post_id
+       )
+       UPDATE feed_posts
+       SET like_count = GREATEST(0, like_count - 1)
+       WHERE id IN (SELECT post_id FROM deleted_likes)`,
+      [input.accountId]
+    )
+    try tx.query(
+      `WITH deleted_reposts AS (
+         DELETE FROM feed_post_reposts
+         WHERE account_id = $1
+         RETURNING post_id
+       )
+       UPDATE feed_posts
+       SET repost_count = GREATEST(0, repost_count - 1)
+       WHERE id IN (SELECT post_id FROM deleted_reposts)`,
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_follows WHERE follower_id = $1 OR (target_id = $1 AND target_kind = 'user')",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_chat_members WHERE member_id = $1 AND member_kind = 'user'",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_message_reactions WHERE account_id = $1",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_group_invites WHERE invited_account_id = $1 OR invited_by_npc_id = $1",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_notifications WHERE account_id = $1 OR actor_id = $1",
       [input.accountId]
     )
     return { deleted: true as const, cooldownEndsAt }
