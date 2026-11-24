@@ -4,10 +4,34 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { loadFeed } from "../src/web/store-world.ts";
 
 const latestPost = { id: "latest-post", content: "Latest timeline post" };
 const latestMorePost = { id: "latest-more-post", content: "Latest timeline continued post" };
+const latestRefreshedPost = { id: "latest-refreshed-post", content: "Latest timeline refreshed post" };
 const topPost = { id: "top-post", content: "Top timeline post" };
+
+async function releaseAndWait(release: () => void): Promise<void> {
+  await act(async () => {
+    release();
+    await Promise.resolve();
+  });
+}
+
+async function gatedResponse(
+  started: Array<PromiseWithResolvers<void>>,
+  releases: Array<PromiseWithResolvers<void>>,
+  makeResponse: (index: number) => Response,
+): Promise<Response> {
+  const index = started.length;
+  const gate = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  started.push(gate);
+  releases.push(release);
+  gate.resolve();
+  await release.promise;
+  return makeResponse(index);
+}
 
 it('Keeps the displayed timeline aligned with the active Home tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   class IdleEventSource extends EventTarget {
@@ -17,6 +41,9 @@ it('Keeps the displayed timeline aligned with the active Home tab (spec/app/navi
   const releaseLoadMore = Promise.withResolvers<void>();
   const topStarted: Array<PromiseWithResolvers<void>> = [];
   const topReleases: Array<PromiseWithResolvers<void>> = [];
+  const latestStarted: Array<PromiseWithResolvers<void>> = [];
+  const latestReleases: Array<PromiseWithResolvers<void>> = [];
+  let holdLatest = false;
   vi.stubGlobal("EventSource", IdleEventSource);
   vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -29,16 +56,14 @@ it('Keeps the displayed timeline aligned with the active Home tab (spec/app/navi
       return Response.json({ items: [latestMorePost], nextCursor: null });
     }
     if (url.pathname === "/api/feed" && url.searchParams.get("tab") === "latest") {
+      if (holdLatest) {
+        return gatedResponse(latestStarted, latestReleases, (index) =>
+          Response.json({ items: [index === 0 ? latestPost : latestRefreshedPost], nextCursor: "latest-cursor-1" }));
+      }
       return Response.json({ items: [latestPost], nextCursor: "latest-cursor-1" });
     }
     if (url.pathname === "/api/feed" && url.searchParams.get("tab") === "top") {
-      const started = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      topStarted.push(started);
-      topReleases.push(release);
-      started.resolve();
-      await release.promise;
-      return Response.json({ items: [topPost], nextCursor: null });
+      return gatedResponse(topStarted, topReleases, () => Response.json({ items: [topPost], nextCursor: null }));
     }
     return Response.json({}, { status: 404 });
   });
@@ -50,30 +75,27 @@ it('Keeps the displayed timeline aligned with the active Home tab (spec/app/navi
     await act(() => Promise.resolve(root.render(<App />)));
     const latest = page.getByText("Latest timeline post", { exact: true });
     const latestMore = page.getByText("Latest timeline continued post", { exact: true });
+    const latestRefreshed = page.getByText("Latest timeline refreshed post", { exact: true });
     const top = page.getByText("Top timeline post", { exact: true });
+    async function expectTimeline(shown: typeof latest, hidden: typeof latest): Promise<void> {
+      await expect.element(shown).toBeInTheDocument();
+      await expect.element(hidden).not.toBeInTheDocument();
+    }
     await expect.element(latest).toBeInTheDocument();
 
     await act(() => userEvent.click(page.getByRole("button", { name: "Load more", exact: true })));
     await loadMoreStarted.promise;
     await act(() => userEvent.click(page.getByRole("tab", { name: "Top", exact: true })));
     await topStarted[0].promise;
-    await act(async () => {
-      releaseLoadMore.resolve();
-      await Promise.resolve();
-    });
+    await releaseAndWait(() => releaseLoadMore.resolve());
     await expect.element(latestMore).not.toBeInTheDocument();
     await expect.element(latest).not.toBeInTheDocument();
 
-    await act(async () => {
-      topReleases[0].resolve();
-      await Promise.resolve();
-    });
-    await expect.element(top).toBeInTheDocument();
-    await expect.element(latest).not.toBeInTheDocument();
+    await releaseAndWait(() => topReleases[0].resolve());
+    await expectTimeline(top, latest);
 
     await act(() => userEvent.click(page.getByRole("tab", { name: "Latest", exact: true })));
-    await expect.element(latest).toBeInTheDocument();
-    await expect.element(top).not.toBeInTheDocument();
+    await expectTimeline(latest, top);
 
     await act(() => userEvent.click(page.getByRole("tab", { name: "Top", exact: true })));
     await topStarted[1].promise;
@@ -81,15 +103,25 @@ it('Keeps the displayed timeline aligned with the active Home tab (spec/app/navi
 
     await act(() => userEvent.click(page.getByRole("tab", { name: "Latest", exact: true })));
     await expect.element(latest).toBeInTheDocument();
-    await act(async () => {
-      topReleases[1].resolve();
-      await Promise.resolve();
-    });
-    await expect.element(latest).toBeInTheDocument();
-    await expect.element(top).not.toBeInTheDocument();
+    await releaseAndWait(() => topReleases[1].resolve());
+    await expectTimeline(latest, top);
+
+    holdLatest = true;
+    const olderLoad = loadFeed();
+    const newerLoad = loadFeed();
+    await latestStarted[0].promise;
+    await latestStarted[1].promise;
+    await releaseAndWait(() => latestReleases[1].resolve());
+    await expect.element(latestRefreshed).toBeInTheDocument();
+    await releaseAndWait(() => latestReleases[0].resolve());
+    await expect.element(latestRefreshed).toBeInTheDocument();
+    await expect.element(latest).not.toBeInTheDocument();
+    await olderLoad;
+    await newerLoad;
   } finally {
     releaseLoadMore.resolve();
     for (const release of topReleases) release.resolve();
+    for (const release of latestReleases) release.resolve();
     await act(() => Promise.resolve(root.unmount()));
     container.remove();
     window.history.replaceState(null, "", oldPath);
