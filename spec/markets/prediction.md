@@ -129,6 +129,13 @@ pure def yesOddsBps(yesR: int, noR: int): int =
   val total = yesR + noR
   if (total <= 0) 5000 else (noR * BPS_DENOMINATOR) / total
 
+pure def oddsWithinBoundsOrUnwinding(oldOdds: int, newOdds: int): bool =
+  or {
+    newOdds >= ODDS_HARD_FLOOR_BPS and newOdds <= ODDS_HARD_CEILING_BPS,
+    oldOdds < ODDS_HARD_FLOOR_BPS and newOdds > oldOdds and newOdds < ODDS_HARD_FLOOR_BPS,
+    oldOdds > ODDS_HARD_CEILING_BPS and newOdds < oldOdds and newOdds > ODDS_HARD_CEILING_BPS,
+  }
+
 pure def buyNextYesReserve(yesR: int, noR: int, side: Side, netUnits: int): int =
   if (yesR <= 0 or noR <= 0 or netUnits <= 0) yesR
   else if (side == Yes) ceilDiv(yesR * noR, noR + netUnits)
@@ -238,7 +245,7 @@ pure def openMarket(m: PredictionMarket, slot: MarketSlot, secretOutcome: Secret
 
 ### Buying YES or NO shares requires an open non-expired market, sufficient balance, and bounded odds impact
 
-The canonical `10 bps` fee is computed on the gross input (`amountCents`), recorded in `feeLedgerCents`, and the remaining `netCents` mints complete sets and swaps along the CPMM curve.
+The canonical `10 bps` fee is computed on the gross input (`amountCents`), recorded in `feeLedgerCents`, and the remaining `netCents` mints complete sets and swaps along the CPMM curve. Post-trade odds must remain within `[200, 9800]` bps, except when an already-extreme pool (`< 200` or `> 9800` bps) unwinds strictly toward `5000` bps without flipping past the opposite bound, and single-trade odds movement cannot exceed `MAX_ODDS_MOVE_BPS`.
 
 ```quint
 pure def canBuy(m: PredictionMarket, traderId: str, side: Side, amountCents: Cents): bool =
@@ -262,8 +269,7 @@ pure def canBuy(m: PredictionMarket, traderId: str, side: Side, amountCents: Cen
     nextYes > 0,
     nextNo > 0,
     sharesOut > 0,
-    newOdds >= ODDS_HARD_FLOOR_BPS,
-    newOdds <= ODDS_HARD_CEILING_BPS,
+    oddsWithinBoundsOrUnwinding(oldOdds, newOdds),
     absInt(newOdds - oldOdds) <= MAX_ODDS_MOVE_BPS,
   }
 
@@ -298,7 +304,7 @@ pure val eval_refuse_canBuy = { traderId: "alice", side: Yes, amountCents: -1 }
 
 ### Selling shares floors gross proceeds to whole cents before charging the canonical fee
 
-Sub-cent remainders stay in house liquidity; if settled proceeds are `1 cent`, the `1 cent` round-up fee yields `0` net credit. A sell quote is refused when its resulting reserves fall below the market’s constant-product floor.
+Sub-cent remainders stay in house liquidity; if settled proceeds are `1 cent`, the `1 cent` round-up fee yields `0` net credit. A sell quote is refused when its resulting reserves fall below the market’s constant-product floor. Sells enforce the same `[200, 9800]` bps bounds (allowing extreme unwind toward `5000` bps without cross-center flips) and cap single-trade movement at `MAX_ODDS_MOVE_BPS` except on full-position exits (`sellShares == held`).
 
 ```quint
 pure def canSell(m: PredictionMarket, traderId: str, side: Side, sellShares: int): bool =
@@ -308,6 +314,9 @@ pure def canSell(m: PredictionMarket, traderId: str, side: Side, sellShares: int
   val settledCents = floorCents(grossUnits, SUBCENTS_PER_CENT)
   val nextYes = if (side == Yes) m.yesReserve + sellShares - grossUnits else m.yesReserve - grossUnits
   val nextNo = if (side == Yes) m.noReserve - grossUnits else m.noReserve + sellShares - grossUnits
+  val oldOdds = yesOddsBps(m.yesReserve, m.noReserve)
+  val newOdds = yesOddsBps(nextYes, nextNo)
+  val isFullExit = sellShares == held
   and {
     m.phase == Trading,
     m.now < m.closeAt,
@@ -320,6 +329,8 @@ pure def canSell(m: PredictionMarket, traderId: str, side: Side, sellShares: int
     nextYes > 0,
     nextNo > 0,
     nextYes * nextNo >= m.initialK,
+    oddsWithinBoundsOrUnwinding(oldOdds, newOdds),
+    isFullExit or absInt(newOdds - oldOdds) <= MAX_ODDS_MOVE_BPS,
   }
 
 pure def sell(m: PredictionMarket, traderId: str, side: Side, sellShares: int): PredictionMarket =

@@ -1,6 +1,7 @@
 // spec/markets/economy.md, "Story: Verify account and claim initial grant once"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
 import { Store, type StoreFailure, toInt, toText, type Tx } from "@repo/db"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
+import { BPS_DENOMINATOR } from "../gen/shared__money.effect.vibe"
 import {
   equityCents,
   isWashingtonBlocked,
@@ -12,9 +13,11 @@ import {
   type PlayerLedger,
   type PurchasePack
 } from "../gen/markets__economy.effect.vibe"
+import { yesOddsBps } from "../gen/markets__prediction.effect.vibe"
 import { positionEquityAtMark } from "../gen/markets__spotPerp.effect.vibe"
 import {
   type MarketFailure,
+  insertLedgerEntry,
   marketFail,
   newMarketId,
   optionalText,
@@ -318,6 +321,12 @@ function buildLedger(
   }
 }
 
+function markToMarketPredictionCents(side: unknown, shares: number, yesShares: number, noShares: number): number {
+  const yesPriceBps = yesOddsBps(yesShares, noShares)
+  const sidePriceBps = toText(side)?.toUpperCase() === "NO" ? BPS_DENOMINATOR - yesPriceBps : yesPriceBps
+  return Math.floor((shares * sidePriceBps) / BPS_DENOMINATOR)
+}
+
 export effect function getAccountEconomy(accountId: string): AccountEconomyView!(MarketFailure | StoreFailure)!Store {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
@@ -332,11 +341,16 @@ export effect function getAccountEconomy(accountId: string): AccountEconomyView!
     }
     const acct = accountRows[0]!
     const predRows = try tx.query(
-      `SELECT COALESCE(SUM(cost_basis_cents), 0) AS total_cost
-       FROM feed_prediction_positions
-       WHERE holder_id = $1 AND holder_kind = 'user' AND settled_at IS NULL AND shares > 0`,
+      `SELECT p.side, p.shares, m.yes_shares, m.no_shares
+       FROM feed_prediction_positions p
+       JOIN feed_prediction_markets m ON m.id = p.market_id
+       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`,
       [accountId]
     )
+    let predValueCents = 0
+    for (const row of predRows) {
+      predValueCents += markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
+    }
     const perpRows = try tx.query(
       `SELECT p.holder_id, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
        FROM feed_perp_positions p
@@ -349,7 +363,7 @@ export effect function getAccountEconomy(accountId: string): AccountEconomyView!
       const equity = positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents))
       perpValueCents += Math.max(0, equity)
     }
-    const positionValueCents = toInt(predRows[0]?.total_cost) + perpValueCents
+    const positionValueCents = predValueCents + perpValueCents
     const balanceCents = toInt(acct.balance_cents)
     const startingGrantCents = toInt(acct.starting_grant_cents)
     const purchasedCents = toInt(acct.purchased_cents)
@@ -520,6 +534,32 @@ function readMetaString(metadata: unknown, key: string): string | undefined {
   return toText(record[key])
 }
 
+function extractPaymentIntentId(obj: Readonly<Record<string, unknown>>): string | null {
+  const raw = obj.payment_intent
+  if (typeof raw === "string") {
+    const trimmed = raw.trim()
+    return trimmed === "" ? null : trimmed
+  }
+  if (raw !== null && typeof raw === "object") {
+    const id = toText((raw as Record<string, unknown>).id)?.trim()
+    return id !== undefined && id !== "" ? id : null
+  }
+  return null
+}
+
+function unprocessedWebhookResult(eventType: string, sessionId: string | null = null): StripeWebhookResult {
+  return {
+    received: true,
+    processed: false,
+    alreadyCompleted: false,
+    eventType,
+    accountId: null,
+    sessionId,
+    creditedCents: 0,
+    balanceAfterCents: null
+  }
+}
+
 effect function alreadyCompletedWebhookResult(
   tx: Tx,
   eventType: string,
@@ -536,6 +576,224 @@ effect function alreadyCompletedWebhookResult(
     sessionId,
     creditedCents: 0,
     balanceAfterCents: acctRows.length > 0 ? toInt(acctRows[0]?.balance_cents) : null
+  }
+}
+
+effect function applyStripeReversalTx(
+  tx: Tx,
+  params: {
+    readonly eventId: string
+    readonly eventType: string
+    readonly kind: "refund" | "dispute"
+    readonly paymentIntentId: string
+    readonly disputeId: string | null
+    readonly amountUsdCents: number
+    readonly isCumulativeRefund: boolean
+    readonly now: number
+  }
+): StripeWebhookResult!(MarketFailure | StoreFailure) {
+  const purchaseRows = try tx.query(
+    `SELECT id, account_id, stripe_session_id, points_cents, refunded_cents
+     FROM feed_stripe_purchases
+     WHERE payment_intent_id = $1 AND status = 'completed'
+     FOR UPDATE`,
+    [params.paymentIntentId]
+  )
+  if (purchaseRows.length === 0) {
+    return unprocessedWebhookResult(params.eventType)
+  }
+  const purchase = purchaseRows[0]!
+  const purchaseId = requiredText(purchase.id)
+  const accountId = requiredText(purchase.account_id)
+  const sessionId = requiredText(purchase.stripe_session_id)
+  const purchasePointsCents = toInt(purchase.points_cents)
+  const prevRefundedUsdCents = toInt(purchase.refunded_cents)
+  const acctRows = try tx.query(
+    "SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE",
+    [accountId]
+  )
+  if (acctRows.length === 0) {
+    throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
+  }
+  const currentBalanceCents = toInt(acctRows[0]!.balance_cents)
+  const existingReversal = params.disputeId !== null
+    ? try tx.query(
+        "SELECT id FROM feed_stripe_reversals WHERE stripe_event_id = $1 OR dispute_id = $2 LIMIT 1",
+        [params.eventId, params.disputeId]
+      )
+    : try tx.query(
+        "SELECT id FROM feed_stripe_reversals WHERE stripe_event_id = $1 LIMIT 1",
+        [params.eventId]
+      )
+  if (existingReversal.length > 0) {
+    return try alreadyCompletedWebhookResult(tx, params.eventType, accountId, sessionId)
+  }
+  let deltaUsdCents = params.amountUsdCents
+  if (params.isCumulativeRefund) {
+    deltaUsdCents = Math.max(0, params.amountUsdCents - prevRefundedUsdCents)
+    const nextRefundedUsdCents = Math.max(prevRefundedUsdCents, params.amountUsdCents)
+    if (nextRefundedUsdCents !== prevRefundedUsdCents) {
+      try tx.query(
+        "UPDATE feed_stripe_purchases SET refunded_cents = $2 WHERE id = $1",
+        [purchaseId, nextRefundedUsdCents]
+      )
+    }
+  }
+  const netReversedRows = try tx.query(
+    "SELECT COALESCE(SUM(debited_pts_cents - restored_pts_cents), 0) AS net_reversed FROM feed_stripe_reversals WHERE purchase_id = $1",
+    [purchaseId]
+  )
+  const netReversedPtsCents = toInt(netReversedRows[0]?.net_reversed)
+  const remainingCapPtsCents = Math.max(0, purchasePointsCents - netReversedPtsCents)
+  const desiredDebitPtsCents = deltaUsdCents * 100
+  const cappedDebitPtsCents = Math.min(desiredDebitPtsCents, remainingCapPtsCents)
+  const actualDebitPtsCents = Math.min(currentBalanceCents, cappedDebitPtsCents)
+  try tx.query(
+    `INSERT INTO feed_stripe_reversals
+       (id, purchase_id, account_id, stripe_event_id, dispute_id, kind, amount_cents, debited_pts_cents, restored_event_id, restored_pts_cents, restored_at, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 0, NULL, $9)`,
+    [
+      newMarketId(),
+      purchaseId,
+      accountId,
+      params.eventId,
+      params.disputeId,
+      params.kind,
+      deltaUsdCents,
+      actualDebitPtsCents,
+      params.now
+    ]
+  )
+  let balanceAfterCents = currentBalanceCents
+  if (actualDebitPtsCents > 0) {
+    const updatedAccount = try tx.query(
+      `UPDATE feed_accounts
+       SET balance_cents = balance_cents - $2,
+           purchased_cents = GREATEST(0, purchased_cents - $2),
+           updated_at = $3
+       WHERE account_id = $1
+       RETURNING balance_cents`,
+      [accountId, actualDebitPtsCents, params.now]
+    )
+    balanceAfterCents = toInt(updatedAccount[0]!.balance_cents)
+    const ledgerKind = params.kind === "refund" ? "stripe_refund" : "stripe_dispute"
+    const ledgerId = params.kind === "dispute" && params.disputeId !== null
+      ? `stripe_dispute:${params.disputeId}`
+      : `stripe_refund:${params.eventId}`
+    try insertLedgerEntry(tx, {
+      ledgerId,
+      accountId,
+      kind: ledgerKind,
+      deltaCents: 0 - actualDebitPtsCents,
+      balanceAfterCents,
+      refId: params.disputeId ?? params.paymentIntentId,
+      createdAt: params.now
+    })
+  }
+  return {
+    received: true,
+    processed: true,
+    alreadyCompleted: false,
+    eventType: params.eventType,
+    accountId,
+    sessionId,
+    creditedCents: 0 - actualDebitPtsCents,
+    balanceAfterCents
+  }
+}
+
+effect function handleDisputeWonTx(
+  tx: Tx,
+  params: {
+    readonly eventId: string
+    readonly eventType: string
+    readonly disputeId: string
+    readonly paymentIntentId: string | null
+    readonly now: number
+  }
+): StripeWebhookResult!(MarketFailure | StoreFailure) {
+  const reversalRows = try tx.query(
+    `SELECT r.id, r.account_id, r.debited_pts_cents, r.restored_at, p.stripe_session_id
+     FROM feed_stripe_reversals r
+     JOIN feed_stripe_purchases p ON p.id = r.purchase_id
+     WHERE r.dispute_id = $1 AND r.kind = 'dispute'
+     FOR UPDATE OF r, p`,
+    [params.disputeId]
+  )
+  if (reversalRows.length === 0) {
+    if (params.paymentIntentId !== null) {
+      const purchaseRows = try tx.query(
+        "SELECT id FROM feed_stripe_purchases WHERE payment_intent_id = $1 AND status = 'completed' LIMIT 1",
+        [params.paymentIntentId]
+      )
+      if (purchaseRows.length === 0) {
+        return unprocessedWebhookResult(params.eventType)
+      }
+    }
+    throw marketFail(
+      "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING",
+      `Dispute debit not yet recorded for won dispute ${params.disputeId}`
+    )
+  }
+  const reversal = reversalRows[0]!
+  const reversalId = requiredText(reversal.id)
+  const accountId = requiredText(reversal.account_id)
+  const sessionId = requiredText(reversal.stripe_session_id)
+  const debitedPtsCents = toInt(reversal.debited_pts_cents)
+  const acctRows = try tx.query(
+    "SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE",
+    [accountId]
+  )
+  if (acctRows.length === 0) {
+    throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
+  }
+  const currentBalanceCents = toInt(acctRows[0]!.balance_cents)
+  if (reversal.restored_at !== null) {
+    return try alreadyCompletedWebhookResult(tx, params.eventType, accountId, sessionId)
+  }
+  const marked = try tx.query(
+    `UPDATE feed_stripe_reversals
+     SET restored_event_id = $2,
+         restored_pts_cents = $3,
+         restored_at = $4
+     WHERE id = $1 AND restored_at IS NULL
+     RETURNING id`,
+    [reversalId, params.eventId, debitedPtsCents, params.now]
+  )
+  if (marked.length === 0) {
+    return try alreadyCompletedWebhookResult(tx, params.eventType, accountId, sessionId)
+  }
+  let balanceAfterCents = currentBalanceCents
+  if (debitedPtsCents > 0) {
+    const updatedAccount = try tx.query(
+      `UPDATE feed_accounts
+       SET balance_cents = balance_cents + $2,
+           purchased_cents = purchased_cents + $2,
+           updated_at = $3
+       WHERE account_id = $1
+       RETURNING balance_cents`,
+      [accountId, debitedPtsCents, params.now]
+    )
+    balanceAfterCents = toInt(updatedAccount[0]!.balance_cents)
+    try insertLedgerEntry(tx, {
+      ledgerId: `stripe_dispute_won:${params.disputeId}`,
+      accountId,
+      kind: "stripe_dispute_won",
+      deltaCents: debitedPtsCents,
+      balanceAfterCents,
+      refId: params.disputeId,
+      createdAt: params.now
+    })
+  }
+  return {
+    received: true,
+    processed: true,
+    alreadyCompleted: false,
+    eventType: params.eventType,
+    accountId,
+    sessionId,
+    creditedCents: debitedPtsCents,
+    balanceAfterCents
   }
 }
 
@@ -564,39 +822,87 @@ export effect function handleStripeWebhook(
   if (event === undefined) {
     throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Webhook body does not match Stripe event shape")
   }
-  if (event.type !== "checkout.session.completed" && event.type !== "checkout.session.async_payment_succeeded") {
-    return {
-      received: true,
-      processed: false,
-      alreadyCompleted: false,
-      eventType: event.type,
-      accountId: null,
-      sessionId: null,
-      creditedCents: 0,
-      balanceAfterCents: null
+  if (event.type === "charge.refunded") {
+    const paymentIntentId = extractPaymentIntentId(event.data.object)
+    const amountRefundedUsdCents = toInt(event.data.object.amount_refunded)
+    if (Number.isNaN(amountRefundedUsdCents) || amountRefundedUsdCents < 0) {
+      throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Charge refund missing valid amount_refunded")
     }
+    if (paymentIntentId === null) {
+      return unprocessedWebhookResult(event.type)
+    }
+    return try store.transaction(effect (tx: Tx) =>
+      try applyStripeReversalTx(tx, {
+        eventId: event.id,
+        eventType: event.type,
+        kind: "refund",
+        paymentIntentId,
+        disputeId: null,
+        amountUsdCents: amountRefundedUsdCents,
+        isCumulativeRefund: true,
+        now
+      })
+    )
+  }
+  if (event.type === "charge.dispute.created") {
+    const disputeId = toText(event.data.object.id)?.trim() ?? ""
+    const amountUsdCents = toInt(event.data.object.amount)
+    if (disputeId === "" || Number.isNaN(amountUsdCents) || amountUsdCents < 0) {
+      throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Dispute created missing id or valid amount")
+    }
+    const paymentIntentId = extractPaymentIntentId(event.data.object)
+    if (paymentIntentId === null) {
+      return unprocessedWebhookResult(event.type)
+    }
+    return try store.transaction(effect (tx: Tx) =>
+      try applyStripeReversalTx(tx, {
+        eventId: event.id,
+        eventType: event.type,
+        kind: "dispute",
+        paymentIntentId,
+        disputeId,
+        amountUsdCents,
+        isCumulativeRefund: false,
+        now
+      })
+    )
+  }
+  if (event.type === "charge.dispute.closed") {
+    const disputeId = toText(event.data.object.id)?.trim() ?? ""
+    const status = toText(event.data.object.status)?.trim().toLowerCase() ?? ""
+    if (disputeId === "") {
+      throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Dispute closed missing id")
+    }
+    if (status !== "won") {
+      return unprocessedWebhookResult(event.type)
+    }
+    const paymentIntentId = extractPaymentIntentId(event.data.object)
+    return try store.transaction(effect (tx: Tx) =>
+      try handleDisputeWonTx(tx, {
+        eventId: event.id,
+        eventType: event.type,
+        disputeId,
+        paymentIntentId,
+        now
+      })
+    )
+  }
+  if (event.type !== "checkout.session.completed" && event.type !== "checkout.session.async_payment_succeeded") {
+    return unprocessedWebhookResult(event.type)
   }
   const sessionObj = event.data.object
   const sessionId = toText(sessionObj.id)
   const paymentStatus = toText(sessionObj.payment_status)
+  const paymentIntentId = extractPaymentIntentId(sessionObj)
   if (!sessionId) {
     throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Checkout session missing id")
   }
   if (paymentStatus !== "paid") {
-    return {
-      received: true,
-      processed: false,
-      alreadyCompleted: false,
-      eventType: event.type,
-      accountId: null,
-      sessionId,
-      creditedCents: 0,
-      balanceAfterCents: null
-    }
+    return unprocessedWebhookResult(event.type, sessionId)
   }
   return try store.transaction(effect (tx: Tx) => {
     const existingRows = try tx.query(
-      "SELECT id, account_id, points_cents, status FROM feed_stripe_purchases WHERE stripe_session_id = $1 FOR UPDATE",
+      "SELECT id, account_id, points_cents, status, payment_intent_id FROM feed_stripe_purchases WHERE stripe_session_id = $1 FOR UPDATE",
       [sessionId]
     )
     let accountId: string
@@ -609,12 +915,18 @@ export effect function handleStripeWebhook(
         throw marketFail("REGION_BLOCKED", "Purchase was blocked in Washington")
       }
       if (status === "completed") {
+        if (existing.payment_intent_id === null && paymentIntentId !== null) {
+          try tx.query(
+            "UPDATE feed_stripe_purchases SET payment_intent_id = $2 WHERE id = $1 AND payment_intent_id IS NULL",
+            [requiredText(existing.id), paymentIntentId]
+          )
+        }
         return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
       }
       pointsCents = toInt(existing.points_cents)
       const updatedPurchase = try tx.query(
-        "UPDATE feed_stripe_purchases SET status = 'completed', completed_at = $2 WHERE stripe_session_id = $1 AND status = 'pending' RETURNING id",
-        [sessionId, now]
+        "UPDATE feed_stripe_purchases SET status = 'completed', payment_intent_id = COALESCE(payment_intent_id, $3), completed_at = $2 WHERE stripe_session_id = $1 AND status = 'pending' RETURNING id",
+        [sessionId, now, paymentIntentId]
       )
       if (updatedPurchase.length === 0) {
         return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
@@ -630,11 +942,11 @@ export effect function handleStripeWebhook(
       pointsCents = resolvedPack.pointsCents
       const inserted = try tx.query(
         `INSERT INTO feed_stripe_purchases
-         (id, account_id, stripe_session_id, pack_usd, points_cents, status, billing_state, ip_region, created_at, completed_at)
-         VALUES ($1, $2, $3, $4, $5, 'completed', NULL, NULL, $6, $6)
+         (id, account_id, stripe_session_id, payment_intent_id, pack_usd, points_cents, status, billing_state, ip_region, created_at, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'completed', NULL, NULL, $7, $7)
          ON CONFLICT (stripe_session_id) DO NOTHING
          RETURNING id`,
-        [newMarketId(), accountId, sessionId, resolvedPack.usd, pointsCents, now]
+        [newMarketId(), accountId, sessionId, paymentIntentId, resolvedPack.usd, pointsCents, now]
       )
       if (inserted.length === 0) {
         return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
@@ -657,12 +969,15 @@ export effect function handleStripeWebhook(
       [accountId, pointsCents, now]
     )
     const balanceAfterCents = toInt(updatedAccount[0]!.balance_cents)
-    try tx.query(
-      `INSERT INTO feed_point_ledger (id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at)
-       VALUES ($1, $2, 'stripe_purchase', $3, $4, $5, $6)
-       ON CONFLICT (id) DO NOTHING`,
-      [`stripe_purchase:${sessionId}`, accountId, pointsCents, balanceAfterCents, sessionId, now]
-    )
+    try insertLedgerEntry(tx, {
+      ledgerId: `stripe_purchase:${sessionId}`,
+      accountId,
+      kind: "stripe_purchase",
+      deltaCents: pointsCents,
+      balanceAfterCents,
+      refId: sessionId,
+      createdAt: now
+    })
     return {
       received: true,
       processed: true,
@@ -681,19 +996,24 @@ export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntr
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const accounts = try tx.query(
-      `SELECT account_id, handle, display_name, avatar_url, phone_verified_at, balance_cents, starting_grant_cents, purchased_cents
-       FROM feed_accounts
-       WHERE phone_verified_at IS NOT NULL`
+      `SELECT fa.account_id, fa.handle, fa.display_name, fa.avatar_url, fa.phone_verified_at, fa.balance_cents, fa.starting_grant_cents, fa.purchased_cents
+       FROM feed_accounts fa
+       LEFT JOIN accounts a ON a.key = fa.account_id
+       WHERE fa.is_reviewer = false
+         AND fa.phone_verified_at IS NOT NULL
+         AND (a.key IS NULL OR a.status = 'active')`
     )
-    const predValues = try tx.query(
-      `SELECT holder_id, COALESCE(SUM(cost_basis_cents), 0) AS total_cost
-       FROM feed_prediction_positions
-       WHERE holder_kind = 'user' AND settled_at IS NULL AND shares > 0
-       GROUP BY holder_id`
+    const predRows = try tx.query(
+      `SELECT p.holder_id, p.side, p.shares, m.yes_shares, m.no_shares
+       FROM feed_prediction_positions p
+       JOIN feed_prediction_markets m ON m.id = p.market_id
+       WHERE p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`
     )
     const predMap = new Map<string, number>()
-    for (const row of predValues) {
-      predMap.set(requiredText(row.holder_id), toInt(row.total_cost))
+    for (const row of predRows) {
+      const holderId = requiredText(row.holder_id)
+      const mtm = markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
+      predMap.set(holderId, (predMap.get(holderId) ?? 0) + mtm)
     }
     const perpRows = try tx.query(
       `SELECT p.holder_id, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
@@ -722,12 +1042,16 @@ export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntr
     }
     const predStatsRows = try tx.query(
       `SELECT
-         holder_id,
+         p.holder_id,
          COUNT(*) AS settled_count,
-         SUM(CASE WHEN payout_cents > cost_basis_cents THEN 1 ELSE 0 END) AS wins
-       FROM feed_prediction_positions
-       WHERE holder_kind = 'user' AND settled_at IS NOT NULL
-       GROUP BY holder_id`
+         SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins
+       FROM feed_prediction_positions p
+       JOIN feed_prediction_markets m ON m.id = p.market_id
+       WHERE p.holder_kind = 'user'
+         AND p.settled_at IS NOT NULL
+         AND p.shares > 0
+         AND m.status = 'resolved'
+       GROUP BY p.holder_id`
     )
     const perpStatsRows = try tx.query(
       `SELECT

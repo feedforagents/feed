@@ -29,6 +29,16 @@ export function normalizeViaClient(viaClientName?: string): string | null {
   return trimmed === "" ? null : trimmed
 }
 
+export effect function normalizeIdempotencyKey(raw?: string): (string | null)!MarketFailure {
+  if (raw === undefined) return null
+  const trimmed = raw.trim()
+  if (trimmed === "") return null
+  if (trimmed.length > 255) {
+    throw marketFail("INVALID_IDEMPOTENCY_KEY", "Idempotency-Key must be at most 255 characters")
+  }
+  return trimmed
+}
+
 export effect function assertSafePositiveInt(value: number, code: string, message: string): void!MarketFailure {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw marketFail(code, message)
@@ -158,12 +168,17 @@ export interface TradeInsertInput {
   readonly sharesOrSize: number
   readonly priceCents: number
   readonly viaClientName: string | null
+  readonly idempotencyKey?: string | null
+  readonly requestFingerprint?: string | null
+  readonly receiptJson?: string | null
   readonly createdAt: number
 }
 
 export effect function insertTradeRecord(tx: Tx, input: TradeInsertInput): void!StoreFailure {
   try tx.query(
-    "INSERT INTO feed_trades (id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, via_client_name, idempotency_key, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12)",
+    `INSERT INTO feed_trades
+       (id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, via_client_name, idempotency_key, request_fingerprint, receipt_json, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
     [
       input.tradeId,
       input.traderId,
@@ -176,6 +191,9 @@ export effect function insertTradeRecord(tx: Tx, input: TradeInsertInput): void!
       input.sharesOrSize,
       input.priceCents,
       input.viaClientName,
+      input.idempotencyKey ?? null,
+      input.requestFingerprint ?? null,
+      input.receiptJson ?? null,
       input.createdAt
     ]
   )

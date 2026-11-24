@@ -403,6 +403,7 @@ CREATE TABLE IF NOT EXISTS feed_reports (
   status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reviewed', 'dismissed')),
   created_at bigint NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS feed_reports_open_unique_idx ON feed_reports (reporter_id, target_kind, target_id) WHERE status = 'open';
 
 CREATE TABLE IF NOT EXISTS feed_notifications (
   id text PRIMARY KEY,
@@ -573,11 +574,14 @@ CREATE TABLE IF NOT EXISTS feed_trades (
   shares_or_size bigint NOT NULL,
   price_cents bigint NOT NULL CHECK (price_cents >= 0),
   via_client_name text,
-  idempotency_key text UNIQUE,
+  idempotency_key text,
+  request_fingerprint text,
+  receipt_json text,
   created_at bigint NOT NULL
 );
 CREATE INDEX IF NOT EXISTS feed_trades_trader_idx ON feed_trades (trader_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS feed_trades_market_idx ON feed_trades (market_kind, market_ref, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS feed_trades_trader_idempotency_idx ON feed_trades (trader_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS feed_point_ledger (
   id text PRIMARY KEY,
@@ -594,8 +598,10 @@ CREATE TABLE IF NOT EXISTS feed_stripe_purchases (
   id text PRIMARY KEY,
   account_id text NOT NULL REFERENCES feed_accounts (account_id),
   stripe_session_id text NOT NULL UNIQUE,
+  payment_intent_id text,
   pack_usd integer NOT NULL CHECK (pack_usd > 0),
   points_cents bigint NOT NULL CHECK (points_cents > 0),
+  refunded_cents bigint NOT NULL DEFAULT 0 CHECK (refunded_cents >= 0),
   status text NOT NULL CHECK (status IN ('pending', 'completed', 'blocked_wa')),
   billing_state text,
   ip_region text,
@@ -603,6 +609,24 @@ CREATE TABLE IF NOT EXISTS feed_stripe_purchases (
   completed_at bigint
 );
 CREATE INDEX IF NOT EXISTS feed_stripe_purchases_account_idx ON feed_stripe_purchases (account_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS feed_stripe_purchases_payment_intent_idx ON feed_stripe_purchases (payment_intent_id) WHERE payment_intent_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS feed_stripe_reversals (
+  id text PRIMARY KEY,
+  purchase_id text NOT NULL REFERENCES feed_stripe_purchases (id),
+  account_id text NOT NULL REFERENCES feed_accounts (account_id),
+  stripe_event_id text NOT NULL UNIQUE,
+  dispute_id text,
+  kind text NOT NULL CHECK (kind IN ('refund', 'dispute')),
+  amount_cents bigint NOT NULL CHECK (amount_cents >= 0),
+  debited_pts_cents bigint NOT NULL CHECK (debited_pts_cents >= 0),
+  restored_event_id text UNIQUE,
+  restored_pts_cents bigint NOT NULL DEFAULT 0 CHECK (restored_pts_cents >= 0),
+  restored_at bigint,
+  created_at bigint NOT NULL
+);
+CREATE INDEX IF NOT EXISTS feed_stripe_reversals_purchase_idx ON feed_stripe_reversals (purchase_id, created_at ASC);
+CREATE UNIQUE INDEX IF NOT EXISTS feed_stripe_reversals_dispute_idx ON feed_stripe_reversals (dispute_id) WHERE dispute_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS feed_npc_market_clues (
   clue_key text PRIMARY KEY,

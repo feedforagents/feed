@@ -8,6 +8,7 @@ import {
   MarketFailure,
   accruePerpFunding,
   buyPredictionShares,
+  cancelPredictionMarket,
   closePerpPosition,
   createStripeCheckoutSession,
   executeNpcSpotTrade,
@@ -19,6 +20,7 @@ import {
   getUserPositions,
   handleStripeWebhook,
   listPerpPositions,
+  listPredictionMarkets,
   openPerpPosition,
   resolvePredictionMarket,
   sellPredictionShares
@@ -521,6 +523,418 @@ it.effect('Economy and Stripe Checkout: Washington geo-block, idempotent HMAC we
           [1, "user-alice", 1_639, 11_639, 0],
           [2, "user-bob", 0, 210_000, 200_000]
         ]
+      }
+    ))
+  })
+})
+
+it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement, and resolved notifications (spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () => effect {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
+  try runWithSeededDb(effect {
+    const store = try Store
+    const now = try Clock.currentTimeMillis
+    try createVerifiedAccount("user-alice", "alice", 500_000)
+    try createVerifiedAccount("user-bob", "bob", 500_000)
+    try createVerifiedAccount("user-carol", "carol", 500_000)
+
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_prediction_markets
+           (id, slot_index, question, description, category, timeframe, phase, yes_shares, no_shares, liquidity_cents, secret_outcome, status, resolved_outcome, resolution_proof, resolution_article_id, expires_at, resolved_at, created_at)
+         VALUES
+           ('mkt-expired', NULL, 'Expired still open?', 'desc', 'tech', '15m', 'open', 50000, 50000, 50000, 'YES', 'open', NULL, NULL, NULL, $1, NULL, $2),
+           ('mkt-extreme-low', NULL, 'Extreme low market?', 'desc', 'tech', '15m', 'open', 99000, 1000, 100000, 'YES', 'open', NULL, NULL, NULL, $3, NULL, $2),
+           ('mkt-sell-guard', NULL, 'Sell guard market?', 'desc', 'tech', '15m', 'open', 10000, 10000, 20000, 'YES', 'open', NULL, NULL, NULL, $3, NULL, $2)`,
+        [now - 1_000, now - 60_000, now + 3_600_000]
+      )
+      try tx.query(
+        `INSERT INTO feed_prediction_positions
+           (market_id, holder_id, holder_kind, side, shares, cost_basis_cents, settled_at, payout_cents)
+         VALUES
+           ('mkt-extreme-low', 'user-alice', 'user', 'YES', 5000, 1000, NULL, 0),
+           ('mkt-extreme-low', 'user-bob', 'user', 'NO', 5000, 4000, NULL, 0),
+           ('mkt-extreme-low', 'user-carol', 'user', 'NO', 50000000, 400000, NULL, 0),
+           ('mkt-sell-guard', 'user-alice', 'user', 'YES', 12000, 6000, NULL, 0)`
+      )
+    })
+
+    // spec/markets/prediction.md, "Resolved, cancelled, held, and expired markets allow no trades, and duplicate resolution pays nothing extra"
+    const openMarkets = try listPredictionMarkets("open")
+    const allMarkets = try listPredictionMarkets()
+
+    // spec/markets/prediction.md, "Buying YES or NO shares requires an open non-expired market, sufficient balance, and bounded odds impact"
+    const extremeWorsenBuyCode = try marketErrorCode(buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "mkt-extreme-low",
+      side: "no",
+      amountCents: 100
+    }))
+    const extremeUnwindBuy = try buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "mkt-extreme-low",
+      side: "yes",
+      amountCents: 100
+    })
+
+    // spec/markets/prediction.md, "Selling shares floors gross proceeds to whole cents before charging the canonical fee"
+    const extremeWorsenSellCode = try marketErrorCode(sellPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "mkt-extreme-low",
+      side: "yes",
+      shares: 500
+    }))
+    const extremeCrossCenterSellCode = try marketErrorCode(sellPredictionShares({
+      actorId: "user-carol",
+      actorKind: "user",
+      marketId: "mkt-extreme-low",
+      side: "no",
+      shares: 50_000_000
+    }))
+    const extremeUnwindSell = try sellPredictionShares({
+      actorId: "user-bob",
+      actorKind: "user",
+      marketId: "mkt-extreme-low",
+      side: "no",
+      shares: 500
+    })
+    const partialSellBlockedCode = try marketErrorCode(sellPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "mkt-sell-guard",
+      side: "yes",
+      shares: 11_000
+    }))
+    const fullExitSell = try sellPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "mkt-sell-guard",
+      side: "yes",
+      shares: 12_000
+    })
+
+    const idemBuy1 = try buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 1_000,
+      idempotencyKey: "trade-key-1"
+    })
+    const idemBuyReplay = try buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 1_000,
+      idempotencyKey: "trade-key-1"
+    })
+    const idemBuyConflictCode = try marketErrorCode(buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 2_000,
+      idempotencyKey: "trade-key-1"
+    }))
+    const idemOtherUserBuy = try buyPredictionShares({
+      actorId: "user-bob",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "no",
+      amountCents: 1_000,
+      idempotencyKey: "trade-key-1"
+    })
+    const idemSell1 = try sellPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      shares: idemBuy1.shares,
+      idempotencyKey: "trade-sell-1"
+    })
+    const idemSellReplay = try sellPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      shares: idemBuy1.shares,
+      idempotencyKey: "trade-sell-1"
+    })
+    const idemSellConflictCode = try marketErrorCode(sellPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      shares: 100,
+      idempotencyKey: "trade-sell-1"
+    }))
+
+    try buyPredictionShares({
+      actorId: "user-carol",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 1_500
+    })
+
+    // spec/markets/prediction.md, "Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently"
+    const resolved = try resolvePredictionMarket({ marketId: "seed-market-1" })
+    const idemReplayAfterClose = try buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 1_000,
+      idempotencyKey: "trade-key-1"
+    })
+    const zeroSharePos = try store.transaction((tx: Tx) =>
+      tx.query(
+        "SELECT shares, settled_at FROM feed_prediction_positions WHERE market_id = 'seed-market-1' AND holder_id = 'user-alice' AND side = 'YES'"
+      )
+    )
+    const notifications = try store.transaction((tx: Tx) =>
+      tx.query(
+        "SELECT account_id, kind, market_id, is_game_only FROM feed_notifications WHERE market_id = 'seed-market-1' ORDER BY account_id ASC"
+      )
+    )
+
+    try check(() => assert.deepStrictEqual(
+      {
+        expiredExcludedFromOpen: openMarkets.some((m) => m.id === "mkt-expired"),
+        expiredIncludedInAll: allMarkets.some((m) => m.id === "mkt-expired"),
+        extremeWorsenBuyCode,
+        extremeUnwindBuyImproved: extremeUnwindBuy.yesPriceBps > 100 && extremeUnwindBuy.yesPriceBps < 200,
+        extremeWorsenSellCode,
+        extremeCrossCenterSellCode,
+        extremeUnwindSellImproved: extremeUnwindSell.yesPriceBps > extremeUnwindBuy.yesPriceBps,
+        partialSellBlockedCode,
+        fullExitMovedOverCap: Math.abs(fullExitSell.yesPriceBps - 5000) > 2000 && fullExitSell.yesPriceBps >= 200,
+        idemBuyExactReplay: idemBuyReplay.tradeId === idemBuy1.tradeId && idemBuyReplay.balanceAfterCents === idemBuy1.balanceAfterCents,
+        idemReplayAfterCloseMatches: idemReplayAfterClose.tradeId === idemBuy1.tradeId,
+        idemBuyConflictCode,
+        idemOtherUserSucceeded: idemOtherUserBuy.tradeId !== idemBuy1.tradeId,
+        idemSellExactReplay: idemSellReplay.tradeId === idemSell1.tradeId,
+        idemSellConflictCode,
+        resolvedSettledCount: resolved.positionsSettled,
+        aliceZeroShareNotSettled: [toInt(zeroSharePos[0]?.shares), zeroSharePos[0]?.settled_at],
+        resolvedNotifications: notifications.map((row) => [row.account_id, row.kind, row.market_id, row.is_game_only])
+      },
+      {
+        expiredExcludedFromOpen: false,
+        expiredIncludedInAll: true,
+        extremeWorsenBuyCode: "PRICE_IMPACT_EXCEEDED",
+        extremeUnwindBuyImproved: true,
+        extremeWorsenSellCode: "PRICE_IMPACT_EXCEEDED",
+        extremeCrossCenterSellCode: "PRICE_IMPACT_EXCEEDED",
+        extremeUnwindSellImproved: true,
+        partialSellBlockedCode: "PRICE_IMPACT_EXCEEDED",
+        fullExitMovedOverCap: true,
+        idemBuyExactReplay: true,
+        idemReplayAfterCloseMatches: true,
+        idemBuyConflictCode: "IDEMPOTENCY_CONFLICT",
+        idemOtherUserSucceeded: true,
+        idemSellExactReplay: true,
+        idemSellConflictCode: "IDEMPOTENCY_CONFLICT",
+        resolvedSettledCount: 2,
+        aliceZeroShareNotSettled: [0, null],
+        resolvedNotifications: [
+          ["user-bob", "market_resolved", "seed-market-1", true],
+          ["user-carol", "market_resolved", "seed-market-1", true]
+        ]
+      }
+    ))
+  })
+})
+
+it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unified Stripe refund and dispute reversals (spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () => effect {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
+  try runWithSeededDb(effect {
+    const store = try Store
+    const now = try Clock.currentTimeMillis
+    try createVerifiedAccount("user-alice", "alice", 10_000)
+    try createVerifiedAccount("user-bob", "bob", 10_000)
+
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query("INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ('org-deleted', 'Deleted', 0, $1)", [now])
+      try tx.query(
+        `INSERT INTO accounts (key, state, revision, organization_id, status, email, phone, name, created_at, updated_at)
+         VALUES ('user-deleted', '{}'::jsonb, 1, 'org-deleted', 'erased', NULL, NULL, 'Deleted', $1, $1)`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_accounts (
+           account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2,
+           phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents,
+           purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
+           created_at, updated_at
+         ) VALUES
+           ('user-deleted', 'deleted_user', 'Deleted', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, 0, false, false, NULL, $1, $1),
+           ('user-reviewer', 'reviewer1', 'Reviewer', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, 0, false, true, 'hash', $1, $1),
+           ('user-unverified', 'unverified1', 'Unverified', '', NULL, NULL, NULL, NULL, $1, 'game', 50000, 10000, 0, 0, false, false, NULL, $1, $1)`,
+        [now]
+      )
+    })
+
+    const aliceOpenBuy = try buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 2_000
+    })
+    const bobPushBuy = try buyPredictionShares({
+      actorId: "user-bob",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 4_000
+    })
+    const expectedAliceMtm = Math.floor((aliceOpenBuy.shares * bobPushBuy.yesPriceBps) / 10_000)
+    const aliceEconMtm = try getAccountEconomy("user-alice")
+    const boardMtm = try getLeaderboard()
+    const aliceBoardMtm = boardMtm.find((e) => e.accountId === "user-alice")
+
+    // spec/markets/prediction.md, "Cancelled markets refund every open position at cost basis without publishing an outcome"
+    try cancelPredictionMarket("seed-market-1")
+    const boardAfterCancel = try getLeaderboard()
+    const aliceAfterCancel = boardAfterCancel.find((e) => e.accountId === "user-alice")
+
+    const webhookSecret = "whsec_test_reversals"
+    const sendSigned = (payload: Readonly<Record<string, unknown>>) => effect {
+      const rawBody = JSON.stringify(payload)
+      const signature = signStripeWebhook(rawBody, webhookSecret, Math.floor(now / 1000))
+      return try handleStripeWebhook({ rawBody, signature, webhookSecret })
+    }
+
+    const checkoutRes = try sendSigned({
+      id: "evt_checkout_rev_1",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_rev_1",
+          payment_status: "paid",
+          payment_intent: "pi_rev_1",
+          amount_total: 2_000,
+          client_reference_id: "user-bob",
+          metadata: { accountId: "user-bob", packId: "pack_20" }
+        }
+      }
+    })
+    const earlyWonCode = try marketErrorCode(sendSigned({
+      id: "evt_dispute_won_early",
+      type: "charge.dispute.closed",
+      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", status: "won", amount: 1_500 } }
+    }))
+    const refund1 = try sendSigned({
+      id: "evt_refund_1",
+      type: "charge.refunded",
+      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 600 } }
+    })
+    const refund1Dup = try sendSigned({
+      id: "evt_refund_1",
+      type: "charge.refunded",
+      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 600 } }
+    })
+    const refundStale = try sendSigned({
+      id: "evt_refund_stale",
+      type: "charge.refunded",
+      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 400 } }
+    })
+    const refund2 = try sendSigned({
+      id: "evt_refund_2",
+      type: "charge.refunded",
+      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 1_000 } }
+    })
+    const disputeCreated = try sendSigned({
+      id: "evt_dispute_1",
+      type: "charge.dispute.created",
+      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "needs_response" } }
+    })
+    const disputeWon = try sendSigned({
+      id: "evt_dispute_won_1",
+      type: "charge.dispute.closed",
+      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "won" } }
+    })
+    const disputeWonDup = try sendSigned({
+      id: "evt_dispute_won_dup",
+      type: "charge.dispute.closed",
+      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "won" } }
+    })
+    const bobAfterReversals = try getAccountEconomy("user-bob")
+
+    try sendSigned({
+      id: "evt_checkout_lowbal",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_lowbal_1",
+          payment_status: "paid",
+          payment_intent: "pi_lowbal_1",
+          amount_total: 500,
+          client_reference_id: "user-alice",
+          metadata: { accountId: "user-alice", packId: "pack_5" }
+        }
+      }
+    })
+    try store.transaction((tx: Tx) =>
+      tx.query("UPDATE feed_accounts SET balance_cents = 10000 WHERE account_id = 'user-alice'")
+    )
+    const lowBalRefund1 = try sendSigned({
+      id: "evt_lowbal_ref_1",
+      type: "charge.refunded",
+      data: { object: { id: "ch_low", payment_intent: "pi_lowbal_1", amount_refunded: 300 } }
+    })
+    try store.transaction((tx: Tx) =>
+      tx.query("UPDATE feed_accounts SET balance_cents = 50000 WHERE account_id = 'user-alice'")
+    )
+    const lowBalRefund2 = try sendSigned({
+      id: "evt_lowbal_ref_2",
+      type: "charge.refunded",
+      data: { object: { id: "ch_low", payment_intent: "pi_lowbal_1", amount_refunded: 400 } }
+    })
+
+    try check(() => assert.deepStrictEqual(
+      {
+        leaderboardIds: boardMtm.map((e) => e.accountId).sort(),
+        mtmMatchesEconomyAndBoard: [
+          aliceEconMtm.positionValueCents === expectedAliceMtm,
+          aliceBoardMtm?.positionValueCents === expectedAliceMtm,
+          expectedAliceMtm !== 2_000
+        ],
+        cancelledNotCountedAsSettledOrLoss: [
+          aliceAfterCancel?.settledCount,
+          aliceAfterCancel?.wins
+        ],
+        checkoutCredited: checkoutRes.creditedCents,
+        earlyWonCode,
+        refund1: [refund1.creditedCents, refund1.balanceAfterCents],
+        refund1Dup: [refund1Dup.alreadyCompleted, refund1Dup.creditedCents],
+        refundStale: [refundStale.creditedCents, refundStale.balanceAfterCents],
+        refund2: [refund2.creditedCents, refund2.balanceAfterCents],
+        disputeCreatedCapped: [disputeCreated.creditedCents, disputeCreated.balanceAfterCents],
+        disputeWonRestoresExactDebit: [disputeWon.creditedCents, disputeWon.balanceAfterCents],
+        disputeWonDup: [disputeWonDup.alreadyCompleted, disputeWonDup.creditedCents],
+        bobFinalEconomy: [bobAfterReversals.balanceCents, bobAfterReversals.purchasedCents, bobAfterReversals.netProfitCents],
+        lowBalRefundTracksCumulativeSeparately: [lowBalRefund1.creditedCents, lowBalRefund2.creditedCents]
+      },
+      {
+        leaderboardIds: ["user-alice", "user-bob"],
+        mtmMatchesEconomyAndBoard: [true, true, true],
+        cancelledNotCountedAsSettledOrLoss: [0, 0],
+        checkoutCredited: 200_000,
+        earlyWonCode: "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING",
+        refund1: [-60_000, 150_000],
+        refund1Dup: [true, 0],
+        refundStale: [0, 150_000],
+        refund2: [-40_000, 110_000],
+        disputeCreatedCapped: [-100_000, 10_000],
+        disputeWonRestoresExactDebit: [100_000, 110_000],
+        disputeWonDup: [true, 0],
+        bobFinalEconomy: [110_000, 100_000, 0],
+        lowBalRefundTracksCumulativeSeparately: [-10_000, -10_000]
       }
     ))
   })
