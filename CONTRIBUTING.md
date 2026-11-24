@@ -4,6 +4,51 @@ Every contributor, person or agent, reads [AGENTS.md](AGENTS.md) in full before 
 Starting a project from the template is [README.md, "Set up a new project"](README.md#set-up-a-new-project).
 Everything is built on [the stack](AGENTS.md#the-stack): Node 26, pnpm, VibeLang on Effect for the shell, React for every interface.
 
+## Evidence
+
+Include an `## Evidence` section in every pull request. Start each field on
+its own line with the exact name below in plain text. A Markdown bullet
+before the name is optional.
+
+- `Change types:` Use `docs` alone for documentation-only changes. Otherwise list
+  all applicable types from `non-ui`, `ui`, `performance`, and `hardware`,
+  separated by commas.
+- `Test results:` Give the tested commit, environment, commands, and observed
+  results. Run `pnpm check` for affected specs or implementation and
+  `pnpm test:browser` for browser changes. Report any blocked checks and why.
+  See [Which test for what](#which-test-for-what) and [CI](#ci).
+- `Proof of change:` Identify the affected story or rule where applicable.
+  Reproduce the defect on the previous commit and show the corrected outcome
+  on the PR commit with the same inputs. For new behavior, demonstrate the
+  completed workflow. For documentation, show the links or instructions you
+  checked.
+- `Runtime logs:` For `non-ui` changes, attach redacted output from the affected
+  workflow, such as an MCP invocation, session operation, market update, or
+  engine tick. Include the command or request, an identifying detail, and the
+  observed outcome.
+- `UI video:` For `ui` changes, record the affected flow before and after from
+  the same starting state, such as connecting an agent or placing a trade.
+  Link the recording in the field and show the initial state, interaction, and
+  result.
+- `Benchmarks:` For `performance` changes, report before and after on the same
+  representative workload and environment. Include the command, inputs,
+  metric and units, run count, result spread, and errors.
+- `On-device testing:` For `hardware` changes, run the affected flow on the
+  physical device or peripheral it depends on. Record the model, OS, build,
+  steps, and outcome with a redacted log or video.
+
+Provide test results and proof for every PR, plus the evidence for every
+declared change type that applies. Use inspectable links or inline commands and
+observed results. Update evidence when the head changes and redact credentials
+and personal data. Empty fields and placeholders do not count.
+
+Maintainers close PRs that fail to demonstrate a claimed fix or useful change,
+including added complexity for highly unlikely paths without evidence that the
+path is reachable and the impact matters. Eligible signed Slop.cash PRs closed
+for these reasons incur the applicable Points deduction. Follow the
+[Slop.cash contributor workflow](https://slop.cash/contribute/SKILL.md) for
+project routing and the submission signature.
+
 ## The monorepo
 
 | Path | Holds |
@@ -24,7 +69,7 @@ does not import React, and a UI package holds no business rules. A shared type l
 |---|---|
 | `pnpm dev` | Studio, and every package's `dev` script beside it |
 | `pnpm quick` | the fast local check: types, tests, ESLint and Stylelint, in every package |
-| `pnpm verify` | what CI runs: build, types, tests, browser tests, every `check`, lint, `pnpm analyze` and `pnpm selftest`, which also installs and checks each example |
+| `pnpm verify` | build, types, tests, browser tests, every `check`, ESLint, Stylelint, and `pnpm analyze` |
 | `pnpm all <task>…` | one or more kinds of task in every package: `pnpm all build typecheck test` |
 | `pnpm test:browser` | the browser tests |
 | `pnpm test:models` | every workspace `check`: the root's, which is its owners' too, and Studio's |
@@ -53,8 +98,8 @@ The hosted VibeStack app build keys its `//#gen` dependency on `apps/app/gen/`.
 Its other inputs come from `apps/app/` and the declared workspace builds. Add any
 new reads outside those inputs to the build profile in `.github/workflows/ci.yml`.
 
-Pull requests go to `main`, the only long-lived branch; what CI runs on them is in
-[CI](#ci).
+Use the base branch designated for your work. [CI](#ci) lists the branches
+that run the workflow.
 
 ## Changing the tools
 
@@ -409,7 +454,7 @@ configured scopes are in `knip.config.js`, `.madgerc`, `.jscpd.json` and
 
 | When | Runs |
 |---|---|
-| Pull request or push to `main` | `verify` runs build, types, tests, browser tests, all checks, ESLint, Stylelint, Knip, Madge, jscpd and the docs and examples self-tests with `--continue=dependencies-successful`. In parallel, `selftest-a`, `selftest-b` and `selftest-rest` run the three tool self-test tasks. |
+| Pull request or push to `vibestack`, `staging`, or `main` | Four simulation shards feed the `verify` job, which runs the checks listed for `pnpm verify` and a Cloudflare Worker bundle dry run. |
 | Nightly | Every check fresh under the fixed nightly profile; saved counterexamples become a pull request into the branch the run checked, or the default branch for a tag run. Beside it, the three `selftest:tools` tasks without the selftest's shared tool runs |
 | A `v*` tag (`release.yml`) | Build, `pnpm pack`, the prerequisites and `pnpm selftest --only --concurrency=1` read from the shared cache, and the tarball attached to a GitHub release |
 
