@@ -70,6 +70,7 @@ import {
   markAllNotificationsRead,
   openThread,
   reactToChatMessage,
+  removeDeletedPost,
   repostPost,
   respondAlphaInvite,
   selectFeedTab,
