@@ -1,4 +1,4 @@
-// spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
+// spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
 import { Store, StoreFailure, toText, type Tx } from "@repo/db"
 import {
   AuthFailure,
@@ -30,6 +30,7 @@ import {
   listPerpPositions,
   listPredictionMarkets,
   openPerpPosition,
+  previewPostOpenMarkPriceCents,
   sellPredictionShares,
   type PerpMarketView,
   type PredictionMarketView
@@ -794,9 +795,9 @@ effect function executePublicMarketTool(
       return {
         metric,
         currency: CURRENCY_DISCLAIMER,
-        rankingRule: "Ordered by net profit (equity - starting grant - purchased points), never raw point balance.",
+        rankingRule: "Ordered by net profit (equity - starting grant), never raw point balance.",
         entries: entries.slice(0, limit).map((entry, idx) => {
-          const investedCents = entry.startingGrantCents + entry.purchasedCents
+          const investedCents = entry.startingGrantCents
           const returnPct = investedCents > 0 ? Math.round((entry.netProfitCents / investedCents) * 10_000) / 100 : 0
           return {
             rank: metric === "net_profit" ? entry.rank : idx + 1,
@@ -1000,9 +1001,16 @@ effect function executeProtectedAccountTool(
         })
       }
       const estimatedFeeCents = Math.floor((sizeCents * TRADING_FEE_BPS + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR)
+      const postOpenMarkCents = previewPostOpenMarkPriceCents({
+        indexPriceCents: market.indexPriceCents,
+        longOiCents: market.longOiCents,
+        shortOiCents: market.shortOiCents,
+        side,
+        sizeCents
+      })
       const estimatedLiqCents = computeLiquidationPriceCents({
         side,
-        entryPriceCents: market.markPriceCents,
+        entryPriceCents: postOpenMarkCents,
         marginCents: collateralCents,
         sizeCents
       })
@@ -1015,7 +1023,7 @@ effect function executeProtectedAccountTool(
         notionalSizePts: toPtsNumber(sizeCents),
         estimatedFeePts: toPtsNumber(estimatedFeeCents),
         totalDebitPts: toPtsNumber(collateralCents + estimatedFeeCents),
-        entryMarkPricePts: toPtsNumber(market.markPriceCents),
+        entryMarkPricePts: toPtsNumber(postOpenMarkCents),
         indexPricePts: toPtsNumber(market.indexPriceCents),
         estimatedLiquidationPricePts: toPtsNumber(estimatedLiqCents),
         fundingRateBps: market.fundingRateBps,

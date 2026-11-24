@@ -20,6 +20,7 @@ import {
   creditActorBalance,
   debitActorBalance,
   insertLedgerEntry,
+  insertPriceHistoryRowTx,
   insertTradeRecord,
   marketFail,
   newMarketId,
@@ -540,6 +541,15 @@ effect function recordPredictionTradeTx(params: RecordPredictionTradeParams): Tr
     balanceAfterCents: params.balanceAfterCents,
     refId: tradeId,
     createdAt: params.now
+  })
+  try insertPriceHistoryRowTx(params.tx, {
+    marketKind: "prediction",
+    marketRef: params.marketId,
+    priceCents: Math.max(1, Math.min(99, Math.round(marketView.yesPriceBps / 100))),
+    yesPriceBps: marketView.yesPriceBps,
+    markPriceCents: null,
+    volumeCents: params.notionalCents,
+    recordedAt: params.now
   })
   return receipt
 }

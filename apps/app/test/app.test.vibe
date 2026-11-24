@@ -8,7 +8,7 @@ import { parseAppServerConfig, type AppServerConfig } from "../src/server/config
 import { handleFeedRequest } from "../src/server/router.vibe"
 
 module node {
-  import { createHash, createHmac } from "node:crypto"
+  import { createHash } from "node:crypto"
 
   /** @throws {never} */
   export function sha256Hex(text: string): string {
@@ -18,16 +18,6 @@ module node {
   /** @throws {never} */
   export function pkceChallenge(verifier: string): string {
     return createHash("sha256").update(verifier, "utf8").digest("base64url")
-  }
-
-  /** @throws {never} */
-  export function stripeWebhookHeaders(rawBody: string, secret: string, nowMs: number): Record<string, string> {
-    const timestampSec = Math.floor(nowMs / 1000)
-    const signature = createHmac("sha256", secret).update(`${timestampSec}.${rawBody}`).digest("hex")
-    return {
-      "content-type": "application/json",
-      "stripe-signature": `t=${timestampSec},v1=${signature}`
-    }
   }
 
   /** @throws {never} */
@@ -60,10 +50,9 @@ module node {
     return reader.read()
   }
 }
-import { decodeUtf8, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk, stripeWebhookHeaders } from node
+import { decodeUtf8, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk } from node
 
 const APP_ORIGIN = "http://feed.localtest"
-const TEST_STRIPE_WEBHOOK_SECRET = "whsec_app_parity_test"
 
 const TEST_CONFIG = parseAppServerConfig(
   {
@@ -74,8 +63,7 @@ const TEST_CONFIG = parseAppServerConfig(
     AUTH_DIGEST_KEY: "test-digest-key-00000000000000000000000000000000",
     OAUTH_SIGNING_SECRET: "test-oauth-secret-00000000000000000000000000000",
     CRON_SECRET: "test-cron-secret",
-    TURNSTILE_SITE_KEY: "0x4AAAAAAB_test_site_key",
-    STRIPE_WEBHOOK_SECRET: TEST_STRIPE_WEBHOOK_SECRET
+    TURNSTILE_SITE_KEY: "0x4AAAAAAB_test_site_key"
   },
   APP_ORIGIN
 )
@@ -380,7 +368,7 @@ effect function readSseEventsUntil(
   return frames
 }
 
-it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 500, profile cursor/edit, SSE auth/block, perp broadcast, single rate-limit bucket (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
+it.effect('REST parity: Turnstile flags, strict leverage, idempotency, fixed capital, chart history, trade tape, closed positions, PnL, leaderboard, world/chat/admin APIs, SSE auth/block/market events, single rate-limit bucket (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
   provide appLayer() {
     const now = Date.now()
     try TestClock.setTime(now)
@@ -440,44 +428,14 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
       }
     ))
 
-    const checkoutRaw = JSON.stringify({
-      id: "evt_app_checkout_1",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: "cs_app_1",
-          payment_status: "paid",
-          payment_intent: "pi_app_1",
-          amount_total: 500,
-          client_reference_id: aliceId,
-          metadata: { accountId: aliceId, packId: "pack_5" }
-        }
-      }
-    })
-    const checkoutWhRes = try callApp("/api/webhooks/stripe", {
-      rawBody: checkoutRaw,
-      headers: stripeWebhookHeaders(checkoutRaw, TEST_STRIPE_WEBHOOK_SECRET, now)
-    })
-    const earlyWonRaw = JSON.stringify({
-      id: "evt_app_dispute_won_early",
-      type: "charge.dispute.closed",
-      data: {
-        object: {
-          id: "dp_app_missing_1",
-          payment_intent: "pi_app_1",
-          amount: 500,
-          status: "won"
-        }
-      }
-    })
-    const earlyWonRes = try callApp("/api/webhooks/stripe", {
-      rawBody: earlyWonRaw,
-      headers: stripeWebhookHeaders(earlyWonRaw, TEST_STRIPE_WEBHOOK_SECRET, now)
-    })
-    const earlyWonBody = try readJson(earlyWonRes)
+    const packsRes = try callApp("/api/economy/packs")
+    const packsBody = try readJson(packsRes)
+    const checkoutGoneRes = try callApp("/api/economy/checkout", { cookie: alice.cookie, json: { packId: "pack_5" } })
+    const checkoutGoneBody = try readJson(checkoutGoneRes)
+    const webhookGoneRes = try callApp("/api/webhooks/stripe", { rawBody: "{}" })
     try check(() => assert.deepStrictEqual(
-      [checkoutWhRes.status, earlyWonRes.status, earlyWonBody.code],
-      [200, 500, "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING"]
+      [packsRes.status, (packsBody.packs as ReadonlyArray<unknown>).length, checkoutGoneRes.status, checkoutGoneBody.code, webhookGoneRes.status],
+      [200, 0, 410, "point_purchases_disabled", 410]
     ))
 
     const badPatch = try callApp("/api/users/me", { method: "PATCH", cookie: alice.cookie, json: {} })
@@ -571,6 +529,12 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
       json: { content: "Blocked author post hidden from Alice SSE" }
     })
 
+    const predSseBuyRes = try callApp("/api/markets/prediction/seed-market-1/buy", {
+      cookie: alice.cookie,
+      json: { side: "yes", amountCents: 200 }
+    })
+    try check(() => assert.strictEqual(predSseBuyRes.status, 200))
+
     const perpOpenRes = try callApp("/api/markets/perp/XTRPC/open", {
       cookie: alice.cookie,
       json: { side: "long", collateralCents: 1000, leverage: 2 }
@@ -597,17 +561,117 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
     try check(() => assert.deepStrictEqual(
       {
         anonHasNoPrivateChat: !anonJoined.includes("event: chat.message"),
+        anonHasPredBuy: anonJoined.includes("event: market.prediction") && anonJoined.includes('"action":"buy"'),
         anonHasPerpOpen: anonJoined.includes("event: market.perp") && anonJoined.includes('"action":"open"'),
         aliceHasNoBlockedPost: !aliceJoined.includes("event: post.created"),
+        aliceHasPredBuy: aliceJoined.includes("event: market.prediction") && aliceJoined.includes('"action":"buy"'),
         aliceHasPerpOpen: aliceJoined.includes("event: market.perp") && aliceJoined.includes('"action":"open"'),
         aliceHasPerpClose: aliceJoined.includes("event: market.perp") && aliceJoined.includes('"action":"close"') && aliceJoined.includes('"leverage":2')
       },
       {
         anonHasNoPrivateChat: true,
+        anonHasPredBuy: true,
         anonHasPerpOpen: true,
         aliceHasNoBlockedPost: true,
+        aliceHasPredBuy: true,
         aliceHasPerpOpen: true,
         aliceHasPerpClose: true
+      }
+    ))
+
+    const perpHistBody = try readJson(try callApp("/api/markets/perp/XTRPC/history?range=1D&limit=50"))
+    const predHistBody = try readJson(try callApp("/api/markets/prediction/seed-market-1/history?range=1D&limit=50"))
+    const perpTradesBody = try readJson(try callApp("/api/markets/perp/XTRPC/trades?limit=20"))
+    const predTradesBody = try readJson(try callApp("/api/markets/prediction/seed-market-1/trades?limit=20"))
+    const aliceTradesBody = try readJson(try callApp("/api/users/parity_alice/trades?limit=20"))
+    const closedPosBody = try readJson(try callApp("/api/markets/positions/closed?outcome=all&page=1&limit=10", { cookie: alice.cookie }))
+    const pnlHistBody = try readJson(try callApp("/api/economy/me/pnl-history?range=ALL", { cookie: alice.cookie }))
+    const lbTradersBody = try readJson(try callApp("/api/leaderboard?filter=traders&timeframe=all&page=1&pageSize=10"))
+    const lbNpcsBody = try readJson(try callApp("/api/leaderboard?filter=npcs&timeframe=all&page=1&pageSize=10"))
+    const lbMeBody = try readJson(try callApp("/api/leaderboard/me?filter=traders&timeframe=all", { cookie: alice.cookie }))
+    const worldStatusBody = try readJson(try callApp("/api/world/status"))
+    const taggedPostRes = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Tracking #wave2tag and $XTRPC now" } })
+    const trendingTagBody = try readJson(try callApp("/api/trending/wave2tag"))
+    const userSearchBody = try readJson(try callApp("/api/users/search?q=parity"))
+    const modBlocksBody = try readJson(try callApp("/api/moderation/blocks", { cookie: alice.cookie }))
+    const modMutesBody = try readJson(try callApp("/api/moderation/mutes", { cookie: alice.cookie }))
+
+    const grpCreateRes = try callApp("/api/chats/group", {
+      cookie: alice.cookie,
+      json: { title: "Alpha Desk", memberHandles: ["ailonmusk"] }
+    })
+    const grpId = String(((try readJson(grpCreateRes)).chat as Record<string, unknown>).id ?? "")
+    const grpRenameRes = try callApp(`/api/chats/${encodeURIComponent(grpId)}`, {
+      method: "PATCH",
+      cookie: alice.cookie,
+      json: { name: "Renamed Desk" }
+    })
+    const grpKickRes = try callApp(`/api/chats/${encodeURIComponent(grpId)}/members/ailon-musk`, {
+      method: "DELETE",
+      cookie: alice.cookie
+    })
+    const grpDelRes = try callApp(`/api/chats/${encodeURIComponent(grpId)}`, {
+      method: "DELETE",
+      cookie: alice.cookie
+    })
+
+    const repRes = try callApp("/api/reports", {
+      cookie: bob.cookie,
+      json: { targetKind: "account", targetId: aliceId, reason: "spam test" }
+    })
+    const repId = String((try readJson(repRes)).id ?? "")
+    try store.transaction((tx: Tx) =>
+      tx.query("UPDATE feed_accounts SET is_admin = true WHERE account_id = $1", [aliceId])
+    )
+    const adminReportsBody = try readJson(try callApp("/api/admin/reports?status=open", { cookie: alice.cookie }))
+    const adminReportPatchRes = try callApp(`/api/admin/reports/${encodeURIComponent(repId)}`, {
+      method: "PATCH",
+      cookie: alice.cookie,
+      json: { status: "resolved" }
+    })
+    const adminUsersBody = try readJson(try callApp("/api/admin/users?q=parity", { cookie: alice.cookie }))
+    const adminFactCreateRes = try callApp("/api/admin/world-facts", {
+      cookie: alice.cookie,
+      json: { factText: "Wave 2A world fact", category: "markets" }
+    })
+    const factId = String((try readJson(adminFactCreateRes)).id ?? "")
+    const adminFactsListBody = try readJson(try callApp("/api/admin/world-facts", { cookie: alice.cookie }))
+    const adminFactDelRes = try callApp(`/api/admin/world-facts/${encodeURIComponent(factId)}`, {
+      method: "DELETE",
+      cookie: alice.cookie
+    })
+
+    try check(() => assert.deepStrictEqual(
+      {
+        historyPopulated: (perpHistBody.points as ReadonlyArray<unknown>).length >= 2 && (predHistBody.points as ReadonlyArray<unknown>).length >= 2,
+        tapesPopulated: (perpTradesBody.trades as ReadonlyArray<unknown>).length >= 2 && (predTradesBody.trades as ReadonlyArray<unknown>).length >= 2 && (aliceTradesBody.trades as ReadonlyArray<unknown>).length >= 3,
+        closedPositionsOk: closedPosBody.totalCount === 1 && (closedPosBody.items as ReadonlyArray<unknown>).length === 1,
+        pnlHistoryOk: (pnlHistBody.points as ReadonlyArray<unknown>).length >= 2,
+        leaderboardOk: (lbTradersBody.entries as ReadonlyArray<unknown>).length === 2 && (lbNpcsBody.entries as ReadonlyArray<unknown>).length > 0 && typeof lbMeBody.rank === "number",
+        worldStatusOk: typeof worldStatusBody.currentDay === "number" && Number(worldStatusBody.activeMarketsCount) > 0 && Number(worldStatusBody.activeActorsCount) > 0,
+        trendingAndSearchOk: taggedPostRes.status === 201 && (trendingTagBody.posts as ReadonlyArray<unknown>).length >= 1 && (userSearchBody.items as ReadonlyArray<unknown>).length >= 2,
+        moderationAliasesOk: (modBlocksBody.items as ReadonlyArray<unknown>).length === 1 && (modMutesBody.items as ReadonlyArray<unknown>).length === 0,
+        chatMgmtStatuses: [grpCreateRes.status, grpRenameRes.status, grpKickRes.status, grpDelRes.status],
+        adminOpsOk: [
+          (adminReportsBody.reports as ReadonlyArray<unknown>).length >= 1,
+          adminReportPatchRes.status,
+          (adminUsersBody.users as ReadonlyArray<unknown>).length >= 2,
+          adminFactCreateRes.status,
+          (adminFactsListBody.facts as ReadonlyArray<unknown>).some((f) => (f as Record<string, unknown>).id === factId),
+          adminFactDelRes.status
+        ]
+      },
+      {
+        historyPopulated: true,
+        tapesPopulated: true,
+        closedPositionsOk: true,
+        pnlHistoryOk: true,
+        leaderboardOk: true,
+        worldStatusOk: true,
+        trendingAndSearchOk: true,
+        moderationAliasesOk: true,
+        chatMgmtStatuses: [201, 200, 200, 200],
+        adminOpsOk: [true, 200, true, 201, true, 200]
       }
     ))
   }

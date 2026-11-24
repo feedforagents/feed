@@ -157,8 +157,8 @@ effect function provisionReviewerAccount(handle: string, password: string) {
     })
     try tx.query(
       `INSERT INTO feed_accounts
-         (account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
-       VALUES ($1, $2, $3, '', NULL, NULL, NULL, NULL, $4, 'game', 0, 0, 0, 0, false, true, $5, $4, $4)`,
+         (account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
+       VALUES ($1, $2, $3, '', NULL, NULL, NULL, NULL, $4, 'game', 0, 0, 0, false, true, $5, $4, $4)`,
       [accountId, handle, handle, now, passwordHash]
     )
   })
@@ -290,7 +290,7 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
       [aliceId, peerId, seedNow]
     )
     try sqlQuery(
-      `INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_npc_id, status, created_at)
+      `INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_id, status, created_at)
        VALUES
          ('inv-recv', 'chat-del-1', $1, 'npc-1', 'pending', $3),
          ('inv-sent', 'chat-del-1', $2, $1, 'pending', $3),
@@ -360,7 +360,6 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
           onboarded.account.handle,
           onboarded.account.balanceCents,
           onboarded.account.startingGrantCents,
-          onboarded.account.purchasedCents,
           authedInitial?.accountId === onboarded.account.accountId,
           authedInitial?.balanceCents,
           authedInitial?.sessionsEpoch
@@ -402,7 +401,7 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
         rapidResend: "rate_limited:sms_send",
         verifiedOnboarding: [true, "01"],
         underageRefusal: "attestation_required",
-        onboardedGrant: ["alice", 10_000, 10_000, 0, true, 10_000, 1],
+        onboardedGrant: ["alice", 10_000, 10_000, true, 10_000, 1],
         reviewer: ["reviewer_signin_refused", "reviewer_signin_refused", true, "reviewer_demo", true],
         signOut: [2, null],
         deletion: [true, true, null, "account_not_found", "phone_cooldown"],

@@ -490,7 +490,7 @@ export effect function createDirectChat(
       [chatId, actor.id, now]
     )
     try tx.query(
-      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4), ($1, $5, $6, 'member', $4)",
+      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at) VALUES ($1, $2, $3, 'member', $4, $4), ($1, $5, $6, 'member', $4, $4)",
       [chatId, actor.id, actor.kind === "npc" ? "npc" : "user", now, target.id, target.kind === "npc" ? "npc" : "user"]
     )
     const createdRows = try tx.query("SELECT * FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
@@ -548,12 +548,12 @@ export effect function createUserGroupChat(
       [chatId, cleanTitle, owner.id, now]
     )
     try tx.query(
-      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'owner', $4)",
+      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at) VALUES ($1, $2, $3, 'owner', $4, $4)",
       [chatId, owner.id, owner.kind === "npc" ? "npc" : "user", now]
     )
     for (const member of membersToAdd.values()) {
       try tx.query(
-        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
+        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at) VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
         [chatId, member.id, member.kind, now]
       )
     }
@@ -782,7 +782,7 @@ export effect function reactToMessage(input: ReactToMessageInput): ReactToMessag
 
 function rowToAlphaInvite(row: Row): AlphaInviteView {
   const respondedAt = row.responded_at === null || row.responded_at === undefined ? null : safeInt(row.responded_at, 0)
-  const actorId = toText(row.invited_by_npc_id) ?? ""
+  const actorId = toText(row.invited_by_id) ?? ""
   return {
     id: toText(row.id) ?? "",
     chatId: toText(row.chat_id) ?? "",
@@ -804,7 +804,7 @@ export effect function listAlphaInvites(accountId: string): ReadonlyArray<AlphaI
   return try store.transaction(effect (tx: Tx) => {
     const account = try resolveUserOrNpcTx(tx, accountId)
     const rows = try tx.query(
-      "SELECT i.id, i.chat_id, i.invited_account_id, i.invited_by_npc_id, i.status, i.created_at, i.responded_at, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name, a.profile_image_url AS actor_avatar_url FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_npc_id WHERE i.invited_account_id = $1 AND i.status = 'pending' AND c.kind = 'npc_alpha' AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = i.invited_by_npc_id) OR (b.blocker_id = i.invited_by_npc_id AND b.blocked_id = $1)) ORDER BY i.created_at DESC",
+      "SELECT i.id, i.chat_id, i.invited_account_id, i.invited_by_id, i.status, i.created_at, i.responded_at, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name, a.profile_image_url AS actor_avatar_url FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_id WHERE i.invited_account_id = $1 AND i.status = 'pending' AND c.kind = 'npc_alpha' AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = i.invited_by_id) OR (b.blocker_id = i.invited_by_id AND b.blocked_id = $1)) ORDER BY i.created_at DESC",
       [account.id]
     )
     return rows.map(rowToAlphaInvite)
@@ -820,7 +820,7 @@ export effect function respondAlphaInvite(input: RespondAlphaInviteInput): Alpha
   const committed = try store.transaction(effect (tx: Tx) => {
     const account = try resolveUserOrNpcTx(tx, input.accountId)
     const inviteRows = try tx.query(
-      "SELECT i.*, c.kind AS chat_kind, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name, a.profile_image_url AS actor_avatar_url FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_npc_id WHERE i.id = $1 FOR UPDATE OF i",
+      "SELECT i.*, c.kind AS chat_kind, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name, a.profile_image_url AS actor_avatar_url FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_id WHERE i.id = $1 FOR UPDATE OF i",
       [input.inviteId]
     )
     const inviteRow = inviteRows[0]
@@ -835,7 +835,7 @@ export effect function respondAlphaInvite(input: RespondAlphaInviteInput): Alpha
       throw new SocialFailure({ code: "Conflict", message: "Invite has already been responded to" })
     }
     const chatId = toText(inviteRow.chat_id) ?? ""
-    const inviterId = toText(inviteRow.invited_by_npc_id) ?? ""
+    const inviterId = toText(inviteRow.invited_by_id) ?? ""
     const blocked = try isBlockedBetweenTx(tx, account.id, inviterId)
     if (input.accept && blocked) {
       throw new SocialFailure({ code: "Blocked", message: "Cannot accept invite from a blocked actor" })
@@ -896,7 +896,7 @@ export effect function respondAlphaInvite(input: RespondAlphaInviteInput): Alpha
     )
     if (input.accept) {
       try tx.query(
-        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, 'user', 'member', $3) ON CONFLICT (chat_id, member_id) DO NOTHING",
+        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at) VALUES ($1, $2, 'user', 'member', $3, $3) ON CONFLICT (chat_id, member_id) DO NOTHING",
         [chatId, account.id, now]
       )
     }
@@ -976,7 +976,7 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
         [chatId, chatTitle, actorId, chatTier, now]
       )
       try tx.query(
-        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, 'npc', 'owner', $3)",
+        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at) VALUES ($1, $2, 'npc', 'owner', $3, $3)",
         [chatId, actorId, now]
       )
     }
@@ -988,7 +988,7 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
       throw new SocialFailure({ code: "Conflict", message: "Account is already a member of this alpha group" })
     }
     const existingInviteRows = try tx.query(
-      "SELECT i.*, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name, a.profile_image_url AS actor_avatar_url FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_npc_id WHERE i.chat_id = $1 AND i.invited_account_id = $2 AND i.status = 'pending' LIMIT 1",
+      "SELECT i.*, c.name AS chat_name, c.tier AS chat_tier, a.username AS actor_username, a.name AS actor_name, a.profile_image_url AS actor_avatar_url FROM feed_group_invites i INNER JOIN feed_chats c ON c.id = i.chat_id LEFT JOIN feed_actors a ON a.id = i.invited_by_id WHERE i.chat_id = $1 AND i.invited_account_id = $2 AND i.status = 'pending' LIMIT 1",
       [chatId, input.targetAccountId]
     )
     if (existingInviteRows[0] !== undefined) {
@@ -1006,7 +1006,7 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
     }
     const inviteId = freshId()
     try tx.query(
-      "INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_npc_id, status, created_at, responded_at) VALUES ($1, $2, $3, $4, 'pending', $5, NULL)",
+      "INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_id, status, created_at, responded_at) VALUES ($1, $2, $3, $4, 'pending', $5, NULL)",
       [inviteId, chatId, input.targetAccountId, actorId, now]
     )
     const invite: AlphaInviteView = {
@@ -1093,7 +1093,7 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): { r
       throw new SocialFailure({ code: "Forbidden", message: "Group invitation refused by messaging rules" })
     }
     try tx.query(
-      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
+      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at) VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
       [input.chatId, target.id, target.kind === "npc" ? "npc" : "user", now]
     )
     return { chatId: input.chatId, memberId: target.id, added: true }

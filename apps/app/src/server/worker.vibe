@@ -67,14 +67,14 @@ function connectionStringForEnv(env: WorkerEnv): string | undefined {
 effect function schemaAndSeedReady(): boolean!StoreFailure!Store {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const revRows = try tx.query(
-      "SELECT to_regclass('public.feed_stripe_reversals') AS rev, to_regclass('public.feed_actors') AS actors"
+    const tableRows = try tx.query(
+      "SELECT to_regclass('public.feed_market_price_history') AS hist, to_regclass('public.feed_actors') AS actors"
     )
-    const rev = revRows[0]?.rev
-    const actorsTable = revRows[0]?.actors
-    if (typeof rev !== "string" || typeof actorsTable !== "string") return false
+    const hist = tableRows[0]?.hist
+    const actorsTable = tableRows[0]?.actors
+    if (typeof hist !== "string" || typeof actorsTable !== "string") return false
     const colRows = try tx.query(
-      "SELECT count(*) AS count FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feed_stripe_purchases' AND column_name = 'payment_intent_id'"
+      "SELECT count(*) AS count FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feed_group_invites' AND column_name = 'invited_by_id'"
     )
     if (toInt(colRows[0]?.count) < 1) return false
     const actorRows = try tx.query("SELECT count(*) AS count FROM feed_actors")

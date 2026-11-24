@@ -1,8 +1,7 @@
-// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"
+// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"
 import { assert, it } from "@effect/vitest"
 import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld, toInt, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
-import { HttpClient, HttpClientResponse } from "effect/http"
 import { TestClock } from "effect/testing"
 import {
   MarketFailure,
@@ -10,39 +9,30 @@ import {
   buyPredictionShares,
   cancelPredictionMarket,
   closePerpPosition,
-  createStripeCheckoutSession,
   executeNpcSpotTrade,
   getAccountEconomy,
+  getAccountPnlHistory,
   getLeaderboard,
+  getLeaderboardPage,
+  getLeaderboardViewerRank,
   getPerpMarket,
+  getPerpPriceHistory,
   getPointLedger,
   getPredictionMarket,
+  getPredictionPriceHistory,
   getUserPositions,
-  handleStripeWebhook,
+  listClosedPositions,
+  listMarketTrades,
   listPerpPositions,
   listPredictionMarkets,
+  listUserTrades,
   openPerpPosition,
   resolvePredictionMarket,
   sellPredictionShares,
+  snapshotMarketPrices,
   type BuyPredictionInput,
   type SellPredictionInput
 } from "../src/index.vibe"
-
-module node {
-  import { createHmac } from "node:crypto"
-
-  /** @throws {never} */
-  export function signStripeWebhook(rawBody: string, secret: string, timestampSec: number): string {
-    const signature = createHmac("sha256", secret).update(`${timestampSec}.${rawBody}`).digest("hex")
-    return `t=${timestampSec},v1=${signature}`
-  }
-
-  /** @throws {never} */
-  export function jsonResponse(body: string, status: number): Response {
-    return new Response(body, { status, headers: { "content-type": "application/json" } })
-  }
-}
-import { jsonResponse, signStripeWebhook } from node
 
 effect function check(run: () => void) {
   try Effect.try(run)
@@ -58,7 +48,7 @@ effect function runWithSeededDb<A, E>(body: A!E!Store) {
 
 const FEED_ACCOUNT_COLUMNS = `account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2,
   phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents,
-  purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
+  total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
   created_at, updated_at`
 
 effect function createVerifiedAccount(accountId: string, handle: string, balanceCents = 10_000): void!StoreFailure!Store {
@@ -66,7 +56,7 @@ effect function createVerifiedAccount(accountId: string, handle: string, balance
   const now = try Clock.currentTimeMillis
   try store.transaction(effect (tx: Tx) => {
     try tx.query(
-      `INSERT INTO feed_accounts (${FEED_ACCOUNT_COLUMNS}) VALUES ($1, $2, $3, '', NULL, $4, '01', $5, $5, 'game', $6, $6, 0, 0, false, false, NULL, $5, $5)`,
+      `INSERT INTO feed_accounts (${FEED_ACCOUNT_COLUMNS}) VALUES ($1, $2, $3, '', NULL, $4, '01', $5, $5, 'game', $6, $6, 0, false, false, NULL, $5, $5)`,
       [accountId, handle, handle, `phone-hash-${accountId}`, now, balanceCents]
     )
   })
@@ -255,7 +245,7 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
       actorId: "ailon-musk",
       ticker: "XTRPC",
       side: "buy",
-      quoteCents: 3_000_000
+      quoteCents: 150_000
     })
     const poolAfterSpot = try store.transaction((tx: Tx) =>
       tx.query("SELECT base_reserve, quote_reserve_cents, index_price_cents FROM feed_spot_pools WHERE ticker = $1", ["XTRPC"])
@@ -298,7 +288,7 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
       actorId: "ailon-musk",
       ticker: "XTRPC",
       side: "buy",
-      quoteCents: 5_000_000
+      quoteCents: 250_000
     })
 
     // spec/markets/spotPerp.md, "Closing a perp settles equity and canonical fees at mark price without touching spot"
@@ -360,33 +350,24 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
         ]
       },
       {
-        initialPerp: [1_200, 1_200, 10_000, 12_000_000],
+        initialPerp: [1_200, 1_200, 50_000, 600_000],
         nonNpcCode: "FORBIDDEN_NON_NPC",
-        spotBuy1: [8_000, 15_000_000, 1_875, 1_875, 8_000, 15_000_000, 1_875, 1_875, 1_875],
+        spotBuy1: [40_000, 750_000, 1_875, 1_875, 40_000, 750_000, 1_875, 1_875, 1_875],
         overLeverageCode: "INVALID_LEVERAGE",
-        opened: [10, 20_000, 20, 1_875, 7_980, 1_875, 1_968, 20_000],
+        opened: [10, 20_000, 20, 1_968, 7_980, 1_875, 1_968, 20_000],
         funding: [0, false, 1, 1, true, 0, [[100, true]], [[true, 100]]],
-        spotBuy2: [6_000, 20_000_000, 3_333, 3_499],
-        closed: [3_499, 20, 19_202, 17_202, 27_182, 0, 0, 0, 3_333, 3_333]
+        spotBuy2: [30_000, 1_000_000, 3_333, 3_499],
+        closed: [3_333, 20, 15_751, 13_751, 23_731, 0, 0, 0, 3_333, 3_333]
       }
     ))
   })
 })
 
-it.effect('Economy and Stripe Checkout: Washington geo-block, idempotent HMAC webhook crediting, and netProfitCents purchase invariance (spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere")', () => effect {
+it.effect('Fixed capital economy, price history, trade tape, closed positions, PnL history, and leaderboard filters (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/markets/spotPerp.md, "Zero-time open and close round-trips on an unchanged index price strictly decrease trader cash")', () => effect {
   try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
   try runWithSeededDb(effect {
     try createVerifiedAccount("user-alice", "alice", 10_000)
     try createVerifiedAccount("user-bob", "bob", 10_000)
-    try buyPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "yes",
-      amountCents: 2_000
-    })
-    try resolvePredictionMarket({ marketId: "seed-market-1" })
-    // spec/markets/economy.md, "Pack pricing, equity, net profit, and leaderboard rank helpers"
     try createVerifiedAccount("user-carol", "carol", 15_000)
     const db = try Store
     try db.transaction(effect (tx: Tx) => {
@@ -395,136 +376,79 @@ it.effect('Economy and Stripe Checkout: Washington geo-block, idempotent HMAC we
       )
     })
 
-    const bobCheckoutInput = (billingState: string, ipRegion: string) => ({
-      accountId: "user-bob",
-      packId: "pack_20" as const,
-      billingState,
-      ipRegion,
-      requestCountry: "US",
-      successUrl: "https://feed.fun/markets?checkout=success",
-      cancelUrl: "https://feed.fun/markets?checkout=cancel",
-      stripeSecretKey: "sk_test_fake"
+    const alicePredBuy = try buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 2_000
     })
-    // spec/markets/economy.md, "Stripe Checkout packs are web-only and strictly blocked for Washington billing addresses or IPs"
-    const waBillingCode = try marketErrorCode(createStripeCheckoutSession(bobCheckoutInput("WA", "CA")))
-    const waIpCode = try marketErrorCode(createStripeCheckoutSession(bobCheckoutInput("CA", "US-WA")))
-
-    const bobBefore = try getAccountEconomy("user-bob")
-    const boardBefore = try getLeaderboard()
-
-    const stripeRequests: Array<{ readonly method: string; readonly url: string; readonly auth: string | undefined }> = []
-    const stripeClient = HttpClient.make(effect (request, url) => {
-      stripeRequests.push({ method: request.method, url: url.href, auth: request.headers.authorization })
-      return HttpClientResponse.fromWeb(
-        request,
-        jsonResponse(
-          JSON.stringify({ id: "cs_test_ca_pack20", url: "https://checkout.stripe.com/c/pay/cs_test_ca_pack20" }),
-          200
-        )
-      )
+    try TestClock.adjust(Duration.seconds(10))
+    const bobRoundTripOpen = try openPerpPosition({
+      ownerId: "user-bob",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 5
     })
-
-    const checkout = try Effect.provideService(
-      createStripeCheckoutSession(bobCheckoutInput("CA", "US-CA")),
-      HttpClient.HttpClient,
-      stripeClient
-    )
-
-    const now = try Clock.currentTimeMillis
-    const webhookSecret = "whsec_test_feed_markets"
-    const rawBody = JSON.stringify({
-      id: "evt_test_ca_pack20",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: checkout.sessionId,
-          payment_status: "paid",
-          amount_total: checkout.pack.amountCentsUsd,
-          client_reference_id: "user-bob",
-          metadata: {
-            accountId: "user-bob",
-            packId: checkout.pack.id,
-            pointsCents: String(checkout.pack.pointsCents)
-          }
-        }
-      }
+    const bobRoundTripClose = try closePerpPosition({
+      ownerId: "user-bob",
+      positionId: bobRoundTripOpen.positionId
     })
-    const invalidSigCode = try marketErrorCode(handleStripeWebhook({
-      rawBody,
-      signature: `t=${Math.floor(now / 1000)},v1=${"0".repeat(64)}`,
-      webhookSecret
-    }))
-    const signature = signStripeWebhook(rawBody, webhookSecret, Math.floor(now / 1000))
-    const firstWebhook = try handleStripeWebhook({ rawBody, signature, webhookSecret })
-    const replayWebhook = try handleStripeWebhook({ rawBody, signature, webhookSecret })
+    try TestClock.adjust(Duration.seconds(10))
+    try resolvePredictionMarket({ marketId: "seed-market-1" })
+    const snap = try snapshotMarketPrices()
 
-    // spec/markets/economy.md, "Buying points never changes net profit or leaderboard rank, and broke players receive no free refills"
-    const bobAfter = try getAccountEconomy("user-bob")
-    const boardAfter = try getLeaderboard()
-    const bobLedger = try getPointLedger("user-bob")
-    const purchaseEntries = bobLedger.filter((entry) => entry.kind === "stripe_purchase")
+    const perpHistory = try getPerpPriceHistory({ ticker: "XTRPC", range: "ALL", limit: 20 })
+    const predHistory = try getPredictionPriceHistory({ marketId: "seed-market-1", range: "ALL", limit: 20 })
+    const perpTrades = try listMarketTrades({ marketKind: "perp", marketRef: "XTRPC", limit: 20 })
+    const predTrades = try listMarketTrades({ marketKind: "prediction", marketRef: "seed-market-1", limit: 20 })
+    const aliceTrades = try listUserTrades({ handleOrId: "alice", limit: 20 })
+    const aliceClosedAll = try listClosedPositions({ accountId: "user-alice", outcome: "all", page: 1, limit: 10 })
+    const aliceClosedWon = try listClosedPositions({ accountId: "user-alice", outcome: "won", page: 1, limit: 10 })
+    const bobClosedLost = try listClosedPositions({ accountId: "user-bob", outcome: "lost", page: 1, limit: 10 })
+    const alicePnl = try getAccountPnlHistory({ accountId: "user-alice", range: "ALL" })
+    const tradersBoard = try getLeaderboardPage({ filter: "traders", timeframe: "all", page: 1, pageSize: 10 })
+    const npcsBoard = try getLeaderboardPage({ filter: "npcs", timeframe: "all", page: 1, pageSize: 10 })
+    const allBoard = try getLeaderboardPage({ filter: "all", timeframe: "all", page: 1, pageSize: 10 })
+    const aliceRank = try getLeaderboardViewerRank("user-alice", { filter: "traders", timeframe: "all", pageSize: 10 })
 
     try check(() => assert.deepStrictEqual(
       {
-        waBlocks: [waBillingCode, waIpCode],
-        checkout: [
-          checkout.status,
-          checkout.sessionId,
-          checkout.checkoutUrl,
-          checkout.pack.pointsCents,
-          stripeRequests
-        ],
-        invalidSigCode,
-        firstWebhook: [
-          firstWebhook.received,
-          firstWebhook.processed,
-          firstWebhook.alreadyCompleted,
-          firstWebhook.accountId,
-          firstWebhook.sessionId,
-          firstWebhook.creditedCents,
-          firstWebhook.balanceAfterCents
-        ],
-        replayWebhook: [
-          replayWebhook.received,
-          replayWebhook.processed,
-          replayWebhook.alreadyCompleted,
-          replayWebhook.creditedCents,
-          replayWebhook.balanceAfterCents
-        ],
-        bobEconomy: [
-          bobBefore.balanceCents,
-          bobAfter.balanceCents,
-          bobBefore.purchasedCents,
-          bobAfter.purchasedCents,
-          bobBefore.netProfitCents,
-          bobAfter.netProfitCents,
-          purchaseEntries.length,
-          purchaseEntries[0]?.deltaCents
-        ],
-        leaderboardBefore: boardBefore.map((entry) => [entry.rank, entry.accountId, entry.netProfitCents]),
-        leaderboardAfter: boardAfter.map((entry) => [entry.rank, entry.accountId, entry.netProfitCents, entry.balanceCents, entry.purchasedCents])
+        roundTripStrictlyLostCash: bobRoundTripClose.balanceAfterCents < 10_000,
+        snapshotRecorded: snap.perpCount > 0 && snap.predictionCount >= 0,
+        perpHistoryPopulated: perpHistory.points.length >= 2 && perpHistory.points.length <= 20,
+        predHistoryPopulated: predHistory.points.length >= 2 && predHistory.points.length <= 20,
+        perpTradesFound: perpTrades.length >= 2 && perpTrades[0]?.traderHandle === "bob",
+        predTradesFound: predTrades.length >= 1 && predTrades[0]?.id === alicePredBuy.tradeId,
+        aliceTradesFound: aliceTrades.length === 1 && aliceTrades[0]?.traderHandle === "alice",
+        aliceClosedWonCount: [aliceClosedAll.totalCount, aliceClosedWon.totalCount, aliceClosedWon.items[0]?.outcome],
+        bobClosedLostCount: [bobClosedLost.totalCount, bobClosedLost.items[0]?.outcome],
+        alicePnlPositive: alicePnl.currentNetProfitCents > 0 && alicePnl.points.length >= 2,
+        tradersRankOrder: tradersBoard.entries.map((e) => [e.rank, e.accountId, e.isNpc]),
+        npcsOnlyHasNpcs: npcsBoard.entries.length > 0 && npcsBoard.entries.every((e) => e.isNpc),
+        allIncludesBoth: allBoard.pagination.totalCount === tradersBoard.pagination.totalCount + npcsBoard.pagination.totalCount,
+        aliceViewerRank: [aliceRank.rank, aliceRank.page, aliceRank.entry?.accountId]
       },
       {
-        waBlocks: ["REGION_BLOCKED", "REGION_BLOCKED"],
-        checkout: [
-          "pending",
-          "cs_test_ca_pack20",
-          "https://checkout.stripe.com/c/pay/cs_test_ca_pack20",
-          200_000,
-          [{ method: "POST", url: "https://api.stripe.com/v1/checkout/sessions", auth: "Bearer sk_test_fake" }]
+        roundTripStrictlyLostCash: true,
+        snapshotRecorded: true,
+        perpHistoryPopulated: true,
+        predHistoryPopulated: true,
+        perpTradesFound: true,
+        predTradesFound: true,
+        aliceTradesFound: true,
+        aliceClosedWonCount: [1, 1, "won"],
+        bobClosedLostCount: [1, "lost"],
+        alicePnlPositive: true,
+        tradersRankOrder: [
+          [1, "user-alice", false],
+          [2, "user-bob", false]
         ],
-        invalidSigCode: "INVALID_SIGNATURE",
-        firstWebhook: [true, true, false, "user-bob", "cs_test_ca_pack20", 200_000, 210_000],
-        replayWebhook: [true, true, true, 0, 210_000],
-        bobEconomy: [10_000, 210_000, 0, 200_000, 0, 0, 1, 200_000],
-        leaderboardBefore: [
-          [1, "user-alice", 1_639],
-          [2, "user-bob", 0]
-        ],
-        leaderboardAfter: [
-          [1, "user-alice", 1_639, 11_639, 0],
-          [2, "user-bob", 0, 210_000, 200_000]
-        ]
+        npcsOnlyHasNpcs: true,
+        allIncludesBoth: true,
+        aliceViewerRank: [1, 1, "user-alice"]
       }
     ))
   })
@@ -717,7 +641,7 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
   })
 )
 
-it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unified Stripe refund and dispute reversals (spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+it.effect('Leaderboard filters, MTM valuation, and voided market exclusion (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
   runWithSeededMarketDay(effect (now) => {
     const store = try Store
     try createVerifiedAccount("user-alice", "alice", 10_000)
@@ -732,9 +656,9 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
       )
       try tx.query(
         `INSERT INTO feed_accounts (${FEED_ACCOUNT_COLUMNS}) VALUES
-           ('user-deleted', 'deleted_user', 'Deleted', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, 0, false, false, NULL, $1, $1),
-           ('user-reviewer', 'reviewer1', 'Reviewer', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, 0, false, true, 'hash', $1, $1),
-           ('user-unverified', 'unverified1', 'Unverified', '', NULL, NULL, NULL, NULL, $1, 'game', 50000, 10000, 0, 0, false, false, NULL, $1, $1)`,
+           ('user-deleted', 'deleted_user', 'Deleted', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, false, false, NULL, $1, $1),
+           ('user-reviewer', 'reviewer1', 'Reviewer', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, false, true, 'hash', $1, $1),
+           ('user-unverified', 'unverified1', 'Unverified', '', NULL, NULL, NULL, NULL, $1, 'game', 50000, 10000, 0, false, false, NULL, $1, $1)`,
         [now]
       )
     })
@@ -762,100 +686,7 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
     try cancelPredictionMarket("seed-market-1")
     const boardAfterCancel = try getLeaderboard()
     const aliceAfterCancel = boardAfterCancel.find((e) => e.accountId === "user-alice")
-
-    const webhookSecret = "whsec_test_reversals"
-    const sendSigned = (payload: Readonly<Record<string, unknown>>) => effect {
-      const rawBody = JSON.stringify(payload)
-      const signature = signStripeWebhook(rawBody, webhookSecret, Math.floor(now / 1000))
-      return try handleStripeWebhook({ rawBody, signature, webhookSecret })
-    }
-
-    const checkoutRes = try sendSigned({
-      id: "evt_checkout_rev_1",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: "cs_rev_1",
-          payment_status: "paid",
-          payment_intent: "pi_rev_1",
-          amount_total: 2_000,
-          client_reference_id: "user-bob",
-          metadata: { accountId: "user-bob", packId: "pack_20" }
-        }
-      }
-    })
-    const earlyWonCode = try marketErrorCode(sendSigned({
-      id: "evt_dispute_won_early",
-      type: "charge.dispute.closed",
-      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", status: "won", amount: 1_500 } }
-    }))
-    const refund1 = try sendSigned({
-      id: "evt_refund_1",
-      type: "charge.refunded",
-      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 600 } }
-    })
-    const refund1Dup = try sendSigned({
-      id: "evt_refund_1",
-      type: "charge.refunded",
-      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 600 } }
-    })
-    const refundStale = try sendSigned({
-      id: "evt_refund_stale",
-      type: "charge.refunded",
-      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 400 } }
-    })
-    const refund2 = try sendSigned({
-      id: "evt_refund_2",
-      type: "charge.refunded",
-      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 1_000 } }
-    })
-    const disputeCreated = try sendSigned({
-      id: "evt_dispute_1",
-      type: "charge.dispute.created",
-      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "needs_response" } }
-    })
-    const disputeWon = try sendSigned({
-      id: "evt_dispute_won_1",
-      type: "charge.dispute.closed",
-      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "won" } }
-    })
-    const disputeWonDup = try sendSigned({
-      id: "evt_dispute_won_dup",
-      type: "charge.dispute.closed",
-      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "won" } }
-    })
-    const bobAfterReversals = try getAccountEconomy("user-bob")
-
-    try sendSigned({
-      id: "evt_checkout_lowbal",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: "cs_lowbal_1",
-          payment_status: "paid",
-          payment_intent: "pi_lowbal_1",
-          amount_total: 500,
-          client_reference_id: "user-alice",
-          metadata: { accountId: "user-alice", packId: "pack_5" }
-        }
-      }
-    })
-    try store.transaction((tx: Tx) =>
-      tx.query("UPDATE feed_accounts SET balance_cents = 10000 WHERE account_id = 'user-alice'")
-    )
-    const lowBalRefund1 = try sendSigned({
-      id: "evt_lowbal_ref_1",
-      type: "charge.refunded",
-      data: { object: { id: "ch_low", payment_intent: "pi_lowbal_1", amount_refunded: 300 } }
-    })
-    try store.transaction((tx: Tx) =>
-      tx.query("UPDATE feed_accounts SET balance_cents = 50000 WHERE account_id = 'user-alice'")
-    )
-    const lowBalRefund2 = try sendSigned({
-      id: "evt_lowbal_ref_2",
-      type: "charge.refunded",
-      data: { object: { id: "ch_low", payment_intent: "pi_lowbal_1", amount_refunded: 400 } }
-    })
+    const bobAfterCancel = try getAccountEconomy("user-bob")
 
     try check(() => assert.deepStrictEqual(
       {
@@ -869,33 +700,13 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
           aliceAfterCancel?.settledCount,
           aliceAfterCancel?.wins
         ],
-        checkoutCredited: checkoutRes.creditedCents,
-        earlyWonCode,
-        refund1: [refund1.creditedCents, refund1.balanceAfterCents],
-        refund1Dup: [refund1Dup.alreadyCompleted, refund1Dup.creditedCents],
-        refundStale: [refundStale.creditedCents, refundStale.balanceAfterCents],
-        refund2: [refund2.creditedCents, refund2.balanceAfterCents],
-        disputeCreatedCapped: [disputeCreated.creditedCents, disputeCreated.balanceAfterCents],
-        disputeWonRestoresExactDebit: [disputeWon.creditedCents, disputeWon.balanceAfterCents],
-        disputeWonDup: [disputeWonDup.alreadyCompleted, disputeWonDup.creditedCents],
-        bobFinalEconomy: [bobAfterReversals.balanceCents, bobAfterReversals.purchasedCents, bobAfterReversals.netProfitCents],
-        lowBalRefundTracksCumulativeSeparately: [lowBalRefund1.creditedCents, lowBalRefund2.creditedCents]
+        bobRefundedAtCost: [bobAfterCancel.balanceCents, bobAfterCancel.netProfitCents]
       },
       {
         leaderboardIds: ["user-alice", "user-bob"],
         mtmMatchesEconomyAndBoard: [true, true, true],
         cancelledNotCountedAsSettledOrLoss: [0, 0],
-        checkoutCredited: 200_000,
-        earlyWonCode: "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING",
-        refund1: [-60_000, 150_000],
-        refund1Dup: [true, 0],
-        refundStale: [0, 150_000],
-        refund2: [-40_000, 110_000],
-        disputeCreatedCapped: [-100_000, 10_000],
-        disputeWonRestoresExactDebit: [100_000, 110_000],
-        disputeWonDup: [true, 0],
-        bobFinalEconomy: [110_000, 100_000, 0],
-        lowBalRefundTracksCumulativeSeparately: [-10_000, -10_000]
+        bobRefundedAtCost: [10_000, 0]
       }
     ))
   })

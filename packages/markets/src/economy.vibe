@@ -1,42 +1,32 @@
-// spec/markets/economy.md, "Story: Verify account and claim initial grant once"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
-import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
+// spec/markets/economy.md, "Story: Verify account and claim initial grant once"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
+import {
+  Store,
+  type StoreFailure,
+  resolveActorAvatarUrl,
+  tierStartingBalanceCents,
+  toInt,
+  toText,
+  type Row,
+  type Tx
+} from "@repo/db"
 import { BPS_DENOMINATOR } from "../gen/shared__money.effect.vibe"
 import {
   equityCents,
-  isWashingtonBlocked,
   netProfitCents,
-  packCents,
-  packPts,
-  packUsd,
-  type GeoCheck,
-  type PlayerLedger,
-  type PurchasePack
+  type PlayerLedger
 } from "../gen/markets__economy.effect.vibe"
 import { yesOddsBps } from "../gen/markets__prediction.effect.vibe"
-import { positionEquityAtMark } from "../gen/markets__spotPerp.effect.vibe"
+import { positionEquityAtMark, unrealizedPnlAtMark } from "../gen/markets__spotPerp.effect.vibe"
 import {
   type MarketFailure,
-  insertLedgerEntry,
   marketFail,
-  newMarketId,
   optionalText,
-  parseJsonBody,
   requiredText,
   toSpecPerpPosition
 } from "./shared.vibe"
 
-export type PackId = "pack_5" | "pack_20" | "pack_50"
-
-export interface PointPack {
-  readonly id: PackId
-  readonly specPack: PurchasePack
-  readonly name: string
-  readonly usd: number
-  readonly amountCentsUsd: number
-  readonly points: number
-  readonly pointsCents: number
-}
+export type LeaderboardFilter = "all" | "traders" | "npcs"
+export type LeaderboardTimeframe = "24h" | "7d" | "30d" | "all"
 
 export interface AccountEconomyView {
   readonly accountId: string
@@ -48,7 +38,6 @@ export interface AccountEconomyView {
   readonly positionValueCents: number
   readonly equityCents: number
   readonly startingGrantCents: number
-  readonly purchasedCents: number
   readonly totalFeesPaidCents: number
   readonly netProfitCents: number
 }
@@ -63,243 +52,79 @@ export interface PointLedgerEntry {
   readonly createdAt: number
 }
 
-export interface CreateStripeCheckoutInput {
-  readonly accountId: string
-  readonly packId: string
-  readonly billingState?: string
-  readonly requestCountry?: string
-  readonly ipRegion?: string
-  readonly successUrl: string
-  readonly cancelUrl: string
-  readonly stripeSecretKey?: string
-}
-
-export interface StripeCheckoutSessionView {
-  readonly purchaseId: string
-  readonly sessionId: string
-  readonly checkoutUrl: string
-  readonly pack: PointPack
-  readonly status: "pending"
-  readonly createdAt: number
-}
-
-export interface HandleStripeWebhookInput {
-  readonly rawBody: string
-  readonly signature?: string
-  readonly webhookSecret?: string
-}
-
-export interface StripeWebhookResult {
-  readonly received: boolean
-  readonly processed: boolean
-  readonly alreadyCompleted: boolean
-  readonly eventType: string
-  readonly accountId: string | null
-  readonly sessionId: string | null
-  readonly creditedCents: number
-  readonly balanceAfterCents: number | null
-}
-
 export interface LeaderboardEntry {
   readonly rank: number
   readonly accountId: string
   readonly handle: string
   readonly displayName: string
   readonly avatarUrl: string | null
+  readonly isNpc: boolean
   readonly balanceCents: number
   readonly positionValueCents: number
   readonly equityCents: number
   readonly startingGrantCents: number
-  readonly purchasedCents: number
   readonly netProfitCents: number
+  readonly roiPct: number
   readonly volumeCents: number
   readonly tradeCount: number
   readonly wins: number
   readonly settledCount: number
   readonly winRate: number
+  readonly winRatePct: number
 }
 
-module stripeSdk {
-  import Stripe from "stripe"
-
-  export interface SdkCheckoutRequest {
-    readonly secretKey: string
-    readonly accountId: string
-    readonly packId: string
-    readonly packName: string
-    readonly usdAmountCents: number
-    readonly points: number
-    readonly pointsCents: number
-    readonly successUrl: string
-    readonly cancelUrl: string
-  }
-
-  export interface SdkCheckoutSession {
-    readonly id: string
-    readonly url: string | null
-  }
-
-  /** @throws {unknown} */
-  export async function createCheckoutViaSdk(input: SdkCheckoutRequest): Promise<SdkCheckoutSession> {
-    const client = new Stripe(input.secretKey, {
-      httpClient: Stripe.createFetchHttpClient(),
-      maxNetworkRetries: 1,
-      timeout: 6000
-    })
-    const session = await client.checkout.sessions.create({
-      mode: "payment",
-      client_reference_id: input.accountId,
-      success_url: input.successUrl,
-      cancel_url: input.cancelUrl,
-      line_items: [
-        {
-          quantity: 1,
-          price_data: {
-            currency: "usd",
-            unit_amount: input.usdAmountCents,
-            product_data: {
-              name: input.packName,
-              description: `${input.points} virtual game points (no cash value)`
-            }
-          }
-        }
-      ],
-      metadata: {
-        accountId: input.accountId,
-        packId: input.packId,
-        pointsCents: String(input.pointsCents)
-      }
-    })
-    return { id: session.id, url: session.url }
-  }
-}
-import { createCheckoutViaSdk, type SdkCheckoutRequest, type SdkCheckoutSession } from stripeSdk
-
-module webCrypto {
-  /** @throws {never} */
-  export async function verifyStripeHmac(
-    rawBody: string,
-    signatureHeader: string,
-    webhookSecret: string,
-    nowMs: number
-  ): Promise<boolean> {
-    try {
-      if (!signatureHeader || !webhookSecret) return false
-      const fields = signatureHeader.split(",").map((part) => {
-        const eq = part.indexOf("=")
-        return eq === -1 ? ["", ""] as const : [part.slice(0, eq).trim(), part.slice(eq + 1).trim()] as const
-      })
-      const timestamps = fields.filter(([key]) => key === "t").map(([, val]) => val)
-      const signatures = fields.filter(([key]) => key === "v1").map(([, val]) => val)
-      if (timestamps.length !== 1 || signatures.length === 0) return false
-      const timestamp = timestamps[0]
-      if (timestamp === undefined || !/^\d{1,12}$/.test(timestamp)) return false
-      if (Math.abs(nowMs - Number(timestamp) * 1000) > 300_000) return false
-      const encoder = new TextEncoder()
-      const key = await globalThis.crypto.subtle.importKey(
-        "raw",
-        encoder.encode(webhookSecret),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"]
-      )
-      const mac = await globalThis.crypto.subtle.sign(
-        "HMAC",
-        key,
-        encoder.encode(`${timestamp}.${rawBody}`)
-      )
-      const expectedHex = Array.from(new Uint8Array(mac), (byte) => byte.toString(16).padStart(2, "0")).join("")
-      const expectedBytes = encoder.encode(expectedHex)
-      return signatures.some((candidate) => {
-        const candidateBytes = encoder.encode(candidate.toLowerCase())
-        if (candidateBytes.length !== expectedBytes.length) return false
-        let diff = 0
-        for (let i = 0; i < expectedBytes.length; i++) {
-          diff |= (candidateBytes[i] ?? 0) ^ (expectedBytes[i] ?? 0)
-        }
-        return diff === 0
-      })
-    } catch {
-      return false
-    }
-  }
-}
-import { verifyStripeHmac } from webCrypto
-
-const StripeSessionResponse = Schema.Struct({
-  id: Schema.String,
-  url: Schema.optionalKey(Schema.NullOr(Schema.String))
-})
-
-const StripeWebhookPayload = Schema.Struct({
-  id: Schema.String,
-  type: Schema.String,
-  data: Schema.Struct({
-    object: Schema.Record(Schema.String, Schema.Unknown)
-  })
-})
-
-function buildPack(id: PackId, specPack: PurchasePack, name: string): PointPack {
-  const usd = packUsd(specPack)
-  return {
-    id,
-    specPack,
-    name,
-    usd,
-    amountCentsUsd: usd * 100,
-    points: packPts(specPack),
-    pointsCents: packCents(specPack)
-  }
+export interface LeaderboardPagination {
+  readonly page: number
+  readonly pageSize: number
+  readonly totalCount: number
+  readonly totalPages: number
 }
 
-const pointPacks: ReadonlyArray<PointPack> = [
-  buildPack("pack_5", "Pack5", "500 pts Pack"),
-  buildPack("pack_20", "Pack20", "2,000 pts Pack"),
-  buildPack("pack_50", "Pack50", "5,000 pts Pack")
-]
-
-export function listPointPacks(): ReadonlyArray<PointPack> {
-  return pointPacks
+export interface LeaderboardPage {
+  readonly entries: ReadonlyArray<LeaderboardEntry>
+  readonly pagination: LeaderboardPagination
+  readonly generatedAt: number
 }
 
-effect function resolvePack(packId: string): PointPack!MarketFailure {
-  const normalized = packId.trim().toLowerCase()
-  switch (normalized) {
-    case "pack_5":
-    case "pack5":
-    case "5":
-    case "500":
-      return pointPacks[0]!
-    case "pack_20":
-    case "pack20":
-    case "20":
-    case "2000":
-      return pointPacks[1]!
-    case "pack_50":
-    case "pack50":
-    case "50":
-    case "5000":
-      return pointPacks[2]!
-    default:
-      throw marketFail("INVALID_PACK", `Unknown point pack: ${packId}`)
+export interface LeaderboardViewerRank {
+  readonly rank: number | null
+  readonly page: number | null
+  readonly entry: LeaderboardEntry | null
+}
+
+export interface LeaderboardQueryOptions {
+  readonly filter?: LeaderboardFilter
+  readonly timeframe?: LeaderboardTimeframe
+  readonly page?: number
+  readonly pageSize?: number
+}
+
+export function parseLeaderboardFilter(raw: string | null | undefined): LeaderboardFilter {
+  const norm = raw?.trim().toLowerCase()
+  if (norm === "traders" || norm === "humans") return "traders"
+  if (norm === "npcs" || norm === "actors") return "npcs"
+  return "all"
+}
+
+export function parseLeaderboardTimeframe(raw: string | null | undefined): LeaderboardTimeframe {
+  const norm = raw?.trim().toLowerCase()
+  if (norm === "24h" || norm === "1d") return "24h"
+  if (norm === "7d" || norm === "1w") return "7d"
+  if (norm === "30d" || norm === "1m") return "30d"
+  return "all"
+}
+
+function timeframeCutoffMs(timeframe: LeaderboardTimeframe, nowMs: number): number | null {
+  switch (timeframe) {
+    case "24h":
+      return nowMs - 86_400_000
+    case "7d":
+      return nowMs - 7 * 86_400_000
+    case "30d":
+      return nowMs - 30 * 86_400_000
+    case "all":
+      return null
   }
-}
-
-function resolvePackByUsdAmount(amountTotal: unknown): PointPack | undefined {
-  const amount = toInt(amountTotal)
-  return pointPacks.find((pack) => pack.amountCentsUsd === amount)
-}
-
-function isWashingtonRegion(region: string | undefined, country: string | undefined): boolean {
-  if (region === undefined) return false
-  const norm = region.trim().toUpperCase()
-  if (norm === "") return false
-  if (norm === "US-WA" || norm === "WASHINGTON") return true
-  if (norm === "WA") {
-    const countryNorm = country?.trim().toUpperCase()
-    return countryNorm === undefined || countryNorm === "" || countryNorm === "US" || countryNorm === "USA"
-  }
-  return false
 }
 
 function buildLedger(
@@ -307,8 +132,7 @@ function buildLedger(
   verified: boolean,
   cashCents: number,
   positionValueCents: number,
-  startingGrantCents: number,
-  purchasedCents: number
+  startingGrantCents: number
 ): PlayerLedger {
   return {
     id: accountId,
@@ -316,8 +140,7 @@ function buildLedger(
     grantClaimed: verified,
     cashCents,
     positionValueCents,
-    startingGrantCents,
-    purchasedCents
+    startingGrantCents
   }
 }
 
@@ -327,68 +150,84 @@ function markToMarketPredictionCents(side: unknown, shares: number, yesShares: n
   return Math.floor((shares * sidePriceBps) / BPS_DENOMINATOR)
 }
 
-effect function loadOpenUserPerpRows(tx: Tx, accountId?: string): ReadonlyArray<Row>!StoreFailure {
-  const accountFilter = accountId === undefined ? "" : " AND p.holder_id = $1"
+effect function loadOpenPerpRows(tx: Tx, holderKind?: "user" | "npc", accountId?: string): ReadonlyArray<Row>!StoreFailure {
+  if (accountId !== undefined) {
+    return try tx.query(
+      `SELECT p.holder_id, p.holder_kind, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
+       FROM feed_perp_positions p
+       JOIN feed_perp_markets m ON m.ticker = p.ticker
+       WHERE p.holder_kind = 'user' AND p.status = 'open' AND p.holder_id = $1`,
+      [accountId]
+    )
+  }
+  if (holderKind !== undefined) {
+    return try tx.query(
+      `SELECT p.holder_id, p.holder_kind, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
+       FROM feed_perp_positions p
+       JOIN feed_perp_markets m ON m.ticker = p.ticker
+       WHERE p.holder_kind = $1 AND p.status = 'open'`,
+      [holderKind]
+    )
+  }
   return try tx.query(
-    `SELECT p.holder_id, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
+    `SELECT p.holder_id, p.holder_kind, p.side, p.margin_cents, p.size_cents, p.entry_price_cents, p.leverage, p.accrued_funding_cents, p.last_funding_period, p.created_at, m.mark_price_cents
      FROM feed_perp_positions p
      JOIN feed_perp_markets m ON m.ticker = p.ticker
-     WHERE p.holder_kind = 'user' AND p.status = 'open'${accountFilter}`,
-    accountId === undefined ? [] : [accountId]
+     WHERE p.status = 'open'`
   )
+}
+
+export effect function getAccountEconomyIn(tx: Tx, accountId: string): AccountEconomyView!(MarketFailure | StoreFailure) {
+  const accountRows = try tx.query(
+    `SELECT account_id, handle, display_name, phone_verified_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents
+     FROM feed_accounts
+     WHERE account_id = $1`,
+    [accountId]
+  )
+  if (accountRows.length === 0) {
+    throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
+  }
+  const acct = accountRows[0]!
+  const predRows = try tx.query(
+    `SELECT p.side, p.shares, m.yes_shares, m.no_shares
+     FROM feed_prediction_positions p
+     JOIN feed_prediction_markets m ON m.id = p.market_id
+     WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`,
+    [accountId]
+  )
+  let predValueCents = 0
+  for (const row of predRows) {
+    predValueCents += markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
+  }
+  const perpRows = try loadOpenPerpRows(tx, "user", accountId)
+  let perpValueCents = 0
+  for (const row of perpRows) {
+    const equity = positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents))
+    perpValueCents += Math.max(0, equity)
+  }
+  const positionValueCents = predValueCents + perpValueCents
+  const balanceCents = toInt(acct.balance_cents)
+  const startingGrantCents = toInt(acct.starting_grant_cents)
+  const verified = acct.phone_verified_at !== null
+  const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents)
+  return {
+    accountId,
+    handle: requiredText(acct.handle),
+    displayName: requiredText(acct.display_name),
+    verified,
+    uiMode: requiredText(acct.ui_mode) === "social" ? "social" : "game",
+    balanceCents,
+    positionValueCents,
+    equityCents: equityCents(ledger),
+    startingGrantCents,
+    totalFeesPaidCents: toInt(acct.total_fees_paid_cents),
+    netProfitCents: netProfitCents(ledger)
+  }
 }
 
 export effect function getAccountEconomy(accountId: string): AccountEconomyView!(MarketFailure | StoreFailure)!Store {
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const accountRows = try tx.query(
-      `SELECT account_id, handle, display_name, phone_verified_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents
-       FROM feed_accounts
-       WHERE account_id = $1`,
-      [accountId]
-    )
-    if (accountRows.length === 0) {
-      throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
-    }
-    const acct = accountRows[0]!
-    const predRows = try tx.query(
-      `SELECT p.side, p.shares, m.yes_shares, m.no_shares
-       FROM feed_prediction_positions p
-       JOIN feed_prediction_markets m ON m.id = p.market_id
-       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`,
-      [accountId]
-    )
-    let predValueCents = 0
-    for (const row of predRows) {
-      predValueCents += markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
-    }
-    const perpRows = try loadOpenUserPerpRows(tx, accountId)
-    let perpValueCents = 0
-    for (const row of perpRows) {
-      const equity = positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents))
-      perpValueCents += Math.max(0, equity)
-    }
-    const positionValueCents = predValueCents + perpValueCents
-    const balanceCents = toInt(acct.balance_cents)
-    const startingGrantCents = toInt(acct.starting_grant_cents)
-    const purchasedCents = toInt(acct.purchased_cents)
-    const verified = acct.phone_verified_at !== null
-    const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents, purchasedCents)
-    return {
-      accountId,
-      handle: requiredText(acct.handle),
-      displayName: requiredText(acct.display_name),
-      verified,
-      uiMode: requiredText(acct.ui_mode) === "social" ? "social" : "game",
-      balanceCents,
-      positionValueCents,
-      equityCents: equityCents(ledger),
-      startingGrantCents,
-      purchasedCents,
-      totalFeesPaidCents: toInt(acct.total_fees_paid_cents),
-      netProfitCents: netProfitCents(ledger)
-    }
-  })
+  return try store.transaction((tx: Tx) => getAccountEconomyIn(tx, accountId))
 }
 
 export effect function getPointLedger(accountId: string, limit = 50): ReadonlyArray<PointLedgerEntry>!StoreFailure!Store {
@@ -415,670 +254,355 @@ export effect function getPointLedger(accountId: string, limit = 50): ReadonlyAr
   })
 }
 
-effect function createCheckoutViaHttpClient(
-  client: HttpClient.HttpClient,
-  input: SdkCheckoutRequest
-): SdkCheckoutSession!MarketFailure {
-  const form = new URLSearchParams([
-    ["mode", "payment"],
-    ["client_reference_id", input.accountId],
-    ["success_url", input.successUrl],
-    ["cancel_url", input.cancelUrl],
-    ["line_items[0][quantity]", "1"],
-    ["line_items[0][price_data][currency]", "usd"],
-    ["line_items[0][price_data][unit_amount]", String(input.usdAmountCents)],
-    ["line_items[0][price_data][product_data][name]", input.packName],
-    ["line_items[0][price_data][product_data][description]", `${input.points} virtual game points (no cash value)`],
-    ["metadata[accountId]", input.accountId],
-    ["metadata[packId]", input.packId],
-    ["metadata[pointsCents]", String(input.pointsCents)]
-  ]).toString()
-  const request = HttpClientRequest.post("https://api.stripe.com/v1/checkout/sessions").pipe(
-    HttpClientRequest.bearerToken(input.secretKey),
-    HttpClientRequest.acceptJson,
-    HttpClientRequest.bodyText(form, "application/x-www-form-urlencoded")
-  )
-  const response = Effect.provideService(client.execute(request), FetchHttpClient.RequestInit, { redirect: "manual" }) catch effect (cause) => {
-    throw marketFail("STRIPE_UNAVAILABLE", "Failed to reach Stripe Checkout API", cause)
-  }
-  const text = response.text catch effect (cause) => {
-    throw marketFail("STRIPE_UNAVAILABLE", "Failed to read Stripe Checkout response", cause)
-  }
-  if (response.status < 200 || response.status >= 300) {
-    throw marketFail("STRIPE_ERROR", `Stripe Checkout rejected request (${response.status})`)
-  }
-  const parsedJson = try parseJsonBody(text, "STRIPE_INVALID_RESPONSE", "Stripe Checkout returned invalid JSON")
-  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(StripeSessionResponse)(parsedJson))
-  if (decoded === undefined) {
-    throw marketFail("STRIPE_INVALID_RESPONSE", "Stripe Checkout returned unexpected session shape")
-  }
-  return { id: decoded.id, url: decoded.url ?? null }
+interface LeaderboardAggregateMaps {
+  readonly volumeMap: ReadonlyMap<string, { readonly volumeCents: number; readonly tradeCount: number }>
+  readonly statsMap: ReadonlyMap<string, { readonly wins: number; readonly settledCount: number; readonly realizedPnlCents: number }>
 }
 
-export effect function createStripeCheckoutSession(
-  input: CreateStripeCheckoutInput
-): StripeCheckoutSessionView!(MarketFailure | StoreFailure)!Store {
-  const pack = try resolvePack(input.packId)
-  if (!input.successUrl.trim() || !input.cancelUrl.trim()) {
-    throw marketFail("INVALID_REDIRECT_URL", "successUrl and cancelUrl are required")
-  }
-  const geo: GeoCheck = {
-    billingWashington: isWashingtonRegion(input.billingState, input.requestCountry),
-    ipWashington: isWashingtonRegion(input.ipRegion, input.requestCountry)
-  }
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  if (isWashingtonBlocked(geo)) {
-    try store.transaction(effect (tx: Tx) => {
-      const accountRows = try tx.query("SELECT account_id FROM feed_accounts WHERE account_id = $1", [input.accountId])
-      if (accountRows.length > 0) {
-        const blockId = newMarketId()
-        try tx.query(
-          `INSERT INTO feed_stripe_purchases
-           (id, account_id, stripe_session_id, pack_usd, points_cents, status, billing_state, ip_region, created_at, completed_at)
-           VALUES ($1, $2, $3, $4, $5, 'blocked_wa', $6, $7, $8, NULL)`,
-          [blockId, input.accountId, `blocked_wa:${blockId}`, pack.usd, pack.pointsCents, input.billingState ?? null, input.ipRegion ?? null, now]
-        )
-      }
+effect function loadLeaderboardStatsMapsTx(
+  tx: Tx,
+  kindFilter: "user" | "npc" | undefined,
+  cutoffMs: number | null
+): LeaderboardAggregateMaps!StoreFailure {
+  const volumeRows = cutoffMs === null
+    ? (kindFilter === undefined
+        ? try tx.query(
+            `SELECT trader_id, trader_kind, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
+             FROM feed_trades
+             GROUP BY trader_id, trader_kind`
+          )
+        : try tx.query(
+            `SELECT trader_id, trader_kind, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
+             FROM feed_trades
+             WHERE trader_kind = $1
+             GROUP BY trader_id, trader_kind`,
+            [kindFilter]
+          ))
+    : (kindFilter === undefined
+        ? try tx.query(
+            `SELECT trader_id, trader_kind, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
+             FROM feed_trades
+             WHERE created_at >= $1
+             GROUP BY trader_id, trader_kind`,
+            [cutoffMs]
+          )
+        : try tx.query(
+            `SELECT trader_id, trader_kind, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
+             FROM feed_trades
+             WHERE trader_kind = $1 AND created_at >= $2
+             GROUP BY trader_id, trader_kind`,
+            [kindFilter, cutoffMs]
+          ))
+  const volumeMap = new Map<string, { readonly volumeCents: number; readonly tradeCount: number }>()
+  for (const row of volumeRows) {
+    const key = `${requiredText(row.trader_kind)}:${requiredText(row.trader_id)}`
+    volumeMap.set(key, {
+      volumeCents: toInt(row.volume_cents),
+      tradeCount: toInt(row.trade_count)
     })
-    throw marketFail("REGION_BLOCKED", "Point purchases are unavailable in Washington State. Free play remains open.")
   }
-  const secretKey = input.stripeSecretKey?.trim() ?? ""
-  if (secretKey === "") {
-    throw marketFail("STRIPE_UNCONFIGURED", "Stripe secret key is not configured")
+  const predStatsRows = cutoffMs === null
+    ? (kindFilter === undefined
+        ? try tx.query(
+            `SELECT p.holder_id, p.holder_kind, COUNT(*) AS settled_count,
+               SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(p.payout_cents - p.cost_basis_cents), 0) AS realized_pnl_cents
+             FROM feed_prediction_positions p
+             JOIN feed_prediction_markets m ON m.id = p.market_id
+             WHERE p.settled_at IS NOT NULL AND p.shares > 0 AND m.status = 'resolved'
+             GROUP BY p.holder_id, p.holder_kind`
+          )
+        : try tx.query(
+            `SELECT p.holder_id, p.holder_kind, COUNT(*) AS settled_count,
+               SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(p.payout_cents - p.cost_basis_cents), 0) AS realized_pnl_cents
+             FROM feed_prediction_positions p
+             JOIN feed_prediction_markets m ON m.id = p.market_id
+             WHERE p.holder_kind = $1 AND p.settled_at IS NOT NULL AND p.shares > 0 AND m.status = 'resolved'
+             GROUP BY p.holder_id, p.holder_kind`,
+            [kindFilter]
+          ))
+    : (kindFilter === undefined
+        ? try tx.query(
+            `SELECT p.holder_id, p.holder_kind, COUNT(*) AS settled_count,
+               SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(p.payout_cents - p.cost_basis_cents), 0) AS realized_pnl_cents
+             FROM feed_prediction_positions p
+             JOIN feed_prediction_markets m ON m.id = p.market_id
+             WHERE p.settled_at IS NOT NULL AND p.settled_at >= $1 AND p.shares > 0 AND m.status = 'resolved'
+             GROUP BY p.holder_id, p.holder_kind`,
+            [cutoffMs]
+          )
+        : try tx.query(
+            `SELECT p.holder_id, p.holder_kind, COUNT(*) AS settled_count,
+               SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(p.payout_cents - p.cost_basis_cents), 0) AS realized_pnl_cents
+             FROM feed_prediction_positions p
+             JOIN feed_prediction_markets m ON m.id = p.market_id
+             WHERE p.holder_kind = $1 AND p.settled_at IS NOT NULL AND p.settled_at >= $2 AND p.shares > 0 AND m.status = 'resolved'
+             GROUP BY p.holder_id, p.holder_kind`,
+            [kindFilter, cutoffMs]
+          ))
+  const perpStatsRows = cutoffMs === null
+    ? (kindFilter === undefined
+        ? try tx.query(
+            `SELECT holder_id, holder_kind, COUNT(*) AS settled_count,
+               SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(realized_pnl_cents), 0) AS realized_pnl_cents
+             FROM feed_perp_positions
+             WHERE status IN ('closed', 'liquidated')
+             GROUP BY holder_id, holder_kind`
+          )
+        : try tx.query(
+            `SELECT holder_id, holder_kind, COUNT(*) AS settled_count,
+               SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(realized_pnl_cents), 0) AS realized_pnl_cents
+             FROM feed_perp_positions
+             WHERE holder_kind = $1 AND status IN ('closed', 'liquidated')
+             GROUP BY holder_id, holder_kind`,
+            [kindFilter]
+          ))
+    : (kindFilter === undefined
+        ? try tx.query(
+            `SELECT holder_id, holder_kind, COUNT(*) AS settled_count,
+               SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(realized_pnl_cents), 0) AS realized_pnl_cents
+             FROM feed_perp_positions
+             WHERE status IN ('closed', 'liquidated') AND closed_at >= $1
+             GROUP BY holder_id, holder_kind`,
+            [cutoffMs]
+          )
+        : try tx.query(
+            `SELECT holder_id, holder_kind, COUNT(*) AS settled_count,
+               SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins,
+               COALESCE(SUM(realized_pnl_cents), 0) AS realized_pnl_cents
+             FROM feed_perp_positions
+             WHERE holder_kind = $1 AND status IN ('closed', 'liquidated') AND closed_at >= $2
+             GROUP BY holder_id, holder_kind`,
+            [kindFilter, cutoffMs]
+          ))
+  const statsMap = new Map<string, { wins: number; settledCount: number; realizedPnlCents: number }>()
+  for (const row of [...predStatsRows, ...perpStatsRows]) {
+    const key = `${requiredText(row.holder_kind)}:${requiredText(row.holder_id)}`
+    const prev = statsMap.get(key) ?? { wins: 0, settledCount: 0, realizedPnlCents: 0 }
+    statsMap.set(key, {
+      wins: prev.wins + toInt(row.wins),
+      settledCount: prev.settledCount + toInt(row.settled_count),
+      realizedPnlCents: prev.realizedPnlCents + toInt(row.realized_pnl_cents)
+    })
   }
-  try store.transaction(effect (tx: Tx) => {
-    const accountRows = try tx.query("SELECT account_id FROM feed_accounts WHERE account_id = $1", [input.accountId])
-    if (accountRows.length === 0) {
-      throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${input.accountId}`)
-    }
-  })
-  const sdkRequest: SdkCheckoutRequest = {
-    secretKey,
-    accountId: input.accountId,
-    packId: pack.id,
-    packName: pack.name,
-    usdAmountCents: pack.amountCentsUsd,
-    points: pack.points,
-    pointsCents: pack.pointsCents,
-    successUrl: input.successUrl,
-    cancelUrl: input.cancelUrl
-  }
-  const maybeClient = try Effect.serviceOption(HttpClient.HttpClient)
-  const session = Option.isSome(maybeClient)
-    ? try createCheckoutViaHttpClient(maybeClient.value, sdkRequest)
-    : try tryPromise({
-        try: () => createCheckoutViaSdk(sdkRequest),
-        catch: (cause) => marketFail("STRIPE_ERROR", "Stripe Checkout session creation failed", cause)
-      })
-  if (!session.url) {
-    throw marketFail("STRIPE_INVALID_RESPONSE", "Stripe Checkout session did not return a URL")
-  }
-  const purchaseId = newMarketId()
-  try store.transaction(effect (tx: Tx) => {
-    try tx.query(
-      `INSERT INTO feed_stripe_purchases
-       (id, account_id, stripe_session_id, pack_usd, points_cents, status, billing_state, ip_region, created_at, completed_at)
-       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NULL)`,
-      [purchaseId, input.accountId, session.id, pack.usd, pack.pointsCents, input.billingState ?? null, input.ipRegion ?? null, now]
-    )
-  })
-  return {
-    purchaseId,
-    sessionId: session.id,
-    checkoutUrl: session.url,
-    pack,
-    status: "pending",
-    createdAt: now
-  }
+  return { volumeMap, statsMap }
 }
 
-function readMetaString(metadata: unknown, key: string): string | undefined {
-  if (metadata === null || typeof metadata !== "object") return undefined
-  const record = metadata as Record<string, unknown>
-  return toText(record[key])
-}
-
-function extractPaymentIntentId(obj: Readonly<Record<string, unknown>>): string | null {
-  const raw = obj.payment_intent
-  if (typeof raw === "string") {
-    const trimmed = raw.trim()
-    return trimmed === "" ? null : trimmed
-  }
-  if (raw !== null && typeof raw === "object") {
-    const id = toText((raw as Record<string, unknown>).id)?.trim()
-    return id !== undefined && id !== "" ? id : null
-  }
-  return null
-}
-
-function unprocessedWebhookResult(eventType: string, sessionId: string | null = null): StripeWebhookResult {
-  return {
-    received: true,
-    processed: false,
-    alreadyCompleted: false,
-    eventType,
-    accountId: null,
-    sessionId,
-    creditedCents: 0,
-    balanceAfterCents: null
-  }
-}
-
-effect function alreadyCompletedWebhookResult(
+effect function computeRankedLeaderboardTx(
   tx: Tx,
-  eventType: string,
-  accountId: string,
-  sessionId: string
-): StripeWebhookResult!StoreFailure {
-  const acctRows = try tx.query("SELECT balance_cents FROM feed_accounts WHERE account_id = $1", [accountId])
-  return {
-    received: true,
-    processed: true,
-    alreadyCompleted: true,
-    eventType,
-    accountId,
-    sessionId,
-    creditedCents: 0,
-    balanceAfterCents: acctRows.length > 0 ? toInt(acctRows[0]?.balance_cents) : null
-  }
-}
+  filter: LeaderboardFilter,
+  timeframe: LeaderboardTimeframe,
+  nowMs: number
+): ReadonlyArray<LeaderboardEntry>!StoreFailure {
+  const includeTraders = filter === "all" || filter === "traders"
+  const includeNpcs = filter === "all" || filter === "npcs"
+  const cutoffMs = timeframeCutoffMs(timeframe, nowMs)
+  const kindFilter = includeTraders && includeNpcs ? undefined : includeTraders ? "user" : "npc"
 
-effect function lockAccountBalance(tx: Tx, accountId: string): number!(MarketFailure | StoreFailure) {
-  const rows = try tx.query("SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE", [accountId])
-  if (rows.length === 0) {
-    throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
-  }
-  return toInt(rows[0]!.balance_cents)
-}
-
-effect function applyStripeReversalTx(
-  tx: Tx,
-  params: {
-    readonly eventId: string
-    readonly eventType: string
-    readonly kind: "refund" | "dispute"
-    readonly paymentIntentId: string
-    readonly disputeId: string | null
-    readonly amountUsdCents: number
-    readonly isCumulativeRefund: boolean
-    readonly now: number
-  }
-): StripeWebhookResult!(MarketFailure | StoreFailure) {
-  const purchaseRows = try tx.query(
-    `SELECT id, account_id, stripe_session_id, points_cents, refunded_cents
-     FROM feed_stripe_purchases
-     WHERE payment_intent_id = $1 AND status = 'completed'
-     FOR UPDATE`,
-    [params.paymentIntentId]
-  )
-  if (purchaseRows.length === 0) {
-    return unprocessedWebhookResult(params.eventType)
-  }
-  const purchase = purchaseRows[0]!
-  const purchaseId = requiredText(purchase.id)
-  const accountId = requiredText(purchase.account_id)
-  const sessionId = requiredText(purchase.stripe_session_id)
-  const purchasePointsCents = toInt(purchase.points_cents)
-  const prevRefundedUsdCents = toInt(purchase.refunded_cents)
-  const currentBalanceCents = try lockAccountBalance(tx, accountId)
-  const existingReversal = params.disputeId !== null
+  const accounts = includeTraders
     ? try tx.query(
-        "SELECT id FROM feed_stripe_reversals WHERE stripe_event_id = $1 OR dispute_id = $2 LIMIT 1",
-        [params.eventId, params.disputeId]
+        `SELECT fa.account_id, fa.handle, fa.display_name, fa.avatar_url, fa.phone_verified_at, fa.balance_cents, fa.starting_grant_cents
+         FROM feed_accounts fa
+         LEFT JOIN accounts a ON a.key = fa.account_id
+         WHERE fa.is_reviewer = false
+           AND fa.phone_verified_at IS NOT NULL
+           AND (a.key IS NULL OR a.status = 'active')`
+      )
+    : []
+
+  const actors = includeNpcs
+    ? try tx.query(
+        `SELECT id, username, name, tier, profile_image_url, balance_cents
+         FROM feed_actors
+         WHERE id NOT LIKE 'test-%'`
+      )
+    : []
+
+  const predRows = kindFilter === undefined
+    ? try tx.query(
+        `SELECT p.holder_id, p.holder_kind, p.side, p.shares, p.cost_basis_cents, m.yes_shares, m.no_shares
+         FROM feed_prediction_positions p
+         JOIN feed_prediction_markets m ON m.id = p.market_id
+         WHERE p.settled_at IS NULL AND p.shares > 0`
       )
     : try tx.query(
-        "SELECT id FROM feed_stripe_reversals WHERE stripe_event_id = $1 LIMIT 1",
-        [params.eventId]
+        `SELECT p.holder_id, p.holder_kind, p.side, p.shares, p.cost_basis_cents, m.yes_shares, m.no_shares
+         FROM feed_prediction_positions p
+         JOIN feed_prediction_markets m ON m.id = p.market_id
+         WHERE p.holder_kind = $1 AND p.settled_at IS NULL AND p.shares > 0`,
+        [kindFilter]
       )
-  if (existingReversal.length > 0) {
-    return try alreadyCompletedWebhookResult(tx, params.eventType, accountId, sessionId)
+  const predValueMap = new Map<string, number>()
+  const openUnrealizedMap = new Map<string, number>()
+  for (const row of predRows) {
+    const key = `${requiredText(row.holder_kind)}:${requiredText(row.holder_id)}`
+    const mtm = markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
+    const costBasis = toInt(row.cost_basis_cents)
+    predValueMap.set(key, (predValueMap.get(key) ?? 0) + mtm)
+    openUnrealizedMap.set(key, (openUnrealizedMap.get(key) ?? 0) + (mtm - costBasis))
   }
-  let deltaUsdCents = params.amountUsdCents
-  if (params.isCumulativeRefund) {
-    deltaUsdCents = Math.max(0, params.amountUsdCents - prevRefundedUsdCents)
-    const nextRefundedUsdCents = Math.max(prevRefundedUsdCents, params.amountUsdCents)
-    if (nextRefundedUsdCents !== prevRefundedUsdCents) {
-      try tx.query(
-        "UPDATE feed_stripe_purchases SET refunded_cents = $2 WHERE id = $1",
-        [purchaseId, nextRefundedUsdCents]
-      )
-    }
+
+  const perpRows = try loadOpenPerpRows(tx, kindFilter)
+  const perpValueMap = new Map<string, number>()
+  for (const row of perpRows) {
+    const key = `${requiredText(row.holder_kind)}:${requiredText(row.holder_id)}`
+    const specPos = toSpecPerpPosition(row)
+    const mark = toInt(row.mark_price_cents)
+    const equity = Math.max(0, positionEquityAtMark(specPos, mark))
+    perpValueMap.set(key, (perpValueMap.get(key) ?? 0) + equity)
+    openUnrealizedMap.set(key, (openUnrealizedMap.get(key) ?? 0) + unrealizedPnlAtMark(specPos, mark))
   }
-  const netReversedRows = try tx.query(
-    "SELECT COALESCE(SUM(debited_pts_cents - restored_pts_cents), 0) AS net_reversed FROM feed_stripe_reversals WHERE purchase_id = $1",
-    [purchaseId]
-  )
-  const netReversedPtsCents = toInt(netReversedRows[0]?.net_reversed)
-  const remainingCapPtsCents = Math.max(0, purchasePointsCents - netReversedPtsCents)
-  const desiredDebitPtsCents = deltaUsdCents * 100
-  const cappedDebitPtsCents = Math.min(desiredDebitPtsCents, remainingCapPtsCents)
-  const actualDebitPtsCents = Math.min(currentBalanceCents, cappedDebitPtsCents)
-  try tx.query(
-    `INSERT INTO feed_stripe_reversals
-       (id, purchase_id, account_id, stripe_event_id, dispute_id, kind, amount_cents, debited_pts_cents, restored_event_id, restored_pts_cents, restored_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 0, NULL, $9)`,
-    [
-      newMarketId(),
-      purchaseId,
+
+  const { volumeMap, statsMap } = try loadLeaderboardStatsMapsTx(tx, kindFilter, cutoffMs)
+
+  const scored: Array<Omit<LeaderboardEntry, "rank">> = []
+
+  for (const acct of accounts) {
+    const accountId = requiredText(acct.account_id)
+    const key = `user:${accountId}`
+    const balanceCents = toInt(acct.balance_cents)
+    const startingGrantCents = toInt(acct.starting_grant_cents)
+    const positionValueCents = (predValueMap.get(key) ?? 0) + (perpValueMap.get(key) ?? 0)
+    const verified = acct.phone_verified_at !== null
+    const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents)
+    const totalEquityCents = equityCents(ledger)
+    const vol = volumeMap.get(key) ?? { volumeCents: 0, tradeCount: 0 }
+    const stat = statsMap.get(key) ?? { wins: 0, settledCount: 0, realizedPnlCents: 0 }
+    const computedNetProfitCents = cutoffMs === null
+      ? netProfitCents(ledger)
+      : stat.realizedPnlCents + (openUnrealizedMap.get(key) ?? 0)
+    const roiPct = startingGrantCents > 0
+      ? Math.round((computedNetProfitCents / startingGrantCents) * 10_000) / 100
+      : 0
+    const winRate = stat.settledCount === 0 ? 0 : stat.wins / stat.settledCount
+    const winRatePct = stat.settledCount === 0 ? 0 : Math.round(winRate * 10_000) / 100
+    scored.push({
       accountId,
-      params.eventId,
-      params.disputeId,
-      params.kind,
-      deltaUsdCents,
-      actualDebitPtsCents,
-      params.now
-    ]
-  )
-  let balanceAfterCents = currentBalanceCents
-  if (actualDebitPtsCents > 0) {
-    const updatedAccount = try tx.query(
-      `UPDATE feed_accounts
-       SET balance_cents = balance_cents - $2,
-           purchased_cents = GREATEST(0, purchased_cents - $2),
-           updated_at = $3
-       WHERE account_id = $1
-       RETURNING balance_cents`,
-      [accountId, actualDebitPtsCents, params.now]
-    )
-    balanceAfterCents = toInt(updatedAccount[0]!.balance_cents)
-    const ledgerKind = params.kind === "refund" ? "stripe_refund" : "stripe_dispute"
-    const ledgerId = params.kind === "dispute" && params.disputeId !== null
-      ? `stripe_dispute:${params.disputeId}`
-      : `stripe_refund:${params.eventId}`
-    try insertLedgerEntry(tx, {
-      ledgerId,
-      accountId,
-      kind: ledgerKind,
-      deltaCents: 0 - actualDebitPtsCents,
-      balanceAfterCents,
-      refId: params.disputeId ?? params.paymentIntentId,
-      createdAt: params.now
+      handle: requiredText(acct.handle),
+      displayName: requiredText(acct.display_name),
+      avatarUrl: optionalText(acct.avatar_url),
+      isNpc: false,
+      balanceCents,
+      positionValueCents,
+      equityCents: totalEquityCents,
+      startingGrantCents,
+      netProfitCents: computedNetProfitCents,
+      roiPct,
+      volumeCents: vol.volumeCents,
+      tradeCount: vol.tradeCount,
+      wins: stat.wins,
+      settledCount: stat.settledCount,
+      winRate,
+      winRatePct
     })
   }
-  return {
-    received: true,
-    processed: true,
-    alreadyCompleted: false,
-    eventType: params.eventType,
-    accountId,
-    sessionId,
-    creditedCents: 0 - actualDebitPtsCents,
-    balanceAfterCents
-  }
-}
 
-effect function handleDisputeWonTx(
-  tx: Tx,
-  params: {
-    readonly eventId: string
-    readonly eventType: string
-    readonly disputeId: string
-    readonly paymentIntentId: string | null
-    readonly now: number
-  }
-): StripeWebhookResult!(MarketFailure | StoreFailure) {
-  const reversalRows = try tx.query(
-    `SELECT r.id, r.account_id, r.debited_pts_cents, r.restored_at, p.stripe_session_id
-     FROM feed_stripe_reversals r
-     JOIN feed_stripe_purchases p ON p.id = r.purchase_id
-     WHERE r.dispute_id = $1 AND r.kind = 'dispute'
-     FOR UPDATE OF r, p`,
-    [params.disputeId]
-  )
-  if (reversalRows.length === 0) {
-    if (params.paymentIntentId !== null) {
-      const purchaseRows = try tx.query(
-        "SELECT id FROM feed_stripe_purchases WHERE payment_intent_id = $1 AND status = 'completed' LIMIT 1",
-        [params.paymentIntentId]
-      )
-      if (purchaseRows.length === 0) {
-        return unprocessedWebhookResult(params.eventType)
-      }
-    }
-    throw marketFail(
-      "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING",
-      `Dispute debit not yet recorded for won dispute ${params.disputeId}`
-    )
-  }
-  const reversal = reversalRows[0]!
-  const reversalId = requiredText(reversal.id)
-  const accountId = requiredText(reversal.account_id)
-  const sessionId = requiredText(reversal.stripe_session_id)
-  const debitedPtsCents = toInt(reversal.debited_pts_cents)
-  const currentBalanceCents = try lockAccountBalance(tx, accountId)
-  if (reversal.restored_at !== null) {
-    return try alreadyCompletedWebhookResult(tx, params.eventType, accountId, sessionId)
-  }
-  const marked = try tx.query(
-    `UPDATE feed_stripe_reversals
-     SET restored_event_id = $2,
-         restored_pts_cents = $3,
-         restored_at = $4
-     WHERE id = $1 AND restored_at IS NULL
-     RETURNING id`,
-    [reversalId, params.eventId, debitedPtsCents, params.now]
-  )
-  if (marked.length === 0) {
-    return try alreadyCompletedWebhookResult(tx, params.eventType, accountId, sessionId)
-  }
-  let balanceAfterCents = currentBalanceCents
-  if (debitedPtsCents > 0) {
-    const updatedAccount = try tx.query(
-      `UPDATE feed_accounts
-       SET balance_cents = balance_cents + $2,
-           purchased_cents = purchased_cents + $2,
-           updated_at = $3
-       WHERE account_id = $1
-       RETURNING balance_cents`,
-      [accountId, debitedPtsCents, params.now]
-    )
-    balanceAfterCents = toInt(updatedAccount[0]!.balance_cents)
-    try insertLedgerEntry(tx, {
-      ledgerId: `stripe_dispute_won:${params.disputeId}`,
-      accountId,
-      kind: "stripe_dispute_won",
-      deltaCents: debitedPtsCents,
-      balanceAfterCents,
-      refId: params.disputeId,
-      createdAt: params.now
+  for (const actor of actors) {
+    const actorId = requiredText(actor.id)
+    const key = `npc:${actorId}`
+    const balanceCents = toInt(actor.balance_cents)
+    const startingGrantCents = tierStartingBalanceCents(requiredText(actor.tier))
+    const positionValueCents = (predValueMap.get(key) ?? 0) + (perpValueMap.get(key) ?? 0)
+    const totalEquityCents = balanceCents + positionValueCents
+    const vol = volumeMap.get(key) ?? { volumeCents: 0, tradeCount: 0 }
+    const stat = statsMap.get(key) ?? { wins: 0, settledCount: 0, realizedPnlCents: 0 }
+    const computedNetProfitCents = cutoffMs === null
+      ? totalEquityCents - startingGrantCents
+      : stat.realizedPnlCents + (openUnrealizedMap.get(key) ?? 0)
+    const roiPct = startingGrantCents > 0
+      ? Math.round((computedNetProfitCents / startingGrantCents) * 10_000) / 100
+      : 0
+    const winRate = stat.settledCount === 0 ? 0 : stat.wins / stat.settledCount
+    const winRatePct = stat.settledCount === 0 ? 0 : Math.round(winRate * 10_000) / 100
+    scored.push({
+      accountId: actorId,
+      handle: requiredText(actor.username, actorId),
+      displayName: requiredText(actor.name, actorId),
+      avatarUrl: optionalText(actor.profile_image_url) ?? (actorId !== "" ? resolveActorAvatarUrl(actorId) : null),
+      isNpc: true,
+      balanceCents,
+      positionValueCents,
+      equityCents: totalEquityCents,
+      startingGrantCents,
+      netProfitCents: computedNetProfitCents,
+      roiPct,
+      volumeCents: vol.volumeCents,
+      tradeCount: vol.tradeCount,
+      wins: stat.wins,
+      settledCount: stat.settledCount,
+      winRate,
+      winRatePct
     })
   }
-  return {
-    received: true,
-    processed: true,
-    alreadyCompleted: false,
-    eventType: params.eventType,
-    accountId,
-    sessionId,
-    creditedCents: debitedPtsCents,
-    balanceAfterCents
-  }
+
+  scored.sort((a, b) => {
+    if (b.netProfitCents !== a.netProfitCents) return b.netProfitCents - a.netProfitCents
+    if (b.volumeCents !== a.volumeCents) return b.volumeCents - a.volumeCents
+    return a.accountId.localeCompare(b.accountId)
+  })
+
+  return scored.map((entry, idx) => ({
+    rank: idx + 1,
+    ...entry
+  }))
 }
 
-export effect function handleStripeWebhook(
-  input: HandleStripeWebhookInput
-): StripeWebhookResult!(MarketFailure | StoreFailure)!Store {
-  const webhookSecret = input.webhookSecret?.trim() ?? ""
-  if (webhookSecret === "") {
-    throw marketFail("WEBHOOK_UNCONFIGURED", "Stripe webhook secret is not configured")
-  }
-  const signature = input.signature?.trim() ?? ""
-  if (signature === "") {
-    throw marketFail("INVALID_SIGNATURE", "Missing Stripe webhook signature")
-  }
+export effect function getLeaderboardPage(options: LeaderboardQueryOptions = {}): LeaderboardPage!StoreFailure!Store {
+  const filter = options.filter ?? "all"
+  const timeframe = options.timeframe ?? "all"
+  const safePageSize = Math.max(1, Math.min(200, Math.floor(options.pageSize ?? 50)))
+  const requestedPage = Math.max(1, Math.floor(options.page ?? 1))
   const store = try Store
   const now = try Clock.currentTimeMillis
-  const verified = try tryPromise({
-    try: () => verifyStripeHmac(input.rawBody, signature, webhookSecret, now),
-    catch: () => marketFail("INVALID_SIGNATURE", "Stripe webhook signature check failed")
-  })
-  if (!verified) {
-    throw marketFail("INVALID_SIGNATURE", "Invalid Stripe webhook signature")
-  }
-  const parsedJson = try parseJsonBody(input.rawBody, "INVALID_WEBHOOK_PAYLOAD", "Webhook body is not valid JSON")
-  const event = Option.getOrUndefined(Schema.decodeUnknownOption(StripeWebhookPayload)(parsedJson))
-  if (event === undefined) {
-    throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Webhook body does not match Stripe event shape")
-  }
-  if (event.type === "charge.refunded" || event.type === "charge.dispute.created") {
-    const isCumulativeRefund = event.type === "charge.refunded"
-    const disputeId = isCumulativeRefund ? null : toText(event.data.object.id)?.trim() ?? ""
-    const amountUsdCents = toInt(isCumulativeRefund ? event.data.object.amount_refunded : event.data.object.amount)
-    if (disputeId === "" || Number.isNaN(amountUsdCents) || amountUsdCents < 0) {
-      const message = isCumulativeRefund ? "Charge refund missing valid amount_refunded" : "Dispute created missing id or valid amount"
-      throw marketFail("INVALID_WEBHOOK_PAYLOAD", message)
-    }
-    const paymentIntentId = extractPaymentIntentId(event.data.object)
-    if (paymentIntentId === null) {
-      return unprocessedWebhookResult(event.type)
-    }
-    return try store.transaction((tx: Tx) => applyStripeReversalTx(tx, {
-      eventId: event.id,
-      eventType: event.type,
-      kind: isCumulativeRefund ? "refund" : "dispute",
-      paymentIntentId,
-      disputeId,
-      amountUsdCents,
-      isCumulativeRefund,
-      now
-    }))
-  }
-  if (event.type === "charge.dispute.closed") {
-    const disputeId = toText(event.data.object.id)?.trim() ?? ""
-    const status = toText(event.data.object.status)?.trim().toLowerCase() ?? ""
-    if (disputeId === "") {
-      throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Dispute closed missing id")
-    }
-    if (status !== "won") {
-      return unprocessedWebhookResult(event.type)
-    }
-    const paymentIntentId = extractPaymentIntentId(event.data.object)
-    return try store.transaction(effect (tx: Tx) =>
-      try handleDisputeWonTx(tx, {
-        eventId: event.id,
-        eventType: event.type,
-        disputeId,
-        paymentIntentId,
-        now
-      })
-    )
-  }
-  if (event.type !== "checkout.session.completed" && event.type !== "checkout.session.async_payment_succeeded") {
-    return unprocessedWebhookResult(event.type)
-  }
-  const sessionObj = event.data.object
-  const sessionId = toText(sessionObj.id)
-  const paymentStatus = toText(sessionObj.payment_status)
-  const paymentIntentId = extractPaymentIntentId(sessionObj)
-  if (!sessionId) {
-    throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Checkout session missing id")
-  }
-  if (paymentStatus !== "paid") {
-    return unprocessedWebhookResult(event.type, sessionId)
-  }
   return try store.transaction(effect (tx: Tx) => {
-    const existingRows = try tx.query(
-      "SELECT id, account_id, points_cents, status, payment_intent_id FROM feed_stripe_purchases WHERE stripe_session_id = $1 FOR UPDATE",
-      [sessionId]
-    )
-    let accountId: string
-    let pointsCents: number
-    if (existingRows.length > 0) {
-      const existing = existingRows[0]!
-      accountId = requiredText(existing.account_id)
-      const status = requiredText(existing.status)
-      if (status === "blocked_wa") {
-        throw marketFail("REGION_BLOCKED", "Purchase was blocked in Washington")
-      }
-      if (status === "completed") {
-        if (existing.payment_intent_id === null && paymentIntentId !== null) {
-          try tx.query(
-            "UPDATE feed_stripe_purchases SET payment_intent_id = $2 WHERE id = $1 AND payment_intent_id IS NULL",
-            [requiredText(existing.id), paymentIntentId]
-          )
-        }
-        return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
-      }
-      pointsCents = toInt(existing.points_cents)
-      const updatedPurchase = try tx.query(
-        "UPDATE feed_stripe_purchases SET status = 'completed', payment_intent_id = COALESCE(payment_intent_id, $3), completed_at = $2 WHERE stripe_session_id = $1 AND status = 'pending' RETURNING id",
-        [sessionId, now, paymentIntentId]
-      )
-      if (updatedPurchase.length === 0) {
-        return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
-      }
-    } else {
-      const metaAccount = readMetaString(sessionObj.metadata, "accountId") ?? toText(sessionObj.client_reference_id)
-      const metaPackId = readMetaString(sessionObj.metadata, "packId")
-      const resolvedPack = metaPackId !== undefined ? try resolvePack(metaPackId) : resolvePackByUsdAmount(sessionObj.amount_total)
-      if (!metaAccount || resolvedPack === undefined) {
-        throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Checkout session missing accountId or recognized point pack")
-      }
-      accountId = metaAccount
-      pointsCents = resolvedPack.pointsCents
-      const inserted = try tx.query(
-        `INSERT INTO feed_stripe_purchases
-         (id, account_id, stripe_session_id, payment_intent_id, pack_usd, points_cents, status, billing_state, ip_region, created_at, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'completed', NULL, NULL, $7, $7)
-         ON CONFLICT (stripe_session_id) DO NOTHING
-         RETURNING id`,
-        [newMarketId(), accountId, sessionId, paymentIntentId, resolvedPack.usd, pointsCents, now]
-      )
-      if (inserted.length === 0) {
-        return try alreadyCompletedWebhookResult(tx, event.type, accountId, sessionId)
-      }
-    }
-    const acctLock = try tx.query(
-      "SELECT balance_cents FROM feed_accounts WHERE account_id = $1 FOR UPDATE",
-      [accountId]
-    )
-    if (acctLock.length === 0) {
-      throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
-    }
-    const updatedAccount = try tx.query(
-      `UPDATE feed_accounts
-       SET balance_cents = balance_cents + $2,
-           purchased_cents = purchased_cents + $2,
-           updated_at = $3
-       WHERE account_id = $1
-       RETURNING balance_cents`,
-      [accountId, pointsCents, now]
-    )
-    const balanceAfterCents = toInt(updatedAccount[0]!.balance_cents)
-    try insertLedgerEntry(tx, {
-      ledgerId: `stripe_purchase:${sessionId}`,
-      accountId,
-      kind: "stripe_purchase",
-      deltaCents: pointsCents,
-      balanceAfterCents,
-      refId: sessionId,
-      createdAt: now
-    })
+    const ranked = try computeRankedLeaderboardTx(tx, filter, timeframe, now)
+    const totalCount = ranked.length
+    const totalPages = Math.max(1, Math.ceil(totalCount / safePageSize))
+    const safePage = Math.min(requestedPage, totalPages)
+    const offset = (safePage - 1) * safePageSize
     return {
-      received: true,
-      processed: true,
-      alreadyCompleted: false,
-      eventType: event.type,
-      accountId,
-      sessionId,
-      creditedCents: pointsCents,
-      balanceAfterCents
+      entries: ranked.slice(offset, offset + safePageSize),
+      pagination: {
+        page: safePage,
+        pageSize: safePageSize,
+        totalCount,
+        totalPages
+      },
+      generatedAt: now
+    }
+  })
+}
+
+export effect function getLeaderboardViewerRank(
+  accountId: string,
+  options: Omit<LeaderboardQueryOptions, "page"> = {}
+): LeaderboardViewerRank!StoreFailure!Store {
+  const filter = options.filter ?? "all"
+  const timeframe = options.timeframe ?? "all"
+  const safePageSize = Math.max(1, Math.min(200, Math.floor(options.pageSize ?? 50)))
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const ranked = try computeRankedLeaderboardTx(tx, filter, timeframe, now)
+    const idx = ranked.findIndex((entry) => !entry.isNpc && entry.accountId === accountId)
+    if (idx === -1) {
+      return { rank: null, page: null, entry: null }
+    }
+    return {
+      rank: idx + 1,
+      page: Math.floor(idx / safePageSize) + 1,
+      entry: ranked[idx]!
     }
   })
 }
 
 export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntry>!StoreFailure!Store {
-  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
-  const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const accounts = try tx.query(
-      `SELECT fa.account_id, fa.handle, fa.display_name, fa.avatar_url, fa.phone_verified_at, fa.balance_cents, fa.starting_grant_cents, fa.purchased_cents
-       FROM feed_accounts fa
-       LEFT JOIN accounts a ON a.key = fa.account_id
-       WHERE fa.is_reviewer = false
-         AND fa.phone_verified_at IS NOT NULL
-         AND (a.key IS NULL OR a.status = 'active')`
-    )
-    const predRows = try tx.query(
-      `SELECT p.holder_id, p.side, p.shares, m.yes_shares, m.no_shares
-       FROM feed_prediction_positions p
-       JOIN feed_prediction_markets m ON m.id = p.market_id
-       WHERE p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`
-    )
-    const predMap = new Map<string, number>()
-    for (const row of predRows) {
-      const holderId = requiredText(row.holder_id)
-      const mtm = markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
-      predMap.set(holderId, (predMap.get(holderId) ?? 0) + mtm)
-    }
-    const perpRows = try loadOpenUserPerpRows(tx)
-    const perpMap = new Map<string, number>()
-    for (const row of perpRows) {
-      const holderId = requiredText(row.holder_id)
-      const equity = Math.max(0, positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents)))
-      perpMap.set(holderId, (perpMap.get(holderId) ?? 0) + equity)
-    }
-    const volumeRows = try tx.query(
-      `SELECT trader_id, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
-       FROM feed_trades
-       WHERE trader_kind = 'user'
-       GROUP BY trader_id`
-    )
-    const volumeMap = new Map<string, { readonly volumeCents: number; readonly tradeCount: number }>()
-    for (const row of volumeRows) {
-      volumeMap.set(requiredText(row.trader_id), {
-        volumeCents: toInt(row.volume_cents),
-        tradeCount: toInt(row.trade_count)
-      })
-    }
-    const predStatsRows = try tx.query(
-      `SELECT
-         p.holder_id,
-         COUNT(*) AS settled_count,
-         SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins
-       FROM feed_prediction_positions p
-       JOIN feed_prediction_markets m ON m.id = p.market_id
-       WHERE p.holder_kind = 'user'
-         AND p.settled_at IS NOT NULL
-         AND p.shares > 0
-         AND m.status = 'resolved'
-       GROUP BY p.holder_id`
-    )
-    const perpStatsRows = try tx.query(
-      `SELECT
-         holder_id,
-         COUNT(*) AS settled_count,
-         SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins
-       FROM feed_perp_positions
-       WHERE holder_kind = 'user' AND status IN ('closed', 'liquidated')
-       GROUP BY holder_id`
-    )
-    const statsMap = new Map<string, { wins: number; settledCount: number }>()
-    for (const row of [...predStatsRows, ...perpStatsRows]) {
-      const holderId = requiredText(row.holder_id)
-      const prev = statsMap.get(holderId) ?? { wins: 0, settledCount: 0 }
-      statsMap.set(holderId, {
-        wins: prev.wins + toInt(row.wins),
-        settledCount: prev.settledCount + toInt(row.settled_count)
-      })
-    }
-    const scored = accounts.map((acct) => {
-      const accountId = requiredText(acct.account_id)
-      const balanceCents = toInt(acct.balance_cents)
-      const startingGrantCents = toInt(acct.starting_grant_cents)
-      const purchasedCents = toInt(acct.purchased_cents)
-      const positionValueCents = (predMap.get(accountId) ?? 0) + (perpMap.get(accountId) ?? 0)
-      const verified = acct.phone_verified_at !== null
-      const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents, purchasedCents)
-      const vol = volumeMap.get(accountId) ?? { volumeCents: 0, tradeCount: 0 }
-      const stat = statsMap.get(accountId) ?? { wins: 0, settledCount: 0 }
-      return {
-        accountId,
-        handle: requiredText(acct.handle),
-        displayName: requiredText(acct.display_name),
-        avatarUrl: optionalText(acct.avatar_url),
-        balanceCents,
-        positionValueCents,
-        equityCents: equityCents(ledger),
-        startingGrantCents,
-        purchasedCents,
-        netProfitCents: netProfitCents(ledger),
-        volumeCents: vol.volumeCents,
-        tradeCount: vol.tradeCount,
-        wins: stat.wins,
-        settledCount: stat.settledCount,
-        winRate: stat.settledCount === 0 ? 0 : stat.wins / stat.settledCount
-      }
-    })
-    scored.sort((a, b) => {
-      if (b.netProfitCents !== a.netProfitCents) return b.netProfitCents - a.netProfitCents
-      if (b.volumeCents !== a.volumeCents) return b.volumeCents - a.volumeCents
-      return a.accountId.localeCompare(b.accountId)
-    })
-    return scored.slice(0, safeLimit).map((entry, idx) => ({
-      rank: idx + 1,
-      ...entry
-    }))
-  })
+  const page = try getLeaderboardPage({ filter: "traders", timeframe: "all", page: 1, pageSize: limit })
+  return page.entries
 }

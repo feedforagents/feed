@@ -1,4 +1,4 @@
-// spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
+// spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
 import { type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
 import { fundingPeriodFromSeconds } from "../gen/shared__time.effect.vibe"
 import type { PerpPosition } from "../gen/markets__spotPerp.effect.vibe"
@@ -167,6 +167,7 @@ export interface TradeInsertInput {
   readonly feeCents: number
   readonly sharesOrSize: number
   readonly priceCents: number
+  readonly realizedPnlCents?: number | null
   readonly viaClientName: string | null
   readonly idempotencyKey?: string | null
   readonly requestFingerprint?: string | null
@@ -177,8 +178,8 @@ export interface TradeInsertInput {
 export effect function insertTradeRecord(tx: Tx, input: TradeInsertInput): void!StoreFailure {
   try tx.query(
     `INSERT INTO feed_trades
-       (id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, via_client_name, idempotency_key, request_fingerprint, receipt_json, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+       (id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, realized_pnl_cents, via_client_name, idempotency_key, request_fingerprint, receipt_json, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
     [
       input.tradeId,
       input.traderId,
@@ -190,11 +191,48 @@ export effect function insertTradeRecord(tx: Tx, input: TradeInsertInput): void!
       input.feeCents,
       input.sharesOrSize,
       input.priceCents,
+      input.realizedPnlCents ?? null,
       input.viaClientName,
       input.idempotencyKey ?? null,
       input.requestFingerprint ?? null,
       input.receiptJson ?? null,
       input.createdAt
+    ]
+  )
+}
+
+export interface PriceHistoryInsertInput {
+  readonly marketKind: "prediction" | "perp" | "spot"
+  readonly marketRef: string
+  readonly priceCents: number
+  readonly yesPriceBps?: number | null
+  readonly markPriceCents?: number | null
+  readonly volumeCents?: number
+  readonly recordedAt: number
+}
+
+export effect function insertPriceHistoryRowTx(tx: Tx, input: PriceHistoryInsertInput): void!StoreFailure {
+  const safePrice = Math.max(0, Math.round(input.priceCents))
+  const safeYesBps = input.yesPriceBps === undefined || input.yesPriceBps === null
+    ? null
+    : Math.max(0, Math.min(10_000, Math.round(input.yesPriceBps)))
+  const safeMark = input.markPriceCents === undefined || input.markPriceCents === null
+    ? null
+    : Math.max(0, Math.round(input.markPriceCents))
+  const safeVolume = Math.max(0, Math.round(input.volumeCents ?? 0))
+  try tx.query(
+    `INSERT INTO feed_market_price_history
+       (id, market_kind, market_ref, price_cents, yes_price_bps, mark_price_cents, volume_cents, recorded_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      newMarketId(),
+      input.marketKind,
+      input.marketRef,
+      safePrice,
+      safeYesBps,
+      safeMark,
+      safeVolume,
+      input.recordedAt
     ]
   )
 }

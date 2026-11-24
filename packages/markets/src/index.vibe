@@ -1,4 +1,4 @@
-// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"
+// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"
 export {
   MarketFailure,
   type MarketActorKind
@@ -34,6 +34,7 @@ export {
   listPerpMarkets,
   listPerpPositions,
   openPerpPosition,
+  previewPostOpenMarkPriceCents,
   type ClosePerpInput,
   type ClosePerpReceipt,
   type FundingAccrualSummary,
@@ -49,19 +50,42 @@ export {
 } from "./spot-perp.vibe"
 
 export {
-  createStripeCheckoutSession,
   getAccountEconomy,
   getLeaderboard,
+  getLeaderboardPage,
+  getLeaderboardViewerRank,
   getPointLedger,
-  handleStripeWebhook,
-  listPointPacks,
+  parseLeaderboardFilter,
+  parseLeaderboardTimeframe,
   type AccountEconomyView,
-  type CreateStripeCheckoutInput,
-  type HandleStripeWebhookInput,
   type LeaderboardEntry,
-  type PackId,
-  type PointLedgerEntry,
-  type PointPack,
-  type StripeCheckoutSessionView,
-  type StripeWebhookResult
+  type LeaderboardFilter,
+  type LeaderboardPage,
+  type LeaderboardPagination,
+  type LeaderboardQueryOptions,
+  type LeaderboardTimeframe,
+  type LeaderboardViewerRank,
+  type PointLedgerEntry
 } from "./economy.vibe"
+
+export {
+  getAccountPnlHistory,
+  getPerpPriceHistory,
+  getPredictionPriceHistory,
+  listClosedPositions,
+  listMarketTrades,
+  listUserTrades,
+  parseClosedOutcomeFilter,
+  parseHistoryRange,
+  snapshotMarketPrices,
+  type AccountPnlHistoryView,
+  type ClosedOutcomeFilter,
+  type ClosedPositionView,
+  type ClosedPositionsPage,
+  type HistoryRange,
+  type MarketPriceHistoryView,
+  type MarketSnapshotSummary,
+  type MarketTradeView,
+  type PnlHistoryPoint,
+  type PriceHistoryPoint
+} from "./analytics.vibe"

@@ -1,0 +1,741 @@
+// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"
+import { Store, type StoreFailure, resolveActorAvatarUrl, toInt, toText, type Row, type Tx } from "@repo/db"
+import { yesOddsBps } from "../gen/markets__prediction.effect.vibe"
+import { getAccountEconomyIn } from "./economy.vibe"
+import {
+  type MarketFailure,
+  insertPriceHistoryRowTx,
+  marketFail,
+  optionalInt,
+  optionalText,
+  requiredText
+} from "./shared.vibe"
+
+export type HistoryRange = "1H" | "4H" | "1D" | "1W" | "ALL"
+export type ClosedOutcomeFilter = "all" | "won" | "lost"
+
+export interface PriceHistoryPoint {
+  readonly timestamp: number
+  readonly priceCents: number
+  readonly indexPriceCents?: number
+  readonly markPriceCents?: number
+  readonly yesPriceBps?: number
+  readonly volumeCents: number
+}
+
+export interface MarketPriceHistoryView {
+  readonly range: HistoryRange
+  readonly points: ReadonlyArray<PriceHistoryPoint>
+}
+
+export interface MarketTradeView {
+  readonly id: string
+  readonly traderId: string
+  readonly traderName: string
+  readonly traderHandle: string
+  readonly traderAvatarUrl: string | null
+  readonly isNpc: boolean
+  readonly marketKind: "prediction" | "spot" | "perp"
+  readonly marketRef: string
+  readonly marketTitle: string | null
+  readonly side: string
+  readonly sharesOrSize: number
+  readonly priceCents: number
+  readonly notionalCents: number
+  readonly feeCents: number
+  readonly realizedPnlCents: number | null
+  readonly createdAt: number
+}
+
+export interface ClosedPositionView {
+  readonly id: string
+  readonly kind: "prediction" | "perp"
+  readonly marketId: string | null
+  readonly ticker: string | null
+  readonly title: string
+  readonly side: string
+  readonly sharesOrSize: number
+  readonly entryPriceCents: number | null
+  readonly exitPriceCents: number | null
+  readonly costBasisCents: number
+  readonly payoutCents: number
+  readonly realizedPnlCents: number
+  readonly outcome: "won" | "lost"
+  readonly status: string
+  readonly closedAt: number
+}
+
+export interface ClosedPositionsPage {
+  readonly items: ReadonlyArray<ClosedPositionView>
+  readonly page: number
+  readonly limit: number
+  readonly totalCount: number
+  readonly totalPages: number
+}
+
+export interface PnlHistoryPoint {
+  readonly timestamp: number
+  readonly pnlCents: number
+  readonly cumulativePnlCents: number
+  readonly deltaCents: number
+  readonly kind: string
+}
+
+export interface AccountPnlHistoryView {
+  readonly range: HistoryRange
+  readonly points: ReadonlyArray<PnlHistoryPoint>
+  readonly currentNetProfitCents: number
+}
+
+export interface MarketSnapshotSummary {
+  readonly perpCount: number
+  readonly predictionCount: number
+}
+
+export function parseHistoryRange(raw: string | null | undefined): HistoryRange {
+  const norm = raw?.trim().toUpperCase()
+  if (norm === "1H") return "1H"
+  if (norm === "4H") return "4H"
+  if (norm === "1D" || norm === "24H") return "1D"
+  if (norm === "1W" || norm === "7D") return "1W"
+  return "ALL"
+}
+
+export function parseClosedOutcomeFilter(raw: string | null | undefined): ClosedOutcomeFilter {
+  const norm = raw?.trim().toLowerCase()
+  if (norm === "won") return "won"
+  if (norm === "lost") return "lost"
+  return "all"
+}
+
+function rangeDurationMs(range: HistoryRange): number | null {
+  switch (range) {
+    case "1H":
+      return 3_600_000
+    case "4H":
+      return 4 * 3_600_000
+    case "1D":
+      return 86_400_000
+    case "1W":
+      return 7 * 86_400_000
+    case "ALL":
+      return null
+  }
+}
+
+function downsamplePricePoints(
+  points: ReadonlyArray<PriceHistoryPoint>,
+  maxPoints: number
+): ReadonlyArray<PriceHistoryPoint> {
+  const limit = Math.max(2, Math.floor(maxPoints))
+  if (points.length <= limit) return points
+  const result: Array<PriceHistoryPoint> = [points[0]!]
+  const middle = points.slice(1, -1)
+  const buckets = limit - 2
+  const bucketSize = middle.length / buckets
+  for (let i = 0; i < buckets; i++) {
+    const start = Math.floor(i * bucketSize)
+    const end = Math.max(start + 1, Math.min(middle.length, Math.floor((i + 1) * bucketSize)))
+    const slice = middle.slice(start, end)
+    if (slice.length === 0) continue
+    const last = slice[slice.length - 1]!
+    let totalVol = 0
+    for (const item of slice) totalVol += item.volumeCents
+    result.push({
+      ...last,
+      volumeCents: totalVol
+    })
+  }
+  result.push(points[points.length - 1]!)
+  return result
+}
+
+function downsamplePnlPoints(
+  points: ReadonlyArray<PnlHistoryPoint>,
+  maxPoints: number
+): ReadonlyArray<PnlHistoryPoint> {
+  const limit = Math.max(2, Math.floor(maxPoints))
+  if (points.length <= limit) return points
+  const result: Array<PnlHistoryPoint> = [points[0]!]
+  const middle = points.slice(1, -1)
+  const buckets = limit - 2
+  const bucketSize = middle.length / buckets
+  for (let i = 0; i < buckets; i++) {
+    const start = Math.floor(i * bucketSize)
+    const end = Math.max(start + 1, Math.min(middle.length, Math.floor((i + 1) * bucketSize)))
+    const slice = middle.slice(start, end)
+    if (slice.length === 0) continue
+    const last = slice[slice.length - 1]!
+    let totalDelta = 0
+    for (const item of slice) totalDelta += item.deltaCents
+    result.push({
+      ...last,
+      deltaCents: totalDelta
+    })
+  }
+  result.push(points[points.length - 1]!)
+  return result
+}
+
+function mapPerpHistoryRow(row: Row): PriceHistoryPoint {
+  const indexPriceCents = toInt(row.price_cents)
+  const markPriceCents = optionalInt(row.mark_price_cents) ?? indexPriceCents
+  return {
+    timestamp: toInt(row.recorded_at),
+    priceCents: markPriceCents,
+    indexPriceCents,
+    markPriceCents,
+    volumeCents: toInt(row.volume_cents)
+  }
+}
+
+function mapPredictionHistoryRow(row: Row): PriceHistoryPoint {
+  const priceCents = toInt(row.price_cents)
+  const yesPriceBps = optionalInt(row.yes_price_bps) ?? Math.max(0, Math.min(10_000, priceCents * 100))
+  return {
+    timestamp: toInt(row.recorded_at),
+    priceCents,
+    yesPriceBps,
+    volumeCents: toInt(row.volume_cents)
+  }
+}
+
+export effect function getPerpPriceHistory(input: {
+  readonly ticker: string
+  readonly range?: HistoryRange
+  readonly limit?: number
+}): MarketPriceHistoryView!(MarketFailure | StoreFailure)!Store {
+  const range = input.range ?? "1D"
+  const safeLimit = Math.max(2, Math.min(500, Math.floor(input.limit ?? 200)))
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const marketRows = try tx.query(
+      "SELECT ticker, index_price_cents, mark_price_cents, updated_at FROM feed_perp_markets WHERE ticker = $1 LIMIT 1",
+      [input.ticker]
+    )
+    if (marketRows.length === 0) {
+      throw marketFail("MARKET_NOT_FOUND", `Perp market not found: ${input.ticker}`)
+    }
+    const market = marketRows[0]!
+    const liveIndex = toInt(market.index_price_cents)
+    const liveMark = toInt(market.mark_price_cents)
+    const durationMs = rangeDurationMs(range)
+    const cutoffMs = durationMs === null ? null : now - durationMs
+    let rows = cutoffMs === null
+      ? try tx.query(
+          `SELECT price_cents, mark_price_cents, volume_cents, recorded_at
+           FROM feed_market_price_history
+           WHERE market_kind IN ('perp', 'spot') AND market_ref = $1
+           ORDER BY recorded_at ASC, id ASC`,
+          [input.ticker]
+        )
+      : try tx.query(
+          `SELECT price_cents, mark_price_cents, volume_cents, recorded_at
+           FROM feed_market_price_history
+           WHERE market_kind IN ('perp', 'spot') AND market_ref = $1 AND recorded_at >= $2
+           ORDER BY recorded_at ASC, id ASC`,
+          [input.ticker, cutoffMs]
+        )
+    if (cutoffMs !== null && rows.length < 2) {
+      const priorRows = try tx.query(
+        `SELECT price_cents, mark_price_cents, volume_cents, recorded_at
+         FROM feed_market_price_history
+         WHERE market_kind IN ('perp', 'spot') AND market_ref = $1 AND recorded_at < $2
+         ORDER BY recorded_at DESC, id DESC
+         LIMIT 1`,
+        [input.ticker, cutoffMs]
+      )
+      if (priorRows.length > 0) {
+        rows = [priorRows[0]!, ...rows]
+      }
+    }
+    const points = rows.map(mapPerpHistoryRow)
+    const last = points[points.length - 1]
+    if (
+      last === undefined ||
+      last.markPriceCents !== liveMark ||
+      last.indexPriceCents !== liveIndex ||
+      now - last.timestamp > 60_000
+    ) {
+      points.push({
+        timestamp: Math.max(now, last !== undefined ? last.timestamp + 1 : now),
+        priceCents: liveMark,
+        indexPriceCents: liveIndex,
+        markPriceCents: liveMark,
+        volumeCents: 0
+      })
+    }
+    return {
+      range,
+      points: downsamplePricePoints(points, safeLimit)
+    }
+  })
+}
+
+export effect function getPredictionPriceHistory(input: {
+  readonly marketId: string
+  readonly range?: HistoryRange
+  readonly limit?: number
+}): MarketPriceHistoryView!(MarketFailure | StoreFailure)!Store {
+  const range = input.range ?? "1D"
+  const safeLimit = Math.max(2, Math.min(500, Math.floor(input.limit ?? 200)))
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const marketRows = try tx.query(
+      "SELECT id, yes_shares, no_shares, status, resolved_at FROM feed_prediction_markets WHERE id = $1 LIMIT 1",
+      [input.marketId]
+    )
+    if (marketRows.length === 0) {
+      throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${input.marketId}`)
+    }
+    const market = marketRows[0]!
+    const liveYesBps = yesOddsBps(toInt(market.yes_shares), toInt(market.no_shares))
+    const livePriceCents = Math.max(1, Math.min(99, Math.round(liveYesBps / 100)))
+    const durationMs = rangeDurationMs(range)
+    const cutoffMs = durationMs === null ? null : now - durationMs
+    let rows = cutoffMs === null
+      ? try tx.query(
+          `SELECT price_cents, yes_price_bps, volume_cents, recorded_at
+           FROM feed_market_price_history
+           WHERE market_kind = 'prediction' AND market_ref = $1
+           ORDER BY recorded_at ASC, id ASC`,
+          [input.marketId]
+        )
+      : try tx.query(
+          `SELECT price_cents, yes_price_bps, volume_cents, recorded_at
+           FROM feed_market_price_history
+           WHERE market_kind = 'prediction' AND market_ref = $1 AND recorded_at >= $2
+           ORDER BY recorded_at ASC, id ASC`,
+          [input.marketId, cutoffMs]
+        )
+    if (cutoffMs !== null && rows.length < 2) {
+      const priorRows = try tx.query(
+        `SELECT price_cents, yes_price_bps, volume_cents, recorded_at
+         FROM feed_market_price_history
+         WHERE market_kind = 'prediction' AND market_ref = $1 AND recorded_at < $2
+         ORDER BY recorded_at DESC, id DESC
+         LIMIT 1`,
+        [input.marketId, cutoffMs]
+      )
+      if (priorRows.length > 0) {
+        rows = [priorRows[0]!, ...rows]
+      }
+    }
+    const points = rows.map(mapPredictionHistoryRow)
+    const last = points[points.length - 1]
+    const marketEndTs = optionalInt(market.resolved_at) ?? now
+    if (
+      last === undefined ||
+      last.yesPriceBps !== liveYesBps ||
+      marketEndTs - last.timestamp > 60_000
+    ) {
+      points.push({
+        timestamp: Math.max(marketEndTs, last !== undefined ? last.timestamp + 1 : marketEndTs),
+        priceCents: livePriceCents,
+        yesPriceBps: liveYesBps,
+        volumeCents: 0
+      })
+    }
+    return {
+      range,
+      points: downsamplePricePoints(points, safeLimit)
+    }
+  })
+}
+
+export effect function snapshotMarketPrices(nowMs?: number): MarketSnapshotSummary!StoreFailure!Store {
+  const store = try Store
+  const now = nowMs ?? (try Clock.currentTimeMillis)
+  return try store.transaction(effect (tx: Tx) => {
+    const perpRows = try tx.query(
+      "SELECT ticker, index_price_cents, mark_price_cents FROM feed_perp_markets ORDER BY ticker ASC"
+    )
+    for (const row of perpRows) {
+      try insertPriceHistoryRowTx(tx, {
+        marketKind: "perp",
+        marketRef: requiredText(row.ticker),
+        priceCents: toInt(row.index_price_cents),
+        markPriceCents: toInt(row.mark_price_cents),
+        volumeCents: 0,
+        recordedAt: now
+      })
+    }
+    const predRows = try tx.query(
+      "SELECT id, yes_shares, no_shares FROM feed_prediction_markets WHERE status = 'open' ORDER BY id ASC"
+    )
+    for (const row of predRows) {
+      const yesBps = yesOddsBps(toInt(row.yes_shares), toInt(row.no_shares))
+      try insertPriceHistoryRowTx(tx, {
+        marketKind: "prediction",
+        marketRef: requiredText(row.id),
+        priceCents: Math.max(1, Math.min(99, Math.round(yesBps / 100))),
+        yesPriceBps: yesBps,
+        markPriceCents: null,
+        volumeCents: 0,
+        recordedAt: now
+      })
+    }
+    return {
+      perpCount: perpRows.length,
+      predictionCount: predRows.length
+    }
+  })
+}
+
+function mapTradeRow(row: Row): MarketTradeView {
+  const traderKind = requiredText(row.trader_kind)
+  const isNpc = traderKind === "npc"
+  const traderId = requiredText(row.trader_id)
+  const rawAvatar = isNpc ? optionalText(row.actor_avatar_url) : optionalText(row.account_avatar_url)
+  const traderAvatarUrl = rawAvatar ?? (isNpc && traderId !== "" ? resolveActorAvatarUrl(traderId) : null)
+  const rawMarketKind = requiredText(row.market_kind)
+  const marketKind: "prediction" | "spot" | "perp" = rawMarketKind === "prediction"
+    ? "prediction"
+    : rawMarketKind === "spot"
+      ? "spot"
+      : "perp"
+  return {
+    id: requiredText(row.id),
+    traderId,
+    traderName: isNpc
+      ? requiredText(row.actor_name, traderId)
+      : requiredText(row.account_display_name, traderId),
+    traderHandle: isNpc
+      ? requiredText(row.actor_username, traderId)
+      : requiredText(row.account_handle, traderId),
+    traderAvatarUrl,
+    isNpc,
+    marketKind,
+    marketRef: requiredText(row.market_ref),
+    marketTitle: optionalText(row.market_title),
+    side: requiredText(row.side),
+    sharesOrSize: toInt(row.shares_or_size),
+    priceCents: toInt(row.price_cents),
+    notionalCents: toInt(row.notional_cents),
+    feeCents: toInt(row.fee_cents),
+    realizedPnlCents: optionalInt(row.realized_pnl_cents),
+    createdAt: toInt(row.created_at)
+  }
+}
+
+export effect function listMarketTrades(input: {
+  readonly marketKind: "perp" | "prediction"
+  readonly marketRef: string
+  readonly limit?: number
+}): ReadonlyArray<MarketTradeView>!(MarketFailure | StoreFailure)!Store {
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)))
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    if (input.marketKind === "perp") {
+      const exists = try tx.query("SELECT ticker FROM feed_perp_markets WHERE ticker = $1 LIMIT 1", [input.marketRef])
+      if (exists.length === 0) {
+        throw marketFail("MARKET_NOT_FOUND", `Perp market not found: ${input.marketRef}`)
+      }
+      const rows = try tx.query(
+        `SELECT
+           t.*,
+           fa.handle AS account_handle,
+           fa.display_name AS account_display_name,
+           fa.avatar_url AS account_avatar_url,
+           ac.username AS actor_username,
+           ac.name AS actor_name,
+           ac.profile_image_url AS actor_avatar_url,
+           COALESCE(o.name, t.market_ref) AS market_title
+         FROM feed_trades t
+         LEFT JOIN feed_accounts fa ON t.trader_kind = 'user' AND fa.account_id = t.trader_id
+         LEFT JOIN feed_actors ac ON t.trader_kind = 'npc' AND ac.id = t.trader_id
+         LEFT JOIN feed_spot_pools sp ON sp.ticker = t.market_ref
+         LEFT JOIN feed_organizations o ON o.id = sp.organization_id
+         WHERE t.market_kind IN ('perp', 'spot') AND t.market_ref = $1
+         ORDER BY t.created_at DESC, t.id DESC
+         LIMIT $2`,
+        [input.marketRef, safeLimit]
+      )
+      return rows.map(mapTradeRow)
+    }
+    const exists = try tx.query("SELECT id FROM feed_prediction_markets WHERE id = $1 LIMIT 1", [input.marketRef])
+    if (exists.length === 0) {
+      throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${input.marketRef}`)
+    }
+    const rows = try tx.query(
+      `SELECT
+         t.*,
+         fa.handle AS account_handle,
+         fa.display_name AS account_display_name,
+         fa.avatar_url AS account_avatar_url,
+         ac.username AS actor_username,
+         ac.name AS actor_name,
+         ac.profile_image_url AS actor_avatar_url,
+         pm.question AS market_title
+       FROM feed_trades t
+       LEFT JOIN feed_accounts fa ON t.trader_kind = 'user' AND fa.account_id = t.trader_id
+       LEFT JOIN feed_actors ac ON t.trader_kind = 'npc' AND ac.id = t.trader_id
+       LEFT JOIN feed_prediction_markets pm ON pm.id = t.market_ref
+       WHERE t.market_kind = 'prediction' AND t.market_ref = $1
+       ORDER BY t.created_at DESC, t.id DESC
+       LIMIT $2`,
+      [input.marketRef, safeLimit]
+    )
+    return rows.map(mapTradeRow)
+  })
+}
+
+export effect function listUserTrades(input: {
+  readonly handleOrId: string
+  readonly limit?: number
+}): ReadonlyArray<MarketTradeView>!(MarketFailure | StoreFailure)!Store {
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)))
+  const raw = input.handleOrId.trim().replace(/^@/, "")
+  if (raw === "") {
+    throw marketFail("USER_NOT_FOUND", "Trader handle or ID is required")
+  }
+  const lower = raw.toLowerCase()
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    let traderId: string | null = null
+    let traderKind: "user" | "npc" | null = null
+    const acctRows = try tx.query(
+      `SELECT account_id FROM feed_accounts WHERE account_id = $1 OR LOWER(handle) = $2 LIMIT 1`,
+      [raw, lower]
+    )
+    if (acctRows.length > 0) {
+      traderId = requiredText(acctRows[0]!.account_id)
+      traderKind = "user"
+    } else {
+      const actorRows = try tx.query(
+        `SELECT id FROM feed_actors WHERE id NOT LIKE 'test-%' AND (id = $1 OR LOWER(username) = $2) LIMIT 1`,
+        [raw, lower]
+      )
+      if (actorRows.length > 0) {
+        traderId = requiredText(actorRows[0]!.id)
+        traderKind = "npc"
+      }
+    }
+    if (traderId === null || traderKind === null) {
+      throw marketFail("USER_NOT_FOUND", `Trader not found: ${input.handleOrId}`)
+    }
+    const rows = try tx.query(
+      `SELECT
+         t.*,
+         fa.handle AS account_handle,
+         fa.display_name AS account_display_name,
+         fa.avatar_url AS account_avatar_url,
+         ac.username AS actor_username,
+         ac.name AS actor_name,
+         ac.profile_image_url AS actor_avatar_url,
+         COALESCE(pm.question, o.name, t.market_ref) AS market_title
+       FROM feed_trades t
+       LEFT JOIN feed_accounts fa ON t.trader_kind = 'user' AND fa.account_id = t.trader_id
+       LEFT JOIN feed_actors ac ON t.trader_kind = 'npc' AND ac.id = t.trader_id
+       LEFT JOIN feed_prediction_markets pm ON t.market_kind = 'prediction' AND pm.id = t.market_ref
+       LEFT JOIN feed_spot_pools sp ON t.market_kind IN ('perp', 'spot') AND sp.ticker = t.market_ref
+       LEFT JOIN feed_organizations o ON o.id = sp.organization_id
+       WHERE t.trader_id = $1 AND t.trader_kind = $2
+       ORDER BY t.created_at DESC, t.id DESC
+       LIMIT $3`,
+      [traderId, traderKind, safeLimit]
+    )
+    return rows.map(mapTradeRow)
+  })
+}
+
+export effect function listClosedPositions(input: {
+  readonly accountId: string
+  readonly outcome?: ClosedOutcomeFilter
+  readonly page?: number
+  readonly limit?: number
+}): ClosedPositionsPage!StoreFailure!Store {
+  const outcomeFilter = input.outcome ?? "all"
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(input.limit ?? 10)))
+  const requestedPage = Math.max(1, Math.floor(input.page ?? 1))
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const predRows = try tx.query(
+      `SELECT
+         p.market_id,
+         p.side,
+         p.shares,
+         p.cost_basis_cents,
+         p.payout_cents,
+         p.settled_at,
+         m.question,
+         m.status AS market_status,
+         m.resolved_outcome
+       FROM feed_prediction_positions p
+       JOIN feed_prediction_markets m ON m.id = p.market_id
+       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NOT NULL AND p.shares > 0`,
+      [input.accountId]
+    )
+    const perpRows = try tx.query(
+      `SELECT
+         p.id,
+         p.ticker,
+         p.side,
+         p.margin_cents,
+         p.size_cents,
+         p.entry_price_cents,
+         p.realized_pnl_cents,
+         p.status,
+         p.closed_at,
+         COALESCE(o.name, p.ticker) AS org_name
+       FROM feed_perp_positions p
+       LEFT JOIN feed_spot_pools sp ON sp.ticker = p.ticker
+       LEFT JOIN feed_organizations o ON o.id = sp.organization_id
+       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.status IN ('closed', 'liquidated')`,
+      [input.accountId]
+    )
+    const combined: Array<ClosedPositionView> = []
+    for (const row of predRows) {
+      const marketId = requiredText(row.market_id)
+      const sideRaw = requiredText(row.side).toLowerCase()
+      const costBasisCents = toInt(row.cost_basis_cents)
+      const payoutCents = toInt(row.payout_cents)
+      const realizedPnlCents = payoutCents - costBasisCents
+      const resolvedOutcome = toText(row.resolved_outcome)?.toLowerCase() ?? null
+      const marketStatus = requiredText(row.market_status, "resolved")
+      const outcome: "won" | "lost" = realizedPnlCents > 0 || (marketStatus === "resolved" && resolvedOutcome === sideRaw && payoutCents > 0)
+        ? "won"
+        : "lost"
+      combined.push({
+        id: `pred:${marketId}:${sideRaw}`,
+        kind: "prediction",
+        marketId,
+        ticker: null,
+        title: requiredText(row.question, marketId),
+        side: sideRaw,
+        sharesOrSize: toInt(row.shares),
+        entryPriceCents: null,
+        exitPriceCents: marketStatus === "resolved" ? (resolvedOutcome === sideRaw ? 100 : 0) : null,
+        costBasisCents,
+        payoutCents,
+        realizedPnlCents,
+        outcome,
+        status: marketStatus,
+        closedAt: toInt(row.settled_at)
+      })
+    }
+    for (const row of perpRows) {
+      const ticker = requiredText(row.ticker)
+      const marginCents = toInt(row.margin_cents)
+      const realizedPnlCents = toInt(row.realized_pnl_cents)
+      const payoutCents = Math.max(0, marginCents + realizedPnlCents)
+      const outcome: "won" | "lost" = realizedPnlCents > 0 ? "won" : "lost"
+      combined.push({
+        id: requiredText(row.id),
+        kind: "perp",
+        marketId: null,
+        ticker,
+        title: requiredText(row.org_name, ticker),
+        side: requiredText(row.side).toLowerCase(),
+        sharesOrSize: toInt(row.size_cents),
+        entryPriceCents: toInt(row.entry_price_cents),
+        exitPriceCents: null,
+        costBasisCents: marginCents,
+        payoutCents,
+        realizedPnlCents,
+        outcome,
+        status: requiredText(row.status, "closed"),
+        closedAt: toInt(row.closed_at)
+      })
+    }
+    const filtered = outcomeFilter === "all"
+      ? combined
+      : combined.filter((item) => item.outcome === outcomeFilter)
+    filtered.sort((a, b) => {
+      if (b.closedAt !== a.closedAt) return b.closedAt - a.closedAt
+      return b.id.localeCompare(a.id)
+    })
+    const totalCount = filtered.length
+    const totalPages = Math.max(1, Math.ceil(totalCount / safeLimit))
+    const safePage = Math.min(requestedPage, totalPages)
+    const offset = (safePage - 1) * safeLimit
+    return {
+      items: filtered.slice(offset, offset + safeLimit),
+      page: safePage,
+      limit: safeLimit,
+      totalCount,
+      totalPages
+    }
+  })
+}
+
+export effect function getAccountPnlHistory(input: {
+  readonly accountId: string
+  readonly range?: HistoryRange
+  readonly limit?: number
+}): AccountPnlHistoryView!(MarketFailure | StoreFailure)!Store {
+  const range = input.range ?? "ALL"
+  const safeLimit = Math.max(2, Math.min(500, Math.floor(input.limit ?? 200)))
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const economy = try getAccountEconomyIn(tx, input.accountId)
+    const rows = try tx.query(
+      `SELECT kind, delta_cents, created_at
+       FROM feed_point_ledger
+       WHERE account_id = $1 AND kind <> 'starting_grant'
+       ORDER BY created_at ASC, id ASC`,
+      [input.accountId]
+    )
+    const durationMs = rangeDurationMs(range)
+    const cutoffMs = durationMs === null ? null : now - durationMs
+    let cumulative = 0
+    const points: Array<PnlHistoryPoint> = []
+    let baselineEmitted = false
+    for (const row of rows) {
+      const ts = toInt(row.created_at)
+      const deltaCents = toInt(row.delta_cents)
+      const kind = requiredText(row.kind)
+      if (cutoffMs !== null && ts < cutoffMs) {
+        cumulative += deltaCents
+        continue
+      }
+      if (!baselineEmitted) {
+        const startTs = cutoffMs ?? Math.max(0, ts - 1_000)
+        points.push({
+          timestamp: startTs,
+          pnlCents: cumulative,
+          cumulativePnlCents: cumulative,
+          deltaCents: 0,
+          kind: "baseline"
+        })
+        baselineEmitted = true
+      }
+      cumulative += deltaCents
+      points.push({
+        timestamp: ts,
+        pnlCents: cumulative,
+        cumulativePnlCents: cumulative,
+        deltaCents,
+        kind
+      })
+    }
+    if (!baselineEmitted) {
+      const startTs = cutoffMs ?? Math.max(0, now - 3_600_000)
+      points.push({
+        timestamp: startTs,
+        pnlCents: cumulative,
+        cumulativePnlCents: cumulative,
+        deltaCents: 0,
+        kind: "baseline"
+      })
+    }
+    const last = points[points.length - 1]
+    if (last === undefined || last.pnlCents !== economy.netProfitCents || now - last.timestamp > 1_000) {
+      points.push({
+        timestamp: Math.max(now, last !== undefined ? last.timestamp + 1 : now),
+        pnlCents: economy.netProfitCents,
+        cumulativePnlCents: economy.netProfitCents,
+        deltaCents: economy.netProfitCents - (last?.pnlCents ?? 0),
+        kind: "mark_to_market"
+      })
+    }
+    return {
+      range,
+      points: downsamplePnlPoints(points, safeLimit),
+      currentNetProfitCents: economy.netProfitCents
+    }
+  })
+}

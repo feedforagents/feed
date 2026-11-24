@@ -30,7 +30,7 @@ import {
   type PlayMode,
   type SessionIdentity
 } from "@repo/auth"
-import { Store, StoreFailure, toInt, toText, type Tx } from "@repo/db"
+import { Store, StoreFailure, resolveActorAvatarUrl, toInt, toText, type Tx } from "@repo/db"
 import {
   EngineFailure,
   approveManualHold,
@@ -53,18 +53,26 @@ import {
   MarketFailure,
   buyPredictionShares,
   closePerpPosition,
-  createStripeCheckoutSession,
   getAccountEconomy,
-  getLeaderboard,
+  getAccountPnlHistory,
+  getLeaderboardPage,
+  getLeaderboardViewerRank,
   getPerpMarket,
+  getPerpPriceHistory,
   getPointLedger,
   getPredictionMarket,
+  getPredictionPriceHistory,
   getUserPositions,
-  handleStripeWebhook,
+  listClosedPositions,
+  listMarketTrades,
   listPerpMarkets,
-  listPointPacks,
   listPredictionMarkets,
+  listUserTrades,
   openPerpPosition,
+  parseClosedOutcomeFilter,
+  parseHistoryRange,
+  parseLeaderboardFilter,
+  parseLeaderboardTimeframe,
   sellPredictionShares
 } from "@repo/markets"
 import {
@@ -140,8 +148,13 @@ module web {
   export function makeResponse(body: BodyInit | null, init?: ResponseInit): Response {
     return new Response(body, init)
   }
+
+  /** @throws {never} */
+  export function randomUuid(): string {
+    return globalThis.crypto.randomUUID()
+  }
 }
-import { makeHeaders, makeResponse } from web
+import { makeHeaders, makeResponse, randomUuid } from web
 
 error HttpRequestError { status: number; code: string; message: string }
 
@@ -286,13 +299,6 @@ effect function readParsedBody(request: Request): ParsedBody!HttpRequestError {
     return try badRequest("invalid_json", "Request body must be a JSON object.")
   }
   return { data: record, isForm: false }
-}
-
-effect function readRawText(request: Request): string!HttpRequestError {
-  return try tryPromise({
-    try: () => request.text(),
-    catch: () => new HttpRequestError({ status: 400, code: "invalid_body", message: "Unable to read request body." })
-  })
 }
 
 effect function optionalSession(
@@ -693,7 +699,6 @@ effect function handleAuthRoute(
         uiMode: profile.uiMode,
         balanceCents: profile.balanceCents,
         startingGrantCents: profile.startingGrantCents,
-        purchasedCents: profile.purchasedCents,
         isAdmin: profile.isAdmin,
         isReviewer: profile.isReviewer,
         agentGrant: grant
@@ -940,13 +945,109 @@ effect function updateOwnAccountProfile(
   return profile
 }
 
+function escapeSqlLike(input: string): string {
+  return input.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+}
+
+effect function handleWorldStatusAndUserSearch(
+  url: URL
+): (Response | undefined)!StoreFailure!Store {
+  const path = url.pathname
+  if (path === "/api/world/status") {
+    const store = try Store
+    const now = try Clock.currentTimeMillis
+    const status = try store.transaction(effect (tx: Tx) => {
+      const worldRows = try tx.query(
+        "SELECT current_day, current_hour, phase, game_running, last_tick_at FROM feed_world_state WHERE singleton = true LIMIT 1"
+      )
+      const countsRows = try tx.query(
+        `SELECT
+           (SELECT COUNT(*) FROM feed_prediction_markets WHERE status = 'open' AND expires_at > $1)
+             + (SELECT COUNT(*) FROM feed_perp_markets) AS active_markets_count,
+           (SELECT COUNT(*) FROM feed_posts WHERE deleted_at IS NULL) AS total_posts_count,
+           (SELECT COUNT(*) FROM feed_actors WHERE id NOT LIKE 'test-%') AS active_actors_count`,
+        [now]
+      )
+      const w = worldRows[0] ?? {}
+      const c = countsRows[0] ?? {}
+      return {
+        currentDay: Math.max(1, toInt(w.current_day) || 1),
+        currentHour: Math.max(0, toInt(w.current_hour)),
+        phase: toText(w.phase) ?? "active",
+        gameRunning: w.game_running !== false,
+        lastTickAt: Math.max(0, toInt(w.last_tick_at)),
+        activeMarketsCount: Math.max(0, toInt(c.active_markets_count)),
+        totalPostsCount: Math.max(0, toInt(c.total_posts_count)),
+        activeActorsCount: Math.max(0, toInt(c.active_actors_count))
+      }
+    })
+    return jsonResponse(status)
+  }
+  if (path === "/api/users/search") {
+    const q = (url.searchParams.get("q") ?? "").trim().replace(/^@/, "")
+    const limit = clampIntQuery(url, "limit", 20, 1, 50)
+    if (q === "") return jsonResponse({ items: [], users: [] })
+    const like = `%${escapeSqlLike(q)}%`
+    const prefix = `${escapeSqlLike(q)}%`
+    const store = try Store
+    const items = try store.transaction(effect (tx: Tx) => {
+      const accountRows = try tx.query(
+        `SELECT fa.account_id AS id, fa.handle, fa.display_name, fa.avatar_url
+         FROM feed_accounts fa
+         LEFT JOIN accounts a ON a.key = fa.account_id
+         WHERE fa.is_reviewer = false
+           AND (a.key IS NULL OR a.status = 'active')
+           AND (fa.handle ILIKE $1 ESCAPE '\\' OR fa.display_name ILIKE $1 ESCAPE '\\')
+         ORDER BY CASE WHEN fa.handle ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, fa.handle ASC
+         LIMIT $3`,
+        [like, prefix, limit]
+      )
+      const actorRows = try tx.query(
+        `SELECT id, username AS handle, name AS display_name, profile_image_url AS avatar_url
+         FROM feed_actors
+         WHERE id NOT LIKE 'test-%'
+           AND (username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\')
+         ORDER BY CASE WHEN username ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, name ASC
+         LIMIT $3`,
+        [like, prefix, limit]
+      )
+      const users = accountRows.map((row) => ({
+        id: toText(row.id) ?? "",
+        handle: toText(row.handle) ?? "",
+        displayName: toText(row.display_name) ?? "",
+        avatarUrl: toText(row.avatar_url) ?? null,
+        kind: "user" as const,
+        isNpc: false
+      }))
+      const actors = actorRows.map((row) => {
+        const id = toText(row.id) ?? ""
+        return {
+          id,
+          handle: toText(row.handle) ?? id,
+          displayName: toText(row.display_name) ?? id,
+          avatarUrl: toText(row.avatar_url) ?? (id !== "" ? resolveActorAvatarUrl(id) : null),
+          kind: "npc" as const,
+          isNpc: true
+        }
+      })
+      return [...users, ...actors].slice(0, limit)
+    })
+    return jsonResponse({ items, users: items })
+  }
+  return undefined
+}
+
 effect function handleSocialPostsAndUsers(
   request: Request,
   url: URL,
   config: AppServerConfig
-): (Response | undefined)!(AuthFailure | RateLimited | SocialFailure | StoreFailure | HttpRequestError)!Store {
+): (Response | undefined)!(AuthFailure | RateLimited | MarketFailure | SocialFailure | StoreFailure | HttpRequestError)!Store {
   const path = url.pathname
   const method = request.method.toUpperCase()
+  if (method === "GET") {
+    const worldOrSearch = try handleWorldStatusAndUserSearch(url)
+    if (worldOrSearch !== undefined) return worldOrSearch
+  }
   if (method === "GET" && path === "/api/feed") {
     const session = try optionalSession(request, config)
     const rawTab = url.searchParams.get("tab") ?? "latest"
@@ -1021,6 +1122,47 @@ effect function handleSocialPostsAndUsers(
     const session = try optionalSession(request, config)
     return jsonResponse({ trending: try listTrending(clampIntQuery(url, "limit", 15, 1, 50), resolveMode(session, url), session?.accountId) })
   }
+  const trendingTagMatch = /^\/api\/trending\/([^/]+)$/.exec(path)
+  if (method === "GET" && trendingTagMatch !== null) {
+    const session = try optionalSession(request, config)
+    const mode = resolveMode(session, url)
+    const rawTag = decodeSegment(trendingTagMatch[1] ?? "").trim()
+    const cleanTag = rawTag.replace(/^[#$]+/, "").trim()
+    if (cleanTag === "" || (mode === "social" && rawTag.startsWith("$"))) {
+      return jsonResponse({ tag: rawTag, posts: [] })
+    }
+    const lowerTag = cleanTag.toLowerCase()
+    const search = try searchWorld({
+      query: cleanTag,
+      mode,
+      viewerId: session?.accountId,
+      limit: clampIntQuery(url, "limit", 30, 1, 50)
+    })
+    const posts = search.posts.filter((post) => {
+      if (post.hashtags.some((h) => h.toLowerCase() === lowerTag)) return true
+      if (mode !== "social") {
+        if (post.cashtags.some((c) => c.toLowerCase() === lowerTag)) return true
+        if (post.ticker !== null && post.ticker.toLowerCase() === lowerTag) return true
+      }
+      const lowerContent = post.content.toLowerCase()
+      return lowerContent.includes(`#${lowerTag}`) || (mode !== "social" && lowerContent.includes(`$${lowerTag}`))
+    })
+    return jsonResponse({ tag: rawTag, posts })
+  }
+  if (method === "GET" && (path === "/api/users/me/blocked" || path === "/api/moderation/blocks")) {
+    const session = try requireSession(request, config)
+    return jsonResponse({ items: try listBlockedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
+  }
+  if (method === "GET" && (path === "/api/users/me/muted" || path === "/api/moderation/mutes")) {
+    const session = try requireSession(request, config)
+    return jsonResponse({ items: try listMutedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
+  }
+  const userTradesMatch = /^\/api\/users\/([^/]+)\/trades$/.exec(path)
+  if (method === "GET" && userTradesMatch !== null) {
+    const handle = decodeSegment(userTradesMatch[1] ?? "")
+    const trades = try listUserTrades({ handleOrId: handle, limit: clampIntQuery(url, "limit", 50, 1, 200) })
+    return jsonResponse({ trades })
+  }
   const userFollowListMatch = /^\/api\/users\/([^/]+)\/(followers|following)$/.exec(path)
   if (method === "GET" && userFollowListMatch !== null) {
     const session = try optionalSession(request, config)
@@ -1036,14 +1178,6 @@ effect function handleSocialPostsAndUsers(
   const userEdgeMatch = /^\/api\/users\/([^/]+)\/(follow|block|mute)$/.exec(path)
   if (userEdgeMatch !== null) {
     return try handleAccountEdge(request, decodeSegment(userEdgeMatch[1] ?? ""), userEdgeMatch[2] ?? "", config)
-  }
-  if (method === "GET" && path === "/api/users/me/blocked") {
-    const session = try requireSession(request, config)
-    return jsonResponse({ items: try listBlockedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
-  }
-  if (method === "GET" && path === "/api/users/me/muted") {
-    const session = try requireSession(request, config)
-    return jsonResponse({ items: try listMutedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
   }
   if (method === "PATCH" && path === "/api/users/me") {
     const session = try requireSession(request, config)
@@ -1193,13 +1327,104 @@ effect function handleSocialChatsAndNotifications(
     const session = try requireSession(request, config)
     return jsonResponse(try leaveGroupChat(session.accountId, decodeSegment(chatLeaveMatch[1] ?? "")))
   }
+  const chatKickMatch = /^\/api\/chats\/([^/]+)\/members\/([^/]+)$/.exec(path)
+  if (method === "DELETE" && chatKickMatch !== null) {
+    const session = try requireSession(request, config)
+    const chatId = decodeSegment(chatKickMatch[1] ?? "")
+    const memberId = decodeSegment(chatKickMatch[2] ?? "")
+    const store = try Store
+    const result = try store.transaction(effect (tx: Tx) => {
+      const chatRows = try tx.query("SELECT id, kind, created_by FROM feed_chats WHERE id = $1 FOR UPDATE", [chatId])
+      if (chatRows.length === 0) {
+        throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
+      }
+      if (toText(chatRows[0]?.kind) !== "group") {
+        throw new SocialFailure({ code: "Forbidden", message: "Members can only be removed from user group chats." })
+      }
+      const callerRows = try tx.query(
+        "SELECT role FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+        [chatId, session.accountId]
+      )
+      const callerRole = toText(callerRows[0]?.role)
+      if (callerRole !== "owner" && callerRole !== "admin") {
+        throw new SocialFailure({ code: "Forbidden", message: "Only group owners or admins can remove members." })
+      }
+      const targetRows = try tx.query(
+        "SELECT role FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+        [chatId, memberId]
+      )
+      if (targetRows.length === 0) {
+        throw new SocialFailure({ code: "NotFound", message: "Chat member not found." })
+      }
+      if (toText(targetRows[0]?.role) === "owner") {
+        throw new SocialFailure({ code: "Forbidden", message: "Cannot remove the group owner." })
+      }
+      try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, memberId])
+      return { chatId, memberId, removed: true }
+    })
+    return jsonResponse(result)
+  }
+  const chatSingleMatch = /^\/api\/chats\/([^/]+)$/.exec(path)
+  if (chatSingleMatch !== null && (method === "PATCH" || method === "DELETE")) {
+    const session = try requireSession(request, config)
+    const chatId = decodeSegment(chatSingleMatch[1] ?? "")
+    if (method === "PATCH") {
+      const { data } = try readParsedBody(request)
+      const nextTitle = try reqStr(data, "name", "name", "title")
+      if (nextTitle.length > 100) {
+        return try badRequest("invalid_input", "Group name must be at most 100 characters.")
+      }
+      const store = try Store
+      const updated = try store.transaction(effect (tx: Tx) => {
+        const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 FOR UPDATE", [chatId])
+        if (chatRows.length === 0) {
+          throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
+        }
+        if (toText(chatRows[0]?.kind) !== "group") {
+          throw new SocialFailure({ code: "Forbidden", message: "Only user group chats can be renamed." })
+        }
+        const callerRows = try tx.query(
+          "SELECT role FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+          [chatId, session.accountId]
+        )
+        const callerRole = toText(callerRows[0]?.role)
+        if (callerRole !== "owner" && callerRole !== "admin") {
+          throw new SocialFailure({ code: "Forbidden", message: "Only group owners or admins can rename this group." })
+        }
+        try tx.query("UPDATE feed_chats SET name = $2 WHERE id = $1", [chatId, nextTitle])
+        return { chatId, title: nextTitle, name: nextTitle }
+      })
+      return jsonResponse(updated)
+    }
+    const store = try Store
+    const deleted = try store.transaction(effect (tx: Tx) => {
+      const chatRows = try tx.query("SELECT id, kind, created_by FROM feed_chats WHERE id = $1 FOR UPDATE", [chatId])
+      if (chatRows.length === 0) {
+        throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
+      }
+      if (toText(chatRows[0]?.kind) !== "group") {
+        throw new SocialFailure({ code: "Forbidden", message: "Only user group chats can be deleted." })
+      }
+      const callerRows = try tx.query(
+        "SELECT role FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+        [chatId, session.accountId]
+      )
+      const callerRole = toText(callerRows[0]?.role)
+      const isCreator = toText(chatRows[0]?.created_by) === session.accountId
+      if (callerRole !== "owner" && !isCreator) {
+        throw new SocialFailure({ code: "Forbidden", message: "Only the group owner can delete this group." })
+      }
+      try tx.query("DELETE FROM feed_chats WHERE id = $1", [chatId])
+      return { chatId, deleted: true }
+    })
+    return jsonResponse(deleted)
+  }
   return undefined
 }
 
 effect function handleMarketRoute(
   request: Request,
   url: URL,
-  origin: string,
   config: AppServerConfig
 ): (Response | undefined)!(AuthFailure | RateLimited | MarketFailure | StoreFailure | HttpRequestError)!Store {
   const path = url.pathname
@@ -1211,6 +1436,33 @@ effect function handleMarketRoute(
     if (session === null) return jsonResponse({ predictions, perps })
     const positions = try getUserPositions(session.accountId)
     return jsonResponse({ predictions, perps, positions })
+  }
+  if (method === "GET" && path === "/api/markets/positions/closed") {
+    const session = try requireSession(request, config)
+    return jsonResponse(try listClosedPositions({
+      accountId: session.accountId,
+      outcome: parseClosedOutcomeFilter(url.searchParams.get("outcome")),
+      page: clampIntQuery(url, "page", 1, 1, 10_000),
+      limit: clampIntQuery(url, "limit", 10, 1, 100)
+    }))
+  }
+  const predHistoryMatch = /^\/api\/markets\/prediction\/([^/]+)\/history$/.exec(path)
+  if (method === "GET" && predHistoryMatch !== null) {
+    return jsonResponse(try getPredictionPriceHistory({
+      marketId: decodeSegment(predHistoryMatch[1] ?? ""),
+      range: parseHistoryRange(url.searchParams.get("range")),
+      limit: clampIntQuery(url, "limit", 200, 2, 500)
+    }))
+  }
+  const predTradesMatch = /^\/api\/markets\/prediction\/([^/]+)\/trades$/.exec(path)
+  if (method === "GET" && predTradesMatch !== null) {
+    return jsonResponse({
+      trades: try listMarketTrades({
+        marketKind: "prediction",
+        marketRef: decodeSegment(predTradesMatch[1] ?? ""),
+        limit: clampIntQuery(url, "limit", 50, 1, 200)
+      })
+    })
   }
   const predDetailMatch = /^\/api\/markets\/prediction\/([^/]+)$/.exec(path)
   if (method === "GET" && predDetailMatch !== null) {
@@ -1228,24 +1480,64 @@ effect function handleMarketRoute(
     if (rawSide !== "yes" && rawSide !== "no") return try badRequest("invalid_side", "Side must be yes or no.")
     if (action === "buy") {
       const amountCents = numField(data, "amountCents", "amount_cents") ?? Math.round((numField(data, "amountPts") ?? 0) * 100)
-      return jsonResponse(try buyPredictionShares({
+      const receipt = try buyPredictionShares({
         actorId: session.accountId,
         actorKind: "user",
         marketId,
         side: rawSide,
         amountCents: Math.round(amountCents),
         ...(idempotencyKey === undefined ? {} : { idempotencyKey })
-      }))
+      })
+      try publishFeedEvent({
+        type: "market.prediction",
+        marketId: receipt.marketId,
+        action: receipt.action,
+        side: receipt.side,
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        shares: receipt.shares,
+        notionalCents: receipt.notionalCents
+      })
+      return jsonResponse(receipt)
     }
     const shares = numField(data, "shares") ?? 0
-    return jsonResponse(try sellPredictionShares({
+    const receipt = try sellPredictionShares({
       actorId: session.accountId,
       actorKind: "user",
       marketId,
       side: rawSide,
       shares: Math.round(shares),
       ...(idempotencyKey === undefined ? {} : { idempotencyKey })
+    })
+    try publishFeedEvent({
+      type: "market.prediction",
+      marketId: receipt.marketId,
+      action: receipt.action,
+      side: receipt.side,
+      yesPriceBps: receipt.yesPriceBps,
+      noPriceBps: receipt.noPriceBps,
+      shares: receipt.shares,
+      notionalCents: receipt.notionalCents
+    })
+    return jsonResponse(receipt)
+  }
+  const perpHistoryMatch = /^\/api\/markets\/perp\/([^/]+)\/history$/.exec(path)
+  if (method === "GET" && perpHistoryMatch !== null) {
+    return jsonResponse(try getPerpPriceHistory({
+      ticker: decodeSegment(perpHistoryMatch[1] ?? ""),
+      range: parseHistoryRange(url.searchParams.get("range")),
+      limit: clampIntQuery(url, "limit", 200, 2, 500)
     }))
+  }
+  const perpTradesMatch = /^\/api\/markets\/perp\/([^/]+)\/trades$/.exec(path)
+  if (method === "GET" && perpTradesMatch !== null) {
+    return jsonResponse({
+      trades: try listMarketTrades({
+        marketKind: "perp",
+        marketRef: decodeSegment(perpTradesMatch[1] ?? ""),
+        limit: clampIntQuery(url, "limit", 50, 1, 200)
+      })
+    })
   }
   const perpDetailMatch = /^\/api\/markets\/perp\/([^/]+)$/.exec(path)
   if (method === "GET" && perpDetailMatch !== null) {
@@ -1307,11 +1599,36 @@ effect function handleMarketRoute(
     })
     return jsonResponse(closed)
   }
+  if (method === "GET" && path === "/api/leaderboard/me") {
+    const session = try requireSession(request, config)
+    const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
+    const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
+    const pageSize = clampIntQuery(url, "pageSize", clampIntQuery(url, "limit", 50, 1, 200), 1, 200)
+    return jsonResponse(try getLeaderboardViewerRank(session.accountId, { filter, timeframe, pageSize }))
+  }
   if (method === "GET" && path === "/api/leaderboard") {
-    return jsonResponse({ leaderboard: try getLeaderboard(clampIntQuery(url, "limit", 50, 1, 200)) })
+    const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
+    const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
+    const page = clampIntQuery(url, "page", 1, 1, 10_000)
+    const pageSize = clampIntQuery(url, "pageSize", clampIntQuery(url, "limit", 50, 1, 200), 1, 200)
+    const result = try getLeaderboardPage({ filter, timeframe, page, pageSize })
+    return jsonResponse({
+      entries: result.entries,
+      leaderboard: result.entries,
+      pagination: result.pagination,
+      generatedAt: result.generatedAt
+    })
   }
   if (method === "GET" && path === "/api/economy/packs") {
-    return jsonResponse({ packs: listPointPacks() })
+    return jsonResponse({ packs: [] })
+  }
+  if (method === "GET" && path === "/api/economy/me/pnl-history") {
+    const session = try requireSession(request, config)
+    return jsonResponse(try getAccountPnlHistory({
+      accountId: session.accountId,
+      range: parseHistoryRange(url.searchParams.get("range")),
+      limit: clampIntQuery(url, "limit", 200, 2, 500)
+    }))
   }
   if (method === "GET" && path === "/api/economy/me") {
     const session = try requireSession(request, config)
@@ -1320,28 +1637,15 @@ effect function handleMarketRoute(
       ledger: try getPointLedger(session.accountId, clampIntQuery(url, "limit", 50, 1, 200))
     })
   }
-  if (method === "POST" && path === "/api/economy/checkout") {
-    const session = try requireSession(request, config)
-    const { data } = try readParsedBody(request)
-    const checkout = try createStripeCheckoutSession({
-      accountId: session.accountId,
-      packId: try reqStr(data, "packId", "packId", "pack_id"),
-      billingState: strField(data, "billingState", "billing_state"),
-      requestCountry: request.headers.get("cf-ipcountry") ?? request.headers.get("x-vercel-ip-country") ?? undefined,
-      ipRegion: request.headers.get("cf-region") ?? request.headers.get("cf-region-code") ?? undefined,
-      successUrl: strField(data, "successUrl") ?? `${origin}/markets?checkout=success`,
-      cancelUrl: strField(data, "cancelUrl") ?? `${origin}/markets?checkout=cancel`,
-      stripeSecretKey: config.stripeSecretKey
-    })
-    return jsonResponse({ ...checkout, url: checkout.checkoutUrl })
-  }
-  if (method === "POST" && path === "/api/webhooks/stripe") {
-    const rawBody = try readRawText(request)
-    return jsonResponse(try handleStripeWebhook({
-      rawBody,
-      signature: request.headers.get("stripe-signature") ?? undefined,
-      webhookSecret: config.stripeWebhookSecret
-    }))
+  if (method === "POST" && (path === "/api/economy/checkout" || path === "/api/webhooks/stripe")) {
+    return jsonResponse(
+      {
+        error: "point_purchases_disabled",
+        code: "point_purchases_disabled",
+        message: "Point purchases are disabled. Accounts start with a fixed 100 pts virtual balance."
+      },
+      410
+    )
   }
   return undefined
 }
@@ -1487,6 +1791,161 @@ effect function handleEngineAdminRoute(
     const job = decodeSegment(cronMatch[1] ?? "")
     return jsonResponse({ ok: true, job, result: try dispatchCronJob(job) })
   }
+  if (method === "GET" && path === "/api/admin/reports") {
+    try requireAdminSession(request, config)
+    const rawStatus = url.searchParams.get("status")?.trim().toLowerCase() ?? "all"
+    const limit = clampIntQuery(url, "limit", 50, 1, 200)
+    const store = try Store
+    const reports = try store.transaction(effect (tx: Tx) => {
+      const rows = rawStatus === "open" || rawStatus === "reviewed" || rawStatus === "dismissed"
+        ? try tx.query(
+            `SELECT r.id, r.reporter_id, r.target_id, r.target_kind, r.reason, r.status, r.created_at, fa.handle AS reporter_handle
+             FROM feed_reports r
+             LEFT JOIN feed_accounts fa ON fa.account_id = r.reporter_id
+             WHERE r.status = $1
+             ORDER BY r.created_at DESC
+             LIMIT $2`,
+            [rawStatus, limit]
+          )
+        : try tx.query(
+            `SELECT r.id, r.reporter_id, r.target_id, r.target_kind, r.reason, r.status, r.created_at, fa.handle AS reporter_handle
+             FROM feed_reports r
+             LEFT JOIN feed_accounts fa ON fa.account_id = r.reporter_id
+             ORDER BY r.created_at DESC
+             LIMIT $1`,
+            [limit]
+          )
+      return rows.map((row) => ({
+        id: toText(row.id) ?? "",
+        reporterId: toText(row.reporter_id) ?? "",
+        reporterHandle: toText(row.reporter_handle) ?? null,
+        targetId: toText(row.target_id) ?? "",
+        targetKind: toText(row.target_kind) ?? "",
+        reason: toText(row.reason) ?? "",
+        status: toText(row.status) ?? "open",
+        createdAt: toInt(row.created_at)
+      }))
+    })
+    return jsonResponse({ reports })
+  }
+  const adminReportMatch = /^\/api\/admin\/reports\/([^/]+)$/.exec(path)
+  if (method === "PATCH" && adminReportMatch !== null) {
+    try requireAdminSession(request, config)
+    const reportId = decodeSegment(adminReportMatch[1] ?? "")
+    const { data } = try readParsedBody(request)
+    const rawStatus = (try reqStr(data, "status", "status")).toLowerCase()
+    const nextStatus = rawStatus === "resolved" || rawStatus === "reviewed"
+      ? "reviewed"
+      : rawStatus === "dismissed"
+        ? "dismissed"
+        : rawStatus === "open"
+          ? "open"
+          : null
+    if (nextStatus === null) {
+      return try badRequest("invalid_status", "Report status must be open, reviewed, resolved, or dismissed.")
+    }
+    const store = try Store
+    const updated = try store.transaction(effect (tx: Tx) => {
+      const rows = try tx.query(
+        "UPDATE feed_reports SET status = $2 WHERE id = $1 RETURNING id, status",
+        [reportId, nextStatus]
+      )
+      return rows[0]
+    })
+    if (updated === undefined) {
+      return try badRequest("not_found", "Report not found.", 404)
+    }
+    return jsonResponse({ id: toText(updated.id) ?? reportId, status: toText(updated.status) ?? nextStatus })
+  }
+  if (method === "GET" && path === "/api/admin/users") {
+    try requireAdminSession(request, config)
+    const q = (url.searchParams.get("q") ?? "").trim()
+    const limit = clampIntQuery(url, "limit", 50, 1, 200)
+    const store = try Store
+    const users = try store.transaction(effect (tx: Tx) => {
+      const rows = q === ""
+        ? try tx.query(
+            `SELECT account_id, handle, display_name, avatar_url, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, phone_verified_at, created_at
+             FROM feed_accounts
+             ORDER BY created_at DESC
+             LIMIT $1`,
+            [limit]
+          )
+        : try tx.query(
+            `SELECT account_id, handle, display_name, avatar_url, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, phone_verified_at, created_at
+             FROM feed_accounts
+             WHERE handle ILIKE $1 ESCAPE '\\' OR display_name ILIKE $1 ESCAPE '\\'
+             ORDER BY created_at DESC
+             LIMIT $2`,
+            [`%${escapeSqlLike(q)}%`, limit]
+          )
+      return rows.map((row) => ({
+        accountId: toText(row.account_id) ?? "",
+        handle: toText(row.handle) ?? "",
+        displayName: toText(row.display_name) ?? "",
+        avatarUrl: toText(row.avatar_url) ?? null,
+        uiMode: toText(row.ui_mode) === "social" ? "social" : "game",
+        balanceCents: toInt(row.balance_cents),
+        startingGrantCents: toInt(row.starting_grant_cents),
+        totalFeesPaidCents: toInt(row.total_fees_paid_cents),
+        isAdmin: row.is_admin === true,
+        isReviewer: row.is_reviewer === true,
+        phoneVerifiedAt: row.phone_verified_at === null ? null : toInt(row.phone_verified_at),
+        createdAt: toInt(row.created_at)
+      }))
+    })
+    return jsonResponse({ users })
+  }
+  if (method === "GET" && path === "/api/admin/world-facts") {
+    try requireAdminSession(request, config)
+    const limit = clampIntQuery(url, "limit", 100, 1, 200)
+    const store = try Store
+    const facts = try store.transaction(effect (tx: Tx) => {
+      const rows = try tx.query(
+        "SELECT id, fact_text, category, created_at FROM feed_world_facts ORDER BY created_at DESC LIMIT $1",
+        [limit]
+      )
+      return rows.map((row) => ({
+        id: toText(row.id) ?? "",
+        factText: toText(row.fact_text) ?? "",
+        category: toText(row.category) ?? "markets",
+        createdAt: toInt(row.created_at)
+      }))
+    })
+    return jsonResponse({ facts })
+  }
+  if (method === "POST" && path === "/api/admin/world-facts") {
+    try requireAdminSession(request, config)
+    const { data } = try readParsedBody(request)
+    const factText = try reqStr(data, "factText", "factText", "fact_text", "text")
+    const category = strField(data, "category")?.trim() || "markets"
+    if (factText.length > 500) {
+      return try badRequest("invalid_input", "factText must be at most 500 characters.")
+    }
+    const id = `fact-${randomUuid()}`
+    const now = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction((tx: Tx) =>
+      tx.query(
+        "INSERT INTO feed_world_facts (id, fact_text, category, created_at) VALUES ($1, $2, $3, $4)",
+        [id, factText, category.slice(0, 60), now]
+      )
+    )
+    return jsonResponse({ id, factText, category: category.slice(0, 60), createdAt: now }, 201)
+  }
+  const worldFactDeleteMatch = /^\/api\/admin\/world-facts\/([^/]+)$/.exec(path)
+  if (method === "DELETE" && worldFactDeleteMatch !== null) {
+    try requireAdminSession(request, config)
+    const factId = decodeSegment(worldFactDeleteMatch[1] ?? "")
+    const store = try Store
+    const removed = try store.transaction((tx: Tx) =>
+      tx.query("DELETE FROM feed_world_facts WHERE id = $1 RETURNING id", [factId])
+    )
+    if (removed.length === 0) {
+      return try badRequest("not_found", "World fact not found.", 404)
+    }
+    return jsonResponse({ id: factId, deleted: true })
+  }
   return undefined
 }
 
@@ -1553,7 +2012,7 @@ effect function routeOptionalResponse(
   const chatNotifyResponse = try handleSocialChatsAndNotifications(request, url, config)
   if (chatNotifyResponse !== undefined) return chatNotifyResponse
 
-  const marketResponse = try handleMarketRoute(request, url, origin, config)
+  const marketResponse = try handleMarketRoute(request, url, config)
   if (marketResponse !== undefined) return marketResponse
 
   const adminResponse = try handleEngineAdminRoute(request, url, config)

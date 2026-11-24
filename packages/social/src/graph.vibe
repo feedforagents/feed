@@ -778,14 +778,14 @@ export effect function listNotifications(
     const inviteByActor = new Map<string, { readonly inviteId: string; readonly chatId: string }>()
     if (inviteActorIds.length > 0) {
       const inviteRows = try tx.query(
-        `SELECT DISTINCT ON (invited_by_npc_id) id, chat_id, invited_by_npc_id
+        `SELECT DISTINCT ON (invited_by_id) id, chat_id, invited_by_id
          FROM feed_group_invites
-         WHERE invited_account_id = $1 AND invited_by_npc_id = ANY($2)
-         ORDER BY invited_by_npc_id, created_at DESC`,
+         WHERE invited_account_id = $1 AND invited_by_id = ANY($2)
+         ORDER BY invited_by_id, created_at DESC`,
         [accountId, inviteActorIds]
       )
       for (const inv of inviteRows) {
-        const npcId = toText(inv.invited_by_npc_id)
+        const npcId = toText(inv.invited_by_id)
         const inviteId = toText(inv.id)
         const chatId = toText(inv.chat_id)
         if (npcId !== undefined && inviteId !== undefined && chatId !== undefined) {
