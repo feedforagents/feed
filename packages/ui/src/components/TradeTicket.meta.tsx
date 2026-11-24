@@ -39,7 +39,17 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     },
     PredictionBuyFeeRoundsUp: {
       yesOddsPct: 54,
-      defaultAmount: "15",
+      defaultAmount: "12",
+    },
+    PerpFeeRoundsUp: {
+      marketKind: "perp",
+      ticker: "SAMALT",
+      marketTitle: "Sam Parody Index Perpetual",
+      balancePts: "500 pts",
+      markPricePts: "103.15 pts",
+      indexPricePts: "102.40 pts",
+      defaultAmount: "12",
+      defaultLeverage: 5,
     },
   },
   play: {
@@ -53,6 +63,7 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     PredictionCpmmQuote: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       const canvas = within(canvasElement);
       await expect(canvas.getByText("1834.00 shares")).toBeVisible();
+      await expect(canvas.getByText("0.01 pts")).toBeVisible();
       await userEvent.click(canvas.getByRole("radio", { name: /NO/i }));
       await expect(canvas.getByText("2146.00 shares")).toBeVisible();
     },
@@ -63,6 +74,10 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     PredictionBuyFeeRoundsUp: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       const canvas = within(canvasElement);
       await expect(canvas.getByText("0.02 pts")).toBeVisible();
+    },
+    PerpFeeRoundsUp: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("0.06 pts")).toBeVisible();
     },
   },
 };
