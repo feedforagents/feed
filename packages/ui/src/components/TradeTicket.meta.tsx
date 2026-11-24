@@ -37,6 +37,16 @@ export const meta: ComponentMeta<TradeTicketProps> = {
       defaultSide: "YES",
       defaultAmount: "1834",
     },
+    PerpBelowMinimum: {
+      marketKind: "perp",
+      ticker: "SAMALT",
+      marketTitle: "Sam Parody Index Perpetual",
+      balancePts: "500 pts",
+      markPricePts: "103.15 pts",
+      indexPricePts: "102.40 pts",
+      defaultAmount: "1",
+      defaultLeverage: 5,
+    },
   },
   play: {
     Default: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
@@ -55,6 +65,11 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     PredictionSellFee: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       const canvas = within(canvasElement);
       await expect(canvas.getByText("0.01 pts")).toBeVisible();
+    },
+    PerpBelowMinimum: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("Notional size must be at least 10 pts (margin × leverage).")).toBeVisible();
+      await expect(canvas.getByRole("button", { name: "Open Long 5x" })).toBeDisabled();
     },
   },
 };
