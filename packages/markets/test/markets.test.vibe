@@ -811,7 +811,8 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
     const webhookSecret = "whsec_test_reversals"
     const sendSigned = (payload: Readonly<Record<string, unknown>>) => effect {
       const rawBody = JSON.stringify(payload)
-      const signature = signStripeWebhook(rawBody, webhookSecret, Math.floor(now / 1000))
+      const signedAt = try Clock.currentTimeMillis
+      const signature = signStripeWebhook(rawBody, webhookSecret, Math.floor(signedAt / 1000))
       return try handleStripeWebhook({ rawBody, signature, webhookSecret })
     }
 
