@@ -65,26 +65,49 @@ const SAMPLE_MARKETS = {
   economy: null,
 };
 
-function installMockNetwork() {
+type RecordedRequest = { readonly path: string; readonly method: string; readonly body: string | undefined };
+
+function installMockNetwork(options?: {
+  readonly authenticatedViewer?: Record<string, unknown>;
+  readonly positions?: unknown;
+  readonly recorded?: RecordedRequest[];
+}) {
   const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
+  const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const path = new URL(raw, window.location.origin).pathname;
+    options?.recorded?.push({
+      path,
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? init.body : undefined,
+    });
     if (path === "/api/auth/me") {
-      return json({
-        authenticated: false,
-        viewer: null,
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
+      return json(
+        options?.authenticatedViewer !== undefined
+          ? {
+              authenticated: true,
+              viewer: options.authenticatedViewer,
+              acceptedCountries: ["+1", "+44"],
+              publicAppUrl: window.location.origin,
+            }
+          : {
+              authenticated: false,
+              viewer: null,
+              acceptedCountries: ["+1", "+44"],
+              publicAppUrl: window.location.origin,
+            },
+      );
     }
     if (path === "/api/feed") return json(SAMPLE_POSTS);
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
-    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/markets") return json({ ...SAMPLE_MARKETS, positions: options?.positions ?? SAMPLE_MARKETS.positions });
     if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
     if (path === "/api/leaderboard") return json({ leaderboard: [] });
     if (path === "/api/economy/packs") return json({ packs: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    if (path === "/api/markets/prediction/seed-market-1/sell") {
+      return json({ tradeId: "browser-sell-1", shares: 1834, balanceAfterCents: 10000 });
+    }
     return json({});
   };
   vi.stubGlobal("fetch", fetchMock);
@@ -147,4 +170,50 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+it('Positions show display shares and closing sells stored units (spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement")', async () => {
+  const recorded: RecordedRequest[] = [];
+  installMockNetwork({
+    authenticatedViewer: {
+      accountId: "browser-user-1",
+      handle: "browsertrader",
+      displayName: "Browser Trader",
+      balanceCents: 10000,
+    },
+    positions: {
+      predictionPositions: [
+        {
+          marketId: "seed-market-1",
+          question: "Will OpenAGI ship Strawberry-9000 before Friday?",
+          status: "open",
+          side: "yes",
+          shares: 1834,
+          costBasisCents: 1000,
+          estimatedValueCents: 990,
+          payoutCents: 1834,
+          yesPriceBps: 5000,
+          noPriceBps: 5000,
+        },
+      ],
+      perpPositions: [],
+    },
+    recorded,
+  });
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const marketsButton = page.getByRole("button", { name: "Markets" }).first();
+  await act(() => userEvent.click(marketsButton));
+  await expect.element(page.getByRole("heading", { name: "Will OpenAGI ship Strawberry-9000 before Friday?" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: /Positions/ })));
+  await expect.element(page.getByText("Size 18.34 shares")).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("button", { name: "Close" })));
+  await vi.waitFor(() => {
+    const sell = recorded.find((r) => r.path === "/api/markets/prediction/seed-market-1/sell");
+    expect(sell).toBeDefined();
+    expect((JSON.parse(sell?.body ?? "{}") as { readonly shares?: unknown }).shares).toBe(1834);
+  });
 });

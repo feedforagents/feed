@@ -1269,9 +1269,9 @@ effect function executeProtectedTradeTool(
     case "sell_prediction": {
       const marketId = asOptionalString(args.marketId) ?? ""
       const side = args.side === "no" ? "no" : "yes"
-      const shares = sharesToWholeUnits(Number(args.shares))
+      const shares = sharesToWholeUnits(Number(args.shareCount))
       if (shares === undefined) {
-        throw new InvalidRpcParamsFailure({ message: "shares must be a positive number of shares (up to 2 decimal places)." })
+        throw new InvalidRpcParamsFailure({ message: "shareCount must be a positive number of shares (up to 2 decimal places)." })
       }
       const idempotencyKey = asOptionalString(args.idempotencyKey)
       const receipt = try sellPredictionShares({

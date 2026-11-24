@@ -440,6 +440,25 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
       }
     ))
 
+    const sellRes = try callApp("/api/markets/prediction/seed-market-1/sell", {
+      cookie: alice.cookie,
+      headers: { "Idempotency-Key": "rest-sell-idem-1" },
+      json: { side: "yes", shares: Number(buy.body.shares ?? 0) }
+    })
+    const sellBody = try readJson(sellRes)
+    try check(() => assert.deepStrictEqual(
+      {
+        status: sellRes.status,
+        soldShares: sellBody.shares,
+        balanceGrew: Number(sellBody.balanceAfterCents ?? 0) > Number(buy.body.balanceAfterCents ?? 0)
+      },
+      {
+        status: 200,
+        soldShares: buy.body.shares,
+        balanceGrew: true
+      }
+    ))
+
     const checkoutRaw = JSON.stringify({
       id: "evt_app_checkout_1",
       type: "checkout.session.completed",

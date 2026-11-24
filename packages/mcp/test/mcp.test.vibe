@@ -740,20 +740,28 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       authConfig,
       aliceToken
     ))
+    const portfolioAfterBuy = unwrapToolPayload(try callMcpTool(127, "get_portfolio", {}, authConfig, aliceToken))
     const sellFirst = unwrapToolPayload(try callMcpTool(
       118,
       "sell_prediction",
-      { marketId: "seed-market-1", side: "yes", shares: 1, idempotencyKey: "mcp-sell-idem-1" },
+      { marketId: "seed-market-1", side: "yes", shareCount: 1, idempotencyKey: "mcp-sell-idem-1" },
       authConfig,
       aliceToken
     ))
     const sellReplay = unwrapToolPayload(try callMcpTool(
       119,
       "sell_prediction",
-      { marketId: "seed-market-1", side: "yes", shares: 1, idempotencyKey: "mcp-sell-idem-1" },
+      { marketId: "seed-market-1", side: "yes", shareCount: 1, idempotencyKey: "mcp-sell-idem-1" },
       authConfig,
       aliceToken
     ))
+    const legacySellRes = try callMcpTool(
+      128,
+      "sell_prediction",
+      { marketId: "seed-market-1", side: "yes", shares: 1 },
+      authConfig,
+      aliceToken
+    )
 
     const marketsPayload = unwrapToolPayload(try callMcpTool(120, "list_markets", { kind: "perp", limit: 5 }, authConfig))
     const firstPerp = ((marketsPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>)[0]
@@ -825,6 +833,14 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       assert.strictEqual(buyConflictErr.code, "IDEMPOTENCY_CONFLICT")
       assert.strictEqual(sellReplay.tradeId, sellFirst.tradeId)
       assert.strictEqual(sellReplay.balanceAfterPts, sellFirst.balanceAfterPts)
+      assert.strictEqual(sellFirst.shares, 1)
+      const portfolioPositions = (portfolioAfterBuy.predictionPositions as ReadonlyArray<{ readonly shares?: number }>)
+      assert.strictEqual(portfolioPositions.length, 1)
+      assert.strictEqual(portfolioPositions[0]?.shares, buyFirst.shares)
+      assert.strictEqual(legacySellRes.status, 400)
+      const legacySellErr = legacySellRes.body.error as { readonly code?: number; readonly message?: string }
+      assert.strictEqual(legacySellErr.code, -32602)
+      assert.include(legacySellErr.message ?? "", "shareCount")
 
       assert.notStrictEqual(ticker, "")
       assert.strictEqual(previewTooSmallErr.error, "ORDER_TOO_SMALL")

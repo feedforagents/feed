@@ -1287,7 +1287,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     isGameFinanceTool: true,
     fields: {
       ...predictionTradeBaseFields("Outcome side to sell."),
-      shares: {
+      shareCount: {
         kind: "number",
         required: true,
         exclusiveMinimum: 0,
