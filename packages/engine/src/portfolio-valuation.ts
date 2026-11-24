@@ -14,6 +14,10 @@ export { toNumber };
  * owed (fundingPaid > 0) reduces the value, a funding rebate
  * (fundingPaid < 0) increases it. Omitting it overstates the value by
  * exactly the accrued funding.
+ *
+ * Positions use isolated margin: close and liquidation settlement both cap
+ * loss at the posted margin and floor proceeds at 0, so an underwater
+ * position cannot carry negative market value into `totalAssets`.
  */
 export function calculatePerpPositionMarketValue(position: {
   leverage: unknown;
@@ -33,5 +37,5 @@ export function calculatePerpPositionMarketValue(position: {
     Number.isFinite(leverage) && leverage > 0 ? leverage : 1;
   const margin = Math.abs(size / effectiveLeverage);
 
-  return margin + unrealizedPnL - fundingPaid;
+  return Math.max(0, margin + unrealizedPnL - fundingPaid);
 }

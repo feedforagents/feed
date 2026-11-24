@@ -147,4 +147,42 @@ describe('calculatePerpPositionMarketValue', () => {
     });
     expect(value).toBe(30);
   });
+
+  it('floors isolated-margin position value at zero when loss plus funding exceeds margin', () => {
+    // 5x long with size=100 has margin=20; -18 price loss is not yet
+    // liquidated on price (-20%), but 5 pts of accrued funding exhausts the
+    // margin. Close settlement floors at 0, so market value must not go
+    // negative and pull totalAssets below the cash wallet.
+    const value = calculatePerpPositionMarketValue({
+      size: 100,
+      leverage: 5,
+      unrealizedPnL: -18,
+      fundingPaid: 5,
+    });
+    expect(value).toBe(0);
+  });
+
+  it('floors isolated-margin position value at zero when a price gap exceeds margin', () => {
+    // 10x position with size=100 has margin=10; a -25 gap loss still settles
+    // at 0 on close or liquidation.
+    const value = calculatePerpPositionMarketValue({
+      size: 100,
+      leverage: 10,
+      unrealizedPnL: -25,
+      fundingPaid: 0,
+    });
+    expect(value).toBe(0);
+  });
+
+  it('applies funding rebate before flooring at zero', () => {
+    // margin=20, unrealizedPnL=-22, fundingPaid=-5 (5 pts owed to holder)
+    // settles to 20 - 22 + 5 = 3 before fees.
+    const value = calculatePerpPositionMarketValue({
+      size: 100,
+      leverage: 5,
+      unrealizedPnL: -22,
+      fundingPaid: -5,
+    });
+    expect(value).toBe(3);
+  });
 });
