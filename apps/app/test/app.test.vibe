@@ -155,6 +155,12 @@ function extractSessionCookie(response: Response): string {
   const tokenPart = raw.split(";")[0]?.trim() ?? ""
   return tokenPart
 }
+function sessionCookieMaxAge(setCookieHeader: string | null): number | null {
+  if (setCookieHeader === null) return null
+  const match = /Max-Age=(\d+)/.exec(setCookieHeader)
+  if (match === null) return null
+  return Number(match[1])
+}
 
 effect function seedWorld() {
   try migrateFeedSchema()
@@ -610,5 +616,33 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
         aliceHasPerpClose: true
       }
     ))
+  }
+}, 180_000)
+it.effect('Session cookie slides with the server session (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+    const player = try onboardPhonePlayer("+14155550155", "sliding_session")
+
+    const meFresh = try callApp("/api/auth/me", { cookie: player.cookie })
+    const meFreshBody = try readJson(meFresh)
+    try check(() => assert.strictEqual(meFreshBody.authenticated, true))
+    try check(() => assert.strictEqual(meFresh.headers.get("set-cookie"), null))
+
+    try TestClock.adjust("25 days")
+    const meLater = try callApp("/api/auth/me", { cookie: player.cookie })
+    const meLaterBody = try readJson(meLater)
+    try check(() => assert.strictEqual(meLaterBody.authenticated, true))
+    const refreshedMaxAge = sessionCookieMaxAge(meLater.headers.get("set-cookie"))
+    const refreshedPair = extractSessionCookie(meLater)
+    try check(() => assert.deepStrictEqual(
+      { refreshedMaxAge, sameToken: refreshedPair === player.cookie },
+      { refreshedMaxAge: 30 * 86_400, sameToken: true }
+    ))
+
+    try TestClock.adjust("25 days")
+    const meStill = try callApp("/api/auth/me", { cookie: player.cookie })
+    const meStillBody = try readJson(meStill)
+    try check(() => assert.strictEqual(meStillBody.authenticated, true))
   }
 }, 180_000)
