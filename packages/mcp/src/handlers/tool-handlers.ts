@@ -56,7 +56,9 @@ import { PredictionPricing } from '@feed/core/markets/prediction';
 import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   acquireUserBlockPairLock,
+  aliasedTable,
   and,
+  comments,
   count,
   db,
   dbWrite,
@@ -72,6 +74,7 @@ import {
   groupMembers,
   hasBlocked,
   inArray,
+  isNotNull,
   isNull,
   like,
   lte,
@@ -86,6 +89,7 @@ import {
   posts,
   postTags,
   questions,
+  reactions,
   sql,
   timeframedMarkets,
   userBlocks,
@@ -2246,25 +2250,60 @@ export async function executeGetUserStats(
   _agent: AuthenticatedAgent,
   args: GetUserStatsArgs
 ): Promise<GetUserStatsResult> {
-  const [user, postsCount, commentsCount, reactionsCount] = await Promise.all([
-    db.user.findUnique({
-      where: { id: args.userId },
-      select: {
-        reputationPoints: true,
-        virtualBalance: true,
-        lifetimePnL: true,
-      },
-    }),
-    db.post.count({
-      where: { authorId: args.userId, deletedAt: null },
-    }),
-    db.comment.count({
-      where: { authorId: args.userId, deletedAt: null },
-    }),
-    db.reaction.count({
-      where: { userId: args.userId, type: 'like' },
-    }),
-  ]);
+  // Alias for the host post of a liked comment (distinct from the
+  // directly-liked post joined in the reactions count below).
+  const commentPost = aliasedTable(posts, 'commentPost');
+  // The reaction repository count takes column filters only, so totalLikes
+  // uses a Drizzle join: a like counts only while its target is still
+  // visible — the directly-liked post not soft-deleted, or the liked
+  // comment not deleted and its host post not soft-deleted. Same
+  // visible-population membership as the profile stats counts (#1889
+  // comments, #1890 positions, #1717 posts).
+  const reactionsCountQuery = db
+    .select({ count: count() })
+    .from(reactions)
+    .leftJoin(posts, eq(reactions.postId, posts.id))
+    .leftJoin(comments, eq(reactions.commentId, comments.id))
+    .leftJoin(commentPost, eq(comments.postId, commentPost.id))
+    .where(
+      and(
+        eq(reactions.userId, args.userId),
+        eq(reactions.type, 'like'),
+        or(
+          and(
+            isNotNull(reactions.postId),
+            isNotNull(posts.id),
+            isNull(posts.deletedAt)
+          ),
+          and(
+            isNotNull(reactions.commentId),
+            isNotNull(comments.id),
+            isNull(comments.deletedAt),
+            isNotNull(commentPost.id),
+            isNull(commentPost.deletedAt)
+          )
+        )
+      )
+    );
+  const [user, postsCount, commentsCount, reactionsCountResult] =
+    await Promise.all([
+      db.user.findUnique({
+        where: { id: args.userId },
+        select: {
+          reputationPoints: true,
+          virtualBalance: true,
+          lifetimePnL: true,
+        },
+      }),
+      db.post.count({
+        where: { authorId: args.userId, deletedAt: null },
+      }),
+      db.comment.count({
+        where: { authorId: args.userId, deletedAt: null },
+      }),
+      reactionsCountQuery,
+    ]);
+  const reactionsCount = Number(reactionsCountResult[0]?.count ?? 0);
   if (!user) {
     throw new Error('User not found');
   }

@@ -14,6 +14,7 @@
  */
 
 import {
+  aliasedTable,
   and,
   asc,
   comments,
@@ -25,11 +26,13 @@ import {
   follows,
   getDbInstance,
   inArray,
+  isNotNull,
   isNull,
   like,
   lte,
   markets,
   not,
+  or,
   type Post,
   type PostFeedVisibilityOptions,
   positions,
@@ -368,6 +371,10 @@ class CachedDatabaseService {
     return getCacheOrFetch(
       cacheKey,
       async () => {
+        // Alias for the host post of a liked comment (distinct from the
+        // directly-liked post joined in the reactions count below).
+        const commentPost = aliasedTable(posts, 'commentPost');
+
         // Execute all count queries in parallel for minimum latency
         const [
           followersResult,
@@ -456,11 +463,40 @@ class CachedDatabaseService {
               and(eq(comments.authorId, userId), isNull(comments.deletedAt))
             ),
 
-          // Count reactions
+          // Count reactions on targets that are still visible. A post
+          // like counts only while its post is not soft-deleted, and a
+          // comment like only while its comment is not deleted and its
+          // host post is not soft-deleted — the same visible-population
+          // membership the sibling counts (#1889 comments, #1890
+          // positions, #1717 posts) already apply. Without the joins a
+          // like on a deleted post keeps inflating the number after the
+          // post has left every list, and the deleted post is gone from
+          // the screen so unlike can never reach it.
           db
             .select({ count: count() })
             .from(reactions)
-            .where(eq(reactions.userId, userId)),
+            .leftJoin(posts, eq(reactions.postId, posts.id))
+            .leftJoin(comments, eq(reactions.commentId, comments.id))
+            .leftJoin(commentPost, eq(comments.postId, commentPost.id))
+            .where(
+              and(
+                eq(reactions.userId, userId),
+                or(
+                  and(
+                    isNotNull(reactions.postId),
+                    isNotNull(posts.id),
+                    isNull(posts.deletedAt)
+                  ),
+                  and(
+                    isNotNull(reactions.commentId),
+                    isNotNull(comments.id),
+                    isNull(comments.deletedAt),
+                    isNotNull(commentPost.id),
+                    isNull(commentPost.deletedAt)
+                  )
+                )
+              )
+            ),
 
           // Count posts the profile list can show: not soft-deleted and
           // already published. getPostsByActor applies the same two

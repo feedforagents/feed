@@ -77,6 +77,7 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  aliasedTable,
   and,
   comments,
   count,
@@ -84,10 +85,13 @@ import {
   eq,
   followStatuses,
   follows,
+  isNotNull,
   isNull,
   like,
   not,
+  or,
   positions,
+  posts,
   reactions,
   sql,
   userActorFollows,
@@ -148,6 +152,10 @@ export const GET = withErrorHandling(
       throw new NotFoundError('User', username);
     }
 
+    // Alias for the host post of a liked comment (distinct from the
+    // directly-liked post joined in the reactions count below).
+    const commentPost = aliasedTable(posts, 'commentPost');
+
     // Get counts for stats
     const [
       [positionCount],
@@ -182,10 +190,37 @@ export const GET = withErrorHandling(
             isNull(comments.deletedAt)
           )
         ),
+      // Count reactions on targets that are still visible: a post like
+      // counts only while its post is not soft-deleted, and a comment
+      // like only while its comment is not deleted and its host post is
+      // not soft-deleted — the same visible-population membership the
+      // sibling counts (#1889 comments, #1890 positions, #1717 posts)
+      // already apply.
       db
         .select({ count: count() })
         .from(reactions)
-        .where(eq(reactions.userId, dbUser.id)),
+        .leftJoin(posts, eq(reactions.postId, posts.id))
+        .leftJoin(comments, eq(reactions.commentId, comments.id))
+        .leftJoin(commentPost, eq(comments.postId, commentPost.id))
+        .where(
+          and(
+            eq(reactions.userId, dbUser.id),
+            or(
+              and(
+                isNotNull(reactions.postId),
+                isNotNull(posts.id),
+                isNull(posts.deletedAt)
+              ),
+              and(
+                isNotNull(reactions.commentId),
+                isNotNull(comments.id),
+                isNull(comments.deletedAt),
+                isNotNull(commentPost.id),
+                isNull(commentPost.deletedAt)
+              )
+            )
+          )
+        ),
       db
         .select({ count: count() })
         .from(follows)
