@@ -10,11 +10,13 @@
  */
 
 import {
+  and,
   db,
   desc,
   eq,
   games,
   getDbInstance,
+  gte,
   markets,
   questions,
 } from '@feed/db';
@@ -167,8 +169,11 @@ class GameService {
   }
 
   /**
-   * Get active (unresolved) prediction markets with minimal fields.
-   * Used by NPC context providers to avoid direct DB access.
+   * Get active (unresolved and not yet expired) prediction markets with
+   * minimal fields. Used by NPC context providers to avoid direct DB
+   * access. Active means open for trading (PRD §8.1, §9.2): an expired
+   * market stays unresolved until settlement runs, but buys on it are
+   * refused, so it must not be listed as active.
    */
   async getActiveMarketSummaries(limit = 5): Promise<ActiveMarketSummary[]> {
     const activeMarkets = await db
@@ -179,7 +184,7 @@ class GameService {
       })
       .from(markets)
       .innerJoin(questions, eq(questions.marketId, markets.id))
-      .where(eq(markets.resolved, false))
+      .where(and(eq(markets.resolved, false), gte(markets.endDate, new Date())))
       .limit(limit);
 
     return activeMarkets;
