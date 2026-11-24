@@ -738,7 +738,7 @@
       ],
       "Domain / CPMM pricing, square-root proceeds, and account helpers": [
         "9927a5fe1a11",
-        "e959e404dcbd",
+        "e834427176c5",
         "6819dc7a2e31"
       ],
       "## Story: Open and trade a prediction market": [
@@ -750,14 +750,14 @@
         "6d02330ce451"
       ],
       "Story: Open and trade a prediction market / Buying YES or NO shares requires an open non-expired market, sufficient balance, and bounded odds impact": [
-        "62cdd342e7b7",
-        "ec0871652838",
-        "9d984f070945"
+        "63d5971241d1",
+        "025148194df7",
+        "e411da0f8da2"
       ],
       "Story: Open and trade a prediction market / Selling shares floors gross proceeds to whole cents before charging the canonical fee": [
-        "1a7ee626be40",
-        "8ddf35cab4d2",
-        "9d984f070945"
+        "59e57ad07cac",
+        "3e602e64c1b7",
+        "e411da0f8da2"
       ],
       "## Story: Close on schedule, review, resolve, or cancel": [
         "1695b5b70de8"
@@ -775,12 +775,12 @@
       "Story: Close on schedule, review, resolve, or cancel / Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently": [
         "37d34a92190d",
         "7f528d4cda9f",
-        "d90d887468e7"
+        "028d5bca4b5e"
       ],
       "Story: Close on schedule, review, resolve, or cancel / Cancelled markets refund every open position at cost basis without publishing an outcome": [
         "e3b0c44298fc",
         "f8be861ee671",
-        "d90d887468e7"
+        "028d5bca4b5e"
       ],
       "## Invariants, step properties, and reachability": [
         "e3b0c44298fc"
@@ -1098,13 +1098,13 @@
         "e3b0c44298fc"
       ],
       "Domain / Accounts, moderation edges, reports, and notifications": [
-        "a19d121a2506",
-        "8cc3d1bb8ce6"
+        "4b6ba8e35de8",
+        "c7b39c768801"
       ],
       "Domain / Initial moderation and notification state": [
         "02cf79623ea1",
         "ee408a09f4da",
-        "dd4977434af9"
+        "29a4d618e983"
       ],
       "Domain / What the simulator tries": [
         "e3b0c44298fc",
@@ -1113,7 +1113,7 @@
       "Domain / Shared lookups and visibility helpers": [
         "e3b0c44298fc",
         "44c6a32a372e",
-        "dd4977434af9"
+        "29a4d618e983"
       ],
       "## Story: Block, mute, follow, and report users or posts": [
         "6b6cb50a8e55"
@@ -1121,22 +1121,22 @@
       "Story: Block, mute, follow, and report users or posts / Blocking prevents self-blocks and atomically removes follow edges in both directions": [
         "e3b0c44298fc",
         "b8c834004c40",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ],
       "Story: Block, mute, follow, and report users or posts / Muting hides an author's feed content without removing follows": [
         "e3b0c44298fc",
         "8f98d8cae941",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ],
       "Story: Block, mute, follow, and report users or posts / Following is refused when blocked": [
         "e3b0c44298fc",
         "995f2d46ad98",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ],
       "Story: Block, mute, follow, and report users or posts / Reporting covers both user accounts and specific posts without self-reporting or duplicate open filings": [
         "e3b0c44298fc",
         "0da84cfa8def",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ],
       "## Story: In-app notifications and Social-mode presentation filtering": [
         "879fe07c1e5a"
@@ -1144,27 +1144,27 @@
       "Story: In-app notifications and Social-mode presentation filtering / Creating notifications skips blocked actors and increments unread count": [
         "034439dbb6fb",
         "add962945c80",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ],
       "Story: In-app notifications and Social-mode presentation filtering / Marking notifications read clears only notifications visible in the account's current mode": [
         "74e646220b76",
         "d4310248238e",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ],
       "Story: In-app notifications and Social-mode presentation filtering / Presentation mode toggles without touching open positions": [
         "e3b0c44298fc",
         "d48682267638",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ],
       "Story: In-app notifications and Social-mode presentation filtering / Block, unread count, report, notification, and Social-mode invariants and laws": [
         "e3b0c44298fc",
         "c1701bba998a",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ],
       "Story: In-app notifications and Social-mode presentation filtering / Block-cleared follows, mutes, reports, read notifications, and Social-mode suppression are reachable": [
         "e3b0c44298fc",
         "937173db5b6e",
-        "fc9ea4c66095"
+        "6dba029c7400"
       ]
     },
     "spec/social/posts.md": {

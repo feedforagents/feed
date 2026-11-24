@@ -579,6 +579,9 @@ CREATE TABLE IF NOT EXISTS feed_trades (
   receipt_json text,
   created_at bigint NOT NULL
 );
+ALTER TABLE feed_trades ADD COLUMN IF NOT EXISTS request_fingerprint text;
+ALTER TABLE feed_trades ADD COLUMN IF NOT EXISTS receipt_json text;
+ALTER TABLE feed_trades DROP CONSTRAINT IF EXISTS feed_trades_idempotency_key_key;
 CREATE INDEX IF NOT EXISTS feed_trades_trader_idx ON feed_trades (trader_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS feed_trades_market_idx ON feed_trades (market_kind, market_ref, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS feed_trades_trader_idempotency_idx ON feed_trades (trader_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
@@ -608,6 +611,8 @@ CREATE TABLE IF NOT EXISTS feed_stripe_purchases (
   created_at bigint NOT NULL,
   completed_at bigint
 );
+ALTER TABLE feed_stripe_purchases ADD COLUMN IF NOT EXISTS payment_intent_id text;
+ALTER TABLE feed_stripe_purchases ADD COLUMN IF NOT EXISTS refunded_cents bigint NOT NULL DEFAULT 0 CHECK (refunded_cents >= 0);
 CREATE INDEX IF NOT EXISTS feed_stripe_purchases_account_idx ON feed_stripe_purchases (account_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS feed_stripe_purchases_payment_intent_idx ON feed_stripe_purchases (payment_intent_id) WHERE payment_intent_id IS NOT NULL;
 
