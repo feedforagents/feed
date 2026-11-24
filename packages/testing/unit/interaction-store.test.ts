@@ -201,6 +201,56 @@ describe('interactionStore mutations', () => {
     expect(state.postInteractions.get('post-1')?.commentCount).toBe(2);
     expect(state.errors.get('comment-post-1-root')?.code).toBe('UNAUTHORIZED');
   });
+
+  test('addComment bumps the count for a top-level comment', async () => {
+    seedPost();
+    mockFetch.mockImplementationOnce(() =>
+      json({ id: 'comment-2', parentCommentId: null, content: 'hi' })
+    );
+
+    const comment = await useInteractionStore
+      .getState()
+      .addComment('post-1', 'hi');
+
+    expect(comment).not.toBeNull();
+    expect(
+      useInteractionStore.getState().postInteractions.get('post-1')
+        ?.commentCount
+    ).toBe(3);
+  });
+
+  test('addComment bumps the count for a reply', async () => {
+    seedPost();
+    mockFetch.mockImplementationOnce(() =>
+      json({ id: 'comment-3', parentCommentId: 'comment-1', content: 'reply' })
+    );
+
+    const comment = await useInteractionStore
+      .getState()
+      .addComment('post-1', 'reply', 'comment-1');
+
+    expect(comment).not.toBeNull();
+    expect(
+      useInteractionStore.getState().postInteractions.get('post-1')
+        ?.commentCount
+    ).toBe(3);
+  });
+
+  test('addComment keeps the count for a failed reply', async () => {
+    seedPost();
+    mockFetch.mockImplementation(() => json({ error: 'Unauthorized' }, 401));
+
+    const comment = await useInteractionStore
+      .getState()
+      .addComment('post-1', 'reply', 'comment-1');
+
+    expect(comment).toBeNull();
+    const state = useInteractionStore.getState();
+    expect(state.postInteractions.get('post-1')?.commentCount).toBe(2);
+    expect(state.errors.get('comment-post-1-comment-1')?.code).toBe(
+      'UNAUTHORIZED'
+    );
+  });
 });
 
 describe('interactionStore.syncPostInteraction', () => {
