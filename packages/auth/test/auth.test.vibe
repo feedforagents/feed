@@ -4,6 +4,7 @@ import { TestClock } from "effect/testing"
 import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld, toInt, toText, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
 import {
+  ACTION_HOURLY_LIMITS,
   AuthFailure,
   DEFAULT_ALLOWED_COUNTRIES,
   RateLimited,
@@ -11,6 +12,7 @@ import {
   approveDeviceAuthorization,
   authenticateSessionCookie,
   checkAndConsumeRateLimit,
+  checkAndConsumeRateLimitInTx,
   completePhoneOnboarding,
   createAuthorizationCode,
   deleteAccountSelfServe,
@@ -21,6 +23,7 @@ import {
   getRateLimitStatus,
   hashReviewerPassword,
   normalizeResource,
+  rateLimitScopeKey,
   recordAgentAttribution,
   registerDynamicClient,
   signInReviewerPassword,
@@ -47,6 +50,7 @@ const localnetConfig: AuthRuntimeConfig = {
   digestKey: "dev-digest-key-change-in-production-32-bytes",
   oauthSigningSecret: "dev-oauth-signing-secret-change-in-prod-32-bytes",
   smsMode: "loopback",
+  turnstileSiteKey: "0x4AAAAAAA_localnet_site_key",
   allowedCountries: DEFAULT_ALLOWED_COUNTRIES,
   publicAppUrl: "http://localhost:5173"
 }
@@ -229,13 +233,118 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
     const reauthed = try verifyPhoneCode({ phoneE164: phone, code: reauthCode, config: localnetConfig })
     if (reauthed.needsOnboarding) return try Effect.die("Expected existing account sign-in")
     const reauthedCookie = cookiePairOf(reauthed.sessionCookieHeader)
+
+    const peer = try onboardViaPhone("+14155550199", "peer_user")
+    const aliceId = onboarded.account.accountId
+    const peerId = peer.account.accountId
+    const seedNow = try Clock.currentTimeMillis
+    try sqlQuery(
+      `INSERT INTO feed_posts (id, author_id, author_kind, content, like_count, repost_count, reply_count, created_at)
+       VALUES
+         ('post-shared', $1, 'user', 'Shared post', 2, 2, 0, $2),
+         ('post-solo', $1, 'user', 'Solo post', 1, 1, 0, $2),
+         ('post-floor', $1, 'user', 'Zero floor post', 0, 0, 0, $2)`,
+      [peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_post_likes (post_id, account_id, created_at)
+       VALUES
+         ('post-shared', $1, $3),
+         ('post-shared', $2, $3),
+         ('post-solo', $1, $3),
+         ('post-floor', $1, $3)`,
+      [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_post_reposts (post_id, account_id, created_at)
+       VALUES
+         ('post-shared', $1, $3),
+         ('post-shared', $2, $3),
+         ('post-solo', $1, $3),
+         ('post-floor', $1, $3)`,
+      [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_follows (follower_id, target_id, target_kind, created_at)
+       VALUES
+         ($1, $2, 'user', $3),
+         ($2, $1, 'user', $3),
+         ($2, 'npc-1', 'npc', $3)`,
+      [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_chats (id, kind, name, created_by, created_at)
+       VALUES ('chat-del-1', 'group', 'Test Group', $1, $2)`,
+      [peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at)
+       VALUES
+         ('chat-del-1', $1, 'user', 'member', $3),
+         ('chat-del-1', $2, 'user', 'owner', $3)`,
+      [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_messages (id, chat_id, sender_id, sender_kind, body, created_at)
+       VALUES ('msg-del-1', 'chat-del-1', $1, 'user', 'hello', $2)`,
+      [peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_message_reactions (message_id, account_id, emoji, created_at)
+       VALUES
+         ('msg-del-1', $1, 'fire', $3),
+         ('msg-del-1', $2, 'fire', $3)`,
+      [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_npc_id, status, created_at)
+       VALUES
+         ('inv-recv', 'chat-del-1', $1, 'npc-1', 'pending', $3),
+         ('inv-sent', 'chat-del-1', $2, $1, 'pending', $3),
+         ('inv-peer', 'chat-del-1', $2, 'npc-1', 'pending', $3)`,
+      [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_notifications (id, account_id, kind, actor_id, title, body, created_at)
+       VALUES
+         ('notif-recv', $1, 'like', $2, 'Liked', 'body', $3),
+         ('notif-actor', $2, 'follow', $1, 'Followed', 'body', $3),
+         ('notif-peer', $2, 'system', 'npc-1', 'Keep', 'body', $3)`,
+      [aliceId, peerId, seedNow]
+    )
+
     const deleted = try deleteAccountSelfServe({
-      accountId: onboarded.account.accountId,
+      accountId: aliceId,
       cookieHeader: reauthedCookie,
       config: localnetConfig
     })
+    const postCountsAfterDelete = try sqlQuery(
+      "SELECT id, like_count, repost_count FROM feed_posts WHERE id IN ('post-shared', 'post-solo', 'post-floor') ORDER BY id ASC"
+    )
+    const remainingLikes = try sqlQuery(
+      "SELECT post_id, account_id FROM feed_post_likes WHERE post_id IN ('post-shared', 'post-solo', 'post-floor') ORDER BY post_id, account_id"
+    )
+    const remainingReposts = try sqlQuery(
+      "SELECT post_id, account_id FROM feed_post_reposts WHERE post_id IN ('post-shared', 'post-solo', 'post-floor') ORDER BY post_id, account_id"
+    )
+    const remainingFollows = try sqlQuery(
+      "SELECT follower_id, target_id FROM feed_follows WHERE follower_id IN ($1, $2) OR target_id IN ($1, $2) ORDER BY follower_id, target_id",
+      [aliceId, peerId]
+    )
+    const remainingChatMembers = try sqlQuery(
+      "SELECT member_id FROM feed_chat_members WHERE chat_id = 'chat-del-1' ORDER BY member_id"
+    )
+    const remainingReactions = try sqlQuery(
+      "SELECT account_id FROM feed_message_reactions WHERE message_id = 'msg-del-1' ORDER BY account_id"
+    )
+    const remainingInvites = try sqlQuery(
+      "SELECT id FROM feed_group_invites WHERE chat_id = 'chat-del-1' ORDER BY id"
+    )
+    const remainingNotifications = try sqlQuery(
+      "SELECT id FROM feed_notifications WHERE id IN ('notif-recv', 'notif-actor', 'notif-peer') ORDER BY id"
+    )
     const afterDeleteSession = try authenticateSessionCookie(reauthedCookie, localnetConfig)
-    const profileAfterDelete = try refusedCode(getAccountProfile(onboarded.account.accountId))
+    const profileAfterDelete = try refusedCode(getAccountProfile(aliceId))
     const cooldownBlocked = try refusedCode(startPhoneVerification({ phoneE164: phone, config: localnetConfig }))
 
     try TestClock.adjust("30 days")
@@ -278,6 +387,17 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
           profileAfterDelete,
           cooldownBlocked
         ],
+        deletionCleanup: {
+          postCounts: postCountsAfterDelete.map((row) => [toText(row.id), toInt(row.like_count), toInt(row.repost_count)]),
+          likes: remainingLikes.map((row) => [toText(row.post_id), toText(row.account_id) === peerId]),
+          reposts: remainingReposts.map((row) => [toText(row.post_id), toText(row.account_id) === peerId]),
+          follows: remainingFollows.map((row) => [toText(row.follower_id) === peerId, toText(row.target_id)]),
+          chatMembers: remainingChatMembers.map((row) => toText(row.member_id) === peerId),
+          reactions: remainingReactions.map((row) => toText(row.account_id) === peerId),
+          invites: remainingInvites.map((row) => toText(row.id)),
+          notifications: remainingNotifications.map((row) => toText(row.id))
+        },
+        turnstileSiteKeyConfigured: localnetConfig.turnstileSiteKey,
         postCooldownOnboarding: postCooldownVerified.needsOnboarding
       },
       {
@@ -293,6 +413,21 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
         reviewer: ["reviewer_signin_refused", "reviewer_signin_refused", true, "reviewer_demo", true],
         signOut: [2, null],
         deletion: [true, true, null, "account_not_found", "phone_cooldown"],
+        deletionCleanup: {
+          postCounts: [
+            ["post-floor", 0, 0],
+            ["post-shared", 1, 1],
+            ["post-solo", 0, 0]
+          ],
+          likes: [["post-shared", true]],
+          reposts: [["post-shared", true]],
+          follows: [[true, "npc-1"]],
+          chatMembers: [true],
+          reactions: [true],
+          invites: ["inv-peer"],
+          notifications: ["notif-peer"]
+        },
+        turnstileSiteKeyConfigured: "0x4AAAAAAA_localnet_site_key",
         postCooldownOnboarding: true
       }
     ))
@@ -514,7 +649,17 @@ it.effect('Web and MCP share one per-account hourly rate-limit budget and exhaus
     const mcpExhausted = try expectRateLimited(checkAndConsumeRateLimit({ accountId, action: "post", surface: "mcp" }))
 
     const dmWeb = try checkAndConsumeRateLimit({ accountId, action: "dm", surface: "web" })
-    const dmMcp = try checkAndConsumeRateLimit({ accountId, action: "dm", surface: "mcp" })
+    const store = try Store
+    const dmNow = try Clock.currentTimeMillis
+    const dmMcp = try store.transaction((tx: Tx) =>
+      checkAndConsumeRateLimitInTx(tx, { accountId, action: "dm", surface: "mcp" }, dmNow)
+    )
+    const canonicalKeys = [
+      rateLimitScopeKey(accountId, "post"),
+      rateLimitScopeKey(accountId, "dm"),
+      rateLimitScopeKey(accountId, "trade")
+    ]
+    const tradeLimits = [ACTION_HOURLY_LIMITS.post, ACTION_HOURLY_LIMITS.dm, ACTION_HOURLY_LIMITS.trade]
 
     try TestClock.adjust("1 hour")
     const nextHourStatus = try getRateLimitStatus(accountId)
@@ -531,6 +676,8 @@ it.effect('Web and MCP share one per-account hourly rate-limit budget and exhaus
         atCap: [lastUsed, lastRemaining, exhaustedStatus.post.used],
         exhausted: [webExhausted, mcpExhausted],
         dmShared: [[dmWeb.used, dmWeb.remaining], [dmMcp.used, dmMcp.remaining]],
+        canonicalKeys,
+        tradeLimits,
         afterHourReset: [
           nextHourStatus.post.used,
           [nextHourMcp.surface, nextHourMcp.used, nextHourMcp.remaining],
@@ -546,6 +693,8 @@ it.effect('Web and MCP share one per-account hourly rate-limit budget and exhaus
           { tag: "RateLimited", action: "post", retryAfterPositive: true }
         ],
         dmShared: [[1, 59], [2, 58]],
+        canonicalKeys: [`${accountId}:post`, `${accountId}:dm`, `${accountId}:trade`],
+        tradeLimits: [30, 60, 120],
         afterHourReset: [0, ["mcp", 1, 29], ["web", 2, 28]]
       }
     ))

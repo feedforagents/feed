@@ -31,7 +31,7 @@ export type RateLimitStatus = Readonly<Record<string, ActionQuotaStatus>>
 
 const HOUR_MS = 3_600_000
 
-const ACTION_HOURLY_LIMITS: Readonly<Record<RateLimitActionKind, number>> = {
+export const ACTION_HOURLY_LIMITS: Readonly<Record<RateLimitActionKind, number>> = {
   post: 30,
   dm: 60,
   trade: 120,
@@ -39,7 +39,7 @@ const ACTION_HOURLY_LIMITS: Readonly<Record<RateLimitActionKind, number>> = {
   mcp_call: 600
 }
 
-function accountScopeKey(accountId: string, action: RateLimitActionKind): string {
+export function rateLimitScopeKey(accountId: string, action: RateLimitActionKind): string {
   return `${accountId}:${action}`
 }
 
@@ -90,20 +90,20 @@ export effect function consumeRateLimitWindowInTx(
   }
 }
 
-export effect function checkAndConsumeRateLimit(input: CheckRateLimitInput): RateLimitConsumeResult!(RateLimited | StoreFailure)!Store {
-  const store = try Store
-  const now = try Clock.currentTimeMillis
+export effect function checkAndConsumeRateLimitInTx(
+  tx: Tx,
+  input: CheckRateLimitInput,
+  now: number
+): RateLimitConsumeResult!(RateLimited | StoreFailure) {
   const limit = ACTION_HOURLY_LIMITS[input.action]
-  const result = try store.transaction((tx: Tx) =>
-    consumeRateLimitWindowInTx(tx, {
-      scopeKey: accountScopeKey(input.accountId, input.action),
-      limit,
-      windowMs: HOUR_MS,
-      action: input.action,
-      message: `Hourly ${input.action} rate limit exceeded.`,
-      now
-    })
-  )
+  const result = try consumeRateLimitWindowInTx(tx, {
+    scopeKey: rateLimitScopeKey(input.accountId, input.action),
+    limit,
+    windowMs: HOUR_MS,
+    action: input.action,
+    message: `Hourly ${input.action} rate limit exceeded.`,
+    now
+  })
   return {
     allowed: true,
     action: input.action,
@@ -115,6 +115,12 @@ export effect function checkAndConsumeRateLimit(input: CheckRateLimitInput): Rat
   }
 }
 
+export effect function checkAndConsumeRateLimit(input: CheckRateLimitInput): RateLimitConsumeResult!(RateLimited | StoreFailure)!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction((tx: Tx) => checkAndConsumeRateLimitInTx(tx, input, now))
+}
+
 export effect function getRateLimitStatus(accountId: string): RateLimitStatus!StoreFailure!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
@@ -122,7 +128,7 @@ export effect function getRateLimitStatus(accountId: string): RateLimitStatus!St
   const windowStart = windowHour * HOUR_MS
   const resetAt = windowStart + HOUR_MS
   const actions: ReadonlyArray<RateLimitActionKind> = ["post", "dm", "trade", "sms_send", "mcp_call"]
-  const keys = actions.map((action) => accountScopeKey(accountId, action))
+  const keys = actions.map((action) => rateLimitScopeKey(accountId, action))
   const rows = try store.transaction((tx: Tx) =>
     tx.query(
       "SELECT scope_key, window_start, count FROM feed_rate_limits WHERE scope_key = ANY($1::text[])",
@@ -139,7 +145,7 @@ export effect function getRateLimitStatus(accountId: string): RateLimitStatus!St
     }
   }
   const quotaFor = (action: RateLimitActionKind): ActionQuotaStatus => ({
-    used: counts.get(accountScopeKey(accountId, action)) ?? 0,
+    used: counts.get(rateLimitScopeKey(accountId, action)) ?? 0,
     limit: ACTION_HOURLY_LIMITS[action],
     resetAt
   })

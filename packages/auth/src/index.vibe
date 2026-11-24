@@ -59,8 +59,11 @@ export {
   type VerifiedAccessToken
 } from "./oauth-server.vibe"
 export {
+  ACTION_HOURLY_LIMITS,
   checkAndConsumeRateLimit,
+  checkAndConsumeRateLimitInTx,
   getRateLimitStatus,
+  rateLimitScopeKey,
   type ActionQuotaStatus,
   type CheckRateLimitInput,
   type RateLimitActionKind,
