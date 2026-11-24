@@ -36,9 +36,11 @@ const MAX_ODDS_MOVE_PER_TRADE = 0.2;
 
 /**
  * Hard floor/ceiling for YES odds after any trade. Even with a relaxed
- * maxOddsMove, a trade that would push odds below 2% or above 98% is rejected
- * because such extreme values signal thin liquidity and make resolution payouts
- * almost meaningless for the minority side.
+ * maxOddsMove, a trade that would push odds further past 2% or 98% on
+ * the same side is rejected because such extreme values signal thin
+ * liquidity and make resolution payouts almost meaningless for the
+ * minority side. A trade that unwinds toward 50% is allowed even if it
+ * still lands outside the band.
  */
 const ODDS_HARD_FLOOR = 0.02;
 const ODDS_HARD_CEILING = 0.98;
@@ -218,10 +220,21 @@ export class PredictionMarketService {
       );
     }
 
-    // Hard floor/ceiling: reject any trade that pushes odds to extreme values.
+    // Hard floor/ceiling: reject only a trade that pushes odds further
+    // past the band on the same side. A buy that unwinds an
+    // already-extreme market back toward 50% must still be allowed —
+    // otherwise nobody can buy the cheap side of a market that entered
+    // the band before this guard existed (or was pushed there by
+    // unguarded sells), and the market cannot be corrected from the buy
+    // side until resolution. But a trade that crosses the centre and
+    // lands past the band on the other side is still rejected:
+    // comparing distances from 50% alone would let a 99% market flip
+    // to 1.56% on one buy. This mirrors the sell-side carve-out in sell().
     if (
-      calc.newYesPrice < ODDS_HARD_FLOOR ||
-      calc.newYesPrice > ODDS_HARD_CEILING
+      (calc.newYesPrice < ODDS_HARD_FLOOR &&
+        calc.newYesPrice < currentYesOdds) ||
+      (calc.newYesPrice > ODDS_HARD_CEILING &&
+        calc.newYesPrice > currentYesOdds)
     ) {
       throw new BadRequestError(
         `Trade would push YES odds to ${(calc.newYesPrice * 100).toFixed(1)}% — market is too thin for this trade size.`

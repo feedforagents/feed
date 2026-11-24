@@ -315,3 +315,83 @@ describe('Perp AMM — config constants', () => {
     expect(PERP_MARKET_CONFIG.INITIAL_BASE_RESERVE).toBe(5000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 6. Prediction: buys unwind an extreme market toward the center
+//    (buy-side mirror of the sell carve-out: the hard 2%/98% bounds
+//    reject only a trade that pushes odds further from 50%)
+// ---------------------------------------------------------------------------
+describe('PredictionMarketService — buy unwinding an extreme market', () => {
+  test('small NO buy unwinding a 99% YES market succeeds', async () => {
+    // Pool 100/9900 → YES at 99%. A $10 NO buy (net $9.90) moves YES
+    // to ~98.79% — toward the center, but still above the 98% ceiling.
+    const service = makeService({
+      yesShares: 100,
+      noShares: 9900,
+      liquidity: 10_000,
+    });
+    const result = await service.buy({
+      userId: 'u1',
+      marketId: 'market-1',
+      side: 'no',
+      amount: 10,
+    });
+    expect(result.market.yesPrice).toBeCloseTo(0.9879, 4);
+  });
+
+  test('small YES buy unwinding a 1% YES market succeeds', async () => {
+    // Pool 9900/100 → YES at 1%. A $10 YES buy (net $9.90) moves YES
+    // to ~1.21% — toward the center, but still below the 2% floor.
+    const service = makeService({
+      yesShares: 9900,
+      noShares: 100,
+      liquidity: 10_000,
+    });
+    const result = await service.buy({
+      userId: 'u1',
+      marketId: 'market-1',
+      side: 'yes',
+      amount: 10,
+    });
+    expect(result.market.yesPrice).toBeCloseTo(0.0121, 4);
+  });
+
+  test('large unwinding buy is still capped at 20ppt', async () => {
+    // Same 99% YES pool: a $700 NO buy would move YES to ~60.8%
+    // (~38ppt), so the per-trade cap — not the floor/ceiling — rejects it.
+    const service = makeService({
+      yesShares: 100,
+      noShares: 9900,
+      liquidity: 10_000,
+    });
+    await expect(
+      service.buy({
+        userId: 'u1',
+        marketId: 'market-1',
+        side: 'no',
+        amount: 700,
+      })
+    ).rejects.toThrow(/move odds by/i);
+  });
+
+  test('buy crossing the centre past the far band is still rejected', async () => {
+    // Same 99% YES pool: a $7800 NO buy with the cap relaxed would move
+    // YES to ~1.59% — across the centre and past the 2% floor. The
+    // unwind carve-out only covers trades that land closer to 50% on the
+    // same side, so the floor still rejects this one.
+    const service = makeService({
+      yesShares: 100,
+      noShares: 9900,
+      liquidity: 10_000,
+    });
+    await expect(
+      service.buy({
+        userId: 'u1',
+        marketId: 'market-1',
+        side: 'no',
+        amount: 7800,
+        maxOddsMove: 1,
+      })
+    ).rejects.toThrow(/thin|push YES odds/i);
+  });
+});
