@@ -1,11 +1,13 @@
 // spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation"; spec/shared/time.md, "Funding periods partition UTC time into non-negative 8-hour windows"; spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"
 import { Store, type StoreFailure, resolveOrgLogoUrl, toInt, toText, type Row, type Tx } from "@repo/db"
-import { canonicalTradingFee, clampMin0, minInt } from "../gen/shared__money.effect.vibe"
+import { BPS_DENOMINATOR, canonicalTradingFee, ceilDiv, clampMin0, minInt } from "../gen/shared__money.effect.vibe"
 import { fundingPeriodFromSeconds } from "../gen/shared__time.effect.vibe"
 import {
+  BASE_SCALE,
   MAX_LEVERAGE,
   MIN_ORDER_SIZE_CENTS,
   boundedPremiumBps,
+  computeIndexPriceCents,
   computeMarkPriceCents,
   fundingDeltaForPosition,
   maintenanceMarginCents,
@@ -20,8 +22,11 @@ import {
   creditActorBalance,
   debitActorBalance,
   insertLedgerEntry,
+  insertMarketNotification,
+  insertPriceHistory,
   insertTradeRecord,
   marketFail,
+  maybePublishMarketPerpEvent,
   newMarketId,
   normalizeViaClient,
   optionalInt,
@@ -32,6 +37,15 @@ import {
 
 export type PerpSide = "long" | "short"
 export type PerpPositionStatus = "open" | "closed" | "liquidated"
+export type PerpOrderAction = "open" | "add" | "reduce" | "close" | "flip"
+
+export const MAX_PERP_USER_EXPOSURE_CENTS = 100_000_000
+export const MAX_POSITIONS_PER_USER = 50
+export const MIN_PERP_MARKET_ORDER_LIMIT_CENTS = 1_000_000
+
+export function getPerpMarketOrderSizeLimitCents(openInterestCents: number): number {
+  return Math.max(Math.floor(Math.max(0, openInterestCents) * 0.1), MIN_PERP_MARKET_ORDER_LIMIT_CENTS)
+}
 
 export interface PerpMarketView {
   readonly ticker: string
@@ -45,6 +59,7 @@ export interface PerpMarketView {
   readonly longOiCents: number
   readonly shortOiCents: number
   readonly openInterestCents: number
+  readonly volumeCents: number
   readonly maxLeverage: number
   readonly fundingRateBps: number
   readonly lastFundingPeriod: number
@@ -105,18 +120,22 @@ export interface OpenPerpInput {
   readonly side: PerpSide
   readonly collateralCents: number
   readonly leverage: number
+  readonly maxSlippageBps?: number
   readonly viaClientName?: string
 }
 
 export interface OpenPerpReceipt {
   readonly tradeId: string
   readonly positionId: string
+  readonly action: PerpOrderAction
   readonly position: PerpPositionView
   readonly collateralCents: number
   readonly sizeCents: number
   readonly leverage: number
   readonly feeCents: number
   readonly executionPriceCents: number
+  readonly realizedPnlCents: number
+  readonly closedPositionId: string | null
   readonly balanceAfterCents: number
   readonly createdAt: number
 }
@@ -124,6 +143,9 @@ export interface OpenPerpReceipt {
 export interface ClosePerpInput {
   readonly ownerId: string
   readonly positionId: string
+  readonly sizeCents?: number
+  readonly closePct?: number
+  readonly maxSlippageBps?: number
   readonly viaClientName?: string
 }
 
@@ -133,6 +155,8 @@ export interface ClosePerpReceipt {
   readonly ticker: string
   readonly side: PerpSide
   readonly sizeCents: number
+  readonly remainingSizeCents: number
+  readonly isFullClose: boolean
   readonly exitPriceCents: number
   readonly netCreditCents: number
   readonly feeCents: number
@@ -141,10 +165,49 @@ export interface ClosePerpReceipt {
   readonly closedAt: number
 }
 
+export interface PreviewPerpOrderInput {
+  readonly ownerId?: string
+  readonly ticker: string
+  readonly side: PerpSide
+  readonly collateralCents: number
+  readonly leverage: number
+}
+
+export interface PerpOrderPreview {
+  readonly ticker: string
+  readonly side: PerpSide
+  readonly action: PerpOrderAction
+  readonly collateralCents: number
+  readonly sizeCents: number
+  readonly leverage: number
+  readonly feeCents: number
+  readonly totalDebitCents: number
+  readonly indexPriceCents: number
+  readonly preMarkPriceCents: number
+  readonly executionPriceCents: number
+  readonly priceImpactBps: number
+  readonly estimatedLiquidationPriceCents: number
+  readonly fundingRateBps: number
+}
+
+export interface LiquidatedPositionInfo {
+  readonly positionId: string
+  readonly holderId: string
+  readonly holderKind: MarketActorKind
+  readonly ticker: string
+  readonly side: PerpSide
+  readonly sizeCents: number
+  readonly leverage: number
+  readonly liquidationMarkPriceCents: number
+  readonly payoutCents: number
+  readonly realizedPnlCents: number
+}
+
 export interface LiquidationSweepSummary {
   readonly checkedCount: number
   readonly liquidatedCount: number
   readonly liquidatedPositionIds: ReadonlyArray<string>
+  readonly liquidatedPositions: ReadonlyArray<LiquidatedPositionInfo>
 }
 
 export interface FundingAccrualSummary {
@@ -153,7 +216,51 @@ export interface FundingAccrualSummary {
   readonly skippedCutover: boolean
 }
 
-function computeLiquidationPriceCents(pos: PerpPosition): number {
+function safeIndexPriceCents(quoteReserveCents: number, baseReserve: number): number {
+  if (quoteReserveCents <= 0 || baseReserve <= 0) return 1
+  if (quoteReserveCents <= 90_000_000_000_000 && baseReserve <= Number.MAX_SAFE_INTEGER) {
+    return computeIndexPriceCents(quoteReserveCents, baseReserve)
+  }
+  try {
+    const q = BigInt(Math.trunc(quoteReserveCents))
+    const b = BigInt(Math.trunc(baseReserve))
+    return Math.max(1, Number((q * BigInt(BASE_SCALE)) / b))
+  } catch {
+    return 1
+  }
+}
+
+function computePriceImpactBps(beforeMark: number, afterMark: number): number {
+  if (beforeMark <= 0) return 0
+  return Math.round((Math.abs(afterMark - beforeMark) * BPS_DENOMINATOR) / beforeMark)
+}
+
+effect function assertSlippageWithinCap(beforeMark: number, afterMark: number, maxSlippageBps?: number): void!MarketFailure {
+  if (maxSlippageBps === undefined) return
+  if (!Number.isFinite(maxSlippageBps) || maxSlippageBps < 0) {
+    throw marketFail("INVALID_SLIPPAGE", "maxSlippageBps must be a non-negative number")
+  }
+  const impactBps = computePriceImpactBps(beforeMark, afterMark)
+  if (impactBps > maxSlippageBps) {
+    throw marketFail("SLIPPAGE_EXCEEDED", `Price impact ${impactBps} bps exceeds max slippage ${maxSlippageBps} bps`)
+  }
+}
+
+function blendWeightedEntryPrice(
+  prevSize: number,
+  prevEntry: number,
+  addSize: number,
+  addEntry: number,
+  side: PerpSide
+): number {
+  const totalSize = prevSize + addSize
+  if (totalSize <= 0) return Math.max(1, addEntry)
+  const weighted = (prevEntry * prevSize + addEntry * addSize) / totalSize
+  const rounded = side === "long" ? Math.ceil(weighted) : Math.floor(weighted)
+  return Math.max(1, rounded)
+}
+
+export function computeLiquidationPriceCents(pos: PerpPosition): number {
   if (pos.sizeCents <= 0 || pos.entryPriceCents <= 0) return 1
   const maint = maintenanceMarginCents(pos.sizeCents)
   const netBuffer = pos.marginCents - pos.fundingPaidCents - maint
@@ -191,6 +298,7 @@ function toPerpMarketView(row: Row, stats?: Perp24hStats): PerpMarketView {
     longOiCents: longOi,
     shortOiCents: shortOi,
     openInterestCents: longOi + shortOi,
+    volumeCents: row.volume_cents === undefined ? 0 : toInt(row.volume_cents),
     maxLeverage: toInt(row.max_leverage),
     fundingRateBps: toInt(row.funding_rate_bps),
     lastFundingPeriod: toInt(row.last_funding_period),
@@ -200,7 +308,7 @@ function toPerpMarketView(row: Row, stats?: Perp24hStats): PerpMarketView {
   }
 }
 
-function toPerpPositionView(row: Row): PerpPositionView {
+export function toPerpPositionView(row: Row): PerpPositionView {
   const specPos = toSpecPerpPosition(row)
   const markPriceCents = toInt(row.mark_price_cents)
   const indexPriceCents = toInt(row.index_price_cents)
@@ -251,11 +359,18 @@ const perpMarketSelectSql = `
     COALESCE(p.base_reserve, 0) AS base_reserve,
     COALESCE(p.quote_reserve_cents, 0) AS quote_reserve_cents,
     COALESCE(o.name, m.ticker) AS org_name,
+    COALESCE(tv.volume_cents, 0) AS volume_cents,
     o.image_url AS org_image_url,
     o.initial_price_cents AS initial_price_cents
   FROM feed_perp_markets m
   LEFT JOIN feed_spot_pools p ON p.ticker = m.ticker
   LEFT JOIN feed_organizations o ON o.id = p.organization_id
+  LEFT JOIN (
+    SELECT market_ref, COALESCE(SUM(notional_cents), 0) AS volume_cents
+    FROM feed_trades
+    WHERE market_kind = 'perp'
+    GROUP BY market_ref
+  ) tv ON tv.market_ref = m.ticker
 `
 
 effect function loadPerp24hStatsTx(
@@ -313,33 +428,6 @@ effect function loadPerp24hStatsTx(
   }
   return stats
 }
-
-effect function recomputePerpMarketOi(
-  tx: Tx,
-  ticker: string,
-  indexPriceCents: number,
-  now: number
-): void!StoreFailure {
-  const oiRows = try tx.query(
-    `SELECT
-       COALESCE(SUM(CASE WHEN side = 'LONG' THEN size_cents ELSE 0 END), 0) AS long_oi,
-       COALESCE(SUM(CASE WHEN side = 'SHORT' THEN size_cents ELSE 0 END), 0) AS short_oi
-     FROM feed_perp_positions
-     WHERE ticker = $1 AND status = 'open'`,
-    [ticker]
-  )
-  const longOi = toInt(oiRows[0]?.long_oi)
-  const shortOi = toInt(oiRows[0]?.short_oi)
-  const nextMark = computeMarkPriceCents(indexPriceCents, longOi, shortOi)
-  const nextRateBps = boundedPremiumBps(longOi, shortOi)
-  try tx.query(
-    `UPDATE feed_perp_markets
-     SET long_oi_cents = $2, short_oi_cents = $3, mark_price_cents = $4, funding_rate_bps = $5, updated_at = $6
-     WHERE ticker = $1`,
-    [ticker, longOi, shortOi, nextMark, nextRateBps, now]
-  )
-}
-
 export effect function listPerpMarkets(): ReadonlyArray<PerpMarketView>!StoreFailure!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
@@ -429,7 +517,18 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
         throw marketFail("INSUFFICIENT_LIQUIDITY", "Spot pool base reserve exhausted")
       }
       baseDelta = baseReserve - nextBase
+      if (baseDelta <= 0) {
+        throw marketFail("INVALID_AMOUNT", "Spot buy amount too small to acquire base units")
+      }
       cashDelta = 0 - input.quoteCents
+      try tx.query(
+        `INSERT INTO feed_npc_spot_holdings (actor_id, ticker, base_units, updated_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (actor_id, ticker) DO UPDATE
+         SET base_units = feed_npc_spot_holdings.base_units + EXCLUDED.base_units,
+             updated_at = EXCLUDED.updated_at`,
+        [input.actorId, input.ticker, baseDelta, now]
+      )
     } else {
       if (input.quoteCents >= quoteReserve) {
         throw marketFail("INSUFFICIENT_LIQUIDITY", "Spot sale exceeds available quote liquidity")
@@ -437,9 +536,24 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
       nextQuote = quoteReserve - input.quoteCents
       nextBase = ceilDivProduct(baseReserve, quoteReserve, nextQuote)
       baseDelta = nextBase - baseReserve
+      if (baseDelta <= 0) {
+        throw marketFail("INVALID_AMOUNT", "Spot sale amount too small")
+      }
+      const holdingRows = try tx.query(
+        "SELECT base_units FROM feed_npc_spot_holdings WHERE actor_id = $1 AND ticker = $2 FOR UPDATE",
+        [input.actorId, input.ticker]
+      )
+      const heldBase = holdingRows.length > 0 ? toInt(holdingRows[0]!.base_units) : 0
+      if (heldBase < baseDelta) {
+        throw marketFail("INSUFFICIENT_SPOT_INVENTORY", "NPC actor has insufficient spot inventory to sell")
+      }
+      try tx.query(
+        "UPDATE feed_npc_spot_holdings SET base_units = base_units - $3, updated_at = $4 WHERE actor_id = $1 AND ticker = $2",
+        [input.actorId, input.ticker, baseDelta, now]
+      )
       cashDelta = input.quoteCents
     }
-    const nextIndexPriceCents = Math.max(1, Math.floor(nextQuote / nextBase))
+    const nextIndexPriceCents = safeIndexPriceCents(nextQuote, nextBase)
     const longOi = toInt(marketRows[0]!.long_oi_cents)
     const shortOi = toInt(marketRows[0]!.short_oi_cents)
     const nextMarkPriceCents = computeMarkPriceCents(nextIndexPriceCents, longOi, shortOi)
@@ -468,6 +582,7 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
       feeCents: 0,
       sharesOrSize: baseDelta,
       priceCents: nextIndexPriceCents,
+      realizedPnlCents: null,
       viaClientName: null,
       createdAt: now
     })
@@ -479,6 +594,22 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
       balanceAfterCents,
       refId: tradeId,
       createdAt: now
+    })
+    try insertPriceHistory(tx, {
+      marketKind: "spot",
+      marketRef: input.ticker,
+      priceCents: nextIndexPriceCents,
+      markPriceCents: nextMarkPriceCents,
+      volumeCents: input.quoteCents,
+      recordedAt: now
+    })
+    try insertPriceHistory(tx, {
+      marketKind: "perp",
+      marketRef: input.ticker,
+      priceCents: nextIndexPriceCents,
+      markPriceCents: nextMarkPriceCents,
+      volumeCents: input.quoteCents,
+      recordedAt: now
     })
     return {
       tradeId,
@@ -497,6 +628,563 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
   })
 }
 
+effect function assertUserPerpExposureAndPositionCap(
+  tx: Tx,
+  ownerId: string,
+  ownerKind: MarketActorKind,
+  additionalSizeCents: number,
+  isNewPosition: boolean
+): void!(MarketFailure | StoreFailure) {
+  if (ownerKind !== "user") return
+  const rows = try tx.query(
+    `SELECT COUNT(*) AS open_count, COALESCE(SUM(size_cents), 0) AS total_exposure
+     FROM feed_perp_positions
+     WHERE holder_id = $1 AND status = 'open'`,
+    [ownerId]
+  )
+  const openCount = toInt(rows[0]?.open_count)
+  const currentExposure = toInt(rows[0]?.total_exposure)
+  if (isNewPosition && openCount >= MAX_POSITIONS_PER_USER) {
+    throw marketFail("MAX_POSITIONS_EXCEEDED", `Maximum open perp positions (${MAX_POSITIONS_PER_USER}) reached`)
+  }
+  if (currentExposure + additionalSizeCents > MAX_PERP_USER_EXPOSURE_CENTS) {
+    throw marketFail("EXPOSURE_LIMIT_EXCEEDED", `Total perp exposure exceeds cap (${MAX_PERP_USER_EXPOSURE_CENTS} cents)`)
+  }
+}
+
+interface PerpMarketSnapshot {
+  readonly ticker: string
+  readonly indexPriceCents: number
+  readonly markPriceCents: number
+  readonly longOiCents: number
+  readonly shortOiCents: number
+  readonly maxLeverage: number
+}
+
+effect function lockPerpMarket(tx: Tx, ticker: string): PerpMarketSnapshot!(MarketFailure | StoreFailure) {
+  const rows = try tx.query(
+    "SELECT ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage FROM feed_perp_markets WHERE ticker = $1 FOR UPDATE",
+    [ticker]
+  )
+  if (rows.length === 0) {
+    throw marketFail("MARKET_NOT_FOUND", `Perp market not found: ${ticker}`)
+  }
+  const row = rows[0]!
+  return {
+    ticker: requiredText(row.ticker),
+    indexPriceCents: toInt(row.index_price_cents),
+    markPriceCents: toInt(row.mark_price_cents),
+    longOiCents: toInt(row.long_oi_cents),
+    shortOiCents: toInt(row.short_oi_cents),
+    maxLeverage: Math.min(MAX_LEVERAGE, toInt(row.max_leverage))
+  }
+}
+
+effect function updatePerpMarketOiAndMark(
+  tx: Tx,
+  ticker: string,
+  indexPriceCents: number,
+  longOiCents: number,
+  shortOiCents: number,
+  now: number
+): { readonly markPriceCents: number; readonly fundingRateBps: number }!StoreFailure {
+  const safeLong = Math.max(0, longOiCents)
+  const safeShort = Math.max(0, shortOiCents)
+  const markPriceCents = computeMarkPriceCents(indexPriceCents, safeLong, safeShort)
+  const fundingRateBps = boundedPremiumBps(safeLong, safeShort)
+  try tx.query(
+    `UPDATE feed_perp_markets
+     SET long_oi_cents = $2, short_oi_cents = $3, mark_price_cents = $4, funding_rate_bps = $5, updated_at = $6
+     WHERE ticker = $1`,
+    [ticker, safeLong, safeShort, markPriceCents, fundingRateBps, now]
+  )
+  return { markPriceCents, fundingRateBps }
+}
+
+effect function settlePerpCloseSliceTx(
+  tx: Tx,
+  params: {
+    readonly posRow: Row
+    readonly market: PerpMarketSnapshot
+    readonly closeSizeCents: number
+    readonly maxSlippageBps?: number
+    readonly viaClientName: string | null
+    readonly tradeSideOverride?: string
+    readonly now: number
+  }
+): {
+  readonly receipt: ClosePerpReceipt
+  readonly updatedPositionRow: Row
+  readonly nextLongOi: number
+  readonly nextShortOi: number
+  readonly postCloseMark: number
+}!(MarketFailure | StoreFailure) {
+  const specPos = toSpecPerpPosition(params.posRow)
+  const positionId = requiredText(params.posRow.id)
+  const side: PerpSide = specPos.perpSide === "Short" ? "short" : "long"
+  const holderKind: MarketActorKind = requiredText(params.posRow.holder_kind) === "npc" ? "npc" : "user"
+  const remainingSizeCents = specPos.sizeCents - params.closeSizeCents
+  const isFullClose = remainingSizeCents === 0
+  if (!isFullClose && (params.closeSizeCents < MIN_ORDER_SIZE_CENTS || remainingSizeCents < MIN_ORDER_SIZE_CENTS)) {
+    throw marketFail("ORDER_TOO_SMALL", `Partial close and remaining size must each be at least ${MIN_ORDER_SIZE_CENTS} cents`)
+  }
+  const closedMarginCents = isFullClose
+    ? specPos.marginCents
+    : Math.max(1, Math.min(specPos.marginCents - 1, Math.floor((specPos.marginCents * params.closeSizeCents) / specPos.sizeCents)))
+  const closedFundingCents = isFullClose
+    ? specPos.fundingPaidCents
+    : Math.trunc((specPos.fundingPaidCents * params.closeSizeCents) / specPos.sizeCents)
+  const nextLongOi = side === "long" ? Math.max(0, params.market.longOiCents - params.closeSizeCents) : params.market.longOiCents
+  const nextShortOi = side === "short" ? Math.max(0, params.market.shortOiCents - params.closeSizeCents) : params.market.shortOiCents
+  const postCloseMark = computeMarkPriceCents(params.market.indexPriceCents, nextLongOi, nextShortOi)
+  try assertSlippageWithinCap(params.market.markPriceCents, postCloseMark, params.maxSlippageBps)
+  const closingSlice: PerpPosition = {
+    ...specPos,
+    sizeCents: params.closeSizeCents,
+    marginCents: closedMarginCents,
+    fundingPaidCents: closedFundingCents
+  }
+  const grossCents = clampMin0(positionEquityAtMark(closingSlice, postCloseMark))
+  const rawFee = canonicalTradingFee(params.closeSizeCents)
+  const collectedFeeCents = minInt(rawFee, grossCents)
+  const netCreditCents = clampMin0(grossCents - rawFee)
+  const openFeeCents = canonicalTradingFee(params.closeSizeCents)
+  const realizedPnlCents = netCreditCents - closedMarginCents - openFeeCents
+  const updatedRows = isFullClose
+    ? try tx.query(
+        `UPDATE feed_perp_positions
+         SET status = 'closed', realized_pnl_cents = realized_pnl_cents + $2, closed_at = $3
+         WHERE id = $1 AND status = 'open'
+         RETURNING *`,
+        [positionId, realizedPnlCents, params.now]
+      )
+    : try tx.query(
+        `UPDATE feed_perp_positions
+         SET margin_cents = margin_cents - $2,
+             size_cents = size_cents - $3,
+             accrued_funding_cents = accrued_funding_cents - $4,
+             realized_pnl_cents = realized_pnl_cents + $5
+         WHERE id = $1 AND status = 'open'
+         RETURNING *`,
+        [positionId, closedMarginCents, params.closeSizeCents, closedFundingCents, realizedPnlCents]
+      )
+  if (updatedRows.length === 0) {
+    throw marketFail("POSITION_CLOSED", "Position is already closed")
+  }
+  try updatePerpMarketOiAndMark(tx, params.market.ticker, params.market.indexPriceCents, nextLongOi, nextShortOi, params.now)
+  const balanceAfterCents = try creditActorBalance(tx, specPos.owner, holderKind, netCreditCents, collectedFeeCents, params.now)
+  const tradeId = newMarketId()
+  const defaultTradeSide = isFullClose
+    ? (side === "long" ? "close_long" : "close_short")
+    : (side === "long" ? "reduce_long" : "reduce_short")
+  try insertTradeRecord(tx, {
+    tradeId,
+    traderId: specPos.owner,
+    traderKind: holderKind,
+    marketKind: "perp",
+    marketRef: params.market.ticker,
+    side: params.tradeSideOverride ?? defaultTradeSide,
+    notionalCents: params.closeSizeCents,
+    feeCents: collectedFeeCents,
+    sharesOrSize: params.closeSizeCents,
+    priceCents: postCloseMark,
+    realizedPnlCents,
+    viaClientName: params.viaClientName,
+    createdAt: params.now
+  })
+  try insertLedgerEntry(tx, {
+    ledgerId: newMarketId(),
+    accountId: specPos.owner,
+    kind: isFullClose ? "perp_close" : "perp_partial_close",
+    deltaCents: netCreditCents,
+    balanceAfterCents,
+    refId: tradeId,
+    createdAt: params.now
+  })
+  try insertPriceHistory(tx, {
+    marketKind: "perp",
+    marketRef: params.market.ticker,
+    priceCents: params.market.indexPriceCents,
+    markPriceCents: postCloseMark,
+    volumeCents: params.closeSizeCents,
+    recordedAt: params.now
+  })
+  return {
+    receipt: {
+      tradeId,
+      positionId,
+      ticker: params.market.ticker,
+      side,
+      sizeCents: params.closeSizeCents,
+      remainingSizeCents,
+      isFullClose,
+      exitPriceCents: postCloseMark,
+      netCreditCents,
+      feeCents: collectedFeeCents,
+      realizedPnlCents,
+      balanceAfterCents,
+      closedAt: params.now
+    },
+    updatedPositionRow: updatedRows[0]!,
+    nextLongOi,
+    nextShortOi,
+    postCloseMark
+  }
+}
+
+effect function insertFreshPerpPositionTx(
+  tx: Tx,
+  params: {
+    readonly ownerId: string
+    readonly ownerKind: MarketActorKind
+    readonly market: PerpMarketSnapshot
+    readonly side: PerpSide
+    readonly collateralCents: number
+    readonly sizeCents: number
+    readonly leverage: number
+    readonly maxSlippageBps?: number
+    readonly viaClientName: string | null
+    readonly currentPeriod: number
+    readonly action: "open" | "flip"
+    readonly realizedPnlCents: number
+    readonly closedPositionId: string | null
+    readonly now: number
+  }
+): OpenPerpReceipt!(MarketFailure | StoreFailure) {
+  const nextLongOi = params.side === "long" ? params.market.longOiCents + params.sizeCents : params.market.longOiCents
+  const nextShortOi = params.side === "short" ? params.market.shortOiCents + params.sizeCents : params.market.shortOiCents
+  const postOpenMark = computeMarkPriceCents(params.market.indexPriceCents, nextLongOi, nextShortOi)
+  try assertSlippageWithinCap(params.market.markPriceCents, postOpenMark, params.maxSlippageBps)
+  const feeCents = canonicalTradingFee(params.sizeCents)
+  const totalDebitCents = params.collateralCents + feeCents
+  const balanceAfterCents = try debitActorBalance(tx, params.ownerId, params.ownerKind, totalDebitCents, feeCents, params.now)
+  const positionId = newMarketId()
+  const dbSide = params.side === "long" ? "LONG" : "SHORT"
+  const inserted = try tx.query(
+    `INSERT INTO feed_perp_positions
+     (id, ticker, holder_id, holder_kind, side, margin_cents, size_cents, entry_price_cents, leverage, accrued_funding_cents, last_funding_period, status, realized_pnl_cents, closed_at, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, 'open', 0, NULL, $11)
+     RETURNING *`,
+    [positionId, params.market.ticker, params.ownerId, params.ownerKind, dbSide, params.collateralCents, params.sizeCents, postOpenMark, params.leverage, params.currentPeriod, params.now]
+  )
+  try updatePerpMarketOiAndMark(tx, params.market.ticker, params.market.indexPriceCents, nextLongOi, nextShortOi, params.now)
+  const tradeId = newMarketId()
+  try insertTradeRecord(tx, {
+    tradeId,
+    traderId: params.ownerId,
+    traderKind: params.ownerKind,
+    marketKind: "perp",
+    marketRef: params.market.ticker,
+    side: params.side === "long" ? "open_long" : "open_short",
+    notionalCents: params.sizeCents,
+    feeCents,
+    sharesOrSize: params.sizeCents,
+    priceCents: postOpenMark,
+    realizedPnlCents: null,
+    viaClientName: params.viaClientName,
+    createdAt: params.now
+  })
+  try insertLedgerEntry(tx, {
+    ledgerId: newMarketId(),
+    accountId: params.ownerId,
+    kind: "perp_open",
+    deltaCents: 0 - totalDebitCents,
+    balanceAfterCents,
+    refId: tradeId,
+    createdAt: params.now
+  })
+  try insertPriceHistory(tx, {
+    marketKind: "perp",
+    marketRef: params.market.ticker,
+    priceCents: params.market.indexPriceCents,
+    markPriceCents: postOpenMark,
+    volumeCents: params.sizeCents,
+    recordedAt: params.now
+  })
+  const posRow = {
+    ...inserted[0]!,
+    mark_price_cents: postOpenMark,
+    index_price_cents: params.market.indexPriceCents
+  }
+  return {
+    tradeId,
+    positionId,
+    action: params.action,
+    position: toPerpPositionView(posRow),
+    collateralCents: params.collateralCents,
+    sizeCents: params.sizeCents,
+    leverage: params.leverage,
+    feeCents,
+    executionPriceCents: postOpenMark,
+    realizedPnlCents: params.realizedPnlCents,
+    closedPositionId: params.closedPositionId,
+    balanceAfterCents,
+    createdAt: params.now
+  }
+}
+
+effect function addToPerpPositionTx(
+  tx: Tx,
+  params: {
+    readonly existingRow: Row
+    readonly market: PerpMarketSnapshot
+    readonly side: PerpSide
+    readonly addCollateralCents: number
+    readonly addSizeCents: number
+    readonly maxSlippageBps?: number
+    readonly viaClientName: string | null
+    readonly now: number
+  }
+): OpenPerpReceipt!(MarketFailure | StoreFailure) {
+  const existing = toSpecPerpPosition(params.existingRow)
+  const positionId = requiredText(params.existingRow.id)
+  const holderKind: MarketActorKind = requiredText(params.existingRow.holder_kind) === "npc" ? "npc" : "user"
+  const nextLongOi = params.side === "long" ? params.market.longOiCents + params.addSizeCents : params.market.longOiCents
+  const nextShortOi = params.side === "short" ? params.market.shortOiCents + params.addSizeCents : params.market.shortOiCents
+  const postAddMark = computeMarkPriceCents(params.market.indexPriceCents, nextLongOi, nextShortOi)
+  try assertSlippageWithinCap(params.market.markPriceCents, postAddMark, params.maxSlippageBps)
+  const feeCents = canonicalTradingFee(params.addSizeCents)
+  const totalDebitCents = params.addCollateralCents + feeCents
+  const balanceAfterCents = try debitActorBalance(tx, existing.owner, holderKind, totalDebitCents, feeCents, params.now)
+  const nextSize = existing.sizeCents + params.addSizeCents
+  const nextMargin = existing.marginCents + params.addCollateralCents
+  const nextLeverage = Math.max(1, Math.min(params.market.maxLeverage, ceilDiv(nextSize, nextMargin)))
+  const nextEntry = blendWeightedEntryPrice(existing.sizeCents, existing.entryPriceCents, params.addSizeCents, postAddMark, params.side)
+  const updatedRows = try tx.query(
+    `UPDATE feed_perp_positions
+     SET margin_cents = $2, size_cents = $3, entry_price_cents = $4, leverage = $5
+     WHERE id = $1 AND status = 'open'
+     RETURNING *`,
+    [positionId, nextMargin, nextSize, nextEntry, nextLeverage]
+  )
+  try updatePerpMarketOiAndMark(tx, params.market.ticker, params.market.indexPriceCents, nextLongOi, nextShortOi, params.now)
+  const tradeId = newMarketId()
+  try insertTradeRecord(tx, {
+    tradeId,
+    traderId: existing.owner,
+    traderKind: holderKind,
+    marketKind: "perp",
+    marketRef: params.market.ticker,
+    side: params.side === "long" ? "add_long" : "add_short",
+    notionalCents: params.addSizeCents,
+    feeCents,
+    sharesOrSize: params.addSizeCents,
+    priceCents: postAddMark,
+    realizedPnlCents: null,
+    viaClientName: params.viaClientName,
+    createdAt: params.now
+  })
+  try insertLedgerEntry(tx, {
+    ledgerId: newMarketId(),
+    accountId: existing.owner,
+    kind: "perp_add",
+    deltaCents: 0 - totalDebitCents,
+    balanceAfterCents,
+    refId: tradeId,
+    createdAt: params.now
+  })
+  try insertPriceHistory(tx, {
+    marketKind: "perp",
+    marketRef: params.market.ticker,
+    priceCents: params.market.indexPriceCents,
+    markPriceCents: postAddMark,
+    volumeCents: params.addSizeCents,
+    recordedAt: params.now
+  })
+  const posRow = {
+    ...updatedRows[0]!,
+    mark_price_cents: postAddMark,
+    index_price_cents: params.market.indexPriceCents
+  }
+  return {
+    tradeId,
+    positionId,
+    action: "add",
+    position: toPerpPositionView(posRow),
+    collateralCents: params.addCollateralCents,
+    sizeCents: params.addSizeCents,
+    leverage: nextLeverage,
+    feeCents,
+    executionPriceCents: postAddMark,
+    realizedPnlCents: 0,
+    closedPositionId: null,
+    balanceAfterCents,
+    createdAt: params.now
+  }
+}
+
+export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrderPreview!(MarketFailure | StoreFailure)!Store {
+  try assertSafePositiveInt(input.collateralCents, "INVALID_AMOUNT", "collateralCents must be a positive integer")
+  if (!Number.isSafeInteger(input.leverage) || input.leverage < 1 || input.leverage > MAX_LEVERAGE) {
+    throw marketFail("INVALID_LEVERAGE", `Leverage must be an integer between 1 and ${MAX_LEVERAGE}`)
+  }
+  if (input.side !== "long" && input.side !== "short") {
+    throw marketFail("INVALID_SIDE", "Perp side must be 'long' or 'short'")
+  }
+  const sizeCents = input.collateralCents * input.leverage
+  if (!Number.isSafeInteger(sizeCents) || sizeCents < MIN_ORDER_SIZE_CENTS) {
+    throw marketFail("ORDER_TOO_SMALL", `Notional size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
+  }
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const marketRows = try tx.query(
+      "SELECT ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage, funding_rate_bps FROM feed_perp_markets WHERE ticker = $1",
+      [input.ticker]
+    )
+    if (marketRows.length === 0) {
+      throw marketFail("MARKET_NOT_FOUND", `Perp market not found: ${input.ticker}`)
+    }
+    const row = marketRows[0]!
+    const indexPriceCents = toInt(row.index_price_cents)
+    const preMarkPriceCents = toInt(row.mark_price_cents)
+    const longOi = toInt(row.long_oi_cents)
+    const shortOi = toInt(row.short_oi_cents)
+    const maxMarketLeverage = Math.min(MAX_LEVERAGE, toInt(row.max_leverage))
+    if (input.leverage > maxMarketLeverage) {
+      throw marketFail("INVALID_LEVERAGE", `Market leverage cap is ${maxMarketLeverage}x`)
+    }
+    const orderCap = getPerpMarketOrderSizeLimitCents(longOi + shortOi)
+    if (sizeCents > orderCap) {
+      throw marketFail("ORDER_LIMIT_EXCEEDED", `Order size exceeds market limit (${orderCap} cents)`)
+    }
+    const existingRows = input.ownerId !== undefined
+      ? try tx.query(
+          "SELECT * FROM feed_perp_positions WHERE holder_id = $1 AND ticker = $2 AND status = 'open' LIMIT 1",
+          [input.ownerId, input.ticker]
+        )
+      : []
+    const existing = existingRows.length > 0 ? toSpecPerpPosition(existingRows[0]!) : null
+    if (existing !== null) {
+      const existingSide: PerpSide = existing.perpSide === "Short" ? "short" : "long"
+      if (existingSide === input.side) {
+        const nextLong = input.side === "long" ? longOi + sizeCents : longOi
+        const nextShort = input.side === "short" ? shortOi + sizeCents : shortOi
+        const executionPriceCents = computeMarkPriceCents(indexPriceCents, nextLong, nextShort)
+        const feeCents = canonicalTradingFee(sizeCents)
+        const nextSize = existing.sizeCents + sizeCents
+        const nextMargin = existing.marginCents + input.collateralCents
+        const nextEntry = blendWeightedEntryPrice(existing.sizeCents, existing.entryPriceCents, sizeCents, executionPriceCents, input.side)
+        const estLiq = computeLiquidationPriceCents({
+          ...existing,
+          sizeCents: nextSize,
+          marginCents: nextMargin,
+          entryPriceCents: nextEntry
+        })
+        return {
+          ticker: input.ticker,
+          side: input.side,
+          action: "add",
+          collateralCents: input.collateralCents,
+          sizeCents,
+          leverage: Math.max(1, Math.min(maxMarketLeverage, ceilDiv(nextSize, nextMargin))),
+          feeCents,
+          totalDebitCents: input.collateralCents + feeCents,
+          indexPriceCents,
+          preMarkPriceCents,
+          executionPriceCents,
+          priceImpactBps: computePriceImpactBps(preMarkPriceCents, executionPriceCents),
+          estimatedLiquidationPriceCents: estLiq,
+          fundingRateBps: boundedPremiumBps(nextLong, nextShort)
+        }
+      }
+      if (sizeCents <= existing.sizeCents) {
+        const isFull = sizeCents === existing.sizeCents
+        const nextLong = existingSide === "long" ? Math.max(0, longOi - sizeCents) : longOi
+        const nextShort = existingSide === "short" ? Math.max(0, shortOi - sizeCents) : shortOi
+        const executionPriceCents = computeMarkPriceCents(indexPriceCents, nextLong, nextShort)
+        const feeCents = canonicalTradingFee(sizeCents)
+        const remSize = existing.sizeCents - sizeCents
+        const remMargin = isFull ? 0 : existing.marginCents - Math.floor((existing.marginCents * sizeCents) / existing.sizeCents)
+        const estLiq = isFull ? 0 : computeLiquidationPriceCents({ ...existing, sizeCents: remSize, marginCents: remMargin })
+        return {
+          ticker: input.ticker,
+          side: input.side,
+          action: isFull ? "close" : "reduce",
+          collateralCents: 0,
+          sizeCents,
+          leverage: existing.leverage,
+          feeCents,
+          totalDebitCents: feeCents,
+          indexPriceCents,
+          preMarkPriceCents,
+          executionPriceCents,
+          priceImpactBps: computePriceImpactBps(preMarkPriceCents, executionPriceCents),
+          estimatedLiquidationPriceCents: estLiq,
+          fundingRateBps: boundedPremiumBps(nextLong, nextShort)
+        }
+      }
+      const flipSize = sizeCents - existing.sizeCents
+      const flipMargin = ceilDiv(flipSize, input.leverage)
+      const afterCloseLong = existingSide === "long" ? Math.max(0, longOi - existing.sizeCents) : longOi
+      const afterCloseShort = existingSide === "short" ? Math.max(0, shortOi - existing.sizeCents) : shortOi
+      const finalLong = input.side === "long" ? afterCloseLong + flipSize : afterCloseLong
+      const finalShort = input.side === "short" ? afterCloseShort + flipSize : afterCloseShort
+      const executionPriceCents = computeMarkPriceCents(indexPriceCents, finalLong, finalShort)
+      const feeCents = canonicalTradingFee(existing.sizeCents) + canonicalTradingFee(flipSize)
+      const estLiq = computeLiquidationPriceCents({
+        posId: 1,
+        owner: input.ownerId ?? "",
+        perpSide: input.side === "short" ? "Short" : "Long",
+        sizeCents: flipSize,
+        leverage: input.leverage,
+        marginCents: flipMargin,
+        entryPriceCents: executionPriceCents,
+        openedPeriod: 0,
+        lastFundingPeriod: 0,
+        fundingPaidCents: 0
+      })
+      return {
+        ticker: input.ticker,
+        side: input.side,
+        action: "flip",
+        collateralCents: flipMargin,
+        sizeCents: flipSize,
+        leverage: input.leverage,
+        feeCents,
+        totalDebitCents: flipMargin + canonicalTradingFee(flipSize),
+        indexPriceCents,
+        preMarkPriceCents,
+        executionPriceCents,
+        priceImpactBps: computePriceImpactBps(preMarkPriceCents, executionPriceCents),
+        estimatedLiquidationPriceCents: estLiq,
+        fundingRateBps: boundedPremiumBps(finalLong, finalShort)
+      }
+    }
+    const nextLong = input.side === "long" ? longOi + sizeCents : longOi
+    const nextShort = input.side === "short" ? shortOi + sizeCents : shortOi
+    const executionPriceCents = computeMarkPriceCents(indexPriceCents, nextLong, nextShort)
+    const feeCents = canonicalTradingFee(sizeCents)
+    const estLiq = computeLiquidationPriceCents({
+      posId: 1,
+      owner: input.ownerId ?? "",
+      perpSide: input.side === "short" ? "Short" : "Long",
+      sizeCents,
+      leverage: input.leverage,
+      marginCents: input.collateralCents,
+      entryPriceCents: executionPriceCents,
+      openedPeriod: 0,
+      lastFundingPeriod: 0,
+      fundingPaidCents: 0
+    })
+    return {
+      ticker: input.ticker,
+      side: input.side,
+      action: "open",
+      collateralCents: input.collateralCents,
+      sizeCents,
+      leverage: input.leverage,
+      feeCents,
+      totalDebitCents: input.collateralCents + feeCents,
+      indexPriceCents,
+      preMarkPriceCents,
+      executionPriceCents,
+      priceImpactBps: computePriceImpactBps(preMarkPriceCents, executionPriceCents),
+      estimatedLiquidationPriceCents: estLiq,
+      fundingRateBps: boundedPremiumBps(nextLong, nextShort)
+    }
+  })
+}
+
 export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(MarketFailure | StoreFailure)!Store {
   try assertSafePositiveInt(input.collateralCents, "INVALID_AMOUNT", "collateralCents must be a positive integer")
   if (!Number.isSafeInteger(input.leverage) || input.leverage < 1 || input.leverage > MAX_LEVERAGE) {
@@ -509,96 +1197,124 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
   if (!Number.isSafeInteger(sizeCents) || sizeCents < MIN_ORDER_SIZE_CENTS) {
     throw marketFail("ORDER_TOO_SMALL", `Notional size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
   }
-  const feeCents = canonicalTradingFee(sizeCents)
-  const totalDebitCents = input.collateralCents + feeCents
   const viaClientName = normalizeViaClient(input.viaClientName)
   const store = try Store
   const now = try Clock.currentTimeMillis
   const currentPeriod = fundingPeriodFromSeconds(Math.floor(now / 1000))
   return try store.transaction(effect (tx: Tx) => {
-    const marketRows = try tx.query(
-      "SELECT ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage FROM feed_perp_markets WHERE ticker = $1 FOR UPDATE",
-      [input.ticker]
-    )
-    if (marketRows.length === 0) {
-      throw marketFail("MARKET_NOT_FOUND", `Perp market not found: ${input.ticker}`)
+    const market = try lockPerpMarket(tx, input.ticker)
+    if (input.leverage > market.maxLeverage) {
+      throw marketFail("INVALID_LEVERAGE", `Market leverage cap is ${market.maxLeverage}x`)
     }
-    const maxMarketLeverage = Math.min(MAX_LEVERAGE, toInt(marketRows[0]!.max_leverage))
-    if (input.leverage > maxMarketLeverage) {
-      throw marketFail("INVALID_LEVERAGE", `Market leverage cap is ${maxMarketLeverage}x`)
+    const orderCap = getPerpMarketOrderSizeLimitCents(market.longOiCents + market.shortOiCents)
+    if (sizeCents > orderCap) {
+      throw marketFail("ORDER_LIMIT_EXCEEDED", `Order size exceeds market limit (${orderCap} cents)`)
     }
     const existingRows = try tx.query(
-      "SELECT id FROM feed_perp_positions WHERE holder_id = $1 AND ticker = $2 AND status = 'open' FOR UPDATE",
+      "SELECT * FROM feed_perp_positions WHERE holder_id = $1 AND ticker = $2 AND status = 'open' FOR UPDATE",
       [input.ownerId, input.ticker]
     )
-    if (existingRows.length > 0) {
-      throw marketFail("POSITION_ALREADY_OPEN", `Open position already exists on ${input.ticker}`)
+    if (existingRows.length === 0) {
+      try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, true)
+      return try insertFreshPerpPositionTx(tx, {
+        ownerId: input.ownerId,
+        ownerKind: input.ownerKind,
+        market,
+        side: input.side,
+        collateralCents: input.collateralCents,
+        sizeCents,
+        leverage: input.leverage,
+        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+        viaClientName,
+        currentPeriod,
+        action: "open",
+        realizedPnlCents: 0,
+        closedPositionId: null,
+        now
+      })
     }
-    const balanceAfterCents = try debitActorBalance(tx, input.ownerId, input.ownerKind, totalDebitCents, feeCents, now)
-    const entryPriceCents = toInt(marketRows[0]!.mark_price_cents)
-    const indexPriceCents = toInt(marketRows[0]!.index_price_cents)
-    const longOi = toInt(marketRows[0]!.long_oi_cents)
-    const shortOi = toInt(marketRows[0]!.short_oi_cents)
-    const nextLongOi = input.side === "long" ? longOi + sizeCents : longOi
-    const nextShortOi = input.side === "short" ? shortOi + sizeCents : shortOi
-    const nextMarkPriceCents = computeMarkPriceCents(indexPriceCents, nextLongOi, nextShortOi)
-    const nextFundingRateBps = boundedPremiumBps(nextLongOi, nextShortOi)
-    const positionId = newMarketId()
-    const dbSide = input.side === "long" ? "LONG" : "SHORT"
-    const inserted = try tx.query(
-      `INSERT INTO feed_perp_positions
-       (id, ticker, holder_id, holder_kind, side, margin_cents, size_cents, entry_price_cents, leverage, accrued_funding_cents, last_funding_period, status, realized_pnl_cents, closed_at, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, 'open', 0, NULL, $11)
-       RETURNING *`,
-      [positionId, input.ticker, input.ownerId, input.ownerKind, dbSide, input.collateralCents, sizeCents, entryPriceCents, input.leverage, currentPeriod, now]
-    )
-    try tx.query(
-      `UPDATE feed_perp_markets
-       SET long_oi_cents = $2, short_oi_cents = $3, mark_price_cents = $4, funding_rate_bps = $5, updated_at = $6
-       WHERE ticker = $1`,
-      [input.ticker, nextLongOi, nextShortOi, nextMarkPriceCents, nextFundingRateBps, now]
-    )
-    const tradeId = newMarketId()
-    try insertTradeRecord(tx, {
-      tradeId,
-      traderId: input.ownerId,
-      traderKind: input.ownerKind,
-      marketKind: "perp",
-      marketRef: input.ticker,
-      side: input.side === "long" ? "open_long" : "open_short",
-      notionalCents: sizeCents,
-      feeCents,
-      sharesOrSize: sizeCents,
-      priceCents: entryPriceCents,
+    const existingRow = existingRows[0]!
+    const existing = toSpecPerpPosition(existingRow)
+    const existingSide: PerpSide = existing.perpSide === "Short" ? "short" : "long"
+    if (existingSide === input.side) {
+      try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, false)
+      return try addToPerpPositionTx(tx, {
+        existingRow,
+        market,
+        side: input.side,
+        addCollateralCents: input.collateralCents,
+        addSizeCents: sizeCents,
+        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+        viaClientName,
+        now
+      })
+    }
+    if (sizeCents <= existing.sizeCents) {
+      const settled = try settlePerpCloseSliceTx(tx, {
+        posRow: existingRow,
+        market,
+        closeSizeCents: sizeCents,
+        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+        viaClientName,
+        now
+      })
+      const posRow = {
+        ...settled.updatedPositionRow,
+        mark_price_cents: settled.postCloseMark,
+        index_price_cents: market.indexPriceCents
+      }
+      return {
+        tradeId: settled.receipt.tradeId,
+        positionId: settled.receipt.positionId,
+        action: settled.receipt.isFullClose ? "close" : "reduce",
+        position: toPerpPositionView(posRow),
+        collateralCents: 0,
+        sizeCents,
+        leverage: existing.leverage,
+        feeCents: settled.receipt.feeCents,
+        executionPriceCents: settled.receipt.exitPriceCents,
+        realizedPnlCents: settled.receipt.realizedPnlCents,
+        closedPositionId: settled.receipt.isFullClose ? settled.receipt.positionId : null,
+        balanceAfterCents: settled.receipt.balanceAfterCents,
+        createdAt: now
+      }
+    }
+    const flipSizeCents = sizeCents - existing.sizeCents
+    if (flipSizeCents < MIN_ORDER_SIZE_CENTS) {
+      throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
+    }
+    const flipCollateralCents = ceilDiv(flipSizeCents, input.leverage)
+    const closedOld = try settlePerpCloseSliceTx(tx, {
+      posRow: existingRow,
+      market,
+      closeSizeCents: existing.sizeCents,
+      ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
       viaClientName,
-      createdAt: now
+      now
     })
-    try insertLedgerEntry(tx, {
-      ledgerId: newMarketId(),
-      accountId: input.ownerId,
-      kind: "perp_open",
-      deltaCents: 0 - totalDebitCents,
-      balanceAfterCents,
-      refId: tradeId,
-      createdAt: now
-    })
-    const posRow = {
-      ...inserted[0]!,
-      mark_price_cents: nextMarkPriceCents,
-      index_price_cents: indexPriceCents
+    try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, flipSizeCents, true)
+    const postCloseMarket: PerpMarketSnapshot = {
+      ...market,
+      longOiCents: closedOld.nextLongOi,
+      shortOiCents: closedOld.nextShortOi,
+      markPriceCents: closedOld.postCloseMark
     }
-    return {
-      tradeId,
-      positionId,
-      position: toPerpPositionView(posRow),
-      collateralCents: input.collateralCents,
-      sizeCents,
+    return try insertFreshPerpPositionTx(tx, {
+      ownerId: input.ownerId,
+      ownerKind: input.ownerKind,
+      market: postCloseMarket,
+      side: input.side,
+      collateralCents: flipCollateralCents,
+      sizeCents: flipSizeCents,
       leverage: input.leverage,
-      feeCents,
-      executionPriceCents: entryPriceCents,
-      balanceAfterCents,
-      createdAt: now
-    }
+      ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+      viaClientName,
+      currentPeriod,
+      action: "flip",
+      realizedPnlCents: closedOld.receipt.realizedPnlCents,
+      closedPositionId: closedOld.receipt.positionId,
+      now
+    })
   })
 }
 
@@ -618,108 +1334,88 @@ export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceip
     if (requiredText(pos.status) !== "open") {
       throw marketFail("POSITION_CLOSED", "Position is already closed")
     }
-    const ticker = requiredText(pos.ticker)
-    const marketRows = try tx.query(
-      "SELECT ticker, index_price_cents, mark_price_cents FROM feed_perp_markets WHERE ticker = $1 FOR UPDATE",
-      [ticker]
-    )
-    if (marketRows.length === 0) {
-      throw marketFail("MARKET_NOT_FOUND", `Perp market not found: ${ticker}`)
+    const totalSizeCents = toInt(pos.size_cents)
+    let closeSizeCents = totalSizeCents
+    if (input.sizeCents !== undefined) {
+      try assertSafePositiveInt(input.sizeCents, "INVALID_AMOUNT", "sizeCents must be a positive integer")
+      if (input.sizeCents > totalSizeCents) {
+        throw marketFail("INVALID_AMOUNT", "Close size exceeds open position size")
+      }
+      closeSizeCents = input.sizeCents
+    } else if (input.closePct !== undefined) {
+      if (!Number.isFinite(input.closePct) || input.closePct < 1 || input.closePct > 100) {
+        throw marketFail("INVALID_AMOUNT", "closePct must be between 1 and 100")
+      }
+      closeSizeCents = input.closePct >= 100 ? totalSizeCents : Math.floor((totalSizeCents * input.closePct) / 100)
+      if (closeSizeCents <= 0) {
+        throw marketFail("ORDER_TOO_SMALL", "Partial close size is zero")
+      }
     }
-    const indexPriceCents = toInt(marketRows[0]!.index_price_cents)
-    const markPriceCents = toInt(marketRows[0]!.mark_price_cents)
-    const specPos = toSpecPerpPosition(pos)
-    const grossCents = clampMin0(positionEquityAtMark(specPos, markPriceCents))
-    const rawFee = canonicalTradingFee(specPos.sizeCents)
-    const collectedFeeCents = minInt(rawFee, grossCents)
-    const netCreditCents = clampMin0(grossCents - rawFee)
-    const realizedPnlCents = netCreditCents - specPos.marginCents
-    const closedRows = try tx.query(
-      `UPDATE feed_perp_positions
-       SET status = 'closed', realized_pnl_cents = $2, closed_at = $3
-       WHERE id = $1 AND status = 'open'
-       RETURNING id`,
-      [input.positionId, realizedPnlCents, now]
-    )
-    if (closedRows.length === 0) {
-      throw marketFail("POSITION_CLOSED", "Position is already closed")
-    }
-    try recomputePerpMarketOi(tx, ticker, indexPriceCents, now)
-    const holderKind: MarketActorKind = requiredText(pos.holder_kind) === "npc" ? "npc" : "user"
-    const balanceAfterCents = try creditActorBalance(tx, input.ownerId, holderKind, netCreditCents, collectedFeeCents, now)
-    const tradeId = newMarketId()
-    const side: PerpSide = specPos.perpSide === "Short" ? "short" : "long"
-    try insertTradeRecord(tx, {
-      tradeId,
-      traderId: input.ownerId,
-      traderKind: holderKind,
-      marketKind: "perp",
-      marketRef: ticker,
-      side: side === "long" ? "close_long" : "close_short",
-      notionalCents: specPos.sizeCents,
-      feeCents: collectedFeeCents,
-      sharesOrSize: specPos.sizeCents,
-      priceCents: markPriceCents,
+    const market = try lockPerpMarket(tx, requiredText(pos.ticker))
+    const settled = try settlePerpCloseSliceTx(tx, {
+      posRow: pos,
+      market,
+      closeSizeCents,
+      ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
       viaClientName,
-      createdAt: now
+      now
     })
-    try insertLedgerEntry(tx, {
-      ledgerId: newMarketId(),
-      accountId: input.ownerId,
-      kind: "perp_close",
-      deltaCents: netCreditCents,
-      balanceAfterCents,
-      refId: tradeId,
-      createdAt: now
-    })
-    return {
-      tradeId,
-      positionId: input.positionId,
-      ticker,
-      side,
-      sizeCents: specPos.sizeCents,
-      exitPriceCents: markPriceCents,
-      netCreditCents,
-      feeCents: collectedFeeCents,
-      realizedPnlCents,
-      balanceAfterCents,
-      closedAt: now
-    }
+    return settled.receipt
   })
 }
 
 export effect function liquidateEligiblePositions(): LiquidationSweepSummary!(MarketFailure | StoreFailure)!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
+  const summary = try store.transaction(effect (tx: Tx) => {
+    const marketRows = try tx.query(
+      "SELECT ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents FROM feed_perp_markets ORDER BY ticker ASC FOR UPDATE"
+    )
+    const liveMarkets = new Map<string, { indexPriceCents: number; markPriceCents: number; longOiCents: number; shortOiCents: number }>()
+    for (const row of marketRows) {
+      liveMarkets.set(requiredText(row.ticker), {
+        indexPriceCents: toInt(row.index_price_cents),
+        markPriceCents: toInt(row.mark_price_cents),
+        longOiCents: toInt(row.long_oi_cents),
+        shortOiCents: toInt(row.short_oi_cents)
+      })
+    }
     const rows = try tx.query(
-      `SELECT p.*, m.index_price_cents, m.mark_price_cents
-       FROM feed_perp_positions p
-       JOIN feed_perp_markets m ON m.ticker = p.ticker
-       WHERE p.status = 'open'
-       ORDER BY p.ticker ASC, p.created_at ASC, p.id ASC
-       FOR UPDATE OF p, m`
+      `SELECT *
+       FROM feed_perp_positions
+       WHERE status = 'open'
+       ORDER BY ticker ASC, created_at ASC, id ASC
+       FOR UPDATE`
     )
     const liquidatedIds: Array<string> = []
-    const touchedTickers = new Map<string, number>()
+    const liquidatedPositions: Array<LiquidatedPositionInfo> = []
     for (const row of rows) {
-      const specPos = toSpecPerpPosition(row)
-      const markPriceCents = toInt(row.mark_price_cents)
-      const indexPriceCents = toInt(row.index_price_cents)
-      const equity = positionEquityAtMark(specPos, markPriceCents)
-      if (equity > maintenanceMarginCents(specPos.sizeCents)) continue
-      const posId = requiredText(row.id)
       const ticker = requiredText(row.ticker)
-      const payoutCents = clampMin0(equity)
-      const realizedPnlCents = payoutCents - specPos.marginCents
+      const liveMarket = liveMarkets.get(ticker)
+      if (liveMarket === undefined) continue
+      const specPos = toSpecPerpPosition(row)
+      const equityBefore = positionEquityAtMark(specPos, liveMarket.markPriceCents)
+      if (equityBefore > maintenanceMarginCents(specPos.sizeCents)) continue
+      const posId = requiredText(row.id)
+      const side: PerpSide = specPos.perpSide === "Short" ? "short" : "long"
+      const nextLongOi = side === "long" ? Math.max(0, liveMarket.longOiCents - specPos.sizeCents) : liveMarket.longOiCents
+      const nextShortOi = side === "short" ? Math.max(0, liveMarket.shortOiCents - specPos.sizeCents) : liveMarket.shortOiCents
+      const postLiqMark = computeMarkPriceCents(liveMarket.indexPriceCents, nextLongOi, nextShortOi)
+      const payoutCents = clampMin0(positionEquityAtMark(specPos, postLiqMark))
+      const openFeeCents = canonicalTradingFee(specPos.sizeCents)
+      const realizedPnlCents = payoutCents - specPos.marginCents - openFeeCents
       const updated = try tx.query(
         `UPDATE feed_perp_positions
-         SET status = 'liquidated', realized_pnl_cents = $2, closed_at = $3
+         SET status = 'liquidated', realized_pnl_cents = realized_pnl_cents + $2, closed_at = $3
          WHERE id = $1 AND status = 'open'
          RETURNING id`,
         [posId, realizedPnlCents, now]
       )
       if (updated.length === 0) continue
+      try updatePerpMarketOiAndMark(tx, ticker, liveMarket.indexPriceCents, nextLongOi, nextShortOi, now)
+      liveMarket.longOiCents = nextLongOi
+      liveMarket.shortOiCents = nextShortOi
+      liveMarket.markPriceCents = postLiqMark
       const holderKind: MarketActorKind = requiredText(row.holder_kind) === "npc" ? "npc" : "user"
       const balanceAfterCents = try creditActorBalance(tx, specPos.owner, holderKind, payoutCents, 0, now)
       const tradeId = newMarketId()
@@ -729,11 +1425,12 @@ export effect function liquidateEligiblePositions(): LiquidationSweepSummary!(Ma
         traderKind: holderKind,
         marketKind: "perp",
         marketRef: ticker,
-        side: specPos.perpSide === "Short" ? "liquidate_short" : "liquidate_long",
+        side: side === "short" ? "liquidate_short" : "liquidate_long",
         notionalCents: specPos.sizeCents,
         feeCents: 0,
         sharesOrSize: specPos.sizeCents,
-        priceCents: markPriceCents,
+        priceCents: postLiqMark,
+        realizedPnlCents,
         viaClientName: null,
         createdAt: now
       })
@@ -748,18 +1445,61 @@ export effect function liquidateEligiblePositions(): LiquidationSweepSummary!(Ma
           createdAt: now
         })
       }
+      try insertPriceHistory(tx, {
+        marketKind: "perp",
+        marketRef: ticker,
+        priceCents: liveMarket.indexPriceCents,
+        markPriceCents: postLiqMark,
+        volumeCents: specPos.sizeCents,
+        recordedAt: now
+      })
+      if (holderKind === "user") {
+        const direction = side === "long" ? "Long" : "Short"
+        try insertMarketNotification(tx, {
+          id: `perp_liquidated:${posId}`,
+          accountId: specPos.owner,
+          kind: "perp_liquidated",
+          marketId: null,
+          title: `$${ticker} ${direction} position liquidated`,
+          body: `Your ${specPos.leverage}x $${ticker} ${direction} position was liquidated at ${(postLiqMark / 100).toFixed(2)} pts. Remaining equity credited: ${(payoutCents / 100).toFixed(2)} pts.`,
+          createdAt: now
+        })
+      }
       liquidatedIds.push(posId)
-      touchedTickers.set(ticker, indexPriceCents)
-    }
-    for (const [ticker, indexPriceCents] of touchedTickers.entries()) {
-      try recomputePerpMarketOi(tx, ticker, indexPriceCents, now)
+      liquidatedPositions.push({
+        positionId: posId,
+        holderId: specPos.owner,
+        holderKind,
+        ticker,
+        side,
+        sizeCents: specPos.sizeCents,
+        leverage: specPos.leverage,
+        liquidationMarkPriceCents: postLiqMark,
+        payoutCents,
+        realizedPnlCents
+      })
     }
     return {
       checkedCount: rows.length,
       liquidatedCount: liquidatedIds.length,
-      liquidatedPositionIds: liquidatedIds
+      liquidatedPositionIds: liquidatedIds,
+      liquidatedPositions
     }
   })
+  for (const liq of summary.liquidatedPositions) {
+    try maybePublishMarketPerpEvent({
+      type: "market.perp",
+      action: "liquidate",
+      actorId: liq.holderId,
+      ticker: liq.ticker,
+      side: liq.side,
+      sizeCents: liq.sizeCents,
+      leverage: liq.leverage,
+      positionId: liq.positionId,
+      markPriceCents: liq.liquidationMarkPriceCents
+    })
+  }
+  return summary
 }
 
 export effect function accruePerpFunding(nowMs?: number): FundingAccrualSummary!(MarketFailure | StoreFailure)!Store {

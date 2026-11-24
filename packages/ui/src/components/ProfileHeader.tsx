@@ -69,6 +69,10 @@ export type ProfileHeaderProps = Omit<ComponentProps<"section">, "children"> & {
   onFollowingClick?: () => void;
   /** Opens the Followers list modal or tab. */
   onFollowersClick?: () => void;
+  /** Alias for `onFollowingClick`. */
+  onOpenFollowing?: () => void;
+  /** Alias for `onFollowersClick`. */
+  onOpenFollowers?: () => void;
   /** Shows loading state on the primary follow/edit button. */
   loading?: boolean;
   /** Disables profile action buttons. */
@@ -88,6 +92,8 @@ export function ProfileHeader({
   onEditProfile,
   onFollowingClick,
   onFollowersClick,
+  onOpenFollowing,
+  onOpenFollowers,
   loading = false,
   disabled = false,
   className,
@@ -96,6 +102,8 @@ export function ProfileHeader({
   const isGame = mode === "GameMode";
   const blocked = disabled || loading;
   const hasMenu = Boolean(onCopyLink || (!profile.isOwnProfile && (onMuteToggle || onBlockToggle || onReport)));
+  const handleFollowing = onOpenFollowing ?? onFollowingClick;
+  const handleFollowers = onOpenFollowers ?? onFollowersClick;
 
   return (
     <section aria-label={`${profile.displayName} profile`} className={cn("border-b border-border bg-background text-foreground", className)} {...props}>
@@ -216,11 +224,11 @@ export function ProfileHeader({
         ) : null}
 
         <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
-          {onFollowingClick ? (
+          {handleFollowing ? (
             <button
               type="button"
               disabled={blocked}
-              onClick={() => !blocked && onFollowingClick()}
+              onClick={() => !blocked && handleFollowing()}
               className={cn(focusRing, inactive, "rounded-sm hover:underline")}
             >
               <strong className="font-bold text-foreground tabular-nums">{profile.followingCount}</strong> Following
@@ -230,11 +238,11 @@ export function ProfileHeader({
               <strong className="font-bold text-foreground tabular-nums">{profile.followingCount}</strong> Following
             </span>
           )}
-          {onFollowersClick ? (
+          {handleFollowers ? (
             <button
               type="button"
               disabled={blocked}
-              onClick={() => !blocked && onFollowersClick()}
+              onClick={() => !blocked && handleFollowers()}
               className={cn(focusRing, inactive, "rounded-sm hover:underline")}
             >
               <strong className="font-bold text-foreground tabular-nums">{profile.followersCount}</strong> Followers

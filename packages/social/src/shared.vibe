@@ -413,6 +413,73 @@ export effect function loadSubjectProfilesMapTx(
   return profiles
 }
 
+export effect function loadProfilesByIdsTx(
+  tx: Tx,
+  ids: ReadonlyArray<string>
+): Map<string, SubjectProfile>!StoreFailure {
+  const uniqueIds = [...new Set(ids.filter((id) => id !== ""))]
+  const profiles = new Map<string, SubjectProfile>()
+  if (uniqueIds.length === 0) return profiles
+  const userRows = try tx.query(
+    "SELECT account_id, handle, display_name, avatar_url, banner_url FROM feed_accounts WHERE account_id = ANY($1)",
+    [uniqueIds]
+  )
+  for (const row of userRows) {
+    const id = toText(row.account_id) ?? ""
+    if (id !== "") {
+      profiles.set(id, {
+        id,
+        kind: "user",
+        handle: toText(row.handle) ?? id,
+        displayName: toText(row.display_name) ?? (toText(row.handle) ?? id),
+        avatarUrl: toText(row.avatar_url) ?? null,
+        bannerUrl: toText(row.banner_url) ?? null
+      })
+    }
+  }
+  const missingAfterUsers = uniqueIds.filter((id) => !profiles.has(id))
+  if (missingAfterUsers.length > 0) {
+    const orgRows = try tx.query(
+      "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
+      [missingAfterUsers]
+    )
+    for (const row of orgRows) {
+      const id = toText(row.id) ?? ""
+      if (id !== "") {
+        profiles.set(id, {
+          id,
+          kind: "org",
+          handle: id,
+          displayName: toText(row.name) ?? id,
+          avatarUrl: toText(row.image_url) ?? resolveOrgLogoUrl(id),
+          bannerUrl: toText(row.banner_url) ?? resolveOrgBannerUrl(id)
+        })
+      }
+    }
+  }
+  const missingAfterOrgs = uniqueIds.filter((id) => !profiles.has(id))
+  if (missingAfterOrgs.length > 0) {
+    const npcRows = try tx.query(
+      "SELECT id, username, name, profile_image_url, profile_banner_url FROM feed_actors WHERE id = ANY($1) AND id NOT LIKE 'test-%'",
+      [missingAfterOrgs]
+    )
+    for (const row of npcRows) {
+      const id = toText(row.id) ?? ""
+      if (id !== "") {
+        profiles.set(id, {
+          id,
+          kind: "npc",
+          handle: toText(row.username) ?? id,
+          displayName: toText(row.name) ?? id,
+          avatarUrl: toText(row.profile_image_url) ?? resolveActorAvatarUrl(id),
+          bannerUrl: toText(row.profile_banner_url) ?? resolveActorBannerUrl(id)
+        })
+      }
+    }
+  }
+  return profiles
+}
+
 export effect function emitAfterCommit(events: ReadonlyArray<FeedRealtimeEvent>): void!! {
   for (const event of events) {
     try publishFeedEvent(event)

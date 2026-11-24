@@ -44,6 +44,10 @@ export type JoinSheetProps = {
   turnstileSiteKey?: string;
   /** Optional local development SMS code surfaced as a quick-fill helper on the verify step. */
   devSmsCode?: string;
+  /** Shows a localnet/loopback dev SMS code autofill button on the verification step when `onFillDevCode` is provided. */
+  devSmsCodeEnabled?: boolean;
+  /** Fetches or fills the localnet/loopback SMS code; returning a 6-digit string populates the input automatically. */
+  onFillDevCode?: (phone: string) => Promise<string | null | undefined> | string | null | undefined | void;
   /** Requests a 6-digit SMS code for an allowlisted non-VoIP phone number. */
   onRequestSmsCode?: (payload: { country: string; phone: string; turnstileToken?: string }) => void;
   /** Verifies the 6-digit SMS autofill code. */
@@ -123,6 +127,8 @@ function JoinPhoneDoor({
   loading,
   turnstileSiteKey,
   devSmsCode,
+  devSmsCodeEnabled,
+  onFillDevCode,
   onStepChange,
   onRequestSmsCode,
   onVerifySmsCode,
@@ -134,6 +140,8 @@ function JoinPhoneDoor({
   readonly loading: boolean;
   readonly turnstileSiteKey?: string;
   readonly devSmsCode?: string;
+  readonly devSmsCodeEnabled?: boolean;
+  readonly onFillDevCode?: (phone: string) => Promise<string | null | undefined> | string | null | undefined | void;
   readonly onStepChange: (next: JoinPhoneStep) => void;
   readonly onRequestSmsCode?: (payload: { country: string; phone: string; turnstileToken?: string }) => void;
   readonly onVerifySmsCode?: (code: string) => void;
@@ -176,11 +184,27 @@ function JoinPhoneDoor({
     onStepChange("profile");
   };
 
+  const handleFillDevCode = async () => {
+    if (blocked) return;
+    if (devSmsCode) {
+      setSmsCode(devSmsCode.replace(/\D/g, "").slice(0, 6));
+      return;
+    }
+    if (!onFillDevCode) return;
+    const result = await onFillDevCode(phone.trim());
+    if (typeof result === "string") {
+      const digits = result.replace(/\D/g, "").slice(0, 6);
+      if (digits.length > 0) setSmsCode(digits);
+    }
+  };
+
   const handleCompleteProfile = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (blocked || !username.trim() || !ageConfirmed || !acceptedTerms) return;
     onCompleteProfile?.({ username: username.trim(), ageConfirmed, acceptedTerms });
   };
+
+  const showDevCodeHelper = Boolean(devSmsCode) || (Boolean(devSmsCodeEnabled) && Boolean(onFillDevCode));
 
   if (step === "entry") {
     return (
@@ -239,14 +263,16 @@ function JoinPhoneDoor({
             <ArrowLeft aria-hidden className="size-3.5" />
             Change number
           </button>
-          {devSmsCode ? (
+          {showDevCodeHelper ? (
             <Button
               type="button"
               variant="outline"
               size="sm"
               shape="pill"
               disabled={blocked}
-              onClick={() => setSmsCode(devSmsCode.replace(/\D/g, "").slice(0, 6))}
+              onClick={() => {
+                void handleFillDevCode();
+              }}
             >
               Fill dev code
             </Button>
@@ -386,6 +412,8 @@ export function JoinSheet({
   launchers = defaultAgentLaunchers,
   turnstileSiteKey,
   devSmsCode,
+  devSmsCodeEnabled = false,
+  onFillDevCode,
   onRequestSmsCode,
   onVerifySmsCode,
   onResendSmsCode,
@@ -461,6 +489,8 @@ export function JoinSheet({
                   loading={loading}
                   turnstileSiteKey={turnstileSiteKey}
                   devSmsCode={devSmsCode}
+                  devSmsCodeEnabled={devSmsCodeEnabled}
+                  onFillDevCode={onFillDevCode}
                   onStepChange={setStep}
                   onRequestSmsCode={onRequestSmsCode}
                   onVerifySmsCode={onVerifySmsCode}

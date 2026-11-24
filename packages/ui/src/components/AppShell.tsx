@@ -1,12 +1,12 @@
 import type { ComponentProps, ReactNode } from "react";
-import { Bell, Compass, HelpCircle, LineChart, MessageSquare, Settings, TrendingUp, User } from "lucide-react";
+import { Bell, Compass, HelpCircle, LineChart, MessageSquare, Settings, TrendingUp, Trophy, User } from "lucide-react";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import { Badge } from "./Badge.tsx";
 import { BrandMark, HouseIcon } from "./BrandMark.tsx";
 import { Button } from "./Button.tsx";
 import type { UiMode } from "./ModeToggle.tsx";
 
-export type AppNavRoute = "Home" | "Explore" | "Markets" | "Chats" | "Notifications" | "Profile" | "Settings" | "HowToPlay";
+export type AppNavRoute = "Home" | "Explore" | "Markets" | "Leaderboard" | "Chats" | "Notifications" | "Profile" | "Settings" | "HowToPlay";
 
 export type AppShellLayout = "social" | "wide";
 
@@ -26,7 +26,7 @@ export interface TrendingItem {
 export type AppShellProps = Omit<ComponentProps<"div">, "children"> & {
   /** Active navigation route highlighted in both desktop rail and mobile bottom bar. */
   route: AppNavRoute;
-  /** Current presentation mode (`SocialMode` hides Markets, balances, and financial movers). */
+  /** Current presentation mode (`SocialMode` hides Markets, Leaderboard, balances, and financial movers). */
   mode: UiMode;
   /** Whether a player session is active; hides auth-only destinations when false. */
   signedIn: boolean;
@@ -76,15 +76,16 @@ export type AppShellProps = Omit<ComponentProps<"div">, "children"> & {
 
 type NavIcon = typeof Compass;
 
-const navConfig: { id: AppNavRoute; label: string; icon?: NavIcon; authOnly?: boolean; gameOnly?: boolean; mobile?: boolean }[] = [
-  { id: "Home", label: "Home", mobile: true },
-  { id: "Explore", label: "Explore", icon: Compass, mobile: true },
-  { id: "Markets", label: "Markets", icon: LineChart, gameOnly: true, mobile: true },
-  { id: "Chats", label: "Chats", icon: MessageSquare, authOnly: true, mobile: true },
-  { id: "Notifications", label: "Notifications", icon: Bell, authOnly: true, mobile: true },
-  { id: "Profile", label: "Profile", icon: User, authOnly: true },
-  { id: "Settings", label: "Settings", icon: Settings, authOnly: true },
-  { id: "HowToPlay", label: "How to Play", icon: HelpCircle, mobile: true },
+const navConfig: { id: AppNavRoute; label: string; href: string; icon?: NavIcon; authOnly?: boolean; gameOnly?: boolean; mobile?: boolean }[] = [
+  { id: "Home", label: "Home", href: "/", mobile: true },
+  { id: "Explore", label: "Explore", href: "/explore", icon: Compass, mobile: true },
+  { id: "Markets", label: "Markets", href: "/markets", icon: LineChart, gameOnly: true, mobile: true },
+  { id: "Leaderboard", label: "Leaderboard", href: "/leaderboard", icon: Trophy, gameOnly: true, mobile: true },
+  { id: "Chats", label: "Chats", href: "/chats", icon: MessageSquare, authOnly: true, mobile: true },
+  { id: "Notifications", label: "Notifications", href: "/notifications", icon: Bell, authOnly: true, mobile: true },
+  { id: "Profile", label: "Profile", href: "/profile", icon: User, authOnly: true },
+  { id: "Settings", label: "Settings", href: "/settings", icon: Settings, authOnly: true },
+  { id: "HowToPlay", label: "How to Play", href: "/how-to-play", icon: HelpCircle, mobile: true },
 ];
 
 type NavItemConfig = (typeof navConfig)[number];
@@ -129,6 +130,7 @@ function NavItemButton({
     <button
       type="button"
       disabled={disabled}
+      data-href={item.href}
       aria-current={active ? "page" : undefined}
       onClick={() => {
         if (!disabled) onNavigate?.(item.id);
@@ -138,7 +140,7 @@ function NavItemButton({
         inactive,
         isRail
           ? "group flex items-center justify-center rounded-full px-3 py-2.5 text-lg transition-colors duration-fast hover:bg-accent lg:w-fit lg:justify-start lg:px-3.5"
-          : "relative flex min-w-12 flex-col items-center justify-center gap-0.5 rounded-full px-2.5 py-1.5 text-[11px] font-medium",
+          : "relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-full px-1.5 py-1.5 text-[11px] font-medium",
         isRail
           ? active
             ? "font-bold text-foreground"
@@ -162,7 +164,7 @@ function NavItemButton({
             <NavIconMark item={item} active={active} className="size-5" />
             <UnreadDot count={count} />
           </span>
-          <span className="sr-only sm:not-sr-only">{item.label}</span>
+          <span className="sr-only max-w-full truncate sm:not-sr-only">{item.label}</span>
         </>
       )}
     </button>
@@ -249,7 +251,7 @@ export function AppShell({
   const isSocial = mode === "SocialMode";
   const isWide = layout === "wide";
   const visibleItems = navConfig.filter((item) => (!item.authOnly || signedIn) && (!item.gameOnly || !isSocial));
-  const mobileItems = visibleItems.filter((item) => item.mobile).slice(0, 5);
+  const mobileItems = visibleItems.filter((item) => item.mobile).slice(0, 6);
   const visibleTrending = trendingItems.filter((item) => !isSocial || !item.financial);
   const resolvedRightRail = rightRailSlot ?? rightRail;
   const badgeCount = (id: AppNavRoute) => (id === "Notifications" ? unreadNotifications : id === "Chats" ? unreadChats : 0);

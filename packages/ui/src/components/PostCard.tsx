@@ -52,10 +52,12 @@ export interface PostCardData {
   content: string;
   /** Optional MCP client attribution (`via Claude`, etc.). */
   viaClientName?: string;
-  /** Parent handle when this post is a unified single-model reply. */
+  /** Parent handle without `@` when this post is a unified single-model reply. */
   replyToHandle?: string;
   /** Optional repost header metadata. */
   repostedBy?: { name: string; handle: string };
+  /** Reposter handle without `@` when rendered as a repost. */
+  repostedByHandle?: string;
   /** Optional embedded quote post. */
   quotePost?: PostQuotePreview;
   /** Optional trade/market embed hidden automatically in `SocialMode`. */
@@ -95,7 +97,7 @@ export type PostCardProps = Omit<ComponentProps<"article">, "children"> & {
   onRepost?: (postId: string) => void;
   /** Called when Reply is clicked. */
   onReply?: (postId: string) => void;
-  /** Called when Quote is clicked. */
+  /** Called when Quote is clicked; button is hidden when omitted. */
   onQuote?: (postId: string) => void;
   /** Called when an embedded quote card is clicked. */
   onQuoteClick?: (quotePostId: string) => void;
@@ -105,8 +107,12 @@ export type PostCardProps = Omit<ComponentProps<"article">, "children"> & {
   onAuthorClick?: (handle: string) => void;
   /** Called when an inline `@mention` is clicked. */
   onMentionClick?: (handle: string) => void;
+  /** Alias for `onMentionClick` (also used for reply/repost handles). */
+  onSelectHandle?: (handle: string) => void;
   /** Called when an inline `#hashtag` is clicked. */
   onHashtagClick?: (tag: string) => void;
+  /** Alias for `onHashtagClick`. */
+  onSelectTag?: (tag: string) => void;
   /** Called when a cashtag or market badge is clicked in `GameMode`. */
   onMarketClick?: (ticker: string) => void;
   /** Called when Follow/Unfollow author is chosen from the menu. */
@@ -117,7 +123,9 @@ export type PostCardProps = Omit<ComponentProps<"article">, "children"> & {
   onBlockAuthor?: (handle: string) => void;
   /** Called when Report is chosen from the menu. */
   onReport?: (postId: string) => void;
-  /** Called when Delete is chosen from the menu on an own post. */
+  /** Enables author delete controls when `onDelete` is provided (defaults to `Boolean(post.isOwn)`). */
+  canDelete?: boolean;
+  /** Called when Delete is clicked by the post author. */
   onDelete?: (postId: string) => void;
   /** Disables interactive actions. */
   disabled?: boolean;
@@ -126,14 +134,17 @@ export type PostCardProps = Omit<ComponentProps<"article">, "children"> & {
 function PostOverflowMenu({
   post,
   disabled,
+  showDelete,
   onFollowAuthor,
   onShare,
   onMuteAuthor,
   onBlockAuthor,
   onReport,
   onDelete,
-}: Pick<PostCardProps, "post" | "disabled" | "onFollowAuthor" | "onShare" | "onMuteAuthor" | "onBlockAuthor" | "onReport" | "onDelete">) {
-  const hasMenu = Boolean(onFollowAuthor || onShare || onMuteAuthor || onBlockAuthor || onReport || (post.isOwn && onDelete));
+}: Pick<PostCardProps, "post" | "disabled" | "onFollowAuthor" | "onShare" | "onMuteAuthor" | "onBlockAuthor" | "onReport" | "onDelete"> & {
+  readonly showDelete: boolean;
+}) {
+  const hasMenu = Boolean(onFollowAuthor || onShare || onMuteAuthor || onBlockAuthor || onReport || showDelete);
   if (!hasMenu) return null;
 
   return (
@@ -183,7 +194,7 @@ function PostOverflowMenu({
             </DropdownMenuItem>
           </>
         ) : null}
-        {post.isOwn && onDelete ? (
+        {showDelete && onDelete ? (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem destructive onSelect={() => !disabled && onDelete(post.id)}>
@@ -255,16 +266,143 @@ function QuoteEmbed({
         <TaggedText
           text={quote.content}
           showCashtags={isGame}
-          onMentionClick={onMentionClick}
-          onHashtagClick={onHashtagClick}
-          onCashtagClick={isGame ? onMarketClick : undefined}
+          onMentionClick={disabled ? undefined : onMentionClick}
+          onHashtagClick={disabled ? undefined : onHashtagClick}
+          onCashtagClick={isGame && !disabled ? onMarketClick : undefined}
         />
       </p>
     </div>
   );
 }
 
-/** X-style social post row supporting verified character marks, tagged text, quotes, market cards, and overflow moderation actions. */
+function PostActionBar({
+  post,
+  isDetail,
+  disabled,
+  showDelete,
+  onReply,
+  onRepost,
+  onLike,
+  onQuote,
+  onShare,
+  onDelete,
+}: {
+  readonly post: PostCardData;
+  readonly isDetail: boolean;
+  readonly disabled: boolean;
+  readonly showDelete: boolean;
+  readonly onReply?: (postId: string) => void;
+  readonly onRepost?: (postId: string) => void;
+  readonly onLike?: (postId: string) => void;
+  readonly onQuote?: (postId: string) => void;
+  readonly onShare?: (postId: string) => void;
+  readonly onDelete?: (postId: string) => void;
+}) {
+  return (
+    <div className={cn("flex items-center justify-between pt-1 text-xs text-muted-foreground", isDetail && "mt-2 border-t border-border pt-2.5")}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!disabled) onReply?.(post.id);
+        }}
+        className={cn(focusRing, inactive, "group -ml-1.5 inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
+      >
+        <MessageCircle aria-hidden className="size-4" />
+        <span className="sr-only">Reply</span>
+        {post.replyCount > 0 ? <span className="tabular-nums">{post.replyCount}</span> : null}
+      </button>
+
+      <button
+        type="button"
+        disabled={disabled}
+        aria-pressed={Boolean(post.reposted)}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!disabled) onRepost?.(post.id);
+        }}
+        className={cn(
+          focusRing,
+          inactive,
+          "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-ok/10 hover:text-ok",
+          post.reposted && "text-ok",
+        )}
+      >
+        <Repeat2 aria-hidden className="size-4" />
+        <span className="sr-only">Repost</span>
+        {post.repostCount > 0 ? <span className="tabular-nums">{post.repostCount}</span> : null}
+      </button>
+
+      <button
+        type="button"
+        disabled={disabled}
+        aria-pressed={Boolean(post.liked)}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!disabled) onLike?.(post.id);
+        }}
+        className={cn(
+          focusRing,
+          inactive,
+          "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-destructive/10 hover:text-destructive",
+          post.liked && "text-destructive",
+        )}
+      >
+        <Heart aria-hidden className="size-4" fill={post.liked ? "currentColor" : "none"} />
+        <span className="sr-only">Like</span>
+        {post.likeCount > 0 ? <span className="tabular-nums">{post.likeCount}</span> : null}
+      </button>
+
+      {onQuote ? (
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label="Quote post"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!disabled) onQuote(post.id);
+          }}
+          className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
+        >
+          <Quote aria-hidden className="size-4" />
+        </button>
+      ) : null}
+
+      {showDelete && onDelete ? (
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label="Delete post"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!disabled) onDelete(post.id);
+          }}
+          className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-destructive/10 hover:text-destructive")}
+        >
+          <Trash2 aria-hidden className="size-4" />
+        </button>
+      ) : null}
+
+      {onShare ? (
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label="Share post"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!disabled) onShare(post.id);
+          }}
+          className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
+        >
+          <Share aria-hidden className="size-4" />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** X-style social post row supporting verified character marks, tagged text, quotes, repost banners, delete action, market cards, and overflow moderation actions. */
 export function PostCard({
   post,
   mode = "GameMode",
@@ -278,12 +416,15 @@ export function PostCard({
   onShare,
   onAuthorClick,
   onMentionClick,
+  onSelectHandle,
   onHashtagClick,
+  onSelectTag,
   onMarketClick,
   onFollowAuthor,
   onMuteAuthor,
   onBlockAuthor,
   onReport,
+  canDelete,
   onDelete,
   disabled = false,
   className,
@@ -292,6 +433,10 @@ export function PostCard({
   const isGame = mode === "GameMode";
   const isDetail = variant === "detail";
   const clickableRow = Boolean(onOpen && !disabled && !isDetail);
+  const resolvedMention = onSelectHandle ?? onMentionClick ?? onAuthorClick;
+  const resolvedHashtag = onSelectTag ?? onHashtagClick;
+  const showDelete = Boolean(onDelete) && (canDelete !== undefined ? canDelete : Boolean(post.isOwn));
+  const repostHandle = post.repostedBy?.handle ?? post.repostedByHandle;
 
   return (
     <article
@@ -304,10 +449,27 @@ export function PostCard({
       )}
       {...props}
     >
-      {post.repostedBy ? (
+      {repostHandle ? (
         <div className="flex items-center gap-2 pl-8 text-xs font-medium text-muted-foreground">
           <Repeat2 aria-hidden className="size-3.5" />
-          <span>{post.repostedBy.name} reposted</span>
+          <span>
+            Reposted by{" "}
+            {resolvedMention ? (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!disabled) resolvedMention(repostHandle);
+                }}
+                className={cn(focusRing, inactive, "rounded-sm font-medium text-foreground hover:underline")}
+              >
+                {post.repostedBy?.name ? `${post.repostedBy.name} (@${repostHandle})` : `@${repostHandle}`}
+              </button>
+            ) : (
+              <span>{post.repostedBy?.name ? `${post.repostedBy.name} (@${repostHandle})` : `@${repostHandle}`}</span>
+            )}
+          </span>
         </div>
       ) : null}
 
@@ -364,6 +526,7 @@ export function PostCard({
             <PostOverflowMenu
               post={post}
               disabled={disabled}
+              showDelete={showDelete}
               onFollowAuthor={onFollowAuthor}
               onShare={onShare}
               onMuteAuthor={onMuteAuthor}
@@ -375,7 +538,22 @@ export function PostCard({
 
           {post.replyToHandle ? (
             <p className="text-xs text-muted-foreground">
-              Replying to <span className="text-primary">@{post.replyToHandle}</span>
+              Replying to{" "}
+              {resolvedMention ? (
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!disabled) resolvedMention(post.replyToHandle!);
+                  }}
+                  className={cn(focusRing, inactive, "rounded-sm font-medium text-primary hover:underline")}
+                >
+                  @{post.replyToHandle}
+                </button>
+              ) : (
+                <span className="text-primary">@{post.replyToHandle}</span>
+              )}
             </p>
           ) : null}
 
@@ -383,9 +561,9 @@ export function PostCard({
             <TaggedText
               text={post.content}
               showCashtags={isGame}
-              onMentionClick={onMentionClick ?? onAuthorClick}
-              onHashtagClick={onHashtagClick}
-              onCashtagClick={isGame ? onMarketClick : undefined}
+              onMentionClick={disabled ? undefined : resolvedMention}
+              onHashtagClick={disabled ? undefined : resolvedHashtag}
+              onCashtagClick={isGame && !disabled ? onMarketClick : undefined}
             />
           </p>
 
@@ -395,8 +573,8 @@ export function PostCard({
               isGame={isGame}
               disabled={disabled}
               onQuoteClick={onQuoteClick}
-              onMentionClick={onMentionClick ?? onAuthorClick}
-              onHashtagClick={onHashtagClick}
+              onMentionClick={resolvedMention}
+              onHashtagClick={resolvedHashtag}
               onMarketClick={onMarketClick}
             />
           ) : null}
@@ -430,87 +608,18 @@ export function PostCard({
             </button>
           ) : null}
 
-          <div className={cn("flex items-center justify-between pt-1 text-xs text-muted-foreground", isDetail && "mt-2 border-t border-border pt-2.5")}>
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!disabled) onReply?.(post.id);
-              }}
-              className={cn(focusRing, inactive, "group -ml-1.5 inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
-            >
-              <MessageCircle aria-hidden className="size-4" />
-              <span className="sr-only">Reply</span>
-              {post.replyCount > 0 ? <span className="tabular-nums">{post.replyCount}</span> : null}
-            </button>
-
-            <button
-              type="button"
-              disabled={disabled}
-              aria-pressed={Boolean(post.reposted)}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!disabled) onRepost?.(post.id);
-              }}
-              className={cn(
-                focusRing,
-                inactive,
-                "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-ok/10 hover:text-ok",
-                post.reposted && "text-ok",
-              )}
-            >
-              <Repeat2 aria-hidden className="size-4" />
-              <span className="sr-only">Repost</span>
-              {post.repostCount > 0 ? <span className="tabular-nums">{post.repostCount}</span> : null}
-            </button>
-
-            <button
-              type="button"
-              disabled={disabled}
-              aria-pressed={Boolean(post.liked)}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!disabled) onLike?.(post.id);
-              }}
-              className={cn(
-                focusRing,
-                inactive,
-                "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-destructive/10 hover:text-destructive",
-                post.liked && "text-destructive",
-              )}
-            >
-              <Heart aria-hidden className="size-4" fill={post.liked ? "currentColor" : "none"} />
-              <span className="sr-only">Like</span>
-              {post.likeCount > 0 ? <span className="tabular-nums">{post.likeCount}</span> : null}
-            </button>
-
-            <button
-              type="button"
-              disabled={disabled}
-              aria-label="Quote post"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!disabled) onQuote?.(post.id);
-              }}
-              className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
-            >
-              <Quote aria-hidden className="size-4" />
-            </button>
-
-            <button
-              type="button"
-              disabled={disabled}
-              aria-label="Share post"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!disabled) onShare?.(post.id);
-              }}
-              className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
-            >
-              <Share aria-hidden className="size-4" />
-            </button>
-          </div>
+          <PostActionBar
+            post={post}
+            isDetail={isDetail}
+            disabled={disabled}
+            showDelete={showDelete}
+            onReply={onReply}
+            onRepost={onRepost}
+            onLike={onLike}
+            onQuote={onQuote}
+            onShare={onShare}
+            onDelete={onDelete}
+          />
         </div>
       </div>
     </article>

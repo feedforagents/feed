@@ -9,10 +9,12 @@ import {
   assertAllowedChatKind,
   blockAccount,
   canDeliverRealtimeEventToViewer,
+  clearNotifications,
   createDirectChat,
   createNpcAlphaInvite,
   createPost,
   createUserGroupChat,
+  deleteGroupChat,
   deletePost,
   followAccount,
   getArticle,
@@ -30,23 +32,31 @@ import {
   listFeedPosts,
   listFollowers,
   listFollowing,
+  listModerationReports,
   listMutedAccounts,
   listNotifications,
+  listPendingGroupInvites,
   listTrending,
   markChatRead,
   markNotificationsRead,
   muteAccount,
   reactToMessage,
   realtimeBusLayer,
+  removeGroupMember,
+  renameGroupChat,
   reportTarget,
   repostPost,
+  resolveModerationReport,
   respondAlphaInvite,
+  respondGroupInvite,
   searchWorld,
   sendChatMessage,
+  transferGroupOwnership,
   unblockAccount,
   unfollowAccount,
   unlikePost,
   unmuteAccount,
+  unreactToMessage,
   unrepostPost,
   updateProfile
 } from "../src/index.vibe"
@@ -259,7 +269,7 @@ it.effect(
       rootLength: 280,
       threadCounts: [1, [reply.id], root.id, 0, 0],
       engagement: [1, 0, true, 1, 0, true],
-      deletedReply: { postId: reply.id, deleted: true },
+      deletedReply: { postId: reply.id, deleted: true, replyToPostId: root.id, parentReplyCount: 0 },
       gameRoot: {
         viaClientName: "Claude",
         marketId: "seed-market-1",
@@ -485,7 +495,11 @@ it.effect(
     const dmMsgsForAlice = try getChatMessages("alice", dm.id)
 
     const group = try createUserGroupChat("alice", "Trading Desk", ["bob"])
+    const bobGroupInvites = try listPendingGroupInvites("bob", "user_group")
+    const bobInviteId = bobGroupInvites.find((i) => i.chatId === group.id)?.id ?? ""
+    try respondGroupInvite({ accountId: "bob", inviteId: bobInviteId, accept: true })
     const invitedCarol = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    try respondGroupInvite({ accountId: "carol", inviteId: invitedCarol.inviteId, accept: true })
     const groupMsg = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: group.id, content: "Group signal" })
     const groupReact = try reactToMessage({ accountId: "carol", messageId: groupMsg.id, emoji: "👀" })
     const groupMsgs = try getChatMessages("alice", group.id)
@@ -539,7 +553,7 @@ it.effect(
         group.kind,
         group.title,
         group.memberCount,
-        invitedCarol.added,
+        invitedCarol.status,
         groupReact.added,
         groupMsgs[0]?.reactions,
         carolLeft.left,
@@ -579,8 +593,8 @@ it.effect(
       group: [
         "user_group",
         "Trading Desk",
-        2,
-        true,
+        1,
+        "pending",
         true,
         [{ emoji: "👀", count: 1, reactedByViewer: false }],
         true,
@@ -678,6 +692,13 @@ it.effect(
     const aliceSocialPage = try listNotifications("alice", 2, "social")
 
     const group = try createUserGroupChat("alice", "Filter Desk", ["bob", "carol", "dave"])
+    for (const memberId of ["bob", "carol", "dave"]) {
+      const pending = try listPendingGroupInvites(memberId, "user_group")
+      const invite = pending.find((i) => i.chatId === group.id)
+      if (invite !== undefined) {
+        try respondGroupInvite({ accountId: memberId, inviteId: invite.id, accept: true })
+      }
+    }
     try TestClock.adjust(Duration.seconds(1))
     const groupMsgDave = try sendChatMessage({ senderId: "dave", senderKind: "user", chatId: group.id, content: "Dave group message" })
     try TestClock.adjust(Duration.seconds(1))
@@ -774,6 +795,8 @@ it.effect(
     try blockAccount("alice", "carol")
     const ssePostBlockedDenied = try canDeliverRealtimeEventToViewer(store, postEvent, "alice")
     const groupSkippingBlocked = try createUserGroupChat("alice", "Skip Blocked Group", ["carol", "dave"])
+    const daveSkipGroupInvites = try listPendingGroupInvites("dave", "user_group")
+    const carolSkipGroupInvites = try listPendingGroupInvites("carol", "user_group")
     try unblockAccount("alice", "carol")
     try leaveGroupChat("dave", group.id)
     const sseChatNonMemberDenied = try canDeliverRealtimeEventToViewer(store, chatEvent, "dave")
@@ -810,7 +833,10 @@ it.effect(
         groupMsgsForAlice.map((m) => m.id),
         filteredGroupSummary?.lastMessagePreview,
         [groupMsgBob.id, groupMsgCarol.id].every((id) => !groupMsgsForAlice.some((m) => m.id === id)),
-        groupSkippingBlocked.members.map((m) => m.memberId).sort()
+        [
+          daveSkipGroupInvites.some((i) => i.chatId === groupSkippingBlocked.id),
+          carolSkipGroupInvites.some((i) => i.chatId === groupSkippingBlocked.id)
+        ]
       ],
       concurrency: [
         blockRace,
@@ -851,7 +877,7 @@ it.effect(
         [groupMsgDave.id],
         "Dave group message",
         true,
-        ["alice", "dave"]
+        [true, false]
       ],
       concurrency: [
         "accepted",
@@ -878,6 +904,341 @@ it.effect(
         false,
         false
       ]
+    }))
+  })
+)
+
+it.effect(
+  'top-level reply filtering, replyToHandle, profile replies, repost propagation, and 24h top/trending decay (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")',
+  () => withSocialWorld(effect {
+    try seedChatParticipants()
+    try followAccount("carol", "bob")
+
+    const alicePost = try createPost({
+      authorId: "alice",
+      authorKind: "user",
+      content: "Alice original alpha thesis #origtag $NVDAI",
+      ticker: "NVDAI"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+
+    const bobReply = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Bob reply under Alice #replyonly",
+      replyToPostId: alicePost.id
+    })
+    try TestClock.adjust(Duration.seconds(1))
+
+    try repostPost("bob", alicePost.id)
+
+    const latestPage = try listFeedPosts({ tab: "latest", viewerId: "carol", limit: 50 })
+    const topPageBefore = try listFeedPosts({ tab: "top", viewerId: "carol", limit: 50 })
+    const followingPage = try listFeedPosts({ tab: "following", viewerId: "carol", limit: 50 })
+    const bobProfilePosts = try listFeedPosts({ tab: "latest", authorHandle: "bob", viewerId: "carol", limit: 50 })
+    const bobProfileReplies = try listFeedPosts({ tab: "latest", authorHandle: "bob", onlyReplies: true, viewerId: "carol", limit: 50 })
+
+    const repostInFollowing = followingPage.items.find((p) => p.id === alicePost.id)
+    const repostInBobProfile = bobProfilePosts.items.find((p) => p.id === alicePost.id)
+    const replyEntry = bobProfileReplies.items.find((p) => p.id === bobReply.id)
+
+    try muteAccount("carol", "alice")
+    const followingWithMutedOriginal = try listFeedPosts({ tab: "following", viewerId: "carol", limit: 50 })
+    try unmuteAccount("carol", "alice")
+
+    try TestClock.adjust(Duration.hours(25))
+    const freshPost = try createPost({
+      authorId: "alice",
+      authorKind: "user",
+      content: "Fresh catalyst breaking now #freshtag $TSLAI",
+      ticker: "TSLAI"
+    })
+    try likePost("bob", freshPost.id)
+    const topPageAfter25h = try listFeedPosts({ tab: "top", viewerId: "carol", limit: 50 })
+    const trendingAfter25h = try listTrending(20, "game", "carol")
+
+    try check(() => assert.deepStrictEqual({
+      repliesExcludedFromTopLevel: [
+        latestPage.items.some((p) => p.id === bobReply.id),
+        topPageBefore.items.some((p) => p.id === bobReply.id),
+        followingPage.items.some((p) => p.id === bobReply.id),
+        bobProfilePosts.items.some((p) => p.id === bobReply.id),
+        latestPage.items.some((p) => p.id === "seed-post-12")
+      ],
+      replyHydration: replyEntry === undefined ? undefined : {
+        id: replyEntry.id,
+        replyToPostId: replyEntry.replyToPostId,
+        replyToHandle: replyEntry.replyToHandle,
+        replyToAuthorId: replyEntry.replyToAuthorId
+      },
+      repostFollowing: repostInFollowing === undefined ? undefined : {
+        id: repostInFollowing.id,
+        repostedByHandle: repostInFollowing.repostedByHandle,
+        repostedByName: repostInFollowing.repostedByName,
+        hasRepostedAt: repostInFollowing.repostedAt !== null
+      },
+      repostProfile: repostInBobProfile === undefined ? undefined : {
+        id: repostInBobProfile.id,
+        repostedByHandle: repostInBobProfile.repostedByHandle,
+        repostedByName: repostInBobProfile.repostedByName
+      },
+      mutedOriginalHiddenInRepost: followingWithMutedOriginal.items.some((p) => p.id === alicePost.id),
+      recencyTopAndTrending: [
+        topPageAfter25h.items.map((p) => p.id),
+        trendingAfter25h.some((t) => t.tag === "#freshtag"),
+        trendingAfter25h.some((t) => t.tag === "#origtag")
+      ]
+    }, {
+      repliesExcludedFromTopLevel: [false, false, false, false, false],
+      replyHydration: {
+        id: bobReply.id,
+        replyToPostId: alicePost.id,
+        replyToHandle: "alice",
+        replyToAuthorId: "alice"
+      },
+      repostFollowing: {
+        id: alicePost.id,
+        repostedByHandle: "bob",
+        repostedByName: "Bob Trader",
+        hasRepostedAt: true
+      },
+      repostProfile: {
+        id: alicePost.id,
+        repostedByHandle: "bob",
+        repostedByName: "Bob Trader"
+      },
+      mutedOriginalHiddenInRepost: false,
+      recencyTopAndTrending: [
+        [freshPost.id],
+        true,
+        false
+      ]
+    }))
+  })
+)
+
+it.effect(
+  'chat read state, reaction toggle/remove, NPC DM refusal, user-group consent invites, alpha decline cooldown, and group management (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave")',
+  () => withSocialWorld(effect {
+    try seedChatParticipants()
+
+    const npcDmCode = try expectSocialCode(createDirectChat("alice", "ailon-musk"))
+
+    const dm = try createDirectChat("alice", "bob")
+    const dmMsg = try sendChatMessage({ senderId: "alice", senderKind: "user", chatId: dm.id, content: "Ping unread" })
+    const bobChatsUnread = try listChats("bob")
+    const aliceChatsUnread = try listChats("alice")
+    const markedRead = try markChatRead("bob", dm.id)
+    const bobChatsAfterRead = try listChats("bob")
+
+    const reactAdd = try reactToMessage({ accountId: "bob", messageId: dmMsg.id, emoji: "🔥" })
+    const reactToggleOff = try reactToMessage({ accountId: "bob", messageId: dmMsg.id, emoji: "🔥" })
+    const reactReAdd = try reactToMessage({ accountId: "bob", messageId: dmMsg.id, emoji: "🔥" })
+    const reactExplicitRemove = try unreactToMessage({ accountId: "bob", messageId: dmMsg.id, emoji: "🔥" })
+    const dmMsgsAfterUnreact = try getChatMessages("bob", dm.id)
+
+    const group = try createUserGroupChat("alice", "Desk Alpha", ["bob"])
+    const bobPendingBefore = try listAlphaInvites("bob")
+    const bobNotifsInvite = try listNotifications("bob", 50, "game")
+    const inviteNotif = bobNotifsInvite.find((n) => n.kind === "group_invite")
+    const bobNotMemberYetCode = try expectSocialCode(getChatMessages("bob", group.id))
+    const bobAccepted = try respondGroupInvite({ accountId: "bob", inviteId: bobPendingBefore[0]?.id ?? "", accept: true })
+    const bobNotifsAfterAccept = try listNotifications("bob", 50, "game")
+    const inviteNotifAfterAccept = bobNotifsAfterAccept.find((n) => n.kind === "group_invite")
+
+    const carolInvite = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    const carolDeclined = try respondGroupInvite({ accountId: "carol", inviteId: carolInvite.inviteId, accept: false })
+    const carolStillNotMember = try expectSocialCode(getChatMessages("carol", group.id))
+
+    const memberRenameForbidden = try expectSocialCode(renameGroupChat("bob", group.id, "Hijacked"))
+    const renamed = try renameGroupChat("alice", group.id, "Desk Renamed")
+    const carolReinvite = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    try respondGroupInvite({ accountId: "carol", inviteId: carolReinvite.inviteId, accept: true })
+    const removedCarol = try removeGroupMember("alice", group.id, "carol")
+    const carolRemovedCode = try expectSocialCode(getChatMessages("carol", group.id))
+    const transferred = try transferGroupOwnership("alice", group.id, "bob")
+    const aliceLeftAfterTransfer = try leaveGroupChat("alice", group.id)
+    const deletedGroup = try deleteGroupChat("bob", group.id)
+    const deletedGroupReadCode = try expectSocialCode(getChatMessages("bob", group.id))
+
+    const alpha1 = try createNpcAlphaInvite({ actorId: "ailon-musk", targetAccountId: "alice", tier: "inner_circle" })
+    const declined1 = try respondAlphaInvite({ accountId: "alice", inviteId: alpha1.id, accept: false })
+    const immediateReinviteCode = try expectSocialCode(createNpcAlphaInvite({ actorId: "ailon-musk", targetAccountId: "alice", tier: "inner_circle" }))
+    try TestClock.adjust(Duration.hours(24))
+    try TestClock.adjust(Duration.seconds(1))
+    const alpha2 = try createNpcAlphaInvite({ actorId: "ailon-musk", targetAccountId: "alice", tier: "inner_circle" })
+    try respondAlphaInvite({ accountId: "alice", inviteId: alpha2.id, accept: false })
+    try TestClock.adjust(Duration.hours(25))
+    const stillIn48hCooldownCode = try expectSocialCode(createNpcAlphaInvite({ actorId: "ailon-musk", targetAccountId: "alice", tier: "inner_circle" }))
+    try TestClock.adjust(Duration.hours(24))
+    const alpha3After48h = try createNpcAlphaInvite({ actorId: "ailon-musk", targetAccountId: "alice", tier: "inner_circle" })
+
+    try check(() => assert.deepStrictEqual({
+      npcDmCode,
+      unread: [
+        bobChatsUnread.find((c) => c.id === dm.id)?.unreadCount,
+        aliceChatsUnread.find((c) => c.id === dm.id)?.unreadCount,
+        markedRead.unreadCount,
+        bobChatsAfterRead.find((c) => c.id === dm.id)?.unreadCount
+      ],
+      reactions: [
+        reactAdd.added,
+        reactToggleOff.added,
+        reactReAdd.added,
+        reactExplicitRemove.added,
+        dmMsgsAfterUnreact[0]?.reactions.length
+      ],
+      userGroupInvites: [
+        bobPendingBefore.map((i) => [i.chatKind, i.isAlpha, i.inviterHandle]),
+        inviteNotif === undefined ? undefined : [inviteNotif.actorHandle, inviteNotif.chatId === group.id, inviteNotif.inviteId === bobPendingBefore[0]?.id, inviteNotif.invitePending],
+        bobNotMemberYetCode,
+        bobAccepted.status,
+        inviteNotifAfterAccept?.invitePending,
+        carolDeclined.status,
+        carolStillNotMember
+      ],
+      groupManagement: [
+        memberRenameForbidden,
+        renamed.title,
+        removedCarol.removed,
+        carolRemovedCode,
+        transferred.createdBy,
+        aliceLeftAfterTransfer.left,
+        deletedGroup.deleted,
+        deletedGroupReadCode
+      ],
+      alphaCooldown: [
+        declined1.status,
+        immediateReinviteCode,
+        alpha2.status,
+        stillIn48hCooldownCode,
+        alpha3After48h.status
+      ]
+    }, {
+      npcDmCode: "NpcDmDisallowed",
+      unread: [1, 0, 0, 0],
+      reactions: [true, false, true, false, 0],
+      userGroupInvites: [
+        [["user_group", false, "alice"]],
+        ["alice", true, true, true],
+        "Forbidden",
+        "accepted",
+        false,
+        "declined",
+        "Forbidden"
+      ],
+      groupManagement: [
+        "Forbidden",
+        "Desk Renamed",
+        true,
+        "Forbidden",
+        "bob",
+        true,
+        true,
+        "NotFound"
+      ],
+      alphaCooldown: [
+        "declined",
+        "CooldownActive",
+        "pending",
+        "CooldownActive",
+        "pending"
+      ]
+    }))
+  })
+)
+
+it.effect(
+  'hydrated notifications with mute filtering, clearNotifications, ordered block/mute lists, report categories/review, and SSE quote/DM rules (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  () => withSocialWorld(effect {
+    try seedChatParticipants()
+    try seedAccount("dave", "dave", "Dave Observer")
+
+    const dm = try createDirectChat("alice", "bob")
+    const dmMsg = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: dm.id, content: "Hey Alice" })
+    const aliceNotifsBeforeMute = try listNotifications("alice", 50, "game")
+    const chatNotif = aliceNotifsBeforeMute.find((n) => n.kind === "chat_message")
+
+    try muteAccount("alice", "bob")
+    const aliceNotifsMuted = try listNotifications("alice", 50, "game")
+    const aliceUnreadMuted = try getUnreadNotificationCount("alice", "game")
+    const store = try Store
+    const dmEvent: FeedRealtimeEvent = {
+      type: "chat.message",
+      chatId: dm.id,
+      messageId: dmMsg.id,
+      senderId: "bob",
+      senderKind: "user",
+      createdAt: dmMsg.createdAt,
+      recipientIds: ["alice", "bob"]
+    }
+    const sseDirectMutedAllowed = try canDeliverRealtimeEventToViewer(store, dmEvent, "alice")
+
+    const bobPost = try createPost({ authorId: "bob", authorKind: "user", content: "Muted author post" })
+    const carolQuote = try createPost({ authorId: "carol", authorKind: "user", content: "Quoting muted Bob", quotePostId: bobPost.id })
+    const quoteEvent: FeedRealtimeEvent = {
+      type: "post.created",
+      postId: carolQuote.id,
+      authorId: "carol",
+      authorKind: "user",
+      replyToPostId: null,
+      quotePostId: bobPost.id,
+      quoteAuthorId: "bob",
+      createdAt: carolQuote.createdAt
+    }
+    const sseQuoteMutedAuthorDenied = try canDeliverRealtimeEventToViewer(store, quoteEvent, "alice")
+
+    try muteAccount("alice", "carol")
+    const mutedList = try listMutedAccounts("alice", 50)
+    try unmuteAccount("alice", "bob")
+    const clearedOne = try clearNotifications("alice", chatNotif ? [chatNotif.id] : [])
+    const notifsAfterClear = try listNotifications("alice", 50, "game")
+
+    try blockAccount("alice", "bob")
+    try blockAccount("alice", "dave")
+    const blockedList = try listBlockedAccounts("alice", 50)
+
+    const spamReport = try reportTarget({
+      reporterId: "carol",
+      targetKind: "post",
+      targetId: bobPost.id,
+      category: "Spam",
+      reason: "Promotional spam"
+    })
+    const openReports = try listModerationReports({ status: "open", limit: 20 })
+    const resolvedReport = try resolveModerationReport({ reportId: spamReport.id, status: "reviewed" })
+    const openAfterResolve = try listModerationReports({ status: "open", limit: 20 })
+
+    try check(() => assert.deepStrictEqual({
+      chatNotifHydration: chatNotif === undefined ? undefined : {
+        actorHandle: chatNotif.actorHandle,
+        actorName: chatNotif.actorName,
+        chatId: chatNotif.chatId
+      },
+      mutedNotifHidden: [aliceNotifsMuted.length, aliceUnreadMuted],
+      sseRules: [sseDirectMutedAllowed, sseQuoteMutedAuthorDenied],
+      cleared: [clearedOne.clearedCount, notifsAfterClear.length],
+      mutedOrder: mutedList.map((m) => m.id),
+      blockedOrder: blockedList.map((b) => b.id),
+      reports: [
+        spamReport.category,
+        spamReport.reason,
+        openReports.some((r) => r.id === spamReport.id && r.category === "Spam"),
+        resolvedReport.status,
+        openAfterResolve.some((r) => r.id === spamReport.id)
+      ]
+    }, {
+      chatNotifHydration: {
+        actorHandle: "bob",
+        actorName: "Bob Trader",
+        chatId: dm.id
+      },
+      mutedNotifHidden: [0, 0],
+      sseRules: [true, false],
+      cleared: [1, 0],
+      mutedOrder: ["carol", "bob"],
+      blockedOrder: ["dave", "bob"],
+      reports: ["Spam", "Promotional spam", true, "reviewed", false]
     }))
   })
 )
