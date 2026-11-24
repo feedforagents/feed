@@ -4,21 +4,29 @@ import { passThrough, requestJson } from "./api.ts";
 import {
   buildHostActionNote,
   getStoreSnapshot,
+  notifyAuthChanged,
   persistExplainerDismissed,
   pushBrowserRoute,
+  pushToast,
   sendApp,
   sendNav,
   sendOnboarding,
+  setErrorNotice,
+  setStatusNotice,
   setStoreState,
 } from "./store-core.ts";
 import {
   createPost,
+  loadArticle,
   loadChats,
+  loadExplore,
   loadFeed,
   loadMarkets,
   loadNotifications,
+  loadPositionsSilent,
   loadProfile,
   loadTrending,
+  openThread,
   repostPost,
   selectFeedTab,
   startDirectChat,
@@ -67,6 +75,7 @@ export async function loadSkillsHosts(): Promise<void> {
 }
 
 export async function hydrateAuth(): Promise<void> {
+  const prevViewerId = getStoreSnapshot().viewer?.accountId ?? null;
   const res = await requestJson("/api/auth/me", { parse: decodeAuthMe });
   if (!res.ok) {
     setStoreState({ authLoaded: true });
@@ -84,22 +93,28 @@ export async function hydrateAuth(): Promise<void> {
     if (viewer.agentGrant) {
       sendApp({ type: "connectSingleAgent", clientName: viewer.agentGrant.clientName });
     }
-    const nextRoute = viewer.uiMode === "social" && getStoreSnapshot().route === "Markets" ? "Home" : getStoreSnapshot().route;
-    if (nextRoute !== getStoreSnapshot().route) {
+    const snap = getStoreSnapshot();
+    const restrictedInSocial = viewer.uiMode === "social" && (snap.route === "Markets" || snap.route === "Leaderboard" || snap.walletView);
+    const nextRoute = restrictedInSocial ? "Home" : snap.route;
+    if (nextRoute !== snap.route || (restrictedInSocial && snap.walletView)) {
       pushBrowserRoute(nextRoute);
     }
     setStoreState({
       authLoaded: true,
       viewer,
-      acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : getStoreSnapshot().acceptedCountries,
+      acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : snap.acceptedCountries,
       publicAppUrl,
       turnstileSiteKey,
       devSmsCodeEnabled,
       route: nextRoute,
+      walletView: restrictedInSocial ? false : snap.walletView,
       localUiMode: viewer.uiMode,
       joinSheetOpen: false,
       joinError: null,
     });
+    if (prevViewerId !== viewer.accountId) {
+      notifyAuthChanged();
+    }
     return;
   }
   const currentRoute = getStoreSnapshot().route;
@@ -117,6 +132,9 @@ export async function hydrateAuth(): Promise<void> {
     devSmsCodeEnabled,
     route: fallbackRoute,
   });
+  if (prevViewerId !== null) {
+    notifyAuthChanged();
+  }
 }
 
 async function runPendingAction(action: PendingAction | null): Promise<void> {
@@ -258,6 +276,7 @@ export async function verifySmsCode(code: string): Promise<void> {
   const pending = getStoreSnapshot().pendingAction;
   setStoreState({ joinLoading: false, pendingAction: null, joinSheetOpen: false, joinPhoneStep: "entry" });
   await hydrateAuth();
+  notifyAuthChanged();
   await runPendingAction(pending);
   await refreshViewerSurfaces();
 }
@@ -302,9 +321,10 @@ export async function completePhoneOnboard(payload: {
     pendingAction: null,
     joinSheetOpen: false,
     joinPhoneStep: "entry",
-    statusMessage: "Welcome to Feed. 100 virtual pts credited.",
   });
+  setStatusNotice("Welcome to Feed. 100 pts credited.");
   await hydrateAuth();
+  notifyAuthChanged();
   await runPendingAction(pending);
   await refreshViewerSurfaces();
 }
@@ -325,6 +345,7 @@ export async function submitReviewerLogin(payload: { readonly identifier: string
   const pending = getStoreSnapshot().pendingAction;
   setStoreState({ joinLoading: false, pendingAction: null, joinSheetOpen: false });
   await hydrateAuth();
+  notifyAuthChanged();
   await runPendingAction(pending);
   await refreshViewerSurfaces();
 }
@@ -332,10 +353,23 @@ export async function submitReviewerLogin(payload: { readonly identifier: string
 export async function refreshViewerSurfaces(): Promise<void> {
   const s = getStoreSnapshot();
   const tasks: Promise<void>[] = [loadFeed(), loadTrending()];
-  if (s.route === "Markets") tasks.push(loadMarkets());
+  if (s.route === "Explore") {
+    if (s.activeArticleId) {
+      tasks.push(loadArticle(s.activeArticleId));
+    } else {
+      tasks.push(loadExplore(s.exploreQuery));
+    }
+  }
+  if (s.route === "PostDetail" && s.activePostId) {
+    tasks.push(openThread(s.activePostId, s.threadSort));
+  }
+  if (s.route === "Markets" || s.route === "Leaderboard") tasks.push(loadMarkets());
   if (s.viewer) {
     tasks.push(loadNotifications());
     tasks.push(loadChats(s.route === "Chats"));
+    if (s.route !== "Markets" && s.route !== "Leaderboard") {
+      tasks.push(loadPositionsSilent());
+    }
   }
   if (s.route === "Profile") tasks.push(loadProfile(s.profileHandle));
   if (s.route === "OAuthConsent" && typeof window !== "undefined") tasks.push(loadOAuthConsent(window.location.search));
@@ -348,15 +382,17 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   if (prevMode === nextMode) return;
   sendNav({ type: "toggleUiMode" });
   sendApp({ type: "switchUiMode" });
-  if (nextMode === "social" && s.route === "Markets") {
+  const leavingGameRoute = nextMode === "social" && (s.route === "Markets" || s.route === "Leaderboard" || s.walletView);
+  if (leavingGameRoute) {
     pushBrowserRoute("Home");
   }
   if (!s.viewer) {
     setStoreState({
       localUiMode: nextMode,
-      route: nextMode === "social" && s.route === "Markets" ? "Home" : s.route,
+      route: leavingGameRoute ? "Home" : s.route,
+      walletView: leavingGameRoute ? false : s.walletView,
     });
-    await loadFeed();
+    await refreshViewerSurfaces();
     return;
   }
   const res = await requestJson("/api/auth/mode", {
@@ -367,15 +403,16 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   if (!res.ok) {
     sendNav({ type: "toggleUiMode" });
     sendApp({ type: "switchUiMode" });
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
   setStoreState({
     localUiMode: nextMode,
     viewer: { ...s.viewer, uiMode: nextMode },
-    route: nextMode === "social" && s.route === "Markets" ? "Home" : s.route,
-    statusMessage: nextMode === "social" ? "Social mode enabled." : "Game mode enabled.",
+    route: leavingGameRoute ? "Home" : s.route,
+    walletView: leavingGameRoute ? false : s.walletView,
   });
+  setStatusNotice(nextMode === "social" ? "Social mode enabled." : "Game mode enabled.");
   await refreshViewerSurfaces();
 }
 
@@ -400,7 +437,9 @@ export async function copySkillPrompt(text: string): Promise<void> {
   if (typeof navigator !== "undefined" && navigator.clipboard) {
     await navigator.clipboard.writeText(text);
   }
-  setStoreState({ hostActionNote: "Copied Feed SKILL.md prompt to clipboard." });
+  const note = "Copied Feed agent prompt to clipboard.";
+  setStoreState({ hostActionNote: note });
+  pushToast(note, "info");
 }
 
 export function launchAgentHost(hostId: AgentHostId): void {
@@ -420,7 +459,9 @@ export function launchAgentHost(hostId: AgentHostId): void {
       window.location.assign(host.launcher.href);
     }
   }
-  setStoreState({ hostActionNote: buildHostActionNote(hostId) });
+  const note = buildHostActionNote(hostId);
+  setStoreState({ hostActionNote: note });
+  pushToast(note, "info");
 }
 
 export async function revokeAgentGrant(): Promise<void> {
@@ -432,14 +473,14 @@ export async function revokeAgentGrant(): Promise<void> {
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
   sendApp({ type: "revokeConnectedAgent" });
   setStoreState({
     viewer: { ...s.viewer, agentGrant: null },
-    statusMessage: "Connected agent grant revoked.",
   });
+  setStatusNotice("Connected agent grant revoked.");
 }
 
 export async function fetchLoopbackCode(phoneE164: string): Promise<string | null> {
@@ -457,10 +498,10 @@ export async function startPhoneChange(newPhoneE164: string, turnstileToken?: st
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
-  setStoreState({ statusMessage: "Verification code sent to new number." });
+  setStatusNotice("Verification code sent to new number.");
   return true;
 }
 
@@ -471,10 +512,10 @@ export async function confirmPhoneChange(newPhoneE164: string, code: string): Pr
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
-  setStoreState({ statusMessage: "Phone number updated." });
+  setStatusNotice("Phone number updated.");
   await hydrateAuth();
   return true;
 }
@@ -490,7 +531,7 @@ async function performSignOut({
 }): Promise<void> {
   const res = await requestJson(endpoint, { method: "POST", body: {}, parse: passThrough });
   if (!ignoreFailure && !res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
   sendNav({ type: "signOutNav" });
@@ -500,12 +541,20 @@ async function performSignOut({
   setStoreState({
     viewer: null,
     route: "Home",
+    walletView: false,
     feedTab: "latest",
     chats: [],
+    selectedChatId: null,
+    chatMessages: [],
+    alphaInvites: [],
     notifications: [],
+    unreadNotifications: 0,
     positions: [],
-    statusMessage,
+    blockedAccounts: [],
+    mutedAccounts: [],
   });
+  setStatusNotice(statusMessage);
+  notifyAuthChanged();
   await loadFeed("latest");
 }
 
@@ -605,7 +654,8 @@ export async function loadAdminStatus(): Promise<void> {
   setStoreState({ adminLoading: true });
   const res = await requestJson("/api/admin/status", { parse: decodeAdminStatus });
   if (!res.ok) {
-    setStoreState({ adminLoading: false, errorMessage: res.message });
+    setStoreState({ adminLoading: false });
+    setErrorNotice(res.message);
     return;
   }
   setStoreState({ adminLoading: false, adminStatus: res.data });
@@ -618,10 +668,9 @@ export async function adminFastForward(minutes: number): Promise<void> {
     body: { minutes },
     parse: passThrough,
   });
-  setStoreState({
-    adminLoading: false,
-    adminMessage: res.ok ? `Clock fast-forwarded ${minutes}m.` : res.message,
-  });
+  const msg = res.ok ? `Clock fast-forwarded ${minutes}m.` : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
   if (res.ok) await loadAdminStatus();
 }
 
@@ -632,10 +681,9 @@ export async function adminRunCron(job: string): Promise<void> {
     body: {},
     parse: passThrough,
   });
-  setStoreState({
-    adminLoading: false,
-    adminMessage: res.ok ? `Executed ${job}.` : res.message,
-  });
+  const msg = res.ok ? `Executed ${job}.` : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
   if (res.ok) await loadAdminStatus();
 }
 
@@ -651,9 +699,8 @@ export async function adminResolveHold(
     body: { outcome, ...(reason.trim() ? { reason: reason.trim() } : {}) },
     parse: passThrough,
   });
-  setStoreState({
-    adminLoading: false,
-    adminMessage: res.ok ? `Resolved hold ${marketId} as ${outcome.toUpperCase()}.` : res.message,
-  });
+  const msg = res.ok ? `Resolved hold ${marketId} as ${outcome.toUpperCase()}.` : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
   if (res.ok) await loadAdminStatus();
 }

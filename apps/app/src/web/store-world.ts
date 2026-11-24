@@ -1,30 +1,41 @@
 // spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
 import { passThrough, requestJson } from "./api.ts";
 import {
+  appendAnonymousModeParam,
   clearNotices,
   getStoreSnapshot,
+  hasAtRiskOpenPositions,
   pushBrowserRoute,
   recordPublicView,
   requireAuthOrQueue,
   sendApp,
   sendNav,
+  setErrorNotice,
+  setStatusNotice,
   setStoreState,
   toSpecTab,
+  type ThreadReplySort,
   type UiFeedTab,
 } from "./store-core.ts";
 import {
   type AppPerpMarket,
   type AppPost,
   type AppPredictionMarket,
+  type ExploreAccountHit,
+  type ExploreActorHit,
   decodeAlphaInvites,
+  decodeArticle,
+  decodeArticles,
   decodeChatMessages,
   decodeChats,
+  decodeEconomy,
   decodeExplore,
   decodeFeedPage,
+  decodeFollowList,
   decodeLeaderboard,
+  decodeModerationList,
   decodeNotifications,
   decodePerpMarket,
-  decodePointPacks,
   decodePositions,
   decodePost,
   decodePostThread,
@@ -36,6 +47,10 @@ import {
   optStr,
   str,
 } from "./types.ts";
+
+const likeInFlight = new Set<string>();
+const repostInFlight = new Set<string>();
+const followInFlight = new Set<string>();
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -56,33 +71,115 @@ function findPostInState(postId: string): AppPost | undefined {
   const s = getStoreSnapshot();
   return s.feedPosts.find((p) => p.card.id === postId)
     ?? (s.activeThread?.post.card.id === postId ? s.activeThread.post : undefined)
+    ?? s.activeThread?.ancestors.find((p) => p.card.id === postId)
     ?? s.activeThread?.replies.find((p) => p.card.id === postId)
     ?? s.profileBundle?.posts.find((p) => p.card.id === postId)
     ?? s.explore.posts.find((p) => p.card.id === postId);
 }
 
+export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost["card"]) => AppPost["card"]): void {
+  const patchPost = (post: AppPost): AppPost =>
+    post.card.id === postId ? { ...post, card: updater(post.card) } : post;
+  const patchList = (list: ReadonlyArray<AppPost>) => list.map(patchPost);
+  const cur = getStoreSnapshot();
+  setStoreState({
+    feedPosts: patchList(cur.feedPosts),
+    explore: { ...cur.explore, posts: patchList(cur.explore.posts) },
+    profileBundle: cur.profileBundle ? { ...cur.profileBundle, posts: patchList(cur.profileBundle.posts) } : null,
+    activeThread: cur.activeThread
+      ? {
+          post: patchPost(cur.activeThread.post),
+          parentPost: cur.activeThread.parentPost ? patchPost(cur.activeThread.parentPost) : null,
+          ancestors: patchList(cur.activeThread.ancestors),
+          replies: patchList(cur.activeThread.replies),
+        }
+      : null,
+  });
+}
+
+export function removePostAcrossStore(postId: string): void {
+  const cur = getStoreSnapshot();
+  const thread = cur.activeThread;
+  setStoreState({
+    feedPosts: cur.feedPosts.filter((p) => p.card.id !== postId),
+    explore: { ...cur.explore, posts: cur.explore.posts.filter((p) => p.card.id !== postId) },
+    profileBundle: cur.profileBundle
+      ? { ...cur.profileBundle, posts: cur.profileBundle.posts.filter((p) => p.card.id !== postId) }
+      : null,
+    activeThread: thread
+      ? thread.post.card.id === postId
+        ? null
+        : {
+            ...thread,
+            ancestors: thread.ancestors.filter((p) => p.card.id !== postId),
+            replies: thread.replies.filter((p) => p.card.id !== postId),
+          }
+      : null,
+  });
+}
+
+function filterAuthorOutOfFeeds(handle: string): void {
+  const normalized = handle.toLowerCase();
+  const keep = (p: AppPost) => p.card.authorHandle.toLowerCase() !== normalized;
+  const cur = getStoreSnapshot();
+  setStoreState({
+    feedPosts: cur.feedPosts.filter(keep),
+    explore: { ...cur.explore, posts: cur.explore.posts.filter(keep) },
+    activeThread: cur.activeThread
+      ? {
+          ...cur.activeThread,
+          replies: cur.activeThread.replies.filter(keep),
+        }
+      : null,
+  });
+}
+
+function syncAtRiskPositions(positions: ReadonlyArray<{ readonly isClosed: boolean }>): void {
+  const atRisk = positions.some((p) => !p.isClosed);
+  sendNav({ type: "setAtRiskPositions", atRisk });
+  sendApp({ type: "updateAtRiskPositions", atRisk });
+}
+
 export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const s = getStoreSnapshot();
   const tab = tabOverride ?? s.feedTab;
+  const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ feedLoading: true });
-  const res = await requestJson(`/api/feed?tab=${encodeURIComponent(tab)}`, {
-    parse: decodeFeedPage,
+  const url = appendAnonymousModeParam(`/api/feed?tab=${encodeURIComponent(tab)}`, s);
+  const res = await requestJson(url, {
+    parse: (raw) => decodeFeedPage(raw, viewerId),
   });
   if (res.ok) {
-    setStoreState({ feedPosts: res.data.items, feedNextCursor: res.data.nextCursor, feedLoading: false });
+    setStoreState({
+      feedPosts: res.data.items,
+      feedNextCursor: res.data.nextCursor,
+      feedLoading: false,
+      pendingNewPostCount: 0,
+    });
     return;
   }
-  setStoreState({ feedLoading: false, errorMessage: res.message });
+  setStoreState({ feedLoading: false });
+  setErrorNotice(res.message);
+}
+
+export async function flushPendingNewPosts(): Promise<void> {
+  if (typeof window !== "undefined") {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  setStoreState({ pendingNewPostCount: 0 });
+  await loadFeed();
 }
 
 export async function loadMoreFeed(): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.feedNextCursor || s.feedLoading || s.feedLoadingMore) return;
+  const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ feedLoadingMore: true });
-  const res = await requestJson(
+  const url = appendAnonymousModeParam(
     `/api/feed?tab=${encodeURIComponent(s.feedTab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
-    { parse: decodeFeedPage },
+    s,
   );
+  const res = await requestJson(url, { parse: (raw) => decodeFeedPage(raw, viewerId) });
   if (res.ok) {
     const latest = getStoreSnapshot();
     setStoreState({
@@ -92,21 +189,30 @@ export async function loadMoreFeed(): Promise<void> {
     });
     return;
   }
-  setStoreState({ feedLoadingMore: false, errorMessage: res.message });
+  setStoreState({ feedLoadingMore: false });
+  setErrorNotice(res.message);
 }
 
 export async function loadTrending(): Promise<void> {
-  const res = await requestJson("/api/trending", { parse: decodeTrendingList });
-  if (res.ok) {
-    const cur = getStoreSnapshot();
-    setStoreState({ explore: { ...cur.explore, trending: res.data } });
-  }
+  const s = getStoreSnapshot();
+  const [trendRes, articlesRes] = await Promise.all([
+    requestJson(appendAnonymousModeParam("/api/trending", s), { parse: decodeTrendingList }),
+    requestJson(appendAnonymousModeParam("/api/articles?limit=10", s), { parse: decodeArticles }),
+  ]);
+  const cur = getStoreSnapshot();
+  setStoreState({
+    explore: {
+      ...cur.explore,
+      ...(trendRes.ok ? { trending: trendRes.data } : {}),
+      ...(articlesRes.ok && articlesRes.data.length > 0 ? { articles: articlesRes.data } : {}),
+    },
+  });
 }
 
 export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   const s = getStoreSnapshot();
   if ((tab === "following" || tab === "top") && s.viewer === null) {
-    requireAuthOrQueue({ kind: "switch_tab", tab, label: `view the ${tab} feed` });
+    requireAuthOrQueue({ kind: "switch_tab", tab, label: `view the ${tab === "top" ? "For You" : "Following"} feed` });
     return;
   }
   const specTab = toSpecTab(tab);
@@ -116,21 +222,48 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   await loadFeed(tab);
 }
 
-export async function openThread(postId: string): Promise<void> {
-  setStoreState({ threadLoading: true });
-  recordPublicView("Home");
-  const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}`, {
-    parse: decodePostThread,
+export async function openThread(postId: string, sortOverride?: ThreadReplySort): Promise<void> {
+  const s = getStoreSnapshot();
+  const sort = sortOverride ?? s.threadSort;
+  const viewerId = s.viewer?.accountId ?? null;
+  setStoreState({ threadLoading: true, activePostId: postId, threadSort: sort });
+  recordPublicView("PostDetail");
+  const baseUrl = `/api/posts/${encodeURIComponent(postId)}?sort=${encodeURIComponent(sort)}`;
+  const res = await requestJson(appendAnonymousModeParam(baseUrl, s), {
+    parse: (raw) => decodePostThread(raw, viewerId),
   });
   if (res.ok && res.data) {
     setStoreState({ activeThread: res.data, threadLoading: false });
     return;
   }
-  setStoreState({ threadLoading: false, errorMessage: res.ok ? "Post not found" : res.message });
+  setStoreState({ threadLoading: false });
+  setErrorNotice(res.ok ? "Post not found" : res.message);
 }
 
 export function closeThread(): void {
-  setStoreState({ activeThread: null });
+  setStoreState({ activeThread: null, activePostId: null });
+}
+
+export async function loadArticle(articleId: string): Promise<void> {
+  const s = getStoreSnapshot();
+  const cached = s.explore.articles.find((a) => a.id === articleId) ?? null;
+  setStoreState({
+    activeArticleId: articleId,
+    activeArticle: cached,
+    articleLoading: true,
+  });
+  recordPublicView("Explore");
+  const res = await requestJson(appendAnonymousModeParam(`/api/articles/${encodeURIComponent(articleId)}`, s), {
+    parse: decodeArticle,
+  });
+  if (res.ok && res.data) {
+    setStoreState({ activeArticle: res.data, articleLoading: false });
+    return;
+  }
+  setStoreState({ articleLoading: false });
+  if (!cached) {
+    setErrorNotice(res.ok ? "Article not found" : res.message);
+  }
 }
 
 export async function createPost(
@@ -143,6 +276,7 @@ export async function createPost(
     : { kind: "post" as const, content, ...(options?.quotePostId ? { quotePostId: options.quotePostId } : {}), label };
   if (!requireAuthOrQueue(pending)) return false;
   clearNotices();
+  const viewerId = getStoreSnapshot().viewer?.accountId ?? null;
   const res = await requestJson("/api/posts", {
     method: "POST",
     body: {
@@ -152,142 +286,215 @@ export async function createPost(
       ...(options?.marketId ? { marketId: options.marketId } : {}),
       ...(options?.ticker ? { ticker: options.ticker } : {}),
     },
-    parse: decodePost,
+    parse: (raw) => decodePost(raw, viewerId),
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
-  setStoreState({ statusMessage: options?.replyToPostId ? "Reply posted." : "Post published." });
-  await loadFeed();
+  setStatusNotice(options?.replyToPostId ? "Reply posted." : "Post published.");
+  const cur = getStoreSnapshot();
+  if (res.data && !options?.replyToPostId) {
+    setStoreState({ feedPosts: [res.data, ...cur.feedPosts.filter((p) => p.card.id !== res.data?.card.id)] });
+  } else {
+    await loadFeed();
+  }
   const thread = getStoreSnapshot().activeThread;
   if (thread && options?.replyToPostId === thread.post.card.id) {
-    await openThread(thread.post.card.id);
+    await openThread(thread.post.card.id, getStoreSnapshot().threadSort);
   }
   return true;
 }
 
-export async function deletePost(postId: string): Promise<void> {
-  if (!getStoreSnapshot().viewer) return;
+export async function deletePost(postId: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer) return false;
   const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}`, {
     method: "DELETE",
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
-    return;
+    setErrorNotice(res.message);
+    return false;
   }
-  const thread = getStoreSnapshot().activeThread;
-  setStoreState({
-    feedPosts: getStoreSnapshot().feedPosts.filter((p) => p.card.id !== postId),
-    activeThread: thread?.post.card.id === postId ? null : thread,
-    statusMessage: "Post deleted.",
-  });
-}
-
-async function executePostAction({
-  postId,
-  endpoint,
-  method,
-  includeThread,
-  buildPatch,
-}: {
-  readonly postId: string;
-  readonly endpoint: string;
-  readonly method: "POST" | "DELETE";
-  readonly includeThread: boolean;
-  readonly buildPatch: (data: unknown) => (card: AppPost["card"]) => AppPost["card"];
-}): Promise<void> {
-  const res = await requestJson(endpoint, { method, parse: passThrough });
-  if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
-    return;
+  const wasActiveDetail = getStoreSnapshot().route === "PostDetail" && getStoreSnapshot().activePostId === postId;
+  removePostAcrossStore(postId);
+  setStatusNotice("Post deleted.");
+  if (wasActiveDetail) {
+    pushBrowserRoute("Home");
+    setStoreState({ route: "Home", activePostId: null });
   }
-  const updateCard = buildPatch(res.data);
-  const patchPost = (post: AppPost): AppPost =>
-    post.card.id === postId ? { ...post, card: updateCard(post.card) } : post;
-  const patchList = (list: ReadonlyArray<AppPost>) => list.map(patchPost);
-  const cur = getStoreSnapshot();
-  setStoreState({
-    feedPosts: patchList(cur.feedPosts),
-    explore: { ...cur.explore, posts: patchList(cur.explore.posts) },
-    profileBundle: cur.profileBundle ? { ...cur.profileBundle, posts: patchList(cur.profileBundle.posts) } : null,
-    ...(includeThread
-      ? {
-          activeThread: cur.activeThread
-            ? {
-                post: patchPost(cur.activeThread.post),
-                parentPost: cur.activeThread.parentPost,
-                replies: patchList(cur.activeThread.replies),
-              }
-            : null,
-        }
-      : {}),
-  });
+  return true;
 }
 
 export async function toggleLike(postId: string): Promise<void> {
   const existing = findPostInState(postId);
   const currentlyLiked = existing?.card.liked ?? false;
   if (!requireAuthOrQueue({ kind: "like", postId, currentlyLiked, label: "like this post" })) return;
-  await executePostAction({
-    postId,
-    endpoint: `/api/posts/${encodeURIComponent(postId)}/like`,
-    method: currentlyLiked ? "DELETE" : "POST",
-    includeThread: true,
-    buildPatch: (data) => {
-      const rec = isRecord(data) ? data : {};
-      const nextLiked = typeof rec.liked === "boolean" ? rec.liked : !currentlyLiked;
-      const nextCount = typeof rec.likeCount === "number"
-        ? rec.likeCount
-        : Math.max(0, (existing?.card.likeCount ?? 0) + (nextLiked ? 1 : -1));
-      return (card) => ({ ...card, liked: nextLiked, likeCount: nextCount });
-    },
-  });
+  if (likeInFlight.has(postId)) return;
+  likeInFlight.add(postId);
+  const prevCount = existing?.card.likeCount ?? 0;
+  const optimisticLiked = !currentlyLiked;
+  const optimisticCount = Math.max(0, prevCount + (optimisticLiked ? 1 : -1));
+  patchPostCardAcrossStore(postId, (card) => ({
+    ...card,
+    liked: optimisticLiked,
+    likeCount: optimisticCount,
+  }));
+  try {
+    const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}/like`, {
+      method: currentlyLiked ? "DELETE" : "POST",
+      parse: passThrough,
+    });
+    if (!res.ok) {
+      patchPostCardAcrossStore(postId, (card) => ({
+        ...card,
+        liked: currentlyLiked,
+        likeCount: prevCount,
+      }));
+      setErrorNotice(res.message);
+      return;
+    }
+    const rec = isRecord(res.data) ? res.data : {};
+    const serverLiked = typeof rec.liked === "boolean" ? rec.liked : optimisticLiked;
+    const serverCount = typeof rec.likeCount === "number" ? rec.likeCount : optimisticCount;
+    patchPostCardAcrossStore(postId, (card) => ({
+      ...card,
+      liked: serverLiked,
+      likeCount: serverCount,
+    }));
+  } finally {
+    likeInFlight.delete(postId);
+  }
 }
 
 export async function repostPost(postId: string): Promise<void> {
   const existing = findPostInState(postId);
   const currentlyReposted = existing?.card.reposted ?? false;
   if (!requireAuthOrQueue({ kind: "repost", postId, label: currentlyReposted ? "remove repost" : "repost this post" })) return;
-  await executePostAction({
-    postId,
-    endpoint: `/api/posts/${encodeURIComponent(postId)}/repost`,
-    method: currentlyReposted ? "DELETE" : "POST",
-    includeThread: true,
-    buildPatch: (data) => {
-      const rec = isRecord(data) ? data : {};
-      const nextReposted = typeof rec.reposted === "boolean" ? rec.reposted : !currentlyReposted;
-      const nextCount = typeof rec.repostCount === "number" ? rec.repostCount : undefined;
-      return (card) => ({
+  if (repostInFlight.has(postId)) return;
+  repostInFlight.add(postId);
+  const prevCount = existing?.card.repostCount ?? 0;
+  const optimisticReposted = !currentlyReposted;
+  const optimisticCount = Math.max(0, prevCount + (optimisticReposted ? 1 : -1));
+  patchPostCardAcrossStore(postId, (card) => ({
+    ...card,
+    reposted: optimisticReposted,
+    repostCount: optimisticCount,
+  }));
+  try {
+    const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}/repost`, {
+      method: currentlyReposted ? "DELETE" : "POST",
+      parse: passThrough,
+    });
+    if (!res.ok) {
+      patchPostCardAcrossStore(postId, (card) => ({
         ...card,
-        reposted: nextReposted,
-        repostCount: nextCount ?? Math.max(0, card.repostCount + (nextReposted ? 1 : -1)),
-      });
-    },
-  });
+        reposted: currentlyReposted,
+        repostCount: prevCount,
+      }));
+      setErrorNotice(res.message);
+      return;
+    }
+    const rec = isRecord(res.data) ? res.data : {};
+    const serverReposted = typeof rec.reposted === "boolean" ? rec.reposted : optimisticReposted;
+    const serverCount = typeof rec.repostCount === "number" ? rec.repostCount : optimisticCount;
+    patchPostCardAcrossStore(postId, (card) => ({
+      ...card,
+      reposted: serverReposted,
+      repostCount: serverCount,
+    }));
+  } finally {
+    repostInFlight.delete(postId);
+  }
 }
 
 export async function loadExplore(queryOverride?: string): Promise<void> {
-  const q = queryOverride ?? getStoreSnapshot().exploreQuery;
+  const s = getStoreSnapshot();
+  const q = queryOverride ?? s.exploreQuery;
+  const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ exploreLoading: true, exploreQuery: q });
-  const res = await requestJson(`/api/explore?q=${encodeURIComponent(q.trim())}`, {
-    parse: decodeExplore,
+  const url = appendAnonymousModeParam(`/api/explore?q=${encodeURIComponent(q.trim())}`, s);
+  const res = await requestJson(url, {
+    parse: (raw) => decodeExplore(raw, viewerId),
   });
   if (res.ok) {
     setStoreState({ explore: res.data, exploreLoading: false });
     return;
   }
-  setStoreState({ exploreLoading: false, errorMessage: res.message });
+  setStoreState({ exploreLoading: false });
+  setErrorNotice(res.message);
+}
+
+export async function loadTrendingTag(tag: string): Promise<void> {
+  const cleanTag = tag.trim();
+  setStoreState({ activeTrendingTag: cleanTag, exploreQuery: cleanTag });
+  await loadExplore(cleanTag);
+}
+
+export async function searchAccounts(query: string): Promise<{
+  readonly accounts: ReadonlyArray<ExploreAccountHit>;
+  readonly actors: ReadonlyArray<ExploreActorHit>;
+}> {
+  const trimmed = query.trim();
+  if (!trimmed) return { accounts: [], actors: [] };
+  const s = getStoreSnapshot();
+  const res = await requestJson(
+    appendAnonymousModeParam(`/api/explore?q=${encodeURIComponent(trimmed)}`, s),
+    { parse: (raw) => decodeExplore(raw, s.viewer?.accountId ?? null) },
+  );
+  if (!res.ok) return { accounts: [], actors: [] };
+  return { accounts: res.data.accounts, actors: res.data.actors };
+}
+
+export async function loadPositionsSilent(): Promise<void> {
+  if (!getStoreSnapshot().viewer) return;
+  const res = await requestJson("/api/markets", { parse: passThrough });
+  if (!res.ok || !isRecord(res.data)) return;
+  const rawPreds = arr(res.data.predictions ?? res.data.predictionMarkets);
+  const rawPerps = arr(res.data.perps ?? res.data.perpMarkets);
+  const predictions = rawPreds.map(decodePredictionMarket).filter((m): m is AppPredictionMarket => m !== null);
+  const perps = rawPerps.map(decodePerpMarket).filter((m): m is AppPerpMarket => m !== null);
+  const positions = res.data.positions !== undefined ? decodePositions(res.data.positions) : getStoreSnapshot().positions;
+  syncAtRiskPositions(positions);
+  setStoreState({ predictions, perps, positions });
+}
+
+export async function loadLeaderboard(): Promise<void> {
+  setStoreState({ leaderboardLoading: true });
+  const res = await requestJson("/api/leaderboard", { parse: decodeLeaderboard });
+  if (res.ok) {
+    setStoreState({ leaderboard: res.data, leaderboardLoading: false });
+    return;
+  }
+  setStoreState({ leaderboardLoading: false });
+  setErrorNotice(res.message);
+}
+
+export async function loadEconomy(): Promise<void> {
+  if (!getStoreSnapshot().viewer) return;
+  setStoreState({ economyLoading: true });
+  const res = await requestJson("/api/economy/me", { parse: decodeEconomy });
+  if (res.ok) {
+    setStoreState({
+      economy: res.data.economy,
+      ledger: res.data.ledger,
+      economyLoading: false,
+    });
+    return;
+  }
+  setStoreState({ economyLoading: false });
 }
 
 export async function loadMarkets(): Promise<void> {
   setStoreState({ marketsLoading: true });
-  const [mktRes, lbRes, packsRes] = await Promise.all([
+  const sBefore = getStoreSnapshot();
+  const [mktRes, lbRes] = await Promise.all([
     requestJson("/api/markets", { parse: passThrough }),
     requestJson("/api/leaderboard", { parse: decodeLeaderboard }),
-    requestJson("/api/economy/packs", { parse: decodePointPacks }),
   ]);
+  if (sBefore.viewer) {
+    void loadEconomy();
+  }
   const s = getStoreSnapshot();
   let predictions = s.predictions;
   let perps = s.perps;
@@ -301,9 +508,7 @@ export async function loadMarkets(): Promise<void> {
       positions = decodePositions(mktRes.data.positions);
     }
   }
-  const hasAtRisk = positions.length > 0;
-  sendNav({ type: "setAtRiskPositions", atRisk: hasAtRisk });
-  sendApp({ type: "updateAtRiskPositions", atRisk: hasAtRisk });
+  syncAtRiskPositions(positions);
   let selectedMarketKind = s.selectedMarketKind;
   let selectedMarketId = s.selectedMarketId;
   if (s.selectedTicker) {
@@ -332,7 +537,6 @@ export async function loadMarkets(): Promise<void> {
     selectedMarketKind,
     selectedMarketId,
     leaderboard: lbRes.ok ? lbRes.data : s.leaderboard,
-    packs: packsRes.ok ? packsRes.data : s.packs,
   });
 }
 
@@ -363,15 +567,16 @@ async function executeTradeRequest({
   const res = await requestJson(endpoint, { method: "POST", body, headers, parse: passThrough });
   if (!res.ok) {
     setStoreState({ tradeLoading: false, tradeError: res.message });
+    setErrorNotice(res.message);
     return false;
   }
   const curViewer = getStoreSnapshot().viewer;
   const bal = isRecord(res.data) && typeof res.data.balanceAfterCents === "number" ? res.data.balanceAfterCents : curViewer?.balanceCents;
   setStoreState({
     tradeLoading: false,
-    statusMessage,
     ...(curViewer && bal !== undefined ? { viewer: { ...curViewer, balanceCents: bal } } : {}),
   });
+  setStatusNotice(statusMessage);
   await loadMarkets();
   return true;
 }
@@ -425,28 +630,20 @@ export async function closePerpPosition(positionId: string): Promise<void> {
   });
 }
 
-export async function startPointPackCheckout(packId: string, billingState: string): Promise<string | null> {
-  if (!getStoreSnapshot().viewer) return null;
-  setStoreState({ checkoutLoading: true, checkoutError: null });
-  const res = await requestJson("/api/economy/checkout", {
+export async function markChatRead(chatId: string): Promise<void> {
+  if (!getStoreSnapshot().viewer) return;
+  const cur = getStoreSnapshot();
+  const target = cur.chats.find((c) => c.id === chatId);
+  if (target && target.unreadCount > 0) {
+    setStoreState({
+      chats: cur.chats.map((c) => (c.id === chatId ? { ...c, unreadCount: 0 } : c)),
+    });
+  }
+  await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
     method: "POST",
-    body: { packId, billingState },
+    body: {},
     parse: passThrough,
   });
-  if (!res.ok) {
-    setStoreState({ checkoutLoading: false, checkoutError: res.message });
-    return null;
-  }
-  const rec = isRecord(res.data) ? res.data : {};
-  const url = optStr(rec.checkoutUrl ?? rec.url);
-  setStoreState({
-    checkoutLoading: false,
-    statusMessage: url ? "Checkout session created." : "Points pack request recorded.",
-  });
-  if (url && typeof window !== "undefined") {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-  return url;
 }
 
 export async function loadChats(loadMessages = true): Promise<void> {
@@ -481,6 +678,10 @@ export async function loadChatMessages(chatId: string): Promise<void> {
   });
   if (res.ok) {
     setStoreState({ selectedChatId: chatId, chatMessages: res.data });
+    const chat = getStoreSnapshot().chats.find((c) => c.id === chatId);
+    if (chat && chat.unreadCount > 0) {
+      void markChatRead(chatId);
+    }
   }
 }
 
@@ -493,7 +694,7 @@ export async function startDirectChat(targetHandleOrId: string): Promise<void> {
     parse: (raw) => decodeChats([isRecord(raw) && raw.chat ? raw.chat : raw], viewerId),
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
   const createdId = res.data[0]?.id ?? null;
@@ -517,11 +718,12 @@ export async function createGroupChat(title: string, memberHandles: ReadonlyArra
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
   const rec = isRecord(res.data) ? (isRecord(res.data.chat) ? res.data.chat : res.data) : {};
   const chatId = optStr(rec.id);
+  setStatusNotice(`Created group "${title}".`);
   await loadChats();
   if (chatId) await loadChatMessages(chatId);
   return true;
@@ -537,10 +739,10 @@ export async function inviteToGroupChat(chatId: string, targetHandleOrId: string
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
-  setStoreState({ statusMessage: `Invited @${cleaned} to group.` });
+  setStatusNotice(`Invited @${cleaned} to group.`);
   await loadChats();
   return true;
 }
@@ -553,15 +755,15 @@ export async function leaveGroupChat(chatId: string): Promise<boolean> {
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
   const s = getStoreSnapshot();
   setStoreState({
     selectedChatId: s.selectedChatId === chatId ? null : s.selectedChatId,
     chatMessages: s.selectedChatId === chatId ? [] : s.chatMessages,
-    statusMessage: "Left group chat.",
   });
+  setStatusNotice("Left group chat.");
   await loadChats();
   return true;
 }
@@ -576,7 +778,7 @@ export async function sendChatMessage(chatId: string, content: string): Promise<
   });
   setStoreState({ chatSending: false });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
   await loadChatMessages(chatId);
@@ -591,7 +793,7 @@ export async function reactToChatMessage(messageId: string, emoji: string): Prom
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
   await loadChatMessages(s.selectedChatId);
@@ -605,11 +807,17 @@ export async function respondAlphaInvite(inviteId: string, accept: boolean): Pro
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
-  setStoreState({ statusMessage: accept ? "Joined NPC alpha group." : "Invite declined." });
-  await loadChats();
+  setStatusNotice(accept ? "Joined alpha group." : "Invite declined.");
+  const cur = getStoreSnapshot();
+  setStoreState({
+    notifications: cur.notifications.map((n) =>
+      n.inviteId === inviteId ? { ...n, item: { ...n.item, read: true, invitePending: false } } : n,
+    ),
+  });
+  await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
 }
 
 export async function loadNotifications(): Promise<void> {
@@ -617,11 +825,36 @@ export async function loadNotifications(): Promise<void> {
   setStoreState({ notificationsLoading: true });
   const res = await requestJson("/api/notifications", { parse: decodeNotifications });
   if (res.ok) {
-    const unread = res.data.filter((n) => !n.item.read).length;
-    setStoreState({ notifications: res.data, unreadNotifications: unread, notificationsLoading: false });
+    setStoreState({
+      notifications: res.data.items,
+      unreadNotifications: res.data.unreadCount,
+      notificationsLoading: false,
+    });
     return;
   }
-  setStoreState({ notificationsLoading: false, errorMessage: res.message });
+  setStoreState({ notificationsLoading: false });
+  setErrorNotice(res.message);
+}
+
+export async function markNotificationRead(notificationId: string): Promise<void> {
+  if (!getStoreSnapshot().viewer) return;
+  const cur = getStoreSnapshot();
+  const target = cur.notifications.find((n) => n.item.id === notificationId);
+  if (!target || target.item.read) return;
+  setStoreState({
+    notifications: cur.notifications.map((n) =>
+      n.item.id === notificationId ? { ...n, item: { ...n.item, read: true } } : n,
+    ),
+    unreadNotifications: Math.max(0, cur.unreadNotifications - 1),
+  });
+  const res = await requestJson("/api/notifications/read", {
+    method: "POST",
+    body: { notificationIds: [notificationId] },
+    parse: passThrough,
+  });
+  if (res.ok && isRecord(res.data) && typeof res.data.unreadCount === "number") {
+    setStoreState({ unreadNotifications: res.data.unreadCount });
+  }
 }
 
 export async function markAllNotificationsRead(): Promise<void> {
@@ -632,7 +865,7 @@ export async function markAllNotificationsRead(): Promise<void> {
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
   setStoreState({
@@ -646,14 +879,16 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const handle = (handleOrSelf ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
   setStoreState({ profileLoading: true, profileHandle: handle });
-  const res = await requestJson(`/api/users/${encodeURIComponent(handle)}`, {
+  const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}`, s);
+  const res = await requestJson(url, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
   });
   if (res.ok && res.data) {
     setStoreState({ profileBundle: res.data, profileLoading: false });
     return;
   }
-  setStoreState({ profileBundle: null, profileLoading: false, errorMessage: res.ok ? "Profile not found" : res.message });
+  setStoreState({ profileBundle: null, profileLoading: false });
+  setErrorNotice(res.ok ? "Profile not found" : res.message);
 }
 
 export async function loadMoreProfilePosts(): Promise<void> {
@@ -661,10 +896,13 @@ export async function loadMoreProfilePosts(): Promise<void> {
   const bundle = s.profileBundle;
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
   setStoreState({ profileLoadingMore: true });
-  const res = await requestJson(
+  const url = appendAnonymousModeParam(
     `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
-    { parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null) },
+    s,
   );
+  const res = await requestJson(url, {
+    parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
+  });
   if (res.ok && res.data) {
     const latest = getStoreSnapshot().profileBundle;
     if (latest && latest.id === res.data.id) {
@@ -681,12 +919,52 @@ export async function loadMoreProfilePosts(): Promise<void> {
     setStoreState({ profileLoadingMore: false });
     return;
   }
-  setStoreState({ profileLoadingMore: false, errorMessage: res.ok ? "Profile not found" : res.message });
+  setStoreState({ profileLoadingMore: false });
+  setErrorNotice(res.ok ? "Profile not found" : res.message);
+}
+
+export async function loadFollowList(handle: string, kind: "followers" | "following"): Promise<void> {
+  setStoreState({
+    followListHandle: handle,
+    followListKind: kind,
+    followListItems: [],
+    followListLoading: true,
+  });
+  const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/${kind}`, {
+    parse: decodeFollowList,
+  });
+  if (res.ok) {
+    setStoreState({ followListItems: res.data, followListLoading: false });
+    return;
+  }
+  setStoreState({ followListLoading: false });
+  setErrorNotice(res.message);
+}
+
+export function closeFollowList(): void {
+  setStoreState({ followListKind: null, followListHandle: null, followListItems: [] });
+}
+
+export async function loadModerationLists(): Promise<void> {
+  if (!getStoreSnapshot().viewer) return;
+  setStoreState({ moderationLoading: true });
+  const [blockedRes, mutedRes] = await Promise.all([
+    requestJson("/api/users/me/blocked", { parse: decodeModerationList }),
+    requestJson("/api/users/me/muted", { parse: decodeModerationList }),
+  ]);
+  const cur = getStoreSnapshot();
+  setStoreState({
+    moderationLoading: false,
+    blockedAccounts: blockedRes.ok ? blockedRes.data : cur.blockedAccounts,
+    mutedAccounts: mutedRes.ok ? mutedRes.data : cur.mutedAccounts,
+  });
 }
 
 export async function updateOwnProfile(payload: {
   readonly displayName?: string;
   readonly bio?: string;
+  readonly avatarUrl?: string | null;
+  readonly bannerUrl?: string | null;
 }): Promise<boolean> {
   const s = getStoreSnapshot();
   if (!s.viewer) return false;
@@ -696,64 +974,159 @@ export async function updateOwnProfile(payload: {
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
   const rec = isRecord(res.data) ? res.data : {};
   const nextDisplayName = str(rec.displayName, payload.displayName ?? s.viewer.displayName);
   const nextBio = str(rec.bio, payload.bio ?? s.viewer.bio);
+  const nextAvatar = optStr(rec.avatarUrl) ?? (payload.avatarUrl !== undefined ? payload.avatarUrl : s.viewer.avatarUrl);
+  const nextBanner = optStr(rec.bannerUrl) ?? (payload.bannerUrl !== undefined ? payload.bannerUrl : s.viewer.bannerUrl);
   setStoreState({
-    viewer: { ...s.viewer, displayName: nextDisplayName, bio: nextBio },
-    statusMessage: "Profile updated.",
+    viewer: {
+      ...s.viewer,
+      displayName: nextDisplayName,
+      bio: nextBio,
+      avatarUrl: nextAvatar,
+      bannerUrl: nextBanner,
+    },
   });
-  await loadProfile(s.viewer.handle);
+  setStatusNotice("Profile updated.");
+  if (s.route === "Profile" && s.profileBundle?.summary.isOwnProfile) {
+    await loadProfile(s.viewer.handle);
+  }
   return true;
 }
 
-export async function toggleFollow(handle: string, currentlyFollowing?: boolean): Promise<void> {
-  const active = currentlyFollowing ?? getStoreSnapshot().profileBundle?.summary.isFollowing ?? false;
-  if (!requireAuthOrQueue({ kind: "follow", handle, currentlyFollowing: active, label: `follow @${handle}` })) return;
-  const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/follow`, {
-    method: active ? "DELETE" : "POST",
-    parse: passThrough,
+function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
+  const lower = handle.toLowerCase();
+  const cur = getStoreSnapshot();
+  const profileMatches = cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower;
+  const delta = nextFollowing ? 1 : -1;
+  setStoreState({
+    profileBundle: profileMatches && cur.profileBundle
+      ? {
+          ...cur.profileBundle,
+          summary: {
+            ...cur.profileBundle.summary,
+            isFollowing: nextFollowing,
+            followersCount: Math.max(0, cur.profileBundle.summary.followersCount + delta),
+          },
+        }
+      : cur.profileBundle,
+    followListItems: cur.followListItems.map((item) =>
+      item.handle.toLowerCase() === lower ? { ...item, viewerFollows: nextFollowing } : item,
+    ),
+    leaderboard: cur.leaderboard.map((row) =>
+      row.handle.toLowerCase() === lower ? { ...row, isFollowing: nextFollowing } : row,
+    ),
+    feedPosts: cur.feedPosts.map((p) =>
+      p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p,
+    ),
   });
-  if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
-    return;
-  }
-  await loadProfile(handle);
 }
 
-export async function toggleBlock(handle: string): Promise<void> {
+export async function toggleFollow(handle: string, currentlyFollowing?: boolean): Promise<void> {
+  const s = getStoreSnapshot();
+  const lower = handle.toLowerCase();
+  const inferred = currentlyFollowing
+    ?? (s.profileBundle?.summary.handle.toLowerCase() === lower ? s.profileBundle.summary.isFollowing : undefined)
+    ?? s.followListItems.find((item) => item.handle.toLowerCase() === lower)?.viewerFollows
+    ?? s.leaderboard.find((row) => row.handle.toLowerCase() === lower)?.isFollowing
+    ?? false;
+  if (!requireAuthOrQueue({ kind: "follow", handle, currentlyFollowing: inferred, label: `follow @${handle}` })) return;
+  if (followInFlight.has(lower)) return;
+  followInFlight.add(lower);
+  const nextFollowing = !inferred;
+  patchFollowAcrossStore(handle, nextFollowing);
+  try {
+    const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/follow`, {
+      method: inferred ? "DELETE" : "POST",
+      parse: passThrough,
+    });
+    if (!res.ok) {
+      patchFollowAcrossStore(handle, inferred);
+      setErrorNotice(res.message);
+      return;
+    }
+    setStatusNotice(nextFollowing ? `Following @${handle}.` : `Unfollowed @${handle}.`);
+  } finally {
+    followInFlight.delete(lower);
+  }
+}
+
+export async function toggleBlock(handle: string, currentBlocked?: boolean): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.viewer) return;
-  const blocked = s.profileBundle?.summary.isBlocked ?? false;
+  const lower = handle.toLowerCase();
+  const blocked = currentBlocked
+    ?? (s.profileBundle?.summary.handle.toLowerCase() === lower ? s.profileBundle.summary.isBlocked : undefined)
+    ?? s.blockedAccounts.some((acc) => acc.handle.toLowerCase() === lower);
   const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/block`, {
     method: blocked ? "DELETE" : "POST",
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
-  setStoreState({ statusMessage: blocked ? `Unblocked @${handle}.` : `Blocked @${handle}.` });
-  await loadProfile(handle);
+  if (!blocked) {
+    filterAuthorOutOfFeeds(handle);
+  }
+  const cur = getStoreSnapshot();
+  if (cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower) {
+    setStoreState({
+      profileBundle: {
+        ...cur.profileBundle,
+        summary: { ...cur.profileBundle.summary, isBlocked: !blocked, isFollowing: blocked ? cur.profileBundle.summary.isFollowing : false },
+      },
+    });
+  }
+  if (blocked) {
+    setStoreState({
+      blockedAccounts: getStoreSnapshot().blockedAccounts.filter((a) => a.handle.toLowerCase() !== lower),
+    });
+  } else if (cur.route === "Settings") {
+    void loadModerationLists();
+  }
+  setStatusNotice(blocked ? `Unblocked @${handle}.` : `Blocked @${handle}.`);
 }
 
-export async function toggleMute(handle: string): Promise<void> {
+export async function toggleMute(handle: string, currentMuted?: boolean): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.viewer) return;
-  const muted = s.profileBundle?.summary.isMuted ?? false;
+  const lower = handle.toLowerCase();
+  const muted = currentMuted
+    ?? (s.profileBundle?.summary.handle.toLowerCase() === lower ? s.profileBundle.summary.isMuted : undefined)
+    ?? s.mutedAccounts.some((acc) => acc.handle.toLowerCase() === lower);
   const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/mute`, {
     method: muted ? "DELETE" : "POST",
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
-  setStoreState({ statusMessage: muted ? `Unmuted @${handle}.` : `Muted @${handle}.` });
-  await loadProfile(handle);
+  if (!muted) {
+    filterAuthorOutOfFeeds(handle);
+  }
+  const cur = getStoreSnapshot();
+  if (cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower) {
+    setStoreState({
+      profileBundle: {
+        ...cur.profileBundle,
+        summary: { ...cur.profileBundle.summary, isMuted: !muted },
+      },
+    });
+  }
+  if (muted) {
+    setStoreState({
+      mutedAccounts: getStoreSnapshot().mutedAccounts.filter((a) => a.handle.toLowerCase() !== lower),
+    });
+  } else if (cur.route === "Settings") {
+    void loadModerationLists();
+  }
+  setStatusNotice(muted ? `Unmuted @${handle}.` : `Muted @${handle}.`);
 }
 
 export async function submitReport(targetKind: "account" | "post", targetId: string, reason: string): Promise<boolean> {
@@ -764,9 +1137,11 @@ export async function submitReport(targetKind: "account" | "post", targetId: str
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
-  setStoreState({ statusMessage: "Report submitted." });
+  setStatusNotice("Report submitted.");
   return true;
 }
+
+export { hasAtRiskOpenPositions };
