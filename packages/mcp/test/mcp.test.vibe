@@ -897,6 +897,27 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       authConfig
     ))
     const whoamiAfterTrades = unwrapToolPayload(try callMcpTool(126, "whoami", {}, authConfig, aliceToken))
+    const previewFractionalLeverage = try callMcpTool(
+      127,
+      "preview_perp",
+      { ticker, side: "long", collateralPts: 5, leverage: 2.5 },
+      authConfig,
+      aliceToken
+    )
+    const openFractionalLeverage = try callMcpTool(
+      128,
+      "open_perp",
+      { ticker, side: "long", collateralPts: 5, leverage: 2.5 },
+      authConfig,
+      aliceToken
+    )
+    const sellFractionalShares = try callMcpTool(
+      129,
+      "sell_prediction",
+      { marketId: "seed-market-1", side: "yes", shares: 2.5 },
+      authConfig,
+      aliceToken
+    )
 
     try check(() => {
       assert.strictEqual(invitedBob.status, "pending")
@@ -1018,6 +1039,15 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       const charEntries = (charactersBoard.entries ?? []) as ReadonlyArray<{ readonly isNpc: boolean }>
       assert.isAbove(charEntries.length, 0)
       assert.strictEqual(charEntries[0]?.isNpc, true)
+      assert.strictEqual(previewFractionalLeverage.status, 400)
+      assert.strictEqual((previewFractionalLeverage.body.error as { readonly code?: number } | undefined)?.code, -32602)
+      assert.include((previewFractionalLeverage.body.error as { readonly message?: string } | undefined)?.message ?? "", "integer")
+      assert.strictEqual(openFractionalLeverage.status, 400)
+      assert.strictEqual((openFractionalLeverage.body.error as { readonly code?: number } | undefined)?.code, -32602)
+      assert.include((openFractionalLeverage.body.error as { readonly message?: string } | undefined)?.message ?? "", "integer")
+      assert.strictEqual(sellFractionalShares.status, 400)
+      assert.strictEqual((sellFractionalShares.body.error as { readonly code?: number } | undefined)?.code, -32602)
+      assert.include((sellFractionalShares.body.error as { readonly message?: string } | undefined)?.message ?? "", "whole number")
 
       const perpEvents = publishedEvents.filter(
         (ev): ev is Extract<FeedRealtimeEvent, { readonly type: "market.perp" }> => ev.type === "market.perp"
