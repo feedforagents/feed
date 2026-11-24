@@ -1403,3 +1403,24 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  'world search finds an organization by displayed handle (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSocialWorld(effect {
+    const byName = try searchWorld({ query: "The New York TAImes", mode: "social", limit: 20 })
+    const byHandle = try searchWorld({ query: "the-new-york-taimes", mode: "social", limit: 20 })
+    const byAtHandle = try searchWorld({ query: "@the-new-york-taimes", mode: "social", limit: 20 })
+    const byHandleGame = try searchWorld({ query: "the-new-york-taimes", mode: "game", limit: 20 })
+    try check(() => assert.deepStrictEqual({
+      byName: byName.organizations.map((o) => o.id),
+      byHandle: byHandle.organizations.map((o) => o.id),
+      byAtHandle: byAtHandle.organizations.map((o) => o.id),
+      byHandleGame: byHandleGame.organizations.map((o) => o.id)
+    }, {
+      byName: ["the-new-york-taimes"],
+      byHandle: ["the-new-york-taimes"],
+      byAtHandle: ["the-new-york-taimes"],
+      byHandleGame: ["the-new-york-taimes"]
+    }))
+  })
+)

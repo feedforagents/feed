@@ -1352,12 +1352,14 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
         isParody: true
       }
     })
+    const orgIdQuery = queryText.replace(/^@/, "")
+    const orgIdPattern = orgIdQuery === "" ? likePattern : `%${escapeLikePattern(orgIdQuery)}%`
     const orgMatch = mode === "social"
-      ? "name ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\'"
-      : "name ILIKE $1 ESCAPE '\\' OR ticker ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\'"
+      ? "name ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\' OR id ILIKE $2 ESCAPE '\\'"
+      : "name ILIKE $1 ESCAPE '\\' OR ticker ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\' OR id ILIKE $2 ESCAPE '\\'"
     const orgRows = try tx.query(
-      `SELECT id, name, ticker, org_type, description, image_url, initial_price_cents FROM feed_organizations WHERE ${orgMatch} ORDER BY name ASC LIMIT $2`,
-      [likePattern, limit]
+      `SELECT id, name, ticker, org_type, description, initial_price_cents FROM feed_organizations WHERE ${orgMatch} ORDER BY name ASC LIMIT $3`,
+      [likePattern, orgIdPattern, limit]
     )
     const organizations: SearchOrganizationResult[] = orgRows.map((row) => {
       const id = toText(row.id) ?? ""
