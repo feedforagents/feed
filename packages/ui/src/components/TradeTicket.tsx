@@ -96,9 +96,15 @@ export function TradeTicket({
   const blocked = disabled || loading;
   const numericAmount = Number(amount);
   const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
-  const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
-  const estimatedFeePts = validAmount ? Math.max(0.01, (notionalPts * feeBps) / 10000) : 0;
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
+  const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
+  const sellSettledCents =
+    marketKind === "prediction" && action === "Sell" && validAmount ? Math.floor((numericAmount * activePricePct) / 100) : 0;
+  const estimatedFeePts = validAmount
+    ? marketKind === "prediction" && action === "Sell"
+      ? Math.max(0.01, Math.ceil((sellSettledCents * feeBps) / 10000) / 100)
+      : Math.max(0.01, (notionalPts * feeBps) / 10000)
+    : 0;
   const estimatedShares = validAmount && activePricePct > 0 ? (numericAmount * 100) / activePricePct : 0;
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
