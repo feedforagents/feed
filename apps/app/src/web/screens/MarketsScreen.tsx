@@ -167,9 +167,7 @@ function BuyPointsDialog({ open, onOpenChange }: { readonly open: boolean; reado
 
 export function MarketsScreen() {
   const s = useAppStore();
-  const [marketTab, setMarketTab] = useState<"predictions" | "perps" | "positions" | "leaderboard">(
-    s.selectedMarketKind === "perp" ? "perps" : "predictions",
-  );
+    const marketTab = s.marketsTab;
   const [buyDialogOpen, setBuyDialogOpen] = useState(false);
   const [sortBy, setSortBy] = useState<LeaderboardSortColumn>("netProfit");
   const [sortDir, setSortDir] = useState<"ascending" | "descending">("descending");
@@ -220,7 +218,7 @@ export function MarketsScreen() {
 
       <Tabs value={marketTab} onValueChange={(next) => {
         if (next === "perps" || next === "positions" || next === "leaderboard" || next === "predictions") {
-          setMarketTab(next);
+          storeActions.selectMarketsTab(next);
         }
       }}>
         <TabsList className="grid w-full grid-cols-4">
