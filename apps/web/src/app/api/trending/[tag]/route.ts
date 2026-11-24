@@ -57,7 +57,10 @@
  */
 
 import {
+  addPrivateReadHeaders,
   addPublicReadHeaders,
+  countReachablePostComments,
+  countVisiblePostComments,
   publicRateLimit,
   withErrorHandling,
 } from '@feed/api';
@@ -133,6 +136,30 @@ export const GET = withErrorHandling(async function GET(
       const actor = StaticDataRegistry.getActor(post.authorId);
       const org = StaticDataRegistry.getOrganization(post.authorId);
 
+      // The card must promise only the comments the detail screen can
+      // show for this viewer (#1994 rule): the raw row count also includes
+      // soft-deleted comments and replies under a hidden parent.
+      const reachableCommentCount = await countReachablePostComments(
+        post.id,
+        []
+      );
+
+      // Compute the viewer-adjusted count outside the per-post transaction
+      // below: countVisiblePostComments queries the global client (the
+      // viewer's blocks/mutes plus the reachable walk), while asUser holds
+      // one pool connection for its transaction. A signed page with as many
+      // posts as the pool has connections deadlocks otherwise — every
+      // connection is held by a transaction waiting on a count query that
+      // can never get one (test pool 5, prod 8/10, default limit 20).
+      const visibleCommentCount =
+        authUser && authUser.userId
+          ? await countVisiblePostComments(
+              post.id,
+              authUser.userId,
+              reachableCommentCount
+            )
+          : reachableCommentCount;
+
       const [user, likeCount, commentCount, shareCount, userLike, userShare] =
         authUser && authUser.userId
           ? await asUser(authUser, async (db) => {
@@ -150,9 +177,7 @@ export const GET = withErrorHandling(async function GET(
                 db.reaction.count({
                   where: { postId: post.id, type: 'like' },
                 }),
-                db.comment.count({
-                  where: { postId: post.id },
-                }),
+                visibleCommentCount,
                 db.share.count({
                   where: { postId: post.id },
                 }),
@@ -185,9 +210,7 @@ export const GET = withErrorHandling(async function GET(
                 db.reaction.count({
                   where: { postId: post.id, type: 'like' },
                 }),
-                db.comment.count({
-                  where: { postId: post.id },
-                }),
+                visibleCommentCount,
                 db.share.count({
                   where: { postId: post.id },
                 }),
@@ -237,6 +260,13 @@ export const GET = withErrorHandling(async function GET(
     posts: enrichedPosts,
     total: result.total,
   });
-  if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
+  // Signed counts are viewer-dependent (blocks/mutes), so they must never
+  // sit in a shared cache; anonymous counts are the same for everyone.
+  if (authUser) {
+    if (rateLimitInfo) addPrivateReadHeaders(res, rateLimitInfo);
+    else res.headers.set('Cache-Control', 'private, no-store');
+  } else if (rateLimitInfo) {
+    addPublicReadHeaders(res, rateLimitInfo);
+  }
   return res;
 });
