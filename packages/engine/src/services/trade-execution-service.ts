@@ -465,6 +465,26 @@ export class TradeExecutionService {
   }
 
   /**
+   * Broadcast port for NPC perp trades. Kept separate from the prediction
+   * port because that port drops non-prediction payloads, while
+   * PerpMarketService emits `perp_trade` events on the `markets` channel.
+   */
+  private createPerpBroadcast() {
+    return {
+      emit: async (channel: string, payload: Record<string, unknown>) => {
+        if (payload.type !== 'perp_trade') return;
+
+        await broadcastToChannel(channel, payload as Record<string, JsonValue>);
+
+        logger.debug('Perp broadcast event', {
+          type: payload.type,
+          ticker: payload.ticker,
+        });
+      },
+    };
+  }
+
+  /**
    * Open a perpetual position
    */
   private async openPerpPosition(
@@ -522,6 +542,7 @@ export class TradeExecutionService {
       settlement: createNpcPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      broadcast: this.createPerpBroadcast(),
       cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
@@ -1112,6 +1133,7 @@ export class TradeExecutionService {
       settlement: createNpcPerpSettlement(),
       db: new PerpDbAdapter(),
       wallet: createNpcWalletAdapter(actorId),
+      broadcast: this.createPerpBroadcast(),
       cache: createPerpTradesCachePort(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
