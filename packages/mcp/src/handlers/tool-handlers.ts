@@ -3619,7 +3619,8 @@ export async function executeGetBlocks(
 ): Promise<GetBlocksResult> {
   const blocksList = await db.userBlock.findMany({
     where: { blockerId: agent.userId },
-    orderBy: { createdAt: 'desc' },
+    // Total order, the web block list's (GET /api/moderation/blocks).
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   });
   const blockedIds = blocksList.map((b) => b.blockedId);
   const usersList = await db.user.findMany({
@@ -3653,7 +3654,8 @@ export async function executeGetMutes(
 ): Promise<GetMutesResult> {
   const mutesList = await db.userMute.findMany({
     where: { muterId: agent.userId },
-    orderBy: { createdAt: 'desc' },
+    // Total order, the web mute list's (GET /api/moderation/mutes).
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   });
   const mutedIds = mutesList.map((m) => m.mutedId);
   const usersList = await db.user.findMany({
@@ -3842,7 +3844,10 @@ export async function executeGetFavorites(
     where: { userId: agent.userId },
     take: args.limit || 50,
     skip: args.offset || 0,
-    orderBy: { createdAt: 'desc' },
+    // Total order, the web favorites list's (GET /api/profiles/favorites):
+    // with createdAt alone, favorites sharing one timestamp have no fixed
+    // order, so offset pages can repeat one profile and skip another.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   });
   const targetUserIds = favoritesList.map((f) => f.targetUserId);
   const usersList = await db.user.findMany({
