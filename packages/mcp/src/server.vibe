@@ -623,6 +623,124 @@ effect function requireAuthenticatedCaller(
   return caller
 }
 
+effect function describeFeed(baseOrigin: string): object!StoreFailure!Store {
+  const status = getEngineAdminStatus() catch effect (err) => {
+    if (err instanceof StoreFailure) throw err
+    return undefined
+  }
+  const openPrediction = try listPredictionMarkets("open")
+  const perps = try listPerpMarkets()
+  return {
+    name: "Feed",
+    tagline: "Twitter with markets, played from your own AI.",
+    origin: baseOrigin,
+    currency: CURRENCY_DISCLAIMER,
+    startingGrant: "100.00 pts (10,000 cents) granted once on 18+ phone verification; no free refills.",
+    noPurchasePolicy: "There is no MCP tool to buy points, no upsells, and no checkout links.",
+    worldStatus: status === undefined
+      ? { available: false, openPredictionMarkets: openPrediction.length, perpMarkets: perps.length }
+      : {
+          available: true,
+          currentDay: status.currentDay,
+          currentHour: status.currentHour,
+          phase: status.phase,
+          gameRunning: status.gameRunning,
+          openPredictionMarkets: openPrediction.length,
+          perpMarkets: perps.length,
+          lastTickAt: status.lastTickAt
+        },
+    auth: {
+      mcpEndpoint: `${baseOrigin}/mcp`,
+      skillUrl: `${baseOrigin}/SKILL.md`,
+      discoveryIndexUrl: `${baseOrigin}/.well-known/agent-skills/index.json`,
+      oauthProtectedResource: `${baseOrigin}/.well-known/oauth-protected-resource`,
+      oauthAuthorizationServer: `${baseOrigin}/.well-known/oauth-authorization-server`,
+      deviceLinkUrl: `${baseOrigin}/link`,
+      singleGrantPolicy: "At most one active connected agent per account."
+    },
+    toolsSummary: {
+      publicTools: 15,
+      protectedTools: 34,
+      totalTools: MCP_TOOL_DEFINITIONS.length
+    }
+  }
+}
+
+effect function startMcpSignIn(args: Record<string, unknown>, baseOrigin: string): object!(AuthFailure | StoreFailure)!Store {
+  const clientId = asOptionalString(args.clientId) ?? DEFAULT_DEVICE_CLIENT_ID
+  const clientName = asOptionalString(args.clientName) ?? DEFAULT_DEVICE_CLIENT_NAME
+  const rawScopes = Array.isArray(args.scopes) ? (args.scopes as ReadonlyArray<string>) : undefined
+  const scopeString = rawScopes !== undefined && rawScopes.length > 0 ? rawScopes.join(" ") : undefined
+  const device = try startDeviceAuthorization({
+    clientId,
+    clientName,
+    scope: scopeString,
+    resource: `${baseOrigin}/mcp`,
+    origin: baseOrigin
+  })
+  return {
+    status: "pending",
+    clientId,
+    clientName,
+    deviceCode: device.device_code,
+    userCode: device.user_code,
+    verificationUri: device.verification_uri,
+    verificationUriComplete: device.verification_uri_complete,
+    expiresIn: device.expires_in,
+    interval: device.interval,
+    instructions: "Share verificationUri and userCode with the player so they can sign in on the browser and approve the connection. Never ask for or relay a phone number or SMS verification code."
+  }
+}
+
+effect function checkMcpSignIn(
+  args: Record<string, unknown>,
+  baseOrigin: string,
+  authConfig: AuthRuntimeConfig
+): object!(InvalidRpcParamsFailure | McpFailure | StoreFailure)!Store {
+  const deviceCode = asOptionalString(args.deviceCode) ?? ""
+  if (deviceCode === "") {
+    throw new InvalidRpcParamsFailure({ message: "deviceCode is required." })
+  }
+  const clientId = asOptionalString(args.clientId) ?? (try lookupDeviceClientId(deviceCode)) ?? DEFAULT_DEVICE_CLIENT_ID
+  const exchanged = exchangeOAuthToken({
+    grantType: "urn:ietf:params:oauth:grant-type:device_code",
+    deviceCode,
+    clientId,
+    resource: `${baseOrigin}/mcp`,
+    config: authConfig
+  }) catch effect (err) => {
+    if (err instanceof StoreFailure) throw err
+    if (err instanceof AuthFailure) {
+      if (err.code === "authorization_pending") {
+        return { status: "pending", interval: 5, message: "Waiting for player approval at /link." }
+      }
+      if (err.code === "expired_token") {
+        return { status: "expired", message: "Device code expired; call start_sign_in again." }
+      }
+      if (err.code === "access_denied") {
+        return { status: "denied", message: "Connection request was denied by the player." }
+      }
+      return { status: "error", code: err.code, message: err.message }
+    }
+    return { status: "error", code: "device_exchange_failed", message: "Unable to check device sign-in." }
+  }
+  if ("status" in exchanged) {
+    return exchanged
+  }
+  return {
+    status: "authorized",
+    token_type: exchanged.token_type,
+    access_token: exchanged.access_token,
+    refresh_token: exchanged.refresh_token,
+    expires_in: exchanged.expires_in,
+    scope: exchanged.scope,
+    resource: exchanged.resource,
+    grant_id: exchanged.grant_id,
+    client_id: exchanged.client_id,
+    client_name: exchanged.client_name
+  }
+}
+
 effect function executePublicTool(
   definition: McpToolDefinition,
   args: Record<string, unknown>,
@@ -634,121 +752,16 @@ effect function executePublicTool(
   const viewer = try resolveOptionalViewer(authorizationHeader, authConfig)
 
   switch (definition.name) {
-    case "about_feed": {
-      const status = getEngineAdminStatus() catch effect (err) => {
-        if (err instanceof StoreFailure) throw err
-        return undefined
-      }
-      const openPrediction = try listPredictionMarkets("open")
-      const perps = try listPerpMarkets()
-      return {
-        name: "Feed",
-        tagline: "Twitter with markets, played from your own AI.",
-        origin: baseOrigin,
-        currency: CURRENCY_DISCLAIMER,
-        startingGrant: "100.00 pts (10,000 cents) granted once on 18+ phone verification; no free refills.",
-        noPurchasePolicy: "There is no MCP tool to buy points, no upsells, and no checkout links.",
-        worldStatus: status === undefined
-          ? { available: false, openPredictionMarkets: openPrediction.length, perpMarkets: perps.length }
-          : {
-              available: true,
-              currentDay: status.currentDay,
-              currentHour: status.currentHour,
-              phase: status.phase,
-              gameRunning: status.gameRunning,
-              openPredictionMarkets: openPrediction.length,
-              perpMarkets: perps.length,
-              lastTickAt: status.lastTickAt
-            },
-        auth: {
-          mcpEndpoint: `${baseOrigin}/mcp`,
-          skillUrl: `${baseOrigin}/SKILL.md`,
-          discoveryIndexUrl: `${baseOrigin}/.well-known/agent-skills/index.json`,
-          oauthProtectedResource: `${baseOrigin}/.well-known/oauth-protected-resource`,
-          oauthAuthorizationServer: `${baseOrigin}/.well-known/oauth-authorization-server`,
-          deviceLinkUrl: `${baseOrigin}/link`,
-          singleGrantPolicy: "At most one active connected agent per account."
-        },
-        toolsSummary: {
-          publicTools: 15,
-          protectedTools: 34,
-          totalTools: MCP_TOOL_DEFINITIONS.length
-        }
-      }
-    }
+    case "about_feed":
+      return try describeFeed(baseOrigin)
     case "how_to_play": {
       const topic = asOptionalString(args.topic) ?? "overview"
       return guideSectionForTopic(topic, baseOrigin)
     }
-    case "start_sign_in": {
-      const clientId = asOptionalString(args.clientId) ?? DEFAULT_DEVICE_CLIENT_ID
-      const clientName = asOptionalString(args.clientName) ?? DEFAULT_DEVICE_CLIENT_NAME
-      const rawScopes = Array.isArray(args.scopes) ? (args.scopes as ReadonlyArray<string>) : undefined
-      const scopeString = rawScopes !== undefined && rawScopes.length > 0 ? rawScopes.join(" ") : undefined
-      const device = try startDeviceAuthorization({
-        clientId,
-        clientName,
-        scope: scopeString,
-        resource: `${baseOrigin}/mcp`,
-        origin: baseOrigin
-      })
-      return {
-        status: "pending",
-        clientId,
-        clientName,
-        deviceCode: device.device_code,
-        userCode: device.user_code,
-        verificationUri: device.verification_uri,
-        verificationUriComplete: device.verification_uri_complete,
-        expiresIn: device.expires_in,
-        interval: device.interval,
-        instructions: "Share verificationUri and userCode with the player so they can sign in on the browser and approve the connection. Never ask for or relay a phone number or SMS verification code."
-      }
-    }
-    case "check_sign_in": {
-      const deviceCode = asOptionalString(args.deviceCode) ?? ""
-      if (deviceCode === "") {
-        throw new InvalidRpcParamsFailure({ message: "deviceCode is required." })
-      }
-      const clientId = asOptionalString(args.clientId) ?? (try lookupDeviceClientId(deviceCode)) ?? DEFAULT_DEVICE_CLIENT_ID
-      const exchanged = exchangeOAuthToken({
-        grantType: "urn:ietf:params:oauth:grant-type:device_code",
-        deviceCode,
-        clientId,
-        resource: `${baseOrigin}/mcp`,
-        config: authConfig
-      }) catch effect (err) => {
-        if (err instanceof StoreFailure) throw err
-        if (err instanceof AuthFailure) {
-          if (err.code === "authorization_pending") {
-            return { status: "pending", interval: 5, message: "Waiting for player approval at /link." }
-          }
-          if (err.code === "expired_token") {
-            return { status: "expired", message: "Device code expired; call start_sign_in again." }
-          }
-          if (err.code === "access_denied") {
-            return { status: "denied", message: "Connection request was denied by the player." }
-          }
-          return { status: "error", code: err.code, message: err.message }
-        }
-        return { status: "error", code: "device_exchange_failed", message: "Unable to check device sign-in." }
-      }
-      if ("status" in exchanged) {
-        return exchanged
-      }
-      return {
-        status: "authorized",
-        token_type: exchanged.token_type,
-        access_token: exchanged.access_token,
-        refresh_token: exchanged.refresh_token,
-        expires_in: exchanged.expires_in,
-        scope: exchanged.scope,
-        resource: exchanged.resource,
-        grant_id: exchanged.grant_id,
-        client_id: exchanged.client_id,
-        client_name: exchanged.client_name
-      }
-    }
+    case "start_sign_in":
+      return try startMcpSignIn(args, baseOrigin)
+    case "check_sign_in":
+      return try checkMcpSignIn(args, baseOrigin, authConfig)
     case "get_post": {
       const postId = asOptionalString(args.postId) ?? ""
       const thread = try getPostThread(postId, viewer.viewerId, viewer.playMode)
@@ -949,6 +962,212 @@ effect function executePublicTool(
   }
 }
 
+effect function readMcpPortfolio(args: Record<string, unknown>, caller: VerifiedAccessToken): object!(MarketFailure | StoreFailure)!Store {
+  const mode = caller.playMode
+  if (mode === "social") {
+    return {
+      accountId: caller.accountId,
+      playMode: "social",
+      financialFieldsOmittedInSocialMode: true,
+      message: "Balances, open positions, and P&L are omitted in Social mode. Open positions continue running safely; switch via set_mode({ mode: \"game\" }) only if the user explicitly wants Game mode.",
+      currency: CURRENCY_DISCLAIMER
+    }
+  }
+  const ledgerLimit = clampCount(asOptionalInt(args.ledgerLimit), 20, 50)
+  const economy = try getAccountEconomy(caller.accountId)
+  const positions = try getUserPositions(caller.accountId)
+  const ledger = try getPointLedger(caller.accountId, ledgerLimit)
+  return {
+    accountId: caller.accountId,
+    playMode: "game",
+    currency: CURRENCY_DISCLAIMER,
+    balancePts: toPtsNumber(economy.balanceCents),
+    balanceDisplay: formatPtsLabeled(economy.balanceCents),
+    positionValuePts: toPtsNumber(economy.positionValueCents),
+    equityPts: toPtsNumber(economy.equityCents),
+    startingGrantPts: toPtsNumber(economy.startingGrantCents),
+    netProfitPts: toPtsNumber(economy.netProfitCents),
+    totalFeesPaidPts: toPtsNumber(economy.totalFeesPaidCents),
+    predictionPositions: positions.predictionPositions.map((p) => ({
+      marketId: p.marketId,
+      question: p.question,
+      status: p.marketStatus,
+      side: p.side,
+      shares: p.shares,
+      costBasisPts: toPtsNumber(p.costBasisCents),
+      estimatedValuePts: toPtsNumber(p.estimatedValueCents),
+      payoutPts: toPtsNumber(p.payoutCents),
+      yesPriceBps: p.yesPriceBps,
+      noPriceBps: p.noPriceBps
+    })),
+    perpPositions: positions.perpPositions.map((p) => ({
+      id: p.id,
+      ticker: p.ticker,
+      side: p.side,
+      status: p.status,
+      leverage: p.leverage,
+      marginPts: toPtsNumber(p.marginCents),
+      sizePts: toPtsNumber(p.sizeCents),
+      entryPricePts: toPtsNumber(p.entryPriceCents),
+      markPricePts: toPtsNumber(p.markPriceCents),
+      unrealizedPnlPts: toPtsNumber(p.unrealizedPnlCents),
+      equityPts: toPtsNumber(p.equityCents),
+      liquidationPricePts: toPtsNumber(p.liquidationPriceCents),
+      accruedFundingPts: toPtsNumber(p.accruedFundingCents)
+    })),
+    recentLedger: ledger.map((entry) => ({
+      id: entry.id,
+      kind: entry.kind,
+      deltaPts: toPtsNumber(entry.deltaCents),
+      balanceAfterPts: toPtsNumber(entry.balanceAfterCents),
+      refId: entry.refId,
+      createdAt: entry.createdAt
+    }))
+  }
+}
+
+effect function buyMcpPrediction(args: Record<string, unknown>, caller: VerifiedAccessToken): object!(InvalidRpcParamsFailure | MarketFailure | StoreFailure)!Store {
+  const mode = caller.playMode
+  const marketId = asOptionalString(args.marketId) ?? ""
+  const side = args.side === "no" ? "no" : "yes"
+  const amountCents = ptsToWholeCents(Number(args.amountPts))
+  if (amountCents === undefined) {
+    throw new InvalidRpcParamsFailure({ message: "amountPts must equal at least 0.01 pt (1 cent)." })
+  }
+  const receipt = try buyPredictionShares({
+    actorId: caller.accountId,
+    actorKind: "user",
+    marketId,
+    side,
+    amountCents,
+    viaClientName: caller.clientName
+  })
+  return {
+    tradeId: receipt.tradeId,
+    marketId: receipt.marketId,
+    action: receipt.action,
+    side: receipt.side,
+    shares: receipt.shares,
+    notionalPts: toPtsNumber(receipt.notionalCents),
+    feePts: toPtsNumber(receipt.feeCents),
+    netPts: toPtsNumber(receipt.netCents),
+    yesPriceBps: receipt.yesPriceBps,
+    noPriceBps: receipt.noPriceBps,
+    viaClientName: caller.clientName,
+    currency: CURRENCY_DISCLAIMER,
+    ...(mode === "social"
+      ? { financialFieldsOmittedInSocialMode: true }
+      : {
+          balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
+          balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
+        })
+  }
+}
+
+effect function sellMcpPrediction(args: Record<string, unknown>, caller: VerifiedAccessToken): object!(MarketFailure | StoreFailure)!Store {
+  const mode = caller.playMode
+  const marketId = asOptionalString(args.marketId) ?? ""
+  const side = args.side === "no" ? "no" : "yes"
+  const shares = asOptionalInt(args.shares) ?? 0
+  const receipt = try sellPredictionShares({
+    actorId: caller.accountId,
+    actorKind: "user",
+    marketId,
+    side,
+    shares,
+    viaClientName: caller.clientName
+  })
+  return {
+    tradeId: receipt.tradeId,
+    marketId: receipt.marketId,
+    action: receipt.action,
+    side: receipt.side,
+    shares: receipt.shares,
+    notionalPts: toPtsNumber(receipt.notionalCents),
+    feePts: toPtsNumber(receipt.feeCents),
+    netPts: toPtsNumber(receipt.netCents),
+    yesPriceBps: receipt.yesPriceBps,
+    noPriceBps: receipt.noPriceBps,
+    viaClientName: caller.clientName,
+    currency: CURRENCY_DISCLAIMER,
+    ...(mode === "social"
+      ? { financialFieldsOmittedInSocialMode: true }
+      : {
+          balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
+          balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
+        })
+  }
+}
+
+effect function openMcpPerp(args: Record<string, unknown>, caller: VerifiedAccessToken): object!(InvalidRpcParamsFailure | MarketFailure | StoreFailure)!Store {
+  const mode = caller.playMode
+  const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
+  const side = args.side === "short" ? "short" : "long"
+  const leverage = asOptionalInt(args.leverage) ?? 1
+  const collateralCents = ptsToWholeCents(Number(args.collateralPts))
+  if (collateralCents === undefined) {
+    throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
+  }
+  const receipt = try openPerpPosition({
+    ownerId: caller.accountId,
+    ownerKind: "user",
+    ticker,
+    side,
+    collateralCents,
+    leverage,
+    viaClientName: caller.clientName
+  })
+  return {
+    tradeId: receipt.tradeId,
+    positionId: receipt.positionId,
+    ticker,
+    side,
+    leverage: receipt.leverage,
+    collateralPts: toPtsNumber(receipt.collateralCents),
+    sizePts: toPtsNumber(receipt.sizeCents),
+    feePts: toPtsNumber(receipt.feeCents),
+    executionPricePts: toPtsNumber(receipt.executionPriceCents),
+    liquidationPricePts: toPtsNumber(receipt.position.liquidationPriceCents),
+    viaClientName: caller.clientName,
+    currency: CURRENCY_DISCLAIMER,
+    ...(mode === "social"
+      ? { financialFieldsOmittedInSocialMode: true }
+      : {
+          balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
+          balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
+        })
+  }
+}
+
+effect function closeMcpPerp(args: Record<string, unknown>, caller: VerifiedAccessToken): object!(MarketFailure | StoreFailure)!Store {
+  const mode = caller.playMode
+  const positionId = asOptionalString(args.positionId) ?? ""
+  const receipt = try closePerpPosition({
+    ownerId: caller.accountId,
+    positionId,
+    viaClientName: caller.clientName
+  })
+  return {
+    tradeId: receipt.tradeId,
+    positionId: receipt.positionId,
+    ticker: receipt.ticker,
+    side: receipt.side,
+    sizePts: toPtsNumber(receipt.sizeCents),
+    exitPricePts: toPtsNumber(receipt.exitPriceCents),
+    feePts: toPtsNumber(receipt.feeCents),
+    viaClientName: caller.clientName,
+    currency: CURRENCY_DISCLAIMER,
+    ...(mode === "social"
+      ? { financialFieldsOmittedInSocialMode: true }
+      : {
+          realizedPnlPts: toPtsNumber(receipt.realizedPnlCents),
+          netCreditPts: toPtsNumber(receipt.netCreditCents),
+          balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
+          balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
+        })
+  }
+}
+
 effect function executeProtectedTool(
   definition: McpToolDefinition,
   args: Record<string, unknown>,
@@ -1016,68 +1235,8 @@ effect function executeProtectedTool(
       const items = unreadOnly ? all.filter((n) => !n.isRead) : all
       return { mode, items }
     }
-    case "get_portfolio": {
-      if (mode === "social") {
-        return {
-          accountId: caller.accountId,
-          playMode: "social",
-          financialFieldsOmittedInSocialMode: true,
-          message: "Balances, open positions, and P&L are omitted in Social mode. Open positions continue running safely; switch via set_mode({ mode: \"game\" }) only if the user explicitly wants Game mode.",
-          currency: CURRENCY_DISCLAIMER
-        }
-      }
-      const ledgerLimit = clampCount(asOptionalInt(args.ledgerLimit), 20, 50)
-      const economy = try getAccountEconomy(caller.accountId)
-      const positions = try getUserPositions(caller.accountId)
-      const ledger = try getPointLedger(caller.accountId, ledgerLimit)
-      return {
-        accountId: caller.accountId,
-        playMode: "game",
-        currency: CURRENCY_DISCLAIMER,
-        balancePts: toPtsNumber(economy.balanceCents),
-        balanceDisplay: formatPtsLabeled(economy.balanceCents),
-        positionValuePts: toPtsNumber(economy.positionValueCents),
-        equityPts: toPtsNumber(economy.equityCents),
-        startingGrantPts: toPtsNumber(economy.startingGrantCents),
-        netProfitPts: toPtsNumber(economy.netProfitCents),
-        totalFeesPaidPts: toPtsNumber(economy.totalFeesPaidCents),
-        predictionPositions: positions.predictionPositions.map((p) => ({
-          marketId: p.marketId,
-          question: p.question,
-          status: p.marketStatus,
-          side: p.side,
-          shares: p.shares,
-          costBasisPts: toPtsNumber(p.costBasisCents),
-          estimatedValuePts: toPtsNumber(p.estimatedValueCents),
-          payoutPts: toPtsNumber(p.payoutCents),
-          yesPriceBps: p.yesPriceBps,
-          noPriceBps: p.noPriceBps
-        })),
-        perpPositions: positions.perpPositions.map((p) => ({
-          id: p.id,
-          ticker: p.ticker,
-          side: p.side,
-          status: p.status,
-          leverage: p.leverage,
-          marginPts: toPtsNumber(p.marginCents),
-          sizePts: toPtsNumber(p.sizeCents),
-          entryPricePts: toPtsNumber(p.entryPriceCents),
-          markPricePts: toPtsNumber(p.markPriceCents),
-          unrealizedPnlPts: toPtsNumber(p.unrealizedPnlCents),
-          equityPts: toPtsNumber(p.equityCents),
-          liquidationPricePts: toPtsNumber(p.liquidationPriceCents),
-          accruedFundingPts: toPtsNumber(p.accruedFundingCents)
-        })),
-        recentLedger: ledger.map((entry) => ({
-          id: entry.id,
-          kind: entry.kind,
-          deltaPts: toPtsNumber(entry.deltaCents),
-          balanceAfterPts: toPtsNumber(entry.balanceAfterCents),
-          refId: entry.refId,
-          createdAt: entry.createdAt
-        }))
-      }
-    }
+    case "get_portfolio":
+      return try readMcpPortfolio(args, caller)
     case "preview_perp": {
       const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
       const side = args.side === "short" ? "short" : "long"
@@ -1234,140 +1393,14 @@ effect function executeProtectedTool(
       const invite = try respondAlphaInvite({ accountId: caller.accountId, inviteId, accept })
       return { invite }
     }
-    case "buy_prediction": {
-      const marketId = asOptionalString(args.marketId) ?? ""
-      const side = args.side === "no" ? "no" : "yes"
-      const amountCents = ptsToWholeCents(Number(args.amountPts))
-      if (amountCents === undefined) {
-        throw new InvalidRpcParamsFailure({ message: "amountPts must equal at least 0.01 pt (1 cent)." })
-      }
-      const receipt = try buyPredictionShares({
-        actorId: caller.accountId,
-        actorKind: "user",
-        marketId,
-        side,
-        amountCents,
-        viaClientName: caller.clientName
-      })
-      return {
-        tradeId: receipt.tradeId,
-        marketId: receipt.marketId,
-        action: receipt.action,
-        side: receipt.side,
-        shares: receipt.shares,
-        notionalPts: toPtsNumber(receipt.notionalCents),
-        feePts: toPtsNumber(receipt.feeCents),
-        netPts: toPtsNumber(receipt.netCents),
-        yesPriceBps: receipt.yesPriceBps,
-        noPriceBps: receipt.noPriceBps,
-        viaClientName: caller.clientName,
-        currency: CURRENCY_DISCLAIMER,
-        ...(mode === "social"
-          ? { financialFieldsOmittedInSocialMode: true }
-          : {
-              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
-              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
-            })
-      }
-    }
-    case "sell_prediction": {
-      const marketId = asOptionalString(args.marketId) ?? ""
-      const side = args.side === "no" ? "no" : "yes"
-      const shares = asOptionalInt(args.shares) ?? 0
-      const receipt = try sellPredictionShares({
-        actorId: caller.accountId,
-        actorKind: "user",
-        marketId,
-        side,
-        shares,
-        viaClientName: caller.clientName
-      })
-      return {
-        tradeId: receipt.tradeId,
-        marketId: receipt.marketId,
-        action: receipt.action,
-        side: receipt.side,
-        shares: receipt.shares,
-        notionalPts: toPtsNumber(receipt.notionalCents),
-        feePts: toPtsNumber(receipt.feeCents),
-        netPts: toPtsNumber(receipt.netCents),
-        yesPriceBps: receipt.yesPriceBps,
-        noPriceBps: receipt.noPriceBps,
-        viaClientName: caller.clientName,
-        currency: CURRENCY_DISCLAIMER,
-        ...(mode === "social"
-          ? { financialFieldsOmittedInSocialMode: true }
-          : {
-              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
-              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
-            })
-      }
-    }
-    case "open_perp": {
-      const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
-      const side = args.side === "short" ? "short" : "long"
-      const leverage = asOptionalInt(args.leverage) ?? 1
-      const collateralCents = ptsToWholeCents(Number(args.collateralPts))
-      if (collateralCents === undefined) {
-        throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
-      }
-      const receipt = try openPerpPosition({
-        ownerId: caller.accountId,
-        ownerKind: "user",
-        ticker,
-        side,
-        collateralCents,
-        leverage,
-        viaClientName: caller.clientName
-      })
-      return {
-        tradeId: receipt.tradeId,
-        positionId: receipt.positionId,
-        ticker,
-        side,
-        leverage: receipt.leverage,
-        collateralPts: toPtsNumber(receipt.collateralCents),
-        sizePts: toPtsNumber(receipt.sizeCents),
-        feePts: toPtsNumber(receipt.feeCents),
-        executionPricePts: toPtsNumber(receipt.executionPriceCents),
-        liquidationPricePts: toPtsNumber(receipt.position.liquidationPriceCents),
-        viaClientName: caller.clientName,
-        currency: CURRENCY_DISCLAIMER,
-        ...(mode === "social"
-          ? { financialFieldsOmittedInSocialMode: true }
-          : {
-              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
-              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
-            })
-      }
-    }
-    case "close_perp": {
-      const positionId = asOptionalString(args.positionId) ?? ""
-      const receipt = try closePerpPosition({
-        ownerId: caller.accountId,
-        positionId,
-        viaClientName: caller.clientName
-      })
-      return {
-        tradeId: receipt.tradeId,
-        positionId: receipt.positionId,
-        ticker: receipt.ticker,
-        side: receipt.side,
-        sizePts: toPtsNumber(receipt.sizeCents),
-        exitPricePts: toPtsNumber(receipt.exitPriceCents),
-        feePts: toPtsNumber(receipt.feeCents),
-        viaClientName: caller.clientName,
-        currency: CURRENCY_DISCLAIMER,
-        ...(mode === "social"
-          ? { financialFieldsOmittedInSocialMode: true }
-          : {
-              realizedPnlPts: toPtsNumber(receipt.realizedPnlCents),
-              netCreditPts: toPtsNumber(receipt.netCreditCents),
-              balanceAfterPts: toPtsNumber(receipt.balanceAfterCents),
-              balanceAfterDisplay: formatPtsLabeled(receipt.balanceAfterCents)
-            })
-      }
-    }
+    case "buy_prediction":
+      return try buyMcpPrediction(args, caller)
+    case "sell_prediction":
+      return try sellMcpPrediction(args, caller)
+    case "open_perp":
+      return try openMcpPerp(args, caller)
+    case "close_perp":
+      return try closeMcpPerp(args, caller)
     default:
       throw new McpFailure({ code: "INVALID_PROTECTED_TOOL", message: `Unsupported protected tool: ${definition.name}` })
   }
