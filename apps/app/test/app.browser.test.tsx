@@ -184,7 +184,7 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
 });
 
-it('A post deleted elsewhere disappears from Explore and Profile (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+it('A deleted post disappears from Explore and Profile (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
   installMockNetwork();
   explorePosts = [SAMPLE_POSTS[0]];
   profilePosts = [SAMPLE_POSTS[0]];
@@ -195,6 +195,7 @@ it('A post deleted elsewhere disappears from Explore and Profile (spec/social/po
 
    await act(async () => {
      await storeActions.navigate("/explore");
+     await storeActions.loadExplore("XTRPC");
    });
   await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
 
