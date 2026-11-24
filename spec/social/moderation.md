@@ -272,6 +272,8 @@ pure def createNotification(s: ModerationState, recipientId: str, actorId: str, 
 
 ### Marking notifications read clears only notifications visible in the account's current mode
 
+In the model, the action requires at least one visible unread notification. It marks unread notifications of kinds the current mode displays. Block filtering applies separately to notification lists and visible unread counts.
+
 ```quint
 pure def canMarkNotificationsRead(s: ModerationState, by: str): bool =
   hasAccount(s, by) and visibleUnreadCount(s, by) > 0

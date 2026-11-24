@@ -96,7 +96,7 @@ pure val initial: MessagingState = {
 
 ### What the simulator tries
 
-Sample sets include valid actors and an unknown `"outsider"`, invalid and valid message lengths (`0` and `501`), valid and invalid emoji values, and chat/message/invite IDs.
+Sample sets include valid actors and an unknown `"outsider"`, message lengths at and beyond both bounds, valid emoji and the empty string, and chat, message, and invite IDs.
 
 ```quint
 pure val byValues = Set("alice", "bob", "npc1", "outsider")

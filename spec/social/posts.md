@@ -78,7 +78,7 @@ pure val initial: PostsState = {
 
 ### What the simulator tries
 
-Sample sets cover valid and invalid callers (including client-spoofing attempts and unknown actors), valid and out-of-range post text lengths (`0` and `281`), existing and missing post IDs, and sample `Post` records for mode projection laws.
+Sample sets cover valid and invalid callers (including client-spoofing attempts and unknown actors), post text lengths at and beyond both bounds, existing and missing post IDs, and sample `Post` records for mode projection laws.
 
 ```quint
 pure val byValues: Set[Caller] = Set(
@@ -168,7 +168,7 @@ pure def removeStr(xs: List[str], accountId: str): List[str] =
 
 ### Creating a post enforces 1..280 length, valid reply/quote targets, block isolation, and shared per-account rate limits
 
-Web requests (`viaClientName == ""`) and connected-agent MCP calls (`viaClientName != ""`) share the exact same `postsInWindow` counter on the author's account, so alternating between web and connected agent cannot multiply limits (PRD §8.1). Blocked users cannot reply to or quote each other's posts.
+Web requests (`viaClientName == ""`) and connected-agent MCP calls (`viaClientName != ""`) share the exact same `postsInWindow` counter on the author's account, so alternating between web and connected agent cannot multiply limits (PRD §8.1). Blocked users cannot reply to or quote each other's posts. The model uses a three-post window to make the rate limit reachable in simulation. Feed enforces a shared limit of 30 posts per account per hour.
 
 ```quint
 pure def canCreatePost(s: PostsState, textLen: int, quotePostId: int, replyToPostId: int, by: Caller): bool =
@@ -321,9 +321,11 @@ pure val eval_witness_sometimesPostRateLimitReached = (
 
 ## Story: Like, repost, follow, and block enforcement
 
-> As a user, I want to like, unlike, repost, unrepost, and follow accounts without duplicates, while blocking prevents blocked users from engaging with or following each other.
+> As a user, I want to like, unlike, repost, unrepost, and follow accounts without duplicates, while blocking prevents new likes, reposts, and follows between the two accounts.
 
-### Users can like and unlike active non-blocked posts at most once
+### Users can add one like to an active post when neither account has blocked the other
+
+The user can remove their own existing like from an active post even after either account has blocked the other.
 
 ```quint
 pure def canLikePost(s: PostsState, postId: int, by: Caller): bool =
@@ -348,7 +350,9 @@ pure def unlikePost(s: PostsState, postId: int, by: Caller): PostsState =
   }
 ```
 
-### Users can repost and unrepost active non-blocked posts at most once
+### Users can add one repost to an active post when neither account has blocked the other
+
+The user can remove their own existing repost from an active post even after either account has blocked the other.
 
 ```quint
 pure def canRepostPost(s: PostsState, postId: int, by: Caller): bool =
