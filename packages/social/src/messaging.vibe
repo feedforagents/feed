@@ -208,8 +208,8 @@ effect function loadParticipantProfilesTx(
 effect function loadChatHeaderTx(
   tx: Tx,
   chatId: string
-): { readonly kind: ChatKind; readonly createdBy: string }!(SocialFailure | StoreFailure) {
-  const chatRows = try tx.query("SELECT id, kind, created_by FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
+): { readonly kind: ChatKind; readonly createdBy: string; readonly name: string | null }!(SocialFailure | StoreFailure) {
+  const chatRows = try tx.query("SELECT id, kind, created_by, name FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
   const chatRow = chatRows[0]
   if (chatRow === undefined) {
     throw new SocialFailure({ code: "NotFound", message: "Chat not found" })
@@ -218,7 +218,7 @@ effect function loadChatHeaderTx(
   if (kind === undefined) {
     throw new SocialFailure({ code: "TeamChatRetired", message: "Unsupported or retired chat kind" })
   }
-  return { kind, createdBy: toText(chatRow.created_by) ?? "" }
+  return { kind, createdBy: toText(chatRow.created_by) ?? "", name: toText(chatRow.name) }
 }
 
 effect function loadChatMembersTx(tx: Tx, chatId: string): ReadonlyArray<Row>!StoreFailure {
@@ -1016,7 +1016,7 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): { r
   }
   const store = try Store
   const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
+  const committed = try store.transaction(effect (tx: Tx) => {
     const inviter = try resolveUserOrNpcTx(tx, input.accountId)
     const target = try resolveUserOrNpcTx(tx, input.targetHandleOrId)
     const chat = try loadChatHeaderTx(tx, input.chatId)
@@ -1029,7 +1029,7 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): { r
     }
     const already = memberRows.some((m) => toText(m.member_id) === target.id)
     if (already) {
-      return { chatId: input.chatId, memberId: target.id, added: true }
+return { result: { chatId: input.chatId, memberId: target.id, added: true }, events: [] as FeedRealtimeEvent[] }
     }
     const targetAccount: SpecAccount = {
       id: target.id,
@@ -1054,8 +1054,25 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): { r
       "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
       [input.chatId, target.id, target.kind === "npc" ? "npc" : "user", now]
     )
-    return { chatId: input.chatId, memberId: target.id, added: true }
+    const events: FeedRealtimeEvent[] = []
+    if (target.kind === "user") {
+      const notifEvent = try insertNotificationTx(tx, {
+        accountId: target.id,
+        kind: "group_invite",
+        actorId: inviter.id,
+        postId: null,
+        marketId: null,
+        title: "Group invite",
+        body: `${inviter.displayName} invited you to ${chat.name ?? "Group Chat"}`,
+        isGameOnly: false,
+        createdAt: now
+      })
+      if (notifEvent !== undefined) events.push(notifEvent)
+    }
+    return { result: { chatId: input.chatId, memberId: target.id, added: true }, events }
   })
+  try emitAfterCommit(committed.events)
+  return committed.result
 }
 
 export effect function leaveGroupChat(accountId: string, chatId: string): LeaveGroupResult!(SocialFailure | StoreFailure)!Store {
