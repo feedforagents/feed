@@ -208,5 +208,112 @@ That should work!`;
       expect(data.decision).toBeDefined();
       expect(Array.isArray(data.decision)).toBe(true);
     });
+
+    test('should strip leading XML declaration before root extraction', () => {
+      const xml =
+        '<?xml version="1.0" encoding="UTF-8"?>\n<response><fact>Hello</fact></response>\nNote: check <foo>';
+      const extracted = extractXMLFromText(xml);
+      expect(extracted).toBe('<response><fact>Hello</fact></response>');
+
+      const result = parseXML(xml);
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ fact: 'Hello' });
+    });
+
+    test('should preserve CDATA content verbatim including angle brackets, tags, and entities', () => {
+      const xml = `<response>
+  <fact><![CDATA[Price < 100 & volume > 50]]></fact>
+  <snippet><![CDATA[Use <tag> and keep &amp; literal with $& and $1]]></snippet>
+  <mixed>prefix <![CDATA[a < b]]> &amp; suffix</mixed>
+  <marketId><![CDATA[367525326588215296]]></marketId>
+  <rawFlag><![CDATA[true]]></rawFlag>
+</response>`;
+      const result = parseXML(xml);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        fact: 'Price < 100 & volume > 50',
+        snippet: 'Use <tag> and keep &amp; literal with $& and $1',
+        mixed: 'prefix a < b & suffix',
+        marketId: '367525326588215296',
+        rawFlag: 'true',
+      });
+    });
+
+    test('should reject unclosed CDATA sections as truncated XML', () => {
+      const xml = '<response><fact><![CDATA[unclosed content</fact></response>';
+      const result = parseXML(xml);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('CDATA');
+    });
+
+    test('should decode XML entities in text nodes without double-decoding', () => {
+      const xml = `<response>
+  <headline>AT&amp;T &lt; $50 &amp; &quot;Q4&quot; &apos;beat&apos; &#39;ok&#x27;</headline>
+  <escaped>&amp;lt;script&amp;gt;</escaped>
+</response>`;
+      const result = parseXML(xml);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        headline: `AT&T < $50 & "Q4" 'beat' 'ok'`,
+        escaped: '&lt;script&gt;',
+      });
+    });
+
+    test('should preserve unescaped comparison operators in leaf text', () => {
+      const xml = `<decisions>
+  <decision>
+    <npcId>npc-1</npcId>
+    <reasoning>odds < 0.4 and volume > 100</reasoning>
+    <note>price <50 and cap >200</note>
+    <amount>25</amount>
+  </decision>
+</decisions>`;
+      const result = parseXML(xml);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        decision: {
+          npcId: 'npc-1',
+          reasoning: 'odds < 0.4 and volume > 100',
+          note: 'price <50 and cap >200',
+          amount: 25,
+        },
+      });
+    });
+
+    test('should fail closed on invalid wrapper tag names instead of lifting inner decisions', () => {
+      for (const wrapper of ['1_rejected', '-alt']) {
+        const xml = `<decisions><decision><npcId>a</npcId><action>wait</action></decision><${wrapper}><decision><npcId>b</npcId><action>buy_yes</action></decision></${wrapper}></decisions>`;
+        const result = parseXML(xml);
+        expect(result.success).toBe(false);
+      }
+    });
+
+    test('should not expand entity-encoded CDATA placeholders across fields', () => {
+      const xml =
+        '<decision><reasoning><![CDATA[secret-other]]></reasoning><marketId>&#95;_XML_CDATA_0__</marketId><sameLeaf><![CDATA[secret-other]]> &#95;_XML_CDATA_0__</sameLeaf></decision>';
+      const result = parseXML(xml);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        reasoning: 'secret-other',
+        marketId: '__XML_CDATA_0__',
+        sameLeaf: 'secret-other __XML_CDATA_0__',
+      });
+    });
+
+    test('should fail in linear time on repeated unclosed CDATA openers', () => {
+      const repeated = `<response><fact>${'<![CDATA['.repeat(12000)}</fact></response>`;
+      const start = performance.now();
+      const result = parseXML(repeated);
+      const elapsedMs = performance.now() - start;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('CDATA');
+      expect(elapsedMs).toBeLessThan(200);
+    });
   });
 });
