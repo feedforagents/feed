@@ -156,20 +156,21 @@ export function TradeTicket({
   const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
   const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
+  const sellUnits = Math.max(1, Math.round(numericAmount));
   const hasSellCpmmInputs =
     validAmount &&
     yesShares !== undefined &&
     noShares !== undefined &&
     yesShares > 0 &&
     noShares > 0 &&
-    Number.isSafeInteger(numericAmount) &&
+    Number.isSafeInteger(sellUnits) &&
     Number.isSafeInteger(yesShares) &&
     Number.isSafeInteger(noShares);
   const sellSettledCents =
     marketKind === "prediction" && action === "Sell" && validAmount
       ? hasSellCpmmInputs
-        ? estimatePredictionSellGrossCents(yesShares, noShares, predSide, numericAmount)
-        : Math.floor((numericAmount * activePricePct) / 100)
+        ? estimatePredictionSellGrossCents(yesShares, noShares, predSide, sellUnits)
+        : Math.floor((sellUnits * activePricePct) / 100)
       : 0;
   const estimatedFeePts = validAmount
     ? marketKind === "prediction" && action === "Sell"

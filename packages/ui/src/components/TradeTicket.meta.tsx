@@ -45,6 +45,14 @@ export const meta: ComponentMeta<TradeTicketProps> = {
       defaultSide: "YES",
       defaultAmount: "9300",
     },
+    PredictionSellCpmmFractional: {
+      yesOddsPct: 54,
+      yesShares: 46000,
+      noShares: 54000,
+      defaultAction: "Sell",
+      defaultSide: "YES",
+      defaultAmount: "9300.4",
+    },
   },
   play: {
     Default: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
@@ -65,6 +73,11 @@ export const meta: ComponentMeta<TradeTicketProps> = {
       await expect(canvas.getByText("0.01 pts")).toBeVisible();
     },
     PredictionSellCpmmQuote: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("0.05 pts")).toBeVisible();
+      await expect(canvas.getByText("48.01 pts")).toBeVisible();
+    },
+    PredictionSellCpmmFractional: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       const canvas = within(canvasElement);
       await expect(canvas.getByText("0.05 pts")).toBeVisible();
       await expect(canvas.getByText("48.01 pts")).toBeVisible();
