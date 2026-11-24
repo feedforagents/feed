@@ -11,6 +11,8 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import type { JsonValue } from '@feed/api';
+import { broadcastToChannel } from '@feed/api';
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { and, db, eq, isNull, perpPositions } from '@feed/db';
 import {
@@ -141,6 +143,13 @@ export const closePerpAction: Action = {
         db: new PerpDbAdapter(),
         wallet: createUserWalletAdapter(),
         cache: createPerpTradesCachePort(),
+        // Publish trade events to the `markets` realtime channel, as the
+        // web, MCP, and sibling prediction actions do, so open market pages
+        // update when an agent trades.
+        broadcast: {
+          emit: (channel, payload) =>
+            broadcastToChannel(channel, payload as Record<string, JsonValue>),
+        },
         fees: {
           tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
           platformShare: FEE_CONFIG.PLATFORM_SHARE,
