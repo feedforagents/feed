@@ -1285,6 +1285,24 @@ export effect function authenticateSessionCookie(
   })
 }
 
+export effect function revokeSessionByCookie(
+  cookieHeader: string | undefined,
+  config?: Pick<AuthRuntimeConfig, "publicAppUrl">
+): void!StoreFailure!Store {
+  const token = parseSessionCookieToken(cookieHeader, config?.publicAppUrl.startsWith("https://") ?? false)
+  if (token === undefined) return
+  const digest = sha256Hex(token) catch () => ""
+  if (digest === "") return
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      "UPDATE sessions SET live = false, updated_at = $2 WHERE access_digest = $1 AND live = true",
+      [digest, now]
+    )
+  })
+}
+
 export effect function deleteAccountSelfServe(input: {
   readonly accountId: string
   readonly authAt?: number | undefined
