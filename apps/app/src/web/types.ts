@@ -566,19 +566,13 @@ export function decodePerpMarket(raw: unknown): AppPerpMarket | null {
   const history = rawHistory
     .map((pt) => (isRecord(pt) ? { label: str(pt.label, ""), value: num(pt.value, markCents / 100) } : null))
     .filter((pt): pt is { label: string; value: number } => pt !== null);
-  const fallbackHistory = history.length > 0
-    ? history
-    : [
-        { label: "Index", value: indexCents / 100 },
-        { label: "Mark", value: markCents / 100 },
-      ];
   return {
     ticker,
     indexCents,
     markCents,
     fundingRateBps,
     openInterestCents,
-    history: fallbackHistory,
+    history,
     card: {
       kind: "perp",
       id: ticker,
