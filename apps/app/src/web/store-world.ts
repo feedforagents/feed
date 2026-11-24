@@ -641,14 +641,18 @@ export async function markAllNotificationsRead(): Promise<void> {
   });
 }
 
+let profileLoadCount = 0;
+
 export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
+  const loadId = ++profileLoadCount;
   setStoreState({ profileLoading: true, profileHandle: handle });
   const res = await requestJson(`/api/users/${encodeURIComponent(handle)}`, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
   });
+  if (loadId !== profileLoadCount) return;
   if (res.ok && res.data) {
     setStoreState({ profileBundle: res.data, profileLoading: false });
     return;
