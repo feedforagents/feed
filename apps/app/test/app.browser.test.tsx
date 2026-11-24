@@ -313,11 +313,15 @@ function installMockNetwork(threadFetch?: (path: string) => Promise<Response> | 
   vi.stubGlobal("EventSource", StubEventSource);
 }
 
-async function openThreadDialog() {
+async function mountApp() {
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
   opened.push(root);
   await act(() => Promise.resolve(root.render(<App />)));
+}
+
+async function openThreadDialog() {
+  await mountApp();
 
   const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
   await act(() => userEvent.click(homeButton));
@@ -356,10 +360,7 @@ afterAll(() => {
 
 it('Visitors browse markets and leaderboard, switch modes, sign in, and view fixed 100 pts wallet (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await mountApp();
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
