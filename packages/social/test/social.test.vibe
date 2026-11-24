@@ -100,6 +100,12 @@ effect function seedAccount(
   )
 }
 
+effect function listGameAndSocialFeeds(viewerId: string) {
+  const gameFeed = try listFeedPosts({ tab: "latest", viewerId, mode: "game", limit: 50 })
+  const socialFeed = try listFeedPosts({ tab: "latest", viewerId, mode: "social", limit: 50 })
+  return { gameFeed, socialFeed }
+}
+
 effect function seedChatParticipants() {
   try seedAccount("alice", "alice", "Alice Player")
   try seedAccount("bob", "bob", "Bob Trader")
@@ -164,8 +170,7 @@ it.effect(
     const unreposted = try unrepostPost("bob", root.id)
     const rereposted = try repostPost("bob", root.id)
 
-    const gameFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
-    const socialFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "social", limit: 50 })
+    const { gameFeed, socialFeed } = try listGameAndSocialFeeds("alice")
 
     const gameRoot = gameFeed.items.find((p) => p.id === root.id)
     const socialRoot = socialFeed.items.find((p) => p.id === root.id)
@@ -896,8 +901,7 @@ it.effect(
       ticker: "nvdai"
     })
 
-    const gameFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
-    const socialFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "social", limit: 50 })
+    const { gameFeed, socialFeed } = try listGameAndSocialFeeds("alice")
     const gameIdOnly = gameFeed.items.find((p) => p.id === idOnly.id)
     const gameWithTicker = gameFeed.items.find((p) => p.id === withTicker.id)
     const socialIdOnly = socialFeed.items.find((p) => p.id === idOnly.id)

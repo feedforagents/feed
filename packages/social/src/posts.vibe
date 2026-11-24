@@ -78,9 +78,7 @@ export interface PostQuotePreview {
 }
 
 export interface PostMarketBadge {
-  /** Attached prediction market question shown on the trade embed. */
   readonly label: string
-  /** Optional YES odds percentage for prediction markets. */
   readonly oddsPct: number | null
 }
 
@@ -100,7 +98,6 @@ export interface PostView {
   readonly viaClientName: string | null
   readonly marketId: string | null
   readonly ticker: string | null
-  /** Trade embed supplied by the server for an attached market; null when no market is attached or embeds are hidden. */
   readonly marketBadge: PostMarketBadge | null
   readonly cashtags: ReadonlyArray<string>
   readonly hashtags: ReadonlyArray<string>

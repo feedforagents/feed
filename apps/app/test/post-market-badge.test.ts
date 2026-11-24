@@ -2,9 +2,6 @@
 import { expect, it } from "vitest";
 import { decodePost } from "../src/web/types.ts";
 
-// PostView JSON exactly as the Game-mode feed returns it for a post created
-// with marketId only (no ticker): the server supplies marketBadge with the
-// attached prediction market's question; the card must show it.
 const idOnlyGamePost = {
   id: "probe-post-id-only",
   authorId: "alice",
