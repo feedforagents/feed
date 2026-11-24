@@ -200,27 +200,57 @@ it('A deleted post disappears from Explore and Profile (spec/social/posts.md, "S
   opened.push(root);
   await act(() => Promise.resolve(root.render(<App />)));
 
-   await act(async () => {
-     await storeActions.navigate("/explore");
-     await storeActions.loadExplore("XTRPC");
-   });
+  await act(async () => {
+    await storeActions.navigate("/explore");
+    await storeActions.loadExplore("XTRPC");
+  });
   await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
 
-   explorePosts = [];
-  liveEventSources[0].dispatchEvent(new Event("post.deleted"));
-  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
-
-   act(() => {
-     setStoreState({ viewer: VIEWER, profileHandle: "ailonmusk" });
-   });
+  act(() => {
+    setStoreState({ viewer: VIEWER, profileHandle: "ailonmusk" });
+  });
   await act(async () => {
     await storeActions.loadProfile("ailonmusk");
   });
-  expect(getStoreSnapshot().profileBundle?.posts?.length).toBe(1);
-  act(() => {
-    setStoreState({ route: "Profile" });
-  });
-  profilePosts = [];
-  liveEventSources[0].dispatchEvent(new Event("post.deleted"));
-  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.posts?.length).toBe(0));
+  const loaded = getStoreSnapshot().profileBundle;
+  expect(loaded?.posts?.length).toBe(1);
+  expect(loaded?.posts[0]?.card.id).toBe(SAMPLE_POSTS[0].id);
+  const firstPost = loaded?.posts[0];
+  if (firstPost !== undefined) {
+    const secondPost = { ...firstPost, card: { ...firstPost.card, id: "browser-post-2" } };
+    act(() => {
+      const bundle = getStoreSnapshot().profileBundle;
+      if (bundle !== null) {
+        setStoreState({ profileBundle: { ...bundle, posts: [...bundle.posts, secondPost] } });
+      }
+    });
+  }
+  expect(getStoreSnapshot().profileBundle?.posts?.length).toBe(2);
+
+  const fetchCallsBefore = fetchPaths.length;
+  liveEventSources[0].dispatchEvent(
+    new MessageEvent("post.deleted", {
+      data: JSON.stringify({ type: "post.deleted", postId: SAMPLE_POSTS[0].id, authorId: SAMPLE_POSTS[0].authorId }),
+    }),
+  );
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle).not.toBeNull();
+  expect(getStoreSnapshot().profileBundle?.posts?.map((post) => post.card.id)).toEqual(["browser-post-2"]);
+  expect(fetchPaths.length).toBe(fetchCallsBefore);
+
+  liveEventSources[0].dispatchEvent(
+    new MessageEvent("post.created", {
+      data: JSON.stringify({
+        type: "post.created",
+        postId: "browser-post-2",
+        authorId: "ailonmusk",
+        authorKind: "npc",
+        replyToPostId: null,
+        quotePostId: null,
+        createdAt: Date.now(),
+      }),
+    }),
+  );
+  expect(getStoreSnapshot().profileBundle?.posts?.map((post) => post.card.id)).toEqual(["browser-post-2"]);
+  expect(fetchPaths.length).toBe(fetchCallsBefore);
 });
