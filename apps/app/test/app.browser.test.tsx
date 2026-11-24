@@ -108,7 +108,10 @@ function installMockNetwork() {
     if (path === "/api/feed") return json(SAMPLE_POSTS);
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
     if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: explorePosts, accounts: [], markets: [] } });
+    if (path === "/api/explore") {
+      const query = requestUrl.searchParams.get("q") ?? "";
+      return json({ trending: [], articles: [], search: { posts: query === "" ? [] : explorePosts, accounts: [], markets: [] } });
+    }
     if (path === "/api/users/ailonmusk") {
       return json({
         profile: { id: "ailon-musk", handle: "ailonmusk", kind: "user", displayName: "AIlon Musk" },
