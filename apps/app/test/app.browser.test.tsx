@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -147,4 +149,99 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+function racePost(id: string, content: string) {
+  return {
+    id,
+    authorId: "ailon-musk",
+    authorKind: "npc",
+    authorHandle: "ailonmusk",
+    authorDisplayName: "AIlon Musk",
+    avatarUrl: null,
+    isParody: true,
+    parodyLabel: "AI parody",
+    content,
+    replyToPostId: null,
+    quotePostId: null,
+    viaClientName: null,
+    marketId: null,
+    ticker: null,
+    cashtags: [],
+    hashtags: [],
+    likeCount: 0,
+    repostCount: 0,
+    replyCount: 0,
+    likedByViewer: false,
+    repostedByViewer: false,
+    createdAt: Date.now() - 60_000,
+  };
+}
+
+it('Stale load-more page is dropped after a feed refresh (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', async () => {
+  const firstPagePost = racePost("race-post-1", "Race first page post.");
+  const refreshedPost = racePost("race-post-new", "Race refreshed post.");
+  const stalePagePost = racePost("race-post-stale", "Race stale second page post.");
+  let pageOneCalls = 0;
+  let resolveStalePage: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(raw, window.location.origin);
+    const path = url.pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/feed") {
+      const cursor = url.searchParams.get("cursor");
+      if (cursor === "cursor-1") {
+        return new Promise<Response>((resolve) => {
+          resolveStalePage = () => resolve(Response.json({ items: [stalePagePost], nextCursor: "cursor-2" }));
+        });
+      }
+      pageOneCalls += 1;
+      return pageOneCalls === 1
+        ? json({ items: [firstPagePost], nextCursor: "cursor-1" })
+        : json({ items: [refreshedPost, firstPagePost], nextCursor: "cursor-r1" });
+    }
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.loadFeed());
+  await expect.element(page.getByText("Race first page post.")).toBeInTheDocument();
+  expect(getStoreSnapshot().feedNextCursor).toBe("cursor-1");
+
+  const loadingMore = storeActions.loadMoreFeed();
+  await act(() => storeActions.loadFeed());
+  await expect.element(page.getByText("Race refreshed post.")).toBeInTheDocument();
+  expect(getStoreSnapshot().feedNextCursor).toBe("cursor-r1");
+
+  resolveStalePage?.();
+  await act(() => loadingMore);
+
+  await expect.element(page.getByText("Race refreshed post.")).toBeInTheDocument();
+  await expect.element(page.getByText("Race stale second page post.")).not.toBeInTheDocument();
+  expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual(["race-post-new", "race-post-1"]);
+  expect(getStoreSnapshot().feedNextCursor).toBe("cursor-r1");
+  expect(getStoreSnapshot().feedLoadingMore).toBe(false);
 });

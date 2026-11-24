@@ -61,13 +61,17 @@ function findPostInState(postId: string): AppPost | undefined {
     ?? s.explore.posts.find((p) => p.card.id === postId);
 }
 
+let feedLoadCount = 0;
+
 export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const s = getStoreSnapshot();
   const tab = tabOverride ?? s.feedTab;
+  const loadId = ++feedLoadCount;
   setStoreState({ feedLoading: true });
   const res = await requestJson(`/api/feed?tab=${encodeURIComponent(tab)}`, {
     parse: decodeFeedPage,
   });
+  if (loadId !== feedLoadCount) return;
   if (res.ok) {
     setStoreState({ feedPosts: res.data.items, feedNextCursor: res.data.nextCursor, feedLoading: false });
     return;
@@ -78,11 +82,18 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
 export async function loadMoreFeed(): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.feedNextCursor || s.feedLoading || s.feedLoadingMore) return;
+  const loadId = feedLoadCount;
+  const cursor = s.feedNextCursor;
+  const tab = s.feedTab;
   setStoreState({ feedLoadingMore: true });
   const res = await requestJson(
-    `/api/feed?tab=${encodeURIComponent(s.feedTab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
+    `/api/feed?tab=${encodeURIComponent(tab)}&cursor=${encodeURIComponent(cursor)}`,
     { parse: decodeFeedPage },
   );
+  if (loadId !== feedLoadCount) {
+    setStoreState({ feedLoadingMore: false });
+    return;
+  }
   if (res.ok) {
     const latest = getStoreSnapshot();
     setStoreState({
