@@ -1,9 +1,12 @@
-// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"
+// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { storeActions } from "../src/web/store.ts";
+import { type ViewerSession } from "../src/web/types.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -63,6 +66,26 @@ const SAMPLE_MARKETS = {
   perps: [],
   positions: [],
   economy: null,
+};  
+
+const liveEventSources: EventTarget[] = [];
+let explorePosts: typeof SAMPLE_POSTS = [];
+let profilePosts: typeof SAMPLE_POSTS = [];
+
+const VIEWER: ViewerSession = {
+  accountId: "ailon-musk",
+  handle: "ailonmusk",
+  displayName: "AIlon Musk",
+  bio: "",
+  avatarUrl: null,
+  phoneLast2: null,
+  uiMode: "game",
+  balanceCents: 0,
+  startingGrantCents: 0,
+  purchasedCents: 0,
+  isAdmin: false,
+  isReviewer: false,
+  agentGrant: null,
 };
 
 function installMockNetwork() {
@@ -81,7 +104,15 @@ function installMockNetwork() {
     if (path === "/api/feed") return json(SAMPLE_POSTS);
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
     if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: explorePosts, accounts: [], markets: [] } });
+    if (path === "/api/users/ailonmusk") {
+      return json({
+        profile: { id: "ailon-musk", handle: "ailonmusk", kind: "user", displayName: "AIlon Musk" },
+        posts: profilePosts,
+        nextCursor: null,
+        positions: [],
+      });
+    }
     if (path === "/api/leaderboard") return json({ leaderboard: [] });
     if (path === "/api/economy/packs") return json({ packs: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
@@ -90,6 +121,10 @@ function installMockNetwork() {
   vi.stubGlobal("fetch", fetchMock);
 
   class StubEventSource extends EventTarget {
+    constructor() {
+      super();
+      liveEventSources.push(this);
+    }
     close() {}
   }
   vi.stubGlobal("EventSource", StubEventSource);
@@ -147,4 +182,37 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+it('A post deleted elsewhere disappears from Explore and Profile (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  installMockNetwork();
+  explorePosts = [SAMPLE_POSTS[0]];
+  profilePosts = [SAMPLE_POSTS[0]];
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+   await act(async () => {
+     await storeActions.navigate("/explore");
+   });
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+
+   explorePosts = [];
+  liveEventSources[0].dispatchEvent(new Event("post.deleted"));
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
+
+   act(() => {
+     setStoreState({ viewer: VIEWER, profileHandle: "ailonmusk" });
+   });
+  await act(async () => {
+    await storeActions.loadProfile("ailonmusk");
+  });
+  expect(getStoreSnapshot().profileBundle?.posts?.length).toBe(1);
+  act(() => {
+    setStoreState({ route: "Profile" });
+  });
+  profilePosts = [];
+  liveEventSources[0].dispatchEvent(new Event("post.deleted"));
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.posts?.length).toBe(0));
 });
