@@ -4,7 +4,7 @@ import { actors, organizations } from "@repo/pack-default"
 import { type Store, type StoreFailure } from "@repo/db"
 import { HttpClientRequest } from "effect/http"
 import { type PromptId, PromptCatalog } from "./prompts.vibe"
-import { EngineFailure, executeHttpWithTimeout, hashString, isRuntimeNpcActor, resolveClockNow, sanitizeText } from "./shared.vibe"
+import { EngineFailure, fetchTextWithTimeout, hashString, isRuntimeNpcActor, resolveClockNow, sanitizeText } from "./shared.vibe"
 import { confirmLlmSpend, markLlmSpendUncertain, reserveLlmBudget } from "./spend-budget.vibe"
 import { type ThrottleLevel } from "../gen/engine__spendBudget.effect.vibe"
 
@@ -298,7 +298,7 @@ effect function sendChatCompletionHttp(config: LlmProviderConfig, request: Compl
     HttpClientRequest.setHeaders(headers),
     HttpClientRequest.bodyText(JSON.stringify(bodyObj), "application/json"),
   )
-  const response = try executeHttpWithTimeout(
+  const response = try fetchTextWithTimeout(
     req,
     "25 seconds",
     "LLM_UNAVAILABLE",
@@ -307,7 +307,7 @@ effect function sendChatCompletionHttp(config: LlmProviderConfig, request: Compl
   if (response.status < 200 || response.status >= 300) {
     throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: `LLM provider ${config.provider} returned HTTP ${response.status}.` })
   }
-  const payload = response.json catch effect (cause) => {
+  const payload = Effect.try((): unknown => JSON.parse(response.text)) catch effect (cause) => {
     throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: "LLM response body was not valid JSON.", cause })
   }
   const parsed = parseJsonModelRecord(typeof payload === "string" ? payload : JSON.stringify(payload))

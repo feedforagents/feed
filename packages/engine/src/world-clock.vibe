@@ -29,7 +29,7 @@ import {
   EngineFailure,
   advanceDayHour,
   ensureWorldStateTx,
-  executeHttpWithTimeout,
+  fetchTextWithTimeout,
   hashString,
   isRuntimeNpcActor,
   maybePublishFeedEvent,
@@ -931,9 +931,9 @@ export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(Engi
       const perFeedBuckets: Array<ReadonlyArray<RssFeedHeadlineItem>> = []
       for (const url of selectedUrls) {
         const req = HttpClientRequest.get(url)
-        const response = executeHttpWithTimeout(req, "8 seconds", "RSS_FAILED", `RSS fetch failed for ${url}`) catch effect () => null
+        const response = fetchTextWithTimeout(req, "8 seconds", "RSS_FAILED", `RSS fetch failed for ${url}`) catch effect () => null
         if (!response || response.status < 200 || response.status >= 300) continue
-        const xml = response.text catch effect () => ""
+        const xml = response.text
         if (xml.length > 0) {
           const parsedItems = extractRssHeadlinesFromXml(xml, url)
           if (parsedItems.length > 0) {
