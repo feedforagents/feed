@@ -439,6 +439,17 @@ effect function sendChatCompletionHttp(config: LlmProviderConfig, request: Compl
   return { content: rawContent, actualMicros }
 }
 
+function requestWasNeverSent(error: unknown): boolean {
+  let current: unknown = error
+  while (current !== null && typeof current === "object" && !Array.isArray(current)) {
+    const record = current as Record<string, unknown>
+    if (record.code === "ECONNREFUSED" || record.code === "ENOTFOUND" || record.code === "EAI_AGAIN") return true
+    if (record.message === "bad port") return true
+    current = record.cause
+  }
+  return false
+}
+
 export effect function generateCompletion(request: CompletionRequest): CompletionResult!(EngineFailure | StoreFailure)!Store {
   const nowMs = try resolveClockNow(request.nowMs)
   const config = resolveLlmProviderConfig()
@@ -469,14 +480,17 @@ export effect function generateCompletion(request: CompletionRequest): Completio
     }
   }
   const live = sendChatCompletionHttp(config, request, resolvedSystem) catch effect (err) => {
+    if (requestWasNeverSent(err)) {
+      try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
+    } else {
+      try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
+    }
     if (request.allowOfflineFallback !== false) {
       return null
     }
-    try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
     throw err
   }
   if (live === null) {
-    try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
     return {
       text: buildDeterministicFallback(request),
       provider: "offline-fallback",
