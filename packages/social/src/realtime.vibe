@@ -93,6 +93,32 @@ export type FeedRealtimeEvent =
       readonly organizationId: string
     }
 
+export function isFeedEventVisibleToViewer(
+  excluded: Set<string>,
+  viewerId: string,
+  event: FeedRealtimeEvent
+): boolean {
+  switch (event.type) {
+    case "post.created":
+    case "post.deleted":
+      return !excluded.has(event.authorId)
+    case "post.engagement":
+      return !excluded.has(event.accountId)
+    case "chat.message":
+      return !excluded.has(event.senderId)
+    case "chat.reaction":
+      return !excluded.has(event.accountId)
+    case "chat.invite":
+      return event.invitedAccountId === viewerId
+    case "alpha.invite":
+      return event.targetAccountId === viewerId
+    case "notification.created":
+      return event.accountId === viewerId
+    default:
+      return true
+  }
+}
+
 export interface SseStreamOptions {
   readonly signal?: AbortSignal
   readonly keepalive?: boolean
