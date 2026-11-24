@@ -74,6 +74,7 @@ import {
   respondAlphaInvite,
   selectFeedTab,
   selectMarket,
+    selectMarketsTab,
   sendChatMessage,
   startDirectChat,
   startPointPackCheckout,
@@ -155,7 +156,7 @@ export async function navigate(path: string): Promise<void> {
     route: parsed.route,
     profileHandle: parsed.profileHandle,
     selectedTicker: parsed.queryTicker,
-    ...(parsed.queryTicker ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker } : {}),
+    ...(parsed.queryTicker ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker, marketsTab: "perps" as const } : {}),
   });
   await loadDataForRoute(parsed.route, url.search);
 }
@@ -227,6 +228,7 @@ export function bootStore(): void {
         route: parsed.route,
         profileHandle: parsed.profileHandle,
         selectedTicker: parsed.queryTicker,
+                ...(parsed.queryTicker ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker, marketsTab: "perps" as const } : {}),
       });
       void loadDataForRoute(parsed.route, window.location.search);
     });
@@ -285,6 +287,7 @@ export const storeActions = {
   loadTrending,
   loadMarkets,
   selectMarket,
+    selectMarketsTab,
   submitPredictionOrder,
   submitPerpOrder,
   closePerpPosition,
