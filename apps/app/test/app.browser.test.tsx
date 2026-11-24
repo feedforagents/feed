@@ -65,9 +65,11 @@ const SAMPLE_MARKETS = {
   economy: null,
 };
 
+const phoneStartRequests: Array<Record<string, unknown>> = [];
+
 function installMockNetwork() {
   const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
+  const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const path = new URL(raw, window.location.origin).pathname;
     if (path === "/api/auth/me") {
@@ -77,6 +79,14 @@ function installMockNetwork() {
         acceptedCountries: ["+1", "+44"],
         publicAppUrl: window.location.origin,
       });
+    }
+    if (path === "/api/auth/phone/start") {
+      try {
+        phoneStartRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      } catch {
+        phoneStartRequests.push({});
+      }
+      return json({});
     }
     if (path === "/api/feed") return json(SAMPLE_POSTS);
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
@@ -147,4 +157,37 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+it('Phone SMS door sends national numbers as E.164 (spec/app/onboarding.md, "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link")', async () => {
+  installMockNetwork();
+  phoneStartRequests.length = 0;
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  const join = page.getByRole("dialog", { name: "Join Feed" });
+  await expect.element(join).toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByRole("combobox", { name: "Country" })));
+  await act(() => userEvent.click(page.getByRole("option", { name: "United Kingdom (+44)" })));
+  await act(() => userEvent.fill(page.getByLabel("Mobile number (non-VoIP)"), "07700900123"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Send 6-digit SMS code" })));
+  await expect.element(page.getByLabel("6-digit SMS code")).toBeInTheDocument();
+  expect(phoneStartRequests).toHaveLength(1);
+  expect(phoneStartRequests[0]?.phoneE164).toBe("+447700900123");
+
+  await act(() => userEvent.click(join.getByRole("button", { name: "Close" })));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await expect.element(page.getByRole("dialog", { name: "Join Feed" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("combobox", { name: "Country" })));
+  await act(() => userEvent.click(page.getByRole("option", { name: "France (+33)" })));
+  await act(() => userEvent.fill(page.getByLabel("Mobile number (non-VoIP)"), "06 12 34 56 78"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Send 6-digit SMS code" })));
+  await expect.element(page.getByLabel("6-digit SMS code")).toBeInTheDocument();
+  expect(phoneStartRequests).toHaveLength(2);
+  expect(phoneStartRequests[1]?.phoneE164).toBe("+33612345678");
 });
