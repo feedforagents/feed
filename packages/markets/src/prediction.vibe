@@ -683,7 +683,6 @@ export effect function sellPredictionShares(input: SellPredictionInput): TradeRe
   const fingerprint = `sell:${input.marketId}:${input.side}:${input.shares}`
   return try withLockedPredictionMarket(
   input,
-
     fingerprint,
     effect ({ tx, market, now, viaClientName, idempotencyKey, requestFingerprint }) => {
       const dbSide = toDbSide(input.side)
