@@ -168,7 +168,25 @@ export function navigateRoute(route: AppRoute): void {
   void navigate(routeToPath(route, handle));
 }
 
-function handleSseSignal(eventType: string): void {
+function deletedPostId(event: Event | undefined): string | null {
+  if (!(event instanceof MessageEvent) || typeof event.data !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(event.data);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const postId = parsed.postId;
+  return typeof postId === "string" && postId !== "" ? postId : null;
+}
+
+function handleSseSignal(eventType: string, event?: Event): void {
+  if (eventType === "post.deleted") {
+    const postId = deletedPostId(event);
+    if (postId !== null) removeDeletedPost(postId);
+    return;
+  }
   if (sseRefreshPending) return;
   sseRefreshPending = true;
   const s = getStoreSnapshot();
