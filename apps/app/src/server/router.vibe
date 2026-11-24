@@ -676,25 +676,31 @@ effect function handleAuthRoute(
       )
     }
     const grant = try getActiveAgentGrant(session.accountId)
-    return jsonResponse({
-      authenticated: true,
-      viewer: {
-        accountId: profile.accountId,
-        handle: profile.handle,
-        displayName: profile.displayName,
-        bio: profile.bio,
-        avatarUrl: profile.avatarUrl,
-        phoneLast2: profile.phoneLast2,
-        uiMode: profile.uiMode,
-        balanceCents: profile.balanceCents,
-        startingGrantCents: profile.startingGrantCents,
-        purchasedCents: profile.purchasedCents,
-        isAdmin: profile.isAdmin,
-        isReviewer: profile.isReviewer,
-        agentGrant: grant
-      },
+    const refreshedCookie = session.refreshedSessionCookieHeader
+    return jsonResponse(
+      {
+        authenticated: true,
+        viewer: {
+          accountId: profile.accountId,
+          handle: profile.handle,
+          displayName: profile.displayName,
+          bio: profile.bio,
+          avatarUrl: profile.avatarUrl,
+          phoneLast2: profile.phoneLast2,
+          uiMode: profile.uiMode,
+          balanceCents: profile.balanceCents,
+          startingGrantCents: profile.startingGrantCents,
+          purchasedCents: profile.purchasedCents,
+          isAdmin: profile.isAdmin,
+          isReviewer: profile.isReviewer,
+          agentGrant: grant
+        },
       ...bootstrap
-    })
+      },
+      200,
+      {},
+      refreshedCookie !== undefined ? [refreshedCookie] : []
+    )
   }
   if (method === "POST" && path === "/api/auth/phone/start") {
     const { data } = try readParsedBody(request)
