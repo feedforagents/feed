@@ -19,6 +19,7 @@ import {
   getProfile,
   getUnreadNotificationCount,
   inviteToUserGroupChat,
+  isFeedEventVisibleToViewer,
   leaveGroupChat,
   likePost,
   listAlphaInvites,
@@ -28,14 +29,17 @@ import {
   listFollowers,
   listFollowing,
   listNotifications,
+  loadViewerExcludedAuthorIdsTx,
   markNotificationsRead,
   muteAccount,
+  publishFeedEvent,
   reactToMessage,
   realtimeBusLayer,
   reportTarget,
   repostPost,
   respondAlphaInvite,
   sendChatMessage,
+  subscribeFeedEvents,
   unblockAccount,
   unfollowAccount,
   unlikePost,
@@ -584,4 +588,85 @@ it.effect(
       ]
     }))
   })
+)
+
+it.effect(
+  'SSE viewer filter hides blocked, muted, and blocking authors and delivers only addressed notifications and invites (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 10_000, "game")
+    try seedAccount("bob", "bob", "Bob Trader", 10_000, "game")
+    try seedAccount("carol", "carol", "Carol Analyst", 10_000, "game")
+    try seedAccount("dave", "dave", "Dave Analyst", 10_000, "game")
+    try seedAccount("erin", "erin", "Erin Trader", 10_000, "game")
+
+    const blockedBob = try blockAccount("alice", "bob")
+    const blockedByCarol = try blockAccount("carol", "alice")
+    const mutedCarol = try muteAccount("alice", "carol")
+    const mutedErin = try muteAccount("alice", "erin")
+
+    const store = try Store
+    const excluded = try store.transaction((tx) => loadViewerExcludedAuthorIdsTx(tx, "alice"))
+
+    const now = 1_760_000_000_000
+    try check(() => assert.deepStrictEqual({
+      setup: [blockedBob.blocked, blockedByCarol.blocked, mutedCarol.muted, mutedErin.muted],
+      excluded: [...excluded].sort(),
+      postByBlocked: isFeedEventVisibleToViewer(excluded, "alice", { type: "post.created", postId: "p-bob", authorId: "bob", authorKind: "user", replyToPostId: null, quotePostId: null, createdAt: now }),
+      postByBlocking: isFeedEventVisibleToViewer(excluded, "alice", { type: "post.created", postId: "p-carol", authorId: "carol", authorKind: "user", replyToPostId: null, quotePostId: null, createdAt: now }),
+      postByMutedOnly: isFeedEventVisibleToViewer(excluded, "alice", { type: "post.created", postId: "p-erin", authorId: "erin", authorKind: "user", replyToPostId: null, quotePostId: null, createdAt: now }),
+      postByStranger: isFeedEventVisibleToViewer(excluded, "alice", { type: "post.created", postId: "p-dave", authorId: "dave", authorKind: "user", replyToPostId: null, quotePostId: null, createdAt: now }),
+      postBySelf: isFeedEventVisibleToViewer(excluded, "alice", { type: "post.created", postId: "p-alice", authorId: "alice", authorKind: "user", replyToPostId: null, quotePostId: null, createdAt: now }),
+      deletedByBlocked: isFeedEventVisibleToViewer(excluded, "alice", { type: "post.deleted", postId: "p-bob", authorId: "bob" }),
+      chatFromBlocked: isFeedEventVisibleToViewer(excluded, "alice", { type: "chat.message", chatId: "c1", messageId: "m1", senderId: "bob", senderKind: "user", createdAt: now }),
+      chatFromStranger: isFeedEventVisibleToViewer(excluded, "alice", { type: "chat.message", chatId: "c1", messageId: "m2", senderId: "dave", senderKind: "user", createdAt: now }),
+      engagementByBlocked: isFeedEventVisibleToViewer(excluded, "alice", { type: "post.engagement", postId: "p-dave", kind: "like", accountId: "bob", likeCount: 1, repostCount: 0 }),
+      notifForSelf: isFeedEventVisibleToViewer(excluded, "alice", { type: "notification.created", notificationId: "n1", accountId: "alice", kind: "reply", isGameOnly: false }),
+      notifForOther: isFeedEventVisibleToViewer(excluded, "alice", { type: "notification.created", notificationId: "n2", accountId: "bob", kind: "reply", isGameOnly: false }),
+      inviteForSelf: isFeedEventVisibleToViewer(excluded, "alice", { type: "chat.invite", inviteId: "i1", chatId: "c1", invitedAccountId: "alice", invitedByNpcId: "npc-1", status: "pending" }),
+      inviteForOther: isFeedEventVisibleToViewer(excluded, "alice", { type: "chat.invite", inviteId: "i2", chatId: "c1", invitedAccountId: "bob", invitedByNpcId: "npc-1", status: "pending" }),
+      alphaInviteForSelf: isFeedEventVisibleToViewer(excluded, "alice", { type: "alpha.invite", actorId: "npc-1", targetAccountId: "alice" }),
+      alphaInviteForOther: isFeedEventVisibleToViewer(excluded, "alice", { type: "alpha.invite", actorId: "npc-1", targetAccountId: "bob" }),
+      worldTick: isFeedEventVisibleToViewer(excluded, "alice", { type: "world.tick", kind: "market", refId: "m1", createdAt: now }),
+      marketSpot: isFeedEventVisibleToViewer(excluded, "alice", { type: "market.spot", actorId: "npc-1", ticker: "SOL", side: "buy", quoteCents: 100 })
+    }, {
+      setup: [true, true, true, true],
+      excluded: ["bob", "carol", "erin"],
+      postByBlocked: false,
+      postByBlocking: false,
+      postByMutedOnly: false,
+      postByStranger: true,
+      postBySelf: true,
+      deletedByBlocked: false,
+      chatFromBlocked: false,
+      chatFromStranger: true,
+      engagementByBlocked: false,
+      notifForSelf: true,
+      notifForOther: false,
+      inviteForSelf: true,
+      inviteForOther: false,
+      alphaInviteForSelf: true,
+      alphaInviteForOther: false,
+      worldTick: true,
+      marketSpot: true
+    }))
+  })
+)
+
+it.live(
+  'SSE stream skips events from blocked authors and delivers the next visible event (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
+  () => effect {
+    provide realtimeBusLayer {
+      try scoped(effect {
+        const excluded = new Set<string>(["bob"])
+        const events = try subscribeFeedEvents()
+        const filtered = Stream.filter(events, (event) => isFeedEventVisibleToViewer(excluded, "alice", event))
+        const fiber = try Effect.forkScoped(timeout(Stream.runHead(filtered), "5 seconds"))
+        try sleep("1 second")
+        try publishFeedEvent({ type: "post.created", postId: "p-bob", authorId: "bob", authorKind: "user", replyToPostId: null, quotePostId: null, createdAt: 1_760_000_000_000 })
+        try publishFeedEvent({ type: "post.created", postId: "p-dave", authorId: "dave", authorKind: "user", replyToPostId: null, quotePostId: null, createdAt: 1_760_000_000_000 })
+        const first = try Fiber.join(fiber)
+        try check(() => assert.isTrue(Option.isSome(first) && first.value.type === "post.created" && first.value.postId === "p-dave"))
+      })
+    }
+  }
 )
