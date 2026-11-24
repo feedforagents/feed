@@ -913,17 +913,17 @@ export effect function createPost(input: CreatePostInput): PostView!(SocialFailu
   const now = try Clock.currentTimeMillis
   const committed = try store.transaction(effect (tx: Tx) => {
     try ensureAuthorExistsTx(tx, input.authorId, input.authorKind)
-    if (input.authorKind === "user") {
-      if (viaClientName !== null) {
-        const grantRows = try tx.query(
-          "SELECT client_name FROM feed_agent_grants WHERE account_id = $1 AND status = 'active' LIMIT 1",
-          [input.authorId]
-        )
-        const activeClient = toText(grantRows[0]?.client_name)
-        if (activeClient !== viaClientName) {
-          throw new SocialFailure({ code: "Forbidden", message: "Active connected agent grant does not match viaClientName" })
-        }
+    if (input.authorKind === "user" && viaClientName !== null) {
+      const grantRows = try tx.query(
+        "SELECT client_name FROM feed_agent_grants WHERE account_id = $1 AND status = 'active' LIMIT 1",
+        [input.authorId]
+      )
+      const activeClient = toText(grantRows[0]?.client_name)
+      if (activeClient !== viaClientName) {
+        throw new SocialFailure({ code: "Forbidden", message: "Active connected agent grant does not match viaClientName" })
       }
+    }
+    if (input.authorKind !== "org") {
       try consumeHourlyRateLimitTx(tx, `${input.authorId}:post`, POSTS_PER_HOUR_LIMIT, now)
     }
     const replyTarget = try resolveReferencePostTx(tx, input.authorId, replyToPostId, "Reply", true)
