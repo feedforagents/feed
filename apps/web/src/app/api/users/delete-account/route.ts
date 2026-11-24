@@ -77,7 +77,12 @@
  * @see GDPR Article 17 - Right to erasure
  */
 
-import { authenticate, successResponse, withErrorHandling } from '@feed/api';
+import {
+  authenticate,
+  invalidateCachedKeysForUser,
+  successResponse,
+  withErrorHandling,
+} from '@feed/api';
 import {
   chatParticipants,
   db,
@@ -93,8 +98,10 @@ import {
   referrals,
   shareActions,
   shares,
+  sql,
   tradingFees,
   userActorFollows,
+  userApiKeys,
   userInteractions,
   users,
   withTransaction,
@@ -195,6 +202,15 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       .delete(messageReactions)
       .where(eq(messageReactions.userId, userId));
 
+    // Revoke the user's API keys. UserApiKey has no foreign key to User,
+    // so nothing cascades: without this the keys keep authenticating MCP
+    // and A2A requests as the deleted account, and the owner can no longer
+    // revoke them. Keys that were already revoked keep their revokedAt.
+    await tx
+      .update(userApiKeys)
+      .set({ revokedAt: sql`coalesce(${userApiKeys.revokedAt}, now())` })
+      .where(eq(userApiKeys.userId, userId));
+
     // Delete group memberships
     await tx.delete(groupMembers).where(eq(groupMembers.userId, userId));
 
@@ -238,6 +254,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       'POST /api/users/delete-account'
     );
   });
+
+  // Drop cached validations only after the revocation has committed, so a
+  // concurrent request cannot re-cache a key from the pre-commit state.
+  invalidateCachedKeysForUser(userId);
 
   return successResponse({
     success: true,
