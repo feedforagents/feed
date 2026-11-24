@@ -9,7 +9,6 @@ import {
   follows,
   gte,
   inArray,
-  isNotNull,
   isNull,
   like,
   lt,
@@ -49,6 +48,12 @@ import {
   loadViewerExcludedAuthorIds,
 } from '../_lib/viewer-moderation';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
+import {
+  buildUserActiveStoryPositionsWhere,
+  buildUserStoryPositionIndex,
+  storyHasUserPosition,
+  type UserStoryPositionRow,
+} from '../user-positions';
 import {
   loadDiscoveryForYouCandidatePosts,
   loadHistoricalForYouBackfillPosts,
@@ -1331,7 +1336,7 @@ export async function buildForYouFeed(userId?: string | null) {
     FollowRow[],
     Array<{ postId: string | null }>,
     Array<{ postId: string }>,
-    Array<{ questionId: number | null }>,
+    UserStoryPositionRow[],
     EventAggregates,
   ] = userId
     ? await (async () => {
@@ -1378,28 +1383,20 @@ export async function buildForYouFeed(userId?: string | null) {
                       )
                   : Promise.resolve([]),
                 (() => {
-                  const questionNumbers = baseResult.stories
-                    .map((story) => story.questionNumber)
-                    .filter(
-                      (questionNumber): questionNumber is number =>
-                        questionNumber !== null
-                    );
-
-                  if (questionNumbers.length === 0) {
+                  const where = buildUserActiveStoryPositionsWhere(
+                    userId,
+                    baseResult.stories
+                  );
+                  if (!where) {
                     return Promise.resolve([]);
                   }
-
                   return db
-                    .select({ questionId: positions.questionId })
+                    .select({
+                      marketId: positions.marketId,
+                      questionId: positions.questionId,
+                    })
                     .from(positions)
-                    .where(
-                      and(
-                        eq(positions.userId, userId),
-                        eq(positions.status, 'active'),
-                        isNotNull(positions.questionId),
-                        inArray(positions.questionId, questionNumbers)
-                      )
-                    );
+                    .where(where);
                 })(),
                 loadFeedEventAggregates(userId),
               ]);
@@ -1423,7 +1420,7 @@ export async function buildForYouFeed(userId?: string | null) {
             FollowRow[],
             Array<{ postId: string | null }>,
             Array<{ postId: string }>,
-            Array<{ questionId: number | null }>,
+            UserStoryPositionRow[],
             EventAggregates,
           ];
         }
@@ -1455,11 +1452,7 @@ export async function buildForYouFeed(userId?: string | null) {
     ])
   );
 
-  const positionSet = new Set(
-    userPositions
-      .map((row) => row.questionId)
-      .filter((questionId): questionId is number => questionId !== null)
-  );
+  const positionIndex = buildUserStoryPositionIndex(userPositions);
 
   const rescoredStories = baseResult.stories.map((story) => {
     const clusterId = story.clusterId ?? story.marketId ?? story.storyKey;
@@ -1504,8 +1497,7 @@ export async function buildForYouFeed(userId?: string | null) {
       (sum, post) => sum + post.commentCount,
       0
     );
-    const hasUserPosition =
-      story.questionNumber !== null && positionSet.has(story.questionNumber);
+    const hasUserPosition = storyHasUserPosition(story, positionIndex);
     const authorAffinityScore =
       getAffinityScore(eventAggregates.authorAffinity, primaryAuthorId) +
       (primaryAuthorId && followedAuthorIds.has(primaryAuthorId) ? 0.8 : 0);

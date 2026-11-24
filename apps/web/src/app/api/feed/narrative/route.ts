@@ -32,7 +32,6 @@ import {
   eq,
   gte,
   inArray,
-  isNotNull,
   isNull,
   like,
   lt,
@@ -58,6 +57,11 @@ import {
 } from '../_lib/viewer-moderation';
 import { compareFeedStories } from '../feed-cursor';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
+import {
+  buildUserActiveStoryPositionsWhere,
+  buildUserStoryPositionIndex,
+  storyHasUserPosition,
+} from '../user-positions';
 import {
   calculateArcStateMultiplier,
   calculateResolutionBoost,
@@ -134,6 +138,7 @@ const USER_ENRICHMENT_TTL_S = 30;
 interface UserEnrichmentCache {
   likedPostIds: string[];
   sharedPostIds: string[];
+  positionMarketIds?: string[];
   positionQuestionIds: number[];
 }
 
@@ -775,9 +780,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   if (user?.userId) {
     const userId = user.userId;
-    const questionNumbersInResult = result.stories
-      .map((s) => s.questionNumber)
-      .filter((n): n is number => n !== null);
 
     try {
       const enrichCacheKey = narrativeEnrichmentKey(userId);
@@ -816,20 +818,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                   )
                 )
             : Promise.resolve([]),
-          questionNumbersInResult.length > 0
-            ? db
-                .select({ questionId: positions.questionId })
-                .from(positions)
-                .where(
-                  and(
-                    eq(positions.userId, userId),
-                    eq(positions.status, 'active'),
-                    isNotNull(positions.questionId),
-                    inArray(positions.questionId, questionNumbersInResult)
-                  )
-                )
-            : Promise.resolve([]),
+          (() => {
+            const where = buildUserActiveStoryPositionsWhere(
+              userId,
+              result.stories
+            );
+            if (!where) {
+              return Promise.resolve([]);
+            }
+            return db
+              .select({
+                marketId: positions.marketId,
+                questionId: positions.questionId,
+              })
+              .from(positions)
+              .where(where);
+          })(),
         ]);
+
+        const fetchedPositionIndex = buildUserStoryPositionIndex(userPositions);
 
         enrichment = {
           likedPostIds: userLikes
@@ -838,9 +845,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           sharedPostIds: userShares
             .map((s) => s.postId)
             .filter((id): id is string => id !== null),
-          positionQuestionIds: userPositions
-            .map((p) => p.questionId)
-            .filter((id): id is number => id !== null),
+          positionMarketIds: Array.from(fetchedPositionIndex.marketIds),
+          positionQuestionIds: Array.from(fetchedPositionIndex.questionNumbers),
         };
 
         // Cache write — errors logged but never block the response.
@@ -861,13 +867,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
       const likedSet = new Set(enrichment.likedPostIds);
       const sharedSet = new Set(enrichment.sharedPostIds);
-      const positionSet = new Set(enrichment.positionQuestionIds);
+      const positionIndex = {
+        marketIds: new Set(enrichment.positionMarketIds ?? []),
+        questionNumbers: new Set(enrichment.positionQuestionIds),
+      };
 
       finalStories = result.stories.map((story) => ({
         ...story,
-        hasUserPosition:
-          story.questionNumber !== null &&
-          positionSet.has(story.questionNumber),
+        hasUserPosition: storyHasUserPosition(story, positionIndex),
         posts: story.posts.map((post) => ({
           ...post,
           isLiked: likedSet.has(post.id),
