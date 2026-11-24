@@ -343,8 +343,8 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
     selectedMarketKind: kind,
     selectedMarketId: id,
     marketsTab: kind === "perp" ? "perps" : "predictions",
-          tradeError: null,
-    });
+    tradeError: null,
+  });
 }
 
 export function selectMarketsTab(tab: MarketsTab): void {
