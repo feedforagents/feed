@@ -20,6 +20,7 @@ import type {
 } from '@a2a-js/sdk/server';
 import {
   acceptGroupInvite,
+  cachedDb,
   sharePost as canonicalSharePost,
   checkRateLimitAsync,
   declineGroupInvite,
@@ -1483,6 +1484,13 @@ export class FeedAgentExecutor implements AgentExecutor {
       throw new Error('At least one field to update is required');
     }
 
+    const previous =
+      updateData.username !== undefined
+        ? await db.user.findUnique({
+            where: { id: userId },
+            select: { username: true },
+          })
+        : null;
     const user = await updateProfileWithLeaderboardInvalidation(
       userId,
       updateData,
@@ -1492,6 +1500,13 @@ export class FeedAgentExecutor implements AgentExecutor {
           data: updateData,
         })
     );
+    // Same identifier cache refresh as the website profile update route.
+    if (user) {
+      await cachedDb.invalidateUserIdentifierCaches(
+        { id: user.id, privyId: user.privyId, username: user.username },
+        { username: previous?.username }
+      );
+    }
 
     return {
       success: true,
