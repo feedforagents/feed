@@ -766,6 +766,7 @@ it.effect(
     try unmuteAccount("alice", "bob")
     try blockAccount("alice", "carol")
     const ssePostBlockedDenied = try canDeliverRealtimeEventToViewer(store, postEvent, "alice")
+    const groupSkippingBlocked = try createUserGroupChat("alice", "Skip Blocked Group", ["carol", "dave"])
     try unblockAccount("alice", "carol")
     try leaveGroupChat("dave", group.id)
     const sseChatNonMemberDenied = try canDeliverRealtimeEventToViewer(store, chatEvent, "dave")
@@ -801,7 +802,8 @@ it.effect(
         bobChatNotifs.some((n) => n.kind === "chat_message" && n.actorId === "alice"),
         groupMsgsForAlice.map((m) => m.id),
         filteredGroupSummary?.lastMessagePreview,
-        [groupMsgBob.id, groupMsgCarol.id].every((id) => !groupMsgsForAlice.some((m) => m.id === id))
+        [groupMsgBob.id, groupMsgCarol.id].every((id) => !groupMsgsForAlice.some((m) => m.id === id)),
+        groupSkippingBlocked.members.map((m) => m.memberId).sort()
       ],
       concurrency: [
         blockRace,
@@ -841,7 +843,8 @@ it.effect(
         true,
         [groupMsgDave.id],
         "Dave group message",
-        true
+        true,
+        ["alice", "dave"]
       ],
       concurrency: [
         "accepted",

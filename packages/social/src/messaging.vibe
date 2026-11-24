@@ -506,9 +506,7 @@ export effect function createUserGroupChat(
       if (handle.trim() === "") continue
       const member = try resolveUserOrNpcTx(tx, handle)
       if (member.id === owner.id) continue
-      if (try isBlockedBetweenTx(tx, owner.id, member.id)) {
-        throw new SocialFailure({ code: "Blocked", message: `Cannot add blocked account ${member.handle} to group` })
-      }
+      if (try isBlockedBetweenTx(tx, owner.id, member.id)) continue
       membersToAdd.set(member.id, { id: member.id, kind: member.kind === "npc" ? "npc" : "user" })
     }
     const chatId = freshId()
