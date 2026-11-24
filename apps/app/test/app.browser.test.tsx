@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -305,6 +306,17 @@ afterEach(async () => {
   for (const root of opened.splice(0)) {
     await act(() => Promise.resolve(root.unmount()));
   }
+  setStoreState({
+    route: "Home",
+    profileHandle: null,
+    selectedTicker: null,
+    localUiMode: "game",
+    joinSheetOpen: false,
+    joinTab: "phone",
+    joinPhoneStep: "entry",
+    activeThread: null,
+    threadLoading: false,
+  });
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
@@ -407,12 +419,28 @@ it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, 
   });
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
 
+  const pushState = vi.spyOn(window.history, "pushState");
+  const replaceState = vi.spyOn(window.history, "replaceState");
   const popped = new Promise<void>((resolve) => {
     window.addEventListener("popstate", () => resolve(), { once: true });
   });
   window.history.back();
   await act(() => popped);
   expect(window.location.pathname).toBe("/");
+  expect(pushState).not.toHaveBeenCalled();
+  expect(replaceState).toHaveBeenCalledTimes(1);
+  expect(getStoreSnapshot().route).toBe("Home");
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   await expect.element(page.getByText("Markets & Trading")).not.toBeInTheDocument();
+
+  const poppedAgain = new Promise<void>((resolve) => {
+    window.addEventListener("popstate", () => resolve(), { once: true });
+  });
+  window.history.back();
+  await act(() => poppedAgain);
+  expect(window.location.pathname).toBe("/");
+  expect(pushState).not.toHaveBeenCalled();
+  expect(getStoreSnapshot().route).toBe("Home");
+  pushState.mockRestore();
+  replaceState.mockRestore();
 });
