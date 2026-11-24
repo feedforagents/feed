@@ -239,6 +239,7 @@ lemma AccrueFundingPreCutover(m: SpotPerpMarket, period: int)
   ensures stepOnlyNpcTradesSpot(m, "accrueFunding", accrueFunding(m, period))
   ensures stepPerpTradesLeaveSpotAndIndexUnchanged(m, "accrueFunding", accrueFunding(m, period))
   ensures stepFundingPeriodMonotonicAndCutoverGuarded(m, "accrueFunding", accrueFunding(m, period))
+  ensures stepOpenFillsAtPostImpactMark(m, "accrueFunding", accrueFunding(m, period))
 {
   PositionsDistinctPosIds(m);
 }
@@ -251,6 +252,7 @@ lemma AccrueFundingOIAndPrices(m: SpotPerpMarket, period: int)
   ensures alwaysSpotAndPricesConsistent(accrueFunding(m, period))
   ensures stepOnlyNpcTradesSpot(m, "accrueFunding", accrueFunding(m, period))
   ensures stepPerpTradesLeaveSpotAndIndexUnchanged(m, "accrueFunding", accrueFunding(m, period))
+  ensures stepOpenFillsAtPostImpactMark(m, "accrueFunding", accrueFunding(m, period))
 {
   var after := accrueFunding(m, period);
   ProofLib.FoldLeftPointwise(
@@ -358,6 +360,7 @@ lemma tradeSpot_ensures(m: SpotPerpMarket, spotSide: SpotSide, spotAmount: int, 
   ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> stepOnlyNpcTradesSpot(m, "tradeSpot", tradeSpot(m, spotSide, spotAmount, by_)))
   ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> stepPerpTradesLeaveSpotAndIndexUnchanged(m, "tradeSpot", tradeSpot(m, spotSide, spotAmount, by_)))
   ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> stepFundingPeriodMonotonicAndCutoverGuarded(m, "tradeSpot", tradeSpot(m, spotSide, spotAmount, by_)))
+  ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> stepOpenFillsAtPostImpactMark(m, "tradeSpot", tradeSpot(m, spotSide, spotAmount, by_)))
 {
   if inv(m) && canTradeSpot(m, spotSide, spotAmount, by_) {
     var after := tradeSpot(m, spotSide, spotAmount, by_);
@@ -389,12 +392,16 @@ lemma openPerp_ensures(m: SpotPerpMarket, traderId: string, perpSide: PerpSide, 
   ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> stepOnlyNpcTradesSpot(m, "openPerp", openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
   ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> stepPerpTradesLeaveSpotAndIndexUnchanged(m, "openPerp", openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
   ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> stepFundingPeriodMonotonicAndCutoverGuarded(m, "openPerp", openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
+  ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> stepOpenFillsAtPostImpactMark(m, "openPerp", openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
 {
   if inv(m) && canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) {
     var after := openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_);
     var margin := shared__money_ceilDiv(perpSizeCents, leverage);
     var fee := shared__money_canonicalTradingFee(perpSizeCents);
-    var newPos := PerpPosition(m.nextPosId + 1, traderId, perpSide, perpSizeCents, leverage, margin, m.markPriceCents, m.currentPeriod, m.currentPeriod, 0);
+    var newLong := if perpSide.Long? then m.longOICents + perpSizeCents else m.longOICents;
+    var newShort := if perpSide.Short? then m.shortOICents + perpSizeCents else m.shortOICents;
+    var postOpenMark := computeMarkPriceCents(m.indexPriceCents, newLong, newShort);
+    var newPos := PerpPosition(m.nextPosId + 1, traderId, perpSide, perpSizeCents, leverage, margin, postOpenMark, m.currentPeriod, m.currentPeriod, 0);
     CanonicalTradingFeeNonNeg(perpSizeCents);
     ProofLib.FoldLeftAppend(
       (acc: int, p: PerpPosition) => (if p.perpSide.Long? then (acc + p.sizeCents) else acc),
@@ -439,11 +446,13 @@ lemma closePerp_ensures(m: SpotPerpMarket, traderId: string, by_: Sender)
   ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> stepOnlyNpcTradesSpot(m, "closePerp", closePerp(m, traderId, by_)))
   ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> stepPerpTradesLeaveSpotAndIndexUnchanged(m, "closePerp", closePerp(m, traderId, by_)))
   ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> stepFundingPeriodMonotonicAndCutoverGuarded(m, "closePerp", closePerp(m, traderId, by_)))
+  ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> stepOpenFillsAtPostImpactMark(m, "closePerp", closePerp(m, traderId, by_)))
 {
   if inv(m) && canClosePerp(m, traderId, by_) {
     var after := closePerp(m, traderId, by_);
     var pos := positionFor(m, traderId);
-    var gross := shared__money_clampMin0(positionEquityAtMark(pos, m.markPriceCents));
+    var postCloseMark := computeMarkPriceCents(m.indexPriceCents, after.longOICents, after.shortOICents);
+    var gross := shared__money_clampMin0(positionEquityAtMark(pos, postCloseMark));
     var fee := shared__money_canonicalTradingFee(pos.sizeCents);
     var netCredit := shared__money_clampMin0(gross - fee);
     CanonicalTradingFeeNonNeg(pos.sizeCents);
@@ -468,6 +477,7 @@ lemma advanceHours_ensures(m: SpotPerpMarket, deltaHours: int)
   ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> stepOnlyNpcTradesSpot(m, "advanceHours", advanceHours(m, deltaHours)))
   ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> stepPerpTradesLeaveSpotAndIndexUnchanged(m, "advanceHours", advanceHours(m, deltaHours)))
   ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> stepFundingPeriodMonotonicAndCutoverGuarded(m, "advanceHours", advanceHours(m, deltaHours)))
+  ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> stepOpenFillsAtPostImpactMark(m, "advanceHours", advanceHours(m, deltaHours)))
 {
   if inv(m) && canAdvanceHours(m, deltaHours) {
     FundingPeriodIndexMonotonic(m.currentHour, m.currentHour + deltaHours);
@@ -483,6 +493,7 @@ lemma accrueFunding_ensures(m: SpotPerpMarket, period: int)
   ensures (inv(m) ==> canAccrueFunding(m, period) ==> stepOnlyNpcTradesSpot(m, "accrueFunding", accrueFunding(m, period)))
   ensures (inv(m) ==> canAccrueFunding(m, period) ==> stepPerpTradesLeaveSpotAndIndexUnchanged(m, "accrueFunding", accrueFunding(m, period)))
   ensures (inv(m) ==> canAccrueFunding(m, period) ==> stepFundingPeriodMonotonicAndCutoverGuarded(m, "accrueFunding", accrueFunding(m, period)))
+  ensures (inv(m) ==> canAccrueFunding(m, period) ==> stepOpenFillsAtPostImpactMark(m, "accrueFunding", accrueFunding(m, period)))
 {
   hide *;
   reveal inv;
@@ -505,11 +516,13 @@ lemma liquidate_ensures(m: SpotPerpMarket, traderId: string)
   ensures (inv(m) ==> canLiquidate(m, traderId) ==> stepOnlyNpcTradesSpot(m, "liquidate", liquidate(m, traderId)))
   ensures (inv(m) ==> canLiquidate(m, traderId) ==> stepPerpTradesLeaveSpotAndIndexUnchanged(m, "liquidate", liquidate(m, traderId)))
   ensures (inv(m) ==> canLiquidate(m, traderId) ==> stepFundingPeriodMonotonicAndCutoverGuarded(m, "liquidate", liquidate(m, traderId)))
+  ensures (inv(m) ==> canLiquidate(m, traderId) ==> stepOpenFillsAtPostImpactMark(m, "liquidate", liquidate(m, traderId)))
 {
   if inv(m) && canLiquidate(m, traderId) {
     var after := liquidate(m, traderId);
     var pos := positionFor(m, traderId);
-    var payout := shared__money_clampMin0(positionEquityAtMark(pos, m.markPriceCents));
+    var postLiqMark := computeMarkPriceCents(m.indexPriceCents, after.longOICents, after.shortOICents);
+    var payout := shared__money_clampMin0(positionEquityAtMark(pos, postLiqMark));
     LiquidatePositionsBridge(m, traderId);
     FilteredPositionsValid(m, traderId);
     PositionsFilterBridge(m);
@@ -520,6 +533,245 @@ lemma liquidate_ensures(m: SpotPerpMarket, traderId: string)
     FoldShortOINonNeg(0, after.positions);
     FundingFilterBridge(m);
     FundingFilterBridge(after);
+  }
+}
+
+lemma MulLe(x: int, y: int, c: int)
+  requires x <= y && c >= 0
+  ensures x * c <= y * c
+{
+  hide *;
+}
+
+lemma MulLt(x: int, y: int, c: int)
+  requires x < y && c > 0
+  ensures x * c < y * c
+{
+  hide *;
+}
+
+lemma DivBounds(a: int, d: int)
+  requires a >= 0 && d > 0
+  ensures a / d >= 0
+  ensures (a / d) * d <= a
+  ensures a < (a / d + 1) * d
+{
+  hide *;
+  var q := a / d;
+  var r := a % d;
+  assert q * d + r == a;
+  assert 0 <= r < d;
+}
+
+lemma QuotientMonotonic(a1: int, d1: int, a2: int, d2: int)
+  requires d1 > 0 && d2 > 0
+  requires a1 * d2 <= a2 * d1
+  ensures quotient_markets__spotPerp(a1, d1) <= quotient_markets__spotPerp(a2, d2)
+{
+  hide *;
+  reveal quotient_markets__spotPerp, JSFloorDiv, MathAbs;
+  if a1 >= 0 && a2 >= 0 {
+    DivBounds(a1, d1);
+    DivBounds(a2, d2);
+    var q1 := a1 / d1;
+    var q2 := a2 / d2;
+    if q1 > q2 {
+      MulLe(q1 * d1, a1, d2);
+      MulLt(a2, (q2 + 1) * d2, d1);
+      MulLe(q2 + 1, q1, d1 * d2);
+      assert (q1 * d1) * d2 == q1 * (d1 * d2);
+      assert ((q2 + 1) * d2) * d1 == (q2 + 1) * (d1 * d2);
+    }
+  } else if a1 < 0 && a2 >= 0 {
+    DivBounds(-a1, d1);
+    DivBounds(a2, d2);
+  } else if a1 >= 0 && a2 < 0 {
+    MulLe(0, a1, d2);
+    MulLt(a2, 0, d1);
+  } else {
+    DivBounds(-a1, d1);
+    DivBounds(-a2, d2);
+    var p1 := (-a1) / d1;
+    var p2 := (-a2) / d2;
+    if p2 > p1 {
+      MulLe(p2 * d2, -a2, d1);
+      MulLt(-a1, (p1 + 1) * d1, d2);
+      MulLe(p1 + 1, p2, d1 * d2);
+      assert (p2 * d2) * d1 == p2 * (d1 * d2);
+      assert ((p1 + 1) * d1) * d2 == (p1 + 1) * (d1 * d2);
+    }
+  }
+}
+
+lemma BoundedPremiumBounds(l: int, s: int)
+  requires l >= 0 && s >= 0
+  ensures -MAX_PREMIUM_BPS <= boundedPremiumBps(l, s) <= MAX_PREMIUM_BPS
+{
+  if l + s > 0 {
+    QuotientMonotonic(-MAX_PREMIUM_BPS, 1, (l - s) * MAX_PREMIUM_BPS, l + s);
+    QuotientMonotonic((l - s) * MAX_PREMIUM_BPS, l + s, MAX_PREMIUM_BPS, 1);
+  }
+}
+
+lemma BoundedPremiumMonotonicLong(l0: int, l1: int, s: int)
+  requires 0 <= l0 <= l1 && s >= 0
+  ensures boundedPremiumBps(l0, s) <= boundedPremiumBps(l1, s)
+{
+  if l0 + s == 0 {
+    assert l0 == 0 && s == 0;
+    assert boundedPremiumBps(l0, s) == 0;
+    if l1 > 0 {
+      QuotientMonotonic(0, 1, l1 * MAX_PREMIUM_BPS, l1);
+    }
+  } else {
+    assert ((l0 - s) * MAX_PREMIUM_BPS) * (l1 + s) <= ((l1 - s) * MAX_PREMIUM_BPS) * (l0 + s);
+    QuotientMonotonic((l0 - s) * MAX_PREMIUM_BPS, l0 + s, (l1 - s) * MAX_PREMIUM_BPS, l1 + s);
+  }
+}
+
+lemma BoundedPremiumMonotonicShort(l: int, s0: int, s1: int)
+  requires l >= 0 && 0 <= s0 <= s1
+  ensures boundedPremiumBps(l, s1) <= boundedPremiumBps(l, s0)
+{
+  if l + s0 == 0 {
+    assert l == 0 && s0 == 0;
+    assert boundedPremiumBps(l, s0) == 0;
+    if s1 > 0 {
+      QuotientMonotonic((-s1) * MAX_PREMIUM_BPS, s1, 0, 1);
+    }
+  } else {
+    assert ((l - s1) * MAX_PREMIUM_BPS) * (l + s0) <= ((l - s0) * MAX_PREMIUM_BPS) * (l + s1);
+    QuotientMonotonic((l - s1) * MAX_PREMIUM_BPS, l + s1, (l - s0) * MAX_PREMIUM_BPS, l + s0);
+  }
+}
+
+lemma ComputeMarkMonotonic(indexCents: int, l1: int, s1: int, l2: int, s2: int)
+  requires indexCents > 0 && l1 >= 0 && s1 >= 0 && l2 >= 0 && s2 >= 0
+  requires boundedPremiumBps(l1, s1) <= boundedPremiumBps(l2, s2)
+  ensures computeMarkPriceCents(indexCents, l1, s1) <= computeMarkPriceCents(indexCents, l2, s2)
+{
+  var p1 := boundedPremiumBps(l1, s1);
+  var p2 := boundedPremiumBps(l2, s2);
+  BoundedPremiumBounds(l1, s1);
+  BoundedPremiumBounds(l2, s2);
+  assert (indexCents * (shared__money_BPS_DENOMINATOR + p1)) * shared__money_BPS_DENOMINATOR <= (indexCents * (shared__money_BPS_DENOMINATOR + p2)) * shared__money_BPS_DENOMINATOR;
+  QuotientMonotonic(indexCents * (shared__money_BPS_DENOMINATOR + p1), shared__money_BPS_DENOMINATOR, indexCents * (shared__money_BPS_DENOMINATOR + p2), shared__money_BPS_DENOMINATOR);
+}
+
+lemma FloorCentsNonPos(numer: int, denom: int)
+  requires numer <= 0 && denom > 0
+  ensures shared__money_floorCents(numer, denom) <= 0
+{
+  hide *;
+  reveal shared__money_floorCents, shared__money_quotient_shared__money, JSFloorDiv, MathAbs;
+  if numer < 0 {
+    var a := numer - denom + 1;
+    assert a < 0;
+    assert (-a) / denom >= 0;
+  }
+}
+
+lemma CanonicalTradingFeePos(sizeCents: int)
+  requires sizeCents >= MIN_ORDER_SIZE_CENTS
+  ensures shared__money_canonicalTradingFee(sizeCents) >= 1
+{
+  CeilDivMulGe(sizeCents * shared__money_TRADING_FEE_BPS, shared__money_BPS_DENOMINATOR);
+}
+
+lemma FilterAllKeep(xs: seq<PerpPosition>, traderId: string)
+  requires forall p :: p in xs ==> p.owner != traderId
+  ensures ProofLib.Filter((p: PerpPosition) => (p.owner != traderId), xs) == xs
+  decreases |xs|
+{
+  if |xs| > 0 {
+    assert xs[0] in xs;
+    assert forall p :: p in xs[1..] ==> p in xs;
+    FilterAllKeep(xs[1..], traderId);
+    ProofLib.FilterCons((p: PerpPosition) => (p.owner != traderId), xs);
+    assert [xs[0]] + xs[1..] == xs;
+  } else {
+    ProofLib.FilterNil((p: PerpPosition) => (p.owner != traderId), xs);
+  }
+}
+
+lemma lawPerpRoundTripStrictlyDecreasesCash_ensures(indexCents: int, longOI: int, shortOI: int, perpSide: PerpSide, perpSizeCents: int, leverage: int)
+  ensures (lawPerpRoundTripStrictlyDecreasesCash(indexCents, longOI, shortOI, perpSide, perpSizeCents, leverage) == true)
+{
+  if indexCents > 0 && longOI >= 0 && shortOI >= 0 && perpSizeCents >= MIN_ORDER_SIZE_CENTS && leverage >= 1 && leverage <= MAX_LEVERAGE {
+    var openLong := if perpSide.Long? then longOI + perpSizeCents else longOI;
+    var openShort := if perpSide.Short? then shortOI + perpSizeCents else shortOI;
+    var entryPrice := computeMarkPriceCents(indexCents, openLong, openShort);
+    var exitPrice := computeMarkPriceCents(indexCents, longOI, shortOI);
+    var margin := shared__money_ceilDiv(perpSizeCents, leverage);
+    var openFee := shared__money_canonicalTradingFee(perpSizeCents);
+    var closeFee := shared__money_canonicalTradingFee(perpSizeCents);
+    CeilDivMulGe(perpSizeCents, leverage);
+    CanonicalTradingFeePos(perpSizeCents);
+    if perpSide.Long? {
+      BoundedPremiumMonotonicLong(longOI, openLong, shortOI);
+      ComputeMarkMonotonic(indexCents, longOI, shortOI, openLong, openShort);
+      assert exitPrice <= entryPrice;
+      FloorCentsNonPos(perpSizeCents * (exitPrice - entryPrice), entryPrice);
+    } else {
+      BoundedPremiumMonotonicShort(longOI, shortOI, openShort);
+      ComputeMarkMonotonic(indexCents, openLong, openShort, longOI, shortOI);
+      assert entryPrice <= exitPrice;
+      FloorCentsNonPos(perpSizeCents * (entryPrice - exitPrice), entryPrice);
+    }
+    var pos := PerpPosition(1, "alice", perpSide, perpSizeCents, leverage, margin, entryPrice, 0, 0, 0);
+    assert unrealizedPnlAtMark(pos, exitPrice) <= 0;
+    assert positionEquityAtMark(pos, exitPrice) <= margin;
+    var gross := shared__money_clampMin0(positionEquityAtMark(pos, exitPrice));
+    assert gross <= margin;
+    var netCredit := shared__money_clampMin0(gross - closeFee);
+    assert netCredit < margin + openFee;
+  }
+}
+
+lemma lawPerpMarketRoundTripStrictlyDecreasesCash_ensures(mkt: SpotPerpMarket, traderId: string, perpSide: PerpSide, perpSizeCents: int, leverage: int, by_: Sender)
+  ensures (lawPerpMarketRoundTripStrictlyDecreasesCash(mkt, traderId, perpSide, perpSizeCents, leverage, by_) == true)
+{
+  if alwaysSpotAndPricesConsistent(mkt) && alwaysOpenInterestMatchesPositions(mkt) && alwaysPositionsWithin20xAndUnique(mkt) && canOpenPerp(mkt, traderId, perpSide, perpSizeCents, leverage, by_) {
+    var afterOpen := openPerp(mkt, traderId, perpSide, perpSizeCents, leverage, by_);
+    var afterClose := closePerp(afterOpen, traderId, by_);
+    var margin := shared__money_ceilDiv(perpSizeCents, leverage);
+    var openFee := shared__money_canonicalTradingFee(perpSizeCents);
+    var newLong := if perpSide.Long? then mkt.longOICents + perpSizeCents else mkt.longOICents;
+    var newShort := if perpSide.Short? then mkt.shortOICents + perpSizeCents else mkt.shortOICents;
+    var postOpenMark := computeMarkPriceCents(mkt.indexPriceCents, newLong, newShort);
+    var newPos := PerpPosition(mkt.nextPosId + 1, traderId, perpSide, perpSizeCents, leverage, margin, postOpenMark, mkt.currentPeriod, mkt.currentPeriod, 0);
+    assert afterOpen.positions == mkt.positions + [newPos];
+    ProofLib.FoldLeftAppend(
+      (found: PerpPosition, p: PerpPosition) => (if (p.owner == traderId) then p else found),
+      emptyPos,
+      mkt.positions,
+      newPos
+    );
+    assert positionFor(afterOpen, traderId) == newPos;
+    ClosePerpPositionsBridge(afterOpen, traderId, by_);
+    ProofLib.FilterAppend((p: PerpPosition) => (p.owner != traderId), mkt.positions, newPos);
+    FilterAllKeep(mkt.positions, traderId);
+    assert afterClose.positions == mkt.positions;
+    assert afterClose.longOICents == mkt.longOICents;
+    assert afterClose.shortOICents == mkt.shortOICents;
+    var postCloseMark := computeMarkPriceCents(mkt.indexPriceCents, mkt.longOICents, mkt.shortOICents);
+    assert afterClose.markPriceCents == postCloseMark;
+    lawPerpRoundTripStrictlyDecreasesCash_ensures(mkt.indexPriceCents, mkt.longOICents, mkt.shortOICents, perpSide, perpSizeCents, leverage);
+    var gross := shared__money_clampMin0(positionEquityAtMark(newPos, postCloseMark));
+    var closeFee := shared__money_canonicalTradingFee(perpSizeCents);
+    var netCredit := shared__money_clampMin0(gross - closeFee);
+    assert netCredit < margin + openFee;
+    var idx :| 0 <= idx < |mkt.accounts| && mkt.accounts[idx].id == traderId;
+    AccountsDistinctIds(mkt);
+    SpotBalanceForAt(mkt, idx);
+    assert afterOpen.accounts[idx].id == traderId;
+    assert afterOpen.accounts[idx].balanceCents == mkt.accounts[idx].balanceCents - (margin + openFee);
+    assert afterClose.accounts[idx].id == traderId;
+    assert afterClose.accounts[idx].balanceCents == afterOpen.accounts[idx].balanceCents + netCredit;
+    assert forall j :: idx < j < |afterClose.accounts| ==> afterClose.accounts[j].id != traderId;
+    FoldSpotBalanceAt(afterClose.accounts, 0, traderId, idx);
+    assert spotBalanceFor(afterClose, traderId) == mkt.accounts[idx].balanceCents - (margin + openFee) + netCredit;
+    assert spotBalanceFor(afterClose, traderId) < spotBalanceFor(mkt, traderId);
   }
 }
 

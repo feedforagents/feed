@@ -1,6 +1,9 @@
-import { expect, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 import type { ComponentMeta } from "vibestack/stories";
 import type { ProfileHeaderProps } from "./ProfileHeader.tsx";
+
+const onOpenFollowers = fn();
+const onOpenFollowing = fn();
 
 const baseProfile = {
   displayName: "Alice",
@@ -15,7 +18,7 @@ const baseProfile = {
 };
 
 export const meta: ComponentMeta<ProfileHeaderProps> = {
-  args: { profile: baseProfile, mode: "GameMode" },
+  args: { profile: baseProfile, mode: "GameMode", onOpenFollowers, onOpenFollowing },
   examples: {
     SocialMode: { profile: baseProfile, mode: "SocialMode" },
     NpcParody: {
@@ -34,6 +37,15 @@ export const meta: ComponentMeta<ProfileHeaderProps> = {
     },
   },
   play: {
+    Default: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      onOpenFollowers.mockClear();
+      onOpenFollowing.mockClear();
+      const canvas = within(canvasElement);
+      await userEvent.click(canvas.getByRole("button", { name: /38 Following/ }));
+      await expect(onOpenFollowing).toHaveBeenCalled();
+      await userEvent.click(canvas.getByRole("button", { name: /142 Followers/ }));
+      await expect(onOpenFollowers).toHaveBeenCalled();
+    },
     SocialMode: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       await expect(within(canvasElement).queryByText("240 pts")).toBeNull();
     },

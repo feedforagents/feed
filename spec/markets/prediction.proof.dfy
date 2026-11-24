@@ -126,15 +126,14 @@ lemma AccountForAt(m: PredictionMarket, idx: int)
 lemma FoldPayoutsNonNeg(init: int, xs: seq<TraderAccount>, winner: Side)
   requires init >= 0
   requires forall a :: a in xs ==> a.yesShares >= 0 && a.noShares >= 0
-  ensures Std.Collections.Seq.FoldLeft((acc: int, a: TraderAccount) => (if a.settledOnClose then acc else (acc + shared__money_floorCents((if winner.Yes? then a.yesShares else a.noShares), SUBCENTS_PER_CENT))), init, xs) >= init
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: TraderAccount) => (if a.settledOnClose then acc else (acc + (if winner.Yes? then a.yesShares else a.noShares))), init, xs) >= init
   decreases |xs|
 {
   if |xs| > 0 {
     assert xs[0] in xs;
     assert forall a :: a in xs[1..] ==> a in xs;
     var shares := if winner.Yes? then xs[0].yesShares else xs[0].noShares;
-    FloorCentsBounds(shares, SUBCENTS_PER_CENT);
-    var next := if xs[0].settledOnClose then init else (init + shared__money_floorCents(shares, SUBCENTS_PER_CENT));
+    var next := if xs[0].settledOnClose then init else (init + shares);
     FoldPayoutsNonNeg(next, xs[1..], winner);
   }
 }
@@ -166,13 +165,11 @@ lemma SellPreservesBalances(m: PredictionMarket, traderId: string, side: Side, s
   ensures alwaysBalancesAndPositionsNonNegative(sell(m, traderId, side, sellShares))
 {
   hide *;
-  reveal inv, canSell, sell, sellAccountUpdate, hasTrader, heldSharesFor, heldCostFor, shared__money_sellNetProceeds, shared__money_clampMin0, SUBCENTS_PER_CENT;
+  reveal inv, canSell, sell, sellAccountUpdate, hasTrader, heldSharesFor, heldCostFor, shared__money_sellNetProceeds, shared__money_clampMin0;
   var after := sell(m, traderId, side, sellShares);
-  var grossUnits := cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares);
-  var settledCents := shared__money_floorCents(grossUnits, SUBCENTS_PER_CENT);
+  var settledCents := cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares);
   var fee := shared__money_canonicalTradingFee(settledCents);
   var netCredit := shared__money_sellNetProceeds(settledCents);
-  FloorCentsBounds(grossUnits, SUBCENTS_PER_CENT);
   CanonicalTradingFeeNonNeg(settledCents);
   assert netCredit <= settledCents;
   BalancesFilterBridge(m);
@@ -208,8 +205,7 @@ lemma SellPreservesFees(m: PredictionMarket, traderId: string, side: Side, sellS
 {
   hide *;
   reveal inv, alwaysFeeLedgerReconciles, canSell, sell;
-  var grossUnits := cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares);
-  var settledCents := shared__money_floorCents(grossUnits, SUBCENTS_PER_CENT);
+  var settledCents := cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares);
   var fee := shared__money_canonicalTradingFee(settledCents);
   CanonicalTradingFeeNonNeg(settledCents);
   ProofLib.FoldLeftAppend((acc: int, f: int) => (acc + f), 0, m.chargedFees, fee);
@@ -245,13 +241,12 @@ lemma buy_ensures(m: PredictionMarket, traderId: string, side: Side, amountCents
     var after := buy(m, traderId, side, amountCents);
     var fee := shared__money_canonicalTradingFee(amountCents);
     var netCents := shared__money_buyNetAfterFee(amountCents);
-    var netUnits := netCents * SUBCENTS_PER_CENT;
     CanonicalTradingFeeNonNeg(amountCents);
     assert netCents <= amountCents;
     if side.Yes? {
-      CeilDivMulGe(m.yesReserve * m.noReserve, m.noReserve + netUnits);
+      CeilDivMulGe(m.yesReserve * m.noReserve, m.noReserve + netCents);
     } else {
-      CeilDivMulGe(m.yesReserve * m.noReserve, m.yesReserve + netUnits);
+      CeilDivMulGe(m.yesReserve * m.noReserve, m.yesReserve + netCents);
     }
     BalancesFilterBridge(m);
     BalancesFilterBridge(after);
@@ -336,7 +331,6 @@ lemma resolveMarket_ensures(m: PredictionMarket)
       var a := m.accounts[i];
       var a' := after.accounts[i];
       assert a in m.accounts;
-      FloorCentsBounds(if winner.Yes? then a.yesShares else a.noShares, SUBCENTS_PER_CENT);
       ProofLib.FilterLengthPointwise((b: TraderAccount) => (b.id == a'.id), (b: TraderAccount) => (b.id == a.id), after.accounts, m.accounts);
     }
   }

@@ -122,7 +122,7 @@ lemma expireMarketSlot_ensures(j: JourneyState, slotId: int)
   ensures (inv(j) ==> canExpireMarketSlot(j, slotId) ==> alwaysJourneySubmachinesConsistent(expireMarketSlot(j, slotId)))
   ensures (inv(j) ==> canExpireMarketSlot(j, slotId) ==> alwaysEconomyAndSingleAgentConstraints(expireMarketSlot(j, slotId)))
   ensures (inv(j) ==> canExpireMarketSlot(j, slotId) ==> alwaysBudgetAttemptBoundsValid(expireMarketSlot(j, slotId)))
-  ensures (inv(j) ==> canExpireMarketSlot(j, slotId) ==> stepStripePurchaseDoesNotChangeProfitRank(j, "expireMarketSlot", expireMarketSlot(j, slotId)))
+  ensures (inv(j) ==> canExpireMarketSlot(j, slotId) ==> stepFixedStartingCapitalNoRefill(j, expireMarketSlot(j, slotId)))
 {
   if inv(j) && canExpireMarketSlot(j, slotId) {
     var after := expireMarketSlot(j, slotId);
@@ -134,7 +134,7 @@ lemma prepareMarketProof_ensures(j: JourneyState, slotId: int, needsManualReview
   ensures (inv(j) ==> canPrepareMarketProof(j, slotId) ==> alwaysJourneySubmachinesConsistent(prepareMarketProof(j, slotId, needsManualReview)))
   ensures (inv(j) ==> canPrepareMarketProof(j, slotId) ==> alwaysEconomyAndSingleAgentConstraints(prepareMarketProof(j, slotId, needsManualReview)))
   ensures (inv(j) ==> canPrepareMarketProof(j, slotId) ==> alwaysBudgetAttemptBoundsValid(prepareMarketProof(j, slotId, needsManualReview)))
-  ensures (inv(j) ==> canPrepareMarketProof(j, slotId) ==> stepStripePurchaseDoesNotChangeProfitRank(j, "prepareMarketProof", prepareMarketProof(j, slotId, needsManualReview)))
+  ensures (inv(j) ==> canPrepareMarketProof(j, slotId) ==> stepFixedStartingCapitalNoRefill(j, prepareMarketProof(j, slotId, needsManualReview)))
 {
   if inv(j) && canPrepareMarketProof(j, slotId) {
     var after := prepareMarketProof(j, slotId, needsManualReview);
@@ -154,7 +154,7 @@ lemma settleMarketAndPayout_ensures(j: JourneyState, slotId: int)
   ensures (inv(j) ==> canSettleMarketAndPayout(j, slotId) ==> alwaysJourneySubmachinesConsistent(settleMarketAndPayout(j, slotId)))
   ensures (inv(j) ==> canSettleMarketAndPayout(j, slotId) ==> alwaysEconomyAndSingleAgentConstraints(settleMarketAndPayout(j, slotId)))
   ensures (inv(j) ==> canSettleMarketAndPayout(j, slotId) ==> alwaysBudgetAttemptBoundsValid(settleMarketAndPayout(j, slotId)))
-  ensures (inv(j) ==> canSettleMarketAndPayout(j, slotId) ==> stepStripePurchaseDoesNotChangeProfitRank(j, "settleMarketAndPayout", settleMarketAndPayout(j, slotId)))
+  ensures (inv(j) ==> canSettleMarketAndPayout(j, slotId) ==> stepFixedStartingCapitalNoRefill(j, settleMarketAndPayout(j, slotId)))
 {
   if inv(j) && canSettleMarketAndPayout(j, slotId) {
     var after := settleMarketAndPayout(j, slotId);
@@ -171,7 +171,7 @@ lemma runNpcTickSpotAndAlpha_ensures(j: JourneyState, actorId: int, boundCents: 
   ensures (inv(j) ==> canRunNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta) ==> alwaysJourneySubmachinesConsistent(runNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta)))
   ensures (inv(j) ==> canRunNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta) ==> alwaysEconomyAndSingleAgentConstraints(runNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta)))
   ensures (inv(j) ==> canRunNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta) ==> alwaysBudgetAttemptBoundsValid(runNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta)))
-  ensures (inv(j) ==> canRunNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta) ==> stepStripePurchaseDoesNotChangeProfitRank(j, "runNpcTickSpotAndAlpha", runNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta)))
+  ensures (inv(j) ==> canRunNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta) ==> stepFixedStartingCapitalNoRefill(j, runNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta)))
 {
   if inv(j) && canRunNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta) {
     var after := runNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta);

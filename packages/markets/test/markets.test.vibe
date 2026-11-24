@@ -1,48 +1,42 @@
-// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation"; spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"
+// spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"
 import { assert, it } from "@effect/vitest"
 import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld, toInt, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
-import { HttpClient, HttpClientResponse } from "effect/http"
 import { TestClock } from "effect/testing"
 import {
+  INITIAL_GRANT_CENTS,
   MarketFailure,
+  MarketRealtimeBus,
   accruePerpFunding,
   buyPredictionShares,
   cancelPredictionMarket,
   closePerpPosition,
-  createStripeCheckoutSession,
   executeNpcSpotTrade,
   getAccountEconomy,
+  getAccountLeaderboardRank,
   getLeaderboard,
+  getMarketPriceHistory,
   getPerpMarket,
   getPointLedger,
   getPredictionMarket,
   getUserPositions,
-  handleStripeWebhook,
+  liquidateEligiblePositions,
+  listMarketTrades,
+  listPerpMarkets,
   listPerpPositions,
   listPredictionMarkets,
+  listUserClosedPositions,
+  markToMarketPredictionCents,
   openPerpPosition,
+  previewPerpOrder,
+  previewPredictionBuy,
+  previewPredictionSell,
   resolvePredictionMarket,
   sellPredictionShares,
   type BuyPredictionInput,
+  type MarketPerpRealtimeEvent,
   type SellPredictionInput
 } from "../src/index.vibe"
-
-module node {
-  import { createHmac } from "node:crypto"
-
-  /** @throws {never} */
-  export function signStripeWebhook(rawBody: string, secret: string, timestampSec: number): string {
-    const signature = createHmac("sha256", secret).update(`${timestampSec}.${rawBody}`).digest("hex")
-    return `t=${timestampSec},v1=${signature}`
-  }
-
-  /** @throws {never} */
-  export function jsonResponse(body: string, status: number): Response {
-    return new Response(body, { status, headers: { "content-type": "application/json" } })
-  }
-}
-import { jsonResponse, signStripeWebhook } from node
 
 effect function check(run: () => void) {
   try Effect.try(run)
@@ -56,17 +50,37 @@ effect function runWithSeededDb<A, E>(body: A!E!Store) {
   }
 }
 
+effect function runWithSeededMarketDay<A, E>(body: (now: number) => A!E!Store) {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
+  return try runWithSeededDb(effect {
+    const now = try Clock.currentTimeMillis
+    return try body(now)
+  })
+}
+
 const FEED_ACCOUNT_COLUMNS = `account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2,
   phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents,
-  purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
+  total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
   created_at, updated_at`
 
-effect function createVerifiedAccount(accountId: string, handle: string, balanceCents = 10_000): void!StoreFailure!Store {
+effect function createVerifiedAccount(accountId: string, handle: string, balanceCents = INITIAL_GRANT_CENTS): void!StoreFailure!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
   try store.transaction(effect (tx: Tx) => {
+    const orgId = `org-${accountId}`
     try tx.query(
-      `INSERT INTO feed_accounts (${FEED_ACCOUNT_COLUMNS}) VALUES ($1, $2, $3, '', NULL, $4, '01', $5, $5, 'game', $6, $6, 0, 0, false, false, NULL, $5, $5)`,
+      "INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ($1, $2, 0, $3) ON CONFLICT (id) DO NOTHING",
+      [orgId, handle, now]
+    )
+    try tx.query(
+      `INSERT INTO accounts (key, state, revision, organization_id, status, email, phone, name, created_at, updated_at)
+       VALUES ($1, '{}'::jsonb, 1, $2, 'active', NULL, NULL, $3, $4, $4)
+       ON CONFLICT (key) DO NOTHING`,
+      [accountId, orgId, handle, now]
+    )
+    try tx.query(
+      `INSERT INTO feed_accounts (${FEED_ACCOUNT_COLUMNS})
+       VALUES ($1, $2, $3, '', NULL, $4, '01', $5, $5, 'game', $6, $6, 0, false, false, NULL, $5, $5)`,
       [accountId, handle, handle, `phone-hash-${accountId}`, now, balanceCents]
     )
   })
@@ -82,13 +96,20 @@ effect function marketErrorCode<A, R>(program: A!(MarketFailure | StoreFailure)!
   }
 }
 
-it.effect('Prediction market lifecycle: omits secretOutcome while open, CPMM buy/sell, 1 pt winning payout per whole share, and idempotent resolution (spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () => effect {
-  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
-  try runWithSeededDb(effect {
+it.effect('Prediction market lifecycle: previews, cent-share CPMM, MIN_SELL_SHARE_UNITS, price history, atomic proof resolution, and closed positions (spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    const store = try Store
     // spec/markets/prediction.md, "Hidden outcome and prepared proof are never visible before resolution"
     const openView = try getPredictionMarket("seed-market-1")
-    try createVerifiedAccount("user-alice", "alice", 10_000)
-    try createVerifiedAccount("user-bob", "bob", 10_000)
+    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
+
+    const historyBefore = try getMarketPriceHistory("prediction", "seed-market-1", 50)
+    const buyPreview = try previewPredictionBuy({
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 2_000
+    })
 
     // spec/markets/prediction.md, "Buying YES or NO shares requires an open non-expired market, sufficient balance, and bounded odds impact"
     const aliceBuy = try buyPredictionShares({
@@ -107,7 +128,20 @@ it.effect('Prediction market lifecycle: omits secretOutcome while open, CPMM buy
     })
 
     // spec/markets/prediction.md, "Selling shares floors gross proceeds to whole cents before charging the canonical fee"
+    const tooSmallSellCode = try marketErrorCode(sellPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      shares: 50
+    }))
     const sharesToSell = 1_000 + (aliceBuy.shares % 100)
+    const sellPreview = try previewPredictionSell({
+      marketId: "seed-market-1",
+      side: "yes",
+      shares: sharesToSell,
+      holderId: "user-alice"
+    })
     const aliceSell = try sellPredictionShares({
       actorId: "user-alice",
       actorKind: "user",
@@ -117,8 +151,18 @@ it.effect('Prediction market lifecycle: omits secretOutcome while open, CPMM buy
     })
     const remainingShares = aliceBuy.shares - sharesToSell
     const positionsBeforeResolve = try getUserPositions("user-alice")
+    const marketAfterTrades = try getPredictionMarket("seed-market-1")
+    const history = try getMarketPriceHistory("prediction", "seed-market-1", 50)
+    const trades = try listMarketTrades("prediction", "seed-market-1", 10)
 
     // spec/markets/prediction.md, "Resolved, cancelled, held, and expired markets allow no trades, and duplicate resolution pays nothing extra"
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_prediction_resolution_work (market_id, attempts, last_error, next_retry_at, updated_at)
+         VALUES ('seed-market-1', 0, NULL, $1, $1) ON CONFLICT (market_id) DO NOTHING`,
+        [now]
+      )
+    })
     try TestClock.adjust(Duration.seconds(4 * 86_400))
     const expiredBuyCode = try marketErrorCode(buyPredictionShares({
       actorId: "user-alice",
@@ -131,17 +175,31 @@ it.effect('Prediction market lifecycle: omits secretOutcome while open, CPMM buy
     // spec/markets/prediction.md, "Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently"
     const resolved = try resolvePredictionMarket({
       marketId: "seed-market-1",
-      proofSummary: "OpenAGI published frontier compute pricing."
+      clearResolutionWork: true,
+      proofArticle: {
+        id: "art-proof-seed-1",
+        title: "OpenAGI publishes frontier compute pricing",
+        summary: "OpenAGI published frontier compute pricing.",
+        body: "Official rate card published before expiry.",
+        authorOrgId: "the-new-york-taimes"
+      }
     })
+    const proofArticleRows = try store.transaction((tx: Tx) =>
+      tx.query("SELECT id, is_resolution_proof FROM feed_articles WHERE id = 'art-proof-seed-1'")
+    )
+    const remainingWorkRows = try store.transaction((tx: Tx) =>
+      tx.query("SELECT market_id FROM feed_prediction_resolution_work WHERE market_id = 'seed-market-1'")
+    )
     const aliceAfterResolve = try getAccountEconomy("user-alice")
     const bobAfterResolve = try getAccountEconomy("user-bob")
     const resolvedView = try getPredictionMarket("seed-market-1")
+    const aliceClosed = try listUserClosedPositions("user-alice")
+    const bobClosed = try listUserClosedPositions("user-bob")
     const aliceLedger = try getPointLedger("user-alice")
     const resolutionLedger = aliceLedger.find((entry) => entry.kind === "prediction_resolution")
 
     const replayed = try resolvePredictionMarket({ marketId: "seed-market-1" })
     const aliceAfterReplay = try getAccountEconomy("user-alice")
-    const bobAfterReplay = try getAccountEconomy("user-bob")
 
     try check(() => assert.deepStrictEqual(
       {
@@ -151,27 +209,24 @@ it.effect('Prediction market lifecycle: omits secretOutcome while open, CPMM buy
           openView.resolutionProof,
           openView.resolutionArticleId,
           openView.resolvedAt,
-          Object.prototype.hasOwnProperty.call(openView, "secretOutcome"),
-          Object.prototype.hasOwnProperty.call(openView, "secret_outcome")
+          Object.prototype.hasOwnProperty.call(openView, "secretOutcome")
         ],
-        aliceBuy: [
-          aliceBuy.action,
-          aliceBuy.side,
-          aliceBuy.feeCents,
-          aliceBuy.netCents,
-          aliceBuy.balanceAfterCents,
-          aliceBuy.yesPriceBps > openView.yesPriceBps,
-          aliceBuy.market.yesShares * aliceBuy.market.noShares >= openView.yesShares * openView.noShares
+        previewMatchesBuy: [
+          buyPreview.sharesOut === aliceBuy.shares,
+          buyPreview.feeCents === aliceBuy.feeCents,
+          buyPreview.newYesPriceBps === aliceBuy.yesPriceBps
         ],
-        bobBuy: [bobBuy.balanceAfterCents, bobBuy.shares > 0],
-        aliceSell: [
-          aliceSell.action,
-          aliceSell.shares,
-          aliceSell.feeCents,
-          aliceSell.netCents,
-          aliceSell.balanceAfterCents,
-          positionsBeforeResolve.predictionPositions.map((pos) => pos.shares)
+        tooSmallSellCode,
+        previewMatchesSell: [
+          sellPreview.grossCents === aliceSell.notionalCents,
+          sellPreview.feeCents === aliceSell.feeCents,
+          sellPreview.netCreditCents === aliceSell.netCents,
+          sellPreview.newYesPriceBps === aliceSell.yesPriceBps
         ],
+        aliceSellRealizedRecorded: aliceSell.realizedPnlCents !== null,
+        marketVolumeMatchesTrades: marketAfterTrades.volumeCents === aliceBuy.notionalCents + bobBuy.notionalCents + aliceSell.notionalCents,
+        historyAndTradesCounts: [history.length - historyBefore.length, trades.length],
+        openPositionsBeforeResolve: positionsBeforeResolve.predictionPositions.map((p) => p.shares),
         expiredBuyCode,
         resolved: [
           resolved.status,
@@ -179,90 +234,196 @@ it.effect('Prediction market lifecycle: omits secretOutcome while open, CPMM buy
           resolved.positionsSettled,
           resolved.totalPayoutCents,
           resolved.alreadyResolved,
-          remainingShares % 100,
-          resolved.totalPayoutCents === Math.trunc(remainingShares / 100) * 100
+          remainingShares % 100
+        ],
+        atomicProofAndWorkCleanup: [
+          proofArticleRows.length,
+          proofArticleRows[0]?.is_resolution_proof,
+          remainingWorkRows.length,
+          resolvedView.resolutionArticleId
         ],
         balancesAfterResolve: [
           aliceAfterResolve.balanceCents,
           bobAfterResolve.balanceCents,
           resolutionLedger?.deltaCents
         ],
-        resolvedView: [
-          resolvedView.status,
-          resolvedView.resolvedOutcome,
-          resolvedView.resolutionProof
+        closedOutcomes: [
+          aliceClosed.predictionPositions[0]?.outcome,
+          bobClosed.predictionPositions[0]?.outcome
         ],
-        replayed: [
-          replayed.status,
-          replayed.outcome,
-          replayed.positionsSettled,
-          replayed.totalPayoutCents,
-          replayed.alreadyResolved,
-          aliceAfterReplay.balanceCents,
-          bobAfterReplay.balanceCents
-        ]
+        replayed: [replayed.alreadyResolved, replayed.totalPayoutCents, aliceAfterReplay.balanceCents]
       },
       {
-        openSecrecy: ["open", null, null, null, null, false, false],
-        aliceBuy: ["buy", "yes", 2, 1_998, 8_000, true, true],
-        bobBuy: [9_000, true],
-        aliceSell: [
-          "sell",
-          sharesToSell,
-          Math.floor((aliceSell.notionalCents * 10 + 9_999) / 10_000),
-          aliceSell.notionalCents - aliceSell.feeCents,
-          8_000 + aliceSell.netCents,
-          [remainingShares]
-        ],
+        openSecrecy: ["open", null, null, null, null, false],
+        previewMatchesBuy: [true, true, true],
+        tooSmallSellCode: "INVALID_SHARES",
+        previewMatchesSell: [true, true, true, true],
+        aliceSellRealizedRecorded: true,
+        marketVolumeMatchesTrades: true,
+        historyAndTradesCounts: [3, 3],
+        openPositionsBeforeResolve: [remainingShares],
         expiredBuyCode: "MARKET_CLOSED",
-        resolved: ["resolved", "yes", 2, remainingShares, false, 0, true],
+        resolved: ["resolved", "yes", 2, remainingShares, false, 0],
+        atomicProofAndWorkCleanup: [1, true, 0, "art-proof-seed-1"],
         balancesAfterResolve: [
           aliceSell.balanceAfterCents + remainingShares,
           9_000,
           remainingShares
         ],
-        resolvedView: ["resolved", "yes", "OpenAGI published frontier compute pricing."],
-        replayed: [
-          "resolved",
-          "yes",
-          0,
-          0,
-          true,
-          aliceSell.balanceAfterCents + remainingShares,
-          9_000
-        ]
+        closedOutcomes: ["won", "lost"],
+        replayed: [true, 0, aliceSell.balanceAfterCents + remainingShares]
       }
     ))
   })
-})
+)
 
-it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage cap enforced, 8h UTC funding accrues once per period, and perp close realizes P&L (spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation")', () => effect {
-  try TestClock.setTime(Date.UTC(2026, 10, 19, 1, 0, 0))
-  try runWithSeededDb(effect {
+it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp open/close round-trip (spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Zero-time open and close round-trips on an unchanged index price strictly decrease trader cash")', () =>
+  runWithSeededMarketDay(effect (now) => {
     const store = try Store
-    try createVerifiedAccount("user-alice", "alice", 10_000)
-    const initialPerp = try getPerpMarket("XTRPC")
+    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
+
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_organizations (id, name, ticker, org_type, description, post_style, can_be_involved, initial_price_cents, created_at)
+         VALUES ('org-hundred', 'Hundred Corp', 'HUND', 'company', 'Synthetic $100 org', 'neutral', true, 10000, $1)
+         ON CONFLICT (id) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_spot_pools (ticker, organization_id, base_reserve, quote_reserve_cents, index_price_cents, updated_at)
+         VALUES ('HUND', 'org-hundred', 50000, 5000000, 10000, $1)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage, funding_rate_bps, last_funding_period, updated_at)
+         VALUES ('HUND', 10000, 10000, 0, 0, 20, 0, 0, $1)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [now]
+      )
+    })
 
     // spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
     const nonNpcCode = try marketErrorCode(executeNpcSpotTrade({
       actorId: "user-alice",
-      ticker: "XTRPC",
+      ticker: "HUND",
       side: "buy",
-      quoteCents: 1_000
+      quoteCents: 2_500
     }))
-
-    const spotBuy1 = try executeNpcSpotTrade({
+    const sellWithoutInventoryCode = try marketErrorCode(executeNpcSpotTrade({
       actorId: "ailon-musk",
-      ticker: "XTRPC",
+      ticker: "HUND",
+      side: "sell",
+      quoteCents: 2_500
+    }))
+    const smallSpotBuy = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "HUND",
       side: "buy",
-      quoteCents: 3_000_000
+      quoteCents: 2_500
     })
-    const poolAfterSpot = try store.transaction((tx: Tx) =>
-      tx.query("SELECT base_reserve, quote_reserve_cents, index_price_cents FROM feed_spot_pools WHERE ticker = $1", ["XTRPC"])
+    const holdingAfterBuy = try store.transaction((tx: Tx) =>
+      tx.query("SELECT base_units FROM feed_npc_spot_holdings WHERE actor_id = 'ailon-musk' AND ticker = 'HUND'")
     )
-    const perpAfterSpot = try getPerpMarket("XTRPC")
+    const smallSpotSell = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "HUND",
+      side: "sell",
+      quoteCents: 1_000
+    })
 
-    // spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium"
+    // spec/markets/spotPerp.md, "Zero-time open and close round-trips on an unchanged index price strictly decrease trader cash"
+    const longPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "HUND",
+      side: "long",
+      collateralCents: 500,
+      leverage: 20
+    })
+    const longOpen = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "long",
+      collateralCents: 500,
+      leverage: 20
+    })
+    const longClose = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: longOpen.positionId
+    })
+
+    const shortOpen = try openPerpPosition({
+      ownerId: "user-bob",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "short",
+      collateralCents: 500,
+      leverage: 20
+    })
+    const shortClose = try closePerpPosition({
+      ownerId: "user-bob",
+      positionId: shortOpen.positionId
+    })
+
+    const aliceEconAfter = try getAccountEconomy("user-alice")
+    const bobEconAfter = try getAccountEconomy("user-bob")
+    const perpHistory = try getMarketPriceHistory("perp", "HUND", 20)
+    const perpMarkets = try listPerpMarkets()
+    const hundMarket = perpMarkets.find((m) => m.ticker === "HUND")
+
+    try check(() => assert.deepStrictEqual(
+      {
+        nonNpcCode,
+        sellWithoutInventoryCode,
+        smallSpotBuy: [smallSpotBuy.baseDelta, smallSpotBuy.indexPriceCents, toInt(holdingAfterBuy[0]?.base_units)],
+        smallSpotSellReducedIndex: smallSpotSell.indexPriceCents < smallSpotBuy.indexPriceCents,
+        previewMatchesLongOpen: [
+          longPreview.action,
+          longPreview.executionPriceCents === longOpen.executionPriceCents,
+          longPreview.feeCents === longOpen.feeCents,
+          longPreview.estimatedLiquidationPriceCents === longOpen.position.liquidationPriceCents,
+          longPreview.priceImpactBps > 0
+        ],
+        longFillsPostImpactAndLosesOnRoundTrip: [
+          longOpen.executionPriceCents > smallSpotSell.indexPriceCents,
+          longClose.exitPriceCents === smallSpotSell.indexPriceCents,
+          longClose.balanceAfterCents < INITIAL_GRANT_CENTS,
+          longClose.realizedPnlCents === aliceEconAfter.balanceCents - INITIAL_GRANT_CENTS
+        ],
+        shortFillsPostImpactAndLosesOnRoundTrip: [
+          shortOpen.executionPriceCents < smallSpotSell.indexPriceCents,
+          shortClose.exitPriceCents === smallSpotSell.indexPriceCents,
+          shortClose.balanceAfterCents < INITIAL_GRANT_CENTS,
+          shortClose.realizedPnlCents === bobEconAfter.balanceCents - INITIAL_GRANT_CENTS
+        ],
+        historyRecorded: perpHistory.length >= 6,
+        hundVolumeRecorded: (hundMarket?.volumeCents ?? 0) === 40_000
+      },
+      {
+        nonNpcCode: "FORBIDDEN_NON_NPC",
+        sellWithoutInventoryCode: "INSUFFICIENT_SPOT_INVENTORY",
+        smallSpotBuy: [24, 10_009, 24],
+        smallSpotSellReducedIndex: true,
+        previewMatchesLongOpen: ["open", true, true, true, true],
+        longFillsPostImpactAndLosesOnRoundTrip: [true, true, true, true],
+        shortFillsPostImpactAndLosesOnRoundTrip: [true, true, true, true],
+        historyRecorded: true,
+        hundVolumeRecorded: true
+      }
+    ))
+  })
+)
+
+it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liquidation with SSE + notifications (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation")', () => effect {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 1, 0, 0))
+  try runWithSeededDb(effect {
+    const store = try Store
+    try createVerifiedAccount("user-alice", "alice", 50_000)
+    try createVerifiedAccount("user-bob", "bob", 50_000)
+
+    const initialXtrpc = try getPerpMarket("XTRPC")
     const overLeverageCode = try marketErrorCode(openPerpPosition({
       ownerId: "user-alice",
       ownerKind: "user",
@@ -271,16 +432,60 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
       collateralCents: 1_000,
       leverage: 21
     }))
+    const slippageBlockedCode = try marketErrorCode(openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 10,
+      maxSlippageBps: 100
+    }))
 
     const opened = try openPerpPosition({
       ownerId: "user-alice",
       ownerKind: "user",
       ticker: "XTRPC",
       side: "long",
-      collateralCents: 2_000,
-      leverage: 10
+      collateralCents: 1_000,
+      leverage: 5
     })
-    const perpAfterOpen = try getPerpMarket("XTRPC")
+    const addPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 5
+    })
+    const added = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 5
+    })
+    const partialClose = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: added.positionId,
+      closePct: 40
+    })
+    const reduced = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 400,
+      leverage: 5
+    })
+    const flipped = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5
+    })
 
     // spec/markets/spotPerp.md, "UTC time advances across 8-hour funding boundaries, and funding skips pre-cutover or duplicate periods"
     try TestClock.adjust(Duration.seconds(2 * 3_600))
@@ -289,254 +494,92 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
     const nextPeriodFunding = try accruePerpFunding()
     try TestClock.adjust(Duration.seconds(3_600))
     const duplicatePeriodFunding = try accruePerpFunding()
-    const positionsDuringHold = try listPerpPositions("user-alice")
-    const fundingRows = try store.transaction((tx: Tx) =>
-      tx.query("SELECT period_index, funding_delta_cents FROM feed_perp_funding_periods WHERE position_id = $1", [opened.positionId])
-    )
+    const aliceHeldAfterFunding = try listPerpPositions("user-alice")
 
-    const spotBuy2 = try executeNpcSpotTrade({
-      actorId: "ailon-musk",
+    const bobLong = try openPerpPosition({
+      ownerId: "user-bob",
+      ownerKind: "user",
       ticker: "XTRPC",
-      side: "buy",
-      quoteCents: 5_000_000
+      side: "long",
+      collateralCents: 500,
+      leverage: 20
     })
-
-    // spec/markets/spotPerp.md, "Closing a perp settles equity and canonical fees at mark price without touching spot"
-    const closed = try closePerpPosition({
-      ownerId: "user-alice",
-      positionId: opened.positionId
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "UPDATE feed_perp_markets SET index_price_cents = 500, mark_price_cents = 500 WHERE ticker = 'XTRPC'"
+      )
     })
-    const positionsAfterClose = try listPerpPositions("user-alice")
-    const perpAfterClose = try getPerpMarket("XTRPC")
+    const publishedEvents: Array<MarketPerpRealtimeEvent> = []
+    const busLayer = Layer.succeed(MarketRealtimeBus, {
+      publish: (event: MarketPerpRealtimeEvent) => Effect.sync(() => {
+        publishedEvents.push(event)
+        return true
+      })
+    })
+    const liqSummary = try effect {
+      provide busLayer {
+        return try liquidateEligiblePositions()
+      }
+    }
+    const bobNotifs = try store.transaction((tx: Tx) =>
+      tx.query("SELECT kind, title FROM feed_notifications WHERE account_id = 'user-bob' AND kind = 'perp_liquidated'")
+    )
+    const bobClosed = try listUserClosedPositions("user-bob")
 
     try check(() => assert.deepStrictEqual(
       {
-        initialPerp: [initialPerp.indexPriceCents, initialPerp.markPriceCents, initialPerp.baseReserve, initialPerp.quoteReserveCents],
-        nonNpcCode,
-        spotBuy1: [
-          spotBuy1.baseReserve,
-          spotBuy1.quoteReserveCents,
-          spotBuy1.indexPriceCents,
-          spotBuy1.markPriceCents,
-          toInt(poolAfterSpot[0]?.base_reserve),
-          toInt(poolAfterSpot[0]?.quote_reserve_cents),
-          toInt(poolAfterSpot[0]?.index_price_cents),
-          perpAfterSpot.indexPriceCents,
-          perpAfterSpot.markPriceCents
-        ],
+        initialPrice: initialXtrpc.indexPriceCents,
         overLeverageCode,
-        opened: [
-          opened.leverage,
-          opened.sizeCents,
-          opened.feeCents,
-          opened.executionPriceCents,
-          opened.balanceAfterCents,
-          perpAfterOpen.indexPriceCents,
-          perpAfterOpen.markPriceCents,
-          perpAfterOpen.longOiCents
+        slippageBlockedCode,
+        addFlow: [
+          opened.action,
+          addPreview.action,
+          added.action,
+          added.position.sizeCents,
+          added.position.marginCents
+        ],
+        partialAndReduce: [
+          partialClose.isFullClose,
+          partialClose.sizeCents,
+          partialClose.remainingSizeCents,
+          reduced.action,
+          reduced.position.sizeCents
+        ],
+        flipFlow: [
+          flipped.action,
+          flipped.position.side,
+          flipped.position.sizeCents,
+          flipped.closedPositionId === opened.positionId
         ],
         funding: [
           samePeriodFunding.accruedCount,
-          samePeriodFunding.skippedCutover,
-          nextPeriodFunding.period - samePeriodFunding.period,
           nextPeriodFunding.accruedCount,
-          duplicatePeriodFunding.period === nextPeriodFunding.period,
           duplicatePeriodFunding.accruedCount,
-          positionsDuringHold.map((pos) => [pos.accruedFundingCents, pos.lastFundingPeriod === nextPeriodFunding.period]),
-          fundingRows.map((row) => [toInt(row.period_index) === nextPeriodFunding.period, toInt(row.funding_delta_cents)])
+          aliceHeldAfterFunding.length
         ],
-        spotBuy2: [spotBuy2.baseReserve, spotBuy2.quoteReserveCents, spotBuy2.indexPriceCents, spotBuy2.markPriceCents],
-        closed: [
-          closed.exitPriceCents,
-          closed.feeCents,
-          closed.netCreditCents,
-          closed.realizedPnlCents,
-          closed.balanceAfterCents,
-          positionsAfterClose.length,
-          perpAfterClose.longOiCents,
-          perpAfterClose.shortOiCents,
-          perpAfterClose.indexPriceCents,
-          perpAfterClose.markPriceCents
+        liquidation: [
+          liqSummary.liquidatedCount,
+          liqSummary.liquidatedPositionIds.includes(bobLong.positionId),
+          publishedEvents.length,
+          publishedEvents[0]?.action,
+          publishedEvents[0]?.positionId === bobLong.positionId,
+          bobNotifs.length,
+          bobClosed.perpPositions[0]?.status
         ]
       },
       {
-        initialPerp: [1_200, 1_200, 10_000, 12_000_000],
-        nonNpcCode: "FORBIDDEN_NON_NPC",
-        spotBuy1: [8_000, 15_000_000, 1_875, 1_875, 8_000, 15_000_000, 1_875, 1_875, 1_875],
+        initialPrice: 1_200,
         overLeverageCode: "INVALID_LEVERAGE",
-        opened: [10, 20_000, 20, 1_875, 7_980, 1_875, 1_968, 20_000],
-        funding: [0, false, 1, 1, true, 0, [[100, true]], [[true, 100]]],
-        spotBuy2: [6_000, 20_000_000, 3_333, 3_499],
-        closed: [3_499, 20, 19_202, 17_202, 27_182, 0, 0, 0, 3_333, 3_333]
+        slippageBlockedCode: "SLIPPAGE_EXCEEDED",
+        addFlow: ["open", "add", "add", 10_000, 2_000],
+        partialAndReduce: [false, 4_000, 6_000, "reduce", 4_000],
+        flipFlow: ["flip", "short", 6_000, true],
+        funding: [0, 1, 0, 1],
+        liquidation: [1, true, 1, "liquidate", true, 1, "liquidated"]
       }
     ))
   })
 })
-
-it.effect('Economy and Stripe Checkout: Washington geo-block, idempotent HMAC webhook crediting, and netProfitCents purchase invariance (spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere")', () => effect {
-  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
-  try runWithSeededDb(effect {
-    try createVerifiedAccount("user-alice", "alice", 10_000)
-    try createVerifiedAccount("user-bob", "bob", 10_000)
-    try buyPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "seed-market-1",
-      side: "yes",
-      amountCents: 2_000
-    })
-    try resolvePredictionMarket({ marketId: "seed-market-1" })
-    // spec/markets/economy.md, "Pack pricing, equity, net profit, and leaderboard rank helpers"
-    try createVerifiedAccount("user-carol", "carol", 15_000)
-    const db = try Store
-    try db.transaction(effect (tx: Tx) => {
-      try tx.query(
-        "UPDATE feed_accounts SET handle = 'deleted_user-carol', display_name = 'Deleted User', phone_hash = NULL, phone_last2 = NULL, phone_verified_at = NULL, starting_grant_cents = 10000 WHERE account_id = 'user-carol'"
-      )
-    })
-
-    const bobCheckoutInput = (billingState: string, ipRegion: string) => ({
-      accountId: "user-bob",
-      packId: "pack_20" as const,
-      billingState,
-      ipRegion,
-      requestCountry: "US",
-      successUrl: "https://feed.fun/markets?checkout=success",
-      cancelUrl: "https://feed.fun/markets?checkout=cancel",
-      stripeSecretKey: "sk_test_fake"
-    })
-    // spec/markets/economy.md, "Stripe Checkout packs are web-only and strictly blocked for Washington billing addresses or IPs"
-    const waBillingCode = try marketErrorCode(createStripeCheckoutSession(bobCheckoutInput("WA", "CA")))
-    const waIpCode = try marketErrorCode(createStripeCheckoutSession(bobCheckoutInput("CA", "US-WA")))
-
-    const bobBefore = try getAccountEconomy("user-bob")
-    const boardBefore = try getLeaderboard()
-
-    const stripeRequests: Array<{ readonly method: string; readonly url: string; readonly auth: string | undefined }> = []
-    const stripeClient = HttpClient.make(effect (request, url) => {
-      stripeRequests.push({ method: request.method, url: url.href, auth: request.headers.authorization })
-      return HttpClientResponse.fromWeb(
-        request,
-        jsonResponse(
-          JSON.stringify({ id: "cs_test_ca_pack20", url: "https://checkout.stripe.com/c/pay/cs_test_ca_pack20" }),
-          200
-        )
-      )
-    })
-
-    const checkout = try Effect.provideService(
-      createStripeCheckoutSession(bobCheckoutInput("CA", "US-CA")),
-      HttpClient.HttpClient,
-      stripeClient
-    )
-
-    const now = try Clock.currentTimeMillis
-    const webhookSecret = "whsec_test_feed_markets"
-    const rawBody = JSON.stringify({
-      id: "evt_test_ca_pack20",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: checkout.sessionId,
-          payment_status: "paid",
-          amount_total: checkout.pack.amountCentsUsd,
-          client_reference_id: "user-bob",
-          metadata: {
-            accountId: "user-bob",
-            packId: checkout.pack.id,
-            pointsCents: String(checkout.pack.pointsCents)
-          }
-        }
-      }
-    })
-    const invalidSigCode = try marketErrorCode(handleStripeWebhook({
-      rawBody,
-      signature: `t=${Math.floor(now / 1000)},v1=${"0".repeat(64)}`,
-      webhookSecret
-    }))
-    const signature = signStripeWebhook(rawBody, webhookSecret, Math.floor(now / 1000))
-    const firstWebhook = try handleStripeWebhook({ rawBody, signature, webhookSecret })
-    const replayWebhook = try handleStripeWebhook({ rawBody, signature, webhookSecret })
-
-    // spec/markets/economy.md, "Buying points never changes net profit or leaderboard rank, and broke players receive no free refills"
-    const bobAfter = try getAccountEconomy("user-bob")
-    const boardAfter = try getLeaderboard()
-    const bobLedger = try getPointLedger("user-bob")
-    const purchaseEntries = bobLedger.filter((entry) => entry.kind === "stripe_purchase")
-
-    try check(() => assert.deepStrictEqual(
-      {
-        waBlocks: [waBillingCode, waIpCode],
-        checkout: [
-          checkout.status,
-          checkout.sessionId,
-          checkout.checkoutUrl,
-          checkout.pack.pointsCents,
-          stripeRequests
-        ],
-        invalidSigCode,
-        firstWebhook: [
-          firstWebhook.received,
-          firstWebhook.processed,
-          firstWebhook.alreadyCompleted,
-          firstWebhook.accountId,
-          firstWebhook.sessionId,
-          firstWebhook.creditedCents,
-          firstWebhook.balanceAfterCents
-        ],
-        replayWebhook: [
-          replayWebhook.received,
-          replayWebhook.processed,
-          replayWebhook.alreadyCompleted,
-          replayWebhook.creditedCents,
-          replayWebhook.balanceAfterCents
-        ],
-        bobEconomy: [
-          bobBefore.balanceCents,
-          bobAfter.balanceCents,
-          bobBefore.purchasedCents,
-          bobAfter.purchasedCents,
-          bobBefore.netProfitCents,
-          bobAfter.netProfitCents,
-          purchaseEntries.length,
-          purchaseEntries[0]?.deltaCents
-        ],
-        leaderboardBefore: boardBefore.map((entry) => [entry.rank, entry.accountId, entry.netProfitCents]),
-        leaderboardAfter: boardAfter.map((entry) => [entry.rank, entry.accountId, entry.netProfitCents, entry.balanceCents, entry.purchasedCents])
-      },
-      {
-        waBlocks: ["REGION_BLOCKED", "REGION_BLOCKED"],
-        checkout: [
-          "pending",
-          "cs_test_ca_pack20",
-          "https://checkout.stripe.com/c/pay/cs_test_ca_pack20",
-          200_000,
-          [{ method: "POST", url: "https://api.stripe.com/v1/checkout/sessions", auth: "Bearer sk_test_fake" }]
-        ],
-        invalidSigCode: "INVALID_SIGNATURE",
-        firstWebhook: [true, true, false, "user-bob", "cs_test_ca_pack20", 200_000, 210_000],
-        replayWebhook: [true, true, true, 0, 210_000],
-        bobEconomy: [10_000, 210_000, 0, 200_000, 0, 0, 1, 200_000],
-        leaderboardBefore: [
-          [1, "user-alice", 1_639],
-          [2, "user-bob", 0]
-        ],
-        leaderboardAfter: [
-          [1, "user-alice", 1_639, 11_639, 0],
-          [2, "user-bob", 0, 210_000, 200_000]
-        ]
-      }
-    ))
-  })
-})
-
-effect function runWithSeededMarketDay<A, E>(body: (now: number) => A!E!Store) {
-  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
-  return try runWithSeededDb(effect {
-    const now = try Clock.currentTimeMillis
-    return try body(now)
-  })
-}
 
 it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement, and resolved notifications (spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
   runWithSeededMarketDay(effect (now) => {
@@ -568,11 +611,9 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
       )
     })
 
-    // spec/markets/prediction.md, "Resolved, cancelled, held, and expired markets allow no trades, and duplicate resolution pays nothing extra"
     const openMarkets = try listPredictionMarkets("open")
     const allMarkets = try listPredictionMarkets()
 
-    // spec/markets/prediction.md, "Buying YES or NO shares requires an open non-expired market, sufficient balance, and bounded odds impact"
     const extremeWorsenBuyCode = try marketErrorCode(buyPredictionShares({
       actorId: "user-alice",
       actorKind: "user",
@@ -588,7 +629,6 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
       amountCents: 100
     })
 
-    // spec/markets/prediction.md, "Selling shares floors gross proceeds to whole cents before charging the canonical fee"
     const extremeWorsenSellCode = try marketErrorCode(sellPredictionShares({
       actorId: "user-alice",
       actorKind: "user",
@@ -682,7 +722,6 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
       amountCents: 1_500
     })
 
-    // spec/markets/prediction.md, "Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently"
     const resolved = try resolvePredictionMarket({ marketId: "seed-market-1" })
     const idemReplayAfterClose = try buyPredictionShares(idempotentBuy)
     const zeroSharePos = try store.transaction((tx: Tx) =>
@@ -752,24 +791,30 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
   })
 )
 
-it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unified Stripe refund and dispute reversals (spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagination, server-side metrics, early-sell win rate, and NPC characters board (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
   runWithSeededMarketDay(effect (now) => {
     const store = try Store
-    try createVerifiedAccount("user-alice", "alice", 10_000)
-    try createVerifiedAccount("user-bob", "bob", 10_000)
+    for (const handle of ["alice", "bob", "carol", "dave"]) {
+      try createVerifiedAccount(`user-${handle}`, handle, INITIAL_GRANT_CENTS)
+    }
 
     try store.transaction(effect (tx: Tx) => {
       try tx.query("INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ('org-deleted', 'Deleted', 0, $1)", [now])
+      try tx.query("INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ('org-reviewer', 'Reviewer', 0, $1)", [now])
+      try tx.query("INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ('org-unverified', 'Unverified', 0, $1)", [now])
       try tx.query(
-        `INSERT INTO accounts (key, state, revision, organization_id, status, email, phone, name, created_at, updated_at)
-         VALUES ('user-deleted', '{}'::jsonb, 1, 'org-deleted', 'erased', NULL, NULL, 'Deleted', $1, $1)`,
+        `INSERT INTO accounts (key, state, revision, organization_id, status, email, phone, name, created_at, updated_at) VALUES
+           ('user-deleted', '{}'::jsonb, 1, 'org-deleted', 'erased', NULL, NULL, 'Deleted', $1, $1),
+           ('user-reviewer', '{}'::jsonb, 1, 'org-reviewer', 'active', NULL, NULL, 'Reviewer', $1, $1),
+           ('user-unverified', '{}'::jsonb, 1, 'org-unverified', 'active', NULL, NULL, 'Unverified', $1, $1)`,
         [now]
       )
       try tx.query(
         `INSERT INTO feed_accounts (${FEED_ACCOUNT_COLUMNS}) VALUES
-           ('user-deleted', 'deleted_user', 'Deleted', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, 0, false, false, NULL, $1, $1),
-           ('user-reviewer', 'reviewer1', 'Reviewer', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, 0, false, true, 'hash', $1, $1),
-           ('user-unverified', 'unverified1', 'Unverified', '', NULL, NULL, NULL, NULL, $1, 'game', 50000, 10000, 0, 0, false, false, NULL, $1, $1)`,
+           ('user-deleted', 'deleted_user', 'Deleted', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, false, false, NULL, $1, $1),
+           ('user-reviewer', 'reviewer1', 'Reviewer', '', NULL, NULL, NULL, $1, $1, 'game', 50000, 10000, 0, false, true, 'hash', $1, $1),
+           ('user-unverified', 'unverified1', 'Unverified', '', NULL, NULL, NULL, NULL, $1, 'game', 50000, 10000, 0, false, false, NULL, $1, $1),
+           ('user-ghost', 'ghost1', 'Ghost', '', NULL, NULL, NULL, $1, $1, 'game', 90000, 10000, 0, false, false, NULL, $1, $1)`,
         [now]
       )
     })
@@ -788,149 +833,94 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
       side: "yes",
       amountCents: 4_000
     })
-    const expectedAliceMtm = Math.floor((aliceOpenBuy.shares * bobPushBuy.yesPriceBps) / 10_000)
+
+    const expectedAliceMtm = markToMarketPredictionCents(
+      "yes",
+      aliceOpenBuy.shares,
+      bobPushBuy.market.yesShares,
+      bobPushBuy.market.noShares
+    )
     const aliceEconMtm = try getAccountEconomy("user-alice")
-    const boardMtm = try getLeaderboard()
-    const aliceBoardMtm = boardMtm.find((e) => e.accountId === "user-alice")
+    const linearMidpointMtm = Math.floor((aliceOpenBuy.shares * bobPushBuy.yesPriceBps) / 10_000)
+
+    const aliceEarlySell = try sellPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      shares: aliceOpenBuy.shares
+    })
 
     // spec/markets/prediction.md, "Cancelled markets refund every open position at cost basis without publishing an outcome"
     try cancelPredictionMarket("seed-market-1")
-    const boardAfterCancel = try getLeaderboard()
-    const aliceAfterCancel = boardAfterCancel.find((e) => e.accountId === "user-alice")
 
-    const webhookSecret = "whsec_test_reversals"
-    const sendSigned = (payload: Readonly<Record<string, unknown>>) => effect {
-      const rawBody = JSON.stringify(payload)
-      const signature = signStripeWebhook(rawBody, webhookSecret, Math.floor(now / 1000))
-      return try handleStripeWebhook({ rawBody, signature, webhookSecret })
-    }
+    const page1 = try getLeaderboard({ scope: "players", metric: "net_profit", page: 1, pageSize: 2, viewerAccountId: "user-dave" })
+    const page2 = try getLeaderboard({ scope: "players", metric: "net_profit", page: 2, pageSize: 2 })
+    const byVolume = try getLeaderboard({ scope: "players", metric: "volume", page: 1, pageSize: 10 })
+    const byWinRate = try getLeaderboard({ scope: "players", metric: "win_rate", page: 1, pageSize: 10 })
+    const daveRank = try getAccountLeaderboardRank("user-dave", "net_profit", 2)
 
-    const checkoutRes = try sendSigned({
-      id: "evt_checkout_rev_1",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: "cs_rev_1",
-          payment_status: "paid",
-          payment_intent: "pi_rev_1",
-          amount_total: 2_000,
-          client_reference_id: "user-bob",
-          metadata: { accountId: "user-bob", packId: "pack_20" }
-        }
-      }
+    try buyPredictionShares({
+      actorId: "ailon-musk",
+      actorKind: "npc",
+      marketId: "seed-market-2",
+      side: "yes",
+      amountCents: 5_000
     })
-    const earlyWonCode = try marketErrorCode(sendSigned({
-      id: "evt_dispute_won_early",
-      type: "charge.dispute.closed",
-      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", status: "won", amount: 1_500 } }
-    }))
-    const refund1 = try sendSigned({
-      id: "evt_refund_1",
-      type: "charge.refunded",
-      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 600 } }
-    })
-    const refund1Dup = try sendSigned({
-      id: "evt_refund_1",
-      type: "charge.refunded",
-      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 600 } }
-    })
-    const refundStale = try sendSigned({
-      id: "evt_refund_stale",
-      type: "charge.refunded",
-      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 400 } }
-    })
-    const refund2 = try sendSigned({
-      id: "evt_refund_2",
-      type: "charge.refunded",
-      data: { object: { id: "ch_1", payment_intent: "pi_rev_1", amount_refunded: 1_000 } }
-    })
-    const disputeCreated = try sendSigned({
-      id: "evt_dispute_1",
-      type: "charge.dispute.created",
-      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "needs_response" } }
-    })
-    const disputeWon = try sendSigned({
-      id: "evt_dispute_won_1",
-      type: "charge.dispute.closed",
-      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "won" } }
-    })
-    const disputeWonDup = try sendSigned({
-      id: "evt_dispute_won_dup",
-      type: "charge.dispute.closed",
-      data: { object: { id: "dp_1", payment_intent: "pi_rev_1", amount: 1_500, status: "won" } }
-    })
-    const bobAfterReversals = try getAccountEconomy("user-bob")
-
-    try sendSigned({
-      id: "evt_checkout_lowbal",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: "cs_lowbal_1",
-          payment_status: "paid",
-          payment_intent: "pi_lowbal_1",
-          amount_total: 500,
-          client_reference_id: "user-alice",
-          metadata: { accountId: "user-alice", packId: "pack_5" }
-        }
-      }
-    })
-    try store.transaction((tx: Tx) =>
-      tx.query("UPDATE feed_accounts SET balance_cents = 10000 WHERE account_id = 'user-alice'")
-    )
-    const lowBalRefund1 = try sendSigned({
-      id: "evt_lowbal_ref_1",
-      type: "charge.refunded",
-      data: { object: { id: "ch_low", payment_intent: "pi_lowbal_1", amount_refunded: 300 } }
-    })
-    try store.transaction((tx: Tx) =>
-      tx.query("UPDATE feed_accounts SET balance_cents = 50000 WHERE account_id = 'user-alice'")
-    )
-    const lowBalRefund2 = try sendSigned({
-      id: "evt_lowbal_ref_2",
-      type: "charge.refunded",
-      data: { object: { id: "ch_low", payment_intent: "pi_lowbal_1", amount_refunded: 400 } }
-    })
+    try resolvePredictionMarket({ marketId: "seed-market-2" })
+    const npcBoard = try getLeaderboard({ scope: "characters", metric: "net_profit", page: 1, pageSize: 10 })
 
     try check(() => assert.deepStrictEqual(
       {
-        leaderboardIds: boardMtm.map((e) => e.accountId).sort(),
-        mtmMatchesEconomyAndBoard: [
+        fixedStartingGrant: [aliceEconMtm.startingGrantCents, Object.prototype.hasOwnProperty.call(aliceEconMtm, "purchasedCents")],
+        slippageAwareMtm: [
           aliceEconMtm.positionValueCents === expectedAliceMtm,
-          aliceBoardMtm?.positionValueCents === expectedAliceMtm,
-          expectedAliceMtm !== 2_000
+          expectedAliceMtm <= linearMidpointMtm
         ],
-        cancelledNotCountedAsSettledOrLoss: [
-          aliceAfterCancel?.settledCount,
-          aliceAfterCancel?.wins
+        earlySellProfitable: (aliceEarlySell.realizedPnlCents ?? 0) > 0,
+        filteredEligiblePlayers: [
+          page1.totalCount,
+          page1.totalPages,
+          page1.entries.length,
+          page2.entries.length,
+          [...page1.entries, ...page2.entries].map((e) => e.accountId).every((id) =>
+            id !== "user-deleted" && id !== "user-reviewer" && id !== "user-unverified" && id !== "user-ghost"
+          )
         ],
-        checkoutCredited: checkoutRes.creditedCents,
-        earlyWonCode,
-        refund1: [refund1.creditedCents, refund1.balanceAfterCents],
-        refund1Dup: [refund1Dup.alreadyCompleted, refund1Dup.creditedCents],
-        refundStale: [refundStale.creditedCents, refundStale.balanceAfterCents],
-        refund2: [refund2.creditedCents, refund2.balanceAfterCents],
-        disputeCreatedCapped: [disputeCreated.creditedCents, disputeCreated.balanceAfterCents],
-        disputeWonRestoresExactDebit: [disputeWon.creditedCents, disputeWon.balanceAfterCents],
-        disputeWonDup: [disputeWonDup.alreadyCompleted, disputeWonDup.creditedCents],
-        bobFinalEconomy: [bobAfterReversals.balanceCents, bobAfterReversals.purchasedCents, bobAfterReversals.netProfitCents],
-        lowBalRefundTracksCumulativeSeparately: [lowBalRefund1.creditedCents, lowBalRefund2.creditedCents]
+        sharedTiedRankForZeroProfitPlayers: [
+          page1.entries[0]?.accountId,
+          page1.entries[0]?.rank,
+          page1.entries[1]?.rank,
+          page2.entries[0]?.rank,
+          page2.entries[1]?.rank,
+          page1.currentUser?.accountId,
+          page1.currentUser?.rank,
+          daveRank?.rank,
+          daveRank?.page
+        ],
+        serverSideMetricSorting: [
+          byVolume.entries[0]?.accountId,
+          byWinRate.entries[0]?.accountId,
+          byWinRate.entries[0]?.winRatePct,
+          byWinRate.entries[0]?.wins,
+          byWinRate.entries[0]?.settledCount
+        ],
+        charactersBoard: [
+          npcBoard.scope,
+          npcBoard.totalCount > 0,
+          npcBoard.entries[0]?.isNpc,
+          npcBoard.entries[0]?.accountId,
+          (npcBoard.entries[0]?.netProfitCents ?? 0) > 0
+        ]
       },
       {
-        leaderboardIds: ["user-alice", "user-bob"],
-        mtmMatchesEconomyAndBoard: [true, true, true],
-        cancelledNotCountedAsSettledOrLoss: [0, 0],
-        checkoutCredited: 200_000,
-        earlyWonCode: "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING",
-        refund1: [-60_000, 150_000],
-        refund1Dup: [true, 0],
-        refundStale: [0, 150_000],
-        refund2: [-40_000, 110_000],
-        disputeCreatedCapped: [-100_000, 10_000],
-        disputeWonRestoresExactDebit: [100_000, 110_000],
-        disputeWonDup: [true, 0],
-        bobFinalEconomy: [110_000, 100_000, 0],
-        lowBalRefundTracksCumulativeSeparately: [-10_000, -10_000]
+        fixedStartingGrant: [10_000, false],
+        slippageAwareMtm: [true, true],
+        earlySellProfitable: true,
+        filteredEligiblePlayers: [4, 2, 2, 2, true],
+        sharedTiedRankForZeroProfitPlayers: ["user-alice", 1, 2, 2, 2, "user-dave", 2, 2, 2],
+        serverSideMetricSorting: ["user-alice", "user-alice", 100, 1, 1],
+        charactersBoard: ["characters", true, true, "ailon-musk", true]
       }
     ))
   })

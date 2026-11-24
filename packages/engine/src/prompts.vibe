@@ -1,6 +1,8 @@
 // spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
 import { actors, correlations, manifest, organizations } from "@repo/pack-default"
-import { sanitizeText } from "./shared.vibe"
+import { realityGroundingContent } from "./data/reality-grounding.ts"
+import { worldFactsContent } from "./data/world-facts.ts"
+import { isRuntimeNpcActor, sanitizeText } from "./shared.vibe"
 
 export type PromptId =
   | "ambientPost"
@@ -74,9 +76,14 @@ export interface WorldContextInput {
 export type NpcDecisionAction =
   | { readonly kind: "SPOT_TRADE"; readonly ticker: string; readonly side: "buy" | "sell"; readonly quoteCents: number }
   | { readonly kind: "PERP_TRADE"; readonly ticker: string; readonly side: "long" | "short"; readonly collateralCents: number; readonly leverage: number }
+  | { readonly kind: "CLOSE_PERP"; readonly positionId: string; readonly closePct?: number }
   | { readonly kind: "PREDICTION_TRADE"; readonly marketId: string; readonly side: "yes" | "no"; readonly amountCents: number }
+  | { readonly kind: "SELL_PREDICTION"; readonly marketId: string; readonly side: "yes" | "no"; readonly shares: number }
   | { readonly kind: "CREATE_POST"; readonly content: string; readonly marketId?: string; readonly ticker?: string }
   | { readonly kind: "CREATE_REPLY"; readonly replyToPostId: string; readonly content: string }
+  | { readonly kind: "LIKE_POST"; readonly postId: string }
+  | { readonly kind: "REPOST_POST"; readonly postId: string }
+  | { readonly kind: "FOLLOW_USER"; readonly targetId: string }
   | { readonly kind: "SEND_GROUP_MESSAGE"; readonly chatId: string; readonly content: string }
   | { readonly kind: "INVITE_ALPHA" }
 
@@ -132,8 +139,8 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 180,
     temperature: 0.8,
     jsonMode: false,
-    system: "You write an atmospheric phase-aware market observation from an NPC in Feed. Reflect the tension of the narrative phase (opening rumors, mid debate, or climax crunch) WITHOUT stating a guaranteed YES or NO outcome or claiming private settlement knowledge. Keep under 260 characters.",
-    user: "Actor: {{actorName}} (@{{actorHandle}})\nVoice: {{actorVoice}}\nMarket Question: {{question}}\nCategory: {{category}}\nNarrative Phase: {{phase}}\nWorld Context:\n{{worldContext}}\nWrite one subtle clue post.",
+    system: "You write an atmospheric phase-aware market observation from an NPC in Feed. Reflect the tension of the narrative phase (opening rumors, mid debate, or climax crunch) and any subtle directional read WITHOUT stating a guaranteed YES or NO outcome or claiming private settlement knowledge. Keep under 260 characters.",
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nVoice: {{actorVoice}}\nMarket Question: {{question}}\nCategory: {{category}}\nNarrative Phase: {{phase}}\nSignal Guidance: {{signalGuidance}}\nWorld Context:\n{{worldContext}}\nWrite one subtle clue post.",
   },
   resolutionArticle: {
     id: "resolutionArticle",
@@ -147,11 +154,11 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
   npcTradingDecision: {
     id: "npcTradingDecision",
     description: "Bounded JSON turn plan over Feed actions and trades",
-    maxTokens: 520,
+    maxTokens: 560,
     temperature: 0.65,
     jsonMode: true,
-    system: "You are an autonomous NPC agent inside Feed deciding up to {{maxSteps}} concrete actions for this tick. Return strict JSON: {\"actions\": [...]}. Allowed action objects: SPOT_TRADE ({kind:\"SPOT_TRADE\",ticker,side:\"buy\"|\"sell\",quoteCents}), PERP_TRADE ({kind:\"PERP_TRADE\",ticker,side:\"long\"|\"short\",collateralCents,leverage}), PREDICTION_TRADE ({kind:\"PREDICTION_TRADE\",marketId,side:\"yes\"|\"no\",amountCents}), CREATE_POST ({kind:\"CREATE_POST\",content,marketId?,ticker?}), CREATE_REPLY ({kind:\"CREATE_REPLY\",replyToPostId,content}), SEND_GROUP_MESSAGE ({kind:\"SEND_GROUP_MESSAGE\",chatId,content}), INVITE_ALPHA ({kind:\"INVITE_ALPHA\"}). Use only listed IDs and tickers.",
-    user: "Actor: {{actorName}} ({{actorId}})\nPersona: {{actorPersona}}\nTrading Style: {{tradingStyle}}\nMax Steps: {{maxSteps}}\nAvailable Tickers: {{tickers}}\nAvailable Market IDs: {{marketIds}}\nAvailable Reply Post IDs: {{replyPostIds}}\nAvailable Alpha Chat IDs: {{chatIds}}\nActor Portfolio:\n{{portfolio}}\nWorld Context:\n{{worldContext}}\nDiversity Guidance:\n{{diversityHint}}\nOutput your JSON action list.",
+    system: "You are an autonomous NPC agent inside Feed deciding up to {{maxSteps}} concrete actions for this tick. Return strict JSON: {\"actions\": [...]}. Allowed action objects: SPOT_TRADE ({kind:\"SPOT_TRADE\",ticker,side:\"buy\"|\"sell\",quoteCents}), PERP_TRADE ({kind:\"PERP_TRADE\",ticker,side:\"long\"|\"short\",collateralCents,leverage}), CLOSE_PERP ({kind:\"CLOSE_PERP\",positionId,closePct?}), PREDICTION_TRADE ({kind:\"PREDICTION_TRADE\",marketId,side:\"yes\"|\"no\",amountCents}), SELL_PREDICTION ({kind:\"SELL_PREDICTION\",marketId,side:\"yes\"|\"no\",shares}), CREATE_POST ({kind:\"CREATE_POST\",content,marketId?,ticker?}), CREATE_REPLY ({kind:\"CREATE_REPLY\",replyToPostId,content}), LIKE_POST ({kind:\"LIKE_POST\",postId}), REPOST_POST ({kind:\"REPOST_POST\",postId}), FOLLOW_USER ({kind:\"FOLLOW_USER\",targetId}), SEND_GROUP_MESSAGE ({kind:\"SEND_GROUP_MESSAGE\",chatId,content}), INVITE_ALPHA ({kind:\"INVITE_ALPHA\"}). Actively take profits or cut losses on open perps and prediction positions when appropriate. Use only listed IDs and tickers.",
+    user: "Actor: {{actorName}} ({{actorId}})\nPersona: {{actorPersona}}\nTrading Style: {{tradingStyle}}\nMax Steps: {{maxSteps}}\nAvailable Tickers: {{tickers}}\nAvailable Market IDs: {{marketIds}}\nOpen Perp Positions: {{openPerpPositions}}\nHeld Prediction Positions: {{heldPredictions}}\nAvailable Reply Post IDs: {{replyPostIds}}\nAvailable Follow Targets: {{followTargets}}\nAvailable Alpha Chat IDs: {{chatIds}}\nActor Portfolio:\n{{portfolio}}\nWorld Context:\n{{worldContext}}\nDiversity Guidance:\n{{diversityHint}}\nOutput your JSON action list.",
   },
   alphaGroupMessage: {
     id: "alphaGroupMessage",
@@ -207,17 +214,70 @@ export function renderPrompt(id: PromptId, vars: Readonly<Record<string, string>
   }
 }
 
+const tickerPriorityRank: ReadonlyMap<string, number> = (() => {
+  const orgById = new Map(organizations.map((o) => [o.id, o]))
+  const map = new Map<string, number>()
+  let rank = 0
+  for (const id of manifest.orgPriorities.major) {
+    const ticker = orgById.get(id)?.ticker?.toUpperCase()
+    if (ticker && !map.has(ticker)) {
+      map.set(ticker, rank)
+      rank += 1
+    }
+  }
+  for (const id of manifest.orgPriorities.secondary) {
+    const ticker = orgById.get(id)?.ticker?.toUpperCase()
+    if (ticker && !map.has(ticker)) {
+      map.set(ticker, 100 + rank)
+      rank += 1
+    }
+  }
+  return map
+})()
+
+export function prioritizePerpMarkets(
+  perps: ReadonlyArray<WorldContextPerpItem>,
+  limit: number = 16,
+): ReadonlyArray<WorldContextPerpItem> {
+  const safeLimit = Math.max(1, Math.floor(limit))
+  return [...perps]
+    .toSorted((left, right) => {
+      const leftRank = tickerPriorityRank.get(left.ticker.toUpperCase()) ?? 10_000
+      const rightRank = tickerPriorityRank.get(right.ticker.toUpperCase()) ?? 10_000
+      if (leftRank !== rightRank) return leftRank - rightRank
+      const leftActivity = Math.abs(left.markPriceCents - left.indexPriceCents) * 10 + Math.abs(left.fundingRateBps)
+      const rightActivity = Math.abs(right.markPriceCents - right.indexPriceCents) * 10 + Math.abs(right.fundingRateBps)
+      if (leftActivity !== rightActivity) return rightActivity - leftActivity
+      return left.ticker.localeCompare(right.ticker)
+    })
+    .slice(0, safeLimit)
+}
+
 export function groundingRosterSummary(): string {
-  const sampleActors = actors.slice(0, 6).map((a) => `${a.name} (@${a.username})`).join(", ")
-  const sampleOrgs = organizations.filter((o) => o.ticker).slice(0, 6).map((o) => `${o.name} [$${o.ticker}]`).join(", ")
-  const sampleCorr = correlations.slice(0, 2).map((c) => `${c.orgId}->${c.relatedOrgId}`).join(", ")
-  return `Pack ${manifest.id}: Actors [${sampleActors}]; Tickers [${sampleOrgs}]; Links [${sampleCorr}]`
+  const realActors = actors.filter((a) => isRuntimeNpcActor(a.id, a.name, a.username))
+  const prioritizedActors = [
+    ...realActors.filter((a) => a.tier === "S_TIER"),
+    ...realActors.filter((a) => a.tier === "A_TIER"),
+  ].slice(0, 8)
+  const sampleActors = prioritizedActors.map((a) => `${a.name} (@${a.username})`).join(", ")
+  const orgById = new Map(organizations.map((o) => [o.id, o]))
+  const majorOrgs = manifest.orgPriorities.major
+    .map((id) => orgById.get(id))
+    .filter((o): o is (typeof organizations)[number] => o !== undefined && Boolean(o.ticker))
+    .slice(0, 10)
+  const sampleOrgs = (majorOrgs.length > 0 ? majorOrgs : organizations.filter((o) => o.ticker).slice(0, 10))
+    .map((o) => `${o.name} [$${o.ticker}]`)
+    .join(", ")
+  const sampleCorr = correlations.slice(0, 3).map((c) => `${c.orgId}->${c.relatedOrgId}`).join(", ")
+  return `Pack ${manifest.id}: S-Tier Actors [${sampleActors}]; Major Tickers [${sampleOrgs}]; Links [${sampleCorr}]`
 }
 
 export function buildWorldContext(input: WorldContextInput): string {
   const sections: string[] = [
     `World Clock: Day ${input.currentDay}, Hour ${String(input.currentHour).padStart(2, "0")}:00 UTC (Phase: ${input.phase})`,
     groundingRosterSummary(),
+    worldFactsContent,
+    realityGroundingContent,
   ]
   if (input.worldFacts.length > 0) {
     sections.push(`World Facts:\n${input.worldFacts.slice(0, 6).map((f) => `- ${sanitizeText(f, 160)}`).join("\n")}`)
@@ -231,8 +291,9 @@ export function buildWorldContext(input: WorldContextInput): string {
     )
   }
   if (input.perpMarkets.length > 0) {
+    const prioritizedPerps = prioritizePerpMarkets(input.perpMarkets, 16)
     sections.push(
-      `Perp & Spot Tickers:\n${input.perpMarkets.slice(0, 8).map((p) => `- ${p.ticker}: mark $${(p.markPriceCents / 100).toFixed(2)}, index $${(p.indexPriceCents / 100).toFixed(2)}, funding ${p.fundingRateBps}bps`).join("\n")}`,
+      `Perp & Spot Tickers:\n${prioritizedPerps.map((p) => `- ${p.ticker}: mark $${(p.markPriceCents / 100).toFixed(2)}, index $${(p.indexPriceCents / 100).toFixed(2)}, funding ${p.fundingRateBps}bps`).join("\n")}`,
     )
   }
   if (input.recentPosts.length > 0) {
@@ -276,6 +337,8 @@ function parseTradeDecision(
   kind: string,
   tickers: Set<string>,
   marketIds: Set<string>,
+  openPerpPositionIds: Set<string>,
+  heldPredictionKeys: Set<string>,
 ): NpcDecisionAction | null {
   if (kind === "SPOT_TRADE") {
     const ticker = asNonEmptyString(item.ticker)?.toUpperCase() ?? ""
@@ -289,11 +352,24 @@ function parseTradeDecision(
     if (!tickers.has(ticker)) return null
     return { kind: "PERP_TRADE", ticker, side, collateralCents: asPositiveInt(item.collateralCents, 2_500, 500, 50_000), leverage: asPositiveInt(item.leverage, 3, 1, 20) }
   }
+  if (kind === "CLOSE_PERP") {
+    const positionId = asNonEmptyString(item.positionId) ?? ""
+    if (!positionId || !openPerpPositionIds.has(positionId)) return null
+    const closePct = item.closePct === undefined ? undefined : asPositiveInt(item.closePct, 100, 1, 100)
+    return closePct === undefined ? { kind: "CLOSE_PERP", positionId } : { kind: "CLOSE_PERP", positionId, closePct }
+  }
   if (kind === "PREDICTION_TRADE") {
     const marketId = asNonEmptyString(item.marketId) ?? ""
     const side = item.side === "no" ? "no" : "yes"
     if (!marketIds.has(marketId)) return null
     return { kind: "PREDICTION_TRADE", marketId, side, amountCents: asPositiveInt(item.amountCents, 2_000, 100, 25_000) }
+  }
+  if (kind === "SELL_PREDICTION") {
+    const marketId = asNonEmptyString(item.marketId) ?? ""
+    const side = item.side === "no" ? "no" : "yes"
+    const key = `${marketId}:${side}`
+    if (!marketId || !marketIds.has(marketId) || !heldPredictionKeys.has(key)) return null
+    return { kind: "SELL_PREDICTION", marketId, side, shares: asPositiveInt(item.shares, 100, 100, 1_000_000) }
   }
   return null
 }
@@ -305,8 +381,24 @@ function parseSocialDecision(
   marketIds: Set<string>,
   replyIds: Set<string>,
   chatIds: Set<string>,
+  followTargetIds: Set<string>,
 ): NpcDecisionAction | null {
   if (kind === "INVITE_ALPHA") return { kind: "INVITE_ALPHA" }
+  if (kind === "LIKE_POST") {
+    const postId = asNonEmptyString(item.postId)
+    if (!postId || !replyIds.has(postId)) return null
+    return { kind: "LIKE_POST", postId }
+  }
+  if (kind === "REPOST_POST") {
+    const postId = asNonEmptyString(item.postId)
+    if (!postId || !replyIds.has(postId)) return null
+    return { kind: "REPOST_POST", postId }
+  }
+  if (kind === "FOLLOW_USER") {
+    const targetId = asNonEmptyString(item.targetId)
+    if (!targetId || !followTargetIds.has(targetId)) return null
+    return { kind: "FOLLOW_USER", targetId }
+  }
   const rawContent = asNonEmptyString(item.content)
   if (rawContent === null) return null
   const content = sanitizeText(rawContent, 275)
@@ -340,6 +432,9 @@ export function validateNpcTradingDecision(
   availableMarketIds: ReadonlyArray<string>,
   replyTargetIds: ReadonlyArray<string> = [],
   chatIds: ReadonlyArray<string> = [],
+  openPerpPositionIds: ReadonlyArray<string> = [],
+  heldPredictionKeys: ReadonlyArray<string> = [],
+  followTargetIds: ReadonlyArray<string> = [],
 ): ReadonlyArray<NpcDecisionAction> {
   const root = asRecord(raw)
   const rawActions = root && Array.isArray(root.actions) ? root.actions : Array.isArray(raw) ? raw : []
@@ -348,6 +443,9 @@ export function validateNpcTradingDecision(
   const marketSet = new Set(availableMarketIds)
   const replySet = new Set(replyTargetIds)
   const chatSet = new Set(chatIds)
+  const openPerpSet = new Set(openPerpPositionIds)
+  const heldPredSet = new Set(heldPredictionKeys.map((k) => k.toLowerCase()))
+  const followSet = new Set(followTargetIds)
   const out: NpcDecisionAction[] = []
   for (const entry of rawActions) {
     if (out.length >= cap) break
@@ -355,7 +453,9 @@ export function validateNpcTradingDecision(
     if (!item) continue
     const kind = asNonEmptyString(item.kind)
     if (!kind) continue
-    const parsed = parseTradeDecision(item, kind, tickerSet, marketSet) ?? parseSocialDecision(item, kind, tickerSet, marketSet, replySet, chatSet)
+    const parsed =
+      parseTradeDecision(item, kind, tickerSet, marketSet, openPerpSet, heldPredSet) ??
+      parseSocialDecision(item, kind, tickerSet, marketSet, replySet, chatSet, followSet)
     if (parsed !== null) out.push(parsed)
   }
   return out

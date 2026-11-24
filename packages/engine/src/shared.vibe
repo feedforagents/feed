@@ -48,6 +48,15 @@ export function sanitizeText(input: string, maxLen: number): string {
   return `${collapsed.slice(0, maxLen - 3).trimEnd()}...`
 }
 
+export function isRuntimeNpcActor(id: string, name?: string, username?: string): boolean {
+  const cleanId = id.trim()
+  if (cleanId.length === 0) return false
+  if (/\btest\b/i.test(cleanId) || /^test[-_]/i.test(cleanId)) return false
+  if (name !== undefined && /\btest\b/i.test(name)) return false
+  if (username !== undefined && (/\btest\b/i.test(username) || /^test[-_]/i.test(username))) return false
+  return true
+}
+
 export function hashString(input: string): number {
   let hash = 2166136261
   for (let i = 0; i < input.length; i++) {

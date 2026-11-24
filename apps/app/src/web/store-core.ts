@@ -1,5 +1,18 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/navigation.md, "Story: Browse public world content without a login wall"
-import type { AgentHostId, ChatMessageItem, JoinPhoneStep, JoinTab, LeaderboardEntry, UiMode } from "@repo/ui";
+import type {
+  AgentHostId,
+  AssetTradeEntry,
+  ChatMessageItem,
+  JoinPhoneStep,
+  JoinTab,
+  LeaderboardMetric,
+  LeaderboardScope,
+  LightweightChartPoint,
+  MarketTimeRange,
+  ToastTone,
+  UiMode,
+  WalletClosedPosition,
+} from "@repo/ui";
 import { ManagedRuntime } from "effect";
 import { routeAccessible, type AppRoute, type FeedTab as SpecFeedTab } from "../../gen/app__navigation.ts";
 import { type Event as AppEvent } from "../../gen/app.ts";
@@ -13,23 +26,33 @@ import {
   navLayer,
   onboardingLayer,
 } from "./machines.vibe";
-import { parseLocation, routeToPath, toPublicTarget } from "./routes.ts";
+import { type SettingsTabId, parseLocation, routeToPath, toPublicTarget } from "./routes.ts";
 import {
   type AdminStatusData,
+  type AppAccountEconomy,
   type AppAlphaInvite,
+  type AppArticle,
   type AppChatSummary,
+  type AppFollowListEntry,
+  type AppLeaderboardEntry,
+  type AppLedgerEntry,
+  type AppMarketHistoryPoint,
+  type AppModerationEntry,
   type AppNotification,
   type AppPerpMarket,
-  type AppPointPack,
+  type AppPerpPreview,
   type AppPosition,
   type AppPost,
   type AppPredictionMarket,
   type AppProfileBundle,
   type AppSkillsPayload,
+  type AppWorldStatus,
   type ExploreData,
   type OAuthConsentInfo,
   type PendingAction,
   type PostThreadData,
+  type ThemePreference,
+  type ToastItem,
   type ViewerSession,
   decodeSkillHosts,
 } from "./types.ts";
@@ -40,6 +63,19 @@ export const onboardingRuntime = ManagedRuntime.make(onboardingLayer);
 
 export type UiFeedTab = "latest" | "following" | "top";
 
+export type ThreadReplySort = "popular" | "newest" | "oldest";
+
+export interface GlobalReportTarget {
+  readonly kind: "post" | "account";
+  readonly id: string;
+  readonly label: string;
+}
+
+export interface GlobalAccountActionTarget {
+  readonly handle: string;
+  readonly currentlyActive: boolean;
+}
+
 export interface StoreState {
   readonly authLoaded: boolean;
   readonly viewer: ViewerSession | null;
@@ -49,13 +85,23 @@ export interface StoreState {
   readonly devSmsCodeEnabled: boolean;
   readonly route: AppRoute;
   readonly profileHandle: string | null;
+  readonly activePostId: string | null;
+  readonly activeArticleId: string | null;
+  readonly activeArticle: AppArticle | null;
+  readonly articleLoading: boolean;
+  readonly activeTrendingTag: string | null;
+  readonly walletView: boolean;
+  readonly settingsTab: SettingsTabId;
   readonly selectedTicker: string | null;
   readonly feedTab: UiFeedTab;
   readonly localUiMode: "game" | "social";
+  readonly theme: ThemePreference;
+  readonly sseConnected: boolean;
   readonly bannerDismissed: boolean;
   readonly explainerDismissed: boolean;
   readonly scrolledDeep: boolean;
   readonly itemsViewed: number;
+  readonly toasts: ReadonlyArray<ToastItem>;
   readonly statusMessage: string | null;
   readonly errorMessage: string | null;
   readonly joinSheetOpen: boolean;
@@ -66,27 +112,57 @@ export interface StoreState {
   readonly pendingPhoneE164: string;
   readonly pendingOnboardingToken: string;
   readonly pendingAction: PendingAction | null;
+  readonly composeOpen: boolean;
+  readonly quotePostTarget: AppPost | null;
+  readonly reportTarget: GlobalReportTarget | null;
+  readonly blockTarget: GlobalAccountActionTarget | null;
+  readonly muteTarget: GlobalAccountActionTarget | null;
+  readonly deletePostTargetId: string | null;
   readonly feedLoading: boolean;
   readonly feedLoadingMore: boolean;
   readonly feedPosts: ReadonlyArray<AppPost>;
   readonly feedNextCursor: string | null;
+  readonly pendingNewPostCount: number;
   readonly activeThread: PostThreadData | null;
+  readonly threadSort: ThreadReplySort;
   readonly threadLoading: boolean;
   readonly exploreQuery: string;
   readonly exploreLoading: boolean;
   readonly explore: ExploreData;
   readonly marketsLoading: boolean;
+  readonly marketsViewMode: "dashboard" | "terminal";
   readonly predictions: ReadonlyArray<AppPredictionMarket>;
   readonly perps: ReadonlyArray<AppPerpMarket>;
   readonly positions: ReadonlyArray<AppPosition>;
+  readonly closedPositions: ReadonlyArray<WalletClosedPosition>;
+  readonly closedPositionsLoading: boolean;
   readonly selectedMarketKind: "prediction" | "perp";
   readonly selectedMarketId: string | null;
-  readonly leaderboard: ReadonlyArray<LeaderboardEntry>;
-  readonly packs: ReadonlyArray<AppPointPack>;
+  readonly marketHistory: ReadonlyArray<AppMarketHistoryPoint>;
+  readonly marketHistoryLoading: boolean;
+  readonly marketTrades: ReadonlyArray<AssetTradeEntry>;
+  readonly marketTradesLoading: boolean;
+  readonly marketSocialPosts: ReadonlyArray<AppPost>;
+  readonly marketTimeRange: MarketTimeRange;
+  readonly watchlist: ReadonlyArray<string>;
+  readonly worldStatus: AppWorldStatus | null;
+  readonly perpPreview: AppPerpPreview | null;
+  readonly leaderboard: ReadonlyArray<AppLeaderboardEntry>;
+  readonly leaderboardScope: LeaderboardScope;
+  readonly leaderboardMetric: LeaderboardMetric;
+  readonly leaderboardPage: number;
+  readonly leaderboardTotalPages: number;
+  readonly leaderboardTotalCount: number;
+  readonly leaderboardCurrentUser: AppLeaderboardEntry | null;
+  readonly leaderboardLoading: boolean;
+  readonly economy: AppAccountEconomy | null;
+  readonly ledger: ReadonlyArray<AppLedgerEntry>;
+  readonly economyLoading: boolean;
+  readonly pnlTimeRange: MarketTimeRange;
+  readonly pnlHistory: ReadonlyArray<LightweightChartPoint>;
+  readonly pnlHistoryLoading: boolean;
   readonly tradeLoading: boolean;
   readonly tradeError: string | null;
-  readonly checkoutLoading: boolean;
-  readonly checkoutError: string | null;
   readonly chatsLoading: boolean;
   readonly chats: ReadonlyArray<AppChatSummary>;
   readonly selectedChatId: string | null;
@@ -99,6 +175,15 @@ export interface StoreState {
   readonly profileLoading: boolean;
   readonly profileLoadingMore: boolean;
   readonly profileBundle: AppProfileBundle | null;
+  readonly profileReplies: ReadonlyArray<AppPost>;
+  readonly profileRepliesLoading: boolean;
+  readonly followListKind: "followers" | "following" | null;
+  readonly followListHandle: string | null;
+  readonly followListItems: ReadonlyArray<AppFollowListEntry>;
+  readonly followListLoading: boolean;
+  readonly blockedAccounts: ReadonlyArray<AppModerationEntry>;
+  readonly mutedAccounts: ReadonlyArray<AppModerationEntry>;
+  readonly moderationLoading: boolean;
   readonly skills: AppSkillsPayload;
   readonly hostActionNote: string | null;
   readonly oauthConsent: OAuthConsentInfo | null;
@@ -113,6 +198,38 @@ export interface StoreState {
 }
 
 const EXPLAINER_STORAGE_KEY = "feed:explainer-dismissed";
+const THEME_STORAGE_KEY = "feed-theme";
+const WATCHLIST_STORAGE_KEY = "feed-watchlist";
+const LEGACY_FAVORITES_STORAGE_KEY = "feed:market-favorites";
+
+function readWatchlist(): ReadonlyArray<string> {
+  try {
+    if (typeof localStorage === "undefined") return [];
+    const raw = localStorage.getItem(WATCHLIST_STORAGE_KEY) ?? localStorage.getItem(LEGACY_FAVORITES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+  } catch {
+    return [];
+  }
+}
+
+export function toggleWatchlistItem(kind: "perp" | "prediction", ref: string): void {
+  const key = `${kind}:${kind === "perp" ? ref.toUpperCase() : ref}`;
+  const current = currentState.watchlist;
+  const exists = current.includes(key);
+  const next = exists ? current.filter((item) => item !== key) : [...current, key];
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next));
+    }
+  } catch {
+    setStoreState({ watchlist: next });
+    return;
+  }
+  setStoreState({ watchlist: next });
+}
 
 function readExplainerDismissed(): boolean {
   try {
@@ -132,9 +249,55 @@ export function persistExplainerDismissed(): void {
   }
 }
 
+export function readStoredTheme(): ThemePreference {
+  try {
+    if (typeof localStorage === "undefined") return "dark";
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark" || stored === "system") return stored;
+  } catch {
+    return "dark";
+  }
+  return "dark";
+}
+
+export function applyDocumentTheme(theme: ThemePreference): void {
+  if (typeof document === "undefined") return;
+  const prefersDark = typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-color-scheme: dark)").matches
+    : true;
+  const useDark = theme === "light" ? false : theme === "system" ? prefersDark : true;
+  document.documentElement.classList.remove("dark", "light");
+  document.documentElement.classList.add(useDark ? "dark" : "light");
+}
+
+export function setThemePreference(next: ThemePreference): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(THEME_STORAGE_KEY, next);
+    }
+  } catch {
+    return;
+  }
+  applyDocumentTheme(next);
+  setStoreState({ theme: next });
+}
+
+export function cycleThemePreference(): void {
+  const cur = getStoreSnapshot().theme;
+  const next: ThemePreference = cur === "dark" ? "light" : cur === "light" ? "system" : "dark";
+  setThemePreference(next);
+}
+
+const initialTheme = readStoredTheme();
+applyDocumentTheme(initialTheme);
+
 const initialLocation = typeof window !== "undefined"
   ? parseLocation(window.location.pathname, window.location.search)
   : parseLocation("/", "");
+
+if (typeof window !== "undefined" && initialLocation.replaceCanonical) {
+  window.history.replaceState(null, "", initialLocation.canonicalPath);
+}
 
 let currentState: StoreState = {
   authLoaded: false,
@@ -145,13 +308,23 @@ let currentState: StoreState = {
   devSmsCodeEnabled: false,
   route: initialLocation.route,
   profileHandle: initialLocation.profileHandle,
+  activePostId: initialLocation.postId,
+  activeArticleId: initialLocation.articleId,
+  activeArticle: null,
+  articleLoading: false,
+  activeTrendingTag: initialLocation.trendingTag,
+  walletView: initialLocation.walletView,
+  settingsTab: initialLocation.settingsTab ?? "profile",
   selectedTicker: initialLocation.queryTicker,
   feedTab: "latest",
   localUiMode: "game",
+  theme: initialTheme,
+  sseConnected: false,
   bannerDismissed: false,
   explainerDismissed: readExplainerDismissed(),
   scrolledDeep: false,
   itemsViewed: 0,
+  toasts: [],
   statusMessage: null,
   errorMessage: null,
   joinSheetOpen: false,
@@ -162,27 +335,57 @@ let currentState: StoreState = {
   pendingPhoneE164: "",
   pendingOnboardingToken: "",
   pendingAction: null,
+  composeOpen: false,
+  quotePostTarget: null,
+  reportTarget: null,
+  blockTarget: null,
+  muteTarget: null,
+  deletePostTargetId: null,
   feedLoading: false,
   feedLoadingMore: false,
   feedPosts: [],
   feedNextCursor: null,
+  pendingNewPostCount: 0,
   activeThread: null,
+  threadSort: "popular",
   threadLoading: false,
-  exploreQuery: "",
+  exploreQuery: initialLocation.exploreQuery ?? "",
   exploreLoading: false,
-  explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [] },
+  explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [], tags: [] },
   marketsLoading: false,
+  marketsViewMode: initialLocation.marketId || initialLocation.queryTicker ? "terminal" : "dashboard",
   predictions: [],
   perps: [],
   positions: [],
-  selectedMarketKind: initialLocation.queryTicker ? "perp" : "prediction",
-  selectedMarketId: initialLocation.queryTicker,
+  closedPositions: [],
+  closedPositionsLoading: false,
+  selectedMarketKind: initialLocation.marketKind ?? (initialLocation.queryTicker ? "perp" : "prediction"),
+  selectedMarketId: initialLocation.marketId ?? initialLocation.queryTicker,
+  marketHistory: [],
+  marketHistoryLoading: false,
+  marketTrades: [],
+  marketTradesLoading: false,
+  marketSocialPosts: [],
+  marketTimeRange: "1D",
+  watchlist: readWatchlist(),
+  worldStatus: null,
+  perpPreview: null,
   leaderboard: [],
-  packs: [],
+  leaderboardScope: "players",
+  leaderboardMetric: "net_profit",
+  leaderboardPage: 1,
+  leaderboardTotalPages: 1,
+  leaderboardTotalCount: 0,
+  leaderboardCurrentUser: null,
+  leaderboardLoading: false,
+  economy: null,
+  ledger: [],
+  economyLoading: false,
+  pnlTimeRange: "ALL",
+  pnlHistory: [],
+  pnlHistoryLoading: false,
   tradeLoading: false,
   tradeError: null,
-  checkoutLoading: false,
-  checkoutError: null,
   chatsLoading: false,
   chats: [],
   selectedChatId: null,
@@ -195,6 +398,15 @@ let currentState: StoreState = {
   profileLoading: false,
   profileLoadingMore: false,
   profileBundle: null,
+  profileReplies: [],
+  profileRepliesLoading: false,
+  followListKind: null,
+  followListHandle: null,
+  followListItems: [],
+  followListLoading: false,
+  blockedAccounts: [],
+  mutedAccounts: [],
+  moderationLoading: false,
   skills: decodeSkillHosts(null),
   hostActionNote: null,
   oauthConsent: null,
@@ -210,6 +422,16 @@ let currentState: StoreState = {
 
 const listeners = new Set<() => void>();
 let pendingActionSeq = 0;
+let toastSeq = 0;
+let onAuthChangedCallback: (() => void) | null = null;
+
+export function registerAuthChangedHook(fn: () => void): void {
+  onAuthChangedCallback = fn;
+}
+
+export function notifyAuthChanged(): void {
+  onAuthChangedCallback?.();
+}
 
 export function getStoreSnapshot(): StoreState {
   return currentState;
@@ -227,15 +449,58 @@ export function setStoreState(patch: Partial<StoreState>): void {
   for (const listener of listeners) listener();
 }
 
+export function pushToast(message: string, tone: ToastTone = "default", description?: string): void {
+  const trimmed = message.trim();
+  if (!trimmed) return;
+  toastSeq += 1;
+  const item: ToastItem = {
+    id: `toast-${toastSeq}`,
+    message: trimmed,
+    ...(description ? { description } : {}),
+    tone,
+  };
+  const deduped = currentState.toasts.filter((t) => t.message !== trimmed || t.tone !== tone);
+  setStoreState({ toasts: [...deduped.slice(-3), item] });
+}
+
+export function dismissToast(id: string): void {
+  setStoreState({ toasts: currentState.toasts.filter((t) => t.id !== id) });
+}
+
+export function setStatusNotice(message: string): void {
+  pushToast(message, "ok");
+  setStoreState({ statusMessage: message });
+}
+
+export function setErrorNotice(message: string): void {
+  pushToast(message, "destructive");
+  setStoreState({ errorMessage: message });
+}
+
 export function clearNotices(): void {
   if (currentState.statusMessage !== null || currentState.errorMessage !== null) {
     setStoreState({ statusMessage: null, errorMessage: null });
   }
 }
 
+export function hasAtRiskOpenPositions(s: StoreState = currentState): boolean {
+  return s.positions.some((p) => !p.isClosed);
+}
+
 export function currentUiMode(s: StoreState = currentState): UiMode {
   const mode = s.viewer ? s.viewer.uiMode : s.localUiMode;
   return mode === "social" ? "SocialMode" : "GameMode";
+}
+
+export function anonymousModeQuery(s: StoreState = currentState): string {
+  if (s.viewer !== null) return "";
+  return `mode=${currentUiMode(s) === "SocialMode" ? "social" : "game"}`;
+}
+
+export function appendAnonymousModeParam(url: string, s: StoreState = currentState): string {
+  const q = anonymousModeQuery(s);
+  if (!q) return url;
+  return url.includes("?") ? `${url}&${q}` : `${url}?${q}`;
 }
 
 export function sendApp(event: AppEvent): void {
@@ -295,8 +560,12 @@ export function requireAuthOrQueue(action: PendingAction): boolean {
   return false;
 }
 
-export function pushBrowserRoute(route: AppRoute, profileHandle?: string | null, search = ""): void {
-  const nextPath = `${routeToPath(route, profileHandle)}${search}`;
+export function pushBrowserRoute(
+  route: AppRoute,
+  options?: { readonly profileHandle?: string | null; readonly postId?: string | null; readonly articleId?: string | null; readonly walletView?: boolean },
+  search = "",
+): void {
+  const nextPath = `${routeToPath(route, options)}${search}`;
   if (typeof window !== "undefined") {
     const current = `${window.location.pathname}${window.location.search}`;
     if (current !== nextPath) {
@@ -320,7 +589,7 @@ export function canEnterRoute(route: AppRoute): boolean {
       scrolledDeep: currentState.scrolledDeep,
       itemsViewed: currentState.itemsViewed,
       bannerDismissed: currentState.bannerDismissed,
-      hasAtRiskOpenPositions: currentState.positions.length > 0,
+      hasAtRiskOpenPositions: hasAtRiskOpenPositions(currentState),
       lastPublicTarget: "ViewFeed",
     },
     route,
@@ -337,8 +606,69 @@ export function recordPublicView(route: AppRoute): void {
 
 export function buildHostActionNote(hostId: AgentHostId): string {
   const found = currentState.skills.hosts.find((h) => h.launcher.id === hostId);
-  if (!found) return "Copied Feed SKILL.md setup prompt.";
+  if (!found) return "Copied Feed setup prompt.";
   if (found.cliCommand) return `Copied prompt & CLI for ${found.launcher.label}: ${found.cliCommand}`;
   if (found.notes) return `${found.launcher.label}: ${found.notes}`;
-  return `Copied Feed SKILL.md prompt for ${found.launcher.label}.`;
+  return `Copied Feed setup prompt for ${found.launcher.label}.`;
+}
+
+export function openComposeDialog(quotePost: AppPost | null = null): void {
+  if (!currentState.viewer) {
+    setStoreState({
+      joinSheetOpen: true,
+      joinTab: "phone",
+      joinPhoneStep: "entry",
+      joinError: null,
+    });
+    return;
+  }
+  setStoreState({ composeOpen: true, quotePostTarget: quotePost });
+}
+
+export function closeComposeDialog(): void {
+  setStoreState({ composeOpen: false, quotePostTarget: null });
+}
+
+export function openReportDialog(target: GlobalReportTarget): void {
+  if (!currentState.viewer) {
+    setStoreState({ joinSheetOpen: true, joinTab: "phone", joinPhoneStep: "entry", joinError: null });
+    return;
+  }
+  setStoreState({ reportTarget: target });
+}
+
+export function closeReportDialog(): void {
+  setStoreState({ reportTarget: null });
+}
+
+export function openBlockDialog(handle: string, currentlyActive: boolean): void {
+  if (!currentState.viewer) {
+    setStoreState({ joinSheetOpen: true, joinTab: "phone", joinPhoneStep: "entry", joinError: null });
+    return;
+  }
+  setStoreState({ blockTarget: { handle, currentlyActive } });
+}
+
+export function closeBlockDialog(): void {
+  setStoreState({ blockTarget: null });
+}
+
+export function openMuteDialog(handle: string, currentlyActive: boolean): void {
+  if (!currentState.viewer) {
+    setStoreState({ joinSheetOpen: true, joinTab: "phone", joinPhoneStep: "entry", joinError: null });
+    return;
+  }
+  setStoreState({ muteTarget: { handle, currentlyActive } });
+}
+
+export function closeMuteDialog(): void {
+  setStoreState({ muteTarget: null });
+}
+
+export function openDeletePostDialog(postId: string): void {
+  setStoreState({ deletePostTargetId: postId });
+}
+
+export function closeDeletePostDialog(): void {
+  setStoreState({ deletePostTargetId: null });
 }
