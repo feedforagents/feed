@@ -1,11 +1,63 @@
-// spec/markets/economy.md, "Story: Buy points on web outside Washington, and play anywhere"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
-import { type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+// spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
+import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
 import { fundingPeriodFromSeconds } from "../gen/shared__time.effect.vibe"
 import type { PerpPosition } from "../gen/markets__spotPerp.effect.vibe"
 
 export error MarketFailure { code: string; message: string; cause?: unknown }
 
 export type MarketActorKind = "user" | "npc"
+export type MarketKind = "prediction" | "spot" | "perp"
+
+export interface MarketPriceHistoryPoint {
+  readonly id: string
+  readonly marketKind: MarketKind
+  readonly marketRef: string
+  readonly priceCents: number
+  readonly yesPriceBps: number | null
+  readonly markPriceCents: number | null
+  readonly volumeCents: number
+  readonly recordedAt: number
+}
+
+export interface MarketTradeView {
+  readonly id: string
+  readonly traderId: string
+  readonly traderKind: MarketActorKind
+  readonly marketKind: MarketKind
+  readonly marketRef: string
+  readonly side: string
+  readonly notionalCents: number
+  readonly feeCents: number
+  readonly sharesOrSize: number
+  readonly priceCents: number
+  readonly realizedPnlCents: number | null
+  readonly viaClientName: string | null
+  readonly createdAt: number
+}
+
+export interface MarketPerpRealtimeEvent {
+  readonly type: "market.perp"
+  readonly action: "open" | "close" | "liquidate"
+  readonly actorId: string
+  readonly ticker: string
+  readonly side: "long" | "short"
+  readonly sizeCents: number
+  readonly leverage: number
+  readonly positionId?: string
+  readonly markPriceCents?: number
+}
+
+export const MarketRealtimeBus = Context.Service<{
+  readonly publish: (event: MarketPerpRealtimeEvent) => boolean!!
+}>("@repo/social/RealtimeBus")
+
+export effect function maybePublishMarketPerpEvent(event: MarketPerpRealtimeEvent): boolean!! {
+  const maybeBus = try Effect.serviceOption(MarketRealtimeBus)
+  if (Option.isSome(maybeBus)) {
+    return try maybeBus.value.publish(event)
+  }
+  return false
+}
 
 module webIds {
   /** @throws {never} */
@@ -160,13 +212,14 @@ export interface TradeInsertInput {
   readonly tradeId: string
   readonly traderId: string
   readonly traderKind: MarketActorKind
-  readonly marketKind: "prediction" | "spot" | "perp"
+  readonly marketKind: MarketKind
   readonly marketRef: string
   readonly side: string
   readonly notionalCents: number
   readonly feeCents: number
   readonly sharesOrSize: number
   readonly priceCents: number
+  readonly realizedPnlCents?: number | null
   readonly viaClientName: string | null
   readonly idempotencyKey?: string | null
   readonly requestFingerprint?: string | null
@@ -177,8 +230,8 @@ export interface TradeInsertInput {
 export effect function insertTradeRecord(tx: Tx, input: TradeInsertInput): void!StoreFailure {
   try tx.query(
     `INSERT INTO feed_trades
-       (id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, via_client_name, idempotency_key, request_fingerprint, receipt_json, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+       (id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, realized_pnl_cents, via_client_name, idempotency_key, request_fingerprint, receipt_json, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
     [
       input.tradeId,
       input.traderId,
@@ -190,6 +243,7 @@ export effect function insertTradeRecord(tx: Tx, input: TradeInsertInput): void!
       input.feeCents,
       input.sharesOrSize,
       input.priceCents,
+      input.realizedPnlCents ?? null,
       input.viaClientName,
       input.idempotencyKey ?? null,
       input.requestFingerprint ?? null,
@@ -197,6 +251,104 @@ export effect function insertTradeRecord(tx: Tx, input: TradeInsertInput): void!
       input.createdAt
     ]
   )
+}
+
+export interface PriceHistoryInsertInput {
+  readonly marketKind: MarketKind
+  readonly marketRef: string
+  readonly priceCents: number
+  readonly yesPriceBps?: number | null
+  readonly markPriceCents?: number | null
+  readonly volumeCents?: number
+  readonly recordedAt: number
+}
+
+export effect function insertPriceHistory(tx: Tx, input: PriceHistoryInsertInput): void!StoreFailure {
+  try tx.query(
+    `INSERT INTO feed_market_price_history
+       (id, market_kind, market_ref, price_cents, yes_price_bps, mark_price_cents, volume_cents, recorded_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      newMarketId(),
+      input.marketKind,
+      input.marketRef,
+      Math.max(0, Math.trunc(input.priceCents)),
+      input.yesPriceBps ?? null,
+      input.markPriceCents ?? null,
+      Math.max(0, Math.trunc(input.volumeCents ?? 0)),
+      input.recordedAt
+    ]
+  )
+}
+
+export effect function getMarketPriceHistory(
+  marketKind: MarketKind,
+  marketRef: string,
+  limit = 100
+): ReadonlyArray<MarketPriceHistoryPoint>!StoreFailure!Store {
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)))
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT id, market_kind, market_ref, price_cents, yes_price_bps, mark_price_cents, volume_cents, recorded_at
+       FROM feed_market_price_history
+       WHERE market_kind = $1 AND market_ref = $2
+       ORDER BY recorded_at DESC, id DESC
+       LIMIT $3`,
+      [marketKind, marketRef, safeLimit]
+    )
+    return [...rows].reverse().map((row) => ({
+      id: requiredText(row.id),
+      marketKind: parseMarketKind(row.market_kind),
+      marketRef: requiredText(row.market_ref),
+      priceCents: toInt(row.price_cents),
+      yesPriceBps: optionalInt(row.yes_price_bps),
+      markPriceCents: optionalInt(row.mark_price_cents),
+      volumeCents: toInt(row.volume_cents),
+      recordedAt: toInt(row.recorded_at)
+    }))
+  })
+}
+
+export effect function listMarketTrades(
+  marketKind: MarketKind,
+  marketRef: string,
+  limit = 50
+): ReadonlyArray<MarketTradeView>!StoreFailure!Store {
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, realized_pnl_cents, via_client_name, created_at
+       FROM feed_trades
+       WHERE market_kind = $1 AND market_ref = $2
+       ORDER BY created_at DESC, id DESC
+       LIMIT $3`,
+      [marketKind, marketRef, safeLimit]
+    )
+    return rows.map((row) => ({
+      id: requiredText(row.id),
+      traderId: requiredText(row.trader_id),
+      traderKind: requiredText(row.trader_kind) === "npc" ? "npc" : "user",
+      marketKind: parseMarketKind(row.market_kind),
+      marketRef: requiredText(row.market_ref),
+      side: requiredText(row.side),
+      notionalCents: toInt(row.notional_cents),
+      feeCents: toInt(row.fee_cents),
+      sharesOrSize: toInt(row.shares_or_size),
+      priceCents: toInt(row.price_cents),
+      realizedPnlCents: optionalInt(row.realized_pnl_cents),
+      viaClientName: optionalText(row.via_client_name),
+      createdAt: toInt(row.created_at)
+    }))
+  })
+}
+
+function parseMarketKind(value: unknown): MarketKind {
+  const text = requiredText(value)
+  if (text === "spot") return "spot"
+  if (text === "perp") return "perp"
+  return "prediction"
 }
 
 export interface LedgerInsertInput {
@@ -223,6 +375,26 @@ export effect function insertLedgerEntry(tx: Tx, input: LedgerInsertInput): bool
     ]
   )
   return inserted.length === 1
+}
+
+export interface MarketNotificationInput {
+  readonly id: string
+  readonly accountId: string
+  readonly kind: string
+  readonly marketId: string | null
+  readonly title: string
+  readonly body: string
+  readonly createdAt: number
+}
+
+export effect function insertMarketNotification(tx: Tx, input: MarketNotificationInput): void!StoreFailure {
+  try tx.query(
+    `INSERT INTO feed_notifications
+       (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at)
+     VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, true, NULL, $7)
+     ON CONFLICT (id) DO NOTHING`,
+    [input.id, input.accountId, input.kind, input.marketId, input.title, input.body, input.createdAt]
+  )
 }
 
 export function requiredText(value: unknown, fallback = ""): string {
