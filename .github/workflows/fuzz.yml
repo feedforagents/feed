@@ -22,6 +22,8 @@ jobs:
       TURBO_CACHE: local:rw,remote:r
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
       - uses: ./.github/actions/setup
         with:
           cache-verification: "false"
@@ -53,6 +55,8 @@ jobs:
         shard: [a, b, rest]
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
       - uses: ./.github/actions/setup
         with:
           job: selftest-${{ matrix.shard }}
