@@ -435,11 +435,13 @@ export const POST = withErrorHandling(
 
     // If parentCommentId provided, validate it exists and belongs to this post
     let parentCommentAuthorId: string | undefined;
+    let grandparentCommentId: string | null = null;
     if (parentCommentId) {
       const [parentComment] = await dbWrite
         .select({
           postId: comments.postId,
           authorId: comments.authorId,
+          parentCommentId: comments.parentCommentId,
         })
         .from(comments)
         .where(
@@ -459,6 +461,7 @@ export const POST = withErrorHandling(
       }
 
       parentCommentAuthorId = parentComment.authorId;
+      grandparentCommentId = parentComment.parentCommentId;
     }
 
     // Get the post to find the authorId for notifications
@@ -498,6 +501,44 @@ export const POST = withErrorHandling(
           'Cannot comment on this post',
           'BLOCKED_USER'
         );
+      }
+    }
+
+    // A reply nested under another reply inherits the whole ancestor
+    // chain: the same bilateral rule applies to every thread ancestor,
+    // not just the immediate parent. Walk up from the grandparent (the
+    // immediate parent is already checked above) and refuse when any
+    // ancestor author blocked the replier, or vice versa. The visited
+    // set stops a legacy cyclic thread from looping forever.
+    {
+      const seenAncestorIds = new Set<string>();
+      let ancestorId = grandparentCommentId;
+      while (ancestorId) {
+        if (seenAncestorIds.has(ancestorId)) break;
+        seenAncestorIds.add(ancestorId);
+        const [ancestor] = await dbWrite
+          .select({
+            authorId: comments.authorId,
+            parentCommentId: comments.parentCommentId,
+          })
+          .from(comments)
+          .where(eq(comments.id, ancestorId))
+          .limit(1);
+        if (!ancestor) break;
+        if (ancestor.authorId !== postRecord?.authorId) {
+          const [ancestorBlocked, ancestorBlockedMe] = await Promise.all([
+            hasBlocked(ancestor.authorId, canonicalUserId, dbWrite),
+            hasBlocked(canonicalUserId, ancestor.authorId, dbWrite),
+          ]);
+
+          if (ancestorBlocked || ancestorBlockedMe) {
+            throw new BusinessLogicError(
+              'Cannot comment on this post',
+              'BLOCKED_USER'
+            );
+          }
+        }
+        ancestorId = ancestor.parentCommentId;
       }
     }
 
