@@ -1,4 +1,4 @@
-// spec/auth/index.md, "Authentication and single-agent authorization"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
+// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
 export { AuthFailure, RateLimited, UnauthorizedError } from "./errors.vibe"
 export {
   DEFAULT_ALLOWED_COUNTRIES,
