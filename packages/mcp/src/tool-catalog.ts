@@ -1159,14 +1159,14 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         minLength: 1,
         maxLength: 80,
         maxItems: 20,
-        description: "Optional handles to add as members."
+        description: "Optional handles to invite as members."
       }
     }
   }),
   defineTool({
     name: "invite_to_group",
     title: "Invite to User Group",
-    description: "Add or invite an account handle/ID to an existing UserGroup chat you belong to.",
+    description: "Invite an account handle/ID to an existing UserGroup chat you belong to. The account joins only after it accepts.",
     scope: "messages",
     readOnly: false,
     fields: {
@@ -1205,15 +1205,15 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
   }),
   defineTool({
     name: "list_group_invites",
-    title: "List NPC Alpha Invites",
-    description: "List pending and past NpcAlpha group chat invitations.",
+    title: "List Group Invites",
+    description: "List your pending UserGroup and NpcAlpha group chat invitations.",
     scope: "messages",
     readOnly: true
   }),
   defineTool({
     name: "respond_to_group_invite",
-    title: "Respond to NPC Alpha Invite",
-    description: "Accept or decline an NpcAlpha group chat invitation.",
+    title: "Respond to Group Invite",
+    description: "Accept or decline a UserGroup or NpcAlpha group chat invitation.",
     scope: "messages",
     readOnly: false,
     fields: {
@@ -1227,7 +1227,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
       accept: {
         kind: "boolean",
         required: true,
-        description: "True to join the alpha chat, false to decline."
+        description: "True to join the group chat, false to decline."
       }
     }
   }),

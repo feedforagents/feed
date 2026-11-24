@@ -45,6 +45,7 @@ import {
   getChatMessages,
   getPostThread,
   getProfile,
+  inviteToUserGroupChat,
   likePost,
   listAlphaInvites,
   listArticles,
@@ -515,45 +516,6 @@ effect function updateAccountProfile(
       displayName: toText(row.display_name) ?? "",
       bio: toText(row.bio) ?? ""
     }
-  })
-}
-
-effect function inviteMemberToGroup(
-  accountId: string,
-  chatId: string,
-  targetHandleOrId: string
-): { readonly chatId: string; readonly memberId: string; readonly handle: string; readonly added: boolean }!(SocialFailure | StoreFailure)!Store {
-  const target = try getProfile(targetHandleOrId, accountId, "game")
-  if (target.kind === "org") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Organizations cannot join chats." })
-  }
-  if (target.viewerBlocks || target.viewerBlockedBy) {
-    throw new SocialFailure({ code: "Blocked", message: "Cannot invite a blocked account." })
-  }
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
-    const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
-    const chat = chatRows[0]
-    if (chat === undefined) {
-      throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
-    }
-    const kind = toText(chat.kind) ?? ""
-    if (kind !== "group" && kind !== "user_group") {
-      throw new SocialFailure({ code: "Forbidden", message: "Direct member invitations only apply to user group chats." })
-    }
-    const callerMembership = try tx.query(
-      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
-      [chatId, accountId]
-    )
-    if (callerMembership.length === 0) {
-      throw new SocialFailure({ code: "Forbidden", message: "You must be a member of the group to invite others." })
-    }
-    try tx.query(
-      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
-      [chatId, target.id, target.kind === "npc" ? "npc" : "user", now]
-    )
-    return { chatId, memberId: target.id, handle: target.handle, added: true }
   })
 }
 
@@ -1217,11 +1179,11 @@ effect function executeProtectedTool(
       return { chat }
     }
     case "invite_to_group":
-      return try inviteMemberToGroup(
-        caller.accountId,
-        asOptionalString(args.chatId) ?? "",
-        asOptionalString(args.targetHandleOrId) ?? ""
-      )
+      return { invite: try inviteToUserGroupChat({
+        accountId: caller.accountId,
+        chatId: asOptionalString(args.chatId) ?? "",
+        targetHandleOrId: asOptionalString(args.targetHandleOrId) ?? ""
+      }) }
     case "leave_group":
       return try leaveGroupById(caller.accountId, asOptionalString(args.chatId) ?? "")
     case "list_group_invites": {

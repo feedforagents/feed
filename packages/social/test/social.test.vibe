@@ -452,6 +452,8 @@ it.effect(
     try seedAccount("alice", "alice", "Alice Player", 10_000, "game")
     try seedAccount("bob", "bob", "Bob Trader", 10_000, "game")
     try seedAccount("carol", "carol", "Carol Analyst", 10_000, "game")
+    try seedAccount("dave", "dave", "Dave Quant", 10_000, "game")
+    try seedAccount("erin", "erin", "Erin Macro", 10_000, "game")
 
     const dm = try createDirectChat("alice", "bob")
     const dmReused = try createDirectChat("bob", "alice")
@@ -463,7 +465,23 @@ it.effect(
     const dmMsgsForAlice = try getChatMessages("alice", dm.id)
 
     const group = try createUserGroupChat("alice", "Trading Desk", ["bob"])
-    const invitedCarol = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    const bobInvites = try listAlphaInvites("bob")
+    const bobReadBeforeAcceptCode = try expectSocialCode(getChatMessages("bob", group.id))
+    try respondAlphaInvite({ accountId: "bob", inviteId: bobInvites[0]?.id ?? "", accept: true })
+    const invitedCarol = try inviteToUserGroupChat({ accountId: "bob", chatId: group.id, targetHandleOrId: "carol" })
+    const reinvitedCarol = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    const carolChatsBeforeAccept = try listChats("carol")
+    const carolReadBeforeAcceptCode = try expectSocialCode(getChatMessages("carol", group.id))
+    const carolNotifs = try listNotifications("carol")
+    const carolAccepted = try respondAlphaInvite({ accountId: "carol", inviteId: invitedCarol.id, accept: true })
+    const invitedDave = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "dave" })
+    const daveDeclined = try respondAlphaInvite({ accountId: "dave", inviteId: invitedDave.id, accept: false })
+    const daveAfterDeclineCode = try expectSocialCode(getChatMessages("dave", group.id))
+    const invitedErin = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "erin" })
+    try blockAccount("erin", "alice")
+    const erinAcceptBlockedCode = try expectSocialCode(respondAlphaInvite({ accountId: "erin", inviteId: invitedErin.id, accept: true }))
+    const inviteBlockedCode = try expectSocialCode(inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "erin" }))
+    const createWithBlockedCode = try expectSocialCode(createUserGroupChat("alice", "Blocked Desk", ["erin"]))
     const groupMsg = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: group.id, content: "Group signal" })
     const groupReact = try reactToMessage({ accountId: "carol", messageId: groupMsg.id, emoji: "👀" })
     const groupMsgs = try getChatMessages("alice", group.id)
@@ -516,7 +534,15 @@ it.effect(
         group.kind,
         group.title,
         group.memberCount,
-        invitedCarol.added,
+        bobInvites.map((i) => [i.chatId, i.actorId, i.status]),
+        bobReadBeforeAcceptCode,
+        [invitedCarol.status, invitedCarol.actorId, invitedCarol.actorHandle, invitedCarol.chatTitle, reinvitedCarol.id === invitedCarol.id],
+        carolChatsBeforeAccept.some((c) => c.id === group.id),
+        carolReadBeforeAcceptCode,
+        carolNotifs.map((n) => [n.kind, n.actorId]),
+        carolAccepted.status,
+        [daveDeclined.status, daveAfterDeclineCode],
+        [erinAcceptBlockedCode, inviteBlockedCode, createWithBlockedCode],
         groupReact.added,
         groupMsgs[0]?.reactions,
         carolLeft.left,
@@ -556,8 +582,16 @@ it.effect(
       group: [
         "user_group",
         "Trading Desk",
-        2,
-        true,
+        1,
+        [[group.id, "alice", "pending"]],
+        "Forbidden",
+        ["pending", "bob", "bob", "Trading Desk", true],
+        false,
+        "Forbidden",
+        [["group_invite", "bob"]],
+        "accepted",
+        ["declined", "Forbidden"],
+        ["Blocked", "Blocked", "Blocked"],
         true,
         [{ emoji: "👀", count: 1, reactedByViewer: false }],
         true,
