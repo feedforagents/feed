@@ -156,9 +156,6 @@ catalogs:
     storybook:
       specifier: 10.6.7
       version: 10.6.7
-    stripe:
-      specifier: 23.1.0
-      version: 23.1.0
     stylelint:
       specifier: ^18.0.0
       version: 18.0.0
@@ -550,9 +547,6 @@ importers:
       effect:
         specifier: 4.1.1
         version: 4.1.1
-      stripe:
-        specifier: 'catalog:'
-        version: 23.1.0(@types/node@26.6.6)
       vibelang-runtime:
         specifier: 0.0.13
         version: 0.0.13(@effect/platform-node@4.1.1(effect@4.1.1)(redis@6.3.1(@opentelemetry/api@1.10.0)))(effect@4.1.1)
