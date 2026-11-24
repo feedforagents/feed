@@ -1,5 +1,13 @@
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"
-import { Store, type StoreFailure, toText, type Row, type Tx } from "@repo/db"
+import {
+  Store,
+  type StoreFailure,
+  resolveActorAvatarUrl,
+  resolveOrgLogoUrl,
+  toText,
+  type Row,
+  type Tx
+} from "@repo/db"
 import {
   canCreatePost,
   canDeletePost,
@@ -46,6 +54,8 @@ export type PostAuthorKind = SubjectKind
 
 export type FeedTab = "latest" | "following" | "top"
 
+export type PostThreadSort = "popular" | "newest" | "oldest"
+
 export interface ListFeedPostsInput {
   readonly tab: FeedTab
   readonly viewerId?: string
@@ -55,7 +65,23 @@ export interface ListFeedPostsInput {
   readonly authorId?: string
   readonly ticker?: string
   readonly marketId?: string
+  readonly includeReplies?: boolean
 }
+
+export type PostMarketBadge =
+  | {
+      readonly kind: "prediction"
+      readonly marketId: string
+      readonly question: string
+      readonly yesPriceBps: number
+      readonly closesAt: number
+    }
+  | {
+      readonly kind: "perp"
+      readonly ticker: string
+      readonly name: string
+      readonly markPriceCents: number
+    }
 
 export interface PostQuotePreview {
   readonly id: string
@@ -88,11 +114,13 @@ export interface PostView {
   readonly parodyLabel: string | null
   readonly content: string
   readonly replyToPostId: string | null
+  readonly replyToHandle: string | null
   readonly quotePostId: string | null
   readonly quotePost: PostQuotePreview | null
   readonly viaClientName: string | null
   readonly marketId: string | null
   readonly ticker: string | null
+  readonly marketBadge: PostMarketBadge | null
   readonly cashtags: ReadonlyArray<string>
   readonly hashtags: ReadonlyArray<string>
   readonly showTradeEmbed: boolean
@@ -113,6 +141,7 @@ export interface FeedPage {
 export interface PostThreadView {
   readonly post: PostView
   readonly parentPost: PostView | null
+  readonly ancestors: ReadonlyArray<PostView>
   readonly replies: ReadonlyArray<PostView>
 }
 
@@ -165,6 +194,7 @@ export interface SearchActorResult {
   readonly name: string
   readonly tier: string
   readonly description: string
+  readonly avatarUrl: string | null
   readonly isParody: boolean
 }
 
@@ -174,6 +204,7 @@ export interface SearchOrganizationResult {
   readonly ticker: string | null
   readonly orgType: string
   readonly description: string
+  readonly avatarUrl: string | null
   readonly initialPriceCents: number | null
 }
 
@@ -200,6 +231,8 @@ export interface ArticleView {
   readonly body: string
   readonly authorOrgId: string
   readonly authorOrgName: string
+  readonly authorOrgAvatarUrl: string | null
+  readonly imageUrl: string | null
   readonly relatedMarketId: string | null
   readonly isResolutionProof: boolean
   readonly publishedAt: number
@@ -306,7 +339,7 @@ function projectRowToPreview(
     authorDisplayName: author?.displayName ?? authorId,
     avatarUrl: author?.avatarUrl ?? null,
     isParody: projected.isNpcParody,
-    parodyLabel: projected.isNpcParody ? "AI parody" : null,
+    parodyLabel: null,
     viaClientName: projected.viaClientName === "" ? null : projected.viaClientName,
     content,
     marketId: projected.showTradeEmbed ? rawMarketId : null,
@@ -336,7 +369,23 @@ effect function hydratePostRowsTx(
         )
       : try tx.query("SELECT * FROM feed_posts WHERE id = ANY($1) AND deleted_at IS NULL", [quoteIds])
   }
-  const allRows = [...rows, ...quoteRows]
+  const replyParentIds = [...new Set(rows.map((r) => toText(r.reply_to_post_id)).filter((id): id is string => id !== undefined && id !== ""))]
+  const replyParentAuthorByPostId = new Map<string, { readonly authorId: string; readonly authorKind: PostAuthorKind }>()
+  let replyParentRows: ReadonlyArray<Row> = []
+  if (replyParentIds.length > 0) {
+    replyParentRows = try tx.query(
+      "SELECT id, author_id, author_kind FROM feed_posts WHERE id = ANY($1)",
+      [replyParentIds]
+    )
+    for (const parentRow of replyParentRows) {
+      const pid = toText(parentRow.id)
+      const pAuthorId = toText(parentRow.author_id)
+      if (pid !== undefined && pAuthorId !== undefined) {
+        replyParentAuthorByPostId.set(pid, { authorId: pAuthorId, authorKind: toAuthorKind(parentRow.author_kind) })
+      }
+    }
+  }
+  const allRows = [...rows, ...quoteRows, ...replyParentRows]
   const authors = try loadSubjectProfilesMapTx(
     tx,
     allRows.map((r) => ({ id: toText(r.author_id) ?? "", kind: toAuthorKind(r.author_kind) }))
@@ -345,6 +394,53 @@ effect function hydratePostRowsTx(
   for (const quoteRow of quoteRows) {
     const preview = projectRowToPreview(quoteRow, authors, mode)
     quoteMap.set(preview.id, preview)
+  }
+  const predictionBadgeMap = new Map<string, PostMarketBadge>()
+  const perpBadgeMap = new Map<string, PostMarketBadge>()
+  if (mode === "game") {
+    const marketIds = [...new Set(rows.map((r) => toText(r.market_id)).filter((id): id is string => id !== undefined && id !== ""))]
+    if (marketIds.length > 0) {
+      const marketRows = try tx.query(
+        "SELECT id, question, yes_shares, no_shares, expires_at FROM feed_prediction_markets WHERE id = ANY($1)",
+        [marketIds]
+      )
+      for (const mRow of marketRows) {
+        const mid = toText(mRow.id) ?? ""
+        if (mid === "") continue
+        const yesShares = safeInt(mRow.yes_shares, 0)
+        const noShares = safeInt(mRow.no_shares, 0)
+        const total = yesShares + noShares
+        const yesPriceBps = total > 0 ? Math.floor((noShares * 10_000) / total) : 5_000
+        predictionBadgeMap.set(mid, {
+          kind: "prediction",
+          marketId: mid,
+          question: toText(mRow.question) ?? "",
+          yesPriceBps,
+          closesAt: safeInt(mRow.expires_at, 0)
+        })
+      }
+    }
+    const tickers = [...new Set(rows.map((r) => toText(r.ticker)?.trim().toUpperCase()).filter((t): t is string => t !== undefined && t !== ""))]
+    if (tickers.length > 0) {
+      const perpRows = try tx.query(
+        `SELECT m.ticker, m.mark_price_cents, COALESCE(o.name, m.ticker) AS org_name
+         FROM feed_perp_markets m
+         LEFT JOIN feed_spot_pools p ON p.ticker = m.ticker
+         LEFT JOIN feed_organizations o ON o.id = p.organization_id
+         WHERE upper(m.ticker) = ANY($1)`,
+        [tickers]
+      )
+      for (const pRow of perpRows) {
+        const ticker = (toText(pRow.ticker) ?? "").toUpperCase()
+        if (ticker === "") continue
+        perpBadgeMap.set(ticker, {
+          kind: "perp",
+          ticker,
+          name: toText(pRow.org_name) ?? ticker,
+          markPriceCents: safeInt(pRow.mark_price_cents, 0)
+        })
+      }
+    }
   }
   const postIds = rows.map((r) => toText(r.id) ?? "").filter(Boolean)
   const replyCountMap = new Map<string, number>()
@@ -386,12 +482,24 @@ effect function hydratePostRowsTx(
   return rows.map((row) => {
     const base = projectRowToPreview(row, authors, mode)
     const replyToPostId = toText(row.reply_to_post_id) ?? null
+    const parentAuthorRef = replyToPostId === null ? undefined : replyParentAuthorByPostId.get(replyToPostId)
+    const parentAuthor = parentAuthorRef === undefined
+      ? undefined
+      : authors.get(buildAuthorMapKey(parentAuthorRef.authorKind, parentAuthorRef.authorId))
+    const replyToHandle = parentAuthor?.handle ?? parentAuthorRef?.authorId ?? null
     const quotePostId = toText(row.quote_post_id) ?? null
+    const marketBadge = mode !== "game"
+      ? null
+      : (base.marketId !== null ? predictionBadgeMap.get(base.marketId) : undefined)
+        ?? (base.ticker !== null ? perpBadgeMap.get(base.ticker.toUpperCase()) : undefined)
+        ?? null
     return {
       ...base,
       replyToPostId,
+      replyToHandle,
       quotePostId,
       quotePost: quotePostId === null ? null : (quoteMap.get(quotePostId) ?? null),
+      marketBadge,
       likeCount: safeInt(row.like_count, 0),
       repostCount: safeInt(row.repost_count, 0),
       replyCount: replyCountMap.get(base.id) ?? 0,
@@ -456,8 +564,18 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
     }
     const authorFilter = normalizeOptionalText(input.authorId)
     if (authorFilter !== null) {
-      params.push(authorFilter)
-      conditions.push(`p.author_id = $${params.length}`)
+      const orgMatch = try tx.query("SELECT 1 FROM feed_organizations WHERE id = $1 LIMIT 1", [authorFilter])
+      if (orgMatch.length > 0) {
+        params.push(authorFilter, `org-${authorFilter}`)
+        conditions.push(`(p.author_id = $${params.length - 1} OR p.author_id = $${params.length})`)
+      } else {
+        params.push(authorFilter)
+        conditions.push(`p.author_id = $${params.length}`)
+      }
+    }
+    const includeReplies = input.includeReplies ?? (authorFilter !== null)
+    if (!includeReplies) {
+      conditions.push("p.reply_to_post_id IS NULL")
     }
     const tickerFilter = normalizeOptionalText(input.ticker)
     if (tickerFilter !== null) {
@@ -529,7 +647,8 @@ effect function checkViewerCanSeeAuthorTx(tx: Tx, viewerId: string, authorId: st
 export effect function getPostThread(
   postId: string,
   viewerId?: string,
-  mode?: SocialPresentationMode
+  mode?: SocialPresentationMode,
+  sort?: PostThreadSort
 ): PostThreadView!(SocialFailure | StoreFailure)!Store {
   if (postId.trim() === "") {
     throw new SocialFailure({ code: "InvalidInput", message: "Post ID is required" })
@@ -548,24 +667,48 @@ export effect function getPostThread(
       try checkViewerCanSeeAuthorTx(tx, viewer, rootAuthorId)
     }
     const visibilitySuffix = viewer === undefined ? "" : ` AND ${viewerAuthorVisibilitySql("$2", "p.author_id")}`
+    const replyOrderBy = sort === "popular"
+      ? "(p.like_count * 2 + p.repost_count * 3 + p.reply_count * 2) DESC, p.created_at DESC, p.id DESC"
+      : sort === "newest"
+        ? "p.created_at DESC, p.id DESC"
+        : "p.created_at ASC, p.id ASC"
     const replyParams: unknown[] = viewer === undefined ? [postId] : [postId, viewer]
     const replyRows = try tx.query(
-      `SELECT p.* FROM feed_posts p WHERE p.reply_to_post_id = $1 AND p.deleted_at IS NULL${visibilitySuffix} ORDER BY p.created_at ASC, p.id ASC`,
+      `SELECT p.* FROM feed_posts p WHERE p.reply_to_post_id = $1 AND p.deleted_at IS NULL${visibilitySuffix} ORDER BY ${replyOrderBy}`,
       replyParams
     )
     const parentId = toText(rootRow.reply_to_post_id) ?? null
-    const parentRows = parentId === null
+    const ancestorVisibility = viewer === undefined ? "" : ` AND ${viewerAuthorVisibilitySql("$4", "p.author_id")}`
+    const ancestorRows = parentId === null
       ? []
       : try tx.query(
-          `SELECT p.* FROM feed_posts p WHERE p.id = $1 AND p.deleted_at IS NULL${visibilitySuffix} LIMIT 1`,
-          viewer === undefined ? [parentId] : [parentId, viewer]
+          `WITH RECURSIVE chain(id, reply_to_post_id, depth, visited) AS (
+             SELECT id, reply_to_post_id, 1, ARRAY[$1::text, id]
+             FROM feed_posts
+             WHERE id = $2 AND id <> $1
+             UNION ALL
+             SELECT p.id, p.reply_to_post_id, c.depth + 1, c.visited || p.id
+             FROM feed_posts p
+             INNER JOIN chain c ON p.id = c.reply_to_post_id
+             WHERE c.reply_to_post_id IS NOT NULL
+               AND c.depth < $3
+               AND NOT (p.id = ANY(c.visited))
+           )
+           SELECT p.*
+           FROM chain c
+           INNER JOIN feed_posts p ON p.id = c.id
+           WHERE p.deleted_at IS NULL${ancestorVisibility}
+           ORDER BY c.depth DESC`,
+          viewer === undefined
+            ? [postId, parentId, MAX_REPLY_ANCESTOR_DEPTH]
+            : [postId, parentId, MAX_REPLY_ANCESTOR_DEPTH, viewer]
         )
-    const allHydrated = try hydratePostRowsTx(tx, [rootRow, ...parentRows, ...replyRows], viewer, effectiveMode)
+    const allHydrated = try hydratePostRowsTx(tx, [rootRow, ...ancestorRows, ...replyRows], viewer, effectiveMode)
     const post = allHydrated[0]!
-    const hasParent = parentRows.length > 0
-    const parentPost = hasParent ? (allHydrated[1] ?? null) : null
-    const replies = allHydrated.slice(hasParent ? 2 : 1)
-    return { post, parentPost, replies }
+    const ancestors = allHydrated.slice(1, 1 + ancestorRows.length)
+    const parentPost = parentId === null ? null : (ancestors.find((a) => a.id === parentId) ?? null)
+    const replies = allHydrated.slice(1 + ancestorRows.length)
+    return { post, parentPost, ancestors, replies }
   })
 }
 
@@ -1061,33 +1204,41 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
       bio: textOrEmpty(row.bio),
       avatarUrl: toText(row.avatar_url) ?? null
     }))
-    const actorWhere = "(username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\')"
+    const actorWhere = "id NOT LIKE 'test-%' AND (username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\')"
     const actorRows = viewerId === undefined
-      ? try tx.query(`SELECT id, username, name, tier, description FROM feed_actors WHERE ${actorWhere} ORDER BY name ASC LIMIT $2`, [likePattern, limit])
-      : try tx.query(`SELECT id, username, name, tier, description FROM feed_actors WHERE ${actorWhere} AND ${viewerAuthorVisibilitySql("$2", "id")} ORDER BY name ASC LIMIT $3`, [likePattern, viewerId, limit])
-    const actors: SearchActorResult[] = actorRows.map((row) => ({
-      id: toText(row.id) ?? "",
-      username: toText(row.username) ?? "",
-      name: toText(row.name) ?? "",
-      tier: toText(row.tier) ?? "",
-      description: toText(row.description) ?? "",
-      isParody: true
-    }))
+      ? try tx.query(`SELECT id, username, name, tier, description, profile_image_url FROM feed_actors WHERE ${actorWhere} ORDER BY name ASC LIMIT $2`, [likePattern, limit])
+      : try tx.query(`SELECT id, username, name, tier, description, profile_image_url FROM feed_actors WHERE ${actorWhere} AND ${viewerAuthorVisibilitySql("$2", "id")} ORDER BY name ASC LIMIT $3`, [likePattern, viewerId, limit])
+    const actors: SearchActorResult[] = actorRows.map((row) => {
+      const id = toText(row.id) ?? ""
+      return {
+        id,
+        username: toText(row.username) ?? "",
+        name: toText(row.name) ?? "",
+        tier: toText(row.tier) ?? "",
+        description: toText(row.description) ?? "",
+        avatarUrl: toText(row.profile_image_url) ?? (id !== "" ? resolveActorAvatarUrl(id) : null),
+        isParody: true
+      }
+    })
     const orgMatch = mode === "social"
       ? "name ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\'"
       : "name ILIKE $1 ESCAPE '\\' OR ticker ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\'"
     const orgRows = try tx.query(
-      `SELECT id, name, ticker, org_type, description, initial_price_cents FROM feed_organizations WHERE ${orgMatch} ORDER BY name ASC LIMIT $2`,
+      `SELECT id, name, ticker, org_type, description, image_url, initial_price_cents FROM feed_organizations WHERE ${orgMatch} ORDER BY name ASC LIMIT $2`,
       [likePattern, limit]
     )
-    const organizations: SearchOrganizationResult[] = orgRows.map((row) => ({
-      id: toText(row.id) ?? "",
-      name: toText(row.name) ?? "",
-      ticker: mode === "social" ? null : (toText(row.ticker) ?? null),
-      orgType: toText(row.org_type) ?? "",
-      description: toText(row.description) ?? "",
-      initialPriceCents: mode === "social" || row.initial_price_cents === null ? null : safeInt(row.initial_price_cents, 0)
-    }))
+    const organizations: SearchOrganizationResult[] = orgRows.map((row) => {
+      const id = toText(row.id) ?? ""
+      return {
+        id,
+        name: toText(row.name) ?? "",
+        ticker: mode === "social" ? null : (toText(row.ticker) ?? null),
+        orgType: toText(row.org_type) ?? "",
+        description: toText(row.description) ?? "",
+        avatarUrl: toText(row.image_url) ?? (id !== "" ? resolveOrgLogoUrl(id) : null),
+        initialPriceCents: mode === "social" || row.initial_price_cents === null ? null : safeInt(row.initial_price_cents, 0)
+      }
+    })
     const cleanedTag = queryText.replace(/^[#$]/, "").toLowerCase()
     const tagCounts = new Map<string, SearchTagResult>()
     for (const post of posts) {
@@ -1114,13 +1265,16 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
 }
 
 function rowToArticle(row: Row, mode: SocialPresentationMode): ArticleView {
+  const authorOrgId = toText(row.author_org_id) ?? ""
   return {
     id: toText(row.id) ?? "",
     title: toText(row.title) ?? "",
     summary: toText(row.summary) ?? "",
     body: toText(row.body) ?? "",
-    authorOrgId: toText(row.author_org_id) ?? "",
-    authorOrgName: toText(row.author_org_name) ?? (toText(row.author_org_id) ?? ""),
+    authorOrgId,
+    authorOrgName: toText(row.author_org_name) ?? authorOrgId,
+    authorOrgAvatarUrl: toText(row.author_org_image_url) ?? (authorOrgId !== "" ? resolveOrgLogoUrl(authorOrgId) : null),
+    imageUrl: toText(row.image_url) ?? null,
     relatedMarketId: mode === "social" ? null : (toText(row.related_market_id) ?? null),
     isResolutionProof: Boolean(row.is_resolution_proof),
     publishedAt: safeInt(row.published_at, 0)
@@ -1128,7 +1282,7 @@ function rowToArticle(row: Row, mode: SocialPresentationMode): ArticleView {
 }
 
 const ARTICLE_BASE_SQL =
-  "SELECT a.id, a.title, a.summary, a.body, a.author_org_id, o.name AS author_org_name, a.related_market_id, a.is_resolution_proof, a.published_at FROM feed_articles a LEFT JOIN feed_organizations o ON o.id = a.author_org_id LEFT JOIN feed_prediction_markets m ON m.id = a.related_market_id"
+  "SELECT a.id, a.title, a.summary, a.body, a.author_org_id, o.name AS author_org_name, o.image_url AS author_org_image_url, a.image_url, a.related_market_id, a.is_resolution_proof, a.published_at FROM feed_articles a LEFT JOIN feed_organizations o ON o.id = a.author_org_id LEFT JOIN feed_prediction_markets m ON m.id = a.related_market_id"
 
 const ARTICLE_VISIBLE_SQL = "(a.is_resolution_proof = false OR a.related_market_id IS NULL OR m.status = 'resolved')"
 

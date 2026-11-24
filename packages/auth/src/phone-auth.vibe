@@ -1,6 +1,15 @@
 // spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code"; spec/auth/phone.md, "Codes expire in 10 minutes, lock after 5 wrong attempts, and verify without leaking secrets"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Onboarding requires username, 18+ self-attestation, and Terms, and issues 100 pts once per verified phone"; spec/auth/phone.md, "Changing phone requires verifying the old phone or support recovery and an unused new number"; spec/auth/phone.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the phone hash for 30 days"; spec/auth/phone.md, "Username and password sign-in is admitted solely when `isReviewer` is true (D-29)"
 import type { CloudEnvironment } from "@elizaos/cloud/profile"
-import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+import {
+  Store,
+  type StoreFailure,
+  resolveUserPresetAvatarUrl,
+  resolveUserPresetBannerUrl,
+  toInt,
+  toText,
+  type Row,
+  type Tx
+} from "@repo/db"
 import { HttpClientRequest } from "effect/http"
 import { SignJWT, jwtVerify } from "jose"
 import {
@@ -74,6 +83,7 @@ export interface AccountProfile {
   readonly displayName: string
   readonly bio: string
   readonly avatarUrl: string | null
+  readonly bannerUrl: string | null
   readonly phoneHash: string | null
   readonly phoneLast2: string | null
   readonly uiMode: PlayMode
@@ -94,6 +104,7 @@ export interface SessionIdentity extends Pick<
   | "displayName"
   | "bio"
   | "avatarUrl"
+  | "bannerUrl"
   | "phoneHash"
   | "phoneLast2"
   | "uiMode"
@@ -388,6 +399,7 @@ function rowToAccountProfile(row: Row): AccountProfile {
     displayName: toText(row.display_name) ?? "",
     bio: toText(row.bio) ?? "",
     avatarUrl: toText(row.avatar_url) ?? null,
+    bannerUrl: toText(row.banner_url) ?? null,
     phoneHash: toText(row.phone_hash) ?? null,
     phoneLast2: toText(row.phone_last2) ?? null,
     uiMode,
@@ -1080,12 +1092,14 @@ export effect function completePhoneOnboarding(input: {
       stateJson: cloudAccountState,
       now
     })
+    const defaultAvatarUrl = resolveUserPresetAvatarUrl(accountId)
+    const defaultBannerUrl = resolveUserPresetBannerUrl(accountId)
     const insertedRows = try tx.query(
       `INSERT INTO feed_accounts
-         (account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $7, 'game', $8, $8, 0, 0, false, false, NULL, $7, $7)
+         (account_id, handle, display_name, bio, avatar_url, banner_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, 'game', $10, $10, 0, 0, false, false, NULL, $9, $9)
        RETURNING *`,
-      [accountId, username, displayName, bio, claims.phoneHash, claims.last2, now, STARTING_GRANT_CENTS]
+      [accountId, username, displayName, bio, defaultAvatarUrl, defaultBannerUrl, claims.phoneHash, claims.last2, now, STARTING_GRANT_CENTS]
     )
     try tx.query(
       `INSERT INTO feed_point_ledger
@@ -1271,6 +1285,7 @@ export effect function authenticateSessionCookie(
       displayName: profile.displayName,
       bio: profile.bio,
       avatarUrl: profile.avatarUrl,
+      bannerUrl: profile.bannerUrl,
       phoneHash: profile.phoneHash,
       phoneLast2: profile.phoneLast2,
       uiMode: profile.uiMode,
@@ -1339,7 +1354,7 @@ export effect function deleteAccountSelfServe(input: {
     try revokeSessionsAndBumpEpochInTx(tx, input.accountId, toInt(row.sessions_revoked_before), now, true)
     try tx.query(
       `UPDATE feed_accounts
-       SET handle = $2, display_name = 'Deleted User', bio = '', avatar_url = NULL,
+       SET handle = $2, display_name = 'Deleted User', bio = '', avatar_url = NULL, banner_url = NULL,
            phone_hash = NULL, phone_last2 = NULL, phone_verified_at = NULL, updated_at = $3
        WHERE account_id = $1`,
       [input.accountId, `deleted_${input.accountId}`, now]

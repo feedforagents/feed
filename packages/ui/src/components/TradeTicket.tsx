@@ -1,5 +1,4 @@
 import { type ComponentProps, type FormEvent, useId, useState } from "react";
-import { cn } from "../lib/cn.ts";
 import { Alert } from "./Alert.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
@@ -297,6 +296,7 @@ export function TradeTicket({
         <CardFooter className="flex-col items-stretch gap-2">
           <Button
             type="submit"
+            shape="pill"
             variant={marketKind === "perp" && perpSide === "Short" ? "destructive" : "primary"}
             loading={loading}
             disabled={blocked || !validAmount}
@@ -304,7 +304,6 @@ export function TradeTicket({
           >
             {marketKind === "prediction" ? `${action} ${predSide}` : `Open ${perpSide} ${leverage}x`}
           </Button>
-          <p className={cn("text-center text-xs text-muted-foreground")}>Virtual points — no cash value</p>
         </CardFooter>
       </Card>
     </form>

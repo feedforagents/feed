@@ -1,5 +1,5 @@
 // spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation"; spec/shared/time.md, "Funding periods partition UTC time into non-negative 8-hour windows"; spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"
-import { Store, type StoreFailure, toInt, type Row, type Tx } from "@repo/db"
+import { Store, type StoreFailure, resolveOrgLogoUrl, toInt, toText, type Row, type Tx } from "@repo/db"
 import { BPS_DENOMINATOR, canonicalTradingFee, ceilDiv, clampMin0, minInt } from "../gen/shared__money.effect.vibe"
 import { fundingPeriodFromSeconds } from "../gen/shared__time.effect.vibe"
 import {
@@ -51,8 +51,11 @@ export interface PerpMarketView {
   readonly ticker: string
   readonly organizationId: string
   readonly name: string
+  readonly orgImageUrl: string | null
   readonly indexPriceCents: number
   readonly markPriceCents: number
+  readonly change24hPct: number
+  readonly volume24hCents: number
   readonly longOiCents: number
   readonly shortOiCents: number
   readonly openInterestCents: number
@@ -267,15 +270,31 @@ export function computeLiquidationPriceCents(pos: PerpPosition): number {
   return Math.max(1, raw)
 }
 
-function toPerpMarketView(row: Row): PerpMarketView {
+interface Perp24hStats {
+  readonly volume24hCents: number
+  readonly referencePriceCents: number | null
+}
+
+function toPerpMarketView(row: Row, stats?: Perp24hStats): PerpMarketView {
   const longOi = toInt(row.long_oi_cents)
   const shortOi = toInt(row.short_oi_cents)
+  const ticker = requiredText(row.ticker)
+  const organizationId = requiredText(row.organization_id)
+  const markPriceCents = toInt(row.mark_price_cents)
+  const initialPriceCents = optionalInt(row.initial_price_cents)
+  const refPrice = stats?.referencePriceCents ?? initialPriceCents ?? markPriceCents
+  const change24hPct = refPrice > 0
+    ? Math.round(((markPriceCents - refPrice) / refPrice) * 10_000) / 100
+    : 0
   return {
-    ticker: requiredText(row.ticker),
-    organizationId: requiredText(row.organization_id),
-    name: requiredText(row.org_name, requiredText(row.ticker)),
+    ticker,
+    organizationId,
+    name: requiredText(row.org_name, ticker),
+    orgImageUrl: toText(row.org_image_url) ?? (organizationId !== "" ? resolveOrgLogoUrl(organizationId) : null),
     indexPriceCents: toInt(row.index_price_cents),
-    markPriceCents: toInt(row.mark_price_cents),
+    markPriceCents,
+    change24hPct,
+    volume24hCents: stats?.volume24hCents ?? 0,
     longOiCents: longOi,
     shortOiCents: shortOi,
     openInterestCents: longOi + shortOi,
@@ -340,7 +359,9 @@ const perpMarketSelectSql = `
     COALESCE(p.base_reserve, 0) AS base_reserve,
     COALESCE(p.quote_reserve_cents, 0) AS quote_reserve_cents,
     COALESCE(o.name, m.ticker) AS org_name,
-    COALESCE(tv.volume_cents, 0) AS volume_cents
+    COALESCE(tv.volume_cents, 0) AS volume_cents,
+    o.image_url AS org_image_url,
+    o.initial_price_cents AS initial_price_cents
   FROM feed_perp_markets m
   LEFT JOIN feed_spot_pools p ON p.ticker = m.ticker
   LEFT JOIN feed_organizations o ON o.id = p.organization_id
@@ -352,22 +373,83 @@ const perpMarketSelectSql = `
   ) tv ON tv.market_ref = m.ticker
 `
 
+effect function loadPerp24hStatsTx(
+  tx: Tx,
+  tickers: ReadonlyArray<string>,
+  nowMs: number
+): Map<string, Perp24hStats>!StoreFailure {
+  const stats = new Map<string, Perp24hStats>()
+  if (tickers.length === 0) return stats
+  const cutoffMs = nowMs - 86_400_000
+  const volRows = try tx.query(
+    `SELECT market_ref AS ticker, COALESCE(SUM(notional_cents), 0) AS volume_24h_cents
+     FROM feed_trades
+     WHERE market_kind IN ('perp', 'spot') AND market_ref = ANY($1) AND created_at >= $2
+     GROUP BY market_ref`,
+    [tickers, cutoffMs]
+  )
+  const volumeByTicker = new Map<string, number>()
+  for (const row of volRows) {
+    const t = requiredText(row.ticker)
+    if (t !== "") volumeByTicker.set(t, toInt(row.volume_24h_cents))
+  }
+  const priorRows = try tx.query(
+    `SELECT DISTINCT ON (market_ref) market_ref AS ticker, price_cents
+     FROM feed_trades
+     WHERE market_kind IN ('perp', 'spot') AND market_ref = ANY($1) AND created_at < $2 AND price_cents > 0
+     ORDER BY market_ref, created_at DESC, id DESC`,
+    [tickers, cutoffMs]
+  )
+  const refPriceByTicker = new Map<string, number>()
+  for (const row of priorRows) {
+    const t = requiredText(row.ticker)
+    const price = toInt(row.price_cents)
+    if (t !== "" && price > 0) refPriceByTicker.set(t, price)
+  }
+  const windowFirstRows = try tx.query(
+    `SELECT DISTINCT ON (market_ref) market_ref AS ticker, price_cents
+     FROM feed_trades
+     WHERE market_kind IN ('perp', 'spot') AND market_ref = ANY($1) AND created_at >= $2 AND price_cents > 0
+     ORDER BY market_ref, created_at ASC, id ASC`,
+    [tickers, cutoffMs]
+  )
+  for (const row of windowFirstRows) {
+    const t = requiredText(row.ticker)
+    const price = toInt(row.price_cents)
+    if (t !== "" && price > 0 && !refPriceByTicker.has(t)) {
+      refPriceByTicker.set(t, price)
+    }
+  }
+  for (const t of tickers) {
+    stats.set(t, {
+      volume24hCents: volumeByTicker.get(t) ?? 0,
+      referencePriceCents: refPriceByTicker.get(t) ?? null
+    })
+  }
+  return stats
+}
 export effect function listPerpMarkets(): ReadonlyArray<PerpMarketView>!StoreFailure!Store {
   const store = try Store
+  const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(`${perpMarketSelectSql} ORDER BY m.ticker ASC`)
-    return rows.map(toPerpMarketView)
+    const tickers = rows.map((r) => requiredText(r.ticker)).filter(Boolean)
+    const stats = try loadPerp24hStatsTx(tx, tickers, now)
+    return rows.map((row) => toPerpMarketView(row, stats.get(requiredText(row.ticker))))
   })
 }
 
 export effect function getPerpMarket(ticker: string): PerpMarketView!(MarketFailure | StoreFailure)!Store {
   const store = try Store
+  const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(`${perpMarketSelectSql} WHERE m.ticker = $1`, [ticker])
     if (rows.length === 0) {
       throw marketFail("MARKET_NOT_FOUND", `Perp market not found: ${ticker}`)
     }
-    return toPerpMarketView(rows[0]!)
+    const row = rows[0]!
+    const stats = try loadPerp24hStatsTx(tx, [requiredText(row.ticker)], now)
+    return toPerpMarketView(row, stats.get(requiredText(row.ticker)))
   })
 }
 
