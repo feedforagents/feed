@@ -454,9 +454,7 @@ function ActiveRouteScreen({ mode }: { readonly mode: UiMode }) {
       );
     case "Markets":
       if (mode === "SocialMode") return <HomeScreen mode={mode} />;
-      return s.walletView ? <WalletScreen /> : <MarketsScreen />;
-    case "Leaderboard":
-      return mode === "SocialMode" ? <HomeScreen mode={mode} /> : <LeaderboardScreen />;
+      return s.walletView ? <WalletScreen /> : <MarketsScreen key={s.selectedMarketKind} />;
     case "Chats":
       return <ChatsScreen />;
     case "Notifications":
