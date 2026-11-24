@@ -585,3 +585,48 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+'createUserGroupChat leaves blocked members out instead of failing the whole group (spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave")',
+() => withSocialWorld(effect {
+try seedAccount("alice", "alice", "Alice Player", 10_000, "game")
+try seedAccount("bob", "bob", "Bob Trader", 10_000, "game")
+try seedAccount("carol", "carol", "Carol Analyst", 10_000, "game")
+try seedAccount("dave", "dave", "Dave Analyst", 10_000, "game")
+
+const blockedBob = try blockAccount("alice", "bob")
+const blockedByCarol = try blockAccount("carol", "alice")
+
+const group = try createUserGroupChat("alice", "Mixed Group", ["bob", "dave"])
+const group2 = try createUserGroupChat("alice", "Second Group", ["carol", "dave"])
+const groupAllBlocked = try createUserGroupChat("alice", "Solo Group", ["bob", "carol"])
+
+const blockedDmCode = try expectSocialCode(createDirectChat("alice", "bob"))
+
+const unblockedBob = try unblockAccount("alice", "bob")
+const unblockedByCarol = try unblockAccount("carol", "alice")
+const groupAfterUnblock = try createUserGroupChat("alice", "Reunited Group", ["bob", "carol", "dave"])
+
+try check(() => assert.deepStrictEqual({
+blocked: [blockedBob.blocked, blockedByCarol.blocked],
+mixedMembers: group.members.map((m) => m.memberId).sort(),
+mixedMemberCount: group.memberCount,
+secondMembers: group2.members.map((m) => m.memberId).sort(),
+soloMembers: groupAllBlocked.members.map((m) => m.memberId).sort(),
+soloMemberCount: groupAllBlocked.memberCount,
+blockedDmCode,
+cleared: [unblockedBob.blocked, unblockedByCarol.blocked],
+reunitedMembers: groupAfterUnblock.members.map((m) => m.memberId).sort()
+    }, {
+blocked: [true, true],
+mixedMembers: ["alice", "dave"],
+mixedMemberCount: 2,
+secondMembers: ["alice", "dave"],
+soloMembers: ["alice"],
+soloMemberCount: 1,
+blockedDmCode: "Blocked",
+cleared: [false, false],
+reunitedMembers: ["alice", "bob", "carol", "dave"]
+    }))
+  })
+)
