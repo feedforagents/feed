@@ -1,11 +1,12 @@
 import { expect, fn, screen, userEvent } from "storybook/test";
 import type { ComponentMeta } from "vibestack/stories";
+import { Button } from "./Button.tsx";
 import type { JoinSheetProps } from "./JoinSheet.tsx";
 
 const onFillDevCode = fn(() => "654321");
 
 export const meta: ComponentMeta<JoinSheetProps> = {
-  args: { defaultOpen: false, pendingActionLabel: "like this post" },
+  args: { defaultOpen: false, trigger: <Button>Join Feed</Button>, pendingActionLabel: "like this post" },
   examples: {
     Open: { defaultOpen: true },
     AgentTab: { defaultOpen: true, activeTab: "agent" },

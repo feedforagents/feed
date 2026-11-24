@@ -2,15 +2,15 @@
 
 One electric-blue (`#0066FF`-inspired) accent on crisp X-style light and dark neutrals. Color carries meaning; position and weight carry hierarchy.
 
-- **Surfaces.** `background` is the page, `card` a raised panel, `popover` anything floating. `muted` and
-  `secondary` are quiet fills, `accent` the hover and selection fill.
+- **Surfaces.** `background` is the page (pure white in light mode, pure OLED black in dark mode), `card` a raised panel, `popover` anything floating, `scrim` a pure-black modal backdrop. `muted` and `secondary` are quiet fills, `accent` the neutral hover and selection fill.
 - **Text.** `foreground` by default, `muted-foreground` for what matters less. Every `x-foreground` is
   the text color on `x`, and each pair meets WCAG AA in both themes.
 - **Edges.** `border` divides and may be faint. `input` is the edge of a control (a field, a checkbox, an
   outlined button): it and the focus `ring` stand at least 3:1 off `background` and `card` in both
   themes (WCAG 1.4.11).
-- **Meaning.** `primary` is the one accent: the main action, links, the focus `ring`. `destructive`,
-  `ok`, `warn` and `info` are states, never decoration.
+- **Meaning.** `primary` is the text/link accent and focus `ring`; `brand` (`#0066FF`) with `brand-foreground`
+  fills primary CTAs and active indicators. `destructive`, `danger-solid`, `ok`, `warn` and `info` are
+  states, never decoration.
 - **Shape.** One `radius`; `rounded-sm`, `-md`, `-lg` and `-xl` derive from it. Three shadows, by elevation.
 - **Motion.** `fast` for hover and press, `base` for most changes, `slow` for entering and leaving.
 - **Dark.** Follows the system; a `.dark` or `.light` class on an ancestor overrides it.
@@ -36,28 +36,33 @@ this prose into tokens. To change the design, describe it, and have the change w
 <!-- tokens:start -->
 | Color | Light | Dark |
 | --- | --- | --- |
-| `background` | oklch(0.99 0.002 260) | oklch(0.145 0.006 260) |
+| `background` | oklch(1 0 0) | oklch(0 0 0) |
 | `foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
-| `card` | oklch(1 0 0) | oklch(0.185 0.008 260) |
+| `card` | oklch(0.975 0.002 240) | oklch(0.205 0.006 260) |
 | `card-foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
-| `popover` | oklch(1 0 0) | oklch(0.195 0.009 260) |
+| `popover` | oklch(1 0 0) | oklch(0.14 0.004 260) |
 | `popover-foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
 | `primary` | oklch(0.495 0.226 262) | oklch(0.68 0.168 262) |
 | `primary-foreground` | oklch(1 0 0) | oklch(0.145 0.006 260) |
 | `secondary` | oklch(0.955 0.006 255) | oklch(0.235 0.012 260) |
 | `secondary-foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
-| `muted` | oklch(0.955 0.006 255) | oklch(0.235 0.012 260) |
-| `muted-foreground` | oklch(0.48 0.018 255) | oklch(0.72 0.015 260) |
-| `accent` | oklch(0.948 0.022 260) | oklch(0.26 0.065 262) |
+| `muted` | oklch(0.955 0.006 255) | oklch(0.2 0.006 260) |
+| `muted-foreground` | oklch(0.48 0.018 255) | oklch(0.64 0.01 255) |
+| `accent` | oklch(0.955 0.004 250) | oklch(0.22 0.006 260) |
 | `accent-foreground` | oklch(0.19 0.012 250) | oklch(0.95 0.005 260) |
 | `destructive` | oklch(0.545 0.215 26) | oklch(0.7 0.175 24) |
 | `destructive-foreground` | oklch(1 0 0) | oklch(0.145 0.006 260) |
-| `border` | oklch(0.908 0.007 255) | oklch(0.275 0.012 260) |
+| `border` | oklch(0.908 0.007 255) | oklch(0.32 0.008 250) |
 | `input` | oklch(0.62 0.014 255) | oklch(0.515 0.015 260) |
 | `ring` | oklch(0.495 0.226 262) | oklch(0.68 0.168 262) |
 | `ok` | oklch(0.52 0.125 155) | oklch(0.78 0.165 155) |
 | `warn` | oklch(0.545 0.134 55) | oklch(0.82 0.155 78) |
 | `info` | oklch(0.52 0.11 235) | oklch(0.78 0.112 232) |
+| `brand` | oklch(0.562 0.244 261.3) | oklch(0.562 0.244 261.3) |
+| `brand-foreground` | oklch(1 0 0) | oklch(1 0 0) |
+| `scrim` | oklch(0 0 0) | oklch(0 0 0) |
+| `danger-solid` | oklch(0.57 0.23 26) | oklch(0.57 0.23 26) |
+| `danger-solid-foreground` | oklch(1 0 0) | oklch(1 0 0) |
 
 | Token | Value |
 | --- | --- |

@@ -1,5 +1,4 @@
 import { type ComponentProps, type FormEvent, useId, useState } from "react";
-import { cn } from "../lib/cn.ts";
 import { formatPts } from "../lib/hosts.ts";
 import { Alert } from "./Alert.tsx";
 import { Badge } from "./Badge.tsx";
@@ -297,7 +296,7 @@ function TradeTicketSummary({
   );
 }
 
-/** Order ticket for prediction YES/NO shares and 1x-20x perpetuals with mandatory virtual-points disclosure. */
+/** Order ticket for prediction YES/NO shares and 1x-20x perpetuals with cent-share precision and perp previews. */
 export function TradeTicket({
   marketKind,
   marketTitle,
@@ -547,6 +546,7 @@ export function TradeTicket({
         <CardFooter className="flex-col items-stretch gap-2">
           <Button
             type="submit"
+            shape="pill"
             variant={marketKind === "perp" && perpSide === "Short" ? "destructive" : "primary"}
             loading={loading}
             disabled={blocked || !validAmount}
@@ -554,7 +554,6 @@ export function TradeTicket({
           >
             {marketKind === "prediction" ? `${action} ${predSide}` : perpSubmitLabel}
           </Button>
-          <p className={cn("text-center text-xs text-muted-foreground")}>Virtual points — no cash value</p>
         </CardFooter>
       </Card>
     </form>

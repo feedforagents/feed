@@ -1,11 +1,14 @@
 import type { ComponentProps } from "react";
+import { Bot } from "lucide-react";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import { formatPts } from "../lib/hosts.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
+import { RankBadge, RankNumber } from "./RankBadge.tsx";
 import { SegmentedControl } from "./SegmentedControl.tsx";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "./Table.tsx";
+import { VerifiedBadge } from "./VerifiedBadge.tsx";
 
 export type LeaderboardScope = "players" | "characters";
 
@@ -30,10 +33,18 @@ export interface LeaderboardEntry {
   netProfitPts: number;
   /** Return on fixed starting capital percentage (e.g. `12.5` for `+12.5%`). */
   returnPct?: number;
+  /** Optional return on investment percentage alias. */
+  roiPct?: number;
+  /** Optional total account equity in `pts`. */
+  equityPts?: number;
   /** Win rate percentage (`0..100`). */
   winRatePct: number;
+  /** Optional total closed trade count. */
+  tradeCount?: number;
   /** Total traded volume in `pts`. */
   volumePts: number;
+  /** True when the current viewer already follows this trader. */
+  isFollowing?: boolean;
 }
 
 export type LeaderboardTableProps = Omit<ComponentProps<"div">, "children"> & {
@@ -51,12 +62,10 @@ export type LeaderboardTableProps = Omit<ComponentProps<"div">, "children"> & {
   sortBy?: LeaderboardSortColumn;
   /** Sort direction for the active column. */
   sortDir?: "ascending" | "descending";
-  /** Invoked when a sortable column header is clicked. */
-  onSort?: (column: LeaderboardSortColumn) => void;
-  /** Invoked when a trader row button is clicked. */
-  onSelectTrader?: (accountId: string) => void;
   /** Account ID of the signed-in user to highlight in the standings. */
   currentUserId?: string;
+  /** Alias for `currentUserId` highlighting the signed-in viewer with a `YOU` badge. */
+  viewerAccountId?: string;
   /** Signed-in user's standing shown in a pinned bar when outside the current page. */
   currentUserRow?: LeaderboardEntry | null;
   /** Navigates to the page containing the signed-in user's rank. */
@@ -69,6 +78,12 @@ export type LeaderboardTableProps = Omit<ComponentProps<"div">, "children"> & {
   totalCount?: number;
   /** Invoked when navigating to another page. */
   onPageChange?: (page: number) => void;
+  /** Invoked when a sortable column header is clicked. */
+  onSort?: (column: LeaderboardSortColumn) => void;
+  /** Invoked when a trader row button is clicked. */
+  onSelectTrader?: (accountId: string) => void;
+  /** Invoked when Follow/Following is clicked on a row. */
+  onFollow?: (accountId: string) => void;
   /** Disables row, board, sort, and pagination interactions. */
   disabled?: boolean;
 };
@@ -93,7 +108,42 @@ const formatReturnPct = (value: number): string => {
   return `${prefix}${normalized.toFixed(1)}%`;
 };
 
-/** Net-profit and ROI standings table with Players/Characters scope tabs, metric sorting, pagination, and current-user rank highlighting. */
+function PinnedCurrentUserBar({
+  row,
+  disabled,
+  onJumpToCurrentUser,
+}: {
+  readonly row: LeaderboardEntry;
+  readonly disabled: boolean;
+  readonly onJumpToCurrentUser?: () => void;
+}) {
+  const roi = row.returnPct ?? row.roiPct;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-brand/5 px-4 py-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <RankNumber rank={row.rank} size="sm" />
+        <span className="font-semibold text-foreground">{row.displayName}</span>
+        <span className="text-muted-foreground">@{row.handle}</span>
+        <Badge variant="info">YOU</Badge>
+        <span className={cn("font-mono font-semibold tabular-nums", row.netProfitPts >= 0 ? "text-ok" : "text-destructive")}>
+          {formatPts(row.netProfitPts, true)}
+        </span>
+        {roi !== undefined ? (
+          <span className={cn("font-mono tabular-nums", roi >= 0 ? "text-ok" : "text-destructive")}>
+            {formatReturnPct(roi)}
+          </span>
+        ) : null}
+      </div>
+      {onJumpToCurrentUser ? (
+        <Button type="button" variant="outline" size="sm" shape="pill" disabled={disabled} onClick={() => !disabled && onJumpToCurrentUser()}>
+          Jump to my rank
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/** Net-profit and ROI leaderboard table with Top-3 rank badges, Players/Characters scope tabs, metric sorting, pagination, and current-user rank highlighting. */
 export function LeaderboardTable({
   rows,
   scope = "players",
@@ -102,15 +152,17 @@ export function LeaderboardTable({
   onMetricChange,
   sortBy,
   sortDir = "descending",
-  onSort,
-  onSelectTrader,
   currentUserId,
+  viewerAccountId,
   currentUserRow,
   onJumpToCurrentUser,
   page = 1,
   totalPages,
   totalCount,
   onPageChange,
+  onSort,
+  onSelectTrader,
+  onFollow,
   onClick,
   disabled = false,
   className,
@@ -126,17 +178,21 @@ export function LeaderboardTable({
     onSort?.(col);
   };
 
-  const highlightId = currentUserId ?? currentUserRow?.accountId;
+  const highlightId = currentUserId ?? viewerAccountId ?? currentUserRow?.accountId;
   const currentUserVisible = Boolean(highlightId && rows.some((row) => row.accountId === highlightId));
   const showPinnedCurrentUser = Boolean(currentUserRow && !currentUserVisible);
   const currentPage = Math.max(1, page);
   const showPagination = Boolean(onPageChange && totalPages !== undefined && totalPages > 1);
+  const showEquity = rows.some((row) => row.equityPts !== undefined);
+  const showTrades = rows.some((row) => row.tradeCount !== undefined);
+  const showFollow = Boolean(onFollow);
+  const colSpan = 6 + (showEquity ? 1 : 0) + (showTrades ? 1 : 0) + (showFollow ? 1 : 0);
 
   return (
     <div
       aria-disabled={disabled || undefined}
       onClick={disabled ? undefined : onClick}
-      className={cn("overflow-hidden rounded-lg border border-border bg-card text-card-foreground", className)}
+      className={cn("overflow-hidden rounded-xl border border-border bg-background text-foreground", className)}
       {...props}
     >
       {onScopeChange ? (
@@ -162,34 +218,14 @@ export function LeaderboardTable({
       ) : null}
 
       {showPinnedCurrentUser && currentUserRow ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-accent/40 px-4 py-2 text-xs">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono font-semibold text-foreground tabular-nums">#{currentUserRow.rank}</span>
-            <span className="font-medium text-foreground">{currentUserRow.displayName}</span>
-            <span className="text-muted-foreground">@{currentUserRow.handle}</span>
-            <Badge variant="secondary">You</Badge>
-            <span className={cn("font-mono font-semibold tabular-nums", currentUserRow.netProfitPts >= 0 ? "text-ok" : "text-destructive")}>
-              {formatPts(currentUserRow.netProfitPts, true)}
-            </span>
-            {currentUserRow.returnPct !== undefined ? (
-              <span className={cn("font-mono tabular-nums", currentUserRow.returnPct >= 0 ? "text-ok" : "text-destructive")}>
-                {formatReturnPct(currentUserRow.returnPct)}
-              </span>
-            ) : null}
-          </div>
-          {onJumpToCurrentUser ? (
-            <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => !disabled && onJumpToCurrentUser()}>
-              Jump to my rank
-            </Button>
-          ) : null}
-        </div>
+        <PinnedCurrentUserBar row={currentUserRow} disabled={disabled} onJumpToCurrentUser={onJumpToCurrentUser} />
       ) : null}
 
       <Table label="Net profit leaderboard">
         <TableCaption visuallyHidden>Standings ranked by net trading profit and return on fixed virtual starting capital</TableCaption>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-16 text-right" sort={dirFor("rank")} onSort={canSortColumn("rank") && !disabled ? () => handleSort("rank") : undefined}>
+            <TableHead className="w-20" sort={dirFor("rank")} onSort={canSortColumn("rank") && !disabled ? () => handleSort("rank") : undefined}>
               Rank
             </TableHead>
             <TableHead>Trader</TableHead>
@@ -199,40 +235,53 @@ export function LeaderboardTable({
             <TableHead className="text-right" sort={dirFor("returnPct")} onSort={canSortColumn("returnPct") && !disabled ? () => handleSort("returnPct") : undefined}>
               ROI %
             </TableHead>
+            {showEquity ? <TableHead className="text-right">Equity</TableHead> : null}
             <TableHead className="text-right" sort={dirFor("winRate")} onSort={canSortColumn("winRate") && !disabled ? () => handleSort("winRate") : undefined}>
               Win Rate
             </TableHead>
+            {showTrades ? <TableHead className="text-right">Trades</TableHead> : null}
             <TableHead className="text-right" sort={dirFor("volume")} onSort={canSortColumn("volume") && !disabled ? () => handleSort("volume") : undefined}>
               Volume
             </TableHead>
+            {showFollow ? <TableHead className="text-right">Action</TableHead> : null}
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
+              <TableCell colSpan={colSpan} className="py-8 text-center text-muted-foreground">
                 No ranked traders yet.
               </TableCell>
             </TableRow>
           ) : (
             rows.map((row) => {
               const positive = row.netProfitPts >= 0;
-              const positiveRoi = (row.returnPct ?? 0) >= 0;
-              const isCurrentUser = Boolean(highlightId && row.accountId === highlightId);
+              const roi = row.returnPct ?? row.roiPct;
+              const isViewer = Boolean(highlightId && row.accountId === highlightId);
               const trader = (
                 <>
-                  <Avatar name={row.displayName} src={row.avatarUrl} size="sm" />
-                  <span className="flex items-center gap-1.5">
-                    <span className="font-medium text-foreground">{row.displayName}</span>
-                    <span className="text-xs text-muted-foreground">@{row.handle}</span>
-                    {isCurrentUser ? <Badge variant="secondary">You</Badge> : null}
-                    {row.isNpc ? <Badge variant="info">AI parody</Badge> : null}
+                  <Avatar name={row.displayName} src={row.avatarUrl} seed={row.handle} size="sm" />
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate font-semibold text-foreground">{row.displayName}</span>
+                    {row.isNpc ? (
+                      <span className="inline-flex shrink-0 items-center gap-1">
+                        <VerifiedBadge size="sm" />
+                        <Bot aria-hidden className="size-3.5 text-muted-foreground" />
+                      </span>
+                    ) : null}
+                    {isViewer ? <Badge variant="info">YOU</Badge> : null}
+                    <span className="truncate text-xs text-muted-foreground">@{row.handle}</span>
                   </span>
                 </>
               );
               return (
-                <TableRow key={row.accountId} data-current-user={isCurrentUser ? "true" : undefined} className={cn(isCurrentUser && "bg-accent/50")}>
-                  <TableCell className="text-right font-mono text-muted-foreground tabular-nums">#{row.rank}</TableCell>
+                <TableRow key={row.accountId} data-current-user={isViewer ? "true" : undefined} className={cn(isViewer && "bg-brand/5")}>
+                  <TableCell>
+                    <div className="flex items-center gap-1.5">
+                      <RankNumber rank={row.rank} size="sm" />
+                      {row.rank <= 3 ? <RankBadge rank={row.rank} size="sm" showLabel={false} /> : null}
+                    </div>
+                  </TableCell>
                   <TableCell>
                     {onSelectTrader ? (
                       <button
@@ -250,11 +299,41 @@ export function LeaderboardTable({
                   <TableCell className={cn("text-right font-mono font-semibold tabular-nums", positive ? "text-ok" : "text-destructive")}>
                     {formatPts(row.netProfitPts, true)}
                   </TableCell>
-                  <TableCell className={cn("text-right font-mono tabular-nums", row.returnPct === undefined ? "text-muted-foreground" : positiveRoi ? "text-ok" : "text-destructive")}>
-                    {row.returnPct === undefined ? "—" : formatReturnPct(row.returnPct)}
+                  <TableCell
+                    className={cn(
+                      "text-right font-mono tabular-nums",
+                      roi === undefined ? "text-muted-foreground" : roi >= 0 ? "text-ok" : "text-destructive",
+                    )}
+                  >
+                    {roi !== undefined ? formatReturnPct(roi) : "—"}
                   </TableCell>
+                  {showEquity ? (
+                    <TableCell className="text-right font-mono tabular-nums">
+                      {row.equityPts !== undefined ? formatPts(row.equityPts) : "—"}
+                    </TableCell>
+                  ) : null}
                   <TableCell className="text-right font-mono tabular-nums">{row.winRatePct}%</TableCell>
+                  {showTrades ? (
+                    <TableCell className="text-right font-mono text-muted-foreground tabular-nums">
+                      {row.tradeCount !== undefined ? row.tradeCount : "—"}
+                    </TableCell>
+                  ) : null}
                   <TableCell className="text-right font-mono text-muted-foreground tabular-nums">{formatPts(row.volumePts)}</TableCell>
+                  {showFollow ? (
+                    <TableCell className="text-right">
+                      {isViewer ? null : (
+                        <Button
+                          variant={row.isFollowing ? "outline" : "primary"}
+                          size="sm"
+                          shape="pill"
+                          disabled={disabled}
+                          onClick={() => !disabled && onFollow?.(row.accountId)}
+                        >
+                          {row.isFollowing ? "Following" : "Follow"}
+                        </Button>
+                      )}
+                    </TableCell>
+                  ) : null}
                 </TableRow>
               );
             })
@@ -273,6 +352,7 @@ export function LeaderboardTable({
               type="button"
               variant="outline"
               size="sm"
+              shape="pill"
               disabled={disabled || currentPage <= 1}
               onClick={() => !disabled && onPageChange(currentPage - 1)}
             >
@@ -282,6 +362,7 @@ export function LeaderboardTable({
               type="button"
               variant="outline"
               size="sm"
+              shape="pill"
               disabled={disabled || currentPage >= totalPages}
               onClick={() => !disabled && onPageChange(currentPage + 1)}
             >

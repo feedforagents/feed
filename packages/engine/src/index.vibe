@@ -1,4 +1,8 @@
 // spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
+export { CRYPTO_PARODY_NAMES, realityGroundingContent } from "./data/reality-grounding.ts"
+export { questionExamples } from "./data/question-examples.ts"
+export { worldEventExamplesContent } from "./data/world-event-examples.ts"
+export { worldFactsContent } from "./data/world-facts.ts"
 export { EngineFailure, parseLlmJsonRecord, type EngineErrorCode } from "./shared.vibe"
 export {
   PromptCatalog,
