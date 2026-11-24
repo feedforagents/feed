@@ -231,7 +231,7 @@ function connectRealtime(): void {
     "market.perp",
   ];
   for (const eventType of types) {
-    source.addEventListener(eventType, () => handleSseSignal(eventType));
+    source.addEventListener(eventType, (event) => handleSseSignal(eventType, event));
   }
 }
 
