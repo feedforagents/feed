@@ -1,5 +1,5 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/navigation.md, "Story: Browse public world content without a login wall"
-import { useId } from "react";
+import { useId, useState } from "react";
 import {
   Alert,
   AppShell,
@@ -34,8 +34,10 @@ import { MarketsScreen } from "./screens/MarketsScreen.tsx";
 import { NotificationsScreen } from "./screens/NotificationsScreen.tsx";
 import { ProfileScreen } from "./screens/ProfileScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
+import { ThreadDialog } from "./screens/ThreadDialog.tsx";
 import { currentUiMode, toSpecTab } from "./store-core.ts";
 import { appRuntime, navRuntime, onboardingRuntime, storeActions, useAppStore } from "./store.ts";
+import type { AppPost } from "./types.ts";
 
 function RailModeControl({
   mode,
@@ -191,20 +193,25 @@ function NoticeStrip({
 function ActiveRouteScreen({
   mode,
   explainerVisible,
+  quoteTarget,
+  onQuoteTargetChange,
 }: {
   readonly mode: UiMode;
   readonly explainerVisible: boolean;
+  readonly quoteTarget: AppPost | null;
+  readonly onQuoteTargetChange: (post: AppPost | null) => void;
 }) {
   const s = useAppStore();
 
+  const homeProps = { mode, explainerVisible, quoteTarget, onQuoteTargetChange };
   switch (s.route) {
     case "Home":
-      return <HomeScreen mode={mode} explainerVisible={explainerVisible} />;
+      return <HomeScreen {...homeProps} />;
     case "Explore":
       return <ExploreScreen mode={mode} />;
     case "Markets":
       return mode === "SocialMode"
-        ? <HomeScreen mode={mode} explainerVisible={explainerVisible} />
+        ? <HomeScreen {...homeProps} />
         : <MarketsScreen />;
     case "Chats":
       return <ChatsScreen />;
@@ -227,6 +234,7 @@ function ActiveRouteScreen({
 
 export function App() {
   const s = useAppStore();
+  const [quoteTarget, setQuoteTarget] = useState<AppPost | null>(null);
   const appMachine = useAppMachine(appRuntime);
   const navMachine = useNavMachine(navRuntime);
   const onboardingMachine = useOnboardingMachine(onboardingRuntime);
@@ -305,9 +313,23 @@ export function App() {
           errorMessage={s.errorMessage}
           hostActionNote={s.joinSheetOpen ? null : s.hostActionNote}
         />
-        <ActiveRouteScreen mode={mode} explainerVisible={explainerVisible} />
+        <ActiveRouteScreen
+          mode={mode}
+          explainerVisible={explainerVisible}
+          quoteTarget={quoteTarget}
+          onQuoteTargetChange={setQuoteTarget}
+        />
       </AppShell>
 
+      <ThreadDialog
+        mode={mode}
+        viewerHandle={s.viewer?.handle ?? null}
+        onQuote={(post) => {
+          storeActions.closeThread();
+          if (s.route !== "Home") void storeActions.navigate("/");
+          setQuoteTarget(post);
+        }}
+      />
       <JoinSheet
         open={s.joinSheetOpen}
         onOpenChange={storeActions.setJoinSheetOpen}
