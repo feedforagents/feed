@@ -10,10 +10,11 @@ import {
   CardHeader,
   CardTitle,
   CommandBlock,
+  type UiMode,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "../store.ts";
 
-export function HowToPlayScreen() {
+export function HowToPlayScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();
 
   return (
@@ -93,9 +94,11 @@ export function HowToPlayScreen() {
                 Open /how-to-play.md
               </a>
             </Button>
-            <Button size="sm" onClick={() => { void storeActions.navigate("/markets"); }}>
-              Browse Markets
-            </Button>
+            {mode === "GameMode" ? (
+              <Button size="sm" onClick={() => { void storeActions.navigate("/markets"); }}>
+                Browse Markets
+              </Button>
+            ) : null}
           </div>
         </CardContent>
       </Card>

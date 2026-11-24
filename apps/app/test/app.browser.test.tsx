@@ -148,3 +148,33 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
 });
+
+it('How to Play hides Browse Markets in Social mode (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+  installMockNetwork();
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const modeSwitch = page.getByRole("switch", { name: "Social mode", exact: true });
+  await act(() => userEvent.keyboard("{Escape}"));
+  await expect.element(modeSwitch).toBeInTheDocument();
+  if (document.querySelector('[role="switch"]')?.getAttribute("aria-checked") === "true") {
+    await act(() => userEvent.click(modeSwitch));
+  }
+
+  const howToPlay = page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "How to Play", exact: true });
+  await act(() => userEvent.click(howToPlay));
+  const browseMarkets = page.getByRole("button", { name: "Browse Markets", exact: true });
+  await expect.element(browseMarkets).toBeInTheDocument();
+  await act(() => userEvent.click(browseMarkets));
+  expect(window.location.pathname).toBe("/markets");
+
+  await act(() => userEvent.click(howToPlay));
+  expect(window.location.pathname).toBe("/how-to-play");
+  await act(() => userEvent.click(modeSwitch));
+  await expect.element(browseMarkets).not.toBeInTheDocument();
+
+  await act(() => userEvent.click(modeSwitch));
+  await expect.element(browseMarkets).toBeInTheDocument();
+});

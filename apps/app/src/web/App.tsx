@@ -215,7 +215,7 @@ function ActiveRouteScreen({
     case "Settings":
       return <SettingsScreen mode={mode} />;
     case "HowToPlay":
-      return <HowToPlayScreen />;
+      return <HowToPlayScreen mode={mode} />;
     case "Link":
       return <LinkScreen />;
     case "OAuthConsent":
