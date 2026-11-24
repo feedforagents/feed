@@ -126,6 +126,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       userPointsResult,
       actorPointsResult,
     ] = await Promise.all([
+      // Active players use the same eligibility as WAU in
+      // GET /api/admin/stats/growth: only users that pass the eligibility
+      // join count. Actors, agents and banned users are not players, so
+      // their recent activity must not inflate the public total.
       db
         .select({
           count: sql<number>`COUNT(DISTINCT ${userActivityLogs.userId})::int`,
@@ -135,6 +139,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         .where(
           and(
             eq(users.isActor, false),
+            eq(users.isAgent, false),
+            eq(users.isBanned, false),
             gte(userActivityLogs.activityDate, sevenDaysAgo)
           )
         ),
