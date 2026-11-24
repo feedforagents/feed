@@ -1076,9 +1076,17 @@ export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntr
       if (b.volumeCents !== a.volumeCents) return b.volumeCents - a.volumeCents
       return a.accountId.localeCompare(b.accountId)
     })
-    return scored.slice(0, safeLimit).map((entry, idx) => ({
-      rank: idx + 1,
-      ...entry
-    }))
+    const ranked: Array<LeaderboardEntry> = []
+    let rank = 0
+    let previousNetProfitCents: number | null = null
+    for (let idx = 0; idx < scored.length; idx++) {
+      const entry = scored[idx]!
+      if (previousNetProfitCents === null || entry.netProfitCents !== previousNetProfitCents) {
+        rank = idx + 1
+        previousNetProfitCents = entry.netProfitCents
+      }
+      ranked.push({ rank, ...entry })
+    }
+    return ranked.slice(0, safeLimit)
   })
 }
