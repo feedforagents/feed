@@ -1,7 +1,7 @@
 // spec/app/navigation.md, "Story: Browse public world content without a login wall"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
@@ -115,7 +115,8 @@ async function renderApp() {
   await act(() => Promise.resolve(root.render(<App />)));
 }
 
-it('Trending perp opens its chart (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+describe('Trending perp chart (spec/app/navigation.md, "Story: Browse public world content without a login wall")', () => {
+it("opens its chart", async () => {
   await renderApp();
 
   await act(() => storeActions.navigate("/markets"));
@@ -140,14 +141,38 @@ it('Trending perp opens its chart (spec/app/navigation.md, "Story: Browse public
   );
 });
 
-it('Fresh perp entry opens its chart (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+it("same-kind click follows tab", async () => {
   await renderApp();
 
   await act(() => storeActions.navigate("/markets?ticker=TSLAI"));
   await expect.element(page.getByText("$TSLAI Spot Index & Mark")).toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Predictions" })));
+  await expect.element(page.getByRole("button", { name: "Trade YES / NO" })).toBeInTheDocument();
+
+  await act(() => storeActions.navigate("/markets?ticker=NVDAI"));
+  await expect.element(page.getByText("$NVDAI Spot Index & Mark")).toBeInTheDocument();
 });
 
-it('Prediction selection follows back to its tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+it("back across tickers follows tab", async () => {
+  await renderApp();
+
+  await act(() => storeActions.navigate("/markets?ticker=TSLAI"));
+  await expect.element(page.getByText("$TSLAI Spot Index & Mark")).toBeInTheDocument();
+
+  await act(() => storeActions.navigate("/markets?ticker=NVDAI"));
+  await expect.element(page.getByText("$NVDAI Spot Index & Mark")).toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Predictions" })));
+  await expect.element(page.getByRole("button", { name: "Trade YES / NO" })).toBeInTheDocument();
+
+  act(() => {
+    window.history.back();
+  });
+  await expect.element(page.getByText("$TSLAI Spot Index & Mark")).toBeInTheDocument();
+});
+
+it("selection follows back to its tab", async () => {
   await renderApp();
 
   await act(() => storeActions.navigate("/markets?ticker=TSLAI"));
@@ -163,7 +188,7 @@ it('Prediction selection follows back to its tab (spec/app/navigation.md, "Story
   );
 });
 
-it('Hand-picked tabs stay put (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+it("hand-picked tabs stay put", async () => {
   await renderApp();
 
   await act(() => storeActions.navigate("/markets?ticker=TSLAI"));
@@ -180,4 +205,5 @@ it('Hand-picked tabs stay put (spec/app/navigation.md, "Story: Browse public wor
 
   await act(() => userEvent.click(page.getByRole("tab", { name: "Perps (20x)" })));
   await expect.element(page.getByText("$TSLAI Spot Index & Mark")).toBeInTheDocument();
+});
 });
