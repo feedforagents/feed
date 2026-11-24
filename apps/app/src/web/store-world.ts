@@ -612,10 +612,17 @@ export async function respondAlphaInvite(inviteId: string, accept: boolean): Pro
   await loadChats();
 }
 
+let notificationsLoadCount = 0;
+
 export async function loadNotifications(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  const loadId = ++notificationsLoadCount;
   setStoreState({ notificationsLoading: true });
   const res = await requestJson("/api/notifications", { parse: decodeNotifications });
+  if (loadId !== notificationsLoadCount) {
+    setStoreState({ notificationsLoading: false });
+    return;
+  }
   if (res.ok) {
     const unread = res.data.filter((n) => !n.item.read).length;
     setStoreState({ notifications: res.data, unreadNotifications: unread, notificationsLoading: false });
@@ -626,6 +633,7 @@ export async function loadNotifications(): Promise<void> {
 
 export async function markAllNotificationsRead(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  notificationsLoadCount += 1;
   const res = await requestJson("/api/notifications/read", {
     method: "POST",
     body: {},
