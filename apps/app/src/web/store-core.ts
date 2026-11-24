@@ -40,6 +40,8 @@ export const onboardingRuntime = ManagedRuntime.make(onboardingLayer);
 
 export type UiFeedTab = "latest" | "following" | "top";
 
+export type MarketsTab = "predictions" | "perps" | "positions" | "leaderboard";
+
 export interface StoreState {
   readonly authLoaded: boolean;
   readonly viewer: ViewerSession | null;
@@ -81,6 +83,7 @@ export interface StoreState {
   readonly positions: ReadonlyArray<AppPosition>;
   readonly selectedMarketKind: "prediction" | "perp";
   readonly selectedMarketId: string | null;
+    readonly marketsTab: MarketsTab;
   readonly leaderboard: ReadonlyArray<LeaderboardEntry>;
   readonly packs: ReadonlyArray<AppPointPack>;
   readonly tradeLoading: boolean;
@@ -177,6 +180,7 @@ let currentState: StoreState = {
   positions: [],
   selectedMarketKind: initialLocation.queryTicker ? "perp" : "prediction",
   selectedMarketId: initialLocation.queryTicker,
+    marketsTab: initialLocation.queryTicker ? "perps" : "predictions",
   leaderboard: [],
   packs: [],
   tradeLoading: false,
