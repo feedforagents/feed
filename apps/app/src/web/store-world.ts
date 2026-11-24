@@ -473,12 +473,16 @@ export async function loadChats(loadMessages = true): Promise<void> {
   }
 }
 
+let chatMessagesLoadCount = 0;
+
 export async function loadChatMessages(chatId: string): Promise<void> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   if (!viewerId) return;
+  const loadId = ++chatMessagesLoadCount;
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
     parse: (raw) => decodeChatMessages(raw, viewerId),
   });
+  if (loadId !== chatMessagesLoadCount) return;
   if (res.ok) {
     setStoreState({ selectedChatId: chatId, chatMessages: res.data });
   }

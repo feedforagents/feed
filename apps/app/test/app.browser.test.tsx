@@ -4,6 +4,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
+import { hydrateAuth } from "../src/web/store-auth.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -147,4 +150,82 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+function chatMessage(id: string, content: string) {
+  return {
+    id,
+    senderId: "acc-alice",
+    senderHandle: "alice",
+    senderDisplayName: "Alice Aardvark",
+    senderKind: "user",
+    content,
+    createdAt: Date.now() - 60_000,
+    reactions: [],
+  };
+}
+
+it('Stale chat messages are dropped after switching chats (spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement")', async () => {
+  let chatARequested = false;
+  let resolveChatA: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: true,
+        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/chats/chat-a/messages") {
+      chatARequested = true;
+      return new Promise<Response>((resolve) => {
+        resolveChatA = () => resolve(Response.json({ messages: [chatMessage("msg-a1", "Chat A message")] }));
+      });
+    }
+    if (path === "/api/chats/chat-b/messages") {
+      return json({ messages: [chatMessage("msg-b1", "Chat B message")] });
+    }
+    if (path === "/api/chats") return json({ chats: [] });
+    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
+    if (path === "/api/notifications") return json({ notifications: [] });
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+  await act(() => hydrateAuth());
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+
+  const loadingA = storeActions.loadChatMessages("chat-a");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(chatARequested).toBe(true);
+
+  await act(() => storeActions.loadChatMessages("chat-b"));
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
+
+  resolveChatA?.();
+  await act(() => loadingA);
+
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
 });
