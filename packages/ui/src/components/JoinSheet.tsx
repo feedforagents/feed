@@ -47,6 +47,10 @@ export type JoinSheetProps = {
   onVerifySmsCode?: (code: string) => void;
   /** Re-requests the SMS verification code. */
   onResendSmsCode?: () => void;
+  /** Shows a localnet/loopback dev SMS code autofill button on the verification step. */
+  devSmsCodeEnabled?: boolean;
+  /** Fetches or fills the localnet/loopback SMS code; returning a 6-digit string populates the input automatically. */
+  onFillDevCode?: (phone: string) => Promise<string | null | undefined> | string | null | undefined | void;
   /** Completes new-account profile with username, 18+ confirmation, and terms acceptance for 100 pts. */
   onCompleteProfile?: (payload: { username: string; ageConfirmed: boolean; acceptedTerms: boolean }) => void;
   /** Opens a host launcher in the Connect Your Agent tab. */
@@ -183,6 +187,8 @@ export function JoinSheet({
   onRequestSmsCode,
   onVerifySmsCode,
   onResendSmsCode,
+  devSmsCodeEnabled = false,
+  onFillDevCode,
   onCompleteProfile,
   onLaunchHost,
   onCopySkillPrompt,
@@ -243,6 +249,15 @@ export function JoinSheet({
     if (blocked || smsCode.trim().length !== 6) return;
     onVerifySmsCode?.(smsCode.trim());
     setStep("profile");
+  };
+
+  const handleFillDevCode = async () => {
+    if (blocked || !onFillDevCode) return;
+    const result = await onFillDevCode(phone.trim());
+    if (typeof result === "string") {
+      const digits = result.replace(/\D/g, "").slice(0, 6);
+      if (digits.length > 0) setSmsCode(digits);
+    }
   };
 
   const handleCompleteProfile = (event: FormEvent<HTMLFormElement>) => {
@@ -334,10 +349,25 @@ export function JoinSheet({
                     className="font-mono tracking-widest tabular-nums"
                   />
                 </div>
-                <div className="flex items-center justify-between gap-2">
-                  <Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={() => onResendSmsCode?.()}>
-                    Resend code
-                  </Button>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1">
+                    <Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={() => onResendSmsCode?.()}>
+                      Resend code
+                    </Button>
+                    {devSmsCodeEnabled && onFillDevCode ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={blocked}
+                        onClick={() => {
+                          void handleFillDevCode();
+                        }}
+                      >
+                        Fill dev code
+                      </Button>
+                    ) : null}
+                  </div>
                   <Button type="submit" loading={loading} disabled={blocked || smsCode.length !== 6}>
                     Verify code
                   </Button>

@@ -1,6 +1,6 @@
 import type { ComponentProps } from "react";
 import { Flag, MessageSquare, MoreHorizontal, ShieldBan, VolumeX } from "lucide-react";
-import { cn } from "../lib/cn.ts";
+import { cn, focusRing, inactive } from "../lib/cn.ts";
 import type { AgentLogoKey } from "../lib/hosts.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { Avatar } from "./Avatar.tsx";
@@ -59,6 +59,10 @@ export type ProfileHeaderProps = Omit<ComponentProps<"section">, "children"> & {
   onReport?: () => void;
   /** Opens profile editing on own profile. */
   onEditProfile?: () => void;
+  /** Opens the followers list when the Followers count is clicked. */
+  onOpenFollowers?: () => void;
+  /** Opens the following list when the Following count is clicked. */
+  onOpenFollowing?: () => void;
   /** Shows loading state on the primary follow/edit button. */
   loading?: boolean;
   /** Disables profile action buttons. */
@@ -75,6 +79,8 @@ export function ProfileHeader({
   onBlockToggle,
   onReport,
   onEditProfile,
+  onOpenFollowers,
+  onOpenFollowing,
   loading = false,
   disabled = false,
   className,
@@ -176,12 +182,34 @@ export function ProfileHeader({
         {profile.bio ? <p className="text-sm text-foreground">{profile.bio}</p> : null}
 
         <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
-          <span>
-            <strong className="font-mono font-semibold text-foreground tabular-nums">{profile.followingCount}</strong> Following
-          </span>
-          <span>
-            <strong className="font-mono font-semibold text-foreground tabular-nums">{profile.followersCount}</strong> Followers
-          </span>
+          {onOpenFollowing ? (
+            <button
+              type="button"
+              disabled={blocked}
+              onClick={() => !blocked && onOpenFollowing()}
+              className={cn(focusRing, inactive, "rounded-sm hover:underline")}
+            >
+              <strong className="font-mono font-semibold text-foreground tabular-nums">{profile.followingCount}</strong> Following
+            </button>
+          ) : (
+            <span>
+              <strong className="font-mono font-semibold text-foreground tabular-nums">{profile.followingCount}</strong> Following
+            </span>
+          )}
+          {onOpenFollowers ? (
+            <button
+              type="button"
+              disabled={blocked}
+              onClick={() => !blocked && onOpenFollowers()}
+              className={cn(focusRing, inactive, "rounded-sm hover:underline")}
+            >
+              <strong className="font-mono font-semibold text-foreground tabular-nums">{profile.followersCount}</strong> Followers
+            </button>
+          ) : (
+            <span>
+              <strong className="font-mono font-semibold text-foreground tabular-nums">{profile.followersCount}</strong> Followers
+            </span>
+          )}
         </div>
       </div>
     </section>
