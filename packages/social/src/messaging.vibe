@@ -1,5 +1,5 @@
 // spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"
-import { Store, type StoreFailure, toText, type Row, type Tx } from "@repo/db"
+import { Store, type StoreFailure, resolveActorAvatarUrl, toText, type Row, type Tx } from "@repo/db"
 import {
   canAddReaction,
   canCreateGroup,
@@ -83,6 +83,7 @@ export interface ChatMessageView {
   readonly senderKind: ChatSenderKind
   readonly senderHandle: string
   readonly senderDisplayName: string
+  readonly senderAvatarUrl: string | null
   readonly viaClientName: string | null
   readonly content: string
   readonly reactions: ReadonlyArray<MessageReactionSummary>
@@ -103,6 +104,7 @@ export interface GroupInviteView {
   readonly actorId: string
   readonly actorHandle: string
   readonly actorDisplayName: string
+  readonly actorAvatarUrl: string | null
   readonly chatTitle: string
   readonly invitedAccountId: string
   readonly tier: string | null
@@ -343,11 +345,11 @@ effect function hydrateChatsTx(
   const unreadRows = try tx.query(
     `SELECT m.chat_id, count(*)::int AS unread_count
      FROM feed_messages m
-     INNER JOIN feed_chat_members cm ON cm.chat_id = m.chat_id AND cm.member_id = $2
      INNER JOIN feed_chats c ON c.id = m.chat_id
+     INNER JOIN feed_chat_members cm ON cm.chat_id = m.chat_id AND cm.member_id = $2
      WHERE m.chat_id = ANY($1)
        AND m.sender_id <> $2
-       AND m.created_at > cm.last_read_at
+       AND m.created_at > COALESCE(cm.last_read_at, 0)
        AND (
          c.kind = 'direct'
          OR (
@@ -361,7 +363,7 @@ effect function hydrateChatsTx(
   const unreadByChat = new Map<string, number>()
   for (const row of unreadRows) {
     const cid = toText(row.chat_id) ?? ""
-    unreadByChat.set(cid, safeInt(row.unread_count, 0))
+    if (cid !== "") unreadByChat.set(cid, safeInt(row.unread_count, 0))
   }
   const summaries: ChatSummaryView[] = []
   for (const row of chatRows) {
@@ -483,6 +485,7 @@ export effect function getChatMessages(
         senderKind,
         senderHandle: profile?.handle ?? senderId,
         senderDisplayName: profile?.displayName ?? senderId,
+        senderAvatarUrl: profile?.avatarUrl ?? null,
         viaClientName: toText(row.via_client_name) ?? null,
         content: toText(row.body) ?? "",
         reactions,
@@ -718,6 +721,7 @@ export effect function sendChatMessage(input: SendChatMessageInput): ChatMessage
       senderKind: input.senderKind,
       senderHandle: sender.handle,
       senderDisplayName: sender.displayName,
+      senderAvatarUrl: sender.avatarUrl,
       viaClientName,
       content: input.content,
       reactions: [],
@@ -932,6 +936,9 @@ function rowToGroupInvite(row: Row): GroupInviteView {
   const inviterKind: ChatSenderKind = actorUsername !== undefined || actorName !== undefined ? "npc" : "user"
   const inviterHandle = actorUsername ?? accountHandle ?? inviterId
   const inviterDisplayName = actorName ?? accountDisplayName ?? inviterHandle
+  const actorAvatarUrl = inviterKind === "npc"
+    ? (toText(row.actor_avatar_url) ?? (inviterId !== "" ? resolveActorAvatarUrl(inviterId) : null))
+    : (toText(row.account_avatar_url) ?? null)
   return {
     id: toText(row.id) ?? "",
     chatId: toText(row.chat_id) ?? "",
@@ -944,6 +951,7 @@ function rowToGroupInvite(row: Row): GroupInviteView {
     actorId: inviterId,
     actorHandle: inviterHandle,
     actorDisplayName: inviterDisplayName,
+    actorAvatarUrl,
     chatTitle: toText(row.chat_name) ?? (isAlpha ? "Alpha Group" : "Group Chat"),
     invitedAccountId: toText(row.invited_account_id) ?? "",
     tier: toText(row.chat_tier) ?? null,
@@ -955,8 +963,8 @@ function rowToGroupInvite(row: Row): GroupInviteView {
 
 const INVITE_SELECT_SQL = `SELECT i.id, i.chat_id, i.invited_account_id, i.invited_by_id, i.status, i.created_at, i.responded_at,
   c.kind AS chat_kind, c.name AS chat_name, c.tier AS chat_tier,
-  a.username AS actor_username, a.name AS actor_name,
-  u.handle AS account_handle, u.display_name AS account_display_name
+  a.username AS actor_username, a.name AS actor_name, a.profile_image_url AS actor_avatar_url,
+  u.handle AS account_handle, u.display_name AS account_display_name, u.avatar_url AS account_avatar_url
 FROM feed_group_invites i
 INNER JOIN feed_chats c ON c.id = i.chat_id
 LEFT JOIN feed_actors a ON a.id = i.invited_by_id
@@ -1142,7 +1150,7 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
   const now = try Clock.currentTimeMillis
   const committed = try store.transaction(effect (tx: Tx) => {
     const actorRows = try tx.query(
-      "SELECT id, username, name, tier FROM feed_actors WHERE id = $1 LIMIT 1",
+      "SELECT id, username, name, tier, profile_image_url FROM feed_actors WHERE id = $1 LIMIT 1",
       [input.actorId]
     )
     const actorRow = actorRows[0]
@@ -1152,6 +1160,7 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
     const actorId = toText(actorRow.id) ?? input.actorId
     const actorUsername = toText(actorRow.username) ?? actorId
     const actorName = toText(actorRow.name) ?? actorId
+    const actorAvatarUrl = toText(actorRow.profile_image_url) ?? (actorId !== "" ? resolveActorAvatarUrl(actorId) : null)
     const actorTier = normalizeOptionalText(input.tier ?? undefined) ?? toText(actorRow.tier) ?? null
     const targetRows = try tx.query(
       "SELECT account_id FROM feed_accounts WHERE account_id = $1 LIMIT 1",
@@ -1240,6 +1249,7 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
       actorId,
       actorHandle: actorUsername,
       actorDisplayName: actorName,
+      actorAvatarUrl,
       chatTitle,
       invitedAccountId: input.targetAccountId,
       tier: chatTier,

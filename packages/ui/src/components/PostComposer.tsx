@@ -1,8 +1,7 @@
-import { type ComponentProps, type FormEvent, useState } from "react";
+import { type ComponentProps, type FormEvent, type KeyboardEvent, useState } from "react";
 import { X } from "lucide-react";
 import { cn } from "../lib/cn.ts";
 import { Avatar } from "./Avatar.tsx";
-import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
 import { Textarea } from "./Textarea.tsx";
 
@@ -48,14 +47,50 @@ export type PostComposerProps = Omit<ComponentProps<"form">, "onSubmit" | "child
   error?: string;
 };
 
-/** 280-character post composer with reply/quote context preview and loading/disabled guards. */
+const RING_RADIUS = 9;
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+
+function CharProgressRing({ length, maxLength }: { readonly length: number; readonly maxLength: number }) {
+  const remaining = maxLength - length;
+  const ratio = Math.min(1, length / Math.max(1, maxLength));
+  const dashOffset = RING_CIRCUMFERENCE * (1 - ratio);
+  const overLimit = remaining < 0;
+  const nearLimit = remaining <= 20;
+  const strokeClass = overLimit ? "stroke-destructive" : nearLimit ? "stroke-warn" : "stroke-brand";
+
+  return (
+    <div className="flex items-center gap-2">
+      {nearLimit ? (
+        <span className={cn("text-xs font-medium tabular-nums", overLimit ? "text-destructive" : "text-warn")}>
+          {remaining}
+        </span>
+      ) : null}
+      <svg viewBox="0 0 24 24" className="size-5 -rotate-90" aria-hidden="true">
+        <circle cx="12" cy="12" r={RING_RADIUS} fill="none" strokeWidth="2.5" className="stroke-border" />
+        <circle
+          cx="12"
+          cy="12"
+          r={RING_RADIUS}
+          fill="none"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeDasharray={RING_CIRCUMFERENCE}
+          strokeDashoffset={dashOffset}
+          className={cn("transition-all duration-fast", strokeClass)}
+        />
+      </svg>
+    </div>
+  );
+}
+
+/** X-style 280-character post composer with circular progress meter, Cmd/Ctrl+Enter submit, and reply/quote previews. */
 export function PostComposer({
   value,
   defaultValue = "",
   onValueChange,
   onSubmit,
   maxLength = 280,
-  placeholder = "Share a signal or reply...",
+  placeholder = "What's happening?",
   authorName = "You",
   authorAvatarUrl,
   viaClientName,
@@ -83,24 +118,35 @@ export function PostComposer({
     onValueChange?.(next);
   };
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const commitSubmit = () => {
     if (!canSubmit) return;
     onSubmit(trimmed);
     if (value === undefined) setInternal("");
   };
 
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    commitSubmit();
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      commitSubmit();
+    }
+  };
+
   return (
-    <form onSubmit={handleSubmit} className={cn("flex gap-3 border-b border-border bg-card p-4 text-card-foreground", className)} {...props}>
+    <form onSubmit={handleSubmit} className={cn("flex gap-3 border-b border-border bg-background px-4 py-3.5 text-foreground", className)} {...props}>
       <Avatar name={authorName} src={authorAvatarUrl} size="md" />
-      <div className="flex min-w-0 flex-1 flex-col gap-3">
+      <div className="flex min-w-0 flex-1 flex-col gap-2.5">
         {replyTo ? (
-          <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted px-3 py-1.5 text-xs text-muted-foreground">
+          <div className="flex items-center justify-between gap-2 rounded-lg bg-muted/60 px-3 py-1.5 text-xs text-muted-foreground">
             <span className="truncate">
-              Replying to <strong className="font-semibold text-foreground">@{replyTo.authorHandle}</strong>: {replyTo.excerpt}
+              Replying to <strong className="font-semibold text-primary">@{replyTo.authorHandle}</strong>: {replyTo.excerpt}
             </span>
             {onCancelContext ? (
-              <Button type="button" variant="ghost" size="icon" aria-label="Clear reply" disabled={blocked} onClick={onCancelContext} className="size-6 shrink-0">
+              <Button type="button" variant="ghost" size="icon" shape="pill" aria-label="Clear reply" disabled={blocked} onClick={onCancelContext} className="size-6 shrink-0">
                 <X aria-hidden className="size-3.5" />
               </Button>
             ) : null}
@@ -114,17 +160,18 @@ export function PostComposer({
           disabled={blocked}
           invalid={overLimit || Boolean(error)}
           onChange={(event) => updateText(event.target.value)}
-          className="min-h-20"
+          onKeyDown={handleKeyDown}
+          className="min-h-16 resize-none border-0 bg-transparent px-0 py-1 text-base placeholder:text-muted-foreground focus-visible:outline-none"
         />
 
         {quotePost ? (
-          <div className="flex items-start justify-between gap-2 rounded-md border border-border bg-background p-2.5 text-xs">
+          <div className="flex items-start justify-between gap-2 rounded-xl border border-border bg-card p-3 text-xs">
             <div className="min-w-0">
               <span className="font-semibold text-foreground">@{quotePost.authorHandle}</span>
               <p className="truncate text-muted-foreground">{quotePost.excerpt}</p>
             </div>
             {onCancelContext ? (
-              <Button type="button" variant="ghost" size="icon" aria-label="Clear quote" disabled={blocked} onClick={onCancelContext} className="size-6 shrink-0">
+              <Button type="button" variant="ghost" size="icon" shape="pill" aria-label="Clear quote" disabled={blocked} onClick={onCancelContext} className="size-6 shrink-0">
                 <X aria-hidden className="size-3.5" />
               </Button>
             ) : null}
@@ -133,13 +180,11 @@ export function PostComposer({
 
         {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
 
-        <div className="flex items-center justify-between gap-3">
-          <div>{viaClientName ? <Badge variant="outline">via {viaClientName}</Badge> : null}</div>
+        <div className="flex items-center justify-between gap-3 border-t border-border pt-2.5">
+          <div className="text-xs text-muted-foreground">{viaClientName ? `via ${viaClientName}` : null}</div>
           <div className="flex items-center gap-3">
-            <span className={cn("font-mono text-xs tabular-nums", overLimit ? "font-semibold text-destructive" : remaining <= 20 ? "text-warn" : "text-muted-foreground")}>
-              {remaining}
-            </span>
-            <Button type="submit" size="sm" loading={loading} disabled={!canSubmit}>
+            {text.length > 0 ? <CharProgressRing length={text.length} maxLength={maxLength} /> : null}
+            <Button type="submit" size="sm" shape="pill" loading={loading} disabled={!canSubmit} className="px-4 font-bold">
               {submitLabel}
             </Button>
           </div>

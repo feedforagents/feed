@@ -1,5 +1,15 @@
 // spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"
-import { toInt, toText, type Row, type Tx, type StoreFailure } from "@repo/db"
+import {
+  resolveActorAvatarUrl,
+  resolveActorBannerUrl,
+  resolveOrgBannerUrl,
+  resolveOrgLogoUrl,
+  toInt,
+  toText,
+  type Row,
+  type Tx,
+  type StoreFailure
+} from "@repo/db"
 import { canCreateNotification, type AccountModeration, type BlockRecord, type ModerationState, type NotificationKind } from "../gen/social__moderation.effect.vibe"
 import type { PresentationMode as PostsPresentationMode } from "../gen/social__posts.effect.vibe"
 import { publishFeedEvent, type FeedRealtimeEvent } from "./realtime.vibe"
@@ -20,6 +30,7 @@ export interface ResolvedSubject {
   readonly handle: string
   readonly displayName: string
   readonly avatarUrl: string | null
+  readonly bannerUrl: string | null
   readonly uiMode: SocialPresentationMode
 }
 
@@ -29,6 +40,7 @@ export interface SubjectProfile {
   readonly handle: string
   readonly displayName: string
   readonly avatarUrl: string | null
+  readonly bannerUrl: string | null
 }
 
 export interface SubjectRef {
@@ -140,17 +152,20 @@ function subjectFromAccountRow(row: Row): ResolvedSubject {
     handle: toText(row.handle) ?? "",
     displayName: toText(row.display_name) ?? "",
     avatarUrl: toText(row.avatar_url) ?? null,
+    bannerUrl: toText(row.banner_url) ?? null,
     uiMode: mode
   }
 }
 
 function subjectFromActorRow(row: Row): ResolvedSubject {
+  const id = toText(row.id) ?? ""
   return {
-    id: toText(row.id) ?? "",
+    id,
     kind: "npc",
     handle: toText(row.username) ?? "",
     displayName: toText(row.name) ?? "",
-    avatarUrl: null,
+    avatarUrl: toText(row.profile_image_url) ?? (id !== "" ? resolveActorAvatarUrl(id) : null),
+    bannerUrl: toText(row.profile_banner_url) ?? (id !== "" ? resolveActorBannerUrl(id) : null),
     uiMode: "game"
   }
 }
@@ -162,9 +177,37 @@ function subjectFromOrgRow(row: Row): ResolvedSubject {
     kind: "org",
     handle: id,
     displayName: toText(row.name) ?? "",
-    avatarUrl: null,
+    avatarUrl: toText(row.image_url) ?? (id !== "" ? resolveOrgLogoUrl(id) : null),
+    bannerUrl: toText(row.banner_url) ?? (id !== "" ? resolveOrgBannerUrl(id) : null),
     uiMode: "game"
   }
+}
+
+effect function findAccountByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
+  const accountRows = try tx.query(
+    "SELECT account_id, handle, display_name, avatar_url, banner_url, ui_mode FROM feed_accounts WHERE account_id = $1 OR lower(handle) = lower($1) LIMIT 1",
+    [cleaned]
+  )
+  const accountRow = accountRows[0]
+  return accountRow === undefined ? undefined : subjectFromAccountRow(accountRow)
+}
+
+effect function findActorByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
+  const actorRows = try tx.query(
+    "SELECT id, name, username, profile_image_url, profile_banner_url FROM feed_actors WHERE (id = $1 OR lower(username) = lower($1)) AND id NOT LIKE 'test-%' LIMIT 1",
+    [cleaned]
+  )
+  const actorRow = actorRows[0]
+  return actorRow === undefined ? undefined : subjectFromActorRow(actorRow)
+}
+
+effect function findOrgByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
+  const orgRows = try tx.query(
+    "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE lower(id) = lower($1) OR lower(ticker) = lower($1) LIMIT 1",
+    [cleaned]
+  )
+  const orgRow = orgRows[0]
+  return orgRow === undefined ? undefined : subjectFromOrgRow(orgRow)
 }
 
 effect function findUserOrNpcTx(tx: Tx, handleOrId: string): (ResolvedSubject | undefined)!(SocialFailure | StoreFailure) {
@@ -172,18 +215,9 @@ effect function findUserOrNpcTx(tx: Tx, handleOrId: string): (ResolvedSubject | 
   if (cleaned === "") {
     throw new SocialFailure({ code: "InvalidInput", message: "Account handle or ID is required" })
   }
-  const accountRows = try tx.query(
-    "SELECT account_id, handle, display_name, avatar_url, ui_mode FROM feed_accounts WHERE account_id = $1 OR lower(handle) = lower($1) LIMIT 1",
-    [cleaned]
-  )
-  const accountRow = accountRows[0]
-  if (accountRow !== undefined) return subjectFromAccountRow(accountRow)
-  const actorRows = try tx.query(
-    "SELECT id, name, username FROM feed_actors WHERE id = $1 OR lower(username) = lower($1) LIMIT 1",
-    [cleaned]
-  )
-  const actorRow = actorRows[0]
-  return actorRow === undefined ? undefined : subjectFromActorRow(actorRow)
+  const account = try findAccountByHandleOrIdTx(tx, cleaned)
+  if (account !== undefined) return account
+  return try findActorByHandleOrIdTx(tx, cleaned)
 }
 
 export effect function resolveUserOrNpcTx(tx: Tx, handleOrId: string): ResolvedSubject!(SocialFailure | StoreFailure) {
@@ -193,15 +227,16 @@ export effect function resolveUserOrNpcTx(tx: Tx, handleOrId: string): ResolvedS
 }
 
 export effect function resolveSubjectTx(tx: Tx, handleOrId: string): ResolvedSubject!(SocialFailure | StoreFailure) {
-  const found = try findUserOrNpcTx(tx, handleOrId)
-  if (found !== undefined) return found
   const cleaned = handleOrId.trim().replace(/^@/, "")
-  const orgRows = try tx.query(
-    "SELECT id, name FROM feed_organizations WHERE id = $1 OR lower(ticker) = lower($1) LIMIT 1",
-    [cleaned]
-  )
-  const orgRow = orgRows[0]
-  if (orgRow !== undefined) return subjectFromOrgRow(orgRow)
+  if (cleaned === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Account handle or ID is required" })
+  }
+  const account = try findAccountByHandleOrIdTx(tx, cleaned)
+  if (account !== undefined) return account
+  const org = try findOrgByHandleOrIdTx(tx, cleaned)
+  if (org !== undefined) return org
+  const actor = try findActorByHandleOrIdTx(tx, cleaned)
+  if (actor !== undefined) return actor
   throw new SocialFailure({ code: "NotFound", message: `Profile not found: ${cleaned}` })
 }
 
@@ -326,7 +361,7 @@ export effect function loadSubjectProfilesMapTx(
   const profiles = new Map<string, SubjectProfile>()
   if (userIds.length > 0) {
     const userRows = try tx.query(
-      "SELECT account_id, handle, display_name, avatar_url FROM feed_accounts WHERE account_id = ANY($1)",
+      "SELECT account_id, handle, display_name, avatar_url, banner_url FROM feed_accounts WHERE account_id = ANY($1)",
       [userIds]
     )
     for (const row of userRows) {
@@ -336,12 +371,16 @@ export effect function loadSubjectProfilesMapTx(
         kind: "user",
         handle: toText(row.handle) ?? id,
         displayName: toText(row.display_name) ?? (toText(row.handle) ?? id),
-        avatarUrl: toText(row.avatar_url) ?? null
+        avatarUrl: toText(row.avatar_url) ?? null,
+        bannerUrl: toText(row.banner_url) ?? null
       })
     }
   }
   if (npcIds.length > 0) {
-    const npcRows = try tx.query("SELECT id, username, name FROM feed_actors WHERE id = ANY($1)", [npcIds])
+    const npcRows = try tx.query(
+      "SELECT id, username, name, profile_image_url, profile_banner_url FROM feed_actors WHERE id = ANY($1)",
+      [npcIds]
+    )
     for (const row of npcRows) {
       const id = toText(row.id) ?? ""
       profiles.set(`npc:${id}`, {
@@ -349,12 +388,16 @@ export effect function loadSubjectProfilesMapTx(
         kind: "npc",
         handle: toText(row.username) ?? id,
         displayName: toText(row.name) ?? id,
-        avatarUrl: null
+        avatarUrl: toText(row.profile_image_url) ?? (id !== "" ? resolveActorAvatarUrl(id) : null),
+        bannerUrl: toText(row.profile_banner_url) ?? (id !== "" ? resolveActorBannerUrl(id) : null)
       })
     }
   }
   if (orgIds.length > 0) {
-    const orgRows = try tx.query("SELECT id, name FROM feed_organizations WHERE id = ANY($1)", [orgIds])
+    const orgRows = try tx.query(
+      "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
+      [orgIds]
+    )
     for (const row of orgRows) {
       const id = toText(row.id) ?? ""
       profiles.set(`org:${id}`, {
@@ -362,7 +405,8 @@ export effect function loadSubjectProfilesMapTx(
         kind: "org",
         handle: id,
         displayName: toText(row.name) ?? id,
-        avatarUrl: null
+        avatarUrl: toText(row.image_url) ?? (id !== "" ? resolveOrgLogoUrl(id) : null),
+        bannerUrl: toText(row.banner_url) ?? (id !== "" ? resolveOrgBannerUrl(id) : null)
       })
     }
   }
@@ -377,7 +421,7 @@ export effect function loadProfilesByIdsTx(
   const profiles = new Map<string, SubjectProfile>()
   if (uniqueIds.length === 0) return profiles
   const userRows = try tx.query(
-    "SELECT account_id, handle, display_name, avatar_url FROM feed_accounts WHERE account_id = ANY($1)",
+    "SELECT account_id, handle, display_name, avatar_url, banner_url FROM feed_accounts WHERE account_id = ANY($1)",
     [uniqueIds]
   )
   for (const row of userRows) {
@@ -388,29 +432,17 @@ export effect function loadProfilesByIdsTx(
         kind: "user",
         handle: toText(row.handle) ?? id,
         displayName: toText(row.display_name) ?? (toText(row.handle) ?? id),
-        avatarUrl: toText(row.avatar_url) ?? null
+        avatarUrl: toText(row.avatar_url) ?? null,
+        bannerUrl: toText(row.banner_url) ?? null
       })
     }
   }
   const missingAfterUsers = uniqueIds.filter((id) => !profiles.has(id))
   if (missingAfterUsers.length > 0) {
-    const npcRows = try tx.query("SELECT id, username, name FROM feed_actors WHERE id = ANY($1)", [missingAfterUsers])
-    for (const row of npcRows) {
-      const id = toText(row.id) ?? ""
-      if (id !== "") {
-        profiles.set(id, {
-          id,
-          kind: "npc",
-          handle: toText(row.username) ?? id,
-          displayName: toText(row.name) ?? id,
-          avatarUrl: null
-        })
-      }
-    }
-  }
-  const missingAfterNpcs = uniqueIds.filter((id) => !profiles.has(id))
-  if (missingAfterNpcs.length > 0) {
-    const orgRows = try tx.query("SELECT id, name FROM feed_organizations WHERE id = ANY($1)", [missingAfterNpcs])
+    const orgRows = try tx.query(
+      "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
+      [missingAfterUsers]
+    )
     for (const row of orgRows) {
       const id = toText(row.id) ?? ""
       if (id !== "") {
@@ -419,7 +451,28 @@ export effect function loadProfilesByIdsTx(
           kind: "org",
           handle: id,
           displayName: toText(row.name) ?? id,
-          avatarUrl: null
+          avatarUrl: toText(row.image_url) ?? resolveOrgLogoUrl(id),
+          bannerUrl: toText(row.banner_url) ?? resolveOrgBannerUrl(id)
+        })
+      }
+    }
+  }
+  const missingAfterOrgs = uniqueIds.filter((id) => !profiles.has(id))
+  if (missingAfterOrgs.length > 0) {
+    const npcRows = try tx.query(
+      "SELECT id, username, name, profile_image_url, profile_banner_url FROM feed_actors WHERE id = ANY($1) AND id NOT LIKE 'test-%'",
+      [missingAfterOrgs]
+    )
+    for (const row of npcRows) {
+      const id = toText(row.id) ?? ""
+      if (id !== "") {
+        profiles.set(id, {
+          id,
+          kind: "npc",
+          handle: toText(row.username) ?? id,
+          displayName: toText(row.name) ?? id,
+          avatarUrl: toText(row.profile_image_url) ?? resolveActorAvatarUrl(id),
+          bannerUrl: toText(row.profile_banner_url) ?? resolveActorBannerUrl(id)
         })
       }
     }

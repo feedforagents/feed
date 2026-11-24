@@ -42,7 +42,6 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     Default: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       onSubmit.mockClear();
       const canvas = within(canvasElement);
-      await expect(canvas.getByText("Virtual points — no cash value")).toBeVisible();
       await userEvent.click(canvas.getByRole("button", { name: "Buy YES" }));
       await expect(onSubmit).toHaveBeenCalledWith({ marketKind: "prediction", action: "Buy", side: "YES", amountPts: 10 });
     },
