@@ -233,6 +233,29 @@ export effect function isBlockedBetweenTx(tx: Tx, a: string, b: string): boolean
   return rows.length > 0
 }
 
+export effect function loadViewerExcludedAuthorIdsTx(tx: Tx, viewerId: string): Set<string>!StoreFailure {
+  const blockRows = try tx.query(
+    "SELECT blocker_id, blocked_id FROM feed_blocks WHERE blocker_id = $1 OR blocked_id = $1",
+    [viewerId]
+  )
+  const muteRows = try tx.query(
+    "SELECT muted_id FROM feed_mutes WHERE muter_id = $1",
+    [viewerId]
+  )
+  const excluded = new Set<string>()
+  for (const row of blockRows) {
+    const blocker = toText(row.blocker_id) ?? ""
+    const blocked = toText(row.blocked_id) ?? ""
+    if (blocker !== "" && blocker !== viewerId) excluded.add(blocker)
+    if (blocked !== "" && blocked !== viewerId) excluded.add(blocked)
+  }
+  for (const row of muteRows) {
+    const muted = toText(row.muted_id) ?? ""
+    if (muted !== "" && muted !== viewerId) excluded.add(muted)
+  }
+  return excluded
+}
+
 export effect function consumeHourlyRateLimitTx(
   tx: Tx,
   scopeKey: string,
