@@ -43,7 +43,6 @@ import {
   navRuntime,
   onboardingRuntime,
   pushBrowserRoute,
-  readStoredUiMode,
   recordPublicView,
   sendApp,
   sendNav,
@@ -220,9 +219,6 @@ export function bootStore(): void {
   if (booted) return;
   booted = true;
   if (typeof window !== "undefined") {
-    if (readStoredUiMode() === "social" && parseLocation(window.location.pathname, window.location.search).route === "Markets") {
-      window.history.replaceState(null, "", "/");
-    }
     window.addEventListener("popstate", () => {
       const parsed = parseLocation(window.location.pathname, window.location.search);
       sendNav({ type: "navigateTo", targetRoute: parsed.route });
@@ -252,13 +248,20 @@ export function bootStore(): void {
   void (async () => {
     await Promise.all([hydrateAuth(), loadSkillsHosts()]);
     const afterAuth = getStoreSnapshot();
-    const tasks: Promise<void>[] = [loadDataForRoute(afterAuth.route, initialSearch)];
-    if (afterAuth.route !== "Explore") {
+    if (!afterAuth.viewer && afterAuth.localUiMode === "social" && afterAuth.route === "Markets") {
+      setStoreState({ route: "Home" });
+      if (typeof window !== "undefined") {
+        window.history.replaceState(null, "", "/");
+      }
+    }
+    const route = getStoreSnapshot().route;
+    const tasks: Promise<void>[] = [loadDataForRoute(route, initialSearch)];
+    if (route !== "Explore") {
       tasks.push(loadTrending());
     }
     if (afterAuth.viewer !== null) {
-      if (afterAuth.route !== "Notifications") tasks.push(loadNotifications());
-      if (afterAuth.route !== "Chats") tasks.push(loadChats(false));
+      if (route !== "Notifications") tasks.push(loadNotifications());
+      if (route !== "Chats") tasks.push(loadChats(false));
     }
     await Promise.all(tasks);
   })();

@@ -160,7 +160,6 @@ const initialLocation = typeof window !== "undefined"
   : parseLocation("/", "");
 
 const initialUiMode = readStoredUiMode();
-const initialRoute = initialUiMode === "social" && initialLocation.route === "Markets" ? "Home" : initialLocation.route;
 
 let currentState: StoreState = {
   authLoaded: false,
@@ -169,7 +168,7 @@ let currentState: StoreState = {
   publicAppUrl: typeof window !== "undefined" ? window.location.origin : "https://feed.fun",
   turnstileSiteKey: null,
   devSmsCodeEnabled: false,
-  route: initialRoute,
+  route: initialLocation.route,
   profileHandle: initialLocation.profileHandle,
   selectedTicker: initialLocation.queryTicker,
   feedTab: "latest",
