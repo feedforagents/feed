@@ -682,7 +682,8 @@ export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntr
   return try store.transaction(effect (tx: Tx) => {
     const accounts = try tx.query(
       `SELECT account_id, handle, display_name, avatar_url, phone_verified_at, balance_cents, starting_grant_cents, purchased_cents
-       FROM feed_accounts`
+       FROM feed_accounts
+       WHERE phone_verified_at IS NOT NULL`
     )
     const predValues = try tx.query(
       `SELECT holder_id, COALESCE(SUM(cost_basis_cents), 0) AS total_cost
