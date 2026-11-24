@@ -309,6 +309,11 @@ export effect function generateCompletion(request: CompletionRequest): Completio
     throw err
   }
   if (live === null) {
+    // The deterministic fallback served this completion at zero provider cost, so the
+    // attempt is reconciled at 0 like the offline-fallback path above. Leaving the
+    // reservation 'uncertain' would lock its estimate against every future day's
+    // budget: nothing else ever settles an uncertain reservation.
+    try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
     return {
       text: buildDeterministicFallback(request),
       provider: "offline-fallback",

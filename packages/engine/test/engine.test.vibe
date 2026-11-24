@@ -10,6 +10,7 @@ import {
   confirmLlmSpend,
   ensureRollingMarketSlots,
   fastForwardSimulatedHours,
+  generateCompletion,
   getDailySpendStatus,
   getEngineAdminStatus,
   loadPublicWorldSnapshot,
@@ -524,6 +525,28 @@ it.effect('Engine parses wrapped LLM JSON, filters expired snapshot markets, fun
       assert.isTrue(buyReceipt.shares > 0)
       assert.strictEqual(liquidationTick.liquidatedCount, 1)
       assert.strictEqual(toText(liquidatedPositionRows[0]?.status), "liquidated")
+    })
+  })
+}))
+
+it.effect('A failed live LLM call served by the deterministic fallback reconciles its budget reservation at zero (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation")', () => scoped(effect {
+  const startMs = Date.UTC(2026, 10, 19, 1, 0, 0)
+  try withSeededEngine(startMs, effect {
+    try withEnvOverrides({ SURPLUS_BASE_URL: "http://127.0.0.1:9", SURPLUS_API_KEY: "sk-test" }, effect {
+      const result = try generateCompletion({
+        promptId: "orgPost",
+        user: "Organization: Feed Corp",
+        nowMs: startMs
+      })
+      const status = try getDailySpendStatus(startMs)
+      const rows = try queryRows("SELECT status, actual_micros FROM feed_llm_spend_reservations")
+      assert.strictEqual(result.usedFallback, true)
+      assert.strictEqual(result.actualMicros, 0)
+      assert.strictEqual(rows.length, 1)
+      assert.strictEqual(toText(rows[0]?.status), "settled")
+      assert.strictEqual(toInt(rows[0]?.actual_micros), 0)
+      assert.strictEqual(status.uncertainReservations, 0)
+      assert.strictEqual(status.committedMicros, 0)
     })
   })
 }))
