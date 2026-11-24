@@ -45,6 +45,7 @@ import {
   getChatMessages,
   getPostThread,
   getProfile,
+  leaveGroupChat,
   likePost,
   listAlphaInvites,
   listArticles,
@@ -548,30 +549,6 @@ effect function inviteMemberToGroup(
       [chatId, target.id, target.kind === "npc" ? "npc" : "user", now]
     )
     return { chatId, memberId: target.id, handle: target.handle, added: true }
-  })
-}
-
-effect function leaveGroupById(
-  accountId: string,
-  chatId: string
-): { readonly chatId: string; readonly left: boolean }!(SocialFailure | StoreFailure)!Store {
-  const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const kind = try loadChatKind(tx, chatId)
-    if (kind === "direct") {
-      throw new SocialFailure({ code: "Forbidden", message: "Cannot leave a direct message thread." })
-    }
-    if (kind === "team") {
-      throw new SocialFailure({ code: "TeamChatRetired", message: "Legacy team chats are retired." })
-    }
-    const deleted = try tx.query(
-      "DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 RETURNING member_id",
-      [chatId, accountId]
-    )
-    if (deleted.length === 0) {
-      throw new SocialFailure({ code: "NotFound", message: "You are not a member of that group." })
-    }
-    return { chatId, left: true }
   })
 }
 
@@ -1269,7 +1246,7 @@ effect function executeProtectedMessagingTool(
         asOptionalString(args.targetHandleOrId) ?? ""
       )
     case "leave_group":
-      return try leaveGroupById(caller.accountId, asOptionalString(args.chatId) ?? "")
+      return try leaveGroupChat(caller.accountId, asOptionalString(args.chatId) ?? "")
     case "list_group_invites": {
       const invites = try listAlphaInvites(caller.accountId)
       return { invites }

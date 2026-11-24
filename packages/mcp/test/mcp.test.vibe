@@ -613,7 +613,14 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
     try assertSocialModeRedaction("alice_mcp", authConfig, token2Access)
     const setGameBackRes = unwrapToolPayload(try callMcpTool(21, "set_mode", { mode: "game" }, authConfig, token2Access))
     const portfolioRestored = unwrapToolPayload(try callMcpTool(22, "get_portfolio", {}, authConfig, token2Access))
+    // spec/social/messaging.md, "Non-owner group members can leave group chats, and blocking enforces DM and invite isolation"
+    const ownedGroup = unwrapToolPayload(try callMcpTool(24, "create_group", { title: "Owner Desk", memberHandles: ["bob_social"] }, authConfig, token2Access)).chat as { readonly id: string }
+    const ownerLeaveRes = try callMcpTool(25, "leave_group", { chatId: ownedGroup.id }, authConfig, token2Access)
+    const ownerChatsAfterLeave = unwrapToolPayload(try callMcpTool(26, "list_chats", {}, authConfig, token2Access)).chats as ReadonlyArray<{ readonly id: string }>
     try check(() => {
+      assert.strictEqual((ownerLeaveRes.body.result as { readonly isError?: boolean }).isError, true)
+      assert.strictEqual((ownerLeaveRes.body.result as { readonly structuredContent: { readonly error: string } }).structuredContent.error, "Forbidden")
+      assert.strictEqual(ownerChatsAfterLeave.some((chat) => chat.id === ownedGroup.id), true)
       assert.strictEqual(createdPayload.viaClientName, "Claude Desktop")
       assert.strictEqual(createdPost.viaClientName, "Claude Desktop")
       assert.strictEqual(feedPage.items[0]?.id, createdPost.id)
