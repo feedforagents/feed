@@ -35,7 +35,7 @@ export const meta: ComponentMeta<TradeTicketProps> = {
       yesOddsPct: 54,
       defaultAction: "Sell",
       defaultSide: "YES",
-      defaultAmount: "1834",
+      defaultAmount: "18.34",
     },
   },
   play: {
@@ -48,9 +48,9 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     },
     PredictionCpmmQuote: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       const canvas = within(canvasElement);
-      await expect(canvas.getByText("1834.00 shares")).toBeVisible();
+      await expect(canvas.getByText("18.34 shares")).toBeVisible();
       await userEvent.click(canvas.getByRole("radio", { name: /NO/i }));
-      await expect(canvas.getByText("2146.00 shares")).toBeVisible();
+      await expect(canvas.getByText("21.46 shares")).toBeVisible();
     },
     PredictionSellFee: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       const canvas = within(canvasElement);

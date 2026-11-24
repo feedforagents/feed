@@ -602,7 +602,7 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
     .map((entry): AppPosition | null => {
       if (!isRecord(entry)) return null;
       const marketId = optStr(entry.marketId ?? entry.market_id);
-      const shares = num(entry.shares, 0);
+      const shares = num(entry.shares, 0) / 100;
       if (!marketId || shares <= 0) return null;
       const rawSide = str(entry.side, "yes").toLowerCase() === "no" ? "no" : "yes";
       const costCents = num(entry.costBasisCents ?? entry.cost_basis_cents, 0);
@@ -618,7 +618,7 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
           kind: "prediction",
           marketLabel: str(entry.question, marketId),
           side: rawSide === "yes" ? "YES" : "NO",
-          quantityLabel: `${shares} shares`,
+          quantityLabel: `${shares.toFixed(2)} shares`,
           entryLabel: formatPts(costCents / 100),
           markLabel: `${Math.round(sidePriceBps / 100)}%`,
           pnlPts: (estCents - costCents) / 100,

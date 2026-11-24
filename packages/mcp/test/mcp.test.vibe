@@ -743,14 +743,14 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     const sellFirst = unwrapToolPayload(try callMcpTool(
       118,
       "sell_prediction",
-      { marketId: "seed-market-1", side: "yes", shares: 100, idempotencyKey: "mcp-sell-idem-1" },
+      { marketId: "seed-market-1", side: "yes", shares: 1, idempotencyKey: "mcp-sell-idem-1" },
       authConfig,
       aliceToken
     ))
     const sellReplay = unwrapToolPayload(try callMcpTool(
       119,
       "sell_prediction",
-      { marketId: "seed-market-1", side: "yes", shares: 100, idempotencyKey: "mcp-sell-idem-1" },
+      { marketId: "seed-market-1", side: "yes", shares: 1, idempotencyKey: "mcp-sell-idem-1" },
       authConfig,
       aliceToken
     ))

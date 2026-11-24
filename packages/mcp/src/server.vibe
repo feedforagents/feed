@@ -117,6 +117,7 @@ import {
   parseProtocolVersion,
   ptsToWholeCents,
   rateLimitedResponse,
+  sharesToWholeUnits,
   toPtsNumber,
   validateToolArguments,
   type JsonRpcId,
@@ -947,7 +948,7 @@ effect function executeProtectedAccountTool(
           question: p.question,
           status: p.marketStatus,
           side: p.side,
-          shares: p.shares,
+          shares: p.shares / 100,
           costBasisPts: toPtsNumber(p.costBasisCents),
           estimatedValuePts: toPtsNumber(p.estimatedValueCents),
           payoutPts: toPtsNumber(p.payoutCents),
@@ -1229,7 +1230,7 @@ function formatPredictionTradeReceipt(
     marketId: receipt.marketId,
     action: receipt.action,
     side: receipt.side,
-    shares: receipt.shares,
+    shares: receipt.shares / 100,
     notionalPts: toPtsNumber(receipt.notionalCents),
     feePts: toPtsNumber(receipt.feeCents),
     netPts: toPtsNumber(receipt.netCents),
@@ -1268,7 +1269,10 @@ effect function executeProtectedTradeTool(
     case "sell_prediction": {
       const marketId = asOptionalString(args.marketId) ?? ""
       const side = args.side === "no" ? "no" : "yes"
-      const shares = asOptionalInt(args.shares) ?? 0
+      const shares = sharesToWholeUnits(Number(args.shares))
+      if (shares === undefined) {
+        throw new InvalidRpcParamsFailure({ message: "shares must be a positive number of shares (up to 2 decimal places)." })
+      }
       const idempotencyKey = asOptionalString(args.idempotencyKey)
       const receipt = try sellPredictionShares({
         actorId: caller.accountId,

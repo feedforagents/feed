@@ -391,7 +391,7 @@ export async function submitPredictionOrder(
     : `/api/markets/prediction/${encodeURIComponent(marketId)}/sell`;
   const body = action === "Buy"
     ? { side, amountCents: Math.max(1, Math.round(amountPts * 100)), amountPts }
-    : { side, shares: Math.max(1, Math.round(amountPts)) };
+    : { side, shares: Math.max(1, Math.round(amountPts * 100)) };
   return executeTradeRequest({
     endpoint,
     body,

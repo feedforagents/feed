@@ -1288,11 +1288,11 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     fields: {
       ...predictionTradeBaseFields("Outcome side to sell."),
       shares: {
-        kind: "integer",
+        kind: "number",
         required: true,
-        minimum: 1,
-        maximum: 1000000000,
-        description: "Whole number of shares to sell."
+        exclusiveMinimum: 0,
+        maximum: 10000000,
+        description: "Shares to sell (1 share = 1 pt at settlement; up to 2 decimal places)."
       }
     }
   }),
@@ -1464,6 +1464,13 @@ export function ptsToWholeCents(pts: number): number | undefined {
   if (!Number.isFinite(pts) || pts <= 0) return undefined
   const cents = Math.round(pts * 100)
   return cents >= 1 ? cents : undefined
+}
+
+/** @throws {never} */
+export function sharesToWholeUnits(shares: number): number | undefined {
+  if (!Number.isFinite(shares) || shares <= 0) return undefined
+  const units = Math.round(shares * 100)
+  return units >= 1 ? units : undefined
 }
 
 /** @throws {never} */
