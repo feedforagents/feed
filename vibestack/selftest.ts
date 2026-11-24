@@ -4604,7 +4604,15 @@ test("a trace integer of 16 or more digits that Quint wrote as a BigNumber decod
 
 test("the lint refuses, in a project's own code, a comment that is neither a citation nor a tool directive, an effect hook, a timer, a console call, inline config that would hide one, and one more than a listed file keeps", async () => {
   const { ESLint } = await import("eslint");
-  const eslint = new ESLint({ cwd: project });
+  const file = "apps/app/src/comment-budget.vibe";
+  const left = 2;
+  const eslint = new ESLint({
+    cwd: project,
+    overrideConfig: {
+      files: [file],
+      rules: { "code/comments": ["error", { left: { [file]: left } }] },
+    },
+  });
   const found = async (file: string, lines: string[]) => (await eslint.lintText(lines.join("\n"), { filePath: path.join(project, file) }))[0]!.messages
     .filter((m) => m.fatal || m.ruleId === "no-console" || m.ruleId?.startsWith("code/")).map((m) => `${m.line} ${m.ruleId ?? "inline config"}`);
   const specFile = "spec/app/index.md";
@@ -4653,8 +4661,6 @@ test("the lint refuses, in a project's own code, a comment that is neither a cit
   const hiding = [["useEffect(() => {}, []); // eslint-disable-line"], ["/* eslint-disable */", "// a note"], ["/* eslint-disable code/comments, code/effects -- it must */", "setTimeout(() => {}, 1);"], ["/* eslint code/comments: off, no-console: off */", `console.log("seen");`], ["// eslint-disable-next-line no-console -- it must", `console.log("seen");`]];
   assert.deepEqual(await Promise.all(hiding.map((lines) => found("apps/app/src/probe.vibe", lines))), hiding.map(() => ["1 inline config"]));
   assert.deepEqual(await found("packages/ui/src/components/probe.vibe", ["/** What a component takes, which the stories generator reads. */", "export function Probe() {", "  /** inside it */", "  return 1;", "}", "// a note"]), ["3 code/comments", "6 code/comments"]);
-  const { default: config } = await import(path.join(project, "eslint.config.js"));
-  const [file, left] = Object.entries(config.find((block: { rules?: Record<string, unknown> }) => block.rules?.["code/comments"]).rules["code/comments"][1].left as Record<string, number>).find(([file]) => file.endsWith(".vibe"))!;
   const notes = (n: number) => Array.from({ length: n }, () => "// a note");
   assert.deepEqual([(await found(file, notes(left))).length, (await found(file, notes(left + 1))).length], [0, left + 1]);
 });
