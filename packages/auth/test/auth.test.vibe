@@ -26,6 +26,7 @@ import {
   rateLimitScopeKey,
   recordAgentAttribution,
   registerDynamicClient,
+  revokeSessionByCookie,
   signInReviewerPassword,
   signOutEverywhere,
   startDeviceAuthorization,
@@ -689,6 +690,32 @@ it.effect('Web and MCP share one per-account hourly rate-limit budget and exhaus
         canonicalKeys: [`${accountId}:post`, `${accountId}:dm`, `${accountId}:trade`],
         tradeLimits: [30, 60, 120],
         afterHourReset: [0, ["mcp", 1, 29], ["web", 2, 28]]
+      }
+    ))
+  })
+}, 180_000)
+
+it.effect('Logout revokes the server session so the same cookie no longer authenticates (spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown")', () => effect {
+  try TestClock.setTime(Date.now())
+  try withFeedStore(effect {
+    const onboarded = try onboardViaPhone("+447700900100", "dave")
+    const cookie = cookiePairOf(onboarded.sessionCookieHeader)
+    const authedBefore = try authenticateSessionCookie(cookie, localnetConfig)
+    try revokeSessionByCookie(cookie, localnetConfig)
+    const authedAfter = try authenticateSessionCookie(cookie, localnetConfig)
+    try revokeSessionByCookie(cookie, localnetConfig)
+    const authedAfterSecondLogout = try authenticateSessionCookie(cookie, localnetConfig)
+    try revokeSessionByCookie(undefined, localnetConfig)
+    try check(() => assert.deepStrictEqual(
+      {
+        beforeLogout: authedBefore?.accountId === onboarded.account.accountId,
+        afterLogout: authedAfter,
+        afterSecondLogout: authedAfterSecondLogout
+      },
+      {
+        beforeLogout: true,
+        afterLogout: null,
+        afterSecondLogout: null
       }
     ))
   })
