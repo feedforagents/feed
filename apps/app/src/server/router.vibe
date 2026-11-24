@@ -1251,6 +1251,7 @@ effect function handleMarketRoute(
   const perpCloseMatch = /^\/api\/markets\/perp\/positions\/([^/]+)\/close$/.exec(path)
   if (method === "POST" && perpCloseMatch !== null) {
     const session = try requireSession(request, config)
+    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const closed = try closePerpPosition({
       ownerId: session.accountId,
       positionId: decodeSegment(perpCloseMatch[1] ?? "")
