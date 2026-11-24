@@ -113,6 +113,31 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
             </Card>
           ) : null}
 
+          {s.explore.organizations.length > 0 ? (
+            <Card className="gap-3 p-4">
+              <CardHeader>
+                <CardTitle className="text-sm">Organizations</CardTitle>
+              </CardHeader>
+              <CardContent className="gap-2">
+                {s.explore.organizations.map((org) => (
+                  <div key={org.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-foreground">{org.name}</span>
+                        <span className="text-xs text-muted-foreground">@{org.id}</span>
+                        {org.ticker ? <span className="font-mono text-xs text-primary">${org.ticker}</span> : null}
+                      </div>
+                      {org.description ? <p className="truncate text-xs text-muted-foreground">{org.description}</p> : null}
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => { void storeActions.navigate(`/u/${encodeURIComponent(org.id)}`); }}>
+                      View
+                    </Button>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          ) : null}
+
           {s.explore.posts.length > 0 ? (
             <BorderedPostList posts={s.explore.posts} mode={mode} />
           ) : null}

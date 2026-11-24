@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -81,7 +82,8 @@ function installMockNetwork() {
     if (path === "/api/feed") return json(SAMPLE_POSTS);
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
     if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [{ id: "the-new-york-taimes", name: "The New York TAImes", ticker: null, orgType: "media", description: "The gray-lady paywall machine, delivering prestige journalism with a subscription gate." }], tags: [] } });
+    if (path === "/api/users/the-new-york-taimes") return json({ profile: { id: "the-new-york-taimes", handle: "the-new-york-taimes", kind: "org", displayName: "The New York TAImes", bio: "The gray-lady paywall machine, delivering prestige journalism with a subscription gate.", followersCount: 3, followingCount: 1 }, posts: [] });
     if (path === "/api/leaderboard") return json({ leaderboard: [] });
     if (path === "/api/economy/packs") return json({ packs: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
@@ -147,4 +149,23 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+it('Explore search shows an organization and opens its profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork();
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.setJoinSheetOpen(false));
+  await act(() => storeActions.setPlayMode("game"));
+  await act(() => storeActions.navigate("/explore"));
+  await act(() => userEvent.fill(page.getByRole("textbox", { name: "Search Feed" }), "the-new-york-taimes"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search" })));
+  await expect.element(page.getByText("The New York TAImes")).toBeInTheDocument();
+  await expect.element(page.getByText("@the-new-york-taimes")).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("button", { name: "View" })));
+  expect(window.location.pathname).toBe("/u/the-new-york-taimes");
+  await expect.element(page.getByText("The New York TAImes")).toBeInTheDocument();
 });
