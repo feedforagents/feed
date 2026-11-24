@@ -382,6 +382,14 @@ it.effect('Economy and Stripe Checkout: Washington geo-block, idempotent HMAC we
       amountCents: 2_000
     })
     try resolvePredictionMarket({ marketId: "seed-market-1" })
+    // spec/markets/economy.md, "Pack pricing, equity, net profit, and leaderboard rank helpers"
+    try createVerifiedAccount("user-carol", "carol", 15_000)
+    const db = try Store
+    try db.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "UPDATE feed_accounts SET handle = 'deleted_user-carol', display_name = 'Deleted User', phone_hash = NULL, phone_last2 = NULL, phone_verified_at = NULL, starting_grant_cents = 10000 WHERE account_id = 'user-carol'"
+      )
+    })
 
     // spec/markets/economy.md, "Stripe Checkout packs are web-only and strictly blocked for Washington billing addresses or IPs"
     const waBillingCode = try marketErrorCode(createStripeCheckoutSession({
