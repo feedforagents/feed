@@ -185,6 +185,24 @@ export async function deletePost(postId: string): Promise<void> {
   });
 }
 
+export function removeDeletedPost(postId: string): void {
+  const cur = getStoreSnapshot();
+  const thread = cur.activeThread;
+  const present = cur.feedPosts.some((p) => p.card.id === postId)
+    || cur.explore.posts.some((p) => p.card.id === postId)
+    || cur.profileBundle?.posts.some((p) => p.card.id === postId)
+    || thread?.post.card.id === postId;
+  if (!present) return;
+  setStoreState({
+    feedPosts: cur.feedPosts.filter((p) => p.card.id !== postId),
+    explore: { ...cur.explore, posts: cur.explore.posts.filter((p) => p.card.id !== postId) },
+    profileBundle: cur.profileBundle
+      ? { ...cur.profileBundle, posts: cur.profileBundle.posts.filter((p) => p.card.id !== postId) }
+      : null,
+    activeThread: thread?.post.card.id === postId ? null : thread,
+  });
+}
+
 async function executePostAction({
   postId,
   endpoint,
