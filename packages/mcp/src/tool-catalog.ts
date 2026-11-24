@@ -394,6 +394,12 @@ function predictionTradeBaseFields(sideDescription: string): Readonly<Record<str
       required: true,
       values: ["yes", "no"],
       description: sideDescription
+    },
+    idempotencyKey: {
+      kind: "string",
+      minLength: 1,
+      maxLength: 255,
+      description: "Optional idempotency key (1-255 characters) to safely deduplicate retried prediction orders."
     }
   }
 }

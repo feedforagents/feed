@@ -1,4 +1,4 @@
-// spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"; spec/mcp/skill.md, "One canonical source renders all discovery documents and `index.json` SHA-256 digests"; spec/mcp/skill.md, "All 9 Join-sheet host launchers degrade to copy-prompt until device-verified"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
+// spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"; spec/mcp/skill.md, "One canonical source renders all discovery documents and `index.json` SHA-256 digests"; spec/mcp/skill.md, "All 9 Join-sheet host launchers degrade to copy-prompt until device-verified"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"
 import { assert, it } from "@effect/vitest"
 import { TestClock } from "effect/testing"
 import { Store, migrateFeedSchema, seedFeedWorld, type Tx } from "@repo/db"
@@ -16,7 +16,7 @@ import {
   verifyPhoneCode,
   type AuthRuntimeConfig
 } from "@repo/auth"
-import { createPost, listFeedPosts } from "@repo/social"
+import { RealtimeBus, createPost, listFeedPosts, type FeedRealtimeEvent } from "@repo/social"
 import {
   getSkillDiscoveryIndex,
   handleMcpRequest,
@@ -205,6 +205,18 @@ function unwrapToolPayload(res: McpCallResult): Record<string, unknown> {
   } | undefined
   assert.isDefined(result)
   assert.notStrictEqual(result?.isError, true)
+  assert.isDefined(result?.structuredContent)
+  return result?.structuredContent ?? {}
+}
+
+function unwrapToolError(res: McpCallResult): Record<string, unknown> {
+  assert.strictEqual(res.status, 200)
+  const result = res.body.result as {
+    readonly isError?: boolean
+    readonly structuredContent?: Record<string, unknown>
+  } | undefined
+  assert.isDefined(result)
+  assert.strictEqual(result?.isError, true)
   assert.isDefined(result?.structuredContent)
   return result?.structuredContent ?? {}
 }
@@ -655,4 +667,222 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
       assert.strictEqual(portfolioRestored.balancePts, 90)
       assert.strictEqual((portfolioRestored.predictionPositions as ReadonlyArray<unknown>).length, 1)
     })
+}))
+
+it.effect('Enforce MCP social delegation, canonical shared rate limits, prediction idempotencyKey replay/conflict, preview_perp validation, and market.perp realtime emission (spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () => withSeededWorld(effect (authConfig) => {
+  const publishedEvents: FeedRealtimeEvent[] = []
+  const captureBusLayer = Layer.effect(RealtimeBus, effect {
+    const pubsub = try PubSub.unbounded<FeedRealtimeEvent>()
+    const shape: RealtimeBus.Shape = {
+      publish: (event) => effect {
+        publishedEvents.push(event)
+        return try PubSub.publish(pubsub, event)
+      },
+      subscribe: () => Stream.fromPubSub(pubsub)
+    }
+    return shape
+  })
+  provide captureBusLayer {
+    const alice = try onboardPhoneUser("+14155550201", "alice_parity", "Alice Parity", authConfig)
+    const bob = try onboardPhoneUser("+14155550202", "bob_parity", "Bob Parity", authConfig)
+    const charlie = try onboardPhoneUser("+14155550203", "charlie_parity", "Charlie Parity", authConfig)
+    const aliceToken = (try connectOAuthGrant({
+      accountId: alice.account.accountId,
+      clientName: "Parity Agent A",
+      redirectUri: "http://127.0.0.1:4101/callback",
+      scope: "read social:write messages trade",
+      state: "state_parity_a",
+      verifier: "pkce_verifier_parity_agent_a_0123456789abcdef0123456789",
+      authConfig
+    })).access_token
+    const bobToken = (try connectOAuthGrant({
+      accountId: bob.account.accountId,
+      clientName: "Parity Agent B",
+      redirectUri: "http://127.0.0.1:4102/callback",
+      scope: "read social:write messages trade",
+      state: "state_parity_b",
+      verifier: "pkce_verifier_parity_agent_b_0123456789abcdef0123456789",
+      authConfig
+    })).access_token
+
+    const createdGroup = unwrapToolPayload(try callMcpTool(101, "create_group", { title: "Parity Squad", memberHandles: [] }, authConfig, aliceToken))
+    const groupChat = createdGroup.chat as { readonly id: string }
+    const invitedBob = unwrapToolPayload(try callMcpTool(102, "invite_to_group", { chatId: groupChat.id, targetHandleOrId: "bob_parity" }, authConfig, aliceToken))
+    const ownerLeaveErr = unwrapToolError(try callMcpTool(103, "leave_group", { chatId: groupChat.id }, authConfig, aliceToken))
+    const memberLeft = unwrapToolPayload(try callMcpTool(104, "leave_group", { chatId: groupChat.id }, authConfig, bobToken))
+    unwrapToolPayload(try callMcpTool(105, "follow", { handleOrId: "alice_parity" }, authConfig, bobToken))
+    unwrapToolPayload(try callMcpTool(106, "follow", { handleOrId: "charlie_parity" }, authConfig, bobToken))
+    unwrapToolPayload(try callMcpTool(107, "block", { handleOrId: "charlie_parity" }, authConfig, aliceToken))
+    const inviteBlockedErr = unwrapToolError(try callMcpTool(108, "invite_to_group", { chatId: groupChat.id, targetHandleOrId: "charlie_parity" }, authConfig, aliceToken))
+    const bobFollowingSeenByAlice = unwrapToolPayload(try callMcpTool(109, "get_following", { handleOrId: "bob_parity", limit: 20 }, authConfig, aliceToken))
+
+    const whoamiBefore = unwrapToolPayload(try callMcpTool(110, "whoami", {}, authConfig, aliceToken))
+    unwrapToolPayload(try callMcpTool(111, "create_post", { content: "Parity post checking canonical rate limit" }, authConfig, aliceToken))
+    const dmSent = unwrapToolPayload(try callMcpTool(112, "send_dm", { recipientHandleOrId: "bob_parity", content: "Hello Bob via MCP" }, authConfig, aliceToken))
+    const dmChatId = String(dmSent.chatId ?? "")
+    unwrapToolPayload(try callMcpTool(113, "send_message", { chatId: dmChatId, content: "Second message in DM" }, authConfig, aliceToken))
+    const whoamiAfterSocial = unwrapToolPayload(try callMcpTool(114, "whoami", {}, authConfig, aliceToken))
+
+    const buyFirst = unwrapToolPayload(try callMcpTool(
+      115,
+      "buy_prediction",
+      { marketId: "seed-market-1", side: "yes", amountPts: 5, idempotencyKey: "mcp-buy-idem-1" },
+      authConfig,
+      aliceToken
+    ))
+    const buyReplay = unwrapToolPayload(try callMcpTool(
+      116,
+      "buy_prediction",
+      { marketId: "seed-market-1", side: "yes", amountPts: 5, idempotencyKey: "mcp-buy-idem-1" },
+      authConfig,
+      aliceToken
+    ))
+    const buyConflictErr = unwrapToolError(try callMcpTool(
+      117,
+      "buy_prediction",
+      { marketId: "seed-market-1", side: "yes", amountPts: 6, idempotencyKey: "mcp-buy-idem-1" },
+      authConfig,
+      aliceToken
+    ))
+    const sellFirst = unwrapToolPayload(try callMcpTool(
+      118,
+      "sell_prediction",
+      { marketId: "seed-market-1", side: "yes", shares: 100, idempotencyKey: "mcp-sell-idem-1" },
+      authConfig,
+      aliceToken
+    ))
+    const sellReplay = unwrapToolPayload(try callMcpTool(
+      119,
+      "sell_prediction",
+      { marketId: "seed-market-1", side: "yes", shares: 100, idempotencyKey: "mcp-sell-idem-1" },
+      authConfig,
+      aliceToken
+    ))
+
+    const marketsPayload = unwrapToolPayload(try callMcpTool(120, "list_markets", { kind: "perp", limit: 5 }, authConfig))
+    const firstPerp = ((marketsPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>)[0]
+    const ticker = firstPerp?.ticker ?? ""
+    const previewTooSmallErr = unwrapToolError(try callMcpTool(
+      121,
+      "preview_perp",
+      { ticker, side: "long", collateralPts: 2, leverage: 2 },
+      authConfig,
+      aliceToken
+    ))
+    const previewValid = unwrapToolPayload(try callMcpTool(
+      122,
+      "preview_perp",
+      { ticker, side: "long", collateralPts: 5, leverage: 3 },
+      authConfig,
+      aliceToken
+    ))
+    const openedPerp = unwrapToolPayload(try callMcpTool(
+      123,
+      "open_perp",
+      { ticker, side: "long", collateralPts: 5, leverage: 3 },
+      authConfig,
+      aliceToken
+    ))
+    const previewDuplicateErr = unwrapToolError(try callMcpTool(
+      124,
+      "preview_perp",
+      { ticker, side: "short", collateralPts: 5, leverage: 2 },
+      authConfig,
+      aliceToken
+    ))
+    const positionId = String(openedPerp.positionId ?? "")
+    const closedPerp = unwrapToolPayload(try callMcpTool(
+      125,
+      "close_perp",
+      { positionId },
+      authConfig,
+      aliceToken
+    ))
+    const whoamiAfterTrades = unwrapToolPayload(try callMcpTool(126, "whoami", {}, authConfig, aliceToken))
+
+    try check(() => {
+      assert.strictEqual(invitedBob.added, true)
+      assert.strictEqual(invitedBob.handle, "bob_parity")
+      assert.strictEqual(invitedBob.memberId, bob.account.accountId)
+      assert.strictEqual(ownerLeaveErr.error, "Forbidden")
+      assert.strictEqual(memberLeft.left, true)
+      assert.strictEqual(inviteBlockedErr.error, "Blocked")
+      const followingIds = ((bobFollowingSeenByAlice.items ?? []) as ReadonlyArray<{ readonly id: string }>).map((i) => i.id)
+      assert.include(followingIds, alice.account.accountId)
+      assert.notInclude(followingIds, charlie.account.accountId)
+
+      const limitsBefore = whoamiBefore.rateLimits as Readonly<Record<string, { readonly used: number }>>
+      const limitsAfterSocial = whoamiAfterSocial.rateLimits as Readonly<Record<string, { readonly used: number }>>
+      const limitsAfterTrades = whoamiAfterTrades.rateLimits as Readonly<Record<string, { readonly used: number }>>
+      assert.strictEqual(limitsBefore.post?.used, 0)
+      assert.strictEqual(limitsBefore.dm?.used, 0)
+      assert.strictEqual(limitsBefore.trade?.used, 0)
+      assert.strictEqual(limitsAfterSocial.post?.used, 1)
+      assert.strictEqual(limitsAfterSocial.dm?.used, 2)
+      assert.strictEqual(limitsAfterSocial.trade?.used, 0)
+      assert.strictEqual(limitsAfterTrades.trade?.used, 7)
+
+      assert.strictEqual(buyReplay.tradeId, buyFirst.tradeId)
+      assert.strictEqual(buyReplay.shares, buyFirst.shares)
+      assert.strictEqual(buyReplay.balanceAfterPts, 95)
+      assert.strictEqual(buyConflictErr.error, "idempotency_conflict")
+      assert.strictEqual(buyConflictErr.code, "IDEMPOTENCY_CONFLICT")
+      assert.strictEqual(sellReplay.tradeId, sellFirst.tradeId)
+      assert.strictEqual(sellReplay.balanceAfterPts, sellFirst.balanceAfterPts)
+
+      assert.notStrictEqual(ticker, "")
+      assert.strictEqual(previewTooSmallErr.error, "ORDER_TOO_SMALL")
+      assert.strictEqual(previewValid.previewOnly, true)
+      assert.strictEqual(openedPerp.liquidationPricePts, previewValid.estimatedLiquidationPricePts)
+      assert.strictEqual(previewDuplicateErr.error, "POSITION_ALREADY_OPEN")
+      assert.strictEqual(closedPerp.positionId, positionId)
+
+      const perpEvents = publishedEvents.filter(
+        (ev): ev is Extract<FeedRealtimeEvent, { readonly type: "market.perp" }> => ev.type === "market.perp"
+      )
+      assert.strictEqual(perpEvents.length, 2)
+      assert.deepStrictEqual(
+        {
+          action: perpEvents[0]?.action,
+          actorId: perpEvents[0]?.actorId,
+          ticker: perpEvents[0]?.ticker,
+          side: perpEvents[0]?.side,
+          sizeCents: perpEvents[0]?.sizeCents,
+          leverage: perpEvents[0]?.leverage,
+          positionId: perpEvents[0]?.positionId
+        },
+        {
+          action: "open",
+          actorId: alice.account.accountId,
+          ticker,
+          side: "long",
+          sizeCents: 1500,
+          leverage: 3,
+          positionId
+        }
+      )
+      assert.isNumber(perpEvents[0]?.markPriceCents)
+      assert.deepStrictEqual(
+        {
+          action: perpEvents[1]?.action,
+          actorId: perpEvents[1]?.actorId,
+          ticker: perpEvents[1]?.ticker,
+          side: perpEvents[1]?.side,
+          sizeCents: perpEvents[1]?.sizeCents,
+          leverage: perpEvents[1]?.leverage,
+          positionId: perpEvents[1]?.positionId
+        },
+        {
+          action: "close",
+          actorId: alice.account.accountId,
+          ticker,
+          side: "long",
+          sizeCents: 1500,
+          leverage: 3,
+          positionId
+        }
+      )
+      assert.isNumber(perpEvents[1]?.markPriceCents)
+    })
+  }
 }))

@@ -27,6 +27,7 @@ import {
   getPredictionMarket,
   getUserPositions,
   listPerpMarkets,
+  listPerpPositions,
   listPredictionMarkets,
   openPerpPosition,
   sellPredictionShares,
@@ -45,15 +46,20 @@ import {
   getChatMessages,
   getPostThread,
   getProfile,
+  inviteToUserGroupChat,
+  leaveGroupChat,
   likePost,
   listAlphaInvites,
   listArticles,
   listChats,
   listFeedPosts,
+  listFollowers,
+  listFollowing,
   listNotifications,
   listTrending,
   markNotificationsRead,
   muteAccount,
+  publishFeedEvent,
   reportTarget,
   repostPost,
   respondAlphaInvite,
@@ -64,6 +70,7 @@ import {
   unlikePost,
   unmuteAccount,
   unrepostPost,
+  type FeedRealtimeEvent,
   type PostView,
   type ProfileView
 } from "@repo/social"
@@ -76,6 +83,7 @@ import {
   hasBalanceOrPnlField,
   isMutatingMcpTool,
   isPublicMcpTool,
+  isTradeExecutionTool,
   requiredScopeOf,
   toolMetadata,
   type McpTool
@@ -134,9 +142,33 @@ export { MCP_TOOL_DEFINITIONS, type McpToolDefinition, type McpToolName, type Mc
 
 const DEFAULT_DEVICE_CLIENT_ID = "https://feed.fun/clients/mcp-device"
 const DEFAULT_DEVICE_CLIENT_NAME = "Feed MCP Agent"
+const MIN_ORDER_SIZE_CENTS = 1000
 const MAINTENANCE_MARGIN_BPS = 250
 const TRADING_FEE_BPS = 10
 const BPS_DENOMINATOR = 10_000
+
+function maintenanceMarginCents(sizeCents: number): number {
+  return Math.max(1, Math.floor((sizeCents * MAINTENANCE_MARGIN_BPS) / BPS_DENOMINATOR))
+}
+
+function computeLiquidationPriceCents(input: {
+  readonly side: "long" | "short"
+  readonly entryPriceCents: number
+  readonly marginCents: number
+  readonly sizeCents: number
+}): number {
+  if (input.sizeCents <= 0 || input.entryPriceCents <= 0) return 1
+  const maint = maintenanceMarginCents(input.sizeCents)
+  const netBuffer = input.marginCents - maint
+  const raw = input.side === "long"
+    ? Math.floor((input.entryPriceCents * (input.sizeCents - netBuffer)) / input.sizeCents)
+    : Math.floor((input.entryPriceCents * (input.sizeCents + netBuffer)) / input.sizeCents)
+  return Math.max(1, raw)
+}
+
+effect function maybePublishFeedEvent(event: FeedRealtimeEvent): void!! {
+  try publishFeedEvent(event)
+}
 
 const SPEC_TOOL_BY_NAME: Readonly<Record<McpToolName, McpTool>> = {
   about_feed: "ToolAboutFeed",
@@ -389,92 +421,6 @@ effect function lookupDeviceClientId(deviceCode: string): (string | undefined)!(
   return found === null || found === "" ? undefined : found
 }
 
-effect function fetchFollowList(
-  direction: "followers" | "following",
-  handleOrId: string,
-  viewerId: string | undefined,
-  limit: number
-): {
-  readonly targetId: string
-  readonly targetHandle: string
-  readonly items: ReadonlyArray<{
-    readonly id: string
-    readonly kind: "user" | "npc" | "org"
-    readonly handle: string
-    readonly displayName: string
-    readonly avatarUrl: string | null
-    readonly isParody: boolean
-  }>
-}!(SocialFailure | StoreFailure)!Store {
-  const target = try getProfile(handleOrId, viewerId, "game")
-  if (target.viewerBlocks || target.viewerBlockedBy) {
-    throw new SocialFailure({ code: "Blocked", message: "Follow list unavailable due to a block." })
-  }
-  const store = try Store
-  const rows = try store.transaction(effect (tx: Tx) => {
-    const peerCol = direction === "followers" ? "follower_id" : "target_id"
-    const filterCol = direction === "followers" ? "target_id" : "follower_id"
-    const query = `SELECT f.${peerCol} AS peer_id,
-                fa.account_id AS user_id, fa.handle AS user_handle, fa.display_name AS user_name, fa.avatar_url AS user_avatar,
-                act.id AS npc_id, act.username AS npc_handle, act.name AS npc_name,
-                org.id AS org_id, org.name AS org_name
-         FROM feed_follows f
-         LEFT JOIN feed_accounts fa ON fa.account_id = f.${peerCol}
-         LEFT JOIN feed_actors act ON act.id = f.${peerCol}
-         LEFT JOIN feed_organizations org ON org.id = f.${peerCol}
-         WHERE f.${filterCol} = $1
-         ORDER BY f.created_at DESC
-         LIMIT $2`
-    return try tx.query(query, [target.id, limit])
-  })
-  const items: Array<{
-    readonly id: string
-    readonly kind: "user" | "npc" | "org"
-    readonly handle: string
-    readonly displayName: string
-    readonly avatarUrl: string | null
-    readonly isParody: boolean
-  }> = []
-  for (const row of rows) {
-    const userId = toText(row.user_id)
-    if (userId !== undefined && userId !== "") {
-      items.push({
-        id: userId,
-        kind: "user",
-        handle: toText(row.user_handle) ?? userId,
-        displayName: toText(row.user_name) ?? userId,
-        avatarUrl: toText(row.user_avatar) ?? null,
-        isParody: false
-      })
-      continue
-    }
-    const npcId = toText(row.npc_id)
-    if (npcId !== undefined && npcId !== "") {
-      items.push({
-        id: npcId,
-        kind: "npc",
-        handle: toText(row.npc_handle) ?? npcId,
-        displayName: toText(row.npc_name) ?? npcId,
-        avatarUrl: null,
-        isParody: true
-      })
-      continue
-    }
-    const orgId = toText(row.org_id)
-    if (orgId !== undefined && orgId !== "") {
-      items.push({
-        id: orgId,
-        kind: "org",
-        handle: orgId,
-        displayName: toText(row.org_name) ?? orgId,
-        avatarUrl: null,
-        isParody: true
-      })
-    }
-  }
-  return { targetId: target.id, targetHandle: target.handle, items }
-}
-
 effect function updateAccountProfile(
   accountId: string,
   displayName: string | undefined,
@@ -508,73 +454,6 @@ effect function updateAccountProfile(
   })
 }
 
-effect function loadChatKind(tx: Tx, chatId: string): string!(SocialFailure | StoreFailure) {
-  const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
-  const chat = chatRows[0]
-  if (chat === undefined) {
-    throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
-  }
-  return toText(chat.kind) ?? ""
-}
-
-effect function inviteMemberToGroup(
-  accountId: string,
-  chatId: string,
-  targetHandleOrId: string
-): { readonly chatId: string; readonly memberId: string; readonly handle: string; readonly added: boolean }!(SocialFailure | StoreFailure)!Store {
-  const target = try getProfile(targetHandleOrId, accountId, "game")
-  if (target.kind === "org") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Organizations cannot join chats." })
-  }
-  if (target.viewerBlocks || target.viewerBlockedBy) {
-    throw new SocialFailure({ code: "Blocked", message: "Cannot invite a blocked account." })
-  }
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
-    const kind = try loadChatKind(tx, chatId)
-    if (kind !== "group" && kind !== "user_group") {
-      throw new SocialFailure({ code: "Forbidden", message: "Direct member invitations only apply to user group chats." })
-    }
-    const callerMembership = try tx.query(
-      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
-      [chatId, accountId]
-    )
-    if (callerMembership.length === 0) {
-      throw new SocialFailure({ code: "Forbidden", message: "You must be a member of the group to invite others." })
-    }
-    try tx.query(
-      "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at) VALUES ($1, $2, $3, 'member', $4) ON CONFLICT (chat_id, member_id) DO NOTHING",
-      [chatId, target.id, target.kind === "npc" ? "npc" : "user", now]
-    )
-    return { chatId, memberId: target.id, handle: target.handle, added: true }
-  })
-}
-
-effect function leaveGroupById(
-  accountId: string,
-  chatId: string
-): { readonly chatId: string; readonly left: boolean }!(SocialFailure | StoreFailure)!Store {
-  const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const kind = try loadChatKind(tx, chatId)
-    if (kind === "direct") {
-      throw new SocialFailure({ code: "Forbidden", message: "Cannot leave a direct message thread." })
-    }
-    if (kind === "team") {
-      throw new SocialFailure({ code: "TeamChatRetired", message: "Legacy team chats are retired." })
-    }
-    const deleted = try tx.query(
-      "DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 RETURNING member_id",
-      [chatId, accountId]
-    )
-    if (deleted.length === 0) {
-      throw new SocialFailure({ code: "NotFound", message: "You are not a member of that group." })
-    }
-    return { chatId, left: true }
-  })
-}
-
 effect function resolveOptionalViewer(
   authorizationHeader: string | undefined,
   authConfig: AuthRuntimeConfig
@@ -603,7 +482,7 @@ effect function requireAuthenticatedCaller(
     throw new InsufficientScopeFailure({ requiredScope, grantedScopes: caller.scopes })
   }
   try checkAndConsumeRateLimit({ accountId: caller.accountId, action: "mcp_call", surface: "mcp" })
-  if (requiredScope === "trade") {
+  if (isTradeExecutionTool(specTool)) {
     try checkAndConsumeRateLimit({ accountId: caller.accountId, action: "trade", surface: "mcp" })
   }
   if (isMutatingMcpTool(specTool)) {
@@ -839,12 +718,16 @@ effect function executePublicSocialTool(
     case "get_followers": {
       const handleOrId = asOptionalString(args.handleOrId) ?? ""
       const limit = clampCount(asOptionalInt(args.limit), 50, 100)
-      return try fetchFollowList("followers", handleOrId, viewer.viewerId, limit)
+      const items = try listFollowers(handleOrId, viewer.viewerId, limit)
+      const target = try getProfile(handleOrId, viewer.viewerId, "game")
+      return { targetId: target.id, targetHandle: target.handle, items }
     }
     case "get_following": {
       const handleOrId = asOptionalString(args.handleOrId) ?? ""
       const limit = clampCount(asOptionalInt(args.limit), 50, 100)
-      return try fetchFollowList("following", handleOrId, viewer.viewerId, limit)
+      const items = try listFollowing(handleOrId, viewer.viewerId, limit)
+      const target = try getProfile(handleOrId, viewer.viewerId, "game")
+      return { targetId: target.id, targetHandle: target.handle, items }
     }
   }
 }
@@ -1119,13 +1002,26 @@ effect function executeProtectedAccountTool(
         throw new InvalidRpcParamsFailure({ message: `Leverage must be between 1 and ${market.maxLeverage}.` })
       }
       const sizeCents = collateralCents * leverage
-      const estimatedFeeCents = Math.ceil((sizeCents * TRADING_FEE_BPS) / BPS_DENOMINATOR)
-      const maintenanceRatio = MAINTENANCE_MARGIN_BPS / BPS_DENOMINATOR
-      const moveAllowance = 1 / leverage - maintenanceRatio
-      const rawLiqCents = side === "long"
-        ? Math.round(market.markPriceCents * (1 - moveAllowance))
-        : Math.round(market.markPriceCents * (1 + moveAllowance))
-      const estimatedLiqCents = Math.max(0, rawLiqCents)
+      if (!Number.isSafeInteger(sizeCents) || sizeCents < MIN_ORDER_SIZE_CENTS) {
+        throw new MarketFailure({
+          code: "ORDER_TOO_SMALL",
+          message: `Notional size must be at least ${MIN_ORDER_SIZE_CENTS} cents (10.00 pts).`
+        })
+      }
+      const openPositions = try listPerpPositions(caller.accountId)
+      if (openPositions.some((pos) => pos.ticker === market.ticker)) {
+        throw new MarketFailure({
+          code: "POSITION_ALREADY_OPEN",
+          message: `Open position already exists on ${market.ticker}.`
+        })
+      }
+      const estimatedFeeCents = Math.floor((sizeCents * TRADING_FEE_BPS + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR)
+      const estimatedLiqCents = computeLiquidationPriceCents({
+        side,
+        entryPriceCents: market.markPriceCents,
+        marginCents: collateralCents,
+        sizeCents
+      })
       return {
         previewOnly: true,
         ticker: market.ticker,
@@ -1262,14 +1158,24 @@ effect function executeProtectedMessagingTool(
       const chat = try createUserGroupChat(caller.accountId, title, memberHandles)
       return { chat }
     }
-    case "invite_to_group":
-      return try inviteMemberToGroup(
-        caller.accountId,
-        asOptionalString(args.chatId) ?? "",
-        asOptionalString(args.targetHandleOrId) ?? ""
-      )
+    case "invite_to_group": {
+      const chatId = asOptionalString(args.chatId) ?? ""
+      const targetHandleOrId = asOptionalString(args.targetHandleOrId) ?? ""
+      const invited = try inviteToUserGroupChat({
+        accountId: caller.accountId,
+        chatId,
+        targetHandleOrId
+      })
+      const target = try getProfile(invited.memberId, caller.accountId, "game")
+      return {
+        chatId: invited.chatId,
+        memberId: invited.memberId,
+        handle: target.handle,
+        added: invited.added
+      }
+    }
     case "leave_group":
-      return try leaveGroupById(caller.accountId, asOptionalString(args.chatId) ?? "")
+      return try leaveGroupChat(caller.accountId, asOptionalString(args.chatId) ?? "")
     case "list_group_invites": {
       const invites = try listAlphaInvites(caller.accountId)
       return { invites }
@@ -1363,13 +1269,15 @@ effect function executeProtectedTradeTool(
       if (amountCents === undefined) {
         throw new InvalidRpcParamsFailure({ message: "amountPts must equal at least 0.01 pt (1 cent)." })
       }
+      const idempotencyKey = asOptionalString(args.idempotencyKey)
       const receipt = try buyPredictionShares({
         actorId: caller.accountId,
         actorKind: "user",
         marketId,
         side,
         amountCents,
-        viaClientName: caller.clientName
+        viaClientName: caller.clientName,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       })
       return formatPredictionTradeReceipt(receipt, caller)
     }
@@ -1377,13 +1285,15 @@ effect function executeProtectedTradeTool(
       const marketId = asOptionalString(args.marketId) ?? ""
       const side = args.side === "no" ? "no" : "yes"
       const shares = asOptionalInt(args.shares) ?? 0
+      const idempotencyKey = asOptionalString(args.idempotencyKey)
       const receipt = try sellPredictionShares({
         actorId: caller.accountId,
         actorKind: "user",
         marketId,
         side,
         shares,
-        viaClientName: caller.clientName
+        viaClientName: caller.clientName,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       })
       return formatPredictionTradeReceipt(receipt, caller)
     }
@@ -1397,6 +1307,17 @@ effect function executeProtectedTradeTool(
         collateralCents,
         leverage,
         viaClientName: caller.clientName
+      })
+      try maybePublishFeedEvent({
+        type: "market.perp",
+        action: "open",
+        actorId: caller.accountId,
+        ticker,
+        side,
+        sizeCents: receipt.sizeCents,
+        leverage: receipt.leverage,
+        positionId: receipt.positionId,
+        markPriceCents: receipt.position.markPriceCents
       })
       return {
         tradeId: receipt.tradeId,
@@ -1414,10 +1335,23 @@ effect function executeProtectedTradeTool(
     }
     case "close_perp": {
       const positionId = asOptionalString(args.positionId) ?? ""
+      const openPositions = try listPerpPositions(caller.accountId)
+      const existingPosition = openPositions.find((pos) => pos.id === positionId)
       const receipt = try closePerpPosition({
         ownerId: caller.accountId,
         positionId,
         viaClientName: caller.clientName
+      })
+      try maybePublishFeedEvent({
+        type: "market.perp",
+        action: "close",
+        actorId: caller.accountId,
+        ticker: receipt.ticker,
+        side: receipt.side,
+        sizeCents: receipt.sizeCents,
+        leverage: existingPosition?.leverage ?? 1,
+        positionId: receipt.positionId,
+        markPriceCents: receipt.exitPriceCents
       })
       return {
         tradeId: receipt.tradeId,
@@ -1655,6 +1589,21 @@ effect function handleToolsCall(input: {
         )
         return jsonRpcSuccessResponse(input.id, result)
       }
+      if (err.code === "IDEMPOTENCY_CONFLICT") {
+        const result: CallToolResult = mcpToolResult(
+          {
+            error: "idempotency_conflict",
+            code: err.code,
+            message: err.message,
+            currency: CURRENCY_DISCLAIMER
+          },
+          true
+        )
+        return jsonRpcSuccessResponse(input.id, result)
+      }
+      if (err.code === "INVALID_IDEMPOTENCY_KEY") {
+        return jsonRpcErrorResponse({ id: input.id, status: 400, code: -32602, message: err.message })
+      }
       const result: CallToolResult = mcpToolResult(
         { error: err.code, message: err.message, currency: CURRENCY_DISCLAIMER },
         true
@@ -1663,9 +1612,14 @@ effect function handleToolsCall(input: {
     }
     if (err instanceof SocialFailure) {
       if (err.code === "RateLimited") {
+        const action = definition.name === "create_post"
+          ? "post"
+          : definition.name === "send_dm" || definition.name === "send_message"
+            ? "dm"
+            : "social"
         return rateLimitedResponse({
           id: input.id,
-          action: "social",
+          action,
           retryAfterSeconds: 60,
           message: err.message
         })
