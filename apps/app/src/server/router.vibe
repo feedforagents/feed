@@ -114,9 +114,11 @@ import {
   unlikePost,
   unmuteAccount,
   unrepostPost,
+  updateProfile,
   type FeedTab,
   type RealtimeBus,
-  type SocialPresentationMode
+  type SocialPresentationMode,
+  type UpdatedAccountProfile
 } from "@repo/social"
 import type { AppServerConfig } from "./config.vibe"
 
@@ -871,7 +873,7 @@ effect function handleAccountEdge(
 effect function updateOwnAccountProfile(
   accountId: string,
   data: Readonly<Record<string, unknown>>
-): { readonly accountId: string; readonly handle: string; readonly displayName: string; readonly bio: string }!(HttpRequestError | StoreFailure)!Store {
+): UpdatedAccountProfile!(HttpRequestError | StoreFailure)!Store {
   const hasDisplayName = Object.prototype.hasOwnProperty.call(data, "displayName")
   const hasBio = Object.prototype.hasOwnProperty.call(data, "bio")
   if (!hasDisplayName && !hasBio) {
@@ -899,29 +901,12 @@ effect function updateOwnAccountProfile(
     }
     nextBio = trimmed
   }
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(
-      `UPDATE feed_accounts
-       SET display_name = COALESCE($2, display_name),
-           bio = COALESCE($3, bio),
-           updated_at = $4
-       WHERE account_id = $1
-       RETURNING account_id, handle, display_name, bio`,
-      [accountId, nextDisplayName, nextBio, now]
-    )
-    const row = rows[0]
-    if (row === undefined) {
-      return try badRequest("not_found", "Account profile not found.", 404)
-    }
-    return {
-      accountId: toText(row.account_id) ?? accountId,
-      handle: toText(row.handle) ?? "",
-      displayName: toText(row.display_name) ?? "",
-      bio: toText(row.bio) ?? ""
-    }
+  const profile = try updateProfile(accountId, {
+    displayName: nextDisplayName ?? undefined,
+    bio: nextBio ?? undefined
   })
+  if (profile === undefined) return try badRequest("not_found", "Account profile not found.", 404)
+  return profile
 }
 
 effect function handleSocialPostsAndUsers(

@@ -197,28 +197,24 @@ effect function callMcpTool(
   )
 }
 
-function unwrapToolPayload(res: McpCallResult): Record<string, unknown> {
+function unwrapToolResult(res: McpCallResult, isError: boolean): Record<string, unknown> {
   assert.strictEqual(res.status, 200)
   const result = res.body.result as {
     readonly isError?: boolean
     readonly structuredContent?: Record<string, unknown>
   } | undefined
   assert.isDefined(result)
-  assert.notStrictEqual(result?.isError, true)
+  assert.strictEqual(result?.isError === true, isError)
   assert.isDefined(result?.structuredContent)
   return result?.structuredContent ?? {}
 }
 
+function unwrapToolPayload(res: McpCallResult): Record<string, unknown> {
+  return unwrapToolResult(res, false)
+}
+
 function unwrapToolError(res: McpCallResult): Record<string, unknown> {
-  assert.strictEqual(res.status, 200)
-  const result = res.body.result as {
-    readonly isError?: boolean
-    readonly structuredContent?: Record<string, unknown>
-  } | undefined
-  assert.isDefined(result)
-  assert.strictEqual(result?.isError, true)
-  assert.isDefined(result?.structuredContent)
-  return result?.structuredContent ?? {}
+  return unwrapToolResult(res, true)
 }
 
 effect function onboardPhoneUser(

@@ -50,6 +50,7 @@ export {
   unblockAccount,
   unfollowAccount,
   unmuteAccount,
+  updateProfile,
   type BlockResult,
   type FollowListEntry,
   type FollowResult,
@@ -60,7 +61,8 @@ export {
   type ProfileView,
   type ReportTargetInput,
   type ReportTargetKindInput,
-  type ReportView
+  type ReportView,
+  type UpdatedAccountProfile
 } from "./graph.vibe"
 
 export {

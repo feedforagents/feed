@@ -70,9 +70,11 @@ import {
   unlikePost,
   unmuteAccount,
   unrepostPost,
+  updateProfile,
   type FeedRealtimeEvent,
   type PostView,
-  type ProfileView
+  type ProfileView,
+  type UpdatedAccountProfile
 } from "@repo/social"
 import {
   LATEST_PROTOCOL_VERSION,
@@ -425,33 +427,15 @@ effect function updateAccountProfile(
   accountId: string,
   displayName: string | undefined,
   bio: string | undefined
-): { readonly accountId: string; readonly handle: string; readonly displayName: string; readonly bio: string }!(InvalidRpcParamsFailure | StoreFailure)!Store {
+): UpdatedAccountProfile!(InvalidRpcParamsFailure | StoreFailure)!Store {
   if (displayName === undefined && bio === undefined) {
     throw new InvalidRpcParamsFailure({ message: "Provide displayName or bio to update." })
   }
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(
-      `UPDATE feed_accounts
-       SET display_name = COALESCE($2, display_name),
-           bio = COALESCE($3, bio),
-           updated_at = $4
-       WHERE account_id = $1
-       RETURNING account_id, handle, display_name, bio`,
-      [accountId, displayName ?? null, bio ?? null, now]
-    )
-    const row = rows[0]
-    if (row === undefined) {
-      throw new InvalidRpcParamsFailure({ message: "Account profile not found." })
-    }
-    return {
-      accountId: toText(row.account_id) ?? accountId,
-      handle: toText(row.handle) ?? "",
-      displayName: toText(row.display_name) ?? "",
-      bio: toText(row.bio) ?? ""
-    }
-  })
+  const profile = try updateProfile(accountId, { displayName, bio })
+  if (profile === undefined) {
+    throw new InvalidRpcParamsFailure({ message: "Account profile not found." })
+  }
+  return profile
 }
 
 effect function resolveOptionalViewer(

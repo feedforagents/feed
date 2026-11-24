@@ -65,6 +65,13 @@ export interface ProfileView {
   readonly uiMode: SocialPresentationMode | null
 }
 
+export interface UpdatedAccountProfile {
+  readonly accountId: string
+  readonly handle: string
+  readonly displayName: string
+  readonly bio: string
+}
+
 export interface FollowResult {
   readonly followerId: string
   readonly targetId: string
@@ -316,6 +323,31 @@ export effect function getProfile(
       uiMode: isSelf ? target.uiMode : null
     }
   })
+}
+
+export effect function updateProfile(
+  accountId: string,
+  patch: { readonly displayName?: string; readonly bio?: string }
+): (UpdatedAccountProfile | undefined)!StoreFailure!Store {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const rows = try store.transaction((tx: Tx) => tx.query(
+    `UPDATE feed_accounts
+     SET display_name = COALESCE($2, display_name),
+         bio = COALESCE($3, bio),
+         updated_at = $4
+     WHERE account_id = $1
+     RETURNING account_id, handle, display_name, bio`,
+    [accountId, patch.displayName ?? null, patch.bio ?? null, now]
+  ))
+  const row = rows[0]
+  if (row === undefined) return undefined
+  return {
+    accountId: toText(row.account_id) ?? accountId,
+    handle: toText(row.handle) ?? "",
+    displayName: toText(row.display_name) ?? "",
+    bio: toText(row.bio) ?? ""
+  }
 }
 
 export effect function followAccount(followerId: string, targetHandleOrId: string): FollowResult!(SocialFailure | StoreFailure)!Store {
