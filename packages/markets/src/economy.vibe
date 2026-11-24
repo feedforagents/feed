@@ -329,6 +329,7 @@ function markToMarketPredictionCents(side: unknown, shares: number, yesShares: n
 
 export effect function getAccountEconomy(accountId: string): AccountEconomyView!(MarketFailure | StoreFailure)!Store {
   const store = try Store
+  const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     const accountRows = try tx.query(
       `SELECT account_id, handle, display_name, phone_verified_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents
@@ -344,8 +345,9 @@ export effect function getAccountEconomy(accountId: string): AccountEconomyView!
       `SELECT p.side, p.shares, m.yes_shares, m.no_shares
        FROM feed_prediction_positions p
        JOIN feed_prediction_markets m ON m.id = p.market_id
-       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`,
-      [accountId]
+       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0
+         AND m.status = 'open' AND m.expires_at > $2`,
+      [accountId, now]
     )
     let predValueCents = 0
     for (const row of predRows) {
@@ -994,6 +996,7 @@ export effect function handleStripeWebhook(
 export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntry>!StoreFailure!Store {
   const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
   const store = try Store
+  const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     const accounts = try tx.query(
       `SELECT fa.account_id, fa.handle, fa.display_name, fa.avatar_url, fa.phone_verified_at, fa.balance_cents, fa.starting_grant_cents, fa.purchased_cents
@@ -1007,7 +1010,9 @@ export effect function getLeaderboard(limit = 50): ReadonlyArray<LeaderboardEntr
       `SELECT p.holder_id, p.side, p.shares, m.yes_shares, m.no_shares
        FROM feed_prediction_positions p
        JOIN feed_prediction_markets m ON m.id = p.market_id
-       WHERE p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`
+       WHERE p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0
+         AND m.status = 'open' AND m.expires_at > $1`,
+      [now]
     )
     const predMap = new Map<string, number>()
     for (const row of predRows) {

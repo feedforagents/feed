@@ -797,6 +797,12 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
     const boardMtm = try getLeaderboard()
     const aliceBoardMtm = boardMtm.find((e) => e.accountId === "user-alice")
 
+    // spec/markets/prediction.md, "Resolved, cancelled, held, and expired markets allow no trades, and duplicate resolution pays nothing extra"
+    try TestClock.adjust(Duration.seconds(4 * 86_400))
+    const aliceEconExpired = try getAccountEconomy("user-alice")
+    const boardExpired = try getLeaderboard()
+    const aliceBoardExpired = boardExpired.find((e) => e.accountId === "user-alice")
+
     // spec/markets/prediction.md, "Cancelled markets refund every open position at cost basis without publishing an outcome"
     try cancelPredictionMarket("seed-market-1")
     const boardAfterCancel = try getLeaderboard()
@@ -904,6 +910,10 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
           aliceBoardMtm?.positionValueCents === expectedAliceMtm,
           expectedAliceMtm !== 2_000
         ],
+        expiredMtmExcluded: [
+          aliceEconExpired.positionValueCents,
+          aliceBoardExpired?.positionValueCents
+        ],
         cancelledNotCountedAsSettledOrLoss: [
           aliceAfterCancel?.settledCount,
           aliceAfterCancel?.wins
@@ -923,6 +933,7 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
       {
         leaderboardIds: ["user-alice", "user-bob"],
         mtmMatchesEconomyAndBoard: [true, true, true],
+        expiredMtmExcluded: [0, 0],
         cancelledNotCountedAsSettledOrLoss: [0, 0],
         checkoutCredited: 200_000,
         earlyWonCode: "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING",
