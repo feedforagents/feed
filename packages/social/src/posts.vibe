@@ -560,6 +560,31 @@ function encodeCursorFromRow(row: Row, tab: FeedTab): string {
   return `${sortTs}:${id}`
 }
 
+effect function resolveAuthorFilterIdsTx(tx: Tx, authorFilter: string): ReadonlyArray<string>!StoreFailure {
+  const orgMatch = try tx.query("SELECT 1 FROM feed_organizations WHERE id = $1 LIMIT 1", [authorFilter])
+  return orgMatch.length > 0 ? [authorFilter, `org-${authorFilter}`] : [authorFilter]
+}
+
+effect function finishFeedPageTx(
+  tx: Tx,
+  sql: string,
+  params: ReadonlyArray<unknown>,
+  limit: number,
+  viewerId: string | undefined,
+  mode: SocialPresentationMode,
+  tab: FeedTab
+): FeedPage!StoreFailure {
+  const rows = try tx.query(sql, params)
+  const hasMore = rows.length > limit
+  const pageRows = hasMore ? rows.slice(0, limit) : rows
+  const items = try hydratePostRowsTx(tx, pageRows, viewerId, mode)
+  const lastRow = pageRows[pageRows.length - 1]
+  return {
+    items,
+    nextCursor: hasMore && lastRow !== undefined ? encodeCursorFromRow(lastRow, tab) : null
+  }
+}
+
 export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(SocialFailure | StoreFailure)!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
@@ -604,15 +629,15 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
         }
       }
       if (authorFilter !== null) {
-        const orgMatch = try tx.query("SELECT 1 FROM feed_organizations WHERE id = $1 LIMIT 1", [authorFilter])
-        if (orgMatch.length > 0) {
-          params.push(authorFilter, `org-${authorFilter}`)
+        const authorIds = try resolveAuthorFilterIdsTx(tx, authorFilter)
+        if (authorIds.length === 2) {
+          params.push(authorIds[0], authorIds[1])
           const ap = `$${params.length - 1}`
           const orgAp = `$${params.length}`
           origConditions.push(`(p.author_id = ${ap} OR p.author_id = ${orgAp})`)
           repostConditions.push(`(r.account_id = ${ap} OR r.account_id = ${orgAp})`)
         } else {
-          params.push(authorFilter)
+          params.push(authorIds[0])
           const ap = `$${params.length}`
           origConditions.push(`p.author_id = ${ap}`)
           repostConditions.push(`r.account_id = ${ap}`)
@@ -658,15 +683,7 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
       ${cursorWhere}
       ORDER BY sort_ts DESC, id DESC
       LIMIT ${limitParam}`
-      const rows = try tx.query(sql, params)
-      const hasMore = rows.length > limit
-      const pageRows = hasMore ? rows.slice(0, limit) : rows
-      const items = try hydratePostRowsTx(tx, pageRows, viewerId, mode)
-      const lastRow = pageRows[pageRows.length - 1]
-      return {
-        items,
-        nextCursor: hasMore && lastRow !== undefined ? encodeCursorFromRow(lastRow, input.tab) : null
-      }
+      return try finishFeedPageTx(tx, sql, params, limit, viewerId, mode, input.tab)
     }
     const conditions: string[] = ["p.deleted_at IS NULL"]
     if (effectiveFilter === "posts") {
@@ -681,12 +698,12 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
       conditions.push(viewerAuthorVisibilitySql(v, "p.author_id"))
     }
     if (authorFilter !== null) {
-      const orgMatch = try tx.query("SELECT 1 FROM feed_organizations WHERE id = $1 LIMIT 1", [authorFilter])
-      if (orgMatch.length > 0) {
-        params.push(authorFilter, `org-${authorFilter}`)
+      const authorIds = try resolveAuthorFilterIdsTx(tx, authorFilter)
+      if (authorIds.length === 2) {
+        params.push(authorIds[0], authorIds[1])
         conditions.push(`(p.author_id = $${params.length - 1} OR p.author_id = $${params.length})`)
       } else {
-        params.push(authorFilter)
+        params.push(authorIds[0])
         conditions.push(`p.author_id = $${params.length}`)
       }
     }
@@ -724,15 +741,7 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
     }
     params.push(limit + 1)
     const sql = `SELECT ${selectCols} FROM feed_posts p WHERE ${conditions.join(" AND ")} ORDER BY ${orderBy} LIMIT $${params.length}`
-    const rows = try tx.query(sql, params)
-    const hasMore = rows.length > limit
-    const pageRows = hasMore ? rows.slice(0, limit) : rows
-    const items = try hydratePostRowsTx(tx, pageRows, viewerId, mode)
-    const lastRow = pageRows[pageRows.length - 1]
-    return {
-      items,
-      nextCursor: hasMore && lastRow !== undefined ? encodeCursorFromRow(lastRow, input.tab) : null
-    }
+    return try finishFeedPageTx(tx, sql, params, limit, viewerId, mode, input.tab)
   })
 }
 

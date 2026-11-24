@@ -13,7 +13,7 @@ import {
   type State,
   type UUID,
 } from "@elizaos/core"
-import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
+import { Store, type Row, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
 import {
   MIN_SELL_SHARE_UNITS,
   buyPredictionShares,
@@ -703,6 +703,51 @@ effect function composeFeedProviders(runtime: AgentRuntime, providers: ReadonlyA
   return { values: { ...values, providers: text }, data: { providerOrder: ordered.map((provider) => provider.name), providers: results }, text }
 }
 
+function rowToDbActor(row: Row): DbActorRow {
+  return {
+    id: toText(row.id) ?? "",
+    name: toText(row.name) ?? "",
+    username: toText(row.username) ?? "",
+    tier: toText(row.tier) ?? "C_TIER",
+    description: toText(row.description) ?? "",
+    systemPrompt: toText(row.system_prompt) ?? "",
+    balanceCents: toInt(row.balance_cents),
+  }
+}
+
+effect function makeStoreEffectRunner(): StoreEffectRunner!!Store {
+  const store = try Store
+  const busOpt = try Effect.serviceOption(RealtimeBus)
+  return <A, E>(eff: A!E!Store) => {
+    const layer = Option.isSome(busOpt)
+      ? Layer.mergeAll(Layer.succeed(Store, store), Layer.succeed(RealtimeBus, busOpt.value))
+      : Layer.succeed(Store, store)
+    return runPromise(Effect.provide(eff, layer))
+  }
+}
+
+effect function executeNpcAction(
+  runtime: AgentRuntime,
+  agentUuid: UUID,
+  action: Action,
+  decision: NpcDecisionAction,
+  state: State,
+): (ActionResult | undefined)!EngineFailure {
+  const params = toJsonParamRecord(decision as unknown as Record<string, unknown>)
+  const actionMemory: Memory = {
+    id: safeElizaUuid(newEngineId("act")),
+    entityId: agentUuid,
+    agentId: agentUuid,
+    roomId: safeElizaUuid("feed-world-room"),
+    content: { text: decision.kind, data: params },
+  }
+  const result = try tryPromise({
+    try: () => Promise.resolve(action.handler(runtime, actionMemory, state, { parameters: params })),
+    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `NPC action ${decision.kind} failed`, cause }),
+  })
+  return result as ActionResult | undefined
+}
+
 export effect function executeNpcDecision(
   actorId: string,
   decision: NpcDecisionAction,
@@ -719,26 +764,12 @@ export effect function executeNpcDecision(
     )
     const row = rows[0]
     if (!row) return null
-    return {
-      id: toText(row.id) ?? "",
-      name: toText(row.name) ?? "",
-      username: toText(row.username) ?? "",
-      tier: toText(row.tier) ?? "C_TIER",
-      description: toText(row.description) ?? "",
-      systemPrompt: toText(row.system_prompt) ?? "",
-      balanceCents: toInt(row.balance_cents),
-    }
+    return rowToDbActor(row)
   })
   if (!actorRow || !isRuntimeNpcActor(actorRow.id, actorRow.name, actorRow.username)) {
     throw new EngineFailure({ code: "NOT_FOUND", message: `NPC actor ${actorId} not found.` })
   }
-  const busOpt = try Effect.serviceOption(RealtimeBus)
-  const runWithStore: StoreEffectRunner = <A, E>(eff: A!E!Store) => {
-    const layer = Option.isSome(busOpt)
-      ? Layer.mergeAll(Layer.succeed(Store, store), Layer.succeed(RealtimeBus, busOpt.value))
-      : Layer.succeed(Store, store)
-    return runPromise(Effect.provide(eff, layer))
-  }
+  const runWithStore = try makeStoreEffectRunner()
   const packActor = packActorById.get(actorRow.id)
   if (!isActionAllowedByAutonomy(decision, packActor)) {
     return { success: false, text: `Autonomy disables ${decision.kind} for ${actorRow.id}` }
@@ -754,30 +785,12 @@ export effect function executeNpcDecision(
   if (!action) {
     return { success: false, text: `Unknown action ${decision.kind}` }
   }
-  const params = toJsonParamRecord(decision as unknown as Record<string, unknown>)
-  const actionMemory: Memory = {
-    id: safeElizaUuid(newEngineId("act")),
-    entityId: agentUuid,
-    agentId: agentUuid,
-    roomId: safeElizaUuid("feed-world-room"),
-    content: { text: decision.kind, data: params },
-  }
-  const result = try tryPromise({
-    try: () => Promise.resolve(action.handler(runtime, actionMemory, { values: {}, data: {}, text: "" }, { parameters: params })),
-    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `NPC action ${decision.kind} failed`, cause }),
-  })
-  return (result as ActionResult | undefined) ?? { success: false, text: "No action result" }
+  const result = try executeNpcAction(runtime, agentUuid, action, decision, { values: {}, data: {}, text: "" })
+  return result ?? { success: false, text: "No action result" }
 }
 
 effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: number): number!(EngineFailure | StoreFailure)!Store {
-  const store = try Store
-  const busOpt = try Effect.serviceOption(RealtimeBus)
-  const runWithStore: StoreEffectRunner = <A, E>(eff: A!E!Store) => {
-    const layer = Option.isSome(busOpt)
-      ? Layer.mergeAll(Layer.succeed(Store, store), Layer.succeed(RealtimeBus, busOpt.value))
-      : Layer.succeed(Store, store)
-    return runPromise(Effect.provide(eff, layer))
-  }
+  const runWithStore = try makeStoreEffectRunner()
   const snap = try loadNpcProviderSnapshot(actor, nowMs)
   const packActor = packActorById.get(actor.id) ?? actors.find((a) => a.username === actor.username)
   const character = buildNpcCharacter(actor, packActor)
@@ -844,19 +857,8 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     if (actionsExecuted >= maxSteps) break
     const action = actionMap.get(decision.kind)
     if (!action) continue
-    const params = toJsonParamRecord(decision as unknown as Record<string, unknown>)
-    const actionMemory: Memory = {
-      id: safeElizaUuid(newEngineId("act")),
-      entityId: agentUuid,
-      agentId: agentUuid,
-      roomId: safeElizaUuid("feed-world-room"),
-      content: { text: decision.kind, data: params },
-    }
-    const result = try tryPromise({
-      try: () => Promise.resolve(action.handler(runtime, actionMemory, composedState, { parameters: params })),
-      catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `NPC action ${decision.kind} failed`, cause }),
-    })
-    if ((result as ActionResult | undefined)?.success) {
+    const result = try executeNpcAction(runtime, agentUuid, action, decision, composedState)
+    if (result?.success) {
       actionsExecuted += 1
     }
   }
@@ -968,15 +970,7 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
        ORDER BY id ASC`,
     )
     const allActors: DbActorRow[] = rows
-      .map((row) => ({
-        id: toText(row.id) ?? "",
-        name: toText(row.name) ?? "",
-        username: toText(row.username) ?? "",
-        tier: toText(row.tier) ?? "C_TIER",
-        description: toText(row.description) ?? "",
-        systemPrompt: toText(row.system_prompt) ?? "",
-        balanceCents: toInt(row.balance_cents),
-      }))
+      .map(rowToDbActor)
       .filter((a) => isRuntimeNpcActor(a.id, a.name, a.username))
     const repliedRows = try tx.query(
       `SELECT DISTINCT parent.author_id AS actor_id

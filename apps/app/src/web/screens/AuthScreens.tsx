@@ -79,6 +79,10 @@ function ScopeChecklist({
   );
 }
 
+function updateScopeSelection(prev: ReadonlyArray<string>, scope: string, checked: boolean): string[] {
+  return checked ? [...new Set([...prev, scope])] : prev.filter((item) => item !== scope);
+}
+
 export function LinkScreen() {
   const s = useAppStore();
   const initialCode = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("user_code") ?? "" : "";
@@ -86,7 +90,7 @@ export function LinkScreen() {
   const [scopes, setScopes] = useState<string[]>(ALL_SCOPES.map((sc) => sc.id));
 
   const toggleScope = (scope: string, checked: boolean) => {
-    setScopes((prev) => (checked ? [...new Set([...prev, scope])] : prev.filter((item) => item !== scope)));
+    setScopes((prev) => updateScopeSelection(prev, scope, checked));
   };
 
   const handleApprove = (e: FormEvent<HTMLFormElement>) => {
@@ -173,7 +177,7 @@ function ConsentScopeForm({
   const [scopes, setScopes] = useState<string[]>(validInitial.length > 0 ? validInitial : ["read"]);
 
   const toggleScope = (scope: string, checked: boolean) => {
-    setScopes((prev) => (checked ? [...new Set([...prev, scope])] : prev.filter((item) => item !== scope)));
+    setScopes((prev) => updateScopeSelection(prev, scope, checked));
   };
 
   return (

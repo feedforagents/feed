@@ -5,7 +5,6 @@ import {
   appendAnonymousModeParam,
   clearNotices,
   getStoreSnapshot,
-  hasAtRiskOpenPositions,
   pushBrowserRoute,
   recordPublicView,
   requireAuthOrQueue,
@@ -1037,11 +1036,17 @@ export async function inviteToGroupChat(chatId: string, targetHandleOrId: string
   return true;
 }
 
-export async function leaveGroupChat(chatId: string): Promise<boolean> {
+async function mutateAndClearGroupChat(
+  path: string,
+  method: "POST" | "DELETE",
+  chatId: string,
+  notice: string,
+  body?: Record<string, unknown>,
+): Promise<boolean> {
   if (!getStoreSnapshot().viewer) return false;
-  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/leave`, {
-    method: "POST",
-    body: {},
+  const res = await requestJson(path, {
+    method,
+    ...(body ? { body } : {}),
     parse: passThrough,
   });
   if (!res.ok) {
@@ -1053,9 +1058,19 @@ export async function leaveGroupChat(chatId: string): Promise<boolean> {
     selectedChatId: s.selectedChatId === chatId ? null : s.selectedChatId,
     chatMessages: s.selectedChatId === chatId ? [] : s.chatMessages,
   });
-  setStatusNotice("Left group chat.");
+  setStatusNotice(notice);
   await loadChats();
   return true;
+}
+
+export function leaveGroupChat(chatId: string): Promise<boolean> {
+  return mutateAndClearGroupChat(
+    `/api/chats/${encodeURIComponent(chatId)}/leave`,
+    "POST",
+    chatId,
+    "Left group chat.",
+    {},
+  );
 }
 
 export async function renameGroupChat(chatId: string, title: string): Promise<boolean> {
@@ -1093,24 +1108,13 @@ export async function removeGroupMember(chatId: string, targetHandleOrId: string
   return true;
 }
 
-export async function deleteGroupChat(chatId: string): Promise<boolean> {
-  if (!getStoreSnapshot().viewer) return false;
-  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}`, {
-    method: "DELETE",
-    parse: passThrough,
-  });
-  if (!res.ok) {
-    setErrorNotice(res.message);
-    return false;
-  }
-  const s = getStoreSnapshot();
-  setStoreState({
-    selectedChatId: s.selectedChatId === chatId ? null : s.selectedChatId,
-    chatMessages: s.selectedChatId === chatId ? [] : s.chatMessages,
-  });
-  setStatusNotice("Group chat deleted.");
-  await loadChats();
-  return true;
+export function deleteGroupChat(chatId: string): Promise<boolean> {
+  return mutateAndClearGroupChat(
+    `/api/chats/${encodeURIComponent(chatId)}`,
+    "DELETE",
+    chatId,
+    "Group chat deleted.",
+  );
 }
 
 export async function sendChatMessage(chatId: string, content: string): Promise<void> {
@@ -1147,7 +1151,7 @@ export async function reactToChatMessage(messageId: string, emoji: string): Prom
   await loadChatMessages(s.selectedChatId);
 }
 
-export async function respondAlphaInvite(inviteId: string, accept: boolean): Promise<void> {
+export async function respondGroupInvite(inviteId: string, accept: boolean): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
   const res = await requestJson(`/api/chats/invites/${encodeURIComponent(inviteId)}/respond`, {
     method: "POST",
@@ -1167,8 +1171,6 @@ export async function respondAlphaInvite(inviteId: string, accept: boolean): Pro
   });
   await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
 }
-
-export const respondGroupInvite = respondAlphaInvite;
 
 export async function loadNotifications(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
@@ -1442,22 +1444,29 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
   }
 }
 
-export async function toggleBlock(handle: string, currentBlocked?: boolean): Promise<void> {
+async function toggleModeration(
+  kind: "block" | "mute",
+  handle: string,
+  currentActive?: boolean,
+): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.viewer) return;
   const lower = handle.toLowerCase();
-  const blocked = currentBlocked
-    ?? (s.profileBundle?.summary.handle.toLowerCase() === lower ? s.profileBundle.summary.isBlocked : undefined)
-    ?? s.blockedAccounts.some((acc) => acc.handle.toLowerCase() === lower);
-  const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/block`, {
-    method: blocked ? "DELETE" : "POST",
+  const isBlock = kind === "block";
+  const active = currentActive
+    ?? (s.profileBundle?.summary.handle.toLowerCase() === lower
+      ? (isBlock ? s.profileBundle.summary.isBlocked : s.profileBundle.summary.isMuted)
+      : undefined)
+    ?? (isBlock ? s.blockedAccounts : s.mutedAccounts).some((acc) => acc.handle.toLowerCase() === lower);
+  const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/${kind}`, {
+    method: active ? "DELETE" : "POST",
     parse: passThrough,
   });
   if (!res.ok) {
     setErrorNotice(res.message);
     return;
   }
-  if (!blocked) {
+  if (!active) {
     filterAuthorOutOfFeeds(handle);
   }
   const cur = getStoreSnapshot();
@@ -1465,55 +1474,35 @@ export async function toggleBlock(handle: string, currentBlocked?: boolean): Pro
     setStoreState({
       profileBundle: {
         ...cur.profileBundle,
-        summary: { ...cur.profileBundle.summary, isBlocked: !blocked, isFollowing: blocked ? cur.profileBundle.summary.isFollowing : false },
+        summary: isBlock
+          ? {
+              ...cur.profileBundle.summary,
+              isBlocked: !active,
+              isFollowing: active ? cur.profileBundle.summary.isFollowing : false,
+            }
+          : { ...cur.profileBundle.summary, isMuted: !active },
       },
     });
   }
-  if (blocked) {
-    setStoreState({
-      blockedAccounts: getStoreSnapshot().blockedAccounts.filter((a) => a.handle.toLowerCase() !== lower),
-    });
+  if (active) {
+    setStoreState(
+      isBlock
+        ? { blockedAccounts: getStoreSnapshot().blockedAccounts.filter((a) => a.handle.toLowerCase() !== lower) }
+        : { mutedAccounts: getStoreSnapshot().mutedAccounts.filter((a) => a.handle.toLowerCase() !== lower) },
+    );
   } else if (cur.route === "Settings") {
     void loadModerationLists();
   }
-  setStatusNotice(blocked ? `Unblocked @${handle}.` : `Blocked @${handle}.`);
+  const verb = isBlock ? (active ? "Unblocked" : "Blocked") : (active ? "Unmuted" : "Muted");
+  setStatusNotice(`${verb} @${handle}.`);
 }
 
-export async function toggleMute(handle: string, currentMuted?: boolean): Promise<void> {
-  const s = getStoreSnapshot();
-  if (!s.viewer) return;
-  const lower = handle.toLowerCase();
-  const muted = currentMuted
-    ?? (s.profileBundle?.summary.handle.toLowerCase() === lower ? s.profileBundle.summary.isMuted : undefined)
-    ?? s.mutedAccounts.some((acc) => acc.handle.toLowerCase() === lower);
-  const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/mute`, {
-    method: muted ? "DELETE" : "POST",
-    parse: passThrough,
-  });
-  if (!res.ok) {
-    setErrorNotice(res.message);
-    return;
-  }
-  if (!muted) {
-    filterAuthorOutOfFeeds(handle);
-  }
-  const cur = getStoreSnapshot();
-  if (cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower) {
-    setStoreState({
-      profileBundle: {
-        ...cur.profileBundle,
-        summary: { ...cur.profileBundle.summary, isMuted: !muted },
-      },
-    });
-  }
-  if (muted) {
-    setStoreState({
-      mutedAccounts: getStoreSnapshot().mutedAccounts.filter((a) => a.handle.toLowerCase() !== lower),
-    });
-  } else if (cur.route === "Settings") {
-    void loadModerationLists();
-  }
-  setStatusNotice(muted ? `Unmuted @${handle}.` : `Muted @${handle}.`);
+export function toggleBlock(handle: string, currentBlocked?: boolean): Promise<void> {
+  return toggleModeration("block", handle, currentBlocked);
+}
+
+export function toggleMute(handle: string, currentMuted?: boolean): Promise<void> {
+  return toggleModeration("mute", handle, currentMuted);
 }
 
 export async function submitReport(targetKind: "account" | "post", targetId: string, reason: string): Promise<boolean> {
@@ -1530,5 +1519,3 @@ export async function submitReport(targetKind: "account" | "post", targetId: str
   setStatusNotice("Report submitted.");
   return true;
 }
-
-export { hasAtRiskOpenPositions };

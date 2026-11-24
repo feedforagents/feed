@@ -9,7 +9,7 @@ import {
   Skeleton,
   type UiMode,
 } from "@repo/ui";
-import { ArrowLeftIcon } from "../icons.tsx";
+import { BackHeader } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 import { formatFullTimestamp } from "../types.ts";
 
@@ -17,14 +17,6 @@ export function ArticleDetailScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();
   const article = s.activeArticle;
   const isGame = mode === "GameMode";
-
-  const handleBack = () => {
-    if (typeof window !== "undefined" && window.history.length > 1) {
-      window.history.back();
-      return;
-    }
-    void storeActions.navigate("/explore");
-  };
 
   const relatedPrediction = isGame && article?.relatedMarketId
     ? s.predictions.find((m) => m.card.id === article.relatedMarketId) ?? null
@@ -43,12 +35,9 @@ export function ArticleDetailScreen({ mode }: { readonly mode: UiMode }) {
 
   return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex h-[53px] items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
-        <Button variant="ghost" size="icon" shape="pill" aria-label="Back" onClick={handleBack} className="-ml-2">
-          <ArrowLeftIcon className="size-4" />
-        </Button>
+      <BackHeader fallbackPath="/explore">
         <h1 className="truncate text-base font-bold text-foreground">Article</h1>
-      </header>
+      </BackHeader>
 
       {s.articleLoading && !article ? (
         <div className="flex flex-col gap-4 p-4">

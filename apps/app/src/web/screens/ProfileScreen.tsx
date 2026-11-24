@@ -22,11 +22,10 @@ import {
   VerifiedBadge,
   type UiMode,
 } from "@repo/ui";
-import { ArrowLeftIcon } from "../icons.tsx";
-import { FlatPostList } from "../PostList.tsx";
+import { BackHeader, FlatPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 
-export const PRESET_AVATARS = [
+const PRESET_AVATARS = [
   "/assets/user-pfps/pfp-001.jpg",
   "/assets/user-pfps/pfp-002.jpg",
   "/assets/user-pfps/pfp-003.jpg",
@@ -37,7 +36,7 @@ export const PRESET_AVATARS = [
   "/assets/user-pfps/pfp-010.jpg",
 ] as const;
 
-export const PRESET_BANNERS = [
+const PRESET_BANNERS = [
   "/assets/user-banners/banner-1.jpg",
   "/assets/user-banners/banner-10.jpg",
   "/assets/user-banners/banner-11.jpg",
@@ -45,6 +44,60 @@ export const PRESET_BANNERS = [
   "/assets/user-banners/banner-13.jpg",
   "/assets/user-banners/banner-14.jpg",
 ] as const;
+
+export function ProfileMediaPickers({
+  avatarUrl,
+  bannerUrl,
+  onSelectAvatar,
+  onSelectBanner,
+  avatarLabel = "Avatar preset",
+  bannerLabel = "Banner preset",
+  bannerHeightClass = "h-12",
+}: {
+  readonly avatarUrl: string;
+  readonly bannerUrl: string;
+  readonly onSelectAvatar: (url: string) => void;
+  readonly onSelectBanner: (url: string) => void;
+  readonly avatarLabel?: string;
+  readonly bannerLabel?: string;
+  readonly bannerHeightClass?: string;
+}) {
+  return (
+    <>
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-semibold text-muted-foreground">{avatarLabel}</span>
+        <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+          {PRESET_AVATARS.map((url) => (
+            <button
+              key={url}
+              type="button"
+              onClick={() => onSelectAvatar(url)}
+              className={`overflow-hidden rounded-full border-2 p-0.5 transition-colors ${avatarUrl === url ? "border-feed-brand" : "border-transparent hover:border-border"}`}
+            >
+              <img src={url} alt="" className="size-10 rounded-full object-cover" />
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-semibold text-muted-foreground">{bannerLabel}</span>
+        <div className="grid grid-cols-3 gap-2">
+          {PRESET_BANNERS.map((url) => (
+            <button
+              key={url}
+              type="button"
+              onClick={() => onSelectBanner(url)}
+              className={`overflow-hidden rounded-lg border-2 transition-colors ${bannerUrl === url ? "border-feed-brand" : "border-border hover:border-foreground/40"}`}
+            >
+              <img src={url} alt="" className={`${bannerHeightClass} w-full object-cover`} />
+            </button>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
 
 type ProfileTab = "posts" | "replies" | "likes" | "trades" | "positions";
 
@@ -184,37 +237,12 @@ function EditProfileDialog({
             />
           </div>
 
-          <div className="flex flex-col gap-2">
-            <span className="text-xs font-semibold text-muted-foreground">Avatar preset</span>
-            <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
-              {PRESET_AVATARS.map((url) => (
-                <button
-                  key={url}
-                  type="button"
-                  onClick={() => setAvatarUrl(url)}
-                  className={`overflow-hidden rounded-full border-2 p-0.5 transition-colors ${avatarUrl === url ? "border-brand" : "border-transparent hover:border-border"}`}
-                >
-                  <img src={url} alt="" className="size-10 rounded-full object-cover" />
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            <span className="text-xs font-semibold text-muted-foreground">Banner preset</span>
-            <div className="grid grid-cols-3 gap-2">
-              {PRESET_BANNERS.map((url) => (
-                <button
-                  key={url}
-                  type="button"
-                  onClick={() => setBannerUrl(url)}
-                  className={`overflow-hidden rounded-lg border-2 transition-colors ${bannerUrl === url ? "border-brand" : "border-border hover:border-foreground/40"}`}
-                >
-                  <img src={url} alt="" className="h-12 w-full object-cover" />
-                </button>
-              ))}
-            </div>
-          </div>
+          <ProfileMediaPickers
+            avatarUrl={avatarUrl}
+            bannerUrl={bannerUrl}
+            onSelectAvatar={setAvatarUrl}
+            onSelectBanner={setBannerUrl}
+          />
 
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="outline" size="sm" shape="pill" onClick={() => onOpenChange(false)}>
@@ -236,14 +264,6 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
   const [editOpen, setEditOpen] = useState(false);
   const isGame = mode === "GameMode";
   const bundle = s.profileBundle;
-
-  const handleBack = () => {
-    if (typeof window !== "undefined" && window.history.length > 1) {
-      window.history.back();
-      return;
-    }
-    void storeActions.navigate("/");
-  };
 
   if (!s.viewer && !s.profileHandle && !bundle) {
     return (
@@ -298,17 +318,14 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
 
   return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex h-[53px] items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
-        <Button variant="ghost" size="icon" shape="pill" aria-label="Back" onClick={handleBack} className="-ml-2">
-          <ArrowLeftIcon className="size-4" />
-        </Button>
+      <BackHeader fallbackPath="/">
         <div className="min-w-0">
           <h1 className="truncate text-base leading-tight font-bold text-foreground">{bundle.summary.displayName}</h1>
           <p className="text-xs text-muted-foreground tabular-nums">
             {bundle.postsCount} {bundle.postsCount === 1 ? "post" : "posts"}
           </p>
         </div>
-      </header>
+      </BackHeader>
 
       <ProfileHeader
         profile={bundle.summary}

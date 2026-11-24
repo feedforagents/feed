@@ -7,8 +7,7 @@ import {
   Skeleton,
   type UiMode,
 } from "@repo/ui";
-import { ArrowLeftIcon } from "../icons.tsx";
-import { FeedPostCard } from "../PostList.tsx";
+import { BackHeader, FeedPostCard } from "../PostList.tsx";
 import type { ThreadReplySort } from "../store-core.ts";
 import { storeActions, useAppStore } from "../store.ts";
 import { formatFullTimestamp } from "../types.ts";
@@ -25,14 +24,6 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
   const [replyText, setReplyText] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
 
-  const handleBack = () => {
-    if (typeof window !== "undefined" && window.history.length > 1) {
-      window.history.back();
-      return;
-    }
-    void storeActions.navigate("/");
-  };
-
   const submitReply = async (text: string) => {
     if (!thread) return;
     setReplyBusy(true);
@@ -43,12 +34,9 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
 
   return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex h-[53px] items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
-        <Button variant="ghost" size="icon" shape="pill" aria-label="Back" onClick={handleBack} className="-ml-2">
-          <ArrowLeftIcon className="size-4" />
-        </Button>
+      <BackHeader fallbackPath="/">
         <h1 className="text-base font-bold text-foreground">Post</h1>
-      </header>
+      </BackHeader>
 
       {s.threadLoading && !thread ? (
         <div className="flex flex-col gap-3 p-4">

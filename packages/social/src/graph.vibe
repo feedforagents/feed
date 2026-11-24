@@ -453,13 +453,16 @@ export effect function updateProfile(
   ))
   const row = rows[0]
   if (row === undefined) return undefined
+  const resolvedId = toText(row.account_id) ?? accountId
+  const avatarUrl = toText(row.avatar_url) ?? null
+  const bannerUrl = toText(row.banner_url) ?? null
   return {
-    accountId: toText(row.account_id) ?? accountId,
+    accountId: resolvedId,
     handle: toText(row.handle) ?? "",
     displayName: toText(row.display_name) ?? "",
     bio: toText(row.bio) ?? "",
-    avatarUrl: toText(row.avatar_url) ?? null,
-    bannerUrl: toText(row.banner_url) ?? null
+    avatarUrl,
+    bannerUrl
   }
 }
 
@@ -933,13 +936,17 @@ export effect function listNotifications(
   })
 }
 
+effect function requireNonEmptyAccountId(accountId: string): void!SocialFailure {
+  if (accountId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
+  }
+}
+
 export effect function clearNotifications(
   accountId: string,
   notificationIds?: ReadonlyArray<string>
 ): ClearNotificationsResult!(SocialFailure | StoreFailure)!Store {
-  if (accountId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
-  }
+  try requireNonEmptyAccountId(accountId)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const mode = try requireAccountUiModeTx(tx, accountId)
@@ -1029,9 +1036,7 @@ export effect function getUnreadNotificationCount(
   accountId: string,
   mode?: SocialPresentationMode
 ): number!(SocialFailure | StoreFailure)!Store {
-  if (accountId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
-  }
+  try requireNonEmptyAccountId(accountId)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const effectiveMode = mode ?? (try readViewerUiModeTx(tx, accountId))
@@ -1043,9 +1048,7 @@ export effect function markNotificationsRead(
   accountId: string,
   notificationIds?: ReadonlyArray<string>
 ): MarkNotificationsReadResult!(SocialFailure | StoreFailure)!Store {
-  if (accountId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
-  }
+  try requireNonEmptyAccountId(accountId)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {

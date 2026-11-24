@@ -69,7 +69,7 @@ export function HomeScreen({ mode }: HomeScreenProps) {
             shape="pill"
             variant="ghost"
             onClick={() => { void storeActions.flushPendingNewPosts(); }}
-            className="bg-brand/10 px-4 font-semibold text-primary hover:bg-brand/15"
+            className="bg-feed-brand/10 px-4 font-semibold text-primary hover:bg-feed-brand/15"
           >
             Show {s.pendingNewPostCount} new {s.pendingNewPostCount === 1 ? "post" : "posts"}
           </Button>

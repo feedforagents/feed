@@ -220,7 +220,7 @@ function buildTerminalMarket(
       liquidityPts: selectedPrediction.liquidityCents / 100,
       endsAtLabel: selectedPrediction.card.closesIn ?? selectedPrediction.card.timeframe,
       feeBps: 10,
-      maxOddsMoveBps: 500,
+      maxOddsMoveBps: 2000,
       ...(selectedPrediction.resolutionProof
         ? { resolutionCriteria: selectedPrediction.resolutionProof }
         : selectedPrediction.description

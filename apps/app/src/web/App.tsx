@@ -241,7 +241,7 @@ function MobileDrawer({
               size="sm"
             />
           ) : (
-            <FeedIcon className="size-7 text-brand" />
+            <FeedIcon className="size-7 text-feed-brand" />
           )}
         </button>
       </SheetTrigger>
@@ -402,10 +402,10 @@ function MobileHeaderActions({
 
 function VisitorBanner() {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-brand/30 bg-brand px-4 py-3 text-brand-foreground shadow-lg">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-feed-brand/30 bg-feed-brand px-4 py-3 text-feed-brand-foreground shadow-lg">
       <div className="flex min-w-0 flex-col">
         <span className="text-sm font-bold">Don&apos;t miss what&apos;s happening</span>
-        <span className="text-xs text-brand-foreground/85">Join Feed to post, follow, and trade live.</span>
+        <span className="text-xs text-feed-brand-foreground/85">Join Feed to post, follow, and trade live.</span>
       </div>
       <div className="flex items-center gap-2">
         <Button
@@ -420,7 +420,7 @@ function VisitorBanner() {
           size="sm"
           shape="pill"
           variant="outline"
-          className="border-brand-foreground/40 bg-transparent text-brand-foreground hover:bg-brand-foreground/10"
+          className="border-feed-brand-foreground/40 bg-transparent text-feed-brand-foreground hover:bg-feed-brand-foreground/10"
           onClick={() => storeActions.openJoinSheet("agent")}
         >
           Connect AI
@@ -429,7 +429,7 @@ function VisitorBanner() {
           type="button"
           aria-label="Dismiss sign-in banner"
           onClick={storeActions.dismissBottomBanner}
-          className="rounded-full p-1 text-brand-foreground/80 transition-colors hover:bg-brand-foreground/15 hover:text-brand-foreground"
+          className="rounded-full p-1 text-feed-brand-foreground/80 transition-colors hover:bg-feed-brand-foreground/15 hover:text-feed-brand-foreground"
         >
           <XIcon className="size-4" />
         </button>
@@ -521,7 +521,7 @@ export function App() {
             onClick={() => { void storeActions.navigate("/"); }}
             className="inline-flex items-center rounded-full p-1 transition-opacity hover:opacity-85"
           >
-            <FeedIcon className="size-8 text-brand lg:hidden" />
+            <FeedIcon className="size-8 text-feed-brand lg:hidden" />
             <FeedFullLogo className="hidden h-7 w-auto text-foreground lg:block" />
           </button>
         }

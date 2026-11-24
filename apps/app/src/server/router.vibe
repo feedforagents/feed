@@ -1014,17 +1014,17 @@ effect function handleWorldStatusAndUserSearch(
            (SELECT COUNT(*) FROM feed_actors WHERE id NOT LIKE 'test-%') AS active_actors_count`,
         [now]
       )
-      const w = worldRows[0] ?? {}
-      const c = countsRows[0] ?? {}
+      const [world] = worldRows
+      const [counts] = countsRows
       return {
-        currentDay: Math.max(1, toInt(w.current_day) || 1),
-        currentHour: Math.max(0, toInt(w.current_hour)),
-        phase: toText(w.phase) ?? "active",
-        gameRunning: w.game_running !== false,
-        lastTickAt: Math.max(0, toInt(w.last_tick_at)),
-        activeMarketsCount: Math.max(0, toInt(c.active_markets_count)),
-        totalPostsCount: Math.max(0, toInt(c.total_posts_count)),
-        activeActorsCount: Math.max(0, toInt(c.active_actors_count))
+        currentDay: Math.max(1, toInt(world?.current_day) || 1),
+        currentHour: Math.max(0, toInt(world?.current_hour)),
+        phase: toText(world?.phase) ?? "active",
+        gameRunning: world?.game_running !== false,
+        lastTickAt: Math.max(0, toInt(world?.last_tick_at)),
+        activeMarketsCount: Math.max(0, toInt(counts?.active_markets_count)),
+        totalPostsCount: Math.max(0, toInt(counts?.total_posts_count)),
+        activeActorsCount: Math.max(0, toInt(counts?.active_actors_count))
       }
     })
     return jsonResponse(status)
@@ -1459,33 +1459,71 @@ function parseLeaderboardPageSize(url: URL): number {
   return clampIntQuery(url, "limit", 50, 1, 200)
 }
 
+type MarketRouteOutcome = (Response | undefined)!(AuthFailure | RateLimited | MarketFailure | StoreFailure | HttpRequestError)!(Store | RealtimeBus)
+
+function formatPriceHistoryResponse(view: {
+  readonly range: string
+  readonly points: ReadonlyArray<{ readonly timestamp: number }>
+}): Response {
+  const points = view.points.map((pt) => ({ ...pt, recordedAt: pt.timestamp }))
+  return jsonResponse({ range: view.range, points, history: points })
+}
+
+effect function respondAssetTrades(
+  marketKind: "prediction" | "perp",
+  marketRef: string,
+  url: URL
+): Response!(MarketFailure | StoreFailure)!Store {
+  const trades = try listAssetTrades({
+    marketKind,
+    marketRef,
+    limit: clampIntQuery(url, "limit", 50, 1, 200)
+  })
+  return jsonResponse({ trades: trades.map((t) => ({ ...t, traderDisplayName: t.traderName })) })
+}
+
+function readHistoryQuery(url: URL) {
+  return {
+    range: parseHistoryRange(url.searchParams.get("range")),
+    limit: clampIntQuery(url, "limit", 200, 2, 500)
+  }
+}
+
+effect function parsePerpOrderParams(
+  data: Record<string, unknown>
+): { readonly side: "long" | "short"; readonly collateralCents: number; readonly leverage: number }!HttpRequestError {
+  const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
+  if (rawSide !== "long" && rawSide !== "short") {
+    return try badRequest("invalid_side", "Side must be long or short.")
+  }
+  const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
+  const leverage = numField(data, "leverage") ?? 1
+  return { side: rawSide, collateralCents: Math.round(collateralCents), leverage }
+}
+
+function readLeaderboardFilterParams(url: URL) {
+  if (!url.searchParams.has("filter") && !url.searchParams.has("timeframe")) return null
+  return {
+    filter: parseLeaderboardFilter(url.searchParams.get("filter")),
+    timeframe: parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
+  }
+}
+
 effect function handlePredictionMarketRoute(
   request: Request,
   url: URL,
   config: AppServerConfig
-): (Response | undefined)!(AuthFailure | RateLimited | MarketFailure | StoreFailure | HttpRequestError)!(Store | RealtimeBus) {
+): MarketRouteOutcome {
   const path = url.pathname
   const method = request.method.toUpperCase()
   const predHistoryMatch = /^\/api\/markets\/predictions?\/([^/]+)\/history$/.exec(path)
   if (method === "GET" && predHistoryMatch !== null) {
     const marketId = decodeSegment(predHistoryMatch[1] ?? "")
-    const view = try getPredictionPriceHistory({
-      marketId,
-      range: parseHistoryRange(url.searchParams.get("range")),
-      limit: clampIntQuery(url, "limit", 200, 2, 500)
-    })
-    const points = view.points.map((pt) => ({ ...pt, recordedAt: pt.timestamp }))
-    return jsonResponse({ range: view.range, points, history: points })
+    return formatPriceHistoryResponse(try getPredictionPriceHistory({ marketId, ...readHistoryQuery(url) }))
   }
   const predTradesMatch = /^\/api\/markets\/predictions?\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && predTradesMatch !== null) {
-    const marketId = decodeSegment(predTradesMatch[1] ?? "")
-    const trades = try listAssetTrades({
-      marketKind: "prediction",
-      marketRef: marketId,
-      limit: clampIntQuery(url, "limit", 50, 1, 200)
-    })
-    return jsonResponse({ trades: trades.map((t) => ({ ...t, traderDisplayName: t.traderName })) })
+    return try respondAssetTrades("prediction", decodeSegment(predTradesMatch[1] ?? ""), url)
   }
   const predPreviewMatch = /^\/api\/markets\/predictions?\/([^/]+)\/preview$/.exec(path)
   if (method === "POST" && predPreviewMatch !== null) {
@@ -1545,15 +1583,16 @@ effect function handlePredictionMarketRoute(
           shares: Math.round(numField(data, "shareUnits", "share_units", "shares") ?? 0),
           ...(idempotencyKey === undefined ? {} : { idempotencyKey })
         })
+    const { marketId: receiptMarketId, action: receiptAction, side: receiptSide, yesPriceBps, noPriceBps, shares, notionalCents } = receipt
     try publishFeedEvent({
       type: "market.prediction",
-      marketId: receipt.marketId,
-      action: receipt.action,
-      side: receipt.side,
-      yesPriceBps: receipt.yesPriceBps,
-      noPriceBps: receipt.noPriceBps,
-      shares: receipt.shares,
-      notionalCents: receipt.notionalCents
+      marketId: receiptMarketId,
+      action: receiptAction,
+      side: receiptSide,
+      yesPriceBps,
+      noPriceBps,
+      shares,
+      notionalCents
     })
     return jsonResponse(receipt)
   }
@@ -1571,12 +1610,11 @@ effect function handleLeaderboardAndEconomyRoute(
     const session = try optionalSession(request, config)
     const page = clampIntQuery(url, "page", 1, 1, 10_000)
     const pageSize = parseLeaderboardPageSize(url)
-    if (url.searchParams.has("filter") || url.searchParams.has("timeframe")) {
-      const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
-      const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
-      const result = try getFilteredLeaderboardPage({ filter, timeframe, page, pageSize })
+    const filterParams = readLeaderboardFilterParams(url)
+    if (filterParams !== null) {
+      const result = try getFilteredLeaderboardPage({ ...filterParams, page, pageSize })
       return jsonResponse({
-        scope: filter === "npcs" ? "characters" : "players",
+        scope: filterParams.filter === "npcs" ? "characters" : "players",
         metric: "net_profit",
         entries: result.entries,
         leaderboard: result.entries,
@@ -1612,10 +1650,9 @@ effect function handleLeaderboardAndEconomyRoute(
   if (method === "GET" && path === "/api/leaderboard/me") {
     const session = try requireSession(request, config)
     const pageSize = parseLeaderboardPageSize(url)
-    if (url.searchParams.has("filter") || url.searchParams.has("timeframe")) {
-      const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
-      const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
-      const viewerRank = try getFilteredLeaderboardViewerRank(session.accountId, { filter, timeframe, pageSize })
+    const filterParams = readLeaderboardFilterParams(url)
+    if (filterParams !== null) {
+      const viewerRank = try getFilteredLeaderboardViewerRank(session.accountId, { ...filterParams, pageSize })
       return jsonResponse({ ...viewerRank, position: viewerRank })
     }
     const metric = parseLeaderboardMetric(url.searchParams.get("metric"))
@@ -1655,7 +1692,7 @@ effect function handleMarketRoute(
   request: Request,
   url: URL,
   config: AppServerConfig
-): (Response | undefined)!(AuthFailure | RateLimited | MarketFailure | StoreFailure | HttpRequestError)!(Store | RealtimeBus) {
+): MarketRouteOutcome {
   const path = url.pathname
   const method = request.method.toUpperCase()
   if (method === "GET" && path === "/api/markets") {
@@ -1684,39 +1721,22 @@ effect function handleMarketRoute(
     const session = try optionalSession(request, config)
     const { data } = try readParsedBody(request)
     const ticker = try reqStr(data, "ticker", "ticker")
-    const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
-    if (rawSide !== "long" && rawSide !== "short") return try badRequest("invalid_side", "Side must be long or short.")
-    const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
-    const leverage = numField(data, "leverage") ?? 1
+    const order = try parsePerpOrderParams(data)
     const preview = try previewPerpOrder({
       ...(session !== null ? { ownerId: session.accountId } : {}),
       ticker,
-      side: rawSide,
-      collateralCents: Math.round(collateralCents),
-      leverage
+      ...order
     })
     return jsonResponse({ preview })
   }
   const perpHistoryMatch = /^\/api\/markets\/perp\/([^/]+)\/history$/.exec(path)
   if (method === "GET" && perpHistoryMatch !== null) {
     const ticker = decodeSegment(perpHistoryMatch[1] ?? "")
-    const view = try getPerpPriceHistory({
-      ticker,
-      range: parseHistoryRange(url.searchParams.get("range")),
-      limit: clampIntQuery(url, "limit", 200, 2, 500)
-    })
-    const points = view.points.map((pt) => ({ ...pt, recordedAt: pt.timestamp }))
-    return jsonResponse({ range: view.range, points, history: points })
+    return formatPriceHistoryResponse(try getPerpPriceHistory({ ticker, ...readHistoryQuery(url) }))
   }
   const perpTradesMatch = /^\/api\/markets\/perp\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && perpTradesMatch !== null) {
-    const ticker = decodeSegment(perpTradesMatch[1] ?? "")
-    const trades = try listAssetTrades({
-      marketKind: "perp",
-      marketRef: ticker,
-      limit: clampIntQuery(url, "limit", 50, 1, 200)
-    })
-    return jsonResponse({ trades: trades.map((t) => ({ ...t, traderDisplayName: t.traderName })) })
+    return try respondAssetTrades("perp", decodeSegment(perpTradesMatch[1] ?? ""), url)
   }
   const perpDetailMatch = /^\/api\/markets\/perp\/([^/]+)$/.exec(path)
   if (method === "GET" && perpDetailMatch !== null) {
@@ -1728,18 +1748,13 @@ effect function handleMarketRoute(
     try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const ticker = decodeSegment(perpOpenMatch[1] ?? "")
     const { data } = try readParsedBody(request)
-    const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
-    if (rawSide !== "long" && rawSide !== "short") return try badRequest("invalid_side", "Side must be long or short.")
-    const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
-    const leverage = numField(data, "leverage") ?? 1
+    const order = try parsePerpOrderParams(data)
     const maxSlippageBps = numField(data, "maxSlippageBps", "max_slippage_bps")
     const opened = try openPerpPosition({
       ownerId: session.accountId,
       ownerKind: "user",
       ticker,
-      side: rawSide,
-      collateralCents: Math.round(collateralCents),
-      leverage,
+      ...order,
       ...(maxSlippageBps === undefined ? {} : { maxSlippageBps: Math.round(maxSlippageBps) })
     })
     try publishFeedEvent({

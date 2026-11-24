@@ -177,9 +177,9 @@ const USERNAME_PATTERN = /^[a-z0-9_]{2,32}$/
 const TWILIO_SID_PATTERN = /^AC[a-fA-F0-9]{32}$/
 const TWILIO_VERIFY_PATTERN = /^VA[a-fA-F0-9]{32}$/
 
-const TurnstileResponse = Schema.Struct({
-  success: Schema.Boolean
-})
+schema TurnstileResponse {
+  readonly success: boolean
+}
 
 const TwilioLookupResponse = Schema.Struct({
   valid: Schema.optionalKey(Schema.Boolean),
@@ -193,22 +193,22 @@ const TwilioLookupResponse = Schema.Struct({
   )
 })
 
-const TwilioVerifyResponse = Schema.Struct({
-  status: Schema.String
-})
+schema TwilioVerifyResponse {
+  readonly status: string
+}
 
-const PendingOnboardingClaims = Schema.Struct({
-  purpose: Schema.Literal("feed_phone_onboarding"),
-  phoneHash: Schema.String,
-  last2: Schema.String,
-  challengeId: Schema.String
-})
+schema PendingOnboardingClaims {
+  readonly purpose: "feed_phone_onboarding"
+  readonly phoneHash: string
+  readonly last2: string
+  readonly challengeId: string
+}
 
-const ChallengeStatePayload = Schema.Struct({
-  purpose: Schema.String,
-  attempts: Schema.Int,
-  phoneLast2: Schema.String
-})
+schema ChallengeStatePayload {
+  readonly purpose: string
+  readonly attempts: Schema.Int
+  readonly phoneLast2: string
+}
 
 const loopbackCodes = new Map<string, { readonly code: string; readonly expiresAt: number }>()
 
@@ -392,6 +392,8 @@ export effect function insertCloudAccountTx(
 
 function rowToAccountProfile(row: Row): AccountProfile {
   const uiMode: PlayMode = toText(row.ui_mode) === "social" ? "social" : "game"
+  const phoneHash = toText(row.phone_hash) ?? null
+  const phoneLast2 = toText(row.phone_last2) ?? null
   return {
     accountId: toText(row.account_id) ?? "",
     handle: toText(row.handle) ?? "",
@@ -399,8 +401,8 @@ function rowToAccountProfile(row: Row): AccountProfile {
     bio: toText(row.bio) ?? "",
     avatarUrl: toText(row.avatar_url) ?? null,
     bannerUrl: toText(row.banner_url) ?? null,
-    phoneHash: toText(row.phone_hash) ?? null,
-    phoneLast2: toText(row.phone_last2) ?? null,
+    phoneHash,
+    phoneLast2,
     uiMode,
     playMode: uiMode,
     balanceCents: toInt(row.balance_cents),
@@ -1165,6 +1167,25 @@ export effect function signInReviewerPassword(input: {
   })
 }
 
+effect function resolveSignedInAt(input: {
+  readonly accountId: string
+  readonly authAt?: number | undefined
+  readonly sessionAuthAt?: number | undefined
+  readonly cookieHeader?: string | undefined
+  readonly config?: AuthRuntimeConfig | undefined
+}): { readonly signedInAt: number | undefined; readonly now: number }!(AuthFailure | StoreFailure)!Store {
+  let signedInAt = input.authAt ?? input.sessionAuthAt
+  if (signedInAt === undefined && input.cookieHeader !== undefined && input.config !== undefined) {
+    const session = try authenticateSessionCookie(input.cookieHeader, input.config)
+    if (session === null || session.accountId !== input.accountId) {
+      throw new AuthFailure({ code: "unauthorized", message: "Active session required.", status: 401 })
+    }
+    signedInAt = session.authAt
+  }
+  const now = try Clock.currentTimeMillis
+  return { signedInAt, now }
+}
+
 export effect function requestPhoneChange(input: {
   readonly accountId: string
   readonly newPhoneE164: string
@@ -1178,15 +1199,7 @@ export effect function requestPhoneChange(input: {
 }): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
   let verifiedOrRecovery = input.oldPhoneVerifiedOrRecovery === true
   if (!verifiedOrRecovery && input.oldPhoneVerifiedOrRecovery !== false) {
-    let signedInAt = input.authAt ?? input.sessionAuthAt
-    if (signedInAt === undefined && input.cookieHeader !== undefined) {
-      const session = try authenticateSessionCookie(input.cookieHeader, input.config)
-      if (session === null || session.accountId !== input.accountId) {
-        throw new AuthFailure({ code: "unauthorized", message: "Active session required.", status: 401 })
-      }
-      signedInAt = session.authAt
-    }
-    const now = try Clock.currentTimeMillis
+    const { signedInAt, now } = try resolveSignedInAt(input)
     if (
       signedInAt !== undefined
       && Number.isSafeInteger(signedInAt)
@@ -1351,15 +1364,7 @@ export effect function deleteAccountSelfServe(input: {
   readonly cookieHeader?: string | undefined
   readonly config?: AuthRuntimeConfig | undefined
 }): { readonly deleted: true; readonly cooldownEndsAt: number }!(AuthFailure | StoreFailure)!Store {
-  let signedInAt = input.authAt ?? input.sessionAuthAt
-  if (signedInAt === undefined && input.cookieHeader !== undefined && input.config !== undefined) {
-    const session = try authenticateSessionCookie(input.cookieHeader, input.config)
-    if (session === null || session.accountId !== input.accountId) {
-      throw new AuthFailure({ code: "unauthorized", message: "Active session required.", status: 401 })
-    }
-    signedInAt = session.authAt
-  }
-  const now = try Clock.currentTimeMillis
+  const { signedInAt, now } = try resolveSignedInAt(input)
   if (signedInAt === undefined || !Number.isSafeInteger(signedInAt) || now - signedInAt > recentSignInWindowMs) {
     throw new AuthFailure({
       code: "recent_signin_required",

@@ -319,18 +319,19 @@ effect function hydrateChatsTx(
     if (bucket === undefined) membersByChat.set(cid, [view])
     else bucket.push(view)
   }
-  const latestMsgRows = try tx.query(
-    `SELECT DISTINCT ON (m.chat_id) m.chat_id, m.body, m.created_at
-     FROM feed_messages m
-     INNER JOIN feed_chats c ON c.id = m.chat_id
-     WHERE m.chat_id = ANY($1)
-       AND (
+  const visibleChatMessageSql = `(
          c.kind = 'direct'
          OR (
            NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $2 AND b.blocked_id = m.sender_id) OR (b.blocker_id = m.sender_id AND b.blocked_id = $2))
            AND NOT EXISTS (SELECT 1 FROM feed_mutes mu WHERE mu.muter_id = $2 AND mu.muted_id = m.sender_id)
          )
-       )
+       )`
+  const latestMsgRows = try tx.query(
+    `SELECT DISTINCT ON (m.chat_id) m.chat_id, m.body, m.created_at
+     FROM feed_messages m
+     INNER JOIN feed_chats c ON c.id = m.chat_id
+     WHERE m.chat_id = ANY($1)
+       AND ${visibleChatMessageSql}
      ORDER BY m.chat_id, m.created_at DESC, m.id DESC`,
     [chatIds, viewerId]
   )
@@ -350,13 +351,7 @@ effect function hydrateChatsTx(
      WHERE m.chat_id = ANY($1)
        AND m.sender_id <> $2
        AND m.created_at > COALESCE(cm.last_read_at, 0)
-       AND (
-         c.kind = 'direct'
-         OR (
-           NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $2 AND b.blocked_id = m.sender_id) OR (b.blocker_id = m.sender_id AND b.blocked_id = $2))
-           AND NOT EXISTS (SELECT 1 FROM feed_mutes mu WHERE mu.muter_id = $2 AND mu.muted_id = m.sender_id)
-         )
-       )
+       AND ${visibleChatMessageSql}
      GROUP BY m.chat_id`,
     [chatIds, viewerId]
   )
@@ -546,6 +541,61 @@ export effect function createDirectChat(
   })
 }
 
+effect function normalizeGroupTitle(title: string): string!SocialFailure {
+  const cleanTitle = title.trim()
+  if (cleanTitle === "" || cleanTitle.length > 100) {
+    throw new SocialFailure({ code: "InvalidInput", message: "Group title must be between 1 and 100 characters" })
+  }
+  return cleanTitle
+}
+
+effect function requireNonEmptyChatId(chatId: string): void!SocialFailure {
+  if (chatId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
+  }
+}
+
+effect function insertPendingGroupInviteTx(
+  tx: Tx,
+  chatId: string,
+  invitedAccountId: string,
+  invitedById: string,
+  now: number
+): string!StoreFailure {
+  const inviteId = freshId()
+  try tx.query(
+    "INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_id, status, created_at, responded_at) VALUES ($1, $2, $3, $4, 'pending', $5, NULL)",
+    [inviteId, chatId, invitedAccountId, invitedById, now]
+  )
+  return inviteId
+}
+
+effect function loadUserGroupActionContextTx(
+  tx: Tx,
+  accountId: string,
+  chatId: string,
+  nonGroupMessage: string
+) {
+  const actor = try resolveUserOrNpcTx(tx, accountId)
+  const chat = try loadChatHeaderTx(tx, chatId)
+  if (chat.kind !== "user_group") {
+    throw new SocialFailure({ code: "Forbidden", message: nonGroupMessage })
+  }
+  const memberRows = try loadChatMembersTx(tx, chatId)
+  const actorMember = memberRows.find((m) => toText(m.member_id) === actor.id)
+  return { actor, chat, memberRows, actorMember }
+}
+
+effect function reloadHydratedChatTx(tx: Tx, chatId: string, viewerId: string): ChatSummaryView!(SocialFailure | StoreFailure) {
+  const rows = try tx.query("SELECT * FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
+  const hydrated = try hydrateChatsTx(tx, rows, viewerId)
+  const updated = hydrated[0]
+  if (updated === undefined) {
+    throw new SocialFailure({ code: "NotFound", message: "Chat not found" })
+  }
+  return updated
+}
+
 export effect function createUserGroupChat(
   accountId: string,
   title: string,
@@ -561,10 +611,7 @@ export effect function createUserGroupChat(
       })
     }
   }
-  const cleanTitle = title.trim()
-  if (cleanTitle === "" || cleanTitle.length > 100) {
-    throw new SocialFailure({ code: "InvalidInput", message: "Group title must be between 1 and 100 characters" })
-  }
+  const cleanTitle = try normalizeGroupTitle(title)
   const store = try Store
   const now = try Clock.currentTimeMillis
   const committed = try store.transaction(effect (tx: Tx) => {
@@ -1232,11 +1279,7 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
     if (!canInviteAlphaGroup(inviteState, 1, input.targetAccountId, actorId)) {
       throw new SocialFailure({ code: "Forbidden", message: "Alpha group invite refused by messaging rules" })
     }
-    const inviteId = freshId()
-    try tx.query(
-      "INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_id, status, created_at, responded_at) VALUES ($1, $2, $3, $4, 'pending', $5, NULL)",
-      [inviteId, chatId, input.targetAccountId, actorId, now]
-    )
+    const inviteId = try insertPendingGroupInviteTx(tx, chatId, input.targetAccountId, actorId, now)
     const invite: AlphaInviteView = {
       id: inviteId,
       chatId,
@@ -1355,11 +1398,7 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
     if (!canInviteMember(specState, 1, target.id, inviter.id)) {
       throw new SocialFailure({ code: "Forbidden", message: "Group invitation refused by messaging rules" })
     }
-    const inviteId = freshId()
-    try tx.query(
-      "INSERT INTO feed_group_invites (id, chat_id, invited_account_id, invited_by_id, status, created_at, responded_at) VALUES ($1, $2, $3, $4, 'pending', $5, NULL)",
-      [inviteId, input.chatId, target.id, inviter.id, now]
-    )
+    const inviteId = try insertPendingGroupInviteTx(tx, input.chatId, target.id, inviter.id, now)
     const events: FeedRealtimeEvent[] = [
       {
         type: "chat.invite",
@@ -1404,9 +1443,7 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
 }
 
 export effect function leaveGroupChat(accountId: string, chatId: string): LeaveGroupResult!(SocialFailure | StoreFailure)!Store {
-  if (chatId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
-  }
+  try requireNonEmptyChatId(chatId)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const account = try resolveUserOrNpcTx(tx, accountId)
@@ -1434,34 +1471,17 @@ export effect function renameGroupChat(
   chatId: string,
   title: string
 ): ChatSummaryView!(SocialFailure | StoreFailure)!Store {
-  if (chatId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
-  }
-  const cleanTitle = title.trim()
-  if (cleanTitle === "" || cleanTitle.length > 100) {
-    throw new SocialFailure({ code: "InvalidInput", message: "Group title must be between 1 and 100 characters" })
-  }
+  try requireNonEmptyChatId(chatId)
+  const cleanTitle = try normalizeGroupTitle(title)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const actor = try resolveUserOrNpcTx(tx, accountId)
-    const chat = try loadChatHeaderTx(tx, chatId)
-    if (chat.kind !== "user_group") {
-      throw new SocialFailure({ code: "Forbidden", message: "Only user group chats can be renamed" })
-    }
-    const memberRows = try loadChatMembersTx(tx, chatId)
-    const actorMember = memberRows.find((m) => toText(m.member_id) === actor.id)
+    const { actor, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Only user group chats can be renamed")
     const actorRole = actorMember === undefined ? undefined : toMemberRole(actorMember.role)
     if (actorRole !== "owner" && actorRole !== "admin") {
       throw new SocialFailure({ code: "Forbidden", message: "Only group owners and admins can rename the group" })
     }
     try tx.query("UPDATE feed_chats SET name = $2 WHERE id = $1", [chatId, cleanTitle])
-    const rows = try tx.query("SELECT * FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
-    const hydrated = try hydrateChatsTx(tx, rows, actor.id)
-    const updated = hydrated[0]
-    if (updated === undefined) {
-      throw new SocialFailure({ code: "NotFound", message: "Chat not found" })
-    }
-    return updated
+    return try reloadHydratedChatTx(tx, chatId, actor.id)
   })
 }
 
@@ -1470,22 +1490,14 @@ export effect function removeGroupMember(
   chatId: string,
   targetHandleOrId: string
 ): RemoveGroupMemberResult!(SocialFailure | StoreFailure)!Store {
-  if (chatId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
-  }
+  try requireNonEmptyChatId(chatId)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const actor = try resolveUserOrNpcTx(tx, accountId)
+    const { actor, memberRows, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Member removal only applies to user group chats")
     const target = try resolveUserOrNpcTx(tx, targetHandleOrId)
-    const chat = try loadChatHeaderTx(tx, chatId)
-    if (chat.kind !== "user_group") {
-      throw new SocialFailure({ code: "Forbidden", message: "Member removal only applies to user group chats" })
-    }
     if (actor.id === target.id) {
       throw new SocialFailure({ code: "InvalidInput", message: "Use leaveGroupChat to leave a group" })
     }
-    const memberRows = try loadChatMembersTx(tx, chatId)
-    const actorMember = memberRows.find((m) => toText(m.member_id) === actor.id)
     const targetMember = memberRows.find((m) => toText(m.member_id) === target.id)
     const actorRole = actorMember === undefined ? undefined : toMemberRole(actorMember.role)
     if (actorRole !== "owner" && actorRole !== "admin") {
@@ -1508,22 +1520,14 @@ export effect function transferGroupOwnership(
   chatId: string,
   newOwnerHandleOrId: string
 ): ChatSummaryView!(SocialFailure | StoreFailure)!Store {
-  if (chatId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
-  }
+  try requireNonEmptyChatId(chatId)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const actor = try resolveUserOrNpcTx(tx, accountId)
+    const { actor, chat, memberRows, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Ownership transfer only applies to user group chats")
     const nextOwner = try resolveUserOrNpcTx(tx, newOwnerHandleOrId)
-    const chat = try loadChatHeaderTx(tx, chatId)
-    if (chat.kind !== "user_group") {
-      throw new SocialFailure({ code: "Forbidden", message: "Ownership transfer only applies to user group chats" })
-    }
     if (actor.id === nextOwner.id) {
       throw new SocialFailure({ code: "InvalidInput", message: "You already own this group" })
     }
-    const memberRows = try loadChatMembersTx(tx, chatId)
-    const actorMember = memberRows.find((m) => toText(m.member_id) === actor.id)
     const targetMember = memberRows.find((m) => toText(m.member_id) === nextOwner.id)
     if (actorMember === undefined || (toMemberRole(actorMember.role) !== "owner" && chat.createdBy !== actor.id)) {
       throw new SocialFailure({ code: "Forbidden", message: "Only the group owner can transfer ownership" })
@@ -1534,13 +1538,7 @@ export effect function transferGroupOwnership(
     try tx.query("UPDATE feed_chat_members SET role = 'member' WHERE chat_id = $1 AND member_id = $2", [chatId, actor.id])
     try tx.query("UPDATE feed_chat_members SET role = 'owner' WHERE chat_id = $1 AND member_id = $2", [chatId, nextOwner.id])
     try tx.query("UPDATE feed_chats SET created_by = $2 WHERE id = $1", [chatId, nextOwner.id])
-    const rows = try tx.query("SELECT * FROM feed_chats WHERE id = $1 LIMIT 1", [chatId])
-    const hydrated = try hydrateChatsTx(tx, rows, actor.id)
-    const updated = hydrated[0]
-    if (updated === undefined) {
-      throw new SocialFailure({ code: "NotFound", message: "Chat not found" })
-    }
-    return updated
+    return try reloadHydratedChatTx(tx, chatId, actor.id)
   })
 }
 
@@ -1548,18 +1546,10 @@ export effect function deleteGroupChat(
   accountId: string,
   chatId: string
 ): DeleteGroupChatResult!(SocialFailure | StoreFailure)!Store {
-  if (chatId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
-  }
+  try requireNonEmptyChatId(chatId)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const actor = try resolveUserOrNpcTx(tx, accountId)
-    const chat = try loadChatHeaderTx(tx, chatId)
-    if (chat.kind !== "user_group") {
-      throw new SocialFailure({ code: "Forbidden", message: "Only user group chats can be deleted" })
-    }
-    const memberRows = try loadChatMembersTx(tx, chatId)
-    const actorMember = memberRows.find((m) => toText(m.member_id) === actor.id)
+    const { actor, chat, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Only user group chats can be deleted")
     if (actorMember === undefined || (toMemberRole(actorMember.role) !== "owner" && chat.createdBy !== actor.id)) {
       throw new SocialFailure({ code: "Forbidden", message: "Only the group owner can delete the group" })
     }

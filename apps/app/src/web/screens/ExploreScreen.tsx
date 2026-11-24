@@ -18,9 +18,21 @@ import {
 import { SearchIcon, XIcon } from "../icons.tsx";
 import { FlatPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
+import type { AppArticle } from "../types.ts";
 
 type BrowseTab = "trending" | "news" | "people" | "orgs" | "markets";
 type SearchTab = "top" | "latest" | "people" | "orgs" | "markets";
+
+function renderArticleCards(articles: ReadonlyArray<AppArticle>, mode: UiMode) {
+  return articles.map((article) => (
+    <ArticleCard
+      key={article.id}
+      article={article}
+      mode={mode}
+      onSelect={() => { void storeActions.navigate(`/article/${encodeURIComponent(article.id)}`); }}
+    />
+  ));
+}
 
 function ExplorePeopleList({ hasSearch }: { readonly hasSearch: boolean }) {
   const s = useAppStore();
@@ -229,41 +241,26 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
           </Button>
         </form>
 
-        {hasSearch ? (
-          <Tabs
-            value={activeSearchTab}
-            onValueChange={(next) => {
+        <Tabs
+          value={hasSearch ? activeSearchTab : activeBrowseTab}
+          onValueChange={(next) => {
+            if (hasSearch) {
               if (next === "top" || next === "latest" || next === "people" || next === "orgs" || next === "markets") {
                 setSearchTab(next);
               }
-            }}
-          >
-            <TabsList variant="underline" className="border-b-0">
-              <TabsTrigger value="top">Top</TabsTrigger>
-              <TabsTrigger value="latest">Latest</TabsTrigger>
-              <TabsTrigger value="people">People</TabsTrigger>
-              <TabsTrigger value="orgs">Orgs</TabsTrigger>
-              {isGame ? <TabsTrigger value="markets">Markets</TabsTrigger> : null}
-            </TabsList>
-          </Tabs>
-        ) : (
-          <Tabs
-            value={activeBrowseTab}
-            onValueChange={(next) => {
-              if (next === "trending" || next === "news" || next === "people" || next === "orgs" || next === "markets") {
-                setBrowseTab(next);
-              }
-            }}
-          >
-            <TabsList variant="underline" className="border-b-0">
-              <TabsTrigger value="trending">Trending</TabsTrigger>
-              <TabsTrigger value="news">News</TabsTrigger>
-              <TabsTrigger value="people">People</TabsTrigger>
-              <TabsTrigger value="orgs">Orgs</TabsTrigger>
-              {isGame ? <TabsTrigger value="markets">Markets</TabsTrigger> : null}
-            </TabsList>
-          </Tabs>
-        )}
+            } else if (next === "trending" || next === "news" || next === "people" || next === "orgs" || next === "markets") {
+              setBrowseTab(next);
+            }
+          }}
+        >
+          <TabsList variant="underline" className="border-b-0">
+            <TabsTrigger value={hasSearch ? "top" : "trending"}>{hasSearch ? "Top" : "Trending"}</TabsTrigger>
+            <TabsTrigger value={hasSearch ? "latest" : "news"}>{hasSearch ? "Latest" : "News"}</TabsTrigger>
+            <TabsTrigger value="people">People</TabsTrigger>
+            <TabsTrigger value="orgs">Orgs</TabsTrigger>
+            {isGame ? <TabsTrigger value="markets">Markets</TabsTrigger> : null}
+          </TabsList>
+        </Tabs>
       </div>
 
       {s.activeTrendingTag ? (
@@ -389,14 +386,7 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
                   See all
                 </button>
               </div>
-              {s.explore.articles.slice(0, 5).map((article) => (
-                <ArticleCard
-                  key={article.id}
-                  article={article}
-                  mode={mode}
-                  onSelect={() => { void storeActions.navigate(`/article/${encodeURIComponent(article.id)}`); }}
-                />
-              ))}
+              {renderArticleCards(s.explore.articles.slice(0, 5), mode)}
             </section>
           ) : null}
         </div>
@@ -405,14 +395,7 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
           <EmptyState title="No articles published yet" />
         ) : (
           <div className="flex flex-col">
-            {s.explore.articles.map((article) => (
-              <ArticleCard
-                key={article.id}
-                article={article}
-                mode={mode}
-                onSelect={() => { void storeActions.navigate(`/article/${encodeURIComponent(article.id)}`); }}
-              />
-            ))}
+            {renderArticleCards(s.explore.articles, mode)}
           </div>
         )
       ) : activeBrowseTab === "people" ? (

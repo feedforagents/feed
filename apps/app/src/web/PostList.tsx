@@ -1,7 +1,33 @@
 // spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"
-import { PostCard, type UiMode } from "@repo/ui";
+import type { ReactNode } from "react";
+import { Button, PostCard, type UiMode } from "@repo/ui";
+import { ArrowLeftIcon } from "./icons.tsx";
 import { storeActions, useAppStore } from "./store.ts";
 import type { AppPost } from "./types.ts";
+
+export function BackHeader({
+  fallbackPath,
+  children,
+}: {
+  readonly fallbackPath: string;
+  readonly children: ReactNode;
+}) {
+  const handleBack = () => {
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    void storeActions.navigate(fallbackPath);
+  };
+  return (
+    <header className="sticky top-[53px] z-20 flex h-[53px] items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
+      <Button variant="ghost" size="icon" shape="pill" aria-label="Back" onClick={handleBack} className="-ml-2">
+        <ArrowLeftIcon className="size-4" />
+      </Button>
+      {children}
+    </header>
+  );
+}
 
 export function copyPostLink(postId: string): void {
   const origin = typeof window !== "undefined" ? window.location.origin : "https://feed.fun";

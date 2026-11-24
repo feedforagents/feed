@@ -35,12 +35,15 @@ export interface MarketTradeView {
   readonly createdAt: number
 }
 
+type MarketPerpRealtimeAction = "open" | "close" | "liquidate"
+type MarketPerpRealtimeSide = "long" | "short"
+
 export interface MarketPerpRealtimeEvent {
   readonly type: "market.perp"
-  readonly action: "open" | "close" | "liquidate"
+  readonly action: MarketPerpRealtimeAction
   readonly actorId: string
   readonly ticker: string
-  readonly side: "long" | "short"
+  readonly side: MarketPerpRealtimeSide
   readonly sizeCents: number
   readonly leverage: number
   readonly positionId?: string

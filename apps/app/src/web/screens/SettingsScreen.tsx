@@ -38,8 +38,8 @@ import {
 import { MonitorIcon, MoonIcon, SunIcon } from "../icons.tsx";
 import { hasAtRiskOpenPositions } from "../store-core.ts";
 import { storeActions, useAppStore } from "../store.ts";
-import type { ThemePreference } from "../types.ts";
-import { PRESET_AVATARS, PRESET_BANNERS } from "./ProfileScreen.tsx";
+import type { AppModerationEntry, ThemePreference } from "../types.ts";
+import { ProfileMediaPickers } from "./ProfileScreen.tsx";
 
 function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; readonly onOpenChange: (open: boolean) => void }) {
   const s = useAppStore();
@@ -196,36 +196,15 @@ function SettingsProfileTab() {
               onChange={(e) => setBio(e.target.value)}
             />
           </div>
-          <div className="flex flex-col gap-2">
-            <span className="text-xs font-semibold text-muted-foreground">Avatar</span>
-            <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
-              {PRESET_AVATARS.map((url) => (
-                <button
-                  key={url}
-                  type="button"
-                  onClick={() => setAvatarUrl(url)}
-                  className={`overflow-hidden rounded-full border-2 p-0.5 transition-colors ${avatarUrl === url ? "border-brand" : "border-transparent hover:border-border"}`}
-                >
-                  <img src={url} alt="" className="size-10 rounded-full object-cover" />
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="flex flex-col gap-2">
-            <span className="text-xs font-semibold text-muted-foreground">Banner</span>
-            <div className="grid grid-cols-3 gap-2">
-              {PRESET_BANNERS.map((url) => (
-                <button
-                  key={url}
-                  type="button"
-                  onClick={() => setBannerUrl(url)}
-                  className={`overflow-hidden rounded-lg border-2 transition-colors ${bannerUrl === url ? "border-brand" : "border-border hover:border-foreground/40"}`}
-                >
-                  <img src={url} alt="" className="h-14 w-full object-cover" />
-                </button>
-              ))}
-            </div>
-          </div>
+          <ProfileMediaPickers
+            avatarUrl={avatarUrl}
+            bannerUrl={bannerUrl}
+            onSelectAvatar={setAvatarUrl}
+            onSelectBanner={setBannerUrl}
+            avatarLabel="Avatar"
+            bannerLabel="Banner"
+            bannerHeightClass="h-14"
+          />
           <div className="flex justify-end">
             <Button type="submit" shape="pill" loading={saving} disabled={!displayName.trim()}>
               Save profile
@@ -237,81 +216,84 @@ function SettingsProfileTab() {
   );
 }
 
+function ModerationAccountListCard({
+  title,
+  description,
+  emptyTitle,
+  loading,
+  accounts,
+  actionLabel,
+  onAction,
+}: {
+  readonly title: string;
+  readonly description: string;
+  readonly emptyTitle: string;
+  readonly loading: boolean;
+  readonly accounts: ReadonlyArray<AppModerationEntry>;
+  readonly actionLabel: string;
+  readonly onAction: (handle: string) => void;
+}) {
+  return (
+    <Card className="gap-3 rounded-xl p-5">
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {loading && accounts.length === 0 ? (
+          <Skeleton className="h-16" />
+        ) : accounts.length === 0 ? (
+          <EmptyState title={emptyTitle} />
+        ) : (
+          <div className="divide-y divide-border">
+            {accounts.map((acc) => (
+              <div key={acc.id} className="flex items-center justify-between gap-3 py-2.5">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <Avatar name={acc.displayName} src={acc.avatarUrl ?? undefined} seed={acc.handle} size="sm" />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-foreground">{acc.displayName}</p>
+                    <p className="truncate text-xs text-muted-foreground">@{acc.handle}</p>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  shape="pill"
+                  variant="outline"
+                  onClick={() => onAction(acc.handle)}
+                >
+                  {actionLabel}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function SettingsPrivacyTab() {
   const s = useAppStore();
   return (
     <div className="flex flex-col gap-5">
-      <Card className="gap-3 rounded-xl p-5">
-        <CardHeader>
-          <CardTitle>Blocked accounts</CardTitle>
-          <CardDescription>Blocked accounts cannot follow, message, or interact with you.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {s.moderationLoading && s.blockedAccounts.length === 0 ? (
-            <Skeleton className="h-16" />
-          ) : s.blockedAccounts.length === 0 ? (
-            <EmptyState title="No blocked accounts" />
-          ) : (
-            <div className="divide-y divide-border">
-              {s.blockedAccounts.map((acc) => (
-                <div key={acc.id} className="flex items-center justify-between gap-3 py-2.5">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <Avatar name={acc.displayName} src={acc.avatarUrl ?? undefined} seed={acc.handle} size="sm" />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold text-foreground">{acc.displayName}</p>
-                      <p className="truncate text-xs text-muted-foreground">@{acc.handle}</p>
-                    </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    shape="pill"
-                    variant="outline"
-                    onClick={() => { void storeActions.toggleBlock(acc.handle, true); }}
-                  >
-                    Unblock
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card className="gap-3 rounded-xl p-5">
-        <CardHeader>
-          <CardTitle>Muted accounts</CardTitle>
-          <CardDescription>Posts from muted accounts are hidden from your timelines.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {s.moderationLoading && s.mutedAccounts.length === 0 ? (
-            <Skeleton className="h-16" />
-          ) : s.mutedAccounts.length === 0 ? (
-            <EmptyState title="No muted accounts" />
-          ) : (
-            <div className="divide-y divide-border">
-              {s.mutedAccounts.map((acc) => (
-                <div key={acc.id} className="flex items-center justify-between gap-3 py-2.5">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <Avatar name={acc.displayName} src={acc.avatarUrl ?? undefined} seed={acc.handle} size="sm" />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold text-foreground">{acc.displayName}</p>
-                      <p className="truncate text-xs text-muted-foreground">@{acc.handle}</p>
-                    </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    shape="pill"
-                    variant="outline"
-                    onClick={() => { void storeActions.toggleMute(acc.handle, true); }}
-                  >
-                    Unmute
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <ModerationAccountListCard
+        title="Blocked accounts"
+        description="Blocked accounts cannot follow, message, or interact with you."
+        emptyTitle="No blocked accounts"
+        loading={s.moderationLoading}
+        accounts={s.blockedAccounts}
+        actionLabel="Unblock"
+        onAction={(handle) => { void storeActions.toggleBlock(handle, true); }}
+      />
+      <ModerationAccountListCard
+        title="Muted accounts"
+        description="Posts from muted accounts are hidden from your timelines."
+        emptyTitle="No muted accounts"
+        loading={s.moderationLoading}
+        accounts={s.mutedAccounts}
+        actionLabel="Unmute"
+        onAction={(handle) => { void storeActions.toggleMute(handle, true); }}
+      />
     </div>
   );
 }
@@ -423,7 +405,7 @@ export function SettingsScreen({ mode }: { readonly mode: UiMode }) {
                         type="button"
                         aria-pressed={active}
                         onClick={() => storeActions.setTheme(opt.id)}
-                        className={`flex flex-col items-start gap-2 rounded-xl border p-4 text-left transition-colors ${active ? "border-brand bg-brand/10" : "border-border bg-background hover:bg-accent/50"}`}
+                        className={`flex flex-col items-start gap-2 rounded-xl border p-4 text-left transition-colors ${active ? "border-feed-brand bg-feed-brand/10" : "border-border bg-background hover:bg-accent/50"}`}
                       >
                         {opt.id === "dark" ? (
                           <MoonIcon className="size-5 text-foreground" />
