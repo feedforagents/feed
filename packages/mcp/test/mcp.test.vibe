@@ -332,6 +332,21 @@ function assertDual401(res: McpCallResult, expectedReason: "missing_token" | "re
   assert.deepStrictEqual(dataMeta, [wwwAuth])
 }
 
+function assertHostLaunchState(
+  host: SkillHostsPayload["hosts"][number],
+  expectFallback: boolean
+): void {
+  if (expectFallback) {
+    assert.strictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
+    assert.strictEqual(host.href, null)
+    assert.strictEqual(host.copyPromptFallback, true)
+    return
+  }
+  assert.notStrictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
+  assert.isString(host.href)
+  assert.strictEqual(host.copyPromptFallback, false)
+}
+
 function assertHostsPayload(
   payload: SkillHostsPayload,
   expectedDigest: string,
@@ -346,33 +361,14 @@ function assertHostsPayload(
   assert.deepStrictEqual(sortedIds, [...EXPECTED_HOST_IDS])
   for (const host of payload.hosts) {
     if (expectedUnverifiedAll) {
-      assert.strictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
-      assert.strictEqual(host.href, null)
-      assert.strictEqual(host.copyPromptFallback, true)
+      assertHostLaunchState(host, true)
       continue
     }
     if (expectedVerifiedOnly !== undefined) {
-      const isVerified = expectedVerifiedOnly.has(host.id)
-      if (!isVerified) {
-        assert.strictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
-        assert.strictEqual(host.href, null)
-        assert.strictEqual(host.copyPromptFallback, true)
-      } else {
-        assert.notStrictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
-        assert.isString(host.href)
-        assert.strictEqual(host.copyPromptFallback, false)
-      }
+      assertHostLaunchState(host, !expectedVerifiedOnly.has(host.id))
       continue
     }
-    if (host.id === "gemini" || host.id === "perplexity") {
-      assert.strictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
-      assert.strictEqual(host.href, null)
-      assert.strictEqual(host.copyPromptFallback, true)
-    } else {
-      assert.notStrictEqual(host.resolvedLaunchKind, "CopyPromptFallback")
-      assert.isString(host.href)
-      assert.strictEqual(host.copyPromptFallback, false)
-    }
+    assertHostLaunchState(host, host.id === "gemini" || host.id === "perplexity")
     if (host.id === "openclaw" || host.id === "hermes") {
       assert.strictEqual(host.resolvedLaunchKind, "CliOrSchemeInstall")
       assert.isString(host.cliCommand)
@@ -490,12 +486,19 @@ it.effect('Serve canonical SKILL.md, well-known discovery index with matching SH
   })
 })
 
-it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no-phone schemas, and dual 401 challenge on unauthenticated protected call (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30")', () => effect {
+effect function withSeededWorld<A, E>(
+  run: (authConfig: AuthRuntimeConfig) => A!E!Store
+) {
   try TestClock.setTime(Date.now())
   const authConfig = testAuthConfig()
   provide localStoreLayer({ kind: "pglite", file: undefined }) {
     try migrateFeedSchema()
     try seedFeedWorld()
+    return try run(authConfig)
+  }
+}
+
+it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no-phone schemas, and dual 401 challenge on unauthenticated protected call (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30")', () => withSeededWorld(effect (authConfig) => {
     const initRes = try callMcp(
       {
         jsonrpc: "2.0",
@@ -543,15 +546,9 @@ it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no
       assert.strictEqual(marketsPayload.currency, "Virtual points (pts) — no cash value")
       assertDual401(unauthPostRes, "missing_token")
     })
-  }
-})
+}))
 
-it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribution, and Social mode redaction end to end (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution")', () => effect {
-  try TestClock.setTime(Date.now())
-  const authConfig = testAuthConfig()
-  provide localStoreLayer({ kind: "pglite", file: undefined }) {
-    try migrateFeedSchema()
-    try seedFeedWorld()
+it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribution, and Social mode redaction end to end (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution")', () => withSeededWorld(effect (authConfig) => {
     const alice = try onboardPhoneUser("+14155550101", "alice_mcp", "Alice MCP", authConfig)
     const bob = try onboardPhoneUser("+14155550102", "bob_social", "Bob Social", authConfig)
     try createPost({
@@ -658,5 +655,4 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
       assert.strictEqual(portfolioRestored.balancePts, 90)
       assert.strictEqual((portfolioRestored.predictionPositions as ReadonlyArray<unknown>).length, 1)
     })
-  }
-})
+}))

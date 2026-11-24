@@ -22,7 +22,8 @@
     "test",
     "vitest.config.ts",
     "gen/*.ts",
-    "gen/*.vibe"
+    "gen/*.vibe",
+    "vitest.config.ts"
   ],
   "vibe": {
     "sidecarDir": ".vibe/declarations"

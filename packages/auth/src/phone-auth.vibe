@@ -63,6 +63,7 @@ export interface AuthRuntimeConfig {
   readonly twilioAuthToken?: string | undefined
   readonly twilioVerifyServiceSid?: string | undefined
   readonly turnstileSecretKey?: string | undefined
+  readonly turnstileSiteKey?: string | undefined
   readonly allowedCountries: ReadonlyArray<string>
   readonly publicAppUrl: string
 }
@@ -355,6 +356,28 @@ effect function revokeSessionsAndBumpEpochInTx(
     [accountId, now]
   )
   return nextEpoch
+}
+
+export effect function insertCloudAccountTx(
+  tx: Tx,
+  params: {
+    readonly accountId: string
+    readonly organizationId: string
+    readonly displayName: string
+    readonly stateJson: string
+    readonly now: number
+  }
+): void!StoreFailure {
+  try tx.query(
+    "INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ($1, $2, 0, $3)",
+    [params.organizationId, params.displayName, params.now]
+  )
+  try tx.query(
+    `INSERT INTO accounts
+       (key, state, revision, organization_id, status, email, phone, name, sessions_revoked_before, devices_revoked_before, device_epoch, created_at, updated_at)
+     VALUES ($1, $2::jsonb, 1, $3, 'active', NULL, NULL, $4, 1, 0, 0, $5, $5)`,
+    [params.accountId, params.stateJson, params.organizationId, params.displayName, params.now]
+  )
 }
 
 function rowToAccountProfile(row: Row): AccountProfile {
@@ -1044,22 +1067,19 @@ export effect function completePhoneOnboarding(input: {
       throw new AuthFailure({ code: "onboarding_refused", message: "Cannot complete onboarding.", status: 400 })
     }
     completeOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)
-    try tx.query(
-      "INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ($1, $2, 0, $3)",
-      [organizationId, displayName, now]
-    )
     const cloudAccountState = JSON.stringify({
       status: "Active",
       userId: accountId,
       organizationId,
       identities: [{ method: "PhoneSignIn", subject: claims.phoneHash }]
     })
-    try tx.query(
-      `INSERT INTO accounts
-         (key, state, revision, organization_id, status, email, phone, name, sessions_revoked_before, devices_revoked_before, device_epoch, created_at, updated_at)
-       VALUES ($1, $2::jsonb, 1, $3, 'active', NULL, NULL, $4, 1, 0, 0, $5, $5)`,
-      [accountId, cloudAccountState, organizationId, displayName, now]
-    )
+    try insertCloudAccountTx(tx, {
+      accountId,
+      organizationId,
+      displayName,
+      stateJson: cloudAccountState,
+      now
+    })
     const insertedRows = try tx.query(
       `INSERT INTO feed_accounts
          (account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
@@ -1328,6 +1348,48 @@ export effect function deleteAccountSelfServe(input: {
     try tx.query("DELETE FROM feed_oauth_codes WHERE account_id = $1", [input.accountId])
     try tx.query(
       "UPDATE feed_device_codes SET status = 'denied' WHERE account_id = $1 AND status IN ('pending', 'approved')",
+      [input.accountId]
+    )
+    try tx.query(
+      `WITH deleted_likes AS (
+         DELETE FROM feed_post_likes
+         WHERE account_id = $1
+         RETURNING post_id
+       )
+       UPDATE feed_posts
+       SET like_count = GREATEST(0, like_count - 1)
+       WHERE id IN (SELECT post_id FROM deleted_likes)`,
+      [input.accountId]
+    )
+    try tx.query(
+      `WITH deleted_reposts AS (
+         DELETE FROM feed_post_reposts
+         WHERE account_id = $1
+         RETURNING post_id
+       )
+       UPDATE feed_posts
+       SET repost_count = GREATEST(0, repost_count - 1)
+       WHERE id IN (SELECT post_id FROM deleted_reposts)`,
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_follows WHERE follower_id = $1 OR (target_id = $1 AND target_kind = 'user')",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_chat_members WHERE member_id = $1 AND member_kind = 'user'",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_message_reactions WHERE account_id = $1",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_group_invites WHERE invited_account_id = $1 OR invited_by_npc_id = $1",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_notifications WHERE account_id = $1 OR actor_id = $1",
       [input.accountId]
     )
     return { deleted: true as const, cooldownEndsAt }

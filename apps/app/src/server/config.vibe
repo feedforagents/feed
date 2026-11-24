@@ -93,11 +93,11 @@ export function stringEnvRecord(raw: Readonly<Record<string, unknown>>): Record<
 
 export function parseAppServerConfig(
   env: Readonly<Record<string, string | undefined>>,
-  fallbackOrigin = "http://localhost:5173"
+  fallbackOrigin?: string
 ): AppServerConfig {
   const port = parsePort(env.PORT)
   const host = trimmed(env.HOST) ?? "127.0.0.1"
-  const rawAppUrl = trimmed(env.PUBLIC_APP_URL) ?? fallbackOrigin
+  const rawAppUrl = trimmed(env.PUBLIC_APP_URL) ?? fallbackOrigin ?? `http://${host}:${port}`
   const publicAppUrl = stripTrailingSlashes(rawAppUrl)
   const publicApiUrl = stripTrailingSlashes(trimmed(env.PUBLIC_API_URL) ?? publicAppUrl)
   const deploymentEnv = parseDeploymentEnv(env.DEPLOYMENT_ENV, publicAppUrl)

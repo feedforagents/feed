@@ -562,6 +562,17 @@ function rowToNotification(row: Row): NotificationView {
   }
 }
 
+effect function requireAccountUiModeTx(
+  tx: Tx,
+  accountId: string
+): SocialPresentationMode!(SocialFailure | StoreFailure) {
+  const accountRows = try tx.query("SELECT account_id, ui_mode FROM feed_accounts WHERE account_id = $1 LIMIT 1", [accountId])
+  if (accountRows.length === 0) {
+    throw new SocialFailure({ code: "NotFound", message: "Account not found" })
+  }
+  return toText(accountRows[0]?.ui_mode) === "social" ? "social" : "game"
+}
+
 export effect function listNotifications(
   accountId: string,
   limit?: number,
@@ -573,11 +584,8 @@ export effect function listNotifications(
   const effectiveLimit = clampLimit(limit, 50, 200)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const accountRows = try tx.query("SELECT account_id, ui_mode FROM feed_accounts WHERE account_id = $1 LIMIT 1", [accountId])
-    if (accountRows.length === 0) {
-      throw new SocialFailure({ code: "NotFound", message: "Account not found" })
-    }
-    const effectiveMode = mode ?? (toText(accountRows[0]?.ui_mode) === "social" ? "social" : "game")
+    const accountMode = try requireAccountUiModeTx(tx, accountId)
+    const effectiveMode = mode ?? accountMode
     const specMode = toSpecMode(effectiveMode)
     const rows = try tx.query(
       "SELECT n.* FROM feed_notifications n WHERE n.account_id = $1 AND (n.actor_id IS NULL OR NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1))) ORDER BY n.created_at DESC, n.id DESC LIMIT $2",
@@ -629,11 +637,7 @@ export effect function markNotificationsRead(
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const accountRows = try tx.query("SELECT account_id, ui_mode FROM feed_accounts WHERE account_id = $1 LIMIT 1", [accountId])
-    if (accountRows.length === 0) {
-      throw new SocialFailure({ code: "NotFound", message: "Account not found" })
-    }
-    const mode: SocialPresentationMode = toText(accountRows[0]?.ui_mode) === "social" ? "social" : "game"
+    const mode = try requireAccountUiModeTx(tx, accountId)
     const unreadRows = try tx.query(
       "SELECT id, kind, actor_id, is_game_only FROM feed_notifications WHERE account_id = $1 AND read_at IS NULL",
       [accountId]

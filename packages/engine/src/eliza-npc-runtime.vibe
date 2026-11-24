@@ -2,7 +2,6 @@
 import {
   AgentRuntime,
   createCharacter,
-  parseJsonModelRecord,
   stringToUuid,
   type Action,
   type ActionResult,
@@ -27,7 +26,7 @@ import { RealtimeBus, createNpcAlphaInvite, createPost, listFeedPosts, sendChatM
 import { minAlphaEngagement } from "../gen/engine__npcLoop.effect.vibe"
 import { generateCompletion } from "./llm-client.vibe"
 import { buildWorldContext, formatFeedDiversityHint, renderPrompt, validateNpcTradingDecision } from "./prompts.vibe"
-import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, resolveClockNow, sanitizeText } from "./shared.vibe"
+import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, parseLlmJsonRecord, resolveClockNow, sanitizeText } from "./shared.vibe"
 import { getDailySpendStatus } from "./spend-budget.vibe"
 
 interface DbActorRow {
@@ -121,7 +120,7 @@ interface NpcProviderSnapshot {
   readonly chatIds: ReadonlyArray<string>
 }
 
-effect function loadNpcProviderSnapshot(actor: DbActorRow): NpcProviderSnapshot!StoreFailure!Store {
+effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcProviderSnapshot!StoreFailure!Store {
   const store = try Store
   const dbSnap = try store.transaction(effect (tx: Tx) => {
     const stateRows = try tx.query("SELECT current_day, current_hour, phase FROM feed_world_state WHERE singleton = true")
@@ -166,7 +165,7 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow): NpcProviderSnapshot!
       yesProbPct: Math.round((no * 100) / (yes + no)),
       expiresAt: toInt(row.expiresAt ?? row.expires_at),
     }
-  }).filter((m) => m.id.length > 0)
+  }).filter((m) => m.id.length > 0 && m.expiresAt > nowMs)
   const perps = (Array.isArray(perpMarketsRaw) ? perpMarketsRaw : []).map((p) => {
     const row = p as Record<string, unknown>
     return {
@@ -346,6 +345,34 @@ function createFeedNpcPlugin(actor: DbActorRow, snapshot: NpcProviderSnapshot, r
   }
 }
 
+const NPC_PROVIDER_NAMES = new Set(["WORLD_FACTS", "TRENDING_MARKETS", "RECENT_POSTS", "ACTOR_PORTFOLIO"])
+
+effect function composeNpcState(runtime: AgentRuntime, message: Memory): State!EngineFailure {
+  const baseState: State = { values: {}, data: {}, text: "" }
+  const values: Record<string, string> = {}
+  const data: Record<string, Record<string, unknown>> = {}
+  const parts: string[] = []
+  for (const provider of runtime.providers) {
+    if (!NPC_PROVIDER_NAMES.has(provider.name)) continue
+    const result = try tryPromise({
+      try: () => Promise.resolve(provider.get(runtime, message, baseState)),
+      catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Provider ${provider.name} failed`, cause }),
+    })
+    if (result.text && result.text.trim().length > 0) {
+      parts.push(result.text.trim())
+    }
+    if (result.values && typeof result.values === "object") {
+      for (const [key, val] of Object.entries(result.values)) {
+        if (typeof val === "string") values[key] = val
+      }
+    }
+    if (result.data && typeof result.data === "object") {
+      data[provider.name] = result.data as Record<string, unknown>
+    }
+  }
+  return { values, data, text: parts.join("\n") }
+}
+
 effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: number): number!(EngineFailure | StoreFailure)!Store {
   const store = try Store
   const busOpt = try Effect.serviceOption(RealtimeBus)
@@ -355,15 +382,15 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
       : Layer.succeed(Store, store)
     return runPromise(Effect.provide(eff, layer))
   }
+  const snap = try loadNpcProviderSnapshot(actor, nowMs)
   const packActor = actors.find((a) => a.id === actor.id || a.username === actor.username)
   const character = buildNpcCharacter(actor, packActor)
+  const plugin = createFeedNpcPlugin(actor, snap, runWithStore)
   const agentUuid = safeElizaUuid(`feed-npc:${actor.id}`)
   const runtime = try Effect.try({
     try: () => new AgentRuntime({ character, agentId: agentUuid }),
     catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Failed creating AgentRuntime for ${actor.id}`, cause }),
   })
-  const snap = try loadNpcProviderSnapshot(actor)
-  const plugin = createFeedNpcPlugin(actor, snap, runWithStore)
   try tryPromise({
     try: () => runtime.registerPlugin(plugin),
     catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Failed registering Feed NPC plugin for ${actor.id}`, cause }),
@@ -375,10 +402,7 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     roomId: safeElizaUuid("feed-world-room"),
     content: { text: "Observe Feed markets and social posts, then plan bounded actions." },
   }
-  const composedState: State = try tryPromise({
-    try: () => runtime.composeState(triggerMemory, ["WORLD_FACTS", "TRENDING_MARKETS", "RECENT_POSTS", "ACTOR_PORTFOLIO"], true, true),
-    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Failed composing state for ${actor.id}`, cause }),
-  })
+  const composedState: State = try composeNpcState(runtime, triggerMemory)
   const rendered = renderPrompt("npcTradingDecision", {
     actorId: actor.id,
     actorName: actor.name,
@@ -403,7 +427,7 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     nowMs,
     actorId: actor.id,
   })
-  const parsed = parseJsonModelRecord(completion.text)
+  const parsed = parseLlmJsonRecord(completion.text)
   const decisions = validateNpcTradingDecision(parsed, maxSteps, snap.tickers, snap.marketIds, snap.replyPostIds, snap.chatIds)
   let actionsExecuted = 0
   const actionMap = new Map((plugin.actions ?? []).map((act) => [act.name, act]))

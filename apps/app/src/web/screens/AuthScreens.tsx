@@ -41,6 +41,14 @@ const CRON_JOBS = [
   "world-facts",
 ];
 
+function useScopeSelection() {
+  const [scopes, setScopes] = useState<string[]>(ALL_SCOPES.map((sc) => sc.id));
+  const toggleScope = (scope: string, checked: boolean) => {
+    setScopes((prev) => (checked ? [...new Set([...prev, scope])] : prev.filter((item) => item !== scope)));
+  };
+  return { scopes, toggleScope };
+}
+
 function ScopeChecklist({
   selected,
   onToggle,
@@ -68,11 +76,7 @@ export function LinkScreen() {
   const s = useAppStore();
   const initialCode = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("user_code") ?? "" : "";
   const [userCode, setUserCode] = useState(initialCode);
-  const [scopes, setScopes] = useState<string[]>(ALL_SCOPES.map((sc) => sc.id));
-
-  const toggleScope = (scope: string, checked: boolean) => {
-    setScopes((prev) => (checked ? [...new Set([...prev, scope])] : prev.filter((item) => item !== scope)));
-  };
+  const { scopes, toggleScope } = useScopeSelection();
 
   const handleApprove = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -144,11 +148,7 @@ export function LinkScreen() {
 export function OAuthConsentScreen() {
   const s = useAppStore();
   const consent = s.oauthConsent;
-  const [scopes, setScopes] = useState<string[]>(ALL_SCOPES.map((sc) => sc.id));
-
-  const toggleScope = (scope: string, checked: boolean) => {
-    setScopes((prev) => (checked ? [...new Set([...prev, scope])] : prev.filter((item) => item !== scope)));
-  };
+  const { scopes, toggleScope } = useScopeSelection();
 
   if (!s.viewer) {
     return (
@@ -251,7 +251,7 @@ export function AdminScreen() {
             </div>
             <Progress value={pct} aria-label="D-25 daily LLM spend budget" />
             <p className="text-xs text-muted-foreground">
-              Max steps {status?.spend.maxStepsAllowed ?? 4} · Batch {status?.spend.effectiveBatchSize ?? 6} · Remaining {`$${(status?.spend.remainingCents ?? 0) / 100}`}
+              Max steps {status?.spend.maxStepsAllowed ?? 4} · Batch {status?.spend.effectiveBatchSize ?? 6} · {`Remaining $${((status?.spend.remainingCents ?? 0) / 100).toFixed(2)}`}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

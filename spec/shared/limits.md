@@ -236,5 +236,5 @@ pure def lawSpendReservationRespectsCap(ledger: SpendLedger, boundCents: int): b
 pure def lawCarryoverReducesNewDayHeadroom(ledger: SpendLedger): bool =
   (ledger.dailyBudgetCents > 0 and ledger.confirmedCents >= 0 and ledger.reservedCents >= 0 and ledger.carryoverReservedCents >= 0) implies
     remainingSpendHeadroom(rolloverSpendDay(ledger))
-      <= ledger.dailyBudgetCents - (ledger.reservedCents + ledger.carryoverReservedCents)
+      == nonNegInt(ledger.dailyBudgetCents - (ledger.reservedCents + ledger.carryoverReservedCents))
 ```

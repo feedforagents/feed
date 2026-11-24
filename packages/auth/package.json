@@ -8,7 +8,11 @@
     "node": ">=26"
   },
   "exports": {
-    ".": "./src/index.vibe"
+    ".": {
+      "workerd": "./dist/src/index.js",
+      "types": "./src/index.vibe",
+      "default": "./src/index.vibe"
+    }
   },
   "scripts": {
     "build": "vibelang -p tsconfig.build.json",

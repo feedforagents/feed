@@ -131,6 +131,47 @@ export async function deletePost(postId: string): Promise<void> {
   });
 }
 
+async function executePostAction({
+  postId,
+  endpoint,
+  method,
+  includeThread,
+  buildPatch,
+}: {
+  readonly postId: string;
+  readonly endpoint: string;
+  readonly method: "POST" | "DELETE";
+  readonly includeThread: boolean;
+  readonly buildPatch: (data: unknown) => (card: AppPost["card"]) => AppPost["card"];
+}): Promise<void> {
+  const res = await requestJson(endpoint, { method, parse: passThrough });
+  if (!res.ok) {
+    setStoreState({ errorMessage: res.message });
+    return;
+  }
+  const updateCard = buildPatch(res.data);
+  const patchPost = (post: AppPost): AppPost =>
+    post.card.id === postId ? { ...post, card: updateCard(post.card) } : post;
+  const patchList = (list: ReadonlyArray<AppPost>) => list.map(patchPost);
+  const cur = getStoreSnapshot();
+  setStoreState({
+    feedPosts: patchList(cur.feedPosts),
+    explore: { ...cur.explore, posts: patchList(cur.explore.posts) },
+    profileBundle: cur.profileBundle ? { ...cur.profileBundle, posts: patchList(cur.profileBundle.posts) } : null,
+    ...(includeThread
+      ? {
+          activeThread: cur.activeThread
+            ? {
+                post: patchPost(cur.activeThread.post),
+                parentPost: cur.activeThread.parentPost,
+                replies: patchList(cur.activeThread.replies),
+              }
+            : null,
+        }
+      : {}),
+  });
+}
+
 export async function toggleLike(postId: string): Promise<void> {
   const s = getStoreSnapshot();
   const existing = s.feedPosts.find((p) => p.card.id === postId)
@@ -140,58 +181,35 @@ export async function toggleLike(postId: string): Promise<void> {
     ?? s.explore.posts.find((p) => p.card.id === postId);
   const currentlyLiked = existing?.card.liked ?? false;
   if (!requireAuthOrQueue({ kind: "like", postId, currentlyLiked, label: "like this post" })) return;
-  const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}/like`, {
+  await executePostAction({
+    postId,
+    endpoint: `/api/posts/${encodeURIComponent(postId)}/like`,
     method: currentlyLiked ? "DELETE" : "POST",
-    parse: passThrough,
-  });
-  if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
-    return;
-  }
-  const rec = isRecord(res.data) ? res.data : {};
-  const nextLiked = typeof rec.liked === "boolean" ? rec.liked : !currentlyLiked;
-  const nextCount = typeof rec.likeCount === "number" ? rec.likeCount : Math.max(0, (existing?.card.likeCount ?? 0) + (nextLiked ? 1 : -1));
-  const patchList = (list: ReadonlyArray<AppPost>) =>
-    list.map((p) => (p.card.id === postId ? { ...p, card: { ...p.card, liked: nextLiked, likeCount: nextCount } } : p));
-  const cur = getStoreSnapshot();
-  setStoreState({
-    feedPosts: patchList(cur.feedPosts),
-    explore: { ...cur.explore, posts: patchList(cur.explore.posts) },
-    profileBundle: cur.profileBundle ? { ...cur.profileBundle, posts: patchList(cur.profileBundle.posts) } : null,
-    activeThread: cur.activeThread
-      ? {
-          post: cur.activeThread.post.card.id === postId
-            ? { ...cur.activeThread.post, card: { ...cur.activeThread.post.card, liked: nextLiked, likeCount: nextCount } }
-            : cur.activeThread.post,
-          parentPost: cur.activeThread.parentPost,
-          replies: patchList(cur.activeThread.replies),
-        }
-      : null,
+    includeThread: true,
+    buildPatch: (data) => {
+      const rec = isRecord(data) ? data : {};
+      const nextLiked = typeof rec.liked === "boolean" ? rec.liked : !currentlyLiked;
+      const nextCount = typeof rec.likeCount === "number"
+        ? rec.likeCount
+        : Math.max(0, (existing?.card.likeCount ?? 0) + (nextLiked ? 1 : -1));
+      return (card) => ({ ...card, liked: nextLiked, likeCount: nextCount });
+    },
   });
 }
 
 export async function repostPost(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "repost", postId, label: "repost this post" })) return;
-  const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}/repost`, {
+  await executePostAction({
+    postId,
+    endpoint: `/api/posts/${encodeURIComponent(postId)}/repost`,
     method: "POST",
-    parse: passThrough,
-  });
-  if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
-    return;
-  }
-  const rec = isRecord(res.data) ? res.data : {};
-  const nextReposted = typeof rec.reposted === "boolean" ? rec.reposted : true;
-  const nextCount = typeof rec.repostCount === "number" ? rec.repostCount : undefined;
-  const patchList = (list: ReadonlyArray<AppPost>) =>
-    list.map((p) => (p.card.id === postId
-      ? { ...p, card: { ...p.card, reposted: nextReposted, repostCount: nextCount ?? p.card.repostCount + 1 } }
-      : p));
-  const cur = getStoreSnapshot();
-  setStoreState({
-    feedPosts: patchList(cur.feedPosts),
-    explore: { ...cur.explore, posts: patchList(cur.explore.posts) },
-    profileBundle: cur.profileBundle ? { ...cur.profileBundle, posts: patchList(cur.profileBundle.posts) } : null,
+    includeThread: false,
+    buildPatch: (data) => {
+      const rec = isRecord(data) ? data : {};
+      const nextReposted = typeof rec.reposted === "boolean" ? rec.reposted : true;
+      const nextCount = typeof rec.repostCount === "number" ? rec.repostCount : undefined;
+      return (card) => ({ ...card, reposted: nextReposted, repostCount: nextCount ?? card.repostCount + 1 });
+    },
   });
 }
 
@@ -268,22 +286,16 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
   setStoreState({ selectedMarketKind: kind, selectedMarketId: id, tradeError: null });
 }
 
-export async function submitPredictionOrder(
-  marketId: string,
-  action: "Buy" | "Sell",
-  side: "yes" | "no",
-  amountPts: number,
-): Promise<boolean> {
-  if (!requireAuthOrQueue({ kind: "trade_prediction", marketId, action, side, amountPts, label: `${action} ${side.toUpperCase()} prediction` })) {
-    return false;
-  }
+async function executeTradeRequest({
+  endpoint,
+  body,
+  statusMessage,
+}: {
+  readonly endpoint: string;
+  readonly body: unknown;
+  readonly statusMessage: string;
+}): Promise<boolean> {
   setStoreState({ tradeLoading: true, tradeError: null });
-  const endpoint = action === "Buy"
-    ? `/api/markets/prediction/${encodeURIComponent(marketId)}/buy`
-    : `/api/markets/prediction/${encodeURIComponent(marketId)}/sell`;
-  const body = action === "Buy"
-    ? { side, amountCents: Math.max(1, Math.round(amountPts * 100)), amountPts }
-    : { side, shares: Math.max(1, Math.round(amountPts)) };
   const res = await requestJson(endpoint, { method: "POST", body, parse: passThrough });
   if (!res.ok) {
     setStoreState({ tradeLoading: false, tradeError: res.message });
@@ -293,11 +305,33 @@ export async function submitPredictionOrder(
   const bal = isRecord(res.data) && typeof res.data.balanceAfterCents === "number" ? res.data.balanceAfterCents : curViewer?.balanceCents;
   setStoreState({
     tradeLoading: false,
-    statusMessage: `${action} ${side.toUpperCase()} executed.`,
+    statusMessage,
     ...(curViewer && bal !== undefined ? { viewer: { ...curViewer, balanceCents: bal } } : {}),
   });
   await loadMarkets();
   return true;
+}
+
+export async function submitPredictionOrder(
+  marketId: string,
+  action: "Buy" | "Sell",
+  side: "yes" | "no",
+  amountPts: number,
+): Promise<boolean> {
+  if (!requireAuthOrQueue({ kind: "trade_prediction", marketId, action, side, amountPts, label: `${action} ${side.toUpperCase()} prediction` })) {
+    return false;
+  }
+  const endpoint = action === "Buy"
+    ? `/api/markets/prediction/${encodeURIComponent(marketId)}/buy`
+    : `/api/markets/prediction/${encodeURIComponent(marketId)}/sell`;
+  const body = action === "Buy"
+    ? { side, amountCents: Math.max(1, Math.round(amountPts * 100)), amountPts }
+    : { side, shares: Math.max(1, Math.round(amountPts)) };
+  return executeTradeRequest({
+    endpoint,
+    body,
+    statusMessage: `${action} ${side.toUpperCase()} executed.`,
+  });
 }
 
 export async function submitPerpOrder(
@@ -309,47 +343,20 @@ export async function submitPerpOrder(
   if (!requireAuthOrQueue({ kind: "trade_perp", ticker, side, marginPts, leverage, label: `open $${ticker} ${side} perp` })) {
     return false;
   }
-  setStoreState({ tradeLoading: true, tradeError: null });
-  const res = await requestJson(`/api/markets/perp/${encodeURIComponent(ticker)}/open`, {
-    method: "POST",
+  return executeTradeRequest({
+    endpoint: `/api/markets/perp/${encodeURIComponent(ticker)}/open`,
     body: { side, collateralCents: Math.max(1, Math.round(marginPts * 100)), collateralPts: marginPts, leverage },
-    parse: passThrough,
-  });
-  if (!res.ok) {
-    setStoreState({ tradeLoading: false, tradeError: res.message });
-    return false;
-  }
-  const curViewer = getStoreSnapshot().viewer;
-  const bal = isRecord(res.data) && typeof res.data.balanceAfterCents === "number" ? res.data.balanceAfterCents : curViewer?.balanceCents;
-  setStoreState({
-    tradeLoading: false,
     statusMessage: `Opened $${ticker} ${side} ${leverage}x position.`,
-    ...(curViewer && bal !== undefined ? { viewer: { ...curViewer, balanceCents: bal } } : {}),
   });
-  await loadMarkets();
-  return true;
 }
 
 export async function closePerpPosition(positionId: string): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
-  setStoreState({ tradeLoading: true, tradeError: null });
-  const res = await requestJson(`/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`, {
-    method: "POST",
+  await executeTradeRequest({
+    endpoint: `/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`,
     body: {},
-    parse: passThrough,
-  });
-  if (!res.ok) {
-    setStoreState({ tradeLoading: false, tradeError: res.message });
-    return;
-  }
-  const curViewer = getStoreSnapshot().viewer;
-  const bal = isRecord(res.data) && typeof res.data.balanceAfterCents === "number" ? res.data.balanceAfterCents : curViewer?.balanceCents;
-  setStoreState({
-    tradeLoading: false,
     statusMessage: "Position closed.",
-    ...(curViewer && bal !== undefined ? { viewer: { ...curViewer, balanceCents: bal } } : {}),
   });
-  await loadMarkets();
 }
 
 export async function startPointPackCheckout(packId: string, billingState: string): Promise<string | null> {

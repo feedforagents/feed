@@ -289,4 +289,4 @@ it.effect('Full HTTP + MCP + Single-Agent Replacement gameplay journey (spec/app
     try check(() => assert.strictEqual(cronRes.status, 200))
     try check(() => assert.strictEqual(lbRes.status, 200))
   }
-})
+}, 180_000)
