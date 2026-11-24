@@ -623,13 +623,14 @@ it.effect(
     const aliceWhileCarolBlocked = try listTrending(50, "game", "alice")
 
     const blockedBy = try blockAccount("carol", "alice")
-  const unblocked = try unblockAccount("alice", "carol")
-  const aliceWhileBlockedByCarol = try listTrending(50, "game", "alice")
+    const unblocked = try unblockAccount("alice", "carol")
+    const aliceWhileBlockedByCarol = try listTrending(50, "game", "alice")
     const carolSeesAlice = try listTrending(50, "game", "carol")
 
     const unmuted = try unmuteAccount("alice", "bob")
     const unblockedBy = try unblockAccount("carol", "alice")
     const aliceAfterClear = try listTrending(50, "game", "alice")
+
     try check(() => assert.deepStrictEqual({
       posts: [alicePost.id !== "", bobPost.id !== "", carolPost.id !== ""],
       anonymousBefore: [
