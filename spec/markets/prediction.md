@@ -63,7 +63,7 @@ pure val MANUAL_REVIEW_THRESHOLD_BPS = 7000
 pure val MAX_SQRT_OPERAND = 94906265
 
 pure val SQRT_BITS = List(
-  33554432, 16777216, 8388608, 4194304, 2097152, 1048576, 524288, 262144,
+  67108864, 33554432, 16777216, 8388608, 4194304, 2097152, 1048576, 524288, 262144,
   131072, 65536, 32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64,
   32, 16, 8, 4, 2, 1
 )
@@ -106,7 +106,7 @@ pure val acctValues =
 
 ### CPMM pricing, square-root proceeds, and account helpers
 
-CPMM buys mint complete sets from net cash after fee (`netUnits = netCents * SUBCENTS_PER_CENT`), preserving `yesReserve * noReserve >= initialK` via ceiling division. Sells redeem complete sets using the rationalized quadratic root floored via integer square root (`isqrt`), bounded below `oppReserve`.
+CPMM buys mint complete sets from net cash after fee (`netUnits = netCents * SUBCENTS_PER_CENT`), preserving `yesReserve * noReserve >= initialK` via ceiling division. Sells redeem complete sets using the rationalized quadratic root floored via integer square root (`isqrt`), bounded below `oppReserve`. The bounded integer square root covers every safely representable discriminant.
 
 ```quint
 pure def absInt(x: int): int = if (x < 0) 0 - x else x
@@ -298,7 +298,7 @@ pure val eval_refuse_canBuy = { traderId: "alice", side: Yes, amountCents: -1 }
 
 ### Selling shares floors gross proceeds to whole cents before charging the canonical fee
 
-Sub-cent remainders stay in house liquidity; if settled proceeds are `1 cent`, the `1 cent` round-up fee yields `0` net credit.
+Sub-cent remainders stay in house liquidity; if settled proceeds are `1 cent`, the `1 cent` round-up fee yields `0` net credit. A sell quote is refused when its resulting reserves fall below the market’s constant-product floor.
 
 ```quint
 pure def canSell(m: PredictionMarket, traderId: str, side: Side, sellShares: int): bool =
@@ -319,6 +319,7 @@ pure def canSell(m: PredictionMarket, traderId: str, side: Side, sellShares: int
     settledCents <= m.liquidityCents,
     nextYes > 0,
     nextNo > 0,
+    nextYes * nextNo >= m.initialK,
   }
 
 pure def sell(m: PredictionMarket, traderId: str, side: Side, sellShares: int): PredictionMarket =
