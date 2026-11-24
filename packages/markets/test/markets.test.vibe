@@ -857,6 +857,10 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
       data: { object: { id: "ch_low", payment_intent: "pi_lowbal_1", amount_refunded: 400 } }
     })
 
+        try createVerifiedAccount("user-carol", "carol", 10_000)
+    try store.transaction((tx: Tx) =>
+      tx.query("UPDATE feed_accounts SET balance_cents = 5000 WHERE account_id = 'user-carol'")
+    )
     const boardFinal = try getLeaderboard()
     try check(() => assert.deepStrictEqual(
       {
@@ -898,7 +902,7 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
         disputeWonDup: [true, 0],
         bobFinalEconomy: [110_000, 100_000, 0],
         lowBalRefundTracksCumulativeSeparately: [-10_000, -10_000],
-        tiedRanksShareRankOne: [["user-bob", 1], ["user-alice", 1]]
+        tiedRanksShareRankOne: [["user-bob", 1], ["user-alice", 1], ["user-carol", 3]]
       }
     ))
   })
