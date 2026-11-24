@@ -1045,7 +1045,7 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
     const mode = input.mode ?? (try readViewerUiModeTx(tx, viewerId))
     const postMatch = mode === "social"
       ? "p.content ILIKE $1 ESCAPE '\\'"
-      : "(p.content ILIKE $1 ESCAPE '\\' OR p.ticker ILIKE $1 ESCAPE '\\')"
+      : "(p.content ILIKE $1 ESCAPE '\\' OR (p.ticker ILIKE $1 ESCAPE '\\' AND p.market_id IS NOT NULL))"
     const postRows = viewerId === undefined
       ? try tx.query(`SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} ORDER BY p.created_at DESC LIMIT $2`, [likePattern, limit])
       : try tx.query(`SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql("$2", "p.author_id")} ORDER BY p.created_at DESC LIMIT $3`, [likePattern, viewerId, limit])
