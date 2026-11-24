@@ -37,6 +37,7 @@ import {
   fastForwardSimulatedHours,
   getDailySpendStatus,
   getEngineAdminStatus,
+  isRouteDue,
   overrideManualHold,
   runArticleTick,
   runGameTick,
@@ -1539,21 +1540,25 @@ export effect function resolveOptionalRouteResponse(
 export effect function runScheduledTicks(cycle: number): void!!(Store | RealtimeBus) {
   runMinuteTick() catch () => undefined
   runMarketsRecovery() catch () => undefined
-  if (cycle % 2 === 0) {
+  if (isRouteDue("RouteNpcTick", cycle)) {
     runNpcTick() catch () => undefined
+  }
+  if (isRouteDue("RouteMarketsTick", cycle)) {
     runMarketsTick() catch () => undefined
   }
-  if (cycle % 5 === 0) {
+  if (isRouteDue("RouteOrganizationTick", cycle)) {
     runOrganizationTick() catch () => undefined
+  }
+  if (isRouteDue("RouteRssRefresh", cycle)) {
     runRssRefreshTick() catch () => undefined
   }
-  if (cycle % 15 === 0) {
+  if (isRouteDue("RouteArticleTick", cycle)) {
     runArticleTick() catch () => undefined
   }
-  if (cycle % 60 === 0) {
+  if (isRouteDue("RoutePerpFunding", cycle)) {
     runPerpFundingTick() catch () => undefined
   }
-  if (cycle % 480 === 0) {
+  if (isRouteDue("RouteWorldFacts", cycle)) {
     runWorldFactsTick() catch () => undefined
   }
 }

@@ -92,6 +92,10 @@ function resolveClockMode(): ClockMode {
   return readEnv("NODE_ENV")?.trim().toLowerCase() === "production" ? "ClockRealtime" : "ClockSimulated"
 }
 
+export function isRouteDue(route: RouteName, minuteIndex: number): boolean {
+  return minuteIndex % routeCadenceMinutes(route) === 0
+}
+
 effect function guardCoreRoute(route: RouteName): void!EngineFailure {
   if (isRetiredRoute(route) || !isCoreRoute(route)) {
     throw new EngineFailure({ code: "INVALID_ARGUMENT", message: `Route ${route} is retired and cannot execute.` })

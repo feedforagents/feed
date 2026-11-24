@@ -54,6 +54,7 @@ export {
 export {
   fastForwardSimulatedHours,
   getEngineAdminStatus,
+  isRouteDue,
   runArticleTick,
   runGameTick,
   runMarketsRecovery,
