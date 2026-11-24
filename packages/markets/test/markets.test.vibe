@@ -925,10 +925,7 @@ it.effect('Perp open then immediate close cannot profit from its own mark premiu
       leverage: 10
     })
     // spec/markets/spotPerp.md, "Closing a perp settles equity and canonical fees at mark price without touching spot"
-    const closed = try closePerpPosition({
-      ownerId: "user-alice",
-      positionId: opened.positionId
-    })
+    const closed = try closePerpPosition({ positionId: opened.positionId, ownerId: "user-alice" })
     const positionsAfterClose = try listPerpPositions("user-alice")
     try check(() => assert.deepStrictEqual(
       {
