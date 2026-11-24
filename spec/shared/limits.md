@@ -210,6 +210,8 @@ pure def rolloverSpendDay(ledger: SpendLedger): SpendLedger =
 
 ### Budget thresholds enforce exact 80% batch halving, 90% step caps, and carryover headroom reduction
 
+Unsettled prior reservations reduce the next day's headroom by their full amount, with a zero floor when carryover meets or exceeds the new budget.
+
 ```quint
 pure def lawBelow80PctKeepsFullBatchAndFourSteps(ledger: SpendLedger, configuredBatch: int): bool =
   (ledger.dailyBudgetCents > 0 and configuredBatch > 0
@@ -236,5 +238,5 @@ pure def lawSpendReservationRespectsCap(ledger: SpendLedger, boundCents: int): b
 pure def lawCarryoverReducesNewDayHeadroom(ledger: SpendLedger): bool =
   (ledger.dailyBudgetCents > 0 and ledger.confirmedCents >= 0 and ledger.reservedCents >= 0 and ledger.carryoverReservedCents >= 0) implies
     remainingSpendHeadroom(rolloverSpendDay(ledger))
-      <= ledger.dailyBudgetCents - (ledger.reservedCents + ledger.carryoverReservedCents)
+      == nonNegInt(ledger.dailyBudgetCents - (ledger.reservedCents + ledger.carryoverReservedCents))
 ```
