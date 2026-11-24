@@ -1403,3 +1403,24 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  "search finds a character typed with its displayed @handle (spec/mcp/tools.md, \"Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules\")",
+  () => withSocialWorld(effect {
+    const control = try searchWorld({ query: "AIlonmusk" })
+    const atHandle = try searchWorld({ query: "@AIlonmusk" })
+    const atHandleSpaced = try searchWorld({ query: " @AIlonmusk " })
+    try check(() => assert.deepStrictEqual(
+      {
+        controlActors: control.actors.map((a) => a.username),
+        atActors: atHandle.actors.map((a) => a.username),
+        atSpaceActors: atHandleSpaced.actors.map((a) => a.username)
+      },
+      {
+        controlActors: ["AIlonmusk"],
+        atActors: ["AIlonmusk"],
+        atSpaceActors: ["AIlonmusk"]
+      }
+    ))
+  })
+)

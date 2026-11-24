@@ -1308,7 +1308,7 @@ export effect function deletePost(accountId: string, postId: string): DeletePost
 }
 
 export effect function searchWorld(input: SearchWorldInput): SearchResult!(SocialFailure | StoreFailure)!Store {
-  const queryText = input.query.trim()
+  const queryText = input.query.trim().replace(/^@/, "")
   if (queryText === "") {
     return { posts: [], accounts: [], actors: [], organizations: [], tags: [] }
   }
