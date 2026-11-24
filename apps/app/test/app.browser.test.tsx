@@ -4,10 +4,27 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { setStoreState } from "../src/web/store-core.ts";
+import { storeActions } from "../src/web/store.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
+
+function perp(ticker: string, name: string) {
+  return {
+    ticker,
+    name,
+    indexPriceCents: 10000,
+    markPriceCents: 10100,
+    fundingRateBps: 10,
+    openInterestCents: 50000,
+    history: [
+      { label: "Index", value: 100 },
+      { label: "Mark", value: 101 },
+    ],
+  };
+}
 
 const SAMPLE_POSTS = [
   {
@@ -60,7 +77,7 @@ const SAMPLE_MARKETS = {
       createdAt: Date.now() - 300_000,
     },
   ],
-  perps: [],
+  perps: [perp("TSLAI", "Tesla AI"), perp("NVDAI", "Nvidia AI")],
   positions: {
     predictionPositions: [
       {
@@ -305,6 +322,17 @@ afterEach(async () => {
   for (const root of opened.splice(0)) {
     await act(() => Promise.resolve(root.unmount()));
   }
+  setStoreState({
+    route: "Home",
+    profileHandle: null,
+    selectedTicker: null,
+    localUiMode: "game",
+    joinSheetOpen: false,
+    joinTab: "phone",
+    joinPhoneStep: "entry",
+    activeThread: null,
+    threadLoading: false,
+  });
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
@@ -313,12 +341,39 @@ afterAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
-it('Visitors browse markets and leaderboard, switch modes, sign in, and view fixed 100 pts wallet (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+async function renderApp() {
   installMockNetwork();
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
   opened.push(root);
   await act(() => Promise.resolve(root.render(<App />)));
+}
+
+async function expectChart(ticker: string) {
+  await expect.element(page.getByText(`$${ticker} Spot Index & Mark`)).toBeInTheDocument();
+}
+
+async function openChart(ticker: string) {
+  await act(() => storeActions.navigate(`/markets?ticker=${ticker}`));
+  await expectChart(ticker);
+}
+
+async function expectChartGone(ticker: string) {
+  await vi.waitFor(
+    () => {
+      expect(document.body.textContent ?? "").not.toContain(`$${ticker} Spot Index & Mark`);
+    },
+    { timeout: 5000 },
+  );
+}
+
+async function openPredictionsTab() {
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Predictions" })));
+  await expect.element(page.getByRole("button", { name: "Trade YES / NO" })).toBeInTheDocument();
+}
+
+it('Visitors browse markets and leaderboard, switch modes, sign in, and view fixed 100 pts wallet (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await renderApp();
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -380,4 +435,58 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();
+});
+
+it('opens its chart (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await renderApp();
+
+  await act(() => storeActions.navigate("/markets"));
+  await expect.element(page.getByRole("button", { name: "Trade YES / NO" })).toBeInTheDocument();
+  await expectChartGone("TSLAI");
+
+  await openChart("TSLAI");
+  await openChart("NVDAI");
+  await expectChartGone("TSLAI");
+});
+
+it('same-kind click follows tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await renderApp();
+
+  await openChart("TSLAI");
+  await openPredictionsTab();
+  await openChart("NVDAI");
+});
+
+it('back across tickers follows tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await renderApp();
+
+  await openChart("TSLAI");
+  await openChart("NVDAI");
+  await openPredictionsTab();
+
+  act(() => {
+    window.history.back();
+  });
+  await expectChart("TSLAI");
+});
+
+it('selection follows back (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await renderApp();
+
+  await openChart("TSLAI");
+
+  act(() => storeActions.selectMarket("prediction", "seed-market-1"));
+  await expect.element(page.getByRole("button", { name: "Trade YES / NO" })).toBeInTheDocument();
+  await expectChartGone("TSLAI");
+});
+
+it('hand-picked tabs stay put (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await renderApp();
+
+  await openChart("TSLAI");
+  await openPredictionsTab();
+  await expectChartGone("TSLAI");
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Perps (20x)" })));
+  await expectChart("TSLAI");
 });
