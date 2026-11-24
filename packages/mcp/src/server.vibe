@@ -1299,6 +1299,7 @@ effect function executeProtectedTradeTool(
     }
     case "open_perp": {
       const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
+      const idempotencyKey = asOptionalString(args.idempotencyKey)
       const receipt = try openPerpPosition({
         ownerId: caller.accountId,
         ownerKind: "user",
@@ -1306,7 +1307,8 @@ effect function executeProtectedTradeTool(
         side,
         collateralCents,
         leverage,
-        viaClientName: caller.clientName
+        viaClientName: caller.clientName,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       })
       try maybePublishFeedEvent({
         type: "market.perp",
@@ -1335,12 +1337,14 @@ effect function executeProtectedTradeTool(
     }
     case "close_perp": {
       const positionId = asOptionalString(args.positionId) ?? ""
+      const idempotencyKey = asOptionalString(args.idempotencyKey)
       const openPositions = try listPerpPositions(caller.accountId)
       const existingPosition = openPositions.find((pos) => pos.id === positionId)
       const receipt = try closePerpPosition({
         ownerId: caller.accountId,
         positionId,
-        viaClientName: caller.clientName
+        viaClientName: caller.clientName,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       })
       try maybePublishFeedEvent({
         type: "market.perp",
