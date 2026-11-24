@@ -16,10 +16,12 @@
 import { PredictionPricing } from '@feed/core/markets/prediction/pricing';
 import {
   agentTrades,
+  and,
   db,
   desc,
   eq,
   getDbInstance,
+  gt,
   markets,
   npcTrades,
   questions,
@@ -249,11 +251,21 @@ export async function generateActivePredictions(): Promise<string> {
     return `Active Questions: ${formatSimulationPredictionMarkets().replace(/\n/g, ' | ').replace(/- /g, '')}`;
   }
 
-  // Get active questions from the Question table
+  // Get active questions from the Question table: still 'active' and not
+  // yet past their resolution date. A question past its date but not yet
+  // resolved keeps status 'active' (see expiredMarkets() in
+  // prediction-resolution-work.ts — pending resolutions), so status alone
+  // is not enough: without the date filter it is listed with a negative
+  // "resolves in -Nd".
   const activeQuestions = await db
     .select()
     .from(questions)
-    .where(eq(questions.status, 'active'))
+    .where(
+      and(
+        eq(questions.status, 'active'),
+        gt(questions.resolutionDate, new Date())
+      )
+    )
     .orderBy(desc(questions.createdAt))
     .limit(10);
 
