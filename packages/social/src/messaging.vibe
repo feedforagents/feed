@@ -602,9 +602,14 @@ export effect function sendChatMessage(input: SendChatMessageInput): ChatMessage
       throw new SocialFailure({ code: "Forbidden", message: "Message refused by messaging rules" })
     }
     const messageId = freshId()
+    const lastCreatedRows = try tx.query(
+      "SELECT MAX(created_at) AS max_created FROM feed_messages WHERE chat_id = $1",
+      [input.chatId]
+    )
+    const messageCreatedAt = Math.max(now, safeInt(lastCreatedRows[0]?.max_created, 0) + 1)
     try tx.query(
       "INSERT INTO feed_messages (id, chat_id, sender_id, sender_kind, via_client_name, body, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-      [messageId, input.chatId, sender.id, input.senderKind, viaClientName, input.content, now]
+      [messageId, input.chatId, sender.id, input.senderKind, viaClientName, input.content, messageCreatedAt]
     )
     const message: ChatMessageView = {
       id: messageId,
@@ -616,7 +621,7 @@ export effect function sendChatMessage(input: SendChatMessageInput): ChatMessage
       viaClientName,
       content: input.content,
       reactions: [],
-      createdAt: now
+      createdAt: messageCreatedAt
     }
     const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
     const events: FeedRealtimeEvent[] = [

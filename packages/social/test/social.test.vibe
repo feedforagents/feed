@@ -478,6 +478,11 @@ it.effect(
     const dmReact = try reactToMessage({ accountId: "bob", messageId: dmMsg1.id, emoji: "🔥" })
     const dmMsgsForBob = try getChatMessages("bob", dm.id)
     const dmMsgsForAlice = try getChatMessages("alice", dm.id)
+    const sameMsContents = ["Same-ms 1", "Same-ms 2", "Same-ms 3", "Same-ms 4", "Same-ms 5", "Same-ms 6", "Same-ms 7", "Same-ms 8"]
+    for (const content of sameMsContents) {
+      try sendChatMessage({ senderId: "alice", senderKind: "user", chatId: dm.id, content })
+    }
+    const sameMsMsgs = try getChatMessages("alice", dm.id)
 
     const group = try createUserGroupChat("alice", "Trading Desk", ["bob"])
     const invitedCarol = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
@@ -530,6 +535,7 @@ it.effect(
         dmMsgsForBob.map((m) => [m.id, m.reactions]),
         dmMsgsForAlice[0]?.reactions
       ],
+      sameMsOrder: sameMsMsgs.map((m) => m.content),
       group: [
         group.kind,
         group.title,
@@ -571,6 +577,7 @@ it.effect(
         ],
         [{ emoji: "🔥", count: 1, reactedByViewer: false }]
       ],
+      sameMsOrder: ["DM hello $NVDAI", "DM reply", "Same-ms 1", "Same-ms 2", "Same-ms 3", "Same-ms 4", "Same-ms 5", "Same-ms 6", "Same-ms 7", "Same-ms 8"],
       group: [
         "user_group",
         "Trading Desk",
