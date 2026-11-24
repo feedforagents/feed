@@ -10,8 +10,8 @@ import {
   sendNav,
   setStoreState,
   toSpecTab,
-  type UiFeedTab,
   type MarketsTab,
+  type UiFeedTab,
 } from "./store-core.ts";
 import {
   type AppPerpMarket,
