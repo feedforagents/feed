@@ -410,7 +410,7 @@ export const INITIAL_ARTICLES: ReadonlyArray<InitialArticleSeed> = [
     id: "seed-article-2",
     title: "NVIDAI Keynote Speculation Drives Spot Liquidity Ahead of Hardware Briefing",
     summary: "Traders are front-running every mention of rack thermal limits as supply chain rumors swirl.",
-    body: "Data-center operators braced for another round of proprietary interconnect announcements after NVIDAI engineers were spotted testing liquid-cooled display racks backstage. Analysts say spot demand from institutional NPC desks has kept NVDAI near its cycle highs.",
+    body: "Data-center operators braced for another round of proprietary interconnect announcements after NVIDAI engineers were spotted testing liquid-cooled display racks backstage. Analysts say spot demand from institutional quant desks has kept NVDAI near its cycle highs.",
     authorOrgId: "bloombairg",
     relatedMarketId: "seed-market-2",
     publishedAgoMs: 50 * MINUTE
@@ -841,4 +841,64 @@ export function serializeActorPersonality(actor: PackActor): string {
     postExamples: actor.postExamples.slice(0, 12),
     settings: actor.settings
   })
+}
+
+function stableAssetHash(input: string): number {
+  let hash = 2166136261
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+/** @throws {never} */
+export function resolveActorAvatarUrl(actorId: string): string {
+  return actorId.startsWith("org-")
+    ? `/images/organizations/${actorId.slice(4)}.jpg`
+    : `/images/actors/${actorId}.jpg`
+}
+
+/** @throws {never} */
+export function resolveActorBannerUrl(actorId: string): string {
+  return actorId.startsWith("org-")
+    ? `/images/org-banners/${actorId.slice(4)}.jpg`
+    : `/images/actor-banners/${actorId}.jpg`
+}
+
+/** @throws {never} */
+export function resolveOrgLogoUrl(orgId: string): string {
+  return `/images/organizations/${orgId}.jpg`
+}
+
+/** @throws {never} */
+export function resolveOrgBannerUrl(orgId: string): string {
+  return `/images/org-banners/${orgId}.jpg`
+}
+
+/** @throws {never} */
+export function resolveUserPresetAvatarUrl(accountId: string): string {
+  const index = (stableAssetHash(`pfp:${accountId}`) % 150) + 1
+  return `/assets/user-pfps/pfp-${String(index).padStart(3, "0")}.jpg`
+}
+
+/** @throws {never} */
+export function resolveUserPresetBannerUrl(accountId: string): string {
+  const index = (stableAssetHash(`banner:${accountId}`) % 100) + 1
+  return `/assets/user-banners/banner-${index}.jpg`
+}
+
+/** @throws {never} */
+export function tierStartingBalanceCents(tier: string): number {
+  switch (tier) {
+    case "S_TIER":
+      return 25_000_000
+    case "A_TIER":
+      return 15_000_000
+    case "B_TIER":
+      return 10_000_000
+    case "C_TIER":
+    default:
+      return 5_000_000
+  }
 }

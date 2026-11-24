@@ -94,12 +94,15 @@ import {
   likePost,
   listAlphaInvites,
   listArticles,
+  listBlockedAccounts,
   listChats,
   listFeedPosts,
   listFollowers,
   listFollowing,
+  listMutedAccounts,
   listNotifications,
   listTrending,
+  markChatRead,
   markNotificationsRead,
   muteAccount,
   publishFeedEvent,
@@ -116,6 +119,7 @@ import {
   unrepostPost,
   updateProfile,
   type FeedTab,
+  type PostThreadSort,
   type RealtimeBus,
   type SocialPresentationMode,
   type UpdatedAccountProfile
@@ -684,6 +688,7 @@ effect function handleAuthRoute(
         displayName: profile.displayName,
         bio: profile.bio,
         avatarUrl: profile.avatarUrl,
+        bannerUrl: profile.bannerUrl,
         phoneLast2: profile.phoneLast2,
         uiMode: profile.uiMode,
         balanceCents: profile.balanceCents,
@@ -876,8 +881,10 @@ effect function updateOwnAccountProfile(
 ): UpdatedAccountProfile!(HttpRequestError | StoreFailure)!Store {
   const hasDisplayName = Object.prototype.hasOwnProperty.call(data, "displayName")
   const hasBio = Object.prototype.hasOwnProperty.call(data, "bio")
-  if (!hasDisplayName && !hasBio) {
-    return try badRequest("invalid_input", "Provide displayName or bio to update.")
+  const hasAvatarUrl = Object.prototype.hasOwnProperty.call(data, "avatarUrl")
+  const hasBannerUrl = Object.prototype.hasOwnProperty.call(data, "bannerUrl")
+  if (!hasDisplayName && !hasBio && !hasAvatarUrl && !hasBannerUrl) {
+    return try badRequest("invalid_input", "Provide displayName, bio, avatarUrl, or bannerUrl to update.")
   }
   let nextDisplayName: string | null = null
   if (hasDisplayName) {
@@ -901,9 +908,33 @@ effect function updateOwnAccountProfile(
     }
     nextBio = trimmed
   }
+  let nextAvatarUrl: string | null | undefined = undefined
+  if (hasAvatarUrl) {
+    if (data.avatarUrl !== null && typeof data.avatarUrl !== "string") {
+      return try badRequest("invalid_avatar_url", "avatarUrl must be a string or null.")
+    }
+    const trimmed = typeof data.avatarUrl === "string" ? data.avatarUrl.trim() : ""
+    if (trimmed.length > 500) {
+      return try badRequest("invalid_avatar_url", "avatarUrl must be at most 500 characters.")
+    }
+    nextAvatarUrl = trimmed === "" ? null : trimmed
+  }
+  let nextBannerUrl: string | null | undefined = undefined
+  if (hasBannerUrl) {
+    if (data.bannerUrl !== null && typeof data.bannerUrl !== "string") {
+      return try badRequest("invalid_banner_url", "bannerUrl must be a string or null.")
+    }
+    const trimmed = typeof data.bannerUrl === "string" ? data.bannerUrl.trim() : ""
+    if (trimmed.length > 500) {
+      return try badRequest("invalid_banner_url", "bannerUrl must be at most 500 characters.")
+    }
+    nextBannerUrl = trimmed === "" ? null : trimmed
+  }
   const profile = try updateProfile(accountId, {
     displayName: nextDisplayName ?? undefined,
-    bio: nextBio ?? undefined
+    bio: nextBio ?? undefined,
+    avatarUrl: nextAvatarUrl,
+    bannerUrl: nextBannerUrl
   })
   if (profile === undefined) return try badRequest("not_found", "Account profile not found.", 404)
   return profile
@@ -920,6 +951,8 @@ effect function handleSocialPostsAndUsers(
     const session = try optionalSession(request, config)
     const rawTab = url.searchParams.get("tab") ?? "latest"
     const tab: FeedTab = rawTab === "following" || rawTab === "top" ? rawTab : "latest"
+    const rawIncludeReplies = url.searchParams.get("includeReplies")
+    const includeReplies = rawIncludeReplies === "true" ? true : rawIncludeReplies === "false" ? false : undefined
     return jsonResponse(try listFeedPosts({
       tab,
       viewerId: session?.accountId,
@@ -928,7 +961,8 @@ effect function handleSocialPostsAndUsers(
       limit: clampIntQuery(url, "limit", 25, 1, 100),
       authorId: url.searchParams.get("authorId") ?? undefined,
       ticker: url.searchParams.get("ticker") ?? undefined,
-      marketId: url.searchParams.get("marketId") ?? undefined
+      marketId: url.searchParams.get("marketId") ?? undefined,
+      includeReplies
     }))
   }
   if (method === "POST" && path === "/api/posts") {
@@ -954,7 +988,9 @@ effect function handleSocialPostsAndUsers(
     const postId = decodeSegment(postMatch[1] ?? "")
     if (method === "GET") {
       const session = try optionalSession(request, config)
-      return jsonResponse(try getPostThread(postId, session?.accountId, resolveMode(session, url)))
+      const rawSort = url.searchParams.get("sort")
+      const sort: PostThreadSort | undefined = rawSort === "popular" || rawSort === "newest" || rawSort === "oldest" ? rawSort : undefined
+      return jsonResponse(try getPostThread(postId, session?.accountId, resolveMode(session, url), sort))
     }
     if (method === "DELETE") {
       const session = try requireSession(request, config)
@@ -1000,6 +1036,14 @@ effect function handleSocialPostsAndUsers(
   const userEdgeMatch = /^\/api\/users\/([^/]+)\/(follow|block|mute)$/.exec(path)
   if (userEdgeMatch !== null) {
     return try handleAccountEdge(request, decodeSegment(userEdgeMatch[1] ?? ""), userEdgeMatch[2] ?? "", config)
+  }
+  if (method === "GET" && path === "/api/users/me/blocked") {
+    const session = try requireSession(request, config)
+    return jsonResponse({ items: try listBlockedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
+  }
+  if (method === "GET" && path === "/api/users/me/muted") {
+    const session = try requireSession(request, config)
+    return jsonResponse({ items: try listMutedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
   }
   if (method === "PATCH" && path === "/api/users/me") {
     const session = try requireSession(request, config)
@@ -1138,6 +1182,11 @@ effect function handleSocialChatsAndNotifications(
       chatId: decodeSegment(chatInviteMatch[1] ?? ""),
       targetHandleOrId: try reqStr(data, "targetHandleOrId", "targetHandleOrId", "handle")
     }))
+  }
+  const chatReadMatch = /^\/api\/chats\/([^/]+)\/read$/.exec(path)
+  if (method === "POST" && chatReadMatch !== null) {
+    const session = try requireSession(request, config)
+    return jsonResponse(try markChatRead(session.accountId, decodeSegment(chatReadMatch[1] ?? "")))
   }
   const chatLeaveMatch = /^\/api\/chats\/([^/]+)\/leave$/.exec(path)
   if (method === "POST" && chatLeaveMatch !== null) {
