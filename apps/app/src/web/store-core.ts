@@ -159,6 +159,9 @@ const initialLocation = typeof window !== "undefined"
   ? parseLocation(window.location.pathname, window.location.search)
   : parseLocation("/", "");
 
+const initialUiMode = readStoredUiMode();
+const initialRoute = initialUiMode === "social" && initialLocation.route === "Markets" ? "Home" : initialLocation.route;
+
 let currentState: StoreState = {
   authLoaded: false,
   viewer: null,
@@ -166,11 +169,11 @@ let currentState: StoreState = {
   publicAppUrl: typeof window !== "undefined" ? window.location.origin : "https://feed.fun",
   turnstileSiteKey: null,
   devSmsCodeEnabled: false,
-  route: initialLocation.route,
+  route: initialRoute,
   profileHandle: initialLocation.profileHandle,
   selectedTicker: initialLocation.queryTicker,
   feedTab: "latest",
-  localUiMode: readStoredUiMode(),
+  localUiMode: initialUiMode,
   bannerDismissed: false,
   explainerDismissed: readExplainerDismissed(),
   scrolledDeep: false,

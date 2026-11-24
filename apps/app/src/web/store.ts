@@ -43,6 +43,7 @@ import {
   navRuntime,
   onboardingRuntime,
   pushBrowserRoute,
+  readStoredUiMode,
   recordPublicView,
   sendApp,
   sendNav,
@@ -219,6 +220,9 @@ export function bootStore(): void {
   if (booted) return;
   booted = true;
   if (typeof window !== "undefined") {
+    if (readStoredUiMode() === "social" && parseLocation(window.location.pathname, window.location.search).route === "Markets") {
+      window.history.replaceState(null, "", "/");
+    }
     window.addEventListener("popstate", () => {
       const parsed = parseLocation(window.location.pathname, window.location.search);
       sendNav({ type: "navigateTo", targetRoute: parsed.route });

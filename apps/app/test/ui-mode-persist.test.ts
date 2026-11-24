@@ -18,6 +18,14 @@ function stubStorage(value: string | null) {
   return store;
 }
 
+function stubWindow(pathname: string, search: string) {
+  vi.stubGlobal("window", {
+    location: { pathname, search, origin: "https://feed.local" },
+    history: { replaceState: vi.fn() },
+    addEventListener: () => {},
+  });
+}
+
 afterEach(() => {
   vi.resetModules();
   vi.unstubAllGlobals();
@@ -33,4 +41,20 @@ it('invalid stored mode falls back to Game (spec/app/navigation.md, "Story: Swit
   stubStorage("banana");
   const { getStoreSnapshot } = await import("../src/web/store-core.ts");
   expect(getStoreSnapshot().localUiMode).toBe("game");
+});
+
+it('Social boot on a shared Markets link starts on Home (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+  stubStorage("social");
+  stubWindow("/markets", "?ticker=TSLAI");
+  const { getStoreSnapshot } = await import("../src/web/store-core.ts");
+  expect(getStoreSnapshot().localUiMode).toBe("social");
+  expect(getStoreSnapshot().route).toBe("Home");
+});
+
+it('Game boot on a Markets link stays on Markets (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+  stubStorage(null);
+  stubWindow("/markets", "?ticker=TSLAI");
+  const { getStoreSnapshot } = await import("../src/web/store-core.ts");
+  expect(getStoreSnapshot().localUiMode).toBe("game");
+  expect(getStoreSnapshot().route).toBe("Markets");
 });
