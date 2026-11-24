@@ -77,7 +77,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     activePerpPositions,
   ] = await Promise.all([
     db.market.count(),
-    db.market.count({ where: { resolved: false } }),
+    db.market.count({ where: { resolved: false, endDate: { gte: now } } }),
     db.market.count({ where: { resolved: true } }),
     db.position.count(),
     db.position.count({ where: { shares: { gt: '0' } } }),
