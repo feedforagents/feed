@@ -284,11 +284,16 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
 
     // spec/markets/spotPerp.md, "UTC time advances across 8-hour funding boundaries, and funding skips pre-cutover or duplicate periods"
     try TestClock.adjust(Duration.seconds(2 * 3_600))
+    const samePeriodTime = try Clock.currentTimeMillis
     const samePeriodFunding = try accruePerpFunding()
     try TestClock.adjust(Duration.seconds(6 * 3_600))
     const nextPeriodFunding = try accruePerpFunding()
+    const marketAfterFunding = try getPerpMarket("XTRPC")
     try TestClock.adjust(Duration.seconds(3_600))
     const duplicatePeriodFunding = try accruePerpFunding()
+    const marketAfterDuplicateFunding = try getPerpMarket("XTRPC")
+    try accruePerpFunding(samePeriodTime)
+    const marketAfterStaleFunding = try getPerpMarket("XTRPC")
     const positionsDuringHold = try listPerpPositions("user-alice")
     const fundingRows = try store.transaction((tx: Tx) =>
       tx.query("SELECT period_index, funding_delta_cents FROM feed_perp_funding_periods WHERE position_id = $1", [opened.positionId])
@@ -342,6 +347,8 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
           nextPeriodFunding.accruedCount,
           duplicatePeriodFunding.period === nextPeriodFunding.period,
           duplicatePeriodFunding.accruedCount,
+          [marketAfterFunding.lastFundingPeriod, marketAfterDuplicateFunding.lastFundingPeriod, marketAfterStaleFunding.lastFundingPeriod],
+          [marketAfterFunding.updatedAt, marketAfterDuplicateFunding.updatedAt, marketAfterStaleFunding.updatedAt],
           positionsDuringHold.map((pos) => [pos.accruedFundingCents, pos.lastFundingPeriod === nextPeriodFunding.period]),
           fundingRows.map((row) => [toInt(row.period_index) === nextPeriodFunding.period, toInt(row.funding_delta_cents)])
         ],
@@ -365,7 +372,13 @@ it.effect('Spot and perpetuals: NPC-only spot shifts index price, 20x leverage c
         spotBuy1: [8_000, 15_000_000, 1_875, 1_875, 8_000, 15_000_000, 1_875, 1_875, 1_875],
         overLeverageCode: "INVALID_LEVERAGE",
         opened: [10, 20_000, 20, 1_875, 7_980, 1_875, 1_968, 20_000],
-        funding: [0, false, 1, 1, true, 0, [[100, true]], [[true, 100]]],
+        funding: [
+          0, false, 1, 1, true, 0,
+          [nextPeriodFunding.period, nextPeriodFunding.period, nextPeriodFunding.period],
+          [marketAfterFunding.updatedAt, marketAfterFunding.updatedAt, marketAfterFunding.updatedAt],
+          [[100, true]],
+          [[true, 100]]
+        ],
         spotBuy2: [6_000, 20_000_000, 3_333, 3_499],
         closed: [3_499, 20, 19_202, 17_202, 27_182, 0, 0, 0, 3_333, 3_333]
       }
