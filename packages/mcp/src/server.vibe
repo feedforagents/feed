@@ -1165,9 +1165,10 @@ effect function executeProtectedSocialTool(
   toolName: "create_post" | "delete_post" | "like" | "unlike" | "repost" | "unrepost" | "follow" | "unfollow" | "block" | "unblock" | "mute" | "unmute" | "report" | "update_profile",
   args: Record<string, unknown>,
   caller: VerifiedAccessToken
-): object!(InvalidRpcParamsFailure | SocialFailure | StoreFailure)!Store {
+): object!(InvalidRpcParamsFailure | SocialFailure | RateLimited | StoreFailure)!Store {
   switch (toolName) {
     case "create_post": {
+      try checkAndConsumeRateLimit({ accountId: caller.accountId, action: "post", surface: "mcp" })
       const content = String(args.content ?? "")
       const created = try createPost({
         authorId: caller.accountId,
@@ -1218,7 +1219,7 @@ effect function executeProtectedMessagingTool(
   toolName: "list_chats" | "get_messages" | "send_dm" | "send_message" | "create_group" | "invite_to_group" | "leave_group" | "list_group_invites" | "respond_to_group_invite",
   args: Record<string, unknown>,
   caller: VerifiedAccessToken
-): object!(SocialFailure | StoreFailure)!Store {
+): object!(SocialFailure | RateLimited | StoreFailure)!Store {
   switch (toolName) {
     case "list_chats": {
       const limit = clampCount(asOptionalInt(args.limit), 50, 100)
@@ -1234,6 +1235,7 @@ effect function executeProtectedMessagingTool(
     case "send_dm": {
       const recipientHandleOrId = asOptionalString(args.recipientHandleOrId) ?? ""
       const content = String(args.content ?? "")
+      try checkAndConsumeRateLimit({ accountId: caller.accountId, action: "dm", surface: "mcp" })
       const chat = try createDirectChat(caller.accountId, recipientHandleOrId)
       const message = try sendChatMessage({
         senderId: caller.accountId,
@@ -1247,6 +1249,7 @@ effect function executeProtectedMessagingTool(
     case "send_message": {
       const chatId = asOptionalString(args.chatId) ?? ""
       const content = String(args.content ?? "")
+      try checkAndConsumeRateLimit({ accountId: caller.accountId, action: "dm", surface: "mcp" })
       const message = try sendChatMessage({
         senderId: caller.accountId,
         senderKind: "user",
@@ -1440,7 +1443,7 @@ effect function executeProtectedTool(
   definition: McpToolDefinition,
   args: Record<string, unknown>,
   caller: VerifiedAccessToken
-): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
+): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | RateLimited | StoreFailure)!Store {
   switch (definition.name) {
     case "whoami":
     case "get_home_feed":

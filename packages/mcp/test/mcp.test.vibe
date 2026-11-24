@@ -607,6 +607,11 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
       token2Access
     )
     const whoamiGame = unwrapToolPayload(try callMcpTool(17, "whoami", {}, authConfig, token2Access))
+    // spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
+    const dmRes = try callMcpTool(27, "send_dm", { recipientHandleOrId: "bob_social", content: "Hi Bob from Hermes" }, authConfig, token2Access)
+    const whoamiAfterDm = unwrapToolPayload(try callMcpTool(28, "whoami", {}, authConfig, token2Access))
+    const messageRes = try callMcpTool(29, "send_message", { chatId: unwrapToolPayload(dmRes).chatId, content: "Following up, Bob" }, authConfig, token2Access)
+    const whoamiAfterMessage = unwrapToolPayload(try callMcpTool(30, "whoami", {}, authConfig, token2Access))
     const portfolioGame = unwrapToolPayload(try callMcpTool(18, "get_portfolio", {}, authConfig, token2Access))
     const notifsGame = unwrapToolPayload(try callMcpTool(19, "get_notifications", { limit: 20 }, authConfig, token2Access))
     const setSocialRes = unwrapToolPayload(try callMcpTool(20, "set_mode", { mode: "social" }, authConfig, token2Access))
@@ -644,6 +649,14 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
       assert.strictEqual(whoamiGame.playMode, "game")
       assert.strictEqual(Object.hasOwn(whoamiGame, "balancePts"), true)
       assert.strictEqual(whoamiGame.balancePts, 90)
+      const quotasBeforeDm = whoamiGame.rateLimits as Readonly<Record<string, { readonly used: number }>>
+      const quotasAfterDm = whoamiAfterDm.rateLimits as Readonly<Record<string, { readonly used: number }>>
+      assert.strictEqual(quotasBeforeDm.post?.used, 1)
+      assert.strictEqual(quotasBeforeDm.trade?.used, 1)
+      assert.strictEqual(unwrapToolPayload(dmRes).viaClientName, "Hermes Agent")
+      assert.strictEqual(quotasAfterDm.dm?.used, 1)
+      assert.strictEqual(unwrapToolPayload(messageRes).viaClientName, "Hermes Agent")
+      assert.strictEqual((whoamiAfterMessage.rateLimits as Readonly<Record<string, { readonly used: number }>>).dm?.used, 2)
       assert.strictEqual(portfolioGame.playMode, "game")
       assert.strictEqual(Object.hasOwn(portfolioGame, "balancePts"), true)
       assert.strictEqual(Object.hasOwn(portfolioGame, "netProfitPts"), true)
