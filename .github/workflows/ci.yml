@@ -2,9 +2,9 @@ name: ci
 
 on:
   pull_request:
-    branches: [vibestack, staging, main]
+    branches: [develop, staging, production]
   push:
-    branches: [vibestack, staging, main]
+    branches: [develop, staging, production]
 
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_attempt == '1' && github.ref || github.run_id }}

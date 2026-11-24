@@ -2,7 +2,7 @@ name: deploy
 
 on:
   push:
-    branches: [staging, main]
+    branches: [staging, production]
   workflow_dispatch:
     inputs:
       environment:
@@ -16,7 +16,7 @@ on:
         default: false
 
 concurrency:
-  group: deploy-${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+  group: deploy-${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }}
   cancel-in-progress: false
 
 permissions:
@@ -27,11 +27,11 @@ env:
 
 jobs:
   deploy:
-    name: Deploy feed.fun (${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }})
+    name: Deploy feed.fun (${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }})
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+    environment: ${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }}
     env:
-      TARGET_ENV: ${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+      TARGET_ENV: ${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
     steps:

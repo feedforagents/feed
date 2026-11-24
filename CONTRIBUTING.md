@@ -167,7 +167,7 @@ errors in subscribers, since Node reports a thrown subscriber error as an uncaug
 
 ## Releasing
 
-Set `version` in the root `package.json`, merge to `main`, and push the tag `v<version>` from it.
+Set `version` in the root `package.json`, merge to `production`, and push the tag `v<version>` from it.
 `.github/workflows/release.yml` reuses the `build` task when it runs `pnpm pack`. Then it runs the remaining shard prerequisites
 and `pnpm selftest --only --concurrency=1` with the CI cache keys and attaches the tarball to a GitHub release of that tag.
 A project installs it as [README.md, "Using it from another package"](README.md#using-it-from-another-package) says.
@@ -454,7 +454,7 @@ configured scopes are in `knip.config.js`, `.madgerc`, `.jscpd.json` and
 
 | When | Runs |
 |---|---|
-| Pull request or push to `vibestack`, `staging`, or `main` | Four simulation shards feed the `verify` job, which runs the checks listed for `pnpm verify` and a Cloudflare Worker bundle dry run. |
+| Pull request or push to `develop`, `staging`, or `production` | Four simulation shards feed the `verify` job, which runs the checks listed for `pnpm verify` and a Cloudflare Worker bundle dry run. |
 | Nightly | Every check fresh under the fixed nightly profile; saved counterexamples become a pull request into the branch the run checked, or the default branch for a tag run. Beside it, the three `selftest:tools` tasks without the selftest's shared tool runs |
 | A `v*` tag (`release.yml`) | Build, `pnpm pack`, the prerequisites and `pnpm selftest --only --concurrency=1` read from the shared cache, and the tarball attached to a GitHub release |
 
