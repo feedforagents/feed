@@ -74,7 +74,7 @@ import {
   respondAlphaInvite,
   selectFeedTab,
   selectMarket,
-    selectMarketsTab,
+  selectMarketsTab,
   sendChatMessage,
   startDirectChat,
   startPointPackCheckout,
@@ -228,7 +228,7 @@ export function bootStore(): void {
         route: parsed.route,
         profileHandle: parsed.profileHandle,
         selectedTicker: parsed.queryTicker,
-                ...(parsed.queryTicker ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker, marketsTab: "perps" as const } : {}),
+        ...(parsed.queryTicker ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker, marketsTab: "perps" as const } : {}),
       });
       void loadDataForRoute(parsed.route, window.location.search);
     });
@@ -287,7 +287,7 @@ export const storeActions = {
   loadTrending,
   loadMarkets,
   selectMarket,
-    selectMarketsTab,
+  selectMarketsTab,
   submitPredictionOrder,
   submitPerpOrder,
   closePerpPosition,
