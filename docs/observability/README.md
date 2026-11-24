@@ -15,6 +15,11 @@ credential, which must have [tail access to `feed-cron-staging`](https://develop
 The job streams allowlisted delivery records for up to 145 seconds.
 It creates no raw log artifact and triggers no scheduled job.
 
+Skipped `game-tick`, `markets-tick`, and `npc-tick` deliveries can include a
+fixed `skipReason` code, such as `game_disabled`, `game_not_running`, or
+`inference_budget_exhausted_or_suspended`. Only exact, known responses for
+those routes produce a code. Older events and other skips omit it.
+
 The tail shows deliveries observed while it is connected. Empty output is
 inconclusive, and sampled or disconnected tails can miss records. Pair a
 completed `game-tick` with `lastTickAt` advancing at `/api/game/control`.

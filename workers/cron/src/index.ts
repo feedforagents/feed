@@ -1,4 +1,5 @@
 import { type CronJob, dueJobs, isCronJob } from './schedule';
+import { getCronSkipReason } from './skip-reasons';
 
 interface Env {
   APP: Fetcher;
@@ -9,25 +10,43 @@ interface Env {
   DEPLOYMENT_ENV?: string;
 }
 
-async function readOutcome(response: Response) {
+type DeliveryOutcome = {
+  outcome: 'completed' | 'skipped' | 'failed' | 'unknown';
+  skipReason?: string;
+};
+
+async function readOutcome(
+  response: Response,
+  path: string
+): Promise<DeliveryOutcome> {
   // Consume the stream before acknowledging: completion can include deferred work.
   const body = await response.arrayBuffer();
-  if (!response.ok) return 'failed';
+  if (!response.ok) return { outcome: 'failed' };
   if (!response.headers.get('content-type')?.startsWith('application/json')) {
-    return 'unknown';
+    return { outcome: 'unknown' };
   }
 
   try {
     const payload: unknown = JSON.parse(new TextDecoder().decode(body));
     if (payload && typeof payload === 'object') {
-      if ('success' in payload && payload.success === false) return 'failed';
-      if ('skipped' in payload && payload.skipped === true) return 'skipped';
-      if ('success' in payload && payload.success === true) return 'completed';
+      if ('success' in payload && payload.success === false)
+        return { outcome: 'failed' };
+      if ('skipped' in payload && payload.skipped === true) {
+        const skipReason =
+          'reason' in payload
+            ? getCronSkipReason(path, payload.reason)
+            : undefined;
+        return skipReason
+          ? { outcome: 'skipped', skipReason }
+          : { outcome: 'skipped' };
+      }
+      if ('success' in payload && payload.success === true)
+        return { outcome: 'completed' };
     }
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
   }
-  return 'unknown';
+  return { outcome: 'unknown' };
 }
 
 export default {
@@ -59,7 +78,7 @@ export default {
       const { path, scheduledTime } = message.body;
       const startedAt = Date.now();
       let httpStatus: number | null = null;
-      let outcome: Awaited<ReturnType<typeof readOutcome>> = 'failed';
+      let delivery: DeliveryOutcome = { outcome: 'failed' };
       try {
         const response = await env.APP.fetch(
           new Request(new URL(path, env.APP_ORIGIN), {
@@ -71,7 +90,7 @@ export default {
           })
         );
         httpStatus = response.status;
-        outcome = await readOutcome(response);
+        delivery = await readOutcome(response, path);
         if (!response.ok)
           throw new Error(`Cron ${path} returned HTTP ${response.status}`);
         message.ack();
@@ -85,7 +104,7 @@ export default {
           finishedAt: Date.now(),
           attempt: message.attempts,
           httpStatus,
-          outcome,
+          ...delivery,
         });
       }
     }
