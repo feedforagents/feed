@@ -23,8 +23,11 @@ import {
   insertTradeRecord,
   marketFail,
   newMarketId,
+  normalizeIdempotencyKey,
   normalizeViaClient,
   optionalInt,
+  optionalText,
+  parseJsonBody,
   requiredText,
   toSpecPerpPosition,
   type MarketActorKind
@@ -103,6 +106,7 @@ export interface OpenPerpInput {
   readonly collateralCents: number
   readonly leverage: number
   readonly viaClientName?: string
+  readonly idempotencyKey?: string
 }
 
 export interface OpenPerpReceipt {
@@ -122,6 +126,7 @@ export interface ClosePerpInput {
   readonly ownerId: string
   readonly positionId: string
   readonly viaClientName?: string
+  readonly idempotencyKey?: string
 }
 
 export interface ClosePerpReceipt {
@@ -414,6 +419,120 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
   })
 }
 
+const StoredPerpPositionViewSchema = Schema.Struct({
+  id: Schema.String,
+  ticker: Schema.String,
+  holderId: Schema.String,
+  holderKind: Schema.Union([Schema.Literal("user"), Schema.Literal("npc")]),
+  side: Schema.Union([Schema.Literal("long"), Schema.Literal("short")]),
+  marginCents: Schema.Number,
+  sizeCents: Schema.Number,
+  leverage: Schema.Number,
+  entryPriceCents: Schema.Number,
+  markPriceCents: Schema.Number,
+  indexPriceCents: Schema.Number,
+  accruedFundingCents: Schema.Number,
+  lastFundingPeriod: Schema.Number,
+  unrealizedPnlCents: Schema.Number,
+  equityCents: Schema.Number,
+  liquidationPriceCents: Schema.Number,
+  status: Schema.Union([Schema.Literal("open"), Schema.Literal("closed"), Schema.Literal("liquidated")]),
+  realizedPnlCents: Schema.Number,
+  closedAt: Schema.NullOr(Schema.Number),
+  createdAt: Schema.Number
+})
+
+const StoredOpenPerpReceiptSchema = Schema.Struct({
+  tradeId: Schema.String,
+  positionId: Schema.String,
+  position: StoredPerpPositionViewSchema,
+  collateralCents: Schema.Number,
+  sizeCents: Schema.Number,
+  leverage: Schema.Number,
+  feeCents: Schema.Number,
+  executionPriceCents: Schema.Number,
+  balanceAfterCents: Schema.Number,
+  createdAt: Schema.Number
+})
+
+const StoredClosePerpReceiptSchema = Schema.Struct({
+  tradeId: Schema.String,
+  positionId: Schema.String,
+  ticker: Schema.String,
+  side: Schema.Union([Schema.Literal("long"), Schema.Literal("short")]),
+  sizeCents: Schema.Number,
+  exitPriceCents: Schema.Number,
+  netCreditCents: Schema.Number,
+  feeCents: Schema.Number,
+  realizedPnlCents: Schema.Number,
+  balanceAfterCents: Schema.Number,
+  closedAt: Schema.Number
+})
+
+effect function findIdempotentOpenPerpReceipt(
+  tx: Tx,
+  actorId: string,
+  idempotencyKey: string,
+  requestFingerprint: string
+): (OpenPerpReceipt | null)!(MarketFailure | StoreFailure) {
+  try tx.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [actorId, idempotencyKey])
+  const existingRows = try tx.query(
+    `SELECT request_fingerprint, receipt_json
+     FROM feed_trades
+     WHERE trader_id = $1 AND idempotency_key = $2
+     LIMIT 1`,
+    [actorId, idempotencyKey]
+  )
+  if (existingRows.length === 0) return null
+  const existing = existingRows[0]!
+  const storedFingerprint = optionalText(existing.request_fingerprint)
+  if (storedFingerprint !== requestFingerprint) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used with different trade parameters")
+  }
+  const receiptRaw = optionalText(existing.receipt_json)
+  if (receiptRaw === null) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Stored trade receipt is unavailable for Idempotency-Key replay")
+  }
+  const parsed = try parseJsonBody(receiptRaw, "IDEMPOTENCY_CONFLICT", "Stored trade receipt is invalid JSON")
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(StoredOpenPerpReceiptSchema)(parsed))
+  if (decoded === undefined) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Stored trade receipt does not match OpenPerpReceipt shape")
+  }
+  return decoded
+}
+
+effect function findIdempotentClosePerpReceipt(
+  tx: Tx,
+  actorId: string,
+  idempotencyKey: string,
+  requestFingerprint: string
+): (ClosePerpReceipt | null)!(MarketFailure | StoreFailure) {
+  try tx.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [actorId, idempotencyKey])
+  const existingRows = try tx.query(
+    `SELECT request_fingerprint, receipt_json
+     FROM feed_trades
+     WHERE trader_id = $1 AND idempotency_key = $2
+     LIMIT 1`,
+    [actorId, idempotencyKey]
+  )
+  if (existingRows.length === 0) return null
+  const existing = existingRows[0]!
+  const storedFingerprint = optionalText(existing.request_fingerprint)
+  if (storedFingerprint !== requestFingerprint) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used with different trade parameters")
+  }
+  const receiptRaw = optionalText(existing.receipt_json)
+  if (receiptRaw === null) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Stored trade receipt is unavailable for Idempotency-Key replay")
+  }
+  const parsed = try parseJsonBody(receiptRaw, "IDEMPOTENCY_CONFLICT", "Stored trade receipt is invalid JSON")
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(StoredClosePerpReceiptSchema)(parsed))
+  if (decoded === undefined) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Stored trade receipt does not match ClosePerpReceipt shape")
+  }
+  return decoded
+}
+
 export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(MarketFailure | StoreFailure)!Store {
   try assertSafePositiveInt(input.collateralCents, "INVALID_AMOUNT", "collateralCents must be a positive integer")
   if (!Number.isSafeInteger(input.leverage) || input.leverage < 1 || input.leverage > MAX_LEVERAGE) {
@@ -429,11 +548,17 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
   const feeCents = canonicalTradingFee(sizeCents)
   const totalDebitCents = input.collateralCents + feeCents
   const viaClientName = normalizeViaClient(input.viaClientName)
+  const fingerprint = `open:${input.ticker}:${input.side}:${input.collateralCents}:${input.leverage}`
+  const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
   const store = try Store
   const now = try Clock.currentTimeMillis
   const currentPeriod = fundingPeriodFromSeconds(Math.floor(now / 1000))
   return try store.transaction(effect (tx: Tx) => {
     const marketRows = try tx.query(
+    if (idempotencyKey !== null) {
+      const replayed = try findIdempotentOpenPerpReceipt(tx, input.ownerId, idempotencyKey, fingerprint)
+      if (replayed !== null) return replayed
+    }
       "SELECT ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage FROM feed_perp_markets WHERE ticker = $1 FOR UPDATE",
       [input.ticker]
     )
@@ -476,6 +601,23 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       [input.ticker, nextLongOi, nextShortOi, nextMarkPriceCents, nextFundingRateBps, now]
     )
     const tradeId = newMarketId()
+    const posRow = {
+      ...inserted[0]!,
+      mark_price_cents: nextMarkPriceCents,
+      index_price_cents: indexPriceCents
+    }
+    const receipt: OpenPerpReceipt = {
+      tradeId,
+      positionId,
+      position: toPerpPositionView(posRow),
+      collateralCents: input.collateralCents,
+      sizeCents,
+      leverage: input.leverage,
+      feeCents,
+      executionPriceCents: entryPriceCents,
+      balanceAfterCents,
+      createdAt: now
+    }
     try insertTradeRecord(tx, {
       tradeId,
       traderId: input.ownerId,
@@ -488,6 +630,9 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       sharesOrSize: sizeCents,
       priceCents: entryPriceCents,
       viaClientName,
+      idempotencyKey,
+      requestFingerprint: idempotencyKey !== null ? fingerprint : null,
+      receiptJson: idempotencyKey !== null ? JSON.stringify(receipt) : null,
       createdAt: now
     })
     try insertLedgerEntry(tx, {
@@ -499,31 +644,21 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       refId: tradeId,
       createdAt: now
     })
-    const posRow = {
-      ...inserted[0]!,
-      mark_price_cents: nextMarkPriceCents,
-      index_price_cents: indexPriceCents
-    }
-    return {
-      tradeId,
-      positionId,
-      position: toPerpPositionView(posRow),
-      collateralCents: input.collateralCents,
-      sizeCents,
-      leverage: input.leverage,
-      feeCents,
-      executionPriceCents: entryPriceCents,
-      balanceAfterCents,
-      createdAt: now
-    }
+    return receipt
   })
 }
 
 export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceipt!(MarketFailure | StoreFailure)!Store {
   const viaClientName = normalizeViaClient(input.viaClientName)
+  const fingerprint = `close:${input.positionId}`
+  const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
+    if (idempotencyKey !== null) {
+      const replayed = try findIdempotentClosePerpReceipt(tx, input.ownerId, idempotencyKey, fingerprint)
+      if (replayed !== null) return replayed
+    }
     const posRows = try tx.query("SELECT * FROM feed_perp_positions WHERE id = $1 FOR UPDATE", [input.positionId])
     if (posRows.length === 0) {
       throw marketFail("POSITION_NOT_FOUND", `Position not found: ${input.positionId}`)
@@ -566,30 +701,7 @@ export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceip
     const balanceAfterCents = try creditActorBalance(tx, input.ownerId, holderKind, netCreditCents, collectedFeeCents, now)
     const tradeId = newMarketId()
     const side: PerpSide = specPos.perpSide === "Short" ? "short" : "long"
-    try insertTradeRecord(tx, {
-      tradeId,
-      traderId: input.ownerId,
-      traderKind: holderKind,
-      marketKind: "perp",
-      marketRef: ticker,
-      side: side === "long" ? "close_long" : "close_short",
-      notionalCents: specPos.sizeCents,
-      feeCents: collectedFeeCents,
-      sharesOrSize: specPos.sizeCents,
-      priceCents: markPriceCents,
-      viaClientName,
-      createdAt: now
-    })
-    try insertLedgerEntry(tx, {
-      ledgerId: newMarketId(),
-      accountId: input.ownerId,
-      kind: "perp_close",
-      deltaCents: netCreditCents,
-      balanceAfterCents,
-      refId: tradeId,
-      createdAt: now
-    })
-    return {
+    const receipt: ClosePerpReceipt = {
       tradeId,
       positionId: input.positionId,
       ticker,
@@ -602,6 +714,33 @@ export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceip
       balanceAfterCents,
       closedAt: now
     }
+    try insertTradeRecord(tx, {
+      tradeId,
+      traderId: input.ownerId,
+      traderKind: holderKind,
+      marketKind: "perp",
+      marketRef: ticker,
+      side: side === "long" ? "close_long" : "close_short",
+      notionalCents: specPos.sizeCents,
+      feeCents: collectedFeeCents,
+      sharesOrSize: specPos.sizeCents,
+      priceCents: markPriceCents,
+      viaClientName,
+      idempotencyKey,
+      requestFingerprint: idempotencyKey !== null ? fingerprint : null,
+      receiptJson: idempotencyKey !== null ? JSON.stringify(receipt) : null,
+      createdAt: now
+    })
+    try insertLedgerEntry(tx, {
+      ledgerId: newMarketId(),
+      accountId: input.ownerId,
+      kind: "perp_close",
+      deltaCents: netCreditCents,
+      balanceAfterCents,
+      refId: tradeId,
+      createdAt: now
+    })
+    return receipt
   })
 }
 
