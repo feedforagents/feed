@@ -1223,6 +1223,7 @@ effect function handleMarketRoute(
     try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const ticker = decodeSegment(perpOpenMatch[1] ?? "")
     const { data } = try readParsedBody(request)
+    const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
     if (rawSide !== "long" && rawSide !== "short") return try badRequest("invalid_side", "Side must be long or short.")
     const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
@@ -1233,7 +1234,8 @@ effect function handleMarketRoute(
       ticker,
       side: rawSide,
       collateralCents: Math.round(collateralCents),
-      leverage
+      leverage,
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey })
     })
     try publishFeedEvent({
       type: "market.perp",
@@ -1251,9 +1253,12 @@ effect function handleMarketRoute(
   const perpCloseMatch = /^\/api\/markets\/perp\/positions\/([^/]+)\/close$/.exec(path)
   if (method === "POST" && perpCloseMatch !== null) {
     const session = try requireSession(request, config)
+    const { data } = try readParsedBody(request)
+    const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const closed = try closePerpPosition({
       ownerId: session.accountId,
-      positionId: decodeSegment(perpCloseMatch[1] ?? "")
+      positionId: decodeSegment(perpCloseMatch[1] ?? ""),
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey })
     })
     const store = try Store
     const levRows = try store.transaction((tx: Tx) =>
