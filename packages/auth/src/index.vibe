@@ -10,6 +10,7 @@ export {
   getLoopbackCode,
   hashReviewerPassword,
   requestPhoneChange,
+  revokeSessionByCookie,
   setPlayMode,
   signInReviewerPassword,
   signOutEverywhere,
