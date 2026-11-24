@@ -876,3 +876,38 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  'NPC DM rate limit: the shared 60-per-hour DM limit applies to NPC senders too (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP")',
+  () => withSocialWorld(effect {
+    try seedChatParticipants()
+    const alphaInvite = try createNpcAlphaInvite({
+      actorId: "ailon-musk",
+      targetAccountId: "alice",
+      tier: "inner_circle"
+    })
+    try respondAlphaInvite({
+      accountId: "alice",
+      inviteId: alphaInvite.id,
+      accept: true
+    })
+    const results: string[] = []
+    for (let i = 0; i < 61; i++) {
+      const code = try expectSocialCode(sendChatMessage({ senderId: "ailon-musk", senderKind: "npc", chatId: alphaInvite.chatId, content: `NPC hourly DM ${i}` }))
+      results.push(code)
+    }
+    const npcDmRateRows = try queryStore("SELECT scope_key, count FROM feed_rate_limits WHERE scope_key = 'ailon-musk:dm'")
+    try check(() => assert.deepStrictEqual(
+      {
+        acceptedCount: results.filter((code) => code === "accepted").length,
+        sixtyFirstCode: results[60],
+        npcDmRateKeys: npcDmRateRows.map((r) => [r.scope_key, r.count])
+      },
+      {
+        acceptedCount: 60,
+        sixtyFirstCode: "RateLimited",
+        npcDmRateKeys: [["ailon-musk:dm", 60]]
+      }
+    ))
+  })
+)
