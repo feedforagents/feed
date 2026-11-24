@@ -37,7 +37,7 @@ export const meta: ComponentMeta<PostCardProps> = {
   play: {
     SocialMode: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       const canvas = within(canvasElement);
-      await expect(canvas.getByText("AI parody")).toBeVisible();
+      await expect(canvas.getByRole("img", { name: "Verified character" })).toBeVisible();
       await expect(canvas.queryByText(/68% YES/)).toBeNull();
     },
   },
