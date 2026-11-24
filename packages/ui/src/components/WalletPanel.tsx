@@ -298,7 +298,7 @@ function ClosedPositionsSection({
               className={cn(
                 focusRing,
                 "rounded-sm px-2.5 py-1 text-xs font-medium capitalize transition-colors duration-fast",
-                filter === option ? "bg-brand text-brand-foreground" : "text-muted-foreground hover:text-foreground",
+                filter === option ? "bg-feed-brand text-feed-brand-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
               {option}

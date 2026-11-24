@@ -9,7 +9,7 @@ const toneStyles: Record<ToastTone, { border: string; icon: string }> = {
   ok: { border: "border-ok/30", icon: "text-ok" },
   warn: { border: "border-warn/30", icon: "text-warn" },
   destructive: { border: "border-destructive/40", icon: "text-destructive" },
-  info: { border: "border-brand/30", icon: "text-primary" },
+  info: { border: "border-feed-brand/30", icon: "text-primary" },
 };
 
 export type ToastBannerProps = Omit<ComponentProps<"div">, "children"> & {
@@ -26,8 +26,6 @@ export type ToastBannerProps = Omit<ComponentProps<"div">, "children"> & {
   /** Invoked when the dismiss button is clicked. */
   onDismiss?: () => void;
 };
-
-export type ToastProps = ToastBannerProps;
 
 function ToastIcon({ tone }: { tone: ToastTone }) {
   const cls = cn("mt-0.5 size-4 shrink-0", toneStyles[tone].icon);
@@ -97,9 +95,6 @@ export function ToastBanner({
     </div>
   );
 }
-
-/** Floating toast notification banner. */
-export const Toast = ToastBanner;
 
 export type ToastViewportProps = {
   /** Stacked `ToastBanner` elements to position over the viewport. */

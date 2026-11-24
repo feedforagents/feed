@@ -130,7 +130,7 @@ function McpSetupSection({
           command={mcpUrl}
           label="MCP endpoint URL"
           copyLabel="Copy MCP URL"
-          copyLabels={{ ready: "Copy URL", copied: "Copied", failed: "Select URL" }}
+          copyLabels={{ ready: "Copy", copied: "Copied", failed: "Select URL" }}
         />
         <CodeBlock code={buildMcpJsonSnippet(mcpUrl)} label="MCP client JSON config" />
       </div>

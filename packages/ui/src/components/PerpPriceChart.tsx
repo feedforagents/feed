@@ -1,4 +1,5 @@
 import { type ComponentProps, useMemo } from "react";
+import { filterChartPointsByRange } from "../lib/chart.ts";
 import { cn } from "../lib/cn.ts";
 import { Badge } from "./Badge.tsx";
 import {
@@ -39,27 +40,8 @@ export type PerpPriceChartProps = Omit<ComponentProps<"div">, "children"> & {
   formatPrice?: (price: number) => string;
 };
 
-const RANGE_MS: Record<Exclude<MarketTimeRange, "ALL">, number> = {
-  "1H": 60 * 60 * 1000,
-  "4H": 4 * 60 * 60 * 1000,
-  "1D": 24 * 60 * 60 * 1000,
-  "1W": 7 * 24 * 60 * 60 * 1000,
-};
-
 function defaultFormatPrice(price: number): string {
   return `${new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(price)} pts`;
-}
-
-function toMs(time: number): number {
-  return time > 1e11 ? time : time * 1000;
-}
-
-function filterByRange(points: readonly PerpPricePoint[], timeRange: MarketTimeRange): PerpPricePoint[] {
-  if (points.length === 0 || timeRange === "ALL") return [...points];
-  const latestMs = points.reduce((max, pt) => Math.max(max, toMs(pt.time)), 0);
-  const cutoff = latestMs - RANGE_MS[timeRange];
-  const filtered = points.filter((pt) => toMs(pt.time) >= cutoff);
-  return filtered.length >= 2 ? filtered : [...points];
 }
 
 /** Interactive perpetual mark-price area chart colored by period direction with a dashed live price line. */
@@ -78,7 +60,11 @@ export function PerpPriceChart({
   className,
   ...props
 }: PerpPriceChartProps) {
-  const visible = useMemo(() => filterByRange(data, timeRange), [data, timeRange]);
+  const safeFormatPrice = (value: number): string => {
+    const formatted = formatPrice(value);
+    return typeof formatted === "string" ? formatted : defaultFormatPrice(value);
+  };
+  const visible = useMemo(() => filterChartPointsByRange(data, timeRange), [data, timeRange]);
 
   const firstPrice = visible[0]?.price ?? currentPrice;
   const delta = currentPrice - firstPrice;
@@ -99,14 +85,14 @@ export function PerpPriceChart({
 
   const headerLeft = showHeader ? (
     <div className="flex flex-wrap items-baseline gap-2.5">
-      <span className="font-mono text-2xl font-bold text-foreground tabular-nums">{formatPrice(currentPrice)}</span>
+      <span className="font-mono text-2xl font-bold text-foreground tabular-nums">{safeFormatPrice(currentPrice)}</span>
       <Badge variant={positive ? "ok" : "destructive"} className="font-mono tabular-nums">
         {positive ? "+" : ""}
         {deltaPct.toFixed(2)}%
       </Badge>
       <span className="font-mono text-xs text-muted-foreground tabular-nums">
         {positive ? "+" : ""}
-        {formatPrice(delta)} ({timeRange})
+        {safeFormatPrice(delta)} ({timeRange})
       </span>
     </div>
   ) : undefined;

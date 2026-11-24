@@ -96,7 +96,7 @@ export function SpotlightTutorial({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-md gap-5">
         <div className="flex items-center gap-3">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-brand/15 text-primary">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-feed-brand/15 text-primary">
             <StepIcon aria-hidden className="size-5" />
           </div>
           <div className="flex min-w-0 flex-col gap-1">
@@ -120,7 +120,7 @@ export function SpotlightTutorial({
               key={step.id}
               className={cn(
                 "h-1.5 rounded-full transition-all duration-fast",
-                index === boundedIndex ? "w-6 bg-brand" : "w-1.5 bg-border",
+                index === boundedIndex ? "w-6 bg-feed-brand" : "w-1.5 bg-border",
               )}
             />
           ))}

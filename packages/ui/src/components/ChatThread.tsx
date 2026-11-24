@@ -129,7 +129,7 @@ function ChatMessageRow({
           <span className="text-muted-foreground">{message.timestamp}</span>
         </div>
 
-        <div className={cn("rounded-xl px-3.5 py-2 text-sm leading-snug whitespace-pre-wrap", message.isOwn ? "bg-brand text-brand-foreground" : "bg-muted text-foreground")}>
+        <div className={cn("rounded-xl px-3.5 py-2 text-sm leading-snug whitespace-pre-wrap", message.isOwn ? "bg-feed-brand text-feed-brand-foreground" : "bg-muted text-foreground")}>
           {message.content}
         </div>
 
@@ -145,7 +145,7 @@ function ChatMessageRow({
                 focusRing,
                 inactive,
                 "inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-0.5 text-xs text-foreground transition-colors hover:bg-accent",
-                reaction.reacted && "border-brand bg-brand/10",
+                reaction.reacted && "border-feed-brand bg-feed-brand/10",
               )}
             >
               <span>{reaction.emoji}</span>

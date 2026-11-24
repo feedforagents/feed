@@ -27,7 +27,7 @@ import { SegmentedControl } from "./SegmentedControl.tsx";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "./Sheet.tsx";
 import { Skeleton } from "./Skeleton.tsx";
 import { SpotlightTutorial } from "./SpotlightTutorial.tsx";
-import { Tabs, TabsList, TabsTrigger } from "./Tabs.tsx";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./Tabs.tsx";
 import { type TradeConfirmationDetails, TradeConfirmationDialog } from "./TradeConfirmationDialog.tsx";
 
 export interface TerminalPerpMarket {
@@ -76,7 +76,7 @@ export interface TerminalPredictionMarket {
   endsAtLabel?: string;
   /** Canonical fee in basis points (defaults to 10). */
   feeBps?: number;
-  /** Maximum allowed single-trade odds move in basis points (defaults to 500). */
+  /** Maximum allowed single-trade odds move in basis points (defaults to 2000). */
   maxOddsMoveBps?: number;
   /** Resolution rule summary shown in the info modal. */
   resolutionCriteria?: string;
@@ -391,6 +391,33 @@ export function AssetTradesFeed({
   );
 }
 
+function PendingTradeDialog({
+  details,
+  submitting,
+  onClear,
+  onExecute,
+}: {
+  details: TradeConfirmationDetails | null;
+  submitting: boolean;
+  onClear: () => void;
+  onExecute: () => void;
+}) {
+  return (
+    <TradeConfirmationDialog
+      open={details !== null}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClear();
+      }}
+      details={details}
+      submitting={submitting}
+      onConfirm={() => {
+        onClear();
+        onExecute();
+      }}
+    />
+  );
+}
+
 function ExistingPositionSummaryCard({ position }: { position: ExistingPerpPosition }) {
   const liqDistPct = calcLiquidationDistancePct(position.markPrice, position.liquidationPrice, position.side);
   const nearLiquidation = liqDistPct < 5;
@@ -693,17 +720,11 @@ function RebalancePerpForm({
               : `Flip to ${oppositeSide.toUpperCase()} ${flipLeverage}x`}
       </Button>
 
-      <TradeConfirmationDialog
-        open={pendingConfirm !== null}
-        onOpenChange={(nextOpen) => {
-          if (!nextOpen) setPendingConfirm(null);
-        }}
+      <PendingTradeDialog
         details={pendingConfirm}
         submitting={submitting}
-        onConfirm={() => {
-          setPendingConfirm(null);
-          execute();
-        }}
+        onClear={() => setPendingConfirm(null)}
+        onExecute={execute}
       />
     </form>
   );
@@ -929,17 +950,11 @@ export function PerpOrderPanel({
         </form>
       </CardContent>
 
-      <TradeConfirmationDialog
-        open={pendingConfirm !== null}
-        onOpenChange={(nextOpen) => {
-          if (!nextOpen) setPendingConfirm(null);
-        }}
+      <PendingTradeDialog
         details={pendingConfirm}
         submitting={submitting}
-        onConfirm={() => {
-          setPendingConfirm(null);
-          executeOpen();
-        }}
+        onClear={() => setPendingConfirm(null)}
+        onExecute={executeOpen}
       />
     </Card>
   );
@@ -959,7 +974,7 @@ export function PredictionOrderPanel({
 }: PredictionOrderPanelProps) {
   const inputId = useId();
   const feeBps = market.feeBps ?? 10;
-  const maxOddsMovePct = (market.maxOddsMoveBps ?? 500) / 100;
+  const maxOddsMovePct = (market.maxOddsMoveBps ?? 2000) / 100;
 
   const [action, setAction] = useState<"buy" | "sell">("buy");
   const [side, setSide] = useState<"YES" | "NO">("YES");
@@ -1197,17 +1212,11 @@ export function PredictionOrderPanel({
         </DialogContent>
       </Dialog>
 
-      <TradeConfirmationDialog
-        open={pendingConfirm !== null}
-        onOpenChange={(nextOpen) => {
-          if (!nextOpen) setPendingConfirm(null);
-        }}
+      <PendingTradeDialog
         details={pendingConfirm}
         submitting={submitting}
-        onConfirm={() => {
-          setPendingConfirm(null);
-          executeOrder();
-        }}
+        onClear={() => setPendingConfirm(null)}
+        onExecute={executeOrder}
       />
     </Card>
   );
@@ -1280,6 +1289,80 @@ function PositionsSidebarList({
         );
       })}
     </div>
+  );
+}
+
+function TerminalHeader({
+  market,
+  fullscreen,
+  onBack,
+  onOpenTutorial,
+  onToggleFullscreen,
+}: {
+  market: MarketsTradingTerminalProps["market"];
+  fullscreen: boolean;
+  onBack?: () => void;
+  onOpenTutorial: () => void;
+  onToggleFullscreen: () => void;
+}) {
+  return (
+    <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+      <div className="flex min-w-0 items-center gap-3">
+        {onBack ? (
+          <Button variant="ghost" size="sm" onClick={onBack} className="gap-1.5 px-2">
+            <ArrowLeft aria-hidden className="size-4" />
+            Markets
+          </Button>
+        ) : null}
+
+        {market.kind === "perp" ? (
+          <div className="flex min-w-0 items-center gap-2.5">
+            <Avatar name={market.data.name} src={market.data.avatarUrl} seed={market.data.ticker} size="sm" />
+            <div className="flex min-w-0 flex-col">
+              <div className="flex items-center gap-2">
+                <h1 className="font-mono text-base font-bold text-foreground">${market.data.ticker}</h1>
+                <Badge variant={market.data.changePercent24h >= 0 ? "ok" : "destructive"} className="font-mono tabular-nums">
+                  {market.data.changePercent24h >= 0 ? "+" : ""}
+                  {market.data.changePercent24h.toFixed(2)}%
+                </Badge>
+              </div>
+              <span className="truncate text-xs text-muted-foreground">{market.data.name}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="truncate text-sm font-bold text-foreground sm:text-base">{market.data.question}</h1>
+              {market.data.category ? <Badge variant="secondary">{market.data.category}</Badge> : null}
+            </div>
+            {market.data.endsAtLabel ? (
+              <span className="font-mono text-xs text-muted-foreground">Ends {market.data.endsAtLabel}</span>
+            ) : null}
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Open trading tutorial"
+          onClick={onOpenTutorial}
+          className={cn(focusRing)}
+        >
+          <HelpCircle aria-hidden className="size-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+          aria-pressed={fullscreen}
+          onClick={onToggleFullscreen}
+        >
+          {fullscreen ? <Minimize2 aria-hidden className="size-4" /> : <Maximize2 aria-hidden className="size-4" />}
+        </Button>
+      </div>
+    </header>
   );
 }
 
@@ -1392,117 +1475,74 @@ export function MarketsTradingTerminal({
       )}
       {...props}
     >
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
-        <div className="flex min-w-0 items-center gap-3">
-          {onBack ? (
-            <Button variant="ghost" size="sm" onClick={onBack} className="gap-1.5 px-2">
-              <ArrowLeft aria-hidden className="size-4" />
-              Markets
-            </Button>
-          ) : null}
-
-          {market.kind === "perp" ? (
-            <div className="flex min-w-0 items-center gap-2.5">
-              <Avatar name={market.data.name} src={market.data.avatarUrl} seed={market.data.ticker} size="sm" />
-              <div className="flex min-w-0 flex-col">
-                <div className="flex items-center gap-2">
-                  <h1 className="font-mono text-base font-bold text-foreground">${market.data.ticker}</h1>
-                  <Badge variant={market.data.changePercent24h >= 0 ? "ok" : "destructive"} className="font-mono tabular-nums">
-                    {market.data.changePercent24h >= 0 ? "+" : ""}
-                    {market.data.changePercent24h.toFixed(2)}%
-                  </Badge>
-                </div>
-                <span className="truncate text-xs text-muted-foreground">{market.data.name}</span>
-              </div>
-            </div>
-          ) : (
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <h1 className="truncate text-sm font-bold text-foreground sm:text-base">{market.data.question}</h1>
-                {market.data.category ? <Badge variant="secondary">{market.data.category}</Badge> : null}
-              </div>
-              {market.data.endsAtLabel ? (
-                <span className="font-mono text-xs text-muted-foreground">Ends {market.data.endsAtLabel}</span>
-              ) : null}
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Open trading tutorial"
-            onClick={() => setTutorialOpen(true)}
-            className={cn(focusRing)}
-          >
-            <HelpCircle aria-hidden className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-            aria-pressed={fullscreen}
-            onClick={() => setFullscreen((prev) => !prev)}
-          >
-            {fullscreen ? <Minimize2 aria-hidden className="size-4" /> : <Maximize2 aria-hidden className="size-4" />}
-          </Button>
-        </div>
-      </header>
-
-      <div className="border-b border-border px-4 lg:hidden">
-        <Tabs
-          value={mobileTab}
-          onValueChange={(next) => {
-            if (next === "chart" || next === "social" || next === "positions" || next === "trades") setMobileTab(next);
-          }}
-        >
-          <TabsList variant="underline" className="border-b-0">
-            <TabsTrigger value="chart">Chart</TabsTrigger>
-            <TabsTrigger value="social">Social</TabsTrigger>
-            <TabsTrigger value="positions">Positions ({totalPositions})</TabsTrigger>
-            <TabsTrigger value="trades">Trades</TabsTrigger>
-          </TabsList>
-        </Tabs>
-      </div>
+      <TerminalHeader
+        market={market}
+        fullscreen={fullscreen}
+        onBack={onBack}
+        onOpenTutorial={() => setTutorialOpen(true)}
+        onToggleFullscreen={() => setFullscreen((prev) => !prev)}
+      />
 
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col lg:border-r lg:border-border">
-          <div className="hidden border-b border-border px-4 lg:block">
-            <Tabs
-              value={desktopTab}
-              onValueChange={(next) => {
-                if (next === "chart" || next === "social" || next === "trades") setDesktopTab(next);
-              }}
-            >
+          <Tabs
+            value={mobileTab}
+            onValueChange={(next) => {
+              if (next === "chart" || next === "social" || next === "positions" || next === "trades") setMobileTab(next);
+            }}
+            className="flex min-h-0 flex-1 flex-col lg:hidden"
+          >
+            <div className="border-b border-border px-4">
               <TabsList variant="underline" className="border-b-0">
-                <TabsTrigger value="chart" className="flex-none">Chart</TabsTrigger>
-                <TabsTrigger value="social" className="flex-none">Social</TabsTrigger>
-                <TabsTrigger value="trades" className="flex-none">Trades ({trades.length})</TabsTrigger>
+                <TabsTrigger value="chart">Chart</TabsTrigger>
+                <TabsTrigger value="social">Social</TabsTrigger>
+                <TabsTrigger value="positions">Positions ({totalPositions})</TabsTrigger>
+                <TabsTrigger value="trades">Trades</TabsTrigger>
               </TabsList>
-            </Tabs>
-          </div>
-
-          <div className="hidden min-h-0 flex-1 overflow-auto p-4 lg:block">
-            {desktopTab === "chart" ? chartNode : desktopTab === "social" ? socialNode : <AssetTradesFeed trades={trades} loading={tradesLoading} />}
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-auto p-4 pb-20 lg:hidden">
-            {mobileTab === "chart" ? (
-              chartNode
-            ) : mobileTab === "social" ? (
-              socialNode
-            ) : mobileTab === "positions" ? (
+            </div>
+            <TabsContent value="chart" className="mt-0 min-h-0 flex-1 overflow-auto p-4 pb-20">
+              {chartNode}
+            </TabsContent>
+            <TabsContent value="social" className="mt-0 min-h-0 flex-1 overflow-auto p-4 pb-20">
+              {socialNode}
+            </TabsContent>
+            <TabsContent value="positions" className="mt-0 min-h-0 flex-1 overflow-auto p-4 pb-20">
               <PositionsSidebarList
                 perpPositions={perpPositions}
                 predictionPositions={predictionPositions}
                 onClosePerp={onClosePerp}
                 submitting={submitting}
               />
-            ) : (
+            </TabsContent>
+            <TabsContent value="trades" className="mt-0 min-h-0 flex-1 overflow-auto p-4 pb-20">
               <AssetTradesFeed trades={trades} loading={tradesLoading} />
-            )}
-          </div>
+            </TabsContent>
+          </Tabs>
+
+          <Tabs
+            value={desktopTab}
+            onValueChange={(next) => {
+              if (next === "chart" || next === "social" || next === "trades") setDesktopTab(next);
+            }}
+            className="hidden min-h-0 flex-1 flex-col lg:flex"
+          >
+            <div className="border-b border-border px-4">
+              <TabsList variant="underline" className="border-b-0">
+                <TabsTrigger value="chart" className="flex-none">Chart</TabsTrigger>
+                <TabsTrigger value="social" className="flex-none">Social</TabsTrigger>
+                <TabsTrigger value="trades" className="flex-none">Trades ({trades.length})</TabsTrigger>
+              </TabsList>
+            </div>
+            <TabsContent value="chart" className="mt-0 min-h-0 flex-1 overflow-auto p-4">
+              {chartNode}
+            </TabsContent>
+            <TabsContent value="social" className="mt-0 min-h-0 flex-1 overflow-auto p-4">
+              {socialNode}
+            </TabsContent>
+            <TabsContent value="trades" className="mt-0 min-h-0 flex-1 overflow-auto p-4">
+              <AssetTradesFeed trades={trades} loading={tradesLoading} />
+            </TabsContent>
+          </Tabs>
         </div>
 
         <aside aria-label="Order entry" className="hidden w-96 shrink-0 overflow-auto p-4 lg:block">

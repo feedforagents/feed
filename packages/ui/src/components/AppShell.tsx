@@ -102,7 +102,7 @@ function UnreadDot({ count }: { readonly count: number }) {
   if (count <= 0) return null;
   const label = count > 99 ? "99+" : String(count);
   return (
-    <span className="pointer-events-none absolute -top-1.5 -right-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[10px] leading-none font-bold text-brand-foreground tabular-nums">
+    <span className="pointer-events-none absolute -top-1.5 -right-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-feed-brand px-1 text-[10px] leading-none font-bold text-feed-brand-foreground tabular-nums">
       {label}
     </span>
   );
@@ -264,7 +264,7 @@ export function AppShell({
             <div className="flex items-center justify-center px-2 py-1 lg:justify-start">
               {brand ?? (
                 <>
-                  <BrandMark variant="icon" className="size-8 text-brand lg:hidden" />
+                  <BrandMark variant="icon" className="size-8 text-feed-brand lg:hidden" />
                   <BrandMark variant="logo" className="hidden h-7 w-auto text-foreground lg:block" />
                 </>
               )}
@@ -313,7 +313,7 @@ export function AppShell({
               {mobileDrawer ? <div className="md:hidden">{mobileDrawer}</div> : null}
               {!mobileDrawer ? (
                 <span className="inline-flex items-center font-bold text-foreground md:hidden">
-                  {brand ?? <BrandMark variant="icon" className="size-6 text-brand" />}
+                  {brand ?? <BrandMark variant="icon" className="size-6 text-feed-brand" />}
                 </span>
               ) : null}
               <h1 className="truncate text-base font-bold text-foreground">{navConfig.find((item) => item.id === route)?.label ?? route}</h1>

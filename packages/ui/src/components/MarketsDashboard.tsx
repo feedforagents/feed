@@ -9,7 +9,7 @@ import { Button } from "./Button.tsx";
 import { Input } from "./Input.tsx";
 import { Skeleton } from "./Skeleton.tsx";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "./Table.tsx";
-import { Tabs, TabsList, TabsTrigger } from "./Tabs.tsx";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./Tabs.tsx";
 
 export interface PerpMarketRow {
   /** Contract ticker symbol such as `SAMALT`. */
@@ -418,6 +418,18 @@ export function MarketsDashboard({
     });
   }, [predictionMarkets, favoritesOnly, normalizedQuery, predSort, predSortDir]);
 
+  const statusView = error ? (
+    <div className="p-4">
+      <Alert variant="destructive">{error}</Alert>
+    </div>
+  ) : loading ? (
+    <div className="flex flex-col gap-3 p-4">
+      {Array.from({ length: 6 }, (_, idx) => (
+        <Skeleton key={idx} className="h-11 w-full" />
+      ))}
+    </div>
+  ) : null;
+
   return (
     <div
       aria-busy={loading || undefined}
@@ -426,36 +438,40 @@ export function MarketsDashboard({
       className={cn("flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-background text-foreground", className)}
       {...props}
     >
-      <div className="flex flex-col border-b border-border px-4 pt-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-lg font-bold text-foreground">Markets</h1>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative w-60 sm:w-64">
-              <Search aria-hidden className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                type="search"
-                aria-label="Search markets"
-                placeholder="Search markets…"
-                value={query}
+      <Tabs
+        value={tab}
+        onValueChange={(next) => !blocked && setTab(next === "predictions" ? "predictions" : "perps")}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <div className="flex flex-col border-b border-border px-4 pt-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h1 className="text-lg font-bold text-foreground">Markets</h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative w-60 sm:w-64">
+                <Search aria-hidden className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  type="search"
+                  aria-label="Search markets"
+                  placeholder="Search markets…"
+                  value={query}
+                  disabled={blocked}
+                  onChange={(event) => setQuery(event.target.value)}
+                  className="pl-8"
+                />
+              </div>
+              <Button
+                variant={favoritesOnly ? "primary" : "outline"}
+                size="sm"
                 disabled={blocked}
-                onChange={(event) => setQuery(event.target.value)}
-                className="pl-8"
-              />
+                aria-pressed={favoritesOnly}
+                onClick={() => setFavoritesOnly((prev) => !prev)}
+              >
+                <Star aria-hidden className={cn("size-3.5", favoritesOnly && "fill-current")} />
+                Watchlist
+              </Button>
             </div>
-            <Button
-              variant={favoritesOnly ? "primary" : "outline"}
-              size="sm"
-              disabled={blocked}
-              aria-pressed={favoritesOnly}
-              onClick={() => setFavoritesOnly((prev) => !prev)}
-            >
-              <Star aria-hidden className={cn("size-3.5", favoritesOnly && "fill-current")} />
-              Watchlist
-            </Button>
           </div>
-        </div>
 
-        <Tabs value={tab} onValueChange={(next) => !blocked && setTab(next === "predictions" ? "predictions" : "perps")}>
           <TabsList variant="underline" className="border-b-0">
             <TabsTrigger value="perps" disabled={blocked} className="flex-none gap-2">
               Perps
@@ -466,42 +482,36 @@ export function MarketsDashboard({
               <Badge variant="secondary" className="font-mono tabular-nums">{visiblePredictions.length}</Badge>
             </TabsTrigger>
           </TabsList>
-        </Tabs>
-      </div>
+        </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
-        {error ? (
-          <div className="p-4">
-            <Alert variant="destructive">{error}</Alert>
-          </div>
-        ) : loading ? (
-          <div className="flex flex-col gap-3 p-4">
-            {Array.from({ length: 6 }, (_, idx) => (
-              <Skeleton key={idx} className="h-11 w-full" />
-            ))}
-          </div>
-        ) : tab === "perps" ? (
-          <PerpsMarketsTable
-            rows={visiblePerps}
-            sortBy={perpSort}
-            sortDir={perpSortDir}
-            onSort={handlePerpSort}
-            onSelect={(ticker) => onSelectMarket({ kind: "perp", ticker })}
-            onToggleFavorite={onToggleFavorite ? (ticker) => onToggleFavorite({ kind: "perp", ticker }) : undefined}
-            disabled={disabled}
-          />
-        ) : (
-          <PredictionsMarketsTable
-            rows={visiblePredictions}
-            sortBy={predSort}
-            sortDir={predSortDir}
-            onSort={handlePredSort}
-            onSelect={(id) => onSelectMarket({ kind: "prediction", id })}
-            onToggleFavorite={onToggleFavorite ? (id) => onToggleFavorite({ kind: "prediction", id }) : undefined}
-            disabled={disabled}
-          />
-        )}
-      </div>
+        <TabsContent value="perps" className="mt-0 min-h-0 flex-1 overflow-auto">
+          {statusView ?? (
+            <PerpsMarketsTable
+              rows={visiblePerps}
+              sortBy={perpSort}
+              sortDir={perpSortDir}
+              onSort={handlePerpSort}
+              onSelect={(ticker) => onSelectMarket({ kind: "perp", ticker })}
+              onToggleFavorite={onToggleFavorite ? (ticker) => onToggleFavorite({ kind: "perp", ticker }) : undefined}
+              disabled={disabled}
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent value="predictions" className="mt-0 min-h-0 flex-1 overflow-auto">
+          {statusView ?? (
+            <PredictionsMarketsTable
+              rows={visiblePredictions}
+              sortBy={predSort}
+              sortDir={predSortDir}
+              onSort={handlePredSort}
+              onSelect={(id) => onSelectMarket({ kind: "prediction", id })}
+              onToggleFavorite={onToggleFavorite ? (id) => onToggleFavorite({ kind: "prediction", id }) : undefined}
+              disabled={disabled}
+            />
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

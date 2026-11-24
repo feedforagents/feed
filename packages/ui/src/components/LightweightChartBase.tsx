@@ -111,7 +111,7 @@ export interface TimeRangeSelectorProps {
 const TONE_VARS: Record<LightweightChartTone, string> = {
   ok: "--ok",
   destructive: "--destructive",
-  brand: "--brand",
+  brand: "--feed-brand",
   primary: "--primary",
   info: "--info",
 };
@@ -248,7 +248,14 @@ function buildChartOptions(
       fixLeftEdge: true,
       fixRightEdge: true,
     },
-    localization: formatPrice ? { priceFormatter: formatPrice } : undefined,
+    localization: formatPrice
+      ? {
+          priceFormatter: (value: number) => {
+            const formatted = formatPrice(value);
+            return typeof formatted === "string" ? formatted : value.toFixed(2);
+          },
+        }
+      : undefined,
     handleScroll: { mouseWheel: true, pressedMouseMove: true },
     handleScale: { mouseWheel: true, pinch: true },
   };
@@ -270,7 +277,7 @@ export function TimeRangeSelector({ value, onChange, disabled = false, className
             className={cn(
               focusRing,
               "rounded-sm px-2 py-1 font-mono text-xs font-medium transition-colors duration-fast",
-              active ? "bg-brand text-brand-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              active ? "bg-feed-brand text-feed-brand-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
               disabled && "pointer-events-none opacity-50",
             )}
           >
@@ -333,9 +340,10 @@ export function LightweightChartBase({
 
       for (const spec of series) {
         const normalized = normalizePoints(spec.data);
+        let api: ReturnType<typeof chart.addSeries>;
         if (spec.kind === "area") {
           const colors = palette.tones[spec.tone];
-          const area = chart.addSeries(AreaSeries, {
+          api = chart.addSeries(AreaSeries, {
             lineColor: colors.solid,
             topColor: spec.invertFilledArea ? colors.bottom : colors.top,
             bottomColor: spec.invertFilledArea ? colors.top : colors.bottom,
@@ -351,23 +359,10 @@ export function LightweightChartBase({
             crosshairMarkerBorderWidth: 2,
             autoscaleInfoProvider,
           });
-          area.setData(normalized);
-          if (spec.priceLine) {
-            const lineTone = palette.tones[spec.priceLine.tone ?? "brand"];
-            area.createPriceLine({
-              price: spec.priceLine.price,
-              color: lineTone.solid,
-              lineWidth: 1,
-              lineStyle: LineStyle.Dashed,
-              axisLabelVisible: true,
-              title: spec.priceLine.title ?? "",
-            });
-          }
-          mountedSeries.push({ spec, api: area });
         } else if (spec.kind === "baseline") {
           const top = palette.tones[spec.topTone ?? "ok"];
           const bottom = palette.tones[spec.bottomTone ?? "destructive"];
-          const baseline = chart.addSeries(BaselineSeries, {
+          api = chart.addSeries(BaselineSeries, {
             baseValue: { type: "price", price: spec.baseValue },
             topLineColor: top.solid,
             topFillColor1: top.top,
@@ -380,22 +375,9 @@ export function LightweightChartBase({
             lastValueVisible: false,
             autoscaleInfoProvider,
           });
-          baseline.setData(normalized);
-          if (spec.priceLine) {
-            const lineTone = palette.tones[spec.priceLine.tone ?? "brand"];
-            baseline.createPriceLine({
-              price: spec.priceLine.price,
-              color: lineTone.solid,
-              lineWidth: 1,
-              lineStyle: LineStyle.Dashed,
-              axisLabelVisible: true,
-              title: spec.priceLine.title ?? "",
-            });
-          }
-          mountedSeries.push({ spec, api: baseline });
         } else {
           const colors = palette.tones[spec.tone];
-          const line = chart.addSeries(LineSeries, {
+          api = chart.addSeries(LineSeries, {
             color: colors.solid,
             lineWidth: 2,
             priceLineVisible: false,
@@ -407,20 +389,20 @@ export function LightweightChartBase({
             crosshairMarkerBorderWidth: 2,
             autoscaleInfoProvider,
           });
-          line.setData(normalized);
-          if (spec.priceLine) {
-            const lineTone = palette.tones[spec.priceLine.tone ?? "brand"];
-            line.createPriceLine({
-              price: spec.priceLine.price,
-              color: lineTone.solid,
-              lineWidth: 1,
-              lineStyle: LineStyle.Dashed,
-              axisLabelVisible: true,
-              title: spec.priceLine.title ?? "",
-            });
-          }
-          mountedSeries.push({ spec, api: line });
         }
+        api.setData(normalized);
+        if (spec.priceLine) {
+          const lineTone = palette.tones[spec.priceLine.tone ?? "brand"];
+          api.createPriceLine({
+            price: spec.priceLine.price,
+            color: lineTone.solid,
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: spec.priceLine.title ?? "",
+          });
+        }
+        mountedSeries.push({ spec, api });
       }
 
       chart.timeScale().fitContent();

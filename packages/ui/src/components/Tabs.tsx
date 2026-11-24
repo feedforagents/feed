@@ -52,7 +52,7 @@ export function TabsTrigger({ variant, className, ...props }: TabsTriggerProps) 
         focusRing,
         inactive,
         resolvedVariant === "underline"
-          ? "relative inline-flex flex-1 items-center justify-center px-4 py-3 text-sm font-semibold whitespace-nowrap text-muted-foreground transition-colors duration-fast after:pointer-events-none after:absolute after:inset-x-4 after:bottom-0 after:h-[3px] after:rounded-full after:bg-transparent hover:bg-accent/50 hover:text-foreground data-[state=active]:font-bold data-[state=active]:text-foreground data-[state=active]:after:bg-brand"
+          ? "relative inline-flex flex-1 items-center justify-center px-4 py-3 text-sm font-semibold whitespace-nowrap text-muted-foreground transition-colors duration-fast after:pointer-events-none after:absolute after:inset-x-4 after:bottom-0 after:h-[3px] after:rounded-full after:bg-transparent hover:bg-accent/50 hover:text-foreground data-[state=active]:font-bold data-[state=active]:text-foreground data-[state=active]:after:bg-feed-brand"
           : "inline-flex items-center justify-center rounded-sm px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors duration-fast hover:text-foreground data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm",
         className,
       )}

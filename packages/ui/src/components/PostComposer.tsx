@@ -56,7 +56,7 @@ function CharProgressRing({ length, maxLength }: { readonly length: number; read
   const dashOffset = RING_CIRCUMFERENCE * (1 - ratio);
   const overLimit = remaining < 0;
   const nearLimit = remaining <= 20;
-  const strokeClass = overLimit ? "stroke-destructive" : nearLimit ? "stroke-warn" : "stroke-brand";
+  const strokeClass = overLimit ? "stroke-destructive" : nearLimit ? "stroke-warn" : "stroke-feed-brand";
 
   return (
     <div className="flex items-center gap-2">

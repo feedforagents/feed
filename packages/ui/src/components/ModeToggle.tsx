@@ -67,7 +67,7 @@ export function ModeToggle({
       <span
         className={cn(
           "rounded-full px-3 py-1 transition-colors duration-fast",
-          !isSocial ? "bg-brand text-brand-foreground shadow-sm" : "text-muted-foreground",
+          !isSocial ? "bg-feed-brand text-feed-brand-foreground shadow-sm" : "text-muted-foreground",
         )}
       >
         Game
@@ -75,7 +75,7 @@ export function ModeToggle({
       <span
         className={cn(
           "rounded-full px-3 py-1 transition-colors duration-fast",
-          isSocial ? "bg-brand text-brand-foreground shadow-sm" : "text-muted-foreground",
+          isSocial ? "bg-feed-brand text-feed-brand-foreground shadow-sm" : "text-muted-foreground",
         )}
       >
         Social

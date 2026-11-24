@@ -55,7 +55,7 @@ export * from "./components/Table.tsx";
 export * from "./components/Tabs.tsx";
 export * from "./components/TaggedText.tsx";
 export * from "./components/Textarea.tsx";
-export * from "./components/Toast.tsx";
+export * from "./components/ToastBanner.tsx";
 export * from "./components/Tooltip.tsx";
 export * from "./components/TradeConfirmationDialog.tsx";
 export * from "./components/TradeTicket.tsx";
