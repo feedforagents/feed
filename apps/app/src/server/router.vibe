@@ -915,7 +915,7 @@ effect function handleSocialPostsAndUsers(
     const session = try optionalSession(request, config)
     const mode = resolveMode(session, url)
     const q = url.searchParams.get("q")?.trim() ?? ""
-    const trending = try listTrending(15, mode)
+    const trending = try listTrending(15, mode, session?.accountId)
     const articles = try listArticles(15, mode)
     const search = q === ""
       ? { posts: [], accounts: [], actors: [], organizations: [], tags: [] }
@@ -933,7 +933,7 @@ effect function handleSocialPostsAndUsers(
   }
   if (method === "GET" && path === "/api/trending") {
     const session = try optionalSession(request, config)
-    return jsonResponse({ trending: try listTrending(clampIntQuery(url, "limit", 15, 1, 50), resolveMode(session, url)) })
+    return jsonResponse({ trending: try listTrending(clampIntQuery(url, "limit", 15, 1, 50), resolveMode(session, url), session?.accountId) })
   }
   const userFollowListMatch = /^\/api\/users\/([^/]+)\/(followers|following)$/.exec(path)
   if (method === "GET" && userFollowListMatch !== null) {
