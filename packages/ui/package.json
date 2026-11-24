@@ -39,6 +39,7 @@
     "@radix-ui/react-tooltip": "catalog:",
     "class-variance-authority": "catalog:",
     "clsx": "catalog:",
+    "lightweight-charts": "^5.3.0",
     "lucide-react": "catalog:",
     "tailwind-merge": "catalog:"
   },

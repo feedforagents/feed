@@ -391,7 +391,9 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, fixed cap
 
     const alice = try onboardPhonePlayer("+14155550111", "parity_alice")
     const bob = try onboardPhonePlayer("+14155550112", "parity_bob")
+    const charlie = try onboardPhonePlayer("+14155550113", "parity_charlie")
     const aliceId = String(alice.account.accountId)
+    const charlieId = String(charlie.account.accountId)
 
     const badLevRes = try callApp("/api/markets/perp/XTRPC/open", {
       cookie: alice.cookie,
@@ -518,7 +520,7 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, fixed cap
     const blockRes = try callApp("/api/users/parity_bob/block", { method: "POST", cookie: alice.cookie })
     try check(() => assert.strictEqual(blockRes.status, 200))
 
-    const privateDmForBob = try callApp("/api/chats/direct", { cookie: bob.cookie, json: { targetHandleOrId: "ailonmusk" } })
+    const privateDmForBob = try callApp("/api/chats/direct", { cookie: bob.cookie, json: { targetHandleOrId: "parity_charlie" } })
     const bobDmId = String(((try readJson(privateDmForBob)).chat as Record<string, unknown>).id ?? "")
     try callApp(`/api/chats/${encodeURIComponent(bobDmId)}/messages`, {
       cookie: bob.cookie,
@@ -598,15 +600,24 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, fixed cap
 
     const grpCreateRes = try callApp("/api/chats/group", {
       cookie: alice.cookie,
-      json: { title: "Alpha Desk", memberHandles: ["ailonmusk"] }
+      json: { title: "Alpha Desk", memberHandles: ["parity_charlie"] }
     })
     const grpId = String(((try readJson(grpCreateRes)).chat as Record<string, unknown>).id ?? "")
+    const charlieInvitesBody = try readJson(try callApp("/api/chats/alpha-invites", { cookie: charlie.cookie }))
+    const charlieInviteId = String(
+      ((charlieInvitesBody.invites as ReadonlyArray<Record<string, unknown>>).find((inv) => inv.chatId === grpId)?.id) ?? ""
+    )
+    const charlieAcceptRes = try callApp(`/api/chats/alpha-invites/${encodeURIComponent(charlieInviteId)}/respond`, {
+      cookie: charlie.cookie,
+      json: { accept: true }
+    })
+    try check(() => assert.strictEqual(charlieAcceptRes.status, 200))
     const grpRenameRes = try callApp(`/api/chats/${encodeURIComponent(grpId)}`, {
       method: "PATCH",
       cookie: alice.cookie,
       json: { name: "Renamed Desk" }
     })
-    const grpKickRes = try callApp(`/api/chats/${encodeURIComponent(grpId)}/members/ailon-musk`, {
+    const grpKickRes = try callApp(`/api/chats/${encodeURIComponent(grpId)}/members/${encodeURIComponent(charlieId)}`, {
       method: "DELETE",
       cookie: alice.cookie
     })
@@ -647,7 +658,7 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, fixed cap
         tapesPopulated: (perpTradesBody.trades as ReadonlyArray<unknown>).length >= 2 && (predTradesBody.trades as ReadonlyArray<unknown>).length >= 2 && (aliceTradesBody.trades as ReadonlyArray<unknown>).length >= 3,
         closedPositionsOk: closedPosBody.totalCount === 1 && (closedPosBody.items as ReadonlyArray<unknown>).length === 1,
         pnlHistoryOk: (pnlHistBody.points as ReadonlyArray<unknown>).length >= 2,
-        leaderboardOk: (lbTradersBody.entries as ReadonlyArray<unknown>).length === 2 && (lbNpcsBody.entries as ReadonlyArray<unknown>).length > 0 && typeof lbMeBody.rank === "number",
+        leaderboardOk: (lbTradersBody.entries as ReadonlyArray<unknown>).length === 3 && (lbNpcsBody.entries as ReadonlyArray<unknown>).length > 0 && typeof lbMeBody.rank === "number",
         worldStatusOk: typeof worldStatusBody.currentDay === "number" && Number(worldStatusBody.activeMarketsCount) > 0 && Number(worldStatusBody.activeActorsCount) > 0,
         trendingAndSearchOk: taggedPostRes.status === 201 && (trendingTagBody.posts as ReadonlyArray<unknown>).length >= 1 && (userSearchBody.items as ReadonlyArray<unknown>).length >= 2,
         moderationAliasesOk: (modBlocksBody.items as ReadonlyArray<unknown>).length === 1 && (modMutesBody.items as ReadonlyArray<unknown>).length === 0,

@@ -1168,16 +1168,46 @@ export effect function signInReviewerPassword(input: {
 export effect function requestPhoneChange(input: {
   readonly accountId: string
   readonly newPhoneE164: string
+  readonly authAt?: number | undefined
+  readonly sessionAuthAt?: number | undefined
+  readonly cookieHeader?: string | undefined
   readonly turnstileToken?: string | undefined
   readonly ipAddress?: string | undefined
   readonly oldPhoneVerifiedOrRecovery?: boolean | undefined
   readonly config: AuthRuntimeConfig
 }): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  let verifiedOrRecovery = input.oldPhoneVerifiedOrRecovery === true
+  if (!verifiedOrRecovery && input.oldPhoneVerifiedOrRecovery !== false) {
+    let signedInAt = input.authAt ?? input.sessionAuthAt
+    if (signedInAt === undefined && input.cookieHeader !== undefined) {
+      const session = try authenticateSessionCookie(input.cookieHeader, input.config)
+      if (session === null || session.accountId !== input.accountId) {
+        throw new AuthFailure({ code: "unauthorized", message: "Active session required.", status: 401 })
+      }
+      signedInAt = session.authAt
+    }
+    const now = try Clock.currentTimeMillis
+    if (
+      signedInAt !== undefined
+      && Number.isSafeInteger(signedInAt)
+      && now - signedInAt >= 0
+      && now - signedInAt <= recentSignInWindowMs
+    ) {
+      verifiedOrRecovery = true
+    }
+  }
+  if (!verifiedOrRecovery) {
+    throw new AuthFailure({
+      code: "old_phone_verification_required",
+      message: "Verify your current phone or sign in within the last 10 minutes before changing your phone number.",
+      status: 403
+    })
+  }
   return try sendPhoneChallenge({
     phoneE164: input.newPhoneE164,
     purposeKey: "feed_phone_change",
     accountId: input.accountId,
-    oldPhoneVerifiedOrRecovery: input.oldPhoneVerifiedOrRecovery ?? true,
+    oldPhoneVerifiedOrRecovery: verifiedOrRecovery,
     turnstileToken: input.turnstileToken,
     ipAddress: input.ipAddress,
     config: input.config
@@ -1216,6 +1246,22 @@ export effect function confirmPhoneChange(input: {
       }
     }
   )
+}
+
+export effect function revokeSession(sessionKey: string): { readonly revoked: boolean }!StoreFailure!Store {
+  const normalizedKey = sessionKey.trim()
+  if (normalizedKey === "") {
+    return { revoked: false }
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      "UPDATE sessions SET live = false, updated_at = $2 WHERE key = $1 AND live = true RETURNING key",
+      [normalizedKey, now]
+    )
+    return { revoked: rows.length > 0 }
+  })
 }
 
 export effect function signOutEverywhere(accountId: string): { readonly sessionsEpoch: number }!(AuthFailure | StoreFailure)!Store {
@@ -1386,7 +1432,38 @@ export effect function deleteAccountSelfServe(input: {
       [input.accountId]
     )
     try tx.query(
+      `WITH deleted_posts AS (
+         UPDATE feed_posts
+         SET deleted_at = $2
+         WHERE author_id = $1 AND author_kind = 'user' AND deleted_at IS NULL
+         RETURNING reply_to_post_id
+       ),
+       parent_reply_decrements AS (
+         SELECT reply_to_post_id, COUNT(*)::int AS decrement_by
+         FROM deleted_posts
+         WHERE reply_to_post_id IS NOT NULL
+         GROUP BY reply_to_post_id
+       )
+       UPDATE feed_posts fp
+       SET reply_count = GREATEST(0, fp.reply_count - d.decrement_by)
+       FROM parent_reply_decrements d
+       WHERE fp.id = d.reply_to_post_id`,
+      [input.accountId, now]
+    )
+    try tx.query(
       "DELETE FROM feed_follows WHERE follower_id = $1 OR (target_id = $1 AND target_kind = 'user')",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_blocks WHERE blocker_id = $1 OR blocked_id = $1",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_mutes WHERE muter_id = $1 OR muted_id = $1",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_alpha_invite_cooldowns WHERE account_id = $1",
       [input.accountId]
     )
     try tx.query(

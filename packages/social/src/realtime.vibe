@@ -9,6 +9,7 @@ export type FeedRealtimeEvent =
       readonly authorKind: "user" | "npc" | "org"
       readonly replyToPostId: string | null
       readonly quotePostId: string | null
+      readonly quoteAuthorId?: string | null
       readonly createdAt: number
     }
   | {
@@ -39,6 +40,7 @@ export type FeedRealtimeEvent =
       readonly messageId: string
       readonly accountId: string
       readonly emoji: string
+      readonly action?: "added" | "removed"
       readonly recipientIds?: ReadonlyArray<string>
     }
   | {
@@ -46,6 +48,7 @@ export type FeedRealtimeEvent =
       readonly inviteId: string
       readonly chatId: string
       readonly invitedAccountId: string
+      readonly invitedById?: string
       readonly invitedByNpcId: string
       readonly status: "pending" | "accepted" | "declined"
       readonly recipientIds?: ReadonlyArray<string>
@@ -199,6 +202,41 @@ effect function isAuthorVisibleInStore(
   }))
 }
 
+effect function isPostCreatedDeliverableInStore(
+  store: Store.Shape | undefined,
+  viewerId: string,
+  event: Extract<FeedRealtimeEvent, { readonly type: "post.created" }>
+): boolean!! {
+  if (store === undefined) return false
+  return try runFailClosedLookup(store.transaction(effect (tx: Tx) => {
+    if (event.authorId !== "" && event.authorId !== viewerId) {
+      const authorRows = try tx.query(
+        "SELECT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = $2) OR (b.blocker_id = $2 AND b.blocked_id = $1)) AS is_blocked, EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = $2) AS is_muted",
+        [viewerId, event.authorId]
+      )
+      const authorRow = authorRows[0]
+      if (authorRow === undefined || Boolean(authorRow.is_blocked) || Boolean(authorRow.is_muted)) return false
+    }
+    let quoteAuthorId = event.quoteAuthorId ?? null
+    if (quoteAuthorId === null && event.quotePostId !== null && event.quotePostId !== "") {
+      const quoteRows = try tx.query(
+        "SELECT author_id FROM feed_posts WHERE id = $1 LIMIT 1",
+        [event.quotePostId]
+      )
+      quoteAuthorId = toText(quoteRows[0]?.author_id) ?? null
+    }
+    if (quoteAuthorId !== null && quoteAuthorId !== "" && quoteAuthorId !== viewerId) {
+      const quoteVisRows = try tx.query(
+        "SELECT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = $2) OR (b.blocker_id = $2 AND b.blocked_id = $1)) AS is_blocked, EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = $2) AS is_muted",
+        [viewerId, quoteAuthorId]
+      )
+      const quoteVis = quoteVisRows[0]
+      if (quoteVis === undefined || Boolean(quoteVis.is_blocked) || Boolean(quoteVis.is_muted)) return false
+    }
+    return true
+  }))
+}
+
 effect function isChatEventDeliverableInStore(
   store: Store.Shape | undefined,
   viewerId: string,
@@ -210,17 +248,20 @@ effect function isChatEventDeliverableInStore(
   if (store === undefined || chatId === "") return false
   return try runFailClosedLookup(store.transaction(effect (tx: Tx) => {
     const memberRows = try tx.query(
-      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+      "SELECT c.kind FROM feed_chat_members m INNER JOIN feed_chats c ON c.id = m.chat_id WHERE m.chat_id = $1 AND m.member_id = $2 LIMIT 1",
       [chatId, viewerId]
     )
-    if (memberRows.length === 0) return false
+    const memberRow = memberRows[0]
+    if (memberRow === undefined) return false
     if (authorId === "" || authorId === viewerId) return true
+    const chatKind = toText(memberRow.kind) ?? "group"
     const visRows = try tx.query(
       "SELECT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = $2) OR (b.blocker_id = $2 AND b.blocked_id = $1)) AS is_blocked, EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = $2) AS is_muted",
       [viewerId, authorId]
     )
     const row = visRows[0]
     if (row === undefined) return false
+    if (chatKind === "direct") return !row.is_blocked
     return !row.is_blocked && !row.is_muted
   }))
 }
@@ -270,6 +311,7 @@ export effect function canDeliverRealtimeEventToViewer(
     case "article.published":
       return true
     case "post.created":
+      return viewerId === undefined ? true : try isPostCreatedDeliverableInStore(store, viewerId, event)
     case "post.deleted":
       return viewerId === undefined ? true : try isAuthorVisibleInStore(store, viewerId, event.authorId)
     case "post.engagement":
@@ -286,7 +328,7 @@ export effect function canDeliverRealtimeEventToViewer(
       if (viewerId === undefined || event.invitedAccountId !== viewerId || !recipientListAllows(event.recipientIds, viewerId)) {
         return false
       }
-      return try isAuthorVisibleInStore(store, viewerId, event.invitedByNpcId)
+      return try isAuthorVisibleInStore(store, viewerId, event.invitedById ?? event.invitedByNpcId)
     case "alpha.invite":
       if (viewerId === undefined || event.targetAccountId !== viewerId || !recipientListAllows(event.recipientIds, viewerId)) {
         return false

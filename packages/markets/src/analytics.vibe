@@ -4,7 +4,7 @@ import { yesOddsBps } from "../gen/markets__prediction.effect.vibe"
 import { getAccountEconomyIn } from "./economy.vibe"
 import {
   type MarketFailure,
-  insertPriceHistoryRowTx,
+  insertPriceHistory,
   marketFail,
   optionalInt,
   optionalText,
@@ -28,7 +28,7 @@ export interface MarketPriceHistoryView {
   readonly points: ReadonlyArray<PriceHistoryPoint>
 }
 
-export interface MarketTradeView {
+export interface AssetTradeView {
   readonly id: string
   readonly traderId: string
   readonly traderName: string
@@ -353,7 +353,7 @@ export effect function snapshotMarketPrices(nowMs?: number): MarketSnapshotSumma
       "SELECT ticker, index_price_cents, mark_price_cents FROM feed_perp_markets ORDER BY ticker ASC"
     )
     for (const row of perpRows) {
-      try insertPriceHistoryRowTx(tx, {
+      try insertPriceHistory(tx, {
         marketKind: "perp",
         marketRef: requiredText(row.ticker),
         priceCents: toInt(row.index_price_cents),
@@ -367,7 +367,7 @@ export effect function snapshotMarketPrices(nowMs?: number): MarketSnapshotSumma
     )
     for (const row of predRows) {
       const yesBps = yesOddsBps(toInt(row.yes_shares), toInt(row.no_shares))
-      try insertPriceHistoryRowTx(tx, {
+      try insertPriceHistory(tx, {
         marketKind: "prediction",
         marketRef: requiredText(row.id),
         priceCents: Math.max(1, Math.min(99, Math.round(yesBps / 100))),
@@ -384,7 +384,7 @@ export effect function snapshotMarketPrices(nowMs?: number): MarketSnapshotSumma
   })
 }
 
-function mapTradeRow(row: Row): MarketTradeView {
+function mapTradeRow(row: Row): AssetTradeView {
   const traderKind = requiredText(row.trader_kind)
   const isNpc = traderKind === "npc"
   const traderId = requiredText(row.trader_id)
@@ -420,11 +420,11 @@ function mapTradeRow(row: Row): MarketTradeView {
   }
 }
 
-export effect function listMarketTrades(input: {
+export effect function listAssetTrades(input: {
   readonly marketKind: "perp" | "prediction"
   readonly marketRef: string
   readonly limit?: number
-}): ReadonlyArray<MarketTradeView>!(MarketFailure | StoreFailure)!Store {
+}): ReadonlyArray<AssetTradeView>!(MarketFailure | StoreFailure)!Store {
   const safeLimit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)))
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
@@ -485,7 +485,7 @@ export effect function listMarketTrades(input: {
 export effect function listUserTrades(input: {
   readonly handleOrId: string
   readonly limit?: number
-}): ReadonlyArray<MarketTradeView>!(MarketFailure | StoreFailure)!Store {
+}): ReadonlyArray<AssetTradeView>!(MarketFailure | StoreFailure)!Store {
   const safeLimit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)))
   const raw = input.handleOrId.trim().replace(/^@/, "")
   if (raw === "") {

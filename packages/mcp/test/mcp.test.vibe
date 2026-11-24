@@ -704,6 +704,7 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     const createdGroup = unwrapToolPayload(try callMcpTool(101, "create_group", { title: "Parity Squad", memberHandles: [] }, authConfig, aliceToken))
     const groupChat = createdGroup.chat as { readonly id: string }
     const invitedBob = unwrapToolPayload(try callMcpTool(102, "invite_to_group", { chatId: groupChat.id, targetHandleOrId: "bob_parity" }, authConfig, aliceToken))
+    const bobAcceptedInvite = unwrapToolPayload(try callMcpTool(1020, "respond_to_group_invite", { inviteId: String(invitedBob.inviteId ?? ""), accept: true }, authConfig, bobToken))
     const ownerLeaveErr = unwrapToolError(try callMcpTool(103, "leave_group", { chatId: groupChat.id }, authConfig, aliceToken))
     const memberLeft = unwrapToolPayload(try callMcpTool(104, "leave_group", { chatId: groupChat.id }, authConfig, bobToken))
     unwrapToolPayload(try callMcpTool(105, "follow", { handleOrId: "alice_parity" }, authConfig, bobToken))
@@ -797,7 +798,9 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     const whoamiAfterTrades = unwrapToolPayload(try callMcpTool(126, "whoami", {}, authConfig, aliceToken))
 
     try check(() => {
-      assert.strictEqual(invitedBob.added, true)
+      assert.strictEqual(invitedBob.added, false)
+      assert.strictEqual(invitedBob.status, "pending")
+      assert.strictEqual((bobAcceptedInvite.invite as { readonly status?: string } | undefined)?.status, "accepted")
       assert.strictEqual(invitedBob.handle, "bob_parity")
       assert.strictEqual(invitedBob.memberId, bob.account.accountId)
       assert.strictEqual(ownerLeaveErr.error, "Forbidden")

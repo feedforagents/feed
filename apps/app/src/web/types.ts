@@ -15,6 +15,7 @@ import {
   type PostCardData,
   type PredictionMarketPhase,
   type ProfileSummary,
+  type ToastTone,
   type TrendingItem,
   defaultAgentLaunchers,
   defaultSkillPrompt,
@@ -24,17 +25,26 @@ import type { AgentHost } from "../../gen/app__onboarding.ts";
 
 export type AgentGrantSummary = NonNullable<AgentConnectCardProps["grant"]>;
 
+export type ThemePreference = "light" | "dark" | "system";
+
+export interface ToastItem {
+  readonly id: string;
+  readonly message: string;
+  readonly description?: string;
+  readonly tone: ToastTone;
+}
+
 export interface ViewerSession {
   readonly accountId: string;
   readonly handle: string;
   readonly displayName: string;
   readonly bio: string;
   readonly avatarUrl: string | null;
+  readonly bannerUrl: string | null;
   readonly phoneLast2: string | null;
   readonly uiMode: "game" | "social";
   readonly balanceCents: number;
   readonly startingGrantCents: number;
-  readonly purchasedCents: number;
   readonly isAdmin: boolean;
   readonly isReviewer: boolean;
   readonly agentGrant: AgentGrantSummary | null;
@@ -67,6 +77,7 @@ export interface AppPost {
 export interface PostThreadData {
   readonly post: AppPost;
   readonly parentPost: AppPost | null;
+  readonly ancestors: ReadonlyArray<AppPost>;
   readonly replies: ReadonlyArray<AppPost>;
 }
 
@@ -84,8 +95,12 @@ export interface AppPredictionMarket {
 export interface AppPerpMarket {
   readonly card: Extract<MarketCardData, { kind: "perp" }>;
   readonly ticker: string;
+  readonly organizationId: string | null;
+  readonly orgImageUrl: string | null;
   readonly indexCents: number;
   readonly markCents: number;
+  readonly change24hPct: number;
+  readonly volume24hCents: number;
   readonly fundingRateBps: number;
   readonly openInterestCents: number;
   readonly history: ReadonlyArray<{ readonly label: string; readonly value: number }>;
@@ -99,11 +114,46 @@ export interface AppPosition {
   readonly isClosed: boolean;
 }
 
+export interface AppLeaderboardEntry extends LeaderboardEntry {
+  readonly balanceCents: number;
+  readonly positionValueCents: number;
+  readonly equityCents: number;
+  readonly startingGrantCents: number;
+  readonly wins: number;
+  readonly settledCount: number;
+}
+
+export interface AppAccountEconomy {
+  readonly accountId: string;
+  readonly balanceCents: number;
+  readonly positionValueCents: number;
+  readonly equityCents: number;
+  readonly startingGrantCents: number;
+  readonly totalFeesPaidCents: number;
+  readonly netProfitCents: number;
+}
+
+export interface AppLedgerEntry {
+  readonly id: string;
+  readonly kind: string;
+  readonly deltaCents: number;
+  readonly balanceAfterCents: number;
+  readonly refId: string | null;
+  readonly createdAtMs: number;
+  readonly timestamp: string;
+}
+
+export interface AppEconomyPayload {
+  readonly economy: AppAccountEconomy | null;
+  readonly ledger: ReadonlyArray<AppLedgerEntry>;
+}
+
 export interface ExploreAccountHit {
   readonly accountId: string;
   readonly handle: string;
   readonly displayName: string;
   readonly bio: string;
+  readonly avatarUrl: string | null;
 }
 
 export interface ExploreActorHit {
@@ -112,6 +162,8 @@ export interface ExploreActorHit {
   readonly name: string;
   readonly tier: string;
   readonly description: string;
+  readonly avatarUrl: string | null;
+  readonly isParody: boolean;
 }
 
 export interface ExploreOrgHit {
@@ -120,12 +172,16 @@ export interface ExploreOrgHit {
   readonly ticker: string | null;
   readonly orgType: string;
   readonly description: string;
+  readonly avatarUrl: string | null;
+  readonly initialPriceCents: number | null;
 }
 
 export interface AppArticle extends ArticleItem {
+  readonly authorOrgId: string | null;
   readonly body: string;
   readonly relatedMarketId: string | null;
   readonly isResolutionProof: boolean;
+  readonly publishedAtMs: number;
 }
 
 export interface ExploreData {
@@ -137,6 +193,15 @@ export interface ExploreData {
   readonly organizations: ReadonlyArray<ExploreOrgHit>;
 }
 
+export interface AppChatMember {
+  readonly memberId: string;
+  readonly memberKind: "user" | "npc";
+  readonly handle: string;
+  readonly displayName: string;
+  readonly avatarUrl: string | null;
+  readonly role: "owner" | "admin" | "member";
+}
+
 export interface AppChatSummary {
   readonly id: string;
   readonly chatType: ChatKind;
@@ -145,6 +210,10 @@ export interface AppChatSummary {
   readonly memberCount: number;
   readonly unreadCount: number;
   readonly lastMessagePreview: string | null;
+  readonly lastMessageAt: number | null;
+  readonly peerAvatarUrl: string | null;
+  readonly peerHandle: string | null;
+  readonly members: ReadonlyArray<AppChatMember>;
   readonly isOwner: boolean;
   readonly isBlocked: boolean;
 }
@@ -154,6 +223,7 @@ export interface AppAlphaInvite {
   readonly chatId: string;
   readonly actorHandle: string;
   readonly actorDisplayName: string;
+  readonly actorAvatarUrl: string | null;
   readonly chatTitle: string;
   readonly tier: string | null;
   readonly status: string;
@@ -163,7 +233,24 @@ export interface AppNotification {
   readonly item: NotificationItem;
   readonly postId: string | null;
   readonly marketId: string | null;
+  readonly chatId: string | null;
+  readonly inviteId: string | null;
   readonly isGameOnly: boolean;
+}
+
+export interface AppNotificationsPayload {
+  readonly items: ReadonlyArray<AppNotification>;
+  readonly unreadCount: number;
+}
+
+export interface AppProfileActorMeta {
+  readonly tier: string;
+  readonly affiliations: ReadonlyArray<string>;
+}
+
+export interface AppProfileOrgMeta {
+  readonly ticker: string | null;
+  readonly orgType: string;
 }
 
 export interface AppProfileBundle {
@@ -171,17 +258,35 @@ export interface AppProfileBundle {
   readonly id: string;
   readonly kind: string;
   readonly postsCount: number;
+  readonly createdAtMs: number;
+  readonly actorMeta: AppProfileActorMeta | null;
+  readonly orgMeta: AppProfileOrgMeta | null;
+  readonly viewerFollowedBy: boolean;
   readonly viewerBlockedBy: boolean;
+  readonly tradeCount: number | null;
+  readonly openPositionCount: number | null;
   readonly posts: ReadonlyArray<AppPost>;
   readonly postsNextCursor: string | null;
   readonly positions: ReadonlyArray<AppPosition>;
 }
 
-export interface AppPointPack {
+export interface AppFollowListEntry {
   readonly id: string;
-  readonly name: string;
-  readonly usd: number;
-  readonly points: number;
+  readonly kind: string;
+  readonly handle: string;
+  readonly displayName: string;
+  readonly bio: string;
+  readonly avatarUrl: string | null;
+  readonly viewerFollows: boolean;
+  readonly isParody: boolean;
+}
+
+export interface AppModerationEntry {
+  readonly id: string;
+  readonly handle: string;
+  readonly displayName: string;
+  readonly avatarUrl: string | null;
+  readonly bio: string;
 }
 
 export interface AppHostOption {
@@ -295,6 +400,27 @@ export function arr(value: unknown): ReadonlyArray<unknown> {
   return Array.isArray(value) ? value : [];
 }
 
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+export function formatJoinedLabel(ms: number): string | undefined {
+  if (!Number.isFinite(ms) || ms <= 0) return undefined;
+  const d = new Date(ms);
+  const month = MONTH_NAMES[d.getUTCMonth()];
+  if (!month) return undefined;
+  return `Joined ${month} ${d.getUTCFullYear()}`;
+}
+
+export function formatFullTimestamp(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const d = new Date(ms);
+  const month = MONTH_NAMES[d.getUTCMonth()] ?? "Jan";
+  const hours = d.getHours();
+  const mins = String(d.getMinutes()).padStart(2, "0");
+  const period = hours >= 12 ? "PM" : "AM";
+  const h12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${h12}:${mins} ${period} · ${month} ${d.getDate()}, ${d.getFullYear()}`;
+}
+
 export function formatTimeLabel(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "just now";
   const diffSec = Math.floor((Date.now() - ms) / 1000);
@@ -390,11 +516,11 @@ export function decodeViewer(raw: unknown): ViewerSession | null {
     displayName: str(raw.displayName ?? raw.display_name, handle),
     bio: str(raw.bio, ""),
     avatarUrl: optStr(raw.avatarUrl ?? raw.avatar_url),
+    bannerUrl: optStr(raw.bannerUrl ?? raw.banner_url),
     phoneLast2: optStr(raw.phoneLast2 ?? raw.phone_last2),
     uiMode: modeRaw === "social" || modeRaw === "SocialMode" ? "social" : "game",
     balanceCents: num(raw.balanceCents ?? raw.balance_cents, 0),
-    startingGrantCents: num(raw.startingGrantCents ?? raw.starting_grant_cents, 0),
-    purchasedCents: num(raw.purchasedCents ?? raw.purchased_cents, 0),
+    startingGrantCents: num(raw.startingGrantCents ?? raw.starting_grant_cents, 10000),
     isAdmin: bool(raw.isAdmin ?? raw.is_admin, false),
     isReviewer: bool(raw.isReviewer ?? raw.is_reviewer, false),
     agentGrant: decodeAgentGrant(raw.agentGrant ?? raw.activeGrant ?? raw.activeAgentGrant),
@@ -416,37 +542,86 @@ export function decodeAuthMe(raw: unknown): AuthMePayload {
   };
 }
 
-export function decodePost(raw: unknown): AppPost | null {
+function decodeMarketBadge(
+  badgeRaw: Record<string, unknown> | null,
+  ticker: string | null,
+  showTradeEmbed: boolean,
+): PostCardData["marketBadge"] {
+  if (!showTradeEmbed) return undefined;
+  if (badgeRaw) {
+    const kind = optStr(badgeRaw.kind);
+    if (kind === "prediction") {
+      const question = str(badgeRaw.question, "Prediction market");
+      const yesBps = num(badgeRaw.yesPriceBps, 5000);
+      return {
+        ticker: ticker ?? "PRED",
+        label: question,
+        oddsPct: Math.min(99, Math.max(1, Math.round(yesBps / 100))),
+      };
+    }
+    if (kind === "perp") {
+      const perpTicker = str(badgeRaw.ticker, ticker ?? "");
+      if (!perpTicker) return undefined;
+      const markCents = num(badgeRaw.markPriceCents, 0);
+      const label = markCents > 0
+        ? `${str(badgeRaw.name, perpTicker)} · ${formatPts(markCents / 100)}`
+        : str(badgeRaw.name, perpTicker);
+      return {
+        ticker: perpTicker,
+        label,
+        ...(typeof badgeRaw.changePct === "number" ? { changePct: badgeRaw.changePct } : {}),
+      };
+    }
+    const badgeTicker = str(badgeRaw.ticker, ticker ?? "");
+    if (badgeTicker) {
+      return {
+        ticker: badgeTicker,
+        label: str(badgeRaw.label, `Trade $${badgeTicker}`),
+        ...(typeof badgeRaw.oddsPct === "number" ? { oddsPct: badgeRaw.oddsPct } : {}),
+        ...(typeof badgeRaw.changePct === "number" ? { changePct: badgeRaw.changePct } : {}),
+      };
+    }
+  }
+  if (ticker) {
+    return {
+      ticker,
+      label: `Trade $${ticker}`,
+    };
+  }
+  return undefined;
+}
+
+export function decodePost(raw: unknown, viewerAccountId?: string | null): AppPost | null {
   if (!isRecord(raw)) return null;
   const id = optStr(raw.id);
   if (!id) return null;
+  const authorId = str(raw.authorId ?? raw.author_id, "");
   const authorHandle = str(raw.authorHandle ?? raw.author_handle, "unknown");
   const authorDisplayName = str(raw.authorDisplayName ?? raw.author_display_name, authorHandle);
   const createdAtMs = num(raw.createdAt ?? raw.created_at, 0);
   const quoteRaw = raw.quotePost;
+  const quoteAvatar = isRecord(quoteRaw) ? optStr(quoteRaw.avatarUrl ?? quoteRaw.authorAvatarUrl) : null;
   const quotePost = isRecord(quoteRaw) && optStr(quoteRaw.id)
     ? {
         id: str(quoteRaw.id),
         authorDisplayName: str(quoteRaw.authorDisplayName ?? quoteRaw.author_display_name, str(quoteRaw.authorHandle, "user")),
         authorHandle: str(quoteRaw.authorHandle ?? quoteRaw.author_handle, "user"),
+        ...(quoteAvatar ? { authorAvatarUrl: quoteAvatar } : {}),
         isNpcParody: bool(quoteRaw.isParody ?? quoteRaw.isNpcParody, false),
         content: str(quoteRaw.content),
+        ...(bool(quoteRaw.deleted, false) ? { deleted: true } : {}),
       }
     : undefined;
   const marketId = optStr(raw.marketId ?? raw.market_id);
   const ticker = optStr(raw.ticker);
   const showTradeEmbed = bool(raw.showTradeEmbed, true);
   const badgeRaw = isRecord(raw.marketBadge) ? raw.marketBadge : null;
-  const marketBadge = showTradeEmbed && (badgeRaw || ticker)
-    ? {
-        ticker: str(badgeRaw?.ticker, ticker ?? ""),
-        label: str(badgeRaw?.label, ticker ? `Trade $${ticker}` : "Market"),
-        ...(badgeRaw && typeof badgeRaw.oddsPct === "number" ? { oddsPct: badgeRaw.oddsPct } : {}),
-        ...(badgeRaw && typeof badgeRaw.changePct === "number" ? { changePct: badgeRaw.changePct } : {}),
-      }
-    : undefined;
+  const marketBadge = decodeMarketBadge(badgeRaw, ticker, showTradeEmbed);
+  const avatarUrl = optStr(raw.avatarUrl ?? raw.authorAvatarUrl);
+  const viaClientName = optStr(raw.viaClientName ?? raw.via_client_name);
+  const replyToHandle = optStr(raw.replyToHandle ?? raw.reply_to_handle);
   return {
-    authorId: str(raw.authorId ?? raw.author_id, ""),
+    authorId,
     authorKind: str(raw.authorKind ?? raw.author_kind, "user"),
     replyToPostId: optStr(raw.replyToPostId ?? raw.reply_to_post_id),
     marketId,
@@ -456,43 +631,50 @@ export function decodePost(raw: unknown): AppPost | null {
       id,
       authorDisplayName,
       authorHandle,
-      ...(optStr(raw.avatarUrl ?? raw.authorAvatarUrl) ? { authorAvatarUrl: optStr(raw.avatarUrl ?? raw.authorAvatarUrl) ?? undefined } : {}),
+      ...(avatarUrl ? { authorAvatarUrl: avatarUrl } : {}),
       isNpcParody: bool(raw.isParody ?? raw.isNpcParody, false),
       createdAt: typeof raw.createdAt === "string" ? raw.createdAt : formatTimeLabel(createdAtMs),
       content: str(raw.content),
-      ...(optStr(raw.viaClientName ?? raw.via_client_name) ? { viaClientName: optStr(raw.viaClientName ?? raw.via_client_name) ?? undefined } : {}),
-      ...(optStr(raw.replyToHandle) ? { replyToHandle: optStr(raw.replyToHandle) ?? undefined } : {}),
+      ...(viaClientName ? { viaClientName } : {}),
+      ...(replyToHandle ? { replyToHandle } : {}),
       ...(quotePost ? { quotePost } : {}),
-      ...(marketBadge && marketBadge.ticker ? { marketBadge } : {}),
+      ...(marketBadge ? { marketBadge } : {}),
       likeCount: num(raw.likeCount ?? raw.like_count, 0),
       repostCount: num(raw.repostCount ?? raw.repost_count, 0),
       replyCount: num(raw.replyCount ?? raw.reply_count, 0),
       liked: bool(raw.likedByViewer ?? raw.liked, false),
       reposted: bool(raw.repostedByViewer ?? raw.reposted, false),
+      isOwn: Boolean(viewerAccountId && authorId && viewerAccountId === authorId),
     },
   };
 }
 
-export function decodePosts(raw: unknown): ReadonlyArray<AppPost> {
+export function decodePosts(raw: unknown, viewerAccountId?: string | null): ReadonlyArray<AppPost> {
   const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.items ?? raw.posts) : [];
-  return list.map(decodePost).filter((p): p is AppPost => p !== null);
+  return list.map((item) => decodePost(item, viewerAccountId)).filter((p): p is AppPost => p !== null);
 }
 
-export function decodeFeedPage(raw: unknown): AppFeedPage {
+export function decodeFeedPage(raw: unknown, viewerAccountId?: string | null): AppFeedPage {
   return {
-    items: decodePosts(raw),
+    items: decodePosts(raw, viewerAccountId),
     nextCursor: isRecord(raw) ? optStr(raw.nextCursor) : null,
   };
 }
 
-export function decodePostThread(raw: unknown): PostThreadData | null {
+export function decodePostThread(raw: unknown, viewerAccountId?: string | null): PostThreadData | null {
   if (!isRecord(raw)) return null;
-  const post = decodePost(raw.post);
+  const post = decodePost(raw.post, viewerAccountId);
   if (!post) return null;
+  const parentPost = decodePost(raw.parentPost, viewerAccountId);
+  const decodedAncestors = arr(raw.ancestors)
+    .map((item) => decodePost(item, viewerAccountId))
+    .filter((p): p is AppPost => p !== null);
+  const ancestors = decodedAncestors.length > 0 ? decodedAncestors : parentPost ? [parentPost] : [];
   return {
     post,
-    parentPost: decodePost(raw.parentPost),
-    replies: arr(raw.replies).map(decodePost).filter((p): p is AppPost => p !== null),
+    parentPost,
+    ancestors,
+    replies: arr(raw.replies).map((item) => decodePost(item, viewerAccountId)).filter((p): p is AppPost => p !== null),
   };
 }
 
@@ -524,8 +706,8 @@ export function decodePredictionMarket(raw: unknown): AppPredictionMarket | null
   const id = optStr(raw.id);
   if (!id) return null;
   const status = str(raw.status, "open");
-  const yesPriceBps = num(raw.yesPriceBps, Math.round(num(raw.yesPrice, 0.5) * 10000));
-  const noPriceBps = num(raw.noPriceBps, 10000 - yesPriceBps);
+  const yesPriceBps = num(raw.yesPriceBps ?? raw.yesProbabilityBps, Math.round(num(raw.yesPrice, 0.5) * 10000));
+  const noPriceBps = num(raw.noPriceBps ?? raw.noProbabilityBps, 10000 - yesPriceBps);
   const yesShares = num(raw.yesShares ?? raw.yes_shares, 0);
   const noShares = num(raw.noShares ?? raw.no_shares, 0);
   const outcomeRaw = str(raw.resolvedOutcome ?? raw.resolved_outcome).toUpperCase();
@@ -562,6 +744,8 @@ export function decodePerpMarket(raw: unknown): AppPerpMarket | null {
   const markCents = num(raw.markPriceCents ?? raw.mark_price_cents, indexCents);
   const fundingRateBps = num(raw.fundingRateBps ?? raw.funding_rate_bps, 0);
   const openInterestCents = num(raw.openInterestCents, num(raw.longOiCents, 0) + num(raw.shortOiCents, 0));
+  const change24hPct = num(raw.change24hPct ?? raw.change_24h_pct, 0);
+  const volume24hCents = num(raw.volume24hCents ?? raw.volume_24h_cents, 0);
   const rawHistory = arr(raw.history ?? raw.priceHistory);
   const history = rawHistory
     .map((pt) => (isRecord(pt) ? { label: str(pt.label, ""), value: num(pt.value, markCents / 100) } : null))
@@ -574,8 +758,12 @@ export function decodePerpMarket(raw: unknown): AppPerpMarket | null {
       ];
   return {
     ticker,
+    organizationId: optStr(raw.organizationId ?? raw.organization_id),
+    orgImageUrl: optStr(raw.orgImageUrl ?? raw.org_image_url),
     indexCents,
     markCents,
+    change24hPct,
+    volume24hCents,
     fundingRateBps,
     openInterestCents,
     history: fallbackHistory,
@@ -588,7 +776,7 @@ export function decodePerpMarket(raw: unknown): AppPerpMarket | null {
       markPricePts: formatPts(markCents / 100),
       fundingRatePct: `${(fundingRateBps / 100).toFixed(2)}%`,
       openInterestPts: formatPts(openInterestCents / 100),
-      ...(typeof raw.change24hPct === "number" ? { change24hPct: raw.change24hPct } : {}),
+      change24hPct,
       maxLeverage: num(raw.maxLeverage ?? raw.max_leverage, 20),
     },
   };
@@ -667,29 +855,86 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
   return [...predPositions, ...perpPositions];
 }
 
-export function decodeLeaderboard(raw: unknown): ReadonlyArray<LeaderboardEntry> {
+export function decodeLeaderboard(raw: unknown): ReadonlyArray<AppLeaderboardEntry> {
   const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.leaderboard ?? raw.entries ?? raw.rows) : [];
   return list
-    .map((entry, idx): LeaderboardEntry | null => {
+    .map((entry, idx): AppLeaderboardEntry | null => {
       if (!isRecord(entry)) return null;
       const accountId = optStr(entry.accountId ?? entry.account_id);
       const handle = optStr(entry.handle);
       if (!accountId && !handle) return null;
       const winRateRaw = num(entry.winRate ?? entry.winRatePct, 0);
       const winRatePct = winRateRaw <= 1 && winRateRaw > 0 ? Math.round(winRateRaw * 100) : Math.round(winRateRaw);
+      const balanceCents = num(entry.balanceCents ?? entry.balance_cents, 0);
+      const positionValueCents = num(entry.positionValueCents ?? entry.position_value_cents, 0);
+      const equityCents = num(entry.equityCents ?? entry.equity_cents, balanceCents + positionValueCents);
+      const startingGrantCents = num(entry.startingGrantCents ?? entry.starting_grant_cents, 10000);
+      const netProfitCents = num(entry.netProfitCents ?? entry.net_profit_cents, Math.round(num(entry.netProfitPts, 0) * 100));
+      const tradeCount = num(entry.tradeCount ?? entry.trade_count, 0);
+      const wins = num(entry.wins, 0);
+      const settledCount = num(entry.settledCount ?? entry.settled_count, 0);
+      const roiPct = typeof entry.roiPct === "number"
+        ? entry.roiPct
+        : startingGrantCents > 0
+          ? (netProfitCents / startingGrantCents) * 100
+          : 0;
+      const avatarUrl = optStr(entry.avatarUrl ?? entry.avatar_url);
       return {
         rank: num(entry.rank, idx + 1),
         accountId: accountId ?? handle ?? String(idx + 1),
         displayName: str(entry.displayName ?? entry.display_name, handle ?? accountId ?? "Trader"),
         handle: handle ?? accountId ?? "trader",
-        ...(optStr(entry.avatarUrl ?? entry.avatar_url) ? { avatarUrl: optStr(entry.avatarUrl ?? entry.avatar_url) ?? undefined } : {}),
+        ...(avatarUrl ? { avatarUrl } : {}),
         isNpc: bool(entry.isNpc, false),
-        netProfitPts: num(entry.netProfitPts, num(entry.netProfitCents, 0) / 100),
+        netProfitPts: num(entry.netProfitPts, netProfitCents / 100),
         winRatePct,
         volumePts: num(entry.volumePts, num(entry.volumeCents, 0) / 100),
+        roiPct,
+        equityPts: equityCents / 100,
+        tradeCount,
+        balanceCents,
+        positionValueCents,
+        equityCents,
+        startingGrantCents,
+        wins,
+        settledCount,
       };
     })
-    .filter((e): e is LeaderboardEntry => e !== null);
+    .filter((e): e is AppLeaderboardEntry => e !== null);
+}
+
+export function decodeEconomy(raw: unknown): AppEconomyPayload {
+  const rec = isRecord(raw) ? raw : {};
+  const econRec = isRecord(rec.economy) ? rec.economy : null;
+  const economy: AppAccountEconomy | null = econRec
+    ? {
+        accountId: str(econRec.accountId ?? econRec.account_id, ""),
+        balanceCents: num(econRec.balanceCents ?? econRec.balance_cents, 0),
+        positionValueCents: num(econRec.positionValueCents ?? econRec.position_value_cents, 0),
+        equityCents: num(econRec.equityCents ?? econRec.equity_cents, 0),
+        startingGrantCents: num(econRec.startingGrantCents ?? econRec.starting_grant_cents, 10000),
+        totalFeesPaidCents: num(econRec.totalFeesPaidCents ?? econRec.total_fees_paid_cents, 0),
+        netProfitCents: num(econRec.netProfitCents ?? econRec.net_profit_cents, 0),
+      }
+    : null;
+  const ledger = arr(rec.ledger)
+    .map((entry): AppLedgerEntry | null => {
+      if (!isRecord(entry)) return null;
+      const id = optStr(entry.id);
+      if (!id) return null;
+      const createdAtMs = num(entry.createdAt ?? entry.created_at, 0);
+      return {
+        id,
+        kind: str(entry.kind, "entry"),
+        deltaCents: num(entry.deltaCents ?? entry.delta_cents, 0),
+        balanceAfterCents: num(entry.balanceAfterCents ?? entry.balance_after_cents, 0),
+        refId: optStr(entry.refId ?? entry.ref_id),
+        createdAtMs,
+        timestamp: formatTimeLabel(createdAtMs),
+      };
+    })
+    .filter((entry): entry is AppLedgerEntry => entry !== null);
+  return { economy, ledger };
 }
 
 export function decodeTrendingList(raw: unknown): ReadonlyArray<TrendingItem> {
@@ -712,34 +957,46 @@ export function decodeTrendingList(raw: unknown): ReadonlyArray<TrendingItem> {
     .filter((t): t is TrendingItem => t !== null);
 }
 
-export function decodeExplore(raw: unknown): ExploreData {
+export function decodeArticle(raw: unknown): AppArticle | null {
+  if (!isRecord(raw)) return null;
+  const rec = isRecord(raw.article) ? raw.article : raw;
+  const id = optStr(rec.id);
+  if (!id) return null;
+  const publishedAtMs = num(rec.publishedAt ?? rec.published_at, 0);
+  const isProof = bool(rec.isResolutionProof ?? rec.is_resolution_proof, false);
+  const orgAvatarUrl = optStr(rec.authorOrgAvatarUrl ?? rec.orgAvatarUrl);
+  const coverImageUrl = optStr(rec.imageUrl ?? rec.coverImageUrl);
+  const ticker = optStr(rec.ticker);
+  return {
+    id,
+    authorOrgId: optStr(rec.authorOrgId ?? rec.author_org_id),
+    title: str(rec.title, "Dispatch"),
+    summary: str(rec.summary, ""),
+    body: str(rec.body, str(rec.summary, "")),
+    source: str(rec.authorOrgName ?? rec.source, "Feed Wire"),
+    ...(orgAvatarUrl ? { orgAvatarUrl } : {}),
+    ...(coverImageUrl ? { coverImageUrl } : {}),
+    category: isProof ? "Resolution Proof" : optStr(rec.category) ?? undefined,
+    timestamp: typeof rec.timestamp === "string" ? rec.timestamp : formatTimeLabel(publishedAtMs),
+    ...(ticker ? { ticker } : {}),
+    relatedMarketId: optStr(rec.relatedMarketId ?? rec.related_market_id),
+    isResolutionProof: isProof,
+    publishedAtMs,
+  };
+}
+
+export function decodeArticles(raw: unknown): ReadonlyArray<AppArticle> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.articles ?? raw.items) : [];
+  return list.map(decodeArticle).filter((a): a is AppArticle => a !== null);
+}
+
+export function decodeExplore(raw: unknown, viewerAccountId?: string | null): ExploreData {
   const rec = isRecord(raw) ? raw : {};
   const trending = decodeTrendingList(rec.trending);
-
-  const articles = arr(rec.articles)
-    .map((a): AppArticle | null => {
-      if (!isRecord(a)) return null;
-      const id = optStr(a.id);
-      if (!id) return null;
-      const publishedAt = num(a.publishedAt ?? a.published_at, 0);
-      const isProof = bool(a.isResolutionProof ?? a.is_resolution_proof, false);
-      return {
-        id,
-        title: str(a.title, "Dispatch"),
-        summary: str(a.summary, ""),
-        body: str(a.body, str(a.summary, "")),
-        source: str(a.authorOrgName ?? a.source, "Feed Wire"),
-        category: isProof ? "Resolution Proof" : optStr(a.category) ?? undefined,
-        timestamp: typeof a.timestamp === "string" ? a.timestamp : formatTimeLabel(publishedAt),
-        ...(optStr(a.ticker) ? { ticker: optStr(a.ticker) ?? undefined } : {}),
-        relatedMarketId: optStr(a.relatedMarketId ?? a.related_market_id),
-        isResolutionProof: isProof,
-      };
-    })
-    .filter((a): a is AppArticle => a !== null);
+  const articles = decodeArticles(rec.articles);
 
   const searchRec = isRecord(rec.search) ? rec.search : {};
-  const posts = decodePosts(searchRec.posts);
+  const posts = decodePosts(searchRec.posts, viewerAccountId);
   const accounts = arr(searchRec.accounts)
     .map((u): ExploreAccountHit | null => {
       if (!isRecord(u)) return null;
@@ -750,6 +1007,7 @@ export function decodeExplore(raw: unknown): ExploreData {
         handle,
         displayName: str(u.displayName, handle),
         bio: str(u.bio, ""),
+        avatarUrl: optStr(u.avatarUrl ?? u.avatar_url),
       };
     })
     .filter((u): u is ExploreAccountHit => u !== null);
@@ -764,6 +1022,8 @@ export function decodeExplore(raw: unknown): ExploreData {
         name: str(a.name, username),
         tier: str(a.tier, "NPC"),
         description: str(a.description, ""),
+        avatarUrl: optStr(a.avatarUrl ?? a.avatar_url ?? a.profileImageUrl),
+        isParody: bool(a.isParody, true),
       };
     })
     .filter((a): a is ExploreActorHit => a !== null);
@@ -778,11 +1038,34 @@ export function decodeExplore(raw: unknown): ExploreData {
         ticker: optStr(o.ticker),
         orgType: str(o.orgType, "org"),
         description: str(o.description, ""),
+        avatarUrl: optStr(o.avatarUrl ?? o.avatar_url ?? o.imageUrl),
+        initialPriceCents: typeof o.initialPriceCents === "number" ? o.initialPriceCents : null,
       };
     })
     .filter((o): o is ExploreOrgHit => o !== null);
 
   return { trending, articles, posts, accounts, actors, organizations };
+}
+
+function decodeChatMembers(raw: unknown): ReadonlyArray<AppChatMember> {
+  return arr(raw)
+    .map((m): AppChatMember | null => {
+      if (!isRecord(m)) return null;
+      const memberId = optStr(m.memberId ?? m.member_id);
+      const handle = optStr(m.handle);
+      if (!memberId && !handle) return null;
+      const rawRole = str(m.role, "member");
+      const role: AppChatMember["role"] = rawRole === "owner" ? "owner" : rawRole === "admin" ? "admin" : "member";
+      return {
+        memberId: memberId ?? handle ?? "",
+        memberKind: str(m.memberKind ?? m.member_kind) === "npc" ? "npc" : "user",
+        handle: handle ?? memberId ?? "user",
+        displayName: str(m.displayName ?? m.display_name, handle ?? memberId ?? "User"),
+        avatarUrl: optStr(m.avatarUrl ?? m.avatar_url),
+        role,
+      };
+    })
+    .filter((m): m is AppChatMember => m !== null);
 }
 
 export function decodeChats(raw: unknown, viewerId: string): ReadonlyArray<AppChatSummary> {
@@ -799,15 +1082,21 @@ export function decodeChats(raw: unknown, viewerId: string): ReadonlyArray<AppCh
           ? "UserGroup"
           : "Direct";
       const createdBy = str(c.createdBy ?? c.created_by, "");
-      const memberCount = num(c.memberCount, arr(c.members).length);
+      const members = decodeChatMembers(c.members);
+      const peer = members.find((m) => m.memberId !== viewerId) ?? members[0] ?? null;
+      const memberCount = num(c.memberCount, members.length);
       return {
         id,
         chatType,
-        title: str(c.title, "Chat"),
-        subtitle: optStr(c.tier) ? `Tier ${str(c.tier)}` : chatType === "Direct" ? "Direct message" : "Group chat",
+        title: str(c.title, peer?.displayName ?? "Chat"),
+        subtitle: optStr(c.tier) ? `Tier ${str(c.tier)}` : chatType === "Direct" && peer ? `@${peer.handle}` : chatType === "Direct" ? "Direct message" : "Group chat",
         memberCount,
         unreadCount: num(c.unreadCount, 0),
         lastMessagePreview: optStr(c.lastMessagePreview),
+        lastMessageAt: typeof c.lastMessageAt === "number" ? c.lastMessageAt : null,
+        peerAvatarUrl: peer?.avatarUrl ?? null,
+        peerHandle: chatType === "Direct" ? peer?.handle ?? null : null,
+        members,
         isOwner: createdBy !== "" && createdBy === viewerId,
         isBlocked: bool(c.isBlocked, false),
       };
@@ -825,6 +1114,7 @@ export function decodeChatMessages(raw: unknown, viewerId: string): ReadonlyArra
       const senderId = str(m.senderId ?? m.sender_id, "");
       const senderHandle = str(m.senderHandle ?? m.sender_handle, senderId);
       const createdAtMs = num(m.createdAt ?? m.created_at, 0);
+      const senderAvatarUrl = optStr(m.senderAvatarUrl ?? m.sender_avatar_url);
       const reactions = arr(m.reactions)
         .map((r) => {
           if (!isRecord(r)) return null;
@@ -837,6 +1127,7 @@ export function decodeChatMessages(raw: unknown, viewerId: string): ReadonlyArra
         id,
         senderName: str(m.senderDisplayName ?? m.senderName, senderHandle),
         senderHandle,
+        ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
         isNpc: str(m.senderKind ?? m.sender_kind) === "npc" || bool(m.isNpc, false),
         isOwn: senderId !== "" && senderId === viewerId,
         timestamp: typeof m.timestamp === "string" ? m.timestamp : formatTimeLabel(createdAtMs),
@@ -859,6 +1150,7 @@ export function decodeAlphaInvites(raw: unknown): ReadonlyArray<AppAlphaInvite> 
         chatId: str(inv.chatId, ""),
         actorHandle: str(inv.actorHandle, "npc"),
         actorDisplayName: str(inv.actorDisplayName, "Character"),
+        actorAvatarUrl: optStr(inv.actorAvatarUrl ?? inv.actor_avatar_url),
         chatTitle: str(inv.chatTitle, "Alpha Group"),
         tier: optStr(inv.tier),
         status: str(inv.status, "pending"),
@@ -880,6 +1172,7 @@ function toNotificationKind(rawKind: string): NotificationKind {
     case "SocialFollow":
       return "SocialFollow";
     case "group_invite":
+    case "alpha_invite":
     case "GroupInvite":
       return "GroupInvite";
     case "market_resolved":
@@ -893,33 +1186,46 @@ function toNotificationKind(rawKind: string): NotificationKind {
   }
 }
 
-export function decodeNotifications(raw: unknown): ReadonlyArray<AppNotification> {
+export function decodeNotifications(raw: unknown): AppNotificationsPayload {
   const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.notifications ?? raw.items) : [];
-  return list
+  const items = list
     .map((n): AppNotification | null => {
       if (!isRecord(n)) return null;
       const id = optStr(n.id);
       if (!id) return null;
       const kind = toNotificationKind(str(n.kind, "reply"));
       const createdAtMs = num(n.createdAt ?? n.created_at, 0);
+      const actorName = optStr(n.actorName ?? n.actor_name);
+      const actorHandle = optStr(n.actorHandle ?? n.actor_handle);
+      const actorAvatarUrl = optStr(n.actorAvatarUrl ?? n.actor_avatar_url);
+      const detail = optStr(n.body ?? n.detail);
+      const inviteId = optStr(n.inviteId ?? n.invite_id);
+      const chatId = optStr(n.chatId ?? n.chat_id);
+      const read = bool(n.isRead ?? n.read, false);
       return {
         postId: optStr(n.postId ?? n.post_id),
         marketId: optStr(n.marketId ?? n.market_id),
+        chatId,
+        inviteId,
         isGameOnly: bool(n.isGameOnly ?? n.is_game_only, kind === "MarketResolved" || kind === "PnLDigest"),
         item: {
           id,
           kind,
           title: str(n.title, "Notification"),
-          ...(optStr(n.body ?? n.detail) ? { detail: optStr(n.body ?? n.detail) ?? undefined } : {}),
-          ...(optStr(n.actorName) ? { actorName: optStr(n.actorName) ?? undefined } : {}),
-          ...(optStr(n.actorHandle) ? { actorHandle: optStr(n.actorHandle) ?? undefined } : {}),
+          ...(detail ? { detail } : {}),
+          ...(actorName ? { actorName } : {}),
+          ...(actorHandle ? { actorHandle } : {}),
+          ...(actorAvatarUrl ? { actorAvatarUrl } : {}),
           timestamp: typeof n.timestamp === "string" ? n.timestamp : formatTimeLabel(createdAtMs),
-          read: bool(n.isRead ?? n.read, false),
-          invitePending: bool(n.invitePending, false),
+          read,
+          invitePending: bool(n.invitePending, kind === "GroupInvite" && Boolean(inviteId) && !read),
         },
       };
     })
     .filter((n): n is AppNotification => n !== null);
+  const unreadFallback = items.filter((n) => !n.item.read).length;
+  const unreadCount = isRecord(raw) && typeof raw.unreadCount === "number" ? raw.unreadCount : unreadFallback;
+  return { items, unreadCount };
 }
 
 export function decodeProfileBundle(raw: unknown, viewerAccountId: string | null): AppProfileBundle | null {
@@ -931,19 +1237,46 @@ export function decodeProfileBundle(raw: unknown, viewerAccountId: string | null
   const activeClient = optStr(p.activeAgentClientName ?? p.connectedClient);
   const balanceCents = typeof p.balanceCents === "number" ? p.balanceCents : null;
   const isOwnProfile = viewerAccountId !== null && viewerAccountId === id;
+  const createdAtMs = num(p.createdAt ?? p.created_at, 0);
+  const joinedLabel = formatJoinedLabel(createdAtMs);
+  const avatarUrl = optStr(p.avatarUrl ?? p.avatar_url);
+  const bannerUrl = optStr(p.bannerUrl ?? p.banner_url);
+  const bio = optStr(p.bio);
+  const actorMetaRaw = isRecord(p.actorMeta) ? p.actorMeta : null;
+  const actorMeta: AppProfileActorMeta | null = actorMetaRaw
+    ? {
+        tier: str(actorMetaRaw.tier, ""),
+        affiliations: arr(actorMetaRaw.affiliations).filter((v): v is string => typeof v === "string"),
+      }
+    : null;
+  const orgMetaRaw = isRecord(p.orgMeta) ? p.orgMeta : null;
+  const orgMeta: AppProfileOrgMeta | null = orgMetaRaw
+    ? {
+        ticker: optStr(orgMetaRaw.ticker),
+        orgType: str(orgMetaRaw.orgType, "organization"),
+      }
+    : null;
   return {
     id,
     kind: str(p.kind, "user"),
     postsCount: num(p.postsCount, 0),
+    createdAtMs,
+    actorMeta,
+    orgMeta,
+    viewerFollowedBy: bool(p.viewerFollowedBy, false),
     viewerBlockedBy: bool(p.viewerBlockedBy, false),
-    posts: decodePosts(raw.posts),
+    tradeCount: typeof p.tradeCount === "number" ? p.tradeCount : null,
+    openPositionCount: typeof p.openPositionCount === "number" ? p.openPositionCount : null,
+    posts: decodePosts(raw.posts, viewerAccountId),
     postsNextCursor: optStr(raw.nextCursor),
     positions: decodePositions(raw.positions),
     summary: {
       displayName: str(p.displayName, handle),
       handle,
-      ...(optStr(p.avatarUrl) ? { avatarUrl: optStr(p.avatarUrl) ?? undefined } : {}),
-      ...(optStr(p.bio) ? { bio: optStr(p.bio) ?? undefined } : {}),
+      ...(avatarUrl ? { avatarUrl } : {}),
+      ...(bannerUrl ? { bannerUrl } : {}),
+      ...(bio ? { bio } : {}),
+      ...(joinedLabel ? { joinedLabel } : {}),
       isNpcParody: bool(p.isParody ?? p.isNpcParody, false),
       ...(activeClient ? { connectedClient: activeClient, connectedAgentMark: matchAgentLogo(activeClient) } : {}),
       followersCount: num(p.followersCount, 0),
@@ -957,21 +1290,43 @@ export function decodeProfileBundle(raw: unknown, viewerAccountId: string | null
   };
 }
 
-export function decodePointPacks(raw: unknown): ReadonlyArray<AppPointPack> {
-  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.packs ?? raw.items) : [];
+export function decodeFollowList(raw: unknown): ReadonlyArray<AppFollowListEntry> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.items ?? raw.followers ?? raw.following) : [];
   return list
-    .map((p): AppPointPack | null => {
-      if (!isRecord(p)) return null;
-      const id = optStr(p.id);
-      if (!id) return null;
+    .map((entry): AppFollowListEntry | null => {
+      if (!isRecord(entry)) return null;
+      const handle = optStr(entry.handle);
+      if (!handle) return null;
       return {
-        id,
-        name: str(p.name, id),
-        usd: num(p.usd, 0),
-        points: num(p.points, 0),
+        id: str(entry.id, handle),
+        kind: str(entry.kind, "user"),
+        handle,
+        displayName: str(entry.displayName, handle),
+        bio: str(entry.bio, ""),
+        avatarUrl: optStr(entry.avatarUrl ?? entry.avatar_url),
+        viewerFollows: bool(entry.viewerFollows, false),
+        isParody: bool(entry.isParody, false),
       };
     })
-    .filter((p): p is AppPointPack => p !== null);
+    .filter((entry): entry is AppFollowListEntry => entry !== null);
+}
+
+export function decodeModerationList(raw: unknown): ReadonlyArray<AppModerationEntry> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.items) : [];
+  return list
+    .map((entry): AppModerationEntry | null => {
+      if (!isRecord(entry)) return null;
+      const handle = optStr(entry.handle);
+      if (!handle) return null;
+      return {
+        id: str(entry.id ?? entry.accountId, handle),
+        handle,
+        displayName: str(entry.displayName, handle),
+        avatarUrl: optStr(entry.avatarUrl ?? entry.avatar_url),
+        bio: str(entry.bio, ""),
+      };
+    })
+    .filter((entry): entry is AppModerationEntry => entry !== null);
 }
 
 function toUiHostId(raw: string): AgentHostId | null {

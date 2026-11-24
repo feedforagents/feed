@@ -14,6 +14,7 @@ import {
   checkAndConsumeRateLimit,
   checkAndConsumeRateLimitInTx,
   completePhoneOnboarding,
+  confirmPhoneChange,
   createAuthorizationCode,
   deleteAccountSelfServe,
   exchangeOAuthToken,
@@ -26,6 +27,8 @@ import {
   rateLimitScopeKey,
   recordAgentAttribution,
   registerDynamicClient,
+  requestPhoneChange,
+  revokeSession,
   signInReviewerPassword,
   signOutEverywhere,
   startDeviceAuthorization,
@@ -165,7 +168,7 @@ effect function provisionReviewerAccount(handle: string, password: string) {
   return accountId
 }
 
-it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out everywhere, and 30-day deletion cooldown (spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code"; spec/auth/phone.md, "Codes expire in 10 minutes, lock after 5 wrong attempts, and verify without leaking secrets"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Onboarding requires username, 18+ self-attestation, and Terms, and issues 100 pts once per verified phone"; spec/auth/phone.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the phone hash for 30 days"; spec/auth/phone.md, "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts"; spec/auth/phone.md, "Username and password sign-in is admitted solely when `isReviewer` is true (D-29)")', () => effect {
+it.effect('Phone auth onboarding, lockout, reviewer password gate, session revocation, phone change gate, sign-out everywhere, and 30-day deletion cooldown (spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code"; spec/auth/phone.md, "Codes expire in 10 minutes, lock after 5 wrong attempts, and verify without leaking secrets"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Onboarding requires username, 18+ self-attestation, and Terms, and issues 100 pts once per verified phone"; spec/auth/phone.md, "Changing phone requires verifying the old phone or support recovery and an unused new number"; spec/auth/phone.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the phone hash for 30 days"; spec/auth/phone.md, "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts"; spec/auth/phone.md, "Username and password sign-in is admitted solely when `isReviewer` is true (D-29)")', () => effect {
   try TestClock.setTime(Date.now())
   try withFeedStore(effect {
     const phone = "+14155550101"
@@ -221,7 +224,18 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
       password: "reviewer-pass-123",
       config: localnetConfig
     })
-    const reviewerSession = try authenticateSessionCookie(cookiePairOf(reviewerSignedIn.sessionCookieHeader), localnetConfig)
+    const reviewerCookie1 = cookiePairOf(reviewerSignedIn.sessionCookieHeader)
+    const reviewerSession = try authenticateSessionCookie(reviewerCookie1, localnetConfig)
+    const reviewerSignedInSecond = try signInReviewerPassword({
+      usernameOrId: "reviewer_demo",
+      password: "reviewer-pass-123",
+      config: localnetConfig
+    })
+    const reviewerCookie2 = cookiePairOf(reviewerSignedInSecond.sessionCookieHeader)
+    const revokedOnce = try revokeSession(reviewerSession?.sessionKey ?? "")
+    const revokedTwice = try revokeSession(reviewerSession?.sessionKey ?? "")
+    const reviewerCookie1AfterRevoke = try authenticateSessionCookie(reviewerCookie1, localnetConfig)
+    const reviewerCookie2AfterRevoke = try authenticateSessionCookie(reviewerCookie2, localnetConfig)
 
     const signedOut = try signOutEverywhere(onboarded.account.accountId)
     const afterSignOut = try authenticateSessionCookie(initialCookie, localnetConfig)
@@ -233,18 +247,77 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
     const reauthed = try verifyPhoneCode({ phoneE164: phone, code: reauthCode, config: localnetConfig })
     if (reauthed.needsOnboarding) return try Effect.die("Expected existing account sign-in")
     const reauthedCookie = cookiePairOf(reauthed.sessionCookieHeader)
+    const reauthedSession = try authenticateSessionCookie(reauthedCookie, localnetConfig)
+    if (reauthedSession === null) return try Effect.die("Expected authenticated re-auth session")
+
+    const newPhone = "+14155550177"
+    const phoneChangeMissingProof = try refusedCode(requestPhoneChange({
+      accountId: onboarded.account.accountId,
+      newPhoneE164: newPhone,
+      config: localnetConfig
+    }))
+    const phoneChangeExplicitFalse = try refusedCode(requestPhoneChange({
+      accountId: onboarded.account.accountId,
+      newPhoneE164: newPhone,
+      authAt: reauthedSession.authAt,
+      oldPhoneVerifiedOrRecovery: false,
+      config: localnetConfig
+    }))
+    try TestClock.adjust("11 minutes")
+    const phoneChangeStaleAuthAt = try refusedCode(requestPhoneChange({
+      accountId: onboarded.account.accountId,
+      newPhoneE164: newPhone,
+      authAt: reauthedSession.authAt,
+      config: localnetConfig
+    }))
+    const phoneChangeStaleCookie = try refusedCode(requestPhoneChange({
+      accountId: onboarded.account.accountId,
+      newPhoneE164: newPhone,
+      cookieHeader: reauthedCookie,
+      config: localnetConfig
+    }))
+    const phoneChangeViaRecovery = try requestPhoneChange({
+      accountId: onboarded.account.accountId,
+      newPhoneE164: newPhone,
+      oldPhoneVerifiedOrRecovery: true,
+      config: localnetConfig
+    })
+    const recoveryChangeCode = getLoopbackCode(newPhone, localnetConfig)
+    if (recoveryChangeCode === undefined) return try Effect.die("Missing phone-change loopback code")
+    const phoneChanged = try confirmPhoneChange({
+      accountId: onboarded.account.accountId,
+      newPhoneE164: newPhone,
+      code: recoveryChangeCode,
+      config: localnetConfig
+    })
+    const changedCookie = cookiePairOf(phoneChanged.sessionCookieHeader)
+    const changedSession = try authenticateSessionCookie(changedCookie, localnetConfig)
+    if (changedSession === null) return try Effect.die("Expected authenticated phone-changed session")
+    const recentPhoneChange = try requestPhoneChange({
+      accountId: onboarded.account.accountId,
+      newPhoneE164: "+14155550178",
+      cookieHeader: changedCookie,
+      config: localnetConfig
+    })
 
     const peer = try onboardViaPhone("+14155550199", "peer_user")
     const aliceId = onboarded.account.accountId
     const peerId = peer.account.accountId
     const seedNow = try Clock.currentTimeMillis
+    const actorRows = try sqlQuery("SELECT id FROM feed_actors ORDER BY id ASC LIMIT 1")
+    const seededActorId = toText(actorRows[0]?.id)
+    if (seededActorId === undefined) return try Effect.die("Missing seeded actor for cooldown test")
     try sqlQuery(
-      `INSERT INTO feed_posts (id, author_id, author_kind, content, like_count, repost_count, reply_count, created_at)
+      `INSERT INTO feed_posts (id, author_id, author_kind, content, reply_to_post_id, like_count, repost_count, reply_count, created_at)
        VALUES
-         ('post-shared', $1, 'user', 'Shared post', 2, 2, 0, $2),
-         ('post-solo', $1, 'user', 'Solo post', 1, 1, 0, $2),
-         ('post-floor', $1, 'user', 'Zero floor post', 0, 0, 0, $2)`,
-      [peerId, seedNow]
+         ('post-shared', $1, 'user', 'Shared post', NULL, 2, 2, 3, $3),
+         ('post-solo', $1, 'user', 'Solo post', NULL, 1, 1, 0, $3),
+         ('post-floor', $1, 'user', 'Zero floor post', NULL, 0, 0, 0, $3),
+         ('post-alice-root', $2, 'user', 'Alice post', NULL, 0, 0, 0, $3),
+         ('post-alice-reply-1', $2, 'user', 'Alice reply 1', 'post-shared', 0, 0, 0, $3),
+         ('post-alice-reply-2', $2, 'user', 'Alice reply 2', 'post-shared', 0, 0, 0, $3),
+         ('post-peer-reply', $1, 'user', 'Peer reply', 'post-shared', 0, 0, 0, $3)`,
+      [peerId, aliceId, seedNow]
     )
     for (const engagementTable of ["feed_post_likes", "feed_post_reposts"]) {
       try sqlQuery(
@@ -264,6 +337,29 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
          ($2, $1, 'user', $3),
          ($2, 'npc-1', 'npc', $3)`,
       [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_blocks (blocker_id, blocked_id, created_at)
+       VALUES
+         ($1, $2, $3),
+         ($2, $1, $3),
+         ($2, 'npc-1', $3)`,
+      [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_mutes (muter_id, muted_id, created_at)
+       VALUES
+         ($1, $2, $3),
+         ($2, $1, $3),
+         ($2, 'npc-1', $3)`,
+      [aliceId, peerId, seedNow]
+    )
+    try sqlQuery(
+      `INSERT INTO feed_alpha_invite_cooldowns (actor_id, account_id, decline_count, next_eligible_at, updated_at)
+       VALUES
+         ($1, $2, 1, $4, $5),
+         ($1, $3, 1, $4, $5)`,
+      [seededActorId, aliceId, peerId, seedNow + 60_000, seedNow]
     )
     try sqlQuery(
       `INSERT INTO feed_chats (id, kind, name, created_by, created_at)
@@ -308,11 +404,11 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
 
     const deleted = try deleteAccountSelfServe({
       accountId: aliceId,
-      cookieHeader: reauthedCookie,
+      cookieHeader: changedCookie,
       config: localnetConfig
     })
     const postCountsAfterDelete = try sqlQuery(
-      "SELECT id, like_count, repost_count FROM feed_posts WHERE id IN ('post-shared', 'post-solo', 'post-floor') ORDER BY id ASC"
+      "SELECT id, like_count, repost_count, reply_count, deleted_at IS NOT NULL AS is_deleted FROM feed_posts WHERE id IN ('post-shared', 'post-solo', 'post-floor', 'post-alice-root', 'post-alice-reply-1', 'post-alice-reply-2', 'post-peer-reply') ORDER BY id ASC"
     )
     const remainingLikes = try sqlQuery(
       "SELECT post_id, account_id FROM feed_post_likes WHERE post_id IN ('post-shared', 'post-solo', 'post-floor') ORDER BY post_id, account_id"
@@ -322,6 +418,18 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
     )
     const remainingFollows = try sqlQuery(
       "SELECT follower_id, target_id FROM feed_follows WHERE follower_id IN ($1, $2) OR target_id IN ($1, $2) ORDER BY follower_id, target_id",
+      [aliceId, peerId]
+    )
+    const remainingBlocks = try sqlQuery(
+      "SELECT blocker_id, blocked_id FROM feed_blocks WHERE blocker_id IN ($1, $2) OR blocked_id IN ($1, $2) ORDER BY blocker_id, blocked_id",
+      [aliceId, peerId]
+    )
+    const remainingMutes = try sqlQuery(
+      "SELECT muter_id, muted_id FROM feed_mutes WHERE muter_id IN ($1, $2) OR muted_id IN ($1, $2) ORDER BY muter_id, muted_id",
+      [aliceId, peerId]
+    )
+    const remainingCooldowns = try sqlQuery(
+      "SELECT account_id FROM feed_alpha_invite_cooldowns WHERE account_id IN ($1, $2) ORDER BY account_id",
       [aliceId, peerId]
     )
     const remainingChatMembers = try sqlQuery(
@@ -336,15 +444,15 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
     const remainingNotifications = try sqlQuery(
       "SELECT id FROM feed_notifications WHERE id IN ('notif-recv', 'notif-actor', 'notif-peer') ORDER BY id"
     )
-    const afterDeleteSession = try authenticateSessionCookie(reauthedCookie, localnetConfig)
+    const afterDeleteSession = try authenticateSessionCookie(changedCookie, localnetConfig)
     const profileAfterDelete = try refusedCode(getAccountProfile(aliceId))
-    const cooldownBlocked = try refusedCode(startPhoneVerification({ phoneE164: phone, config: localnetConfig }))
+    const cooldownBlocked = try refusedCode(startPhoneVerification({ phoneE164: newPhone, config: localnetConfig }))
 
     try TestClock.adjust("30 days")
-    try startPhoneVerification({ phoneE164: phone, config: localnetConfig })
-    const postCooldownCode = getLoopbackCode(phone, localnetConfig)
+    try startPhoneVerification({ phoneE164: newPhone, config: localnetConfig })
+    const postCooldownCode = getLoopbackCode(newPhone, localnetConfig)
     if (postCooldownCode === undefined) return try Effect.die("Missing post-cooldown loopback code")
-    const postCooldownVerified = try verifyPhoneCode({ phoneE164: phone, code: postCooldownCode, config: localnetConfig })
+    const postCooldownVerified = try verifyPhoneCode({ phoneE164: newPhone, code: postCooldownCode, config: localnetConfig })
 
     try check(() => assert.deepStrictEqual(
       {
@@ -360,6 +468,7 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
           onboarded.account.handle,
           onboarded.account.balanceCents,
           onboarded.account.startingGrantCents,
+          "purchasedCents" in onboarded.account,
           authedInitial?.accountId === onboarded.account.accountId,
           authedInitial?.balanceCents,
           authedInitial?.sessionsEpoch
@@ -371,6 +480,21 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
           reviewerSession?.handle,
           reviewerSession?.isReviewer
         ],
+        singleSessionRevoke: [
+          revokedOnce.revoked,
+          revokedTwice.revoked,
+          reviewerCookie1AfterRevoke,
+          reviewerCookie2AfterRevoke?.handle
+        ],
+        phoneChange: [
+          phoneChangeMissingProof,
+          phoneChangeExplicitFalse,
+          phoneChangeStaleAuthAt,
+          phoneChangeStaleCookie,
+          phoneChangeViaRecovery.last2,
+          phoneChanged.account.phoneLast2,
+          recentPhoneChange.last2
+        ],
         signOut: [signedOut.sessionsEpoch, afterSignOut],
         deletion: [
           deleted.deleted,
@@ -380,10 +504,19 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
           cooldownBlocked
         ],
         deletionCleanup: {
-          postCounts: postCountsAfterDelete.map((row) => [toText(row.id), toInt(row.like_count), toInt(row.repost_count)]),
+          postCounts: postCountsAfterDelete.map((row) => [
+            toText(row.id),
+            toInt(row.like_count),
+            toInt(row.repost_count),
+            toInt(row.reply_count),
+            row.is_deleted === true
+          ]),
           likes: remainingLikes.map((row) => [toText(row.post_id), toText(row.account_id) === peerId]),
           reposts: remainingReposts.map((row) => [toText(row.post_id), toText(row.account_id) === peerId]),
           follows: remainingFollows.map((row) => [toText(row.follower_id) === peerId, toText(row.target_id)]),
+          blocks: remainingBlocks.map((row) => [toText(row.blocker_id) === peerId, toText(row.blocked_id)]),
+          mutes: remainingMutes.map((row) => [toText(row.muter_id) === peerId, toText(row.muted_id)]),
+          alphaCooldowns: remainingCooldowns.map((row) => toText(row.account_id) === peerId),
           chatMembers: remainingChatMembers.map((row) => toText(row.member_id) === peerId),
           reactions: remainingReactions.map((row) => toText(row.account_id) === peerId),
           invites: remainingInvites.map((row) => toText(row.id)),
@@ -401,19 +534,36 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
         rapidResend: "rate_limited:sms_send",
         verifiedOnboarding: [true, "01"],
         underageRefusal: "attestation_required",
-        onboardedGrant: ["alice", 10_000, 10_000, true, 10_000, 1],
+        onboardedGrant: ["alice", 10_000, 10_000, false, true, 10_000, 1],
         reviewer: ["reviewer_signin_refused", "reviewer_signin_refused", true, "reviewer_demo", true],
+        singleSessionRevoke: [true, false, null, "reviewer_demo"],
+        phoneChange: [
+          "old_phone_verification_required",
+          "old_phone_verification_required",
+          "old_phone_verification_required",
+          "old_phone_verification_required",
+          "77",
+          "77",
+          "78"
+        ],
         signOut: [2, null],
         deletion: [true, true, null, "account_not_found", "phone_cooldown"],
         deletionCleanup: {
           postCounts: [
-            ["post-floor", 0, 0],
-            ["post-shared", 1, 1],
-            ["post-solo", 0, 0]
+            ["post-alice-reply-1", 0, 0, 0, true],
+            ["post-alice-reply-2", 0, 0, 0, true],
+            ["post-alice-root", 0, 0, 0, true],
+            ["post-floor", 0, 0, 0, false],
+            ["post-peer-reply", 0, 0, 0, false],
+            ["post-shared", 1, 1, 1, false],
+            ["post-solo", 0, 0, 0, false]
           ],
           likes: [["post-shared", true]],
           reposts: [["post-shared", true]],
           follows: [[true, "npc-1"]],
+          blocks: [[true, "npc-1"]],
+          mutes: [[true, "npc-1"]],
+          alphaCooldowns: [true],
           chatMembers: [true],
           reactions: [true],
           invites: ["inv-peer"],

@@ -55,16 +55,16 @@ import {
   closePerpPosition,
   getAccountEconomy,
   getAccountPnlHistory,
-  getLeaderboardPage,
-  getLeaderboardViewerRank,
+  getFilteredLeaderboardPage,
+  getFilteredLeaderboardViewerRank,
   getPerpMarket,
   getPerpPriceHistory,
   getPointLedger,
   getPredictionMarket,
   getPredictionPriceHistory,
   getUserPositions,
+  listAssetTrades,
   listClosedPositions,
-  listMarketTrades,
   listPerpMarkets,
   listPredictionMarkets,
   listUserTrades,
@@ -1457,7 +1457,7 @@ effect function handleMarketRoute(
   const predTradesMatch = /^\/api\/markets\/prediction\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && predTradesMatch !== null) {
     return jsonResponse({
-      trades: try listMarketTrades({
+      trades: try listAssetTrades({
         marketKind: "prediction",
         marketRef: decodeSegment(predTradesMatch[1] ?? ""),
         limit: clampIntQuery(url, "limit", 50, 1, 200)
@@ -1532,7 +1532,7 @@ effect function handleMarketRoute(
   const perpTradesMatch = /^\/api\/markets\/perp\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && perpTradesMatch !== null) {
     return jsonResponse({
-      trades: try listMarketTrades({
+      trades: try listAssetTrades({
         marketKind: "perp",
         marketRef: decodeSegment(perpTradesMatch[1] ?? ""),
         limit: clampIntQuery(url, "limit", 50, 1, 200)
@@ -1604,14 +1604,14 @@ effect function handleMarketRoute(
     const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
     const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
     const pageSize = clampIntQuery(url, "pageSize", clampIntQuery(url, "limit", 50, 1, 200), 1, 200)
-    return jsonResponse(try getLeaderboardViewerRank(session.accountId, { filter, timeframe, pageSize }))
+    return jsonResponse(try getFilteredLeaderboardViewerRank(session.accountId, { filter, timeframe, pageSize }))
   }
   if (method === "GET" && path === "/api/leaderboard") {
     const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
     const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
     const page = clampIntQuery(url, "page", 1, 1, 10_000)
     const pageSize = clampIntQuery(url, "pageSize", clampIntQuery(url, "limit", 50, 1, 200), 1, 200)
-    const result = try getLeaderboardPage({ filter, timeframe, page, pageSize })
+    const result = try getFilteredLeaderboardPage({ filter, timeframe, page, pageSize })
     return jsonResponse({
       entries: result.entries,
       leaderboard: result.entries,

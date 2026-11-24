@@ -30,7 +30,7 @@ import {
   listPerpPositions,
   listPredictionMarkets,
   openPerpPosition,
-  previewPostOpenMarkPriceCents,
+  previewPerpOrder,
   sellPredictionShares,
   type PerpMarketView,
   type PredictionMarketView
@@ -146,28 +146,6 @@ export { MCP_TOOL_DEFINITIONS, type McpToolDefinition, type McpToolName, type Mc
 const DEFAULT_DEVICE_CLIENT_ID = "https://feed.fun/clients/mcp-device"
 const DEFAULT_DEVICE_CLIENT_NAME = "Feed MCP Agent"
 const MIN_ORDER_SIZE_CENTS = 1000
-const MAINTENANCE_MARGIN_BPS = 250
-const TRADING_FEE_BPS = 10
-const BPS_DENOMINATOR = 10_000
-
-function maintenanceMarginCents(sizeCents: number): number {
-  return Math.max(1, Math.floor((sizeCents * MAINTENANCE_MARGIN_BPS) / BPS_DENOMINATOR))
-}
-
-function computeLiquidationPriceCents(input: {
-  readonly side: "long" | "short"
-  readonly entryPriceCents: number
-  readonly marginCents: number
-  readonly sizeCents: number
-}): number {
-  if (input.sizeCents <= 0 || input.entryPriceCents <= 0) return 1
-  const maint = maintenanceMarginCents(input.sizeCents)
-  const netBuffer = input.marginCents - maint
-  const raw = input.side === "long"
-    ? Math.floor((input.entryPriceCents * (input.sizeCents - netBuffer)) / input.sizeCents)
-    : Math.floor((input.entryPriceCents * (input.sizeCents + netBuffer)) / input.sizeCents)
-  return Math.max(1, raw)
-}
 
 effect function maybePublishFeedEvent(event: FeedRealtimeEvent): void!! {
   try publishFeedEvent(event)
@@ -784,35 +762,27 @@ effect function executePublicMarketTool(
       }
     }
     case "get_leaderboard": {
-      const metric = asOptionalString(args.metric) ?? "net_profit"
+      const rawMetric = asOptionalString(args.metric) ?? "net_profit"
+      const metric = rawMetric === "win_rate" || rawMetric === "volume" || rawMetric === "return_pct" ? rawMetric : "net_profit"
       const limit = clampCount(asOptionalInt(args.limit), 25, 100)
-      const entries = [...(try getLeaderboard(100))]
-      if (metric === "win_rate") {
-        entries.sort((a, b) => b.winRate - a.winRate || b.netProfitCents - a.netProfitCents)
-      } else if (metric === "volume") {
-        entries.sort((a, b) => b.volumeCents - a.volumeCents || b.netProfitCents - a.netProfitCents)
-      }
+      const page = try getLeaderboard({ scope: "players", metric, page: 1, pageSize: limit })
       return {
         metric,
         currency: CURRENCY_DISCLAIMER,
         rankingRule: "Ordered by net profit (equity - starting grant), never raw point balance.",
-        entries: entries.slice(0, limit).map((entry, idx) => {
-          const investedCents = entry.startingGrantCents
-          const returnPct = investedCents > 0 ? Math.round((entry.netProfitCents / investedCents) * 10_000) / 100 : 0
-          return {
-            rank: metric === "net_profit" ? entry.rank : idx + 1,
-            accountId: entry.accountId,
-            handle: entry.handle,
-            displayName: entry.displayName,
-            netProfitPts: toPtsNumber(entry.netProfitCents),
-            netProfitDisplay: formatPtsLabeled(entry.netProfitCents),
-            equityPts: toPtsNumber(entry.equityCents),
-            volumePts: toPtsNumber(entry.volumeCents),
-            returnPct,
-            winRate: entry.winRate,
-            tradeCount: entry.tradeCount
-          }
-        })
+        entries: page.entries.map((entry) => ({
+          rank: entry.rank,
+          accountId: entry.accountId,
+          handle: entry.handle,
+          displayName: entry.displayName,
+          netProfitPts: toPtsNumber(entry.netProfitCents),
+          netProfitDisplay: formatPtsLabeled(entry.netProfitCents),
+          equityPts: toPtsNumber(entry.equityCents),
+          volumePts: toPtsNumber(entry.volumeCents),
+          returnPct: entry.returnPct,
+          winRate: entry.winRate,
+          tradeCount: entry.tradeCount
+        }))
       }
     }
   }
@@ -1000,19 +970,11 @@ effect function executeProtectedAccountTool(
           message: `Open position already exists on ${market.ticker}.`
         })
       }
-      const estimatedFeeCents = Math.floor((sizeCents * TRADING_FEE_BPS + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR)
-      const postOpenMarkCents = previewPostOpenMarkPriceCents({
-        indexPriceCents: market.indexPriceCents,
-        longOiCents: market.longOiCents,
-        shortOiCents: market.shortOiCents,
+      const preview = try previewPerpOrder({
+        ticker: market.ticker,
         side,
-        sizeCents
-      })
-      const estimatedLiqCents = computeLiquidationPriceCents({
-        side,
-        entryPriceCents: postOpenMarkCents,
-        marginCents: collateralCents,
-        sizeCents
+        collateralCents,
+        leverage
       })
       return {
         previewOnly: true,
@@ -1021,12 +983,12 @@ effect function executeProtectedAccountTool(
         leverage,
         collateralPts: toPtsNumber(collateralCents),
         notionalSizePts: toPtsNumber(sizeCents),
-        estimatedFeePts: toPtsNumber(estimatedFeeCents),
-        totalDebitPts: toPtsNumber(collateralCents + estimatedFeeCents),
-        entryMarkPricePts: toPtsNumber(postOpenMarkCents),
-        indexPricePts: toPtsNumber(market.indexPriceCents),
-        estimatedLiquidationPricePts: toPtsNumber(estimatedLiqCents),
-        fundingRateBps: market.fundingRateBps,
+        estimatedFeePts: toPtsNumber(preview.feeCents),
+        totalDebitPts: toPtsNumber(preview.totalDebitCents),
+        entryMarkPricePts: toPtsNumber(preview.executionPriceCents),
+        indexPricePts: toPtsNumber(preview.indexPriceCents),
+        estimatedLiquidationPricePts: toPtsNumber(preview.estimatedLiquidationPriceCents),
+        fundingRateBps: preview.fundingRateBps,
         currency: CURRENCY_DISCLAIMER
       }
     }
@@ -1160,9 +1122,11 @@ effect function executeProtectedMessagingTool(
       })
       const target = try getProfile(invited.memberId, caller.accountId, "game")
       return {
+        inviteId: invited.inviteId,
         chatId: invited.chatId,
         memberId: invited.memberId,
         handle: target.handle,
+        status: invited.status,
         added: invited.added
       }
     }

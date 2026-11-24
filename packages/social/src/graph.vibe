@@ -17,7 +17,8 @@ import {
   type ModerationReport,
   type ModerationState,
   type MuteRecord,
-  type Notification as SpecNotification
+  type Notification as SpecNotification,
+  type ReportCategory
 } from "../gen/social__moderation.effect.vibe"
 import { type FeedRealtimeEvent } from "./realtime.vibe"
 import {
@@ -26,7 +27,7 @@ import {
   freshId,
   insertNotificationTx,
   isBlockedBetweenTx,
-  loadSubjectProfilesMapTx,
+  loadProfilesByIdsTx,
   normalizeOptionalText,
   readViewerUiModeTx,
   resolveSubjectTx,
@@ -38,9 +39,10 @@ import {
   type ResolvedSubject,
   type SocialPresentationMode,
   type SubjectKind,
-  type SubjectProfile,
-  type SubjectRef
+  type SubjectProfile
 } from "./shared.vibe"
+
+export type { ReportCategory } from "../gen/social__moderation.effect.vibe"
 
 export type ProfileKind = SubjectKind
 
@@ -112,11 +114,14 @@ export interface MuteResult {
 
 export type ReportTargetKindInput = "account" | "post"
 
+export type ReportStatusFilter = "open" | "reviewed" | "dismissed" | "all"
+
 export interface ReportTargetInput {
   readonly reporterId: string
   readonly targetKind: ReportTargetKindInput
   readonly targetId: string
   readonly reason: string
+  readonly category?: ReportCategory
 }
 
 export interface ReportView {
@@ -124,9 +129,20 @@ export interface ReportView {
   readonly reporterId: string
   readonly targetKind: ReportTargetKindInput
   readonly targetId: string
+  readonly category: ReportCategory
   readonly reason: string
   readonly status: string
   readonly createdAt: number
+}
+
+export interface ListModerationReportsInput {
+  readonly status?: ReportStatusFilter
+  readonly limit?: number
+}
+
+export interface ResolveModerationReportInput {
+  readonly reportId: string
+  readonly status: "reviewed" | "dismissed"
 }
 
 export interface NotificationView {
@@ -142,6 +158,7 @@ export interface NotificationView {
   readonly marketId: string | null
   readonly chatId: string | null
   readonly inviteId: string | null
+  readonly invitePending: boolean
   readonly isRead: boolean
   readonly readAt: number | null
   readonly isGameOnly: boolean
@@ -150,6 +167,11 @@ export interface NotificationView {
 
 export interface MarkNotificationsReadResult {
   readonly markedCount: number
+  readonly unreadCount: number
+}
+
+export interface ClearNotificationsResult {
+  readonly clearedCount: number
   readonly unreadCount: number
 }
 
@@ -162,6 +184,10 @@ export interface FollowListEntry {
   readonly avatarUrl: string | null
   readonly viewerFollows: boolean
   readonly isParody: boolean
+}
+
+export interface ModerationListEntry extends FollowListEntry {
+  readonly createdAt: number
 }
 
 interface ModerationPairSnapshot {
@@ -601,11 +627,49 @@ export effect function unmuteAccount(muterId: string, targetHandleOrId: string):
   })
 }
 
+function normalizeReportCategory(raw: string | undefined): ReportCategory {
+  if (raw === "Spam" || raw === "Harassment" || raw === "Impersonation" || raw === "OtherViolation") {
+    return raw
+  }
+  return "OtherViolation"
+}
+
+function encodeStoredReportReason(category: ReportCategory, reason: string): string {
+  return `[${category}] ${reason}`
+}
+
+function decodeStoredReportReason(raw: string): { readonly category: ReportCategory; readonly reason: string } {
+  const match = /^\[(Spam|Harassment|Impersonation|OtherViolation)\]\s+([\s\S]*)$/.exec(raw)
+  if (match === null) {
+    return { category: "OtherViolation", reason: raw }
+  }
+  return {
+    category: normalizeReportCategory(match[1]),
+    reason: match[2] ?? ""
+  }
+}
+
+function rowToReportView(row: Row): ReportView {
+  const decoded = decodeStoredReportReason(toText(row.reason) ?? "")
+  const rawKind = toText(row.target_kind)
+  return {
+    id: toText(row.id) ?? "",
+    reporterId: toText(row.reporter_id) ?? "",
+    targetKind: rawKind === "account" ? "account" : "post",
+    targetId: toText(row.target_id) ?? "",
+    category: decoded.category,
+    reason: decoded.reason,
+    status: toText(row.status) ?? "open",
+    createdAt: safeInt(row.created_at, 0)
+  }
+}
+
 export effect function reportTarget(input: ReportTargetInput): ReportView!(SocialFailure | StoreFailure)!Store {
   const reason = input.reason.trim()
   if (reason === "" || reason.length > 1000) {
     throw new SocialFailure({ code: "InvalidInput", message: "Report reason must be between 1 and 1000 characters" })
   }
+  const category = normalizeReportCategory(input.category)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
@@ -648,7 +712,7 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
           targetKind: specTargetKind,
           targetUserId: targetOwnerId,
           targetPostId: specPostId,
-          category: "OtherViolation",
+          category,
           status: "PendingReview"
         }]
       : []
@@ -670,9 +734,10 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
       throw new SocialFailure({ code: "Conflict", message: "An open report already exists for this target" })
     }
     const id = freshId()
+    const storedReason = encodeStoredReportReason(category, reason)
     tx.query(
       "INSERT INTO feed_reports (id, reporter_id, target_id, target_kind, reason, status, created_at) VALUES ($1, $2, $3, $4, $5, 'open', $6)",
-      [id, reporter.id, resolvedTargetId, input.targetKind, reason, now]
+      [id, reporter.id, resolvedTargetId, input.targetKind, storedReason, now]
     ) catch effect (err) => {
       if (isUniqueViolationFailure(err)) {
         throw new SocialFailure({ code: "Conflict", message: "An open report already exists for this target" })
@@ -684,6 +749,7 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
       reporterId: reporter.id,
       targetKind: input.targetKind,
       targetId: resolvedTargetId,
+      category,
       reason,
       status: "open",
       createdAt: now
@@ -691,39 +757,64 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
   })
 }
 
-function lookupActorProfile(
-  profiles: ReadonlyMap<string, SubjectProfile>,
-  actorId: string | null
-): SubjectProfile | undefined {
-  if (actorId === null || actorId === "") return undefined
-  return profiles.get(`user:${actorId}`) ?? profiles.get(`org:${actorId}`) ?? profiles.get(`npc:${actorId}`)
+export effect function listModerationReports(
+  input: ListModerationReportsInput = {}
+): ReadonlyArray<ReportView>!StoreFailure!Store {
+  const effectiveLimit = clampLimit(input.limit, 50, 200)
+  const statusFilter = input.status ?? "open"
+  const store = try Store
+  const rows = try store.transaction((tx: Tx) =>
+    statusFilter === "all"
+      ? tx.query("SELECT * FROM feed_reports ORDER BY created_at DESC, id DESC LIMIT $1", [effectiveLimit])
+      : tx.query("SELECT * FROM feed_reports WHERE status = $1 ORDER BY created_at DESC, id DESC LIMIT $2", [statusFilter, effectiveLimit])
+  )
+  return rows.map(rowToReportView)
 }
 
-function rowToNotification(
-  row: Row,
-  actorProfiles: ReadonlyMap<string, SubjectProfile>,
-  inviteByActor: ReadonlyMap<string, { readonly inviteId: string; readonly chatId: string }>,
-  chatByActor: ReadonlyMap<string, string>
-): NotificationView {
+export effect function resolveModerationReport(
+  input: ResolveModerationReportInput
+): ReportView!(SocialFailure | StoreFailure)!Store {
+  if (input.reportId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Report ID is required" })
+  }
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      "UPDATE feed_reports SET status = $2 WHERE id = $1 RETURNING *",
+      [input.reportId, input.status]
+    )
+    const row = rows[0]
+    if (row === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: "Report not found" })
+    }
+    return rowToReportView(row)
+  })
+}
+
+interface HydratedNotificationMeta {
+  readonly actor: SubjectProfile | undefined
+  readonly chatId: string | null
+  readonly inviteId: string | null
+  readonly invitePending: boolean
+}
+
+function rowToNotification(row: Row, meta: HydratedNotificationMeta): NotificationView {
   const readAt = row.read_at === null || row.read_at === undefined ? null : safeInt(row.read_at, 0)
   const kind = toText(row.kind) ?? ""
-  const actorId = toText(row.actor_id) ?? null
-  const actor = lookupActorProfile(actorProfiles, actorId)
-  const inviteRef = kind === "group_invite" && actorId !== null ? inviteByActor.get(actorId) : undefined
-  const chatId = inviteRef?.chatId ?? (kind === "chat_message" && actorId !== null ? (chatByActor.get(actorId) ?? null) : null)
   return {
     id: toText(row.id) ?? "",
     kind,
     title: toText(row.title) ?? "",
     body: toText(row.body) ?? "",
-    actorId,
-    actorName: actor?.displayName ?? null,
-    actorHandle: actor?.handle ?? null,
-    actorAvatarUrl: actor?.avatarUrl ?? null,
+    actorId: toText(row.actor_id) ?? null,
+    actorName: meta.actor?.displayName ?? null,
+    actorHandle: meta.actor?.handle ?? null,
+    actorAvatarUrl: meta.actor?.avatarUrl ?? null,
     postId: toText(row.post_id) ?? null,
     marketId: toText(row.market_id) ?? null,
-    chatId,
-    inviteId: inviteRef?.inviteId ?? null,
+    chatId: meta.chatId,
+    inviteId: meta.inviteId,
+    invitePending: meta.invitePending,
     isRead: readAt !== null,
     readAt,
     isGameOnly: Boolean(row.is_game_only),
@@ -746,7 +837,7 @@ function notificationVisibilityWhereSql(mode: SocialPresentationMode): string {
   const modeFilter = mode === "social"
     ? " AND n.is_game_only = false AND n.kind NOT IN ('market_resolved', 'pnl_digest')"
     : ""
-  return `n.account_id = $1${modeFilter} AND (n.post_id IS NULL OR (p.id IS NOT NULL AND p.deleted_at IS NULL)) AND (n.actor_id IS NULL OR NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1)))`
+  return `n.account_id = $1${modeFilter} AND (n.post_id IS NULL OR (p.id IS NOT NULL AND p.deleted_at IS NULL)) AND (n.actor_id IS NULL OR (NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1)) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = n.actor_id)))`
 }
 
 export effect function listNotifications(
@@ -767,56 +858,159 @@ export effect function listNotifications(
       `SELECT n.* FROM feed_notifications n LEFT JOIN feed_posts p ON p.id = n.post_id WHERE ${notificationVisibilityWhereSql(effectiveMode)} ORDER BY n.created_at DESC, n.id DESC LIMIT $2`,
       [accountId, effectiveLimit]
     )
-    const actorIds = [...new Set(rows.map((r) => toText(r.actor_id)).filter((id): id is string => id !== undefined && id !== ""))]
-    const actorRefs: SubjectRef[] = actorIds.flatMap((id) => [
-      { id, kind: "user" as const },
-      { id, kind: "npc" as const },
-      { id, kind: "org" as const }
-    ])
-    const actorProfiles = actorRefs.length > 0 ? try loadSubjectProfilesMapTx(tx, actorRefs) : new Map<string, SubjectProfile>()
-    const inviteActorIds = [...new Set(rows.filter((r) => toText(r.kind) === "group_invite").map((r) => toText(r.actor_id)).filter((id): id is string => id !== undefined && id !== ""))]
-    const inviteByActor = new Map<string, { readonly inviteId: string; readonly chatId: string }>()
-    if (inviteActorIds.length > 0) {
+    if (rows.length === 0) return []
+    const actorIds = rows.map((r) => toText(r.actor_id) ?? "").filter(Boolean)
+    const actorProfiles = try loadProfilesByIdsTx(tx, actorIds)
+    const hasInviteRows = rows.some((r) => toText(r.kind) === "group_invite")
+    const inviteExact = new Map<string, { readonly id: string; readonly chatId: string; readonly pending: boolean }>()
+    const inviteLatestByInviter = new Map<string, { readonly id: string; readonly chatId: string; readonly pending: boolean }>()
+    if (hasInviteRows) {
       const inviteRows = try tx.query(
-        `SELECT DISTINCT ON (invited_by_id) id, chat_id, invited_by_id
-         FROM feed_group_invites
-         WHERE invited_account_id = $1 AND invited_by_id = ANY($2)
-         ORDER BY invited_by_id, created_at DESC`,
-        [accountId, inviteActorIds]
+        "SELECT id, chat_id, invited_by_id, status, created_at FROM feed_group_invites WHERE invited_account_id = $1 ORDER BY created_at DESC, id DESC",
+        [accountId]
       )
       for (const inv of inviteRows) {
-        const npcId = toText(inv.invited_by_id)
-        const inviteId = toText(inv.id)
-        const chatId = toText(inv.chat_id)
-        if (npcId !== undefined && inviteId !== undefined && chatId !== undefined) {
-          inviteByActor.set(npcId, { inviteId, chatId })
+        const inviter = toText(inv.invited_by_id) ?? ""
+        const createdAt = safeInt(inv.created_at, 0)
+        const entry = {
+          id: toText(inv.id) ?? "",
+          chatId: toText(inv.chat_id) ?? "",
+          pending: toText(inv.status) === "pending"
         }
+        const exactKey = `${inviter}:${createdAt}`
+        if (!inviteExact.has(exactKey)) inviteExact.set(exactKey, entry)
+        if (!inviteLatestByInviter.has(inviter)) inviteLatestByInviter.set(inviter, entry)
       }
     }
-    const chatActorIds = [...new Set(rows.filter((r) => toText(r.kind) === "chat_message").map((r) => toText(r.actor_id)).filter((id): id is string => id !== undefined && id !== ""))]
-    const chatByActor = new Map<string, string>()
-    if (chatActorIds.length > 0) {
-      const chatRows = try tx.query(
-        `SELECT DISTINCT ON (m2.member_id) m2.member_id AS actor_id, m1.chat_id
-         FROM feed_chat_members m1
-         INNER JOIN feed_chat_members m2 ON m2.chat_id = m1.chat_id AND m2.member_id = ANY($2)
-         INNER JOIN feed_chats c ON c.id = m1.chat_id
-         WHERE m1.member_id = $1
-         ORDER BY m2.member_id, CASE WHEN c.kind = 'direct' THEN 0 ELSE 1 END, c.created_at DESC`,
-        [accountId, chatActorIds]
+    const chatSenderIds = [...new Set(
+      rows
+        .filter((r) => toText(r.kind) === "chat_message")
+        .map((r) => toText(r.actor_id) ?? "")
+        .filter(Boolean)
+    )]
+    const chatExact = new Map<string, string>()
+    const chatLatestBySender = new Map<string, string>()
+    if (chatSenderIds.length > 0) {
+      const msgRows = try tx.query(
+        `SELECT m.chat_id, m.sender_id, m.created_at
+         FROM feed_messages m
+         INNER JOIN feed_chat_members cm ON cm.chat_id = m.chat_id AND cm.member_id = $1
+         WHERE m.sender_id = ANY($2)
+         ORDER BY m.created_at DESC, m.id DESC`,
+        [accountId, chatSenderIds]
       )
-      for (const chatRow of chatRows) {
-        const actorId = toText(chatRow.actor_id)
-        const chatId = toText(chatRow.chat_id)
-        if (actorId !== undefined && chatId !== undefined) {
-          chatByActor.set(actorId, chatId)
-        }
+      for (const msg of msgRows) {
+        const sender = toText(msg.sender_id) ?? ""
+        const cid = toText(msg.chat_id) ?? ""
+        const createdAt = safeInt(msg.created_at, 0)
+        const exactKey = `${sender}:${createdAt}`
+        if (!chatExact.has(exactKey)) chatExact.set(exactKey, cid)
+        if (!chatLatestBySender.has(sender)) chatLatestBySender.set(sender, cid)
       }
     }
     return rows
-      .map((row) => rowToNotification(row, actorProfiles, inviteByActor, chatByActor))
+      .map((row) => {
+        const kind = toText(row.kind) ?? ""
+        const actorId = toText(row.actor_id) ?? null
+        const createdAt = safeInt(row.created_at, 0)
+        const actor = actorId === null ? undefined : actorProfiles.get(actorId)
+        let chatId: string | null = null
+        let inviteId: string | null = null
+        let invitePending = false
+        if (kind === "group_invite" && actorId !== null) {
+          const matched = inviteExact.get(`${actorId}:${createdAt}`) ?? inviteLatestByInviter.get(actorId)
+          if (matched !== undefined) {
+            chatId = matched.chatId === "" ? null : matched.chatId
+            inviteId = matched.id === "" ? null : matched.id
+            invitePending = matched.pending
+          }
+        } else if (kind === "chat_message" && actorId !== null) {
+          chatId = chatExact.get(`${actorId}:${createdAt}`) ?? chatLatestBySender.get(actorId) ?? null
+        }
+        return rowToNotification(row, { actor, chatId, inviteId, invitePending })
+      })
       .filter((notif) => isVisibleInMode(toSpecNotificationKind(notif.kind, notif.isGameOnly), specMode))
   })
+}
+
+export effect function clearNotifications(
+  accountId: string,
+  notificationIds?: ReadonlyArray<string>
+): ClearNotificationsResult!(SocialFailure | StoreFailure)!Store {
+  if (accountId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
+  }
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const mode = try requireAccountUiModeTx(tx, accountId)
+    if (notificationIds !== undefined && notificationIds.length === 0) {
+      return { clearedCount: 0, unreadCount: try countUnreadNotificationsTx(tx, accountId, mode) }
+    }
+    const deleted = notificationIds !== undefined
+      ? try tx.query(
+          "DELETE FROM feed_notifications WHERE account_id = $1 AND id = ANY($2) RETURNING id",
+          [accountId, [...notificationIds]]
+        )
+      : try tx.query(
+          "DELETE FROM feed_notifications WHERE account_id = $1 RETURNING id",
+          [accountId]
+        )
+    return {
+      clearedCount: deleted.length,
+      unreadCount: try countUnreadNotificationsTx(tx, accountId, mode)
+    }
+  })
+}
+
+effect function listModerationEdges(
+  kind: "blocks" | "mutes",
+  accountId: string,
+  limit?: number
+): ReadonlyArray<ModerationListEntry>!(SocialFailure | StoreFailure)!Store {
+  const effectiveLimit = clampLimit(limit, 50, 200)
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const owner = try resolveUserOrNpcTx(tx, accountId)
+    const rows = kind === "blocks"
+      ? try tx.query(
+          "SELECT blocked_id AS target_id, created_at FROM feed_blocks WHERE blocker_id = $1 ORDER BY created_at DESC, blocked_id DESC LIMIT $2",
+          [owner.id, effectiveLimit]
+        )
+      : try tx.query(
+          "SELECT muted_id AS target_id, created_at FROM feed_mutes WHERE muter_id = $1 ORDER BY created_at DESC, muted_id DESC LIMIT $2",
+          [owner.id, effectiveLimit]
+        )
+    if (rows.length === 0) return []
+    const createdAtById = new Map<string, number>()
+    const targetIds: string[] = []
+    for (const row of rows) {
+      const targetId = toText(row.target_id) ?? ""
+      if (targetId === "") continue
+      targetIds.push(targetId)
+      if (!createdAtById.has(targetId)) {
+        createdAtById.set(targetId, safeInt(row.created_at, 0))
+      }
+    }
+    const hydrated = try hydratePeerEntriesTx(tx, targetIds, owner.id, false)
+    return hydrated.map((entry) => ({
+      ...entry,
+      createdAt: createdAtById.get(entry.id) ?? 0
+    }))
+  })
+}
+
+export effect function listBlockedAccounts(
+  accountId: string,
+  limit?: number
+): ReadonlyArray<ModerationListEntry>!(SocialFailure | StoreFailure)!Store {
+  return try listModerationEdges("blocks", accountId, limit)
+}
+
+export effect function listMutedAccounts(
+  accountId: string,
+  limit?: number
+): ReadonlyArray<ModerationListEntry>!(SocialFailure | StoreFailure)!Store {
+  return try listModerationEdges("mutes", accountId, limit)
 }
 
 effect function countUnreadNotificationsTx(
@@ -999,38 +1193,4 @@ export effect function listFollowing(
   limit?: number
 ): ReadonlyArray<FollowListEntry>!(SocialFailure | StoreFailure)!Store {
   return try listFollowEdges("following", handleOrId, viewerId, limit)
-}
-
-export effect function listBlockedAccounts(
-  accountId: string,
-  limit?: number
-): ReadonlyArray<FollowListEntry>!(SocialFailure | StoreFailure)!Store {
-  const effectiveLimit = clampLimit(limit, 50, 200)
-  const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const account = try resolveUserOrNpcTx(tx, accountId)
-    const rows = try tx.query(
-      "SELECT blocked_id AS peer_id FROM feed_blocks WHERE blocker_id = $1 ORDER BY created_at DESC LIMIT $2",
-      [account.id, effectiveLimit]
-    )
-    const peerIds = rows.map((r) => toText(r.peer_id) ?? "").filter(Boolean)
-    return try hydratePeerEntriesTx(tx, peerIds, account.id, false)
-  })
-}
-
-export effect function listMutedAccounts(
-  accountId: string,
-  limit?: number
-): ReadonlyArray<FollowListEntry>!(SocialFailure | StoreFailure)!Store {
-  const effectiveLimit = clampLimit(limit, 50, 200)
-  const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const account = try resolveUserOrNpcTx(tx, accountId)
-    const rows = try tx.query(
-      "SELECT muted_id AS peer_id FROM feed_mutes WHERE muter_id = $1 ORDER BY created_at DESC LIMIT $2",
-      [account.id, effectiveLimit]
-    )
-    const peerIds = rows.map((r) => toText(r.peer_id) ?? "").filter(Boolean)
-    return try hydratePeerEntriesTx(tx, peerIds, account.id, false)
-  })
 }
