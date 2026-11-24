@@ -72,7 +72,7 @@ effect function browse(url: string) {
 /** An app at its boundary: a development server that says where it serves, as Vite does, and answers every request. */
 const APP = `require("node:http").createServer((_, res) => res.end("door app")).listen(0, "127.0.0.1", function () { console.log("  Local: http://localhost:" + this.address().port + "/") })`
 
-describe.concurrent("Studio through its server, its files and a browser", () => {
+describe.sequential("Studio through its server, its files and a browser", () => {
   it.live('a spec is published with its origins, checked, and synced by an agent (spec/index.md, "Story: Edit, then publish"; spec/index.md, "Story: Sync with an agent")', effect () => { provide services { try scoped(effect {
     const fs = try FileSystem.FileSystem
     const root = try scratch({ "spec/door.md": try fs.readFileString(`${TOOLS}/fixtures/door.md`),
