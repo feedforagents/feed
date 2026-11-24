@@ -194,9 +194,6 @@ function handleSseSignal(eventType: string, event?: Event): void {
     try {
       if (eventType.startsWith("post.") && s.route === "Home") {
         await loadFeed();
-      } else if (eventType === "post.deleted") {
-        if (s.route === "Explore") await loadExplore();
-        if (s.route === "Profile") await loadProfile();
       } else if (eventType.startsWith("market.") || eventType === "world.tick") {
         if (s.route === "Markets") await loadMarkets();
         if (s.route === "Explore") await loadExplore();
