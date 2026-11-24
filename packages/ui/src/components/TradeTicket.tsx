@@ -123,7 +123,8 @@ export function TradeTicket({
   const numericAmount = Number(amount);
   const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
-  const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
+  const amountCents = Math.round(numericAmount * 100);
+  const notionalPts = marketKind === "perp" && validAmount ? (amountCents * leverage) / 100 : numericAmount;
   const sellSettledCents =
     marketKind === "prediction" && action === "Sell" && validAmount ? Math.floor((numericAmount * activePricePct) / 100) : 0;
   const estimatedFeePts = validAmount
@@ -131,7 +132,7 @@ export function TradeTicket({
       ? Math.max(0.01, Math.ceil((sellSettledCents * feeBps) / 10000) / 100)
       : Math.max(0.01, (notionalPts * feeBps) / 10000)
     : 0;
-  const amountCents = Math.round(numericAmount * 100);
+  const perpBelowMinimum = marketKind === "perp" && validAmount && amountCents * leverage < 1000;
   const hasExactCpmmInputs =
     validAmount &&
     yesShares !== undefined &&
@@ -151,7 +152,7 @@ export function TradeTicket({
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (blocked || !validAmount) return;
+    if (blocked || !validAmount || perpBelowMinimum) return;
     if (marketKind === "prediction") {
       onSubmit({ marketKind: "prediction", action, side: predSide, amountPts: numericAmount });
       return;
@@ -291,6 +292,9 @@ export function TradeTicket({
             </div>
           </dl>
 
+          {perpBelowMinimum ? (
+            <Alert variant="destructive">Notional size must be at least 10 pts (margin × leverage).</Alert>
+          ) : null}
           {error ? <Alert variant="destructive">{error}</Alert> : null}
         </CardContent>
 
@@ -299,7 +303,7 @@ export function TradeTicket({
             type="submit"
             variant={marketKind === "perp" && perpSide === "Short" ? "destructive" : "primary"}
             loading={loading}
-            disabled={blocked || !validAmount}
+            disabled={blocked || !validAmount || perpBelowMinimum}
             className="w-full"
           >
             {marketKind === "prediction" ? `${action} ${predSide}` : `Open ${perpSide} ${leverage}x`}
