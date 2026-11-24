@@ -21,6 +21,7 @@ import {
   requestPhoneChange,
   revokeActiveAgentGrant,
   revokeOAuthToken,
+  revokeSession,
   setPlayMode,
   signInReviewerPassword,
   signOutEverywhere,
@@ -52,11 +53,14 @@ import {
 import {
   MarketFailure,
   buyPredictionShares,
+  cancelPredictionMarket,
   closePerpPosition,
   getAccountEconomy,
+  getAccountLeaderboardRank,
   getAccountPnlHistory,
   getFilteredLeaderboardPage,
   getFilteredLeaderboardViewerRank,
+  getLeaderboard,
   getPerpMarket,
   getPerpPriceHistory,
   getPointLedger,
@@ -67,13 +71,19 @@ import {
   listClosedPositions,
   listPerpMarkets,
   listPredictionMarkets,
+  listUserClosedPositions,
   listUserTrades,
   openPerpPosition,
   parseClosedOutcomeFilter,
   parseHistoryRange,
   parseLeaderboardFilter,
   parseLeaderboardTimeframe,
-  sellPredictionShares
+  previewPerpOrder,
+  previewPredictionBuy,
+  previewPredictionSell,
+  sellPredictionShares,
+  type LeaderboardMetric,
+  type LeaderboardScope
 } from "@repo/markets"
 import {
   McpFailure,
@@ -86,10 +96,12 @@ import { manifest } from "@repo/pack-default"
 import {
   SocialFailure,
   blockAccount,
+  clearNotifications,
   createDirectChat,
   createPost,
   createSseResponse,
   createUserGroupChat,
+  deleteGroupChat,
   deletePost,
   followAccount,
   getArticle,
@@ -100,35 +112,45 @@ import {
   inviteToUserGroupChat,
   leaveGroupChat,
   likePost,
-  listAlphaInvites,
   listArticles,
   listBlockedAccounts,
   listChats,
   listFeedPosts,
   listFollowers,
   listFollowing,
+  listModerationReports,
   listMutedAccounts,
   listNotifications,
+  listPendingGroupInvites,
   listTrending,
   markChatRead,
   markNotificationsRead,
   muteAccount,
   publishFeedEvent,
   reactToMessage,
+  removeGroupMember,
+  renameGroupChat,
   reportTarget,
   repostPost,
-  respondAlphaInvite,
+  resolveModerationReport,
+  respondGroupInvite,
   searchWorld,
   sendChatMessage,
+  transferGroupOwnership,
   unblockAccount,
   unfollowAccount,
   unlikePost,
   unmuteAccount,
+  unreactToMessage,
   unrepostPost,
   updateProfile,
+  type FeedPostFilter,
   type FeedTab,
+  type GroupInviteFilterKind,
   type PostThreadSort,
   type RealtimeBus,
+  type ReportCategory,
+  type ReportStatusFilter,
   type SocialPresentationMode,
   type UpdatedAccountProfile
 } from "@repo/social"
@@ -204,10 +226,8 @@ function clearCookieHeaders(publicAppUrl: string): ReadonlyArray<string> {
 }
 
 function requestOrigin(request: Request, config: AppServerConfig): string {
-  const fwdHost = request.headers.get("x-forwarded-host")?.trim()
-  if (fwdHost !== undefined && fwdHost !== "") {
-    const fwdProto = request.headers.get("x-forwarded-proto")?.trim() || (config.publicAppUrl.startsWith("https://") ? "https" : "http")
-    return `${fwdProto}://${fwdHost}`.replace(/\/+$/, "")
+  if (config.publicAppUrl !== "") {
+    return config.publicAppUrl
   }
   const url = new URL(request.url)
   if (url.origin !== "null" && url.origin !== "") {
@@ -357,9 +377,8 @@ function clampIntQuery(url: URL, key: string, fallback: number, min: number, max
 }
 
 function marketFailureStatus(code: string): number {
-  if (code === "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING") return 500
   if (code.includes("NOT_FOUND")) return 404
-  if (code.includes("WASHINGTON") || code.includes("GEO") || code === "FORBIDDEN") return 403
+  if (code === "FORBIDDEN") return 403
   if (code === "RATE_LIMITED") return 429
   if (code === "MARKET_NOT_OPEN" || code === "ALREADY_SETTLED" || code === "CONFLICT" || code === "IDEMPOTENCY_CONFLICT") return 409
   if (code === "INVALID_IDEMPOTENCY_KEY") return 400
@@ -368,7 +387,7 @@ function marketFailureStatus(code: string): number {
 
 function socialFailureStatus(code: string): number {
   if (code === "NotFound") return 404
-  if (code === "Blocked" || code === "Forbidden") return 403
+  if (code === "Blocked" || code === "Forbidden" || code === "NpcDmDisallowed") return 403
   if (code === "RateLimited") return 429
   if (code === "Conflict" || code === "TeamChatRetired" || code === "AlphaLimitReached") return 409
   return 400
@@ -762,6 +781,10 @@ effect function handleAuthRoute(
     return jsonResponse({ account: result.account }, 200, {}, [result.sessionCookieHeader])
   }
   if (method === "POST" && path === "/api/auth/logout") {
+    const session = try optionalSession(request, config)
+    if (session !== null) {
+      try revokeSession(session.sessionKey)
+    }
     return jsonResponse({ ok: true }, 200, {}, clearCookieHeaders(config.publicAppUrl))
   }
   if (method === "POST" && path === "/api/auth/signout-everywhere") {
@@ -795,6 +818,8 @@ effect function handleAuthRoute(
     const res = try requestPhoneChange({
       accountId: session.accountId,
       newPhoneE164: try reqStr(data, "newPhoneE164", "newPhoneE164", "phoneE164"),
+      authAt: session.authAt,
+      cookieHeader: request.headers.get("cookie") ?? undefined,
       turnstileToken: strField(data, "turnstileToken", "turnstile_token"),
       ipAddress: clientIp(request),
       config: config.auth
@@ -945,6 +970,27 @@ effect function updateOwnAccountProfile(
   return profile
 }
 
+function parseFeedPostFilter(raw: string | null): FeedPostFilter | undefined {
+  if (raw === "posts" || raw === "replies" || raw === "all") return raw
+  return undefined
+}
+
+function parseBoolQuery(raw: string | null): boolean | undefined {
+  if (raw === "true") return true
+  if (raw === "false") return false
+  return undefined
+}
+
+function parseReportCategory(raw: string | undefined): ReportCategory | undefined {
+  const normalized = raw?.trim().toLowerCase()
+  if (normalized === undefined || normalized === "") return undefined
+  if (normalized === "spam") return "Spam"
+  if (normalized === "harassment") return "Harassment"
+  if (normalized === "impersonation") return "Impersonation"
+  if (normalized === "other" || normalized === "otherviolation" || normalized === "other_violation") return "OtherViolation"
+  return undefined
+}
+
 function escapeSqlLike(input: string): string {
   return input.replace(/[\\%_]/g, (ch) => `\\${ch}`)
 }
@@ -1048,12 +1094,10 @@ effect function handleSocialPostsAndUsers(
     const worldOrSearch = try handleWorldStatusAndUserSearch(url)
     if (worldOrSearch !== undefined) return worldOrSearch
   }
-  if (method === "GET" && path === "/api/feed") {
+  if (method === "GET" && (path === "/api/feed" || path === "/api/posts")) {
     const session = try optionalSession(request, config)
     const rawTab = url.searchParams.get("tab") ?? "latest"
     const tab: FeedTab = rawTab === "following" || rawTab === "top" ? rawTab : "latest"
-    const rawIncludeReplies = url.searchParams.get("includeReplies")
-    const includeReplies = rawIncludeReplies === "true" ? true : rawIncludeReplies === "false" ? false : undefined
     return jsonResponse(try listFeedPosts({
       tab,
       viewerId: session?.accountId,
@@ -1061,9 +1105,12 @@ effect function handleSocialPostsAndUsers(
       cursor: url.searchParams.get("cursor") ?? undefined,
       limit: clampIntQuery(url, "limit", 25, 1, 100),
       authorId: url.searchParams.get("authorId") ?? undefined,
+      authorHandle: url.searchParams.get("authorHandle") ?? undefined,
       ticker: url.searchParams.get("ticker") ?? undefined,
       marketId: url.searchParams.get("marketId") ?? undefined,
-      includeReplies
+      filter: parseFeedPostFilter(url.searchParams.get("filter")),
+      onlyReplies: parseBoolQuery(url.searchParams.get("onlyReplies")),
+      includeReplies: parseBoolQuery(url.searchParams.get("includeReplies"))
     }))
   }
   if (method === "POST" && path === "/api/posts") {
@@ -1149,14 +1196,6 @@ effect function handleSocialPostsAndUsers(
     })
     return jsonResponse({ tag: rawTag, posts })
   }
-  if (method === "GET" && (path === "/api/users/me/blocked" || path === "/api/moderation/blocks")) {
-    const session = try requireSession(request, config)
-    return jsonResponse({ items: try listBlockedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
-  }
-  if (method === "GET" && (path === "/api/users/me/muted" || path === "/api/moderation/mutes")) {
-    const session = try requireSession(request, config)
-    return jsonResponse({ items: try listMutedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
-  }
   const userTradesMatch = /^\/api\/users\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && userTradesMatch !== null) {
     const handle = decodeSegment(userTradesMatch[1] ?? "")
@@ -1179,6 +1218,14 @@ effect function handleSocialPostsAndUsers(
   if (userEdgeMatch !== null) {
     return try handleAccountEdge(request, decodeSegment(userEdgeMatch[1] ?? ""), userEdgeMatch[2] ?? "", config)
   }
+  if (method === "GET" && (path === "/api/users/me/blocked" || path === "/api/moderation/blocks")) {
+    const session = try requireSession(request, config)
+    return jsonResponse({ items: try listBlockedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
+  }
+  if (method === "GET" && (path === "/api/users/me/muted" || path === "/api/moderation/mutes")) {
+    const session = try requireSession(request, config)
+    return jsonResponse({ items: try listMutedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
+  }
   if (method === "PATCH" && path === "/api/users/me") {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
@@ -1196,9 +1243,13 @@ effect function handleSocialPostsAndUsers(
       mode,
       authorId: profile.id,
       cursor: url.searchParams.get("cursor") ?? undefined,
-      limit: clampIntQuery(url, "limit", 30, 1, 100)
+      limit: clampIntQuery(url, "limit", 30, 1, 100),
+      filter: parseFeedPostFilter(url.searchParams.get("filter")),
+      onlyReplies: parseBoolQuery(url.searchParams.get("onlyReplies")),
+      includeReplies: parseBoolQuery(url.searchParams.get("includeReplies"))
     })
-    const positions = profile.kind === "user" && mode === "game"
+    const canViewPositions = profile.kind === "user" && mode === "game" && !profile.viewerBlockedBy && !profile.viewerBlocks
+    const positions = canViewPositions
       ? try getUserPositions(profile.id)
       : { accountId: profile.id, predictionPositions: [], perpPositions: [] }
     return jsonResponse({ profile, posts: feed.items, nextCursor: feed.nextCursor, positions })
@@ -1210,11 +1261,13 @@ effect function handleSocialPostsAndUsers(
     if (rawKind !== "account" && rawKind !== "post") {
       return try badRequest("invalid_target_kind", "targetKind must be account or post.")
     }
+    const category = parseReportCategory(strField(data, "category"))
     return jsonResponse(try reportTarget({
       reporterId: session.accountId,
       targetKind: rawKind,
       targetId: try reqStr(data, "targetId", "targetId", "target_id"),
-      reason: try reqStr(data, "reason", "reason")
+      reason: try reqStr(data, "reason", "reason"),
+      ...(category === undefined ? {} : { category })
     }), 201)
   }
   return undefined
@@ -1242,6 +1295,11 @@ effect function handleSocialChatsAndNotifications(
     const unreadCount = try getUnreadNotificationCount(session.accountId, mode)
     return jsonResponse({ notifications, unreadCount })
   }
+  if (method === "DELETE" && path === "/api/notifications") {
+    const session = try requireSession(request, config)
+    const { data } = try readParsedBody(request)
+    return jsonResponse(try clearNotifications(session.accountId, strArrayField(data, "notificationIds", "ids")))
+  }
   if (method === "POST" && path === "/api/notifications/read") {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
@@ -1251,15 +1309,17 @@ effect function handleSocialChatsAndNotifications(
     const session = try requireSession(request, config)
     return jsonResponse({ chats: try listChats(session.accountId) })
   }
-  if (method === "GET" && path === "/api/chats/alpha-invites") {
+  if (method === "GET" && (path === "/api/chats/invites" || path === "/api/chats/alpha-invites")) {
     const session = try requireSession(request, config)
-    return jsonResponse({ invites: try listAlphaInvites(session.accountId) })
+    const rawKind = url.searchParams.get("kind")
+    const kind: GroupInviteFilterKind = rawKind === "npc_alpha" || rawKind === "user_group" ? rawKind : "all"
+    return jsonResponse({ invites: try listPendingGroupInvites(session.accountId, kind) })
   }
-  const inviteRespondMatch = /^\/api\/chats\/alpha-invites\/([^/]+)\/respond$/.exec(path)
+  const inviteRespondMatch = /^\/api\/chats\/(?:alpha-)?invites\/([^/]+)\/respond$/.exec(path)
   if (method === "POST" && inviteRespondMatch !== null) {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
-    return jsonResponse(try respondAlphaInvite({
+    return jsonResponse(try respondGroupInvite({
       accountId: session.accountId,
       inviteId: decodeSegment(inviteRespondMatch[1] ?? ""),
       accept: boolField(data, true, "accept")
@@ -1280,15 +1340,35 @@ effect function handleSocialChatsAndNotifications(
       chat: try createUserGroupChat(session.accountId, title, memberHandles, strField(data, "kind"))
     }, 201)
   }
-  const reactMatch = /^\/api\/chats\/messages\/([^/]+)\/react$/.exec(path)
-  if (method === "POST" && reactMatch !== null) {
+  const chatReactionMatch = /^\/api\/chats\/([^/]+)\/messages\/([^/]+)\/reactions$/.exec(path)
+  const legacyReactMatch = /^\/api\/chats\/messages\/([^/]+)\/react$/.exec(path)
+  const reactionMessageId = chatReactionMatch !== null
+    ? decodeSegment(chatReactionMatch[2] ?? "")
+    : legacyReactMatch !== null
+      ? decodeSegment(legacyReactMatch[1] ?? "")
+      : undefined
+  if (reactionMessageId !== undefined) {
     const session = try requireSession(request, config)
-    const { data } = try readParsedBody(request)
-    return jsonResponse(try reactToMessage({
-      accountId: session.accountId,
-      messageId: decodeSegment(reactMatch[1] ?? ""),
-      emoji: try reqStr(data, "emoji", "emoji")
-    }))
+    if (method === "POST") {
+      const { data } = try readParsedBody(request)
+      return jsonResponse(try reactToMessage({
+        accountId: session.accountId,
+        messageId: reactionMessageId,
+        emoji: try reqStr(data, "emoji", "emoji")
+      }))
+    }
+    if (method === "DELETE") {
+      const { data } = try readParsedBody(request)
+      const emoji = (strField(data, "emoji") ?? url.searchParams.get("emoji") ?? "").trim()
+      if (emoji === "") {
+        return try badRequest("invalid_input", "emoji is required.")
+      }
+      return jsonResponse(try unreactToMessage({
+        accountId: session.accountId,
+        messageId: reactionMessageId,
+        emoji
+      }))
+    }
   }
   const chatMsgsMatch = /^\/api\/chats\/([^/]+)\/messages$/.exec(path)
   if (chatMsgsMatch !== null) {
@@ -1306,6 +1386,24 @@ effect function handleSocialChatsAndNotifications(
         content: try reqStr(data, "content", "content")
       }), 201)
     }
+  }
+  const chatMemberMatch = /^\/api\/chats\/([^/]+)\/members\/([^/]+)$/.exec(path)
+  if (method === "DELETE" && chatMemberMatch !== null) {
+    const session = try requireSession(request, config)
+    return jsonResponse(try removeGroupMember(
+      session.accountId,
+      decodeSegment(chatMemberMatch[1] ?? ""),
+      decodeSegment(chatMemberMatch[2] ?? "")
+    ))
+  }
+  const chatTransferMatch = /^\/api\/chats\/([^/]+)\/transfer$/.exec(path)
+  if (method === "POST" && chatTransferMatch !== null) {
+    const session = try requireSession(request, config)
+    const { data } = try readParsedBody(request)
+    const newOwner = try reqStr(data, "newOwnerHandleOrId", "newOwnerHandleOrId", "targetHandleOrId", "handle")
+    return jsonResponse({
+      chat: try transferGroupOwnership(session.accountId, decodeSegment(chatTransferMatch[1] ?? ""), newOwner)
+    })
   }
   const chatInviteMatch = /^\/api\/chats\/([^/]+)\/invite$/.exec(path)
   if (method === "POST" && chatInviteMatch !== null) {
@@ -1327,148 +1425,100 @@ effect function handleSocialChatsAndNotifications(
     const session = try requireSession(request, config)
     return jsonResponse(try leaveGroupChat(session.accountId, decodeSegment(chatLeaveMatch[1] ?? "")))
   }
-  const chatKickMatch = /^\/api\/chats\/([^/]+)\/members\/([^/]+)$/.exec(path)
-  if (method === "DELETE" && chatKickMatch !== null) {
-    const session = try requireSession(request, config)
-    const chatId = decodeSegment(chatKickMatch[1] ?? "")
-    const memberId = decodeSegment(chatKickMatch[2] ?? "")
-    const store = try Store
-    const result = try store.transaction(effect (tx: Tx) => {
-      const chatRows = try tx.query("SELECT id, kind, created_by FROM feed_chats WHERE id = $1 FOR UPDATE", [chatId])
-      if (chatRows.length === 0) {
-        throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
-      }
-      if (toText(chatRows[0]?.kind) !== "group") {
-        throw new SocialFailure({ code: "Forbidden", message: "Members can only be removed from user group chats." })
-      }
-      const callerRows = try tx.query(
-        "SELECT role FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
-        [chatId, session.accountId]
-      )
-      const callerRole = toText(callerRows[0]?.role)
-      if (callerRole !== "owner" && callerRole !== "admin") {
-        throw new SocialFailure({ code: "Forbidden", message: "Only group owners or admins can remove members." })
-      }
-      const targetRows = try tx.query(
-        "SELECT role FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
-        [chatId, memberId]
-      )
-      if (targetRows.length === 0) {
-        throw new SocialFailure({ code: "NotFound", message: "Chat member not found." })
-      }
-      if (toText(targetRows[0]?.role) === "owner") {
-        throw new SocialFailure({ code: "Forbidden", message: "Cannot remove the group owner." })
-      }
-      try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, memberId])
-      return { chatId, memberId, removed: true }
-    })
-    return jsonResponse(result)
-  }
-  const chatSingleMatch = /^\/api\/chats\/([^/]+)$/.exec(path)
-  if (chatSingleMatch !== null && (method === "PATCH" || method === "DELETE")) {
-    const session = try requireSession(request, config)
-    const chatId = decodeSegment(chatSingleMatch[1] ?? "")
+  const chatIdMatch = /^\/api\/chats\/([^/]+)$/.exec(path)
+  if (chatIdMatch !== null) {
+    const chatId = decodeSegment(chatIdMatch[1] ?? "")
     if (method === "PATCH") {
+      const session = try requireSession(request, config)
       const { data } = try readParsedBody(request)
-      const nextTitle = try reqStr(data, "name", "name", "title")
-      if (nextTitle.length > 100) {
-        return try badRequest("invalid_input", "Group name must be at most 100 characters.")
-      }
-      const store = try Store
-      const updated = try store.transaction(effect (tx: Tx) => {
-        const chatRows = try tx.query("SELECT id, kind FROM feed_chats WHERE id = $1 FOR UPDATE", [chatId])
-        if (chatRows.length === 0) {
-          throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
-        }
-        if (toText(chatRows[0]?.kind) !== "group") {
-          throw new SocialFailure({ code: "Forbidden", message: "Only user group chats can be renamed." })
-        }
-        const callerRows = try tx.query(
-          "SELECT role FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
-          [chatId, session.accountId]
-        )
-        const callerRole = toText(callerRows[0]?.role)
-        if (callerRole !== "owner" && callerRole !== "admin") {
-          throw new SocialFailure({ code: "Forbidden", message: "Only group owners or admins can rename this group." })
-        }
-        try tx.query("UPDATE feed_chats SET name = $2 WHERE id = $1", [chatId, nextTitle])
-        return { chatId, title: nextTitle, name: nextTitle }
-      })
-      return jsonResponse(updated)
+      const title = try reqStr(data, "title", "title", "name")
+      const updated = try renameGroupChat(session.accountId, chatId, title)
+      return jsonResponse({ chat: updated, chatId: updated.id, title: updated.title, name: updated.title })
     }
-    const store = try Store
-    const deleted = try store.transaction(effect (tx: Tx) => {
-      const chatRows = try tx.query("SELECT id, kind, created_by FROM feed_chats WHERE id = $1 FOR UPDATE", [chatId])
-      if (chatRows.length === 0) {
-        throw new SocialFailure({ code: "NotFound", message: "Chat not found." })
-      }
-      if (toText(chatRows[0]?.kind) !== "group") {
-        throw new SocialFailure({ code: "Forbidden", message: "Only user group chats can be deleted." })
-      }
-      const callerRows = try tx.query(
-        "SELECT role FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
-        [chatId, session.accountId]
-      )
-      const callerRole = toText(callerRows[0]?.role)
-      const isCreator = toText(chatRows[0]?.created_by) === session.accountId
-      if (callerRole !== "owner" && !isCreator) {
-        throw new SocialFailure({ code: "Forbidden", message: "Only the group owner can delete this group." })
-      }
-      try tx.query("DELETE FROM feed_chats WHERE id = $1", [chatId])
-      return { chatId, deleted: true }
-    })
-    return jsonResponse(deleted)
+    if (method === "DELETE") {
+      const session = try requireSession(request, config)
+      return jsonResponse(try deleteGroupChat(session.accountId, chatId))
+    }
   }
   return undefined
 }
 
-effect function handleMarketRoute(
+function parseLeaderboardScope(raw: string | null): LeaderboardScope {
+  return raw === "characters" ? "characters" : "players"
+}
+
+function parseLeaderboardMetric(raw: string | null): LeaderboardMetric {
+  if (raw === "return_pct" || raw === "win_rate" || raw === "volume") return raw
+  return "net_profit"
+}
+
+function parseLeaderboardPageSize(url: URL): number {
+  if (url.searchParams.has("pageSize")) {
+    return clampIntQuery(url, "pageSize", 50, 1, 200)
+  }
+  return clampIntQuery(url, "limit", 50, 1, 200)
+}
+
+effect function handlePredictionMarketRoute(
   request: Request,
   url: URL,
   config: AppServerConfig
-): (Response | undefined)!(AuthFailure | RateLimited | MarketFailure | StoreFailure | HttpRequestError)!Store {
+): (Response | undefined)!(AuthFailure | RateLimited | MarketFailure | StoreFailure | HttpRequestError)!(Store | RealtimeBus) {
   const path = url.pathname
   const method = request.method.toUpperCase()
-  if (method === "GET" && path === "/api/markets") {
-    const session = try optionalSession(request, config)
-    const predictions = try listPredictionMarkets()
-    const perps = try listPerpMarkets()
-    if (session === null) return jsonResponse({ predictions, perps })
-    const positions = try getUserPositions(session.accountId)
-    return jsonResponse({ predictions, perps, positions })
-  }
-  if (method === "GET" && path === "/api/markets/positions/closed") {
-    const session = try requireSession(request, config)
-    return jsonResponse(try listClosedPositions({
-      accountId: session.accountId,
-      outcome: parseClosedOutcomeFilter(url.searchParams.get("outcome")),
-      page: clampIntQuery(url, "page", 1, 1, 10_000),
-      limit: clampIntQuery(url, "limit", 10, 1, 100)
-    }))
-  }
-  const predHistoryMatch = /^\/api\/markets\/prediction\/([^/]+)\/history$/.exec(path)
+  const predHistoryMatch = /^\/api\/markets\/predictions?\/([^/]+)\/history$/.exec(path)
   if (method === "GET" && predHistoryMatch !== null) {
-    return jsonResponse(try getPredictionPriceHistory({
-      marketId: decodeSegment(predHistoryMatch[1] ?? ""),
+    const marketId = decodeSegment(predHistoryMatch[1] ?? "")
+    const view = try getPredictionPriceHistory({
+      marketId,
       range: parseHistoryRange(url.searchParams.get("range")),
       limit: clampIntQuery(url, "limit", 200, 2, 500)
-    }))
-  }
-  const predTradesMatch = /^\/api\/markets\/prediction\/([^/]+)\/trades$/.exec(path)
-  if (method === "GET" && predTradesMatch !== null) {
-    return jsonResponse({
-      trades: try listAssetTrades({
-        marketKind: "prediction",
-        marketRef: decodeSegment(predTradesMatch[1] ?? ""),
-        limit: clampIntQuery(url, "limit", 50, 1, 200)
-      })
     })
+    const points = view.points.map((pt) => ({ ...pt, recordedAt: pt.timestamp }))
+    return jsonResponse({ range: view.range, points, history: points })
   }
-  const predDetailMatch = /^\/api\/markets\/prediction\/([^/]+)$/.exec(path)
+  const predTradesMatch = /^\/api\/markets\/predictions?\/([^/]+)\/trades$/.exec(path)
+  if (method === "GET" && predTradesMatch !== null) {
+    const marketId = decodeSegment(predTradesMatch[1] ?? "")
+    const trades = try listAssetTrades({
+      marketKind: "prediction",
+      marketRef: marketId,
+      limit: clampIntQuery(url, "limit", 50, 1, 200)
+    })
+    return jsonResponse({ trades: trades.map((t) => ({ ...t, traderDisplayName: t.traderName })) })
+  }
+  const predPreviewMatch = /^\/api\/markets\/predictions?\/([^/]+)\/preview$/.exec(path)
+  if (method === "POST" && predPreviewMatch !== null) {
+    const session = try optionalSession(request, config)
+    const marketId = decodeSegment(predPreviewMatch[1] ?? "")
+    const { data } = try readParsedBody(request)
+    const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
+    if (rawSide !== "yes" && rawSide !== "no") return try badRequest("invalid_side", "Side must be yes or no.")
+    const rawAction = strField(data, "action")?.trim().toLowerCase()
+    const rawShares = numField(data, "shareUnits", "share_units", "shares")
+    const rawAmount = numField(data, "amountCents", "amount_cents") ?? (numField(data, "amountPts") !== undefined ? Math.round((numField(data, "amountPts") ?? 0) * 100) : undefined)
+    const isSell = rawAction === "sell" || (rawAction !== "buy" && rawShares !== undefined && rawAmount === undefined)
+    if (isSell) {
+      const preview = try previewPredictionSell({
+        marketId,
+        side: rawSide,
+        shares: Math.round(rawShares ?? 0),
+        ...(session !== null ? { holderId: session.accountId } : {})
+      })
+      return jsonResponse({ preview })
+    }
+    const preview = try previewPredictionBuy({
+      marketId,
+      side: rawSide,
+      amountCents: Math.round(rawAmount ?? 0)
+    })
+    return jsonResponse({ preview })
+  }
+  const predDetailMatch = /^\/api\/markets\/predictions?\/([^/]+)$/.exec(path)
   if (method === "GET" && predDetailMatch !== null) {
     return jsonResponse(try getPredictionMarket(decodeSegment(predDetailMatch[1] ?? "")))
   }
-  const predTradeMatch = /^\/api\/markets\/prediction\/([^/]+)\/(buy|sell)$/.exec(path)
+  const predTradeMatch = /^\/api\/markets\/predictions?\/([^/]+)\/(buy|sell)$/.exec(path)
   if (method === "POST" && predTradeMatch !== null) {
     const session = try requireSession(request, config)
     try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
@@ -1478,37 +1528,23 @@ effect function handleMarketRoute(
     const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
     if (rawSide !== "yes" && rawSide !== "no") return try badRequest("invalid_side", "Side must be yes or no.")
-    if (action === "buy") {
-      const amountCents = numField(data, "amountCents", "amount_cents") ?? Math.round((numField(data, "amountPts") ?? 0) * 100)
-      const receipt = try buyPredictionShares({
-        actorId: session.accountId,
-        actorKind: "user",
-        marketId,
-        side: rawSide,
-        amountCents: Math.round(amountCents),
-        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
-      })
-      try publishFeedEvent({
-        type: "market.prediction",
-        marketId: receipt.marketId,
-        action: receipt.action,
-        side: receipt.side,
-        yesPriceBps: receipt.yesPriceBps,
-        noPriceBps: receipt.noPriceBps,
-        shares: receipt.shares,
-        notionalCents: receipt.notionalCents
-      })
-      return jsonResponse(receipt)
-    }
-    const shares = numField(data, "shares") ?? 0
-    const receipt = try sellPredictionShares({
-      actorId: session.accountId,
-      actorKind: "user",
-      marketId,
-      side: rawSide,
-      shares: Math.round(shares),
-      ...(idempotencyKey === undefined ? {} : { idempotencyKey })
-    })
+    const receipt = action === "buy"
+      ? try buyPredictionShares({
+          actorId: session.accountId,
+          actorKind: "user",
+          marketId,
+          side: rawSide,
+          amountCents: Math.round(numField(data, "amountCents", "amount_cents") ?? Math.round((numField(data, "amountPts") ?? 0) * 100)),
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey })
+        })
+      : try sellPredictionShares({
+          actorId: session.accountId,
+          actorKind: "user",
+          marketId,
+          side: rawSide,
+          shares: Math.round(numField(data, "shareUnits", "share_units", "shares") ?? 0),
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey })
+        })
     try publishFeedEvent({
       type: "market.prediction",
       marketId: receipt.marketId,
@@ -1521,23 +1557,166 @@ effect function handleMarketRoute(
     })
     return jsonResponse(receipt)
   }
-  const perpHistoryMatch = /^\/api\/markets\/perp\/([^/]+)\/history$/.exec(path)
-  if (method === "GET" && perpHistoryMatch !== null) {
-    return jsonResponse(try getPerpPriceHistory({
-      ticker: decodeSegment(perpHistoryMatch[1] ?? ""),
+  return undefined
+}
+
+effect function handleLeaderboardAndEconomyRoute(
+  request: Request,
+  url: URL,
+  config: AppServerConfig
+): (Response | undefined)!(AuthFailure | MarketFailure | StoreFailure)!Store {
+  const path = url.pathname
+  const method = request.method.toUpperCase()
+  if (method === "GET" && path === "/api/leaderboard") {
+    const session = try optionalSession(request, config)
+    const page = clampIntQuery(url, "page", 1, 1, 10_000)
+    const pageSize = parseLeaderboardPageSize(url)
+    if (url.searchParams.has("filter") || url.searchParams.has("timeframe")) {
+      const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
+      const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
+      const result = try getFilteredLeaderboardPage({ filter, timeframe, page, pageSize })
+      return jsonResponse({
+        scope: filter === "npcs" ? "characters" : "players",
+        metric: "net_profit",
+        entries: result.entries,
+        leaderboard: result.entries,
+        page: result.pagination.page,
+        pageSize: result.pagination.pageSize,
+        totalCount: result.pagination.totalCount,
+        totalPages: result.pagination.totalPages,
+        pagination: result.pagination,
+        generatedAt: result.generatedAt,
+        currentUser: null
+      })
+    }
+    const scope = parseLeaderboardScope(url.searchParams.get("scope"))
+    const metric = parseLeaderboardMetric(url.searchParams.get("metric"))
+    const leaderboardPage = try getLeaderboard({
+      scope,
+      metric,
+      page,
+      pageSize,
+      ...(session !== null ? { viewerAccountId: session.accountId } : {})
+    })
+    return jsonResponse({
+      ...leaderboardPage,
+      leaderboard: leaderboardPage.entries,
+      pagination: {
+        page: leaderboardPage.page,
+        pageSize: leaderboardPage.pageSize,
+        totalCount: leaderboardPage.totalCount,
+        totalPages: leaderboardPage.totalPages
+      }
+    })
+  }
+  if (method === "GET" && path === "/api/leaderboard/me") {
+    const session = try requireSession(request, config)
+    const pageSize = parseLeaderboardPageSize(url)
+    if (url.searchParams.has("filter") || url.searchParams.has("timeframe")) {
+      const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
+      const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
+      const viewerRank = try getFilteredLeaderboardViewerRank(session.accountId, { filter, timeframe, pageSize })
+      return jsonResponse({ ...viewerRank, position: viewerRank })
+    }
+    const metric = parseLeaderboardMetric(url.searchParams.get("metric"))
+    const position = try getAccountLeaderboardRank(session.accountId, metric, pageSize)
+    return jsonResponse({
+      ...(position !== null
+        ? {
+            rank: position.entry.rank,
+            page: position.page,
+            totalCount: position.totalCount,
+            totalPages: Math.max(1, Math.ceil(position.totalCount / pageSize)),
+            entry: position.entry
+          }
+        : { rank: null }),
+      position
+    })
+  }
+  if (method === "GET" && path === "/api/economy/me/pnl-history") {
+    const session = try requireSession(request, config)
+    return jsonResponse(try getAccountPnlHistory({
+      accountId: session.accountId,
       range: parseHistoryRange(url.searchParams.get("range")),
       limit: clampIntQuery(url, "limit", 200, 2, 500)
     }))
   }
+  if (method === "GET" && path === "/api/economy/me") {
+    const session = try requireSession(request, config)
+    return jsonResponse({
+      economy: try getAccountEconomy(session.accountId),
+      ledger: try getPointLedger(session.accountId, clampIntQuery(url, "limit", 50, 1, 200))
+    })
+  }
+  return undefined
+}
+
+effect function handleMarketRoute(
+  request: Request,
+  url: URL,
+  config: AppServerConfig
+): (Response | undefined)!(AuthFailure | RateLimited | MarketFailure | StoreFailure | HttpRequestError)!(Store | RealtimeBus) {
+  const path = url.pathname
+  const method = request.method.toUpperCase()
+  if (method === "GET" && path === "/api/markets") {
+    const session = try optionalSession(request, config)
+    const predictions = try listPredictionMarkets()
+    const perps = try listPerpMarkets()
+    if (session === null) return jsonResponse({ predictions, perps })
+    const positions = try getUserPositions(session.accountId)
+    return jsonResponse({ predictions, perps, positions })
+  }
+  if (method === "GET" && path === "/api/markets/positions/closed") {
+    const session = try requireSession(request, config)
+    const limit = clampIntQuery(url, "limit", 50, 1, 200)
+    const paged = try listClosedPositions({
+      accountId: session.accountId,
+      outcome: parseClosedOutcomeFilter(url.searchParams.get("outcome")),
+      page: clampIntQuery(url, "page", 1, 1, 10_000),
+      limit: Math.min(limit, 100)
+    })
+    const structured = try listUserClosedPositions(session.accountId, limit)
+    return jsonResponse({ ...paged, ...structured })
+  }
+  const predictionResponse = try handlePredictionMarketRoute(request, url, config)
+  if (predictionResponse !== undefined) return predictionResponse
+  if (method === "POST" && path === "/api/markets/perp/preview") {
+    const session = try optionalSession(request, config)
+    const { data } = try readParsedBody(request)
+    const ticker = try reqStr(data, "ticker", "ticker")
+    const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
+    if (rawSide !== "long" && rawSide !== "short") return try badRequest("invalid_side", "Side must be long or short.")
+    const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
+    const leverage = numField(data, "leverage") ?? 1
+    const preview = try previewPerpOrder({
+      ...(session !== null ? { ownerId: session.accountId } : {}),
+      ticker,
+      side: rawSide,
+      collateralCents: Math.round(collateralCents),
+      leverage
+    })
+    return jsonResponse({ preview })
+  }
+  const perpHistoryMatch = /^\/api\/markets\/perp\/([^/]+)\/history$/.exec(path)
+  if (method === "GET" && perpHistoryMatch !== null) {
+    const ticker = decodeSegment(perpHistoryMatch[1] ?? "")
+    const view = try getPerpPriceHistory({
+      ticker,
+      range: parseHistoryRange(url.searchParams.get("range")),
+      limit: clampIntQuery(url, "limit", 200, 2, 500)
+    })
+    const points = view.points.map((pt) => ({ ...pt, recordedAt: pt.timestamp }))
+    return jsonResponse({ range: view.range, points, history: points })
+  }
   const perpTradesMatch = /^\/api\/markets\/perp\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && perpTradesMatch !== null) {
-    return jsonResponse({
-      trades: try listAssetTrades({
-        marketKind: "perp",
-        marketRef: decodeSegment(perpTradesMatch[1] ?? ""),
-        limit: clampIntQuery(url, "limit", 50, 1, 200)
-      })
+    const ticker = decodeSegment(perpTradesMatch[1] ?? "")
+    const trades = try listAssetTrades({
+      marketKind: "perp",
+      marketRef: ticker,
+      limit: clampIntQuery(url, "limit", 50, 1, 200)
     })
+    return jsonResponse({ trades: trades.map((t) => ({ ...t, traderDisplayName: t.traderName })) })
   }
   const perpDetailMatch = /^\/api\/markets\/perp\/([^/]+)$/.exec(path)
   if (method === "GET" && perpDetailMatch !== null) {
@@ -1553,17 +1732,19 @@ effect function handleMarketRoute(
     if (rawSide !== "long" && rawSide !== "short") return try badRequest("invalid_side", "Side must be long or short.")
     const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
     const leverage = numField(data, "leverage") ?? 1
+    const maxSlippageBps = numField(data, "maxSlippageBps", "max_slippage_bps")
     const opened = try openPerpPosition({
       ownerId: session.accountId,
       ownerKind: "user",
       ticker,
       side: rawSide,
       collateralCents: Math.round(collateralCents),
-      leverage
+      leverage,
+      ...(maxSlippageBps === undefined ? {} : { maxSlippageBps: Math.round(maxSlippageBps) })
     })
     try publishFeedEvent({
       type: "market.perp",
-      action: "open",
+      action: opened.action === "close" ? "close" : "open",
       actorId: session.accountId,
       ticker: opened.position.ticker,
       side: opened.position.side,
@@ -1572,14 +1753,23 @@ effect function handleMarketRoute(
       positionId: opened.positionId,
       markPriceCents: opened.position.markPriceCents
     })
-    return jsonResponse(opened, 201)
+    return jsonResponse({ ...opened, markPriceCents: opened.position.markPriceCents }, 201)
   }
   const perpCloseMatch = /^\/api\/markets\/perp\/positions\/([^/]+)\/close$/.exec(path)
   if (method === "POST" && perpCloseMatch !== null) {
     const session = try requireSession(request, config)
+    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
+    const { data } = try readParsedBody(request)
+    const rawSizePts = numField(data, "sizePts", "size_pts")
+    const sizeCents = numField(data, "sizeCents", "size_cents") ?? (rawSizePts !== undefined ? Math.round(rawSizePts * 100) : undefined)
+    const closePct = numField(data, "closePct", "close_pct")
+    const maxSlippageBps = numField(data, "maxSlippageBps", "max_slippage_bps")
     const closed = try closePerpPosition({
       ownerId: session.accountId,
-      positionId: decodeSegment(perpCloseMatch[1] ?? "")
+      positionId: decodeSegment(perpCloseMatch[1] ?? ""),
+      ...(sizeCents === undefined ? {} : { sizeCents: Math.round(sizeCents) }),
+      ...(closePct === undefined ? {} : { closePct }),
+      ...(maxSlippageBps === undefined ? {} : { maxSlippageBps: Math.round(maxSlippageBps) })
     })
     const store = try Store
     const levRows = try store.transaction((tx: Tx) =>
@@ -1597,57 +1787,9 @@ effect function handleMarketRoute(
       positionId: closed.positionId,
       markPriceCents: closed.exitPriceCents
     })
-    return jsonResponse(closed)
+    return jsonResponse({ ...closed, markPriceCents: closed.exitPriceCents })
   }
-  if (method === "GET" && path === "/api/leaderboard/me") {
-    const session = try requireSession(request, config)
-    const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
-    const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
-    const pageSize = clampIntQuery(url, "pageSize", clampIntQuery(url, "limit", 50, 1, 200), 1, 200)
-    return jsonResponse(try getFilteredLeaderboardViewerRank(session.accountId, { filter, timeframe, pageSize }))
-  }
-  if (method === "GET" && path === "/api/leaderboard") {
-    const filter = parseLeaderboardFilter(url.searchParams.get("filter"))
-    const timeframe = parseLeaderboardTimeframe(url.searchParams.get("timeframe"))
-    const page = clampIntQuery(url, "page", 1, 1, 10_000)
-    const pageSize = clampIntQuery(url, "pageSize", clampIntQuery(url, "limit", 50, 1, 200), 1, 200)
-    const result = try getFilteredLeaderboardPage({ filter, timeframe, page, pageSize })
-    return jsonResponse({
-      entries: result.entries,
-      leaderboard: result.entries,
-      pagination: result.pagination,
-      generatedAt: result.generatedAt
-    })
-  }
-  if (method === "GET" && path === "/api/economy/packs") {
-    return jsonResponse({ packs: [] })
-  }
-  if (method === "GET" && path === "/api/economy/me/pnl-history") {
-    const session = try requireSession(request, config)
-    return jsonResponse(try getAccountPnlHistory({
-      accountId: session.accountId,
-      range: parseHistoryRange(url.searchParams.get("range")),
-      limit: clampIntQuery(url, "limit", 200, 2, 500)
-    }))
-  }
-  if (method === "GET" && path === "/api/economy/me") {
-    const session = try requireSession(request, config)
-    return jsonResponse({
-      economy: try getAccountEconomy(session.accountId),
-      ledger: try getPointLedger(session.accountId, clampIntQuery(url, "limit", 50, 1, 200))
-    })
-  }
-  if (method === "POST" && (path === "/api/economy/checkout" || path === "/api/webhooks/stripe")) {
-    return jsonResponse(
-      {
-        error: "point_purchases_disabled",
-        code: "point_purchases_disabled",
-        message: "Point purchases are disabled. Accounts start with a fixed 100 pts virtual balance."
-      },
-      410
-    )
-  }
-  return undefined
+  return try handleLeaderboardAndEconomyRoute(request, url, config)
 }
 
 effect function dispatchCronJob(
@@ -1785,77 +1927,62 @@ effect function handleEngineAdminRoute(
     const reason = try reqStr(data, "reason", "reason")
     return jsonResponse(try overrideManualHold(marketId, outcome, reason))
   }
-  const cronMatch = /^\/api\/cron\/([^/]+)$/.exec(path)
-  if (method === "POST" && cronMatch !== null) {
-    try authorizeCronRequest(request, config)
-    const job = decodeSegment(cronMatch[1] ?? "")
-    return jsonResponse({ ok: true, job, result: try dispatchCronJob(job) })
+  const adminMarketCancelMatch = /^\/api\/admin\/markets\/([^/]+)\/cancel$/.exec(path)
+  if (method === "POST" && adminMarketCancelMatch !== null) {
+    try requireAdminSession(request, config)
+    const marketId = decodeSegment(adminMarketCancelMatch[1] ?? "")
+    return jsonResponse(try cancelPredictionMarket(marketId))
   }
   if (method === "GET" && path === "/api/admin/reports") {
     try requireAdminSession(request, config)
-    const rawStatus = url.searchParams.get("status")?.trim().toLowerCase() ?? "all"
+    const rawStatus = url.searchParams.get("status")?.trim().toLowerCase()
+    const status: ReportStatusFilter = rawStatus === "open" || rawStatus === "reviewed" || rawStatus === "dismissed"
+      ? rawStatus
+      : "all"
     const limit = clampIntQuery(url, "limit", 50, 1, 200)
-    const store = try Store
-    const reports = try store.transaction(effect (tx: Tx) => {
-      const rows = rawStatus === "open" || rawStatus === "reviewed" || rawStatus === "dismissed"
-        ? try tx.query(
-            `SELECT r.id, r.reporter_id, r.target_id, r.target_kind, r.reason, r.status, r.created_at, fa.handle AS reporter_handle
-             FROM feed_reports r
-             LEFT JOIN feed_accounts fa ON fa.account_id = r.reporter_id
-             WHERE r.status = $1
-             ORDER BY r.created_at DESC
-             LIMIT $2`,
-            [rawStatus, limit]
-          )
-        : try tx.query(
-            `SELECT r.id, r.reporter_id, r.target_id, r.target_kind, r.reason, r.status, r.created_at, fa.handle AS reporter_handle
-             FROM feed_reports r
-             LEFT JOIN feed_accounts fa ON fa.account_id = r.reporter_id
-             ORDER BY r.created_at DESC
-             LIMIT $1`,
-            [limit]
-          )
-      return rows.map((row) => ({
-        id: toText(row.id) ?? "",
-        reporterId: toText(row.reporter_id) ?? "",
-        reporterHandle: toText(row.reporter_handle) ?? null,
-        targetId: toText(row.target_id) ?? "",
-        targetKind: toText(row.target_kind) ?? "",
-        reason: toText(row.reason) ?? "",
-        status: toText(row.status) ?? "open",
-        createdAt: toInt(row.created_at)
-      }))
-    })
-    return jsonResponse({ reports })
+    return jsonResponse({ reports: try listModerationReports({ status, limit }) })
   }
-  const adminReportMatch = /^\/api\/admin\/reports\/([^/]+)$/.exec(path)
-  if (method === "PATCH" && adminReportMatch !== null) {
+  const adminReportResolveMatch = /^\/api\/admin\/reports\/([^/]+)\/resolve$/.exec(path)
+  if (method === "POST" && adminReportResolveMatch !== null) {
     try requireAdminSession(request, config)
-    const reportId = decodeSegment(adminReportMatch[1] ?? "")
+    const reportId = decodeSegment(adminReportResolveMatch[1] ?? "")
     const { data } = try readParsedBody(request)
     const rawStatus = (try reqStr(data, "status", "status")).toLowerCase()
     const nextStatus = rawStatus === "resolved" || rawStatus === "reviewed"
       ? "reviewed"
       : rawStatus === "dismissed"
         ? "dismissed"
-        : rawStatus === "open"
-          ? "open"
-          : null
+        : null
     if (nextStatus === null) {
+      return try badRequest("invalid_status", "status must be reviewed or dismissed.")
+    }
+    return jsonResponse(try resolveModerationReport({ reportId, status: nextStatus }))
+  }
+  const adminReportPatchMatch = /^\/api\/admin\/reports\/([^/]+)$/.exec(path)
+  if (method === "PATCH" && adminReportPatchMatch !== null) {
+    try requireAdminSession(request, config)
+    const reportId = decodeSegment(adminReportPatchMatch[1] ?? "")
+    const { data } = try readParsedBody(request)
+    const rawStatus = (try reqStr(data, "status", "status")).toLowerCase()
+    if (rawStatus === "resolved" || rawStatus === "reviewed" || rawStatus === "dismissed") {
+      const nextStatus = rawStatus === "dismissed" ? "dismissed" : "reviewed"
+      return jsonResponse(try resolveModerationReport({ reportId, status: nextStatus }))
+    }
+    if (rawStatus !== "open") {
       return try badRequest("invalid_status", "Report status must be open, reviewed, resolved, or dismissed.")
     }
     const store = try Store
     const updated = try store.transaction(effect (tx: Tx) => {
       const rows = try tx.query(
-        "UPDATE feed_reports SET status = $2 WHERE id = $1 RETURNING id, status",
-        [reportId, nextStatus]
+        "UPDATE feed_reports SET status = 'open' WHERE id = $1 RETURNING id, status",
+        [reportId]
       )
       return rows[0]
     })
     if (updated === undefined) {
       return try badRequest("not_found", "Report not found.", 404)
     }
-    return jsonResponse({ id: toText(updated.id) ?? reportId, status: toText(updated.status) ?? nextStatus })
+    return jsonResponse({ id: toText(updated.id) ?? reportId, status: toText(updated.status) ?? "open" })
   }
   if (method === "GET" && path === "/api/admin/users") {
     try requireAdminSession(request, config)
@@ -1946,6 +2073,12 @@ effect function handleEngineAdminRoute(
     }
     return jsonResponse({ id: factId, deleted: true })
   }
+  const cronMatch = /^\/api\/cron\/([^/]+)$/.exec(path)
+  if (method === "POST" && cronMatch !== null) {
+    try authorizeCronRequest(request, config)
+    const job = decodeSegment(cronMatch[1] ?? "")
+    return jsonResponse({ ok: true, job, result: try dispatchCronJob(job) })
+  }
   return undefined
 }
 
@@ -2031,25 +2164,35 @@ export effect function resolveOptionalRouteResponse(
   return routeOptionalResponse(request, config) catch (err) => mapDomainError(err)
 }
 
+effect function runScheduledJob(
+  name: string,
+  run: () => unknown!(EngineFailure | StoreFailure | MarketFailure | SocialFailure)!(Store | RealtimeBus)
+): void!!(Store | RealtimeBus) {
+  run() catch effect (err) => {
+    const detail = err instanceof Error ? err.message : String(err)
+    try Effect.logWarning(`scheduled tick ${name} failed: ${detail}`)
+  }
+}
+
 export effect function runScheduledTicks(cycle: number): void!!(Store | RealtimeBus) {
-  runMinuteTick() catch () => undefined
-  runMarketsRecovery() catch () => undefined
+  try runScheduledJob("minute-tick", () => runMinuteTick())
+  try runScheduledJob("markets-tick", () => runMarketsTick())
+  try runScheduledJob("markets-recovery", () => runMarketsRecovery())
   if (cycle % 2 === 0) {
-    runNpcTick() catch () => undefined
-    runMarketsTick() catch () => undefined
+    try runScheduledJob("npc-tick", () => runNpcTick())
   }
   if (cycle % 5 === 0) {
-    runOrganizationTick() catch () => undefined
-    runRssRefreshTick() catch () => undefined
+    try runScheduledJob("organization-tick", () => runOrganizationTick())
+    try runScheduledJob("rss-refresh-tick", () => runRssRefreshTick())
   }
-  if (cycle % 15 === 0) {
-    runArticleTick() catch () => undefined
-  }
-  if (cycle % 60 === 0) {
-    runPerpFundingTick() catch () => undefined
+  if (cycle % 30 === 0) {
+    try runScheduledJob("article-tick", () => runArticleTick())
   }
   if (cycle % 480 === 0) {
-    runWorldFactsTick() catch () => undefined
+    try runScheduledJob("perp-funding-tick", () => runPerpFundingTick())
+  }
+  if (cycle % 720 === 0) {
+    try runScheduledJob("world-facts-tick", () => runWorldFactsTick())
   }
 }
 

@@ -14,6 +14,7 @@ import {
   dismissBottomBanner,
   dismissExplainer,
   fetchLoopbackCode,
+  formatPhoneToE164,
   hydrateAuth,
   launchAgentHost,
   loadAdminStatus,
@@ -68,16 +69,18 @@ import {
   toggleWatchlistItem,
 } from "./store-core.ts";
 import {
+  clearNotifications,
   closeFollowList,
   closePerpPosition,
   closeThread,
   createGroupChat,
   createPost,
+  deleteGroupChat,
   deletePost,
   flushPendingNewPosts,
   inviteToGroupChat,
+  jumpToMyLeaderboardRank,
   leaveGroupChat,
-  loadActiveMarketTerminalData,
   loadArticle,
   loadChatMessages,
   loadChats,
@@ -87,32 +90,34 @@ import {
   loadFeed,
   loadFollowList,
   loadLeaderboard,
-  loadLeaderboardFiltered,
-  loadMarketSocialFeed,
-  loadMarketTrades,
+  loadMarketDetails,
   loadMarkets,
   loadModerationLists,
   loadMoreFeed,
   loadMoreProfilePosts,
   loadNotifications,
-  loadPerpHistory,
   loadPnlHistory,
   loadPositionsSilent,
-  loadPredictionHistory,
   loadProfile,
+  loadProfileReplies,
   loadTrending,
   loadTrendingTag,
   loadWorldStatus,
   markAllNotificationsRead,
   markChatRead,
   markNotificationRead,
+  openMarketsDashboard,
   openThread,
   patchPostCardAcrossStore,
+  previewPerpOrder,
   reactToChatMessage,
   rebalancePerpPosition,
+  removeGroupMember,
   removePostAcrossStore,
+  renameGroupChat,
   repostPost,
   respondAlphaInvite,
+  respondGroupInvite,
   searchAccounts,
   selectFeedTab,
   selectMarket,
@@ -135,14 +140,23 @@ type SseDomain = "feed" | "markets" | "explore" | "profile" | "chats" | "notific
 let booted = false;
 let activeEventSource: EventSource | null = null;
 const sseDomainInFlight = new Set<SseDomain>();
+const sseDomainPending = new Map<SseDomain, () => Promise<void>>();
 
 async function runDomainRefresh(domain: SseDomain, task: () => Promise<void>): Promise<void> {
-  if (sseDomainInFlight.has(domain)) return;
+  if (sseDomainInFlight.has(domain)) {
+    sseDomainPending.set(domain, task);
+    return;
+  }
   sseDomainInFlight.add(domain);
   try {
     await task();
   } finally {
     sseDomainInFlight.delete(domain);
+    const queued = sseDomainPending.get(domain);
+    if (queued) {
+      sseDomainPending.delete(domain);
+      void runDomainRefresh(domain, queued);
+    }
   }
 }
 
@@ -167,15 +181,13 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
     case "Markets": {
       const tasks: Promise<void>[] = [loadMarkets(), loadWorldStatus()];
       if (s.walletView && s.viewer) {
-        tasks.push(loadEconomy(), loadPnlHistory(), loadClosedPositions());
-      } else if (!s.walletView && s.selectedMarketId) {
-        tasks.push(loadActiveMarketTerminalData(s.selectedMarketKind, s.selectedMarketId));
+        tasks.push(loadEconomy(), loadClosedPositions(), loadPnlHistory());
       }
       await Promise.all(tasks);
       return;
     }
     case "Leaderboard":
-      await Promise.all([loadLeaderboardFiltered(), loadWorldStatus()]);
+      await Promise.all([loadLeaderboard(), loadWorldStatus()]);
       return;
     case "Chats":
       await loadChats();
@@ -242,12 +254,7 @@ export async function navigate(path: string): Promise<void> {
   sendNav({ type: "navigateTo", targetRoute: parsed.route });
   sendApp({ type: "navigateApp", targetRoute: parsed.route });
   recordPublicView(parsed.route);
-  const nextMarketId = parsed.marketKind && parsed.marketId
-    ? parsed.marketId
-    : parsed.queryTicker
-      ? parsed.queryTicker.toUpperCase()
-      : null;
-  const nextMarketKind = parsed.marketKind ?? (parsed.queryTicker ? "perp" : "prediction");
+  const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
   setStoreState({
     route: parsed.route,
     profileHandle: parsed.profileHandle,
@@ -260,13 +267,15 @@ export async function navigate(path: string): Promise<void> {
     selectedTicker: parsed.queryTicker,
     ...(parsed.route === "Markets"
       ? {
-          selectedMarketKind: nextMarketKind,
-          selectedMarketId: parsed.walletView ? null : nextMarketId,
-          ...(nextMarketId !== getStoreSnapshot().selectedMarketId
-            ? { perpHistory: [], predictionHistory: [], marketTrades: [], marketSocialPosts: [], tradeError: null }
-            : {}),
+          marketsViewMode: enteringTerminal ? "terminal" as const : "dashboard" as const,
+          perpPreview: null,
         }
       : {}),
+    ...(parsed.marketKind && parsed.marketId
+      ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId }
+      : parsed.queryTicker
+        ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker }
+        : {}),
   });
   await loadDataForRoute(parsed.route, url.search);
 }
@@ -328,7 +337,10 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
   if (eventType === "post.deleted" && data) {
     const postId = optStr(data.postId);
     if (postId) {
-      removePostAcrossStore(postId);
+      removePostAcrossStore(postId, {
+        replyToPostId: optStr(data.replyToPostId),
+        parentReplyCount: typeof data.parentReplyCount === "number" ? data.parentReplyCount : null,
+      });
     }
     return;
   }
@@ -338,11 +350,6 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
     if (s.route === "PostDetail" && s.activePostId && replyToPostId === s.activePostId) {
       void runDomainRefresh("feed", () => openThread(s.activePostId ?? "", s.threadSort));
       return;
-    }
-    if (s.route === "Markets" && !s.walletView && s.selectedMarketId) {
-      const targetKind = s.selectedMarketKind;
-      const targetRef = s.selectedMarketId;
-      void runDomainRefresh("feed", () => loadMarketSocialFeed(targetKind, targetRef));
     }
     if (s.route === "Home") {
       const scrolledDown = typeof window !== "undefined" && window.scrollY > 120;
@@ -368,20 +375,15 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
     if (s.route === "Markets" || s.route === "Leaderboard") {
       void runDomainRefresh("markets", async () => {
         if (s.route === "Leaderboard") {
-          await loadLeaderboardFiltered();
+          await loadLeaderboard();
           return;
         }
-        const tasks: Promise<void>[] = [loadMarkets()];
+        await loadMarkets();
         if (s.walletView && s.viewer) {
-          tasks.push(loadEconomy(), loadPnlHistory(), loadClosedPositions());
-        } else if (!s.walletView && s.selectedMarketId) {
-          if (s.selectedMarketKind === "perp") {
-            tasks.push(loadPerpHistory(s.selectedMarketId), loadMarketTrades("perp", s.selectedMarketId));
-          } else {
-            tasks.push(loadPredictionHistory(s.selectedMarketId), loadMarketTrades("prediction", s.selectedMarketId));
-          }
+          await Promise.all([loadEconomy(), loadClosedPositions(), loadPnlHistory()]);
+        } else if (s.marketsViewMode === "terminal" && s.selectedMarketId) {
+          await loadMarketDetails(s.selectedMarketKind, s.selectedMarketId);
         }
-        await Promise.all(tasks);
       });
     }
     if (s.route === "Explore") {
@@ -474,12 +476,7 @@ export function bootStore(): void {
     }
     window.addEventListener("popstate", () => {
       const parsed = parseLocation(window.location.pathname, window.location.search);
-      const nextMarketId = parsed.marketKind && parsed.marketId
-        ? parsed.marketId
-        : parsed.queryTicker
-          ? parsed.queryTicker.toUpperCase()
-          : null;
-      const nextMarketKind = parsed.marketKind ?? (parsed.queryTicker ? "perp" : "prediction");
+      const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
       sendNav({ type: "navigateTo", targetRoute: parsed.route });
       sendApp({ type: "navigateApp", targetRoute: parsed.route });
       setStoreState({
@@ -493,8 +490,16 @@ export function bootStore(): void {
         ...(parsed.settingsTab ? { settingsTab: parsed.settingsTab } : {}),
         selectedTicker: parsed.queryTicker,
         ...(parsed.route === "Markets"
-          ? { selectedMarketKind: nextMarketKind, selectedMarketId: parsed.walletView ? null : nextMarketId }
+          ? {
+              marketsViewMode: enteringTerminal ? "terminal" as const : "dashboard" as const,
+              perpPreview: null,
+            }
           : {}),
+        ...(parsed.marketKind && parsed.marketId
+          ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId }
+          : parsed.queryTicker
+            ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker }
+            : {}),
       });
       void loadDataForRoute(parsed.route, window.location.search);
     });
@@ -579,24 +584,22 @@ export const storeActions = {
   loadTrendingTag,
   searchAccounts,
   loadMarkets,
-  loadPerpHistory,
-  loadPredictionHistory,
-  loadMarketTrades,
-  loadMarketSocialFeed,
-  loadActiveMarketTerminalData,
+  loadMarketDetails,
   setMarketTimeRange,
   loadClosedPositions,
   loadPnlHistory,
   loadWorldStatus,
   loadLeaderboard,
-  loadLeaderboardFiltered,
+  jumpToMyLeaderboardRank,
   loadEconomy,
   selectMarket,
+  openMarketsDashboard,
   toggleWatchlistItem,
+  previewPerpOrder,
   submitPredictionOrder,
   submitPerpOrder,
-  closePerpPosition,
   rebalancePerpPosition,
+  closePerpPosition,
   loadChats,
   loadChatMessages,
   markChatRead,
@@ -604,13 +607,19 @@ export const storeActions = {
   createGroupChat,
   inviteToGroupChat,
   leaveGroupChat,
+  renameGroupChat,
+  removeGroupMember,
+  deleteGroupChat,
   sendChatMessage,
   reactToChatMessage,
   respondAlphaInvite,
+  respondGroupInvite,
   loadNotifications,
   markNotificationRead,
   markAllNotificationsRead,
+  clearNotifications,
   loadProfile,
+  loadProfileReplies,
   loadMoreProfilePosts,
   loadFollowList,
   closeFollowList,
@@ -637,6 +646,7 @@ export const storeActions = {
   launchAgentHost,
   revokeAgentGrant,
   fetchLoopbackCode,
+  formatPhoneToE164,
   startPhoneChange,
   confirmPhoneChange,
   logout,

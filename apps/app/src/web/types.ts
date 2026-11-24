@@ -9,17 +9,18 @@ import {
   type ChatKind,
   type ChatMessageItem,
   type LeaderboardEntry,
+  type LeaderboardMetric,
+  type LeaderboardScope,
   type LightweightChartPoint,
   type MarketCardData,
   type NotificationItem,
   type NotificationKind,
-  type PerpPricePoint,
   type PositionRowData,
   type PostCardData,
   type PredictionMarketPhase,
-  type PredictionProbabilityPoint,
   type ProfileSummary,
   type ToastTone,
+  type TradeTicketPerpPreview,
   type TrendingItem,
   type WalletClosedPosition,
   defaultAgentLaunchers,
@@ -116,57 +117,46 @@ export interface AppPerpMarket {
   readonly history: ReadonlyArray<{ readonly label: string; readonly value: number }>;
 }
 
+export interface AppMarketHistoryPoint {
+  readonly id: string;
+  readonly recordedAt: number;
+  readonly priceCents: number;
+  readonly yesPriceBps: number | null;
+  readonly markPriceCents: number | null;
+  readonly volumeCents: number;
+}
+
+export interface AppPerpPreview extends TradeTicketPerpPreview {
+  readonly ticker: string;
+  readonly side: "long" | "short";
+  readonly action: string;
+  readonly collateralCents: number;
+  readonly sizeCents: number;
+  readonly leverage: number;
+  readonly totalDebitCents: number;
+  readonly indexPriceCents: number;
+  readonly preMarkPriceCents: number;
+  readonly fundingRateBps: number;
+}
+
 export interface AppPosition {
   readonly row: PositionRowData;
   readonly marketId: string;
   readonly rawSide: "yes" | "no" | "long" | "short";
   readonly shares: number;
-  readonly isClosed: boolean;
+  readonly wholeShares: number;
+  readonly costBasisCents: number;
   readonly marginCents: number;
   readonly sizeCents: number;
+  readonly leverage: number;
   readonly entryPriceCents: number;
   readonly markPriceCents: number;
   readonly liquidationPriceCents: number;
   readonly unrealizedPnlCents: number;
-  readonly leverage: number;
-  readonly costBasisCents: number;
-  readonly estimatedValueCents: number;
-  readonly sidePriceBps: number;
-}
-
-export interface AppWorldStatus {
-  readonly currentDay: number;
-  readonly currentHour: number;
-  readonly phase: string;
-  readonly gameRunning: boolean;
-  readonly lastTickAt: number;
-  readonly activeMarketsCount: number;
-  readonly totalPostsCount: number;
-  readonly activeActorsCount: number;
-}
-
-export type ClosedOutcomeFilter = "all" | "won" | "lost";
-
-export interface AppClosedPositionsPage {
-  readonly items: ReadonlyArray<WalletClosedPosition>;
-  readonly page: number;
-  readonly limit: number;
-  readonly totalCount: number;
-  readonly totalPages: number;
-}
-
-export interface AppLeaderboardPage {
-  readonly entries: ReadonlyArray<AppLeaderboardEntry>;
-  readonly page: number;
-  readonly pageSize: number;
-  readonly totalCount: number;
-  readonly totalPages: number;
-}
-
-export interface AppLeaderboardViewerRank {
-  readonly rank: number | null;
-  readonly page: number | null;
-  readonly entry: AppLeaderboardEntry | null;
+  readonly pnlPct: number;
+  readonly avgPricePct: number;
+  readonly currentPricePct: number;
+  readonly isClosed: boolean;
 }
 
 export interface AppLeaderboardEntry extends LeaderboardEntry {
@@ -176,6 +166,25 @@ export interface AppLeaderboardEntry extends LeaderboardEntry {
   readonly startingGrantCents: number;
   readonly wins: number;
   readonly settledCount: number;
+}
+
+export interface AppLeaderboardPage {
+  readonly scope: LeaderboardScope;
+  readonly metric: LeaderboardMetric;
+  readonly entries: ReadonlyArray<AppLeaderboardEntry>;
+  readonly totalCount: number;
+  readonly totalPages: number;
+  readonly page: number;
+  readonly pageSize: number;
+  readonly currentUser: AppLeaderboardEntry | null;
+}
+
+export interface AppLeaderboardPosition {
+  readonly rank: number;
+  readonly page: number;
+  readonly totalCount: number;
+  readonly totalPages: number;
+  readonly entry: AppLeaderboardEntry;
 }
 
 export interface AppAccountEconomy {
@@ -246,6 +255,7 @@ export interface ExploreData {
   readonly accounts: ReadonlyArray<ExploreAccountHit>;
   readonly actors: ReadonlyArray<ExploreActorHit>;
   readonly organizations: ReadonlyArray<ExploreOrgHit>;
+  readonly tags: ReadonlyArray<string>;
 }
 
 export interface AppChatMember {
@@ -276,6 +286,8 @@ export interface AppChatSummary {
 export interface AppAlphaInvite {
   readonly id: string;
   readonly chatId: string;
+  readonly chatKind: "user_group" | "npc_alpha";
+  readonly isAlpha: boolean;
   readonly actorHandle: string;
   readonly actorDisplayName: string;
   readonly actorAvatarUrl: string | null;
@@ -421,7 +433,7 @@ export type PendingAction =
   | { readonly kind: "post"; readonly content: string; readonly quotePostId?: string; readonly label: string }
   | { readonly kind: "follow"; readonly handle: string; readonly currentlyFollowing: boolean; readonly label: string }
   | { readonly kind: "dm"; readonly handle: string; readonly label: string }
-  | { readonly kind: "trade_prediction"; readonly marketId: string; readonly action: "Buy" | "Sell"; readonly side: "yes" | "no"; readonly amountPts: number; readonly label: string }
+  | { readonly kind: "trade_prediction"; readonly marketId: string; readonly action: "Buy" | "Sell"; readonly side: "yes" | "no"; readonly amountPts: number; readonly shareUnits?: number; readonly label: string }
   | { readonly kind: "trade_perp"; readonly ticker: string; readonly side: "long" | "short"; readonly marginPts: number; readonly leverage: number; readonly label: string }
   | { readonly kind: "persist_mode"; readonly mode: "game" | "social"; readonly label: string }
   | { readonly kind: "switch_tab"; readonly tab: "latest" | "following" | "top"; readonly label: string };
@@ -675,6 +687,8 @@ export function decodePost(raw: unknown, viewerAccountId?: string | null): AppPo
   const avatarUrl = optStr(raw.avatarUrl ?? raw.authorAvatarUrl);
   const viaClientName = optStr(raw.viaClientName ?? raw.via_client_name);
   const replyToHandle = optStr(raw.replyToHandle ?? raw.reply_to_handle);
+  const repostedByHandle = optStr(raw.repostedByHandle ?? raw.reposted_by_handle);
+  const repostedByName = optStr(raw.repostedByName ?? raw.reposted_by_name);
   return {
     authorId,
     authorKind: str(raw.authorKind ?? raw.author_kind, "user"),
@@ -692,6 +706,12 @@ export function decodePost(raw: unknown, viewerAccountId?: string | null): AppPo
       content: str(raw.content),
       ...(viaClientName ? { viaClientName } : {}),
       ...(replyToHandle ? { replyToHandle } : {}),
+      ...(repostedByHandle
+        ? {
+            repostedByHandle,
+            repostedBy: { name: repostedByName ?? repostedByHandle, handle: repostedByHandle },
+          }
+        : {}),
       ...(quotePost ? { quotePost } : {}),
       ...(marketBadge ? { marketBadge } : {}),
       likeCount: num(raw.likeCount ?? raw.like_count, 0),
@@ -812,12 +832,6 @@ export function decodePerpMarket(raw: unknown): AppPerpMarket | null {
   const history = rawHistory
     .map((pt) => (isRecord(pt) ? { label: str(pt.label, ""), value: num(pt.value, markCents / 100) } : null))
     .filter((pt): pt is { label: string; value: number } => pt !== null);
-  const fallbackHistory = history.length > 0
-    ? history
-    : [
-        { label: "Index", value: indexCents / 100 },
-        { label: "Mark", value: markCents / 100 },
-      ];
   return {
     ticker,
     organizationId: optStr(raw.organizationId ?? raw.organization_id),
@@ -828,7 +842,7 @@ export function decodePerpMarket(raw: unknown): AppPerpMarket | null {
     volume24hCents,
     fundingRateBps,
     openInterestCents,
-    history: fallbackHistory,
+    history,
     card: {
       kind: "perp",
       id: ticker,
@@ -841,6 +855,101 @@ export function decodePerpMarket(raw: unknown): AppPerpMarket | null {
       change24hPct,
       maxLeverage: num(raw.maxLeverage ?? raw.max_leverage, 20),
     },
+  };
+}
+
+export function decodeMarketPriceHistory(raw: unknown): ReadonlyArray<AppMarketHistoryPoint> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.history ?? raw.points ?? raw.items) : [];
+  return list
+    .map((entry, idx): AppMarketHistoryPoint | null => {
+      if (!isRecord(entry)) return null;
+      const recordedAt = num(entry.recordedAt ?? entry.recorded_at ?? entry.time, 0);
+      if (recordedAt <= 0) return null;
+      const priceCents = num(entry.priceCents ?? entry.price_cents, 0);
+      const yesPriceBps = entry.yesPriceBps !== undefined && entry.yesPriceBps !== null
+        ? num(entry.yesPriceBps, 5000)
+        : entry.yes_price_bps !== undefined && entry.yes_price_bps !== null
+          ? num(entry.yes_price_bps, 5000)
+          : null;
+      const markPriceCents = entry.markPriceCents !== undefined && entry.markPriceCents !== null
+        ? num(entry.markPriceCents, priceCents)
+        : entry.mark_price_cents !== undefined && entry.mark_price_cents !== null
+          ? num(entry.mark_price_cents, priceCents)
+          : null;
+      return {
+        id: optStr(entry.id) ?? `pt-${recordedAt}-${idx}`,
+        recordedAt,
+        priceCents,
+        yesPriceBps,
+        markPriceCents,
+        volumeCents: num(entry.volumeCents ?? entry.volume_cents, 0),
+      };
+    })
+    .filter((pt): pt is AppMarketHistoryPoint => pt !== null)
+    .sort((a, b) => a.recordedAt - b.recordedAt);
+}
+
+export function decodeMarketTrades(raw: unknown): ReadonlyArray<AssetTradeEntry> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.trades ?? raw.items) : [];
+  return list
+    .map((entry, idx): AssetTradeEntry | null => {
+      if (!isRecord(entry)) return null;
+      const id = optStr(entry.id) ?? `trade-${idx}`;
+      const marketKind = str(entry.marketKind ?? entry.market_kind, "perp");
+      const rawSide = str(entry.side, "buy").toLowerCase();
+      const traderId = str(entry.traderId ?? entry.trader_id, "trader");
+      const handle = optStr(entry.traderHandle ?? entry.handle) ?? traderId;
+      const displayName = optStr(entry.traderDisplayName ?? entry.displayName) ?? handle;
+      const avatarUrl = optStr(entry.traderAvatarUrl ?? entry.avatarUrl);
+      const isNpc = str(entry.traderKind ?? entry.trader_kind) === "npc" || bool(entry.isNpc, false);
+      const notionalCents = num(entry.notionalCents ?? entry.notional_cents, 0);
+      const priceCents = num(entry.priceCents ?? entry.price_cents, 0);
+      const sharesOrSize = num(entry.sharesOrSize ?? entry.shares_or_size, 0);
+      const createdAt = num(entry.createdAt ?? entry.created_at, 0);
+      const bullish = rawSide.includes("long") || rawSide.includes("yes") || rawSide === "buy";
+      const actionLabel = rawSide.replace(/_/gu, " ").toUpperCase();
+      const priceLabel = marketKind === "prediction"
+        ? `${Math.max(1, Math.min(99, Math.round(priceCents)))}%`
+        : formatPts(priceCents / 100);
+      return {
+        id,
+        displayName,
+        handle,
+        ...(avatarUrl ? { avatarUrl } : {}),
+        isNpc,
+        actionLabel,
+        tone: bullish ? "ok" : "destructive",
+        amountPts: notionalCents / 100,
+        priceLabel,
+        ...(marketKind === "prediction" && sharesOrSize > 0 ? { shares: sharesOrSize / 100 } : {}),
+        timeAgoLabel: createdAt > 0 ? formatTimeLabel(createdAt) : "just now",
+      };
+    })
+    .filter((entry): entry is AssetTradeEntry => entry !== null);
+}
+
+export function decodePerpPreview(raw: unknown): AppPerpPreview | null {
+  if (!isRecord(raw)) return null;
+  const rec = isRecord(raw.preview) ? raw.preview : raw;
+  const ticker = optStr(rec.ticker);
+  if (!ticker) return null;
+  const entryPriceCents = num(rec.executionPriceCents ?? rec.entryPriceCents, 0);
+  const liquidationPriceCents = num(rec.estimatedLiquidationPriceCents ?? rec.liquidationPriceCents, 0);
+  return {
+    ticker,
+    side: str(rec.side, "long").toLowerCase() === "short" ? "short" : "long",
+    action: str(rec.action, "open"),
+    collateralCents: num(rec.collateralCents, 0),
+    sizeCents: num(rec.sizeCents, 0),
+    leverage: num(rec.leverage, 1),
+    feeCents: num(rec.feeCents, 0),
+    totalDebitCents: num(rec.totalDebitCents, 0),
+    indexPriceCents: num(rec.indexPriceCents, 0),
+    preMarkPriceCents: num(rec.preMarkPriceCents, entryPriceCents),
+    entryPriceCents,
+    liquidationPriceCents,
+    priceImpactBps: num(rec.priceImpactBps, 0),
+    fundingRateBps: num(rec.fundingRateBps, 0),
   };
 }
 
@@ -858,30 +967,37 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
       const costCents = num(entry.costBasisCents ?? entry.cost_basis_cents, 0);
       const estCents = num(entry.estimatedValueCents, costCents);
       const sidePriceBps = rawSide === "yes" ? num(entry.yesPriceBps, 5000) : num(entry.noPriceBps, 5000);
+      const wholeShares = shares / 100;
+      const unrealizedPnlCents = estCents - costCents;
+      const avgPricePct = wholeShares > 0 ? Math.min(99, Math.max(1, (costCents / wholeShares))) : Math.round(sidePriceBps / 100);
+      const currentPricePct = Math.min(99, Math.max(1, sidePriceBps / 100));
+      const pnlPct = costCents > 0 ? (unrealizedPnlCents / costCents) * 100 : 0;
       return {
         marketId,
         rawSide,
         shares,
-        isClosed: entry.settledAt !== null && entry.settledAt !== undefined,
+        wholeShares,
+        costBasisCents: costCents,
         marginCents: costCents,
         sizeCents: estCents,
-        entryPriceCents: shares > 0 ? Math.round(costCents / shares) : 0,
-        markPriceCents: Math.round(sidePriceBps / 100),
-        liquidationPriceCents: 0,
-        unrealizedPnlCents: estCents - costCents,
         leverage: 1,
-        costBasisCents: costCents,
-        estimatedValueCents: estCents,
-        sidePriceBps,
+        entryPriceCents: Math.round(avgPricePct),
+        markPriceCents: Math.round(currentPricePct),
+        liquidationPriceCents: 0,
+        unrealizedPnlCents,
+        pnlPct,
+        avgPricePct,
+        currentPricePct,
+        isClosed: entry.settledAt !== null && entry.settledAt !== undefined,
         row: {
           id: `pred:${marketId}:${rawSide}`,
           kind: "prediction",
           marketLabel: str(entry.question, marketId),
           side: rawSide === "yes" ? "YES" : "NO",
-          quantityLabel: `${shares} shares`,
+          quantityLabel: `${wholeShares.toFixed(2)} shares`,
           entryLabel: formatPts(costCents / 100),
           markLabel: `${Math.round(sidePriceBps / 100)}%`,
-          pnlPts: (estCents - costCents) / 100,
+          pnlPts: unrealizedPnlCents / 100,
         },
       };
     })
@@ -896,29 +1012,32 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
       const rawSide = str(entry.side, "long").toLowerCase() === "short" ? "short" : "long";
       const sizeCents = num(entry.sizeCents ?? entry.size_cents, 0);
       const marginCents = num(entry.marginCents ?? entry.margin_cents, 0);
+      const leverage = num(entry.leverage, 1);
       const entryCents = num(entry.entryPriceCents ?? entry.entry_price_cents, 0);
       const markCents = num(entry.markPriceCents ?? entry.mark_price_cents, entryCents);
       const liqCents = num(entry.liquidationPriceCents, 0);
-      const leverage = num(entry.leverage, 1);
       const rawEquity = entry.equityCents ?? entry.equity_cents;
       const pnlCents = rawEquity !== undefined
         ? num(rawEquity, marginCents) - marginCents
         : num(entry.unrealizedPnlCents, 0) - num(entry.accruedFundingCents ?? entry.accrued_funding_cents, 0);
+      const pnlPct = marginCents > 0 ? (pnlCents / marginCents) * 100 : 0;
       return {
         marketId: ticker,
         rawSide,
         shares: sizeCents,
-        isClosed: str(entry.status, "open") !== "open",
+        wholeShares: sizeCents / 100,
+        costBasisCents: marginCents,
         marginCents,
         sizeCents,
+        leverage,
         entryPriceCents: entryCents,
         markPriceCents: markCents,
         liquidationPriceCents: liqCents,
         unrealizedPnlCents: pnlCents,
-        leverage,
-        costBasisCents: marginCents,
-        estimatedValueCents: Math.max(0, marginCents + pnlCents),
-        sidePriceBps: 0,
+        pnlPct,
+        avgPricePct: 0,
+        currentPricePct: 0,
+        isClosed: str(entry.status, "open") !== "open",
         row: {
           id,
           kind: "perp",
@@ -938,52 +1057,165 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
   return [...predPositions, ...perpPositions];
 }
 
-export function decodeLeaderboard(raw: unknown): ReadonlyArray<AppLeaderboardEntry> {
-  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.leaderboard ?? raw.entries ?? raw.rows) : [];
-  return list
-    .map((entry, idx): AppLeaderboardEntry | null => {
+export function decodeClosedPositions(raw: unknown): ReadonlyArray<WalletClosedPosition> {
+  const rec = isRecord(raw) ? raw : {};
+  const predRaw = arr(rec.predictionPositions ?? rec.predictions);
+  const perpRaw = arr(rec.perpPositions ?? rec.perps);
+  const closedPreds = predRaw
+    .map((entry, idx): { readonly item: WalletClosedPosition; readonly closedAt: number } | null => {
       if (!isRecord(entry)) return null;
-      const accountId = optStr(entry.accountId ?? entry.account_id);
-      const handle = optStr(entry.handle);
-      if (!accountId && !handle) return null;
-      const winRateRaw = num(entry.winRate ?? entry.winRatePct, 0);
-      const winRatePct = winRateRaw <= 1 && winRateRaw > 0 ? Math.round(winRateRaw * 100) : Math.round(winRateRaw);
-      const balanceCents = num(entry.balanceCents ?? entry.balance_cents, 0);
-      const positionValueCents = num(entry.positionValueCents ?? entry.position_value_cents, 0);
-      const equityCents = num(entry.equityCents ?? entry.equity_cents, balanceCents + positionValueCents);
-      const startingGrantCents = num(entry.startingGrantCents ?? entry.starting_grant_cents, 10000);
-      const netProfitCents = num(entry.netProfitCents ?? entry.net_profit_cents, Math.round(num(entry.netProfitPts, 0) * 100));
-      const tradeCount = num(entry.tradeCount ?? entry.trade_count, 0);
-      const wins = num(entry.wins, 0);
-      const settledCount = num(entry.settledCount ?? entry.settled_count, 0);
-      const roiPct = typeof entry.roiPct === "number"
+      const marketId = optStr(entry.marketId ?? entry.market_id) ?? `pred-${idx}`;
+      const rawSide = str(entry.side, "yes").toLowerCase() === "no" ? "NO" : "YES";
+      const costCents = num(entry.costBasisCents ?? entry.cost_basis_cents, 0);
+      const realizedPnlCents = num(entry.realizedPnlCents ?? entry.realized_pnl_cents, num(entry.payoutCents, 0) - costCents);
+      const settledAt = num(entry.settledAt ?? entry.settled_at, 0);
+      return {
+        closedAt: settledAt,
+        item: {
+          id: `closed-pred:${marketId}:${rawSide}:${settledAt}:${idx}`,
+          kind: "prediction",
+          marketLabel: str(entry.question, marketId),
+          side: rawSide,
+          realizedPnlPts: realizedPnlCents / 100,
+          realizedPnlPct: costCents > 0 ? (realizedPnlCents / costCents) * 100 : 0,
+          closedAtLabel: settledAt > 0 ? formatTimeLabel(settledAt) : "Settled",
+        },
+      };
+    })
+    .filter((v): v is { readonly item: WalletClosedPosition; readonly closedAt: number } => v !== null);
+
+  const closedPerps = perpRaw
+    .map((entry, idx): { readonly item: WalletClosedPosition; readonly closedAt: number } | null => {
+      if (!isRecord(entry)) return null;
+      const id = optStr(entry.id) ?? `closed-perp-${idx}`;
+      const ticker = optStr(entry.ticker) ?? "PERP";
+      const rawSide = str(entry.side, "long").toLowerCase() === "short" ? "Short" : "Long";
+      const marginCents = num(entry.marginCents ?? entry.margin_cents, 0);
+      const realizedPnlCents = num(entry.realizedPnlCents ?? entry.realized_pnl_cents, 0);
+      const closedAt = num(entry.closedAt ?? entry.closed_at, 0);
+      return {
+        closedAt,
+        item: {
+          id,
+          kind: "perp",
+          marketLabel: `$${ticker} Perp`,
+          side: rawSide,
+          realizedPnlPts: realizedPnlCents / 100,
+          realizedPnlPct: marginCents > 0 ? (realizedPnlCents / marginCents) * 100 : 0,
+          closedAtLabel: closedAt > 0 ? formatTimeLabel(closedAt) : "Closed",
+        },
+      };
+    })
+    .filter((v): v is { readonly item: WalletClosedPosition; readonly closedAt: number } => v !== null);
+
+  return [...closedPreds, ...closedPerps]
+    .sort((a, b) => b.closedAt - a.closedAt)
+    .map((v) => v.item);
+}
+
+export function decodeLeaderboardEntry(entry: unknown, fallbackRank = 1): AppLeaderboardEntry | null {
+  if (!isRecord(entry)) return null;
+  const accountId = optStr(entry.accountId ?? entry.account_id);
+  const handle = optStr(entry.handle);
+  if (!accountId && !handle) return null;
+  const winRatePct = typeof entry.winRatePct === "number"
+    ? Math.round(entry.winRatePct)
+    : typeof entry.winRateBps === "number"
+      ? Math.round(entry.winRateBps / 100)
+      : Math.round(num(entry.winRate, 0) * 100);
+  const balanceCents = num(entry.balanceCents ?? entry.balance_cents, 0);
+  const positionValueCents = num(entry.positionValueCents ?? entry.position_value_cents, 0);
+  const equityCents = num(entry.equityCents ?? entry.equity_cents, balanceCents + positionValueCents);
+  const startingGrantCents = num(entry.startingGrantCents ?? entry.starting_grant_cents, 10000);
+  const netProfitCents = num(entry.netProfitCents ?? entry.net_profit_cents, Math.round(num(entry.netProfitPts, 0) * 100));
+  const tradeCount = num(entry.tradeCount ?? entry.trade_count, 0);
+  const wins = num(entry.wins, 0);
+  const settledCount = num(entry.settledCount ?? entry.settled_count, 0);
+  const returnPct = typeof entry.returnPct === "number"
+    ? entry.returnPct
+    : typeof entry.returnBps === "number"
+      ? entry.returnBps / 100
+      : typeof entry.roiPct === "number"
         ? entry.roiPct
         : startingGrantCents > 0
           ? (netProfitCents / startingGrantCents) * 100
           : 0;
-      const avatarUrl = optStr(entry.avatarUrl ?? entry.avatar_url);
-      return {
-        rank: num(entry.rank, idx + 1),
-        accountId: accountId ?? handle ?? String(idx + 1),
-        displayName: str(entry.displayName ?? entry.display_name, handle ?? accountId ?? "Trader"),
-        handle: handle ?? accountId ?? "trader",
-        ...(avatarUrl ? { avatarUrl } : {}),
-        isNpc: bool(entry.isNpc, false),
-        netProfitPts: num(entry.netProfitPts, netProfitCents / 100),
-        winRatePct,
-        volumePts: num(entry.volumePts, num(entry.volumeCents, 0) / 100),
-        roiPct,
-        equityPts: equityCents / 100,
-        tradeCount,
-        balanceCents,
-        positionValueCents,
-        equityCents,
-        startingGrantCents,
-        wins,
-        settledCount,
-      };
-    })
+  const avatarUrl = optStr(entry.avatarUrl ?? entry.avatar_url);
+  return {
+    rank: num(entry.rank, fallbackRank),
+    accountId: accountId ?? handle ?? String(fallbackRank),
+    displayName: str(entry.displayName ?? entry.display_name, handle ?? accountId ?? "Trader"),
+    handle: handle ?? accountId ?? "trader",
+    ...(avatarUrl ? { avatarUrl } : {}),
+    isNpc: bool(entry.isNpc, false),
+    netProfitPts: num(entry.netProfitPts, netProfitCents / 100),
+    returnPct,
+    roiPct: returnPct,
+    winRatePct,
+    volumePts: num(entry.volumePts, num(entry.volumeCents, 0) / 100),
+    equityPts: equityCents / 100,
+    tradeCount,
+    balanceCents,
+    positionValueCents,
+    equityCents,
+    startingGrantCents,
+    wins,
+    settledCount,
+  };
+}
+
+export function decodeLeaderboard(raw: unknown): ReadonlyArray<AppLeaderboardEntry> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.entries ?? raw.leaderboard ?? raw.rows) : [];
+  return list
+    .map((entry, idx) => decodeLeaderboardEntry(entry, idx + 1))
     .filter((e): e is AppLeaderboardEntry => e !== null);
+}
+
+export function decodeLeaderboardPage(
+  raw: unknown,
+  fallbackScope: LeaderboardScope = "players",
+  fallbackMetric: LeaderboardMetric = "net_profit",
+): AppLeaderboardPage {
+  const rec = isRecord(raw) ? raw : {};
+  const entries = decodeLeaderboard(raw);
+  const rawScope = str(rec.scope, fallbackScope);
+  const scope: LeaderboardScope = rawScope === "characters" ? "characters" : "players";
+  const rawMetric = str(rec.metric, fallbackMetric);
+  const metric: LeaderboardMetric = rawMetric === "return_pct" || rawMetric === "win_rate" || rawMetric === "volume"
+    ? rawMetric
+    : "net_profit";
+  const page = Math.max(1, num(rec.page, 1));
+  const pageSize = Math.max(1, num(rec.pageSize, 25));
+  const totalCount = Math.max(entries.length, num(rec.totalCount, entries.length));
+  const totalPages = Math.max(1, num(rec.totalPages, Math.ceil(totalCount / pageSize)));
+  const currentUser = decodeLeaderboardEntry(rec.currentUser, 1);
+  return {
+    scope,
+    metric,
+    entries,
+    totalCount,
+    totalPages,
+    page,
+    pageSize,
+    currentUser,
+  };
+}
+
+export function decodeLeaderboardPosition(raw: unknown): AppLeaderboardPosition | null {
+  if (!isRecord(raw)) return null;
+  const rec = isRecord(raw.position) ? raw.position : raw;
+  const entry = decodeLeaderboardEntry(rec.entry ?? rec, num(rec.rank, 1));
+  if (!entry) return null;
+  const page = Math.max(1, num(rec.page, 1));
+  const totalCount = Math.max(1, num(rec.totalCount, 1));
+  const totalPages = Math.max(1, num(rec.totalPages, page));
+  return {
+    rank: num(rec.rank, entry.rank),
+    page,
+    totalCount,
+    totalPages,
+    entry,
+  };
 }
 
 export function decodeEconomy(raw: unknown): AppEconomyPayload {
@@ -1127,7 +1359,9 @@ export function decodeExplore(raw: unknown, viewerAccountId?: string | null): Ex
     })
     .filter((o): o is ExploreOrgHit => o !== null);
 
-  return { trending, articles, posts, accounts, actors, organizations };
+  const tags = arr(searchRec.tags).filter((t): t is string => typeof t === "string" && t.trim() !== "");
+
+  return { trending, articles, posts, accounts, actors, organizations, tags };
 }
 
 function decodeChatMembers(raw: unknown): ReadonlyArray<AppChatMember> {
@@ -1228,13 +1462,18 @@ export function decodeAlphaInvites(raw: unknown): ReadonlyArray<AppAlphaInvite> 
       if (!isRecord(inv)) return null;
       const id = optStr(inv.id);
       if (!id) return null;
+      const rawKind = str(inv.chatKind ?? inv.chat_kind, bool(inv.isAlpha, true) ? "npc_alpha" : "user_group");
+      const chatKind: "user_group" | "npc_alpha" = rawKind === "user_group" ? "user_group" : "npc_alpha";
+      const isAlpha = bool(inv.isAlpha, chatKind === "npc_alpha");
       return {
         id,
         chatId: str(inv.chatId, ""),
-        actorHandle: str(inv.actorHandle, "npc"),
-        actorDisplayName: str(inv.actorDisplayName, "Character"),
+        chatKind,
+        isAlpha,
+        actorHandle: str(inv.inviterHandle ?? inv.actorHandle, "user"),
+        actorDisplayName: str(inv.inviterDisplayName ?? inv.actorDisplayName, isAlpha ? "Character" : "Member"),
         actorAvatarUrl: optStr(inv.actorAvatarUrl ?? inv.actor_avatar_url),
-        chatTitle: str(inv.chatTitle, "Alpha Group"),
+        chatTitle: str(inv.chatTitle, isAlpha ? "Alpha Group" : "Group Chat"),
         tier: optStr(inv.tier),
         status: str(inv.status, "pending"),
       };
@@ -1264,6 +1503,7 @@ function toNotificationKind(rawKind: string): NotificationKind {
     case "pnl_digest":
     case "PnLDigest":
       return "PnLDigest";
+    case "chat_message":
     default:
       return "SocialReply";
   }
@@ -1576,6 +1816,17 @@ export function decodeAdminStatus(raw: unknown): AdminStatusData {
   };
 }
 
+export interface AppWorldStatus {
+  readonly currentDay: number;
+  readonly currentHour: number;
+  readonly phase: string;
+  readonly gameRunning: boolean;
+  readonly lastTickAt: number;
+  readonly activeMarketsCount: number;
+  readonly totalPostsCount: number;
+  readonly activeActorsCount: number;
+}
+
 export function decodeWorldStatus(raw: unknown): AppWorldStatus | null {
   if (!isRecord(raw)) return null;
   return {
@@ -1587,137 +1838,6 @@ export function decodeWorldStatus(raw: unknown): AppWorldStatus | null {
     activeMarketsCount: Math.max(0, num(raw.activeMarketsCount ?? raw.active_markets_count, 0)),
     totalPostsCount: Math.max(0, num(raw.totalPostsCount ?? raw.total_posts_count, 0)),
     activeActorsCount: Math.max(0, num(raw.activeActorsCount ?? raw.active_actors_count, 0)),
-  };
-}
-
-export function decodePerpHistory(raw: unknown): ReadonlyArray<PerpPricePoint> {
-  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.points) : [];
-  return list
-    .map((pt): PerpPricePoint | null => {
-      if (!isRecord(pt)) return null;
-      const time = num(pt.timestamp ?? pt.time, 0);
-      const rawCents = pt.markPriceCents ?? pt.priceCents ?? pt.indexPriceCents;
-      const price = rawCents !== undefined ? num(rawCents, 0) / 100 : num(pt.price, 0);
-      if (time <= 0 || price <= 0) return null;
-      return { time, price };
-    })
-    .filter((pt): pt is PerpPricePoint => pt !== null);
-}
-
-export function decodePredictionHistory(raw: unknown): ReadonlyArray<PredictionProbabilityPoint> {
-  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.points) : [];
-  return list
-    .map((pt): PredictionProbabilityPoint | null => {
-      if (!isRecord(pt)) return null;
-      const time = num(pt.timestamp ?? pt.time, 0);
-      if (time <= 0) return null;
-      const yesBps = pt.yesPriceBps !== undefined ? num(pt.yesPriceBps, 5000) : null;
-      const yesPct = yesBps !== null
-        ? Math.min(100, Math.max(0, yesBps / 100))
-        : pt.yesPrice !== undefined
-          ? num(pt.yesPrice, 50)
-          : Math.min(100, Math.max(0, num(pt.priceCents, 50)));
-      const normalizedYes = yesPct <= 1 ? yesPct * 100 : yesPct;
-      const volCents = num(pt.volumeCents, 0);
-      return {
-        time,
-        yesPrice: normalizedYes,
-        noPrice: Math.max(0, 100 - normalizedYes),
-        ...(volCents > 0 ? { volume: volCents / 100 } : {}),
-      };
-    })
-    .filter((pt): pt is PredictionProbabilityPoint => pt !== null);
-}
-
-function classifyTradeSide(rawSide: string, marketKind: string): { readonly label: string; readonly tone: "ok" | "destructive" } {
-  const norm = rawSide.trim().toLowerCase();
-  if (marketKind === "prediction") {
-    if (norm === "buy_yes" || norm === "yes") return { label: "BUY YES", tone: "ok" };
-    if (norm === "buy_no" || norm === "no") return { label: "BUY NO", tone: "destructive" };
-    if (norm === "sell_yes") return { label: "SELL YES", tone: "destructive" };
-    if (norm === "sell_no") return { label: "SELL NO", tone: "ok" };
-  }
-  if (norm === "open_long" || norm === "long" || norm === "buy") return { label: "LONG", tone: "ok" };
-  if (norm === "open_short" || norm === "short" || norm === "sell") return { label: "SHORT", tone: "destructive" };
-  if (norm === "close_long") return { label: "CLOSE LONG", tone: "destructive" };
-  if (norm === "close_short") return { label: "CLOSE SHORT", tone: "ok" };
-  if (norm.startsWith("liquidat")) return { label: "LIQUIDATED", tone: "destructive" };
-  return { label: norm.toUpperCase() || "TRADE", tone: "ok" };
-}
-
-export function decodeAssetTrades(raw: unknown): ReadonlyArray<AssetTradeEntry> {
-  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.trades ?? raw.items) : [];
-  return list
-    .map((entry): AssetTradeEntry | null => {
-      if (!isRecord(entry)) return null;
-      const id = optStr(entry.id);
-      if (!id) return null;
-      const marketKind = str(entry.marketKind, "perp");
-      const rawSide = str(entry.side, "");
-      const { label, tone } = classifyTradeSide(rawSide, marketKind);
-      const priceCents = num(entry.priceCents, 0);
-      const notionalCents = num(entry.notionalCents, 0);
-      const sharesOrSize = num(entry.sharesOrSize, 0);
-      const createdAt = num(entry.createdAt, 0);
-      const avatarUrl = optStr(entry.traderAvatarUrl ?? entry.avatarUrl);
-      const leverage = typeof entry.leverage === "number" && entry.leverage > 0 ? entry.leverage : undefined;
-      const priceLabel = marketKind === "prediction"
-        ? `${Math.min(100, Math.max(0, priceCents))}%`
-        : formatPts(priceCents / 100);
-      return {
-        id,
-        displayName: str(entry.traderName ?? entry.displayName, str(entry.traderHandle, "Trader")),
-        handle: str(entry.traderHandle ?? entry.handle, "trader"),
-        ...(avatarUrl ? { avatarUrl } : {}),
-        isNpc: bool(entry.isNpc, false),
-        actionLabel: label,
-        tone,
-        amountPts: notionalCents / 100,
-        priceLabel,
-        ...(leverage !== undefined ? { leverage } : {}),
-        ...(marketKind === "prediction" && sharesOrSize > 0 ? { shares: sharesOrSize } : {}),
-        timeAgoLabel: formatTimeLabel(createdAt),
-      };
-    })
-    .filter((item): item is AssetTradeEntry => item !== null);
-}
-
-export function decodeClosedPositions(raw: unknown): AppClosedPositionsPage {
-  const rec = isRecord(raw) ? raw : {};
-  const list = Array.isArray(raw) ? raw : arr(rec.items);
-  const items: WalletClosedPosition[] = list
-    .map((entry): WalletClosedPosition | null => {
-      if (!isRecord(entry)) return null;
-      const id = optStr(entry.id);
-      if (!id) return null;
-      const kind: "perp" | "prediction" = str(entry.kind, "perp") === "prediction" ? "prediction" : "perp";
-      const rawSide = str(entry.side, "").toLowerCase();
-      const side: WalletClosedPosition["side"] = kind === "prediction"
-        ? (rawSide === "no" ? "NO" : "YES")
-        : (rawSide === "short" ? "Short" : "Long");
-      const costBasisCents = num(entry.costBasisCents, 0);
-      const realizedPnlCents = num(entry.realizedPnlCents, 0);
-      const realizedPnlPct = costBasisCents > 0 ? (realizedPnlCents / costBasisCents) * 100 : 0;
-      const closedAt = num(entry.closedAt, 0);
-      const ticker = optStr(entry.ticker);
-      const title = str(entry.title, ticker ? `$${ticker}` : id);
-      return {
-        id,
-        kind,
-        marketLabel: kind === "perp" && ticker ? `$${ticker} · ${title}` : title,
-        side,
-        realizedPnlPts: realizedPnlCents / 100,
-        realizedPnlPct,
-        closedAtLabel: formatTimeLabel(closedAt),
-      };
-    })
-    .filter((item): item is WalletClosedPosition => item !== null);
-  return {
-    items,
-    page: Math.max(1, num(rec.page, 1)),
-    limit: Math.max(1, num(rec.limit, 10)),
-    totalCount: Math.max(items.length, num(rec.totalCount, items.length)),
-    totalPages: Math.max(1, num(rec.totalPages, 1)),
   };
 }
 
@@ -1736,23 +1856,4 @@ export function decodePnlHistory(raw: unknown): ReadonlyArray<LightweightChartPo
       return { time, value };
     })
     .filter((pt): pt is LightweightChartPoint => pt !== null);
-}
-
-export function decodeLeaderboardPage(raw: unknown): AppLeaderboardPage {
-  const entries = decodeLeaderboard(raw);
-  const rec = isRecord(raw) ? raw : {};
-  const pagination = isRecord(rec.pagination) ? rec.pagination : rec;
-  const page = Math.max(1, num(pagination.page, 1));
-  const pageSize = Math.max(1, num(pagination.pageSize, 50));
-  const totalCount = Math.max(entries.length, num(pagination.totalCount, entries.length));
-  const totalPages = Math.max(1, num(pagination.totalPages, Math.ceil(totalCount / pageSize)));
-  return { entries, page, pageSize, totalCount, totalPages };
-}
-
-export function decodeLeaderboardViewerRank(raw: unknown): AppLeaderboardViewerRank | null {
-  if (!isRecord(raw)) return null;
-  const entry = raw.entry ? decodeLeaderboard([raw.entry])[0] ?? null : null;
-  const rank = typeof raw.rank === "number" ? raw.rank : entry?.rank ?? null;
-  const page = typeof raw.page === "number" ? raw.page : null;
-  return { rank, page, entry };
 }

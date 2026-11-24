@@ -5,12 +5,10 @@ import type {
   ChatMessageItem,
   JoinPhoneStep,
   JoinTab,
-  LeaderboardAudienceFilter,
-  LeaderboardTimeframe,
+  LeaderboardMetric,
+  LeaderboardScope,
   LightweightChartPoint,
   MarketTimeRange,
-  PerpPricePoint,
-  PredictionProbabilityPoint,
   ToastTone,
   UiMode,
   WalletClosedPosition,
@@ -37,18 +35,18 @@ import {
   type AppChatSummary,
   type AppFollowListEntry,
   type AppLeaderboardEntry,
-  type AppLeaderboardViewerRank,
   type AppLedgerEntry,
+  type AppMarketHistoryPoint,
   type AppModerationEntry,
   type AppNotification,
   type AppPerpMarket,
+  type AppPerpPreview,
   type AppPosition,
   type AppPost,
   type AppPredictionMarket,
   type AppProfileBundle,
   type AppSkillsPayload,
   type AppWorldStatus,
-  type ClosedOutcomeFilter,
   type ExploreData,
   type OAuthConsentInfo,
   type PendingAction,
@@ -132,39 +130,37 @@ export interface StoreState {
   readonly exploreLoading: boolean;
   readonly explore: ExploreData;
   readonly marketsLoading: boolean;
+  readonly marketsViewMode: "dashboard" | "terminal";
   readonly predictions: ReadonlyArray<AppPredictionMarket>;
   readonly perps: ReadonlyArray<AppPerpMarket>;
   readonly positions: ReadonlyArray<AppPosition>;
+  readonly closedPositions: ReadonlyArray<WalletClosedPosition>;
+  readonly closedPositionsLoading: boolean;
   readonly selectedMarketKind: "prediction" | "perp";
   readonly selectedMarketId: string | null;
-  readonly marketTimeRange: MarketTimeRange;
-  readonly perpHistory: ReadonlyArray<PerpPricePoint>;
-  readonly predictionHistory: ReadonlyArray<PredictionProbabilityPoint>;
-  readonly marketChartLoading: boolean;
+  readonly marketHistory: ReadonlyArray<AppMarketHistoryPoint>;
+  readonly marketHistoryLoading: boolean;
   readonly marketTrades: ReadonlyArray<AssetTradeEntry>;
   readonly marketTradesLoading: boolean;
   readonly marketSocialPosts: ReadonlyArray<AppPost>;
-  readonly marketSocialLoading: boolean;
+  readonly marketTimeRange: MarketTimeRange;
   readonly watchlist: ReadonlyArray<string>;
   readonly worldStatus: AppWorldStatus | null;
+  readonly perpPreview: AppPerpPreview | null;
   readonly leaderboard: ReadonlyArray<AppLeaderboardEntry>;
-  readonly leaderboardLoading: boolean;
-  readonly leaderboardFilter: LeaderboardAudienceFilter;
-  readonly leaderboardTimeframe: LeaderboardTimeframe;
+  readonly leaderboardScope: LeaderboardScope;
+  readonly leaderboardMetric: LeaderboardMetric;
   readonly leaderboardPage: number;
   readonly leaderboardTotalPages: number;
-  readonly leaderboardViewerRank: AppLeaderboardViewerRank | null;
+  readonly leaderboardTotalCount: number;
+  readonly leaderboardCurrentUser: AppLeaderboardEntry | null;
+  readonly leaderboardLoading: boolean;
   readonly economy: AppAccountEconomy | null;
   readonly ledger: ReadonlyArray<AppLedgerEntry>;
   readonly economyLoading: boolean;
   readonly pnlTimeRange: MarketTimeRange;
   readonly pnlHistory: ReadonlyArray<LightweightChartPoint>;
   readonly pnlHistoryLoading: boolean;
-  readonly closedPositions: ReadonlyArray<WalletClosedPosition>;
-  readonly closedPositionsOutcome: ClosedOutcomeFilter;
-  readonly closedPositionsPage: number;
-  readonly closedPositionsTotalPages: number;
-  readonly closedPositionsLoading: boolean;
   readonly tradeLoading: boolean;
   readonly tradeError: string | null;
   readonly chatsLoading: boolean;
@@ -179,6 +175,8 @@ export interface StoreState {
   readonly profileLoading: boolean;
   readonly profileLoadingMore: boolean;
   readonly profileBundle: AppProfileBundle | null;
+  readonly profileReplies: ReadonlyArray<AppPost>;
+  readonly profileRepliesLoading: boolean;
   readonly followListKind: "followers" | "following" | null;
   readonly followListHandle: string | null;
   readonly followListItems: ReadonlyArray<AppFollowListEntry>;
@@ -202,11 +200,12 @@ export interface StoreState {
 const EXPLAINER_STORAGE_KEY = "feed:explainer-dismissed";
 const THEME_STORAGE_KEY = "feed-theme";
 const WATCHLIST_STORAGE_KEY = "feed-watchlist";
+const LEGACY_FAVORITES_STORAGE_KEY = "feed:market-favorites";
 
 function readWatchlist(): ReadonlyArray<string> {
   try {
     if (typeof localStorage === "undefined") return [];
-    const raw = localStorage.getItem(WATCHLIST_STORAGE_KEY);
+    const raw = localStorage.getItem(WATCHLIST_STORAGE_KEY) ?? localStorage.getItem(LEGACY_FAVORITES_STORAGE_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -352,41 +351,39 @@ let currentState: StoreState = {
   threadLoading: false,
   exploreQuery: initialLocation.exploreQuery ?? "",
   exploreLoading: false,
-  explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [] },
+  explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [], tags: [] },
   marketsLoading: false,
+  marketsViewMode: initialLocation.marketId || initialLocation.queryTicker ? "terminal" : "dashboard",
   predictions: [],
   perps: [],
   positions: [],
+  closedPositions: [],
+  closedPositionsLoading: false,
   selectedMarketKind: initialLocation.marketKind ?? (initialLocation.queryTicker ? "perp" : "prediction"),
   selectedMarketId: initialLocation.marketId ?? initialLocation.queryTicker,
-  marketTimeRange: "1D",
-  perpHistory: [],
-  predictionHistory: [],
-  marketChartLoading: false,
+  marketHistory: [],
+  marketHistoryLoading: false,
   marketTrades: [],
   marketTradesLoading: false,
   marketSocialPosts: [],
-  marketSocialLoading: false,
+  marketTimeRange: "1D",
   watchlist: readWatchlist(),
   worldStatus: null,
+  perpPreview: null,
   leaderboard: [],
-  leaderboardLoading: false,
-  leaderboardFilter: "all",
-  leaderboardTimeframe: "ALL",
+  leaderboardScope: "players",
+  leaderboardMetric: "net_profit",
   leaderboardPage: 1,
   leaderboardTotalPages: 1,
-  leaderboardViewerRank: null,
+  leaderboardTotalCount: 0,
+  leaderboardCurrentUser: null,
+  leaderboardLoading: false,
   economy: null,
   ledger: [],
   economyLoading: false,
   pnlTimeRange: "ALL",
   pnlHistory: [],
   pnlHistoryLoading: false,
-  closedPositions: [],
-  closedPositionsOutcome: "all",
-  closedPositionsPage: 1,
-  closedPositionsTotalPages: 1,
-  closedPositionsLoading: false,
   tradeLoading: false,
   tradeError: null,
   chatsLoading: false,
@@ -401,6 +398,8 @@ let currentState: StoreState = {
   profileLoading: false,
   profileLoadingMore: false,
   profileBundle: null,
+  profileReplies: [],
+  profileRepliesLoading: false,
   followListKind: null,
   followListHandle: null,
   followListItems: [],

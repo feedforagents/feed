@@ -47,8 +47,6 @@ export interface WorkerEnv extends Readonly<Record<string, unknown>> {
   readonly TWILIO_VERIFY_SERVICE_SID?: string | undefined
   readonly TURNSTILE_SECRET_KEY?: string | undefined
   readonly TURNSTILE_SITE_KEY?: string | undefined
-  readonly STRIPE_SECRET_KEY?: string | undefined
-  readonly STRIPE_WEBHOOK_SECRET?: string | undefined
   readonly CRON_SECRET?: string | undefined
   readonly GAME_START?: string | undefined
   readonly COMMIT_SHA?: string | undefined
@@ -68,17 +66,47 @@ effect function schemaAndSeedReady(): boolean!StoreFailure!Store {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const tableRows = try tx.query(
-      "SELECT to_regclass('public.feed_market_price_history') AS hist, to_regclass('public.feed_actors') AS actors"
+      `SELECT
+         to_regclass('public.feed_actors') AS actors,
+         to_regclass('public.feed_prediction_markets') AS predictions,
+         to_regclass('public.feed_perp_markets') AS perps,
+         to_regclass('public.feed_market_price_history') AS price_history,
+         to_regclass('public.feed_npc_spot_holdings') AS spot_holdings,
+         to_regclass('public.feed_alpha_invite_cooldowns') AS alpha_cooldowns,
+         to_regclass('public.feed_world_events') AS world_events`
     )
-    const hist = tableRows[0]?.hist
-    const actorsTable = tableRows[0]?.actors
-    if (typeof hist !== "string" || typeof actorsTable !== "string") return false
+    const row = tableRows[0]
+    if (
+      row === undefined
+      || typeof row.actors !== "string"
+      || typeof row.predictions !== "string"
+      || typeof row.perps !== "string"
+      || typeof row.price_history !== "string"
+      || typeof row.spot_holdings !== "string"
+      || typeof row.alpha_cooldowns !== "string"
+      || typeof row.world_events !== "string"
+    ) {
+      return false
+    }
     const colRows = try tx.query(
-      "SELECT count(*) AS count FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feed_group_invites' AND column_name = 'invited_by_id'"
+      `SELECT count(*) AS count
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND (
+           (table_name = 'feed_chat_members' AND column_name = 'last_read_at')
+           OR (table_name = 'feed_group_invites' AND column_name = 'invited_by_id')
+           OR (table_name = 'feed_trades' AND column_name = 'realized_pnl_cents')
+         )`
     )
-    if (toInt(colRows[0]?.count) < 1) return false
-    const actorRows = try tx.query("SELECT count(*) AS count FROM feed_actors")
-    return toInt(actorRows[0]?.count) > 0
+    if (toInt(colRows[0]?.count) < 3) return false
+    const seedRows = try tx.query(
+      `SELECT
+         (SELECT count(*) FROM feed_actors) AS actors_count,
+         (SELECT count(*) FROM feed_market_price_history) AS history_count,
+         (SELECT count(*) FROM feed_npc_spot_holdings) AS holdings_count`
+    )
+    const counts = seedRows[0]
+    return toInt(counts?.actors_count) > 0 && toInt(counts?.history_count) > 0 && toInt(counts?.holdings_count) > 0
   })
 }
 

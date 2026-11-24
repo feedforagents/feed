@@ -1,5 +1,5 @@
 // spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
-import type { LeaderboardAudienceFilter, LeaderboardTimeframe, MarketTimeRange } from "@repo/ui";
+import type { LeaderboardMetric, LeaderboardScope, MarketTimeRange, PerpRebalanceOrderInput } from "@repo/ui";
 import { passThrough, requestJson } from "./api.ts";
 import {
   appendAnonymousModeParam,
@@ -22,13 +22,11 @@ import {
   type AppPerpMarket,
   type AppPost,
   type AppPredictionMarket,
-  type ClosedOutcomeFilter,
   type ExploreAccountHit,
   type ExploreActorHit,
   decodeAlphaInvites,
   decodeArticle,
   decodeArticles,
-  decodeAssetTrades,
   decodeChatMessages,
   decodeChats,
   decodeClosedPositions,
@@ -37,16 +35,17 @@ import {
   decodeFeedPage,
   decodeFollowList,
   decodeLeaderboardPage,
-  decodeLeaderboardViewerRank,
+  decodeLeaderboardPosition,
+  decodeMarketPriceHistory,
+  decodeMarketTrades,
   decodeModerationList,
   decodeNotifications,
-  decodePerpHistory,
   decodePerpMarket,
+  decodePerpPreview,
   decodePnlHistory,
   decodePositions,
   decodePost,
   decodePostThread,
-  decodePredictionHistory,
   decodePredictionMarket,
   decodeProfileBundle,
   decodeTrendingList,
@@ -79,7 +78,6 @@ function appendUniquePosts(
 function findPostInState(postId: string): AppPost | undefined {
   const s = getStoreSnapshot();
   return s.feedPosts.find((p) => p.card.id === postId)
-    ?? s.marketSocialPosts.find((p) => p.card.id === postId)
     ?? (s.activeThread?.post.card.id === postId ? s.activeThread.post : undefined)
     ?? s.activeThread?.ancestors.find((p) => p.card.id === postId)
     ?? s.activeThread?.replies.find((p) => p.card.id === postId)
@@ -94,7 +92,6 @@ export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost
   const cur = getStoreSnapshot();
   setStoreState({
     feedPosts: patchList(cur.feedPosts),
-    marketSocialPosts: patchList(cur.marketSocialPosts),
     explore: { ...cur.explore, posts: patchList(cur.explore.posts) },
     profileBundle: cur.profileBundle ? { ...cur.profileBundle, posts: patchList(cur.profileBundle.posts) } : null,
     activeThread: cur.activeThread
@@ -108,23 +105,37 @@ export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost
   });
 }
 
-export function removePostAcrossStore(postId: string): void {
+export function removePostAcrossStore(
+  postId: string,
+  parentInfo?: { readonly replyToPostId?: string | null; readonly parentReplyCount?: number | null },
+): void {
   const cur = getStoreSnapshot();
+  const existing = findPostInState(postId);
+  const parentId = parentInfo?.replyToPostId ?? existing?.replyToPostId ?? null;
   const thread = cur.activeThread;
+  const adjustParent = (post: AppPost): AppPost => {
+    if (!parentId || post.card.id !== parentId) return post;
+    const nextCount = typeof parentInfo?.parentReplyCount === "number"
+      ? Math.max(0, parentInfo.parentReplyCount)
+      : Math.max(0, post.card.replyCount - 1);
+    return { ...post, card: { ...post.card, replyCount: nextCount } };
+  };
+  const cleanList = (list: ReadonlyArray<AppPost>) => list.filter((p) => p.card.id !== postId).map(adjustParent);
   setStoreState({
-    feedPosts: cur.feedPosts.filter((p) => p.card.id !== postId),
-    marketSocialPosts: cur.marketSocialPosts.filter((p) => p.card.id !== postId),
-    explore: { ...cur.explore, posts: cur.explore.posts.filter((p) => p.card.id !== postId) },
+    feedPosts: cleanList(cur.feedPosts),
+    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
     profileBundle: cur.profileBundle
-      ? { ...cur.profileBundle, posts: cur.profileBundle.posts.filter((p) => p.card.id !== postId) }
+      ? { ...cur.profileBundle, posts: cleanList(cur.profileBundle.posts) }
       : null,
+    profileReplies: cleanList(cur.profileReplies),
     activeThread: thread
       ? thread.post.card.id === postId
         ? null
         : {
-            ...thread,
-            ancestors: thread.ancestors.filter((p) => p.card.id !== postId),
-            replies: thread.replies.filter((p) => p.card.id !== postId),
+            post: adjustParent(thread.post),
+            parentPost: thread.parentPost ? adjustParent(thread.parentPost) : null,
+            ancestors: cleanList(thread.ancestors),
+            replies: cleanList(thread.replies),
           }
       : null,
   });
@@ -136,7 +147,6 @@ function filterAuthorOutOfFeeds(handle: string): void {
   const cur = getStoreSnapshot();
   setStoreState({
     feedPosts: cur.feedPosts.filter(keep),
-    marketSocialPosts: cur.marketSocialPosts.filter(keep),
     explore: { ...cur.explore, posts: cur.explore.posts.filter(keep) },
     activeThread: cur.activeThread
       ? {
@@ -224,8 +234,8 @@ export async function loadTrending(): Promise<void> {
 
 export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   const s = getStoreSnapshot();
-  if ((tab === "following" || tab === "top") && s.viewer === null) {
-    requireAuthOrQueue({ kind: "switch_tab", tab, label: `view the ${tab === "top" ? "For You" : "Following"} feed` });
+  if (tab === "following" && s.viewer === null) {
+    requireAuthOrQueue({ kind: "switch_tab", tab, label: "view the Following feed" });
     return;
   }
   const specTab = toSpecTab(tab);
@@ -337,8 +347,11 @@ export async function deletePost(postId: string): Promise<boolean> {
     setErrorNotice(res.message);
     return false;
   }
+  const rec = isRecord(res.data) ? res.data : {};
+  const replyToPostId = optStr(rec.replyToPostId ?? rec.reply_to_post_id);
+  const parentReplyCount = typeof rec.parentReplyCount === "number" ? rec.parentReplyCount : null;
   const wasActiveDetail = getStoreSnapshot().route === "PostDetail" && getStoreSnapshot().activePostId === postId;
-  removePostAcrossStore(postId);
+  removePostAcrossStore(postId, { replyToPostId, parentReplyCount });
   setStatusNotice("Post deleted.");
   if (wasActiveDetail) {
     pushBrowserRoute("Home");
@@ -480,199 +493,72 @@ export async function loadPositionsSilent(): Promise<void> {
   setStoreState({ predictions, perps, positions });
 }
 
-export async function loadWorldStatus(): Promise<void> {
-  const res = await requestJson("/api/world/status", { parse: decodeWorldStatus });
-  if (res.ok && res.data) {
-    setStoreState({ worldStatus: res.data });
-  }
-}
-
-export async function loadPerpHistory(ticker: string, rangeOverride?: MarketTimeRange): Promise<void> {
-  const range = rangeOverride ?? getStoreSnapshot().marketTimeRange;
-  setStoreState({ marketChartLoading: true, marketTimeRange: range });
-  const res = await requestJson(
-    `/api/markets/perp/${encodeURIComponent(ticker)}/history?range=${encodeURIComponent(range)}&limit=200`,
-    { parse: decodePerpHistory },
-  );
-  if (res.ok) {
-    const latest = getStoreSnapshot();
-    if (latest.selectedMarketKind === "perp" && latest.selectedMarketId?.toUpperCase() === ticker.toUpperCase()) {
-      setStoreState({ perpHistory: res.data, marketChartLoading: false });
-      return;
-    }
-  }
-  setStoreState({ marketChartLoading: false });
-}
-
-export async function loadPredictionHistory(marketId: string, rangeOverride?: MarketTimeRange): Promise<void> {
-  const range = rangeOverride ?? getStoreSnapshot().marketTimeRange;
-  setStoreState({ marketChartLoading: true, marketTimeRange: range });
-  const res = await requestJson(
-    `/api/markets/prediction/${encodeURIComponent(marketId)}/history?range=${encodeURIComponent(range)}&limit=200`,
-    { parse: decodePredictionHistory },
-  );
-  if (res.ok) {
-    const latest = getStoreSnapshot();
-    if (latest.selectedMarketKind === "prediction" && latest.selectedMarketId === marketId) {
-      setStoreState({ predictionHistory: res.data, marketChartLoading: false });
-      return;
-    }
-  }
-  setStoreState({ marketChartLoading: false });
-}
-
-export async function loadMarketTrades(kind: "perp" | "prediction", ref: string): Promise<void> {
-  setStoreState({ marketTradesLoading: true });
-  const endpoint = kind === "perp"
-    ? `/api/markets/perp/${encodeURIComponent(ref)}/trades?limit=50`
-    : `/api/markets/prediction/${encodeURIComponent(ref)}/trades?limit=50`;
-  const res = await requestJson(endpoint, { parse: decodeAssetTrades });
-  if (res.ok) {
-    const latest = getStoreSnapshot();
-    const matches = kind === "perp"
-      ? latest.selectedMarketKind === "perp" && latest.selectedMarketId?.toUpperCase() === ref.toUpperCase()
-      : latest.selectedMarketKind === "prediction" && latest.selectedMarketId === ref;
-    if (matches) {
-      setStoreState({ marketTrades: res.data, marketTradesLoading: false });
-      return;
-    }
-  }
-  setStoreState({ marketTradesLoading: false });
-}
-
-export async function loadMarketSocialFeed(kind: "perp" | "prediction", ref: string): Promise<void> {
+export async function loadLeaderboard(options?: {
+  readonly scope?: LeaderboardScope;
+  readonly metric?: LeaderboardMetric;
+  readonly page?: number;
+  readonly pageSize?: number;
+}): Promise<void> {
   const s = getStoreSnapshot();
-  const viewerId = s.viewer?.accountId ?? null;
-  setStoreState({ marketSocialLoading: true });
-  const baseUrl = kind === "perp"
-    ? `/api/feed?ticker=${encodeURIComponent(ref)}&limit=30`
-    : `/api/feed?marketId=${encodeURIComponent(ref)}&limit=30`;
-  const res = await requestJson(appendAnonymousModeParam(baseUrl, s), {
-    parse: (raw) => decodeFeedPage(raw, viewerId),
-  });
-  if (res.ok) {
-    const latest = getStoreSnapshot();
-    const matches = kind === "perp"
-      ? latest.selectedMarketKind === "perp" && latest.selectedMarketId?.toUpperCase() === ref.toUpperCase()
-      : latest.selectedMarketKind === "prediction" && latest.selectedMarketId === ref;
-    if (matches) {
-      setStoreState({ marketSocialPosts: res.data.items, marketSocialLoading: false });
-      return;
-    }
-  }
-  setStoreState({ marketSocialLoading: false });
-}
-
-export async function loadActiveMarketTerminalData(
-  kind: "perp" | "prediction",
-  ref: string,
-  rangeOverride?: MarketTimeRange,
-): Promise<void> {
-  const historyTask = kind === "perp"
-    ? loadPerpHistory(ref, rangeOverride)
-    : loadPredictionHistory(ref, rangeOverride);
-  await Promise.all([
-    historyTask,
-    loadMarketTrades(kind, ref),
-    loadMarketSocialFeed(kind, ref),
-  ]);
-}
-
-export async function setMarketTimeRange(range: MarketTimeRange): Promise<void> {
-  const s = getStoreSnapshot();
-  setStoreState({ marketTimeRange: range });
-  if (!s.selectedMarketId) return;
-  if (s.selectedMarketKind === "perp") {
-    await loadPerpHistory(s.selectedMarketId, range);
-  } else {
-    await loadPredictionHistory(s.selectedMarketId, range);
-  }
-}
-
-export async function loadClosedPositions(
-  outcomeOverride?: ClosedOutcomeFilter,
-  pageOverride?: number,
-  limit = 50,
-): Promise<void> {
-  const s = getStoreSnapshot();
-  if (!s.viewer) return;
-  const outcome = outcomeOverride ?? s.closedPositionsOutcome;
-  const page = pageOverride ?? s.closedPositionsPage;
-  setStoreState({ closedPositionsLoading: true, closedPositionsOutcome: outcome, closedPositionsPage: page });
-  const res = await requestJson(
-    `/api/markets/positions/closed?outcome=${encodeURIComponent(outcome)}&page=${page}&limit=${limit}`,
-    { parse: decodeClosedPositions },
-  );
-  if (res.ok) {
-    setStoreState({
-      closedPositions: res.data.items,
-      closedPositionsPage: res.data.page,
-      closedPositionsTotalPages: res.data.totalPages,
-      closedPositionsLoading: false,
-    });
-    return;
-  }
-  setStoreState({ closedPositionsLoading: false });
-}
-
-export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<void> {
-  const s = getStoreSnapshot();
-  if (!s.viewer) return;
-  const range = rangeOverride ?? s.pnlTimeRange;
-  setStoreState({ pnlHistoryLoading: true, pnlTimeRange: range });
-  const res = await requestJson(`/api/economy/me/pnl-history?range=${encodeURIComponent(range)}`, {
-    parse: decodePnlHistory,
-  });
-  if (res.ok) {
-    setStoreState({ pnlHistory: res.data, pnlHistoryLoading: false });
-    return;
-  }
-  setStoreState({ pnlHistoryLoading: false });
-}
-
-export async function loadLeaderboardFiltered(
-  filterOverride?: LeaderboardAudienceFilter,
-  timeframeOverride?: LeaderboardTimeframe,
-  pageOverride?: number,
-): Promise<void> {
-  const s = getStoreSnapshot();
-  const filter = filterOverride ?? s.leaderboardFilter;
-  const timeframe = timeframeOverride ?? s.leaderboardTimeframe;
-  const page = Math.max(1, pageOverride ?? s.leaderboardPage);
-  const apiTimeframe = timeframe.toLowerCase();
+  const scope = options?.scope ?? s.leaderboardScope;
+  const metric = options?.metric ?? s.leaderboardMetric;
+  const page = Math.max(1, options?.page ?? s.leaderboardPage);
+  const pageSize = options?.pageSize ?? 25;
   setStoreState({
     leaderboardLoading: true,
-    leaderboardFilter: filter,
-    leaderboardTimeframe: timeframe,
+    leaderboardScope: scope,
+    leaderboardMetric: metric,
     leaderboardPage: page,
   });
-  const listReq = requestJson(
-    `/api/leaderboard?filter=${encodeURIComponent(filter)}&timeframe=${encodeURIComponent(apiTimeframe)}&page=${page}&pageSize=50`,
-    { parse: decodeLeaderboardPage },
-  );
-  const meReq = s.viewer
-    ? requestJson(
-        `/api/leaderboard/me?filter=${encodeURIComponent(filter)}&timeframe=${encodeURIComponent(apiTimeframe)}&pageSize=50`,
-        { parse: decodeLeaderboardViewerRank },
-      )
-    : Promise.resolve(null);
-  const [listRes, meRes] = await Promise.all([listReq, meReq]);
-  if (listRes.ok) {
+  const params = new URLSearchParams({
+    scope,
+    metric,
+    page: String(page),
+    pageSize: String(pageSize),
+  });
+  const res = await requestJson(`/api/leaderboard?${params.toString()}`, {
+    parse: (raw) => decodeLeaderboardPage(raw, scope, metric),
+  });
+  if (res.ok) {
     setStoreState({
-      leaderboard: listRes.data.entries,
-      leaderboardPage: listRes.data.page,
-      leaderboardTotalPages: listRes.data.totalPages,
-      leaderboardViewerRank: meRes && meRes.ok ? meRes.data : (s.viewer ? getStoreSnapshot().leaderboardViewerRank : null),
+      leaderboard: res.data.entries,
+      leaderboardScope: res.data.scope,
+      leaderboardMetric: res.data.metric,
+      leaderboardPage: res.data.page,
+      leaderboardTotalPages: res.data.totalPages,
+      leaderboardTotalCount: res.data.totalCount,
+      leaderboardCurrentUser: res.data.currentUser,
       leaderboardLoading: false,
     });
     return;
   }
   setStoreState({ leaderboardLoading: false });
-  setErrorNotice(listRes.message);
+  setErrorNotice(res.message);
 }
 
-export async function loadLeaderboard(): Promise<void> {
-  await loadLeaderboardFiltered();
+export async function jumpToMyLeaderboardRank(): Promise<void> {
+  const s = getStoreSnapshot();
+  if (!s.viewer) return;
+  const params = new URLSearchParams({
+    metric: s.leaderboardMetric,
+    pageSize: "25",
+  });
+  const res = await requestJson(`/api/leaderboard/me?${params.toString()}`, {
+    parse: decodeLeaderboardPosition,
+  });
+  if (res.ok && res.data) {
+    setStoreState({ leaderboardCurrentUser: res.data.entry });
+    await loadLeaderboard({
+      scope: "players",
+      metric: s.leaderboardMetric,
+      page: res.data.page,
+      pageSize: 25,
+    });
+    return;
+  }
+  if (!res.ok) {
+    setErrorNotice(res.message);
+  }
 }
 
 export async function loadEconomy(): Promise<void> {
@@ -690,12 +576,123 @@ export async function loadEconomy(): Promise<void> {
   setStoreState({ economyLoading: false });
 }
 
+export async function loadWorldStatus(): Promise<void> {
+  const res = await requestJson("/api/world/status", { parse: decodeWorldStatus });
+  if (res.ok && res.data) {
+    setStoreState({ worldStatus: res.data });
+  }
+}
+
+export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<void> {
+  const s = getStoreSnapshot();
+  if (!s.viewer) return;
+  const range = rangeOverride ?? s.pnlTimeRange;
+  setStoreState({ pnlHistoryLoading: true, pnlTimeRange: range });
+  const res = await requestJson(`/api/economy/me/pnl-history?range=${encodeURIComponent(range)}`, {
+    parse: decodePnlHistory,
+  });
+  if (res.ok) {
+    setStoreState({ pnlHistory: res.data, pnlHistoryLoading: false });
+    return;
+  }
+  setStoreState({ pnlHistoryLoading: false });
+}
+
+export async function loadClosedPositions(): Promise<void> {
+  if (!getStoreSnapshot().viewer) return;
+  setStoreState({ closedPositionsLoading: true });
+  const res = await requestJson("/api/markets/positions/closed?limit=50", {
+    parse: decodeClosedPositions,
+  });
+  if (res.ok) {
+    setStoreState({ closedPositions: res.data, closedPositionsLoading: false });
+    return;
+  }
+  setStoreState({ closedPositionsLoading: false });
+}
+
+export async function loadMarketDetails(
+  kind: "prediction" | "perp",
+  id: string,
+  rangeOverride?: MarketTimeRange,
+): Promise<void> {
+  const s = getStoreSnapshot();
+  const viewerId = s.viewer?.accountId ?? null;
+  const range = rangeOverride ?? s.marketTimeRange;
+  setStoreState({ marketHistoryLoading: true, marketTradesLoading: true, marketTimeRange: range });
+  const basePath = kind === "perp"
+    ? `/api/markets/perp/${encodeURIComponent(id)}`
+    : `/api/markets/predictions/${encodeURIComponent(id)}`;
+  const feedUrl = appendAnonymousModeParam(
+    kind === "perp"
+      ? `/api/feed?ticker=${encodeURIComponent(id)}&limit=20`
+      : `/api/feed?marketId=${encodeURIComponent(id)}&limit=20`,
+    s,
+  );
+  const [histRes, tradesRes, socialRes] = await Promise.all([
+    requestJson(`${basePath}/history?range=${encodeURIComponent(range)}&limit=200`, { parse: decodeMarketPriceHistory }),
+    requestJson(`${basePath}/trades?limit=40`, { parse: decodeMarketTrades }),
+    requestJson(feedUrl, { parse: (raw) => decodeFeedPage(raw, viewerId) }),
+  ]);
+  const latest = getStoreSnapshot();
+  if (latest.selectedMarketKind !== kind || latest.selectedMarketId !== id) return;
+  setStoreState({
+    marketHistory: histRes.ok ? histRes.data : [],
+    marketHistoryLoading: false,
+    marketTrades: tradesRes.ok ? tradesRes.data : [],
+    marketTradesLoading: false,
+    marketSocialPosts: socialRes.ok ? socialRes.data.items : [],
+  });
+}
+
+export async function setMarketTimeRange(range: MarketTimeRange): Promise<void> {
+  const s = getStoreSnapshot();
+  setStoreState({ marketTimeRange: range });
+  if (s.marketsViewMode === "terminal" && s.selectedMarketId) {
+    await loadMarketDetails(s.selectedMarketKind, s.selectedMarketId, range);
+  }
+}
+
+export async function previewPerpOrder(
+  ticker: string,
+  side: "long" | "short",
+  marginPts: number,
+  leverage: number,
+): Promise<void> {
+  if (!Number.isFinite(marginPts) || marginPts <= 0 || !Number.isFinite(leverage) || leverage < 1) {
+    setStoreState({ perpPreview: null });
+    return;
+  }
+  const collateralCents = Math.max(1, Math.round(marginPts * 100));
+  const res = await requestJson("/api/markets/perp/preview", {
+    method: "POST",
+    body: { ticker, side, collateralCents, collateralPts: marginPts, leverage: Math.round(leverage) },
+    parse: decodePerpPreview,
+  });
+  const latest = getStoreSnapshot();
+  if (latest.selectedMarketKind !== "perp" || latest.selectedMarketId?.toUpperCase() !== ticker.toUpperCase()) return;
+  setStoreState({ perpPreview: res.ok ? res.data : null });
+}
+
 export async function loadMarkets(): Promise<void> {
   setStoreState({ marketsLoading: true });
   const sBefore = getStoreSnapshot();
-  const mktRes = await requestJson("/api/markets", { parse: passThrough });
+  const lbParams = new URLSearchParams({
+    scope: sBefore.leaderboardScope,
+    metric: sBefore.leaderboardMetric,
+    page: String(sBefore.leaderboardPage),
+    pageSize: "25",
+  });
+  const [mktRes, lbRes] = await Promise.all([
+    requestJson("/api/markets", { parse: passThrough }),
+    requestJson(`/api/leaderboard?${lbParams.toString()}`, {
+      parse: (raw) => decodeLeaderboardPage(raw, sBefore.leaderboardScope, sBefore.leaderboardMetric),
+    }),
+  ]);
   if (sBefore.viewer) {
     void loadEconomy();
+    void loadClosedPositions();
+    void loadPnlHistory();
   }
   const s = getStoreSnapshot();
   let predictions = s.predictions;
@@ -713,19 +710,49 @@ export async function loadMarkets(): Promise<void> {
   syncAtRiskPositions(positions);
   let selectedMarketKind = s.selectedMarketKind;
   let selectedMarketId = s.selectedMarketId;
+  let marketsViewMode = s.marketsViewMode;
   if (s.selectedTicker) {
     const matchedPerp = perps.find((p) => p.ticker.toUpperCase() === s.selectedTicker?.toUpperCase());
-    selectedMarketKind = "perp";
-    selectedMarketId = matchedPerp ? matchedPerp.ticker : s.selectedTicker.toUpperCase();
+    if (matchedPerp) {
+      selectedMarketKind = "perp";
+      selectedMarketId = matchedPerp.ticker;
+      marketsViewMode = "terminal";
+    }
+  }
+  if (!selectedMarketId) {
+    if (selectedMarketKind === "perp" && perps[0]) {
+      selectedMarketId = perps[0].ticker;
+    } else if (predictions[0]) {
+      selectedMarketKind = "prediction";
+      selectedMarketId = predictions[0].card.id;
+    } else if (perps[0]) {
+      selectedMarketKind = "perp";
+      selectedMarketId = perps[0].ticker;
+    }
   }
   setStoreState({
     marketsLoading: false,
+    marketsViewMode,
     predictions,
     perps,
     positions,
     selectedMarketKind,
     selectedMarketId,
+    ...(lbRes.ok
+      ? {
+          leaderboard: lbRes.data.entries,
+          leaderboardTotalCount: lbRes.data.totalCount,
+          leaderboardTotalPages: lbRes.data.totalPages,
+          leaderboardCurrentUser: lbRes.data.currentUser,
+        }
+      : {}),
   });
+  if (marketsViewMode === "terminal" && selectedMarketId) {
+    void loadMarketDetails(selectedMarketKind, selectedMarketId);
+    if (selectedMarketKind === "perp") {
+      void previewPerpOrder(selectedMarketId, "long", 10, 5);
+    }
+  }
 }
 
 export function selectMarket(kind: "prediction" | "perp", id: string): void {
@@ -734,13 +761,31 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
     selectedMarketKind: kind,
     selectedMarketId: id,
     selectedTicker: kind === "perp" ? id : null,
-    perpHistory: [],
-    predictionHistory: [],
-    marketTrades: [],
-    marketSocialPosts: [],
+    marketsViewMode: "terminal",
+    perpPreview: null,
     tradeError: null,
   });
-  void loadActiveMarketTerminalData(kind, id);
+  if (typeof window !== "undefined") {
+    const targetPath = kind === "perp"
+      ? `/markets/perps/${encodeURIComponent(id)}`
+      : `/markets/predictions/${encodeURIComponent(id)}`;
+    if (window.location.pathname !== targetPath) {
+      window.history.pushState(null, "", targetPath);
+    }
+  }
+  void loadMarketDetails(kind, id);
+}
+
+export function openMarketsDashboard(): void {
+  setStoreState({
+    marketsViewMode: "dashboard",
+    selectedTicker: null,
+    perpPreview: null,
+    tradeError: null,
+  });
+  if (typeof window !== "undefined" && window.location.pathname !== "/markets") {
+    window.history.pushState(null, "", "/markets");
+  }
 }
 
 function newIdempotencyKey(): string {
@@ -750,32 +795,18 @@ function newIdempotencyKey(): string {
   return `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-async function refreshAfterTrade(): Promise<void> {
-  const s = getStoreSnapshot();
-  const tasks: Promise<void>[] = [loadMarkets()];
-  if (s.viewer) {
-    tasks.push(loadEconomy(), loadPnlHistory(), loadClosedPositions());
-  }
-  if (s.selectedMarketId) {
-    if (s.selectedMarketKind === "perp") {
-      tasks.push(loadPerpHistory(s.selectedMarketId), loadMarketTrades("perp", s.selectedMarketId));
-    } else {
-      tasks.push(loadPredictionHistory(s.selectedMarketId), loadMarketTrades("prediction", s.selectedMarketId));
-    }
-  }
-  await Promise.all(tasks);
-}
-
 async function executeTradeRequest({
   endpoint,
   body,
   headers,
   statusMessage,
+  formatReceiptMessage,
 }: {
   readonly endpoint: string;
   readonly body: unknown;
   readonly headers?: Readonly<Record<string, string>>;
   readonly statusMessage: string;
+  readonly formatReceiptMessage?: (data: unknown) => string;
 }): Promise<boolean> {
   setStoreState({ tradeLoading: true, tradeError: null });
   const res = await requestJson(endpoint, { method: "POST", body, headers, parse: passThrough });
@@ -790,8 +821,8 @@ async function executeTradeRequest({
     tradeLoading: false,
     ...(curViewer && bal !== undefined ? { viewer: { ...curViewer, balanceCents: bal } } : {}),
   });
-  setStatusNotice(statusMessage);
-  await refreshAfterTrade();
+  setStatusNotice(formatReceiptMessage ? formatReceiptMessage(res.data) : statusMessage);
+  await loadMarkets();
   return true;
 }
 
@@ -800,17 +831,31 @@ export async function submitPredictionOrder(
   action: "Buy" | "Sell",
   side: "yes" | "no",
   amountPts: number,
+  shareUnitsOverride?: number,
 ): Promise<boolean> {
   if (getStoreSnapshot().tradeLoading) return false;
-  if (!requireAuthOrQueue({ kind: "trade_prediction", marketId, action, side, amountPts, label: `${action} ${side.toUpperCase()} prediction` })) {
+  const computedShareUnits = action === "Sell"
+    ? (shareUnitsOverride !== undefined ? Math.max(1, Math.round(shareUnitsOverride)) : Math.max(1, Math.round(amountPts * 100)))
+    : undefined;
+  if (
+    !requireAuthOrQueue({
+      kind: "trade_prediction",
+      marketId,
+      action,
+      side,
+      amountPts,
+      ...(computedShareUnits !== undefined ? { shareUnits: computedShareUnits } : {}),
+      label: `${action} ${side.toUpperCase()} prediction`,
+    })
+  ) {
     return false;
   }
   const endpoint = action === "Buy"
-    ? `/api/markets/prediction/${encodeURIComponent(marketId)}/buy`
-    : `/api/markets/prediction/${encodeURIComponent(marketId)}/sell`;
+    ? `/api/markets/predictions/${encodeURIComponent(marketId)}/buy`
+    : `/api/markets/predictions/${encodeURIComponent(marketId)}/sell`;
   const body = action === "Buy"
     ? { side, amountCents: Math.max(1, Math.round(amountPts * 100)), amountPts }
-    : { side, shares: Math.max(1, Math.round(amountPts)) };
+    : { side, shareUnits: computedShareUnits, shares: computedShareUnits };
   return executeTradeRequest({
     endpoint,
     body,
@@ -825,7 +870,6 @@ export async function submitPerpOrder(
   marginPts: number,
   leverage: number,
 ): Promise<boolean> {
-  if (getStoreSnapshot().tradeLoading) return false;
   if (!requireAuthOrQueue({ kind: "trade_perp", ticker, side, marginPts, leverage, label: `open $${ticker} ${side} perp` })) {
     return false;
   }
@@ -833,120 +877,47 @@ export async function submitPerpOrder(
     endpoint: `/api/markets/perp/${encodeURIComponent(ticker)}/open`,
     body: { side, collateralCents: Math.max(1, Math.round(marginPts * 100)), collateralPts: marginPts, leverage },
     statusMessage: `Opened $${ticker} ${side} ${leverage}x position.`,
+    formatReceiptMessage: (data) => {
+      const action = isRecord(data) ? str(data.action, "open") : "open";
+      if (action === "add") return `Added to $${ticker} ${side} position.`;
+      if (action === "flip") return `Flipped $${ticker} position to ${side} ${leverage}x.`;
+      if (action === "reduce") return `Reduced $${ticker} position.`;
+      return `Opened $${ticker} ${side} ${leverage}x position.`;
+    },
   });
 }
 
-export async function closePerpPosition(positionId: string): Promise<void> {
-  if (!getStoreSnapshot().viewer || getStoreSnapshot().tradeLoading) return;
+export async function closePerpPosition(
+  positionId: string,
+  options?: { readonly sizeCents?: number; readonly closePct?: number },
+): Promise<void> {
+  if (!getStoreSnapshot().viewer) return;
+  const body: Record<string, number> = {};
+  if (options?.sizeCents !== undefined && options.sizeCents > 0) {
+    body.sizeCents = Math.max(1, Math.round(options.sizeCents));
+  }
+  if (options?.closePct !== undefined && options.closePct > 0 && options.closePct <= 100) {
+    body.closePct = options.closePct;
+  }
   await executeTradeRequest({
     endpoint: `/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`,
-    body: {},
+    body,
     statusMessage: "Position closed.",
+    formatReceiptMessage: (data) => {
+      const isFull = isRecord(data) && typeof data.isFullClose === "boolean" ? data.isFullClose : true;
+      return isFull ? "Position closed." : "Position partially closed.";
+    },
   });
 }
 
-export async function rebalancePerpPosition(input: {
-  readonly positionId?: string;
-  readonly ticker: string;
-  readonly action: "add" | "reduce" | "close" | "flip";
-  readonly side: "long" | "short";
-  readonly marginPts: number;
-  readonly resultingNotionalPts?: number;
-  readonly leverage: number;
-}): Promise<boolean> {
-  const s = getStoreSnapshot();
-  if (s.tradeLoading) return false;
-  if (
-    !requireAuthOrQueue({
-      kind: "trade_perp",
-      ticker: input.ticker,
-      side: input.side,
-      marginPts: input.marginPts,
-      leverage: input.leverage,
-      label: `${input.action} $${input.ticker} perp`,
-    })
-  ) {
-    return false;
+export async function rebalancePerpPosition(order: PerpRebalanceOrderInput): Promise<void> {
+  if (order.action === "reduce") {
+    await closePerpPosition(order.positionId, {
+      sizeCents: Math.max(1, Math.round(order.deltaNotionalPts * 100)),
+    });
+    return;
   }
-  const existing = s.positions.find(
-    (p) =>
-      !p.isClosed &&
-      p.row.kind === "perp" &&
-      ((input.positionId && p.row.id === input.positionId) ||
-        p.marketId.toUpperCase() === input.ticker.toUpperCase()),
-  );
-  if (!existing) {
-    if (input.action === "close" || input.action === "reduce") {
-      setErrorNotice(`No open $${input.ticker} position to ${input.action}.`);
-      return false;
-    }
-    return submitPerpOrder(input.ticker, input.side, input.marginPts, input.leverage);
-  }
-  setStoreState({ tradeLoading: true, tradeError: null });
-  const closeRes = await requestJson(`/api/markets/perp/positions/${encodeURIComponent(existing.row.id)}/close`, {
-    method: "POST",
-    body: {},
-    parse: passThrough,
-  });
-  if (!closeRes.ok) {
-    setStoreState({ tradeLoading: false, tradeError: closeRes.message });
-    setErrorNotice(closeRes.message);
-    return false;
-  }
-  const curViewer = getStoreSnapshot().viewer;
-  const balAfterClose = isRecord(closeRes.data) && typeof closeRes.data.balanceAfterCents === "number"
-    ? closeRes.data.balanceAfterCents
-    : curViewer?.balanceCents;
-  if (curViewer && balAfterClose !== undefined) {
-    setStoreState({ viewer: { ...curViewer, balanceCents: balAfterClose } });
-  }
-  const targetLeverage = Math.max(1, Math.min(20, Math.round(input.leverage)));
-  const targetNotionalPts = input.action === "close"
-    ? 0
-    : input.resultingNotionalPts !== undefined
-      ? Math.max(0, input.resultingNotionalPts)
-      : input.action === "add"
-        ? (existing.sizeCents / 100) + input.marginPts * targetLeverage
-        : input.action === "reduce"
-          ? Math.max(0, (existing.sizeCents / 100) - input.marginPts * targetLeverage)
-          : input.marginPts * targetLeverage;
-  if (input.action === "close" || targetNotionalPts <= 0) {
-    setStoreState({ tradeLoading: false });
-    setStatusNotice(`Closed $${input.ticker} position.`);
-    await refreshAfterTrade();
-    return true;
-  }
-  const nextMarginPts = input.action === "flip"
-    ? Math.max(0.01, input.marginPts)
-    : Math.max(0.01, targetNotionalPts / targetLeverage);
-  const openRes = await requestJson(`/api/markets/perp/${encodeURIComponent(input.ticker)}/open`, {
-    method: "POST",
-    body: {
-      side: input.side,
-      collateralCents: Math.max(1, Math.round(nextMarginPts * 100)),
-      collateralPts: nextMarginPts,
-      leverage: targetLeverage,
-    },
-    parse: passThrough,
-  });
-  if (!openRes.ok) {
-    setStoreState({ tradeLoading: false, tradeError: openRes.message });
-    setErrorNotice(`Closed prior $${input.ticker} position, reopen failed: ${openRes.message}`);
-    await refreshAfterTrade();
-    return false;
-  }
-  const latestViewer = getStoreSnapshot().viewer;
-  const balAfterOpen = isRecord(openRes.data) && typeof openRes.data.balanceAfterCents === "number"
-    ? openRes.data.balanceAfterCents
-    : latestViewer?.balanceCents;
-  setStoreState({
-    tradeLoading: false,
-    ...(latestViewer && balAfterOpen !== undefined ? { viewer: { ...latestViewer, balanceCents: balAfterOpen } } : {}),
-  });
-  const actionVerb = input.action === "add" ? "Increased" : input.action === "reduce" ? "Reduced" : "Flipped";
-  setStatusNotice(`${actionVerb} $${input.ticker} to ${input.side.toUpperCase()} ${targetLeverage}x.`);
-  await refreshAfterTrade();
-  return true;
+  await submitPerpOrder(order.ticker, order.nextSide, order.marginPts, order.leverage);
 }
 
 export async function markChatRead(chatId: string): Promise<void> {
@@ -971,7 +942,7 @@ export async function loadChats(loadMessages = true): Promise<void> {
   if (loadMessages) setStoreState({ chatsLoading: true });
   const [chatsRes, invitesRes] = await Promise.all([
     requestJson("/api/chats", { parse: (raw) => decodeChats(raw, viewerId) }),
-    requestJson("/api/chats/alpha-invites", { parse: decodeAlphaInvites }),
+    requestJson("/api/chats/invites", { parse: decodeAlphaInvites }),
   ]);
   const s = getStoreSnapshot();
   const nextChats = chatsRes.ok ? chatsRes.data : s.chats;
@@ -1087,6 +1058,61 @@ export async function leaveGroupChat(chatId: string): Promise<boolean> {
   return true;
 }
 
+export async function renameGroupChat(chatId: string, title: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer) return false;
+  const trimmed = title.trim();
+  if (!trimmed) return false;
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}`, {
+    method: "PATCH",
+    body: { title: trimmed },
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setErrorNotice(res.message);
+    return false;
+  }
+  setStatusNotice(`Renamed group to "${trimmed}".`);
+  await loadChats(false);
+  return true;
+}
+
+export async function removeGroupMember(chatId: string, targetHandleOrId: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer) return false;
+  const cleaned = targetHandleOrId.trim().replace(/^@/, "");
+  if (!cleaned) return false;
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(cleaned)}`, {
+    method: "DELETE",
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setErrorNotice(res.message);
+    return false;
+  }
+  setStatusNotice("Member removed from group.");
+  await loadChats(false);
+  return true;
+}
+
+export async function deleteGroupChat(chatId: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer) return false;
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}`, {
+    method: "DELETE",
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setErrorNotice(res.message);
+    return false;
+  }
+  const s = getStoreSnapshot();
+  setStoreState({
+    selectedChatId: s.selectedChatId === chatId ? null : s.selectedChatId,
+    chatMessages: s.selectedChatId === chatId ? [] : s.chatMessages,
+  });
+  setStatusNotice("Group chat deleted.");
+  await loadChats();
+  return true;
+}
+
 export async function sendChatMessage(chatId: string, content: string): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
   setStoreState({ chatSending: true });
@@ -1106,11 +1132,14 @@ export async function sendChatMessage(chatId: string, content: string): Promise<
 export async function reactToChatMessage(messageId: string, emoji: string): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.viewer || !s.selectedChatId) return;
-  const res = await requestJson(`/api/chats/messages/${encodeURIComponent(messageId)}/react`, {
-    method: "POST",
-    body: { emoji },
-    parse: passThrough,
-  });
+  const res = await requestJson(
+    `/api/chats/${encodeURIComponent(s.selectedChatId)}/messages/${encodeURIComponent(messageId)}/reactions`,
+    {
+      method: "POST",
+      body: { emoji },
+      parse: passThrough,
+    },
+  );
   if (!res.ok) {
     setErrorNotice(res.message);
     return;
@@ -1120,7 +1149,7 @@ export async function reactToChatMessage(messageId: string, emoji: string): Prom
 
 export async function respondAlphaInvite(inviteId: string, accept: boolean): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
-  const res = await requestJson(`/api/chats/alpha-invites/${encodeURIComponent(inviteId)}/respond`, {
+  const res = await requestJson(`/api/chats/invites/${encodeURIComponent(inviteId)}/respond`, {
     method: "POST",
     body: { accept },
     parse: passThrough,
@@ -1129,7 +1158,7 @@ export async function respondAlphaInvite(inviteId: string, accept: boolean): Pro
     setErrorNotice(res.message);
     return;
   }
-  setStatusNotice(accept ? "Joined alpha group." : "Invite declined.");
+  setStatusNotice(accept ? "Joined group." : "Invite declined.");
   const cur = getStoreSnapshot();
   setStoreState({
     notifications: cur.notifications.map((n) =>
@@ -1138,6 +1167,8 @@ export async function respondAlphaInvite(inviteId: string, accept: boolean): Pro
   });
   await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
 }
+
+export const respondGroupInvite = respondAlphaInvite;
 
 export async function loadNotifications(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
@@ -1193,11 +1224,28 @@ export async function markAllNotificationsRead(): Promise<void> {
   });
 }
 
+export async function clearNotifications(): Promise<void> {
+  if (!getStoreSnapshot().viewer) return;
+  const res = await requestJson("/api/notifications", {
+    method: "DELETE",
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setErrorNotice(res.message);
+    return;
+  }
+  setStoreState({
+    notifications: [],
+    unreadNotifications: 0,
+  });
+  setStatusNotice("Notifications cleared.");
+}
+
 export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
-  setStoreState({ profileLoading: true, profileHandle: handle });
+  setStoreState({ profileLoading: true, profileHandle: handle, profileReplies: [] });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}`, s);
   const res = await requestJson(url, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
@@ -1208,6 +1256,26 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   }
   setStoreState({ profileBundle: null, profileLoading: false });
   setErrorNotice(res.ok ? "Profile not found" : res.message);
+}
+
+export async function loadProfileReplies(handleOrSelf?: string | null): Promise<void> {
+  const s = getStoreSnapshot();
+  const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
+  if (!handle) return;
+  const viewerId = s.viewer?.accountId ?? null;
+  setStoreState({ profileRepliesLoading: true });
+  const url = appendAnonymousModeParam(
+    `/api/posts?authorHandle=${encodeURIComponent(handle)}&filter=replies&limit=40`,
+    s,
+  );
+  const res = await requestJson(url, {
+    parse: (raw) => decodeFeedPage(raw, viewerId),
+  });
+  if (res.ok) {
+    setStoreState({ profileReplies: res.data.items, profileRepliesLoading: false });
+    return;
+  }
+  setStoreState({ profileRepliesLoading: false });
 }
 
 export async function loadMoreProfilePosts(): Promise<void> {
@@ -1268,8 +1336,8 @@ export async function loadModerationLists(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
   setStoreState({ moderationLoading: true });
   const [blockedRes, mutedRes] = await Promise.all([
-    requestJson("/api/users/me/blocked", { parse: decodeModerationList }),
-    requestJson("/api/users/me/muted", { parse: decodeModerationList }),
+    requestJson("/api/moderation/blocks", { parse: decodeModerationList }),
+    requestJson("/api/moderation/mutes", { parse: decodeModerationList }),
   ]);
   const cur = getStoreSnapshot();
   setStoreState({
@@ -1340,9 +1408,6 @@ function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
       row.handle.toLowerCase() === lower ? { ...row, isFollowing: nextFollowing } : row,
     ),
     feedPosts: cur.feedPosts.map((p) =>
-      p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p,
-    ),
-    marketSocialPosts: cur.marketSocialPosts.map((p) =>
       p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p,
     ),
   });
