@@ -260,6 +260,8 @@ pure val eval_refuse_canTradeSpot = { spotSide: SpotBuy, spotAmount: 1000, by: P
 
 Opening a perpetual adds the position's open interest first and fills the entry at the resulting `postOpenMark` price (adverse to the opener), so opening a position never generates instant unrealized profit from its own open-interest impact.
 
+A lone position opened at high leverage can be liquidated when the opposite side opens and the mark returns toward the index, even though the index does not move: the post-trade entry leaves less equity buffer than the old pre-trade entry did.
+
 ```quint
 pure def canOpenPerp(
   m: SpotPerpMarket,

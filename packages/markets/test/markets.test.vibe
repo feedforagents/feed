@@ -911,7 +911,7 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
   })
 )
 
-it.effect('Perp open then immediate close cannot profit from the trader's own mark premium (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () => effect {
+it.effect('Perp open then immediate close cannot profit from its own mark premium (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () => effect {
   try TestClock.setTime(Date.UTC(2026, 10, 19, 1, 0, 0))
   try runWithSeededDb(effect {
     try createVerifiedAccount("user-alice", "alice", 10_000)

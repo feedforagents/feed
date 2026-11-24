@@ -23,6 +23,13 @@ lemma CanonicalTradingFeeNonNeg(settledNotional: int)
   }
 }
 
+lemma MarkPricePositive(indexCents: int, longOI: int, shortOI: int)
+  requires indexCents > 0
+  ensures computeMarkPriceCents(indexCents, longOI, shortOI) > 0
+{
+  assert computeMarkPriceCents(indexCents, longOI, shortOI) == shared__money_maxInt(1, (indexCents * (shared__money_BPS_DENOMINATOR + boundedPremiumBps(longOI, shortOI))) / shared__money_BPS_DENOMINATOR);
+}
+
 lemma FundingPeriodIndexMonotonic(h1: int, h2: int)
   requires 0 <= h1 <= h2
   ensures shared__time_fundingPeriodIndex(h1) <= shared__time_fundingPeriodIndex(h2)
@@ -402,6 +409,7 @@ lemma openPerp_ensures(m: SpotPerpMarket, traderId: string, perpSide: PerpSide, 
     var newShort := if perpSide.Short? then m.shortOICents + perpSizeCents else m.shortOICents;
     var postOpenMark := computeMarkPriceCents(m.indexPriceCents, newLong, newShort);
     var newPos := PerpPosition(m.nextPosId + 1, traderId, perpSide, perpSizeCents, leverage, margin, postOpenMark, m.currentPeriod, m.currentPeriod, 0);
+    MarkPricePositive(m.indexPriceCents, newLong, newShort);
     CanonicalTradingFeeNonNeg(perpSizeCents);
     ProofLib.FoldLeftAppend(
       (acc: int, p: PerpPosition) => (if p.perpSide.Long? then (acc + p.sizeCents) else acc),
