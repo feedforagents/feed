@@ -1,4 +1,4 @@
-// spec/markets/spotPerp.md, "Spot pools, index price, mark price, and open interest stay consistent and positive"
+// spec/markets/spotPerp.md, "Spot reserves and prices stay positive, and open interest is non-negative and matches positions"
 // spec/markets/spotPerp.md, "Every position obeys the 20x leverage cap and unique ownership, and all balances are non-negative"
 // spec/markets/spotPerp.md, "Funding claims are post-cutover, bounded by monotonic lastFundingPeriod, and unique per position and period"
 // spec/markets/spotPerp.md, "Only NPCs execute spot trades, perp trades never move spot or index, and funding periods advance monotonically"

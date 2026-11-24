@@ -183,7 +183,7 @@ pure val eval_refuse_canBuyPoints = {
 
 ### Verified players with positive equity can trade freely in any location, including Washington, and may go broke
 
-Broke accounts (`equity == 0`) have no cash and no open positions, so only a valid purchase (outside Washington) can restore funds.
+Verified accounts with no equity have zero cash and zero position value. Only a valid purchase outside Washington can restore their funds.
 
 ```quint
 pure def canPlayTrade(

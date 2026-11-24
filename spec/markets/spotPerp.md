@@ -1,12 +1,12 @@
 # Spot and perpetual markets
 
-"NPCs buy spot, spot drives perps" (PRD §9.3): only NPCs trade the spot CPMM pool (`D-17`), the persisted `indexPriceCents` derives strictly from the spot pool with no random-walk price source, players and NPCs trade perpetuals up to `20x` leverage (`D-17b`) against a mark price equal to `index * (1 + boundedPremium(netOI))`, 8-hour funding accrues at most once per position per UTC period after the cutover boundary, and positions liquidate on mark price when equity breaches maintenance margin.
+"NPCs buy spot, spot drives perps" (PRD §9.3): only NPCs trade the spot CPMM pool (`D-17`), the persisted `indexPriceCents` derives strictly from the spot pool with no random-walk price source, players and NPCs trade perpetuals up to `20x` leverage (`D-17b`) against a whole-cent mark price computed from `index * (1 + boundedPremium(netOI))` with a one-cent floor. Funding accrues at most once per position per UTC 8-hour period on or after the cutover boundary. A position liquidates when its mark-price equity is at or below maintenance margin.
 
 ## Domain
 
 ### Spot pools, perpetual positions, and sender roles
 
-Only `NpcTrader` may execute `tradeSpot`; `PlayerTrader` is strictly refused spot trades and trades perpetuals instead. `BASE_SCALE = 100` stores spot base reserves in `1/100` tokens so `indexPriceCents = (quoteReserve * BASE_SCALE) / baseReserve`.
+Only `NpcTrader` may execute `tradeSpot`; `PlayerTrader` is strictly refused spot trades and trades perpetuals instead. `BASE_SCALE = 100` stores spot base reserves in `1/100` tokens so a valid spot pool uses `indexPriceCents = max(1, (quoteReserve * BASE_SCALE) / baseReserve)` in whole cents.
 
 ```quint
 import money.* from "../shared/money"
@@ -322,6 +322,8 @@ pure val eval_refuse_canOpenPerp = {
 
 ### Closing a perp settles equity and canonical fees at mark price without touching spot
 
+Equity is computed at the mark price. The canonical fee is computed on the position size and collected up to the amount of positive equity.
+
 ```quint
 pure def canClosePerp(m: SpotPerpMarket, traderId: str, by: Sender): bool =
   senderOwnsTrader(by, traderId) and hasOpenPosition(m, traderId)
@@ -348,7 +350,7 @@ pure def closePerp(m: SpotPerpMarket, traderId: str, by: Sender): SpotPerpMarket
 
 ## Story: 8-hour funding accrual and mark-price liquidation
 
-> As the exchange operator, I want funding to accrue at most once per position per UTC 8h period starting from the cutover boundary, pulling mark toward spot, and under-margined positions to liquidate on mark price.
+> As the exchange operator, I want funding to accrue at most once per position per UTC 8h period starting from the cutover boundary, so funding incentives encourage the mark price to converge toward the spot price. I want positions to liquidate when their mark-price equity reaches or falls below maintenance margin.
 
 ### UTC time advances across 8-hour funding boundaries, and funding skips pre-cutover or duplicate periods
 
@@ -410,7 +412,7 @@ pure def liquidate(m: SpotPerpMarket, traderId: str): SpotPerpMarket =
 
 ## Invariants, step rules, and reachability
 
-### Spot pools, index price, mark price, and open interest stay consistent and positive
+### Spot reserves and prices stay positive, and open interest is non-negative and matches positions
 
 ```quint
 pure def alwaysSpotAndPricesConsistent(m: SpotPerpMarket): bool =
