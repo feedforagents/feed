@@ -61,13 +61,18 @@ function findPostInState(postId: string): AppPost | undefined {
     ?? s.explore.posts.find((p) => p.card.id === postId);
 }
 
+let feedLoadId = 0;
+let feedMoreId = 0;
+
 export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const s = getStoreSnapshot();
   const tab = tabOverride ?? s.feedTab;
+  const loadId = ++feedLoadId;
   setStoreState({ feedLoading: true });
   const res = await requestJson(`/api/feed?tab=${encodeURIComponent(tab)}`, {
     parse: decodeFeedPage,
   });
+  if (loadId !== feedLoadId || getStoreSnapshot().feedTab !== tab) return;
   if (res.ok) {
     setStoreState({ feedPosts: res.data.items, feedNextCursor: res.data.nextCursor, feedLoading: false });
     return;
@@ -78,11 +83,19 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
 export async function loadMoreFeed(): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.feedNextCursor || s.feedLoading || s.feedLoadingMore) return;
+  const tab = s.feedTab;
+  const cursor = s.feedNextCursor;
+  const loadId = feedLoadId;
+  const moreId = ++feedMoreId;
   setStoreState({ feedLoadingMore: true });
   const res = await requestJson(
-    `/api/feed?tab=${encodeURIComponent(s.feedTab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
+    `/api/feed?tab=${encodeURIComponent(tab)}&cursor=${encodeURIComponent(cursor)}`,
     { parse: decodeFeedPage },
   );
+  if (loadId !== feedLoadId || getStoreSnapshot().feedTab !== tab) {
+    if (moreId === feedMoreId) setStoreState({ feedLoadingMore: false });
+    return;
+  }
   if (res.ok) {
     const latest = getStoreSnapshot();
     setStoreState({
@@ -109,10 +122,11 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
     requireAuthOrQueue({ kind: "switch_tab", tab, label: `view the ${tab} feed` });
     return;
   }
+  if (s.feedTab === tab && s.feedLoading) return;
   const specTab = toSpecTab(tab);
   sendNav({ type: "selectFeedTab", tab: specTab });
   sendApp({ type: "selectTab", tab: specTab });
-  setStoreState({ feedTab: tab });
+  if (s.feedTab !== tab) setStoreState({ feedTab: tab, feedPosts: [], feedNextCursor: null, feedLoading: true });
   await loadFeed(tab);
 }
 
