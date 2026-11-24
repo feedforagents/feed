@@ -1,5 +1,14 @@
 // spec/markets/economy.md, "Story: Verify account and claim initial grant once"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
-import { SPOT_BASE_SCALE, Store, type StoreFailure, toInt, type Row, type Tx } from "@repo/db"
+import {
+  SPOT_BASE_SCALE,
+  Store,
+  type StoreFailure,
+  resolveActorAvatarUrl,
+  tierStartingBalanceCents,
+  toInt,
+  type Row,
+  type Tx
+} from "@repo/db"
 import {
   INITIAL_GRANT_CENTS,
   INITIAL_GRANT_PTS,
@@ -7,7 +16,7 @@ import {
   netProfitCents,
   type PlayerLedger
 } from "../gen/markets__economy.effect.vibe"
-import { positionEquityAtMark } from "../gen/markets__spotPerp.effect.vibe"
+import { positionEquityAtMark, unrealizedPnlAtMark } from "../gen/markets__spotPerp.effect.vibe"
 import { markToMarketPredictionCents } from "./prediction.vibe"
 import {
   type MarketFailure,
@@ -21,6 +30,8 @@ export { INITIAL_GRANT_CENTS, INITIAL_GRANT_PTS }
 
 export type LeaderboardScope = "players" | "characters"
 export type LeaderboardMetric = "net_profit" | "return_pct" | "win_rate" | "volume"
+export type LeaderboardFilter = "all" | "traders" | "npcs"
+export type LeaderboardTimeframe = "24h" | "7d" | "30d" | "all"
 
 export interface AccountEconomyView {
   readonly accountId: string
@@ -60,6 +71,7 @@ export interface LeaderboardEntry {
   readonly netProfitCents: number
   readonly returnBps: number
   readonly returnPct: number
+  readonly roiPct: number
   readonly volumeCents: number
   readonly tradeCount: number
   readonly wins: number
@@ -94,7 +106,59 @@ export interface AccountLeaderboardPosition {
   readonly entry: LeaderboardEntry
 }
 
-const NPC_INITIAL_CASH_CENTS = 10_000_000
+export interface LeaderboardPagination {
+  readonly page: number
+  readonly pageSize: number
+  readonly totalCount: number
+  readonly totalPages: number
+}
+
+export interface FilteredLeaderboardPage {
+  readonly entries: ReadonlyArray<LeaderboardEntry>
+  readonly pagination: LeaderboardPagination
+  readonly generatedAt: number
+}
+
+export interface LeaderboardViewerRank {
+  readonly rank: number | null
+  readonly page: number | null
+  readonly entry: LeaderboardEntry | null
+}
+
+export interface LeaderboardQueryOptions {
+  readonly filter?: LeaderboardFilter
+  readonly timeframe?: LeaderboardTimeframe
+  readonly page?: number
+  readonly pageSize?: number
+}
+
+export function parseLeaderboardFilter(raw: string | null | undefined): LeaderboardFilter {
+  const norm = raw?.trim().toLowerCase()
+  if (norm === "traders" || norm === "humans" || norm === "players") return "traders"
+  if (norm === "npcs" || norm === "actors" || norm === "characters") return "npcs"
+  return "all"
+}
+
+export function parseLeaderboardTimeframe(raw: string | null | undefined): LeaderboardTimeframe {
+  const norm = raw?.trim().toLowerCase()
+  if (norm === "24h" || norm === "1d") return "24h"
+  if (norm === "7d" || norm === "1w") return "7d"
+  if (norm === "30d" || norm === "1m") return "30d"
+  return "all"
+}
+
+function timeframeCutoffMs(timeframe: LeaderboardTimeframe, nowMs: number): number | null {
+  switch (timeframe) {
+    case "24h":
+      return nowMs - 86_400_000
+    case "7d":
+      return nowMs - 7 * 86_400_000
+    case "30d":
+      return nowMs - 30 * 86_400_000
+    case "all":
+      return null
+  }
+}
 
 function buildLedger(
   accountId: string,
@@ -124,55 +188,57 @@ effect function loadOpenPerpRows(tx: Tx, holderKind: "user" | "npc", accountId?:
   )
 }
 
+export effect function getAccountEconomyIn(tx: Tx, accountId: string): AccountEconomyView!(MarketFailure | StoreFailure) {
+  const accountRows = try tx.query(
+    `SELECT account_id, handle, display_name, phone_verified_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents
+     FROM feed_accounts
+     WHERE account_id = $1`,
+    [accountId]
+  )
+  if (accountRows.length === 0) {
+    throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
+  }
+  const acct = accountRows[0]!
+  const predRows = try tx.query(
+    `SELECT p.side, p.shares, m.yes_shares, m.no_shares
+     FROM feed_prediction_positions p
+     JOIN feed_prediction_markets m ON m.id = p.market_id
+     WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`,
+    [accountId]
+  )
+  let predValueCents = 0
+  for (const row of predRows) {
+    predValueCents += markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
+  }
+  const perpRows = try loadOpenPerpRows(tx, "user", accountId)
+  let perpValueCents = 0
+  for (const row of perpRows) {
+    const equity = positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents))
+    perpValueCents += Math.max(0, equity)
+  }
+  const positionValueCents = predValueCents + perpValueCents
+  const balanceCents = toInt(acct.balance_cents)
+  const startingGrantCents = toInt(acct.starting_grant_cents)
+  const verified = acct.phone_verified_at !== null
+  const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents)
+  return {
+    accountId,
+    handle: requiredText(acct.handle),
+    displayName: requiredText(acct.display_name),
+    verified,
+    uiMode: requiredText(acct.ui_mode) === "social" ? "social" : "game",
+    balanceCents,
+    positionValueCents,
+    equityCents: equityCents(ledger),
+    startingGrantCents,
+    totalFeesPaidCents: toInt(acct.total_fees_paid_cents),
+    netProfitCents: netProfitCents(ledger)
+  }
+}
+
 export effect function getAccountEconomy(accountId: string): AccountEconomyView!(MarketFailure | StoreFailure)!Store {
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const accountRows = try tx.query(
-      `SELECT account_id, handle, display_name, phone_verified_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents
-       FROM feed_accounts
-       WHERE account_id = $1`,
-      [accountId]
-    )
-    if (accountRows.length === 0) {
-      throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
-    }
-    const acct = accountRows[0]!
-    const predRows = try tx.query(
-      `SELECT p.side, p.shares, m.yes_shares, m.no_shares
-       FROM feed_prediction_positions p
-       JOIN feed_prediction_markets m ON m.id = p.market_id
-       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`,
-      [accountId]
-    )
-    let predValueCents = 0
-    for (const row of predRows) {
-      predValueCents += markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
-    }
-    const perpRows = try loadOpenPerpRows(tx, "user", accountId)
-    let perpValueCents = 0
-    for (const row of perpRows) {
-      const equity = positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents))
-      perpValueCents += Math.max(0, equity)
-    }
-    const positionValueCents = predValueCents + perpValueCents
-    const balanceCents = toInt(acct.balance_cents)
-    const startingGrantCents = toInt(acct.starting_grant_cents)
-    const verified = acct.phone_verified_at !== null
-    const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents)
-    return {
-      accountId,
-      handle: requiredText(acct.handle),
-      displayName: requiredText(acct.display_name),
-      verified,
-      uiMode: requiredText(acct.ui_mode) === "social" ? "social" : "game",
-      balanceCents,
-      positionValueCents,
-      equityCents: equityCents(ledger),
-      startingGrantCents,
-      totalFeesPaidCents: toInt(acct.total_fees_paid_cents),
-      netProfitCents: netProfitCents(ledger)
-    }
-  })
+  return try store.transaction((tx: Tx) => getAccountEconomyIn(tx, accountId))
 }
 
 export effect function getPointLedger(accountId: string, limit = 50): ReadonlyArray<PointLedgerEntry>!StoreFailure!Store {
@@ -212,6 +278,7 @@ interface UnrankedLeaderboardRow {
   readonly netProfitCents: number
   readonly returnBps: number
   readonly returnPct: number
+  readonly roiPct: number
   readonly volumeCents: number
   readonly tradeCount: number
   readonly wins: number
@@ -260,40 +327,56 @@ function rankScoredEntries(
 
 effect function loadTradingAggregatesTx(
   tx: Tx,
-  holderKind: "user" | "npc"
+  holderKind: "user" | "npc",
+  cutoffMs: number | null = null
 ): {
   readonly predValueMap: ReadonlyMap<string, number>
   readonly perpValueMap: ReadonlyMap<string, number>
+  readonly openUnrealizedMap: ReadonlyMap<string, number>
   readonly volumeMap: ReadonlyMap<string, { readonly volumeCents: number; readonly tradeCount: number }>
-  readonly statsMap: ReadonlyMap<string, { readonly wins: number; readonly settledCount: number }>
+  readonly statsMap: ReadonlyMap<string, { readonly wins: number; readonly settledCount: number; readonly realizedPnlCents: number }>
 }!StoreFailure {
   const predRows = try tx.query(
-    `SELECT p.holder_id, p.side, p.shares, m.yes_shares, m.no_shares
+    `SELECT p.holder_id, p.side, p.shares, p.cost_basis_cents, m.yes_shares, m.no_shares
      FROM feed_prediction_positions p
      JOIN feed_prediction_markets m ON m.id = p.market_id
      WHERE p.holder_kind = $1 AND p.settled_at IS NULL AND p.shares > 0`,
     [holderKind]
   )
   const predValueMap = new Map<string, number>()
+  const openUnrealizedMap = new Map<string, number>()
   for (const row of predRows) {
     const holderId = requiredText(row.holder_id)
     const mtm = markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
+    const costBasis = toInt(row.cost_basis_cents)
     predValueMap.set(holderId, (predValueMap.get(holderId) ?? 0) + mtm)
+    openUnrealizedMap.set(holderId, (openUnrealizedMap.get(holderId) ?? 0) + (mtm - costBasis))
   }
   const perpRows = try loadOpenPerpRows(tx, holderKind)
   const perpValueMap = new Map<string, number>()
   for (const row of perpRows) {
     const holderId = requiredText(row.holder_id)
-    const equity = Math.max(0, positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents)))
+    const specPos = toSpecPerpPosition(row)
+    const mark = toInt(row.mark_price_cents)
+    const equity = Math.max(0, positionEquityAtMark(specPos, mark))
     perpValueMap.set(holderId, (perpValueMap.get(holderId) ?? 0) + equity)
+    openUnrealizedMap.set(holderId, (openUnrealizedMap.get(holderId) ?? 0) + unrealizedPnlAtMark(specPos, mark))
   }
-  const volumeRows = try tx.query(
-    `SELECT trader_id, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
-     FROM feed_trades
-     WHERE trader_kind = $1
-     GROUP BY trader_id`,
-    [holderKind]
-  )
+  const volumeRows = cutoffMs === null
+    ? try tx.query(
+        `SELECT trader_id, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
+         FROM feed_trades
+         WHERE trader_kind = $1
+         GROUP BY trader_id`,
+        [holderKind]
+      )
+    : try tx.query(
+        `SELECT trader_id, COALESCE(SUM(notional_cents), 0) AS volume_cents, COUNT(*) AS trade_count
+         FROM feed_trades
+         WHERE trader_kind = $1 AND created_at >= $2
+         GROUP BY trader_id`,
+        [holderKind, cutoffMs]
+      )
   const volumeMap = new Map<string, { readonly volumeCents: number; readonly tradeCount: number }>()
   for (const row of volumeRows) {
     volumeMap.set(requiredText(row.trader_id), {
@@ -301,48 +384,86 @@ effect function loadTradingAggregatesTx(
       tradeCount: toInt(row.trade_count)
     })
   }
-  const resolvedPredRows = try tx.query(
-    `SELECT
-       p.holder_id,
-       COUNT(*) AS settled_count,
-       SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins
-     FROM feed_prediction_positions p
-     JOIN feed_prediction_markets m ON m.id = p.market_id
-     WHERE p.holder_kind = $1
-       AND p.settled_at IS NOT NULL
-       AND p.shares > 0
-       AND m.status = 'resolved'
-     GROUP BY p.holder_id`,
-    [holderKind]
-  )
-  const tradeExitRows = try tx.query(
-    `SELECT
-       trader_id AS holder_id,
-       COUNT(*) AS settled_count,
-       SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins
-     FROM feed_trades
-     WHERE trader_kind = $1
-       AND realized_pnl_cents IS NOT NULL
-       AND (
-         (market_kind = 'prediction' AND side IN ('sell_yes', 'sell_no'))
-         OR (market_kind = 'perp' AND side IN ('close_long', 'close_short', 'reduce_long', 'reduce_short', 'liquidate_long', 'liquidate_short'))
-       )
-     GROUP BY trader_id`,
-    [holderKind]
-  )
-  const statsMap = new Map<string, { wins: number; settledCount: number }>()
+  const resolvedPredRows = cutoffMs === null
+    ? try tx.query(
+        `SELECT
+           p.holder_id,
+           COUNT(*) AS settled_count,
+           SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins,
+           COALESCE(SUM(p.payout_cents - p.cost_basis_cents), 0) AS realized_pnl_cents
+         FROM feed_prediction_positions p
+         JOIN feed_prediction_markets m ON m.id = p.market_id
+         WHERE p.holder_kind = $1
+           AND p.settled_at IS NOT NULL
+           AND p.shares > 0
+           AND m.status = 'resolved'
+         GROUP BY p.holder_id`,
+        [holderKind]
+      )
+    : try tx.query(
+        `SELECT
+           p.holder_id,
+           COUNT(*) AS settled_count,
+           SUM(CASE WHEN p.payout_cents > p.cost_basis_cents THEN 1 ELSE 0 END) AS wins,
+           COALESCE(SUM(p.payout_cents - p.cost_basis_cents), 0) AS realized_pnl_cents
+         FROM feed_prediction_positions p
+         JOIN feed_prediction_markets m ON m.id = p.market_id
+         WHERE p.holder_kind = $1
+           AND p.settled_at IS NOT NULL
+           AND p.settled_at >= $2
+           AND p.shares > 0
+           AND m.status = 'resolved'
+         GROUP BY p.holder_id`,
+        [holderKind, cutoffMs]
+      )
+  const tradeExitRows = cutoffMs === null
+    ? try tx.query(
+        `SELECT
+           trader_id AS holder_id,
+           COUNT(*) AS settled_count,
+           SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins,
+           COALESCE(SUM(realized_pnl_cents), 0) AS realized_pnl_cents
+         FROM feed_trades
+         WHERE trader_kind = $1
+           AND realized_pnl_cents IS NOT NULL
+           AND (
+             (market_kind = 'prediction' AND side IN ('sell_yes', 'sell_no'))
+             OR (market_kind = 'perp' AND side IN ('close_long', 'close_short', 'reduce_long', 'reduce_short', 'liquidate_long', 'liquidate_short'))
+           )
+         GROUP BY trader_id`,
+        [holderKind]
+      )
+    : try tx.query(
+        `SELECT
+           trader_id AS holder_id,
+           COUNT(*) AS settled_count,
+           SUM(CASE WHEN realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins,
+           COALESCE(SUM(realized_pnl_cents), 0) AS realized_pnl_cents
+         FROM feed_trades
+         WHERE trader_kind = $1
+           AND created_at >= $2
+           AND realized_pnl_cents IS NOT NULL
+           AND (
+             (market_kind = 'prediction' AND side IN ('sell_yes', 'sell_no'))
+             OR (market_kind = 'perp' AND side IN ('close_long', 'close_short', 'reduce_long', 'reduce_short', 'liquidate_long', 'liquidate_short'))
+           )
+         GROUP BY trader_id`,
+        [holderKind, cutoffMs]
+      )
+  const statsMap = new Map<string, { wins: number; settledCount: number; realizedPnlCents: number }>()
   for (const row of [...resolvedPredRows, ...tradeExitRows]) {
     const holderId = requiredText(row.holder_id)
-    const prev = statsMap.get(holderId) ?? { wins: 0, settledCount: 0 }
+    const prev = statsMap.get(holderId) ?? { wins: 0, settledCount: 0, realizedPnlCents: 0 }
     statsMap.set(holderId, {
       wins: prev.wins + toInt(row.wins),
-      settledCount: prev.settledCount + toInt(row.settled_count)
+      settledCount: prev.settledCount + toInt(row.settled_count),
+      realizedPnlCents: prev.realizedPnlCents + toInt(row.realized_pnl_cents)
     })
   }
-  return { predValueMap, perpValueMap, volumeMap, statsMap }
+  return { predValueMap, perpValueMap, openUnrealizedMap, volumeMap, statsMap }
 }
 
-effect function scorePlayerLeaderboardTx(tx: Tx): ReadonlyArray<UnrankedLeaderboardRow>!StoreFailure {
+effect function scorePlayerLeaderboardTx(tx: Tx, cutoffMs: number | null = null): ReadonlyArray<UnrankedLeaderboardRow>!StoreFailure {
   const accounts = try tx.query(
     `SELECT fa.account_id, fa.handle, fa.display_name, fa.avatar_url, fa.phone_verified_at, fa.balance_cents, fa.starting_grant_cents
      FROM feed_accounts fa
@@ -351,7 +472,7 @@ effect function scorePlayerLeaderboardTx(tx: Tx): ReadonlyArray<UnrankedLeaderbo
        AND fa.phone_verified_at IS NOT NULL
        AND a.status = 'active'`
   )
-  const { predValueMap, perpValueMap, volumeMap, statsMap } = try loadTradingAggregatesTx(tx, "user")
+  const { predValueMap, perpValueMap, openUnrealizedMap, volumeMap, statsMap } = try loadTradingAggregatesTx(tx, "user", cutoffMs)
   return accounts.map((acct) => {
     const accountId = requiredText(acct.account_id)
     const balanceCents = toInt(acct.balance_cents)
@@ -359,10 +480,12 @@ effect function scorePlayerLeaderboardTx(tx: Tx): ReadonlyArray<UnrankedLeaderbo
     const positionValueCents = (predValueMap.get(accountId) ?? 0) + (perpValueMap.get(accountId) ?? 0)
     const ledger = buildLedger(accountId, true, balanceCents, positionValueCents, startingGrantCents)
     const equity = equityCents(ledger)
-    const profit = netProfitCents(ledger)
+    const stat = statsMap.get(accountId) ?? { wins: 0, settledCount: 0, realizedPnlCents: 0 }
+    const profit = cutoffMs === null
+      ? netProfitCents(ledger)
+      : stat.realizedPnlCents + (openUnrealizedMap.get(accountId) ?? 0)
     const returnBps = startingGrantCents > 0 ? Math.round((profit * 10_000) / startingGrantCents) : 0
     const vol = volumeMap.get(accountId) ?? { volumeCents: 0, tradeCount: 0 }
-    const stat = statsMap.get(accountId) ?? { wins: 0, settledCount: 0 }
     const winRate = stat.settledCount === 0 ? 0 : stat.wins / stat.settledCount
     return {
       accountId,
@@ -377,6 +500,7 @@ effect function scorePlayerLeaderboardTx(tx: Tx): ReadonlyArray<UnrankedLeaderbo
       netProfitCents: profit,
       returnBps,
       returnPct: returnBps / 100,
+      roiPct: returnBps / 100,
       volumeCents: vol.volumeCents,
       tradeCount: vol.tradeCount,
       wins: stat.wins,
@@ -387,13 +511,14 @@ effect function scorePlayerLeaderboardTx(tx: Tx): ReadonlyArray<UnrankedLeaderbo
   })
 }
 
-effect function scoreCharacterLeaderboardTx(tx: Tx): ReadonlyArray<UnrankedLeaderboardRow>!StoreFailure {
+effect function scoreCharacterLeaderboardTx(tx: Tx, cutoffMs: number | null = null): ReadonlyArray<UnrankedLeaderboardRow>!StoreFailure {
   const actors = try tx.query(
-    `SELECT id, username, name, balance_cents
+    `SELECT id, username, name, tier, profile_image_url, balance_cents
      FROM feed_actors
+     WHERE id NOT LIKE 'test-%'
      ORDER BY id ASC`
   )
-  const { predValueMap, perpValueMap, volumeMap, statsMap } = try loadTradingAggregatesTx(tx, "npc")
+  const { predValueMap, perpValueMap, openUnrealizedMap, volumeMap, statsMap } = try loadTradingAggregatesTx(tx, "npc", cutoffMs)
   const holdingRows = try tx.query(
     `SELECT h.actor_id, h.ticker, h.base_units, sp.index_price_cents, COALESCE(o.initial_price_cents, sp.index_price_cents) AS initial_price_cents
      FROM feed_npc_spot_holdings h
@@ -430,18 +555,20 @@ effect function scoreCharacterLeaderboardTx(tx: Tx): ReadonlyArray<UnrankedLeade
     const actorId = requiredText(actor.id)
     const balanceCents = toInt(actor.balance_cents)
     const positionValueCents = (predValueMap.get(actorId) ?? 0) + (perpValueMap.get(actorId) ?? 0) + (spotValueMap.get(actorId) ?? 0)
-    const startingGrantCents = NPC_INITIAL_CASH_CENTS + (spotBaselineMap.get(actorId) ?? 0)
+    const startingGrantCents = tierStartingBalanceCents(requiredText(actor.tier)) + (spotBaselineMap.get(actorId) ?? 0)
     const equity = balanceCents + positionValueCents
-    const profit = equity - startingGrantCents
+    const stat = statsMap.get(actorId) ?? { wins: 0, settledCount: 0, realizedPnlCents: 0 }
+    const profit = cutoffMs === null
+      ? equity - startingGrantCents
+      : stat.realizedPnlCents + (openUnrealizedMap.get(actorId) ?? 0)
     const returnBps = startingGrantCents > 0 ? Math.round((profit * 10_000) / startingGrantCents) : 0
     const vol = volumeMap.get(actorId) ?? { volumeCents: 0, tradeCount: 0 }
-    const stat = statsMap.get(actorId) ?? { wins: 0, settledCount: 0 }
     const winRate = stat.settledCount === 0 ? 0 : stat.wins / stat.settledCount
     return {
       accountId: actorId,
       handle: requiredText(actor.username),
       displayName: requiredText(actor.name),
-      avatarUrl: null,
+      avatarUrl: optionalText(actor.profile_image_url) ?? (actorId !== "" ? resolveActorAvatarUrl(actorId) : null),
       isNpc: true,
       balanceCents,
       positionValueCents,
@@ -450,6 +577,7 @@ effect function scoreCharacterLeaderboardTx(tx: Tx): ReadonlyArray<UnrankedLeade
       netProfitCents: profit,
       returnBps,
       returnPct: returnBps / 100,
+      roiPct: returnBps / 100,
       volumeCents: vol.volumeCents,
       tradeCount: vol.tradeCount,
       wins: stat.wins,
@@ -511,6 +639,72 @@ export effect function getAccountLeaderboardRank(
       rank: entry.rank,
       page: Math.floor(idx / safePageSize) + 1,
       totalCount: ranked.length,
+      entry
+    }
+  })
+}
+
+effect function computeFilteredRankedLeaderboardTx(
+  tx: Tx,
+  filter: LeaderboardFilter,
+  timeframe: LeaderboardTimeframe,
+  nowMs: number
+): ReadonlyArray<LeaderboardEntry>!StoreFailure {
+  const cutoffMs = timeframeCutoffMs(timeframe, nowMs)
+  const players = filter === "all" || filter === "traders"
+    ? try scorePlayerLeaderboardTx(tx, cutoffMs)
+    : []
+  const characters = filter === "all" || filter === "npcs"
+    ? try scoreCharacterLeaderboardTx(tx, cutoffMs)
+    : []
+  return rankScoredEntries([...players, ...characters], "net_profit")
+}
+
+export effect function getFilteredLeaderboardPage(
+  options: LeaderboardQueryOptions = {}
+): FilteredLeaderboardPage!StoreFailure!Store {
+  const filter = options.filter ?? "all"
+  const timeframe = options.timeframe ?? "all"
+  const safePageSize = Math.max(1, Math.min(200, Math.floor(options.pageSize ?? 50)))
+  const requestedPage = Math.max(1, Math.floor(options.page ?? 1))
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const ranked = try computeFilteredRankedLeaderboardTx(tx, filter, timeframe, now)
+    const totalCount = ranked.length
+    const totalPages = Math.max(1, Math.ceil(totalCount / safePageSize))
+    const safePage = Math.min(requestedPage, totalPages)
+    const offset = (safePage - 1) * safePageSize
+    return {
+      entries: ranked.slice(offset, offset + safePageSize),
+      pagination: {
+        page: safePage,
+        pageSize: safePageSize,
+        totalCount,
+        totalPages
+      },
+      generatedAt: now
+    }
+  })
+}
+
+export effect function getFilteredLeaderboardViewerRank(
+  accountId: string,
+  options: Omit<LeaderboardQueryOptions, "page"> = {}
+): LeaderboardViewerRank!StoreFailure!Store {
+  const filter = options.filter ?? "all"
+  const timeframe = options.timeframe ?? "all"
+  const safePageSize = Math.max(1, Math.min(200, Math.floor(options.pageSize ?? 50)))
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const ranked = try computeFilteredRankedLeaderboardTx(tx, filter, timeframe, now)
+    const idx = ranked.findIndex((entry) => !entry.isNpc && entry.accountId === accountId)
+    if (idx === -1) return { rank: null, page: null, entry: null }
+    const entry = ranked[idx]!
+    return {
+      rank: entry.rank,
+      page: Math.floor(idx / safePageSize) + 1,
       entry
     }
   })

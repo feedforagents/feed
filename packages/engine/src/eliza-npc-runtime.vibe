@@ -489,8 +489,16 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
       const ticker = String(p.ticker ?? "")
       const side = p.side === "sell" ? "sell" : "buy"
       const quoteCents = Math.max(100, Math.round(Number(p.quoteCents ?? 2500)))
-      try executeNpcSpotTrade({ actorId: actor.id, ticker, side, quoteCents })
-      try maybePublishFeedEvent({ type: "market.spot", actorId: actor.id, ticker, side, quoteCents })
+      const spotReceipt = try executeNpcSpotTrade({ actorId: actor.id, ticker, side, quoteCents })
+      try maybePublishFeedEvent({
+        type: "market.spot",
+        actorId: actor.id,
+        ticker,
+        side,
+        quoteCents,
+        indexPriceCents: spotReceipt.indexPriceCents,
+        markPriceCents: spotReceipt.markPriceCents,
+      })
       return { success: true, text: `Spot ${side} ${quoteCents}c ${ticker}`, data: { ticker, side, quoteCents } }
     }),
     wrap("PERP_TRADE", "Open a leveraged NPC perpetual position", effect (p) => {
@@ -543,7 +551,17 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
       const marketId = String(p.marketId ?? "")
       const side = p.side === "no" ? "no" : "yes"
       const amountCents = Math.max(100, Math.round(Number(p.amountCents ?? 1500)))
-      try buyPredictionShares({ actorId: actor.id, actorKind: "npc", marketId, side, amountCents, viaClientName: "eliza-npc" })
+      const receipt = try buyPredictionShares({ actorId: actor.id, actorKind: "npc", marketId, side, amountCents, viaClientName: "eliza-npc" })
+      try maybePublishFeedEvent({
+        type: "market.prediction",
+        marketId: receipt.marketId,
+        action: receipt.action,
+        side: receipt.side,
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        shares: receipt.shares,
+        notionalCents: receipt.notionalCents,
+      })
       return { success: true, text: `Prediction ${side} ${amountCents}c on ${marketId}`, data: { marketId, side, amountCents } }
     }),
     wrap("SELL_PREDICTION", "Sell held prediction market YES/NO shares", effect (p) => {

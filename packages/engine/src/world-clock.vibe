@@ -1,7 +1,7 @@
 // spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes"; spec/engine/worldClock.md, "Story: Guard perpetual funding cutover across 8-hour UTC periods"; spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
 import { readEnv } from "@elizaos/core"
 import { SPOT_BASE_SCALE, Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
-import { accruePerpFunding, executeNpcSpotTrade, liquidateEligiblePositions, type MarketFailure } from "@repo/markets"
+import { accruePerpFunding, executeNpcSpotTrade, liquidateEligiblePositions, snapshotMarketPrices, type MarketFailure } from "@repo/markets"
 import { correlations, manifest, organizations } from "@repo/pack-default"
 import { createPost, type SocialFailure } from "@repo/social"
 import { HttpClientRequest } from "effect/http"
@@ -483,6 +483,7 @@ export effect function runMarketsTick(nowMs?: number): {
       const phaseRes = try advanceNarrativePhases(resolvedNow)
       const cluesPublished = try publishPhaseClues(resolvedNow)
       const seededMarketIds = try ensureRollingMarketSlots(resolvedNow)
+      snapshotMarketPrices(resolvedNow) catch effect () => ({ perpCount: 0, predictionCount: 0 })
       const stats = try pendingResolutionStats()
       const endWall = try Clock.currentTimeMillis
       try recordTickHealth("markets-tick", resolvedNow, "ok", null, stats.pendingCount, stats.oldestPendingAt, endWall - startWall)
