@@ -16,10 +16,12 @@
 import { PredictionPricing } from '@feed/core/markets/prediction/pricing';
 import {
   agentTrades,
+  and,
   db,
   desc,
   eq,
   getDbInstance,
+  gte,
   markets,
   npcTrades,
   questions,
@@ -169,11 +171,14 @@ export async function generateCurrentMarkets(): Promise<string> {
     return formatSimulationActiveMarkets();
   }
 
-  // Get active prediction markets
+  // Get active prediction markets: unresolved and not yet expired.
+  // Active means open for trading (PRD §8.1, §9.2) — an expired market
+  // stays unresolved until settlement runs, but buys on it are refused,
+  // so it must not be presented to agents as a market they can trade on.
   const predictionMarkets = await db
     .select()
     .from(markets)
-    .where(eq(markets.resolved, false))
+    .where(and(eq(markets.resolved, false), gte(markets.endDate, new Date())))
     .orderBy(desc(markets.yesShares))
     .limit(5);
 
