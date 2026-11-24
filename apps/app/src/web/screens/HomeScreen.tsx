@@ -80,7 +80,7 @@ function ThreadDialog({
 
   return (
     <Dialog
-      open={thread !== null || s.threadLoading}
+      open={!s.joinSheetOpen && (thread !== null || s.threadLoading)}
       onOpenChange={(open) => {
         if (!open) storeActions.closeThread();
       }}
