@@ -381,3 +381,38 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();
 });
+
+it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+  installMockNetwork();
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
+  await act(() => userEvent.click(homeButton));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+
+  const marketsButton = page.getByRole("button", { name: "Markets", exact: true }).first();
+  await act(() => userEvent.click(marketsButton));
+  await expect.element(page.getByText("Markets & Trading")).toBeInTheDocument();
+  await vi.waitFor(() => {
+    expect(window.location.pathname).toBe("/markets");
+  });
+
+  const modeSwitch = page.getByRole("switch", { name: "Social mode" });
+  await act(() => userEvent.click(modeSwitch));
+  await vi.waitFor(() => {
+    expect(window.location.pathname).toBe("/");
+  });
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+
+  const popped = new Promise<void>((resolve) => {
+    window.addEventListener("popstate", () => resolve(), { once: true });
+  });
+  window.history.back();
+  await act(() => popped);
+  expect(window.location.pathname).toBe("/");
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  await expect.element(page.getByText("Markets & Trading")).not.toBeInTheDocument();
+});

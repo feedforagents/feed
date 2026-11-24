@@ -483,6 +483,14 @@ export function bootStore(): void {
     }
     window.addEventListener("popstate", () => {
       const parsed = parseLocation(window.location.pathname, window.location.search);
+      if (parsed.route === "Markets" && currentUiMode() === "SocialMode") {
+        sendNav({ type: "navigateTo", targetRoute: "Home" });
+        sendApp({ type: "navigateApp", targetRoute: "Home" });
+        window.history.replaceState(null, "", "/");
+        setStoreState({ route: "Home", profileHandle: null, selectedTicker: null });
+        void loadDataForRoute("Home");
+        return;
+      }
       sendNav({ type: "navigateTo", targetRoute: parsed.route });
       sendApp({ type: "navigateApp", targetRoute: parsed.route });
       applyParsedLocation(parsed);
