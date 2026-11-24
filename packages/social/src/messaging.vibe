@@ -1347,6 +1347,9 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
     if (try isBlockedBetweenTx(tx, inviter.id, target.id)) {
       throw new SocialFailure({ code: "Blocked", message: "Cannot invite a blocked account" })
     }
+    if (target.id === inviter.id) {
+      throw new SocialFailure({ code: "Forbidden", message: "Cannot invite yourself to a group" })
+    }
     const already = memberRows.some((m) => toText(m.member_id) === target.id)
     if (already) {
       return {
@@ -1383,10 +1386,8 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
       id: target.id,
       role: target.kind === "npc" ? "NpcActor" : "HumanUser"
     }
-    const specAccounts: SpecAccount[] = [
-      { id: inviter.id, role: inviter.kind === "npc" ? "NpcActor" : "HumanUser" },
-      ...(target.id === inviter.id ? [] : [targetAccount])
-    ]
+    const inviterAccount: SpecAccount = { id: inviter.id, role: inviter.kind === "npc" ? "NpcActor" : "HumanUser" }
+    const specAccounts: SpecAccount[] = [inviterAccount, targetAccount]
     const specMembers = toSpecChatMembers(memberRows)
     const specState: MessagingState = {
       ...initialMessagingState,

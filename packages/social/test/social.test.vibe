@@ -500,6 +500,8 @@ it.effect(
     try respondGroupInvite({ accountId: "bob", inviteId: bobInviteId, accept: true })
     const invitedCarol = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
     try respondGroupInvite({ accountId: "carol", inviteId: invitedCarol.inviteId, accept: true })
+    const selfInviteCode = try expectSocialCode(inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "alice" }))
+    const memberSelfInviteCode = try expectSocialCode(inviteToUserGroupChat({ accountId: "bob", chatId: group.id, targetHandleOrId: "bob" }))
     const groupMsg = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: group.id, content: "Group signal" })
     const groupReact = try reactToMessage({ accountId: "carol", messageId: groupMsg.id, emoji: "👀" })
     const groupMsgs = try getChatMessages("alice", group.id)
@@ -554,6 +556,8 @@ it.effect(
         group.title,
         group.memberCount,
         invitedCarol.status,
+        selfInviteCode,
+        memberSelfInviteCode,
         groupReact.added,
         groupMsgs[0]?.reactions,
         carolLeft.left,
@@ -595,6 +599,8 @@ it.effect(
         "Trading Desk",
         1,
         "pending",
+        "Forbidden",
+        "Forbidden",
         true,
         [{ emoji: "👀", count: 1, reactedByViewer: false }],
         true,
