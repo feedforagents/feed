@@ -1892,7 +1892,7 @@ effect function handlePredictionMarketRoute(
     const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
     if (rawSide !== "yes" && rawSide !== "no") return try badRequest("invalid_side", "Side must be yes or no.")
     const amountCents = Math.round(numField(data, "amountCents", "amount_cents") ?? Math.round((numField(data, "amountPts") ?? 0) * 100))
-    const sharesInput = Math.round(numField(data, "shareUnits", "share_units", "shares") ?? 0)
+    const sharesInput = numField(data, "shareUnits", "share_units", "shares") ?? 0
     try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const receipt = action === "buy"
       ? try buyPredictionShares({
