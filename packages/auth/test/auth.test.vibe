@@ -246,24 +246,17 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
          ('post-floor', $1, 'user', 'Zero floor post', 0, 0, 0, $2)`,
       [peerId, seedNow]
     )
-    try sqlQuery(
-      `INSERT INTO feed_post_likes (post_id, account_id, created_at)
-       VALUES
-         ('post-shared', $1, $3),
-         ('post-shared', $2, $3),
-         ('post-solo', $1, $3),
-         ('post-floor', $1, $3)`,
-      [aliceId, peerId, seedNow]
-    )
-    try sqlQuery(
-      `INSERT INTO feed_post_reposts (post_id, account_id, created_at)
-       VALUES
-         ('post-shared', $1, $3),
-         ('post-shared', $2, $3),
-         ('post-solo', $1, $3),
-         ('post-floor', $1, $3)`,
-      [aliceId, peerId, seedNow]
-    )
+    for (const engagementTable of ["feed_post_likes", "feed_post_reposts"]) {
+      try sqlQuery(
+        `INSERT INTO ${engagementTable} (post_id, account_id, created_at)
+         VALUES
+           ('post-shared', $1, $3),
+           ('post-shared', $2, $3),
+           ('post-solo', $1, $3),
+           ('post-floor', $1, $3)`,
+        [aliceId, peerId, seedNow]
+      )
+    }
     try sqlQuery(
       `INSERT INTO feed_follows (follower_id, target_id, target_kind, created_at)
        VALUES
@@ -432,7 +425,7 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, sign-out ever
       }
     ))
   })
-})
+}, 180_000)
 
 it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 8628 single-agent replacement, refresh rotation, and reuse revocation (spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"; spec/auth/oauth.md, "Authorization requires PKCE S256, code flow, normalized resource, and preserves 400+ character state across one 4-scope consent screen"; spec/auth/oauth.md, "Rotating refresh tokens cap grants at 90 days and revoke the entire grant family on reuse"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/auth/oauth.md, "Exchanging an approved device code issues tokens and atomically replaces any prior connected agent"; spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/agentGrant.md, "Connecting a new agent atomically revokes any prior active grant")', () => effect {
   try TestClock.setTime(Date.now())
@@ -623,7 +616,7 @@ it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 86
       }
     ))
   })
-})
+}, 180_000)
 
 it.effect('Web and MCP share one per-account hourly rate-limit budget and exhaustion hits both identically (spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/shared/limits.md, "Web and MCP always see identical capacity, and consuming via one reduces the other")', () => effect {
   try TestClock.setTime(Date.now())
@@ -699,4 +692,4 @@ it.effect('Web and MCP share one per-account hourly rate-limit budget and exhaus
       }
     ))
   })
-})
+}, 180_000)

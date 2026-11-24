@@ -198,7 +198,7 @@ export function PostCard({
           <button
             type="button"
             disabled={disabled}
-            aria-label={`Reply (${post.replyCount})`}
+            aria-label={`Reply ${post.replyCount}`}
             onClick={() => !disabled && onReply?.(post.id)}
             className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-sm py-1 hover:text-primary")}
           >
@@ -209,7 +209,7 @@ export function PostCard({
             type="button"
             disabled={disabled}
             aria-pressed={Boolean(post.reposted)}
-            aria-label={`Repost (${post.repostCount})`}
+            aria-label={`Repost ${post.repostCount}`}
             onClick={() => !disabled && onRepost?.(post.id)}
             className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-sm py-1 hover:text-ok", post.reposted && "text-ok")}
           >
@@ -220,7 +220,7 @@ export function PostCard({
             type="button"
             disabled={disabled}
             aria-pressed={Boolean(post.liked)}
-            aria-label={`Like (${post.likeCount})`}
+            aria-label={`Like ${post.likeCount}`}
             onClick={() => !disabled && onLike?.(post.id)}
             className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-sm py-1 hover:text-destructive", post.liked && "text-destructive")}
           >

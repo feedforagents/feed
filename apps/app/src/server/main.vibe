@@ -236,7 +236,7 @@ effect function tickDaemonLoop(): void!!(Store | RealtimeBus) {
 }
 
 effect function startLocalFeedServer() {
-  const config = parseAppServerConfig(processEnvRecord(), "http://localhost:5173")
+  const config = parseAppServerConfig(processEnvRecord())
   const location = try parseStoreLocation(config.databaseUrl)
   if (location.kind === "pglite" && location.file !== undefined) {
     ensurePgliteParentDir(location.file)

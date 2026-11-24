@@ -39,6 +39,7 @@ lemma SlotsSameIdsAndClues(before: engine__narrativeArc_NarrativeState, after: e
   ensures engine__narrativeArc_alwaysTenMarketSlots(after)
   ensures engine__narrativeArc_alwaysUniqueClues(after)
 {
+  hide *;
   TenMarketSlotsBridge(before);
   TenMarketSlotsBridge(after);
   UniqueCluesBridge(before);
@@ -225,66 +226,12 @@ lemma runNpcTickSpotAndAlpha_ensures(j: JourneyState, actorId: int, boundCents: 
 
 // spec/app/gameplayJourney.md, "Journey state across web navigation, onboarding, economy, and world engine"
 
-lemma InitialArcsTenSlots()
-  ensures engine__narrativeArc_alwaysTenMarketSlots(engine__narrativeArc_initial)
-{
-  var s := engine__narrativeArc_initial;
-  TenMarketSlotsBridge(s);
-  assert |s.slots| == 10;
-  assert s.slots[0].slotId == 0 && s.slots[1].slotId == 1 && s.slots[2].slotId == 2 && s.slots[3].slotId == 3 && s.slots[4].slotId == 4;
-  assert s.slots[5].slotId == 5 && s.slots[6].slotId == 6 && s.slots[7].slotId == 7 && s.slots[8].slotId == 8 && s.slots[9].slotId == 9;
-  forall a | a in s.slots
-    ensures |ProofLib.Filter((b: engine__narrativeArc_MarketSlot) => (b.slotId == a.slotId), s.slots)| == 1
-  {
-    var idx :| 0 <= idx < 10 && s.slots[idx] == a;
-    ProofLib.FilterOne((b: engine__narrativeArc_MarketSlot) => (b.slotId == a.slotId), s.slots, idx);
-  }
-}
-
-lemma InitialArcsOther()
-  ensures engine__narrativeArc_alwaysLiveSlotHasSecretOutcome(engine__narrativeArc_initial)
-  ensures engine__narrativeArc_alwaysUniqueClues(engine__narrativeArc_initial)
-  ensures engine__narrativeArc_alwaysNoPublicProofBeforeResolution(engine__narrativeArc_initial)
-  ensures engine__narrativeArc_alwaysPreparedDraftMatchesSecretOutcome(engine__narrativeArc_initial)
-  ensures engine__narrativeArc_alwaysResolvedHasProofAndOutcome(engine__narrativeArc_initial)
-{
-  hide *;
-  reveal engine__narrativeArc_initial, engine__narrativeArc_mkSeedSlot, engine__narrativeArc_alwaysLiveSlotHasSecretOutcome, engine__narrativeArc_alwaysUniqueClues, engine__narrativeArc_alwaysNoPublicProofBeforeResolution, engine__narrativeArc_alwaysPreparedDraftMatchesSecretOutcome, engine__narrativeArc_alwaysResolvedHasProofAndOutcome;
-}
-
-lemma InitialBudgetValid()
-  ensures engine__spendBudget_alwaysAttemptIdsUnique(engine__spendBudget_initial)
-  ensures engine__spendBudget_alwaysTotalsMatchAttempts(engine__spendBudget_initial)
-  ensures engine__spendBudget_alwaysNonNegativeAndWithinBudget(engine__spendBudget_initial)
-  ensures engine__spendBudget_alwaysAttemptBoundsValid(engine__spendBudget_initial)
-{
-  hide *;
-  reveal engine__spendBudget_initial, engine__spendBudget_dailyBudgetCents, engine__spendBudget_alwaysAttemptIdsUnique, engine__spendBudget_alwaysTotalsMatchAttempts, engine__spendBudget_alwaysNonNegativeAndWithinBudget, engine__spendBudget_alwaysAttemptBoundsValid, engine__spendBudget_sumReservedForToday, engine__spendBudget_sumPrevReserved, engine__spendBudget_committedCents, Std.Collections.Seq.FoldLeft;
-}
-
-lemma InitialNavOnbNpcValid()
-  ensures app__navigation_alwaysNoLoginModalOnLoad(app__navigation_initial)
-  ensures app__navigation_alwaysLoggedOutDefaultsLatest(app__navigation_initial)
-  ensures app__navigation_alwaysBannerDelayedForVisitors(app__navigation_initial)
-  ensures app__navigation_alwaysProtectedRoutesRequireAuth(app__navigation_initial)
-  ensures app__navigation_alwaysSocialModeNeverOnMarkets(app__navigation_initial)
-  ensures app__onboarding_alwaysSignedInClearsPendingAndClosesSheet(app__onboarding_initial)
-  ensures app__onboarding_alwaysStartingGrantAtMostOnce(app__onboarding_initial)
-  ensures engine__npcLoop_alwaysNpcRolesOnly(engine__npcLoop_initial)
-  ensures engine__npcLoop_alwaysStepsBounded(engine__npcLoop_initial)
-  ensures engine__npcLoop_alwaysSpotIndexPositive(engine__npcLoop_initial)
-{
-  hide *;
-  reveal app__navigation_initial, app__onboarding_initial, app__onboarding_noPendingAction, engine__npcLoop_initial, engine__npcLoop_initialSpotPrice, app__navigation_alwaysNoLoginModalOnLoad, app__navigation_alwaysLoggedOutDefaultsLatest, app__navigation_alwaysBannerDelayedForVisitors, app__navigation_alwaysProtectedRoutesRequireAuth, app__navigation_alwaysSocialModeNeverOnMarkets, app__navigation_showBottomBanner, app__onboarding_alwaysSignedInClearsPendingAndClosesSheet, app__onboarding_alwaysStartingGrantAtMostOnce, engine__npcLoop_alwaysNpcRolesOnly, engine__npcLoop_alwaysStepsBounded, engine__npcLoop_alwaysSpotIndexPositive;
-}
-
 lemma initialHolds_ensures()
   ensures inv(initialHolds())
 {
-  hide *;
-  reveal initial, initialHolds, inv, alwaysJourneySubmachinesConsistent, alwaysEconomyAndSingleAgentConstraints, alwaysBudgetAttemptBoundsValid, computeNetProfitCents, computeEquityCents, app__navigation_initial, app__onboarding_initial;
-  InitialArcsTenSlots();
-  InitialArcsOther();
-  InitialBudgetValid();
-  InitialNavOnbNpcValid();
+  app__navigation_initialHolds_ensures();
+  app__onboarding_initialHolds_ensures();
+  engine__spendBudget_initialHolds_ensures();
+  engine__narrativeArc_initialHolds_ensures();
+  engine__npcLoop_initialHolds_ensures();
 }
