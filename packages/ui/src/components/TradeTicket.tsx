@@ -1,4 +1,5 @@
 import { type ComponentProps, type FormEvent, useId, useState } from "react";
+import { estimatePredictionBuyShares } from "@repo/markets/quote";
 import { cn } from "../lib/cn.ts";
 import { Alert } from "./Alert.tsx";
 import { Badge } from "./Badge.tsx";
@@ -31,6 +32,10 @@ export type TradeTicketProps = Omit<ComponentProps<"form">, "onSubmit" | "childr
   balancePts: string;
   /** Current YES implied probability (2..98) for prediction markets. */
   yesOddsPct?: number;
+  /** CPMM YES reserve in credited shares, when the market view carries it. */
+  yesShares?: number;
+  /** CPMM NO reserve in credited shares, when the market view carries it. */
+  noShares?: number;
   /** Optional perp ticker such as `SAMALT`. */
   ticker?: string;
   /** Current perp mark price string. */
@@ -67,6 +72,8 @@ export function TradeTicket({
   marketTitle,
   balancePts,
   yesOddsPct = 50,
+  yesShares,
+  noShares,
   ticker,
   markPricePts,
   indexPricePts,
@@ -99,7 +106,28 @@ export function TradeTicket({
   const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
   const estimatedFeePts = validAmount ? Math.max(0.01, (notionalPts * feeBps) / 10000) : 0;
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
-  const estimatedShares = validAmount && activePricePct > 0 ? (numericAmount * 100) / activePricePct : 0;
+  const amountCents = numericAmount * 100;
+  const poolReserves =
+    yesShares !== undefined && noShares !== undefined && yesShares > 0 && noShares > 0 ? { yes: yesShares, no: noShares } : null;
+  const exactQuote =
+    validAmount &&
+    poolReserves !== null &&
+    Number.isSafeInteger(amountCents) &&
+    Number.isSafeInteger(feeBps) &&
+    Number.isSafeInteger(poolReserves.yes) &&
+    Number.isSafeInteger(poolReserves.no);
+  const estimatedShares =
+    validAmount && activePricePct > 0
+      ? exactQuote && poolReserves !== null
+        ? estimatePredictionBuyShares({
+            yesShares: poolReserves.yes,
+            noShares: poolReserves.no,
+            side: predSide === "YES" ? "yes" : "no",
+            amountCents,
+            feeBps,
+          })
+        : (amountCents * 100) / activePricePct
+      : 0;
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

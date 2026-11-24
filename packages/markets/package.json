@@ -8,7 +8,8 @@
     "node": ">=26"
   },
   "exports": {
-    ".": "./src/index.vibe"
+    ".": "./src/index.vibe",
+    "./quote": "./src/quote.ts"
   },
   "scripts": {
     "build": "vibelang -p tsconfig.build.json",

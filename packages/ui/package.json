@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@fontsource/figtree": "catalog:",
+    "@repo/markets": "workspace:*",
     "@radix-ui/react-alert-dialog": "catalog:",
     "@radix-ui/react-avatar": "catalog:",
     "@radix-ui/react-checkbox": "catalog:",
