@@ -1,142 +1,1259 @@
 {
   "version": 1,
   "specs": {
-    "spec/app/echo.md": {
+    "spec/app/navigation.md": {
       "@document": [
-        "64ac44a1b618"
+        "132ed7498566"
       ],
-      "## Story: Hear back": [
-        "a77064fef968"
+      "## Domain": [
+        "e3b0c44298fc"
       ],
-      "Story: Hear back / The page keeps the name typed and what it heard, and has sent one hello or none, of which the network holds copies": [
-        "a4bf48e57e2d",
-        "82fa4b6c8fcf"
+      "Domain / Navigation routes, feed tabs, and UI mode": [
+        "e94af45be6d8",
+        "0f9daa035d3b"
       ],
-      "Story: Hear back / A name can be typed until the hello is sent": [
+      "Domain / Surface visibility and delayed visitor banner derivation": [
+        "48d6ffaf79fd",
+        "bcdba1239c54",
+        "3b1ffeb6bbd8"
+      ],
+      "## Story: Browse public world content without a login wall": [
+        "9c8b9bc33a19"
+      ],
+      "Story: Browse public world content without a login wall / Visitors browse public targets and scroll before seeing a delayed sign-in banner": [
         "e3b0c44298fc",
-        "22ca33a5b2f0",
-        "bd6076015418"
+        "f742fde5cd80",
+        "5980cb0ef24f"
       ],
-      "Story: Hear back / The page says hello once a name is typed, and again while nothing is in flight and nothing was heard": [
-        "d8d6232cbd7e",
-        "a3a638136fde",
-        "c386ec1556d0"
-      ],
-      "Story: Hear back / The server says something to each hello, but what it says is its own": [
+      "Story: Browse public world content without a login wall / Route navigation respects public visibility, mode hiding, and auth gates": [
         "e3b0c44298fc",
-        "768cc874ae9c"
+        "8d434e8fc5d8",
+        "5980cb0ef24f"
       ],
-      "Story: Hear back / The network loses or repeats a copy, or delivers it and the page hears the server's answer": [
-        "ea97086b0c2e",
-        "f49683c671fe",
-        "f3622f19d146"
+      "## Story: Switch between Game mode and Social mode": [
+        "521ed7288af7"
       ],
-      "Story: Hear back / Only the hello sent is in flight": [
+      "Story: Switch between Game mode and Social mode / Mode switching updates surface visibility and redirects away from Markets": [
         "e3b0c44298fc",
-        "a2ed8a5c2343",
-        "98b1bda79dcf"
+        "ac64b2be1c85",
+        "3b1ffeb6bbd8"
       ],
-      "Story: Hear back / A hello sent is answered": [
-        "b00948ef5363",
-        "1430aafe6860",
-        "bd6076015418"
-      ],
-      "Story: Hear back / The page can hear back": [
+      "Story: Switch between Game mode and Social mode / Navigation and mode visibility invariants": [
         "e3b0c44298fc",
-        "986cba5216ee",
-        "bd6076015418"
+        "770eb97fac18",
+        "5980cb0ef24f"
       ]
     },
-    "spec/app/tally.md": {
+    "spec/app/onboarding.md": {
       "@document": [
-        "662d7dc5ba55"
+        "564b46ce2199"
       ],
-      "## Story: Count greetings": [
-        "918b59096aac"
+      "## Domain": [
+        "e3b0c44298fc"
       ],
-      "Story: Count greetings / A tally starts at zero and counts one greeting at a time": [
+      "Domain / Gated actions, JoinSheet doors, and agent hosts": [
         "e3b0c44298fc",
-        "f94a9683dc1b"
+        "383d12640814"
       ],
-      "Story: Count greetings / A tally is never below zero": [
+      "## Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer": [
+        "f6929e259dc9"
+      ],
+      "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer / Triggering a gated action opens the JoinSheet while logged out or executes immediately when signed in": [
         "e3b0c44298fc",
-        "03add4b83c43",
-        "345d217f6217"
+        "e2f6638d14c2",
+        "3c189057789d"
+      ],
+      "## Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link": [
+        "b2917968ab1b"
+      ],
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Phone door enforces country allowlist, non-VoIP check, 18+ attestation, and one-time 100 pts grant": [
+        "e3b0c44298fc",
+        "2e475aa582c4",
+        "3c189057789d"
+      ],
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / AI Agent door launches SKILL.md prompt and hands off to phone verification": [
+        "2def154a56ec",
+        "43a422904858",
+        "3c189057789d"
+      ],
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Reviewer sign-in link allows password auth strictly for operator-flagged reviewer accounts": [
+        "e3b0c44298fc",
+        "2012f42f2471",
+        "3c189057789d"
+      ],
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Onboarding invariants and reachability checks": [
+        "e3b0c44298fc",
+        "9425d1612119",
+        "3c189057789d"
+      ],
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Discovered by the proof: Pending gated action has a positive target": [
+        "44402cc18753",
+        "33d163779ae8",
+        "3c189057789d"
       ]
     },
-    "spec/app/words.md": {
+    "spec/engine/spendBudget.md": {
       "@document": [
-        "3e8bc189fe00"
+        "16686a4c1f3a"
       ],
-      "## Story: Say something": [
-        "3d1ba0054d4f"
+      "## Domain": [
+        "e3b0c44298fc"
       ],
-      "Story: Say something / A page says hello to a name": [
+      "Domain / Budget constants and throttle levels": [
+        "e1fee9e839fc",
+        "eee1c24fc866"
+      ],
+      "Domain / Committed utilization and throttle calculation": [
+        "287f48993d19",
+        "9e6ae8c78956",
+        "bf4ef218b603"
+      ],
+      "## Story: Enforce atomic budget reservations and reconciliation": [
+        "456fa6bde36a"
+      ],
+      "Story: Enforce atomic budget reservations and reconciliation / Dispatch reserves a known upper bound atomically or refuses when headroom is insufficient": [
+        "a8453705ddee",
+        "303704fa1e25",
+        "ba8ed7f97288"
+      ],
+      "Story: Enforce atomic budget reservations and reconciliation / Confirming spend charges actual cost and releases unused reservation": [
+        "1bf176917cc8",
+        "782d6fe36fae",
+        "ba8ed7f97288"
+      ],
+      "Story: Enforce atomic budget reservations and reconciliation / Timeouts and worker restarts mark open reservations uncertain without releasing funds": [
         "e3b0c44298fc",
-        "d62783d3f412"
+        "f9826565d59b",
+        "bf4ef218b603"
+      ],
+      "Story: Enforce atomic budget reservations and reconciliation / UTC day rollover carries unsettled prior-day reservations into new-day headroom": [
+        "e3b0c44298fc",
+        "a445235caa6c",
+        "bf4ef218b603"
+      ],
+      "Story: Enforce atomic budget reservations and reconciliation / Inductive safety invariants for spend, reservations, and monotonic throttling": [
+        "e3b0c44298fc",
+        "5129ec36c4b3",
+        "ba8ed7f97288"
+      ]
+    },
+    "spec/engine/narrativeArc.md": {
+      "@document": [
+        "cb87d69a3a18"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Secret outcome, market slots, and phases": [
+        "129d0d67199c",
+        "d5dec32cea1b"
+      ],
+      "Domain / Phase helpers and secret proof preparation": [
+        "f5a1927fcb4d",
+        "882a7e88d4ed",
+        "f5025674d79c"
+      ],
+      "## Story: Advance rolling arcs and publish phase-aware clues": [
+        "09de8799a2c1"
+      ],
+      "Story: Advance rolling arcs and publish phase-aware clues / Advancing a slot moves through active phases and closes trading immediately on expiry": [
+        "e3b0c44298fc",
+        "df3d6050212f",
+        "c9ff34e5c98c"
+      ],
+      "Story: Advance rolling arcs and publish phase-aware clues / Clues require a matching active phase and a persisted unique clue key": [
+        "d5345e2140d1",
+        "19fcf21b9b2b",
+        "c9ff34e5c98c"
+      ],
+      "## Story: Prepare private proofs and settle expired markets safely": [
+        "09abd13211e7"
+      ],
+      "Story: Prepare private proofs and settle expired markets safely / Expired markets prepare a private draft proof or enter manual review hold": [
+        "433ba4f74fac",
+        "b041a1d277db",
+        "c9ff34e5c98c"
+      ],
+      "Story: Prepare private proofs and settle expired markets safely / Settlement declassifies the stored secret outcome only after proof preparation": [
+        "e3b0c44298fc",
+        "33d196d1b479",
+        "c9ff34e5c98c"
+      ],
+      "Story: Prepare private proofs and settle expired markets safely / Only admins may approve or resolve markets on manual hold": [
+        "e3b0c44298fc",
+        "f35e0a888774",
+        "c9ff34e5c98c"
+      ],
+      "Story: Prepare private proofs and settle expired markets safely / Resolved slots are replaced independently with a fresh market epoch": [
+        "d7515b64dc6d",
+        "ccfa8956080c",
+        "c9ff34e5c98c"
+      ],
+      "Story: Prepare private proofs and settle expired markets safely / Inductive invariants for 10 slots, unique clues, and secret isolation": [
+        "8d281a533ee8",
+        "c705f13a7ac3",
+        "c9ff34e5c98c"
+      ]
+    },
+    "spec/engine/npcLoop.md": {
+      "@document": [
+        "ae771718a3e3"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / NPC roles, tick phases, and actions": [
+        "e3b0c44298fc",
+        "c008eb2e98c2"
+      ],
+      "## Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds": [
+        "3e4dfe130515"
+      ],
+      "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds / Human social engagement unlocks eligibility for private alpha-group invites": [
+        "e3b0c44298fc",
+        "d8d3ccd17890",
+        "150d286f4454"
+      ],
+      "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds / Each NPC tick starts with a budget-enforced step cap and loops ObserveFeed -> Decide -> Act": [
+        "e3b0c44298fc",
+        "343d721104d5",
+        "150d286f4454"
+      ],
+      "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds / Only NPC actors execute spot trades (moving the index price) and alpha invites": [
+        "e3b0c44298fc",
+        "4041ecf3bc97",
+        "150d286f4454"
+      ],
+      "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds / Bounded ticks, NPC-only actors, spot-only index movement, and engagement-gated invites": [
+        "e3b0c44298fc",
+        "dddd84f15484",
+        "150d286f4454"
+      ]
+    },
+    "spec/app/gameplayJourney.md": {
+      "@document": [
+        "4549a2755da8"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Journey state across web navigation, onboarding, economy, and world engine": [
+        "e3b0c44298fc",
+        "d537cb7204ca",
+        "191e9b6d03d4"
+      ],
+      "Domain / Equity and profit leaderboard calculation": [
+        "c2493f54d380",
+        "a3ecc281ad7c",
+        "5b7698a4e532"
+      ],
+      "## Story: Walk the full Feed gameplay loop from visitor to settlement": [
+        "c5f9db91b300"
+      ],
+      "Story: Walk the full Feed gameplay loop from visitor to settlement / Visitor browses, hits a gated action, verifies phone, and receives 100 pts": [
+        "e3b0c44298fc",
+        "829776bd57ce",
+        "1771bdc8691b"
+      ],
+      "Story: Walk the full Feed gameplay loop from visitor to settlement / Signed-in player connects one AI agent, posts socially, trades predictions and 20x perps, and purchases points": [
+        "36e5cfd92991",
+        "6e34f23ff57f",
+        "de7a385d3f55"
+      ],
+      "Story: Walk the full Feed gameplay loop from visitor to settlement / Bounded NPC tick moves spot index price and sends alpha invite; market settles 1 pt per winning share": [
+        "e3b0c44298fc",
+        "92c9e48a52f9",
+        "2859610f107c"
+      ],
+      "Story: Walk the full Feed gameplay loop from visitor to settlement / End-to-end journey invariants and witness path": [
+        "e3b0c44298fc",
+        "a49942baa679",
+        "b83ad56b47cf"
+      ],
+      "Story: Walk the full Feed gameplay loop from visitor to settlement / Discovered by the proof: Spend budget attempt bounds remain valid": [
+        "fb72600468d4",
+        "11c922b86a87",
+        "d6d3985b2ada"
+      ]
+    },
+    "spec/shared/money.md": {
+      "@document": [
+        "cc8dd41666e9"
+      ],
+      "## Currency units and integer bounds": [
+        "e3b0c44298fc"
+      ],
+      "Currency units and integer bounds / One point equals one hundred cents, and integer bounds clamp cleanly": [
+        "7bc6768eba14",
+        "21eeb08848c1"
+      ],
+      "## Settlement rounding": [
+        "e3b0c44298fc"
+      ],
+      "Settlement rounding / Cash proceeds floor to whole cents, and ceiling division rounds up safely": [
+        "06dc756254ea",
+        "0de78acceb8f",
+        "3af9e9d703dc"
+      ],
+      "Settlement rounding / Splitting non-negative amounts never increases floored cents": [
+        "e3b0c44298fc",
+        "956ac54af96e",
+        "cbe41cd0600e"
+      ],
+      "## Canonical trading fee": [
+        "e3b0c44298fc"
+      ],
+      "Canonical trading fee / Every trade pays a 0.1% fee rounded up to whole cents on the settled amount": [
+        "484917c68ce3",
+        "2e046e1d62e4",
+        "cbe41cd0600e"
+      ],
+      "## Partition non-amplification": [
+        "e3b0c44298fc"
+      ],
+      "Partition non-amplification / Splitting sales or gross cash proceeds never increases total trader credit": [
+        "5aae6e590fd0",
+        "1208047e3f2e",
+        "a2b423952876"
+      ],
+      "Partition non-amplification / Splitting cash inputs never increases total CPMM shares received": [
+        "4a4eacb3477e",
+        "aa5e1f9096cd",
+        "a2b423952876"
       ]
     },
     "spec/app/index.md": {
       "@document": [
-        "608108f58342"
+        "fb0a56fecf1f"
       ],
-      "## Story: Say hello": [
-        "d8f0f549d499"
+      "## Domain": [
+        "e3b0c44298fc"
       ],
-      "Story: Say hello / A greeter holds the last name it greeted and how many greetings it gave": [
-        "01b6e1433a7b",
-        "78e25a77522e",
-        "c9d907985fcf"
+      "Domain / Application shell state and single-agent grant tracking": [
+        "b99345ef504c",
+        "e30a402998e9",
+        "3bc0371839d2"
       ],
-      "Story: Say hello / Only a name that is not empty can be greeted, and a link greets only a name not greeted last": [
-        "bdd884c9eca3",
-        "a5bf154ca475",
-        "4c8d5c0e7326"
+      "## Story: Browse, switch modes, and sign in through the JoinSheet": [
+        "c33fe2a8cb4c"
       ],
-      "Story: Say hello / Once someone has been greeted, the greeter holds a name": [
+      "Story: Browse, switch modes, and sign in through the JoinSheet / Public navigation, feed tabs, mode switching, and visitor banners": [
         "e3b0c44298fc",
-        "0e0cdba29162",
-        "4c8d5c0e7326"
+        "ac744f4b6620",
+        "0fd370b8906a"
       ],
-      "Story: Say hello / The number of greetings is never negative": [
-        "2bf06e979a4d",
-        "80d9b39629e3",
-        "4c8d5c0e7326"
-      ],
-      "Story: Say hello / Every step adds exactly one greeting": [
+      "Story: Browse, switch modes, and sign in through the JoinSheet / Deferred gated actions and JoinSheet sign-in stay synchronized with navigation auth state": [
         "e3b0c44298fc",
-        "6b7e0617d1c4",
-        "4c8d5c0e7326"
+        "9f858347fcdb",
+        "40d9c5154a0b"
       ],
-      "Story: Say hello / Every step says hello to the name it greeted, once": [
+      "## Story: Connect and revoke the account's single AI agent": [
+        "dcf29e650bd4"
+      ],
+      "Story: Connect and revoke the account's single AI agent / Connecting a new agent atomically revokes any prior grant": [
         "e3b0c44298fc",
-        "cca3a047e14c",
-        "4c8d5c0e7326"
+        "853b8fba2e2a",
+        "4fa82075976d"
       ],
-      "Story: Say hello / A greeting is for the name it was given": [
-        "5e236f69ba5f",
-        "d4353377d89c",
-        "0f8a2df8da07"
-      ],
-      "Story: Say hello / The greeter can give a second greeting": [
-        "f7b62219fd51",
-        "c0b6b2a60a60",
-        "4c8d5c0e7326"
-      ],
-      "Story: Say hello / As a tally, a greeter is its count": [
+      "Story: Connect and revoke the account's single AI agent / Root web application invariants and goals": [
         "e3b0c44298fc",
-        "43b6420577ac",
-        "c4404bb2e91c"
+        "05f63b6804d5",
+        "e3c75e8af77a"
+      ],
+      "Story: Connect and revoke the account's single AI agent / Discovered by the proof: Onboarding pending gated action has a positive target": [
+        "bf4a7b08ccc9",
+        "d6e9f010985c",
+        "aadf47ab0c8c"
+      ]
+    },
+    "spec/auth/agentGrant.md": {
+      "@document": [
+        "bb6a3d6b74db"
+      ],
+      "## Story: Connect at most one agent per account with clear attribution": [
+        "47025914aa7f"
+      ],
+      "Story: Connect at most one agent per account with clear attribution / An account holds at most one active grant over four toggleable scopes": [
+        "ce567eb3c542",
+        "dd2a1ecf1ace"
+      ],
+      "Story: Connect at most one agent per account with clear attribution / Connecting a new agent atomically revokes any prior active grant": [
+        "54ba7359ffb7",
+        "60c16cd595d3",
+        "c9fb74397a60"
+      ],
+      "Story: Connect at most one agent per account with clear attribution / Revoking an active grant clears the slot and records its ID permanently": [
+        "3764c1256d23",
+        "1dc3a8d63419",
+        "c9fb74397a60"
+      ],
+      "Story: Connect at most one agent per account with clear attribution / Agent actions require the currently active grant and return client attribution": [
+        "342b8df6a306",
+        "c697d6f1525e",
+        "c9fb74397a60"
+      ],
+      "Story: Connect at most one agent per account with clear attribution / An account never holds more than one active grant and revoked grants never authorize actions": [
+        "82a0ef50a5a4",
+        "9cd695009997",
+        "39366788fd1d"
+      ],
+      "Story: Connect at most one agent per account with clear attribution / Simulation samples and witness journeys cover connection, replacement, attribution, and revocation": [
+        "e3b0c44298fc",
+        "55cfe12c8864",
+        "c9fb74397a60"
+      ]
+    },
+    "spec/auth/index.md": {
+      "@document": [
+        "47d8d8179370"
+      ]
+    },
+    "spec/auth/oauth.md": {
+      "@document": [
+        "23d98ec14298"
+      ],
+      "## Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely": [
+        "18e04177030a"
+      ],
+      "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely / Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only": [
+        "e3b0c44298fc",
+        "a4ee769143b4",
+        "c9fb74397a60"
+      ],
+      "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely / Authorization requires PKCE S256, code flow, normalized resource, and preserves 400+ character state across one 4-scope consent screen": [
+        "f6a5f9ba2d9e",
+        "40f32cf9ddf4",
+        "e61e24c6399e"
+      ],
+      "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely / Rotating refresh tokens cap grants at 90 days and revoke the entire grant family on reuse": [
+        "fd0777a29cae",
+        "ed72799c74e2",
+        "5531a13d2edc"
+      ],
+      "## Story: Authorize headless agents through RFC 8628 device flow at `/link`": [
+        "7f9e003b1ec1"
+      ],
+      "Story: Authorize headless agents through RFC 8628 device flow at `/link` / Exchanging an approved device code issues tokens and atomically replaces any prior connected agent": [
+        "e3b0c44298fc",
+        "03279b2ecf51",
+        "717727392b64"
+      ],
+      "Story: Authorize headless agents through RFC 8628 device flow at `/link` / Inductive OAuth invariants enforce PKCE S256, single-agent replacement, and token reuse revocation": [
+        "e3b0c44298fc",
+        "628196c2c3f7",
+        "7fc25eb17fed"
+      ],
+      "Story: Authorize headless agents through RFC 8628 device flow at `/link` / Simulation samples and witness journeys exercise 400+ char state, trailing-slash resource, device flow replacement, and reuse detection": [
+        "e3b0c44298fc",
+        "a3183c35c1ee",
+        "2112855513d1"
+      ]
+    },
+    "spec/auth/phone.md": {
+      "@document": [
+        "0885a131f132"
+      ],
+      "## Story: Verify a phone number safely without magic links or SMS pumping": [
+        "6931f20db559"
+      ],
+      "Story: Verify a phone number safely without magic links or SMS pumping / Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code": [
+        "f867e00927b1",
+        "0de20f5b5e9d"
+      ],
+      "Story: Verify a phone number safely without magic links or SMS pumping / Codes expire in 10 minutes, lock after 5 wrong attempts, and verify without leaking secrets": [
+        "e419479f6968",
+        "4d0969451a24",
+        "787dbd8d3631"
+      ],
+      "## Story: Onboard once, change phone, sign out everywhere, or delete after cooldown": [
+        "85d4bf2a7d30"
+      ],
+      "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown / Onboarding requires username, 18+ self-attestation, and Terms, and issues 100 pts once per verified phone": [
+        "6ec4b86e7d27",
+        "076097aeae79",
+        "787dbd8d3631"
+      ],
+      "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown / Changing phone requires verifying the old phone or support recovery and an unused new number": [
+        "e3b0c44298fc",
+        "1986ee71e4f1",
+        "787dbd8d3631"
+      ],
+      "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown / Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the phone hash for 30 days": [
+        "0a9a7a60e221",
+        "894bbf0ee789",
+        "b454daec2d03"
+      ],
+      "## Story: Admit directory reviewer password sign-in only for `isReviewer` accounts": [
+        "56b365ca761f"
+      ],
+      "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts / Username and password sign-in is admitted solely when `isReviewer` is true (D-29)": [
+        "e3b0c44298fc",
+        "06a1cb701819",
+        "b454daec2d03"
+      ],
+      "## Story: Enforce inductive phone-auth invariants and verify reachable milestones": [
+        "e3b0c44298fc"
+      ],
+      "Story: Enforce inductive phone-auth invariants and verify reachable milestones / Active accounts, one-time grants, cooldown release, and secret clearing hold inductively": [
+        "e3b0c44298fc",
+        "4a98de235e87",
+        "2e980283189e"
+      ],
+      "Story: Enforce inductive phone-auth invariants and verify reachable milestones / Discovered by the proof: Unregistered accounts have session epoch zero and onboarding accounts have at least one": [
+        "22915f0a87d4",
+        "646d49cd4509",
+        "787dbd8d3631"
+      ],
+      "Story: Enforce inductive phone-auth invariants and verify reachable milestones / Simulation samples and witness journeys cover onboarding, lockouts, phone change, deletion cooldown, and reviewer sign-in": [
+        "e3b0c44298fc",
+        "cd846fdf7002",
+        "787dbd8d3631"
+      ]
+    },
+    "spec/engine/worldClock.md": {
+      "@document": [
+        "4da31ca267ca"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Clock mode and scheduled routes": [
+        "c03fb6e17366",
+        "436b439e44fa"
+      ],
+      "Domain / Tick health and world clock state": [
+        "1cbce8f686fe",
+        "e4128e43148f",
+        "31d0829e74d1"
+      ],
+      "## Story: Advance the world clock without blocking on inference": [
+        "276dc77bc391"
+      ],
+      "Story: Advance the world clock without blocking on inference / The minute tick advances the clock, flips signal windows, and tracks pending recovery age": [
+        "9a729e4f5b86",
+        "bf57e3851fcd",
+        "be4cba6d847c"
+      ],
+      "Story: Advance the world clock without blocking on inference / Simulated clock fast-forward is restricted to simulated mode": [
+        "e43f6f654aa6",
+        "0e3cacd62084",
+        "be4cba6d847c"
+      ],
+      "Story: Advance the world clock without blocking on inference / Minute ticks never invoke LLM inference and clock time never moves backward": [
+        "e3b0c44298fc",
+        "aa9aaf74b77f",
+        "be4cba6d847c"
+      ],
+      "## Story: Schedule core world jobs and exclude retired routes": [
+        "7f189e554058"
+      ],
+      "Story: Schedule core world jobs and exclude retired routes / Core cadence jobs exclude retired routes and update their respective counters": [
+        "e3b0c44298fc",
+        "3c279f5b1476",
+        "be4cba6d847c"
+      ],
+      "Story: Schedule core world jobs and exclude retired routes / RSS ingestion and parody generation have one scheduled owner at 5-minute cadence": [
+        "e398837b4174",
+        "f1f585077388",
+        "be4cba6d847c"
+      ],
+      "Story: Schedule core world jobs and exclude retired routes / Market recovery drains pending resolutions and updates backlog age": [
+        "e3b0c44298fc",
+        "0c16608a6904",
+        "be4cba6d847c"
+      ],
+      "Story: Schedule core world jobs and exclude retired routes / Retired routes never run and tick health remains consistent": [
+        "e3b0c44298fc",
+        "516c113717d9",
+        "be4cba6d847c"
+      ],
+      "## Story: Guard perpetual funding cutover across 8-hour UTC periods": [
+        "fbad4beae0d2"
+      ],
+      "Story: Guard perpetual funding cutover across 8-hour UTC periods / Funding jobs drain while paused before configuring the cutover boundary": [
+        "e3b0c44298fc",
+        "653b1ede5dfa",
+        "be4cba6d847c"
+      ],
+      "Story: Guard perpetual funding cutover across 8-hour UTC periods / Perpetual funding accrues at most once per eligible post-cutover UTC period": [
+        "e3b0c44298fc",
+        "25994bdb9767",
+        "be4cba6d847c"
+      ],
+      "Story: Guard perpetual funding cutover across 8-hour UTC periods / Unpaused funding requires a configured post-cutover boundary and drained jobs": [
+        "e3b0c44298fc",
+        "0031ae1c7f5d",
+        "be4cba6d847c"
+      ]
+    },
+    "spec/engine/index.md": {
+      "@document": [
+        "cb9abba44260"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Combined engine state": [
+        "18650fb903d7",
+        "b16afd16b6a6",
+        "07c79981c19f"
+      ],
+      "## Story: Run non-blocking minute ticks and D-25 bounded NPC loops": [
+        "9689e298f682"
+      ],
+      "Story: Run non-blocking minute ticks and D-25 bounded NPC loops / Minute ticks advance committed time without calling an LLM or spending budget": [
+        "e3b0c44298fc",
+        "be0b2d88577d",
+        "4746d81f39c8"
+      ],
+      "Story: Run non-blocking minute ticks and D-25 bounded NPC loops / Dispatching an NPC tick atomically reserves D-25 budget and applies utilization throttles": [
+        "e3b0c44298fc",
+        "e95ae10323cd",
+        "aad0cd41164b"
+      ],
+      "Story: Run non-blocking minute ticks and D-25 bounded NPC loops / NPC ticks observe, decide, act within step bounds, and settle D-25 spend": [
+        "e3b0c44298fc",
+        "113cd21ebd16",
+        "0beeb137906e"
+      ],
+      "## Story: Coordinate market phase clues, private recovery, and RSS updates": [
+        "3186052aca8c"
+      ],
+      "Story: Coordinate market phase clues, private recovery, and RSS updates / Market arcs, phase clues, private proof prep, settlement, and replacement": [
+        "e3b0c44298fc",
+        "32951bb98f4d",
+        "ef077604cba5"
+      ],
+      "Story: Coordinate market phase clues, private recovery, and RSS updates / Cross-machine engine invariants and reachability goals": [
+        "e3b0c44298fc",
+        "96c3a5c76e75",
+        "88962fa5fdc5"
       ]
     },
     "spec/index.md": {
       "@document": [
-        "b4f1b3b07f62"
+        "99595a32b10c"
+      ]
+    },
+    "spec/markets/economy.md": {
+      "@document": [
+        "b5cfe9e6da84"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Currency packs, purchase channels, geolocation, and player ledgers": [
+        "e3b0c44298fc",
+        "f4bc32d16293",
+        "3af9e9d703dc"
+      ],
+      "Domain / Pack pricing, equity, net profit, and leaderboard rank helpers": [
+        "d3a016e8e850",
+        "99d5449682c6",
+        "02a8a04d5d10"
+      ],
+      "## Story: Verify account and claim initial grant once": [
+        "66610b9781d7"
+      ],
+      "Story: Verify account and claim initial grant once / Unverified accounts receive 100 pts (10000 cents) exactly once at verification": [
+        "e3b0c44298fc",
+        "c37cac0e9243",
+        "c616caa7e301"
+      ],
+      "## Story: Buy points on web outside Washington, and play anywhere": [
+        "44b3f9a9efb9"
+      ],
+      "Story: Buy points on web outside Washington, and play anywhere / Stripe Checkout packs are web-only and strictly blocked for Washington billing addresses or IPs": [
+        "e3b0c44298fc",
+        "e593a4d63df9",
+        "c616caa7e301"
+      ],
+      "Story: Buy points on web outside Washington, and play anywhere / Verified players with positive equity can trade freely in any location, including Washington, and may go broke": [
+        "8fa968af7313",
+        "d685a132b1d0",
+        "c616caa7e301"
+      ],
+      "## Invariants, step rules, and reachability": [
+        "e3b0c44298fc"
+      ],
+      "Invariants, step rules, and reachability / Initial grants are single-use, balances stay non-negative, and blocked purchases never commit": [
+        "e3b0c44298fc",
+        "88b325f8fe4a",
+        "02a8a04d5d10"
+      ],
+      "Invariants, step rules, and reachability / Buying points never changes net profit or leaderboard rank, and broke players receive no free refills": [
+        "e3b0c44298fc",
+        "d99ca00a09c3",
+        "c616caa7e301"
+      ],
+      "Invariants, step rules, and reachability / Reachable journeys cover sign-up grants, web purchases, Washington free play, going broke, and profit ranking": [
+        "e3b0c44298fc",
+        "bd2b44ee4477",
+        "c616caa7e301"
+      ]
+    },
+    "spec/markets/index.md": {
+      "@document": [
+        "a4f8b6eb2aea"
+      ]
+    },
+    "spec/shared/time.md": {
+      "@document": [
+        "cfadd11d753a"
+      ],
+      "## UTC 8-hour funding boundaries": [
+        "e3b0c44298fc"
+      ],
+      "UTC 8-hour funding boundaries / Funding periods partition UTC time into non-negative 8-hour windows": [
+        "c6cbcd7bb821",
+        "a1c6ec62fba6"
+      ],
+      "## Rolling prediction market slot durations": [
+        "e3b0c44298fc"
+      ],
+      "Rolling prediction market slot durations / Ten rolling slots span from 15 minutes to 3 days": [
+        "ca721b73df7a",
+        "4ec78d74b1bb"
+      ],
+      "## Phone deletion cooldown": [
+        "e3b0c44298fc"
+      ],
+      "Phone deletion cooldown / A deleted account's phone hash is held for a full 30-day cooldown before reuse": [
+        "1f8ab30f7e15",
+        "78b2cf503d30",
+        "1cec9ba080ef"
+      ]
+    },
+    "spec/markets/prediction.md": {
+      "@document": [
+        "71f70218e207"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Market phases, secrecy, and account state": [
+        "9854941432ec",
+        "3674b10be47e",
+        "a2c96047579f"
+      ],
+      "Domain / CPMM pricing, square-root proceeds, and account helpers": [
+        "9927a5fe1a11",
+        "e959e404dcbd",
+        "6819dc7a2e31"
+      ],
+      "## Story: Open and trade a prediction market": [
+        "9d769456d2fe"
+      ],
+      "Story: Open and trade a prediction market / A market opens with a valid slot schedule and private outcome": [
+        "e3b0c44298fc",
+        "4d4243d60825",
+        "6d02330ce451"
+      ],
+      "Story: Open and trade a prediction market / Buying YES or NO shares requires an open non-expired market, sufficient balance, and bounded odds impact": [
+        "62cdd342e7b7",
+        "ec0871652838",
+        "9d984f070945"
+      ],
+      "Story: Open and trade a prediction market / Selling shares floors gross proceeds to whole cents before charging the canonical fee": [
+        "1a7ee626be40",
+        "8ddf35cab4d2",
+        "9d984f070945"
+      ],
+      "## Story: Close on schedule, review, resolve, or cancel": [
+        "1695b5b70de8"
+      ],
+      "Story: Close on schedule, review, resolve, or cancel / Time advances monotonically, and expiry closes trading into pending proof generation": [
+        "e3b0c44298fc",
+        "ca7e53904c1e",
+        "6d02330ce451"
+      ],
+      "Story: Close on schedule, review, resolve, or cancel / Proof generation keeps proofs private and holds low-confidence markets for manual review": [
+        "e3b0c44298fc",
+        "ec694b383de7",
+        "6d02330ce451"
+      ],
+      "Story: Close on schedule, review, resolve, or cancel / Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently": [
+        "37d34a92190d",
+        "7f528d4cda9f",
+        "d90d887468e7"
+      ],
+      "Story: Close on schedule, review, resolve, or cancel / Cancelled markets refund every open position at cost basis without publishing an outcome": [
+        "e3b0c44298fc",
+        "f8be861ee671",
+        "d90d887468e7"
+      ],
+      "## Invariants, step properties, and reachability": [
+        "e3b0c44298fc"
+      ],
+      "Invariants, step properties, and reachability / Pool reserves remain strictly positive and satisfy the constant-product bound": [
+        "e3b0c44298fc",
+        "3c5171d7d1af",
+        "6d02330ce451"
+      ],
+      "Invariants, step properties, and reachability / Account balances, shares, liquidity, and costs never go negative": [
+        "e3b0c44298fc",
+        "d12bf6a5b6a3",
+        "6d02330ce451"
+      ],
+      "Invariants, step properties, and reachability / The fee ledger always equals the exact sum of charged fees": [
+        "e3b0c44298fc",
+        "57800505ec3e",
+        "6d02330ce451"
+      ],
+      "Invariants, step properties, and reachability / Hidden outcome and prepared proof are never visible before resolution": [
+        "e3b0c44298fc",
+        "820d3ce8f04e",
+        "6d02330ce451"
+      ],
+      "Invariants, step properties, and reachability / Closed and settled states leave zero open shares and prevent duplicate settlement": [
+        "3dd089f5c6a4",
+        "8083163003b8",
+        "6d02330ce451"
+      ],
+      "Invariants, step properties, and reachability / Resolved, cancelled, held, and expired markets allow no trades, and duplicate resolution pays nothing extra": [
+        "e3b0c44298fc",
+        "297ae7493b97",
+        "6d02330ce451"
+      ],
+      "Invariants, step properties, and reachability / Reachable journeys cover buys, sells, 1 pt/share resolution, duplicate safety, manual hold, and cancellation": [
+        "e3b0c44298fc",
+        "d537be8cc9fb",
+        "6d02330ce451"
+      ]
+    },
+    "spec/markets/spotPerp.md": {
+      "@document": [
+        "80fde43cf47e"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Spot pools, perpetual positions, and sender roles": [
+        "2aa579764f56",
+        "a351820a7335",
+        "3af9e9d703dc"
+      ],
+      "Domain / Account, margin, equity, and funding helpers": [
+        "e3b0c44298fc",
+        "05a8885c5296",
+        "6fee8b7ab444"
+      ],
+      "## Story: NPC spot trades drive the index price": [
+        "f92281c362e2"
+      ],
+      "Story: NPC spot trades drive the index price / Only NPCs may trade the spot CPMM pool, updating the persisted index price": [
+        "e3b0c44298fc",
+        "31730b0e1a36",
+        "6ce11b29f593"
+      ],
+      "## Story: Open and close perpetuals up to 20x leverage": [
+        "57e124355e9b"
+      ],
+      "Story: Open and close perpetuals up to 20x leverage / Opening a perp enforces the 20x leverage cap and updates only the mark premium": [
+        "e3b0c44298fc",
+        "2d989df4a473",
+        "e91224b5c129"
+      ],
+      "Story: Open and close perpetuals up to 20x leverage / Closing a perp settles equity and canonical fees at mark price without touching spot": [
+        "f494c2d708f7",
+        "b18985dc013c",
+        "e91224b5c129"
+      ],
+      "## Story: 8-hour funding accrual and mark-price liquidation": [
+        "358413820613"
+      ],
+      "Story: 8-hour funding accrual and mark-price liquidation / UTC time advances across 8-hour funding boundaries, and funding skips pre-cutover or duplicate periods": [
+        "e3b0c44298fc",
+        "cb50501182cc",
+        "fcbef0f1b17a"
+      ],
+      "Story: 8-hour funding accrual and mark-price liquidation / A position whose mark-price equity breaches maintenance margin is liquidated": [
+        "e3b0c44298fc",
+        "2f2d59593fa9",
+        "6ce11b29f593"
+      ],
+      "## Invariants, step rules, and reachability": [
+        "e3b0c44298fc"
+      ],
+      "Invariants, step rules, and reachability / Spot reserves and prices stay positive, and open interest is non-negative and matches positions": [
+        "e3b0c44298fc",
+        "b7abd04b97c8",
+        "6ce11b29f593"
+      ],
+      "Invariants, step rules, and reachability / Every position obeys the 20x leverage cap and unique ownership, and all balances are non-negative": [
+        "e3b0c44298fc",
+        "142da75be8bd",
+        "a6cc3f63e0c3"
+      ],
+      "Invariants, step rules, and reachability / Funding claims are post-cutover, bounded by monotonic lastFundingPeriod, and unique per position and period": [
+        "e3b0c44298fc",
+        "c9c209879521",
+        "8f7f394a6a60"
+      ],
+      "Invariants, step rules, and reachability / Only NPCs execute spot trades, perp trades never move spot or index, and funding periods advance monotonically": [
+        "e3b0c44298fc",
+        "96585fd6aa8f",
+        "8f7f394a6a60"
+      ],
+      "Invariants, step rules, and reachability / Reachable journeys cover NPC spot moving index, 20x player perps, 8h funding accrual, and mark-price liquidation": [
+        "e3b0c44298fc",
+        "038cd8b34314",
+        "8f7f394a6a60"
+      ]
+    },
+    "spec/mcp/index.md": {
+      "@document": [
+        "b1547dc0a4e3"
+      ]
+    },
+    "spec/mcp/skill.md": {
+      "@document": [
+        "b9b73954133b"
+      ],
+      "## Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers": [
+        "d03b9f9a04ea"
+      ],
+      "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers / One canonical source renders all discovery documents and `index.json` SHA-256 digests": [
+        "e3b0c44298fc",
+        "734f039cd495"
+      ],
+      "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers / Downloaded skill bytes require HTTPS `feed.fun` origin authority, matching SHA-256 digest, and valid package structure": [
+        "8810812f1855",
+        "7f1c41fd080b",
+        "406d4504f8aa"
+      ],
+      "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers / All 9 Join-sheet host launchers degrade to copy-prompt until device-verified": [
+        "063988a3fb20",
+        "e9304e7f7915",
+        "406d4504f8aa"
+      ],
+      "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers / Single-source digest equality, HTTPS origin authority, and host verification invariants hold inductively": [
+        "e3b0c44298fc",
+        "185d307eec9e",
+        "a1c1d5c7a1b9"
+      ],
+      "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers / Simulation samples and witness journeys cover canonical admission, SHA-256 mismatch rejection, and origin rejection": [
+        "e3b0c44298fc",
+        "cf08d4a720e9",
+        "406d4504f8aa"
+      ]
+    },
+    "spec/mcp/tools.md": {
+      "@document": [
+        "de5937a7974c"
+      ],
+      "## Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules": [
+        "4e016cbc63d0"
+      ],
+      "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30": [
+        "9c746658f5ef",
+        "d7280118b8a4",
+        "c9fb74397a60"
+      ],
+      "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / Public tools succeed unauthenticated; protected tools without a valid token fail with both HTTP 401 `WWW-Authenticate` and `_meta[\"mcp/www_authenticate\"]`": [
+        "616d911e27cf",
+        "b3a33c59fc16",
+        "2423dd813e8d"
+      ],
+      "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution": [
+        "e3b0c44298fc",
+        "cd0a76844f9a",
+        "90a4771a97d2"
+      ],
+      "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / Simulation samples and witness journeys verify mixed auth, dual 401, scopes, Social mode, shared rate limits, and D-30": [
+        "e3b0c44298fc",
+        "667fee639537",
+        "a4472699cebd"
+      ]
+    },
+    "spec/shared/index.md": {
+      "@document": [
+        "ed2cc79a5c9b"
+      ]
+    },
+    "spec/shared/limits.md": {
+      "@document": [
+        "d4f732e0f3b1"
+      ],
+      "## Shared per-account hourly rate limits": [
+        "e3b0c44298fc"
+      ],
+      "Shared per-account hourly rate limits / Posts, DMs, and trades share one hourly budget across web and MCP": [
+        "17cd31fb7465",
+        "d2b9b8ccfb9c"
+      ],
+      "Shared per-account hourly rate limits / Web and MCP always see identical capacity, and consuming via one reduces the other": [
+        "e3b0c44298fc",
+        "4edf10376e87",
+        "4a013ff8d002"
+      ],
+      "## D-25 NPC daily spend budget and throttling": [
+        "e3b0c44298fc"
+      ],
+      "D-25 NPC daily spend budget and throttling / Committed spend combines confirmed charges, active reservations, and previous-day carryover": [
+        "0fc98d9e74fd",
+        "92d775f729ef"
+      ],
+      "D-25 NPC daily spend budget and throttling / Budget thresholds enforce exact 80% batch halving, 90% step caps, and carryover headroom reduction": [
+        "59d602959395",
+        "ea7d1d309b35",
+        "fe472abcf582"
+      ]
+    },
+    "spec/social/index.md": {
+      "@document": [
+        "6f39d6c59f2f"
+      ]
+    },
+    "spec/social/messaging.md": {
+      "@document": [
+        "0dbdc05396e4"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Accounts, chats, memberships, messages, reactions, and invites": [
+        "6fa0709c2dce",
+        "7e0cd35b1b1a"
+      ],
+      "Domain / Initial messaging state": [
+        "addbaddf3b17",
+        "087ac3e307ad",
+        "3606e19096b2"
+      ],
+      "Domain / What the simulator tries": [
+        "e4a2bd78e5ff",
+        "dada09d9591a"
+      ],
+      "Domain / Shared lookups": [
+        "5cd65c6329fe",
+        "9742bffc02c6",
+        "3606e19096b2"
+      ],
+      "## Story: Direct messages, chat messages, and reactions": [
+        "5a211c233631"
+      ],
+      "Story: Direct messages, chat messages, and reactions / Sending a DM reuses any existing thread or auto-creates one for a non-blocked pair": [
+        "d0c1c11022c9",
+        "6ae16170430b",
+        "07bd4f4ed905"
+      ],
+      "Story: Direct messages, chat messages, and reactions / Only active members can send messages, add reactions, or mark a chat read": [
+        "e3b0c44298fc",
+        "9c2d2fb8f6c7",
+        "07bd4f4ed905"
+      ],
+      "## Story: Create groups, invite to alpha groups, respond to invites, and leave": [
+        "93fa94053a6f"
+      ],
+      "Story: Create groups, invite to alpha groups, respond to invites, and leave / Team chats are explicitly refused and only NPCs create alpha groups": [
+        "bebee06bee35",
+        "99d23ef51b9a",
+        "07bd4f4ed905"
+      ],
+      "Story: Create groups, invite to alpha groups, respond to invites, and leave / Group and NPC alpha-group invites require active membership and exclude blocked or already-invited targets": [
+        "063ae8e26646",
+        "5d3d4864aac0",
+        "07bd4f4ed905"
+      ],
+      "Story: Create groups, invite to alpha groups, respond to invites, and leave / Responding to an invite removes the pending invite, adds membership only on Accept, and checks blocks": [
+        "089d6836ca33",
+        "b8a6f94c87dd",
+        "07bd4f4ed905"
+      ],
+      "Story: Create groups, invite to alpha groups, respond to invites, and leave / Non-owner group members can leave group chats, and blocking enforces DM and invite isolation": [
+        "f7d0482aebd9",
+        "87d82c5ee6ba",
+        "07bd4f4ed905"
+      ],
+      "## Story: Membership, invite, and safety invariants": [
+        "41104ec8af59"
+      ],
+      "Story: Membership, invite, and safety invariants / No Team chats exist, DMs always have exactly two active members, and alpha groups stay NPC-owned": [
+        "e3b0c44298fc",
+        "e8d1994ae873",
+        "07bd4f4ed905"
+      ],
+      "Story: Membership, invite, and safety invariants / Memberships, messages, reactions, pending invites, and blocks stay unique and referentially valid": [
+        "e3b0c44298fc",
+        "594de1b39293",
+        "07bd4f4ed905"
+      ],
+      "Story: Membership, invite, and safety invariants / Only active members send messages, declining adds no member, and accepting adds a member while clearing the pending invite": [
+        "e3b0c44298fc",
+        "1da53eca58b1",
+        "07bd4f4ed905"
+      ],
+      "Story: Membership, invite, and safety invariants / Key DM, alpha invite, decline, reaction, and leave journeys are reachable": [
+        "e3b0c44298fc",
+        "d4928ba37643",
+        "07bd4f4ed905"
+      ]
+    },
+    "spec/social/moderation.md": {
+      "@document": [
+        "240c4007ac90"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Accounts, moderation edges, reports, and notifications": [
+        "a19d121a2506",
+        "8cc3d1bb8ce6"
+      ],
+      "Domain / Initial moderation and notification state": [
+        "02cf79623ea1",
+        "ee408a09f4da",
+        "dd4977434af9"
+      ],
+      "Domain / What the simulator tries": [
+        "e3b0c44298fc",
+        "97b821cb35cb"
+      ],
+      "Domain / Shared lookups and visibility helpers": [
+        "e3b0c44298fc",
+        "44c6a32a372e",
+        "dd4977434af9"
+      ],
+      "## Story: Block, mute, follow, and report users or posts": [
+        "6b6cb50a8e55"
+      ],
+      "Story: Block, mute, follow, and report users or posts / Blocking prevents self-blocks and atomically removes follow edges in both directions": [
+        "e3b0c44298fc",
+        "b8c834004c40",
+        "fc9ea4c66095"
+      ],
+      "Story: Block, mute, follow, and report users or posts / Muting hides an author's feed content without removing follows": [
+        "e3b0c44298fc",
+        "8f98d8cae941",
+        "fc9ea4c66095"
+      ],
+      "Story: Block, mute, follow, and report users or posts / Following is refused when blocked": [
+        "e3b0c44298fc",
+        "995f2d46ad98",
+        "fc9ea4c66095"
+      ],
+      "Story: Block, mute, follow, and report users or posts / Reporting covers both user accounts and specific posts without self-reporting or duplicate open filings": [
+        "e3b0c44298fc",
+        "0da84cfa8def",
+        "fc9ea4c66095"
+      ],
+      "## Story: In-app notifications and Social-mode presentation filtering": [
+        "879fe07c1e5a"
+      ],
+      "Story: In-app notifications and Social-mode presentation filtering / Creating notifications skips blocked actors and increments unread count": [
+        "034439dbb6fb",
+        "add962945c80",
+        "fc9ea4c66095"
+      ],
+      "Story: In-app notifications and Social-mode presentation filtering / Marking notifications read clears only notifications visible in the account's current mode": [
+        "74e646220b76",
+        "d4310248238e",
+        "fc9ea4c66095"
+      ],
+      "Story: In-app notifications and Social-mode presentation filtering / Presentation mode toggles without touching open positions": [
+        "e3b0c44298fc",
+        "d48682267638",
+        "fc9ea4c66095"
+      ],
+      "Story: In-app notifications and Social-mode presentation filtering / Block, unread count, report, notification, and Social-mode invariants and laws": [
+        "e3b0c44298fc",
+        "c1701bba998a",
+        "fc9ea4c66095"
+      ],
+      "Story: In-app notifications and Social-mode presentation filtering / Block-cleared follows, mutes, reports, read notifications, and Social-mode suppression are reachable": [
+        "e3b0c44298fc",
+        "937173db5b6e",
+        "fc9ea4c66095"
+      ]
+    },
+    "spec/social/posts.md": {
+      "@document": [
+        "c01f7c3561a2"
+      ],
+      "## Domain": [
+        "e3b0c44298fc"
+      ],
+      "Domain / Accounts, callers, posts, and presentation modes": [
+        "a677eb1657fa",
+        "186e6b35a244"
+      ],
+      "Domain / Initial social state": [
+        "27c089b6460d",
+        "ae356db9c0f2",
+        "d092c4e7aaf3"
+      ],
+      "Domain / What the simulator tries": [
+        "0cce92781a58",
+        "3e39f36b8542",
+        "d092c4e7aaf3"
+      ],
+      "Domain / Shared lookups and list helpers": [
+        "8518986d3425",
+        "a26026e4f5ae",
+        "d092c4e7aaf3"
+      ],
+      "## Story: Create and delete posts with unified replies and attribution": [
+        "e9821821a235"
+      ],
+      "Story: Create and delete posts with unified replies and attribution / Creating a post enforces 1..280 length, valid reply/quote targets, block isolation, and shared per-account rate limits": [
+        "d005bd30c1ba",
+        "93aca7250a50",
+        "c6d67b2fdabf"
+      ],
+      "Story: Create and delete posts with unified replies and attribution / Only the author can delete an active post": [
+        "d16506cd1bd9",
+        "23377b7757a7",
+        "c6d67b2fdabf"
+      ],
+      "Story: Create and delete posts with unified replies and attribution / Post identifiers, text bounds, reply/quote targets, author ownership, and shared rate limits hold inductively": [
+        "83d241f20f05",
+        "ce03dbf4e745",
+        "c6d67b2fdabf"
+      ],
+      "Story: Create and delete posts with unified replies and attribution / Top-level posts, replies, quotes, connected-client attribution, NPC parody posts, deletions, and rate limits are reachable": [
+        "e3b0c44298fc",
+        "6edede9da46b",
+        "d092c4e7aaf3"
+      ],
+      "## Story: Like, repost, follow, and block enforcement": [
+        "71822342a7d2"
+      ],
+      "Story: Like, repost, follow, and block enforcement / Users can add one like to an active post when neither account has blocked the other": [
+        "ce050753610c",
+        "321f03af5fa4",
+        "c6d67b2fdabf"
+      ],
+      "Story: Like, repost, follow, and block enforcement / Users can add one repost to an active post when neither account has blocked the other": [
+        "db4460012494",
+        "5df8ffc7f6a6",
+        "c6d67b2fdabf"
+      ],
+      "Story: Like, repost, follow, and block enforcement / Following and blocking enforce self-exclusion and remove follow edges on block": [
+        "e3b0c44298fc",
+        "690516e1652b",
+        "c6d67b2fdabf"
+      ],
+      "Story: Like, repost, follow, and block enforcement / Likes, reposts, counts, follows, and blocks remain unique and consistent": [
+        "e3b0c44298fc",
+        "05339a7a51ef",
+        "c6d67b2fdabf"
+      ],
+      "Story: Like, repost, follow, and block enforcement / Repost followed by unrepost and following are reachable": [
+        "e3b0c44298fc",
+        "89d596fd06a4",
+        "d092c4e7aaf3"
+      ],
+      "## Story: Project posts for Game and Social presentation modes": [
+        "8319b676bcbd"
+      ],
+      "Story: Project posts for Game and Social presentation modes / Social mode suppresses trade embeds and cashtag links without hiding NPC posts": [
+        "20b09fb54080",
+        "9583a7eb2366",
+        "d092c4e7aaf3"
       ]
     }
   },
-  "contracts": {
-    "apps/app/src/greeting.ts": "6292c9e16ccf"
-  },
+  "contracts": {},
   "unproved": {}
 }
