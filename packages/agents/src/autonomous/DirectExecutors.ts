@@ -17,7 +17,11 @@ import {
   notifyGroupChatMessage,
   type PostActivityData,
 } from '@feed/api';
-import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
+import {
+  PerpDbAdapter,
+  PerpMarketService,
+  type PerpServiceDeps,
+} from '@feed/core/markets/perps';
 import { PredictionDbAdapter } from '@feed/core/markets/prediction';
 import {
   actorState,
@@ -586,6 +590,15 @@ export async function executeDirectTrade(
   });
 }
 
+/**
+ * Publish perp trade events to the `markets` realtime channel, as the web
+ * and MCP perp trade paths do, so open market pages update when an agent trades.
+ */
+const perpBroadcast: NonNullable<PerpServiceDeps['broadcast']> = {
+  emit: (channel, payload) =>
+    broadcastToChannel(channel, payload as Record<string, JsonValue>),
+};
+
 function predictionSettlementOptions(
   agentUserId: string,
   isNpc: boolean,
@@ -919,6 +932,7 @@ async function executePerpTrade(params: {
     db: new PerpDbAdapter(),
     wallet: walletAdapter,
     cache: createPerpTradesCachePort(),
+    broadcast: perpBroadcast,
     fees: {
       tradingFeeRate: 0.001,
       platformShare: 0.5,
@@ -1065,6 +1079,7 @@ async function executeClosePerpPosition(params: {
       db: new PerpDbAdapter(),
       wallet: walletAdapter,
       cache: createPerpTradesCachePort(),
+      broadcast: perpBroadcast,
       fees: {
         tradingFeeRate: 0.001,
         platformShare: 0.5,
