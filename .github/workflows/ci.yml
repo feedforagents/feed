@@ -2,9 +2,9 @@ name: ci
 
 on:
   pull_request:
-    branches: [vibestack, staging, main]
+    branches: [develop, staging, production]
   push:
-    branches: [vibestack, staging, main]
+    branches: [develop, staging, production]
 
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_attempt == '1' && github.ref || github.run_id }}
@@ -73,7 +73,6 @@ jobs:
     needs: vibestack-precompute-simulations
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'push' && 'turbo-cache-publish' || 'turbo-cache-read' }}
     env:
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_CACHE: ${{ secrets.TURBO_TOKEN != '' && (github.event_name == 'push' && 'local:rw,remote:rw' || 'local:rw,remote:r') || 'local:rw' }}

@@ -2,7 +2,7 @@ name: deploy
 
 on:
   push:
-    branches: [staging, main]
+    branches: [staging, production]
   workflow_dispatch:
     inputs:
       environment:
@@ -16,7 +16,7 @@ on:
         default: false
 
 concurrency:
-  group: deploy-${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+  group: deploy-${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }}
   cancel-in-progress: false
 
 permissions:
@@ -27,11 +27,11 @@ env:
 
 jobs:
   deploy:
-    name: Deploy feed.fun (${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }})
+    name: Deploy feed.fun (${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }})
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+    environment: cloudflare-${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }}
     env:
-      TARGET_ENV: ${{ inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+      TARGET_ENV: ${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
     steps:
@@ -44,13 +44,21 @@ jobs:
           verification: "false"
       - name: Generate specs and build @repo/app (SPA + Worker)
         run: |
-          pnpm --filter @repo/design-system build
           pnpm gen
-          pnpm --filter @repo/app build
+          pnpm --filter '@repo/app...' --filter '!vibestack' --filter '!@elizaos/*' --if-present run build
       - name: Deploy Worker + Assets to Cloudflare
         run: |
           flags=()
-          if [[ "${{ inputs.dry_run }}" == "true" || -z "$CLOUDFLARE_API_TOKEN" ]]; then
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
             flags+=(--dry-run)
+          else
+            if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
+              echo "::error::CLOUDFLARE_API_TOKEN is not set in environment cloudflare-${TARGET_ENV}"
+              exit 1
+            fi
+            if [[ -z "$CLOUDFLARE_ACCOUNT_ID" ]]; then
+              echo "::error::CLOUDFLARE_ACCOUNT_ID is not set"
+              exit 1
+            fi
           fi
           pnpm --filter @repo/app exec wrangler deploy --config "wrangler.${TARGET_ENV}.jsonc" "${flags[@]}"
