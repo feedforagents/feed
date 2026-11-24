@@ -233,7 +233,10 @@ pure def registerClient(
 
 ### Authorization requires PKCE S256, code flow, normalized resource, and preserves 400+ character state across one 4-scope consent screen
 
-No implicit flow or plain PKCE is admitted. All four scopes (`read`, `social:write`, `messages`, `trade`) appear on one consent screen (all enabled by default; the user may toggle subsets before confirming on a phone-verified account).
+The server requires PKCE with S256 and the authorization code flow. One
+consent screen shows all four scopes (`read`, `social:write`, `messages`,
+`trade`) enabled by default. A phone-verified user can toggle scopes and
+must leave at least one enabled to approve consent.
 
 ```quint
 pure def canStartAuthorization(

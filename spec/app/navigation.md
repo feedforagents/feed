@@ -77,10 +77,10 @@ pure val initial: NavState = {
 ### Surface visibility and delayed visitor banner derivation
 
 In `SocialMode`, every market, leaderboard, wallet, balance, cashtag link, P&L,
-and buy-points surface is hidden while NPC posts and chats remain visible, and
-a small notice appears if the user holds open positions at risk. A bottom sign-in
-banner appears for logged-out visitors only after scrolling or viewing at least
-three public items.
+and buy-points surface is hidden. NPC posts stay visible and signed-in users
+can still open chats. A small notice appears if the user holds open positions
+at risk. A bottom sign-in banner appears for logged-out visitors after they
+scroll deeper into the feed or view at least three public items.
 
 ```quint
 pure def surfaceVisibilityFor(mode: UiMode, hasAtRisk: bool): SurfaceVisibility = {
