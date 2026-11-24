@@ -296,12 +296,30 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
       WHERE r.type = 'like'
       GROUP BY r."postId"
     ),
+    -- A comment counts only if it is reachable from its post through
+    -- visible parents: replies under a soft-deleted parent are invisible
+    -- on the post detail screen, so the card must not count them either
+    -- (#1994 rule, same as GET /api/posts). The walk runs per post
+    -- (LATERAL) so one deep chain cannot rescan the whole pool at
+    -- every recursion level.
     comment_counts AS (
-      SELECT c."postId" AS post_id, COUNT(*) AS count
-      FROM "Comment" c
-      INNER JOIN target_posts tp ON c."postId" = tp.post_id
-      WHERE c."deletedAt" IS NULL
-      GROUP BY c."postId"
+      SELECT tp.post_id AS post_id, COUNT(visible.id) AS count
+      FROM target_posts tp
+      LEFT JOIN LATERAL (
+        WITH RECURSIVE eligible_comments AS MATERIALIZED (
+          SELECT c.id, c."parentCommentId"
+          FROM "Comment" c
+          WHERE c."postId" = tp.post_id AND c."deletedAt" IS NULL
+        ),
+        visible_comments(id) AS (
+          SELECT id FROM eligible_comments WHERE "parentCommentId" IS NULL
+          UNION ALL
+          SELECT child.id FROM eligible_comments child
+          JOIN visible_comments parent ON child."parentCommentId" = parent.id
+        )
+        SELECT id FROM visible_comments
+      ) visible ON true
+      GROUP BY tp.post_id
     ),
     share_counts AS (
       SELECT s."postId" AS post_id, COUNT(*) AS count
