@@ -2,6 +2,7 @@ import { type FocusEvent, useState } from "react";
 import { AlertCircle, Check, Clipboard } from "lucide-react";
 import { cn } from "../lib/cn.ts";
 import { Button, type ButtonProps } from "./Button.tsx";
+import { Spinner } from "./Spinner.tsx";
 
 export type CopyLabels = { ready: string; copied: string; failed: string };
 
@@ -36,6 +37,8 @@ export function CopyButton({
   tone = "quiet",
   disabled = false,
   onBlur,
+  "aria-disabled": ariaDisabled,
+  "aria-busy": ariaBusy,
   className,
   ...props
 }: CopyButtonProps) {
@@ -69,13 +72,14 @@ export function CopyButton({
         aria-label={iconOnly || labels ? label : undefined}
         data-copy={activeStatus}
         disabled={disabled}
-        loading={copying}
+        aria-disabled={copying || ariaDisabled}
+        aria-busy={copying || ariaBusy}
         onClick={() => void handlePress()}
         onBlur={handleBlur}
         className={cn(tone === "primary" && copied && "bg-ok text-primary-foreground hover:bg-ok", className)}
         {...props}
       >
-        {!copying && (failed && tone === "quiet" ? <AlertCircle aria-hidden className="size-4 text-destructive" /> : copied ? <Check aria-hidden className="size-4" /> : <Clipboard aria-hidden className="size-4" />)}
+        {copying ? <Spinner size="sm" aria-hidden /> : failed && tone === "quiet" ? <AlertCircle aria-hidden className="size-4 text-destructive" /> : copied ? <Check aria-hidden className="size-4" /> : <Clipboard aria-hidden className="size-4" />}
         {labels ? <span data-copy-label>{visibleText(labels, activeStatus)}</span> : variant === "labeled" && label}
       </Button>
       <span role="status" className={failed && !labels ? "text-xs text-destructive" : "sr-only"}>
