@@ -616,6 +616,30 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
     try assertSocialModeRedaction("alice_mcp", authConfig, token2Access)
     const setGameBackRes = unwrapToolPayload(try callMcpTool(21, "set_mode", { mode: "game" }, authConfig, token2Access))
     const portfolioRestored = unwrapToolPayload(try callMcpTool(22, "get_portfolio", {}, authConfig, token2Access))
+    const bobToken = try connectOAuthGrant({
+      accountId: bob.account.accountId,
+      clientName: "Bob Agent",
+      redirectUri: "http://127.0.0.1:4101/callback",
+      scope: "read messages",
+      state: "state_bob_agent_01",
+      verifier: "pkce_verifier_bob_agent_0123456789abcdef0123456789abcd",
+      authConfig
+    })
+    const groupPayload = unwrapToolPayload(try callMcpTool(24, "create_group", { title: "Alpha Desk" }, authConfig, token2Access))
+    const groupId = String((groupPayload.chat as { readonly id?: string } | undefined)?.id ?? "")
+    unwrapToolPayload(try callMcpTool(25, "send_message", { chatId: groupId, content: "members only plan" }, authConfig, token2Access))
+    unwrapToolPayload(try callMcpTool(26, "invite_to_group", { chatId: groupId, targetHandleOrId: "bob_social" }, authConfig, token2Access))
+    const bobChatsBefore = unwrapToolPayload(try callMcpTool(27, "list_chats", {}, authConfig, bobToken.access_token))
+    const bobReadBefore = try callMcpTool(28, "get_messages", { chatId: groupId }, authConfig, bobToken.access_token)
+    const bobInvites = unwrapToolPayload(try callMcpTool(29, "list_group_invites", {}, authConfig, bobToken.access_token))
+    const bobInviteList = (bobInvites.invites ?? []) as ReadonlyArray<{ readonly id: string; readonly chatId: string; readonly status: string }>
+    try check(() => assert.deepStrictEqual({
+      bobSeesGroup: ((bobChatsBefore.chats ?? []) as ReadonlyArray<{ readonly id: string }>).some((c) => c.id === groupId),
+      bobReadRefused: (bobReadBefore.body.result as { readonly isError?: boolean } | undefined)?.isError === true || bobReadBefore.body.error !== undefined,
+      bobInvites: bobInviteList.map((i) => [i.chatId, i.status])
+    }, { bobSeesGroup: false, bobReadRefused: true, bobInvites: [[groupId, "pending"]] }))
+    unwrapToolPayload(try callMcpTool(30, "respond_to_group_invite", { inviteId: bobInviteList[0]?.id ?? "", accept: true }, authConfig, bobToken.access_token))
+    const bobMessagesAfter = unwrapToolPayload(try callMcpTool(31, "get_messages", { chatId: groupId }, authConfig, bobToken.access_token))
     try check(() => {
       assert.strictEqual(createdPayload.viaClientName, "Claude Desktop")
       assert.strictEqual(createdPost.viaClientName, "Claude Desktop")
@@ -656,6 +680,7 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
       assert.strictEqual(setSocialRes.playMode, "social")
       assert.strictEqual(setGameBackRes.playMode, "game")
       assert.strictEqual(portfolioRestored.balancePts, 90)
+      assert.deepStrictEqual(((bobMessagesAfter.messages ?? []) as ReadonlyArray<{ readonly content: string }>).map((m) => m.content), ["members only plan"])
       assert.strictEqual((portfolioRestored.predictionPositions as ReadonlyArray<unknown>).length, 1)
     })
   }
