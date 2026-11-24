@@ -336,6 +336,10 @@ async function executeWithRetry<T>(
 async function checkMcpRateLimit(
   userId: string,
   operation:
+    | 'like_post'
+    | 'like_comment'
+    | 'follow_user'
+    | 'unfollow_user'
     | 'buy_prediction'
     | 'sell_prediction'
     | 'open_position'
@@ -349,6 +353,10 @@ async function checkMcpRateLimit(
     string,
     (typeof RATE_LIMIT_CONFIGS)[keyof typeof RATE_LIMIT_CONFIGS]
   > = {
+    like_post: RATE_LIMIT_CONFIGS.LIKE_POST,
+    like_comment: RATE_LIMIT_CONFIGS.LIKE_COMMENT,
+    follow_user: RATE_LIMIT_CONFIGS.FOLLOW_USER,
+    unfollow_user: RATE_LIMIT_CONFIGS.UNFOLLOW_USER,
     buy_prediction: RATE_LIMIT_CONFIGS.BUY_PREDICTION,
     sell_prediction: RATE_LIMIT_CONFIGS.SELL_PREDICTION,
     open_position: RATE_LIMIT_CONFIGS.OPEN_POSITION,
@@ -1510,6 +1518,7 @@ export async function executeLikePost(
   agent: AuthenticatedAgent,
   args: LikePostArgs
 ): Promise<LikePostResult> {
+  await checkMcpRateLimit(agent.userId, 'like_post');
   const now = new Date();
   const [post] = await db
     .select({
@@ -1762,6 +1771,7 @@ export async function executeLikeComment(
   agent: AuthenticatedAgent,
   args: LikeCommentArgs
 ): Promise<LikeCommentResult> {
+  await checkMcpRateLimit(agent.userId, 'like_comment');
   const comment = await db.comment.findFirst({
     where: { id: args.commentId },
   });
@@ -1979,6 +1989,7 @@ export async function executeFollowUser(
   agent: AuthenticatedAgent,
   args: FollowUserArgs
 ): Promise<FollowUserResult> {
+  await checkMcpRateLimit(agent.userId, 'follow_user');
   if (args.userId === agent.userId) {
     throw new Error('Cannot follow yourself');
   }
@@ -2008,6 +2019,7 @@ export async function executeUnfollowUser(
   agent: AuthenticatedAgent,
   args: UnfollowUserArgs
 ): Promise<UnfollowUserResult> {
+  await checkMcpRateLimit(agent.userId, 'unfollow_user');
   await db.follow.deleteMany({
     where: {
       followerId: agent.userId,
