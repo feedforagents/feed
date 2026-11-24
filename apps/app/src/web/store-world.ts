@@ -268,12 +268,16 @@ export async function repostPost(postId: string): Promise<void> {
   });
 }
 
+let exploreLoadCount = 0;
+
 export async function loadExplore(queryOverride?: string): Promise<void> {
   const q = queryOverride ?? getStoreSnapshot().exploreQuery;
+  const loadId = ++exploreLoadCount;
   setStoreState({ exploreLoading: true, exploreQuery: q });
   const res = await requestJson(`/api/explore?q=${encodeURIComponent(q.trim())}`, {
     parse: decodeExplore,
   });
+  if (loadId !== exploreLoadCount) return;
   if (res.ok) {
     setStoreState({ explore: res.data, exploreLoading: false });
     return;
