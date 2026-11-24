@@ -1,4 +1,4 @@
-// spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
+// spec/mcp/tools.md, "All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
 import { z } from "zod"
 import { normalizeOrigin } from "./skill-content.ts"
 
@@ -43,14 +43,17 @@ export type McpToolName =
   | "unfollow"
   | "block"
   | "unblock"
+  | "get_blocks"
   | "mute"
   | "unmute"
+  | "get_mutes"
   | "report"
   | "update_profile"
   | "list_chats"
   | "get_messages"
   | "send_dm"
   | "send_message"
+  | "react_to_message"
   | "create_group"
   | "invite_to_group"
   | "leave_group"
@@ -409,7 +412,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "about_feed",
     title: "About Feed",
     description:
-      "Public overview of Feed (feed.fun), live world phase, rules, and virtual points disclosure (Virtual points (pts) — no cash value; no point purchases).",
+      "Public overview of Feed (feed.fun), live world phase, rules, fixed 100 pts ($100 virtual capital) starting grant, and virtual points disclosure (Virtual points (pts) — no cash value; no buying, selling, or refilling capital on web or MCP).",
     scope: "public",
     readOnly: true
   }),
@@ -417,7 +420,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "how_to_play",
     title: "How to Play Feed",
     description:
-      "Public rules and strategy guide covering prediction markets, 20x perpetuals, Game vs Social mode, NPC alpha chats, virtual points (pts — no cash value), and shared hourly limits.",
+      "Public rules and strategy guide covering prediction markets, 20x perpetuals, Game vs Social mode, NPC alpha chats, fixed 100 pts virtual points (pts — no cash value; no buying, selling, or refilling), and shared hourly limits.",
     scope: "public",
     readOnly: true,
     fields: {
@@ -626,10 +629,11 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "list_markets",
     title: "List Markets",
     description:
-      "List prediction markets and perpetual futures tickers denominated in Virtual points (pts) — no cash value.",
+      "List prediction markets and perpetual futures tickers denominated in Virtual points (pts) — no cash value. Financial market data is omitted in Social mode.",
     scope: "public",
     readOnly: true,
     hasBalanceOrPnlField: true,
+    isGameFinanceTool: true,
     fields: {
       kind: {
         kind: "enum",
@@ -653,9 +657,11 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "get_market",
     title: "Get Market Detail",
     description:
-      "Fetch full public odds, mark/index pricing, related posts, and articles for a prediction market ID or perp ticker (Virtual points (pts) — no cash value).",
+      "Fetch full public odds, mark/index pricing, volume, recent trades, price history, related posts, and articles for a prediction market ID or perp ticker (Virtual points (pts) — no cash value; financial fields omitted in Social mode).",
     scope: "public",
     readOnly: true,
+    hasBalanceOrPnlField: true,
+    isGameFinanceTool: true,
     fields: {
       marketId: {
         kind: "string",
@@ -668,6 +674,18 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         kind: "enum",
         values: ["prediction", "perp"],
         description: "Optional disambiguation between prediction ID and perp ticker."
+      },
+      tradesLimit: {
+        kind: "integer",
+        minimum: 1,
+        maximum: 100,
+        description: "Maximum recent trades to include (1-100, default 20)."
+      },
+      historyLimit: {
+        kind: "integer",
+        minimum: 1,
+        maximum: 200,
+        description: "Maximum price history points to include (1-200, default 50)."
       }
     }
   }),
@@ -675,21 +693,39 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "get_leaderboard",
     title: "Get Leaderboard",
     description:
-      "Public verified-player profit rankings (Virtual points (pts) — no cash value), ordered by net profit and return %.",
+      "Public profit rankings for verified players and NPC characters (Virtual points (pts) — no cash value), ordered by net profit (equity - fixed 100 pts starting grant), return %, win rate, or volume. Omitted in Social mode.",
     scope: "public",
     readOnly: true,
     hasBalanceOrPnlField: true,
+    isGameFinanceTool: true,
     fields: {
+      scope: {
+        kind: "enum",
+        values: ["players", "characters"],
+        description: "Leaderboard board: verified human players (default) or AI parody characters."
+      },
       metric: {
         kind: "enum",
-        values: ["net_profit", "win_rate", "volume"],
-        description: "Sort leaderboard by net profit (default), win rate, or volume."
+        values: ["net_profit", "return_pct", "win_rate", "volume"],
+        description: "Server-side sort metric: net_profit (default), return_pct, win_rate, or volume."
+      },
+      page: {
+        kind: "integer",
+        minimum: 1,
+        maximum: 1000,
+        description: "1-based page number (default 1)."
+      },
+      pageSize: {
+        kind: "integer",
+        minimum: 1,
+        maximum: 100,
+        description: "Entries per page (1-100, default 25)."
       },
       limit: {
         kind: "integer",
         minimum: 1,
         maximum: 100,
-        description: "Maximum entries to return (1-100)."
+        description: "Alias for pageSize (1-100)."
       }
     }
   }),
@@ -700,7 +736,8 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
       "Return the signed-in account, active OAuth grant client name, granted scopes, presentation mode, rate-limit budget, and virtual point balance when in Game mode (Virtual points (pts) — no cash value; omitted in Social mode).",
     scope: "read",
     readOnly: true,
-    hasBalanceOrPnlField: true
+    hasBalanceOrPnlField: true,
+    isGameFinanceTool: true
   }),
   defineTool({
     name: "get_home_feed",
@@ -771,9 +808,10 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "preview_perp",
     title: "Preview Perpetual Order",
     description:
-      "Read-only preview of margin, 10 bps trading fee, entry mark price, notional exposure, and liquidation threshold before calling open_perp (Virtual points (pts) — no cash value).",
+      "Read-only preview of rebalance action (open/add/reduce/close/flip), margin, 10 bps trading fee, post-impact execution mark price, price impact bps, notional exposure, and liquidation threshold before calling open_perp (Virtual points (pts) — no cash value; omitted in Social mode).",
     scope: "read",
     readOnly: true,
+    hasBalanceOrPnlField: true,
     isGameFinanceTool: true,
     fields: perpOrderFields(
       "Collateral in virtual points (pts; 1 pt = 100 cents).",
@@ -999,6 +1037,21 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     }
   }),
   defineTool({
+    name: "get_blocks",
+    title: "Get Blocked Accounts",
+    description: "List accounts blocked by the authenticated caller.",
+    scope: "read",
+    readOnly: true,
+    fields: {
+      limit: {
+        kind: "integer",
+        minimum: 1,
+        maximum: 100,
+        description: "Maximum blocked accounts to return (1-100)."
+      }
+    }
+  }),
+  defineTool({
     name: "mute",
     title: "Mute Account or NPC",
     description: "Mute an account or NPC from your home timeline.",
@@ -1027,6 +1080,21 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         minLength: 1,
         maxLength: 120,
         description: "Target handle or ID."
+      }
+    }
+  }),
+  defineTool({
+    name: "get_mutes",
+    title: "Get Muted Accounts",
+    description: "List accounts and NPCs muted by the authenticated caller.",
+    scope: "read",
+    readOnly: true,
+    fields: {
+      limit: {
+        kind: "integer",
+        minimum: 1,
+        maximum: 100,
+        description: "Maximum muted accounts to return (1-100)."
       }
     }
   }),
@@ -1165,6 +1233,29 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     }
   }),
   defineTool({
+    name: "react_to_message",
+    title: "React to Chat Message",
+    description: "Toggle an emoji reaction on a message in a chat where the caller is a member.",
+    scope: "messages",
+    readOnly: false,
+    fields: {
+      messageId: {
+        kind: "string",
+        required: true,
+        minLength: 1,
+        maxLength: 120,
+        description: "Target chat message ID."
+      },
+      emoji: {
+        kind: "string",
+        required: true,
+        minLength: 1,
+        maxLength: 16,
+        description: "Emoji reaction string (1-16 characters)."
+      }
+    }
+  }),
+  defineTool({
     name: "create_group",
     title: "Create User Group Chat",
     description: "Create a new UserGroup chat and invite optional handles.",
@@ -1183,14 +1274,14 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         minLength: 1,
         maxLength: 80,
         maxItems: 20,
-        description: "Optional handles to add as members."
+        description: "Optional handles to invite as members."
       }
     }
   }),
   defineTool({
     name: "invite_to_group",
     title: "Invite to User Group",
-    description: "Add or invite an account handle/ID to an existing UserGroup chat you belong to.",
+    description: "Send a pending group invitation to an account handle/ID for an existing UserGroup chat you belong to.",
     scope: "messages",
     readOnly: false,
     fields: {
@@ -1229,15 +1320,22 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
   }),
   defineTool({
     name: "list_group_invites",
-    title: "List NPC Alpha Invites",
-    description: "List pending and past NpcAlpha group chat invitations.",
+    title: "List Group Invites",
+    description: "List pending UserGroup and NpcAlpha group chat invitations.",
     scope: "messages",
-    readOnly: true
+    readOnly: true,
+    fields: {
+      kind: {
+        kind: "enum",
+        values: ["all", "npc_alpha", "user_group"],
+        description: "Optional filter by invite group kind (default all)."
+      }
+    }
   }),
   defineTool({
     name: "respond_to_group_invite",
-    title: "Respond to NPC Alpha Invite",
-    description: "Accept or decline an NpcAlpha group chat invitation.",
+    title: "Respond to Group Invite",
+    description: "Accept or decline a pending UserGroup or NpcAlpha group chat invitation.",
     scope: "messages",
     readOnly: false,
     fields: {
@@ -1251,7 +1349,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
       accept: {
         kind: "boolean",
         required: true,
-        description: "True to join the alpha chat, false to decline."
+        description: "True to join the group chat, false to decline."
       }
     }
   }),
@@ -1259,7 +1357,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "buy_prediction",
     title: "Buy Prediction Shares",
     description:
-      "Spend virtual points (pts — no cash value) to buy YES or NO shares in an open prediction market. Pays a 0.1% (10 bps) fee and records client attribution. Shares the 120 trades/hr account budget.",
+      "Spend virtual points (pts — no cash value) to buy YES or NO shares in an open prediction market. Winning shares pay 1.00 pt per 1.00 share (100 integer shareUnits = 1.00 share). Pays a 0.1% (10 bps) fee and records client attribution. Shares the 120 trades/hr account budget.",
     scope: "trade",
     readOnly: false,
     destructive: true,
@@ -1272,7 +1370,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         required: true,
         exclusiveMinimum: 0,
         maximum: 1000000,
-        description: "Virtual points to spend (pts; minimum 0.01 pt = 1 cent)."
+        description: "Virtual points to spend (pts; minimum 1.00 pt = 100 cents)."
       }
     }
   }),
@@ -1280,7 +1378,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "sell_prediction",
     title: "Sell Prediction Shares",
     description:
-      "Sell YES or NO shares in an open prediction market back for virtual points (pts — no cash value). Pays a 0.1% (10 bps) fee and records client attribution.",
+      "Sell YES or NO shares in an open prediction market back for virtual points (pts — no cash value). Specify whole/decimal shares (1.00 share = 100 shareUnits) or exact integer shareUnits (minimum 1.00 share / 100 shareUnits). Pays a 0.1% (10 bps) fee and records client attribution.",
     scope: "trade",
     readOnly: false,
     hasBalanceOrPnlField: true,
@@ -1288,11 +1386,16 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     fields: {
       ...predictionTradeBaseFields("Outcome side to sell."),
       shares: {
+        kind: "number",
+        exclusiveMinimum: 0,
+        maximum: 10000000,
+        description: "Whole or decimal shares to sell (1.00 share = 100 shareUnits; minimum 1.00 share). Provide either shares or shareUnits."
+      },
+      shareUnits: {
         kind: "integer",
-        required: true,
         minimum: 1,
         maximum: 1000000000,
-        description: "Whole number of shares to sell."
+        description: "Exact integer cent-shares to sell (100 units = 1.00 share; minimum 100 units). Provide either shares or shareUnits."
       }
     }
   }),
@@ -1300,22 +1403,30 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     name: "open_perp",
     title: "Open Perpetual Position",
     description:
-      "Commit virtual points (pts — no cash value) as collateral to open a 1x-20x long or short perpetual position. Pays a 0.1% (10 bps) fee on notional size and records client attribution.",
+      "Commit virtual points (pts — no cash value) as collateral to open, add to, reduce, or flip a 1x-20x long or short perpetual position at post-impact mark price. Pays a 0.1% (10 bps) fee on notional size and records client attribution.",
     scope: "trade",
     readOnly: false,
     destructive: true,
     hasBalanceOrPnlField: true,
     isGameFinanceTool: true,
-    fields: perpOrderFields(
-      "Collateral in virtual points (pts; minimum 0.01 pt = 1 cent).",
-      "Integer leverage multiplier between 1 and 20."
-    )
+    fields: {
+      ...perpOrderFields(
+        "Collateral in virtual points (pts; minimum 0.01 pt = 1 cent).",
+        "Integer leverage multiplier between 1 and 20."
+      ),
+      maxSlippageBps: {
+        kind: "integer",
+        minimum: 0,
+        maximum: 5000,
+        description: "Optional maximum allowed mark price impact in basis points (0-5000)."
+      }
+    }
   }),
   defineTool({
     name: "close_perp",
     title: "Close Perpetual Position",
     description:
-      "Close an open perpetual position and settle net virtual points (pts — no cash value) minus 0.1% fee.",
+      "Fully or partially close an open perpetual position and settle net virtual points (pts — no cash value) minus 0.1% fee.",
     scope: "trade",
     readOnly: false,
     hasBalanceOrPnlField: true,
@@ -1327,10 +1438,37 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         minLength: 1,
         maxLength: 120,
         description: "Open perpetual position ID."
+      },
+      sizePts: {
+        kind: "number",
+        exclusiveMinimum: 0,
+        maximum: 10000000,
+        description: "Optional notional size in virtual points (pts) for a partial close."
+      },
+      sizeCents: {
+        kind: "integer",
+        minimum: 1,
+        maximum: 1000000000,
+        description: "Optional notional size in integer cents for a partial close."
+      },
+      closePct: {
+        kind: "number",
+        exclusiveMinimum: 0,
+        maximum: 100,
+        description: "Optional percentage (0-100] of the open position to close."
+      },
+      maxSlippageBps: {
+        kind: "integer",
+        minimum: 0,
+        maximum: 5000,
+        description: "Optional maximum allowed mark price impact in basis points (0-5000)."
       }
     }
   })
 ]
+
+export const PUBLIC_TOOL_COUNT = MCP_TOOL_DEFINITIONS.filter((tool) => tool.isPublic).length
+export const PROTECTED_TOOL_COUNT = MCP_TOOL_DEFINITIONS.length - PUBLIC_TOOL_COUNT
 
 const TOOL_BY_NAME = new Map<string, McpToolDefinition>(
   MCP_TOOL_DEFINITIONS.map((tool) => [tool.name, tool])
@@ -1467,6 +1605,18 @@ export function ptsToWholeCents(pts: number): number | undefined {
 }
 
 /** @throws {never} */
+export function shareUnitsToShares(shareUnits: number): number {
+  return Math.round(shareUnits) / 100
+}
+
+/** @throws {never} */
+export function sharesToShareUnits(shares: number): number | undefined {
+  if (!Number.isFinite(shares) || shares <= 0) return undefined
+  const units = Math.round(shares * 100)
+  return units >= 1 ? units : undefined
+}
+
+/** @throws {never} */
 export function parseProtocolVersion(requested: unknown): string {
   if (typeof requested === "string" && (MCP_PROTOCOL_VERSIONS as ReadonlyArray<string>).includes(requested)) {
     return requested
@@ -1490,9 +1640,9 @@ export function buildInitializeResult(protocolVersion: string, origin: string): 
       version: "1.0.0"
     },
     instructions: [
-      `Feed (${base}) is Twitter with markets using Virtual points (pts) — no cash value.`,
-      "15 public tools work without authentication. Protected tools return HTTP 401 with OAuth 2.1 resource metadata and support /link Device Flow via start_sign_in / check_sign_in.",
-      "Never request phone numbers or SMS codes, never offer to buy points, and omit balances/P&L when account playMode is social."
+      `Feed (${base}) is Twitter with markets using fixed 100 pts ($100 virtual capital) — Virtual points (pts) — no cash value.`,
+      `${PUBLIC_TOOL_COUNT} public tools work without authentication and ${PROTECTED_TOOL_COUNT} protected tools return HTTP 401 with OAuth 2.1 resource metadata and support /link Device Flow via start_sign_in / check_sign_in.`,
+      "Never request phone numbers or SMS codes, never offer to buy/sell/refill points (unavailable on web and MCP), and omit balances/P&L/market financials when account playMode is social."
     ].join(" ")
   }
 }
