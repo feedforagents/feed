@@ -44,9 +44,8 @@ jobs:
           verification: "false"
       - name: Generate specs and build @repo/app (SPA + Worker)
         run: |
-          pnpm --filter @repo/design-system build
           pnpm gen
-          pnpm --filter @repo/app build
+          pnpm --filter '@repo/app...' --filter '!vibestack' --filter '!@elizaos/*' --if-present run build
       - name: Deploy Worker + Assets to Cloudflare
         run: |
           flags=()

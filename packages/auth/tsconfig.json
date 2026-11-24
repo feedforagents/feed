@@ -20,7 +20,6 @@
   "include": [
     "src",
     "test",
-    "vitest.config.ts",
     "gen/*.ts",
     "gen/*.vibe"
   ],
