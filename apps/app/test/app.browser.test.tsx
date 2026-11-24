@@ -298,6 +298,13 @@ function installMockNetwork() {
   vi.stubGlobal("EventSource", StubEventSource);
 }
 
+async function mountApp() {
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+}
+
 beforeAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -327,10 +334,7 @@ afterAll(() => {
 
 it('Visitors browse markets and leaderboard, switch modes, sign in, and view fixed 100 pts wallet (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await mountApp();
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -396,10 +400,7 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
 
 it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
   installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await mountApp();
 
   const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
   await act(() => userEvent.click(homeButton));
