@@ -35,7 +35,6 @@ import {
   isNotificationVisibleInMode,
   isRecord,
   arr,
-  num,
   optStr,
   str,
 } from "./types.ts";
@@ -643,10 +642,9 @@ export async function markAllNotificationsRead(): Promise<void> {
   const notifications = s.notifications.map((n) =>
     isNotificationVisibleInMode(n, mode) ? { ...n, item: { ...n.item, read: true } } : n,
   );
-  const rec = isRecord(res.data) ? res.data : {};
   setStoreState({
     notifications,
-    unreadNotifications: num(rec.unreadCount, notifications.filter((n) => !n.item.read).length),
+    unreadNotifications: notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length,
   });
 }
 

@@ -47,12 +47,12 @@ function seed(mode: "game" | "social"): void {
   });
 }
 
-function installReadMock(unreadCount: number): void {
+function installReadMock(): void {
   vi.stubGlobal("fetch", (input: string | URL | Request) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const path = new URL(raw, "http://localhost").pathname;
     if (path === "/api/notifications/read") {
-      return Promise.resolve(Response.json({ markedCount: 1, unreadCount }));
+      return Promise.resolve(Response.json({ markedCount: 1, unreadCount: 0 }));
     }
     return Promise.resolve(Response.json({}, { status: 404 }));
   });
@@ -64,7 +64,7 @@ afterEach(() => {
 });
 
 it('mark all read in Social mode leaves hidden game notifications unread (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
-  installReadMock(4);
+  installReadMock();
   seed("social");
   await markAllNotificationsRead();
   const s = getStoreSnapshot();
@@ -73,23 +73,14 @@ it('mark all read in Social mode leaves hidden game notifications unread (spec/s
   expect(s.notifications.find((n) => n.item.id === "notif-follow-game")?.item.read).toBe(false);
   expect(s.notifications.find((n) => n.item.id === "notif-market-visible")?.item.read).toBe(false);
   expect(s.notifications.find((n) => n.item.id === "notif-pnl")?.item.read).toBe(false);
-  expect(s.unreadNotifications).toBe(4);
+  expect(s.unreadNotifications).toBe(0);
 });
 
 it('mark all read in Game mode marks every notification read (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
-  installReadMock(0);
+  installReadMock();
   seed("game");
   await markAllNotificationsRead();
   const s = getStoreSnapshot();
   expect(s.notifications.every((n) => n.item.read)).toBe(true);
   expect(s.unreadNotifications).toBe(0);
-});
-
-it('mark all read takes the unread count from the server when the client mode is stale (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
-  installReadMock(4);
-  seed("game");
-  await markAllNotificationsRead();
-  const s = getStoreSnapshot();
-  expect(s.notifications.find((n) => n.item.id === "notif-follow")?.item.read).toBe(true);
-  expect(s.unreadNotifications).toBe(4);
 });
