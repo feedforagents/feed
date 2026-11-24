@@ -206,6 +206,8 @@ pure def confirmSpend(b: BudgetLedger, attemptId: int, actualCents: int): Budget
 
 ### Timeouts and worker restarts mark open reservations uncertain without releasing funds
 
+A failed live call whose caller falls back to deterministic text is the exception: the attempt settles at actual cost 0 instead of staying uncertain. No provider usage was reported, the caller is told the cost is 0, and no later step ever confirms the attempt — an uncertain row would lock its full bound in every later day's headroom with nothing to release it. The uncertain mark applies when the failure is surfaced to the caller instead (no fallback), where a later confirm can still reconcile it.
+
 ```quint
 pure def canMarkUncertain(b: BudgetLedger, attemptId: int): bool =
   b.attempts.some(a => a.attemptId == attemptId and a.attemptStatus == AttemptReserved)

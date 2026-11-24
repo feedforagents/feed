@@ -469,13 +469,14 @@ export effect function generateCompletion(request: CompletionRequest): Completio
     }
   }
   const live = sendChatCompletionHttp(config, request, resolvedSystem) catch effect (err) => {
-    try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
     if (request.allowOfflineFallback !== false) {
       return null
     }
+    try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
     throw err
   }
   if (live === null) {
+    try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
     return {
       text: buildDeterministicFallback(request),
       provider: "offline-fallback",

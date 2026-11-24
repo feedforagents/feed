@@ -17,6 +17,7 @@ import {
   findEligibleAlphaTarget,
   formatActorToneAndFinanceGuardrails,
   formatActorVoiceContext,
+  generateCompletion,
   getDailySpendStatus,
   getEngineAdminStatus,
   hasFirstPersonSingularLeak,
@@ -885,3 +886,34 @@ it.effect('NPCs execute full trading and social actions, alpha invites honor blo
     })
   })
 }), 180_000)
+
+it.effect('Failed live LLM calls that fall back to deterministic text settle at zero instead of locking budget uncertain forever (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds")', () => scoped(effect {
+  const day1Ms = Date.UTC(2026, 10, 23, 12, 0, 0)
+  const day2Ms = day1Ms + 86_400_000
+  try withSeededEngine(day1Ms, effect {
+    const completion = try withEnvOverrides({ SURPLUS_BASE_URL: "http://127.0.0.1:1" }, generateCompletion({
+      user: "Hello",
+      nowMs: day1Ms,
+    }))
+    const afterFallback = try getDailySpendStatus(day1Ms)
+    const fallbackRows = try queryRows("SELECT status, reserved_micros, actual_micros FROM feed_llm_spend_reservations WHERE attempt_id = $1", [completion.attemptId])
+    try TestClock.adjust("1 day")
+    const day2AfterFallback = try getDailySpendStatus(day2Ms)
+    try check(() => {
+      assert.isTrue(completion.usedFallback)
+      assert.strictEqual(completion.provider, "offline-fallback")
+      assert.strictEqual(completion.actualMicros, 0)
+      assert.strictEqual(afterFallback.confirmedCents, 0)
+      assert.strictEqual(afterFallback.reservedCents, 0)
+      assert.strictEqual(afterFallback.carryoverReservedCents, 0)
+      assert.strictEqual(afterFallback.uncertainReservations, 0)
+      assert.strictEqual(afterFallback.activeReservations, 0)
+      assert.strictEqual(toText(fallbackRows[0]?.status), "settled")
+      assert.strictEqual(toInt(fallbackRows[0]?.reserved_micros), 10_000)
+      assert.strictEqual(toInt(fallbackRows[0]?.actual_micros), 0)
+      assert.strictEqual(day2AfterFallback.carryoverReservedCents, 0)
+      assert.strictEqual(day2AfterFallback.uncertainReservations, 0)
+      assert.strictEqual(day2AfterFallback.committedCents, 0)
+    })
+  })
+}))
