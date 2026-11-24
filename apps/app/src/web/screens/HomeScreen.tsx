@@ -13,7 +13,6 @@ import {
   DialogDescription,
   DialogTitle,
   EmptyState,
-  PostCard,
   PostComposer,
   Skeleton,
   Tabs,
@@ -22,6 +21,7 @@ import {
   type PostComposerContext,
   type UiMode,
 } from "@repo/ui";
+import { FeedPostCard } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 import type { AppPost } from "../types.ts";
 
@@ -99,32 +99,21 @@ function ThreadDialog({
           <div className="flex flex-col">
             {thread.parentPost ? (
               <div className="border-b border-border bg-muted/40">
-                <PostCard
-                  post={thread.parentPost.card}
+                <FeedPostCard
+                  post={thread.parentPost}
                   mode={mode}
-                  onLike={(id) => { void storeActions.toggleLike(id); }}
-                  onRepost={(id) => { void storeActions.repostPost(id); }}
-                  onReply={(id) => { void storeActions.openThread(id); }}
-                  onQuote={() => onQuote(thread.parentPost!)}
-                  onAuthorClick={(h) => { void storeActions.navigate(`/u/${encodeURIComponent(h)}`); }}
-                  onMarketClick={(t) => { void storeActions.navigate(`/markets?ticker=${encodeURIComponent(t)}`); }}
+                  onQuote={() => {
+                    if (thread.parentPost) onQuote(thread.parentPost);
+                  }}
                 />
               </div>
             ) : null}
-            <PostCard
-              post={thread.post.card}
+            <FeedPostCard
+              post={thread.post}
               mode={mode}
-              onLike={(id) => { void storeActions.toggleLike(id); }}
-              onRepost={(id) => { void storeActions.repostPost(id); }}
+              allowReply={false}
+              closeThreadOnNavigate
               onQuote={() => onQuote(thread.post)}
-              onAuthorClick={(h) => {
-                storeActions.closeThread();
-                void storeActions.navigate(`/u/${encodeURIComponent(h)}`);
-              }}
-              onMarketClick={(t) => {
-                storeActions.closeThread();
-                void storeActions.navigate(`/markets?ticker=${encodeURIComponent(t)}`);
-              }}
             />
             {viewerHandle && thread.post.card.authorHandle === viewerHandle ? (
               <div className="flex justify-end border-b border-border px-4 py-2">
@@ -148,22 +137,12 @@ function ThreadDialog({
               <EmptyState title="No replies yet" />
             ) : (
               thread.replies.map((reply) => (
-                <PostCard
+                <FeedPostCard
                   key={reply.card.id}
-                  post={reply.card}
+                  post={reply}
                   mode={mode}
-                  onLike={(id) => { void storeActions.toggleLike(id); }}
-                  onRepost={(id) => { void storeActions.repostPost(id); }}
-                  onReply={(id) => { void storeActions.openThread(id); }}
+                  closeThreadOnNavigate
                   onQuote={() => onQuote(reply)}
-                  onAuthorClick={(h) => {
-                    storeActions.closeThread();
-                    void storeActions.navigate(`/u/${encodeURIComponent(h)}`);
-                  }}
-                  onMarketClick={(t) => {
-                    storeActions.closeThread();
-                    void storeActions.navigate(`/markets?ticker=${encodeURIComponent(t)}`);
-                  }}
                 />
               ))
             )}
@@ -251,12 +230,9 @@ export function HomeScreen({ mode, explainerVisible }: HomeScreenProps) {
         <div className="flex flex-col">
           {s.feedPosts.map((post) => (
             <div key={post.card.id} className="flex flex-col">
-              <PostCard
-                post={post.card}
+              <FeedPostCard
+                post={post}
                 mode={mode}
-                onLike={(id) => { void storeActions.toggleLike(id); }}
-                onRepost={(id) => { void storeActions.repostPost(id); }}
-                onReply={(id) => { void storeActions.openThread(id); }}
                 onQuote={(id) => {
                   const target = s.feedPosts.find((p) => p.card.id === id) ?? null;
                   if (!s.viewer) {
@@ -265,8 +241,6 @@ export function HomeScreen({ mode, explainerVisible }: HomeScreenProps) {
                   }
                   setQuoteTarget(target);
                 }}
-                onAuthorClick={(handle) => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}
-                onMarketClick={(ticker) => { void storeActions.navigate(`/markets?ticker=${encodeURIComponent(ticker)}`); }}
               />
             </div>
           ))}

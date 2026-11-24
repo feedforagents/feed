@@ -69,6 +69,68 @@ const navConfig: { id: AppNavRoute; label: string; icon: typeof Home; authOnly?:
   { id: "HowToPlay", label: "How to Play", icon: HelpCircle, mobile: true },
 ];
 
+type NavItemConfig = (typeof navConfig)[number];
+
+function NavItemButton({
+  item,
+  route,
+  disabled,
+  onNavigate,
+  variant,
+  count = 0,
+}: {
+  readonly item: NavItemConfig;
+  readonly route: AppNavRoute;
+  readonly disabled: boolean;
+  readonly onNavigate?: (route: AppNavRoute) => void;
+  readonly variant: "rail" | "mobile";
+  readonly count?: number;
+}) {
+  const Icon = item.icon;
+  const active = route === item.id;
+  const isRail = variant === "rail";
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      aria-current={active ? "page" : undefined}
+      onClick={() => {
+        if (!disabled) onNavigate?.(item.id);
+      }}
+      className={cn(
+        focusRing,
+        inactive,
+        isRail
+          ? "flex items-center justify-between rounded-lg px-3 py-2.5 text-sm font-medium transition-colors duration-fast"
+          : "flex min-w-14 flex-col items-center gap-0.5 rounded-md px-2 py-1 text-xs font-medium",
+        isRail
+          ? active
+            ? "bg-accent font-semibold text-accent-foreground"
+            : "text-muted-foreground hover:bg-muted hover:text-foreground"
+          : active
+            ? "text-primary"
+            : "text-muted-foreground",
+      )}
+    >
+      {isRail ? (
+        <>
+          <span className="flex items-center gap-3">
+            <Icon aria-hidden className="size-4.5" />
+            {item.label}
+          </span>
+          {count > 0 ? <Badge variant="default">{count}</Badge> : null}
+        </>
+      ) : (
+        <>
+          <Icon aria-hidden className="size-4" />
+          <span>{item.label}</span>
+        </>
+      )}
+    </button>
+  );
+}
+
 /** Responsive three-column Feed shell with desktop left rail, mobile bottom bar, right trending rail, and SocialMode filtering. */
 export function AppShell({
   route,
@@ -107,34 +169,17 @@ export function AppShell({
               {brand ?? <span className="text-xl font-bold tracking-tight text-foreground">Feed</span>}
             </div>
             <nav aria-label="Primary" className="flex flex-col gap-1">
-              {visibleItems.map((item) => {
-                const Icon = item.icon;
-                const active = route === item.id;
-                const count = badgeCount(item.id);
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    disabled={disabled}
-                    aria-current={active ? "page" : undefined}
-                    onClick={() => {
-                      if (!disabled) onNavigate?.(item.id);
-                    }}
-                    className={cn(
-                      focusRing,
-                      inactive,
-                      "flex items-center justify-between rounded-lg px-3 py-2.5 text-sm font-medium transition-colors duration-fast",
-                      active ? "bg-accent font-semibold text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    <span className="flex items-center gap-3">
-                      <Icon aria-hidden className="size-4.5" />
-                      {item.label}
-                    </span>
-                    {count > 0 ? <Badge variant="default">{count}</Badge> : null}
-                  </button>
-                );
-              })}
+              {visibleItems.map((item) => (
+                <NavItemButton
+                  key={item.id}
+                  item={item}
+                  route={route}
+                  disabled={disabled}
+                  onNavigate={onNavigate}
+                  variant="rail"
+                  count={badgeCount(item.id)}
+                />
+              ))}
             </nav>
           </div>
           <div className="flex flex-col gap-3">
@@ -215,30 +260,16 @@ export function AppShell({
       </div>
 
       <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-40 flex items-center justify-around border-t border-border bg-background/95 px-2 py-1.5 backdrop-blur-sm md:hidden">
-        {mobileItems.map((item) => {
-          const Icon = item.icon;
-          const active = route === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              disabled={disabled}
-              aria-current={active ? "page" : undefined}
-              onClick={() => {
-                if (!disabled) onNavigate?.(item.id);
-              }}
-              className={cn(
-                focusRing,
-                inactive,
-                "flex min-w-14 flex-col items-center gap-0.5 rounded-md px-2 py-1 text-xs font-medium",
-                active ? "text-primary" : "text-muted-foreground",
-              )}
-            >
-              <Icon aria-hidden className="size-4" />
-              <span>{item.label}</span>
-            </button>
-          );
-        })}
+        {mobileItems.map((item) => (
+          <NavItemButton
+            key={item.id}
+            item={item}
+            route={route}
+            disabled={disabled}
+            onNavigate={onNavigate}
+            variant="mobile"
+          />
+        ))}
       </nav>
     </div>
   );

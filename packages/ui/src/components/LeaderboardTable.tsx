@@ -88,6 +88,16 @@ export function LeaderboardTable({
           ) : (
             rows.map((row) => {
               const positive = row.netProfitPts >= 0;
+              const trader = (
+                <>
+                  <Avatar name={row.displayName} src={row.avatarUrl} size="sm" />
+                  <span className="flex items-center gap-1.5">
+                    <span className="font-medium text-foreground">{row.displayName}</span>
+                    <span className="text-xs text-muted-foreground">@{row.handle}</span>
+                    {row.isNpc ? <Badge variant="info">AI parody</Badge> : null}
+                  </span>
+                </>
+              );
               return (
                 <TableRow key={row.accountId}>
                   <TableCell className="text-right font-mono text-muted-foreground tabular-nums">#{row.rank}</TableCell>
@@ -99,22 +109,10 @@ export function LeaderboardTable({
                         onClick={() => !disabled && onSelectTrader(row.accountId)}
                         className={cn(focusRing, inactive, "inline-flex items-center gap-2.5 rounded-sm text-left hover:underline")}
                       >
-                        <Avatar name={row.displayName} src={row.avatarUrl} size="sm" />
-                        <span className="flex items-center gap-1.5">
-                          <span className="font-medium text-foreground">{row.displayName}</span>
-                          <span className="text-xs text-muted-foreground">@{row.handle}</span>
-                          {row.isNpc ? <Badge variant="info">AI parody</Badge> : null}
-                        </span>
+                        {trader}
                       </button>
                     ) : (
-                      <div className="inline-flex items-center gap-2.5">
-                        <Avatar name={row.displayName} src={row.avatarUrl} size="sm" />
-                        <span className="flex items-center gap-1.5">
-                          <span className="font-medium text-foreground">{row.displayName}</span>
-                          <span className="text-xs text-muted-foreground">@{row.handle}</span>
-                          {row.isNpc ? <Badge variant="info">AI parody</Badge> : null}
-                        </span>
-                      </div>
+                      <div className="inline-flex items-center gap-2.5">{trader}</div>
                     )}
                   </TableCell>
                   <TableCell className={cn("text-right font-mono font-semibold tabular-nums", positive ? "text-ok" : "text-destructive")}>

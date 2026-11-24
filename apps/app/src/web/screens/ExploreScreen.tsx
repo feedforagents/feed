@@ -14,10 +14,10 @@ import {
   DialogTitle,
   EmptyState,
   Input,
-  PostCard,
   Skeleton,
   type UiMode,
 } from "@repo/ui";
+import { BorderedPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 import type { AppArticle } from "../types.ts";
 
@@ -114,20 +114,7 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
           ) : null}
 
           {s.explore.posts.length > 0 ? (
-            <div className="overflow-hidden rounded-lg border border-border">
-              {s.explore.posts.map((post) => (
-                <PostCard
-                  key={post.card.id}
-                  post={post.card}
-                  mode={mode}
-                  onLike={(id) => { void storeActions.toggleLike(id); }}
-                  onRepost={(id) => { void storeActions.repostPost(id); }}
-                  onReply={(id) => { void storeActions.openThread(id); }}
-                  onAuthorClick={(h) => { void storeActions.navigate(`/u/${encodeURIComponent(h)}`); }}
-                  onMarketClick={(t) => { void storeActions.navigate(`/markets?ticker=${encodeURIComponent(t)}`); }}
-                />
-              ))}
-            </div>
+            <BorderedPostList posts={s.explore.posts} mode={mode} />
           ) : null}
         </section>
       ) : null}

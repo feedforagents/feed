@@ -10,7 +10,6 @@ import {
   DialogTitle,
   EmptyState,
   PositionRow,
-  PostCard,
   ProfileHeader,
   Skeleton,
   Tabs,
@@ -20,6 +19,7 @@ import {
   Textarea,
   type UiMode,
 } from "@repo/ui";
+import { BorderedPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 
 export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
@@ -94,20 +94,7 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
             {bundle.posts.length === 0 ? (
               <EmptyState title="No posts yet" />
             ) : (
-              <div className="overflow-hidden rounded-lg border border-border">
-                {bundle.posts.map((post) => (
-                  <PostCard
-                    key={post.card.id}
-                    post={post.card}
-                    mode={mode}
-                    onLike={(id) => { void storeActions.toggleLike(id); }}
-                    onRepost={(id) => { void storeActions.repostPost(id); }}
-                    onReply={(id) => { void storeActions.openThread(id); }}
-                    onAuthorClick={(h) => { void storeActions.navigate(`/u/${encodeURIComponent(h)}`); }}
-                    onMarketClick={(t) => { void storeActions.navigate(`/markets?ticker=${encodeURIComponent(t)}`); }}
-                  />
-                ))}
-              </div>
+              <BorderedPostList posts={bundle.posts} mode={mode} />
             )}
           </TabsContent>
 
