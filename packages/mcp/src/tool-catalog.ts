@@ -1306,10 +1306,18 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     destructive: true,
     hasBalanceOrPnlField: true,
     isGameFinanceTool: true,
-    fields: perpOrderFields(
-      "Collateral in virtual points (pts; minimum 0.01 pt = 1 cent).",
-      "Integer leverage multiplier between 1 and 20."
-    )
+    fields: {
+      ...perpOrderFields(
+        "Collateral in virtual points (pts; minimum 0.01 pt = 1 cent).",
+        "Integer leverage multiplier between 1 and 20."
+      ),
+      idempotencyKey: {
+        kind: "string",
+        minLength: 1,
+        maxLength: 255,
+        description: "Optional idempotency key (1-255 characters) to safely deduplicate retried perp orders."
+      }
+    }
   }),
   defineTool({
     name: "close_perp",
@@ -1327,6 +1335,12 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         minLength: 1,
         maxLength: 120,
         description: "Open perpetual position ID."
+      },
+      idempotencyKey: {
+        kind: "string",
+        minLength: 1,
+        maxLength: 255,
+        description: "Optional idempotency key (1-255 characters) to safely deduplicate retried perp closes."
       }
     }
   })
