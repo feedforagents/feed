@@ -26,6 +26,7 @@ mock.module('@feed/db', () => ({
   comments: {},
   db: {},
   eq: mock(),
+  hasBlocked: mock(),
   posts: {},
   users: {},
 }));

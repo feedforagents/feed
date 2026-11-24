@@ -106,7 +106,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { comments, db, eq, posts, users } from '@feed/db';
+import { comments, db, eq, hasBlocked, posts, users } from '@feed/db';
 import {
   FollowingMechanics,
   GroupChatService,
@@ -184,6 +184,18 @@ export const POST = withErrorHandling(
 
     const { user: dbUser } = await ensureUserForAuth(user, { displayName });
     const canonicalUserId = dbUser.id;
+
+    // Apply the same bilateral post-author rule as the post comments route.
+    const [blockedByAuthor, blockedAuthor] = await Promise.all([
+      hasBlocked(npcId, canonicalUserId),
+      hasBlocked(canonicalUserId, npcId),
+    ]);
+    if (blockedByAuthor || blockedAuthor) {
+      throw new BusinessLogicError(
+        'Cannot comment on this post',
+        'BLOCKED_USER'
+      );
+    }
 
     // 4. Check rate limiting (fast reject; enforced again in step 7)
     const preCheck = await ReplyRateLimiter.canReply(canonicalUserId, npcId);
@@ -288,7 +300,11 @@ export const POST = withErrorHandling(
 
     // 10. Check for group chat invite chance (only if followed)
     let invitedToChat = false;
-    let chatInfo = null;
+    let chatInfo: {
+      chatId: string;
+      chatName: string;
+      isOwned: boolean;
+    } | null = null;
 
     if (
       followed ||
