@@ -447,14 +447,32 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ exploreLoading: true, exploreQuery: q });
   const url = appendAnonymousModeParam(`/api/explore?q=${encodeURIComponent(q.trim())}`, s);
-  const res = await requestJson(url, {
-    parse: (raw) => decodeExplore(raw, viewerId),
-  });
+  const needMarkets = s.perps.length === 0;
+  const [res, mktRes] = await Promise.all([
+    requestJson(url, {
+      parse: (raw) => decodeExplore(raw, viewerId),
+    }),
+    needMarkets ? requestJson("/api/markets", { parse: passThrough }) : Promise.resolve(null),
+  ]);
+  let marketPatch: Partial<Pick<ReturnType<typeof getStoreSnapshot>, "predictions" | "perps" | "positions">> = {};
+  if (mktRes && mktRes.ok && isRecord(mktRes.data)) {
+    const rawPreds = arr(mktRes.data.predictions ?? mktRes.data.predictionMarkets);
+    const rawPerps = arr(mktRes.data.perps ?? mktRes.data.perpMarkets);
+    const predictions = rawPreds.map(decodePredictionMarket).filter((m): m is AppPredictionMarket => m !== null);
+    const perps = rawPerps.map(decodePerpMarket).filter((m): m is AppPerpMarket => m !== null);
+    if (mktRes.data.positions !== undefined) {
+      const positions = decodePositions(mktRes.data.positions);
+      syncAtRiskPositions(positions);
+      marketPatch = { predictions, perps, positions };
+    } else {
+      marketPatch = { predictions, perps };
+    }
+  }
   if (res.ok) {
-    setStoreState({ explore: res.data, exploreLoading: false });
+    setStoreState({ explore: res.data, exploreLoading: false, ...marketPatch });
     return;
   }
-  setStoreState({ exploreLoading: false });
+  setStoreState({ exploreLoading: false, ...marketPatch });
   setErrorNotice(res.message);
 }
 
@@ -771,6 +789,9 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
     if (window.location.pathname !== targetPath) {
       window.history.pushState(null, "", targetPath);
     }
+    if (typeof window.scrollTo === "function") {
+      window.scrollTo(0, 0);
+    }
   }
   void loadMarketDetails(kind, id);
 }
@@ -782,8 +803,13 @@ export function openMarketsDashboard(): void {
     perpPreview: null,
     tradeError: null,
   });
-  if (typeof window !== "undefined" && window.location.pathname !== "/markets") {
-    window.history.pushState(null, "", "/markets");
+  if (typeof window !== "undefined") {
+    if (window.location.pathname !== "/markets") {
+      window.history.pushState(null, "", "/markets");
+    }
+    if (typeof window.scrollTo === "function") {
+      window.scrollTo(0, 0);
+    }
   }
 }
 

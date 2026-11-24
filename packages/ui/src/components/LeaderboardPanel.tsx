@@ -364,7 +364,7 @@ export function LeaderboardPanel({
         ) : null}
       </Tabs>
 
-      <aside aria-label="Selected trader inspector" className="w-full shrink-0 xl:sticky xl:top-4 xl:w-96">
+      <aside aria-label="Selected trader inspector" className="w-full shrink-0 xl:sticky xl:top-4 xl:w-72 2xl:w-80">
         <TraderDetailInspector
           trader={activeTrader}
           isViewer={Boolean(viewerAccountId && activeTrader?.accountId === viewerAccountId)}

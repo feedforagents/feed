@@ -84,14 +84,14 @@ export function PredictionProbabilityChart({
   }, [visible]);
 
   const headerLeft = showHeader ? (
-    <div className="flex flex-wrap items-center gap-4">
-      <div className="flex items-center gap-2">
-        <span aria-hidden className="size-2.5 rounded-full bg-ok" />
-        <span className="font-mono text-sm font-semibold text-foreground tabular-nums">YES {yesPct.toFixed(1)}%</span>
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
+        <span aria-hidden className="size-2.5 shrink-0 rounded-full bg-ok" />
+        <span className="font-mono text-sm font-semibold whitespace-nowrap text-foreground tabular-nums">YES {yesPct.toFixed(1)}%</span>
       </div>
-      <div className="flex items-center gap-2">
-        <span aria-hidden className="size-2.5 rounded-full bg-destructive" />
-        <span className="font-mono text-sm font-semibold text-foreground tabular-nums">NO {noPct.toFixed(1)}%</span>
+      <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
+        <span aria-hidden className="size-2.5 shrink-0 rounded-full bg-destructive" />
+        <span className="font-mono text-sm font-semibold whitespace-nowrap text-foreground tabular-nums">NO {noPct.toFixed(1)}%</span>
       </div>
     </div>
   ) : undefined;

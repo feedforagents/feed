@@ -264,7 +264,7 @@ function buildChartOptions(
 /** Compact `1H | 4H | 1D | 1W | ALL` timeframe pill strip for charts. */
 export function TimeRangeSelector({ value, onChange, disabled = false, className }: TimeRangeSelectorProps) {
   return (
-    <div role="group" aria-label="Chart time range" className={cn("inline-flex items-center gap-0.5 rounded-md border border-border bg-muted p-0.5", className)}>
+    <div role="group" aria-label="Chart time range" className={cn("inline-flex shrink-0 items-center gap-0.5 rounded-md border border-border bg-muted p-0.5 whitespace-nowrap", className)}>
       {MARKET_TIME_RANGES.map((range) => {
         const active = value === range;
         return (
@@ -276,7 +276,7 @@ export function TimeRangeSelector({ value, onChange, disabled = false, className
             onClick={() => onChange(range)}
             className={cn(
               focusRing,
-              "rounded-sm px-2 py-1 font-mono text-xs font-medium transition-colors duration-fast",
+              "rounded-sm px-2 py-1 font-mono text-xs font-medium whitespace-nowrap transition-colors duration-fast",
               active ? "bg-feed-brand text-feed-brand-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
               disabled && "pointer-events-none opacity-50",
             )}
@@ -475,8 +475,8 @@ export function LightweightChartBase({
     >
       {showToolbar ? (
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0 flex-1">{headerLeft}</div>
-          {timeRange && onTimeRangeChange ? <TimeRangeSelector value={timeRange} onChange={onTimeRangeChange} disabled={loading} /> : null}
+          <div className="min-w-0">{headerLeft}</div>
+          {timeRange && onTimeRangeChange ? <TimeRangeSelector value={timeRange} onChange={onTimeRangeChange} disabled={loading} className="shrink-0" /> : null}
         </div>
       ) : null}
 

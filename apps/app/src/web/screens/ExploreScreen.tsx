@@ -98,52 +98,145 @@ function ExplorePeopleList({ hasSearch }: { readonly hasSearch: boolean }) {
   );
 }
 
+interface ExploreOrgListItem {
+  readonly id: string;
+  readonly name: string;
+  readonly ticker: string | null;
+  readonly orgType: string;
+  readonly description: string;
+  readonly avatarUrl: string | null;
+  readonly markPricePts: string | null;
+  readonly change24hPct: number | null;
+}
+
+function buildExploreOrgItems(
+  s: ReturnType<typeof useAppStore>,
+  hasSearch: boolean,
+): ReadonlyArray<ExploreOrgListItem> {
+  const perpsByTicker = new Map<string, (typeof s.perps)[number]>();
+  const perpsByOrgId = new Map<string, (typeof s.perps)[number]>();
+  for (const perp of s.perps) {
+    perpsByTicker.set(perp.ticker.toUpperCase(), perp);
+    if (perp.organizationId) {
+      perpsByOrgId.set(perp.organizationId.toLowerCase(), perp);
+    }
+  }
+
+  const seenIds = new Set<string>();
+  const seenTickers = new Set<string>();
+  const items: ExploreOrgListItem[] = [];
+
+  for (const org of s.explore.organizations) {
+    const matchedPerp =
+      (org.ticker ? perpsByTicker.get(org.ticker.toUpperCase()) : undefined) ??
+      perpsByOrgId.get(org.id.toLowerCase());
+    seenIds.add(org.id.toLowerCase());
+    if (org.ticker) seenTickers.add(org.ticker.toUpperCase());
+    if (matchedPerp) seenTickers.add(matchedPerp.ticker.toUpperCase());
+    items.push({
+      id: org.id,
+      name: org.name,
+      ticker: org.ticker ?? matchedPerp?.ticker ?? null,
+      orgType: org.orgType,
+      description: org.description,
+      avatarUrl: org.avatarUrl ?? matchedPerp?.orgImageUrl ?? null,
+      markPricePts: matchedPerp?.card.markPricePts ?? null,
+      change24hPct: matchedPerp ? matchedPerp.change24hPct : null,
+    });
+  }
+
+  const qLower = s.exploreQuery.trim().toLowerCase();
+  for (const perp of s.perps) {
+    const orgId = perp.organizationId ?? perp.ticker;
+    if (seenIds.has(orgId.toLowerCase()) || seenTickers.has(perp.ticker.toUpperCase())) continue;
+    if (
+      hasSearch &&
+      !perp.ticker.toLowerCase().includes(qLower) &&
+      !perp.card.name.toLowerCase().includes(qLower) &&
+      !orgId.toLowerCase().includes(qLower)
+    ) {
+      continue;
+    }
+    seenIds.add(orgId.toLowerCase());
+    seenTickers.add(perp.ticker.toUpperCase());
+    items.push({
+      id: orgId,
+      name: perp.card.name,
+      ticker: perp.ticker,
+      orgType: "Organization",
+      description: "",
+      avatarUrl: perp.orgImageUrl,
+      markPricePts: perp.card.markPricePts,
+      change24hPct: perp.change24hPct,
+    });
+  }
+
+  return items;
+}
+
 function ExploreOrgsList({ hasSearch, isGame }: { readonly hasSearch: boolean; readonly isGame: boolean }) {
   const s = useAppStore();
-  if (s.explore.organizations.length === 0) {
-    return <EmptyState title={hasSearch ? "No matching organizations" : "Search to browse organizations"} />;
+  const orgs = buildExploreOrgItems(s, hasSearch);
+  if (orgs.length === 0) {
+    return <EmptyState title={hasSearch ? "No matching organizations" : "No organizations available yet"} />;
   }
   return (
     <div className="divide-y divide-border">
-      {s.explore.organizations.map((org) => (
-        <div key={org.id} className="flex items-start justify-between gap-3 px-4 py-3 transition-colors hover:bg-muted/30">
-          <button
-            type="button"
-            onClick={() => { void storeActions.navigate(`/orgs/${encodeURIComponent(org.id)}`); }}
-            className="flex min-w-0 flex-1 items-start gap-3 text-left"
-          >
-            <Avatar name={org.name} src={org.avatarUrl ?? undefined} seed={org.id} size="md" />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <span className="truncate text-sm font-bold text-foreground hover:underline">{org.name}</span>
-                <VerifiedBadge size="sm" />
-                {isGame && org.ticker ? <Badge variant="info" className="font-mono">${org.ticker}</Badge> : null}
-              </div>
-              <p className="text-xs text-muted-foreground">{org.orgType}</p>
-              {org.description ? <p className="mt-1 line-clamp-2 text-sm text-foreground/90">{org.description}</p> : null}
-            </div>
-          </button>
-          {isGame && org.ticker ? (
-            <Button
-              size="sm"
-              shape="pill"
-              variant="outline"
-              onClick={() => { void storeActions.navigate(`/markets/perps/${encodeURIComponent(org.ticker ?? "")}`); }}
-            >
-              Trade
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              shape="pill"
-              variant="outline"
+      {orgs.map((org) => {
+        const positive = (org.change24hPct ?? 0) >= 0;
+        return (
+          <div key={org.id} className="flex items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-muted/30">
+            <button
+              type="button"
               onClick={() => { void storeActions.navigate(`/orgs/${encodeURIComponent(org.id)}`); }}
+              className="flex min-w-0 flex-1 items-start gap-3 text-left"
             >
-              View
-            </Button>
-          )}
-        </div>
-      ))}
+              <Avatar name={org.name} src={org.avatarUrl ?? undefined} seed={org.id} size="md" />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="truncate text-sm font-bold text-foreground hover:underline">{org.name}</span>
+                  <VerifiedBadge size="sm" />
+                  {isGame && org.ticker ? <Badge variant="info" className="font-mono">${org.ticker}</Badge> : null}
+                </div>
+                <p className="text-xs text-muted-foreground">{org.orgType}</p>
+                {org.description ? <p className="mt-1 line-clamp-2 text-sm text-foreground/90">{org.description}</p> : null}
+              </div>
+            </button>
+            <div className="flex shrink-0 items-center gap-3">
+              {isGame && org.markPricePts ? (
+                <div className="text-right font-mono text-xs tabular-nums">
+                  <span className="block font-semibold text-foreground">{org.markPricePts}</span>
+                  {org.change24hPct !== null ? (
+                    <span className={positive ? "text-ok" : "text-destructive"}>
+                      {positive ? "+" : ""}
+                      {org.change24hPct.toFixed(1)}%
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
+              {isGame && org.ticker ? (
+                <Button
+                  size="sm"
+                  shape="pill"
+                  variant="outline"
+                  onClick={() => { void storeActions.navigate(`/markets/perps/${encodeURIComponent(org.ticker ?? "")}`); }}
+                >
+                  Trade
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  shape="pill"
+                  variant="outline"
+                  onClick={() => { void storeActions.navigate(`/orgs/${encodeURIComponent(org.id)}`); }}
+                >
+                  View
+                </Button>
+              )}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -210,6 +303,7 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
   const activeBrowseTab: BrowseTab = !isGame && browseTab === "markets" ? "trending" : browseTab;
   const activeSearchTab: SearchTab = !isGame && searchTab === "markets" ? "top" : searchTab;
   const peopleCount = s.explore.actors.length + s.explore.accounts.length;
+  const searchOrgCount = hasSearch ? buildExploreOrgItems(s, true).length : 0;
 
   return (
     <div className="flex flex-col">
@@ -311,7 +405,7 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
                 <ExplorePeopleList hasSearch />
               </section>
             ) : null}
-            {s.explore.organizations.length > 0 ? (
+            {searchOrgCount > 0 ? (
               <section className="border-b border-border">
                 <div className="flex items-center justify-between px-4 py-2.5">
                   <h2 className="text-sm font-bold text-foreground">Organizations</h2>
@@ -324,7 +418,7 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
             ) : null}
             {s.explore.posts.length > 0 ? (
               <FlatPostList posts={s.explore.posts} mode={mode} />
-            ) : peopleCount === 0 && s.explore.organizations.length === 0 && s.explore.tags.length === 0 ? (
+            ) : peopleCount === 0 && searchOrgCount === 0 && s.explore.tags.length === 0 ? (
               <EmptyState title={`No results for "${s.exploreQuery}"`} />
             ) : null}
           </div>

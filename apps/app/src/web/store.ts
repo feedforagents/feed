@@ -261,6 +261,9 @@ export async function navigate(path: string): Promise<void> {
       activeTrendingTag: null,
       walletView: false,
     });
+    if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+      window.scrollTo(0, 0);
+    }
     await loadFeed();
     return;
   }
@@ -272,6 +275,9 @@ export async function navigate(path: string): Promise<void> {
       } else {
         window.history.pushState(null, "", parsed.canonicalPath);
       }
+    }
+    if (typeof window.scrollTo === "function") {
+      window.scrollTo(0, 0);
     }
   }
   sendNav({ type: "navigateTo", targetRoute: parsed.route });
@@ -508,7 +514,11 @@ export function bootStore(): void {
       tasks.push(loadTrending());
     }
     if (afterAuth.route !== "Markets" && afterAuth.route !== "Leaderboard") {
-      tasks.push(loadPositionsSilent());
+      if (currentUiMode(afterAuth) === "GameMode") {
+        tasks.push(loadMarkets());
+      } else {
+        tasks.push(loadPositionsSilent());
+      }
     }
     if (afterAuth.viewer !== null) {
       if (afterAuth.route !== "Notifications") tasks.push(loadNotifications());

@@ -276,7 +276,7 @@ export type MarketsTradingTerminalProps = Omit<ComponentProps<"div">, "children"
   submitting?: boolean;
   /** Optional order panel error message. */
   orderError?: string;
-  /** Shows the optional `xl:w-96` sticky Positions sidebar on wide screens (default true). */
+  /** Shows the optional `2xl:w-80` sticky Positions sidebar on wide screens (default true). */
   showPositionsSidebar?: boolean;
   /** Opens confirmation dialog before trade execution (default true). */
   confirmBeforeSubmit?: boolean;
@@ -1391,7 +1391,7 @@ export function MarketsTradingTerminal({
   className,
   ...props
 }: MarketsTradingTerminalProps) {
-  const [desktopTab, setDesktopTab] = useState<"chart" | "social" | "trades">("chart");
+  const [desktopTab, setDesktopTab] = useState<"chart" | "social" | "trades" | "positions">("chart");
   const [mobileTab, setMobileTab] = useState<"chart" | "social" | "positions" | "trades">("chart");
   const [fullscreen, setFullscreen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
@@ -1483,7 +1483,7 @@ export function MarketsTradingTerminal({
         onToggleFullscreen={() => setFullscreen((prev) => !prev)}
       />
 
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+      <div className="flex min-h-0 flex-1 flex-col pb-24 lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col lg:border-r lg:border-border">
           <Tabs
             value={mobileTab}
@@ -1522,7 +1522,7 @@ export function MarketsTradingTerminal({
           <Tabs
             value={desktopTab}
             onValueChange={(next) => {
-              if (next === "chart" || next === "social" || next === "trades") setDesktopTab(next);
+              if (next === "chart" || next === "social" || next === "trades" || next === "positions") setDesktopTab(next);
             }}
             className="hidden min-h-0 flex-1 flex-col lg:flex"
           >
@@ -1531,6 +1531,9 @@ export function MarketsTradingTerminal({
                 <TabsTrigger value="chart" className="flex-none">Chart</TabsTrigger>
                 <TabsTrigger value="social" className="flex-none">Social</TabsTrigger>
                 <TabsTrigger value="trades" className="flex-none">Trades ({trades.length})</TabsTrigger>
+                <TabsTrigger value="positions" className={cn("flex-none", showPositionsSidebar && "2xl:hidden")}>
+                  Positions ({totalPositions})
+                </TabsTrigger>
               </TabsList>
             </div>
             <TabsContent value="chart" className="mt-0 min-h-0 flex-1 overflow-auto p-4">
@@ -1542,15 +1545,23 @@ export function MarketsTradingTerminal({
             <TabsContent value="trades" className="mt-0 min-h-0 flex-1 overflow-auto p-4">
               <AssetTradesFeed trades={trades} loading={tradesLoading} />
             </TabsContent>
+            <TabsContent value="positions" className="mt-0 min-h-0 flex-1 overflow-auto p-4">
+              <PositionsSidebarList
+                perpPositions={perpPositions}
+                predictionPositions={predictionPositions}
+                onClosePerp={onClosePerp}
+                submitting={submitting}
+              />
+            </TabsContent>
           </Tabs>
         </div>
 
-        <aside aria-label="Order entry" className="hidden w-96 shrink-0 overflow-auto p-4 lg:block">
+        <aside aria-label="Order entry" className="hidden shrink-0 overflow-auto p-4 lg:block lg:w-[340px] xl:w-[360px]">
           {orderPanel}
         </aside>
 
         {showPositionsSidebar ? (
-          <aside aria-label="Open positions" className="hidden w-96 shrink-0 border-l border-border xl:block">
+          <aside aria-label="Open positions" className="hidden shrink-0 border-l border-border 2xl:block 2xl:w-80">
             <div className="sticky top-0 flex flex-col gap-3 p-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-foreground">Positions</h2>

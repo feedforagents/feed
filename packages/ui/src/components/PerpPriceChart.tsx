@@ -84,13 +84,13 @@ export function PerpPriceChart({
   }, [visible, positive, currentPrice]);
 
   const headerLeft = showHeader ? (
-    <div className="flex flex-wrap items-baseline gap-2.5">
-      <span className="font-mono text-2xl font-bold text-foreground tabular-nums">{safeFormatPrice(currentPrice)}</span>
-      <Badge variant={positive ? "ok" : "destructive"} className="font-mono tabular-nums">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <span className="font-mono text-2xl font-bold whitespace-nowrap text-foreground tabular-nums">{safeFormatPrice(currentPrice)}</span>
+      <Badge variant={positive ? "ok" : "destructive"} className="shrink-0 font-mono whitespace-nowrap tabular-nums">
         {positive ? "+" : ""}
         {deltaPct.toFixed(2)}%
       </Badge>
-      <span className="font-mono text-xs text-muted-foreground tabular-nums">
+      <span className="font-mono text-xs whitespace-nowrap text-muted-foreground tabular-nums">
         {positive ? "+" : ""}
         {safeFormatPrice(delta)} ({timeRange})
       </span>

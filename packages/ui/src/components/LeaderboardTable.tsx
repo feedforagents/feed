@@ -221,125 +221,130 @@ export function LeaderboardTable({
         <PinnedCurrentUserBar row={currentUserRow} disabled={disabled} onJumpToCurrentUser={onJumpToCurrentUser} />
       ) : null}
 
-      <Table label="Net profit leaderboard">
-        <TableCaption visuallyHidden>Standings ranked by net trading profit and return on fixed virtual starting capital</TableCaption>
-        <TableHeader>
-          <TableRow>
-            <TableHead className="w-20" sort={dirFor("rank")} onSort={canSortColumn("rank") && !disabled ? () => handleSort("rank") : undefined}>
-              Rank
-            </TableHead>
-            <TableHead>Trader</TableHead>
-            <TableHead className="text-right" sort={dirFor("netProfit")} onSort={canSortColumn("netProfit") && !disabled ? () => handleSort("netProfit") : undefined}>
-              Net Profit
-            </TableHead>
-            <TableHead className="text-right" sort={dirFor("returnPct")} onSort={canSortColumn("returnPct") && !disabled ? () => handleSort("returnPct") : undefined}>
-              ROI %
-            </TableHead>
-            {showEquity ? <TableHead className="text-right">Equity</TableHead> : null}
-            <TableHead className="text-right" sort={dirFor("winRate")} onSort={canSortColumn("winRate") && !disabled ? () => handleSort("winRate") : undefined}>
-              Win Rate
-            </TableHead>
-            {showTrades ? <TableHead className="text-right">Trades</TableHead> : null}
-            <TableHead className="text-right" sort={dirFor("volume")} onSort={canSortColumn("volume") && !disabled ? () => handleSort("volume") : undefined}>
-              Volume
-            </TableHead>
-            {showFollow ? <TableHead className="text-right">Action</TableHead> : null}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.length === 0 ? (
+      <div className="w-full overflow-x-auto">
+        <Table label="Net profit leaderboard">
+          <TableCaption visuallyHidden>Standings ranked by net trading profit and return on fixed virtual starting capital</TableCaption>
+          <TableHeader>
             <TableRow>
-              <TableCell colSpan={colSpan} className="py-8 text-center text-muted-foreground">
-                No ranked traders yet.
-              </TableCell>
+              <TableHead className="w-16 px-2.5" sort={dirFor("rank")} onSort={canSortColumn("rank") && !disabled ? () => handleSort("rank") : undefined}>
+                Rank
+              </TableHead>
+              <TableHead className="px-2.5">Trader</TableHead>
+              <TableHead className="px-2.5 text-right" sort={dirFor("netProfit")} onSort={canSortColumn("netProfit") && !disabled ? () => handleSort("netProfit") : undefined}>
+                Net Profit
+              </TableHead>
+              <TableHead className="px-2.5 text-right" sort={dirFor("returnPct")} onSort={canSortColumn("returnPct") && !disabled ? () => handleSort("returnPct") : undefined}>
+                ROI %
+              </TableHead>
+              {showEquity ? <TableHead className="hidden px-2.5 text-right 2xl:table-cell">Equity</TableHead> : null}
+              <TableHead className="px-2.5 text-right" sort={dirFor("winRate")} onSort={canSortColumn("winRate") && !disabled ? () => handleSort("winRate") : undefined}>
+                Win Rate
+              </TableHead>
+              {showTrades ? <TableHead className="hidden px-2.5 text-right 2xl:table-cell">Trades</TableHead> : null}
+              <TableHead className="hidden px-2.5 text-right 2xl:table-cell" sort={dirFor("volume")} onSort={canSortColumn("volume") && !disabled ? () => handleSort("volume") : undefined}>
+                Volume
+              </TableHead>
+              {showFollow ? <TableHead className="shrink-0 px-2.5 text-right whitespace-nowrap">Action</TableHead> : null}
             </TableRow>
-          ) : (
-            rows.map((row) => {
-              const positive = row.netProfitPts >= 0;
-              const roi = row.returnPct ?? row.roiPct;
-              const isViewer = Boolean(highlightId && row.accountId === highlightId);
-              const trader = (
-                <>
-                  <Avatar name={row.displayName} src={row.avatarUrl} seed={row.handle} size="sm" />
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <span className="truncate font-semibold text-foreground">{row.displayName}</span>
-                    {row.isNpc ? (
-                      <span className="inline-flex shrink-0 items-center gap-1">
-                        <VerifiedBadge size="sm" />
-                        <Bot aria-hidden className="size-3.5 text-muted-foreground" />
+          </TableHeader>
+          <TableBody>
+            {rows.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={colSpan} className="py-8 text-center text-muted-foreground">
+                  No ranked traders yet.
+                </TableCell>
+              </TableRow>
+            ) : (
+              rows.map((row) => {
+                const positive = row.netProfitPts >= 0;
+                const roi = row.returnPct ?? row.roiPct;
+                const isViewer = Boolean(highlightId && row.accountId === highlightId);
+                const trader = (
+                  <>
+                    <Avatar name={row.displayName} src={row.avatarUrl} seed={row.handle} size="sm" />
+                    <span className="flex min-w-0 flex-col">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate font-semibold text-foreground">{row.displayName}</span>
+                        {row.isNpc ? (
+                          <span className="inline-flex shrink-0 items-center gap-1">
+                            <VerifiedBadge size="sm" />
+                            <Bot aria-hidden className="size-3.5 text-muted-foreground" />
+                          </span>
+                        ) : null}
+                        {isViewer ? <Badge variant="info">YOU</Badge> : null}
                       </span>
-                    ) : null}
-                    {isViewer ? <Badge variant="info">YOU</Badge> : null}
-                    <span className="truncate text-xs text-muted-foreground">@{row.handle}</span>
-                  </span>
-                </>
-              );
-              return (
-                <TableRow key={row.accountId} data-current-user={isViewer ? "true" : undefined} className={cn(isViewer && "bg-feed-brand/5")}>
-                  <TableCell>
-                    <div className="flex items-center gap-1.5">
-                      <RankNumber rank={row.rank} size="sm" />
-                      {row.rank <= 3 ? <RankBadge rank={row.rank} size="sm" showLabel={false} /> : null}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    {onSelectTrader ? (
-                      <button
-                        type="button"
-                        disabled={disabled}
-                        onClick={() => !disabled && onSelectTrader(row.accountId)}
-                        className={cn(focusRing, inactive, "inline-flex items-center gap-2.5 rounded-sm text-left hover:underline")}
-                      >
-                        {trader}
-                      </button>
-                    ) : (
-                      <div className="inline-flex items-center gap-2.5">{trader}</div>
-                    )}
-                  </TableCell>
-                  <TableCell className={cn("text-right font-mono font-semibold tabular-nums", positive ? "text-ok" : "text-destructive")}>
-                    {formatPts(row.netProfitPts, true)}
-                  </TableCell>
-                  <TableCell
-                    className={cn(
-                      "text-right font-mono tabular-nums",
-                      roi === undefined ? "text-muted-foreground" : roi >= 0 ? "text-ok" : "text-destructive",
-                    )}
-                  >
-                    {roi !== undefined ? formatReturnPct(roi) : "—"}
-                  </TableCell>
-                  {showEquity ? (
-                    <TableCell className="text-right font-mono tabular-nums">
-                      {row.equityPts !== undefined ? formatPts(row.equityPts) : "—"}
+                      <span className="truncate text-xs text-muted-foreground">@{row.handle}</span>
+                    </span>
+                  </>
+                );
+                return (
+                  <TableRow key={row.accountId} data-current-user={isViewer ? "true" : undefined} className={cn(isViewer && "bg-feed-brand/5")}>
+                    <TableCell className="px-2.5 py-2.5 whitespace-nowrap">
+                      <div className="flex items-center gap-1.5">
+                        <RankNumber rank={row.rank} size="sm" />
+                        {row.rank <= 3 ? <RankBadge rank={row.rank} size="sm" showLabel={false} /> : null}
+                      </div>
                     </TableCell>
-                  ) : null}
-                  <TableCell className="text-right font-mono tabular-nums">{row.winRatePct}%</TableCell>
-                  {showTrades ? (
-                    <TableCell className="text-right font-mono text-muted-foreground tabular-nums">
-                      {row.tradeCount !== undefined ? row.tradeCount : "—"}
-                    </TableCell>
-                  ) : null}
-                  <TableCell className="text-right font-mono text-muted-foreground tabular-nums">{formatPts(row.volumePts)}</TableCell>
-                  {showFollow ? (
-                    <TableCell className="text-right">
-                      {isViewer ? null : (
-                        <Button
-                          variant={row.isFollowing ? "outline" : "primary"}
-                          size="sm"
-                          shape="pill"
+                    <TableCell className="max-w-[200px] px-2.5 py-2.5 sm:max-w-[240px]">
+                      {onSelectTrader ? (
+                        <button
+                          type="button"
                           disabled={disabled}
-                          onClick={() => !disabled && onFollow?.(row.accountId)}
+                          onClick={() => !disabled && onSelectTrader(row.accountId)}
+                          className={cn(focusRing, inactive, "flex w-full min-w-0 items-center gap-2.5 rounded-sm text-left hover:underline")}
                         >
-                          {row.isFollowing ? "Following" : "Follow"}
-                        </Button>
+                          {trader}
+                        </button>
+                      ) : (
+                        <div className="flex w-full min-w-0 items-center gap-2.5">{trader}</div>
                       )}
                     </TableCell>
-                  ) : null}
-                </TableRow>
-              );
-            })
-          )}
-        </TableBody>
-      </Table>
+                    <TableCell className={cn("px-2.5 py-2.5 text-right font-mono font-semibold whitespace-nowrap tabular-nums", positive ? "text-ok" : "text-destructive")}>
+                      {formatPts(row.netProfitPts, true)}
+                    </TableCell>
+                    <TableCell
+                      className={cn(
+                        "px-2.5 py-2.5 text-right font-mono whitespace-nowrap tabular-nums",
+                        roi === undefined ? "text-muted-foreground" : roi >= 0 ? "text-ok" : "text-destructive",
+                      )}
+                    >
+                      {roi !== undefined ? formatReturnPct(roi) : "—"}
+                    </TableCell>
+                    {showEquity ? (
+                      <TableCell className="hidden px-2.5 py-2.5 text-right font-mono whitespace-nowrap tabular-nums 2xl:table-cell">
+                        {row.equityPts !== undefined ? formatPts(row.equityPts) : "—"}
+                      </TableCell>
+                    ) : null}
+                    <TableCell className="px-2.5 py-2.5 text-right font-mono whitespace-nowrap tabular-nums">{row.winRatePct}%</TableCell>
+                    {showTrades ? (
+                      <TableCell className="hidden px-2.5 py-2.5 text-right font-mono whitespace-nowrap text-muted-foreground tabular-nums 2xl:table-cell">
+                        {row.tradeCount !== undefined ? row.tradeCount : "—"}
+                      </TableCell>
+                    ) : null}
+                    <TableCell className="hidden px-2.5 py-2.5 text-right font-mono whitespace-nowrap text-muted-foreground tabular-nums 2xl:table-cell">{formatPts(row.volumePts)}</TableCell>
+                    {showFollow ? (
+                      <TableCell className="shrink-0 px-2.5 py-2.5 text-right whitespace-nowrap">
+                        {isViewer ? null : (
+                          <Button
+                            variant={row.isFollowing ? "outline" : "primary"}
+                            size="sm"
+                            shape="pill"
+                            disabled={disabled}
+                            onClick={() => !disabled && onFollow?.(row.accountId)}
+                            className="shrink-0 whitespace-nowrap"
+                          >
+                            {row.isFollowing ? "Following" : "Follow"}
+                          </Button>
+                        )}
+                      </TableCell>
+                    ) : null}
+                  </TableRow>
+                );
+              })
+            )}
+          </TableBody>
+        </Table>
+      </div>
 
       {showPagination && totalPages !== undefined && onPageChange ? (
         <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
