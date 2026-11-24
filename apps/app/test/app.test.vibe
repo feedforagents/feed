@@ -21,9 +21,13 @@ module node {
   }
 
   /** @throws {never} */
-  export function signStripeWebhook(rawBody: string, secret: string, timestampSec: number): string {
+  export function stripeWebhookHeaders(rawBody: string, secret: string, nowMs: number): Record<string, string> {
+    const timestampSec = Math.floor(nowMs / 1000)
     const signature = createHmac("sha256", secret).update(`${timestampSec}.${rawBody}`).digest("hex")
-    return `t=${timestampSec},v1=${signature}`
+    return {
+      "content-type": "application/json",
+      "stripe-signature": `t=${timestampSec},v1=${signature}`
+    }
   }
 
   /** @throws {never} */
@@ -56,7 +60,7 @@ module node {
     return reader.read()
   }
 }
-import { decodeUtf8, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, signStripeWebhook, startReadChunk } from node
+import { decodeUtf8, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk, stripeWebhookHeaders } from node
 
 const APP_ORIGIN = "http://feed.localtest"
 const TEST_STRIPE_WEBHOOK_SECRET = "whsec_app_parity_test"
@@ -408,36 +412,25 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
     const badLevBody = try readJson(badLevRes)
     try check(() => assert.deepStrictEqual([badLevRes.status, badLevBody.code], [400, "INVALID_LEVERAGE"]))
 
-    const buyIdem1 = try callApp("/api/markets/prediction/seed-market-1/buy", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-idem-key-1" },
-      json: { side: "yes", amountCents: 500 }
-    })
-    const buyIdem1Body = try readJson(buyIdem1)
-    const buyIdemReplay = try callApp("/api/markets/prediction/seed-market-1/buy", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-idem-key-1" },
-      json: { side: "yes", amountCents: 500 }
-    })
-    const buyIdemReplayBody = try readJson(buyIdemReplay)
-    const buyIdemConflict = try callApp("/api/markets/prediction/seed-market-1/buy", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-idem-key-1" },
-      json: { side: "no", amountCents: 500 }
-    })
-    const buyIdemConflictBody = try readJson(buyIdemConflict)
-    const buyIdemInvalid = try callApp("/api/markets/prediction/seed-market-1/buy", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "k".repeat(260) },
-      json: { side: "yes", amountCents: 500 }
-    })
-    const buyIdemInvalidBody = try readJson(buyIdemInvalid)
+    const buyWithKey = effect (side: "yes" | "no", key: string) => {
+      const response = try callApp("/api/markets/prediction/seed-market-1/buy", {
+        cookie: alice.cookie,
+        headers: { "Idempotency-Key": key },
+        json: { side, amountCents: 500 }
+      })
+      return { status: response.status, body: try readJson(response) }
+    }
+    const key = "rest-idem-key-1"
+    const buy = try buyWithKey("yes", key)
+    const replay = try buyWithKey("yes", key)
+    const conflict = try buyWithKey("no", key)
+    const invalid = try buyWithKey("yes", "k".repeat(260))
     try check(() => assert.deepStrictEqual(
       {
-        statuses: [buyIdem1.status, buyIdemReplay.status, buyIdemConflict.status, buyIdemInvalid.status],
-        sameTradeId: buyIdem1Body.tradeId === buyIdemReplayBody.tradeId,
-        sameBalance: buyIdem1Body.balanceAfterCents === buyIdemReplayBody.balanceAfterCents,
-        codes: [buyIdemConflictBody.code, buyIdemInvalidBody.code]
+        statuses: [buy.status, replay.status, conflict.status, invalid.status],
+        sameTradeId: buy.body.tradeId === replay.body.tradeId,
+        sameBalance: buy.body.balanceAfterCents === replay.body.balanceAfterCents,
+        codes: [conflict.body.code, invalid.body.code]
       },
       {
         statuses: [200, 200, 409, 400],
@@ -463,10 +456,7 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
     })
     const checkoutWhRes = try callApp("/api/webhooks/stripe", {
       rawBody: checkoutRaw,
-      headers: {
-        "content-type": "application/json",
-        "stripe-signature": signStripeWebhook(checkoutRaw, TEST_STRIPE_WEBHOOK_SECRET, Math.floor(now / 1000))
-      }
+      headers: stripeWebhookHeaders(checkoutRaw, TEST_STRIPE_WEBHOOK_SECRET, now)
     })
     const earlyWonRaw = JSON.stringify({
       id: "evt_app_dispute_won_early",
@@ -482,10 +472,7 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
     })
     const earlyWonRes = try callApp("/api/webhooks/stripe", {
       rawBody: earlyWonRaw,
-      headers: {
-        "content-type": "application/json",
-        "stripe-signature": signStripeWebhook(earlyWonRaw, TEST_STRIPE_WEBHOOK_SECRET, Math.floor(now / 1000))
-      }
+      headers: stripeWebhookHeaders(earlyWonRaw, TEST_STRIPE_WEBHOOK_SECRET, now)
     })
     const earlyWonBody = try readJson(earlyWonRes)
     try check(() => assert.deepStrictEqual(
