@@ -896,6 +896,31 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
       data: { object: { id: "ch_low", payment_intent: "pi_lowbal_1", amount_refunded: 400 } }
     })
 
+    try sendSigned({
+      id: "evt_checkout_inquiry",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_inquiry_1",
+          payment_status: "paid",
+          payment_intent: "pi_inquiry_1",
+          amount_total: 500,
+          client_reference_id: "user-bob",
+          metadata: { accountId: "user-bob", packId: "pack_5" }
+        }
+      }
+    })
+    const inquiryCreated = try sendSigned({
+      id: "evt_inquiry_created",
+      type: "charge.dispute.created",
+      data: { object: { id: "dp_inquiry", payment_intent: "pi_inquiry_1", amount: 500, status: "warning_needs_response" } }
+    })
+    const inquiryClosed = try sendSigned({
+      id: "evt_inquiry_closed",
+      type: "charge.dispute.closed",
+      data: { object: { id: "dp_inquiry", payment_intent: "pi_inquiry_1", amount: 500, status: "warning_closed" } }
+    })
+
     try check(() => assert.deepStrictEqual(
       {
         leaderboardIds: boardMtm.map((e) => e.accountId).sort(),
@@ -918,7 +943,8 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
         disputeWonRestoresExactDebit: [disputeWon.creditedCents, disputeWon.balanceAfterCents],
         disputeWonDup: [disputeWonDup.alreadyCompleted, disputeWonDup.creditedCents],
         bobFinalEconomy: [bobAfterReversals.balanceCents, bobAfterReversals.purchasedCents, bobAfterReversals.netProfitCents],
-        lowBalRefundTracksCumulativeSeparately: [lowBalRefund1.creditedCents, lowBalRefund2.creditedCents]
+        lowBalRefundTracksCumulativeSeparately: [lowBalRefund1.creditedCents, lowBalRefund2.creditedCents],
+        inquiryClosedRestoresDebit: [inquiryCreated.creditedCents, inquiryClosed.creditedCents, inquiryClosed.balanceAfterCents]
       },
       {
         leaderboardIds: ["user-alice", "user-bob"],
@@ -934,7 +960,8 @@ it.effect('Leaderboard filters, MTM valuation, voided market exclusion, and unif
         disputeWonRestoresExactDebit: [100_000, 110_000],
         disputeWonDup: [true, 0],
         bobFinalEconomy: [110_000, 100_000, 0],
-        lowBalRefundTracksCumulativeSeparately: [-10_000, -10_000]
+        lowBalRefundTracksCumulativeSeparately: [-10_000, -10_000],
+        inquiryClosedRestoresDebit: [-50_000, 50_000, 160_000]
       }
     ))
   })

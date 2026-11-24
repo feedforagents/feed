@@ -873,7 +873,7 @@ export effect function handleStripeWebhook(
     if (disputeId === "") {
       throw marketFail("INVALID_WEBHOOK_PAYLOAD", "Dispute closed missing id")
     }
-    if (status !== "won") {
+    if (status !== "won" && status !== "warning_closed") {
       return unprocessedWebhookResult(event.type)
     }
     const paymentIntentId = extractPaymentIntentId(event.data.object)
