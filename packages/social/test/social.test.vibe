@@ -28,6 +28,7 @@ import {
   listFollowers,
   listFollowing,
   listNotifications,
+  listTrending,
   markNotificationsRead,
   muteAccount,
   reactToMessage,
@@ -582,6 +583,98 @@ it.effect(
         },
         [[npcAlphaMsg.id, "ailon-musk", "npc", "Orbital alpha signal"]]
       ]
+    }))
+  })
+)
+
+it.effect(
+  'listTrending hides posts by blocked, muted, and blocking authors for the viewer (spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
+    try seedAccount("bob", "bob", "Bob Trader", 20_000, "game")
+    try seedAccount("carol", "carol", "Carol Analyst", 20_000, "game")
+
+    const alicePost = try createPost({
+      authorId: "alice",
+      authorKind: "user",
+      content: "Alice update #alicetag"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const bobPost = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Bob market update #bobtag"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const carolPost = try createPost({
+      authorId: "carol",
+      authorKind: "user",
+      content: "Carol market update #caroltag"
+    })
+
+    const anonymousBefore = try listTrending(50, "game")
+    const aliceBefore = try listTrending(50, "game", "alice")
+
+    const muted = try muteAccount("alice", "bob")
+    const aliceWhileBobMuted = try listTrending(50, "game", "alice")
+    const anonymousWhileBobMuted = try listTrending(50, "game")
+
+    const blocked = try blockAccount("alice", "carol")
+    const aliceWhileCarolBlocked = try listTrending(50, "game", "alice")
+
+    const blockedBy = try blockAccount("carol", "alice")
+    const aliceWhileBlockedByCarol = try listTrending(50, "game", "alice")
+    const carolSeesAlice = try listTrending(50, "game", "carol")
+
+    const unmuted = try unmuteAccount("alice", "bob")
+    const unblocked = try unblockAccount("alice", "carol")
+    const unblockedBy = try unblockAccount("carol", "alice")
+    const aliceAfterClear = try listTrending(50, "game", "alice")
+
+    try check(() => assert.deepStrictEqual({
+      posts: [alicePost.id !== "", bobPost.id !== "", carolPost.id !== ""],
+      anonymousBefore: [
+        anonymousBefore.some((t) => t.tag === "#alicetag"),
+        anonymousBefore.some((t) => t.tag === "#bobtag"),
+        anonymousBefore.some((t) => t.tag === "#caroltag")
+      ],
+      aliceBefore: [
+        aliceBefore.some((t) => t.tag === "#alicetag"),
+        aliceBefore.some((t) => t.tag === "#bobtag"),
+        aliceBefore.some((t) => t.tag === "#caroltag")
+      ],
+      muted: muted.muted,
+      aliceWhileBobMuted: [
+        aliceWhileBobMuted.some((t) => t.tag === "#alicetag"),
+        aliceWhileBobMuted.some((t) => t.tag === "#bobtag"),
+        aliceWhileBobMuted.some((t) => t.tag === "#caroltag")
+      ],
+      anonymousWhileBobMuted: anonymousWhileBobMuted.some((t) => t.tag === "#bobtag"),
+      blocked: blocked.blocked,
+      aliceWhileCarolBlocked: aliceWhileCarolBlocked.some((t) => t.tag === "#caroltag"),
+      blockedBy: blockedBy.blocked,
+      aliceWhileBlockedByCarol: aliceWhileBlockedByCarol.some((t) => t.tag === "#caroltag"),
+      carolSeesAlice: carolSeesAlice.some((t) => t.tag === "#alicetag"),
+      cleared: [unmuted.muted, unblocked.blocked, unblockedBy.blocked],
+      aliceAfterClear: [
+        aliceAfterClear.some((t) => t.tag === "#alicetag"),
+        aliceAfterClear.some((t) => t.tag === "#bobtag"),
+        aliceAfterClear.some((t) => t.tag === "#caroltag")
+      ]
+    }, {
+      posts: [true, true, true],
+      anonymousBefore: [true, true, true],
+      aliceBefore: [true, true, true],
+      muted: true,
+      aliceWhileBobMuted: [true, false, true],
+      anonymousWhileBobMuted: true,
+      blocked: true,
+      aliceWhileCarolBlocked: false,
+      blockedBy: true,
+      aliceWhileBlockedByCarol: false,
+      carolSeesAlice: false,
+      cleared: [false, false, false],
+      aliceAfterClear: [true, true, true]
     }))
   })
 )
