@@ -160,7 +160,7 @@ export async function createPost(
   }
   setStoreState({ statusMessage: options?.replyToPostId ? "Reply posted." : "Post published." });
   await loadFeed();
-    const thread = cur.activeThread;
+    const thread = getStoreSnapshot().activeThread;
   if (thread && options?.replyToPostId === thread.post.card.id) {
     await openThread(thread.post.card.id);
   }
