@@ -79,24 +79,12 @@ function themeLabel(theme: ThemePreference): string {
 function RailComposeAndGameLinks({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();
   const isGame = mode === "GameMode";
-  const onLeaderboard = s.route === "Leaderboard";
   const onWallet = s.route === "Markets" && s.walletView;
 
   return (
     <div className="flex flex-col items-center gap-2 lg:items-stretch">
       {isGame ? (
         <div className="flex flex-col items-center gap-1 lg:items-stretch">
-          <button
-            type="button"
-            aria-current={onLeaderboard ? "page" : undefined}
-            onClick={() => { void storeActions.navigate("/leaderboard"); }}
-            className={`group flex items-center justify-center rounded-full px-3 py-2.5 text-lg transition-colors duration-fast hover:bg-accent lg:w-fit lg:justify-start lg:px-3.5 ${onLeaderboard ? "font-bold text-foreground" : "font-normal text-foreground/85 hover:text-foreground"}`}
-          >
-            <span className="flex items-center gap-4">
-              <TrophyIcon className="size-6 shrink-0" />
-              <span className="sr-only lg:not-sr-only">Leaderboard</span>
-            </span>
-          </button>
           <button
             type="button"
             aria-current={onWallet ? "page" : undefined}
@@ -459,7 +447,11 @@ function ActiveRouteScreen({ mode }: { readonly mode: UiMode }) {
     case "PostDetail":
       return <PostDetailScreen mode={mode} />;
     case "Explore":
-      return s.activeArticleId ? <ArticleDetailScreen mode={mode} /> : <ExploreScreen mode={mode} />;
+      return s.activeArticleId ? (
+        <ArticleDetailScreen mode={mode} />
+      ) : (
+        <ExploreScreen key={`${s.exploreQuery}:${s.activeTrendingTag ?? ""}`} mode={mode} />
+      );
     case "Markets":
       if (mode === "SocialMode") return <HomeScreen mode={mode} />;
       return s.walletView ? <WalletScreen /> : <MarketsScreen />;
@@ -580,10 +572,16 @@ export function App() {
         activeTab={s.joinTab}
         onTabChange={storeActions.setJoinTab}
         phoneStep={s.joinPhoneStep}
+        onPhoneStepChange={storeActions.setJoinPhoneStep}
         pendingActionLabel={s.pendingAction?.label}
         skillPrompt={s.skills.prompt}
         launchers={s.skills.hosts.map((h) => h.launcher)}
         turnstileSiteKey={s.turnstileSiteKey ?? undefined}
+        devSmsCodeEnabled={s.devSmsCodeEnabled}
+        onFillDevCode={(rawPhone) => {
+          const phoneE164 = s.pendingPhoneE164 || storeActions.formatPhoneToE164("US", rawPhone);
+          return storeActions.fetchLoopbackCode(phoneE164);
+        }}
         onRequestSmsCode={({ country, phone, turnstileToken }) => { void storeActions.requestSmsCode(country, phone, turnstileToken); }}
         onVerifySmsCode={(code) => { void storeActions.verifySmsCode(code); }}
         onResendSmsCode={() => { void storeActions.resendSmsCode(); }}

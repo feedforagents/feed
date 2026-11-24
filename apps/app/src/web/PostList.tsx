@@ -47,7 +47,9 @@ export function FeedPostCard({
       onShare={copyPostLink}
       onAuthorClick={(handle) => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}
       onMentionClick={(handle) => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}
+      onSelectHandle={(handle) => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}
       onHashtagClick={(tag) => { void storeActions.navigate(`/trending/${encodeURIComponent(tag)}`); }}
+      onSelectTag={(tag) => { void storeActions.navigate(`/trending/${encodeURIComponent(tag)}`); }}
       onMarketClick={(ticker) => { void storeActions.navigate(`/markets?ticker=${encodeURIComponent(ticker)}`); }}
       onFollowAuthor={!isOwn ? (handle) => { void storeActions.toggleFollow(handle, post.card.isFollowingAuthor); } : undefined}
       onMuteAuthor={s.viewer && !isOwn ? (handle) => storeActions.openMuteDialog(handle, Boolean(post.card.isMutedAuthor)) : undefined}
@@ -57,6 +59,7 @@ export function FeedPostCard({
           ? (id) => storeActions.openReportDialog({ kind: "post", id, label: `@${post.card.authorHandle}'s post` })
           : undefined
       }
+      canDelete={isOwn}
       onDelete={isOwn ? (id) => storeActions.openDeletePostDialog(id) : undefined}
     />
   );

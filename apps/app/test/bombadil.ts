@@ -12,7 +12,10 @@ const socialModeFinancialNavHidden = extract(({ document }) => {
   const isSocial = switchEl?.getAttribute("aria-checked") === "true";
   if (!isSocial) return true;
   const navButtons = [...document.querySelectorAll("nav button")];
-  return !navButtons.some((button) => button.textContent?.trim() === "Markets");
+  return !navButtons.some((button) => {
+    const label = button.textContent?.trim();
+    return label === "Markets" || label === "Leaderboard";
+  });
 });
 
 export const neverStacksModals = always(() => singleDialogAtMost.current);

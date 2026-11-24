@@ -105,7 +105,6 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
             onSubmit={(text) => { void submitReply(text); }}
             authorName={s.viewer?.displayName ?? "Guest"}
             authorAvatarUrl={s.viewer?.avatarUrl ?? undefined}
-            viaClientName={s.viewer?.agentGrant?.clientName}
             replyTo={{ authorHandle: thread.post.card.authorHandle, excerpt: thread.post.card.content }}
             placeholder="Post your reply"
             submitLabel="Reply"
