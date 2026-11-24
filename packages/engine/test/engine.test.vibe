@@ -14,6 +14,7 @@ import {
   executeNpcDecision,
   fastForwardSimulatedHours,
   findEligibleAlphaTarget,
+  generateCompletion,
   getDailySpendStatus,
   getEngineAdminStatus,
   interleaveRssFeedItems,
@@ -37,7 +38,37 @@ import {
 } from "../src/index.vibe"
 
 module nodeEnv {
+  import http from "node:http"
   import process from "node:process"
+
+  export interface StubLlmServer {
+    readonly url: string
+    close(): void
+  }
+
+  /** @throws {never} */
+  export function startStubLlmServer(): Promise<StubLlmServer> {
+    return new Promise((resolve, reject) => {
+      const server = http.createServer((request, response) => {
+        if (request.method === "POST" && request.url === "/chat/completions") {
+          response.writeHead(200, { "content-type": "application/json" })
+          response.end(JSON.stringify({
+            choices: [{ message: { content: "Stubbed completion text." } }],
+            usage: { prompt_tokens: 1, completion_tokens: 10_000_000 },
+          }))
+        } else {
+          response.writeHead(404)
+          response.end()
+        }
+      })
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address()
+        const port = typeof address === "object" && address !== null ? address.port : 0
+        resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() })
+      })
+    })
+  }
 
   /** @throws {never} */
   export function applyEnvOverrides(overrides: Readonly<Record<string, string>>): Readonly<Record<string, string | undefined>> {
@@ -60,7 +91,7 @@ module nodeEnv {
     }
   }
 }
-import { applyEnvOverrides, restoreEnvSnapshot } from nodeEnv
+import { applyEnvOverrides, restoreEnvSnapshot, startStubLlmServer } from nodeEnv
 
 const OFFLINE_ENGINE_ENV: Readonly<Record<string, string>> = {
   SURPLUS_BASE_URL: "",
@@ -265,10 +296,36 @@ it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncerta
       model: "gpt-4o-mini",
       nowMs: day2Ms + 2_000,
     })
-    const overBoundError = try Effect.flip(
-      confirmLlmSpend({ attemptId: overBound.attemptId, actualMicros: 15_000_000, nowMs: day2Ms + 3_000 }),
-    )
+    try confirmLlmSpend({ attemptId: overBound.attemptId, actualMicros: 15_000_000, nowMs: day2Ms + 3_000 })
     const afterOverBound = try getDailySpendStatus(day2Ms + 3_000)
+    const overBoundRow = (try queryRows(
+      "SELECT status, reserved_micros, actual_micros FROM feed_llm_spend_reservations WHERE attempt_id = $1",
+      [overBound.attemptId],
+    ))[0] ?? {}
+    const overCapError = try Effect.flip(
+      reserveLlmBudget({
+        attemptId: "budget-over-cap-after-over-bound",
+        estimatedMicros: 90_000_000,
+        provider: "openai",
+        model: "gpt-4o-mini",
+        nowMs: day2Ms + 4_000,
+      }),
+    )
+    const exactBound = try reserveLlmBudget({
+      attemptId: "budget-exact-bound",
+      estimatedMicros: 2_000_000,
+      provider: "openai",
+      model: "gpt-4o-mini",
+      nowMs: day2Ms + 5_000,
+    })
+    try confirmLlmSpend({ attemptId: exactBound.attemptId, actualMicros: 2_000_000, nowMs: day2Ms + 6_000 })
+    const afterExactBound = try getDailySpendStatus(day2Ms + 6_000)
+    const missingError = try Effect.flip(
+      confirmLlmSpend({ attemptId: "budget-missing", actualMicros: 1_000, nowMs: day2Ms + 7_000 }),
+    )
+    const settledError = try Effect.flip(
+      confirmLlmSpend({ attemptId: exactBound.attemptId, actualMicros: 1_000, nowMs: day2Ms + 8_000 }),
+    )
 
     try check(() => {
       assert.strictEqual(initialStatus.utcDay, "2026-11-23")
@@ -309,10 +366,57 @@ it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncerta
       assert.strictEqual(day2Reconciled.carryoverReservedCents, 0)
       assert.strictEqual(day2Reconciled.uncertainReservations, 0)
       assert.strictEqual(day2Reconciled.remainingCents, 10_000)
-      assert.strictEqual(failureCode(overBoundError), "INVALID_ARGUMENT")
       assert.strictEqual(afterOverBound.confirmedCents, 0)
-      assert.strictEqual(afterOverBound.reservedCents, 1_000)
-      assert.strictEqual(afterOverBound.committedCents, 1_000)
+      assert.strictEqual(afterOverBound.reservedCents, 1_500)
+      assert.strictEqual(afterOverBound.committedCents, 1_500)
+      assert.strictEqual(afterOverBound.uncertainReservations, 1)
+      assert.strictEqual(toText(overBoundRow.status), "uncertain")
+      assert.strictEqual(toInt(overBoundRow.reserved_micros), 15_000_000)
+      assert.strictEqual(toInt(overBoundRow.actual_micros), 15_000_000)
+      assert.strictEqual(failureCode(overCapError), "BUDGET_EXCEEDED")
+      assert.strictEqual(afterExactBound.confirmedCents, 200)
+      assert.strictEqual(afterExactBound.reservedCents, 1_500)
+      assert.strictEqual(afterExactBound.committedCents, 1_700)
+      assert.strictEqual(afterExactBound.uncertainReservations, 1)
+      assert.strictEqual(failureCode(missingError), "INVALID_ARGUMENT")
+      assert.strictEqual(failureCode(settledError), "INVALID_ARGUMENT")
+    })
+  })
+}))
+
+it.effect('Over-bound provider usage returns the paid text and keeps the full reported cost locked (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation")', () => scoped(effect {
+  const dayMs = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const stub = try acquireRelease(
+    tryPromise({
+      try: () => startStubLlmServer(),
+      catch: () => new EngineFailure({ code: "LLM_UNAVAILABLE", message: "Stub LLM server did not start." }),
+    }),
+    (started) => sync(() => { started.close() }),
+  )
+  try withSeededEngine(dayMs, effect {
+    try withEnvOverrides({ SURPLUS_BASE_URL: stub.url }, effect {
+      const result = try generateCompletion({ user: "Hello", maxTokens: 32, nowMs: dayMs })
+      const afterCompletion = try getDailySpendStatus(dayMs)
+      const overCapError = try Effect.flip(
+        reserveLlmBudget({
+          attemptId: "stub-over-cap",
+          estimatedMicros: 50_000_000,
+          provider: "surplus",
+          model: "gpt-4o-mini",
+          nowMs: dayMs + 1_000,
+        }),
+      )
+      try check(() => {
+        assert.strictEqual(result.text, "Stubbed completion text.")
+        assert.strictEqual(result.provider, "surplus")
+        assert.strictEqual(result.usedFallback, false)
+        assert.strictEqual(result.actualMicros, 60_000_002)
+        assert.strictEqual(afterCompletion.confirmedCents, 0)
+        assert.strictEqual(afterCompletion.reservedCents, 6_001)
+        assert.strictEqual(afterCompletion.committedCents, 6_001)
+        assert.strictEqual(afterCompletion.uncertainReservations, 1)
+        assert.strictEqual(failureCode(overCapError), "BUDGET_EXCEEDED")
+      })
     })
   })
 }))
