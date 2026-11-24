@@ -101,6 +101,12 @@ pure def committedCents(b: BudgetLedger): int =
 pure def committedMicros(b: BudgetLedger): int =
   committedCents(b) * microsPerCent
 
+pure def settledOverageCents(b: BudgetLedger): int =
+  b.attempts.foldl(0, (acc, a) =>
+    if (a.utcDay == b.currentDay and a.attemptStatus == AttemptSettled and a.actualCents > a.boundCents)
+      acc + (a.actualCents - a.boundCents)
+    else acc)
+
 pure def remainingHeadroomCents(b: BudgetLedger): int =
   b.dailyBudget - committedCents(b)
 
@@ -180,12 +186,18 @@ releases `boundCents` from `reservedTodayCents`. Reconciling a prior-day
 carried-over attempt assigns the charge to its original UTC day and releases
 `boundCents` from `outstandingPrevReserved`, restoring today's headroom.
 
+When the provider reports an actual above the reserved bound, the confirm
+still settles — at the reported actual, charged to the attempt's own UTC day —
+and logs the over-bound anomaly with the attempt id, the bound, and the
+actual. The bound is the estimate the reservation was admitted under; it is
+not a clamp on spend the provider already billed. The row keeps its original
+bound.
+
 ```quint
 pure def canConfirmSpend(b: BudgetLedger, attemptId: int, actualCents: int): bool =
   actualCents >= 0 and b.attempts.some(a =>
     a.attemptId == attemptId
-      and (a.attemptStatus == AttemptReserved or a.attemptStatus == AttemptUncertain)
-      and actualCents <= a.boundCents)
+      and (a.attemptStatus == AttemptReserved or a.attemptStatus == AttemptUncertain))
 
 pure def confirmSpend(b: BudgetLedger, attemptId: int, actualCents: int): BudgetLedger =
   val target = findAttempt(b.attempts, attemptId)
@@ -246,6 +258,12 @@ pure def rolloverUtcDay(b: BudgetLedger, newDay: int): BudgetLedger =
 
 ### Inductive safety invariants for spend, reservations, and monotonic throttling
 
+Committed spend can exceed the daily budget only by the excess of
+already-settled same-day actuals over their bounds — spend the provider
+already billed. Every new reservation is still admitted only when committed
+plus bound fits the daily budget, so no new spend is ever admitted past the
+cap.
+
 ```quint
 pure def alwaysAttemptIdsUnique(b: BudgetLedger): bool =
   b.attempts.every(a => b.attempts.select(x => x.attemptId == a.attemptId).length() == 1)
@@ -254,7 +272,7 @@ pure def alwaysAttemptBoundsValid(b: BudgetLedger): bool =
   b.attempts.every(a => and {
     a.boundCents > 0,
     a.actualCents >= 0,
-    a.actualCents <= a.boundCents,
+    a.actualCents <= a.boundCents or a.attemptStatus == AttemptSettled,
     a.utcDay >= 0,
     a.utcDay <= b.currentDay,
     a.attemptId >= 1,
@@ -273,7 +291,7 @@ pure def alwaysNonNegativeAndWithinBudget(b: BudgetLedger): bool = and {
   b.outstandingPrevReserved >= 0,
   b.nextAttemptId >= 1,
   b.declinedCount >= 0,
-  committedCents(b) <= b.dailyBudget,
+  committedCents(b) <= b.dailyBudget + settledOverageCents(b),
 }
 
 pure def lawThrottleMonotonicWithUtilization(spentA: int, spentB: int, budget: int): bool =

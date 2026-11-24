@@ -308,7 +308,7 @@ lemma EngineBudgetConfirmPreserves(b: engine__spendBudget_BudgetLedger, attemptI
   var after := engine__spendBudget_confirmSpend(b, attemptId, actualCents);
   EngineBudgetAttemptIdsUniqueBridge(b);
   EngineBudgetAttemptIdsUniqueBridge(after);
-  var idx :| 0 <= idx < |b.attempts| && b.attempts[idx].attemptId == attemptId && (b.attempts[idx].attemptStatus.AttemptReserved? || b.attempts[idx].attemptStatus.AttemptUncertain?) && actualCents <= b.attempts[idx].boundCents;
+  var idx :| 0 <= idx < |b.attempts| && b.attempts[idx].attemptId == attemptId && (b.attempts[idx].attemptStatus.AttemptReserved? || b.attempts[idx].attemptStatus.AttemptUncertain?);
   assert b.attempts[idx] in b.attempts;
   EngineBudgetAttemptIdUniqueAt(b.attempts, idx);
   EngineBudgetFindAttemptUnique(b.attempts, attemptId, idx, engine__spendBudget_emptyAttempt);

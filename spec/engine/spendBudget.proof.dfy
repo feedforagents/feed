@@ -265,7 +265,7 @@ lemma confirmSpend_ensures(b: BudgetLedger, attemptId: int, actualCents: int)
   if inv(b) && canConfirmSpend(b, attemptId, actualCents) {
     var after := confirmSpend(b, attemptId, actualCents);
     AttemptIdsUniqueBridge(b);
-    var idx :| 0 <= idx < |b.attempts| && b.attempts[idx].attemptId == attemptId && (b.attempts[idx].attemptStatus.AttemptReserved? || b.attempts[idx].attemptStatus.AttemptUncertain?) && actualCents <= b.attempts[idx].boundCents;
+    var idx :| 0 <= idx < |b.attempts| && b.attempts[idx].attemptId == attemptId && (b.attempts[idx].attemptStatus.AttemptReserved? || b.attempts[idx].attemptStatus.AttemptUncertain?);
     assert b.attempts[idx] in b.attempts;
     AttemptIdUniqueAt(b.attempts, idx);
     FindAttemptUnique(b.attempts, attemptId, idx, emptyAttempt);

@@ -327,6 +327,18 @@ it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncerta
       confirmLlmSpend({ attemptId: exactBound.attemptId, actualMicros: 1_000, nowMs: day2Ms + 8_000 }),
     )
 
+    try TestClock.adjust("1 day")
+    const day3Ms = day2Ms + 86_400_000
+    const day3Status = try getDailySpendStatus(day3Ms)
+    const day3Admission = try reserveLlmBudget({
+      attemptId: "budget-day3-after-settled-over-bound",
+      estimatedMicros: 50_000_000,
+      provider: "openai",
+      model: "gpt-4o-mini",
+      nowMs: day3Ms + 1_000,
+    })
+    const day3AfterReserve = try getDailySpendStatus(day3Ms + 1_000)
+
     try check(() => {
       assert.strictEqual(initialStatus.utcDay, "2026-11-23")
       assert.strictEqual(initialStatus.dailyBudgetCents, 10_000)
@@ -366,25 +378,32 @@ it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncerta
       assert.strictEqual(day2Reconciled.carryoverReservedCents, 0)
       assert.strictEqual(day2Reconciled.uncertainReservations, 0)
       assert.strictEqual(day2Reconciled.remainingCents, 10_000)
-      assert.strictEqual(afterOverBound.confirmedCents, 0)
-      assert.strictEqual(afterOverBound.reservedCents, 1_500)
+      assert.strictEqual(afterOverBound.confirmedCents, 1_500)
+      assert.strictEqual(afterOverBound.reservedCents, 0)
       assert.strictEqual(afterOverBound.committedCents, 1_500)
-      assert.strictEqual(afterOverBound.uncertainReservations, 1)
-      assert.strictEqual(toText(overBoundRow.status), "uncertain")
-      assert.strictEqual(toInt(overBoundRow.reserved_micros), 15_000_000)
+      assert.strictEqual(afterOverBound.uncertainReservations, 0)
+      assert.strictEqual(toText(overBoundRow.status), "settled")
+      assert.strictEqual(toInt(overBoundRow.reserved_micros), 10_000_000)
       assert.strictEqual(toInt(overBoundRow.actual_micros), 15_000_000)
       assert.strictEqual(failureCode(overCapError), "BUDGET_EXCEEDED")
-      assert.strictEqual(afterExactBound.confirmedCents, 200)
-      assert.strictEqual(afterExactBound.reservedCents, 1_500)
+      assert.strictEqual(afterExactBound.confirmedCents, 1_700)
+      assert.strictEqual(afterExactBound.reservedCents, 0)
       assert.strictEqual(afterExactBound.committedCents, 1_700)
-      assert.strictEqual(afterExactBound.uncertainReservations, 1)
+      assert.strictEqual(afterExactBound.uncertainReservations, 0)
       assert.strictEqual(failureCode(missingError), "INVALID_ARGUMENT")
       assert.strictEqual(failureCode(settledError), "INVALID_ARGUMENT")
+      assert.strictEqual(day3Status.utcDay, "2026-11-25")
+      assert.strictEqual(day3Status.confirmedCents, 0)
+      assert.strictEqual(day3Status.carryoverReservedCents, 0)
+      assert.strictEqual(day3Status.committedCents, 0)
+      assert.strictEqual(day3Status.uncertainReservations, 0)
+      assert.strictEqual(day3Admission.throttleLevel, "ThrottleNormal")
+      assert.strictEqual(day3AfterReserve.committedCents, 5_000)
     })
   })
 }))
 
-it.effect('Over-bound provider usage returns the paid text and keeps the full reported cost locked (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation")', () => scoped(effect {
+it.effect('Over-bound provider usage returns the paid text and settles the full reported cost on its own day (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation")', () => scoped(effect {
   const dayMs = Date.UTC(2026, 10, 24, 12, 0, 0)
   const stub = try acquireRelease(
     tryPromise({
@@ -406,16 +425,32 @@ it.effect('Over-bound provider usage returns the paid text and keeps the full re
           nowMs: dayMs + 1_000,
         }),
       )
+      try TestClock.adjust("1 day")
+      const day2Ms = dayMs + 86_400_000
+      const day2Status = try getDailySpendStatus(day2Ms)
+      const day2Admission = try reserveLlmBudget({
+        attemptId: "stub-day2-after-settled-over-bound",
+        estimatedMicros: 50_000_000,
+        provider: "surplus",
+        model: "gpt-4o-mini",
+        nowMs: day2Ms + 1_000,
+      })
+      const day2AfterReserve = try getDailySpendStatus(day2Ms + 1_000)
       try check(() => {
         assert.strictEqual(result.text, "Stubbed completion text.")
         assert.strictEqual(result.provider, "surplus")
         assert.strictEqual(result.usedFallback, false)
         assert.strictEqual(result.actualMicros, 60_000_002)
-        assert.strictEqual(afterCompletion.confirmedCents, 0)
-        assert.strictEqual(afterCompletion.reservedCents, 6_001)
+        assert.strictEqual(afterCompletion.confirmedCents, 6_001)
+        assert.strictEqual(afterCompletion.reservedCents, 0)
         assert.strictEqual(afterCompletion.committedCents, 6_001)
-        assert.strictEqual(afterCompletion.uncertainReservations, 1)
+        assert.strictEqual(afterCompletion.uncertainReservations, 0)
         assert.strictEqual(failureCode(overCapError), "BUDGET_EXCEEDED")
+        assert.strictEqual(day2Status.carryoverReservedCents, 0)
+        assert.strictEqual(day2Status.committedCents, 0)
+        assert.strictEqual(day2Status.uncertainReservations, 0)
+        assert.strictEqual(day2Admission.throttleLevel, "ThrottleNormal")
+        assert.strictEqual(day2AfterReserve.committedCents, 5_000)
       })
     })
   })
