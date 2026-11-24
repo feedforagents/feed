@@ -201,9 +201,18 @@ effect function findActorByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubje
   return actorRow === undefined ? undefined : subjectFromActorRow(actorRow)
 }
 
-effect function findOrgByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
+effect function findOrgByIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
   const orgRows = try tx.query(
-    "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE lower(id) = lower($1) OR lower(ticker) = lower($1) LIMIT 1",
+    "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE id = $1 LIMIT 1",
+    [cleaned]
+  )
+  const orgRow = orgRows[0]
+  return orgRow === undefined ? undefined : subjectFromOrgRow(orgRow)
+}
+
+effect function findOrgByTickerTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
+  const orgRows = try tx.query(
+    "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE lower(ticker) = lower($1) LIMIT 1",
     [cleaned]
   )
   const orgRow = orgRows[0]
@@ -235,10 +244,12 @@ export effect function resolveSubjectTx(tx: Tx, handleOrId: string): ResolvedSub
   const cleaned = try normalizeHandleOrId(handleOrId)
   const account = try findAccountByHandleOrIdTx(tx, cleaned)
   if (account !== undefined) return account
-  const org = try findOrgByHandleOrIdTx(tx, cleaned)
+  const org = try findOrgByIdTx(tx, cleaned)
   if (org !== undefined) return org
   const actor = try findActorByHandleOrIdTx(tx, cleaned)
   if (actor !== undefined) return actor
+  const orgByTicker = try findOrgByTickerTx(tx, cleaned)
+  if (orgByTicker !== undefined) return orgByTicker
   throw new SocialFailure({ code: "NotFound", message: `Profile not found: ${cleaned}` })
 }
 

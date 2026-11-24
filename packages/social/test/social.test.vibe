@@ -1403,3 +1403,45 @@ it.effect(
     }))
   })
 )
+
+
+it.effect(
+  'organization author id resolves to the organization before the same-named NPC, NPC id and handle still resolve to the NPC (spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
+
+    const followOrg = try followAccount("alice", "openagi")
+    const orgProfile = try getProfile("openagi", "alice", "game")
+    const orgPosts = try listFeedPosts({ tab: "latest", authorId: orgProfile.id, viewerId: "alice", mode: "game", limit: 20 })
+    const npcProfileById = try getProfile("org-openagi", "alice", "game")
+    const npcProfileByHandle = try getProfile("openAGI", "alice", "game")
+    const followNpc = try followAccount("alice", "org-openagi")
+
+    try check(() => assert.deepStrictEqual({
+      followOrg: [followOrg.targetId, followOrg.targetKind, followOrg.following],
+      orgProfile: [orgProfile.id, orgProfile.kind, orgProfile.handle, orgProfile.postsCount],
+      orgPosts: orgPosts.items.map((p) => p.id),
+      npcById: [npcProfileById.id, npcProfileById.kind],
+      npcByHandle: [npcProfileByHandle.id, npcProfileByHandle.kind],
+      followNpc: [followNpc.targetId, followNpc.targetKind]
+    }, {
+      followOrg: ["openagi", "org", true],
+      orgProfile: ["openagi", "org", "openagi", 1],
+      orgPosts: ["seed-post-9"],
+      npcById: ["org-openagi", "npc"],
+      npcByHandle: ["org-openagi", "npc"],
+      followNpc: ["org-openagi", "npc"]
+    }))
+
+    try seedAccount("orgfan", "openagi", "OpenAGI Fan", 10_000, "game")
+    const accountProfile = try getProfile("openagi", "alice", "game")
+    const followAccountHandle = try followAccount("alice", "openagi")
+    try check(() => assert.deepStrictEqual({
+      accountProfile: [accountProfile.id, accountProfile.kind],
+      followAccountHandle: [followAccountHandle.targetId, followAccountHandle.targetKind]
+    }, {
+      accountProfile: ["orgfan", "user"],
+      followAccountHandle: ["orgfan", "user"]
+    }))
+  })
+)
