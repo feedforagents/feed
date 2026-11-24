@@ -240,17 +240,30 @@ jobs:
             console.log("Verified health:", JSON.stringify(health));
 
             async function expectStatus(path, status, check) {
-              const res = await fetch(`${primaryOrigin}${path}`, {
-                redirect: "manual",
-                cache: "no-store",
-                signal: AbortSignal.timeout(20_000)
-              });
-              const text = await res.text();
-              if (res.status !== status) {
-                throw new Error(`${path}: expected HTTP ${status}, got ${res.status}: ${text.slice(0, 300)}`);
+              let lastErr = null;
+              for (let attempt = 1; attempt <= 8; attempt++) {
+                try {
+                  const res = await fetch(`${primaryOrigin}${path}`, {
+                    redirect: "manual",
+                    cache: "no-store",
+                    signal: AbortSignal.timeout(20_000)
+                  });
+                  const text = await res.text();
+                  if (res.status !== status) {
+                    throw new Error(`${path}: expected HTTP ${status}, got ${res.status}: ${text.slice(0, 300)}`);
+                  }
+                  if (check) check(text, res);
+                  console.log(`OK ${path} -> HTTP ${res.status}`);
+                  return;
+                } catch (err) {
+                  lastErr = err;
+                  if (attempt < 8) {
+                    console.log(`Retry ${attempt}/8 for ${path}: ${err instanceof Error ? err.message : String(err)}`);
+                    await new Promise((r) => setTimeout(r, 3000));
+                  }
+                }
               }
-              if (check) check(text, res);
-              console.log(`OK ${path} -> HTTP ${res.status}`);
+              throw lastErr;
             }
 
             await expectStatus("/", 200, (html) => {
@@ -333,13 +346,26 @@ jobs:
             }
 
             if (targetEnv === "production") {
-              const wwwRes = await fetch("https://www.feed.fun/api/health", {
-                cache: "no-store",
-                signal: AbortSignal.timeout(20_000)
-              });
-              const wwwJson = await wwwRes.json();
-              if (!wwwRes.ok || wwwJson.commit !== expectedSha) {
-                throw new Error(`https://www.feed.fun/api/health mismatch: HTTP ${wwwRes.status} ${JSON.stringify(wwwJson)}`);
+              let wwwOk = false;
+              let lastWww = "";
+              for (let attempt = 1; attempt <= 8; attempt++) {
+                const wwwRes = await fetch("https://www.feed.fun/api/health", {
+                  cache: "no-store",
+                  signal: AbortSignal.timeout(20_000)
+                });
+                const text = await wwwRes.text();
+                lastWww = `HTTP ${wwwRes.status} ${text.slice(0, 300)}`;
+                try {
+                  const wwwJson = JSON.parse(text);
+                  if (wwwRes.ok && wwwJson.commit === expectedSha) {
+                    wwwOk = true;
+                    break;
+                  }
+                } catch {}
+                if (attempt < 8) await new Promise((r) => setTimeout(r, 3000));
+              }
+              if (!wwwOk) {
+                throw new Error(`https://www.feed.fun/api/health mismatch: ${lastWww}`);
               }
               console.log("OK https://www.feed.fun/api/health -> commit verified");
             }
