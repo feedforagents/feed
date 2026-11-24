@@ -99,12 +99,16 @@ jobs:
                     const rows = yield* tx.query(`SELECT count(*) AS count FROM ${table}`);
                     counts[table] = toInt(rows[0]?.count);
                   }
-                  return counts;
+                  const ticks = yield* tx.query(
+                    "SELECT job_name, last_status, last_error, last_run_at FROM feed_tick_health ORDER BY job_name ASC"
+                  );
+                  return { counts, ticks };
                 })
               );
             });
-            const counts = await Effect.runPromise(Effect.provide(program, workerDbStore(url)));
+            const { counts, ticks } = await Effect.runPromise(Effect.provide(program, workerDbStore(url)));
             console.log("Database migrated and seeded:", JSON.stringify(counts));
+            console.log("Current feed_tick_health:", JSON.stringify(ticks));
             if (counts.feed_actors < 1 || counts.feed_prediction_markets < 1 || counts.feed_perp_markets < 1) {
               throw new Error("Seed verification failed: expected non-empty core world tables");
             }
@@ -343,6 +347,15 @@ jobs:
               const cronText = await cronRes.text();
               if (!cronRes.ok) throw new Error(`POST /api/cron/minute-tick failed: HTTP ${cronRes.status}: ${cronText}`);
               console.log("OK POST /api/cron/minute-tick -> HTTP 200", cronText.slice(0, 200));
+
+              const npcRes = await fetch(`${primaryOrigin}/api/cron/npc-tick`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${cronSecret}` },
+                signal: AbortSignal.timeout(90_000)
+              });
+              const npcText = await npcRes.text();
+              if (!npcRes.ok) throw new Error(`POST /api/cron/npc-tick failed: HTTP ${npcRes.status}: ${npcText}`);
+              console.log("OK POST /api/cron/npc-tick -> HTTP 200", npcText.slice(0, 300));
             }
 
             if (targetEnv === "production") {

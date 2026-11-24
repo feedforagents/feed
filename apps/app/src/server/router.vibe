@@ -1472,6 +1472,7 @@ effect function routeOptionalResponse(
       version: manifest.version,
       deploymentEnv: config.deploymentEnv,
       smsMode: config.auth.smsMode,
+      gameStart: config.gameStart,
       ...(config.commitSha !== undefined ? { commit: config.commitSha } : {})
     }
     return method === "HEAD" ? makeResponse(null, { status: 200 }) : jsonResponse(payload)
