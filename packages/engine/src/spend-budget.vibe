@@ -227,6 +227,18 @@ export effect function confirmLlmSpend(input: ConfirmSpendInput): void!(EngineFa
   const actualMicros = Math.round(input.actualMicros)
   const store = try Store
   try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT reserved_micros FROM feed_llm_spend_reservations
+       WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain') FOR UPDATE`,
+      [input.attemptId.trim()],
+    )
+    const row = rows[0]
+    if (row === undefined) {
+      throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "confirmLlmSpend requires an open reservation." })
+    }
+    if (actualMicros > Math.max(0, toInt(row.reserved_micros))) {
+      throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "confirmLlmSpend actual spend exceeds the reserved bound." })
+    }
     try tx.query(
       `UPDATE feed_llm_spend_reservations
        SET status = 'settled', actual_micros = $2, updated_at = $3

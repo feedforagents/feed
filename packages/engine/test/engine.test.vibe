@@ -258,6 +258,18 @@ it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncerta
     try confirmLlmSpend({ attemptId: at90.attemptId, actualMicros: 10_000_000, nowMs: day2Ms + 1_000 })
     const day2Reconciled = try getDailySpendStatus(day2Ms + 1_000)
 
+    const overBound = try reserveLlmBudget({
+      attemptId: "budget-over-bound",
+      estimatedMicros: 10_000_000,
+      provider: "openai",
+      model: "gpt-4o-mini",
+      nowMs: day2Ms + 2_000,
+    })
+    const overBoundError = try Effect.flip(
+      confirmLlmSpend({ attemptId: overBound.attemptId, actualMicros: 15_000_000, nowMs: day2Ms + 3_000 }),
+    )
+    const afterOverBound = try getDailySpendStatus(day2Ms + 3_000)
+
     try check(() => {
       assert.strictEqual(initialStatus.utcDay, "2026-11-23")
       assert.strictEqual(initialStatus.dailyBudgetCents, 10_000)
@@ -297,6 +309,10 @@ it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncerta
       assert.strictEqual(day2Reconciled.carryoverReservedCents, 0)
       assert.strictEqual(day2Reconciled.uncertainReservations, 0)
       assert.strictEqual(day2Reconciled.remainingCents, 10_000)
+      assert.strictEqual(failureCode(overBoundError), "INVALID_ARGUMENT")
+      assert.strictEqual(afterOverBound.confirmedCents, 0)
+      assert.strictEqual(afterOverBound.reservedCents, 1_000)
+      assert.strictEqual(afterOverBound.committedCents, 1_000)
     })
   })
 }))
