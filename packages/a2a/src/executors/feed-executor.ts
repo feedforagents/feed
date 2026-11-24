@@ -52,6 +52,7 @@ import {
   followUserWithBlockCheck,
   getBlockedByUserIds,
   getBlockedUserIds,
+  getFilteredUserIds,
   getMutedUserIds,
   getRawDrizzle,
   groupMembers,
@@ -2372,15 +2373,21 @@ export class FeedAgentExecutor implements AgentExecutor {
 
     // Check eligibility on primary before writing memberships. A replica may
     // still report a banned user as eligible or omit a newly created user.
+    // Like POST /api/groups and MCP create_group, leave out users in a block
+    // relationship with the creator in either direction.
     // This does not change the existing direct-add policy of this operation.
     const otherMemberIds = memberIds.filter((id) => id !== userId);
-    const validMembers = await dbWrite.user.findMany({
-      where: { id: { in: otherMemberIds }, isBanned: false },
-      select: { id: true },
-    });
+    const [validMembers, blockedMemberIds] = await Promise.all([
+      dbWrite.user.findMany({
+        where: { id: { in: otherMemberIds }, isBanned: false },
+        select: { id: true },
+      }),
+      getFilteredUserIds(userId, dbWrite),
+    ]);
     const validMemberIds = new Set(validMembers.map((m) => m.id));
-    const addableMemberIds = otherMemberIds.filter((id) =>
-      validMemberIds.has(id)
+    const blocked = new Set(blockedMemberIds);
+    const addableMemberIds = otherMemberIds.filter(
+      (id) => validMemberIds.has(id) && !blocked.has(id)
     );
 
     // Generate all IDs before transaction
