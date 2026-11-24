@@ -915,6 +915,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     // Prefer request context identity when present (prevents params-based impersonation),
     // Reject conflicting explicit targets; protocol task IDs are not account IDs.
     const userId = requireContextAccountId(params, context);
+    await this.checkRateLimit(userId, RATE_LIMIT_CONFIGS.LIKE_POST);
 
     // Check if already liked
     const existingLike = await db.reaction.findFirst({
@@ -1065,6 +1066,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!postId) throw new Error('postId is required');
 
     const userId = requireContextAccountId({}, context);
+    await this.checkRateLimit(userId, RATE_LIMIT_CONFIGS.SHARE_POST);
     const comment = params.comment;
     if (comment !== undefined && typeof comment !== 'string') {
       throw new Error('comment must be a string');
@@ -1241,6 +1243,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     if (!commentId) throw new Error('commentId is required');
 
     const userId = requireContextAccountId({}, context);
+    await this.checkRateLimit(userId, RATE_LIMIT_CONFIGS.LIKE_COMMENT);
 
     // Verify comment exists
     const comment = await db.comment.findFirst({
@@ -1496,6 +1499,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     context: RequestContext
   ): Promise<SuccessResponse> {
     const followerId = requireContextAccountId({}, context);
+    await this.checkRateLimit(followerId, RATE_LIMIT_CONFIGS.FOLLOW_USER);
     const followingId = String(params.userId ?? '');
 
     if (!followingId) throw new Error('userId is required');
@@ -1529,6 +1533,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     context: RequestContext
   ): Promise<SuccessResponse> {
     const followerId = requireContextAccountId({}, context);
+    await this.checkRateLimit(followerId, RATE_LIMIT_CONFIGS.UNFOLLOW_USER);
     const followingId = String(params.userId ?? '');
 
     if (!followingId) throw new Error('userId is required');
@@ -2226,6 +2231,7 @@ export class FeedAgentExecutor implements AgentExecutor {
     context: RequestContext
   ): Promise<ExecutorOperationResult> {
     const userId = requireContextAccountId({}, context);
+    await this.checkRateLimit(userId, RATE_LIMIT_CONFIGS.SEND_MESSAGE);
     const chatId = String(params.chatId ?? '');
     // Validate and sanitize content (checks type, length, profanity, injection)
     const content = this.validateUserContent(params.content, 'Message');
