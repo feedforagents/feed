@@ -119,7 +119,7 @@ function PinnedCurrentUserBar({
 }) {
   const roi = row.returnPct ?? row.roiPct;
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-brand/5 px-4 py-2 text-xs">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-feed-brand/5 px-4 py-2 text-xs">
       <div className="flex flex-wrap items-center gap-2">
         <RankNumber rank={row.rank} size="sm" />
         <span className="font-semibold text-foreground">{row.displayName}</span>
@@ -275,7 +275,7 @@ export function LeaderboardTable({
                 </>
               );
               return (
-                <TableRow key={row.accountId} data-current-user={isViewer ? "true" : undefined} className={cn(isViewer && "bg-brand/5")}>
+                <TableRow key={row.accountId} data-current-user={isViewer ? "true" : undefined} className={cn(isViewer && "bg-feed-brand/5")}>
                   <TableCell>
                     <div className="flex items-center gap-1.5">
                       <RankNumber rank={row.rank} size="sm" />

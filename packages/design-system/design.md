@@ -8,7 +8,7 @@ One electric-blue (`#0066FF`-inspired) accent on crisp X-style light and dark ne
 - **Edges.** `border` divides and may be faint. `input` is the edge of a control (a field, a checkbox, an
   outlined button): it and the focus `ring` stand at least 3:1 off `background` and `card` in both
   themes (WCAG 1.4.11).
-- **Meaning.** `primary` is the text/link accent and focus `ring`; `brand` (`#0066FF`) with `brand-foreground`
+- **Meaning.** `primary` is the text/link accent and focus `ring`; `feed-brand` (`#0066FF`) with `feed-brand-foreground`
   fills primary CTAs and active indicators. `destructive`, `danger-solid`, `ok`, `warn` and `info` are
   states, never decoration.
 - **Shape.** One `radius`; `rounded-sm`, `-md`, `-lg` and `-xl` derive from it. Three shadows, by elevation.
@@ -58,8 +58,8 @@ this prose into tokens. To change the design, describe it, and have the change w
 | `ok` | oklch(0.52 0.125 155) | oklch(0.78 0.165 155) |
 | `warn` | oklch(0.545 0.134 55) | oklch(0.82 0.155 78) |
 | `info` | oklch(0.52 0.11 235) | oklch(0.78 0.112 232) |
-| `brand` | oklch(0.562 0.244 261.3) | oklch(0.562 0.244 261.3) |
-| `brand-foreground` | oklch(1 0 0) | oklch(1 0 0) |
+| `feed-brand` | oklch(0.562 0.244 261.3) | oklch(0.562 0.244 261.3) |
+| `feed-brand-foreground` | oklch(1 0 0) | oklch(1 0 0) |
 | `scrim` | oklch(0 0 0) | oklch(0 0 0) |
 | `danger-solid` | oklch(0.57 0.23 26) | oklch(0.57 0.23 26) |
 | `danger-solid-foreground` | oklch(1 0 0) | oklch(1 0 0) |

@@ -107,7 +107,7 @@ export function ProfileHeader({
 
   return (
     <section aria-label={`${profile.displayName} profile`} className={cn("border-b border-border bg-background text-foreground", className)} {...props}>
-      <div className="h-48 w-full overflow-hidden bg-linear-to-br from-brand/20 via-muted to-card sm:h-52">
+      <div className="h-48 w-full overflow-hidden bg-linear-to-br from-feed-brand/20 via-muted to-card sm:h-52">
         {profile.bannerUrl ? <img src={profile.bannerUrl} alt="" className="size-full object-cover" /> : null}
       </div>
 

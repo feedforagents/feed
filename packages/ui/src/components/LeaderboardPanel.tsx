@@ -1,12 +1,10 @@
 import { type ComponentProps, useState } from "react";
 import { Bot, ChevronLeft, ChevronRight, Crosshair, ExternalLink } from "lucide-react";
-import { cn, focusRing } from "../lib/cn.ts";
-import { formatPts } from "../lib/hosts.ts";
 import { Alert } from "./Alert.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
-import { Card, CardContent, CardHeader, CardTitle } from "./Card.tsx";
+import { Card, CardContent, CardHeader } from "./Card.tsx";
 import {
   type LeaderboardEntry,
   type LeaderboardSortColumn,
@@ -14,8 +12,10 @@ import {
 } from "./LeaderboardTable.tsx";
 import { RankBadge, RankNumber } from "./RankBadge.tsx";
 import { Skeleton } from "./Skeleton.tsx";
-import { Tabs, TabsList, TabsTrigger } from "./Tabs.tsx";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./Tabs.tsx";
 import { VerifiedBadge } from "./VerifiedBadge.tsx";
+import { cn, focusRing } from "../lib/cn.ts";
+import { formatPts } from "../lib/hosts.ts";
 
 export type LeaderboardAudienceFilter = "all" | "traders" | "npcs";
 export type LeaderboardTimeframe = "24H" | "7D" | "30D" | "ALL";
@@ -95,7 +95,7 @@ function TraderDetailInspector({
             <Avatar name={trader.displayName} src={trader.avatarUrl} seed={trader.handle} size="lg" />
             <div className="flex min-w-0 flex-col">
               <div className="flex items-center gap-1.5">
-                <CardTitle className="truncate text-base">{trader.displayName}</CardTitle>
+                <h2 className="truncate text-base leading-none font-semibold">{trader.displayName}</h2>
                 {trader.isNpc ? (
                   <span className="inline-flex shrink-0 items-center gap-1">
                     <VerifiedBadge size="sm" />
@@ -225,6 +225,30 @@ export function LeaderboardPanel({
   const safeTotalPages = Math.max(1, totalPages);
   const safePage = Math.min(Math.max(1, page), safeTotalPages);
 
+  const tableContent = error ? (
+    <div className="p-4">
+      <Alert variant="destructive">{error}</Alert>
+    </div>
+  ) : loading ? (
+    <div className="flex flex-col gap-3 p-4">
+      {Array.from({ length: 8 }, (_, idx) => (
+        <Skeleton key={idx} className="h-12 w-full" />
+      ))}
+    </div>
+  ) : (
+    <LeaderboardTable
+      rows={[...rows]}
+      sortBy={sortBy}
+      sortDir={sortDir}
+      onSort={onSort}
+      viewerAccountId={viewerAccountId}
+      onSelectTrader={(accountId) => setSelectedId(accountId)}
+      onFollow={onFollow}
+      disabled={blocked}
+      className="rounded-none border-0"
+    />
+  );
+
   return (
     <div
       aria-busy={loading || undefined}
@@ -233,7 +257,13 @@ export function LeaderboardPanel({
       className={cn("flex flex-col gap-6 xl:flex-row xl:items-start", className)}
       {...props}
     >
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background">
+      <Tabs
+        value={audience}
+        onValueChange={(next) => {
+          if (!blocked && (next === "all" || next === "traders" || next === "npcs")) onAudienceChange(next);
+        }}
+        className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background"
+      >
         <div className="sticky top-0 z-10 flex flex-col border-b border-border bg-background/95 backdrop-blur-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-4 pb-2">
             <h1 className="text-lg font-bold text-foreground">Leaderboard</h1>
@@ -249,7 +279,7 @@ export function LeaderboardPanel({
                     className={cn(
                       focusRing,
                       "rounded-sm px-2.5 py-1 font-mono text-xs font-medium transition-colors duration-fast",
-                      timeframe === tf ? "bg-brand text-brand-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                      timeframe === tf ? "bg-feed-brand text-feed-brand-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
                       blocked && "pointer-events-none opacity-50",
                     )}
                   >
@@ -268,46 +298,19 @@ export function LeaderboardPanel({
           </div>
 
           <div className="px-4">
-            <Tabs
-              value={audience}
-              onValueChange={(next) => {
-                if (!blocked && (next === "all" || next === "traders" || next === "npcs")) onAudienceChange(next);
-              }}
-            >
-              <TabsList variant="underline" className="border-b-0">
-                <TabsTrigger value="all" disabled={blocked} className="flex-none">All</TabsTrigger>
-                <TabsTrigger value="traders" disabled={blocked} className="flex-none">Traders</TabsTrigger>
-                <TabsTrigger value="npcs" disabled={blocked} className="flex-none">NPCs</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <TabsList variant="underline" className="border-b-0">
+              <TabsTrigger value="all" disabled={blocked} className="flex-none">All</TabsTrigger>
+              <TabsTrigger value="traders" disabled={blocked} className="flex-none">Traders</TabsTrigger>
+              <TabsTrigger value="npcs" disabled={blocked} className="flex-none">NPCs</TabsTrigger>
+            </TabsList>
           </div>
         </div>
 
-        <div className="min-w-0 flex-1">
-          {error ? (
-            <div className="p-4">
-              <Alert variant="destructive">{error}</Alert>
-            </div>
-          ) : loading ? (
-            <div className="flex flex-col gap-3 p-4">
-              {Array.from({ length: 8 }, (_, idx) => (
-                <Skeleton key={idx} className="h-12 w-full" />
-              ))}
-            </div>
-          ) : (
-            <LeaderboardTable
-              rows={[...rows]}
-              sortBy={sortBy}
-              sortDir={sortDir}
-              onSort={onSort}
-              viewerAccountId={viewerAccountId}
-              onSelectTrader={(accountId) => setSelectedId(accountId)}
-              onFollow={onFollow}
-              disabled={blocked}
-              className="rounded-none border-0"
-            />
-          )}
-        </div>
+        {(["all", "traders", "npcs"] as const).map((tabKey) => (
+          <TabsContent key={tabKey} value={tabKey} className="mt-0 min-w-0 flex-1">
+            {audience === tabKey ? tableContent : null}
+          </TabsContent>
+        ))}
 
         {viewerPosition ? (
           <div
@@ -359,7 +362,7 @@ export function LeaderboardPanel({
             </Button>
           </div>
         ) : null}
-      </div>
+      </Tabs>
 
       <aside aria-label="Selected trader inspector" className="w-full shrink-0 xl:sticky xl:top-4 xl:w-96">
         <TraderDetailInspector

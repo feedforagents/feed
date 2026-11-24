@@ -100,7 +100,7 @@ export function TaggedText({
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={(e) => e.stopPropagation()}
-                className={cn(focusRing, "break-all text-primary hover:underline")}
+                className={cn(focusRing, "break-all text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary")}
               >
                 {token.value}
               </a>

@@ -80,7 +80,7 @@ export function NotificationRow({
     <div
       className={cn(
         "flex items-start gap-3 border-b border-border bg-background px-4 py-3.5 text-foreground transition-colors duration-fast hover:bg-muted/30",
-        !notification.read && "bg-brand/5",
+        !notification.read && "bg-feed-brand/5",
         className,
       )}
       {...props}
@@ -117,7 +117,7 @@ export function NotificationRow({
             <span className="text-xs text-muted-foreground">{notification.timestamp}</span>
             {!notification.read ? (
               <>
-                <span aria-hidden className="size-2 rounded-full bg-brand" />
+                <span aria-hidden className="size-2 rounded-full bg-feed-brand" />
                 <span className="sr-only">Unread</span>
               </>
             ) : null}

@@ -307,7 +307,7 @@ function PostActionBar({
           e.stopPropagation();
           if (!disabled) onReply?.(post.id);
         }}
-        className={cn(focusRing, inactive, "group -ml-1.5 inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
+        className={cn(focusRing, inactive, "group -ml-1.5 inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-feed-brand/10 hover:text-primary")}
       >
         <MessageCircle aria-hidden className="size-4" />
         <span className="sr-only">Reply</span>
@@ -363,7 +363,7 @@ function PostActionBar({
             e.stopPropagation();
             if (!disabled) onQuote(post.id);
           }}
-          className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
+          className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-feed-brand/10 hover:text-primary")}
         >
           <Quote aria-hidden className="size-4" />
         </button>
@@ -393,7 +393,7 @@ function PostActionBar({
             e.stopPropagation();
             if (!disabled) onShare(post.id);
           }}
-          className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-brand/10 hover:text-primary")}
+          className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-full px-1.5 py-1 transition-colors duration-fast hover:bg-feed-brand/10 hover:text-primary")}
         >
           <Share aria-hidden className="size-4" />
         </button>

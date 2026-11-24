@@ -69,7 +69,7 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
     const status = phaseMeta[market.phase];
 
     return (
-      <Card className={cn("gap-4 rounded-xl p-5 transition-colors duration-fast", selected && "border-brand", className)} {...props}>
+      <Card className={cn("gap-4 rounded-xl p-5 transition-colors duration-fast", selected && "border-feed-brand", className)} {...props}>
         <CardHeader className="gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5">
@@ -125,7 +125,7 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
   const positive = (market.change24hPct ?? 0) >= 0;
 
   return (
-    <Card className={cn("gap-4 rounded-xl p-5 transition-colors duration-fast", selected && "border-brand", className)} {...props}>
+    <Card className={cn("gap-4 rounded-xl p-5 transition-colors duration-fast", selected && "border-feed-brand", className)} {...props}>
       <CardHeader className="gap-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2.5">

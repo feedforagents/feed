@@ -41,7 +41,11 @@ export function RankBadge({ rank, size = "md", showLabel = true, className }: Ra
   const badgeLabel = rank === 1 ? "1st Place" : rank === 2 ? "2nd Place" : rank === 3 ? "3rd Place" : `Top ${rank}`;
 
   return (
-    <span className={cn("inline-flex items-center gap-1.5", className)} aria-label={showLabel ? undefined : badgeLabel}>
+    <span
+      className={cn("inline-flex items-center gap-1.5", className)}
+      role={showLabel ? undefined : "img"}
+      aria-label={showLabel ? undefined : badgeLabel}
+    >
       <BadgeIcon aria-hidden className={cn(iconSizes[size], badgeColor, "shrink-0")} strokeWidth={1.75} />
       {showLabel ? <span className={cn("font-semibold", badgeColor, labelSizes[size])}>{badgeLabel}</span> : null}
     </span>

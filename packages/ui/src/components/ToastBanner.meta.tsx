@@ -1,7 +1,7 @@
 import type { ComponentMeta } from "vibestack/stories";
-import type { ToastProps } from "./Toast.tsx";
+import type { ToastBannerProps } from "./ToastBanner.tsx";
 
-export const meta: ComponentMeta<ToastProps> = {
+export const meta: ComponentMeta<ToastBannerProps> = {
   args: {
     message: "Link copied to clipboard",
     tone: "ok",
