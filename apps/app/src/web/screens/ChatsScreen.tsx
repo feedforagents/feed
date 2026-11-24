@@ -128,7 +128,7 @@ export function ChatsScreen() {
                 <button
                   key={chat.id}
                   type="button"
-                  onClick={() => { void storeActions.loadChatMessages(chat.id); }}
+                  onClick={() => { void storeActions.selectChat(chat.id); }}
                   className={`flex flex-col gap-1 rounded-lg border px-3 py-2.5 text-left transition-colors ${selected ? "border-primary bg-accent" : "border-border bg-card hover:bg-muted"}`}
                 >
                   <div className="flex items-center justify-between gap-2">

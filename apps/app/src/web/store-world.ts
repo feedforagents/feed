@@ -483,9 +483,14 @@ export async function loadChatMessages(chatId: string): Promise<void> {
     parse: (raw) => decodeChatMessages(raw, viewerId),
   });
   if (loadId !== chatMessagesLoadCount) return;
-  if (res.ok) {
-    setStoreState({ selectedChatId: chatId, chatMessages: res.data });
+  if (res.ok && getStoreSnapshot().selectedChatId === chatId) {
+    setStoreState({ chatMessages: res.data });
   }
+}
+
+export async function selectChat(chatId: string): Promise<void> {
+  setStoreState({ selectedChatId: chatId });
+  await loadChatMessages(chatId);
 }
 
 export async function startDirectChat(targetHandleOrId: string): Promise<void> {
@@ -509,7 +514,7 @@ export async function startDirectChat(targetHandleOrId: string): Promise<void> {
   }
   await loadChats();
   if (createdId) {
-    await loadChatMessages(createdId);
+    await selectChat(createdId);
   }
 }
 
@@ -527,7 +532,7 @@ export async function createGroupChat(title: string, memberHandles: ReadonlyArra
   const rec = isRecord(res.data) ? (isRecord(res.data.chat) ? res.data.chat : res.data) : {};
   const chatId = optStr(rec.id);
   await loadChats();
-  if (chatId) await loadChatMessages(chatId);
+  if (chatId) await selectChat(chatId);
   return true;
 }
 
