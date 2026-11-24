@@ -132,6 +132,29 @@ export function persistExplainerDismissed(): void {
   }
 }
 
+const UI_MODE_STORAGE_KEY = "feed:ui-mode";
+
+export function readStoredUiMode(): "game" | "social" {
+  try {
+    if (typeof localStorage !== "undefined" && localStorage.getItem(UI_MODE_STORAGE_KEY) === "social") {
+      return "social";
+    }
+  } catch {
+    return "game";
+  }
+  return "game";
+}
+
+export function persistUiMode(mode: "game" | "social"): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(UI_MODE_STORAGE_KEY, mode);
+    }
+  } catch {
+    return;
+  }
+}
+
 const initialLocation = typeof window !== "undefined"
   ? parseLocation(window.location.pathname, window.location.search)
   : parseLocation("/", "");
@@ -147,7 +170,7 @@ let currentState: StoreState = {
   profileHandle: initialLocation.profileHandle,
   selectedTicker: initialLocation.queryTicker,
   feedTab: "latest",
-  localUiMode: "game",
+  localUiMode: readStoredUiMode(),
   bannerDismissed: false,
   explainerDismissed: readExplainerDismissed(),
   scrolledDeep: false,

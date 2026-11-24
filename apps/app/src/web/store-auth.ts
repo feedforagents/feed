@@ -5,6 +5,7 @@ import {
   buildHostActionNote,
   getStoreSnapshot,
   persistExplainerDismissed,
+  persistUiMode,
   pushBrowserRoute,
   sendApp,
   sendNav,
@@ -352,6 +353,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
     pushBrowserRoute("Home");
   }
   if (!s.viewer) {
+    persistUiMode(nextMode);
     setStoreState({
       localUiMode: nextMode,
       route: nextMode === "social" && s.route === "Markets" ? "Home" : s.route,
