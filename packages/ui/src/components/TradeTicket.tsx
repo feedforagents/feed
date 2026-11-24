@@ -340,9 +340,9 @@ export function TradeTicket({
   const numericAmount = Number(amount);
   const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
-  const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
   const amountCents = validAmount ? Math.round(numericAmount * CENT_SHARES_PER_SHARE) : 0;
-
+  const notionalPts = marketKind === "perp" && validAmount ? (amountCents * leverage) / 100 : numericAmount;
+  const perpBelowMinimum = marketKind === "perp" && validAmount && amountCents * leverage < 1000;
   const hasExactCpmmInputs =
     validAmount &&
     yesShares !== undefined &&
@@ -405,7 +405,7 @@ export function TradeTicket({
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (blocked || !validAmount) return;
+    if (blocked || !validAmount || perpBelowMinimum) return;
     if (marketKind === "prediction") {
       if (action === "Sell") {
         onSubmit({ marketKind: "prediction", action, side: predSide, amountPts: numericAmount, shareUnits: amountCents });
@@ -540,6 +540,9 @@ export function TradeTicket({
             estimatedFeePts={estimatedFeePts}
           />
 
+          {perpBelowMinimum ? (
+            <Alert variant="destructive">Notional size must be at least 10 pts (margin × leverage).</Alert>
+          ) : null}
           {error ? <Alert variant="destructive">{error}</Alert> : null}
         </CardContent>
 
@@ -549,7 +552,7 @@ export function TradeTicket({
             shape="pill"
             variant={marketKind === "perp" && perpSide === "Short" ? "destructive" : "primary"}
             loading={loading}
-            disabled={blocked || !validAmount}
+            disabled={blocked || !validAmount || perpBelowMinimum}
             className="w-full"
           >
             {marketKind === "prediction" ? `${action} ${predSide}` : perpSubmitLabel}
