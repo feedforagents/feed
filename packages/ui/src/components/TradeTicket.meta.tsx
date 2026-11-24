@@ -37,6 +37,10 @@ export const meta: ComponentMeta<TradeTicketProps> = {
       defaultSide: "YES",
       defaultAmount: "1834",
     },
+    PredictionBuyFeeRoundsUp: {
+      yesOddsPct: 54,
+      defaultAmount: "15",
+    },
   },
   play: {
     Default: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
@@ -55,6 +59,10 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     PredictionSellFee: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       const canvas = within(canvasElement);
       await expect(canvas.getByText("0.01 pts")).toBeVisible();
+    },
+    PredictionBuyFeeRoundsUp: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("0.02 pts")).toBeVisible();
     },
   },
 };
