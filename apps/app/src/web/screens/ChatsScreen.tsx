@@ -426,7 +426,7 @@ export function ChatsScreen() {
 
         <div className="flex-1 overflow-y-auto">
           {s.alphaInvites.length > 0 ? (
-            <div className="border-b border-border bg-brand/5 p-3">
+            <div className="border-b border-border bg-feed-brand/5 p-3">
               <p className="mb-2 text-xs font-bold text-primary">Pending Invites ({s.alphaInvites.length})</p>
               <div className="flex flex-col gap-2">
                 {s.alphaInvites.map((invite) => (
@@ -491,7 +491,7 @@ export function ChatsScreen() {
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate text-sm font-bold text-foreground">{chat.title}</span>
                         {chat.unreadCount > 0 ? (
-                          <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-brand px-1.5 text-[11px] font-bold text-brand-foreground tabular-nums">
+                          <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-feed-brand px-1.5 text-[11px] font-bold text-feed-brand-foreground tabular-nums">
                             {chat.unreadCount}
                           </span>
                         ) : null}

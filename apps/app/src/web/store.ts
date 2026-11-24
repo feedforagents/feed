@@ -37,7 +37,6 @@ import {
   verifySmsCode,
 } from "./store-auth.ts";
 import {
-  appRuntime,
   applyDocumentTheme,
   canEnterRoute,
   clearNotices,
@@ -51,7 +50,6 @@ import {
   dismissToast,
   getStoreSnapshot,
   navRuntime,
-  onboardingRuntime,
   openBlockDialog,
   openComposeDialog,
   openDeletePostDialog,
@@ -113,7 +111,6 @@ import {
   removePostAcrossStore,
   renameGroupChat,
   repostPost,
-  respondAlphaInvite,
   respondGroupInvite,
   searchAccounts,
   selectFeedTab,
@@ -209,6 +206,32 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
   }
 }
 
+function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
+  const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
+  setStoreState({
+    route: parsed.route,
+    profileHandle: parsed.profileHandle,
+    activePostId: parsed.postId,
+    activeArticleId: parsed.articleId,
+    activeTrendingTag: parsed.trendingTag,
+    walletView: parsed.walletView,
+    ...(parsed.exploreQuery !== null ? { exploreQuery: parsed.exploreQuery } : {}),
+    ...(parsed.settingsTab ? { settingsTab: parsed.settingsTab } : {}),
+    selectedTicker: parsed.queryTicker,
+    ...(parsed.route === "Markets"
+      ? {
+          marketsViewMode: enteringTerminal ? ("terminal" as const) : ("dashboard" as const),
+          perpPreview: null,
+        }
+      : {}),
+    ...(parsed.marketKind && parsed.marketId
+      ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId }
+      : parsed.queryTicker
+        ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker }
+        : {}),
+  });
+}
+
 export async function navigate(path: string): Promise<void> {
   const url = new URL(path, "https://feed.local");
   const parsed = parseLocation(url.pathname, url.search);
@@ -248,29 +271,7 @@ export async function navigate(path: string): Promise<void> {
   sendNav({ type: "navigateTo", targetRoute: parsed.route });
   sendApp({ type: "navigateApp", targetRoute: parsed.route });
   recordPublicView(parsed.route);
-  const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
-  setStoreState({
-    route: parsed.route,
-    profileHandle: parsed.profileHandle,
-    activePostId: parsed.postId,
-    activeArticleId: parsed.articleId,
-    activeTrendingTag: parsed.trendingTag,
-    walletView: parsed.walletView,
-    ...(parsed.exploreQuery !== null ? { exploreQuery: parsed.exploreQuery } : {}),
-    ...(parsed.settingsTab ? { settingsTab: parsed.settingsTab } : {}),
-    selectedTicker: parsed.queryTicker,
-    ...(parsed.route === "Markets"
-      ? {
-          marketsViewMode: enteringTerminal ? "terminal" as const : "dashboard" as const,
-          perpPreview: null,
-        }
-      : {}),
-    ...(parsed.marketKind && parsed.marketId
-      ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId }
-      : parsed.queryTicker
-        ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker }
-        : {}),
-  });
+  applyParsedLocation(parsed);
   await loadDataForRoute(parsed.route, url.search);
 }
 
@@ -456,31 +457,9 @@ export function bootStore(): void {
     }
     window.addEventListener("popstate", () => {
       const parsed = parseLocation(window.location.pathname, window.location.search);
-      const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
       sendNav({ type: "navigateTo", targetRoute: parsed.route });
       sendApp({ type: "navigateApp", targetRoute: parsed.route });
-      setStoreState({
-        route: parsed.route,
-        profileHandle: parsed.profileHandle,
-        activePostId: parsed.postId,
-        activeArticleId: parsed.articleId,
-        activeTrendingTag: parsed.trendingTag,
-        walletView: parsed.walletView,
-        ...(parsed.exploreQuery !== null ? { exploreQuery: parsed.exploreQuery } : {}),
-        ...(parsed.settingsTab ? { settingsTab: parsed.settingsTab } : {}),
-        selectedTicker: parsed.queryTicker,
-        ...(parsed.route === "Markets"
-          ? {
-              marketsViewMode: enteringTerminal ? "terminal" as const : "dashboard" as const,
-              perpPreview: null,
-            }
-          : {}),
-        ...(parsed.marketKind && parsed.marketId
-          ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId }
-          : parsed.queryTicker
-            ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker }
-            : {}),
-      });
+      applyParsedLocation(parsed);
       void loadDataForRoute(parsed.route, window.location.search);
     });
     window.addEventListener(
@@ -585,7 +564,6 @@ export const storeActions = {
   deleteGroupChat,
   sendChatMessage,
   reactToChatMessage,
-  respondAlphaInvite,
   respondGroupInvite,
   loadNotifications,
   markNotificationRead,
@@ -635,4 +613,4 @@ export const storeActions = {
   clearNotices,
 };
 
-export { appRuntime, navRuntime, onboardingRuntime };
+export { navRuntime };

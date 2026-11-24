@@ -28,6 +28,58 @@ const REPORT_CATEGORIES = [
   "Other",
 ] as const;
 
+function ConfirmAlertDialog({
+  open,
+  onClose,
+  title,
+  description,
+  confirmLabel,
+  confirmVariant,
+  onConfirm,
+}: {
+  readonly open: boolean;
+  readonly onClose: () => void;
+  readonly title: string;
+  readonly description: string;
+  readonly confirmLabel: string;
+  readonly confirmVariant: "primary" | "destructive";
+  readonly onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel asChild>
+            <Button variant="outline" size="sm" shape="pill">Cancel</Button>
+          </AlertDialogCancel>
+          <AlertDialogAction asChild>
+            <Button
+              variant={confirmVariant}
+              size="sm"
+              shape="pill"
+              onClick={() => {
+                onConfirm();
+                onClose();
+              }}
+            >
+              {confirmLabel}
+            </Button>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 export function GlobalDialogs() {
   const s = useAppStore();
   const [composeText, setComposeText] = useState("");
@@ -144,121 +196,55 @@ export function GlobalDialogs() {
         </DialogContent>
       </Dialog>
 
-      <AlertDialog
+      <ConfirmAlertDialog
         open={s.blockTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) storeActions.closeBlockDialog();
+        onClose={storeActions.closeBlockDialog}
+        title={`${s.blockTarget?.currentlyActive ? "Unblock" : "Block"} @${s.blockTarget?.handle ?? ""}?`}
+        description={
+          s.blockTarget?.currentlyActive
+            ? `@${s.blockTarget.handle} will be able to follow and interact with your account again.`
+            : `You will no longer see posts or messages from @${s.blockTarget?.handle ?? ""}, and they will not be able to follow or message you.`
+        }
+        confirmLabel={s.blockTarget?.currentlyActive ? "Unblock" : "Block"}
+        confirmVariant={s.blockTarget?.currentlyActive ? "primary" : "destructive"}
+        onConfirm={() => {
+          if (s.blockTarget) {
+            void storeActions.toggleBlock(s.blockTarget.handle, s.blockTarget.currentlyActive);
+          }
         }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {s.blockTarget?.currentlyActive ? "Unblock" : "Block"} @{s.blockTarget?.handle ?? ""}?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {s.blockTarget?.currentlyActive
-                ? `@${s.blockTarget.handle} will be able to follow and interact with your account again.`
-                : `You will no longer see posts or messages from @${s.blockTarget?.handle ?? ""}, and they will not be able to follow or message you.`}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel asChild>
-              <Button variant="outline" size="sm" shape="pill">Cancel</Button>
-            </AlertDialogCancel>
-            <AlertDialogAction asChild>
-              <Button
-                variant={s.blockTarget?.currentlyActive ? "primary" : "destructive"}
-                size="sm"
-                shape="pill"
-                onClick={() => {
-                  if (s.blockTarget) {
-                    void storeActions.toggleBlock(s.blockTarget.handle, s.blockTarget.currentlyActive);
-                  }
-                  storeActions.closeBlockDialog();
-                }}
-              >
-                {s.blockTarget?.currentlyActive ? "Unblock" : "Block"}
-              </Button>
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      />
 
-      <AlertDialog
+      <ConfirmAlertDialog
         open={s.muteTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) storeActions.closeMuteDialog();
+        onClose={storeActions.closeMuteDialog}
+        title={`${s.muteTarget?.currentlyActive ? "Unmute" : "Mute"} @${s.muteTarget?.handle ?? ""}?`}
+        description={
+          s.muteTarget?.currentlyActive
+            ? `Posts from @${s.muteTarget.handle} will appear in your feeds again.`
+            : `Posts from @${s.muteTarget?.handle ?? ""} will be hidden from your timeline without notifying them.`
+        }
+        confirmLabel={s.muteTarget?.currentlyActive ? "Unmute" : "Mute"}
+        confirmVariant="primary"
+        onConfirm={() => {
+          if (s.muteTarget) {
+            void storeActions.toggleMute(s.muteTarget.handle, s.muteTarget.currentlyActive);
+          }
         }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {s.muteTarget?.currentlyActive ? "Unmute" : "Mute"} @{s.muteTarget?.handle ?? ""}?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {s.muteTarget?.currentlyActive
-                ? `Posts from @${s.muteTarget.handle} will appear in your feeds again.`
-                : `Posts from @${s.muteTarget?.handle ?? ""} will be hidden from your timeline without notifying them.`}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel asChild>
-              <Button variant="outline" size="sm" shape="pill">Cancel</Button>
-            </AlertDialogCancel>
-            <AlertDialogAction asChild>
-              <Button
-                variant="primary"
-                size="sm"
-                shape="pill"
-                onClick={() => {
-                  if (s.muteTarget) {
-                    void storeActions.toggleMute(s.muteTarget.handle, s.muteTarget.currentlyActive);
-                  }
-                  storeActions.closeMuteDialog();
-                }}
-              >
-                {s.muteTarget?.currentlyActive ? "Unmute" : "Mute"}
-              </Button>
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      />
 
-      <AlertDialog
+      <ConfirmAlertDialog
         open={s.deletePostTargetId !== null}
-        onOpenChange={(open) => {
-          if (!open) storeActions.closeDeletePostDialog();
+        onClose={storeActions.closeDeletePostDialog}
+        title="Delete post?"
+        description="This cannot be undone. The post will be removed from your profile and all timelines."
+        confirmLabel="Delete"
+        confirmVariant="destructive"
+        onConfirm={() => {
+          if (s.deletePostTargetId) {
+            void storeActions.deletePost(s.deletePostTargetId);
+          }
         }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete post?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This cannot be undone. The post will be removed from your profile and all timelines.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel asChild>
-              <Button variant="outline" size="sm" shape="pill">Cancel</Button>
-            </AlertDialogCancel>
-            <AlertDialogAction asChild>
-              <Button
-                variant="destructive"
-                size="sm"
-                shape="pill"
-                onClick={() => {
-                  if (s.deletePostTargetId) {
-                    void storeActions.deletePost(s.deletePostTargetId);
-                  }
-                  storeActions.closeDeletePostDialog();
-                }}
-              >
-                Delete
-              </Button>
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      />
     </>
   );
 }

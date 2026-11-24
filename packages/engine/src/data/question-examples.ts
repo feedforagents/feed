@@ -115,10 +115,3 @@ Will an AI win a major international art competition by {resolutionDate}?
 Will a VR experience win an Academy Award or Emmy by {resolutionDate}?
 Will a celebrity announce they're "going fully digital" and living in VR by {resolutionDate}?
 Will a major music festival be held entirely in virtual reality by {resolutionDate}?`;
-
-export function getQuestionExamples(): string[] {
-  return questionExamples
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => /^Will\b.+\?$/.test(line));
-}

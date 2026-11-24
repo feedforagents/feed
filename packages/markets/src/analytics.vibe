@@ -123,13 +123,14 @@ function rangeDurationMs(range: HistoryRange): number | null {
   }
 }
 
-function downsamplePricePoints(
-  points: ReadonlyArray<PriceHistoryPoint>,
-  maxPoints: number
-): ReadonlyArray<PriceHistoryPoint> {
+function downsampleBucketed<T>(
+  points: ReadonlyArray<T>,
+  maxPoints: number,
+  combine: (slice: ReadonlyArray<T>, last: T) => T
+): ReadonlyArray<T> {
   const limit = Math.max(2, Math.floor(maxPoints))
   if (points.length <= limit) return points
-  const result: Array<PriceHistoryPoint> = [points[0]!]
+  const result: Array<T> = [points[0]!]
   const middle = points.slice(1, -1)
   const buckets = limit - 2
   const bucketSize = middle.length / buckets
@@ -138,43 +139,43 @@ function downsamplePricePoints(
     const end = Math.max(start + 1, Math.min(middle.length, Math.floor((i + 1) * bucketSize)))
     const slice = middle.slice(start, end)
     if (slice.length === 0) continue
-    const last = slice[slice.length - 1]!
-    let totalVol = 0
-    for (const item of slice) totalVol += item.volumeCents
-    result.push({
-      ...last,
-      volumeCents: totalVol
-    })
+    result.push(combine(slice, slice[slice.length - 1]!))
   }
   result.push(points[points.length - 1]!)
   return result
+}
+
+function downsamplePricePoints(
+  points: ReadonlyArray<PriceHistoryPoint>,
+  maxPoints: number
+): ReadonlyArray<PriceHistoryPoint> {
+  return downsampleBucketed(points, maxPoints, (slice, last) => {
+    let totalVol = 0
+    for (const item of slice) totalVol += item.volumeCents
+    return { ...last, volumeCents: totalVol }
+  })
 }
 
 function downsamplePnlPoints(
   points: ReadonlyArray<PnlHistoryPoint>,
   maxPoints: number
 ): ReadonlyArray<PnlHistoryPoint> {
-  const limit = Math.max(2, Math.floor(maxPoints))
-  if (points.length <= limit) return points
-  const result: Array<PnlHistoryPoint> = [points[0]!]
-  const middle = points.slice(1, -1)
-  const buckets = limit - 2
-  const bucketSize = middle.length / buckets
-  for (let i = 0; i < buckets; i++) {
-    const start = Math.floor(i * bucketSize)
-    const end = Math.max(start + 1, Math.min(middle.length, Math.floor((i + 1) * bucketSize)))
-    const slice = middle.slice(start, end)
-    if (slice.length === 0) continue
-    const last = slice[slice.length - 1]!
+  return downsampleBucketed(points, maxPoints, (slice, last) => {
     let totalDelta = 0
     for (const item of slice) totalDelta += item.deltaCents
-    result.push({
-      ...last,
-      deltaCents: totalDelta
-    })
+    return { ...last, deltaCents: totalDelta }
+  })
+}
+
+function normalizeHistoryParams(
+  range: HistoryRange | undefined,
+  defaultRange: HistoryRange,
+  limit: number | undefined
+): { readonly range: HistoryRange; readonly safeLimit: number } {
+  return {
+    range: range ?? defaultRange,
+    safeLimit: Math.max(2, Math.min(500, Math.floor(limit ?? 200)))
   }
-  result.push(points[points.length - 1]!)
-  return result
 }
 
 function mapPerpHistoryRow(row: Row): PriceHistoryPoint {
@@ -200,16 +201,27 @@ function mapPredictionHistoryRow(row: Row): PriceHistoryPoint {
   }
 }
 
-export effect function getPerpPriceHistory(input: {
-  readonly ticker: string
+interface HistoryWindowInput {
   readonly range?: HistoryRange
   readonly limit?: number
-}): MarketPriceHistoryView!(MarketFailure | StoreFailure)!Store {
-  const range = input.range ?? "1D"
-  const safeLimit = Math.max(2, Math.min(500, Math.floor(input.limit ?? 200)))
+}
+
+type PriceHistoryResult = MarketPriceHistoryView!(MarketFailure | StoreFailure)!Store
+
+effect function withPriceHistoryTx(
+  input: HistoryWindowInput,
+  body: (tx: Tx, ctx: { readonly range: HistoryRange; readonly safeLimit: number; readonly now: number }) => MarketPriceHistoryView!(MarketFailure | StoreFailure)
+): PriceHistoryResult {
+  const { range, safeLimit } = normalizeHistoryParams(input.range, "1D", input.limit)
   const store = try Store
   const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
+  return try store.transaction(effect (tx: Tx) => try body(tx, { range, safeLimit, now }))
+}
+
+export effect function getPerpPriceHistory(
+  input: HistoryWindowInput & { readonly ticker: string }
+): PriceHistoryResult {
+  return try withPriceHistoryTx(input, effect (tx, { range, safeLimit, now }) => {
     const marketRows = try tx.query(
       "SELECT ticker, index_price_cents, mark_price_cents, updated_at FROM feed_perp_markets WHERE ticker = $1 LIMIT 1",
       [input.ticker]
@@ -273,24 +285,17 @@ export effect function getPerpPriceHistory(input: {
   })
 }
 
-export effect function getPredictionPriceHistory(input: {
-  readonly marketId: string
-  readonly range?: HistoryRange
-  readonly limit?: number
-}): MarketPriceHistoryView!(MarketFailure | StoreFailure)!Store {
-  const range = input.range ?? "1D"
-  const safeLimit = Math.max(2, Math.min(500, Math.floor(input.limit ?? 200)))
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
-    const marketRows = try tx.query(
+export effect function getPredictionPriceHistory(
+  input: HistoryWindowInput & { readonly marketId: string }
+): PriceHistoryResult {
+  return try withPriceHistoryTx(input, effect (tx, { range, safeLimit, now }) => {
+    const [market] = try tx.query(
       "SELECT id, yes_shares, no_shares, status, resolved_at FROM feed_prediction_markets WHERE id = $1 LIMIT 1",
       [input.marketId]
     )
-    if (marketRows.length === 0) {
+    if (market === undefined) {
       throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${input.marketId}`)
     }
-    const market = marketRows[0]!
     const liveYesBps = yesOddsBps(toInt(market.yes_shares), toInt(market.no_shares))
     const livePriceCents = Math.max(1, Math.min(99, Math.round(liveYesBps / 100)))
     const durationMs = rangeDurationMs(range)
@@ -420,6 +425,18 @@ function mapTradeRow(row: Row): AssetTradeView {
   }
 }
 
+const TRADE_TRADER_SELECT = `t.*,
+           fa.handle AS account_handle,
+           fa.display_name AS account_display_name,
+           fa.avatar_url AS account_avatar_url,
+           ac.username AS actor_username,
+           ac.name AS actor_name,
+           ac.profile_image_url AS actor_avatar_url`
+
+const TRADE_TRADER_JOINS = `FROM feed_trades t
+         LEFT JOIN feed_accounts fa ON t.trader_kind = 'user' AND fa.account_id = t.trader_id
+         LEFT JOIN feed_actors ac ON t.trader_kind = 'npc' AND ac.id = t.trader_id`
+
 export effect function listAssetTrades(input: {
   readonly marketKind: "perp" | "prediction"
   readonly marketRef: string
@@ -434,18 +451,8 @@ export effect function listAssetTrades(input: {
         throw marketFail("MARKET_NOT_FOUND", `Perp market not found: ${input.marketRef}`)
       }
       const rows = try tx.query(
-        `SELECT
-           t.*,
-           fa.handle AS account_handle,
-           fa.display_name AS account_display_name,
-           fa.avatar_url AS account_avatar_url,
-           ac.username AS actor_username,
-           ac.name AS actor_name,
-           ac.profile_image_url AS actor_avatar_url,
-           COALESCE(o.name, t.market_ref) AS market_title
-         FROM feed_trades t
-         LEFT JOIN feed_accounts fa ON t.trader_kind = 'user' AND fa.account_id = t.trader_id
-         LEFT JOIN feed_actors ac ON t.trader_kind = 'npc' AND ac.id = t.trader_id
+        `SELECT ${TRADE_TRADER_SELECT}, COALESCE(o.name, t.market_ref) AS market_title
+         ${TRADE_TRADER_JOINS}
          LEFT JOIN feed_spot_pools sp ON sp.ticker = t.market_ref
          LEFT JOIN feed_organizations o ON o.id = sp.organization_id
          WHERE t.market_kind IN ('perp', 'spot') AND t.market_ref = $1
@@ -460,18 +467,8 @@ export effect function listAssetTrades(input: {
       throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${input.marketRef}`)
     }
     const rows = try tx.query(
-      `SELECT
-         t.*,
-         fa.handle AS account_handle,
-         fa.display_name AS account_display_name,
-         fa.avatar_url AS account_avatar_url,
-         ac.username AS actor_username,
-         ac.name AS actor_name,
-         ac.profile_image_url AS actor_avatar_url,
-         pm.question AS market_title
-       FROM feed_trades t
-       LEFT JOIN feed_accounts fa ON t.trader_kind = 'user' AND fa.account_id = t.trader_id
-       LEFT JOIN feed_actors ac ON t.trader_kind = 'npc' AND ac.id = t.trader_id
+      `SELECT ${TRADE_TRADER_SELECT}, pm.question AS market_title
+       ${TRADE_TRADER_JOINS}
        LEFT JOIN feed_prediction_markets pm ON pm.id = t.market_ref
        WHERE t.market_kind = 'prediction' AND t.market_ref = $1
        ORDER BY t.created_at DESC, t.id DESC
@@ -517,18 +514,8 @@ export effect function listUserTrades(input: {
       throw marketFail("USER_NOT_FOUND", `Trader not found: ${input.handleOrId}`)
     }
     const rows = try tx.query(
-      `SELECT
-         t.*,
-         fa.handle AS account_handle,
-         fa.display_name AS account_display_name,
-         fa.avatar_url AS account_avatar_url,
-         ac.username AS actor_username,
-         ac.name AS actor_name,
-         ac.profile_image_url AS actor_avatar_url,
-         COALESCE(pm.question, o.name, t.market_ref) AS market_title
-       FROM feed_trades t
-       LEFT JOIN feed_accounts fa ON t.trader_kind = 'user' AND fa.account_id = t.trader_id
-       LEFT JOIN feed_actors ac ON t.trader_kind = 'npc' AND ac.id = t.trader_id
+      `SELECT ${TRADE_TRADER_SELECT}, COALESCE(pm.question, o.name, t.market_ref) AS market_title
+       ${TRADE_TRADER_JOINS}
        LEFT JOIN feed_prediction_markets pm ON t.market_kind = 'prediction' AND pm.id = t.market_ref
        LEFT JOIN feed_spot_pools sp ON t.market_kind IN ('perp', 'spot') AND sp.ticker = t.market_ref
        LEFT JOIN feed_organizations o ON o.id = sp.organization_id
@@ -553,18 +540,10 @@ export effect function listClosedPositions(input: {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const predRows = try tx.query(
-      `SELECT
-         p.market_id,
-         p.side,
-         p.shares,
-         p.cost_basis_cents,
-         p.payout_cents,
-         p.settled_at,
-         m.question,
-         m.status AS market_status,
-         m.resolved_outcome
+      `SELECT p.market_id, p.side, p.shares, p.cost_basis_cents, p.payout_cents, p.settled_at,
+              m.question, m.status AS market_status, m.resolved_outcome
        FROM feed_prediction_positions p
-       JOIN feed_prediction_markets m ON m.id = p.market_id
+       INNER JOIN feed_prediction_markets m ON m.id = p.market_id
        WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NOT NULL AND p.shares > 0`,
       [input.accountId]
     )
@@ -666,8 +645,7 @@ export effect function getAccountPnlHistory(input: {
   readonly range?: HistoryRange
   readonly limit?: number
 }): AccountPnlHistoryView!(MarketFailure | StoreFailure)!Store {
-  const range = input.range ?? "ALL"
-  const safeLimit = Math.max(2, Math.min(500, Math.floor(input.limit ?? 200)))
+  const { range, safeLimit } = normalizeHistoryParams(input.range, "ALL", input.limit)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {

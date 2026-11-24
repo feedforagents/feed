@@ -210,11 +210,16 @@ effect function findOrgByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject
   return orgRow === undefined ? undefined : subjectFromOrgRow(orgRow)
 }
 
-effect function findUserOrNpcTx(tx: Tx, handleOrId: string): (ResolvedSubject | undefined)!(SocialFailure | StoreFailure) {
+effect function normalizeHandleOrId(handleOrId: string): string!SocialFailure {
   const cleaned = handleOrId.trim().replace(/^@/, "")
   if (cleaned === "") {
     throw new SocialFailure({ code: "InvalidInput", message: "Account handle or ID is required" })
   }
+  return cleaned
+}
+
+effect function findUserOrNpcTx(tx: Tx, handleOrId: string): (ResolvedSubject | undefined)!(SocialFailure | StoreFailure) {
+  const cleaned = try normalizeHandleOrId(handleOrId)
   const account = try findAccountByHandleOrIdTx(tx, cleaned)
   if (account !== undefined) return account
   return try findActorByHandleOrIdTx(tx, cleaned)
@@ -227,10 +232,7 @@ export effect function resolveUserOrNpcTx(tx: Tx, handleOrId: string): ResolvedS
 }
 
 export effect function resolveSubjectTx(tx: Tx, handleOrId: string): ResolvedSubject!(SocialFailure | StoreFailure) {
-  const cleaned = handleOrId.trim().replace(/^@/, "")
-  if (cleaned === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account handle or ID is required" })
-  }
+  const cleaned = try normalizeHandleOrId(handleOrId)
   const account = try findAccountByHandleOrIdTx(tx, cleaned)
   if (account !== undefined) return account
   const org = try findOrgByHandleOrIdTx(tx, cleaned)
@@ -351,6 +353,18 @@ export effect function insertNotificationTx(
   }
 }
 
+function userProfileFromRow(row: Row, id: string): SubjectProfile {
+  const handle = toText(row.handle) ?? id
+  return {
+    id,
+    kind: "user",
+    handle,
+    displayName: toText(row.display_name) ?? handle,
+    avatarUrl: toText(row.avatar_url) ?? null,
+    bannerUrl: toText(row.banner_url) ?? null
+  }
+}
+
 export effect function loadSubjectProfilesMapTx(
   tx: Tx,
   refs: ReadonlyArray<SubjectRef>
@@ -366,14 +380,7 @@ export effect function loadSubjectProfilesMapTx(
     )
     for (const row of userRows) {
       const id = toText(row.account_id) ?? ""
-      profiles.set(`user:${id}`, {
-        id,
-        kind: "user",
-        handle: toText(row.handle) ?? id,
-        displayName: toText(row.display_name) ?? (toText(row.handle) ?? id),
-        avatarUrl: toText(row.avatar_url) ?? null,
-        bannerUrl: toText(row.banner_url) ?? null
-      })
+      profiles.set(`user:${id}`, userProfileFromRow(row, id))
     }
   }
   if (npcIds.length > 0) {
@@ -427,14 +434,7 @@ export effect function loadProfilesByIdsTx(
   for (const row of userRows) {
     const id = toText(row.account_id) ?? ""
     if (id !== "") {
-      profiles.set(id, {
-        id,
-        kind: "user",
-        handle: toText(row.handle) ?? id,
-        displayName: toText(row.display_name) ?? (toText(row.handle) ?? id),
-        avatarUrl: toText(row.avatar_url) ?? null,
-        bannerUrl: toText(row.banner_url) ?? null
-      })
+      profiles.set(id, userProfileFromRow(row, id))
     }
   }
   const missingAfterUsers = uniqueIds.filter((id) => !profiles.has(id))

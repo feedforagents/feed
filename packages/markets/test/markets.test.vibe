@@ -759,10 +759,9 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
 it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagination, server-side metrics, early-sell win rate, and NPC characters board (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
   runWithSeededMarketDay(effect (now) => {
     const store = try Store
-    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
-    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
-    try createVerifiedAccount("user-carol", "carol", INITIAL_GRANT_CENTS)
-    try createVerifiedAccount("user-dave", "dave", INITIAL_GRANT_CENTS)
+    for (const handle of ["alice", "bob", "carol", "dave"]) {
+      try createVerifiedAccount(`user-${handle}`, handle, INITIAL_GRANT_CENTS)
+    }
 
     try store.transaction(effect (tx: Tx) => {
       try tx.query("INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ('org-deleted', 'Deleted', 0, $1)", [now])

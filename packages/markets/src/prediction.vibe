@@ -340,7 +340,7 @@ function safeBuyStep(yesShares: number, noShares: number, side: PredictionSide, 
   return { nextYes, nextNo, sharesOut: noShares - nextNo + netCents }
 }
 
-export function safeSellGrossCents(yesShares: number, noShares: number, side: PredictionSide, shares: number): number {
+function safeSellGrossCents(yesShares: number, noShares: number, side: PredictionSide, shares: number): number {
   if (yesShares <= 0 || noShares <= 0 || shares <= 0) return 0
   if (yesShares + noShares + shares <= 30_000_000) {
     return cpmmSellGrossUnits(yesShares, noShares, toSpecSide(side), shares)
@@ -481,39 +481,69 @@ export effect function getPredictionMarket(marketId: string): PredictionMarketVi
   })
 }
 
-export effect function previewPredictionBuy(input: PreviewPredictionBuyInput): PredictionBuyPreview!(MarketFailure | StoreFailure)!Store {
-  try validateSide(input.side)
-  try assertSafePositiveInt(input.amountCents, "INVALID_AMOUNT", "Trade amountCents must be a positive integer")
-  if (input.amountCents < MIN_TRADE_CENTS) {
+effect function validateBuyInput(side: PredictionSide, amountCents: number): void!MarketFailure {
+  try validateSide(side)
+  try assertSafePositiveInt(amountCents, "INVALID_AMOUNT", "Trade amountCents must be a positive integer")
+  if (amountCents < MIN_TRADE_CENTS) {
     throw marketFail("INVALID_AMOUNT", `Minimum trade amount is ${MIN_TRADE_CENTS} cents`)
   }
+}
+
+effect function validateSellInput(side: PredictionSide, shares: number): void!MarketFailure {
+  try validateSide(side)
+  try assertSafePositiveInt(shares, "INVALID_SHARES", "Shares to sell must be a positive integer")
+  if (shares < MIN_SELL_SHARE_UNITS) {
+    throw marketFail("INVALID_SHARES", `Minimum sell quantity is ${MIN_SELL_SHARE_UNITS} cent-shares`)
+  }
+}
+
+effect function readOpenPredictionMarketTx(tx: Tx, marketId: string, now: number): Row!(MarketFailure | StoreFailure) {
+  const rows = try tx.query(`SELECT ${publicMarketColumns} FROM feed_prediction_markets WHERE id = $1`, [marketId])
+  if (rows.length === 0) {
+    throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${marketId}`)
+  }
+  const market = rows[0]!
+  if (parsePredictionStatus(market.status) !== "open" || now >= toInt(market.expires_at)) {
+    throw marketFail("MARKET_CLOSED", "Prediction market is closed for trading")
+  }
+  return market
+}
+
+effect function computeValidatedBuyQuote(market: Row, side: PredictionSide, amountCents: number): {
+  readonly feeCents: number
+  readonly netCents: number
+  readonly nextYes: number
+  readonly nextNo: number
+  readonly sharesOut: number
+  readonly oldYesPriceBps: number
+  readonly newYesPriceBps: number
+}!MarketFailure {
+  const yesShares = toInt(market.yes_shares)
+  const noShares = toInt(market.no_shares)
+  const feeCents = canonicalTradingFee(amountCents)
+  const netCents = buyNetAfterFee(amountCents)
+  if (netCents <= 0) {
+    throw marketFail("INVALID_AMOUNT", "Trade amount too small after trading fee")
+  }
+  const oldYesPriceBps = yesOddsBps(yesShares, noShares)
+  const { nextYes, nextNo, sharesOut } = safeBuyStep(yesShares, noShares, side, netCents)
+  const newYesPriceBps = yesOddsBps(nextYes, nextNo)
+  if (nextYes <= 0 || nextNo <= 0 || sharesOut <= 0) {
+    throw marketFail("INSUFFICIENT_LIQUIDITY", "Pool reserves cannot satisfy buy order")
+  }
+  if (!oddsWithinBoundsOrUnwinding(oldYesPriceBps, newYesPriceBps) || absInt(newYesPriceBps - oldYesPriceBps) > MAX_ODDS_MOVE_BPS) {
+    throw marketFail("PRICE_IMPACT_EXCEEDED", "Trade exceeds maximum allowed odds impact or liquidity bounds")
+  }
+  return { feeCents, netCents, nextYes, nextNo, sharesOut, oldYesPriceBps, newYesPriceBps }
+}
+
+export effect function previewPredictionBuy(input: PreviewPredictionBuyInput): PredictionBuyPreview!(MarketFailure | StoreFailure)!Store {
+  try validateBuyInput(input.side, input.amountCents)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(`SELECT ${publicMarketColumns} FROM feed_prediction_markets WHERE id = $1`, [input.marketId])
-    if (rows.length === 0) {
-      throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${input.marketId}`)
-    }
-    const market = rows[0]!
-    if (parsePredictionStatus(market.status) !== "open" || now >= toInt(market.expires_at)) {
-      throw marketFail("MARKET_CLOSED", "Prediction market is closed for trading")
-    }
-    const yesShares = toInt(market.yes_shares)
-    const noShares = toInt(market.no_shares)
-    const feeCents = canonicalTradingFee(input.amountCents)
-    const netCents = buyNetAfterFee(input.amountCents)
-    if (netCents <= 0) {
-      throw marketFail("INVALID_AMOUNT", "Trade amount too small after trading fee")
-    }
-    const oldYesPriceBps = yesOddsBps(yesShares, noShares)
-    const { nextYes, nextNo, sharesOut } = safeBuyStep(yesShares, noShares, input.side, netCents)
-    const newYesPriceBps = yesOddsBps(nextYes, nextNo)
-    if (nextYes <= 0 || nextNo <= 0 || sharesOut <= 0) {
-      throw marketFail("INSUFFICIENT_LIQUIDITY", "Pool reserves cannot satisfy buy order")
-    }
-    if (!oddsWithinBoundsOrUnwinding(oldYesPriceBps, newYesPriceBps) || absInt(newYesPriceBps - oldYesPriceBps) > MAX_ODDS_MOVE_BPS) {
-      throw marketFail("PRICE_IMPACT_EXCEEDED", "Trade exceeds maximum allowed odds impact or liquidity bounds")
-    }
+    const market = try readOpenPredictionMarketTx(tx, input.marketId, now)
+    const { feeCents, netCents, sharesOut, oldYesPriceBps, newYesPriceBps } = try computeValidatedBuyQuote(market, input.side, input.amountCents)
     const avgPriceCents = Math.max(1, Math.min(100, Math.round((netCents * CENT_SHARES_PER_SHARE) / sharesOut)))
     return {
       marketId: input.marketId,
@@ -531,22 +561,11 @@ export effect function previewPredictionBuy(input: PreviewPredictionBuyInput): P
 }
 
 export effect function previewPredictionSell(input: PreviewPredictionSellInput): PredictionSellPreview!(MarketFailure | StoreFailure)!Store {
-  try validateSide(input.side)
-  try assertSafePositiveInt(input.shares, "INVALID_SHARES", "Shares to sell must be a positive integer")
-  if (input.shares < MIN_SELL_SHARE_UNITS) {
-    throw marketFail("INVALID_SHARES", `Minimum sell quantity is ${MIN_SELL_SHARE_UNITS} cent-shares`)
-  }
+  try validateSellInput(input.side, input.shares)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(`SELECT ${publicMarketColumns} FROM feed_prediction_markets WHERE id = $1`, [input.marketId])
-    if (rows.length === 0) {
-      throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${input.marketId}`)
-    }
-    const market = rows[0]!
-    if (parsePredictionStatus(market.status) !== "open" || now >= toInt(market.expires_at)) {
-      throw marketFail("MARKET_CLOSED", "Prediction market is closed for trading")
-    }
+    const market = try readOpenPredictionMarketTx(tx, input.marketId, now)
     let isFullExit = false
     if (input.holderId !== undefined) {
       const posRows = try tx.query(
@@ -625,21 +644,9 @@ interface LockedPredictionContext {
   readonly requestFingerprint: string
 }
 
-interface RecordPredictionTradeParams {
+type RecordPredictionTradeParams = Omit<TradeReceipt, "tradeId" | "yesPriceBps" | "noPriceBps" | "market" | "createdAt"> & {
   readonly tx: Tx
-  readonly marketId: string
-  readonly actorId: string
-  readonly actorKind: MarketActorKind
-  readonly action: "buy" | "sell"
-  readonly side: PredictionSide
-  readonly shares: number
-  readonly notionalCents: number
-  readonly feeCents: number
-  readonly netCents: number
-  readonly priceCents: number
-  readonly realizedPnlCents: number | null
   readonly ledgerDeltaCents: number
-  readonly balanceAfterCents: number
   readonly viaClientName: string | null
   readonly idempotencyKey: string | null
   readonly requestFingerprint: string
@@ -876,32 +883,13 @@ effect function settlePredictionPositionsTx(
 }
 
 export effect function buyPredictionShares(input: BuyPredictionInput): TradeReceipt!(MarketFailure | StoreFailure)!Store {
-  try validateSide(input.side)
-  try assertSafePositiveInt(input.amountCents, "INVALID_AMOUNT", "Trade amountCents must be a positive integer")
-  if (input.amountCents < MIN_TRADE_CENTS) {
-    throw marketFail("INVALID_AMOUNT", `Minimum trade amount is ${MIN_TRADE_CENTS} cents`)
-  }
+  try validateBuyInput(input.side, input.amountCents)
   const fingerprint = `buy:${input.marketId}:${input.side}:${input.amountCents}`
   return try withLockedPredictionMarket(
     input,
     fingerprint,
     effect ({ tx, market, now, viaClientName, idempotencyKey, requestFingerprint }) => {
-      const yesShares = toInt(market.yes_shares)
-      const noShares = toInt(market.no_shares)
-      const feeCents = canonicalTradingFee(input.amountCents)
-      const netCents = buyNetAfterFee(input.amountCents)
-      if (netCents <= 0) {
-        throw marketFail("INVALID_AMOUNT", "Trade amount too small after trading fee")
-      }
-      const oldOdds = yesOddsBps(yesShares, noShares)
-      const { nextYes, nextNo, sharesOut } = safeBuyStep(yesShares, noShares, input.side, netCents)
-      const newOdds = yesOddsBps(nextYes, nextNo)
-      if (nextYes <= 0 || nextNo <= 0 || sharesOut <= 0) {
-        throw marketFail("INSUFFICIENT_LIQUIDITY", "Pool reserves cannot satisfy buy order")
-      }
-      if (!oddsWithinBoundsOrUnwinding(oldOdds, newOdds) || absInt(newOdds - oldOdds) > MAX_ODDS_MOVE_BPS) {
-        throw marketFail("PRICE_IMPACT_EXCEEDED", "Trade exceeds maximum allowed odds impact or liquidity bounds")
-      }
+      const { feeCents, netCents, nextYes, nextNo, sharesOut } = try computeValidatedBuyQuote(market, input.side, input.amountCents)
       const balanceAfterCents = try debitActorBalance(tx, input.actorId, input.actorKind, input.amountCents, feeCents, now)
       const updatedMarkets = try tx.query(
         `UPDATE feed_prediction_markets
@@ -947,11 +935,7 @@ export effect function buyPredictionShares(input: BuyPredictionInput): TradeRece
 }
 
 export effect function sellPredictionShares(input: SellPredictionInput): TradeReceipt!(MarketFailure | StoreFailure)!Store {
-  try validateSide(input.side)
-  try assertSafePositiveInt(input.shares, "INVALID_SHARES", "Shares to sell must be a positive integer")
-  if (input.shares < MIN_SELL_SHARE_UNITS) {
-    throw marketFail("INVALID_SHARES", `Minimum sell quantity is ${MIN_SELL_SHARE_UNITS} cent-shares`)
-  }
+  try validateSellInput(input.side, input.shares)
   const fingerprint = `sell:${input.marketId}:${input.side}:${input.shares}`
   return try withLockedPredictionMarket(
     input,

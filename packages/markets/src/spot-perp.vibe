@@ -832,6 +832,59 @@ effect function settlePerpCloseSliceTx(
   }
 }
 
+effect function recordPerpLedgerAndPriceTx(
+  tx: Tx,
+  params: {
+    readonly accountId: string
+    readonly kind: string
+    readonly deltaCents: number
+    readonly balanceAfterCents: number
+    readonly refId: string
+    readonly ticker: string
+    readonly indexPriceCents: number
+    readonly markPriceCents: number
+    readonly volumeCents: number
+    readonly now: number
+  }
+): void!StoreFailure {
+  try insertLedgerEntry(tx, {
+    ledgerId: newMarketId(),
+    accountId: params.accountId,
+    kind: params.kind,
+    deltaCents: params.deltaCents,
+    balanceAfterCents: params.balanceAfterCents,
+    refId: params.refId,
+    createdAt: params.now
+  })
+  try insertPriceHistory(tx, {
+    marketKind: "perp",
+    marketRef: params.ticker,
+    priceCents: params.indexPriceCents,
+    markPriceCents: params.markPriceCents,
+    volumeCents: params.volumeCents,
+    recordedAt: params.now
+  })
+}
+
+effect function validatePerpOrderInput(input: {
+  readonly collateralCents: number
+  readonly leverage: number
+  readonly side: PerpSide
+}): number!MarketFailure {
+  try assertSafePositiveInt(input.collateralCents, "INVALID_AMOUNT", "collateralCents must be a positive integer")
+  if (!Number.isSafeInteger(input.leverage) || input.leverage < 1 || input.leverage > MAX_LEVERAGE) {
+    throw marketFail("INVALID_LEVERAGE", `Leverage must be an integer between 1 and ${MAX_LEVERAGE}`)
+  }
+  if (input.side !== "long" && input.side !== "short") {
+    throw marketFail("INVALID_SIDE", "Perp side must be 'long' or 'short'")
+  }
+  const sizeCents = input.collateralCents * input.leverage
+  if (!Number.isSafeInteger(sizeCents) || sizeCents < MIN_ORDER_SIZE_CENTS) {
+    throw marketFail("ORDER_TOO_SMALL", `Notional size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
+  }
+  return sizeCents
+}
+
 effect function insertFreshPerpPositionTx(
   tx: Tx,
   params: {
@@ -884,22 +937,17 @@ effect function insertFreshPerpPositionTx(
     viaClientName: params.viaClientName,
     createdAt: params.now
   })
-  try insertLedgerEntry(tx, {
-    ledgerId: newMarketId(),
+  try recordPerpLedgerAndPriceTx(tx, {
     accountId: params.ownerId,
     kind: "perp_open",
     deltaCents: 0 - totalDebitCents,
     balanceAfterCents,
     refId: tradeId,
-    createdAt: params.now
-  })
-  try insertPriceHistory(tx, {
-    marketKind: "perp",
-    marketRef: params.market.ticker,
-    priceCents: params.market.indexPriceCents,
+    ticker: params.market.ticker,
+    indexPriceCents: params.market.indexPriceCents,
     markPriceCents: postOpenMark,
     volumeCents: params.sizeCents,
-    recordedAt: params.now
+    now: params.now
   })
   const posRow = {
     ...inserted[0]!,
@@ -974,22 +1022,17 @@ effect function addToPerpPositionTx(
     viaClientName: params.viaClientName,
     createdAt: params.now
   })
-  try insertLedgerEntry(tx, {
-    ledgerId: newMarketId(),
+  try recordPerpLedgerAndPriceTx(tx, {
     accountId: existing.owner,
     kind: "perp_add",
     deltaCents: 0 - totalDebitCents,
     balanceAfterCents,
     refId: tradeId,
-    createdAt: params.now
-  })
-  try insertPriceHistory(tx, {
-    marketKind: "perp",
-    marketRef: params.market.ticker,
-    priceCents: params.market.indexPriceCents,
+    ticker: params.market.ticker,
+    indexPriceCents: params.market.indexPriceCents,
     markPriceCents: postAddMark,
     volumeCents: params.addSizeCents,
-    recordedAt: params.now
+    now: params.now
   })
   const posRow = {
     ...updatedRows[0]!,
@@ -1014,17 +1057,7 @@ effect function addToPerpPositionTx(
 }
 
 export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrderPreview!(MarketFailure | StoreFailure)!Store {
-  try assertSafePositiveInt(input.collateralCents, "INVALID_AMOUNT", "collateralCents must be a positive integer")
-  if (!Number.isSafeInteger(input.leverage) || input.leverage < 1 || input.leverage > MAX_LEVERAGE) {
-    throw marketFail("INVALID_LEVERAGE", `Leverage must be an integer between 1 and ${MAX_LEVERAGE}`)
-  }
-  if (input.side !== "long" && input.side !== "short") {
-    throw marketFail("INVALID_SIDE", "Perp side must be 'long' or 'short'")
-  }
-  const sizeCents = input.collateralCents * input.leverage
-  if (!Number.isSafeInteger(sizeCents) || sizeCents < MIN_ORDER_SIZE_CENTS) {
-    throw marketFail("ORDER_TOO_SMALL", `Notional size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
-  }
+  const sizeCents = try validatePerpOrderInput(input)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const marketRows = try tx.query(
@@ -1186,17 +1219,7 @@ export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrder
 }
 
 export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(MarketFailure | StoreFailure)!Store {
-  try assertSafePositiveInt(input.collateralCents, "INVALID_AMOUNT", "collateralCents must be a positive integer")
-  if (!Number.isSafeInteger(input.leverage) || input.leverage < 1 || input.leverage > MAX_LEVERAGE) {
-    throw marketFail("INVALID_LEVERAGE", `Leverage must be an integer between 1 and ${MAX_LEVERAGE}`)
-  }
-  if (input.side !== "long" && input.side !== "short") {
-    throw marketFail("INVALID_SIDE", "Perp side must be 'long' or 'short'")
-  }
-  const sizeCents = input.collateralCents * input.leverage
-  if (!Number.isSafeInteger(sizeCents) || sizeCents < MIN_ORDER_SIZE_CENTS) {
-    throw marketFail("ORDER_TOO_SMALL", `Notional size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
-  }
+  const sizeCents = try validatePerpOrderInput(input)
   const viaClientName = normalizeViaClient(input.viaClientName)
   const store = try Store
   const now = try Clock.currentTimeMillis
