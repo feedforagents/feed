@@ -443,38 +443,6 @@ export async function getAgentGroupChats(
 }
 
 /**
- * Resolve a group chat by name for an agent.
- * Returns the chatId of the first matching group chat the agent is a member of.
- * Used for channel resolution when agents reference groups by name rather than ID.
- */
-export async function resolveGroupChatByName(
-  agentUserId: string,
-  groupName: string
-): Promise<string | null> {
-  const exactName = groupName.trim();
-  if (!exactName) throw new Error('Group name is required');
-
-  const results = await db
-    .select({ chatId: chats.id })
-    .from(chatParticipants)
-    .innerJoin(chats, eq(chatParticipants.chatId, chats.id))
-    .innerJoin(groups, eq(chats.groupId, groups.id))
-    .where(
-      and(
-        eq(chatParticipants.userId, agentUserId),
-        eq(chatParticipants.isActive, true),
-        eq(chats.isGroup, true),
-        sql`lower(${groups.name}) = lower(${exactName})`
-      )
-    )
-    .limit(2);
-
-  if (results.length > 1)
-    throw new Error(`Ambiguous group name: ${exactName}; use a chat ID`);
-  return results[0]?.chatId ?? null;
-}
-
-/**
  * Resolve a user by their username.
  * Returns the userId or null if not found.
  */

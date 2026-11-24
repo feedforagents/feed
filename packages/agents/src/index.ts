@@ -26,13 +26,6 @@ export {
 } from './external/ExternalAgentAdapter';
 // LLM integrations
 export * from './llm';
-// Plugins - Feed plugin is the main export
-export {
-  feedPlugin,
-  initializeAgentA2AClient,
-  initializeFeedPlugin,
-} from './plugins/feed';
-export type { FeedRuntime } from './plugins/feed/types';
 // Plugin utilities
 export { groqPlugin } from './plugins/groq';
 export * from './plugins/plugin-agent-core/src';
