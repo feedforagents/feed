@@ -541,7 +541,7 @@ effect function handleOAuthRoute(
   url: URL,
   origin: string,
   config: AppServerConfig
-): (Response | undefined)!(AuthFailure | StoreFailure | HttpRequestError)!Store {
+): (Response | undefined)!(AuthFailure | RateLimited | StoreFailure | HttpRequestError)!Store {
   const path = url.pathname
   const method = request.method.toUpperCase()
   if (method === "OPTIONS" && (path.startsWith("/.well-known/oauth") || path.startsWith("/oauth/"))) {

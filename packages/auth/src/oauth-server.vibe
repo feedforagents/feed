@@ -55,8 +55,9 @@ import {
   sha256Base64Url,
   sha256Hex
 } from "./crypto.vibe"
-import { AuthFailure, UnauthorizedError } from "./errors.vibe"
+import { AuthFailure, RateLimited, UnauthorizedError } from "./errors.vibe"
 import { executeHttpJson } from "./http.vibe"
+import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
 import type { AuthRuntimeConfig, PlayMode } from "./phone-auth.vibe"
 
 export interface VerifiedAccessToken {
@@ -1130,18 +1131,36 @@ export effect function startDeviceAuthorization(input: {
   })
 }
 
+const DEVICE_APPROVE_ATTEMPTS_PER_HOUR = 20
+const DEVICE_APPROVE_WINDOW_MS = 3_600_000
+
 export effect function approveDeviceAuthorization(input: {
   readonly accountId: string
   readonly userCode: string
   readonly scopes?: ReadonlyArray<string> | string | undefined
   readonly deny?: boolean | undefined
-}): DeviceApprovalResult!(AuthFailure | StoreFailure)!Store {
+}): DeviceApprovalResult!(AuthFailure | RateLimited | StoreFailure)!Store {
   const userCode = input.userCode.trim().toUpperCase()
   if (userCode === "") {
     throw new AuthFailure({ code: "invalid_user_code", message: "Enter a valid pairing code.", status: 400 })
   }
   const store = try Store
   const now = try Clock.currentTimeMillis
+  // User codes are 4 digits (10,000 combinations) with a 10-minute lifetime, so
+  // approval attempts are budgeted per account: without a cap, a signed-in
+  // attacker could script guesses until they hit a victim's pending code and
+  // bind the victim's agent to the attacker's account. The budget lives in its
+  // own transaction so failed attempts still count when the approval throws.
+  try store.transaction((tx: Tx) =>
+    consumeRateLimitWindowInTx(tx, {
+      scopeKey: `device_approve:${input.accountId}`,
+      limit: DEVICE_APPROVE_ATTEMPTS_PER_HOUR,
+      windowMs: DEVICE_APPROVE_WINDOW_MS,
+      action: "device_approve",
+      message: "Too many device approval attempts. Try again later.",
+      now
+    })
+  )
   return try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
       "SELECT device_code_hash, user_code, client_id, client_name, scope, status, expires_at FROM feed_device_codes WHERE user_code = $1 FOR UPDATE",
