@@ -653,6 +653,11 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     setStoreState({ profileBundle: res.data, profileLoading: false });
     return;
   }
+  const cur = getStoreSnapshot().profileBundle;
+  if (!res.ok && res.status !== 404 && cur !== null && cur.summary.handle.toLowerCase() === handle.toLowerCase()) {
+    setStoreState({ profileLoading: false, errorMessage: res.message });
+    return;
+  }
   setStoreState({ profileBundle: null, profileLoading: false, errorMessage: res.ok ? "Profile not found" : res.message });
 }
 
