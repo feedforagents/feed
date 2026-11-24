@@ -28,7 +28,7 @@ import {
 import { invalidateWalletBalance } from '@/stores/walletBalanceStore';
 import type { DisplayPerpPosition } from '@/types/markets';
 import { fetchClosedPositionsSnapshot } from './closed-positions-pages';
-import { closedPredictionWon } from './closed-prediction-outcome';
+import { closedPredictionOutcome } from './closed-prediction-outcome';
 
 interface PositionsTabProps {
   userId: string;
@@ -74,6 +74,7 @@ interface ClosedPredictionPosition {
   currentPrice: number;
   pnl: number;
   outcome: boolean | null;
+  status: string | null;
   resolvedAt: string | null;
   createdAt: string | null;
 }
@@ -204,9 +205,9 @@ export function PositionsTab({ userId }: PositionsTabProps) {
     let filtered = closedPredictions;
 
     if (outcomeFilter === 'won')
-      filtered = filtered.filter((p) => closedPredictionWon(p));
+      filtered = filtered.filter((p) => closedPredictionOutcome(p) === 'won');
     else if (outcomeFilter === 'lost')
-      filtered = filtered.filter((p) => !closedPredictionWon(p));
+      filtered = filtered.filter((p) => closedPredictionOutcome(p) === 'lost');
 
     return filtered;
   }, [closedPredictions, outcomeFilter]);
@@ -804,7 +805,7 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                 // prediction
                 const position = item.data;
                 const pnl = position.pnl;
-                const won = closedPredictionWon(position);
+                const outcome = closedPredictionOutcome(position);
                 const costBasis = position.shares * position.avgPrice;
                 const pnlPercent =
                   costBasis !== 0 ? (pnl / costBasis) * 100 : 0;
@@ -832,12 +833,18 @@ export function PositionsTab({ userId }: PositionsTabProps) {
                           <span
                             className={cn(
                               'rounded px-1.5 pt-0 pb-0.5 font-medium text-[10px] leading-tight',
-                              won
+                              outcome === 'won'
                                 ? 'bg-emerald-500/15 text-emerald-500'
-                                : 'bg-red-500/15 text-red-500'
+                                : outcome === 'void'
+                                  ? 'bg-foreground/10 text-foreground'
+                                  : 'bg-red-500/15 text-red-500'
                             )}
                           >
-                            {won ? 'Won' : 'Lost'}
+                            {outcome === 'void'
+                              ? 'Void'
+                              : outcome === 'won'
+                                ? 'Won'
+                                : 'Lost'}
                           </span>
                         </div>
                       </div>
@@ -990,6 +997,7 @@ function parseClosedPredictions(
     currentPrice: Number(p.currentPrice ?? 0),
     pnl: Number(p.pnl ?? p.unrealizedPnL ?? 0),
     outcome: (p.outcome as boolean | null) ?? null,
+    status: (p.status as string) ?? null,
     resolvedAt: (p.resolvedAt as string) ?? null,
     createdAt: (p.createdAt as string) ?? null,
   }));
