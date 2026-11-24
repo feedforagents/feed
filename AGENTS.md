@@ -35,6 +35,19 @@ The spec format, naming rules and everything the tools accept are in
   judgment, not a validation. Agreement is not the default, candor over
   sycophancy.
 
+## Pull request evidence
+
+Follow [the required PR evidence format](CONTRIBUTING.md#evidence) for every PR.
+Provide exact test results and proof of the change. Include redacted runtime
+logs, a before-and-after UI video, benchmarks, or physical-device results
+whenever the corresponding change type applies. Keep evidence current with the
+PR head and retain the submission signature if you used Slop.cash.
+
+Maintainers close submissions that fail to prove a useful change or add
+complexity to unlikely paths without showing that the path is reachable and
+has a meaningful impact. Eligible signed Slop.cash submissions incur the
+applicable Points deduction.
+
 ## Loading skills
 
 The canonical skill files are committed in `.agents/skills/`, including
