@@ -19,8 +19,8 @@ const itemBase =
   "relative flex cursor-default items-center gap-2 rounded-sm px-2.5 py-1.5 text-sm outline-none select-none data-highlighted:bg-accent data-highlighted:text-accent-foreground data-disabled:pointer-events-none data-disabled:opacity-50";
 
 /** Menu of contextual actions anchored to a trigger control. */
-export function DropdownMenu(props: DropdownMenuProps) {
-  return <DropdownMenuPrimitive.Root {...props} />;
+export function DropdownMenu({ modal = false, ...props }: DropdownMenuProps) {
+  return <DropdownMenuPrimitive.Root modal={modal} {...props} />;
 }
 
 /** Opens the dropdown menu; pass `asChild` to wrap a `Button`. */

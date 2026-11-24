@@ -7,7 +7,7 @@ const children = (
     <PopoverTrigger asChild>
       <Button variant="outline" size="sm">Scope details</Button>
     </PopoverTrigger>
-    <PopoverContent>
+    <PopoverContent aria-label="Single-agent rule">
       <p className="text-sm font-medium text-foreground">Single-agent rule</p>
       <p className="mt-1 text-xs text-muted-foreground">Authorizing a new client replaces any previous grant on this account.</p>
     </PopoverContent>

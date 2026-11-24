@@ -198,33 +198,33 @@ export function PostCard({
           <button
             type="button"
             disabled={disabled}
-            aria-label={`Reply (${post.replyCount})`}
             onClick={() => !disabled && onReply?.(post.id)}
             className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-sm py-1 hover:text-primary")}
           >
             <MessageSquare aria-hidden className="size-4" />
+            <span className="sr-only">Reply</span>
             <span className="font-mono tabular-nums">{post.replyCount}</span>
           </button>
           <button
             type="button"
             disabled={disabled}
             aria-pressed={Boolean(post.reposted)}
-            aria-label={`Repost (${post.repostCount})`}
             onClick={() => !disabled && onRepost?.(post.id)}
             className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-sm py-1 hover:text-ok", post.reposted && "text-ok")}
           >
             <Repeat2 aria-hidden className="size-4" />
+            <span className="sr-only">Repost</span>
             <span className="font-mono tabular-nums">{post.repostCount}</span>
           </button>
           <button
             type="button"
             disabled={disabled}
             aria-pressed={Boolean(post.liked)}
-            aria-label={`Like (${post.likeCount})`}
             onClick={() => !disabled && onLike?.(post.id)}
             className={cn(focusRing, inactive, "inline-flex items-center gap-1.5 rounded-sm py-1 hover:text-destructive", post.liked && "text-destructive")}
           >
             <Heart aria-hidden className="size-4" />
+            <span className="sr-only">Like</span>
             <span className="font-mono tabular-nums">{post.likeCount}</span>
           </button>
           <button

@@ -23,8 +23,10 @@ export const meta: ComponentMeta<AppShellProps> = {
   },
   play: {
     SocialMode: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
-      const nav = within(canvasElement).getByRole("navigation", { name: "Primary" });
-      await expect(within(nav).queryByRole("button", { name: /Markets/ })).toBeNull();
+      const navs = within(canvasElement).getAllByRole("navigation");
+      for (const nav of navs) {
+        await expect(within(nav).queryByRole("button", { name: /Markets/ })).toBeNull();
+      }
     },
   },
 };

@@ -1,15 +1,13 @@
 // spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
-const originalFetch = globalThis.fetch;
-const originalEventSource = globalThis.EventSource;
 
 const SAMPLE_POSTS = [
   {
@@ -68,30 +66,32 @@ const SAMPLE_MARKETS = {
 };
 
 function installMockNetwork() {
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const path = new URL(raw, window.location.origin).pathname;
     if (path === "/api/auth/me") {
-      return Response.json({
+      return json({
         authenticated: false,
         viewer: null,
         acceptedCountries: ["+1", "+44"],
         publicAppUrl: window.location.origin,
       });
     }
-    if (path === "/api/feed") return Response.json(SAMPLE_POSTS);
-    if (path === "/api/markets") return Response.json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return Response.json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return Response.json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return Response.json({ packs: [] });
-    if (path === "/api/skills/hosts") return Response.json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return Response.json({});
-  }) as typeof fetch;
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
 
-  class StubEventSource {
+  class StubEventSource extends EventTarget {
     close() {}
   }
-  globalThis.EventSource = StubEventSource as unknown as typeof EventSource;
+  vi.stubGlobal("EventSource", StubEventSource);
 }
 
 beforeAll(() => {
@@ -102,8 +102,7 @@ afterEach(async () => {
   for (const root of opened.splice(0)) {
     await act(() => Promise.resolve(root.unmount()));
   }
-  globalThis.fetch = originalFetch;
-  globalThis.EventSource = originalEventSource;
+  vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
 
@@ -111,7 +110,7 @@ afterAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
-it('Visitors browse Feed without a login wall, toggle SocialMode to hide Markets, and open JoinSheet on demand (spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
@@ -128,7 +127,7 @@ it('Visitors browse Feed without a login wall, toggle SocialMode to hide Markets
   const modeSwitch = page.getByRole("switch", { name: "Social mode" });
   await act(() => userEvent.click(modeSwitch));
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
-  expect(document.querySelectorAll('nav button').length).toBeGreaterThan(0);
+  await expect.element(page.getByRole("button", { name: "Markets" })).not.toBeInTheDocument();
 
   const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
   await act(() => userEvent.click(signInBtn));

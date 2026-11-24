@@ -57,8 +57,8 @@ export function PriceChart({
   const min = Math.min(...values);
   const max = Math.max(...values);
   const span = max - min || 1;
-  const first = points[0]!.value;
-  const last = points[points.length - 1]!.value;
+  const first = points[0].value;
+  const last = points[points.length - 1].value;
   const resolvedTone = tone ?? (last > first ? "ok" : last < first ? "destructive" : "primary");
 
   const coords = points.map((point, index) => {
@@ -68,7 +68,7 @@ export function PriceChart({
   });
 
   const linePath = coords.map((pt, index) => `${index === 0 ? "M" : "L"}${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ");
-  const areaPath = `${linePath} L${coords[coords.length - 1]!.x.toFixed(1)},${height} L${coords[0]!.x.toFixed(1)},${height} Z`;
+  const areaPath = `${linePath} L${coords[coords.length - 1].x.toFixed(1)},${height} L${coords[0].x.toFixed(1)},${height} Z`;
 
   return (
     <figure aria-label={ariaLabel} className={cn("flex flex-col gap-3 rounded-lg border border-border bg-card p-4 text-card-foreground", className)} {...props}>
@@ -93,11 +93,11 @@ export function PriceChart({
         <line x1={padX} y1={height - padY} x2={width - padX} y2={height - padY} className="stroke-border" strokeDasharray="3 3" strokeWidth="1" />
         {coords.length > 1 ? <path d={areaPath} fill={`url(#${gradientId})`} /> : null}
         {coords.length > 1 ? <path d={linePath} fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" /> : null}
-        <circle cx={coords[coords.length - 1]!.x} cy={coords[coords.length - 1]!.y} r="3.5" fill="currentColor" />
+        <circle cx={coords[coords.length - 1].x} cy={coords[coords.length - 1].y} r="3.5" fill="currentColor" />
       </svg>
       <div className="flex items-center justify-between font-mono text-xs text-muted-foreground tabular-nums">
-        <span>{points[0]!.label} · Low {formatValue(min)}</span>
-        <span>High {formatValue(max)} · {points[points.length - 1]!.label}</span>
+        <span>{points[0].label} · Low {formatValue(min)}</span>
+        <span>High {formatValue(max)} · {points[points.length - 1].label}</span>
       </div>
     </figure>
   );

@@ -50,6 +50,7 @@ export function LeaderboardTable({
   sortDir = "descending",
   onSort,
   onSelectTrader,
+  onClick,
   disabled = false,
   className,
   ...props
@@ -57,7 +58,7 @@ export function LeaderboardTable({
   const dirFor = (col: LeaderboardSortColumn) => (onSort ? (sortBy === col ? sortDir : "none") : undefined);
 
   return (
-    <div className={cn("rounded-lg border border-border bg-card text-card-foreground", className)} {...props}>
+    <div className={cn("rounded-lg border border-border bg-card text-card-foreground", className)} onClick={disabled ? undefined : onClick} {...props}>
       <Table label="Net profit leaderboard">
         <TableCaption visuallyHidden>Player standings ranked by net trading profit in virtual points</TableCaption>
         <TableHeader>
