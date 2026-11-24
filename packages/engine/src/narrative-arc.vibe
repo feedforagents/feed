@@ -445,7 +445,7 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
   return createdIds
 }
 
-effect function queryPendingRecovery(tx: Tx): { readonly pendingCount: number; readonly oldestPendingAt: number | null }!StoreFailure {
+export effect function queryPendingRecovery(tx: Tx): { readonly pendingCount: number; readonly oldestPendingAt: number | null }!StoreFailure {
   const rows = try tx.query(
     `SELECT COUNT(*) AS cnt, MIN(expires_at) AS oldest
      FROM feed_prediction_markets

@@ -346,6 +346,26 @@ function createFeedNpcPlugin(actor: DbActorRow, snapshot: NpcProviderSnapshot, r
   }
 }
 
+effect function composeFeedProviders(runtime: AgentRuntime, providers: ReadonlyArray<Provider>, message: Memory): State!EngineFailure {
+  const initial: State = { values: {}, data: {}, text: "" }
+  const ordered = providers.toSorted((left, right) => left.name.localeCompare(right.name))
+  const values: State["values"] = {}
+  const results: NonNullable<State["data"]["providers"]> = {}
+  const texts: string[] = []
+  for (const provider of ordered) {
+    const result = try tryPromise({
+      try: () => provider.get(runtime, message, initial),
+      catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Feed NPC provider ${provider.name} failed`, cause }),
+    })
+    const text = result.text === undefined ? undefined : runtime.redactSecrets(result.text)
+    results[provider.name] = { values: result.values, data: result.data, ...(text === undefined ? {} : { text }) }
+    for (const [key, value] of Object.entries(result.values ?? {})) values[key] = value
+    if (text?.trim()) texts.push(text)
+  }
+  const text = runtime.redactSecrets(texts.join("\n"))
+  return { values: { ...values, providers: text }, data: { providerOrder: ordered.map((provider) => provider.name), providers: results }, text }
+}
+
 effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: number): number!(EngineFailure | StoreFailure)!Store {
   const store = try Store
   const busOpt = try Effect.serviceOption(RealtimeBus)
@@ -375,10 +395,7 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     roomId: safeElizaUuid("feed-world-room"),
     content: { text: "Observe Feed markets and social posts, then plan bounded actions." },
   }
-  const composedState: State = try tryPromise({
-    try: () => runtime.composeState(triggerMemory, ["WORLD_FACTS", "TRENDING_MARKETS", "RECENT_POSTS", "ACTOR_PORTFOLIO"], true, true),
-    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Failed composing state for ${actor.id}`, cause }),
-  })
+  const composedState = try composeFeedProviders(runtime, plugin.providers ?? [], triggerMemory)
   const rendered = renderPrompt("npcTradingDecision", {
     actorId: actor.id,
     actorName: actor.name,
