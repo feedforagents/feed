@@ -122,7 +122,7 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
 
   const marketsButton = page.getByRole("button", { name: "Markets" }).first();
   await act(() => userEvent.click(marketsButton));
-  await expect.element(page.getByText("Will OpenAGI ship Strawberry-9000 before Friday?")).toBeInTheDocument();
+  await expect.element(page.getByRole("heading", { name: "Will OpenAGI ship Strawberry-9000 before Friday?" })).toBeInTheDocument();
 
   const modeSwitch = page.getByRole("switch", { name: "Social mode" });
   await act(() => userEvent.click(modeSwitch));

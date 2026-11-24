@@ -127,7 +127,7 @@ effect function advanceWorldClockTx(tx: Tx, nowMs: number): {
 
 effect function pendingResolutionStats(): { readonly pendingCount: number; readonly oldestPendingAt: number | null }!StoreFailure!Store {
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => try queryPendingRecovery(tx))
+  return try store.transaction(queryPendingRecovery)
 }
 
 effect function checkAndAccrueFunding(nowMs: number, cutoverPeriod: number): boolean!(StoreFailure | MarketFailure)!Store {

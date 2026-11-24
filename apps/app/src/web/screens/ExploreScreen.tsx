@@ -17,9 +17,9 @@ import {
   Skeleton,
   type UiMode,
 } from "@repo/ui";
+import { BorderedPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 import type { AppArticle } from "../types.ts";
-import { BorderedPostList } from "./HomeScreen.tsx";
 
 export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();

@@ -19,8 +19,8 @@ import {
   Textarea,
   type UiMode,
 } from "@repo/ui";
+import { BorderedPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
-import { BorderedPostList } from "./HomeScreen.tsx";
 
 export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();

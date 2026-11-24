@@ -345,32 +345,24 @@ function createFeedNpcPlugin(actor: DbActorRow, snapshot: NpcProviderSnapshot, r
   }
 }
 
-const NPC_PROVIDER_NAMES = new Set(["WORLD_FACTS", "TRENDING_MARKETS", "RECENT_POSTS", "ACTOR_PORTFOLIO"])
-
-effect function composeNpcState(runtime: AgentRuntime, message: Memory): State!EngineFailure {
-  const baseState: State = { values: {}, data: {}, text: "" }
-  const values: Record<string, string> = {}
-  const data: Record<string, Record<string, unknown>> = {}
-  const parts: string[] = []
-  for (const provider of runtime.providers) {
-    if (!NPC_PROVIDER_NAMES.has(provider.name)) continue
+effect function composeFeedProviders(runtime: AgentRuntime, providers: ReadonlyArray<Provider>, message: Memory): State!EngineFailure {
+  const initial: State = { values: {}, data: {}, text: "" }
+  const ordered = providers.toSorted((left, right) => left.name.localeCompare(right.name))
+  const values: State["values"] = {}
+  const results: NonNullable<State["data"]["providers"]> = {}
+  const texts: string[] = []
+  for (const provider of ordered) {
     const result = try tryPromise({
-      try: () => Promise.resolve(provider.get(runtime, message, baseState)),
-      catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Provider ${provider.name} failed`, cause }),
+      try: () => provider.get(runtime, message, initial),
+      catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Feed NPC provider ${provider.name} failed`, cause }),
     })
-    if (result.text && result.text.trim().length > 0) {
-      parts.push(result.text.trim())
-    }
-    if (result.values && typeof result.values === "object") {
-      for (const [key, val] of Object.entries(result.values)) {
-        if (typeof val === "string") values[key] = val
-      }
-    }
-    if (result.data && typeof result.data === "object") {
-      data[provider.name] = result.data as Record<string, unknown>
-    }
+    const text = result.text === undefined ? undefined : runtime.redactSecrets(result.text)
+    results[provider.name] = { values: result.values, data: result.data, ...(text === undefined ? {} : { text }) }
+    for (const [key, value] of Object.entries(result.values ?? {})) values[key] = value
+    if (text?.trim()) texts.push(text)
   }
-  return { values, data, text: parts.join("\n") }
+  const text = runtime.redactSecrets(texts.join("\n"))
+  return { values: { ...values, providers: text }, data: { providerOrder: ordered.map((provider) => provider.name), providers: results }, text }
 }
 
 effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: number): number!(EngineFailure | StoreFailure)!Store {
@@ -402,7 +394,7 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     roomId: safeElizaUuid("feed-world-room"),
     content: { text: "Observe Feed markets and social posts, then plan bounded actions." },
   }
-  const composedState: State = try composeNpcState(runtime, triggerMemory)
+  const composedState = try composeFeedProviders(runtime, plugin.providers ?? [], triggerMemory)
   const rendered = renderPrompt("npcTradingDecision", {
     actorId: actor.id,
     actorName: actor.name,
