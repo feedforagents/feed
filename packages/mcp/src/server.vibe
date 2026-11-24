@@ -852,7 +852,7 @@ effect function executePublicTool(
     }
     case "get_trending": {
       const limit = clampCount(asOptionalInt(args.limit), 15, 50)
-      const items = try listTrending(limit, viewer.playMode)
+      const items = try listTrending(limit, viewer.playMode, viewer.viewerId)
       return { mode: viewer.playMode, items }
     }
     case "get_followers": {

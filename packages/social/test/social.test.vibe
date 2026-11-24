@@ -28,6 +28,7 @@ import {
   listFollowers,
   listFollowing,
   listNotifications,
+  listTrending,
   markNotificationsRead,
   muteAccount,
   reactToMessage,
@@ -289,7 +290,7 @@ it.effect(
     const bobPost = try createPost({
       authorId: "bob",
       authorKind: "user",
-      content: "Bob market update $TSLAI",
+      content: "Bob market update $TSLAI #bobtag",
       marketId: "seed-market-3",
       ticker: "TSLAI"
     })
@@ -318,7 +319,10 @@ it.effect(
     const muted = try muteAccount("alice", "bob")
     const followingWhileMuted = try listFollowing("alice", "alice")
     const feedWhileMuted = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50 })
+    const trendingWhileMuted = try listTrending(50, "game", "alice")
+    const anonymousTrending = try listTrending(50, "game")
     const unmuted = try unmuteAccount("alice", "bob")
+    const trendingAfterUnmute = try listTrending(50, "game", "alice")
     const feedAfterUnmute = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50 })
 
     const postReport = try reportTarget({
@@ -350,6 +354,7 @@ it.effect(
     try sendChatMessage({ senderId: "alice", senderKind: "user", chatId: dmBeforeBlock.id, content: "Before block" })
 
     const blocked = try blockAccount("alice", "bob")
+    const trendingAfterBlock = try listTrending(50, "game", "alice")
     const aliceFollowingAfterBlock = try listFollowing("alice", "alice")
     const bobFollowingAfterBlock = try listFollowing("bob", "bob")
     const aliceFollowersAfterBlock = try listFollowers("alice", "alice")
@@ -370,6 +375,9 @@ it.effect(
 
     const unblocked = try unblockAccount("alice", "bob")
     const latestAfterUnblock = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+    const trendingAfterUnblock = try listTrending(50, "game", "alice")
+    try blockAccount("bob", "alice")
+    const trendingAfterReverseBlock = try listTrending(50, "game", "alice")
 
     try check(() => assert.deepStrictEqual({
       follows: [followBob.following, followAlice.following, followNpc.following, unfollowNpc.following],
@@ -400,6 +408,8 @@ it.effect(
         unmuted.muted,
         feedAfterUnmute.items.some((p) => p.id === bobPost.id)
       ],
+      trending: [trendingWhileMuted, anonymousTrending, trendingAfterUnmute, trendingAfterBlock, trendingAfterUnblock, trendingAfterReverseBlock]
+        .map((items) => items.some((item) => item.tag === "#bobtag")),
       reports: [
         [postReport.status, postReport.targetKind, postReport.targetId],
         [accountReport.status, accountReport.targetKind, accountReport.targetId],
@@ -435,6 +445,7 @@ it.effect(
       socialNotifs: [2, ["follow"], 2, 1],
       balances: [12_500, "Claude", null, null, null],
       muting: [true, ["bob"], false, false, true],
+      trending: [false, true, true, false, true, false],
       reports: [
         ["open", "post", bobPost.id],
         ["open", "account", "bob"],
