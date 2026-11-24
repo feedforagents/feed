@@ -56,6 +56,13 @@ export interface ConfirmSpendInput {
   readonly nowMs?: number
 }
 
+export const UNCERTAIN_RESERVATION_TTL_MS = 15 * 60_000
+
+export interface ReconcileSpendResult {
+  readonly reconciledCount: number
+  readonly releasedMicros: number
+}
+
 export interface MarkUncertainInput {
   readonly attemptId: string
   readonly nowMs?: number
@@ -139,6 +146,42 @@ export effect function getDailySpendStatus(nowMs?: number): SpendStatus!(EngineF
   return try store.transaction(effect (tx: Tx) => try querySpendStatusTx(tx, utcDay))
 }
 
+effect function reconcileStaleUncertainSpendTx(
+  tx: Tx,
+  nowMs: number,
+  ttlMs: number,
+): ReconcileSpendResult!StoreFailure {
+  const safeTtl = Math.max(1, Math.floor(ttlMs))
+  const cutoffMs = nowMs - safeTtl
+  const rows = try tx.query(
+    `UPDATE feed_llm_spend_reservations
+     SET status = 'settled', actual_micros = 0, updated_at = $2
+     WHERE status = 'uncertain' AND updated_at <= $1
+     RETURNING reserved_micros`,
+    [cutoffMs, nowMs],
+  )
+  let releasedMicros = 0
+  for (const row of rows) {
+    releasedMicros += Math.max(0, toInt(row.reserved_micros))
+  }
+  return { reconciledCount: rows.length, releasedMicros }
+}
+
+export effect function reconcileStaleUncertainSpend(
+  nowMs?: number,
+  ttlMs: number = UNCERTAIN_RESERVATION_TTL_MS,
+): ReconcileSpendResult!(EngineFailure | StoreFailure)!Store {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+    throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "ttlMs must be a positive finite duration." })
+  }
+  const resolvedNow = try resolveClockNow(nowMs)
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(2525001)")
+    return try reconcileStaleUncertainSpendTx(tx, resolvedNow, ttlMs)
+  })
+}
+
 export effect function reserveLlmBudget(input: ReserveBudgetInput): BudgetReservation!(EngineFailure | StoreFailure)!Store {
   if (!Number.isFinite(input.estimatedMicros) || input.estimatedMicros <= 0) {
     throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "estimatedMicros must be positive." })
@@ -150,6 +193,7 @@ export effect function reserveLlmBudget(input: ReserveBudgetInput): BudgetReserv
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     try tx.query("SELECT pg_advisory_xact_lock(2525001)")
+    try reconcileStaleUncertainSpendTx(tx, resolvedNow, UNCERTAIN_RESERVATION_TTL_MS)
     const status = try querySpendStatusTx(tx, utcDay)
     if (status.committedMicros + estimatedMicros > status.budgetMicros) {
       throw new EngineFailure({

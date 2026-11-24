@@ -4,7 +4,7 @@ import { actors, organizations } from "@repo/pack-default"
 import { type Store, type StoreFailure } from "@repo/db"
 import { HttpClientRequest } from "effect/http"
 import { type PromptId, PromptCatalog } from "./prompts.vibe"
-import { EngineFailure, executeHttpWithTimeout, hashString, resolveClockNow, sanitizeText } from "./shared.vibe"
+import { EngineFailure, executeHttpWithTimeout, hashString, isRuntimeNpcActor, resolveClockNow, sanitizeText } from "./shared.vibe"
 import { confirmLlmSpend, markLlmSpendUncertain, reserveLlmBudget } from "./spend-budget.vibe"
 import { type ThrottleLevel } from "../gen/engine__spendBudget.effect.vibe"
 
@@ -80,6 +80,10 @@ function resolveLlmProviderConfig(): LlmProviderConfig {
   return { provider: "offline-fallback", endpoint: "", apiKey: "", model: "deterministic-local" }
 }
 
+export function hasLiveLlmProvider(): boolean {
+  return resolveLlmProviderConfig().provider !== "offline-fallback"
+}
+
 function extractField(text: string, label: string): string {
   const regex = new RegExp(`^${label}:\\s*(.+)$`, "im")
   const match = regex.exec(text)
@@ -96,7 +100,7 @@ function deterministicMarketFallback(user: string, seed: number): string {
   const timeframe = extractField(user, "Timeframe") || "1d"
   const slot = extractField(user, "Slot Index") || "0"
   const orgPool = organizations.filter((o) => Boolean(o.ticker))
-  const actorPool = actors.filter((a) => !a.id.startsWith("test-") && (a.tier === "S_TIER" || a.tier === "A_TIER"))
+  const actorPool = actors.filter((a) => isRuntimeNpcActor(a.id, a.name, a.username) && (a.tier === "S_TIER" || a.tier === "A_TIER"))
   const org = orgPool[seed % Math.max(1, orgPool.length)]
   const actor = actorPool[seed % Math.max(1, actorPool.length)]
   const ticker = org?.ticker ?? "NVDAI"
@@ -114,26 +118,64 @@ function deterministicMarketFallback(user: string, seed: number): string {
   })
 }
 
+function parseFirstOpenPerpId(user: string): string | null {
+  const items = extractCsvField(user, "Open Perp Positions")
+  if (items.length === 0) return null
+  const first = items[0] ?? ""
+  const colonIdx = first.indexOf(":")
+  const id = (colonIdx > 0 ? first.slice(0, colonIdx) : first).trim()
+  return id.length > 0 ? id : null
+}
+
+function parseFirstHeldPrediction(user: string): { readonly marketId: string; readonly side: "yes" | "no"; readonly shares: number } | null {
+  const items = extractCsvField(user, "Held Prediction Positions")
+  for (const item of items) {
+    const match = /^([^:]+):(yes|no)\((\d+)\)$/i.exec(item)
+    if (!match) continue
+    const shares = Number(match[3])
+    if (Number.isFinite(shares) && shares >= 100) {
+      return {
+        marketId: match[1]!.trim(),
+        side: match[2]!.toLowerCase() === "no" ? "no" : "yes",
+        shares: Math.max(100, Math.floor(shares / 2)),
+      }
+    }
+  }
+  return null
+}
+
 function deterministicDecisionFallback(user: string, seed: number): string {
   const tickers = extractCsvField(user, "Available Tickers")
   const marketIds = extractCsvField(user, "Available Market IDs")
   const replyIds = extractCsvField(user, "Available Reply Post IDs")
   const chatIds = extractCsvField(user, "Available Alpha Chat IDs")
+  const followTargets = extractCsvField(user, "Available Follow Targets")
+  const openPerpId = parseFirstOpenPerpId(user)
+  const heldPred = parseFirstHeldPrediction(user)
   const ticker = tickers[seed % Math.max(1, tickers.length)]
   const marketId = marketIds[seed % Math.max(1, marketIds.length)]
   const replyToPostId = replyIds[seed % Math.max(1, replyIds.length)]
   const chatId = chatIds[seed % Math.max(1, chatIds.length)]
+  const followTarget = followTargets[seed % Math.max(1, followTargets.length)]
   const actions: Array<Record<string, unknown>> = []
   if (ticker) {
     actions.push({ kind: "SPOT_TRADE", ticker, side: seed % 3 === 0 ? "sell" : "buy", quoteCents: 2_500 + (seed % 4) * 500 })
   }
-  if (ticker && seed % 2 === 0) {
+  if (openPerpId && seed % 2 === 0) {
+    actions.push({ kind: "CLOSE_PERP", positionId: openPerpId, closePct: 100 })
+  } else if (ticker && seed % 2 === 0) {
     actions.push({ kind: "PERP_TRADE", ticker, side: seed % 4 === 0 ? "short" : "long", collateralCents: 2_500, leverage: 2 + (seed % 3) })
   }
-  if (marketId) {
+  if (heldPred && seed % 3 === 0) {
+    actions.push({ kind: "SELL_PREDICTION", marketId: heldPred.marketId, side: heldPred.side, shares: heldPred.shares })
+  } else if (marketId) {
     actions.push({ kind: "PREDICTION_TRADE", marketId, side: seed % 2 === 0 ? "yes" : "no", amountCents: 1_500 })
   }
-  if (replyToPostId && seed % 3 === 1) {
+  if (replyToPostId && seed % 5 === 1) {
+    actions.push({ kind: "LIKE_POST", postId: replyToPostId })
+  } else if (replyToPostId && seed % 5 === 2) {
+    actions.push({ kind: "REPOST_POST", postId: replyToPostId })
+  } else if (replyToPostId && seed % 5 === 3) {
     actions.push({
       kind: "CREATE_REPLY",
       replyToPostId,
@@ -158,6 +200,8 @@ function deterministicDecisionFallback(user: string, seed: number): string {
       chatId,
       content: sanitizeText(`Desk note: tracking ${ticker ?? "index"} skew ahead of the next window.`, 240),
     })
+  } else if (followTarget && seed % 4 === 1) {
+    actions.push({ kind: "FOLLOW_USER", targetId: followTarget })
   }
   actions.push({ kind: "INVITE_ALPHA" })
   return JSON.stringify({ actions: actions.slice(0, 4) })
@@ -201,7 +245,13 @@ function buildDeterministicFallback(request: CompletionRequest): string {
     case "cluePost": {
       const question = extractField(request.user, "Market Question") || "the active catalyst"
       const phase = extractField(request.user, "Narrative Phase") || "opening"
-      return sanitizeText(`Desk chatter heating up during ${phase} window around "${sanitizeText(question, 100)}" — spreads still wide.`, 240)
+      const signalTone = extractField(request.user, "Signal Guidance")
+      const toneLine = signalTone.includes("bullish")
+        ? "Channel checks are quietly firming up — upside flow feels underpriced."
+        : signalTone.includes("skeptical")
+          ? "Back-channel checks sound shaky — skepticism is building into the close."
+          : "Spreads are still wide and both sides are fighting for control."
+      return sanitizeText(`${phase} tape check on "${sanitizeText(question, 95)}": ${toneLine}`, 240)
     }
     case "alphaGroupMessage": {
       const chatName = extractField(request.user, "Chat") || "Alpha Desk"
@@ -290,6 +340,10 @@ export effect function generateCompletion(request: CompletionRequest): Completio
     nowMs,
   })
   if (config.provider === "offline-fallback") {
+    if (request.allowOfflineFallback === false) {
+      try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
+      throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: "No live LLM provider configured and offline fallback is disabled." })
+    }
     const fallbackText = buildDeterministicFallback(request)
     try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
     return {

@@ -3,12 +3,13 @@ export { CRYPTO_PARODY_NAMES, realityGroundingContent } from "./data/reality-gro
 export { questionExamples } from "./data/question-examples.ts"
 export { worldEventExamplesContent } from "./data/world-event-examples.ts"
 export { worldFactsContent } from "./data/world-facts.ts"
-export { EngineFailure, parseLlmJsonRecord, type EngineErrorCode } from "./shared.vibe"
+export { EngineFailure, isRuntimeNpcActor, parseLlmJsonRecord, type EngineErrorCode } from "./shared.vibe"
 export {
   PromptCatalog,
   buildWorldContext,
   formatFeedDiversityHint,
   groundingRosterSummary,
+  prioritizePerpMarkets,
   renderPrompt,
   renderTemplate,
   validateNpcTradingDecision,
@@ -22,18 +23,22 @@ export {
   type WorldContextPostItem,
 } from "./prompts.vibe"
 export {
+  UNCERTAIN_RESERVATION_TTL_MS,
   confirmLlmSpend,
   getDailySpendStatus,
   markLlmSpendUncertain,
+  reconcileStaleUncertainSpend,
   reserveLlmBudget,
   type BudgetReservation,
   type ConfirmSpendInput,
   type MarkUncertainInput,
+  type ReconcileSpendResult,
   type ReserveBudgetInput,
   type SpendStatus,
 } from "./spend-budget.vibe"
 export {
   generateCompletion,
+  hasLiveLlmProvider,
   type CompletionRequest,
   type CompletionResult,
   type LlmProviderKind,
@@ -52,12 +57,17 @@ export {
   type RecoveryRunResult,
 } from "./narrative-arc.vibe"
 export {
+  executeNpcDecision,
+  findEligibleAlphaTarget,
   runBoundedNpcBatch,
   type NpcTickBatchSummary,
 } from "./eliza-npc-runtime.vibe"
 export {
+  DEFAULT_RSS_URLS,
   fastForwardSimulatedHours,
   getEngineAdminStatus,
+  interleaveRssFeedItems,
+  resolveClockMode,
   runArticleTick,
   runGameTick,
   runMarketsRecovery,
@@ -72,5 +82,6 @@ export {
   type EngineAdminStatus,
   type FastForwardResult,
   type MinuteTickResult,
+  type RssFeedHeadlineItem,
   type RssRefreshResult,
 } from "./world-clock.vibe"
