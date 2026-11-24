@@ -200,6 +200,15 @@ it('A deleted post disappears from Explore and Profile (spec/social/posts.md, "S
   opened.push(root);
   await act(() => Promise.resolve(root.render(<App />)));
 
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+  const feedFetchesBefore = fetchPaths.filter((path) => path === "/api/feed").length;
+  liveEventSources[0].dispatchEvent(
+    new MessageEvent("post.deleted", {
+      data: JSON.stringify({ type: "post.deleted", postId: SAMPLE_POSTS[0].id, authorId: SAMPLE_POSTS[0].authorId }),
+    }),
+  );
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
+  expect(fetchPaths.filter((path) => path === "/api/feed").length).toBe(feedFetchesBefore);
   await act(async () => {
     await storeActions.navigate("/explore");
     await storeActions.loadExplore("XTRPC");
