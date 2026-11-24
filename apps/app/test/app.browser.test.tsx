@@ -4,10 +4,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { getStoreSnapshot from "../src/web/store-core.ts";
+import { storeActions from "../src/web/store.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
+const liveEventSources: EventTarget[] = [];
+let profileShouldFail = false;
 
 const SAMPLE_POSTS = [
   {
@@ -66,6 +70,7 @@ const SAMPLE_MARKETS = {
 };
 
 function installMockNetwork() {
+  profileShouldFail = false;
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -85,11 +90,41 @@ function installMockNetwork() {
     if (path === "/api/leaderboard") return json({ leaderboard: [] });
     if (path === "/api/economy/packs") return json({ packs: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    if (path.startsWith("/api/users/")) {
+      const userHandle = decodeURIComponent(path.slice("/api/users/".length));
+      if (userHandle !== "ailonmusk") {
+        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
+      }
+      if (profileShouldFail) {
+        return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
+      }
+      return json({
+        profile: {
+          id: "ailon-musk",
+          handle: "ailonmusk",
+          displayName: "AIlon Musk",
+          bio: "",
+          isParody: true,
+          followersCount: 10,
+          followingCount: 5,
+          viewerFollows: false,
+          viewerMutes: false,
+          viewerBlocks: false,
+        },
+        posts: SAMPLE_POSTS,
+        nextCursor: null,
+        positions: [],
+      });
+    }
     return json({});
   };
   vi.stubGlobal("fetch", fetchMock);
 
   class StubEventSource extends EventTarget {
+    constructor() {
+      super();
+      liveEventSources.push(this);
+    }
     close() {}
   }
   vi.stubGlobal("EventSource", StubEventSource);
@@ -147,4 +182,34 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork();
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await expect.element(page.getByText("Posts (1)")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk");
+
+  profileShouldFail = true;
+  liveEventSources[0].dispatchEvent(new Event("market.spot"));
+  await vi.waitFor(() => expect(getStoreSnapshot().profileLoading).toBe(false));
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk");
+  expect(getStoreSnapshot().profileBundle?.posts.length).toBe(1);
+  expect(getStoreSnapshot().errorMessage).not.toBeNull();
+  await expect.element(page.getByText("Profile not found")).not.toBeInTheDocument();
+  await expect.element(page.getByText("Posts (1)")).toBeInTheDocument();
+
+  await act(async () => {
+    await storeActions.navigate("/u/ghost");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
 });
