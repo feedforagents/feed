@@ -298,6 +298,20 @@ effect function seedGameNotifications(accountId: string) {
   })
 }
 
+effect function seedReadNotifications(accountId: string, count: number) {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    for (let i = 0; i < count; i++) {
+      try tx.query(
+        `INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at)
+         VALUES ($1, $2, 'like', NULL, NULL, NULL, 'Liked', 'Someone liked your post.', false, $3, $4)`,
+        [`notif-read-${accountId}-${i}`, accountId, now, now + 100 + i]
+      )
+    }
+  })
+}
+
 function assertToolCatalogClean(tools: ReadonlyArray<ToolSchemaSummary>): void {
   assert.strictEqual(tools.length, 49)
   for (const tool of tools) {
@@ -617,6 +631,9 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
     const whoamiGame = unwrapToolPayload(try callMcpTool(17, "whoami", {}, authConfig, token2Access))
     const portfolioGame = unwrapToolPayload(try callMcpTool(18, "get_portfolio", {}, authConfig, token2Access))
     const notifsGame = unwrapToolPayload(try callMcpTool(19, "get_notifications", { limit: 20 }, authConfig, token2Access))
+    try seedReadNotifications(alice.account.accountId, 20)
+    const notifsUnreadOnly = unwrapToolPayload(try callMcpTool(24, "get_notifications", { unreadOnly: true, limit: 20 }, authConfig, token2Access))
+    const notifsAllAfterReadSeed = unwrapToolPayload(try callMcpTool(25, "get_notifications", { limit: 20 }, authConfig, token2Access))
     const setSocialRes = unwrapToolPayload(try callMcpTool(20, "set_mode", { mode: "social" }, authConfig, token2Access))
     try assertSocialModeRedaction("alice_mcp", authConfig, token2Access)
     const setGameBackRes = unwrapToolPayload(try callMcpTool(21, "set_mode", { mode: "game" }, authConfig, token2Access))
@@ -658,6 +675,10 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
       assert.strictEqual((portfolioGame.predictionPositions as ReadonlyArray<unknown>).length, 1)
       const gameKinds = ((notifsGame.items ?? []) as ReadonlyArray<{ readonly kind: string }>).map((n) => n.kind)
       assert.includeMembers(gameKinds, ["mention", "market_resolved", "pnl_digest"])
+      const unreadOnlyItems = (notifsUnreadOnly.items ?? []) as ReadonlyArray<{ readonly kind: string; readonly isRead: boolean }>
+      assert.deepStrictEqual(unreadOnlyItems.map((n) => n.kind).sort(), ["market_resolved", "mention", "pnl_digest"])
+      assert.isTrue(unreadOnlyItems.every((n) => n.isRead === false))
+      assert.strictEqual(((notifsAllAfterReadSeed.items ?? []) as ReadonlyArray<unknown>).length, 20)
       assert.strictEqual(setSocialRes.playMode, "social")
       assert.strictEqual(setGameBackRes.playMode, "game")
       assert.strictEqual(portfolioRestored.balancePts, 90)
