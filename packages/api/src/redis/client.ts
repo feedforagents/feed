@@ -32,9 +32,15 @@ declare global {
 }
 
 const isBuildTime = process.env.NEXT_PHASE === 'phase-production-build';
-const isTestEnv = process.env.NODE_ENV === 'test';
-const isDev = process.env.NODE_ENV === 'development';
-const isRedisDisabled = process.env.FEED_DISABLE_REDIS === '1';
+// Read the environment live, not once at import time: an integration suite
+// flips NODE_ENV after an earlier suite already imported this module, and
+// a cached import-time value would keep Redis disabled for the whole
+// process even though the live environment now allows it (see
+// ensureRedisReady). Build time never changes at runtime, so it stays a
+// const.
+const isTestEnv = () => process.env.NODE_ENV === 'test';
+const isDevEnv = () => process.env.NODE_ENV === 'development';
+const isRedisDisabled = () => process.env.FEED_DISABLE_REDIS === '1';
 
 // Use globalThis to persist across hot reloads in development
 // This prevents multiple Redis connections from being created
@@ -45,9 +51,11 @@ interface RedisState {
   isClosing: boolean;
 }
 const sharedState: RedisState = {
-  redisClient: isDev ? (globalThis.__redisClient ?? null) : null,
-  isInitialized: isDev ? (globalThis.__redisInitialized ?? false) : false,
-  initializationPromise: isDev ? (globalThis.__redisInitPromise ?? null) : null,
+  redisClient: isDevEnv() ? (globalThis.__redisClient ?? null) : null,
+  isInitialized: isDevEnv() ? (globalThis.__redisInitialized ?? false) : false,
+  initializationPromise: isDevEnv()
+    ? (globalThis.__redisInitPromise ?? null)
+    : null,
   isClosing: false,
 };
 function state(): RedisState {
@@ -72,7 +80,7 @@ const DEFAULT_DEV_REDIS_URL = 'redis://localhost:6380';
 
 // Sync state to globalThis in dev
 function syncGlobalState() {
-  if (isDev) {
+  if (isDevEnv()) {
     globalThis.__redisClient = state().redisClient;
     globalThis.__redisInitialized = state().isInitialized;
     globalThis.__redisInitPromise = state().initializationPromise;
@@ -86,13 +94,13 @@ function syncGlobalState() {
  * This is called lazily to avoid bundling ioredis in edge runtime.
  */
 async function initializeRedis(): Promise<void> {
-  if (state().isInitialized || isBuildTime || isTestEnv) {
+  if (state().isInitialized || isBuildTime || isTestEnv()) {
     return;
   }
   state().isInitialized = true;
   syncGlobalState();
 
-  if (isRedisDisabled) {
+  if (isRedisDisabled()) {
     logger.info(
       'Redis explicitly disabled via FEED_DISABLE_REDIS=1',
       undefined,
@@ -103,7 +111,7 @@ async function initializeRedis(): Promise<void> {
 
   // Use REDIS_URL from env, or default to local Docker Redis in development
   const redisUrl =
-    process.env.REDIS_URL || (isDev ? DEFAULT_DEV_REDIS_URL : undefined);
+    process.env.REDIS_URL || (isDevEnv() ? DEFAULT_DEV_REDIS_URL : undefined);
   if (!redisUrl) {
     logger.info(
       'Redis not configured - caching will use in-memory fallback',
@@ -118,7 +126,7 @@ async function initializeRedis(): Promise<void> {
     return;
   }
 
-  if (!process.env.REDIS_URL && isDev) {
+  if (!process.env.REDIS_URL && isDevEnv()) {
     logger.info(
       `Using default Redis URL for development: ${DEFAULT_DEV_REDIS_URL}`,
       undefined,
@@ -182,10 +190,38 @@ async function initializeRedis(): Promise<void> {
   }
 }
 
+/**
+ * Start Redis initialization once, storing the promise so concurrent
+ * callers await the same attempt. No-ops when initialization was already
+ * attempted or the live environment still forbids it (e.g. NODE_ENV=test
+ * at call time), so an earlier call under test does not poison a later
+ * call after a suite flips NODE_ENV to development.
+ */
+function startInitialization(): void {
+  if (
+    state().initializationPromise ||
+    state().isInitialized ||
+    isBuildTime ||
+    isTestEnv()
+  ) {
+    return;
+  }
+  state().initializationPromise = initializeRedis().catch((error: unknown) => {
+    logger.warn(
+      'Redis initialization failed; continuing without Redis',
+      { error: error instanceof Error ? error.message : String(error) },
+      'Redis'
+    );
+    state().redisClient = null;
+    syncGlobalState();
+  });
+  syncGlobalState();
+}
+
 // Skip initialization during build time and test
-if (isBuildTime || isTestEnv) {
+if (isBuildTime || isTestEnv()) {
   logger.info(
-    isTestEnv
+    isTestEnv()
       ? 'Test environment detected - skipping Redis initialization'
       : 'Build time detected - skipping Redis initialization',
     undefined,
@@ -197,16 +233,7 @@ if (isBuildTime || isTestEnv) {
 ) {
   // Always attempt initialization - store the promise so callers can await it
   // Only create a new promise if one doesn't already exist (from globalThis)
-  state().initializationPromise = initializeRedis().catch((error: unknown) => {
-    logger.warn(
-      'Redis initialization failed; continuing without Redis',
-      { error: error instanceof Error ? error.message : String(error) },
-      'Redis'
-    );
-    state().redisClient = null;
-    syncGlobalState();
-  });
-  syncGlobalState();
+  startInitialization();
 }
 
 /**
@@ -246,6 +273,16 @@ export async function ensureRedisReady(): Promise<RedisInstance | null> {
     !state().initializationPromise
   ) {
     state().initializationPromise = initializeRedis();
+  }
+  // Lazily (re)initialize when the module was imported while the live
+  // environment forbade Redis (NODE_ENV=test), leaving no client and no
+  // attempt behind. A caller that flipped the environment since — e.g. an
+  // integration suite that sets NODE_ENV=development before its dynamic
+  // imports — must be able to start the client now instead of getting a
+  // permanent null. initializeRedis() still honors the live environment,
+  // so plain test callers still get null.
+  if (!state().initializationPromise) {
+    startInitialization();
   }
   // Wait for initialization if it's in progress
   if (state().initializationPromise) {

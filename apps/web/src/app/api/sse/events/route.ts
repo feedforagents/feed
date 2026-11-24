@@ -9,9 +9,11 @@ import {
   verifyRealtimeToken,
   withErrorHandling,
 } from '@feed/api';
+import { chats, db, inArray } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
+import { loadViewerExcludedAuthorIds } from '../../feed/_lib/viewer-moderation';
 
 // Force dynamic to prevent caching, use nodejs runtime for streaming support
 export const dynamic = 'force-dynamic';
@@ -107,6 +109,38 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   if (!cursors) {
     return new Response('Invalid cursor', { status: 400 });
   }
+
+  // Live delivery must honor the same viewer moderation rule as the group
+  // chat history (PRD §12 keeps group chats, block/mute/report and
+  // real-time SSE updates): in a group chat, authors the viewer blocked
+  // or muted — and authors who blocked the viewer — must not reach the
+  // viewer's stream, and a visible message must not quote a hidden
+  // author's message back in. The broadcast is one copy for the whole
+  // channel, so the rule is applied per viewer here, at delivery. DM
+  // chats are out of scope: a block relationship already prevents
+  // creating a DM and sending in one.
+  // Only group chats among the authorized channels are filtered.
+  const groupChatChannels = new Set<string>();
+  const chatChannelIds = allowedChannels
+    .filter((ch) => ch.startsWith('chat:'))
+    .map((ch) => ch.slice('chat:'.length));
+  if (chatChannelIds.length > 0) {
+    const chatRows = await db
+      .select({ id: chats.id, isGroup: chats.isGroup })
+      .from(chats)
+      .where(inArray(chats.id, chatChannelIds));
+    for (const row of chatRows) {
+      if (row.isGroup) groupChatChannels.add(`chat:${row.id}`);
+    }
+  }
+
+  // No exclusion snapshot is taken at connect time: the viewer's
+  // relationships are reloaded once per delivery batch below, so a
+  // block/mute (or unblock/unmute) that lands while this connection is
+  // open applies to the next message instead of waiting for a reconnect.
+  // Blocking/muting does not close or invalidate open streams, so the
+  // delivery loop is the only place the change can take effect. A load
+  // failure closes the connection rather than delivering unfiltered.
 
   const encoder = new TextEncoder();
   const connectionId = generateConnectionId();
@@ -304,6 +338,11 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
           'SSE'
         );
 
+        // Reloaded once per batch, lazily on the first group-chat message
+        // in the batch (see the connect-time comment above). Null until
+        // the first group new_message of this batch needs it.
+        let batchExclusions: Set<string> | null = null;
+        let batchExclusionsFailed = false;
         for (const msg of messages) {
           const channel = keyToChannel.get(msg.stream);
           if (!channel) continue;
@@ -344,10 +383,69 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
               ? (payload as { data: unknown }).data
               : payload;
 
+          // Per-viewer group-chat moderation (same rule as history):
+          // drop a live message from an author hidden for this viewer,
+          // and strip the quoted message from a visible reply when the
+          // quoted author is hidden, so the hidden author's text is
+          // never delivered through a quote. The cursor still advances
+          // past a hidden message so it is not replayed on this
+          // connection. Other channels and event types pass through:
+          // DM delivery is unchanged and reactions are out of scope.
+          let forwardedData = innerData;
+          if (groupChatChannels.has(channel) && innerType === 'new_message') {
+            if (batchExclusions === null) {
+              try {
+                batchExclusions = await loadViewerExcludedAuthorIds(userId);
+              } catch (error) {
+                logger.error(
+                  'SSE viewer moderation reload failed - closing connection',
+                  {
+                    connectionId,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  },
+                  'SSE'
+                );
+                batchExclusionsFailed = true;
+                break;
+              }
+            }
+            const excludedSenders = batchExclusions;
+            const asRecord = (
+              value: unknown
+            ): Record<string, unknown> | null =>
+              value !== null && typeof value === 'object'
+                ? (value as Record<string, unknown>)
+                : null;
+            const dataRecord = asRecord(innerData);
+            const messageRecord = asRecord(dataRecord?.message);
+            if (messageRecord) {
+              const senderId = messageRecord.senderId;
+              if (
+                typeof senderId === 'string' &&
+                excludedSenders.has(senderId)
+              ) {
+                lastIds.set(msg.stream, msg.id);
+                continue;
+              }
+              const replyRecord = asRecord(messageRecord.replyToMessage);
+              if (
+                replyRecord &&
+                typeof replyRecord.senderId === 'string' &&
+                excludedSenders.has(replyRecord.senderId)
+              ) {
+                forwardedData = {
+                  ...dataRecord,
+                  message: { ...messageRecord, replyToMessage: null },
+                };
+              }
+            }
+          }
+
           const sseData = JSON.stringify({
             channel,
             type: innerType,
-            data: innerData,
+            data: forwardedData,
             timestamp: innerTimestamp,
             version: innerVersion,
           });
@@ -364,6 +462,18 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
           }
 
           lastIds.set(msg.stream, msg.id);
+        }
+
+        // A failed moderation reload must not fall through to the next
+        // batch unfiltered: close the stream instead. The loop exit alone
+        // does not close the response — without an explicit close the
+        // stream stays open with no more data (heartbeats come only from
+        // the loop) and the client never reconnects.
+        if (batchExclusionsFailed) {
+          isControllerClosed = true;
+          request.signal.removeEventListener('abort', abortListener);
+          controller.close();
+          break;
         }
       }
 
