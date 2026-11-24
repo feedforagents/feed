@@ -1024,10 +1024,14 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
     batchLimit,
     `npc-batch:${Math.floor(resolvedNow / 120_000)}`,
   )
+  const outcomes = try Effect.forEach(
+    batch,
+    effect (actor: DbActorRow) => runSingleNpcTurn(actor, maxSteps, resolvedNow) catch effect () => null,
+    { concurrency: 4 },
+  )
   let actorsCompleted = 0
   let actionsExecuted = 0
-  for (const actor of batch) {
-    const executed = runSingleNpcTurn(actor, maxSteps, resolvedNow) catch effect () => null
+  for (const executed of outcomes) {
     if (executed !== null) {
       actorsCompleted += 1
       actionsExecuted += executed
