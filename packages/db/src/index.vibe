@@ -1,6 +1,8 @@
 export {
   FEED_BASELINE_SQL,
   FEED_SCHEMA_VERSION,
+  INITIAL_SPOT_BASE_RESERVE,
+  SPOT_BASE_SCALE,
   Store,
   StoreFailure,
   StoreLocationInvalid,

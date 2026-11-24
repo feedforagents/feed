@@ -199,7 +199,6 @@ CREATE TABLE IF NOT EXISTS feed_accounts (
   ui_mode text NOT NULL DEFAULT 'game' CHECK (ui_mode IN ('game', 'social')),
   balance_cents bigint NOT NULL DEFAULT 10000 CHECK (balance_cents >= 0),
   starting_grant_cents bigint NOT NULL DEFAULT 10000 CHECK (starting_grant_cents >= 0),
-  purchased_cents bigint NOT NULL DEFAULT 0 CHECK (purchased_cents >= 0),
   total_fees_paid_cents bigint NOT NULL DEFAULT 0 CHECK (total_fees_paid_cents >= 0),
   is_admin boolean NOT NULL DEFAULT false,
   is_reviewer boolean NOT NULL DEFAULT false,
@@ -207,6 +206,7 @@ CREATE TABLE IF NOT EXISTS feed_accounts (
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL
 );
+ALTER TABLE feed_accounts DROP COLUMN IF EXISTS purchased_cents;
 
 CREATE TABLE IF NOT EXISTS feed_phone_cooldowns (
   phone_hash text PRIMARY KEY,
@@ -323,6 +323,18 @@ CREATE TABLE IF NOT EXISTS feed_world_facts (
   created_at bigint NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS feed_world_events (
+  id text PRIMARY KEY,
+  event_type text NOT NULL,
+  market_id text,
+  headline text NOT NULL,
+  summary text NOT NULL,
+  actors_json text NOT NULL DEFAULT '[]',
+  created_at bigint NOT NULL DEFAULT (floor(extract(epoch from now()) * 1000))::bigint
+);
+CREATE INDEX IF NOT EXISTS feed_world_events_created_idx ON feed_world_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS feed_world_events_market_idx ON feed_world_events (market_id, created_at DESC) WHERE market_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS feed_rss_headlines (
   id text PRIMARY KEY,
   source_url text NOT NULL,
@@ -433,8 +445,10 @@ CREATE TABLE IF NOT EXISTS feed_chat_members (
   member_kind text NOT NULL CHECK (member_kind IN ('user', 'npc')),
   role text NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
   joined_at bigint NOT NULL,
+  last_read_at bigint NOT NULL DEFAULT (floor(extract(epoch from now()) * 1000))::bigint,
   PRIMARY KEY (chat_id, member_id)
 );
+ALTER TABLE feed_chat_members ADD COLUMN IF NOT EXISTS last_read_at bigint NOT NULL DEFAULT (floor(extract(epoch from now()) * 1000))::bigint;
 CREATE INDEX IF NOT EXISTS feed_chat_members_member_idx ON feed_chat_members (member_id);
 
 CREATE TABLE IF NOT EXISTS feed_messages (
@@ -460,12 +474,34 @@ CREATE TABLE IF NOT EXISTS feed_group_invites (
   id text PRIMARY KEY,
   chat_id text NOT NULL REFERENCES feed_chats (id) ON DELETE CASCADE,
   invited_account_id text NOT NULL,
-  invited_by_npc_id text NOT NULL,
+  invited_by_id text NOT NULL,
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'declined')),
   created_at bigint NOT NULL,
   responded_at bigint
 );
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'feed_group_invites' AND column_name = 'invited_by_npc_id'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'feed_group_invites' AND column_name = 'invited_by_id'
+  ) THEN
+    ALTER TABLE feed_group_invites RENAME COLUMN invited_by_npc_id TO invited_by_id;
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS feed_group_invites_account_idx ON feed_group_invites (invited_account_id, status);
+
+CREATE TABLE IF NOT EXISTS feed_alpha_invite_cooldowns (
+  actor_id text NOT NULL REFERENCES feed_actors (id) ON DELETE CASCADE,
+  account_id text NOT NULL,
+  decline_count integer NOT NULL DEFAULT 0 CHECK (decline_count >= 0),
+  next_eligible_at bigint NOT NULL,
+  updated_at bigint NOT NULL DEFAULT (floor(extract(epoch from now()) * 1000))::bigint,
+  PRIMARY KEY (actor_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS feed_alpha_invite_cooldowns_account_idx ON feed_alpha_invite_cooldowns (account_id, next_eligible_at);
 
 CREATE TABLE IF NOT EXISTS feed_prediction_markets (
   id text PRIMARY KEY,
@@ -488,6 +524,7 @@ CREATE TABLE IF NOT EXISTS feed_prediction_markets (
   created_at bigint NOT NULL
 );
 CREATE INDEX IF NOT EXISTS feed_prediction_markets_status_idx ON feed_prediction_markets (status, expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_prediction_markets_open_slot ON feed_prediction_markets (slot_index) WHERE status = 'open';
 
 CREATE TABLE IF NOT EXISTS feed_prediction_positions (
   market_id text NOT NULL REFERENCES feed_prediction_markets (id) ON DELETE CASCADE,
@@ -532,6 +569,15 @@ CREATE TABLE IF NOT EXISTS feed_perp_markets (
   updated_at bigint NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS feed_npc_spot_holdings (
+  actor_id text NOT NULL REFERENCES feed_actors (id) ON DELETE CASCADE,
+  ticker text NOT NULL REFERENCES feed_perp_markets (ticker) ON DELETE CASCADE,
+  base_units bigint NOT NULL DEFAULT 0 CHECK (base_units >= 0),
+  updated_at bigint NOT NULL DEFAULT (floor(extract(epoch from now()) * 1000))::bigint,
+  PRIMARY KEY (actor_id, ticker)
+);
+CREATE INDEX IF NOT EXISTS feed_npc_spot_holdings_ticker_idx ON feed_npc_spot_holdings (ticker);
+
 CREATE TABLE IF NOT EXISTS feed_perp_positions (
   id text PRIMARY KEY,
   ticker text NOT NULL REFERENCES feed_perp_markets (ticker),
@@ -551,6 +597,7 @@ CREATE TABLE IF NOT EXISTS feed_perp_positions (
 );
 CREATE INDEX IF NOT EXISTS feed_perp_positions_holder_idx ON feed_perp_positions (holder_id, status);
 CREATE INDEX IF NOT EXISTS feed_perp_positions_ticker_open_idx ON feed_perp_positions (ticker) WHERE status = 'open';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_perp_positions_open_holder_ticker ON feed_perp_positions (holder_id, ticker) WHERE status = 'open';
 
 CREATE TABLE IF NOT EXISTS feed_perp_funding_periods (
   position_id text NOT NULL REFERENCES feed_perp_positions (id) ON DELETE CASCADE,
@@ -559,6 +606,18 @@ CREATE TABLE IF NOT EXISTS feed_perp_funding_periods (
   created_at bigint NOT NULL,
   PRIMARY KEY (position_id, period_index)
 );
+
+CREATE TABLE IF NOT EXISTS feed_market_price_history (
+  id text PRIMARY KEY,
+  market_kind text NOT NULL CHECK (market_kind IN ('prediction', 'perp', 'spot')),
+  market_ref text NOT NULL,
+  price_cents bigint NOT NULL CHECK (price_cents >= 0),
+  yes_price_bps integer CHECK (yes_price_bps IS NULL OR (yes_price_bps >= 0 AND yes_price_bps <= 10000)),
+  mark_price_cents bigint CHECK (mark_price_cents IS NULL OR mark_price_cents >= 0),
+  volume_cents bigint NOT NULL DEFAULT 0 CHECK (volume_cents >= 0),
+  recorded_at bigint NOT NULL DEFAULT (floor(extract(epoch from now()) * 1000))::bigint
+);
+CREATE INDEX IF NOT EXISTS feed_market_price_history_lookup_idx ON feed_market_price_history (market_kind, market_ref, recorded_at DESC);
 
 CREATE TABLE IF NOT EXISTS feed_trades (
   id text PRIMARY KEY,
@@ -571,12 +630,14 @@ CREATE TABLE IF NOT EXISTS feed_trades (
   fee_cents bigint NOT NULL CHECK (fee_cents >= 0),
   shares_or_size bigint NOT NULL,
   price_cents bigint NOT NULL CHECK (price_cents >= 0),
+  realized_pnl_cents bigint,
   via_client_name text,
   idempotency_key text,
   request_fingerprint text,
   receipt_json text,
   created_at bigint NOT NULL
 );
+ALTER TABLE feed_trades ADD COLUMN IF NOT EXISTS realized_pnl_cents bigint;
 ALTER TABLE feed_trades ADD COLUMN IF NOT EXISTS request_fingerprint text;
 ALTER TABLE feed_trades ADD COLUMN IF NOT EXISTS receipt_json text;
 ALTER TABLE feed_trades DROP CONSTRAINT IF EXISTS feed_trades_idempotency_key_key;
@@ -595,41 +656,8 @@ CREATE TABLE IF NOT EXISTS feed_point_ledger (
 );
 CREATE INDEX IF NOT EXISTS feed_point_ledger_account_idx ON feed_point_ledger (account_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS feed_stripe_purchases (
-  id text PRIMARY KEY,
-  account_id text NOT NULL REFERENCES feed_accounts (account_id),
-  stripe_session_id text NOT NULL UNIQUE,
-  payment_intent_id text,
-  pack_usd integer NOT NULL CHECK (pack_usd > 0),
-  points_cents bigint NOT NULL CHECK (points_cents > 0),
-  refunded_cents bigint NOT NULL DEFAULT 0 CHECK (refunded_cents >= 0),
-  status text NOT NULL CHECK (status IN ('pending', 'completed', 'blocked_wa')),
-  billing_state text,
-  ip_region text,
-  created_at bigint NOT NULL,
-  completed_at bigint
-);
-ALTER TABLE feed_stripe_purchases ADD COLUMN IF NOT EXISTS payment_intent_id text;
-ALTER TABLE feed_stripe_purchases ADD COLUMN IF NOT EXISTS refunded_cents bigint NOT NULL DEFAULT 0 CHECK (refunded_cents >= 0);
-CREATE INDEX IF NOT EXISTS feed_stripe_purchases_account_idx ON feed_stripe_purchases (account_id, created_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS feed_stripe_purchases_payment_intent_idx ON feed_stripe_purchases (payment_intent_id) WHERE payment_intent_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS feed_stripe_reversals (
-  id text PRIMARY KEY,
-  purchase_id text NOT NULL REFERENCES feed_stripe_purchases (id),
-  account_id text NOT NULL REFERENCES feed_accounts (account_id),
-  stripe_event_id text NOT NULL UNIQUE,
-  dispute_id text,
-  kind text NOT NULL CHECK (kind IN ('refund', 'dispute')),
-  amount_cents bigint NOT NULL CHECK (amount_cents >= 0),
-  debited_pts_cents bigint NOT NULL CHECK (debited_pts_cents >= 0),
-  restored_event_id text UNIQUE,
-  restored_pts_cents bigint NOT NULL DEFAULT 0 CHECK (restored_pts_cents >= 0),
-  restored_at bigint,
-  created_at bigint NOT NULL
-);
-CREATE INDEX IF NOT EXISTS feed_stripe_reversals_purchase_idx ON feed_stripe_reversals (purchase_id, created_at ASC);
-CREATE UNIQUE INDEX IF NOT EXISTS feed_stripe_reversals_dispute_idx ON feed_stripe_reversals (dispute_id) WHERE dispute_id IS NOT NULL;
+DROP TABLE IF EXISTS feed_stripe_reversals;
+DROP TABLE IF EXISTS feed_stripe_purchases;
 
 CREATE TABLE IF NOT EXISTS feed_npc_market_clues (
   clue_key text PRIMARY KEY,

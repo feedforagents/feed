@@ -6,7 +6,7 @@ Complete-set Constant Product Market Maker (CPMM) YES/NO prediction markets with
 
 ### Market phases, secrecy, and account state
 
-Outcomes are predetermined at market creation as a `SecretOutcome` (`SecretYes | SecretNo`) and cannot enter any public field, feed post, or proof publication before resolution. Shares use `SUBCENTS_PER_CENT = 100` (`1 share = 10,000 share units = 100 cents` on win), so cash credits settle downward to whole `Cents` via `floorCents`.
+Outcomes are predetermined at market creation as a `SecretOutcome` (`SecretYes | SecretNo`) and cannot enter any public field, feed post, or proof publication before resolution. Shares are stored as integer cent-shares (`CENT_SHARES_PER_SHARE = 100`, where `100` cent-shares = `1.00` full share redeeming for `100 cents = 1 pt` on win, so `1` cent-share redeems for `1 cent`), matching the integer cent-share backend directly with no 100x scaling mismatch.
 
 ```quint
 import money.* from "../shared/money"
@@ -51,8 +51,8 @@ type PredictionMarket = {
   accounts: List[TraderAccount],
 }
 
-pure val SUBCENTS_PER_CENT = 100
-pure val INITIAL_RESERVE_UNITS = 500000
+pure val CENT_SHARES_PER_SHARE = 100
+pure val INITIAL_RESERVE_UNITS = 5000
 pure val INITIAL_LIQUIDITY_CENTS = 10000
 pure val MIN_TRADE_CENTS = 100
 pure val MIN_SELL_SHARE_UNITS = 100
@@ -106,7 +106,7 @@ pure val acctValues =
 
 ### CPMM pricing, square-root proceeds, and account helpers
 
-CPMM buys mint complete sets from net cash after fee (`netUnits = netCents * SUBCENTS_PER_CENT`), preserving `yesReserve * noReserve >= initialK` via ceiling division. Sells redeem complete sets using the rationalized quadratic root floored via integer square root (`isqrt`), bounded below `oppReserve`. The bounded integer square root covers every safely representable discriminant.
+CPMM buys mint complete sets directly from net cash cents after fee (`netCents` cent-shares), preserving `yesReserve * noReserve >= initialK` via ceiling division. Sells redeem complete sets using the rationalized quadratic root floored via integer square root (`isqrt`), bounded below `oppReserve`, yielding whole-cent gross proceeds directly. The bounded integer square root covers every safely representable discriminant.
 
 ```quint
 pure def absInt(x: int): int = if (x < 0) 0 - x else x
@@ -191,7 +191,7 @@ pure def sellAccountUpdate(acct: TraderAccount, side: Side, sellShares: int, net
 
 pure def settleWinnerAccount(acct: TraderAccount, winner: Side): TraderAccount =
   val winningShares = if (winner == Yes) acct.yesShares else acct.noShares
-  val payout = floorCents(winningShares, SUBCENTS_PER_CENT)
+  val payout = winningShares
   val cost = acct.yesCostCents + acct.noCostCents
   if (acct.settledOnClose) acct
   else {
@@ -252,10 +252,9 @@ pure def canBuy(m: PredictionMarket, traderId: str, side: Side, amountCents: Cen
   val acct = accountFor(m, traderId)
   val fee = canonicalTradingFee(amountCents)
   val netCents = buyNetAfterFee(amountCents)
-  val netUnits = netCents * SUBCENTS_PER_CENT
-  val nextYes = buyNextYesReserve(m.yesReserve, m.noReserve, side, netUnits)
-  val nextNo = buyNextNoReserve(m.yesReserve, m.noReserve, side, netUnits)
-  val sharesOut = buySharesBought(m.yesReserve, m.noReserve, side, netUnits)
+  val nextYes = buyNextYesReserve(m.yesReserve, m.noReserve, side, netCents)
+  val nextNo = buyNextNoReserve(m.yesReserve, m.noReserve, side, netCents)
+  val sharesOut = buySharesBought(m.yesReserve, m.noReserve, side, netCents)
   val oldOdds = yesOddsBps(m.yesReserve, m.noReserve)
   val newOdds = yesOddsBps(nextYes, nextNo)
   and {
@@ -276,10 +275,9 @@ pure def canBuy(m: PredictionMarket, traderId: str, side: Side, amountCents: Cen
 pure def buy(m: PredictionMarket, traderId: str, side: Side, amountCents: Cents): PredictionMarket =
   val fee = canonicalTradingFee(amountCents)
   val netCents = buyNetAfterFee(amountCents)
-  val netUnits = netCents * SUBCENTS_PER_CENT
-  val nextYes = buyNextYesReserve(m.yesReserve, m.noReserve, side, netUnits)
-  val nextNo = buyNextNoReserve(m.yesReserve, m.noReserve, side, netUnits)
-  val sharesOut = buySharesBought(m.yesReserve, m.noReserve, side, netUnits)
+  val nextYes = buyNextYesReserve(m.yesReserve, m.noReserve, side, netCents)
+  val nextNo = buyNextNoReserve(m.yesReserve, m.noReserve, side, netCents)
+  val sharesOut = buySharesBought(m.yesReserve, m.noReserve, side, netCents)
   {
     ...m,
     yesReserve: nextYes,
@@ -310,10 +308,9 @@ Sub-cent remainders stay in house liquidity; if settled proceeds are `1 cent`, t
 pure def canSell(m: PredictionMarket, traderId: str, side: Side, sellShares: int): bool =
   val acct = accountFor(m, traderId)
   val held = heldSharesFor(acct, side)
-  val grossUnits = cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares)
-  val settledCents = floorCents(grossUnits, SUBCENTS_PER_CENT)
-  val nextYes = if (side == Yes) m.yesReserve + sellShares - grossUnits else m.yesReserve - grossUnits
-  val nextNo = if (side == Yes) m.noReserve - grossUnits else m.noReserve + sellShares - grossUnits
+  val settledCents = cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares)
+  val nextYes = if (side == Yes) m.yesReserve + sellShares - settledCents else m.yesReserve - settledCents
+  val nextNo = if (side == Yes) m.noReserve - settledCents else m.noReserve + sellShares - settledCents
   val oldOdds = yesOddsBps(m.yesReserve, m.noReserve)
   val newOdds = yesOddsBps(nextYes, nextNo)
   val isFullExit = sellShares == held
@@ -323,7 +320,6 @@ pure def canSell(m: PredictionMarket, traderId: str, side: Side, sellShares: int
     hasTrader(m, traderId),
     sellShares >= MIN_SELL_SHARE_UNITS,
     held >= sellShares,
-    grossUnits > 0,
     settledCents > 0,
     settledCents <= m.liquidityCents,
     nextYes > 0,
@@ -334,12 +330,11 @@ pure def canSell(m: PredictionMarket, traderId: str, side: Side, sellShares: int
   }
 
 pure def sell(m: PredictionMarket, traderId: str, side: Side, sellShares: int): PredictionMarket =
-  val grossUnits = cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares)
-  val settledCents = floorCents(grossUnits, SUBCENTS_PER_CENT)
+  val settledCents = cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares)
   val fee = canonicalTradingFee(settledCents)
   val netCredit = sellNetProceeds(settledCents)
-  val nextYes = if (side == Yes) m.yesReserve + sellShares - grossUnits else m.yesReserve - grossUnits
-  val nextNo = if (side == Yes) m.noReserve - grossUnits else m.noReserve + sellShares - grossUnits
+  val nextYes = if (side == Yes) m.yesReserve + sellShares - settledCents else m.yesReserve - settledCents
+  val nextNo = if (side == Yes) m.noReserve - settledCents else m.noReserve + sellShares - settledCents
   {
     ...m,
     yesReserve: nextYes,
@@ -407,7 +402,7 @@ pure def resolveMarket(m: PredictionMarket): PredictionMarket =
   val afterAccounts = m.accounts.listMap(a => settleWinnerAccount(a, winner))
   val payouts = m.accounts.foldl(0, (acc, a) =>
     if (a.settledOnClose) acc
-    else acc + floorCents(if (winner == Yes) a.yesShares else a.noShares, SUBCENTS_PER_CENT))
+    else acc + (if (winner == Yes) a.yesShares else a.noShares))
   {
     ...m,
     phase: Resolved,
@@ -565,7 +560,7 @@ pure val eval_witness_sometimesBought =
   (("openMarket", Slot15m, SecretYes), ("buy", "alice", Yes, 500))
 
 pure val eval_witness_sometimesSold =
-  (("openMarket", Slot15m, SecretYes), ("buy", "alice", Yes, 500), ("sell", "alice", Yes, 5000))
+  (("openMarket", Slot15m, SecretYes), ("buy", "alice", Yes, 500), ("sell", "alice", Yes, 300))
 
 pure val eval_witness_sometimesManualHoldPreserved =
   (("openMarket", Slot15m, SecretYes), ("advanceClock", 15), "closeAtExpiry", ("generateProof", 5000))
