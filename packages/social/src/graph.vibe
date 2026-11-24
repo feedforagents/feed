@@ -642,7 +642,8 @@ function notificationVisibilityWhereSql(mode: SocialPresentationMode): string {
 export effect function listNotifications(
   accountId: string,
   limit?: number,
-  mode?: SocialPresentationMode
+  mode?: SocialPresentationMode,
+  unreadOnly?: boolean
 ): ReadonlyArray<NotificationView>!(SocialFailure | StoreFailure)!Store {
   if (accountId.trim() === "") {
     throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
@@ -653,8 +654,9 @@ export effect function listNotifications(
     const accountMode = try requireAccountUiModeTx(tx, accountId)
     const effectiveMode = mode ?? accountMode
     const specMode = toSpecMode(effectiveMode)
+    const unreadFilter = unreadOnly === true ? " AND n.read_at IS NULL" : ""
     const rows = try tx.query(
-      `SELECT n.* FROM feed_notifications n LEFT JOIN feed_posts p ON p.id = n.post_id WHERE ${notificationVisibilityWhereSql(effectiveMode)} ORDER BY n.created_at DESC, n.id DESC LIMIT $2`,
+      `SELECT n.* FROM feed_notifications n LEFT JOIN feed_posts p ON p.id = n.post_id WHERE ${notificationVisibilityWhereSql(effectiveMode)}${unreadFilter} ORDER BY n.created_at DESC, n.id DESC LIMIT $2`,
       [accountId, effectiveLimit]
     )
     return rows
