@@ -235,6 +235,7 @@ import {
   checkProgress,
   checkRateLimitAndDuplicates,
   checkRateLimitAsync,
+  countReachablePostCommentsForPosts,
   DUPLICATE_DETECTION_CONFIGS,
   ensureUserForAuth,
   getCacheOrFetch,
@@ -250,7 +251,6 @@ import {
 import type { Post } from '@feed/db';
 import {
   and,
-  comments,
   count,
   db,
   desc,
@@ -352,7 +352,10 @@ interface CommentPreviewRow {
  * @param postIds - Array of post IDs to fetch metadata for
  * @returns Maps for reactions, comments, shares, and comment previews
  */
-async function fetchPostMetadataConsolidated(postIds: string[]): Promise<{
+async function fetchPostMetadataConsolidated(
+  postIds: string[],
+  excludedAuthorIds: string[] = []
+): Promise<{
   reactionMap: Map<string, number>;
   commentMap: Map<string, number>;
   shareMap: Map<string, number>;
@@ -559,6 +562,18 @@ async function fetchPostMetadataConsolidated(postIds: string[]): Promise<{
     commentPreviewMap.set(postId, previews);
   }
 
+  // The CTE above counts every non-deleted row, including replies under a
+  // soft-deleted parent and comments by authors this viewer must not see.
+  // The card must promise only what the detail screen shows (#1994 rule),
+  // so replace the raw counts with the reachable ones for this page.
+  const reachableCommentCounts = await countReachablePostCommentsForPosts(
+    postIds,
+    excludedAuthorIds
+  );
+  for (const postId of postIds) {
+    commentMap.set(postId, reachableCommentCounts.get(postId) ?? 0);
+  }
+
   return { reactionMap, commentMap, shareMap, commentPreviewMap };
 }
 
@@ -738,7 +753,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
     // Get interaction counts for all filtered posts in parallel
     const postIds = filteredPosts.map((p: Post) => p.id);
-    const [reactionCounts, commentCounts] = await Promise.all([
+    const [reactionCounts, reachableCommentCounts] = await Promise.all([
       postIds.length > 0
         ? db
             .select({
@@ -754,18 +769,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             )
             .groupBy(reactions.postId)
         : [],
-      postIds.length > 0
-        ? db
-            .select({
-              postId: comments.postId,
-              count: count(),
-            })
-            .from(comments)
-            .where(
-              and(inArray(comments.postId, postIds), isNull(comments.deletedAt))
-            )
-            .groupBy(comments.postId)
-        : [],
+      // The card must promise only the comments the detail screen can
+      // show for this viewer (#1994 rule): replies under a soft-deleted
+      // parent and comments by authors the viewer blocked or muted are
+      // unreachable, so the raw row count would overstate them.
+      countReachablePostCommentsForPosts(postIds, [...excludedUserIds]),
     ]);
 
     // Create maps for quick lookup
@@ -778,11 +786,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         Number(r.count),
       ])
     );
-    const commentMap = new Map<string | null, number>(
-      commentCounts.map((c): [string | null, number] => [
-        c.postId,
-        Number(c.count),
-      ])
+    const commentMap: Map<string | null, number> = new Map(
+      reachableCommentCounts
     );
 
     // Fetch original posts for reposts in the following feed.
@@ -1144,7 +1149,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     commentMap,
     shareMap,
     commentPreviewMap: rawCommentPreviewMap,
-  } = await fetchPostMetadataConsolidated(allPostIds);
+  } = await fetchPostMetadataConsolidated(allPostIds, viewerExcludedAuthorIds);
 
   // Process comment previews with engagement-based visibility logic
   // This determines which posts show comment previews based on engagement
