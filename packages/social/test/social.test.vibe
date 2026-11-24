@@ -100,6 +100,12 @@ effect function seedAccount(
   )
 }
 
+effect function seedChatParticipants() {
+  try seedAccount("alice", "alice", "Alice Player")
+  try seedAccount("bob", "bob", "Bob Trader")
+  try seedAccount("carol", "carol", "Carol Analyst")
+}
+
 effect function seedGrant(accountId: string, clientName: string) {
   const now = try Clock.currentTimeMillis
   try queryStore(
@@ -462,9 +468,7 @@ it.effect(
 it.effect(
   'DMs, user groups, reactions, retired team chat refusal, and NPC alpha invites (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave")',
   () => withSocialWorld(effect {
-    try seedAccount("alice", "alice", "Alice Player", 10_000, "game")
-    try seedAccount("bob", "bob", "Bob Trader", 10_000, "game")
-    try seedAccount("carol", "carol", "Carol Analyst", 10_000, "game")
+    try seedChatParticipants()
 
     const dm = try createDirectChat("alice", "bob")
     const dmReused = try createDirectChat("bob", "alice")
@@ -607,9 +611,7 @@ it.effect(
 it.effect(
   'canonical rate limits, nested reply ancestor block walk, viewer-adjusted replyCount, group chat filtering, notification visibility, concurrency locks, and SSE viewer auth/fail-closed delivery (spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"; spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions")',
   () => withSocialWorld(effect {
-    try seedAccount("alice", "alice", "Alice Player", 10_000, "game")
-    try seedAccount("bob", "bob", "Bob Trader", 10_000, "game")
-    try seedAccount("carol", "carol", "Carol Analyst", 10_000, "game")
+    try seedChatParticipants()
     try seedAccount("dave", "dave", "Dave Observer", 10_000, "social")
 
     const root = try createPost({ authorId: "alice", authorKind: "user", content: "Root thread post" })
