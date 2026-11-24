@@ -324,7 +324,7 @@ async function collectMetrics(snapshotTime: Date) {
              AND "createdAt" < ${snapshotTimeStr}::timestamp
              AND type IN ('pred_buy', 'pred_sell')), 0
           )::text as volume,
-          (SELECT COUNT(*) FROM "Market" WHERE resolved = false)::text as "activeMarkets",
+          (SELECT COUNT(*) FROM "Market" WHERE resolved = false AND "endDate" >= ${snapshotTimeStr}::timestamp)::text as "activeMarkets",
           (SELECT COUNT(*) FROM "Position" WHERE shares::numeric > 0)::text as "openPositions",
           COALESCE(
             (SELECT SUM(ABS(amount::numeric)) FROM "BalanceTransaction" 
