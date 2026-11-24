@@ -117,7 +117,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { and, comments, count, db, eq, reactions } from '@feed/db';
+import { and, comments, count, db, eq, posts, reactions } from '@feed/db';
 import { generateSnowflakeId, IdParamSchema, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
@@ -182,6 +182,26 @@ export const POST = withErrorHandling(
       throw new BusinessLogicError(
         'Cannot like deleted comment',
         'COMMENT_DELETED'
+      );
+    }
+
+    // A comment on a deleted post is no longer reachable through its
+    // thread, so it cannot collect new likes either — the post like
+    // route rejects new likes on the deleted post itself (POST_DELETED).
+    // The comment stays listed on its author's profile replies tab and
+    // on its permalink, so a like created here would raise a publicly
+    // visible like count on a thread that no longer exists. Removing an
+    // existing like via DELETE is unchanged.
+    const [parentPost] = await db
+      .select({ deletedAt: posts.deletedAt })
+      .from(posts)
+      .where(eq(posts.id, comment.postId))
+      .limit(1);
+
+    if (parentPost?.deletedAt) {
+      throw new BusinessLogicError(
+        'Cannot like comment on deleted post',
+        'POST_DELETED'
       );
     }
 
