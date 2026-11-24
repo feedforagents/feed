@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -147,4 +149,69 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"
+it('Stale explore response is dropped when a newer search lands first', async () => {
+  const explorePayload = (post: unknown) => ({
+    trending: [],
+    articles: [],
+    search: { posts: [post], accounts: [], actors: [], organizations: [] },
+  });
+  const oldPost = { ...SAMPLE_POSTS[0], id: "explore-old-post", content: "Old query result post." };
+  const newPost = { ...SAMPLE_POSTS[0], id: "explore-new-post", content: "New query result post." };
+  let resolveHeld: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(raw, window.location.origin);
+    const path = url.pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/explore") {
+      const q = url.searchParams.get("q") ?? "";
+      if (q === "old query") {
+        return new Promise<Response>((resolve) => {
+          resolveHeld = () => resolve(Response.json(explorePayload(oldPost)));
+        });
+      }
+      if (q === "new query") return json(explorePayload(newPost));
+      return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    }
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const loading = storeActions.loadExplore("old query");
+  await act(() => storeActions.loadExplore("new query"));
+  expect(getStoreSnapshot().exploreQuery).toBe("new query");
+  expect(getStoreSnapshot().explore.posts.map((p) => p.card.id)).toEqual(["explore-new-post"]);
+
+  resolveHeld?.();
+  await act(() => loading);
+
+  expect(getStoreSnapshot().exploreQuery).toBe("new query");
+  expect(getStoreSnapshot().explore.posts.map((p) => p.card.id)).toEqual(["explore-new-post"]);
+  expect(getStoreSnapshot().exploreLoading).toBe(false);
 });
