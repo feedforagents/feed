@@ -4,14 +4,15 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
-import { getStoreSnapshot from "../src/web/store-core.ts";
-import { storeActions from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
+import { storeActions } from "../src/web/store.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
 const liveEventSources: EventTarget[] = [];
 let profileShouldFail = false;
+let profileShould404 = false;
 
 const SAMPLE_POSTS = [
   {
@@ -71,6 +72,7 @@ const SAMPLE_MARKETS = {
 
 function installMockNetwork() {
   profileShouldFail = false;
+  profileShould404 = false;
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -93,6 +95,12 @@ function installMockNetwork() {
     if (path.startsWith("/api/users/")) {
       const userHandle = decodeURIComponent(path.slice("/api/users/".length));
       if (userHandle !== "ailonmusk") {
+        if (profileShouldFail) {
+          return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
+      }
+      if (profileShould404) {
         return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
       }
       if (profileShouldFail) {
@@ -207,9 +215,34 @@ it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "St
   await expect.element(page.getByText("Profile not found")).not.toBeInTheDocument();
   await expect.element(page.getByText("Posts (1)")).toBeInTheDocument();
 
+  profileShouldFail = false;
   await act(async () => {
     await storeActions.navigate("/u/ghost");
   });
   await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
   await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  // (a) a different handle whose load fails with 503 clears the open profile (handle guard)
+  profileShouldFail = false;
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
+  profileShouldFail = true;
+  await act(async () => {
+    await storeActions.navigate("/u/other");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  profileShouldFail = false;
+
+  // (b) the open handle returning 404 on a refetch clears the open profile (404 guard)
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
+  profileShould404 = true;
+  liveEventSources[0].dispatchEvent(new Event("market.spot"));
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  profileShould404 = false;
 });
