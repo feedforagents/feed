@@ -18,14 +18,14 @@ export const meta: ComponentMeta<CopyButtonProps> = {
   play: {
     Copies: async ({ canvasElement }: Context) => {
       written.mockClear();
-      const pendingWrite = Promise.withResolvers<void>();
-      written.mockReturnValueOnce(pendingWrite.promise);
+      let finishWrite: () => void = () => undefined;
+      written.mockReturnValueOnce(new Promise<void>((resolve) => { finishWrite = resolve; }));
       const canvas = within(canvasElement);
       const button = canvas.getByRole("button", { name: "Copy" });
       await userEvent.click(button);
       await expect(written.mock.calls).toEqual([["https://feed.fun/SKILL.md"]]);
       await expect(button).toHaveFocus();
-      pendingWrite.resolve();
+      finishWrite();
       await expect(await canvas.findByText("Copied")).toBe(canvas.getByRole("status"));
       button.blur();
       await waitFor(() => expect(button.dataset.copy).toBe("Ready"));
