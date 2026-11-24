@@ -11,6 +11,7 @@ import {
   setStoreState,
   toSpecTab,
   type UiFeedTab,
+    type MarketsTab,
 } from "./store-core.ts";
 import {
   type AppPerpMarket,
@@ -338,7 +339,16 @@ export async function loadMarkets(): Promise<void> {
 
 export function selectMarket(kind: "prediction" | "perp", id: string): void {
   recordPublicView("Markets");
-  setStoreState({ selectedMarketKind: kind, selectedMarketId: id, tradeError: null });
+    setStoreState({
+          selectedMarketKind: kind,
+          selectedMarketId: id,
+    marketsTab: kind === "perp" ? "perps" : "predictions",
+          tradeError: null,
+    });
+}
+
+export function selectMarketsTab(tab: MarketsTab): void {
+  setStoreState({ marketsTab: tab });
 }
 
 function newIdempotencyKey(): string {
