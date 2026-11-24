@@ -49,7 +49,7 @@ jobs:
       - name: Deploy Worker + Assets to Cloudflare
         run: |
           flags=()
-          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "push" || "${{ inputs.dry_run }}" == "true" ]]; then
             flags+=(--dry-run)
           else
             if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
