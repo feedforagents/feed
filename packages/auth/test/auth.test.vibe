@@ -573,6 +573,28 @@ it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 86
       [accountId]
     )
 
+    const lateCode = try createAuthorizationCode({
+      accountId,
+      clientId: clientA.client_id,
+      redirectUri: redirectUriA,
+      codeChallenge: challengeA,
+      codeChallengeMethod: "S256",
+      responseType: "code",
+      scope: "read",
+      state: "late",
+      resource: "https://feed.fun/mcp"
+    })
+    try TestClock.adjust("5 minutes")
+    const expiredCodeExchange = try refusedCode(exchangeOAuthToken({
+      grantType: "authorization_code",
+      code: lateCode.code,
+      codeVerifier: verifierA,
+      clientId: clientA.client_id,
+      redirectUri: redirectUriA,
+      resource: "https://feed.fun/mcp",
+      config: localnetConfig
+    }))
+
     try check(() => assert.deepStrictEqual(
       {
         badRedirect,
@@ -601,7 +623,8 @@ it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 86
           rotatedB.access_token !== tokenB.access_token, verifiedRotatedB.activeGrant,
           replayedOldRefresh, newRefreshAfterReuse, accessBAfterReuse, rotatedAccessAfterReuse,
           activeGrantAfterReuse, toInt(unrevokedTokensAfterReuse[0]?.count), toInt(activeGrantRowsAfterReuse[0]?.count)
-        ]
+        ],
+        expiredCodeExchange
       },
       {
         badRedirect: "invalid_redirect_uri",
@@ -612,7 +635,8 @@ it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 86
         verifiedA: [true, true, true, "Claude Desktop", ["read", "social:write", "messages", "trade"]],
         deviceFlow: ["https://feed.fun/link", true, "authorization_pending", true, true, "https://feed.fun/mcp"],
         singleAgentReplacement: ["token_revoked", "grant_revoked", true, "Hermes CLI", ["read", "trade"], "Hermes CLI", ["revoked", "active"], true, 1],
-        rotationAndReuse: [true, true, true, true, "reused_revoked", "reused_revoked", "token_revoked", "token_revoked", null, 0, 0]
+        rotationAndReuse: [true, true, true, true, "reused_revoked", "reused_revoked", "token_revoked", "token_revoked", null, 0, 0],
+        expiredCodeExchange: "invalid_grant"
       }
     ))
   })

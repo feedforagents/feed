@@ -6,6 +6,7 @@ import {
   accessTokenLifetimeMs,
   approveConsent,
   approveDeviceFlow,
+  authCodeLifetimeMs,
   canApproveConsent,
   canApproveDeviceFlow,
   canExchangeAuthCode,
@@ -128,7 +129,6 @@ export interface DeviceApprovalResult {
   readonly scopes?: ReadonlyArray<AgentScope>
 }
 
-const AUTH_CODE_LIFETIME_MS = 10 * 60_000
 const PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/
 const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/
 const SUPPORTED_GRANTS = [
@@ -570,7 +570,7 @@ export effect function createAuthorizationCode(input: {
   const now = try Clock.currentTimeMillis
   const code = `feed_code_${randomBase64Url(32)}`
   const codeHash = try sha256Hex(code)
-  const expiresAt = now + AUTH_CODE_LIFETIME_MS
+  const expiresAt = now + authCodeLifetimeMs
   return try store.transaction(effect (tx: Tx) => {
     const clientRows = try tx.query(
       "SELECT client_id, client_name, redirect_uris FROM feed_oauth_clients WHERE client_id = $1",
