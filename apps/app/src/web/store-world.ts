@@ -2,6 +2,7 @@
 import { passThrough, requestJson } from "./api.ts";
 import {
   clearNotices,
+  currentUiMode,
   getStoreSnapshot,
   pushBrowserRoute,
   recordPublicView,
@@ -31,6 +32,7 @@ import {
   decodePredictionMarket,
   decodeProfileBundle,
   decodeTrendingList,
+  isNotificationVisibleInMode,
   isRecord,
   arr,
   optStr,
@@ -635,9 +637,14 @@ export async function markAllNotificationsRead(): Promise<void> {
     setStoreState({ errorMessage: res.message });
     return;
   }
+  const s = getStoreSnapshot();
+  const mode = currentUiMode(s);
+  const notifications = s.notifications.map((n) =>
+    isNotificationVisibleInMode(n, mode) ? { ...n, item: { ...n.item, read: true } } : n,
+  );
   setStoreState({
-    notifications: getStoreSnapshot().notifications.map((n) => ({ ...n, item: { ...n.item, read: true } })),
-    unreadNotifications: 0,
+    notifications,
+    unreadNotifications: notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length,
   });
 }
 

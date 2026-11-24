@@ -1,13 +1,12 @@
 // spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"
 import { Button, Card, EmptyState, NotificationRow, Skeleton, type UiMode } from "@repo/ui";
 import { storeActions, useAppStore } from "../store.ts";
+import { isNotificationVisibleInMode } from "../types.ts";
 
 export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();
   const isSocial = mode === "SocialMode";
-  const visible = s.notifications.filter(
-    (n) => !isSocial || (!n.isGameOnly && n.item.kind !== "MarketResolved" && n.item.kind !== "PnLDigest"),
-  );
+  const visible = s.notifications.filter((n) => isNotificationVisibleInMode(n, mode));
 
   return (
     <div className="flex flex-col">

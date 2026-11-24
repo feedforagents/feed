@@ -16,6 +16,7 @@ import {
   type PredictionMarketPhase,
   type ProfileSummary,
   type TrendingItem,
+  type UiMode,
   defaultAgentLaunchers,
   defaultSkillPrompt,
   formatPts,
@@ -164,6 +165,10 @@ export interface AppNotification {
   readonly postId: string | null;
   readonly marketId: string | null;
   readonly isGameOnly: boolean;
+}
+
+export function isNotificationVisibleInMode(n: AppNotification, mode: UiMode): boolean {
+  return mode !== "SocialMode" || (!n.isGameOnly && n.item.kind !== "MarketResolved" && n.item.kind !== "PnLDigest");
 }
 
 export interface AppProfileBundle {
