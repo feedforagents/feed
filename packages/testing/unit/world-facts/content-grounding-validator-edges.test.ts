@@ -56,6 +56,41 @@ test('article grounding counts the same normalized unknown name once', () => {
   });
 });
 
+test('entity consistency matches source entities across differing sentence lead-ins and casing', () => {
+  const leadInSource =
+    'The Federal Reserve met The European Union on rate policy.';
+  const generated =
+    'For Federal Reserve officials, timing matters. In European Union markets, yields moved.';
+
+  expect(checkEntityConsistency(generated, leadInSource)).toEqual({
+    passed: true,
+    score: 1,
+    reasons: [],
+  });
+
+  const lowercaseSource =
+    'A new meme coin and secure terminal access launched today.';
+  const generatedFromLower =
+    'For Meme Coin traders, demand rose. In Secure Terminal reviews, access improved.';
+  expect(checkEntityConsistency(generatedFromLower, lowercaseSource)).toEqual({
+    passed: true,
+    score: 1,
+    reasons: [],
+  });
+
+  // Unsourced entities with lead-ins are still caught.
+  expect(
+    checkEntityConsistency(
+      `${generated} On New Jupiter, For Phantom Harbor agreed.`,
+      leadInSource
+    )
+  ).toEqual({
+    passed: false,
+    score: 0,
+    reasons: ['2 unknown entities: On New Jupiter, For Phantom Harbor'],
+  });
+});
+
 // ─── validateGrounding: Edge Cases ──────────────────────────────────────────
 
 describe('validateGrounding — edge cases', () => {

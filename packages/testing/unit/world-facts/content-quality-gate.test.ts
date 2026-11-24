@@ -66,6 +66,22 @@ describe('ContentQualityGate.validateParody', () => {
     expect(typeof result.passed).toBe('boolean');
     expect(typeof result.score).toBe('number');
   });
+
+  test('parody still rejects unmapped real names echoed from originalTitle', async () => {
+    const original =
+      'Jerome Powell and Janet Yellen clash with Christine Lagarde over rates';
+    const leakedParody =
+      'JerAIme Powell and Janet Yellen hold robot rate summit with Christine Lagarde';
+
+    const result = await ContentQualityGate.validateParody(
+      original,
+      leakedParody
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reasons.some((r) => r.includes('unknown entities'))).toBe(
+      true
+    );
+  });
 });
 
 describe('ContentQualityGate.validateWorldFact', () => {
@@ -106,6 +122,31 @@ describe('ContentQualityGate.validateWorldFact', () => {
     expect(result.reasons.some((r) => r.includes('unknown entities'))).toBe(
       true
     );
+  });
+
+  test('world fact with sourceContext allows entities grounded in that source', async () => {
+    const source =
+      'In-game event recap: Quantum Harbor and Silver Archive settled liquidity disputes at Aurora Exchange.';
+    const consolidated =
+      'The Quantum Harbor and Silver Archive settlement reshaped liquidity at Aurora Exchange.';
+
+    const groundedResult = await ContentQualityGate.validateWorldFact(
+      consolidated,
+      source
+    );
+    expect(groundedResult.passed).toBe(true);
+    expect(groundedResult.reasons).toHaveLength(0);
+
+    const hallucinated =
+      'Velvet Citadel and Obsidian Spire reshaped liquidity alongside Quantum Harbor.';
+    const hallucinatedResult = await ContentQualityGate.validateWorldFact(
+      hallucinated,
+      source
+    );
+    expect(hallucinatedResult.passed).toBe(false);
+    expect(
+      hallucinatedResult.reasons.some((r) => r.includes('unknown entities'))
+    ).toBe(true);
   });
 });
 

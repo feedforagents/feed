@@ -127,8 +127,8 @@ export class ContentQualityGate {
     scores.push(structure.score);
     if (!structure.passed) reasons.push(...structure.reasons);
 
-    // 2. Entity allowlist
-    const entity = checkEntityConsistency(factText);
+    // 2. Entity allowlist (allow entities already present in sourceContext)
+    const entity = checkEntityConsistency(factText, sourceContext);
     scores.push(entity.score);
     if (!entity.passed) reasons.push(...entity.reasons);
 
