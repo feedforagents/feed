@@ -71,6 +71,7 @@ const SAMPLE_MARKETS = {
 const liveEventSources: EventTarget[] = [];
 let explorePosts: typeof SAMPLE_POSTS = [];
 let profilePosts: typeof SAMPLE_POSTS = [];
+const fetchPaths: string[] = [];
 
 const VIEWER: ViewerSession = {
   accountId: "ailon-musk",
