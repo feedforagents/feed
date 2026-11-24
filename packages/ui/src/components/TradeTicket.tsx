@@ -123,7 +123,8 @@ export function TradeTicket({
   const numericAmount = Number(amount);
   const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
-  const notionalPts = marketKind === "perp" && validAmount ? numericAmount * leverage : numericAmount;
+  const amountCents = Math.round(numericAmount * 100);
+  const notionalPts = marketKind === "perp" && validAmount ? (amountCents * leverage) / 100 : numericAmount;
   const sellSettledCents =
     marketKind === "prediction" && action === "Sell" && validAmount ? Math.floor((numericAmount * activePricePct) / 100) : 0;
   const estimatedFeePts = validAmount
@@ -131,7 +132,6 @@ export function TradeTicket({
       ? Math.max(0.01, Math.ceil((sellSettledCents * feeBps) / 10000) / 100)
       : Math.max(0.01, (notionalPts * feeBps) / 10000)
     : 0;
-  const amountCents = Math.round(numericAmount * 100);
   const perpBelowMinimum = marketKind === "perp" && validAmount && amountCents * leverage < 1000;
   const hasExactCpmmInputs =
     validAmount &&

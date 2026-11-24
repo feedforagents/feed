@@ -47,6 +47,46 @@ export const meta: ComponentMeta<TradeTicketProps> = {
       defaultAmount: "1",
       defaultLeverage: 5,
     },
+    PerpJustBelowMinimum: {
+      marketKind: "perp",
+      ticker: "SAMALT",
+      marketTitle: "Sam Parody Index Perpetual",
+      balancePts: "500 pts",
+      markPricePts: "103.15 pts",
+      indexPricePts: "102.40 pts",
+      defaultAmount: "1.99",
+      defaultLeverage: 5,
+    },
+    PerpAtMinimum: {
+      marketKind: "perp",
+      ticker: "SAMALT",
+      marketTitle: "Sam Parody Index Perpetual",
+      balancePts: "500 pts",
+      markPricePts: "103.15 pts",
+      indexPricePts: "102.40 pts",
+      defaultAmount: "2",
+      defaultLeverage: 5,
+    },
+    PerpJustAboveMinimum: {
+      marketKind: "perp",
+      ticker: "SAMALT",
+      marketTitle: "Sam Parody Index Perpetual",
+      balancePts: "500 pts",
+      markPricePts: "103.15 pts",
+      indexPricePts: "102.40 pts",
+      defaultAmount: "2.01",
+      defaultLeverage: 5,
+    },
+    PerpRoundingBlocked: {
+      marketKind: "perp",
+      ticker: "SAMALT",
+      marketTitle: "Sam Parody Index Perpetual",
+      balancePts: "500 pts",
+      markPricePts: "103.15 pts",
+      indexPricePts: "102.40 pts",
+      defaultAmount: "3.334",
+      defaultLeverage: 3,
+    },
   },
   play: {
     Default: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
@@ -70,6 +110,36 @@ export const meta: ComponentMeta<TradeTicketProps> = {
       const canvas = within(canvasElement);
       await expect(canvas.getByText("Notional size must be at least 10 pts (margin × leverage).")).toBeVisible();
       await expect(canvas.getByRole("button", { name: "Open Long 5x" })).toBeDisabled();
+    },
+    PerpJustBelowMinimum: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("9.95 pts")).toBeVisible();
+      await expect(canvas.getByText("Notional size must be at least 10 pts (margin × leverage).")).toBeVisible();
+      await expect(canvas.getByRole("button", { name: "Open Long 5x" })).toBeDisabled();
+    },
+    PerpAtMinimum: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      onSubmit.mockClear();
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("10.00 pts")).toBeVisible();
+      await expect(canvas.queryByText("Notional size must be at least 10 pts (margin × leverage).")).toBeNull();
+      await expect(canvas.getByRole("button", { name: "Open Long 5x" })).toBeEnabled();
+      await userEvent.click(canvas.getByRole("button", { name: "Open Long 5x" }));
+      await expect(onSubmit).toHaveBeenCalledWith({ marketKind: "perp", side: "Long", marginPts: 2, leverage: 5 });
+    },
+    PerpJustAboveMinimum: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      onSubmit.mockClear();
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("10.05 pts")).toBeVisible();
+      await expect(canvas.queryByText("Notional size must be at least 10 pts (margin × leverage).")).toBeNull();
+      await expect(canvas.getByRole("button", { name: "Open Long 5x" })).toBeEnabled();
+      await userEvent.click(canvas.getByRole("button", { name: "Open Long 5x" }));
+      await expect(onSubmit).toHaveBeenCalledWith({ marketKind: "perp", side: "Long", marginPts: 2.01, leverage: 5 });
+    },
+    PerpRoundingBlocked: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+      const canvas = within(canvasElement);
+      await expect(canvas.getByText("9.99 pts")).toBeVisible();
+      await expect(canvas.getByText("Notional size must be at least 10 pts (margin × leverage).")).toBeVisible();
+      await expect(canvas.getByRole("button", { name: "Open Long 3x" })).toBeDisabled();
     },
   },
 };
