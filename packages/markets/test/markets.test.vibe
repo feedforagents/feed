@@ -910,3 +910,104 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
     ))
   })
 )
+
+it.effect('Wallet Net Profit matches open-row PnL when a perp goes below zero equity (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    const store = try Store
+    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+    try createVerifiedAccount("user-bob", "bob", 1_000_000)
+
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_organizations (id, name, ticker, org_type, description, post_style, can_be_involved, initial_price_cents, created_at)
+         VALUES ('org-hundred', 'Hundred Corp', 'HUND', 'company', 'Synthetic $100 org', 'neutral', true, 10000, $1)
+         ON CONFLICT (id) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_spot_pools (ticker, organization_id, base_reserve, quote_reserve_cents, index_price_cents, updated_at)
+         VALUES ('HUND', 'org-hundred', 50000, 5000000, 10000, $1)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage, funding_rate_bps, last_funding_period, updated_at)
+         VALUES ('HUND', 10000, 10000, 0, 0, 20, 0, 0, $1)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [now]
+      )
+    })
+
+    const aliceLong = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "long",
+      collateralCents: 500,
+      leverage: 20
+    })
+    const bobShort = try openPerpPosition({
+      ownerId: "user-bob",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "short",
+      collateralCents: 45_000,
+      leverage: 20
+    })
+
+    try TestClock.adjust(Duration.seconds(8 * 3_600))
+    const funding1 = try accruePerpFunding()
+    try TestClock.adjust(Duration.seconds(8 * 3_600))
+    const funding2 = try accruePerpFunding()
+
+    const positions = try getUserPositions("user-alice")
+    const row = positions.perpPositions[0]!
+    const econ = try getAccountEconomy("user-alice")
+    const rowPnlCents = row.equityCents - row.marginCents
+
+    try check(() => assert.deepStrictEqual(
+      {
+        setup: {
+          alicePositionId: aliceLong.positionId === row.id,
+          bobShortSize: bobShort.position.sizeCents,
+          entryPriceCents: row.entryPriceCents,
+          markPriceCents: row.markPriceCents,
+          marginCents: row.marginCents,
+          unrealizedPnlCents: row.unrealizedPnlCents,
+          accruedFundingCents: row.accruedFundingCents,
+          rowEquityCents: row.equityCents,
+          rowPnlCents,
+          balanceCents: econ.balanceCents,
+          fundingAccrued: [funding1.accruedCount, funding2.accruedCount]
+        },
+        walletTotalMatchesRow: {
+          positionValueCents: econ.positionValueCents,
+          rowEquityCents: row.equityCents,
+          netProfitCents: econ.netProfitCents,
+          expectedNetProfitCents: econ.balanceCents + row.equityCents - INITIAL_GRANT_CENTS
+        }
+      },
+      {
+        setup: {
+          alicePositionId: true,
+          bobShortSize: 900_000,
+          entryPriceCents: 10_500,
+          markPriceCents: 9511,
+          marginCents: 500,
+          unrealizedPnlCents: -942,
+          accruedFundingCents: -96,
+          rowEquityCents: -346,
+          rowPnlCents: -846,
+          balanceCents: 9490,
+          fundingAccrued: [2, 2]
+        },
+        walletTotalMatchesRow: {
+          positionValueCents: -346,
+          rowEquityCents: -346,
+          netProfitCents: -856,
+          expectedNetProfitCents: -856
+        }
+      }
+    ))
+  })
+)

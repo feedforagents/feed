@@ -214,7 +214,7 @@ export effect function getAccountEconomyIn(tx: Tx, accountId: string): AccountEc
   let perpValueCents = 0
   for (const row of perpRows) {
     const equity = positionEquityAtMark(toSpecPerpPosition(row), toInt(row.mark_price_cents))
-    perpValueCents += Math.max(0, equity)
+    perpValueCents += equity
   }
   const positionValueCents = predValueCents + perpValueCents
   const balanceCents = toInt(acct.balance_cents)
@@ -338,7 +338,7 @@ effect function loadTradingAggregatesTx(
     const holderId = requiredText(row.holder_id)
     const specPos = toSpecPerpPosition(row)
     const mark = toInt(row.mark_price_cents)
-    const equity = Math.max(0, positionEquityAtMark(specPos, mark))
+    const equity = positionEquityAtMark(specPos, mark)
     perpValueMap.set(holderId, (perpValueMap.get(holderId) ?? 0) + equity)
     openUnrealizedMap.set(holderId, (openUnrealizedMap.get(holderId) ?? 0) + unrealizedPnlAtMark(specPos, mark))
   }
