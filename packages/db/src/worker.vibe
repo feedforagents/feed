@@ -220,6 +220,39 @@ effect function runBatches(tx: Tx, batches: ReadonlyArray<BatchQuery>): void!Sto
   }
 }
 
+effect function migrateLegacyOrgActorsTx(tx: Tx): void!StoreFailure {
+  try tx.query(
+    "UPDATE feed_posts SET author_id = substr(author_id, 5), author_kind = 'org' WHERE author_id LIKE 'org-%'"
+  )
+  try tx.query(
+    `INSERT INTO feed_follows (follower_id, target_id, target_kind, created_at)
+     SELECT follower_id, substr(target_id, 5), 'org', created_at
+     FROM feed_follows
+     WHERE target_id LIKE 'org-%'
+     ON CONFLICT (follower_id, target_id, target_kind) DO NOTHING`
+  )
+  try tx.query("DELETE FROM feed_follows WHERE target_id LIKE 'org-%' OR follower_id LIKE 'org-%'")
+  try tx.query("DELETE FROM feed_npc_spot_holdings WHERE actor_id LIKE 'org-%'")
+  try tx.query("DELETE FROM feed_npc_market_clues WHERE actor_id LIKE 'org-%'")
+  try tx.query("DELETE FROM feed_actors WHERE id LIKE 'org-%'")
+  try tx.query("UPDATE feed_organizations SET ticker = NULL WHERE id = 'deparment-of-war'")
+}
+
+effect function finalizeRenamedOrgsTx(tx: Tx): void!StoreFailure {
+  try tx.query("UPDATE feed_spot_pools SET organization_id = 'department-of-war' WHERE organization_id = 'deparment-of-war'")
+  try tx.query("UPDATE feed_posts SET author_id = 'department-of-war' WHERE author_id = 'deparment-of-war'")
+  try tx.query("UPDATE feed_articles SET author_org_id = 'department-of-war' WHERE author_org_id = 'deparment-of-war'")
+  try tx.query(
+    `INSERT INTO feed_follows (follower_id, target_id, target_kind, created_at)
+     SELECT follower_id, 'department-of-war', target_kind, created_at
+     FROM feed_follows
+     WHERE target_id = 'deparment-of-war'
+     ON CONFLICT (follower_id, target_id, target_kind) DO NOTHING`
+  )
+  try tx.query("DELETE FROM feed_follows WHERE target_id = 'deparment-of-war' OR follower_id = 'deparment-of-war'")
+  try tx.query("DELETE FROM feed_organizations WHERE id = 'deparment-of-war'")
+}
+
 export effect function seedFeedWorld(): void!StoreFailure!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
@@ -227,20 +260,7 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
     try tx.query("SELECT pg_advisory_xact_lock(4242003)")
     try ensureDefaultWorldStateTx(tx, now)
     const runtimeActors = actors.filter(isRuntimeActor)
-    try tx.query(
-      "UPDATE feed_posts SET author_id = substr(author_id, 5), author_kind = 'org' WHERE author_id LIKE 'org-%'"
-    )
-    try tx.query(
-      `INSERT INTO feed_follows (follower_id, target_id, target_kind, created_at)
-       SELECT follower_id, substr(target_id, 5), 'org', created_at
-       FROM feed_follows
-       WHERE target_id LIKE 'org-%'
-       ON CONFLICT (follower_id, target_id, target_kind) DO NOTHING`
-    )
-    try tx.query("DELETE FROM feed_follows WHERE target_id LIKE 'org-%' OR follower_id LIKE 'org-%'")
-    try tx.query("DELETE FROM feed_npc_spot_holdings WHERE actor_id LIKE 'org-%'")
-    try tx.query("DELETE FROM feed_npc_market_clues WHERE actor_id LIKE 'org-%'")
-    try tx.query("DELETE FROM feed_actors WHERE id LIKE 'org-%'")
+    try migrateLegacyOrgActorsTx(tx)
     try tx.query(
       "DELETE FROM feed_actors WHERE id IN ('test-analyst-npc-002', 'test-trader-npc-001') AND NOT EXISTS (SELECT 1 FROM feed_npc_market_clues WHERE actor_id = feed_actors.id)"
     )
@@ -281,6 +301,7 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
       ]),
       "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, username = EXCLUDED.username, org_type = EXCLUDED.org_type, description = EXCLUDED.description, post_style = EXCLUDED.post_style, can_be_involved = EXCLUDED.can_be_involved, initial_price_cents = COALESCE(feed_organizations.initial_price_cents, EXCLUDED.initial_price_cents), image_url = CASE WHEN feed_organizations.image_url IS NULL OR btrim(feed_organizations.image_url) = '' OR feed_organizations.image_url LIKE '/images/%' THEN EXCLUDED.image_url ELSE feed_organizations.image_url END, banner_url = CASE WHEN feed_organizations.banner_url IS NULL OR btrim(feed_organizations.banner_url) = '' OR feed_organizations.banner_url LIKE '/images/%' THEN EXCLUDED.banner_url ELSE feed_organizations.banner_url END"
     ))
+    try finalizeRenamedOrgsTx(tx)
     try runBatches(tx, buildInsertBatches(
       "feed_follows",
       ["follower_id", "target_id", "target_kind", "created_at"],
