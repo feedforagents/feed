@@ -1275,7 +1275,19 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
-  setStoreState({ profileLoading: true, profileHandle: handle, profileReplies: [] });
+  const lower = handle.toLowerCase();
+  const bundle = s.profileBundle;
+  const sameProfile =
+    bundle !== null &&
+    (bundle.summary.handle.toLowerCase() === lower ||
+      bundle.id.toLowerCase() === lower ||
+      bundle.orgMeta?.ticker?.toLowerCase() === lower);
+  setStoreState({
+    profileLoading: true,
+    profileHandle: handle,
+    profileReplies: [],
+    ...(sameProfile ? {} : { profileBundle: null }),
+  });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}`, s);
   const res = await requestJson(url, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),

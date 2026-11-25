@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -380,4 +382,87 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();
+});
+
+function r37ProfilePayload(id: string, handle: string, displayName: string) {
+  return {
+    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts: [],
+    positions: {},
+    nextCursor: null,
+  };
+}
+
+it('Switching profiles never shows the previous profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  let bobRequested = false;
+  let bobHeld = true;
+  const bobReleases: Array<(res: Response) => void> = [];
+  const releaseBob = () => {
+    for (const release of bobReleases.splice(0)) release(Response.json(r37ProfilePayload("acc-bob", "bob", "Bob Badger")));
+  };
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({ authenticated: false, viewer: null, acceptedCountries: ["+1", "+44"], publicAppUrl: window.location.origin });
+    }
+    if (path === "/api/users/alice") return json(r37ProfilePayload("acc-alice", "alice", "Alice Aardvark"));
+    if (path === "/api/users/bob" || path === "/api/users/acc-bob") {
+      bobRequested = true;
+      if (bobHeld) {
+        return new Promise<Response>((resolve) => {
+          bobReleases.push(resolve);
+        });
+      }
+      return json(r37ProfilePayload("acc-bob", "bob", "Bob Badger"));
+    }
+    if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
+    if (path === "/api/markets") return json({ predictions: SAMPLE_MARKETS.predictions, perps: [] });
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
+    if (path === "/api/leaderboard") return json(SAMPLE_LEADERBOARD_PLAYERS);
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("alice");
+
+  const navBob = storeActions.navigate("/u/bob");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(bobRequested).toBe(true);
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(getStoreSnapshot().profileBundle?.summary.handle).not.toBe("alice");
+  await expect.element(page.getByText("Alice Aardvark")).not.toBeInTheDocument();
+
+  bobHeld = false;
+  releaseBob();
+  await act(() => navBob);
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+
+  bobHeld = true;
+  bobRequested = false;
+  const refreshBob = storeActions.loadProfile();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(bobRequested).toBe(true);
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  bobHeld = false;
+  releaseBob();
+  await act(() => refreshBob);
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
 });
