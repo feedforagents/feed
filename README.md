@@ -246,7 +246,7 @@ Before committing your application's starting point:
 
 1. **Remove what you do not need.** Delete every directory in
    `vibestack/examples/` except `order/`: `pnpm selftest` builds its scratch
-   projects from it, so it stays, with the `demo` and `examples` scripts.
+   projects from it, so it stays, with the `pnpm --dir vibestack/examples/order demo` and `pnpm selftest:examples` scripts.
    Start your application from `apps/app` and its requirements from
    `spec/app/index.md`. Update the package name, description and
    repository links for your project.
@@ -317,7 +317,7 @@ current one. Installed as a package, use `pnpm exec spec <command> [<dir>]`.
 | `pnpm accept unproved` | Records the listed obligations as simulated only. The user's decision |
 | `pnpm new [<path>]` | Fills an empty root index or creates a child [starter spec](SPEC.md#writing-a-spec) |
 | `node vibestack/spec.ts init [<dir>]` | Sets up an existing project ([above](#using-it-from-another-package)) |
-| `pnpm demo` | Runs the order example's scripted checkout session |
+| `pnpm --dir vibestack/examples/order demo` | Runs the order example's scripted checkout session |
 | `pnpm selftest` | Breaks the pipeline one way at a time and checks each break is caught, checks what the documents name, and installs and checks every example, as five cached tasks |
 | `pnpm build` | Compiles the tools into `dist/`, the packaged `spec` command |
 
