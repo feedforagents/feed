@@ -686,11 +686,11 @@ effect function handleAuthRoute(
           displayName: profile.displayName,
           bio: profile.bio,
           avatarUrl: profile.avatarUrl,
+          bannerUrl: profile.bannerUrl,
           phoneLast2: profile.phoneLast2,
           uiMode: profile.uiMode,
           balanceCents: profile.balanceCents,
           startingGrantCents: profile.startingGrantCents,
-          purchasedCents: profile.purchasedCents,
           isAdmin: profile.isAdmin,
           isReviewer: profile.isReviewer,
           agentGrant: grant
