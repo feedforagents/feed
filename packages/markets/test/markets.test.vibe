@@ -21,7 +21,7 @@ import {
   getPredictionMarket,
   getUserPositions,
   liquidateEligiblePositions,
-listClosedPositions,
+  listClosedPositions,
   listMarketTrades,
   listPerpMarkets,
   listPerpPositions,
@@ -29,7 +29,7 @@ listClosedPositions,
   listUserClosedPositions,
   markToMarketPredictionCents,
   openPerpPosition,
-parseClosedOutcomeFilter,
+  parseClosedOutcomeFilter,
   previewPerpOrder,
   previewPredictionBuy,
   previewPredictionSell,
@@ -914,7 +914,7 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
 )
 
 it.effect('Cancelled prediction positions read cancelled in listClosedPositions (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
-  runWithSeededMarketDay(effect (now) => {
+  runWithSeededMarketDay(effect (_now) => {
     try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
     try buyPredictionShares({
       actorId: "user-bob",
@@ -922,9 +922,7 @@ it.effect('Cancelled prediction positions read cancelled in listClosedPositions 
       marketId: "seed-market-1",
       side: "yes",
       amountCents: 4_000
-    })
-    // Cancelled markets refund every open position at cost basis without publishing an outcome,
-    // so the closed position must read "cancelled" with zero realized P&L instead of "lost".
+    }).
     try cancelPredictionMarket("seed-market-1")
     const all = try listClosedPositions({ accountId: "user-bob" })
     const cancelled = try listClosedPositions({ accountId: "user-bob", outcome: "cancelled" })
