@@ -377,6 +377,8 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   const walletButton = page.getByRole("button", { name: "Wallet" }).first();
   await act(() => userEvent.click(walletButton));
   await expect.element(page.getByText("Size 19.78 shares")).toBeInTheDocument();
+  await expect.element(page.getByText("Entry 51%")).toBeInTheDocument();
+  expect(document.body.textContent).not.toContain("Entry 10 pts");
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();

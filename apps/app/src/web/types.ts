@@ -998,7 +998,7 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
           marketLabel: str(entry.question, marketId),
           side: rawSide === "yes" ? "YES" : "NO",
           quantityLabel: `${wholeShares.toFixed(2)} shares`,
-          entryLabel: formatPts(costCents / 100),
+          entryLabel: `${Math.round(avgPricePct)}%`,
           markLabel: `${Math.round(sidePriceBps / 100)}%`,
           pnlPts: unrealizedPnlCents / 100,
         },
