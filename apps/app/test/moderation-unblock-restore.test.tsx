@@ -2,52 +2,29 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadProfile, toggleBlock } from "../src/web/store-world.ts";
-import { decodePost, type AppPost } from "../src/web/types.ts";
+import { aliceViewer, decodedPost, postRaw, resetModerationStore } from "./moderation-fixtures.ts";
 
-const createdAt = Date.now() - 60_000;
-
-function rawPost(overrides: Record<string, unknown>): Record<string, unknown> {
-  return {
-    id: "post-x",
-    authorId: "carol",
-    authorKind: "user",
-    authorHandle: "carol",
-    authorDisplayName: "Carol Analyst",
-    content: "Carol market note",
-    replyToPostId: null,
-    quotePostId: null,
-    quotePost: null,
-    repostedByHandle: null,
-    repostedByName: null,
-    likeCount: 0,
-    repostCount: 0,
-    replyCount: 0,
-    likedByViewer: false,
-    repostedByViewer: false,
-    createdAt,
-    ...overrides,
-  };
-}
-
-function decoded(raw: Record<string, unknown>): AppPost {
-  const post = decodePost(raw, "alice");
-  if (!post) throw new Error("decode failed");
-  return post;
-}
-
-const bobRaw = rawPost({
+const bobRaw = postRaw({
   id: "bob-post",
   authorId: "bob",
   authorHandle: "bob",
   authorDisplayName: "Bob Trader",
   content: "Bob alpha call",
 });
-const carolRaw = rawPost({
+const bobReplyRaw = postRaw({
+  id: "bob-reply",
+  authorId: "bob",
+  authorHandle: "bob",
+  authorDisplayName: "Bob Trader",
+  content: "Bob reply",
+  replyToPostId: "carol-post",
+});
+const carolRaw = postRaw({
   id: "carol-post",
   repostedByHandle: "bob",
   repostedByName: "Bob Trader",
 });
-const daveRaw = rawPost({
+const daveRaw = postRaw({
   id: "dave-post",
   authorId: "dave",
   authorHandle: "dave",
@@ -61,7 +38,7 @@ const daveRaw = rawPost({
     content: "Bob alpha call",
   },
 });
-const erinRaw = rawPost({
+const erinRaw = postRaw({
   id: "erin-post",
   authorId: "erin",
   authorHandle: "erin",
@@ -70,17 +47,17 @@ const erinRaw = rawPost({
 });
 const fullFeedRaw = [bobRaw, carolRaw, daveRaw, erinRaw];
 
-function profileRaw(blocked: boolean): Record<string, unknown> {
+function profileRaw(handle: string, blocked: boolean): Record<string, unknown> {
   return {
     profile: {
-      id: "bob",
+      id: handle,
       kind: "user",
-      handle: "bob",
-      displayName: "Bob Trader",
+      handle,
+      displayName: handle === "bob" ? "Bob Trader" : "Carol Analyst",
       bio: "",
       avatarUrl: null,
       bannerUrl: null,
-      createdAt,
+      createdAt: Date.now() - 60_000,
       followersCount: 0,
       followingCount: 0,
       postsCount: 2,
@@ -91,7 +68,7 @@ function profileRaw(blocked: boolean): Record<string, unknown> {
       viewerMutes: false,
       isParody: false,
     },
-    posts: blocked ? [] : [bobRaw, carolRaw],
+    posts: blocked ? [] : handle === "bob" ? [bobRaw, carolRaw] : [carolRaw],
     nextCursor: null,
     positions: { predictionPositions: [], perpPositions: [] },
   };
@@ -99,20 +76,13 @@ function profileRaw(blocked: boolean): Record<string, unknown> {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  setStoreState({
-    viewer: null,
-    route: "Home",
-    feedTab: "latest",
-    feedPosts: [],
-    profileBundle: null,
-    profileHandle: null,
-    profileReplies: [],
-    blockedAccounts: [],
-  });
+  resetModerationStore();
 });
 
 it('Unblocking an author restores their posts, repost attribution, and quoted content in the loaded feed and profile (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
   let serverBlocked = false;
+  let feedGate: Promise<void> | null = null;
+  let releaseFeed: (() => void) | null = null;
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
     const method = init?.method ?? "GET";
@@ -121,36 +91,26 @@ it('Unblocking an author restores their posts, repost attribution, and quoted co
       return Promise.resolve(Response.json({ blocked: serverBlocked }));
     }
     if (url.startsWith("/api/feed")) {
-      return Promise.resolve(Response.json({ items: serverBlocked ? [erinRaw] : fullFeedRaw, nextCursor: null }));
+      const respond = () => Response.json({ items: serverBlocked ? [erinRaw] : fullFeedRaw, nextCursor: null });
+      return feedGate ? feedGate.then(respond) : Promise.resolve(respond());
     }
     if (url.startsWith("/api/users/bob")) {
-      return Promise.resolve(Response.json(profileRaw(serverBlocked)));
+      return Promise.resolve(Response.json(profileRaw("bob", serverBlocked)));
+    }
+    if (url.startsWith("/api/users/carol")) {
+      return Promise.resolve(Response.json(profileRaw("carol", false)));
     }
     if (url.startsWith("/api/posts")) {
-      return Promise.resolve(Response.json({ items: [], nextCursor: null }));
+      return Promise.resolve(Response.json({ items: serverBlocked ? [] : [bobReplyRaw], nextCursor: null }));
     }
     return Promise.resolve(Response.json({}, { status: 404 }));
   });
 
   setStoreState({
-    viewer: {
-      accountId: "alice",
-      handle: "alice",
-      displayName: "Alice Player",
-      bio: "",
-      avatarUrl: null,
-      bannerUrl: null,
-      phoneLast2: null,
-      uiMode: "game",
-      balanceCents: 10_000,
-      startingGrantCents: 10_000,
-      isAdmin: false,
-      isReviewer: false,
-      agentGrant: null,
-    },
+    viewer: aliceViewer,
     route: "Home",
     feedTab: "latest",
-    feedPosts: fullFeedRaw.map(decoded),
+    feedPosts: fullFeedRaw.map(decodedPost),
     blockedAccounts: [],
   });
 
@@ -159,18 +119,36 @@ it('Unblocking an author restores their posts, repost attribution, and quoted co
   await loadProfile("bob");
   await toggleBlock("bob", true);
 
+  const restored = getStoreSnapshot();
+  await toggleBlock("bob", false);
+  feedGate = new Promise<void>((resolve) => {
+    releaseFeed = resolve;
+  });
+  const unblock = toggleBlock("bob", true);
+  await loadProfile("carol");
+  releaseFeed?.();
+  await unblock;
+
   const after = getStoreSnapshot();
   expect({
-    feedIds: after.feedPosts.map((p) => p.card.id),
-    carolReposter: after.feedPosts.find((p) => p.card.id === "carol-post")?.card.repostedByHandle ?? null,
-    daveQuoteAuthor: after.feedPosts.find((p) => p.card.id === "dave-post")?.card.quotePost?.authorHandle ?? null,
-    profilePostIds: after.profileBundle?.posts.map((p) => p.card.id) ?? null,
-    profileBlocked: after.profileBundle?.summary.isBlocked ?? null,
+    feedIds: restored.feedPosts.map((p) => p.card.id),
+    carolReposter: restored.feedPosts.find((p) => p.card.id === "carol-post")?.card.repostedByHandle ?? null,
+    daveQuoteAuthor: restored.feedPosts.find((p) => p.card.id === "dave-post")?.card.quotePost?.authorHandle ?? null,
+    profilePostIds: restored.profileBundle?.posts.map((p) => p.card.id) ?? null,
+    profileReplyIds: restored.profileReplies.map((p) => p.card.id),
+    profileBlocked: restored.profileBundle?.summary.isBlocked ?? null,
+    navigatedProfileHandle: after.profileHandle,
+    navigatedProfile: after.profileBundle?.summary.handle ?? null,
+    navigatedFeedIds: after.feedPosts.map((p) => p.card.id),
   }).toEqual({
     feedIds: ["bob-post", "carol-post", "dave-post", "erin-post"],
     carolReposter: "bob",
     daveQuoteAuthor: "bob",
     profilePostIds: ["bob-post", "carol-post"],
+    profileReplyIds: ["bob-reply"],
     profileBlocked: false,
+    navigatedProfileHandle: "carol",
+    navigatedProfile: "carol",
+    navigatedFeedIds: ["bob-post", "carol-post", "dave-post", "erin-post"],
   });
 });

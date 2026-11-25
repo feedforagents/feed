@@ -1524,11 +1524,11 @@ async function toggleModeration(
   const verb = isBlock ? (active ? "Unblocked" : "Blocked") : (active ? "Unmuted" : "Muted");
   setStatusNotice(`${verb} @${handle}.`);
   if (active) {
+    await loadFeed();
     const latest = getStoreSnapshot();
     const viewingProfile = latest.route === "Profile"
       && (latest.profileHandle?.toLowerCase() === lower
         || latest.profileBundle?.summary.handle.toLowerCase() === lower);
-    await loadFeed();
     if (viewingProfile) {
       await loadProfile(handle);
       if (getStoreSnapshot().profileBundle?.summary.handle.toLowerCase() === lower) {
