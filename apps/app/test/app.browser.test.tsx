@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { hydrateAuth } from "../src/web/store-auth.ts";
+import { setStoreState } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -65,15 +67,17 @@ const SAMPLE_MARKETS = {
   economy: null,
 };
 
-function installMockNetwork() {
+function installMockNetwork(signedIn = false) {
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const path = new URL(raw, window.location.origin).pathname;
     if (path === "/api/auth/me") {
       return json({
-        authenticated: false,
-        viewer: null,
+        authenticated: signedIn,
+        viewer: signedIn
+          ? { accountId: "viewer-1", handle: "viewer", displayName: "Viewer", uiMode: "game", balanceCents: 0 }
+          : null,
         acceptedCountries: ["+1", "+44"],
         publicAppUrl: window.location.origin,
       });
@@ -111,6 +115,18 @@ afterEach(async () => {
   for (const root of opened.splice(0)) {
     await act(() => Promise.resolve(root.unmount()));
   }
+  setStoreState({
+    route: "Home",
+    profileHandle: null,
+    selectedTicker: null,
+    localUiMode: "game",
+    joinSheetOpen: false,
+    joinTab: "phone",
+    joinPhoneStep: "entry",
+    activeThread: null,
+    threadLoading: false,
+    viewer: null,
+  });
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
@@ -177,4 +193,26 @@ it('Visitors browse, switch modes, and sign in (spec/app/navigation.md, "Story: 
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
+});
+
+it('Signed-in users quote from the Explore reply dialog and land on Home (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork(true);
+  await act(() => hydrateAuth());
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  const exploreButton = page.getByRole("button", { name: "Explore" }).first();
+  await act(() => userEvent.click(exploreButton));
+  const search = page.getByRole("textbox", { name: "Search Feed" });
+  await act(() => search.fill("orbital"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
+  const threadDialog = page.getByRole("dialog", { name: "Post thread" });
+  await act(() => userEvent.click(page.getByRole("button", { name: "Reply1" }).first()));
+  await expect.element(threadDialog.getByText("Thread-only reply text.")).toBeInTheDocument();
+  await act(() => userEvent.click(threadDialog.getByRole("button", { name: "Quote post" }).first()));
+  expect(window.location.pathname).toBe("/");
+  await expect.element(page.getByRole("button", { name: "Clear quote" })).toBeInTheDocument();
 });
