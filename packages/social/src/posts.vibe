@@ -1546,13 +1546,21 @@ function bumpTrendingTag(
 
 export effect function listArticles(
   limit?: number,
-  mode: SocialPresentationMode = "game"
+  mode: SocialPresentationMode = "game",
+  query?: string
 ): ReadonlyArray<ArticleView>!StoreFailure!Store {
   const effectiveLimit = clampLimit(limit, 20, 100)
   const store = try Store
+  const trimmedQuery = query?.trim() ?? ""
+  const matchSql = trimmedQuery === ""
+    ? ""
+    : " AND (a.title ILIKE $2 ESCAPE '\\' OR a.summary ILIKE $2 ESCAPE '\\' OR COALESCE(o.name, a.author_org_id) ILIKE $2 ESCAPE '\\')"
+  const params = trimmedQuery === ""
+    ? [effectiveLimit]
+    : [effectiveLimit, `%${escapeLikePattern(trimmedQuery)}%`]
   const rows = try store.transaction((tx) => tx.query(
-    `${ARTICLE_BASE_SQL} WHERE ${ARTICLE_VISIBLE_SQL} ORDER BY a.published_at DESC, a.id DESC LIMIT $1`,
-    [effectiveLimit]
+    `${ARTICLE_BASE_SQL} WHERE ${ARTICLE_VISIBLE_SQL}${matchSql} ORDER BY a.published_at DESC, a.id DESC LIMIT $1`,
+    params
   ))
   return rows.map((row) => rowToArticle(row, mode))
 }
