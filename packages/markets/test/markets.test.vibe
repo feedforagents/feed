@@ -135,6 +135,13 @@ it.effect('Prediction market lifecycle: previews, cent-share CPMM, MIN_SELL_SHAR
       side: "yes",
       shares: 50
     }))
+const belowMinSellCode = try marketErrorCode(sellPredictionShares({
+  actorId: "user-alice",
+  actorKind: "user",
+marketId: "seed-market-1",
+side: "yes",
+shares: 99
+}))
     const sharesToSell = 1_000 + (aliceBuy.shares % 100)
     const sellPreview = try previewPredictionSell({
       marketId: "seed-market-1",
@@ -217,6 +224,7 @@ it.effect('Prediction market lifecycle: previews, cent-share CPMM, MIN_SELL_SHAR
           buyPreview.newYesPriceBps === aliceBuy.yesPriceBps
         ],
         tooSmallSellCode,
+      belowMinSellCode,
         previewMatchesSell: [
           sellPreview.grossCents === aliceSell.notionalCents,
           sellPreview.feeCents === aliceSell.feeCents,
@@ -257,6 +265,7 @@ it.effect('Prediction market lifecycle: previews, cent-share CPMM, MIN_SELL_SHAR
         openSecrecy: ["open", null, null, null, null, false],
         previewMatchesBuy: [true, true, true],
         tooSmallSellCode: "INVALID_SHARES",
+      belowMinSellCode: "INVALID_SHARES",
         previewMatchesSell: [true, true, true, true],
         aliceSellRealizedRecorded: true,
         marketVolumeMatchesTrades: true,
