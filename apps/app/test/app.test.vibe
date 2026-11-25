@@ -498,6 +498,16 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
       [400, "INVALID_SHARES", 200]
     ))
 
+    const fractionalPreviewRes = try callApp("/api/markets/predictions/seed-market-1/preview", {
+      cookie: alice.cookie,
+      json: { action: "sell", side: "yes", shares: 250.5 }
+    })
+    const fractionalPreviewBody = try readJson(fractionalPreviewRes)
+    try check(() => assert.deepStrictEqual(
+      [fractionalPreviewRes.status, fractionalPreviewBody.code],
+      [400, "INVALID_SHARES"]
+    ))
+
     const perpPreviewRes = try callApp("/api/markets/perp/preview", {
       cookie: alice.cookie,
       json: { ticker: "XTRPC", side: "long", collateralCents: 1000, leverage: 2 }

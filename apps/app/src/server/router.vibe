@@ -1866,7 +1866,7 @@ effect function handlePredictionMarketRoute(
       const preview = try previewPredictionSell({
         marketId,
         side: rawSide,
-        shares: Math.round(rawShares ?? 0),
+        shares: rawShares ?? 0,
         ...(session !== null ? { holderId: session.accountId } : {})
       })
       return jsonResponse({ preview })
