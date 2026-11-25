@@ -1,4 +1,4 @@
-// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
+// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"; spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
 export { AuthFailure, RateLimited, UnauthorizedError } from "./errors.vibe"
 export {
   DEFAULT_ALLOWED_COUNTRIES,
@@ -14,12 +14,14 @@ export {
   setPlayMode,
   signInReviewerPassword,
   signOutEverywhere,
+  startPhoneLink,
   startPhoneVerification,
   verifyPhoneCode,
   verifyTurnstile,
   type AccountProfile,
   type AuthRuntimeConfig,
   type AuthenticatedAccountResult,
+  type EmailMode,
   type FeedEnvironment,
   type PlayMode,
   type SessionIdentity,
@@ -27,6 +29,22 @@ export {
   type StartPhoneVerificationResult,
   type VerifyPhoneCodeResult
 } from "./phone-auth.vibe"
+export {
+  completeEmailOnboarding,
+  completeOnboarding,
+  getLoopbackMagicLink,
+  hashEmail,
+  maskEmail,
+  normalizeEmail,
+  requestEmailLink,
+  requestEmailMagicLink,
+  resolveEmailMode,
+  startEmailLink,
+  startEmailMagicLink,
+  verifyEmailMagicLink,
+  type StartEmailMagicLinkResult,
+  type VerifyEmailMagicLinkResult
+} from "./email-auth.vibe"
 export {
   AGENT_SCOPES,
   connectSingleAgentGrant,
@@ -41,12 +59,16 @@ export {
 } from "./agent-grant.vibe"
 export {
   approveDeviceAuthorization,
+  checkOAuthEndpointRateLimit,
   createAuthorizationCode,
   exchangeOAuthToken,
   fetchClientMetadata,
+  isDisallowedRemoteHost,
+  lookupDeviceCodeForUser,
   normalizeResource,
   oauthAuthorizationServerMetadata,
   oauthProtectedResourceMetadata,
+  redirectUriMatchesRegistered,
   registerDynamicClient,
   revokeOAuthToken,
   startDeviceAuthorization,
@@ -55,6 +77,7 @@ export {
   type ClientMetadataDocument,
   type DeviceApprovalResult,
   type DeviceAuthorizationResponse,
+  type DeviceCodeLookupResult,
   type OAuthTokenResponse,
   type RegisteredOAuthClient,
   type VerifiedAccessToken

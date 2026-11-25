@@ -88,7 +88,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
   {
     id: "seed-market-1",
     slotIndex: 0,
-    question: "Will OpenAGI announce GPT-Next compute pricing before Friday close?",
+    question: "Will OpenAGI announce SMH-9000 compute pricing before Friday close?",
     description: "Resolves YES if OpenAGI publishes a new frontier tier or per-token rate schedule in official announcements before market expiry.",
     category: "ai",
     timeframe: "3d",
@@ -409,7 +409,7 @@ export const INITIAL_ARTICLES: ReadonlyArray<InitialArticleSeed> = [
   {
     id: "seed-article-2",
     title: "NVIDAI Keynote Speculation Drives Spot Liquidity Ahead of Hardware Briefing",
-    summary: "Traders are front-running every mention of rack thermal limits as supply chain rumors swirl.",
+    summary: "Traders are front-running every mention of rack thermal limits ahead of the hardware briefing.",
     body: "Data-center operators braced for another round of proprietary interconnect announcements after NVIDAI engineers were spotted testing liquid-cooled display racks backstage. Analysts say spot demand from institutional quant desks has kept NVDAI near its cycle highs.",
     authorOrgId: "bloombairg",
     relatedMarketId: "seed-market-2",
@@ -650,8 +650,86 @@ function deterministicHash(input: string): number {
 }
 
 /** @throws {never} */
+export function canonicalHandle(raw: string | undefined, fallback = ""): string {
+  const cleaned = (raw ?? "").trim().replace(/^@+/, "")
+  return (cleaned === "" ? fallback.trim().replace(/^@+/, "") : cleaned).toLowerCase()
+}
+
+/** @throws {never} */
 export function isRuntimeActor(actor: PackActor): boolean {
-  return !/\btest\b/i.test(actor.id) && !actor.id.toLowerCase().startsWith("test-")
+  const lower = actor.id.toLowerCase()
+  return !/\btest\b/i.test(actor.id) && !lower.startsWith("test-") && !lower.startsWith("org-")
+}
+
+/** @throws {never} */
+export function buildSeedNpcFollowRows(
+  runtimeActors: ReadonlyArray<PackActor>,
+  organizations: ReadonlyArray<PackOrganization>,
+  now: number
+): ReadonlyArray<ReadonlyArray<unknown>> {
+  const rows: Array<ReadonlyArray<unknown>> = []
+  const seen = new Set<string>()
+  const validActorIds = new Set(runtimeActors.map((actor) => actor.id))
+  const validOrgIds = new Set(organizations.map((org) => org.id))
+  const sTierActors = runtimeActors.filter((actor) => actor.tier === "S_TIER")
+  const aTierActors = runtimeActors.filter((actor) => actor.tier === "A_TIER")
+  const mediaOrgs = organizations.filter((org) => org.type === "media")
+
+  const addFollow = (followerId: string, targetId: string, targetKind: "npc" | "org"): void => {
+    if (followerId === targetId) return
+    if (!validActorIds.has(followerId)) return
+    if (targetKind === "npc" && !validActorIds.has(targetId)) return
+    if (targetKind === "org" && !validOrgIds.has(targetId)) return
+    const key = `${followerId}|${targetId}|${targetKind}`
+    if (seen.has(key)) return
+    seen.add(key)
+    const offsetHours = (deterministicHash(key) % 72) + 1
+    rows.push([followerId, targetId, targetKind, now - offsetHours * HOUR])
+  }
+
+  for (const group of INITIAL_ALPHA_GROUPS) {
+    for (const memberId of group.memberIds) {
+      for (const peerId of group.memberIds) {
+        addFollow(memberId, peerId, "npc")
+      }
+    }
+  }
+
+  const actorCount = runtimeActors.length
+  const orgCount = organizations.length
+  for (let idx = 0; idx < actorCount; idx += 1) {
+    const actor = runtimeActors[idx]
+    if (actor === undefined) continue
+    const seed = deterministicHash(actor.id)
+    for (const orgId of actor.affiliations) {
+      addFollow(actor.id, orgId, "org")
+    }
+    if (actorCount > 1) {
+      for (const step of [1, 3, 7]) {
+        const peer = runtimeActors[(idx + step) % actorCount]
+        if (peer !== undefined) addFollow(actor.id, peer.id, "npc")
+      }
+    }
+    if (sTierActors.length > 0) {
+      const first = sTierActors[seed % sTierActors.length]
+      const second = sTierActors[(seed + 5) % sTierActors.length]
+      if (first !== undefined) addFollow(actor.id, first.id, "npc")
+      if (second !== undefined) addFollow(actor.id, second.id, "npc")
+    }
+    if (aTierActors.length > 0) {
+      const picked = aTierActors[(seed + idx) % aTierActors.length]
+      if (picked !== undefined) addFollow(actor.id, picked.id, "npc")
+    }
+    if (mediaOrgs.length > 0) {
+      const media = mediaOrgs[seed % mediaOrgs.length]
+      if (media !== undefined) addFollow(actor.id, media.id, "org")
+    }
+    if (orgCount > 0) {
+      const org = organizations[(seed + idx) % orgCount]
+      if (org !== undefined) addFollow(actor.id, org.id, "org")
+    }
+  }
+  return rows
 }
 
 /** @throws {never} */

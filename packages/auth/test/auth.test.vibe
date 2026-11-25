@@ -1,4 +1,4 @@
-// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts"; spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
+// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"; spec/auth/email.md, "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown"; spec/auth/agentGrant.md, "Story: Connect at most one agent per account with clear attribution"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
 import { assert, it } from "@effect/vitest"
 import { TestClock } from "effect/testing"
 import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld, toInt, toText, type Tx } from "@repo/db"
@@ -13,6 +13,9 @@ import {
   authenticateSessionCookie,
   checkAndConsumeRateLimit,
   checkAndConsumeRateLimitInTx,
+  checkOAuthEndpointRateLimit,
+  completeEmailOnboarding,
+  completeOnboarding,
   completePhoneOnboarding,
   confirmPhoneChange,
   createAuthorizationCode,
@@ -21,19 +24,27 @@ import {
   getAccountProfile,
   getActiveAgentGrant,
   getLoopbackCode,
+  getLoopbackMagicLink,
   getRateLimitStatus,
   hashReviewerPassword,
+  isDisallowedRemoteHost,
+  lookupDeviceCodeForUser,
   normalizeResource,
   rateLimitScopeKey,
   recordAgentAttribution,
+  redirectUriMatchesRegistered,
   registerDynamicClient,
+  requestEmailMagicLink,
   requestPhoneChange,
   revokeSession,
   signInReviewerPassword,
   signOutEverywhere,
   startDeviceAuthorization,
+  startEmailLink,
+  startPhoneLink,
   startPhoneVerification,
   verifyAccessToken,
+  verifyEmailMagicLink,
   verifyPhoneCode,
   type AuthRuntimeConfig
 } from "../src/index.vibe"
@@ -737,7 +748,7 @@ it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 86
           verifiedA.clientId === clientA.client_id, verifiedA.clientName, verifiedA.scopes
         ],
         deviceFlow: [
-          deviceAuth.verification_uri, deviceAuth.user_code.startsWith("FEED-"),
+          deviceAuth.verification_uri, /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(deviceAuth.user_code),
           pendingDeviceExchange, deviceApproved.approved, tokenB.grant_id !== tokenA.grant_id, tokenB.resource
         ],
         singleAgentReplacement: [
@@ -761,7 +772,7 @@ it.effect('OAuth 2.1 DCR, PKCE S256, 420-char state, normalized audience, RFC 86
         verifiedA: [true, true, true, "Claude Desktop", ["read", "social:write", "messages", "trade"]],
         deviceFlow: ["https://feed.fun/link", true, "authorization_pending", true, true, "https://feed.fun/mcp"],
         singleAgentReplacement: ["token_revoked", "grant_revoked", true, "Hermes CLI", ["read", "trade"], "Hermes CLI", ["revoked", "active"], true, 1],
-        rotationAndReuse: [true, true, true, true, "reused_revoked", "reused_revoked", "token_revoked", "token_revoked", null, 0, 0]
+        rotationAndReuse: [true, true, true, true, "reused_revoked", "invalid_grant", "token_revoked", "token_revoked", null, 0, 0]
       }
     ))
   })
@@ -838,6 +849,489 @@ it.effect('Web and MCP share one per-account hourly rate-limit budget and exhaus
         canonicalKeys: [`${accountId}:post`, `${accountId}:dm`, `${accountId}:trade`],
         tradeLimits: [30, 60, 120],
         afterHourReset: [0, ["mcp", 1, 29], ["web", 2, 28]]
+      }
+    ))
+  })
+}, 180_000)
+
+it.effect('Email magic link signup, superseding, expiry, replay refusal, onboarding, OAuth eligibility, credential linking, and dual 30-day cooldown + chat cleanup on deletion (spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"; spec/auth/email.md, "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`")', () => effect {
+  try TestClock.setTime(Date.now())
+  try withFeedStore(effect {
+    const emailConfig: AuthRuntimeConfig = {
+      ...localnetConfig,
+      emailMode: "loopback",
+      emailPublicOrigin: "http://localhost:5173"
+    }
+    const disabledConfig: AuthRuntimeConfig = {
+      ...localnetConfig,
+      emailMode: "disabled"
+    }
+    const invalidEmail = try refusedCode(requestEmailMagicLink({ email: "not-an-email", config: emailConfig }))
+    const disposableEmail = try refusedCode(requestEmailMagicLink({ email: "bot@mailinator.com", config: emailConfig }))
+    const disabledMode = try refusedCode(requestEmailMagicLink({ email: "alice@example.com", config: disabledConfig }))
+
+    const firstStart = try requestEmailMagicLink({
+      email: "Alice@Example.com",
+      redirectTo: "/markets",
+      ipAddress: "203.0.113.10",
+      config: emailConfig
+    })
+    const firstLoopback = getLoopbackMagicLink("alice@example.com", emailConfig)
+    if (firstLoopback === undefined || firstStart.devToken !== firstLoopback.token) {
+      return try Effect.die("Missing loopback email magic link")
+    }
+    const rapidResend = try refusedCode(requestEmailMagicLink({
+      email: "alice@example.com",
+      ipAddress: "203.0.113.10",
+      config: emailConfig
+    }))
+
+    try TestClock.adjust("31 seconds")
+    const secondStart = try requestEmailMagicLink({
+      email: "alice@example.com",
+      redirectTo: "/explore",
+      ipAddress: "203.0.113.10",
+      config: emailConfig
+    })
+    const supersededRefusal = try refusedCode(verifyEmailMagicLink({
+      token: firstLoopback.token,
+      config: emailConfig
+    }))
+
+    try TestClock.adjust("16 minutes")
+    const expiredRefusal = try refusedCode(verifyEmailMagicLink({
+      token: secondStart.devToken ?? "",
+      config: emailConfig
+    }))
+
+    const thirdStart = try requestEmailMagicLink({
+      email: "alice@example.com",
+      redirectTo: "/markets",
+      ipAddress: "203.0.113.10",
+      config: emailConfig
+    })
+    const thirdToken = thirdStart.devToken ?? ""
+    const verifiedNew = try verifyEmailMagicLink({
+      token: thirdToken,
+      config: emailConfig
+    })
+    const replayRefusal = try refusedCode(verifyEmailMagicLink({
+      token: thirdToken,
+      config: emailConfig
+    }))
+    if (verifiedNew.status !== "needs_onboarding") {
+      return try Effect.die("Expected needs_onboarding for new email user")
+    }
+
+    const underageEmail = try refusedCode(completeEmailOnboarding({
+      pendingToken: verifiedNew.pendingToken,
+      username: "email_alice",
+      accepted18Plus: false,
+      acceptedTerms: true,
+      config: emailConfig
+    }))
+    const npcHijackEmail = try refusedCode(completeEmailOnboarding({
+      pendingToken: verifiedNew.pendingToken,
+      username: "ailonmusk",
+      accepted18Plus: true,
+      acceptedTerms: true,
+      config: emailConfig
+    }))
+    const orgHijackEmail = try refusedCode(completeEmailOnboarding({
+      pendingToken: verifiedNew.pendingToken,
+      username: "openagi",
+      accepted18Plus: true,
+      acceptedTerms: true,
+      config: emailConfig
+    }))
+    const reservedHijackEmail = try refusedCode(completeEmailOnboarding({
+      pendingToken: verifiedNew.pendingToken,
+      username: "settings",
+      accepted18Plus: true,
+      acceptedTerms: true,
+      config: emailConfig
+    }))
+
+    const onboarded = try completeOnboarding({
+      pendingToken: verifiedNew.pendingToken,
+      username: "email_alice",
+      accepted18Plus: true,
+      acceptedTerms: true,
+      config: emailConfig
+    })
+    const emailSessionCookie = cookiePairOf(onboarded.sessionCookieHeader)
+    const emailSession = try authenticateSessionCookie(emailSessionCookie, emailConfig)
+    const rawEmailStoredRows = try sqlQuery(
+      "SELECT email_hash, email_masked, email_verified_at, phone_hash FROM feed_accounts WHERE account_id = $1",
+      [onboarded.account.accountId]
+    )
+
+    try TestClock.adjust("31 seconds")
+    const returningStart = try requestEmailMagicLink({
+      email: "alice@example.com",
+      ipAddress: "203.0.113.10",
+      config: emailConfig
+    })
+    const returningVerify = try verifyEmailMagicLink({
+      token: returningStart.devToken ?? "",
+      config: emailConfig
+    })
+    if (returningVerify.status !== "signed_in") {
+      return try Effect.die("Expected signed_in for returning email user")
+    }
+
+    const agentClient = try registerDynamicClient({
+      clientName: "EmailAgent",
+      redirectUris: ["http://127.0.0.1:43123/callback"],
+      scope: "read trade"
+    })
+    const deviceStart = try startDeviceAuthorization({
+      clientId: agentClient.client_id,
+      scope: "read trade",
+      origin: "https://feed.fun"
+    })
+    const deviceLookup = try lookupDeviceCodeForUser(deviceStart.user_code)
+    const emptyScopeDevice = try refusedCode(approveDeviceAuthorization({
+      accountId: onboarded.account.accountId,
+      userCode: deviceStart.user_code,
+      scopes: []
+    }))
+    const approvedEmailDevice = try approveDeviceAuthorization({
+      accountId: onboarded.account.accountId,
+      userCode: deviceStart.user_code,
+      scopes: ["read", "trade"]
+    })
+    const emailAgentToken = try exchangeOAuthToken({
+      grantType: "urn:ietf:params:oauth:grant-type:device_code",
+      deviceCode: deviceStart.device_code,
+      clientId: agentClient.client_id,
+      config: emailConfig
+    })
+    const verifiedEmailAgent = try verifyBearer(emailAgentToken.access_token)
+
+    try startPhoneLink({
+      accountId: onboarded.account.accountId,
+      phoneE164: "+14155550199",
+      config: emailConfig
+    })
+    const linkedPhoneCode = getLoopbackCode("+14155550199", emailConfig)
+    if (linkedPhoneCode === undefined) return try Effect.die("Missing phone link code")
+    const linkedPhone = try confirmPhoneChange({
+      accountId: onboarded.account.accountId,
+      newPhoneE164: "+14155550199",
+      code: linkedPhoneCode,
+      config: emailConfig
+    })
+
+    const phoneOnlyUser = try onboardViaPhone("+14155550188", "phone_bob")
+    const emailInUseRefusal = try refusedCode(startEmailLink({
+      accountId: phoneOnlyUser.account.accountId,
+      email: "alice@example.com",
+      config: emailConfig
+    }))
+    const linkStart = try startEmailLink({
+      accountId: phoneOnlyUser.account.accountId,
+      email: "bob@example.com",
+      config: emailConfig
+    })
+    const unauthLinkRefusal = try refusedCode(verifyEmailMagicLink({
+      token: linkStart.devToken ?? "",
+      sessionAccountId: null,
+      config: emailConfig
+    }))
+    const bobOldCookie = cookiePairOf(phoneOnlyUser.sessionCookieHeader)
+    const linkedEmail = try verifyEmailMagicLink({
+      token: linkStart.devToken ?? "",
+      sessionAccountId: phoneOnlyUser.account.accountId,
+      config: emailConfig
+    })
+    const bobOldSessionAfterLink = try authenticateSessionCookie(bobOldCookie, emailConfig)
+
+    const nowMs = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "INSERT INTO feed_chats (id, kind, name, created_by, tier, created_at) VALUES ('dm-alice-bob', 'direct', NULL, $1, NULL, $2), ('grp-transfer', 'group', 'Transfer Group', $1, NULL, $2), ('grp-empty', 'group', 'Solo Group', $1, NULL, $2)",
+        [onboarded.account.accountId, nowMs]
+      )
+      try tx.query(
+        "INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at) VALUES ('dm-alice-bob', $1, 'user', 'member', $3, $3), ('dm-alice-bob', $2, 'user', 'member', $3, $3), ('grp-transfer', $1, 'user', 'owner', $3, $3), ('grp-transfer', $2, 'user', 'member', $4, $4), ('grp-empty', $1, 'user', 'owner', $3, $3)",
+        [onboarded.account.accountId, phoneOnlyUser.account.accountId, nowMs, nowMs + 10]
+      )
+    })
+
+    const deleted = try deleteAccountSelfServe({
+      accountId: onboarded.account.accountId,
+      authAt: nowMs,
+      config: emailConfig
+    })
+    const emailCooldownRefusal = try refusedCode(requestEmailMagicLink({
+      email: "alice@example.com",
+      config: emailConfig
+    }))
+    const phoneCooldownRefusal = try refusedCode(startPhoneVerification({
+      phoneE164: "+14155550199",
+      config: emailConfig
+    }))
+    const deletedAccountRow = try sqlQuery(
+      "SELECT email_hash, email_masked, email_verified_at, phone_hash FROM feed_accounts WHERE account_id = $1",
+      [onboarded.account.accountId]
+    )
+    const remainingChats = try sqlQuery(
+      "SELECT id, kind, created_by FROM feed_chats WHERE id IN ('dm-alice-bob', 'grp-transfer', 'grp-empty') ORDER BY id ASC"
+    )
+    const transferredOwner = try sqlQuery(
+      "SELECT member_id, role FROM feed_chat_members WHERE chat_id = 'grp-transfer'"
+    )
+
+    try check(() => assert.deepStrictEqual(
+      {
+        validation: [invalidEmail, disposableEmail, disabledMode, rapidResend, supersededRefusal, expiredRefusal, replayRefusal],
+        onboardingGuards: [underageEmail, npcHijackEmail, orgHijackEmail, reservedHijackEmail],
+        onboardedState: [
+          onboarded.account.balanceCents,
+          onboarded.account.startingGrantCents,
+          onboarded.account.emailMasked,
+          onboarded.account.phoneHash,
+          emailSession?.emailMasked,
+          emailSession?.emailVerifiedAt !== null,
+          toText(rawEmailStoredRows[0]?.email_masked),
+          toText(rawEmailStoredRows[0]?.email_hash)?.includes("alice") ?? false
+        ],
+        oauthOnEmailAccount: [
+          deviceLookup.clientName,
+          deviceLookup.scopes,
+          emptyScopeDevice,
+          approvedEmailDevice.approved,
+          verifiedEmailAgent.activeGrant,
+          verifiedEmailAgent.accountId === onboarded.account.accountId
+        ],
+        credentialLinking: [
+          linkedPhone.account.phoneLast2,
+          linkedPhone.account.emailMasked,
+          emailInUseRefusal,
+          unauthLinkRefusal,
+          linkedEmail.status,
+          linkedEmail.status === "email_linked" ? linkedEmail.account.emailMasked : null,
+          bobOldSessionAfterLink
+        ],
+        deletionAndCleanup: [
+          deleted.deleted,
+          emailCooldownRefusal,
+          phoneCooldownRefusal,
+          deletedAccountRow[0]?.email_hash,
+          deletedAccountRow[0]?.email_masked,
+          deletedAccountRow[0]?.email_verified_at,
+          deletedAccountRow[0]?.phone_hash,
+          remainingChats.map((row) => [toText(row.id), toText(row.created_by)]),
+          transferredOwner.map((row) => [toText(row.member_id), toText(row.role)])
+        ]
+      },
+      {
+        validation: [
+          "invalid_email",
+          "disposable_email_not_allowed",
+          "email_auth_disabled",
+          "rate_limited:email_send",
+          "magic_link_superseded",
+          "magic_link_expired",
+          "magic_link_used"
+        ],
+        onboardingGuards: ["attestation_required", "username_taken", "username_taken", "username_reserved"],
+        onboardedState: [10_000, 10_000, "a***@example.com", null, "a***@example.com", true, "a***@example.com", false],
+        oauthOnEmailAccount: ["EmailAgent", ["read", "trade"], "invalid_scope", true, true, true],
+        credentialLinking: ["99", "a***@example.com", "email_in_use", "session_required_to_link", "email_linked", "b***@example.com", null],
+        deletionAndCleanup: [
+          true,
+          "email_cooldown",
+          "phone_cooldown",
+          null,
+          null,
+          null,
+          null,
+          [["grp-transfer", phoneOnlyUser.account.accountId]],
+          [[phoneOnlyUser.account.accountId, "owner"]]
+        ]
+      }
+    ))
+  })
+}, 180_000)
+
+it.effect('Security hardening (handle hijack, reviewer lockout, RFC 8252 loopback port, SSRF host checks, device pruning) and DB seeding invariants (spec/auth/phone.md, "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only")', () => effect {
+  try TestClock.setTime(Date.now())
+  try withFeedStore(effect {
+    try provisionReviewerAccount("reviewer_lock", "reviewer-pass-123")
+    const reviewerAttempts: string[] = []
+    for (let i = 0; i < 6; i += 1) {
+      reviewerAttempts.push(try refusedCode(signInReviewerPassword({
+        usernameOrId: "reviewer_lock",
+        password: "bad-password",
+        ipAddress: "198.51.100.7",
+        config: localnetConfig
+      })))
+    }
+
+    const dcrClient = try registerDynamicClient({
+      clientName: "LoopbackCLI",
+      redirectUris: ["http://127.0.0.1:41000/callback"],
+      scope: "read",
+      ipAddress: "198.51.100.8",
+      digestKey: localnetConfig.digestKey
+    })
+    const user = try onboardViaPhone("+14155550177", "loopback_user")
+    const verifier = "loopback-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
+    const dynamicPortCode = try createAuthorizationCode({
+      accountId: user.account.accountId,
+      clientId: dcrClient.client_id,
+      redirectUri: "http://127.0.0.1:59123/callback",
+      codeChallenge: pkceChallengeS256(verifier),
+      codeChallengeMethod: "S256",
+      scope: "read",
+      state: "state-loopback",
+      resource: "https://feed.fun/mcp"
+    })
+    const emptyAuthScopeRefusal = try refusedCode(createAuthorizationCode({
+      accountId: user.account.accountId,
+      clientId: dcrClient.client_id,
+      redirectUri: "http://127.0.0.1:59123/callback",
+      codeChallenge: pkceChallengeS256(verifier),
+      codeChallengeMethod: "S256",
+      scope: "",
+      state: "state-empty-scope",
+      resource: "https://feed.fun/mcp"
+    }))
+
+    const ssrfChecks = [
+      isDisallowedRemoteHost("fc00::1"),
+      isDisallowedRemoteHost("fd12:3456::1"),
+      isDisallowedRemoteHost("fe80::1"),
+      isDisallowedRemoteHost("[::ffff:127.0.0.1]"),
+      isDisallowedRemoteHost("100.64.0.1"),
+      isDisallowedRemoteHost("0.0.0.0"),
+      isDisallowedRemoteHost("example.com")
+    ]
+    const loopbackMatchChecks = [
+      redirectUriMatchesRegistered(["http://127.0.0.1:41000/callback"], "http://127.0.0.1:59123/callback"),
+      redirectUriMatchesRegistered(["http://localhost:3000/cb"], "http://localhost:9999/cb"),
+      redirectUriMatchesRegistered(["https://app.example.com:8443/cb"], "https://app.example.com:9443/cb")
+    ]
+
+    try checkOAuthEndpointRateLimit({
+      endpoint: "device_code",
+      ipAddress: "198.51.100.9",
+      digestKey: localnetConfig.digestKey
+    })
+    const nowMs = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_device_codes
+           (device_code_hash, user_code, client_id, client_name, scope, status, account_id, expires_at, interval_sec)
+         VALUES ('expired-hash', 'AAAA-BBBB', $1, 'LoopbackCLI', 'read', 'pending', NULL, $2, 5)`,
+        [dcrClient.client_id, nowMs - 1000]
+      )
+    })
+    try startDeviceAuthorization({
+      clientId: dcrClient.client_id,
+      scope: "read",
+      origin: "https://feed.fun"
+    })
+    const expiredDeviceLeft = try sqlQuery(
+      "SELECT count(*) AS count FROM feed_device_codes WHERE device_code_hash = 'expired-hash'"
+    )
+
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_actors (id, name, username, tier, description, system_prompt, personality_json, balance_cents, created_at)
+         VALUES ('org-openagi', 'Legacy Org Mirror', 'legacy_org_openagi', 'A_TIER', 'mirror', 'mirror', '{}', 1000, $1)
+         ON CONFLICT (id) DO NOTHING`,
+        [nowMs]
+      )
+      try tx.query(
+        `INSERT INTO feed_posts (id, author_id, author_kind, content, created_at)
+         VALUES ('legacy-org-post', 'org-openagi', 'npc', 'Legacy org post', $1)
+         ON CONFLICT (id) DO NOTHING`,
+        [nowMs]
+      )
+      try tx.query(
+        `INSERT INTO feed_follows (follower_id, target_id, target_kind, created_at)
+         VALUES ('ailon-musk', 'org-openagi', 'npc', $1)
+         ON CONFLICT DO NOTHING`,
+        [nowMs]
+      )
+      try tx.query(
+        `INSERT INTO feed_job_leases (job_name, owner_id, lease_until, updated_at)
+         VALUES ('minute-tick', 'worker-1', $1, $2)
+         ON CONFLICT (job_name) DO UPDATE SET owner_id = EXCLUDED.owner_id, lease_until = EXCLUDED.lease_until, updated_at = EXCLUDED.updated_at`,
+        [nowMs + 120_000, nowMs]
+      )
+    })
+    try seedFeedWorld()
+
+    const orgActorsAfterSeed = try sqlQuery("SELECT count(*) AS count FROM feed_actors WHERE id LIKE 'org-%'")
+    const migratedPost = try sqlQuery("SELECT author_id, author_kind FROM feed_posts WHERE id = 'legacy-org-post'")
+    const migratedFollow = try sqlQuery("SELECT target_id, target_kind FROM feed_follows WHERE follower_id = 'ailon-musk' AND target_id = 'openagi'")
+    const orgUsernameRow = try sqlQuery("SELECT username FROM feed_organizations WHERE id = 'openagi'")
+    const npcFollowerCount = try sqlQuery("SELECT count(*) AS count FROM feed_follows WHERE target_id = 'ailon-musk' AND target_kind = 'npc'")
+    const npcFollowingCount = try sqlQuery("SELECT count(*) AS count FROM feed_follows WHERE follower_id = 'ailon-musk'")
+    const market1Row = try sqlQuery("SELECT question FROM feed_prediction_markets WHERE id = 'seed-market-1'")
+    const article2Row = try sqlQuery("SELECT summary FROM feed_articles WHERE id = 'seed-article-2'")
+    const notifCols = try sqlQuery(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'feed_notifications' AND column_name IN ('chat_id', 'invite_id') ORDER BY column_name ASC"
+    )
+    const leaseRow = try sqlQuery("SELECT owner_id FROM feed_job_leases WHERE job_name = 'minute-tick'")
+
+    try check(() => assert.deepStrictEqual(
+      {
+        reviewerLockout: reviewerAttempts,
+        dynamicLoopbackRedirect: dynamicPortCode.redirectUri,
+        emptyAuthScopeRefusal,
+        ssrfChecks,
+        loopbackMatchChecks,
+        expiredDevicePruned: toInt(expiredDeviceLeft[0]?.count),
+        toIntNullUndefined: [toInt(null), toInt(undefined)],
+        dbMigrationsAndSeeding: [
+          toInt(orgActorsAfterSeed[0]?.count),
+          toText(migratedPost[0]?.author_id),
+          toText(migratedPost[0]?.author_kind),
+          toText(migratedFollow[0]?.target_kind),
+          Boolean(toText(orgUsernameRow[0]?.username)),
+          toInt(npcFollowerCount[0]?.count) > 0,
+          toInt(npcFollowingCount[0]?.count) > 0,
+          (toText(market1Row[0]?.question) ?? "").includes("SMH-9000"),
+          (toText(article2Row[0]?.summary) ?? "").includes("supply chain rumors swirl"),
+          notifCols.map((row) => toText(row.column_name)),
+          toText(leaseRow[0]?.owner_id)
+        ]
+      },
+      {
+        reviewerLockout: [
+          "reviewer_signin_refused",
+          "reviewer_signin_refused",
+          "reviewer_signin_refused",
+          "reviewer_signin_refused",
+          "reviewer_signin_refused",
+          "rate_limited:reviewer_login"
+        ],
+        dynamicLoopbackRedirect: "http://127.0.0.1:59123/callback",
+        emptyAuthScopeRefusal: "invalid_scope",
+        ssrfChecks: [true, true, true, true, true, true, false],
+        loopbackMatchChecks: [true, true, false],
+        expiredDevicePruned: 0,
+        toIntNullUndefined: [0, 0],
+        dbMigrationsAndSeeding: [
+          0,
+          "openagi",
+          "org",
+          "org",
+          true,
+          true,
+          true,
+          true,
+          false,
+          ["chat_id", "invite_id"],
+          "worker-1"
+        ]
       }
     ))
   })

@@ -1,0 +1,969 @@
+// spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"; spec/auth/email.md, "Only valid non-disposable emails, Turnstile-verified requests, and rate-limited addresses receive a magic link"; spec/auth/email.md, "Magic links are single-use, expire in 15 minutes, and purge pending secrets on consume or expiry"; spec/auth/email.md, "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown"; spec/auth/email.md, "Email onboarding requires username, 18+ attestation, and Terms, and issues 100 pts once per verified email"; spec/auth/email.md, "Linking or changing an email requires an active non-reviewer account, an unused address, and recent sign-in or first link"
+import {
+  Store,
+  type StoreFailure,
+  resolveUserPresetAvatarUrl,
+  resolveUserPresetBannerUrl,
+  toInt,
+  toText,
+  type Tx
+} from "@repo/db"
+import { HttpClientRequest } from "effect/http"
+import { SignJWT, jwtVerify } from "jose"
+import {
+  canCompleteEmailOnboarding,
+  canConsumeMagicLink,
+  canRequestLinkEmail,
+  canRequestMagicLink,
+  completeEmailOnboarding as stepCompleteEmailOnboarding,
+  consumeMagicLink as stepConsumeMagicLink,
+  currentEmailHourSends,
+  declassifyEmailMasked,
+  emailResendGapMs,
+  emailResendGapOk,
+  initial as initialEmailAuth,
+  magicLinkLifetimeMs,
+  maxEmailSendsPerHour,
+  recentSignInWindowMs,
+  requestLinkEmail as stepRequestLinkEmail,
+  requestMagicLink as stepRequestMagicLink,
+  withinEmailSendRateLimits,
+  type EmailAuth
+} from "../gen/auth__email.effect.vibe"
+import {
+  hmacSha256Hex,
+  newUuid,
+  randomBase64Url,
+  sha256Hex
+} from "./crypto.vibe"
+import { AuthFailure, RateLimited } from "./errors.vibe"
+import { executeHttpJson } from "./http.vibe"
+import {
+  ONBOARDING_TOKEN_TTL_SECONDS,
+  STARTING_GRANT_CENTS,
+  USERNAME_PATTERN,
+  completePhoneOnboarding,
+  emailAuthFromAccount,
+  ensureHandleAvailableInTx,
+  insertCloudAccountTx,
+  issueSessionInTx,
+  lockFeedAccountByIdInTx,
+  normalizeIpPrefix,
+  resolveSignedInAt,
+  revokeSessionsAndBumpEpochInTx,
+  rowToAccountProfile,
+  signingSecretBytes,
+  verifyTurnstile,
+  type AccountProfile,
+  type AuthRuntimeConfig,
+  type AuthenticatedAccountResult,
+  type EmailMode
+} from "./phone-auth.vibe"
+import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
+
+export interface StartEmailMagicLinkResult {
+  readonly challengeId: string
+  readonly emailMasked: string
+  readonly expiresAt: number
+  readonly resendAvailableAt: number
+  readonly devMagicLinkUrl?: string
+  readonly devToken?: string
+}
+
+export type VerifyEmailMagicLinkResult =
+  | {
+      readonly status: "signed_in"
+      readonly needsOnboarding: false
+      readonly account: AccountProfile
+      readonly sessionToken: string
+      readonly sessionCookieHeader: string
+      readonly expiresAt: number
+      readonly redirectTo: string | null
+    }
+  | {
+      readonly status: "needs_onboarding"
+      readonly needsOnboarding: true
+      readonly pendingToken: string
+      readonly emailMasked: string
+      readonly redirectTo: string | null
+    }
+  | {
+      readonly status: "email_linked"
+      readonly needsOnboarding: false
+      readonly account: AccountProfile
+      readonly sessionToken: string
+      readonly sessionCookieHeader: string
+      readonly expiresAt: number
+      readonly redirectTo: string
+    }
+
+const HOUR_MS = 3_600_000
+const DAY_MS = 86_400_000
+const IP_EMAIL_HOURLY_LIMIT = 15
+const EMAIL_LOCAL_PATTERN = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$/
+const EMAIL_DOMAIN_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+
+const DISPOSABLE_EMAIL_DOMAINS = new Set([
+  "10minutemail.com",
+  "10minutemail.net",
+  "burnermail.io",
+  "discard.email",
+  "dispostable.com",
+  "emailondeck.com",
+  "fakeinbox.com",
+  "getairmail.com",
+  "getnada.com",
+  "guerrillamail.biz",
+  "guerrillamail.com",
+  "guerrillamail.de",
+  "guerrillamail.net",
+  "guerrillamail.org",
+  "maildrop.cc",
+  "mailinator.com",
+  "mailnesia.com",
+  "mintemail.com",
+  "mohmal.com",
+  "sharklasers.com",
+  "temp-mail.io",
+  "temp-mail.org",
+  "tempail.com",
+  "tempmail.com",
+  "tempr.email",
+  "throwaway.email",
+  "trashmail.com",
+  "yopmail.com",
+  "yopmail.fr",
+  "yopmail.net"
+])
+
+schema PendingEmailOnboardingClaims {
+  readonly purpose: "feed_email_onboarding"
+  readonly emailHash: string
+  readonly emailMasked: string
+  readonly challengeId: string
+}
+
+schema OnboardingPurposeClaim {
+  readonly purpose: string
+}
+
+const loopbackMagicLinks = new Map<string, { readonly token: string; readonly magicLinkUrl: string; readonly expiresAt: number }>()
+
+module emailRuntimeEnv {
+  /** @throws {never} */
+  export function readEmailEnvVar(name: string): string | undefined {
+    const g = globalThis as { readonly process?: { readonly env?: Record<string, string | undefined> } }
+    return g.process?.env?.[name]
+  }
+}
+import { readEmailEnvVar } from emailRuntimeEnv
+
+function normalizeEmailOrUndefined(raw: string): string | undefined {
+  const normalized = raw.trim().toLowerCase()
+  if (normalized.length < 3 || normalized.length > 254) return undefined
+  if (/[\s\r\n]/.test(normalized)) return undefined
+  const atIndex = normalized.indexOf("@")
+  if (atIndex <= 0 || atIndex !== normalized.lastIndexOf("@")) return undefined
+  const local = normalized.slice(0, atIndex)
+  const domain = normalized.slice(atIndex + 1)
+  if (!EMAIL_LOCAL_PATTERN.test(local)) return undefined
+  if (local.startsWith(".") || local.endsWith(".") || local.includes("..")) return undefined
+  const labels = domain.split(".")
+  if (labels.length < 2) return undefined
+  const tld = labels[labels.length - 1] ?? ""
+  if (!/^[a-z]{2,63}$/.test(tld)) return undefined
+  if (labels.some((label) => !EMAIL_DOMAIN_LABEL_PATTERN.test(label))) return undefined
+  return normalized
+}
+
+function isDisposableDomain(domain: string): boolean {
+  const parts = domain.split(".")
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const candidate = parts.slice(i).join(".")
+    if (DISPOSABLE_EMAIL_DOMAINS.has(candidate)) return true
+  }
+  return false
+}
+
+export effect function normalizeEmail(raw: string): string!AuthFailure {
+  const normalized = normalizeEmailOrUndefined(raw)
+  if (normalized === undefined) {
+    throw new AuthFailure({
+      code: "invalid_email",
+      message: "Enter a valid email address.",
+      status: 400
+    })
+  }
+  const domain = normalized.slice(normalized.indexOf("@") + 1)
+  if (isDisposableDomain(domain)) {
+    throw new AuthFailure({
+      code: "disposable_email_not_allowed",
+      message: "Disposable email addresses are not allowed.",
+      status: 400
+    })
+  }
+  return normalized
+}
+
+export function maskEmail(normalized: string): string {
+  const atIndex = normalized.indexOf("@")
+  if (atIndex <= 0) return declassifyEmailMasked(normalized)
+  const local = normalized.slice(0, atIndex)
+  const domain = normalized.slice(atIndex + 1)
+  return `${local[0]}***@${domain}`
+}
+
+export effect function hashEmail(digestKey: string, normalized: string): string!AuthFailure {
+  return try hmacSha256Hex(digestKey, `email:${normalized}`)
+}
+
+export function resolveEmailMode(config: Pick<AuthRuntimeConfig, "emailMode" | "resendApiKey" | "smsMode">): EmailMode {
+  if (config.emailMode !== undefined) return config.emailMode
+  if (config.smsMode === "loopback") return "loopback"
+  return (config.resendApiKey?.trim() ?? "") !== "" ? "resend" : "disabled"
+}
+
+function sanitizeRedirectTo(raw: string | undefined): string | null {
+  if (raw === undefined) return null
+  const trimmed = raw.trim()
+  if (trimmed === "" || trimmed.length > 512) return null
+  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return null
+  return trimmed
+}
+
+function buildEmailSendRateState(accountState: EmailAuth, sentTimestamps: ReadonlyArray<number>, now: number): EmailAuth {
+  if (sentTimestamps.length === 0) return { ...accountState, now }
+  const lastSentAt = sentTimestamps[0]
+  const inHour = sentTimestamps.filter((ts) => ts > now - HOUR_MS)
+  const inDay = sentTimestamps.filter((ts) => ts > now - DAY_MS)
+  return {
+    ...accountState,
+    hasSentBefore: true,
+    lastSentAt,
+    hourWindowStart: inHour.length > 0 ? inHour[inHour.length - 1] : now - HOUR_MS,
+    hourSends: inHour.length,
+    dayWindowStart: inDay.length > 0 ? inDay[inDay.length - 1] : now - DAY_MS,
+    daySends: inDay.length,
+    now
+  }
+}
+
+function pruneLoopbackMagicLinks(now: number): void {
+  for (const [email, entry] of loopbackMagicLinks.entries()) {
+    if (entry.expiresAt <= now) loopbackMagicLinks.delete(email)
+  }
+}
+
+export function getLoopbackMagicLink(
+  email: string,
+  config?: Pick<AuthRuntimeConfig, "emailMode" | "resendApiKey" | "smsMode">
+): { readonly token: string; readonly magicLinkUrl: string } | undefined {
+  if (config !== undefined && resolveEmailMode(config) !== "loopback") return undefined
+  const envMode = readEmailEnvVar("EMAIL_MODE")
+  if (envMode !== undefined && envMode !== "" && envMode !== "loopback") return undefined
+  const normalized = normalizeEmailOrUndefined(email)
+  if (normalized === undefined) return undefined
+  const entry = loopbackMagicLinks.get(normalized)
+  if (entry === undefined) return undefined
+  if (entry.expiresAt <= Date.now()) {
+    loopbackMagicLinks.delete(normalized)
+    return undefined
+  }
+  return { token: entry.token, magicLinkUrl: entry.magicLinkUrl }
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+}
+
+function buildMagicLinkEmailBodies(
+  magicLinkUrl: string,
+  purpose: "sign_in" | "link_email"
+): { readonly subject: string; readonly html: string; readonly text: string } {
+  const isLink = purpose === "link_email"
+  const subject = isLink ? "Confirm your email on Feed" : "Sign in to Feed"
+  const heading = isLink ? "Confirm your email address" : "Sign in to Feed"
+  const description = isLink
+    ? "Click the button below to confirm and link this email address to your Feed account."
+    : "Click the button below to sign in to your Feed account. This link expires in 15 minutes and can only be used once."
+  const buttonLabel = isLink ? "Confirm email" : "Sign in to Feed"
+  const escapedUrl = escapeHtml(magicLinkUrl)
+  const html = `<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background-color:#000000;color:#e7e9ea;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#000000;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background-color:#16181c;border:1px solid #2f3336;border-radius:16px;padding:32px;">
+            <tr>
+              <td style="font-size:13px;font-weight:700;letter-spacing:0.14em;color:#71767b;padding-bottom:16px;">FEED</td>
+            </tr>
+            <tr>
+              <td style="font-size:24px;font-weight:700;color:#e7e9ea;padding-bottom:12px;">${heading}</td>
+            </tr>
+            <tr>
+              <td style="font-size:15px;line-height:1.5;color:#d6d9db;padding-bottom:24px;">${description}</td>
+            </tr>
+            <tr>
+              <td style="padding-bottom:24px;">
+                <a href="${escapedUrl}" style="display:inline-block;background-color:#1d9bf0;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;padding:12px 24px;border-radius:9999px;">${buttonLabel}</a>
+              </td>
+            </tr>
+            <tr>
+              <td style="font-size:13px;line-height:1.5;color:#71767b;padding-bottom:12px;">Or copy and paste this link into your browser (expires in 15 minutes):</td>
+            </tr>
+            <tr>
+              <td style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.4;color:#71767b;word-break:break-all;padding-bottom:24px;">${escapedUrl}</td>
+            </tr>
+            <tr>
+              <td style="font-size:12px;line-height:1.5;color:#71767b;border-top:1px solid #2f3336;padding-top:16px;">If you did not request this email, you can safely ignore it.</td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`
+  const text = `${heading}\n\n${description}\n\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once. If you did not request this email, you can safely ignore it.`
+  return { subject, html, text }
+}
+
+effect function sendResendEmail(input: {
+  readonly toEmail: string
+  readonly magicLinkId: string
+  readonly magicLinkUrl: string
+  readonly purpose: "sign_in" | "link_email"
+  readonly config: AuthRuntimeConfig
+}): void!(AuthFailure | RateLimited) {
+  const apiKey = input.config.resendApiKey?.trim() ?? ""
+  if (apiKey === "") {
+    throw new AuthFailure({
+      code: "email_provider_unavailable",
+      message: "Email delivery service is not configured.",
+      status: 503
+    })
+  }
+  const emailFrom = input.config.emailFrom?.trim() || "Feed <login@feed.fun>"
+  const { subject, html, text } = buildMagicLinkEmailBodies(input.magicLinkUrl, input.purpose)
+  const payload = JSON.stringify({
+    from: emailFrom,
+    to: [input.toEmail],
+    subject,
+    html,
+    text
+  })
+  const request = HttpClientRequest.post("https://api.resend.com/emails").pipe(
+    HttpClientRequest.setHeader("authorization", `Bearer ${apiKey}`),
+    HttpClientRequest.setHeader("idempotency-key", input.magicLinkId),
+    HttpClientRequest.bodyText(payload, "application/json")
+  )
+  const response = try executeHttpJson(request, "email_provider_unavailable", "Unable to send sign-in email.")
+  if (response.status === 429) {
+    throw new RateLimited({
+      message: "Too many email sign-in requests.",
+      retryAfterSeconds: 60,
+      action: "email_send"
+    })
+  }
+  if (response.status < 200 || response.status >= 300) {
+    throw new AuthFailure({
+      code: "email_provider_unavailable",
+      message: "Unable to send sign-in email.",
+      status: 502
+    })
+  }
+}
+
+effect function ensureEmailUnusedByOtherInTx(tx: Tx, emailHash: string, accountId: string): void!(AuthFailure | StoreFailure) {
+  const inUse = try tx.query(
+    "SELECT account_id FROM feed_accounts WHERE email_hash = $1 AND account_id <> $2",
+    [emailHash, accountId]
+  )
+  if (inUse.length > 0) {
+    throw new AuthFailure({
+      code: "email_in_use",
+      message: "This email address is already linked to another account.",
+      status: 409
+    })
+  }
+}
+
+effect function sendEmailMagicLinkInternal(input: {
+  readonly email: string
+  readonly purpose: "sign_in" | "link_email"
+  readonly accountId: string | null
+  readonly recentSignInOrFirstLink: boolean
+  readonly redirectTo?: string | undefined
+  readonly turnstileToken?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): StartEmailMagicLinkResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const emailMode = resolveEmailMode(input.config)
+  if (emailMode === "disabled") {
+    throw new AuthFailure({
+      code: "email_auth_disabled",
+      message: "Email sign-in is currently unavailable.",
+      status: 503
+    })
+  }
+  const turnstilePassed = try verifyTurnstile({
+    token: input.turnstileToken,
+    ipAddress: input.ipAddress,
+    config: input.config
+  })
+  if (!turnstilePassed) {
+    throw new AuthFailure({ code: "turnstile_failed", message: "Human verification failed.", status: 400 })
+  }
+  const normalizedEmail = try normalizeEmail(input.email)
+  const emailHash = try hashEmail(input.config.digestKey, normalizedEmail)
+  const emailMasked = maskEmail(normalizedEmail)
+  const redirectTo = sanitizeRedirectTo(input.redirectTo)
+  const ipScopeKey = input.ipAddress !== undefined && input.ipAddress.trim() !== ""
+    ? `email_ip:${try hmacSha256Hex(input.config.digestKey, normalizeIpPrefix(input.ipAddress))}`
+    : undefined
+  const magicToken = randomBase64Url(32)
+  const tokenHash = try sha256Hex(magicToken)
+  const challengeId = newUuid()
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    const cooldownRows = try tx.query(
+      "SELECT expires_at FROM feed_email_cooldowns WHERE email_hash = $1",
+      [emailHash]
+    )
+    if (cooldownRows[0] !== undefined) {
+      const expiresAt = toInt(cooldownRows[0].expires_at)
+      if (expiresAt > now) {
+        throw new AuthFailure({
+          code: "email_cooldown",
+          message: "This email address is in a 30-day deletion cooldown.",
+          status: 403
+        })
+      }
+      try tx.query("DELETE FROM feed_email_cooldowns WHERE email_hash = $1", [emailHash])
+    }
+    let baseState: EmailAuth
+    if (input.purpose === "link_email") {
+      if (input.accountId === null || input.accountId === "") {
+        throw new AuthFailure({ code: "unauthorized", message: "Account is required.", status: 401 })
+      }
+      const existingRow = try lockFeedAccountByIdInTx(tx, input.accountId)
+      if (existingRow === undefined) {
+        throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
+      }
+      const currentHash = toText(existingRow.email_hash) ?? ""
+      if (currentHash === emailHash) {
+        throw new AuthFailure({ code: "email_unchanged", message: "That email address is already linked to your account.", status: 400 })
+      }
+      try ensureEmailUnusedByOtherInTx(tx, emailHash, input.accountId)
+      baseState = emailAuthFromAccount(existingRow, now)
+      if (!canRequestLinkEmail(
+        baseState,
+        emailHash,
+        tokenHash,
+        input.recentSignInOrFirstLink,
+        true,
+        true,
+        turnstilePassed,
+        true
+      )) {
+        throw new AuthFailure({ code: "email_link_refused", message: "Cannot link email address for this account.", status: 403 })
+      }
+    } else {
+      const accountRows = try tx.query(
+        `SELECT fa.*, a.status, a.sessions_revoked_before
+         FROM feed_accounts fa
+         JOIN accounts a ON a.key = fa.account_id
+         WHERE fa.email_hash = $1 FOR UPDATE`,
+        [emailHash]
+      )
+      baseState = emailAuthFromAccount(accountRows[0], now)
+      if (!canRequestMagicLink(baseState, emailHash, tokenHash, true, turnstilePassed, true)) {
+        throw new AuthFailure({ code: "email_signin_refused", message: "Cannot request magic link for this account.", status: 403 })
+      }
+    }
+    const recentRows = try tx.query(
+      "SELECT created_at FROM feed_email_magic_links WHERE email_hash = $1 AND created_at > $2 ORDER BY created_at DESC",
+      [emailHash, now - DAY_MS]
+    )
+    const sentTimestamps = recentRows.map((row) => toInt(row.created_at)).filter((ts) => Number.isSafeInteger(ts) && ts > 0)
+    const rateState = buildEmailSendRateState(baseState, sentTimestamps, now)
+    if (!withinEmailSendRateLimits(rateState)) {
+      if (!emailResendGapOk(rateState)) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((rateState.lastSentAt + emailResendGapMs - now) / 1000))
+        throw new RateLimited({ message: "Wait 30 seconds before requesting another sign-in link.", retryAfterSeconds, action: "email_send" })
+      }
+      if (currentEmailHourSends(rateState) >= maxEmailSendsPerHour) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((rateState.hourWindowStart + HOUR_MS - now) / 1000))
+        throw new RateLimited({ message: "Hourly email sign-in limit reached.", retryAfterSeconds, action: "email_send" })
+      }
+      const retryAfterSeconds = Math.max(1, Math.ceil((rateState.dayWindowStart + DAY_MS - now) / 1000))
+      throw new RateLimited({ message: "Daily email sign-in limit reached.", retryAfterSeconds, action: "email_send" })
+    }
+    if (ipScopeKey !== undefined) {
+      try consumeRateLimitWindowInTx(tx, {
+        scopeKey: ipScopeKey,
+        limit: IP_EMAIL_HOURLY_LIMIT,
+        windowMs: HOUR_MS,
+        action: "email_send",
+        message: "Too many email sign-in requests from this IP address.",
+        now
+      })
+    }
+  })
+  const baseOrigin = (input.config.emailPublicOrigin?.trim() || input.config.publicAppUrl).replace(/\/+$/, "")
+  const magicLinkUrl = `${baseOrigin}/auth/email?token=${encodeURIComponent(magicToken)}`
+  if (emailMode === "resend") {
+    try sendResendEmail({
+      toEmail: normalizedEmail,
+      magicLinkId: challengeId,
+      magicLinkUrl,
+      purpose: input.purpose,
+      config: input.config
+    })
+  }
+  const sendNow = try Clock.currentTimeMillis
+  if (input.purpose === "link_email") {
+    stepRequestLinkEmail(
+      { ...initialEmailAuth, status: "EmailActive", emailHash: "", now: sendNow },
+      normalizedEmail,
+      emailHash,
+      magicToken,
+      tokenHash,
+      input.recentSignInOrFirstLink,
+      true,
+      true,
+      turnstilePassed,
+      true
+    )
+  } else {
+    stepRequestMagicLink(
+      { ...initialEmailAuth, now: sendNow },
+      normalizedEmail,
+      emailHash,
+      magicToken,
+      tokenHash,
+      true,
+      turnstilePassed,
+      true
+    )
+  }
+  const expiresAt = sendNow + magicLinkLifetimeMs
+  try store.transaction(effect (tx: Tx) => {
+    if (input.purpose === "link_email" && input.accountId !== null) {
+      try tx.query(
+        `UPDATE feed_email_magic_links
+         SET superseded_at = $3
+         WHERE purpose = 'link_email'
+           AND (email_hash = $1 OR account_id = $2)
+           AND consumed_at IS NULL AND superseded_at IS NULL`,
+        [emailHash, input.accountId, sendNow]
+      )
+    } else {
+      try tx.query(
+        `UPDATE feed_email_magic_links
+         SET superseded_at = $2
+         WHERE email_hash = $1 AND purpose = 'sign_in'
+           AND consumed_at IS NULL AND superseded_at IS NULL`,
+        [emailHash, sendNow]
+      )
+    }
+    try tx.query(
+      `INSERT INTO feed_email_magic_links
+         (id, email_hash, email_masked, token_hash, purpose, account_id, redirect_to, created_at, expires_at, consumed_at, superseded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL)`,
+      [challengeId, emailHash, emailMasked, tokenHash, input.purpose, input.accountId, redirectTo, sendNow, expiresAt]
+    )
+  })
+  if (emailMode === "loopback") {
+    pruneLoopbackMagicLinks(sendNow)
+    loopbackMagicLinks.set(normalizedEmail, { token: magicToken, magicLinkUrl, expiresAt })
+    return {
+      challengeId,
+      emailMasked,
+      expiresAt,
+      resendAvailableAt: sendNow + emailResendGapMs,
+      devMagicLinkUrl: magicLinkUrl,
+      devToken: magicToken
+    }
+  }
+  return {
+    challengeId,
+    emailMasked,
+    expiresAt,
+    resendAvailableAt: sendNow + emailResendGapMs
+  }
+}
+
+export effect function requestEmailMagicLink(input: {
+  readonly email: string
+  readonly redirectTo?: string | undefined
+  readonly turnstileToken?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): StartEmailMagicLinkResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  return try sendEmailMagicLinkInternal({
+    email: input.email,
+    purpose: "sign_in",
+    accountId: null,
+    recentSignInOrFirstLink: true,
+    redirectTo: input.redirectTo,
+    turnstileToken: input.turnstileToken,
+    ipAddress: input.ipAddress,
+    config: input.config
+  })
+}
+
+export const startEmailMagicLink = requestEmailMagicLink
+
+export effect function startEmailLink(input: {
+  readonly accountId: string
+  readonly email: string
+  readonly authAt?: number | undefined
+  readonly sessionAuthAt?: number | undefined
+  readonly cookieHeader?: string | undefined
+  readonly turnstileToken?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): StartEmailMagicLinkResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const store = try Store
+  const existing = try store.transaction((tx: Tx) =>
+    tx.query("SELECT email_hash FROM feed_accounts WHERE account_id = $1", [input.accountId])
+  )
+  const hasExistingEmail = toText(existing[0]?.email_hash) !== undefined && toText(existing[0]?.email_hash) !== ""
+  let recentSignInOrFirstLink = !hasExistingEmail
+  if (hasExistingEmail) {
+    const { signedInAt, now } = try resolveSignedInAt(input)
+    if (
+      signedInAt !== undefined
+      && Number.isSafeInteger(signedInAt)
+      && now - signedInAt >= 0
+      && now - signedInAt <= recentSignInWindowMs
+    ) {
+      recentSignInOrFirstLink = true
+    }
+  }
+  if (!recentSignInOrFirstLink) {
+    throw new AuthFailure({
+      code: "recent_signin_required",
+      message: "Sign in again within the last 10 minutes before changing your email address.",
+      status: 403
+    })
+  }
+  return try sendEmailMagicLinkInternal({
+    email: input.email,
+    purpose: "link_email",
+    accountId: input.accountId,
+    recentSignInOrFirstLink,
+    redirectTo: "/settings?tab=account",
+    turnstileToken: input.turnstileToken,
+    ipAddress: input.ipAddress,
+    config: input.config
+  })
+}
+
+export const requestEmailLink = startEmailLink
+
+export effect function verifyEmailMagicLink(input: {
+  readonly token: string
+  readonly sessionAccountId?: string | null | undefined
+  readonly config: AuthRuntimeConfig
+}): VerifyEmailMagicLinkResult!(AuthFailure | StoreFailure)!Store {
+  const token = input.token.trim()
+  if (token.length < 16) {
+    throw new AuthFailure({ code: "invalid_magic_link", message: "This sign-in link is invalid.", status: 401 })
+  }
+  const tokenHash = try sha256Hex(token)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const verified = try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT id, email_hash, email_masked, token_hash, purpose, account_id, redirect_to, created_at, expires_at, consumed_at, superseded_at
+       FROM feed_email_magic_links
+       WHERE token_hash = $1 FOR UPDATE`,
+      [tokenHash]
+    )
+    const row = rows[0]
+    if (row === undefined) {
+      throw new AuthFailure({ code: "invalid_magic_link", message: "This sign-in link is invalid.", status: 401 })
+    }
+    if (row.superseded_at !== null && row.superseded_at !== undefined) {
+      throw new AuthFailure({ code: "magic_link_superseded", message: "A newer sign-in link was requested. Use the latest email.", status: 401 })
+    }
+    if (row.consumed_at !== null && row.consumed_at !== undefined) {
+      throw new AuthFailure({ code: "magic_link_used", message: "This sign-in link has already been used.", status: 401 })
+    }
+    const expiresAt = toInt(row.expires_at)
+    if (now >= expiresAt) {
+      throw new AuthFailure({ code: "magic_link_expired", message: "This sign-in link has expired. Request a new one.", status: 401 })
+    }
+    const linkId = toText(row.id) ?? ""
+    const emailHash = toText(row.email_hash) ?? ""
+    const emailMasked = toText(row.email_masked) ?? ""
+    const purpose = toText(row.purpose) === "link_email" ? "link_email" : "sign_in"
+    const targetAccountId = toText(row.account_id) ?? null
+    const redirectTo = sanitizeRedirectTo(toText(row.redirect_to))
+    const specState: EmailAuth = {
+      ...initialEmailAuth,
+      status: purpose === "link_email" ? "EmailActive" : "EmailUnregistered",
+      linkStatus: "LinkOpen",
+      linkPurpose: purpose === "link_email" ? "PurposeEmailLink" : "PurposeEmailSignIn",
+      pendingEmailHash: emailHash,
+      pendingEmailMasked: emailMasked,
+      pendingTokenHash: tokenHash,
+      linkSentAt: toInt(row.created_at),
+      linkExpiresAt: expiresAt,
+      hasSentBefore: true,
+      lastSentAt: toInt(row.created_at),
+      now
+    }
+    if (!canConsumeMagicLink(specState, tokenHash, targetAccountId ?? "pending-user")) {
+      throw new AuthFailure({ code: "invalid_magic_link", message: "This sign-in link cannot be used.", status: 401 })
+    }
+    stepConsumeMagicLink(specState, tokenHash, targetAccountId ?? "pending-user")
+    const cooldownRows = try tx.query("SELECT expires_at FROM feed_email_cooldowns WHERE email_hash = $1", [emailHash])
+    if (cooldownRows[0] !== undefined && toInt(cooldownRows[0].expires_at) > now) {
+      throw new AuthFailure({ code: "email_cooldown", message: "This email address is in a 30-day deletion cooldown.", status: 403 })
+    }
+    if (purpose === "link_email") {
+      if (targetAccountId === null || input.sessionAccountId !== targetAccountId) {
+        throw new AuthFailure({
+          code: "session_required_to_link",
+          message: "Sign in to the account that requested this email link before confirming.",
+          status: 401
+        })
+      }
+      const accountRow = try lockFeedAccountByIdInTx(tx, targetAccountId)
+      if (accountRow === undefined || toText(accountRow.status) !== "active" || accountRow.is_reviewer === true) {
+        throw new AuthFailure({ code: "email_link_refused", message: "Account is not eligible to link an email address.", status: 403 })
+      }
+      try ensureEmailUnusedByOtherInTx(tx, emailHash, targetAccountId)
+      try tx.query("UPDATE feed_email_magic_links SET consumed_at = $2 WHERE id = $1", [linkId, now])
+      const updated = try tx.query(
+        `UPDATE feed_accounts
+         SET email_hash = $2, email_masked = $3, email_verified_at = $4, updated_at = $4
+         WHERE account_id = $1 RETURNING *`,
+        [targetAccountId, emailHash, emailMasked, now]
+      )
+      const nextEpoch = try revokeSessionsAndBumpEpochInTx(tx, targetAccountId, toInt(accountRow.sessions_revoked_before), now)
+      const session = try issueSessionInTx(tx, targetAccountId, nextEpoch, input.config, now)
+      return {
+        kind: "email_linked" as const,
+        account: rowToAccountProfile(updated[0]),
+        redirectTo: "/settings?tab=account",
+        ...session
+      }
+    }
+    try tx.query("UPDATE feed_email_magic_links SET consumed_at = $2 WHERE id = $1", [linkId, now])
+    const existingRows = try tx.query(
+      `SELECT fa.*, a.status, a.sessions_revoked_before
+       FROM feed_accounts fa
+       JOIN accounts a ON a.key = fa.account_id
+       WHERE fa.email_hash = $1 FOR UPDATE`,
+      [emailHash]
+    )
+    const existing = existingRows[0]
+    if (existing === undefined) {
+      return {
+        kind: "needs_onboarding" as const,
+        challengeId: linkId,
+        emailHash,
+        emailMasked,
+        redirectTo,
+        now
+      }
+    }
+    if (toText(existing.status) !== "active") {
+      throw new AuthFailure({ code: "account_inactive", message: "Account is not active.", status: 403 })
+    }
+    if (existing.is_reviewer === true) {
+      throw new AuthFailure({ code: "reviewer_password_only", message: "Reviewer accounts must use reviewer sign-in.", status: 403 })
+    }
+    const accountId = toText(existing.account_id) ?? ""
+    const epoch = Math.max(1, toInt(existing.sessions_revoked_before))
+    const updated = try tx.query(
+      "UPDATE feed_accounts SET email_verified_at = $2, updated_at = $2 WHERE account_id = $1 RETURNING *",
+      [accountId, now]
+    )
+    const session = try issueSessionInTx(tx, accountId, epoch, input.config, now)
+    return {
+      kind: "signed_in" as const,
+      account: rowToAccountProfile(updated[0] ?? existing),
+      redirectTo,
+      ...session
+    }
+  })
+  if (verified.kind === "email_linked") {
+    return {
+      status: "email_linked",
+      needsOnboarding: false,
+      account: verified.account,
+      sessionToken: verified.sessionToken,
+      sessionCookieHeader: verified.sessionCookieHeader,
+      expiresAt: verified.expiresAt,
+      redirectTo: verified.redirectTo
+    }
+  }
+  if (verified.kind === "signed_in") {
+    return {
+      status: "signed_in",
+      needsOnboarding: false,
+      account: verified.account,
+      sessionToken: verified.sessionToken,
+      sessionCookieHeader: verified.sessionCookieHeader,
+      expiresAt: verified.expiresAt,
+      redirectTo: verified.redirectTo
+    }
+  }
+  const secret = try signingSecretBytes(input.config)
+  const pendingToken = try tryPromise({
+    try: () =>
+      new SignJWT({
+        purpose: "feed_email_onboarding",
+        emailHash: verified.emailHash,
+        emailMasked: verified.emailMasked,
+        challengeId: verified.challengeId
+      })
+        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+        .setIssuedAt(Math.floor(verified.now / 1000))
+        .setExpirationTime(Math.floor(verified.now / 1000) + ONBOARDING_TOKEN_TTL_SECONDS)
+        .sign(secret),
+    catch: () => new AuthFailure({ code: "crypto_error", message: "Failed to sign onboarding token.", status: 500 })
+  })
+  return {
+    status: "needs_onboarding",
+    needsOnboarding: true,
+    pendingToken,
+    emailMasked: verified.emailMasked,
+    redirectTo: verified.redirectTo
+  }
+}
+
+export effect function completeEmailOnboarding(input: {
+  readonly pendingToken: string
+  readonly username: string
+  readonly accepted18Plus: boolean
+  readonly acceptedTerms: boolean
+  readonly bio?: string | undefined
+  readonly displayName?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
+  if (!input.accepted18Plus || !input.acceptedTerms) {
+    throw new AuthFailure({
+      code: "attestation_required",
+      message: "You must confirm you are 18+ and accept the Terms of Service.",
+      status: 400
+    })
+  }
+  const username = input.username.trim().toLowerCase()
+  if (!USERNAME_PATTERN.test(username)) {
+    throw new AuthFailure({
+      code: "invalid_username",
+      message: "Username must be 2-32 lowercase letters, numbers, or underscores.",
+      status: 400
+    })
+  }
+  const secret = try signingSecretBytes(input.config)
+  const verifiedJwt = try tryPromise({
+    try: () => jwtVerify(input.pendingToken, secret, { algorithms: ["HS256"] }),
+    catch: () => new AuthFailure({ code: "invalid_onboarding_token", message: "Onboarding session expired. Request a new magic link.", status: 401 })
+  })
+  const claims = Option.getOrUndefined(Schema.decodeUnknownOption(PendingEmailOnboardingClaims)(verifiedJwt.payload))
+  if (claims === undefined || claims.emailHash === "") {
+    throw new AuthFailure({ code: "invalid_onboarding_token", message: "Invalid onboarding token.", status: 401 })
+  }
+  const bio = (input.bio ?? "").trim().slice(0, 280)
+  const displayName = (input.displayName?.trim() ?? "") !== "" ? input.displayName!.trim().slice(0, 80) : username
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:onboard:email:${claims.emailHash}`])
+    const cooldownRows = try tx.query("SELECT expires_at FROM feed_email_cooldowns WHERE email_hash = $1", [claims.emailHash])
+    if (cooldownRows[0] !== undefined && toInt(cooldownRows[0].expires_at) > now) {
+      throw new AuthFailure({ code: "email_cooldown", message: "This email address is in a 30-day deletion cooldown.", status: 403 })
+    }
+    const existingEmail = try tx.query("SELECT account_id FROM feed_accounts WHERE email_hash = $1 FOR UPDATE", [claims.emailHash])
+    if (existingEmail.length > 0) {
+      throw new AuthFailure({ code: "account_exists", message: "An account for this email address already exists.", status: 409 })
+    }
+    try ensureHandleAvailableInTx(tx, username)
+    const accountId = newUuid()
+    const organizationId = newUuid()
+    const pendingState: EmailAuth = {
+      ...initialEmailAuth,
+      status: "EmailPendingOnboarding",
+      userId: accountId,
+      emailVerified: true,
+      emailHash: claims.emailHash,
+      emailMasked: claims.emailMasked,
+      sessionsEpoch: 1,
+      lastSignInAt: now,
+      now
+    }
+    if (!canCompleteEmailOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)) {
+      throw new AuthFailure({ code: "onboarding_refused", message: "Cannot complete onboarding.", status: 400 })
+    }
+    stepCompleteEmailOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)
+    const cloudAccountState = JSON.stringify({
+      status: "Active",
+      userId: accountId,
+      organizationId,
+      identities: [{ method: "EmailMagicLink", subject: claims.emailHash }]
+    })
+    try insertCloudAccountTx(tx, {
+      accountId,
+      organizationId,
+      displayName,
+      stateJson: cloudAccountState,
+      now
+    })
+    const defaultAvatarUrl = resolveUserPresetAvatarUrl(accountId)
+    const defaultBannerUrl = resolveUserPresetBannerUrl(accountId)
+    const insertedRows = try tx.query(
+      `INSERT INTO feed_accounts
+         (account_id, handle, display_name, bio, avatar_url, banner_url, phone_hash, phone_last2, phone_verified_at, email_hash, email_masked, email_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $9, 'game', $10, $10, 0, false, false, NULL, $9, $9)
+       RETURNING *`,
+      [accountId, username, displayName, bio, defaultAvatarUrl, defaultBannerUrl, claims.emailHash, claims.emailMasked, now, STARTING_GRANT_CENTS]
+    )
+    try tx.query(
+      `INSERT INTO feed_point_ledger
+         (id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at)
+       VALUES ($1, $2, 'starting_grant', $3, $3, $4, $5)`,
+      [newUuid(), accountId, STARTING_GRANT_CENTS, claims.challengeId, now]
+    )
+    const session = try issueSessionInTx(tx, accountId, 1, input.config, now)
+    return {
+      account: rowToAccountProfile(insertedRows[0]),
+      ...session
+    }
+  })
+}
+
+export effect function completeOnboarding(input: {
+  readonly pendingToken: string
+  readonly username: string
+  readonly accepted18Plus: boolean
+  readonly acceptedTerms: boolean
+  readonly bio?: string | undefined
+  readonly displayName?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
+  const secret = try signingSecretBytes(input.config)
+  const verifiedJwt = try tryPromise({
+    try: () => jwtVerify(input.pendingToken, secret, { algorithms: ["HS256"] }),
+    catch: () => new AuthFailure({ code: "invalid_onboarding_token", message: "Onboarding session expired. Verify again.", status: 401 })
+  })
+  const purposeClaim = Option.getOrUndefined(Schema.decodeUnknownOption(OnboardingPurposeClaim)(verifiedJwt.payload))
+  if (purposeClaim?.purpose === "feed_email_onboarding") {
+    return try completeEmailOnboarding(input)
+  }
+  if (purposeClaim?.purpose === "feed_phone_onboarding") {
+    return try completePhoneOnboarding(input)
+  }
+  throw new AuthFailure({ code: "invalid_onboarding_token", message: "Invalid onboarding token.", status: 401 })
+}

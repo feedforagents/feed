@@ -63,6 +63,19 @@ module web {
   }
 
   /** @throws {never} */
+  export function randomDeviceUserCode(): string {
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    const bytes = new Uint8Array(8)
+    crypto.getRandomValues(bytes)
+    let out = ""
+    for (let i = 0; i < 8; i += 1) {
+      if (i === 4) out += "-"
+      out += alphabet[bytes[i] & 31]
+    }
+    return out
+  }
+
+  /** @throws {never} */
   export function constantTimeEqual(left: string, right: string): boolean {
     const a = encoder.encode(left)
     const b = encoder.encode(right)
@@ -137,6 +150,7 @@ import {
   hmacSha256HexAsync,
   newUuid,
   randomBase64Url,
+  randomDeviceUserCode,
   randomDigits,
   randomHex,
   sha256Base64UrlAsync,
@@ -148,6 +162,7 @@ export {
   constantTimeEqual,
   newUuid,
   randomBase64Url,
+  randomDeviceUserCode,
   randomHex
 }
 
