@@ -910,3 +910,128 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
     ))
   })
 )
+
+it.effect('Perp flip enforces maxSlippageBps against cumulative pre-flip mark impact and rolls back on refusal (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () =>
+  runWithSeededMarketDay(effect () => {
+    try createVerifiedAccount("user-alice", "alice", 50_000)
+
+    const longOpened = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 5
+    })
+    const marketBeforeLongFlip = try getPerpMarket("XTRPC")
+    const econBeforeLongFlip = try getAccountEconomy("user-alice")
+
+    const longToShortPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5
+    })
+    const longToShortBlockedCode = try marketErrorCode(openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5,
+      maxSlippageBps: 600
+    }))
+    const marketAfterBlockedLongFlip = try getPerpMarket("XTRPC")
+    const econAfterBlockedLongFlip = try getAccountEconomy("user-alice")
+    const positionsAfterBlockedLongFlip = try listPerpPositions("user-alice")
+
+    try check(() => assert.deepStrictEqual(
+      {
+        longToShortPreview: [
+          longToShortPreview.action,
+          longToShortPreview.preMarkPriceCents,
+          longToShortPreview.executionPriceCents,
+          longToShortPreview.priceImpactBps
+        ],
+        longToShortBlockedCode,
+        rollbackPreservedState: [
+          marketAfterBlockedLongFlip.markPriceCents === marketBeforeLongFlip.markPriceCents,
+          marketAfterBlockedLongFlip.longOiCents === marketBeforeLongFlip.longOiCents,
+          marketAfterBlockedLongFlip.shortOiCents === marketBeforeLongFlip.shortOiCents,
+          econAfterBlockedLongFlip.balanceCents === econBeforeLongFlip.balanceCents,
+          positionsAfterBlockedLongFlip.length === 1 && positionsAfterBlockedLongFlip[0]?.id === longOpened.positionId
+        ]
+      },
+      {
+        longToShortPreview: ["flip", 1_260, 1_140, 952],
+        longToShortBlockedCode: "SLIPPAGE_EXCEEDED",
+        rollbackPreservedState: [true, true, true, true, true]
+      }
+    ))
+
+    const flippedToShort = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5,
+      maxSlippageBps: longToShortPreview.priceImpactBps
+    })
+
+    const shortToLongPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 5
+    })
+    const shortToLongBlockedCode = try marketErrorCode(openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 5,
+      maxSlippageBps: 600
+    }))
+    const flippedToLong = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 5,
+      maxSlippageBps: shortToLongPreview.priceImpactBps
+    })
+
+    try check(() => assert.deepStrictEqual(
+      {
+        flippedToShortAtExactCap: [
+          flippedToShort.action,
+          flippedToShort.position.side,
+          flippedToShort.executionPriceCents === longToShortPreview.executionPriceCents
+        ],
+        shortToLongPreview: [
+          shortToLongPreview.action,
+          shortToLongPreview.preMarkPriceCents,
+          shortToLongPreview.executionPriceCents,
+          shortToLongPreview.priceImpactBps
+        ],
+        shortToLongBlockedCode,
+        flippedToLongAtExactCap: [
+          flippedToLong.action,
+          flippedToLong.position.side,
+          flippedToLong.executionPriceCents === shortToLongPreview.executionPriceCents
+        ]
+      },
+      {
+        flippedToShortAtExactCap: ["flip", "short", true],
+        shortToLongPreview: ["flip", 1_140, 1_260, 1_053],
+        shortToLongBlockedCode: "SLIPPAGE_EXCEEDED",
+        flippedToLongAtExactCap: ["flip", "long", true]
+      }
+    ))
+  })
+)

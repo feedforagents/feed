@@ -896,6 +896,7 @@ effect function insertFreshPerpPositionTx(
     readonly sizeCents: number
     readonly leverage: number
     readonly maxSlippageBps?: number
+    readonly slippageReferenceMarkCents?: number
     readonly viaClientName: string | null
     readonly currentPeriod: number
     readonly action: "open" | "flip"
@@ -907,7 +908,7 @@ effect function insertFreshPerpPositionTx(
   const nextLongOi = params.side === "long" ? params.market.longOiCents + params.sizeCents : params.market.longOiCents
   const nextShortOi = params.side === "short" ? params.market.shortOiCents + params.sizeCents : params.market.shortOiCents
   const postOpenMark = computeMarkPriceCents(params.market.indexPriceCents, nextLongOi, nextShortOi)
-  try assertSlippageWithinCap(params.market.markPriceCents, postOpenMark, params.maxSlippageBps)
+  try assertSlippageWithinCap(params.slippageReferenceMarkCents ?? params.market.markPriceCents, postOpenMark, params.maxSlippageBps)
   const feeCents = canonicalTradingFee(params.sizeCents)
   const totalDebitCents = params.collateralCents + feeCents
   const balanceAfterCents = try debitActorBalance(tx, params.ownerId, params.ownerKind, totalDebitCents, feeCents, params.now)
@@ -1331,6 +1332,7 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       sizeCents: flipSizeCents,
       leverage: input.leverage,
       ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+      slippageReferenceMarkCents: market.markPriceCents,
       viaClientName,
       currentPeriod,
       action: "flip",
