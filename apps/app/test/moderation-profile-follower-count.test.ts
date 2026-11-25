@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { toggleBlock } from "../src/web/store-world.ts";
 
-function openBobProfile(): void {
+function openBobProfile(isFollowing: boolean, viewerFollowedBy: boolean): void {
   setStoreState({
     viewer: {
       accountId: "alice",
@@ -26,7 +26,7 @@ function openBobProfile(): void {
         handle: "bob",
         followersCount: 6,
         followingCount: 4,
-        isFollowing: true,
+        isFollowing,
         isMuted: false,
         isBlocked: false,
         isOwnProfile: false,
@@ -37,7 +37,7 @@ function openBobProfile(): void {
       createdAtMs: 0,
       actorMeta: null,
       orgMeta: null,
-      viewerFollowedBy: false,
+      viewerFollowedBy,
       viewerBlockedBy: false,
       tradeCount: null,
       openPositionCount: null,
@@ -54,47 +54,36 @@ afterEach(() => {
   setStoreState({ viewer: null, profileBundle: null, blockedAccounts: [] });
 });
 
-it('Blocking a followed profile updates its follower count without a reload (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
-  openBobProfile();
-  vi.stubGlobal("fetch", () => Promise.resolve(Response.json({ blocked: true })));
-
-  await toggleBlock("bob", false);
-
-  const summary = getStoreSnapshot().profileBundle?.summary;
-  expect({
-    followersCount: summary?.followersCount,
-    isFollowing: summary?.isFollowing,
-    isBlocked: summary?.isBlocked,
-  }).toEqual({ followersCount: 5, isFollowing: false, isBlocked: true });
-});
-
-it('Blocking a profile the viewer does not follow leaves its follower count unchanged (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
-  openBobProfile();
-  const bundle = getStoreSnapshot().profileBundle;
-  if (!bundle) throw new Error("profile missing");
-  setStoreState({ profileBundle: { ...bundle, summary: { ...bundle.summary, isFollowing: false } } });
-  vi.stubGlobal("fetch", () => Promise.resolve(Response.json({ blocked: true })));
-
-  await toggleBlock("bob", false);
-
-  const summary = getStoreSnapshot().profileBundle?.summary;
-  expect({
-    followersCount: summary?.followersCount,
-    isFollowing: summary?.isFollowing,
-    isBlocked: summary?.isBlocked,
-  }).toEqual({ followersCount: 6, isFollowing: false, isBlocked: true });
-});
-
-it('A failed block leaves the followed profile follower count unchanged (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
-  openBobProfile();
-  vi.stubGlobal("fetch", () => Promise.resolve(Response.json({ message: "Block failed" }, { status: 500 })));
-
-  await toggleBlock("bob", false);
-
-  const summary = getStoreSnapshot().profileBundle?.summary;
-  expect({
-    followersCount: summary?.followersCount,
-    isFollowing: summary?.isFollowing,
-    isBlocked: summary?.isBlocked,
-  }).toEqual({ followersCount: 6, isFollowing: true, isBlocked: false });
+it('Blocking a profile updates both follow counts without a reload (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const cases = [
+    { isFollowing: true, viewerFollowedBy: true, succeeds: true },
+    { isFollowing: true, viewerFollowedBy: false, succeeds: true },
+    { isFollowing: false, viewerFollowedBy: true, succeeds: true },
+    { isFollowing: false, viewerFollowedBy: false, succeeds: true },
+    { isFollowing: true, viewerFollowedBy: true, succeeds: false },
+  ];
+  const results = [];
+  for (const testCase of cases) {
+    openBobProfile(testCase.isFollowing, testCase.viewerFollowedBy);
+    vi.stubGlobal("fetch", () => Promise.resolve(testCase.succeeds
+      ? Response.json({ blocked: true })
+      : Response.json({ message: "Block failed" }, { status: 500 })));
+    await toggleBlock("bob", false);
+    const bundle = getStoreSnapshot().profileBundle;
+    results.push({
+      followersCount: bundle?.summary.followersCount,
+      followingCount: bundle?.summary.followingCount,
+      isFollowing: bundle?.summary.isFollowing,
+      isBlocked: bundle?.summary.isBlocked,
+      viewerFollowedBy: bundle?.viewerFollowedBy,
+    });
+    vi.unstubAllGlobals();
+  }
+  expect(results).toEqual([
+    { followersCount: 5, followingCount: 3, isFollowing: false, isBlocked: true, viewerFollowedBy: false },
+    { followersCount: 5, followingCount: 4, isFollowing: false, isBlocked: true, viewerFollowedBy: false },
+    { followersCount: 6, followingCount: 3, isFollowing: false, isBlocked: true, viewerFollowedBy: false },
+    { followersCount: 6, followingCount: 4, isFollowing: false, isBlocked: true, viewerFollowedBy: false },
+    { followersCount: 6, followingCount: 4, isFollowing: true, isBlocked: false, viewerFollowedBy: true },
+  ]);
 });

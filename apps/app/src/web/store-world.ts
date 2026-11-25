@@ -1502,6 +1502,7 @@ async function toggleModeration(
     setStoreState({
       profileBundle: {
         ...cur.profileBundle,
+        viewerFollowedBy: isBlock && !active ? false : cur.profileBundle.viewerFollowedBy,
         summary: isBlock
           ? {
               ...cur.profileBundle.summary,
@@ -1510,6 +1511,9 @@ async function toggleModeration(
               followersCount: !active && cur.profileBundle.summary.isFollowing
                 ? Math.max(0, cur.profileBundle.summary.followersCount - 1)
                 : cur.profileBundle.summary.followersCount,
+              followingCount: !active && cur.profileBundle.viewerFollowedBy
+                ? Math.max(0, cur.profileBundle.summary.followingCount - 1)
+                : cur.profileBundle.summary.followingCount,
             }
           : { ...cur.profileBundle.summary, isMuted: !active },
       },
