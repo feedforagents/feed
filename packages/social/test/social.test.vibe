@@ -1278,6 +1278,33 @@ it.effect(
       gameAfter: ["r42-pnl-1", "r42-market-1"],
       socialAfter: []
     }))
+
+    try seedAccount("carol", "carol", "Carol Analyst")
+    try seedAccount("dave", "dave", "Dave Observer", 10_000, "game")
+    try muteAccount("dave", "carol")
+    try queryStore(
+      "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ('r42-game-1', 'dave', 'follow', 'bob', NULL, NULL, 'New follower', 'Bob followed you', false, NULL, $1)",
+      [now + 3]
+    )
+    try queryStore(
+      "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ('r42-muted-1', 'dave', 'follow', 'carol', NULL, NULL, 'New follower', 'Carol followed you', false, NULL, $1)",
+      [now + 4]
+    )
+
+    const gameCleared = try clearNotifications("dave")
+    const mutedHiddenAfterGameClear = try listNotifications("dave", 50, "game")
+    try unmuteAccount("dave", "carol")
+    const mutedAfterUnmute = try listNotifications("dave", 50, "game")
+
+    try check(() => assert.deepStrictEqual({
+      gameClearedCount: gameCleared.clearedCount,
+      mutedHiddenAfterGameClear: mutedHiddenAfterGameClear.map((n) => n.id),
+      mutedAfterUnmute: mutedAfterUnmute.map((n) => n.id)
+    }, {
+      gameClearedCount: 1,
+      mutedHiddenAfterGameClear: [],
+      mutedAfterUnmute: ["r42-muted-1"]
+    }))
   })
 )
 
