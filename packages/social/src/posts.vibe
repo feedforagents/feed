@@ -143,6 +143,7 @@ export interface PostView {
   readonly replyCount: number
   readonly likedByViewer: boolean
   readonly repostedByViewer: boolean
+  readonly followingAuthorByViewer: boolean
   readonly createdAt: number
 }
 
@@ -211,6 +212,7 @@ export interface SearchActorResult {
   readonly description: string
   readonly avatarUrl: string | null
   readonly isParody: boolean
+  readonly isFollowing: boolean
 }
 
 export interface SearchOrganizationResult {
@@ -411,6 +413,20 @@ function projectRowToPreview(
   }
 }
 
+effect function loadFollowedTargetIdsTx(tx: Tx, viewerId: string | undefined, targetIds: ReadonlyArray<string>): Set<string>!StoreFailure {
+  const followed = new Set<string>()
+  if (viewerId === undefined || viewerId === "" || targetIds.length === 0) return followed
+  const followRows = try tx.query(
+    "SELECT target_id FROM feed_follows WHERE follower_id = $1 AND target_id = ANY($2)",
+    [viewerId, targetIds]
+  )
+  for (const row of followRows) {
+    const tid = toText(row.target_id)
+    if (tid !== undefined) followed.add(tid)
+  }
+  return followed
+}
+
 effect function hydratePostRowsTx(
   tx: Tx,
   rows: ReadonlyArray<Row>,
@@ -559,6 +575,8 @@ effect function hydratePostRowsTx(
       if (pid !== undefined) repostedSet.add(pid)
     }
   }
+  const authorIds = [...new Set(rows.map((r) => toText(r.author_id)).filter((id): id is string => id !== undefined && id !== ""))]
+  const followedAuthorSet = try loadFollowedTargetIdsTx(tx, viewerId, authorIds)
   return rows.map((row) => {
     const base = projectRowToPreview(row, authors, mode)
     const replyToPostId = toText(row.reply_to_post_id) ?? null
@@ -596,7 +614,8 @@ effect function hydratePostRowsTx(
       repostCount: safeInt(row.repost_count, 0),
       replyCount: replyCountMap.get(base.id) ?? 0,
       likedByViewer: likedSet.has(base.id),
-      repostedByViewer: repostedSet.has(base.id)
+      repostedByViewer: repostedSet.has(base.id),
+      followingAuthorByViewer: followedAuthorSet.has(base.authorId)
     }
   })
 }
@@ -1444,6 +1463,8 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
           `SELECT id, username, name, tier, description, profile_image_url FROM feed_actors WHERE ${actorWhere} AND ${viewerAuthorVisibilitySql("$5", "id")} ORDER BY ${actorOrder} LIMIT $6`,
           [entityLikePattern, compactLikePattern, entityQuery, entityPrefixPattern, viewerId, limit]
         )
+    const actorIds = actorRows.map((row) => toText(row.id) ?? "").filter((id) => id !== "")
+    const followedActorIds = try loadFollowedTargetIdsTx(tx, viewerId, actorIds)
     const actors: SearchActorResult[] = actorRows.map((row) => {
       const id = toText(row.id) ?? ""
       return {
@@ -1453,7 +1474,8 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
         tier: toText(row.tier) ?? "",
         description: toText(row.description) ?? "",
         avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
-        isParody: true
+        isParody: true,
+        isFollowing: followedActorIds.has(id)
       }
     })
     const orgMatch = mode === "social"

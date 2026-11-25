@@ -481,6 +481,51 @@ it.effect(
 )
 
 it.effect(
+  'Who to follow carries the viewer follow state for already-followed people (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player")
+    try seedAccount("bob", "bob", "Bob Trader")
+
+    const bobPost = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Bob market update $TSLAI #bobtag"
+    })
+
+    const searchBefore = try searchWorld({ query: "ailon", mode: "game", viewerId: "alice", limit: 10 })
+    const feedBefore = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+
+    try followAccount("alice", "bob")
+    try followAccount("alice", "ailon-musk")
+
+    const searchAfter = try searchWorld({ query: "ailon", mode: "game", viewerId: "alice", limit: 10 })
+    const feedAfter = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+
+    try unfollowAccount("alice", "bob")
+    try unfollowAccount("alice", "ailon-musk")
+
+    const searchUnfollowed = try searchWorld({ query: "ailon", mode: "game", viewerId: "alice", limit: 10 })
+    const feedUnfollowed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
+
+    try check(() => assert.deepStrictEqual({
+      actorBefore: searchBefore.actors.find((a) => a.id === "ailon-musk")?.isFollowing,
+      postBefore: feedBefore.items.find((p) => p.id === bobPost.id)?.followingAuthorByViewer,
+      actorAfter: searchAfter.actors.find((a) => a.id === "ailon-musk")?.isFollowing,
+      postAfter: feedAfter.items.find((p) => p.id === bobPost.id)?.followingAuthorByViewer,
+      actorUnfollowed: searchUnfollowed.actors.find((a) => a.id === "ailon-musk")?.isFollowing,
+      postUnfollowed: feedUnfollowed.items.find((p) => p.id === bobPost.id)?.followingAuthorByViewer
+    }, {
+      actorBefore: false,
+      postBefore: false,
+      actorAfter: true,
+      postAfter: true,
+      actorUnfollowed: false,
+      postUnfollowed: false
+    }))
+  })
+)
+
+it.effect(
   'DMs, user groups, reactions, retired team chat refusal, and NPC alpha invites (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave")',
   () => withSocialWorld(effect {
     try seedChatParticipants()

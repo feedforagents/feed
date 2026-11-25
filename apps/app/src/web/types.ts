@@ -228,6 +228,7 @@ export interface ExploreActorHit {
   readonly description: string;
   readonly avatarUrl: string | null;
   readonly isParody: boolean;
+  readonly isFollowing: boolean;
 }
 
 export interface ExploreOrgHit {
@@ -719,6 +720,7 @@ export function decodePost(raw: unknown, viewerAccountId?: string | null): AppPo
       replyCount: num(raw.replyCount ?? raw.reply_count, 0),
       liked: bool(raw.likedByViewer ?? raw.liked, false),
       reposted: bool(raw.repostedByViewer ?? raw.reposted, false),
+      isFollowingAuthor: bool(raw.followingAuthorByViewer ?? raw.isFollowingAuthor, false),
       isOwn: Boolean(viewerAccountId && authorId && viewerAccountId === authorId),
     },
   };
@@ -1343,6 +1345,7 @@ export function decodeExplore(raw: unknown, viewerAccountId?: string | null): Ex
         description: str(a.description, ""),
         avatarUrl: optStr(a.avatarUrl ?? a.avatar_url ?? a.profileImageUrl),
         isParody: bool(a.isParody, true),
+        isFollowing: bool(a.isFollowing, false),
       };
     })
     .filter((a): a is ExploreActorHit => a !== null);

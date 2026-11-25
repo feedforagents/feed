@@ -129,7 +129,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
         displayName: actor.name,
         avatarUrl: actor.avatarUrl ?? undefined,
         isNpc: actor.isParody,
-        isFollowing: false,
+        isFollowing: actor.isFollowing,
       });
       if (suggestedMap.size >= 4) break;
     }

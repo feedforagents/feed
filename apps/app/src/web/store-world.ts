@@ -1440,6 +1440,15 @@ function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
     feedPosts: cur.feedPosts.map((p) =>
       p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p,
     ),
+    explore: {
+      ...cur.explore,
+      actors: cur.explore.actors.map((actor) =>
+        actor.username.toLowerCase() === lower ? { ...actor, isFollowing: nextFollowing } : actor,
+      ),
+      posts: cur.explore.posts.map((p) =>
+        p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p,
+      ),
+    },
   });
 }
 
