@@ -196,6 +196,9 @@ CREATE TABLE IF NOT EXISTS feed_accounts (
   phone_hash text UNIQUE,
   phone_last2 text,
   phone_verified_at bigint,
+  email_hash text,
+  email_masked text,
+  email_verified_at bigint,
   age_confirmed_at bigint,
   ui_mode text NOT NULL DEFAULT 'game' CHECK (ui_mode IN ('game', 'social')),
   balance_cents bigint NOT NULL DEFAULT 10000 CHECK (balance_cents >= 0),
@@ -209,9 +212,36 @@ CREATE TABLE IF NOT EXISTS feed_accounts (
 );
 ALTER TABLE feed_accounts DROP COLUMN IF EXISTS purchased_cents;
 ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS banner_url text;
+ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS email_hash text;
+ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS email_masked text;
+ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS email_verified_at bigint;
+CREATE UNIQUE INDEX IF NOT EXISTS feed_accounts_email_hash_idx ON feed_accounts (email_hash) WHERE email_hash IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS feed_phone_cooldowns (
   phone_hash text PRIMARY KEY,
+  released_at bigint NOT NULL,
+  expires_at bigint NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS feed_email_magic_links (
+  id text PRIMARY KEY,
+  email_hash text NOT NULL,
+  email_masked text NOT NULL,
+  token_hash text NOT NULL UNIQUE,
+  purpose text NOT NULL CHECK (purpose IN ('sign_in', 'link_email')),
+  account_id text REFERENCES feed_accounts (account_id),
+  redirect_to text,
+  created_at bigint NOT NULL,
+  expires_at bigint NOT NULL,
+  consumed_at bigint,
+  superseded_at bigint,
+  CHECK ((purpose = 'sign_in' AND account_id IS NULL) OR (purpose = 'link_email' AND account_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS feed_email_magic_links_email_idx ON feed_email_magic_links (email_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS feed_email_magic_links_expiry_idx ON feed_email_magic_links (expires_at) WHERE consumed_at IS NULL AND superseded_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS feed_email_cooldowns (
+  email_hash text PRIMARY KEY,
   released_at bigint NOT NULL,
   expires_at bigint NOT NULL
 );
@@ -272,7 +302,7 @@ CREATE INDEX IF NOT EXISTS feed_oauth_tokens_account_idx ON feed_oauth_tokens (a
 
 CREATE TABLE IF NOT EXISTS feed_device_codes (
   device_code_hash text PRIMARY KEY,
-  user_code text NOT NULL UNIQUE,
+  user_code text NOT NULL,
   client_id text NOT NULL,
   client_name text NOT NULL,
   scope text NOT NULL,
@@ -281,6 +311,8 @@ CREATE TABLE IF NOT EXISTS feed_device_codes (
   expires_at bigint NOT NULL,
   interval_sec integer NOT NULL DEFAULT 5 CHECK (interval_sec > 0)
 );
+ALTER TABLE feed_device_codes DROP CONSTRAINT IF EXISTS feed_device_codes_user_code_key;
+CREATE UNIQUE INDEX IF NOT EXISTS feed_device_codes_pending_user_code_idx ON feed_device_codes (user_code) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS feed_device_codes_expiry_idx ON feed_device_codes (expires_at);
 
 CREATE TABLE IF NOT EXISTS feed_actors (
@@ -302,6 +334,7 @@ ALTER TABLE feed_actors ADD COLUMN IF NOT EXISTS profile_banner_url text;
 CREATE TABLE IF NOT EXISTS feed_organizations (
   id text PRIMARY KEY,
   name text NOT NULL,
+  username text,
   ticker text UNIQUE,
   org_type text NOT NULL,
   description text NOT NULL,
@@ -312,8 +345,10 @@ CREATE TABLE IF NOT EXISTS feed_organizations (
   banner_url text,
   created_at bigint NOT NULL
 );
+ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS username text;
 ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS image_url text;
 ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS banner_url text;
+CREATE INDEX IF NOT EXISTS feed_organizations_username_idx ON feed_organizations (lower(username));
 
 CREATE TABLE IF NOT EXISTS feed_world_state (
   singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
@@ -432,12 +467,16 @@ CREATE TABLE IF NOT EXISTS feed_notifications (
   actor_id text,
   post_id text,
   market_id text,
+  chat_id text,
+  invite_id text,
   title text NOT NULL,
   body text NOT NULL,
   is_game_only boolean NOT NULL DEFAULT false,
   read_at bigint,
   created_at bigint NOT NULL
 );
+ALTER TABLE feed_notifications ADD COLUMN IF NOT EXISTS chat_id text;
+ALTER TABLE feed_notifications ADD COLUMN IF NOT EXISTS invite_id text;
 CREATE INDEX IF NOT EXISTS feed_notifications_account_idx ON feed_notifications (account_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS feed_chats (
@@ -721,4 +760,11 @@ CREATE TABLE IF NOT EXISTS feed_rate_limits (
   scope_key text PRIMARY KEY,
   window_start bigint NOT NULL,
   count integer NOT NULL CHECK (count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS feed_job_leases (
+  job_name text PRIMARY KEY,
+  owner_id text NOT NULL,
+  lease_until bigint NOT NULL,
+  updated_at bigint NOT NULL
 );

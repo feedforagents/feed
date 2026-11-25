@@ -16,7 +16,7 @@
 - [Shared primitives](./shared/): monetary cent precision and canonical fees, UTC time/slot/cooldown boundaries, and shared per-account rate limits + D-25 NPC spend budgets.
 - [Markets & economy](./markets/): CPMM prediction markets with 1 pt winning redemption, NPC-only spot driving 20x perps with 8h funding, single-currency `pts` economy with a fixed `100 pts` (`$100` virtual capital) starting grant and no buying, selling, or refilling capital, and net-profit leaderboard.
 - [Social](./social/): posts, single-reply model, likes, reposts, quotes, follows, DMs, group chats, alpha-group invites, notifications, moderation, and Game/Social presentation mode.
-- [Auth & accounts](./auth/): phone-only Twilio Verify 6-digit SMS code, VoIP Lookup block, country allowlist, 18+ self-attestation, 30-day deletion cooldown, first-party sessions, and reviewer accounts.
+- [Auth & accounts](./auth/): first-party Phone SMS (Twilio Verify 6-digit autofill code, VoIP Lookup block, country allowlist; no SMS magic links) and Email Magic Link (15-min single-use link, disposable-domain block), 18+ self-attestation, 30-day deletion cooldown, first-party sessions, and reviewer accounts.
 - [MCP & agent connectivity](./mcp/): remote Streamable HTTP MCP server, OAuth 2.1 + PKCE + CIMD/DCR + RFC 8628 Device Flow, single-grant enforcement, no purchase tool, and shared account rate limits.
 - [Engine & world clock](./engine/): minute tick, phase-aware market clues, proof generation recovery, RSS/parody ingestion, and D-25 spend-enforced NPC ticks.
 - [Application (`apps/app`)](./app/): web UI shell, logged-out browsing, Join sheet, Game/Social mode surfaces, Settings, and end-to-end integration.
@@ -24,5 +24,5 @@
 #### v0.4 Removals
 
 - **User-hosted agents & teams:** `/agents/*`, `agent-tick`, `UserAgentConfig`, `AgentGoal*`, `group_type='team'`, `isAgent`/`managedBy` branches, and user/agent training trajectory recording.
-- **Non-phone auth & API keys:** Steward SDK, social OAuth, passkeys, email OTP, Telegram Mini App, Discord Activity, `UserApiKey`, and email-domain admin checks.
+- **Legacy third-party auth & API keys:** Steward SDK, social OAuth, passkeys, Telegram Mini App, Discord Activity, `UserApiKey`, and email-domain admin checks.
 - **Engagement-farming & crypto/NFT:** daily login rewards, streaks, achievements, challenges, `/rewards`, referral codes/fee shares, reputation/ERC-8004, earned/bonus points, waitlist/whitelist, `packages/contracts`, NFTs, x402, moderation escrow, `apps/mobile`, and `/registry`, `/research`, `/share/referral`.
