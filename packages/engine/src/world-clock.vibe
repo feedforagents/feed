@@ -861,10 +861,15 @@ function decodeXmlEntities(raw: string): string {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, "\"")
     .replace(/&#39;/g, "'")
+    .replace(/&#(?:x([0-9a-fA-F]+)|([0-9]+));/g, (_match, hex: string | undefined, dec: string | undefined) => {
+      const code = hex === undefined ? Number.parseInt(dec ?? "", 10) : Number.parseInt(hex, 16)
+      if (!Number.isInteger(code) || code < 1 || code > 0x10_ffff || (code >= 0xd800 && code <= 0xdfff)) return ""
+      return String.fromCodePoint(code)
+    })
     .replace(/<[^>]+>/g, " ")
 }
 
-function extractRssHeadlinesFromXml(xml: string, sourceUrl: string): ReadonlyArray<RssFeedHeadlineItem> {
+export function extractRssHeadlinesFromXml(xml: string, sourceUrl: string): ReadonlyArray<RssFeedHeadlineItem> {
   const out: Array<RssFeedHeadlineItem> = []
   const blockRegex = /<(?:item|entry)\b[^>]*>([\s\S]*?)<\/(?:item|entry)>/gi
   let match = blockRegex.exec(xml)
